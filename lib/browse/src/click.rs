@@ -9,7 +9,7 @@
 //! decision lives here, once, so a double-click can never open something a
 //! keyboard `Enter` would not: the app resolves the press to an item, asks this
 //! detector whether it completes a double-click, and — if it does — runs the
-//! very same [`Activation`](crate::Activation) dispatch (§2.2).
+//! very same [`Activation`](crate::Activation) dispatch.
 //!
 //! The detector holds no authority and does no I/O. It decides only *whether* a
 //! press is the second of a pair; the caller supplies the item index (from the
@@ -20,10 +20,10 @@
 /// The default maximum interval between the two presses of a double-click, in
 /// nanoseconds (half a second).
 ///
-/// A deliberate, fixed UX convenience bound, not a hardware-scaled capacity
-/// (§24.4): it is the human-perception window for "one gesture, two clicks",
-/// the same order of magnitude every desktop uses, and reaching it never fails
-/// anything — a slower second press is simply a fresh single click.
+/// A deliberate, fixed UX convenience bound, not a hardware-scaled capacity: it
+/// is the human-perception window for "one gesture, two clicks", the same order
+/// of magnitude every desktop uses, and reaching it never fails anything — a
+/// slower second press is simply a fresh single click.
 pub const DOUBLE_CLICK_INTERVAL_NS: u64 = 500_000_000;
 
 /// What a primary press resolved to once the double-click rule was applied.
@@ -76,8 +76,8 @@ impl DoubleClickTracker {
 
     /// Register a press against an explicit `interval_ns` window — the one
     /// definition [`register`](Self::register) is a default-interval spelling
-    /// of, so the pairing rule has a single home (§2.2). Exposed so a caller
-    /// (or a test) may choose a different window without a second detector.
+    /// of, so the pairing rule has a single home. Exposed so a caller (or a
+    /// test) may choose a different window without a second detector.
     #[must_use]
     pub fn register_within(&mut self, now_ns: u64, index: usize, interval_ns: u64) -> ClickKind {
         if let Some(prev) = self.last {

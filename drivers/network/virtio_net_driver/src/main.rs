@@ -1,15 +1,14 @@
 //! The `Run` entry-point binary of the virtio-net driver, installed as a
 //! signed `/System/Drivers/` bundle and **autoloaded into user space** by
-//! `devmgr` when a virtio-net device is discovered (`plans/NETWORK.md` N4d,
-//! `AGENTS.md` §4 / §18).
+//! `devmgr` when a virtio-net device is discovered (`plans/NETWORK.md` N4d).
 //!
-//! This is the "drivers in user space" steady state for networking: the
-//! process owns the NIC (its register window, DMA, and interrupt line) and
-//! serves the `netchan-v1` device-channel contract to the network stack
-//! (`userland/net/netstack`), which runs in its own address space and owns
-//! the shared frame-ring region. The two never link each other — the driver
-//! is the *server* of a claimed reserved endpoint and the stack is the
-//! *client* — so any NIC driver serves any stack build (`AGENTS.md` §17.4).
+//! This is the "drivers in user space" steady state for networking: the process
+//! owns the NIC (its register window, DMA, and interrupt line) and serves the
+//! `netchan-v1` device-channel contract to the network stack
+//! (`userland/net/netstack`), which runs in its own address space and owns the
+//! shared frame-ring region. The two never link each other — the driver is the
+//! *server* of a claimed reserved endpoint and the stack is the *client* — so
+//! any NIC driver serves any stack build.
 //!
 //! It is a **pure-Rust** program: TAIRiX is Rust-only, so it links the Rust
 //! userland runtime `tairix-rt`, never the C ABI (which exists solely for
@@ -30,9 +29,9 @@
 //!    transport (`VirtioNet::open`) and binds the granted interrupt line.
 //! 3. Hands the opened device to `tairix_netchan::serve`, the shared
 //!    device-channel serve loop every NIC driver process runs: it claims a
-//!    reserved endpoint bound restricted-sender, publishes the `netchan`
-//!    node `devmgr` hands to the stack, and parks on {call endpoint, device
-//!    IRQ} for the life of the driver (never busy-polls, `AGENTS.md` §2.23).
+//!    reserved endpoint bound restricted-sender, publishes the `netchan` node
+//!    `devmgr` hands to the stack, and parks on {call endpoint, device IRQ} for
+//!    the life of the driver (never busy-polls).
 //!
 //! A bring-up failure exits with a reserved fail-closed code
 //! (`tairix_netchan::exit`), leaving the system without this NIC rather than

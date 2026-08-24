@@ -53,7 +53,7 @@
 //!   interface can obtain an address the same way SLAAC obtains one.
 //! - [`dhcpv6`] — the pure stateful `DHCPv6` client (RFC 8415): the
 //!   message + option wire codec (DUID, `IA_NA`/IAADDR, Option Request,
-//!   Elapsed Time, Status Code) and the §18.2 client state machine
+//!   Elapsed Time, Status Code) and the RFC 8415 §18.2 client state machine
 //!   (Solicit → Request → Bound → Renew → Rebind, plus Release/Decline),
 //!   driven by injected monotonic time and caller-supplied CSPRNG values;
 //!   a sibling of [`dhcp`], not a `cfg`-fork of it.

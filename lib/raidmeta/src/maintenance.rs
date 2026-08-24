@@ -4,14 +4,13 @@
 //!
 //! An array's maintenance is deliberately incremental: a scrub and a resync
 //! each advance a cursor one bounded chunk at a time so a 100 TB+ array never
-//! verifies or rebuilds in one sweep (`AGENTS.md` §26.6, §2.23). On such an
-//! array a full pass is measured in **hours or days**, which is longer than
-//! the interval between reboots on a real machine. Holding that cursor only in
-//! memory would mean every restart silently discarded the work and began
-//! again, so a large array could be rebooted often enough that it never
-//! finishes a rebuild or is never verified at all — a latent, unbounded
-//! data-integrity hole precisely where redundancy is supposed to protect the
-//! most data (`AGENTS.md` §26.5, §26.6).
+//! verifies or rebuilds in one sweep. On such an array a full pass is measured
+//! in **hours or days**, which is longer than the interval between reboots on a
+//! real machine. Holding that cursor only in memory would mean every restart
+//! silently discarded the work and began again, so a large array could be
+//! rebooted often enough that it never finishes a rebuild or is never verified
+//! at all — a latent, unbounded data-integrity hole precisely where redundancy
+//! is supposed to protect the most data.
 //!
 //! [`MaintenanceRecord`] closes it, and carries the contract in full.
 
@@ -37,9 +36,9 @@ pub const MAINTENANCE_BLOCK: u64 = 1;
 /// the maintenance record.
 ///
 /// A member's share of the array's *data* begins at this block offset, so this
-/// is the single definition of the member data offset every consumer derives
-/// (`AGENTS.md` §2.2) — a second, hand-picked offset anywhere would silently
-/// place the array's data over its own metadata.
+/// is the single definition of the member data offset every consumer derives —
+/// a second, hand-picked offset anywhere would silently place the array's data
+/// over its own metadata.
 pub const RESERVED_METADATA_BLOCKS: u64 = MAINTENANCE_BLOCK + 1;
 
 /// A reason a [`MaintenanceRecord`] could not be decoded. Every variant is a
@@ -97,11 +96,10 @@ const OFF_CHECKSUM: usize = OFF_LAST_SCRUB + Time64::WIRE_LEN; // u32
 /// The resumable position of an array's self-maintenance: how far a
 /// verification pass and a rebuild have got.
 ///
-/// This is the value the composition engines report and accept, and the value
-/// a [`MaintenanceRecord`] carries across a reboot, so the in-memory and
-/// on-disk notions of "how far have we got" are the same one (`AGENTS.md`
-/// §2.2). [`None`] means "not running": no pass in progress, nothing to
-/// resume.
+/// This is the value the composition engines report and accept, and the value a
+/// [`MaintenanceRecord`] carries across a reboot, so the in-memory and on-disk
+/// notions of "how far have we got" are the same one. [`None`] means "not
+/// running": no pass in progress, nothing to resume.
 ///
 /// The cursors are in the engine's own cursor domain — the same units its
 /// `scrub_cursor()` reports — which for a striped level is per-member blocks
@@ -137,13 +135,13 @@ impl ArrayProgress {
     /// A cursor is the *next* block a pass will process, so a pass that is in
     /// progress has strictly less than `span` behind it; `span` itself is the
     /// idle position, which is spelled [`None`] here. This is the one
-    /// definition of that bound (`AGENTS.md` §2.2), applied by every
-    /// composition engine before it adopts a restored position, because a
-    /// cursor beyond the end of the array is not a harmless oddity: adopted as
-    /// a rebuild position it would declare a member fully copied without ever
-    /// having copied its tail, leaving a member trusted as a current read
-    /// source while holding stale data (`AGENTS.md` §5.4, §26.5). A record
-    /// that does not fit is refused, and the array starts its passes afresh.
+    /// definition of that bound, applied by every composition engine before it
+    /// adopts a restored position, because a cursor beyond the end of the array
+    /// is not a harmless oddity: adopted as a rebuild position it would declare
+    /// a member fully copied without ever having copied its tail, leaving a
+    /// member trusted as a current read source while holding stale data. A
+    /// record that does not fit is refused, and the array starts its passes
+    /// afresh.
     #[must_use]
     pub const fn fits_span(&self, span: u64) -> bool {
         let scrub_ok = match self.scrub_cursor {
@@ -177,7 +175,7 @@ impl ArrayProgress {
 /// # Fail-safe in both directions
 ///
 /// The record is bound to the array it describes, and every way of losing it
-/// degrades toward *more* verification, never less (`AGENTS.md` §5.4, §26.5):
+/// degrades toward *more* verification, never less:
 ///
 /// * A record that does not decode — absent, blank, torn, or corrupt — yields
 ///   nothing. The array then verifies from the beginning and rebuilds from the
@@ -215,10 +213,10 @@ pub struct MaintenanceRecord {
     /// The maintenance position at this checkpoint.
     pub progress: ArrayProgress,
     /// When the last *complete* verification pass finished, or [`None`] if the
-    /// array has never completed one. Stored as a full [`Time64`]
-    /// (`AGENTS.md` §21), and deliberately independent of the cursors: it
-    /// survives a membership change, because verifying the array is a property
-    /// of the data, not of the member set.
+    /// array has never completed one. Stored as a full [`Time64`], and
+    /// deliberately independent of the cursors: it survives a membership
+    /// change, because verifying the array is a property of the data, not of
+    /// the member set.
     pub last_scrub_completed: Option<Time64>,
 }
 
@@ -227,8 +225,8 @@ impl MaintenanceRecord {
     pub const MAGIC: [u8; 8] = *b"TXRAIDMT";
 
     /// The only maintenance-record format version this build reads or writes.
-    /// The on-disk format is unfrozen pre-release (`AGENTS.md` §2.13): it is
-    /// changed in place, never versioned alongside an old one.
+    /// The on-disk format is unfrozen pre-release: it is changed in place,
+    /// never versioned alongside an old one.
     pub const FORMAT_VERSION: u16 = 1;
 
     /// The encoded size of a record in bytes. The CRC-32C covers the first
@@ -300,8 +298,7 @@ impl MaintenanceRecord {
     /// under a different member set: a member has joined or left since, so a
     /// resumed cursor could skip data the new member never received or verify
     /// against copies that no longer exist. In both cases the array starts its
-    /// passes afresh, which costs time and never correctness (`AGENTS.md`
-    /// §5.4, §26.5).
+    /// passes afresh, which costs time and never correctness.
     #[must_use]
     pub fn progress_for(&self, identity: &ArrayIdentity) -> ArrayProgress {
         if !self.belongs_to(identity) || self.generation != identity.generation {
@@ -324,7 +321,7 @@ impl MaintenanceRecord {
     ///   would let a bogus future stamp suppress verification indefinitely.
     ///
     /// An array whose verification history is unknown is verified, never
-    /// assumed clean (`AGENTS.md` §5.4, §26.5).
+    /// assumed clean.
     #[must_use]
     pub fn since_last_scrub_ns(&self, now: Time64) -> u64 {
         let Some(completed) = self.last_scrub_completed else {

@@ -2,12 +2,12 @@
 //! interactive root-unlock policy over a real (emulated) whole-disk
 //! encrypted-root image on x86_64's virtio-PCI bus — walk PCI to the modern
 //! virtio-blk-pci function, provision a `PciTransport`, route its MSI-X
-//! interrupt, load the signed `.rxe`, type the passphrase at the prompt,
-//! mount the encrypted `ARXFS` root, install the loaded users database into
-//! a `LateUsersDb` cell, and prove the planted account authenticates
-//! through it. The unlock tail is the *shared* `root_unlock_login` the
-//! aarch64 vertical runs (one definition, `AGENTS.md` §2.2); only the bus
-//! bring-up differs (virtio-PCI here, virtio-MMIO there).
+//! interrupt, load the signed `.rxe`, type the passphrase at the prompt, mount
+//! the encrypted `ARXFS` root, install the loaded users database into a
+//! `LateUsersDb` cell, and prove the planted account authenticates through it.
+//! The unlock tail is the *shared* `root_unlock_login` the aarch64 vertical
+//! runs (one definition); only the bus bring-up differs (virtio-PCI here,
+//! virtio-MMIO there).
 //!
 //! On the host (non-`x86_64-unknown-none`) target the bin is a no-op so
 //! that `cargo build --workspace` does not require the freestanding

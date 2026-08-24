@@ -437,14 +437,13 @@ impl StackOutput {
 /// A bounded free-list of byte buffers the engine reuses so the hot path
 /// allocates nothing in steady state.
 ///
-/// A buffer taken for a transmitted frame or a delivered payload is
-/// returned to the pool when the caller's next engine call recycles the
-/// output ([`StackOutput::recycle_into`]); a transient buffer (an upper
-/// message copied into an IP packet, an IP packet copied into a frame) is
-/// returned explicitly the moment its consumer has copied it. The pool is
-/// capped so a hostile traffic pattern cannot make it grow without bound
-/// (§24.1 — a growable capacity, not an unbounded one); beyond the cap a
-/// returned buffer is simply dropped.
+/// A buffer taken for a transmitted frame or a delivered payload is returned to
+/// the pool when the caller's next engine call recycles the output
+/// ([`StackOutput::recycle_into`]); a transient buffer (an upper message copied
+/// into an IP packet, an IP packet copied into a frame) is returned explicitly
+/// the moment its consumer has copied it. The pool is capped so a hostile
+/// traffic pattern cannot make it grow without bound (a growable capacity, not
+/// an unbounded one); beyond the cap a returned buffer is simply dropped.
 #[derive(Debug, Default)]
 struct BufPool {
     free: Vec<Vec<u8>>,

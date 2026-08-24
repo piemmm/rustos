@@ -271,9 +271,9 @@ pub(crate) fn publish_volume_identity(
 /// out of the writable volume.
 ///
 /// Starts from the shared default layout (the four top-level directories and
-/// the §16.2 / §16.3 mount policy — one definition of the paths *and* their
-/// `ro`/`nosuid`/`nodev`/`noexec` flags) and attaches a backing volume to
-/// each mount, leaving the layout's flags untouched:
+/// their mount policy — one definition of the paths *and* their
+/// `ro`/`nosuid`/`nodev`/`noexec` flags) and attaches a backing volume to each
+/// mount, leaving the layout's flags untouched:
 ///
 /// * `/` — the encrypted, writable root volume ([`ROOT_VOLUME_HANDLE`]): the
 ///   persistent home of `/Users`, `/Apps`, `/Storage`, and `/` itself.
@@ -348,12 +348,12 @@ fn system_vfs() -> Result<Vfs, VfsError> {
 /// one disk are serialised park-safely by the device `SleepLock` — and of the
 /// encrypted-root unlock window.
 ///
-/// Every step is fail-soft and fail-closed (`AGENTS.md` §5.4 / §2.9): a disk
-/// with no `ARXFSSystem` partition, an out-of-range window, an unmountable
-/// volume, or a VFS/install refusal leaves the `fs_*` syscalls failing closed
-/// (`NotImplemented`) and is audited, never panicked and never a silent
-/// device fallback. No secret is consumed or logged — the `/System` volume is
-/// keyed by the non-secret well-known [`SYSTEM_VOLUME_KEY`].
+/// Every step is fail-soft and fail-closed: a disk with no `ARXFSSystem`
+/// partition, an out-of-range window, an unmountable volume, or a VFS/install
+/// refusal leaves the `fs_*` syscalls failing closed (`NotImplemented`) and is
+/// audited, never panicked and never a silent device fallback. No secret is
+/// consumed or logged — the `/System` volume is keyed by the non-secret
+/// well-known [`SYSTEM_VOLUME_KEY`].
 pub fn install_system_mount<B: Block + 'static>(
     store: &'static DriverStoreService<B>,
     audit: &'static (dyn Sink + Sync),

@@ -60,7 +60,7 @@
 #![cfg_attr(itest_x86_64, no_main)]
 #![deny(missing_docs)]
 
-// — test affordances must never reach a release binary.
+// Test affordances must never reach a release binary.
 #[cfg(all(feature = "test-hooks", not(debug_assertions)))]
 compile_error!(
     "tairix-test-syscall-regs-qemu-x86_64: the `test-hooks` Cargo feature is a \
@@ -338,9 +338,9 @@ mod kernel {
         let func_va = ring3_reg_probe as *const () as u64;
         let func_phys = func_va - paging::KERNEL_VMA_BASE;
         let func_page = func_phys & !(page - 1);
-        // The probe's page plus the following one as cheap insurance
-        // against the fragment straddling a page boundary. `writable =
-        // false` keeps the executable alias non-writable (W^X).
+        // The probe's page plus the following one as cheap insurance against
+        // the fragment straddling a page boundary. `writable = false` keeps the
+        // executable alias non-writable (W^X).
         for i in 0..2u64 {
             if space
                 .map_4k_user(

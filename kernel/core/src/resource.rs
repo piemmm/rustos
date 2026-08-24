@@ -53,7 +53,7 @@ use tairix_resref::{parse, KnownNamespace, NamespaceBacking, RefError, ResourceR
 ///
 /// A descriptor opened by `resource_open` carries one of these instead of a
 /// filesystem path; the `stream`-style read/write path dispatches on it. The
-/// set grows in place as namespaces gain resolvers (`AGENTS.md` §2.13).
+/// set grows in place as namespaces gain resolvers.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum ResourceBacking {
     /// `sys:null` — the discard sink and empty source: a read yields no bytes

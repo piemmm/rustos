@@ -7,12 +7,12 @@
 //!
 //! # The convention, defined here
 //!
-//! Every icon-bar menu on this desktop reads the same way: the
-//! session-drawn **information** row first, the application's own rows next,
-//! then a rule and **Quit** last. That order is a desktop-wide convention, so
-//! it is written once — in [`declaration`] — rather than restated by each
-//! application (§2.2). An application supplies only the rows in the middle;
-//! it cannot place the two ends, so it cannot get them wrong.
+//! Every icon-bar menu on this desktop reads the same way: the session-drawn
+//! **information** row first, the application's own rows next, then a rule and
+//! **Quit** last. That order is a desktop-wide convention, so it is written
+//! once — in [`declaration`] — rather than restated by each application. An
+//! application supplies only the rows in the middle; it cannot place the two
+//! ends, so it cannot get them wrong.
 //!
 //! Most applications have no rows of their own and want the click left to the
 //! session so it raises their window: [`info_and_quit`] is that case named.
@@ -20,13 +20,13 @@
 //! # Components declare differently
 //!
 //! A bundle the desktop autostarts as a *component of itself* — rather than as
-//! an application the user started — makes a different declaration: a
-//! permanent slot with the component's own rows, and no *Quit* row at all,
-//! because the desktop's own parts are not the user's to close. The session
-//! asks for that role with [`DESKTOP_ROLE_SWITCH`] on the command line, which
-//! is why the switch is named here beside the declaration it selects: the
-//! session that passes it and the bundle that parses it must agree on it
-//! exactly, and it is the one thing that tells them apart (§2.2).
+//! an application the user started — makes a different declaration: a permanent
+//! slot with the component's own rows, and no *Quit* row at all, because the
+//! desktop's own parts are not the user's to close. The session asks for that
+//! role with [`DESKTOP_ROLE_SWITCH`] on the command line, which is why the
+//! switch is named here beside the declaration it selects: the session that
+//! passes it and the bundle that parses it must agree on it exactly, and it is
+//! the one thing that tells them apart.
 
 use tairix_abi::window_ipc::{
     AppBar, AppMenu, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuRow,

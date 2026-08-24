@@ -27,9 +27,9 @@ pub const LOG_ATTESTATION_KEY_PATH: &str = "/System/Security/Keys/LogAttestation
 
 /// Absolute path of the per-installation **machine-id** the journal reads at
 /// startup to bind each stream's hash-chain genesis to this installation
-/// (`AGENTS.md` §16.2; SYSLOG §7.1). Non-secret, world-readable public
-/// identity (the TAIRiX equivalent of `/etc/machine-id`); the installer/image
-/// provisions it, so a missing file means an unprovisioned system.
+/// (SYSLOG §7.1). Non-secret, world-readable public identity (the TAIRiX
+/// equivalent of `/etc/machine-id`); the installer/image provisions it, so a
+/// missing file means an unprovisioned system.
 pub const MACHINE_ID_PATH: &str = "/System/Security/MachineId";
 
 /// Derive where a closed segment image belongs on disk — its containing

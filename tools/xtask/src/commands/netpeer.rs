@@ -123,14 +123,14 @@ impl NetPeer {
 
     /// Bind `peer_sock` and start the **telnet-server** peer thread (the
     /// `plans/TELNET.md` vertical): it accepts the guest `telnet` client's
-    /// connection on [`wire::PEER_TELNET_PORT`] and speaks the *server* half
-    /// of RFC 854 — offering `SUPPRESS GO AHEAD` and asking for `TERMINAL
-    /// TYPE`, `NAWS` and `LINEMODE`, then driving the RFC 1184 `MODE` and
-    /// `SLC` exchange — before greeting the session with
-    /// [`wire::TELNET_BANNER`] and echoing the operator's probe line back
-    /// upper-cased. Its verdict ([`Self::stop_and_join`]) is `Ok` only once
-    /// **every** step was witnessed, so a client that ignored the negotiation,
-    /// declined LINEMODE, or never reported its window fails the run loud.
+    /// connection on [`wire::PEER_TELNET_PORT`] and speaks the *server* half of
+    /// RFC 854 — offering `SUPPRESS GO AHEAD` and asking for `TERMINAL TYPE`,
+    /// `NAWS` and `LINEMODE`, then driving the RFC 1184 `MODE` and `SLC`
+    /// exchange — before greeting the session with [`wire::TELNET_BANNER`] and
+    /// echoing the operator's probe line back upper-cased. Its verdict
+    /// ([`Self::stop_and_join`]) is `Ok` only once **every** step was
+    /// witnessed, so a client that ignored the negotiation, declined LINEMODE,
+    /// or never reported its window fails the run loud.
     pub fn spawn_telnet(qemu_sock: &Path, peer_sock: &Path) -> Result<Self, String> {
         Self::spawn_with(qemu_sock, peer_sock, run_telnet_peer)
     }
@@ -514,10 +514,10 @@ fn run_static_peer(
 
 /// Shared IPv6 ICMP-campaign event loop: serve the guest reactively and ping
 /// `guest_v6` until its echo reply arrives. When `peer_static` is `Some`, the
-/// peer additionally assigns itself that static address (DAD runs first),
-/// which the engine then prefers as the source for an on-link destination in
-/// the same prefix. The one definition both campaign roles share (§2.2), so
-/// the link-local and static verticals cannot drift in their choreography.
+/// peer additionally assigns itself that static address (DAD runs first), which
+/// the engine then prefers as the source for an on-link destination in the same
+/// prefix. The one definition both campaign roles share, so the link-local and
+/// static verticals cannot drift in their choreography.
 fn run_v6_campaign(
     socket: &UnixDatagram,
     qemu_sock: &PathBuf,

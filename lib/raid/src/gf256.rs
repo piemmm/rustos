@@ -1,13 +1,13 @@
 //! GF(2^8) arithmetic for the RAID6 double-parity Q syndrome and the RAID-TP
 //! triple-parity R syndrome.
 //!
-//! RAID6 protects a stripe with two independent syndromes over the finite
-//! field GF(2^8): the P syndrome is the bytewise XOR of the data chunks (the
-//! same parity RAID5 uses), and the Q syndrome is a Reed-Solomon syndrome
+//! RAID6 protects a stripe with two independent syndromes over the finite field
+//! GF(2^8): the P syndrome is the bytewise XOR of the data chunks (the same
+//! parity RAID5 uses), and the Q syndrome is a Reed-Solomon syndrome
 //! `Q = Σ gᵏ · Dₖ` where `g` is the field generator `0x02` and `Dₖ` is the
 //! `k`-th data chunk. Because P and Q are linear and independent, any two lost
-//! chunks in a stripe can be solved for from the survivors (`AGENTS.md` §26.5
-//! two-fault redundancy). This is the standard Linux-md / Anvin RAID6 scheme.
+//! chunks in a stripe can be solved for from the survivors (two-fault
+//! redundancy). This is the standard Linux-md / Anvin RAID6 scheme.
 //!
 //! The field uses the primitive polynomial `x^8 + x^4 + x^3 + x^2 + 1`
 //! (`0x11d`), identical to the Linux RAID6 implementation, so an array is

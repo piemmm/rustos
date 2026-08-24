@@ -14,11 +14,10 @@
 //!
 //! The tool opens an ICMP/`ICMPv6` **echo socket** through the versioned
 //! `netsock-v1` socket ABI served by `userland/net/netstack` — gated on
-//! `CAP_NET` + `CAP_NET_RAW`, audited, fail-closed. It never crafts a raw
-//! IP packet, never touches a device, and holds no ambient authority: the
-//! stack owns the ICMP identifier (so a socket only ever receives replies to
-//! its own requests) and every capability and input check stays stack- and
-//! kernel-side (`AGENTS.md` §5.4).
+//! `CAP_NET` + `CAP_NET_RAW`, audited, fail-closed. It never crafts a raw IP
+//! packet, never touches a device, and holds no ambient authority: the stack
+//! owns the ICMP identifier (so a socket only ever receives replies to its own
+//! requests) and every capability and input check stays stack- and kernel-side.
 //!
 //! # What this crate is
 //!

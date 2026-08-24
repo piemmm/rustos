@@ -12,26 +12,23 @@
 //!
 //! It fails closed: an unknown selector, a decoration (`@guard`, `::facet`,
 //! `?param`) on a resource that takes none, a capability the caller does not
-//! hold, or a reply that does not decode all yield a typed
-//! [`ResolveInfoError`] and never a fabricated value (`AGENTS.md` §5.4, §2.9).
-//! The served set grows in place here as sibling queries land; today it covers
-//! exactly the ungated/self-scoped and kernel-memory `sysinfo-v1` queries that
-//! already exist (`info:system/{hostname,kernel,machine-id,boot-time}`,
+//! hold, or a reply that does not decode all yield a typed [`ResolveInfoError`]
+//! and never a fabricated value. The served set grows in place here as sibling
+//! queries land; today it covers exactly the ungated/self-scoped and
+//! kernel-memory `sysinfo-v1` queries that already exist
+//! (`info:system/{hostname,kernel,machine-id,boot-time}`,
 //! `info:process/{pid,uid,gid,proc-id,trust-domain,caps}`,
-//! `info:mem/{physical,page-size}`,
-//! `info:limits/<kind>/{soft,hard}`, `stats:uptime`, `stats:mem/*`, and
-//! `stats:limits/<kind>`) plus the network-interface queries `netstack`
-//! answers through the broker (`info:net/<iface>/{mac,mtu,kind}`,
-//! `state:net/<iface>/{link,address}`, and
-//! `stats:net/<iface>/{rx,tx}.{packets,bytes,dropped}`, the windowed
-//! throughput rates `stats:net/<iface>/{rx,tx}.{pps,bps}?window=…`, plus
-//! the stack-wide `stats:net/stack/…` defence counters — the packet-path
-//! aggregates `{icmp-errors,icmp-suppressed,reassembly-evicted}` summed
-//! across interfaces, and the TCP connection-defence totals
-//! `{syn-cookies,syn-cookies-accepted,syn-cookies-rejected,
-//! syn-backlog-started,syn-backlog-expired,accepts,accept-overflow,
-//! tcp-resets}` read from the stack's one socket table,
-//! `plans/NETWORK.md` §5).
+//! `info:mem/{physical,page-size}`, `info:limits/<kind>/{soft,hard}`,
+//! `stats:uptime`, `stats:mem/*`, and `stats:limits/<kind>`) plus the
+//! network-interface queries `netstack` answers through the broker
+//! (`info:net/<iface>/{mac,mtu,kind}`, `state:net/<iface>/{link,address}`, and
+//! `stats:net/<iface>/{rx,tx}.{packets,bytes,dropped}`, the windowed throughput
+//! rates `stats:net/<iface>/{rx,tx}.{pps,bps}?window=…`, plus the stack-wide
+//! `stats:net/stack/…` defence counters — the packet-path aggregates
+//! `{icmp-errors,icmp-suppressed,reassembly-evicted}` summed across interfaces,
+//! and the TCP connection-defence totals
+//! `{syn-cookies,syn-cookies-accepted,syn-cookies-rejected, syn-backlog-started,syn-backlog-expired,accepts,accept-overflow, tcp-resets}`
+//! read from the stack's one socket table, `plans/NETWORK.md` §5).
 //!
 //! **A selector added here must be added to the registry too.** The served set
 //! is advertised for display and completion by
@@ -1053,9 +1050,8 @@ pub fn cpu_info(transport: &dyn Transport) -> Result<Vec<CpuInfoRecord>, Resolve
 
 /// The lowercase, space-separated ISA-extension flag list of a raw
 /// [`CpuFeatureSet`] bitset, in stable bit order; `(none)` when empty. The
-/// single decode shared by `info:cpu/features` (here) and the `sysinfo
-/// cpuinfo` renderer walks [`CpuFeature::ALL`], so neither keeps a private
-/// list.
+/// single decode shared by `info:cpu/features` (here) and the `sysinfo cpuinfo`
+/// renderer walks [`CpuFeature::ALL`], so neither keeps a private list.
 fn cpu_feature_flags(bits: u64) -> String {
     let set = CpuFeatureSet::from_bits(bits);
     let mut out = String::new();

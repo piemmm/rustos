@@ -908,9 +908,9 @@ fn push_json_string(out: &mut String, text: &str) {
     out.push('"');
 }
 
-/// Emit one fd-3 `stdinfo` summary record (best-effort, §20.1): terse human
-/// text plus the structured `ai` object. A record that cannot be framed is
-/// dropped — fd 3 is advisory and never changes the command's result.
+/// Emit one fd-3 `stdinfo` summary record (best-effort): terse human text plus
+/// the structured `ai` object. A record that cannot be framed is dropped — fd 3
+/// is advisory and never changes the command's result.
 fn emit(output: &dyn Output, code: &str, message: &str, ai: &str) {
     let record = StdInfoRecord::new(
         OWN_WORD,

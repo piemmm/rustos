@@ -1,4 +1,4 @@
-//! virtio-input driver-shell unit tests: the §8 `register` gate and the
+//! virtio-input driver-shell unit tests: the `register` gate and the
 //! bind table. The open/poll/decode device-logic tests live with
 //! the logic in `lib/virtio_input`.
 

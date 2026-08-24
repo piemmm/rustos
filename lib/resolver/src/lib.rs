@@ -1,14 +1,14 @@
 //! TAIRiX userland DNS stub-resolver client (`plans/DNS.md` DNS2).
 //!
-//! This crate is the small seam that turns the pure, host-tested DNS engine
-//! in [`tairix_net::dns`] into a working name lookup for a userland program.
-//! It owns **no** DNS logic of its own: the RFC 1035 wire codec, the RFC
-//! 5452-hardened response validation, and the retransmit/failover state
-//! machine all live in `tairix-net` (the §2.2 one-definition rule), and the
-//! active recursive-server set comes from the one System Information API
-//! query (`NET_RESOLVER_SERVERS`) that the `state:net/resolver/servers` read
-//! also uses, so a resolver client and an operator inspecting the config can
-//! never disagree.
+//! This crate is the small seam that turns the pure, host-tested DNS engine in
+//! [`tairix_net::dns`] into a working name lookup for a userland program. It
+//! owns **no** DNS logic of its own: the RFC 1035 wire codec, the RFC
+//! 5452-hardened response validation, and the retransmit/failover state machine
+//! all live in `tairix-net` (the one-definition rule), and the active
+//! recursive-server set comes from the one System Information API query
+//! (`NET_RESOLVER_SERVERS`) that the `state:net/resolver/servers` read also
+//! uses, so a resolver client and an operator inspecting the config can never
+//! disagree.
 //!
 //! # What this crate is
 //!
@@ -30,18 +30,16 @@
 //!
 //! The resolver adds no authority: opening the UDP socket is capability-gated
 //! stack-side ([`CAP_NET`](tairix_abi::CapabilityId::NET)), the server-set
-//! query is ungated public host configuration, and every response is
-//! validated by the pure engine before an address is surfaced. A DNS server
-//! and every packet on the wire are treated as hostile (`AGENTS.md` §26.4):
-//! off-path spoofing is bounded by the engine's random query id and strict
-//! question match, and by this crate's source-port randomisation and origin
-//! check.
+//! query is ungated public host configuration, and every response is validated
+//! by the pure engine before an address is surfaced. A DNS server and every
+//! packet on the wire are treated as hostile: off-path spoofing is bounded by
+//! the engine's random query id and strict question match, and by this crate's
+//! source-port randomisation and origin check.
 //!
 //! # Layering & safety
 //!
-//! `no_std` (with `alloc`); as a `lib/*` crate it depends only on other
-//! `lib/*` crates (`AGENTS.md` §17.4). No `unsafe`, and no
-//! `unwrap`/`expect`/`panic!` on a production path.
+//! `no_std` (with `alloc`); as a `lib/*` crate it depends only on other `lib/*`
+//! crates. No `unsafe`, and no `unwrap`/`expect`/`panic!` on a production path.
 
 #![no_std]
 #![forbid(unsafe_code)]

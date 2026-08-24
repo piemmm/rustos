@@ -10,7 +10,7 @@
 //! * feeding any byte stream to the REPL never panics and always terminates
 //!   (every command handler returns, and the reader stops at end of input) —
 //!   the engine renders output or reports an unknown command, never a crash
-//!   (fail closed, `AGENTS.md` §2.9 / §19.6).
+//!   (fail closed).
 //!
 //! TAIRiX pulls in no external fuzz runner: a per-run-seeded LCG
 //! ([`tairix_fuzzseed`]) draws pseudo-random byte scripts, splices real

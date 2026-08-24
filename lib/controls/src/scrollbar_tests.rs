@@ -1,11 +1,11 @@
 //! Unit tests for the scrollbar renderer (spec §11.28–§11.30, §20 checklist).
 //!
 //! These cover the one orientation-parameterized behaviour on both axes: thumb
-//! math, the preserved drag anchor and mid-drag re-clamp, end-button line steps,
-//! track paging, press-and-hold repeat, orientation-aware keys, the wheel, the
-//! §13 denied/disabled fail-closed treatment, dark/light and high-contrast
-//! rendering, the focus ring, the render-equivalence repaint gate, and the
-//! fail-closed degenerate/non-scrollable cases.
+//! math, the preserved drag anchor and mid-drag re-clamp, end-button line
+//! steps, track paging, press-and-hold repeat, orientation-aware keys, the
+//! wheel, the spec §13 denied/disabled fail-closed treatment, dark/light and
+//! high-contrast rendering, the focus ring, the render-equivalence repaint
+//! gate, and the fail-closed degenerate/non-scrollable cases.
 
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};

@@ -318,15 +318,123 @@ context:
   `LengthOutOfRange` arm is unreachable. The sibling width decode above it is a
   stated-invariant cast. One of the two shapes is right for both; pick it.
 
-### Open — charter section numbers cited in comments, 278 lines in 98 files (§2.11)
+### Done — no `.rs` comment cites a charter section, and `cargo xtask charter-cite` keeps it that way
 
-`AGENTS.md` §N in a comment restates *what* a rule is, never *why* the code
-does what it does, and §2.11/§15.17 forbid it outright — including a bare
-trailing `(§5.4)`. Rewrite each as the prose reason ("fail closed", "zeroed on
-drop") or delete it. References to *other* files — `plans/*.md`,
-`tests/SECURITY.md`, `docs/src/**`, an external spec, an RFC, a hardware
-manual — are legitimate and stay. The one sanctioned exception is a generator
-stamping provenance onto a generated artefact.
+614 citations over 539 lines in 143 files are gone: each became the prose
+reason already standing beside it ("fail closed", "one definition", "parallel
+implementations"), or was deleted where the sentence already carried the reason.
+The count is higher than the 278 first recorded because the original scan
+suppressed a whole comment *block* when any legitimate reference appeared in it,
+so a bare `(§2.2)` sharing a block with `plans/NETWORK.md §5` was invisible.
+
+Removal is paragraph-scoped, not line-scoped: a citation inside a wrapped
+parenthetical cannot be deleted line by line without orphaning punctuation
+(`/// .`) or destroying a markdown bullet's continuation indent, so each
+affected paragraph was joined, rewritten, and re-wrapped at 80 columns with
+code spans and intra-doc links protected from being split. Both invariants were
+then machine-checked against `HEAD`: every code span and `[link]` survives
+verbatim, and 140 of the 167 touched files differ in *prose* only by the removed
+citations — the other 27 carry the deliberate substitutions below.
+
+Substitutions worth knowing about, because a future reader may wonder where a
+number went:
+
+- `§5.3-checked` → `permission-checked` (six sites in the file manager and
+  `lib/browse`), `under §26 load` → `under contended multi-user load`,
+  `the signed §8 load gate` → `the signed driver load gate`,
+  `the §16.2 / §16.3 mount policy` → `their mount policy`.
+- A bare `§N` that meant a *sibling* document rather than the charter was
+  **anchored**, not deleted: `spec §13` in `lib/controls` (its module doc names
+  `plans/GUI-CONTROLS-DESIGN.md`), `RFC 1184 §2` in `telnet`, `RFC 8415 §18.2`
+  in the DHCPv6 engines, `plans/APPS.md §2.1` in `lib/help`'s lint. Otherwise
+  the next scan re-flags them and someone deletes a real reference. Seven that
+  the automatic pass had deleted before this was understood were restored
+  anchored (four `spec §13`/`§15` in `lib/controls`, three `SYSLOG §5.1` in
+  `lib/log/src/segment.rs`) — a crate whose sibling document numbers its
+  sections the way the charter does is where this class hides.
+
+Five defects surfaced while sweeping, each fixed here:
+
+- **Ten dangling comments from an earlier half-removal.** Six QEMU fixtures
+  carried `// — test affordances must never reach a release binary.` — the
+  subject (`AGENTS.md §1`) had been stripped, leaving a sentence starting with
+  an em-dash. Same shape in `unlock_service.rs`, `acpi.rs`, `gdt.rs`, and
+  `x86_64/boot.rs` (which had lost a word mid-phrase: "sized from the
+  -discovered CPU count").
+- **`(§ relocation defence)`** in `kernel/mem/src/swap/tests.rs` — a section
+  sign attached to nothing, the residue of a partial edit. Three more in
+  `drivers/filesystem/arxfs/src/tests.rs` had lost a list member and kept its
+  separator (`§15.12, §16;)`).
+- **Two identifier code spans broken mid-token** by the original wrapping, so
+  the documented command did not work: ``` `cargo build … -p tairix-test-
+  syscall-dispatch-qemu` ``` and `DeviceManager:: autoload`. Markdown renders a
+  span's newline as a space, so these were already wrong on the rendered page;
+  joining the paragraph made them visible.
+- **`(§2.4)` in `lib/net/src/bond.rs`** and **`(§2.6.5)` in
+  `kernel/core/src/syscalls.rs`** — the first a charter citation the scan had
+  suppressed because `802.3ad` sat beside it, the second a `plans/FIX-DESKTOP.md`
+  reference that named no document.
+
+The guard is `cargo xtask charter-cite`, a static gate in `ci` beside
+`spec-review`. Two rules over `.rs` comments: a comment must not name the
+charter file beside a section reference (naming it in prose is fine — the
+charter asks for that), and a `§N` whose number is one of the charter's own
+section labels must have its source named within the same comment paragraph, so
+`RFC 9293 §3.2` and `` `plans/APPS.md` §4 `` pass while `(§2.2)` does not. The
+label set is *derived* from `AGENTS.md` at check time — its headings, the
+numbers it cites, and the ordered-list items each heading introduces (the
+charter numbers its rules as list items, so `§2.24` exists in no heading) — and
+never copied, so a new rule needs no edit here.
+
+Three things about the checker a later reviewer should not re-litigate:
+
+- **It lexes rather than pattern-matches.** A section number in a string
+  literal is program output, which the charter permits — a `compile_error!`
+  message, or the provenance banner `font-atlas` stamps into its generated
+  file. Those literals span lines, so the scan carries `Lex` state across them;
+  a line-local `//` search reads the banner's continuations as comments and
+  destroys the one citation the charter sanctions.
+- **The anchor window is one clause (45 characters), not the paragraph.** A
+  paragraph-wide anchor is what let the original scan miss `(§2.2)` beside a
+  legitimate reference. The fifteen references this tightening flagged were
+  genuinely ambiguous — a `§18.2` sixty characters from its `RFC 8415`, a
+  `§11.4` in a `lib/controls` banner, a `§7.3` in `lib/log` — and are now
+  anchored to the document they meant.
+- **A generated file is skipped, by its own first-line banner.** The charter's
+  one sanctioned citation is the provenance a generator stamps onto what it
+  emits, and `lib/font/src/atlas.rs` carries exactly that. Editing it to please
+  the checker makes the generated view drift from its generator — `font-atlas`
+  caught precisely that during this change, which is the whole-project gate
+  doing its job. The banner must be the *first* line and a plain `//` comment,
+  so a hand-written generator whose module doc mentions the banner it writes
+  stays inside the scan.
+- **The source vocabulary is evidence, not a wish list.** Every one of the 41
+  entries is cited by section somewhere in the tree; a speculative entry is
+  both bloat and a hole, because a bare `(§2.2)` passes wherever the word sits
+  nearby. Auditing which entry anchored each accepted reference found exactly
+  that: `PCI` was the sole anchor of five surviving `(§2.2)` citations in
+  `kernel/tairix-kernel/src/hwdiscovery.rs`, whose paragraphs discuss the PCI
+  bus. Those are fixed, and 36 unused entries are gone. A newly-cited
+  specification adds its name in the change that cites it — the diagnostic says
+  so.
+- **`§X`, `§SYSRET`, and `§"Overflow"` are accepted.** A section named rather
+  than numbered cannot be a charter citation; only a sign attached to nothing
+  is refused.
+
+### Open — the same citations in non-`.rs` comments (§2.11)
+
+The sweep above is `.rs` only. A comment is a comment whatever the file type,
+and the tree still carries, by the same detector: **1044** in `.toml` comments
+across **286** files (mostly `Cargo.toml` rationale blocks and `deny.toml`),
+**20** in `.s` assembly headers, **19** in `.sh`, and **18** in `.yml`. A
+`Cargo.toml` `description` field adds **173** more, which are package metadata
+rather than comments and want a separate decision.
+
+`README.md` and `docs/src/**` are deliberately **excluded**: they are prose
+documents where naming the charter as a source is a legitimate cross-reference,
+and `plans/*.md` are binding sub-plans that must cite the rules they implement.
+`charter-cite` scans `.rs` only for the same reason; widening it to `.toml`
+belongs with that sweep, not before it.
 
 ### Done — kernel IPC payloads are wiped on release (§4, §23.1)
 

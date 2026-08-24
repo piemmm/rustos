@@ -19,14 +19,14 @@
 //!
 //! # Arch-neutral and seam-only
 //!
-//! The engine names no architecture, board, device, or kernel type. It talks
-//! to the outside world only through object-safe seams: [`Report`] for
-//! output, [`SupInput`] for keyboard bytes, and [`SupervisorHost`] for the
-//! data and the control actions (`reboot`, `poweroff`, `mount`). The kernel
-//! wires those to the real console, the interrupt-driven reader, the reset
-//! primitive, and the real unlock path; a host unit test wires them to
-//! in-memory mocks. Nothing here allocates — the bootstrap floor cannot
-//! assume a heap — and nothing here panics on any input (`AGENTS.md` §2.9).
+//! The engine names no architecture, board, device, or kernel type. It talks to
+//! the outside world only through object-safe seams: [`Report`] for output,
+//! [`SupInput`] for keyboard bytes, and [`SupervisorHost`] for the data and the
+//! control actions (`reboot`, `poweroff`, `mount`). The kernel wires those to
+//! the real console, the interrupt-driven reader, the reset primitive, and the
+//! real unlock path; a host unit test wires them to in-memory mocks. Nothing
+//! here allocates — the bootstrap floor cannot assume a heap — and nothing here
+//! panics on any input.
 //!
 //! # Security
 //!

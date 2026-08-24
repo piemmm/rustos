@@ -73,9 +73,9 @@ const VOLMGR_DEVICE_FAILED: EventId = EventId(4184);
 /// Diagnostic event id: an extent (the whole device, or a partition) was
 /// recognised as a RAID array member and deliberately not attached — it
 /// belongs to a RAID array awaiting assembly, and mounting one bare copy
-/// would diverge a mirror or serve stale data (`plans/FIX-IO.md` IO6,
-/// `AGENTS.md` §26.5). A normal outcome, logged so a member disk is
-/// diagnosable rather than looking blank.
+/// would diverge a mirror or serve stale data (`plans/FIX-IO.md` IO6). A
+/// normal outcome, logged so a member disk is diagnosable rather than looking
+/// blank.
 const VOLMGR_RAID_MEMBER: EventId = EventId(4185);
 
 /// Diagnostic event id: the RAID member node could not be published, so no

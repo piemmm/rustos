@@ -128,9 +128,9 @@ pub enum TcpError {
     ConnectionClosed,
 }
 
-/// Tuning for a [`Tcb`]. Every capacity is a bounded, caller-chosen value
-/// (the stack sizes them from its per-principal budget, §24); nothing here
-/// is an attacker-influenced allocation.
+/// Tuning for a [`Tcb`]. Every capacity is a bounded, caller-chosen value (the
+/// stack sizes them from its per-principal budget); nothing here is an
+/// attacker-influenced allocation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct TcpConfig {
@@ -703,9 +703,10 @@ pub struct Tcb {
     rto: RtoEstimator,
     rtx_deadline: u128,
     rtx_count: u32,
-    /// The in-flight RTT sample: `(sequence just past the timed byte, send
-    /// time)`. Cancelled on retransmission (Karn's algorithm), so only a
-    /// segment sent exactly once is ever measured.
+    /// The in-flight RTT sample:
+    /// `(sequence just past the timed byte, send time)`. Cancelled on
+    /// retransmission (Karn's algorithm), so only a segment sent exactly once
+    /// is ever measured.
     rtt_sample: Option<(SeqNumber, u128)>,
 
     // Fast retransmit (RFC 5681 §3.2): three duplicate ACKs trigger an
@@ -892,8 +893,7 @@ impl Tcb {
 
     /// Open a connection actively (RFC 9293 §3.10.1): queue a SYN and enter
     /// `SynSent`. `iss` is the initial send sequence number the caller drew
-    /// from the kernel CSPRNG (§22); the engine never generates randomness
-    /// itself.
+    /// from the kernel CSPRNG; the engine never generates randomness itself.
     #[must_use]
     pub fn connect(
         config: TcpConfig,

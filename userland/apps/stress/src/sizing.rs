@@ -103,8 +103,8 @@ pub fn size_targets(spec: &RunSpec, discovered: &Discovered) -> Targets {
 
 /// One worker's even share of `percent` percent of `resource`, floored at
 /// [`FLOOR`]; `fallback` when the resource is undiscovered. The product is
-/// computed in `u128`, so a 100 TB+ resource at a large overcommit cannot
-/// wrap (§26.6 — sizes are 64-bit, intermediates wider).
+/// computed in `u128`, so a 100 TB+ resource at a large overcommit cannot wrap
+/// (sizes are 64-bit, intermediates wider).
 fn share_per_worker(resource: Option<u64>, percent: u32, workers: u32, fallback: u64) -> u64 {
     let Some(resource) = resource else {
         return fallback;

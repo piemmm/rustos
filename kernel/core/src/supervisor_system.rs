@@ -11,10 +11,9 @@
 //! where it lives (the charter forbids duplicating it).
 //!
 //! The provider is built once, at the same boot point the introspection source
-//! is built, and published into a set-once cell the binding kernel's
-//! Supervisor host reads through [`supervisor_system`]. Every method is
-//! read-only except the explicitly audited `reboot`/`poweroff`, and none
-//! panics on any input (`AGENTS.md` §2.9).
+//! is built, and published into a set-once cell the binding kernel's Supervisor
+//! host reads through [`supervisor_system`]. Every method is read-only except
+//! the explicitly audited `reboot`/`poweroff`, and none panics on any input.
 
 use tairix_abi::ABI_VERSION_CURRENT;
 use tairix_arch_api::TakeoverError;

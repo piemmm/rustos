@@ -22,11 +22,10 @@
 //! * the syscall wall from the inside — a probe worker's `fs_open` and
 //!   `spawn` are refused inside the sandbox while its pipe reply crosses.
 //!
-//! The chassis reaps the parent through the wait producer's non-blocking
-//! poll; PASS fires only on a parent exit of 0. Any misbehaviour surfaces
-//! as a distinct failure finisher (the parent's diagnostic exit code is
-//! folded into the finisher), and a wedged run times out through the
-//! harness (fail-loud, `AGENTS.md` §7).
+//! The chassis reaps the parent through the wait producer's non-blocking poll;
+//! PASS fires only on a parent exit of 0. Any misbehaviour surfaces as a
+//! distinct failure finisher (the parent's diagnostic exit code is folded into
+//! the finisher), and a wedged run times out through the harness (fail-loud).
 
 #![cfg_attr(itest_aarch64, no_std)]
 #![cfg_attr(itest_aarch64, no_main)]

@@ -300,7 +300,7 @@ fn hovering_an_item_changes_the_render() {
     );
 }
 
-// --- §13 authority rendering ------------------------------------------
+// --- spec §13 authority rendering -------------------------------------
 
 #[test]
 fn a_disabled_item_never_activates() {

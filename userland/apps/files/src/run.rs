@@ -232,7 +232,7 @@ mod program {
     /// success — the old region (`old_base` / `old_len`) already unmapped — or
     /// `None` when the region could not be allocated or the session refused the
     /// re-map, in which case the old region is left intact and still mapped so
-    /// the current surface stays valid (never a crash or a blank window, §5.4).
+    /// the current surface stays valid (never a crash or a blank window).
     ///
     /// The ordering is deliberately fail-closed: the fresh region is created
     /// and granted first and adopted only once [`WindowClient::resize`]
@@ -368,10 +368,10 @@ mod program {
 
     /// Most windows one file-manager process holds open at once.
     ///
-    /// A bound on this process's *own* resources — each window carries a
-    /// mapped frame region and a listing of its own — not a policy about how
-    /// many folders a user may look at: a further window is refused with a
-    /// stated reason rather than mapping memory without limit (§24).
+    /// A bound on this process's *own* resources — each window carries a mapped
+    /// frame region and a listing of its own — not a policy about how many
+    /// folders a user may look at: a further window is refused with a stated
+    /// reason rather than mapping memory without limit.
     const MAX_WINDOWS: usize = 8;
 
     /// One open browser window: everything a frame is drawn from, and nothing
@@ -826,7 +826,7 @@ mod program {
         /// before any child exists) is stated fail-loud on `stderr` at once; a
         /// load refusal that only shows once the image is read surfaces later
         /// through [`reap`](Self::reap). Either way the file manager carries on
-        /// — a refused launch is an answer, not a crash (§2.24).
+        /// — a refused launch is an answer, not a crash.
         fn launch(&mut self, bundle_path: &str) {
             let label = bundle_leaf(bundle_path);
             let mut run_path = String::from(bundle_path);
@@ -879,7 +879,7 @@ mod program {
         /// [`launch_viewer`](Self::launch_viewer)). When no installed
         /// application claims the type the refusal is stated fail-loud on
         /// `stderr` and nothing is launched — an honest answer, never a
-        /// fabricated open (§2.24).
+        /// fabricated open.
         fn open_file(&mut self, file_path: &str) {
             let name = path_leaf(file_path);
             let mut source = RtBundleSource;
@@ -913,7 +913,7 @@ mod program {
         /// closed regardless of the spawn outcome — the child holds its own
         /// counted clone. Launching is asynchronous and the child is reaped on
         /// the any-child wake exactly as [`launch`](Self::launch)'s children
-        /// are; a refusal is stated fail-loud, never a fabricated open (§2.24).
+        /// are; a refusal is stated fail-loud, never a fabricated open.
         fn launch_viewer(&mut self, bundle_path: &str, file_path: &str, display_name: &str) {
             // A negative (error) or out-of-range result is not a descriptor:
             // state the refusal and launch nothing (fail closed).
@@ -973,27 +973,26 @@ mod program {
     /// The largest `AppInfo` manifest the bundle scan reads: a signed manifest
     /// is a small fixed header plus a bounded capability/MIME body, far under
     /// this, so a file larger than this at a bundle's `AppInfo` path is
-    /// malformed and skipped (bounded read, never unbounded memory, §24.1).
+    /// malformed and skipped (bounded read, never unbounded memory).
     const APPINFO_READ_MAX: usize = 64 * 1024;
 
     /// Depth bound on the app-store walk: bundles may be filed in nested plain
     /// subdirectories, but a pathological tree must not recurse without limit
-    /// (fail closed, §24.1). Ample for the store's real nesting.
+    /// (fail closed). Ample for the store's real nesting.
     const MAX_BUNDLE_SCAN_DEPTH: usize = 8;
 
     /// The running-system [`BundleSource`]: the installed applications and the
     /// file types each declares, read from the on-disk app stores under the
-    /// file manager's own `CAP_FS_ACCESS` (never a compiled-in list, §16.5).
+    /// file manager's own `CAP_FS_ACCESS` (never a compiled-in list).
     ///
     /// It walks the machine-wide stores (`/System/Commands`, then
     /// `/System/Applications`, then `/Apps`), descending nested plain
-    /// subdirectories and reading each `<Name>.app`
-    /// bundle's `AppInfo` manifest for its declared MIME associations
-    /// ([`association_from_appinfo`]). The MIME table is a display *hint* only:
-    /// a bundle offered here is still launched through the ordinary signed load
-    /// gate, which verifies its signature and capabilities. A store or manifest
-    /// that cannot be read is skipped fail-closed, so a corrupt bundle is never
-    /// offered on a guess (§2.24).
+    /// subdirectories and reading each `<Name>.app` bundle's `AppInfo` manifest
+    /// for its declared MIME associations ([`association_from_appinfo`]). The
+    /// MIME table is a display *hint* only: a bundle offered here is still
+    /// launched through the ordinary signed load gate, which verifies its
+    /// signature and capabilities. A store or manifest that cannot be read is
+    /// skipped fail-closed, so a corrupt bundle is never offered on a guess.
     struct RtBundleSource;
 
     impl BundleSource for RtBundleSource {
@@ -1269,7 +1268,7 @@ mod program {
     /// mailbox is open to any capable sender, so the attested origin is the
     /// authentication (fail closed). The one definition the blocking
     /// [`RtEventSource::next`] wait and the non-blocking
-    /// [`poll_operation_event`] share, so they can never diverge (§2.2).
+    /// [`poll_operation_event`] share, so they can never diverge.
     fn accept_frame(len: usize, sender: &[u8; ORIGIN_WIRE_LEN], server: ProcId) -> bool {
         len == WindowEvent::WIRE_LEN
             && Origin::from_bytes(sender).is_ok_and(|origin| origin.proc_id() == server)
@@ -1360,9 +1359,9 @@ mod program {
         /// out as same-volume renames into the user's Trash
         /// (`plans/NEW-FILEMANAGER.md` `FM10`): the per-target
         /// source→destination renames, captured at open time so the dialog's
-        /// "Move to Trash" wording and the confirmed action stay in step
-        /// (§2.24). `None` when Trash is unavailable or cross-volume, in which
-        /// case the removal is the irreversible unlink and the dialog says so.
+        /// "Move to Trash" wording and the confirmed action stay in step.
+        /// `None` when Trash is unavailable or cross-volume, in which case the
+        /// removal is the irreversible unlink and the dialog says so.
         trash_moves: Option<alloc::vec::Vec<(alloc::vec::Vec<String>, alloc::vec::Vec<String>)>>,
     }
 
@@ -1375,8 +1374,8 @@ mod program {
     /// loop advances it a bounded slice at a time ([`advance_operation`]),
     /// repainting the progress panel and polling (non-blocking) for a mid-run
     /// cancel, so a large recursive removal or copy never freezes the window
-    /// and never busy-spins (§2.23). A latched cancel stops the job at the next
-    /// step boundary — between nodes, or between copy chunks, never mid-node.
+    /// and never busy-spins. A latched cancel stops the job at the next step
+    /// boundary — between nodes, or between copy chunks, never mid-node.
     struct Operation {
         /// The long operation being driven — a recursive removal or a paste.
         /// Each holds its exact position between slices, so a cancel or a
@@ -1391,8 +1390,7 @@ mod program {
     enum Job {
         /// A recursive removal, driven by a single [`DeleteWalk`]. The
         /// cross-volume-move source cleanup inside a [`Paste`] reuses the same
-        /// walk definition, so a delete and a move's cleanup can never diverge
-        /// (§2.2).
+        /// walk definition, so a delete and a move's cleanup can never diverge.
         Delete(DeleteWalk),
         /// A move/copy paste of a captured plan, driven by the [`Paste`] state
         /// machine.
@@ -1426,10 +1424,10 @@ mod program {
     ///
     /// `None` unless the user chose Open With… on a regular file that at least
     /// one installed application claims (no application is an honest refusal
-    /// stated on `stderr`, never an empty menu, §2.24). It owns input while
-    /// open and performs nothing itself — a chosen application is launched by
-    /// the manager's own capability-checked hand-off
-    /// ([`Launcher::launch_viewer`]), exactly the path the default open uses.
+    /// stated on `stderr`, never an empty menu). It owns input while open and
+    /// performs nothing itself — a chosen application is launched by the
+    /// manager's own capability-checked hand-off ([`Launcher::launch_viewer`]),
+    /// exactly the path the default open uses.
     struct OpenWithMenu {
         /// The window-local point the chooser is placed at and hit-tested
         /// against (the right-click point Open With… was invoked from, so the
@@ -1598,7 +1596,7 @@ mod program {
         .ok_or(Errno::LengthOutOfRange)?;
         // In rename mode, overlay the inline editor exactly over the selected
         // item's row through the shared selection geometry, so the field sits
-        // on the item the user is renaming (§2.2).
+        // on the item the user is renaming.
         if let Some(field) = rename {
             if let Some(bounds) =
                 tairix_browse::render::selection_rect(browser, scale, theme, viewport)
@@ -1613,7 +1611,7 @@ mod program {
             draw_properties_editable(&mut surface, props, scale, theme, viewport);
             // Reassigning an owner is privileged, so the ownership control is
             // drawn only where the launching user holds `CAP_FS_CHOWN` — never
-            // shown to a session that cannot use it (§2.24).
+            // shown to a session that cannot use it.
             if can_chown {
                 let active = owner.map(|ed| (ed.field, &ed.editor));
                 draw_owner_control(&mut surface, props, scale, theme, viewport, active);
@@ -2047,7 +2045,7 @@ mod program {
         match key {
             // Toolbar-command accelerators: Alt+←/→/↑ drive the history and
             // climb commands, F5 refreshes — the same shared dispatch a toolbar
-            // click uses, so the keyboard and the toolbar cannot disagree (§2.2).
+            // click uses, so the keyboard and the toolbar cannot disagree.
             KeyValue::Named(NamedKeyCode::Left) if modifiers.alt => {
                 apply_toolbar_command(browser, scale, theme, viewport, ToolbarCommand::Back)
             }
@@ -2138,9 +2136,9 @@ mod program {
     /// a repaint. With nothing selected (an empty directory, or a cleared
     /// selection) [`Browser::plan_delete`] yields no plan and this is a no-op —
     /// the Delete verb is simply unavailable rather than a catastrophic empty
-    /// or root removal (fail closed, §5.4). The plan is captured now, so a
-    /// listing change while the dialog is up cannot move what a confirmed
-    /// delete removes.
+    /// or root removal (fail closed). The plan is captured now, so a listing
+    /// change while the dialog is up cannot move what a confirmed delete
+    /// removes.
     fn begin_delete<S: DirectorySource>(
         browser: &Browser<S>,
         delete: &mut Option<DeleteConfirm>,
@@ -2151,9 +2149,9 @@ mod program {
         // Decide now — before showing the dialog — whether the removal can be a
         // recoverable move to Trash (`plans/NEW-FILEMANAGER.md` `FM10`), so the
         // confirmation's wording matches exactly what a confirmed delete will
-        // do (§2.24). A resolvable, same-volume, ensured Trash gives the
-        // per-target rename plan; anything else falls back to the irreversible
-        // unlink and the dialog says "Delete Permanently".
+        // do. A resolvable, same-volume, ensured Trash gives the per-target
+        // rename plan; anything else falls back to the irreversible unlink and
+        // the dialog says "Delete Permanently".
         let trash_moves = plan_trash_moves(&plan);
         let disposition = if trash_moves.is_some() {
             DeleteDisposition::Trash
@@ -2180,9 +2178,9 @@ mod program {
     /// `HOME`, a Trash directory that cannot be created or stat'd, a
     /// cross-volume target (a mounted volume under the current directory), or a
     /// name that cannot be given a collision-free home in Trash — returns
-    /// `None`, and the removal falls back to the irreversible unlink (§2.24,
-    /// fail closed). Every call here is the user's own §5.3-checked I/O — no new
-    /// capability, no ambient authority (§4, §5.4).
+    /// `None`, and the removal falls back to the irreversible unlink (fail
+    /// closed). Every call here is the user's own permission-checked I/O — no
+    /// new capability, no ambient authority.
     fn plan_trash_moves(
         plan: &DeletePlan,
     ) -> Option<alloc::vec::Vec<(alloc::vec::Vec<String>, alloc::vec::Vec<String>)>> {
@@ -2197,9 +2195,9 @@ mod program {
         }
         let trash_vol = VolumeId::new(stat_node(&trash)?.id.volume);
         // The names already in Trash: a move must never overwrite a
-        // previously-trashed item (§2.24), and a second same-named target in
-        // this very batch must not collide with the first, so each resolved
-        // leaf is reserved as it is chosen.
+        // previously-trashed item, and a second same-named target in this very
+        // batch must not collide with the first, so each resolved leaf is
+        // reserved as it is chosen.
         let mut taken: alloc::vec::Vec<String> = read_children(&trash)
             .ok()?
             .into_iter()
@@ -2268,7 +2266,7 @@ mod program {
     /// click that lands on neither button, and every non-decision event, leaves
     /// the dialog open (fail closed). The removal is the user's own
     /// capability-checked `fs_unlink`s — no new capability, no ambient
-    /// authority (§4, §5.4).
+    /// authority.
     fn apply_delete_event(
         overlays: &mut Overlays,
         scale: Scale,
@@ -2316,12 +2314,12 @@ mod program {
                 // Hand the removal to the interleaved operation runner: the
                 // event loop drives it a bounded slice at a time, showing
                 // progress and honouring a mid-run cancel, so a large recursive
-                // delete never freezes the window (§2.23). The plan was captured
-                // at open time, so a listing change cannot move what it targets;
+                // delete never freezes the window. The plan was captured at
+                // open time, so a listing change cannot move what it targets;
                 // the view is re-listed when the operation finishes. A
-                // recoverable move to Trash (captured at open time, matching the
-                // dialog's wording) renames each target into Trash; anything
-                // else is the irreversible recursive unlink (§2.24, `FM10`).
+                // recoverable move to Trash (captured at open time, matching
+                // the dialog's wording) renames each target into Trash;
+                // anything else is the irreversible recursive unlink (`FM10`).
                 overlays.operation = Some(match confirm.trash_moves {
                     Some(moves) => Operation {
                         job: Job::Trash(TrashRun::new(moves)),
@@ -2341,8 +2339,8 @@ mod program {
     /// repaints and cancel polls.
     ///
     /// Large enough that the whole-window repaint is amortised over many nodes,
-    /// small enough that a cancel is honoured promptly (§2.23) — a fixed tuning
-    /// bound, not a hardware-scaled capacity (§24.4).
+    /// small enough that a cancel is honoured promptly — a fixed tuning bound,
+    /// not a hardware-scaled capacity.
     const OPERATION_STEP_BUDGET: u32 = 64;
 
     /// Advance the running `operation` by up to [`OPERATION_STEP_BUDGET`]
@@ -2350,9 +2348,9 @@ mod program {
     /// cancelled at a step boundary, or stopped fail-closed on a refusal.
     ///
     /// Dispatches on the job kind so the event loop drives a delete and a paste
-    /// through one interleaving path (§2.2): each holds its exact position
-    /// between calls, so a bounded slice per turn keeps the window responsive
-    /// without losing or repeating work (§2.23).
+    /// through one interleaving path: each holds its exact position between
+    /// calls, so a bounded slice per turn keeps the window responsive without
+    /// losing or repeating work.
     fn advance_operation(operation: &mut Operation) -> bool {
         match &mut operation.job {
             Job::Delete(walk) => advance_delete_walk(walk, &mut operation.progress),
@@ -2364,10 +2362,10 @@ mod program {
     /// A recoverable move to Trash in progress (`plans/NEW-FILEMANAGER.md`
     /// `FM10`): the captured per-target source→destination renames, carried out
     /// one item per step so the window stays responsive and a cancel is
-    /// honoured between items (§2.23). Each rename is a single same-volume
-    /// `fs_rename` — no tree is walked, since the item moves intact — so a
-    /// move of any size is cheap; the interleaving matches the delete/paste
-    /// runners only so a pathological count of targets can still be cancelled.
+    /// honoured between items. Each rename is a single same-volume `fs_rename`
+    /// — no tree is walked, since the item moves intact — so a move of any size
+    /// is cheap; the interleaving matches the delete/paste runners only so a
+    /// pathological count of targets can still be cancelled.
     struct TrashRun {
         /// The remaining source→destination renames, in listing order.
         moves: alloc::vec::Vec<(alloc::vec::Vec<String>, alloc::vec::Vec<String>)>,
@@ -2393,13 +2391,12 @@ mod program {
     ///
     /// Each step reads a directory (`fs_readdir`) or unlinks a node
     /// (`fs_unlink`, depth-first so contents go before their container) under
-    /// the user's own identity — the ordinary §5.3-checked writes the user
-    /// could perform themselves, no new capability — and updates the honest
-    /// progress count from the walk's own figure. A latched cancel stops at the
-    /// next boundary (never mid-node); the first refused read or unlink stops
-    /// the removal, states the reason on `stderr` (fail loud, §2.24), and
-    /// leaves whatever was already removed removed rather than a fabricated
-    /// success (§5.4).
+    /// the user's own identity — the ordinary permission-checked writes the
+    /// user could perform themselves, no new capability — and updates the
+    /// honest progress count from the walk's own figure. A latched cancel stops
+    /// at the next boundary (never mid-node); the first refused read or unlink
+    /// stops the removal, states the reason on `stderr` (fail loud), and leaves
+    /// whatever was already removed removed rather than a fabricated success.
     fn advance_delete_walk(walk: &mut DeleteWalk, progress: &mut ProgressModel) -> bool {
         for _ in 0..OPERATION_STEP_BUDGET {
             if progress.is_cancel_requested() {
@@ -2450,13 +2447,13 @@ mod program {
     /// returning `true` once it has finished.
     ///
     /// Each step renames one target into its captured Trash destination
-    /// (`fs_rename`) under the user's own identity — the ordinary §5.3-checked
-    /// move the user could perform themselves, no new capability — and updates
-    /// the honest progress count. A latched cancel stops at the next item
-    /// boundary (never mid-rename); the first refused move stops the run,
-    /// states the reason on `stderr` (fail loud, §2.24), and leaves whatever
-    /// already moved in Trash rather than a fabricated success (§5.4). The
-    /// destinations were resolved collision-free at open time, so a rename
+    /// (`fs_rename`) under the user's own identity — the ordinary
+    /// permission-checked move the user could perform themselves, no new
+    /// capability — and updates the honest progress count. A latched cancel
+    /// stops at the next item boundary (never mid-rename); the first refused
+    /// move stops the run, states the reason on `stderr` (fail loud), and
+    /// leaves whatever already moved in Trash rather than a fabricated success.
+    /// The destinations were resolved collision-free at open time, so a rename
     /// never overwrites an existing trashed item.
     fn advance_trash(run: &mut TrashRun, progress: &mut ProgressModel) -> bool {
         for _ in 0..OPERATION_STEP_BUDGET {
@@ -2477,10 +2474,10 @@ mod program {
         false
     }
 
-    /// State on `stderr` that the move to Trash stopped while handling
-    /// `source` — an honest, fail-loud diagnosis naming the item and the
-    /// reason, never a silent failure or a fabricated success (§2.24). Carries
-    /// no path prefix beyond the leaf name the user already sees.
+    /// State on `stderr` that the move to Trash stopped while handling `source`
+    /// — an honest, fail-loud diagnosis naming the item and the reason, never a
+    /// silent failure or a fabricated success. Carries no path prefix beyond
+    /// the leaf name the user already sees.
     fn report_trash_item_error(source: &[String], reason: &str) {
         let name = source.last().map_or("", String::as_str);
         let _ = writeln!(Stderr, "files: could not move {name} to Trash: {reason}");
@@ -2493,7 +2490,7 @@ mod program {
     /// mailbox is empty or the frame is dropped (foreign sender, short, or
     /// malformed), and `Err` only when the channel itself fails. It shares
     /// [`accept_frame`] with the blocking [`RtEventSource::next`], so the two
-    /// authenticate a sender identically (§2.2).
+    /// authenticate a sender identically.
     fn poll_operation_event(endpoint: u64, server: ProcId) -> Result<Option<WindowEvent>, Errno> {
         let mut frame = [0u8; WindowEvent::WIRE_LEN];
         let mut sender = [0u8; ORIGIN_WIRE_LEN];
@@ -2560,9 +2557,9 @@ mod program {
     }
 
     /// State on `stderr` that the item at `path` could not be removed — an
-    /// honest, fail-loud diagnosis naming the item, never a silent failure or
-    /// a fabricated success (§2.24). Carries no path prefix or token beyond the
-    /// leaf name the user already sees.
+    /// honest, fail-loud diagnosis naming the item, never a silent failure or a
+    /// fabricated success. Carries no path prefix or token beyond the leaf name
+    /// the user already sees.
     fn report_delete_refused(path: &[String]) {
         let name = path.last().map_or("", String::as_str);
         let _ = writeln!(Stderr, "files: could not delete {name}");
@@ -2571,7 +2568,7 @@ mod program {
     /// State a `files:`-prefixed diagnosis on `stderr` — the one fail-loud
     /// reporting path a whole-operation refusal (a too-deep tree, an
     /// unspellable path, a rejected paste plan, an internal step error) states
-    /// its reason through, shared by the delete and paste drives (§2.2).
+    /// its reason through, shared by the delete and paste drives.
     fn report_error(reason: &str) {
         let _ = writeln!(Stderr, "files: {reason}");
     }
@@ -2644,7 +2641,7 @@ mod program {
     /// Begin a paste of the held `clipboard` into the current directory as an
     /// interleaved [`Operation`], under the user's own identity (no new
     /// capability, no ambient authority — every step is the ordinary
-    /// §5.3-checked write the user could perform themselves).
+    /// permission-checked write the user could perform themselves).
     ///
     /// The plan is validated first ([`plan_paste`]): pasting a folder into
     /// itself is refused outright (`WouldRecurse`) and nothing is enqueued. The
@@ -2652,14 +2649,14 @@ mod program {
     /// cross-volume for every item), and the plan is handed to a [`Paste`]
     /// state machine the event loop then advances a bounded slice at a time —
     /// showing progress and honouring a mid-run cancel, so a large copy never
-    /// freezes the window (§2.23). Each item's move-vs-copy is decided by
+    /// freezes the window. Each item's move-vs-copy is decided by
     /// [`paste_strategy`] as it runs — a same-volume move is one `fs_rename`, a
     /// cross-volume move is copy-then-delete, a copy always streams — and the
     /// run is fail closed: the first refused operation stops the paste, states
-    /// the reason on `stderr` (fail loud, §2.24), and leaves whatever already
-    /// landed in place rather than a fabricated success (§5.4). A `Cut` is
-    /// consumed by initiating the paste (its sources are being moved); a `Copy`
-    /// keeps the clipboard for another paste.
+    /// the reason on `stderr` (fail loud), and leaves whatever already landed
+    /// in place rather than a fabricated success. A `Cut` is consumed by
+    /// initiating the paste (its sources are being moved); a `Copy` keeps the
+    /// clipboard for another paste.
     fn run_paste<S: DirectorySource>(
         browser: &mut Browser<S>,
         clipboard: &mut Option<Clipboard>,
@@ -2686,8 +2683,8 @@ mod program {
         let op = plan.op();
         // Hand the plan to the interleaved operation runner: the event loop
         // carries it out a bounded chunk at a time, showing progress and
-        // honouring a mid-run cancel, so a large copy never freezes the window
-        // (§2.23). The view is re-listed when the operation finishes.
+        // honouring a mid-run cancel, so a large copy never freezes the window.
+        // The view is re-listed when the operation finishes.
         *operation = Some(Operation {
             job: Job::Paste(Paste::new(op, dest_vol, plan.items().to_vec())),
             progress: ProgressModel::new(ProgressOp::Copy),
@@ -2713,15 +2710,15 @@ mod program {
     }
 
     /// A paste in progress: a captured plan carried out one bounded unit of
-    /// work at a time so the event loop stays responsive (§2.23).
+    /// work at a time so the event loop stays responsive.
     ///
     /// The move-vs-copy decision for each item is made as it runs
     /// ([`paste_strategy`]) from the two nodes' volume ids; a same-volume move
     /// is a single `fs_rename`, a copy streams the bytes through the reused
-    /// buffer a chunk at a time, and a cross-volume move copies then removes the
-    /// source through the shared delete walk (§2.2). Every step is the user's
-    /// own §5.3-checked write — no new capability, no ambient authority (§4,
-    /// §5.4) — so the read-only picker never builds a [`Paste`].
+    /// buffer a chunk at a time, and a cross-volume move copies then removes
+    /// the source through the shared delete walk. Every step is the user's own
+    /// permission-checked write — no new capability, no ambient authority — so
+    /// the read-only picker never builds a [`Paste`].
     struct Paste {
         /// Whether the plan moves (`Cut`) or copies (`Copy`) its items.
         op: ClipboardOp,
@@ -2741,8 +2738,7 @@ mod program {
         /// cross-volume cleanup removals are not counted as copied.
         done: usize,
         /// One reused, fixed-size copy buffer — never a per-file allocation and
-        /// never sized to a file's length, so a copy of any size stays bounded
-        /// (§2.23, §26.6).
+        /// never sized to a file's length, so a copy of any size stays bounded.
         buf: alloc::vec::Vec<u8>,
     }
 
@@ -2764,19 +2760,19 @@ mod program {
             /// the copy completes; `None` for a plain copy.
             then_delete: Option<(alloc::vec::Vec<String>, bool)>,
         },
-        /// Removing a cross-volume move's source after its copy fully succeeded,
-        /// through the shared delete walk (§2.2).
+        /// Removing a cross-volume move's source after its copy fully
+        /// succeeded, through the shared delete walk.
         Deleting(DeleteWalk),
     }
 
     /// One leaf-file transfer in flight: the open source and destination
     /// handles plus the resumable [`CopyCursor`] over them, stepped one bounded
-    /// chunk at a time so a large file never blocks the event loop (§2.23).
+    /// chunk at a time so a large file never blocks the event loop.
     struct Transfer {
         /// The source file opened read-only.
         reader: tairix_rt::File,
         /// The destination file, created exclusively (a pre-existing name is
-        /// refused, never clobbered, §2.24).
+        /// refused, never clobbered).
         writer: tairix_rt::File,
         /// The bounded, resumable copy cursor over the two handles.
         cursor: CopyCursor,
@@ -2808,7 +2804,7 @@ mod program {
         /// Carry one bounded chunk of the transfer through `buf`, returning
         /// `Ok(true)` once the whole file has been copied and `Ok(false)` when
         /// more remains. A source that ends before, or grows past, its stat'd
-        /// length fails closed rather than looping or wrapping (§26.5).
+        /// length fails closed rather than looping or wrapping.
         fn step(&mut self, buf: &mut [u8]) -> Result<bool, &'static str> {
             let Some(chunk) = self.cursor.next_chunk() else {
                 return Ok(true);
@@ -2880,7 +2876,7 @@ mod program {
         }
 
         /// The honest count of nodes moved/copied so far — the rising progress
-        /// figure (§2.24).
+        /// figure.
         fn done(&self) -> usize {
             self.done
         }
@@ -2910,9 +2906,9 @@ mod program {
         ///
         /// A `Cut` back into the item's own directory is a no-op (the item is
         /// already where it would land); a `Copy` onto itself is refused rather
-        /// than duplicating a file onto itself (§2.24). Otherwise the source is
-        /// stat'd for its kind and volume and [`paste_strategy`] picks the
-        /// mechanism: a same-volume move renames in one syscall, a copy (and a
+        /// than duplicating a file onto itself. Otherwise the source is stat'd
+        /// for its kind and volume and [`paste_strategy`] picks the mechanism:
+        /// a same-volume move renames in one syscall, a copy (and a
         /// cross-volume move's copy phase) starts a [`CopyWalk`].
         fn begin_next_item(&mut self) -> StepOutcome {
             let Some(item) = self.items.get(self.index) else {
@@ -3027,8 +3023,8 @@ mod program {
             };
             let Some(step) = next else {
                 // The tree is fully copied. A cross-volume move now removes the
-                // source through the shared delete walk (§2.2); a plain copy is
-                // done with this item.
+                // source through the shared delete walk; a plain copy is done
+                // with this item.
                 if let Some((source, is_directory)) = then_delete {
                     let Some(plan) = DeletePlan::new(alloc::vec![(source, is_directory)]) else {
                         return StepOutcome::Failed("a moved source could not be removed");
@@ -3118,8 +3114,8 @@ mod program {
         }
 
         /// Advance a cross-volume move's source removal by one step, over the
-        /// shared delete walk (§2.2). These removals are cleanup, so they are
-        /// not counted toward the copied figure.
+        /// shared delete walk. These removals are cleanup, so they are not
+        /// counted toward the copied figure.
         fn step_delete(&mut self, mut walk: DeleteWalk) -> StepOutcome {
             // Copy the current step out so the walk is free to be mutated.
             let step = walk.next_action().map(|action| match action {
@@ -3165,11 +3161,11 @@ mod program {
     ///
     /// A unit is one rename, one `fs_mkdir`, one directory listing, one copy
     /// chunk, or one source-removal step, so a single large file cannot block
-    /// the event loop (each chunk is bounded, §2.23). A latched cancel stops at
-    /// the next unit boundary (never mid-chunk); the first refusal states its
-    /// reason on `stderr` naming the item (fail loud, §2.24) and leaves whatever
-    /// already landed in place (§5.4). The honest copied count is updated from
-    /// the paste's own figure after each unit.
+    /// the event loop (each chunk is bounded). A latched cancel stops at the
+    /// next unit boundary (never mid-chunk); the first refusal states its
+    /// reason on `stderr` naming the item (fail loud) and leaves whatever
+    /// already landed in place. The honest copied count is updated from the
+    /// paste's own figure after each unit.
     fn advance_paste(paste: &mut Paste, progress: &mut ProgressModel) -> bool {
         for _ in 0..OPERATION_STEP_BUDGET {
             if progress.is_cancel_requested() {
@@ -3222,8 +3218,8 @@ mod program {
 
     /// State on `stderr` that the paste stopped while handling `source` — an
     /// honest, fail-loud diagnosis naming the item and the reason, never a
-    /// silent failure or a fabricated success (§2.24). Carries no path prefix
-    /// beyond the leaf name the user already sees.
+    /// silent failure or a fabricated success. Carries no path prefix beyond
+    /// the leaf name the user already sees.
     fn report_paste_item_error(source: &[String], reason: &str) {
         let name = source.last().map_or("", String::as_str);
         let _ = writeln!(Stderr, "files: could not paste {name}: {reason}");
@@ -3242,9 +3238,9 @@ mod program {
     /// * an **item** is activated on a quick second press on that same item —
     ///   descend / launch a bundle / open a file, through the very same
     ///   [`activate`] dispatch a keyboard `Enter` drives, so pointer and
-    ///   keyboard can never diverge (§2.2) — and merely selected on a first or
-    ///   lone press. The monotonic [`tairix_rt::clock_get`] needs no
-    ///   capability, and the pairing rule lives once in the shared engine
+    ///   keyboard can never diverge — and merely selected on a first or lone
+    ///   press. The monotonic [`tairix_rt::clock_get`] needs no capability, and
+    ///   the pairing rule lives once in the shared engine
     ///   ([`DoubleClickTracker`]);
     /// * anything else lands on the read-only **chrome** and routes through
     ///   [`apply_chrome_press`].
@@ -3376,9 +3372,9 @@ mod program {
     /// Handle one event while the right-click context menu owns the window.
     ///
     /// `Escape` dismisses it. A primary-button press on an enabled command runs
-    /// that command's verb (and closes the menu); a press off the menu, or on
-    /// a disabled row, simply dismisses it (fail closed — a disabled row never
-    /// acts, §5.4). Every other event leaves the menu open.
+    /// that command's verb (and closes the menu); a press off the menu, or on a
+    /// disabled row, simply dismisses it (fail closed — a disabled row never
+    /// acts). Every other event leaves the menu open.
     fn apply_menu_event<S: DirectorySource>(
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
@@ -3431,8 +3427,8 @@ mod program {
 
     /// Run the verb a chosen [`ContextCommand`] names, over the exact same app
     /// paths the toolbar and keyboard drive, so the right-click menu can never
-    /// diverge from them (§2.2). Every verb is the user's own permission-
-    /// checked action under their identity — the menu adds no authority.
+    /// diverge from them. Every verb is the user's own permission- checked
+    /// action under their identity — the menu adds no authority.
     fn dispatch_context_command<S: DirectorySource>(
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
@@ -3472,7 +3468,7 @@ mod program {
             ContextCommand::Properties => begin_properties(browser, &mut overlays.properties),
             // The same modal-confirmed removal the `Delete` key opens: the menu
             // adds no authority — the confirmed walk is the user's own
-            // permission-checked `fs_unlink`s (§2.2).
+            // permission-checked `fs_unlink`s.
             ContextCommand::Delete => begin_delete(browser, &mut overlays.delete),
         }
     }
@@ -3488,10 +3484,9 @@ mod program {
     /// ([`RtBundleSource`] + [`applications_for`], keyed off the leaf name,
     /// never a hard-coded viewer). When no installed application claims the
     /// file the refusal is stated fail-loud on `stderr` and nothing is opened —
-    /// an honest answer, never an empty menu or a fabricated open (§2.24). The
-    /// chooser itself launches nothing: a chosen row runs the same
-    /// capability-checked hand-off the default open uses
-    /// ([`apply_open_with_event`]).
+    /// an honest answer, never an empty menu or a fabricated open. The chooser
+    /// itself launches nothing: a chosen row runs the same capability-checked
+    /// hand-off the default open uses ([`apply_open_with_event`]).
     fn begin_open_with<S: DirectorySource>(
         browser: &Browser<S>,
         overlays: &mut Overlays,
@@ -3539,12 +3534,12 @@ mod program {
     /// Handle one event while the "Open With…" chooser owns the window.
     ///
     /// `Escape` dismisses it. A primary-button press on a candidate row hands
-    /// the file to that application through the same [`Launcher::launch_viewer`]
-    /// hand-off the default open uses (the file opened read-only in the
-    /// manager's table and wired onto the child's `STDIN`, so the application
-    /// reads it with no filesystem capability of its own); a press off the menu
-    /// simply dismisses it (fail closed, §5.4). Every other event leaves the
-    /// chooser open.
+    /// the file to that application through the same
+    /// [`Launcher::launch_viewer`] hand-off the default open uses (the file
+    /// opened read-only in the manager's table and wired onto the child's
+    /// `STDIN`, so the application reads it with no filesystem capability of
+    /// its own); a press off the menu simply dismisses it (fail closed). Every
+    /// other event leaves the chooser open.
     fn apply_open_with_event(
         overlays: &mut Overlays,
         launcher: &RefCell<Launcher>,
@@ -3674,8 +3669,8 @@ mod program {
     /// exported `HOME`, ensures the fixed `Library/Trash` subtree exists (the
     /// user's own idempotent `fs_mkdir`), and lists it. Going to the Trash is
     /// an incidental, refusable action: an absent home or an unavailable Trash
-    /// is stated on `stderr` and changes nothing (§2.24, §5.4) — never a crash
-    /// or a fabricated view.
+    /// is stated on `stderr` and changes nothing — never a crash or a
+    /// fabricated view.
     fn go_to_trash<S: DirectorySource>(
         browser: &mut Browser<S>,
         scale: Scale,
@@ -3713,15 +3708,15 @@ mod program {
     /// its contents (`plans/NEW-FILEMANAGER.md` `FM11`).
     ///
     /// Recomputes the Trash location and re-reads its contents now, so a stale
-    /// click can never empty the wrong directory (fail closed, §5.4): if the
-    /// current directory is not the user's Trash, or its listing cannot be
-    /// read, or it is already empty, the verb is simply not offered (a silent
-    /// no-op or a stated refusal, never a crash). Emptying is always permanent
-    /// (there is no trash-of-the-trash), so the plan is confirmed with the
+    /// click can never empty the wrong directory (fail closed): if the current
+    /// directory is not the user's Trash, or its listing cannot be read, or it
+    /// is already empty, the verb is simply not offered (a silent no-op or a
+    /// stated refusal, never a crash). Emptying is always permanent (there is
+    /// no trash-of-the-trash), so the plan is confirmed with the
     /// [`DeleteDisposition::Permanent`] wording and carried out — on confirm —
     /// by the same interleaved [`DeleteWalk`] runner an ordinary permanent
-    /// delete uses (§2.2), under the user's own `fs_readdir`/`fs_unlink` (no
-    /// new capability, no ambient authority).
+    /// delete uses, under the user's own `fs_readdir`/`fs_unlink` (no new
+    /// capability, no ambient authority).
     fn begin_empty_trash<S: DirectorySource>(
         browser: &Browser<S>,
         delete: &mut Option<DeleteConfirm>,
@@ -3830,10 +3825,9 @@ mod program {
     /// Showing properties is an incidental, refusable action: if the item can
     /// no longer be named or its metadata cannot be read (it vanished, or is
     /// unreadable), the refusal is stated on `stderr` and the overlay simply
-    /// stays closed — an answer, not a crash, and never a fabricated summary
-    /// (§2.24, §5.4). A directory or sealed bundle is opened with the
-    /// directory flag, a regular file read-only; `stat` needs only a live
-    /// handle either way.
+    /// stays closed — an answer, not a crash, and never a fabricated summary. A
+    /// directory or sealed bundle is opened with the directory flag, a regular
+    /// file read-only; `stat` needs only a live handle either way.
     fn begin_properties<S: DirectorySource>(
         browser: &Browser<S>,
         properties: &mut Option<Properties>,
@@ -3856,12 +3850,12 @@ mod program {
     /// capability-checked handle under the user's own identity (no new
     /// capability). Returns `None` when there is no selection, the item can no
     /// longer be named, or its metadata cannot be read — the caller decides
-    /// whether that is a silent no-op or a stated refusal (§2.24, §5.4). A
-    /// directory or sealed bundle is opened with the directory flag, a regular
-    /// file read-only; `stat` needs only a live handle either way.
+    /// whether that is a silent no-op or a stated refusal. A directory or
+    /// sealed bundle is opened with the directory flag, a regular file
+    /// read-only; `stat` needs only a live handle either way.
     ///
     /// One definition shared by opening the overlay ([`begin_properties`]) and
-    /// refreshing it after a permission change, so the two cannot drift (§2.2).
+    /// refreshing it after a permission change, so the two cannot drift.
     fn stat_selected_properties<S: DirectorySource>(browser: &Browser<S>) -> Option<Properties> {
         let entry = browser.selected_entry()?;
         let kind = entry.kind();
@@ -3903,8 +3897,7 @@ mod program {
     /// dropping the non-settable file-type bits `fs_stat` also reports). On
     /// success the overlay is re-stat'd so it reflects the applied mode; a VFS
     /// refusal leaves the node's mode exactly as it was and states its reason
-    /// on `stderr` — an honest answer, never a crash or a fabricated success
-    /// (§2.24, §5.4).
+    /// on `stderr` — an honest answer, never a crash or a fabricated success.
     fn apply_permission_toggle<S: DirectorySource>(
         browser: &mut Browser<S>,
         properties: &mut Option<Properties>,
@@ -3944,12 +3937,11 @@ mod program {
         }
     }
 
-    /// Route a primary-button press inside the open Properties overlay: a
-    /// press on one of the nine permission toggles commits a mode change
+    /// Route a primary-button press inside the open Properties overlay: a press
+    /// on one of the nine permission toggles commits a mode change
     /// (`apply_permission_toggle`); otherwise, where the user holds
     /// `CAP_FS_CHOWN`, a press on the owner or group value opens the inline id
-    /// editor for that field. A press elsewhere changes nothing (fail closed,
-    /// §5.4).
+    /// editor for that field. A press elsewhere changes nothing (fail closed).
     ///
     /// The permission and owner cells sit on different rows, so a press
     /// resolves to at most one of them; the permission row is checked first so
@@ -4058,7 +4050,7 @@ mod program {
     /// panel is re-stat'd to reflect the new owner; a non-numeric/out-of-range
     /// value or a VFS refusal (including the missing-`CAP_FS_CHOWN` denial)
     /// states its reason in the field and keeps the editor open — an honest
-    /// answer, never a silent or fabricated result (§2.24, §5.4).
+    /// answer, never a silent or fabricated result.
     fn commit_owner_edit<S: DirectorySource>(
         browser: &mut Browser<S>,
         properties: &mut Option<Properties>,
@@ -4155,8 +4147,8 @@ mod program {
                         (true, false)
                     }
                     // A refused rename stays open with the honest reason shown
-                    // in the field (§2.24 — never a silent or fabricated
-                    // result); the listing is untouched.
+                    // in the field (never a silent or fabricated result); the
+                    // listing is untouched.
                     Err(err) => {
                         if let Some(field) = rename.as_mut() {
                             field.set_message(Some(String::from(err.message())));
@@ -4305,7 +4297,7 @@ mod program {
     /// `can_chown` is whether the launching user holds `CAP_FS_CHOWN` — read
     /// once from the kernel-attested self-origin (a refused query fails closed
     /// to "not held") — so the ownership control is offered only where it can
-    /// be used (§2.24).
+    /// be used.
     fn initial_overlays() -> Overlays {
         Overlays {
             rename: None,
@@ -4582,9 +4574,9 @@ mod program {
             // repaint the progress, and poll (non-blocking) for a mid-run
             // cancel or a close — never parking while there is genuine work to
             // do, and returning to the parked wait the instant the operation
-            // finishes (§2.23). Another window carries on: the polled event is
-            // routed to whichever window it names, so only the operating
-            // window is modal.
+            // finishes. Another window carries on: the polled event is routed
+            // to whichever window it names, so only the operating window is
+            // modal.
             if let Some(busy) = windows
                 .iter()
                 .position(|win| win.overlays.operation.is_some())
@@ -4607,8 +4599,8 @@ mod program {
                 }
                 if finished {
                     // Re-list so the view reflects what actually remains — a
-                    // partial removal (a refusal or a cancel) is shown honestly
-                    // (§2.24); a failed re-list leaves the browser put (fail
+                    // partial removal (a refusal or a cancel) is shown
+                    // honestly; a failed re-list leaves the browser put (fail
                     // closed).
                     windows[busy].overlays.operation = None;
                     let _ = windows[busy].browser.refresh();

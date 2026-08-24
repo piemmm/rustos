@@ -1,11 +1,11 @@
 //! Host tests for the unified [`RaidArray`] composed-device dispatch.
 //!
 //! These prove the dispatch layer forwards to the right engine and applies the
-//! honest level-agnostic surface (`AGENTS.md` §27): a stripe fails
-//! redundancy-only operations closed, the redundant levels forward
-//! maintenance, and the [`Block`] I/O path reaches the inner engine (including
-//! through a `&mut dyn Block`). The engines' own recovery behaviour is proven
-//! in their sibling test modules; here we test only the composition.
+//! honest level-agnostic surface: a stripe fails redundancy-only operations
+//! closed, the redundant levels forward maintenance, and the [`Block`] I/O path
+//! reaches the inner engine (including through a `&mut dyn Block`). The
+//! engines' own recovery behaviour is proven in their sibling test modules;
+//! here we test only the composition.
 
 use super::{RaidArray, RaidError};
 use crate::dualparity::DualParityError;

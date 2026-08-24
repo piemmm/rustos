@@ -1,10 +1,10 @@
 //! RAID1 mirror composition over the public block seam.
 //!
 //! [`MirrorArray`] composes a caller-owned slice of [`MirrorMember`]s into one
-//! logical [`Block`] device. It is `no_std` and allocation-free: the member
-//! set is a slice the caller owns (the growable tier lives in the assembling
-//! serve process, `AGENTS.md` §24), so the array imposes no fixed member
-//! ceiling and holds only a borrow.
+//! logical [`Block`] device. It is `no_std` and allocation-free: the member set
+//! is a slice the caller owns (the growable tier lives in the assembling serve
+//! process), so the array imposes no fixed member ceiling and holds only a
+//! borrow.
 
 use crate::superblock::ArrayProgress;
 use tairix_abi::blkio::{BlkDeviceClass, BlkStatus};
@@ -46,9 +46,9 @@ impl MemberRole {
     /// This is the single mapping from the on-disk reassembly verdict
     /// ([`ArrayIdentity::fill_slots`]) to the composed member's role, so the
     /// metadata layer and the composition layer cannot disagree on what "in
-    /// sync" means (`AGENTS.md` §2.2): a slot the metadata marked a stale
-    /// rebuild target (`in_sync == false`) becomes a [`Stale`](Self::Stale)
-    /// member, never a trusted read source.
+    /// sync" means: a slot the metadata marked a stale rebuild target
+    /// (`in_sync == false`) becomes a [`Stale`](Self::Stale) member, never a
+    /// trusted read source.
     ///
     /// [`ArrayIdentity::fill_slots`]: crate::ArrayIdentity::fill_slots
     #[must_use]
@@ -151,8 +151,8 @@ impl<B: Block> MirrorMember<B> {
     /// already checked the cursor against the array
     /// ([`ArrayProgress::fits_span`]), so it names a block the member has.
     ///
-    /// Shared by the mirror and by the RAID10 stripe of mirrors, which is
-    /// built from these same members (`AGENTS.md` §2.2).
+    /// Shared by the mirror and by the RAID10 stripe of mirrors, which is built
+    /// from these same members.
     pub(crate) const fn resume_resync(&mut self, cursor: u64) {
         if matches!(self.state, MemberState::Resyncing) {
             self.resync_next_lba = cursor;
@@ -215,12 +215,12 @@ pub enum MirrorError {
 ///
 /// See the [crate documentation](crate) for the mirror's fault-recovery
 /// behaviour. The array borrows a caller-owned member slice, so it holds no
-/// allocation and imposes no fixed member ceiling (`AGENTS.md` §24.1).
+/// allocation and imposes no fixed member ceiling.
 pub struct MirrorArray<'a, B: Block> {
     members: &'a mut [MirrorMember<B>],
     geometry: BlockGeometry,
     /// The next logical block a scrub pass will verify, or the array block
-    /// count when no scrub is in progress (`AGENTS.md` §26.5 auto-scrub).
+    /// count when no scrub is in progress (auto-scrub).
     scrub_next_lba: u64,
 }
 
@@ -302,16 +302,16 @@ impl<'a, B: Block> MirrorArray<'a, B> {
     /// Wrap an already-prepared member sub-slice as a mirror view without
     /// re-probing geometry.
     ///
-    /// The RAID10 stripe-of-mirrors composition ([`Raid10Array`](crate::Raid10Array))
-    /// drives each of its mirror pairs through this one mirror implementation
-    /// rather than copying the recover/repair/rebuild logic (`AGENTS.md`
-    /// §2.2): it probes the members once at its own `assemble` and then, per
-    /// striped chunk, builds a transient pair view here (an allocation-free
-    /// borrow, `AGENTS.md` §24.1) to serve the read/write/scrub/rebuild for
-    /// that pair. `geometry` is the per-member geometry every pair shares and
-    /// `scrub_next_lba` carries the pair's scrub cursor (the array block count
-    /// when no scrub is in progress); the per-member rebuild cursor lives in
-    /// each [`MirrorMember`], so it persists across transient views.
+    /// The RAID10 stripe-of-mirrors composition
+    /// ([`Raid10Array`](crate::Raid10Array)) drives each of its mirror pairs
+    /// through this one mirror implementation rather than copying the
+    /// recover/repair/rebuild logic: it probes the members once at its own
+    /// `assemble` and then, per striped chunk, builds a transient pair view
+    /// here (an allocation-free borrow) to serve the read/write/scrub/rebuild
+    /// for that pair. `geometry` is the per-member geometry every pair shares
+    /// and `scrub_next_lba` carries the pair's scrub cursor (the array block
+    /// count when no scrub is in progress); the per-member rebuild cursor lives
+    /// in each [`MirrorMember`], so it persists across transient views.
     ///
     /// [`OwnedRaidArray`](crate::owned::OwnedRaidArray) reuses this same
     /// idiom for a top-level mirror: it owns its members on the heap and
@@ -371,11 +371,10 @@ impl<'a, B: Block> MirrorArray<'a, B> {
     ///
     /// The array is [`Optimal`](ArrayHealth::Optimal) only when *every* slot
     /// holds an in-sync copy: a faulted **or absent** (missing) slot reduces
-    /// redundancy and reports [`Degraded`](ArrayHealth::Degraded), so a
-    /// mirror short a member never masquerades as fully redundant
-    /// (`AGENTS.md` §26.5). A slot actively rebuilding reports
-    /// [`Recovering`](ArrayHealth::Recovering); no in-sync copy at all is
-    /// [`Failed`](ArrayHealth::Failed).
+    /// redundancy and reports [`Degraded`](ArrayHealth::Degraded), so a mirror
+    /// short a member never masquerades as fully redundant. A slot actively
+    /// rebuilding reports [`Recovering`](ArrayHealth::Recovering); no in-sync
+    /// copy at all is [`Failed`](ArrayHealth::Failed).
     #[must_use]
     pub fn health(&self) -> ArrayHealth {
         let mut in_sync = 0usize;
@@ -573,12 +572,12 @@ impl<'a, B: Block> MirrorArray<'a, B> {
     ///
     /// `scratch` sizes the chunk (a multiple of the block size); a larger
     /// scratch rebuilds faster, a smaller one yields to other work sooner
-    /// (`AGENTS.md` §26.6 — bounded, interruptible, never a busy-spin). Each
-    /// chunk is read from an in-sync source and written to the resyncing
-    /// member; a member whose cursor reaches the end of the array becomes
-    /// [`MemberState::InSync`]. Resync data is treated as
-    /// [`BufferClass::Sensitive`] because it copies opaque on-disk bytes that
-    /// may include secrets, so member staging buffers are zeroed.
+    /// (bounded, interruptible, never a busy-spin). Each chunk is read from an
+    /// in-sync source and written to the resyncing member; a member whose
+    /// cursor reaches the end of the array becomes [`MemberState::InSync`].
+    /// Resync data is treated as [`BufferClass::Sensitive`] because it copies
+    /// opaque on-disk bytes that may include secrets, so member staging buffers
+    /// are zeroed.
     ///
     /// # Errors
     ///
@@ -673,12 +672,12 @@ impl<'a, B: Block> MirrorArray<'a, B> {
     /// A scrub complements the opportunistic read-repair on the read path. The
     /// read path only ever verifies the copies it consults *before* the first
     /// that serves a block, so a latent media error on a copy that is never
-    /// chosen as the read source stays invisible — until the copies ahead of
-    /// it are gone, at which point that block is unrecoverable. A scrub
+    /// chosen as the read source stays invisible — until the copies ahead of it
+    /// are gone, at which point that block is unrecoverable. A scrub
     /// proactively reads *every* in-sync copy of *every* block and repairs a
     /// copy that cannot read a block from one that can, so a bad sector is
-    /// found and healed while a good copy still exists (the auto-scrub a
-    /// mirror exists to provide, `AGENTS.md` §26.5).
+    /// found and healed while a good copy still exists (the auto-scrub a mirror
+    /// exists to provide).
     ///
     /// Drive the pass by calling [`scrub_step`](Self::scrub_step) until
     /// [`scrubbing`](Self::scrubbing) is false. Calling `begin_scrub` again
@@ -692,12 +691,12 @@ impl<'a, B: Block> MirrorArray<'a, B> {
     /// running.
     ///
     /// This is what the serving process checkpoints to the members' on-disk
-    /// maintenance record, so a pass measured in hours survives a restart
-    /// (`AGENTS.md` §26.6). Several members can rebuild at once with different
-    /// cursors, and one record can only carry a single position, so the
-    /// **least advanced** is reported: resuming from it re-copies blocks a
-    /// further-ahead member already had (harmless — a rebuild write is
-    /// idempotent) and can never skip a block that was still outstanding.
+    /// maintenance record, so a pass measured in hours survives a restart.
+    /// Several members can rebuild at once with different cursors, and one
+    /// record can only carry a single position, so the **least advanced** is
+    /// reported: resuming from it re-copies blocks a further-ahead member
+    /// already had (harmless — a rebuild write is idempotent) and can never
+    /// skip a block that was still outstanding.
     #[must_use]
     pub fn progress(&self) -> ArrayProgress {
         ArrayProgress {
@@ -750,8 +749,8 @@ impl<'a, B: Block> MirrorArray<'a, B> {
     ///
     /// `scratch` sizes the chunk (a multiple of the block size); a larger
     /// scratch scrubs faster, a smaller one yields to other work sooner
-    /// (`AGENTS.md` §26.6 — bounded, interruptible, never a busy-spin). For the
-    /// chunk, every in-sync copy is read:
+    /// (bounded, interruptible, never a busy-spin). For the chunk, every
+    /// in-sync copy is read:
     ///
     /// * a copy that reads the chunk cleanly is verified good;
     /// * a copy that returns a *whole-device* fault is dropped from the array
@@ -951,9 +950,9 @@ impl<'a, B: Block> MirrorArray<'a, B> {
     }
 
     /// Install a spare `device` into a currently-[`MemberState::Absent`]
-    /// (missing) slot and begin rebuilding it from a surviving copy — the
-    /// Linux md "add a spare to a removed slot" operation that restores a
-    /// missing member's redundancy without a reboot (`AGENTS.md` §18.4).
+    /// (missing) slot and begin rebuilding it from a surviving copy — the Linux
+    /// md "add a spare to a removed slot" operation that restores a missing
+    /// member's redundancy without a reboot.
     ///
     /// The slot moves [`MemberState::Absent`] → [`MemberState::Resyncing`] on
     /// success; the rebuild is driven by [`resync_step`](Self::resync_step)
@@ -1163,7 +1162,7 @@ impl<B: Block> Block for MirrorArray<'_, B> {
 ///
 /// Shared with the striped composition ([`crate::StripeArray`]) so both RAID
 /// levels classify "is this a dead device or a recoverable per-block error?"
-/// through one definition (`AGENTS.md` §2.2).
+/// through one definition.
 pub(crate) fn member_faulting(err: DriverError) -> bool {
     match BlkStatus::for_driver_health(err) {
         // A per-block bad sector, or a transient/reset the child already

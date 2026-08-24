@@ -25,9 +25,9 @@
 //!   transmit path one interval after it comes back, not the instant a
 //!   flapping link reports up.
 //!
-//! The monitor is tickless (§2.23): the one-shot deadline is armed only
-//! while a member is up but not yet admitted, and is unarmed once the set
-//! is stable, so a steady bond costs no timer wakeups.
+//! The monitor is tickless: the one-shot deadline is armed only while a member
+//! is up but not yet admitted, and is unarmed once the set is stable, so a
+//! steady bond costs no timer wakeups.
 //!
 //! # Modes
 //!
@@ -63,8 +63,8 @@ pub type MemberId = [u8; 16];
 
 /// A bond's transmit policy (`plans/NETWORK.md` §6.3).
 ///
-/// A closed set; LACP/802.3ad is a future in-place extension (§2.4), not
-/// speculated here.
+/// A closed set; LACP/802.3ad is a future in-place extension, not speculated
+/// here.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
 pub enum BondMode {
     /// One transmitting member at a time, with ordered failover to the
@@ -88,11 +88,10 @@ pub enum BondError {
 
 /// An observable transition the composing interface must act on.
 ///
-/// The two path-affecting variants prompt the interface to emit a
-/// gratuitous ARP / unsolicited Neighbour Advertisement so peers relearn
-/// which member now carries the bond's MAC, and to audit the change
-/// (§19.4). [`BondEvent::WentDown`] carries no gratuitous traffic — there
-/// is no member to send it on.
+/// The two path-affecting variants prompt the interface to emit a gratuitous
+/// ARP / unsolicited Neighbour Advertisement so peers relearn which member now
+/// carries the bond's MAC, and to audit the change. [`BondEvent::WentDown`]
+/// carries no gratuitous traffic — there is no member to send it on.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum BondEvent {
     /// The transmit path changed while the bond can still transmit: the

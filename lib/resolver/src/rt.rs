@@ -5,13 +5,12 @@
 //! [`DnsTransport`](tairix_net::dns::DnsTransport) over the `netsock-v1` UDP
 //! datagram socket (`tairix_rt::net`): it binds an app-local delivery port,
 //! opens the datagram socket for a server's address family on demand with a
-//! CSPRNG-drawn ephemeral source port (the RFC 5452 source-port
-//! randomisation the socket layer contributes), sends each encoded query,
-//! and parks on the delivery port for the reply — never a busy spin
-//! (`AGENTS.md` §2.23). Every received datagram is checked against the
-//! network stack's kernel-attested [`Origin`]; a datagram from any other
-//! sender is dropped (the delivery port is otherwise an unauthenticated
-//! inbox — fail closed).
+//! CSPRNG-drawn ephemeral source port (the RFC 5452 source-port randomisation
+//! the socket layer contributes), sends each encoded query, and parks on the
+//! delivery port for the reply — never a busy spin. Every received datagram is
+//! checked against the network stack's kernel-attested [`Origin`]; a datagram
+//! from any other sender is dropped (the delivery port is otherwise an
+//! unauthenticated inbox — fail closed).
 //!
 //! This module is compiled only for a freestanding userland program that
 //! opts into the `program` feature; the pure orchestration in the crate root

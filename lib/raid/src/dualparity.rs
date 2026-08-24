@@ -5,9 +5,9 @@
 //! `member_count - 2` members and which survives **any two** members being
 //! lost. It is the double-fault-redundant sibling of the [`MirrorArray`],
 //! [`StripeArray`], and single-parity [`ParityArray`] over the same block seam
-//! (`AGENTS.md` §2.2 parallel implementations): it composes child `Block`
-//! endpoints and consumes the shared block-health vocabulary
-//! ([`tairix_abi::blkio`]) rather than re-inventing it.
+//! (parallel implementations): it composes child `Block` endpoints and consumes
+//! the shared block-health vocabulary ([`tairix_abi::blkio`]) rather than
+//! re-inventing it.
 //!
 //! [`MirrorArray`]: crate::MirrorArray
 //! [`StripeArray`]: crate::StripeArray
@@ -34,17 +34,16 @@
 //! Any single lost chunk is recovered from P (like RAID5); any *two* lost
 //! chunks in a stripe are solved from the two independent syndromes. A *third*
 //! lost member makes a stripe unsolvable, so the array is
-//! [`ArrayHealth::Failed`] and every I/O fails closed (`AGENTS.md` §5.4,
-//! §26.5) — it never fabricates data it cannot reconstruct.
+//! [`ArrayHealth::Failed`] and every I/O fails closed — it never fabricates
+//! data it cannot reconstruct.
 //!
 //! # Allocation-free
 //!
 //! Like its siblings, [`DualParityArray`] borrows a caller-owned member slice
-//! (no fixed member ceiling, `AGENTS.md` §24.1). Syndrome computation and
-//! two-erasure reconstruction need working space, so the array also borrows a
-//! caller-owned **scratch** buffer of at least [`SCRATCH_BLOCKS`] logical
-//! blocks; the growable tier and the scratch sizing live in the assembling
-//! serve process.
+//! (no fixed member ceiling). Syndrome computation and two-erasure
+//! reconstruction need working space, so the array also borrows a caller-owned
+//! **scratch** buffer of at least [`SCRATCH_BLOCKS`] logical blocks; the
+//! growable tier and the scratch sizing live in the assembling serve process.
 
 use crate::gf256;
 use crate::mirror::{member_faulting, MemberRole};
@@ -214,12 +213,12 @@ pub enum DualParityError {
 /// fail-closed two-fault redundancy model. The array borrows a caller-owned
 /// member slice and a caller-owned scratch buffer (at least [`SCRATCH_BLOCKS`]
 /// logical blocks), so it holds no allocation and imposes no fixed member
-/// ceiling (`AGENTS.md` §24.1).
+/// ceiling.
 pub struct DualParityArray<'a, B: Block> {
     members: &'a mut [DualParityMember<B>],
     /// A caller-owned working buffer for syndrome computation and two-erasure
     /// reconstruction, at least [`SCRATCH_BLOCKS`] logical blocks (no
-    /// allocation, no fixed ceiling; the caller sizes it, `AGENTS.md` §24.1).
+    /// allocation, no fixed ceiling; the caller sizes it).
     scratch: &'a mut [u8],
     /// The logical geometry the array presents (block size shared with the
     /// members; block count is `(member_count - 2) * per_member_blocks`).
@@ -604,8 +603,8 @@ fn copy_slot(scratch: &mut [u8], bs: usize, dst: usize, src: usize) {
     a.copy_from_slice(b);
 }
 
-/// Borrow two distinct `bs`-byte slots of `scratch` as `(&mut slot[dst],
-/// &mut slot[src])`.
+/// Borrow two distinct `bs`-byte slots of `scratch` as
+/// `(&mut slot[dst], &mut slot[src])`.
 fn split_two(scratch: &mut [u8], bs: usize, dst: usize, src: usize) -> (&mut [u8], &mut [u8]) {
     debug_assert_ne!(dst, src);
     if dst < src {
@@ -786,13 +785,13 @@ impl<B: Block> DualParityArray<'_, B> {
     /// `target` and every member the array currently treats as not in sync
     /// (faulted, absent, or still resyncing) are the *unknowns* of the stripe
     /// row. With at most two syndromes there can be at most two unknowns; a
-    /// third makes the row unsolvable and the block is failed closed
-    /// (`AGENTS.md` §5.4). Every surviving (in-sync) member is read to build
-    /// the known-data P and Q sums and to capture the stored P/Q syndrome
-    /// blocks, then the target is solved from the appropriate one or two
-    /// syndrome equations. The result lands in slot [`S_OUT`] rather than an
-    /// external buffer, so a caller (a degraded write) can reconstruct a lost
-    /// data member without a second mutable borrow of the array.
+    /// third makes the row unsolvable and the block is failed closed. Every
+    /// surviving (in-sync) member is read to build the known-data P and Q sums
+    /// and to capture the stored P/Q syndrome blocks, then the target is solved
+    /// from the appropriate one or two syndrome equations. The result lands in
+    /// slot [`S_OUT`] rather than an external buffer, so a caller (a degraded
+    /// write) can reconstruct a lost data member without a second mutable
+    /// borrow of the array.
     ///
     /// # Errors
     ///
@@ -1248,8 +1247,8 @@ impl<B: Block> DualParityArray<'_, B> {
     ///
     /// `blocks` bounds the work per call (a larger value rebuilds faster, a
     /// smaller one yields to other work sooner — bounded and interruptible,
-    /// never a busy-spin, `AGENTS.md` §26.6). A member whose cursor reaches the
-    /// end of its blocks becomes [`MemberState::InSync`].
+    /// never a busy-spin). A member whose cursor reaches the end of its blocks
+    /// becomes [`MemberState::InSync`].
     ///
     /// # Errors
     ///
@@ -1318,7 +1317,7 @@ impl<B: Block> DualParityArray<'_, B> {
     /// latent media error on any member by reconstructing that block from the
     /// others and writing it back (forcing sector reallocation), so a bad
     /// sector is healed while the array still has the redundancy to reconstruct
-    /// it (`AGENTS.md` §26.5).
+    /// it.
     ///
     /// Like the single-parity array it heals latent *media* errors; it does not
     /// arbitrate a syndrome *content* disagreement between members that all
@@ -1338,12 +1337,12 @@ impl<B: Block> DualParityArray<'_, B> {
     /// [`ArrayProgress::IDLE`] if neither is running.
     ///
     /// This is what the serving process checkpoints to the members' on-disk
-    /// maintenance record, so a pass measured in hours survives a restart
-    /// (`AGENTS.md` §26.6). Several members can rebuild at once with different
-    /// cursors, and one record can only carry a single position, so the
-    /// **least advanced** is reported: resuming from it re-copies blocks a
-    /// further-ahead member already had (harmless — a rebuild write is
-    /// idempotent) and can never skip a block that was still outstanding.
+    /// maintenance record, so a pass measured in hours survives a restart.
+    /// Several members can rebuild at once with different cursors, and one
+    /// record can only carry a single position, so the **least advanced** is
+    /// reported: resuming from it re-copies blocks a further-ahead member
+    /// already had (harmless — a rebuild write is idempotent) and can never
+    /// skip a block that was still outstanding.
     #[must_use]
     pub fn progress(&self) -> ArrayProgress {
         ArrayProgress {
@@ -1396,10 +1395,9 @@ impl<B: Block> DualParityArray<'_, B> {
     /// pass, advancing the scrub cursor. A no-op once the pass is complete.
     ///
     /// `blocks` bounds the work per call (bounded, interruptible, never a
-    /// busy-spin, `AGENTS.md` §26.6). For each stripe row, every in-sync
-    /// member's block is read; a whole-device fault drops that member, and a
-    /// per-block media error is repaired by writing back the block
-    /// reconstructed from the others.
+    /// busy-spin). For each stripe row, every in-sync member's block is read; a
+    /// whole-device fault drops that member, and a per-block media error is
+    /// repaired by writing back the block reconstructed from the others.
     ///
     /// # Errors
     ///
@@ -1527,7 +1525,7 @@ impl<B: Block> DualParityArray<'_, B> {
 
     /// Install a spare into a currently-[`MemberState::Absent`] slot and begin
     /// rebuilding it from the survivors — restoring a missing member's
-    /// redundancy without a reboot (`AGENTS.md` §18.4).
+    /// redundancy without a reboot.
     ///
     /// # Errors
     ///

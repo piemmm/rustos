@@ -512,7 +512,7 @@ impl WindowControl {
             );
         }
 
-        // The §13 Authority Mark / recovery / complete bead, top-trailing.
+        // The spec §13 Authority Mark / recovery / complete bead, top-trailing.
         if let Some((color, shape)) = resolve_bead(theme, self.state) {
             let size = scale
                 .scale_length(theme.metrics().bead_size)
@@ -1700,10 +1700,11 @@ impl WindowFrame {
         TitleBar::icon_side(Rect::new(0, 0, 0, title_h), scale, theme)
     }
 
-    /// The three scaled frame metrics — `(border, title_bar_height,
-    /// frame_inset)` in physical pixels — every frame rectangle is built from.
-    /// The border is at least one physical pixel and the side inset is never
-    /// thinner than the border, so a rim always draws.
+    /// The three scaled frame metrics —
+    /// `(border, title_bar_height, frame_inset)` in physical pixels — every
+    /// frame rectangle is built from. The border is at least one physical pixel
+    /// and the side inset is never thinner than the border, so a rim always
+    /// draws.
     fn edges(scale: Scale, theme: &Theme) -> (u32, u32, u32) {
         let metrics = theme.metrics();
         let border = scale.scale_length(metrics.border_thickness).max(1);
@@ -1804,8 +1805,8 @@ impl WindowFrame {
     ///
     /// This is the window manager's inverse of [`Self::layout`] — it sizes a
     /// decorated window's outer bounds from its client-sized content surface —
-    /// and it round-trips: `self.layout(self.outer_for_client(client, ..),
-    /// ..).client == client`.
+    /// and it round-trips:
+    /// `self.layout(self.outer_for_client(client, ..), ..).client == client`.
     #[must_use]
     pub fn outer_for_client(&self, client: Rect, scale: Scale, theme: &Theme) -> Rect {
         let insets = self.insets(scale, theme);

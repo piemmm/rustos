@@ -13,11 +13,11 @@
 //! Unlike [`crate::proc_id`] there is no monotonic-counter half: a boot
 //! identity has no within-boot uniqueness obligation (there is one per boot),
 //! so its entire value is drawn from the single kernel CSPRNG output reserve
-//! (`kernel/core`'s [`RandomReserve`]; the one sanctioned randomness source —
-//! `plans`/§22). The draw is **non-blocking and fails closed**: if the reserve
-//! is not yet seeded (e.g. a port whose platform entropy source is still
-//! `Pending`) the mint yields [`BootId::UNSET`] rather than a predictable
-//! substitute, and the `boot_id_get` syscall then reports
+//! (`kernel/core`'s [`RandomReserve`]; the one sanctioned randomness source).
+//! The draw is **non-blocking and fails closed**: if the reserve is not yet
+//! seeded (e.g. a port whose platform entropy source is still `Pending`) the
+//! mint yields [`BootId::UNSET`] rather than a predictable substitute, and the
+//! `boot_id_get` syscall then reports
 //! [`Errno::EntropyNotReady`](tairix_abi::Errno::EntropyNotReady) — the kernel
 //! never hands out the all-zero sentinel as if it were a real id.
 

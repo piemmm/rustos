@@ -225,7 +225,7 @@ pub enum ManagerTool {
     /// ([`navigate_to`](Browser::navigate_to)); it is a manager-only tool (not
     /// the picker's) because a trusted read-only pick has no business managing
     /// the Trash. Always offered — a Trash that cannot be reached is reported
-    /// as a refusal, not hidden (§2.24).
+    /// as a refusal, not hidden.
     Trash,
     /// Empty the user's Trash — permanently remove its contents
     /// ([`empty_trash_plan`](crate::trash::empty_trash_plan) driven by the
@@ -271,7 +271,7 @@ impl ManagerTool {
 /// a fact the file manager computes from the user's `HOME` (which the engine
 /// does not know), so it is threaded in here rather than derived from the
 /// browser. A disabled tool renders muted, never hidden, and a click on it
-/// resolves to nothing (fail closed, §5.4).
+/// resolves to nothing (fail closed).
 ///
 /// The trusted read-only picker draws no write tools at all, so it uses
 /// [`none`](Self::none); the model then never enables anything.

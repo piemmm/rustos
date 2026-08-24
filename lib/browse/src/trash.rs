@@ -1,42 +1,41 @@
 //! The **move-to-Trash** model (`plans/NEW-FILEMANAGER.md` `FM10`): the pure,
 //! host-provable core of a *recoverable* delete.
 //!
-//! A delete should be reversible when that costs nothing (§2.24). Removing an
-//! item on the same volume as the user's Trash directory is exactly that cheap
-//! case: a single [`fs_rename`] moves the item into Trash intact, recoverable
-//! until the user empties it, in place of an irreversible recursive
-//! `fs_unlink`. Only a cross-volume removal (a rename cannot span volumes,
-//! exactly as `mv` decides from `st_dev`) or the absence of a usable Trash
-//! forces the irreversible unlink — the existing [`DeleteWalk`](crate::delete::DeleteWalk)
-//! path (§2.2, reused, not duplicated).
+//! A delete should be reversible when that costs nothing. Removing an item on
+//! the same volume as the user's Trash directory is exactly that cheap case: a
+//! single [`fs_rename`] moves the item into Trash intact, recoverable until the
+//! user empties it, in place of an irreversible recursive `fs_unlink`. Only a
+//! cross-volume removal (a rename cannot span volumes, exactly as `mv` decides
+//! from `st_dev`) or the absence of a usable Trash forces the irreversible
+//! unlink — the existing [`DeleteWalk`](crate::delete::DeleteWalk) path
+//! (reused, not duplicated).
 //!
 //! This module is the pure decision behind that: it names *whether* an item can
 //! be trashed cheaply and *where in Trash it lands* without clobbering anything
 //! already there. It touches no filesystem and holds no authority — the
 //! `files.app` `Run` binary performs the `fs_stat` / `fs_rename` / `fs_unlink`
-//! under the user's own identity in its own capability-checked tail (§4, §5.4),
-//! so composing this model grants nothing and the read-only picker never runs
-//! it.
+//! under the user's own identity in its own capability-checked tail, so
+//! composing this model grants nothing and the read-only picker never runs it.
 //!
 //! # Same volume, or unlink
 //!
 //! [`trash_strategy`] makes the move-vs-unlink decision from the item's and the
 //! Trash directory's [`VolumeId`]s — the same 16-byte `fs_stat` volume identity
 //! [`paste_strategy`](crate::execute::paste_strategy) compares, so the two
-//! decisions share one definition of "can a single rename carry this" (§2.2).
+//! decisions share one definition of "can a single rename carry this".
 //!
 //! # A collision-free home in Trash
 //!
 //! Trash accumulates removed items, so a file named `notes.txt` may be deleted
 //! while a previously-trashed `notes.txt` is still there. [`trash_dest_path`]
 //! resolves a destination *inside* the Trash directory that no existing entry
-//! carries: the original leaf when it is free, otherwise the smallest
-//! ` (n)` disambiguation inserted before the extension (`notes (2).txt`,
-//! `notes (3).txt`, …). It never overwrites an existing trashed item (§2.24, no
-//! silent clobber) and is fail closed: it refuses a Trash directory that names
-//! the root, an invalid original name, a disambiguation that would exceed the
+//! carries: the original leaf when it is free, otherwise the smallest ` (n)`
+//! disambiguation inserted before the extension (`notes (2).txt`,
+//! `notes (3).txt`, …). It never overwrites an existing trashed item (no silent
+//! clobber) and is fail closed: it refuses a Trash directory that names the
+//! root, an invalid original name, a disambiguation that would exceed the
 //! per-name length limit, and a search that cannot find a free name within
-//! [`MAX_TRASH_NAME_ATTEMPTS`] (§5.4).
+//! [`MAX_TRASH_NAME_ATTEMPTS`].
 //!
 //! The extension split reuses the one shared [`crate::media`] extension rule, so
 //! the disambiguation lands before the same extension the content-type registry
@@ -46,12 +45,12 @@
 //!
 //! A trashed item stays recoverable until the user empties the Trash;
 //! [`empty_trash_plan`] models that irreversible step. It turns the Trash
-//! directory's listing into a [`DeletePlan`] over its
-//! contents — never over the Trash directory itself — which the app carries out
-//! with the same recursive [`DeleteWalk`](crate::delete::DeleteWalk) an ordinary
-//! permanent delete uses (§2.2). It is the inverse of the move above: the move
-//! is only offered because emptying gives the user the way back to a permanent
-//! removal on their own terms.
+//! directory's listing into a [`DeletePlan`] over its contents — never over the
+//! Trash directory itself — which the app carries out with the same recursive
+//! [`DeleteWalk`](crate::delete::DeleteWalk) an ordinary permanent delete uses.
+//! It is the inverse of the move above: the move is only offered because
+//! emptying gives the user the way back to a permanent removal on their own
+//! terms.
 //!
 //! [`fs_rename`]: tairix_abi::SyscallNumber::FS_RENAME
 
@@ -95,10 +94,10 @@ pub const TRASH_LEAF_DIR: &str = "Trash";
 /// The per-user Trash directory: the fixed `Library/Trash` subtree under the
 /// user's `home` (root-first component path). One definition so the file
 /// manager and its tests agree on exactly where a trashed item lands, and a
-/// change to the location cannot silently diverge between them (§2.2).
+/// change to the location cannot silently diverge between them.
 ///
-/// `home` is the user's home as root-first components (e.g. `["Users",
-/// "root"]`); the returned path appends [`TRASH_LIBRARY_DIR`] then
+/// `home` is the user's home as root-first components (e.g.
+/// `["Users", "root"]`); the returned path appends [`TRASH_LIBRARY_DIR`] then
 /// [`TRASH_LEAF_DIR`]. It spells only a location — it performs no I/O, creates
 /// nothing, and grants no authority (the app creates and writes it under the
 /// user's own identity).
@@ -114,7 +113,7 @@ pub fn trash_dir(home: &[String]) -> Vec<String> {
 /// Build the removal plan that **empties** the user's Trash: one
 /// [`DeleteTarget`](crate::delete::DeleteTarget) per immediate child of the
 /// Trash directory, in the source's listing order, each removed by the existing
-/// recursive [`DeleteWalk`](crate::delete::DeleteWalk) (§2.2 — no second removal
+/// recursive [`DeleteWalk`](crate::delete::DeleteWalk) (no second removal
 /// engine). The Trash directory *itself* is never a target: emptying Trash
 /// removes its contents and leaves the (now-empty) Trash folder in place, ready
 /// to receive the next trashed item.
@@ -128,16 +127,16 @@ pub fn trash_dir(home: &[String]) -> Vec<String> {
 ///
 /// This model touches no filesystem and holds no authority — the app drives the
 /// returned plan's [`DeleteWalk`](crate::delete::DeleteWalk) with its own
-/// capability-checked `fs_readdir`/`fs_unlink` (§4, §5.4) — so composing it
-/// grants nothing and the read-only picker never builds one.
+/// capability-checked `fs_readdir`/`fs_unlink` — so composing it grants nothing
+/// and the read-only picker never builds one.
 ///
 /// Returns `Ok(None)` when the Trash is already empty: emptying it is then a
 /// no-op the app can simply not offer, never an error.
 ///
 /// # Errors
 ///
-/// Fail closed (§5.4), so the app never carries out a removal spelled from a
-/// bad location or name:
+/// Fail closed, so the app never carries out a removal spelled from a bad
+/// location or name:
 ///
 /// * [`TrashError::RootTrash`] — `trash_dir` is empty (names the root): a child
 ///   spelled under it would name a top-level root entry, so the empty is
@@ -175,7 +174,7 @@ pub fn empty_trash_plan(
 
 /// Whether a confirmed delete will move its targets to Trash (recoverable) or
 /// remove them permanently — the honest distinction the confirmation dialog
-/// states so the user knows which will happen (§2.24).
+/// states so the user knows which will happen.
 ///
 /// A file-manager selection lives in one directory, hence on one volume, so a
 /// whole delete plan is uniform: either every target can be moved to Trash (the
@@ -214,16 +213,16 @@ pub fn trash_strategy(item: VolumeId, trash: VolumeId) -> TrashStrategy {
 /// The most disambiguation candidates [`trash_dest_path`] will try before it
 /// gives up with [`TrashError::NoFreeName`].
 ///
-/// A fixed fail-closed *bound*, not a hardware-scaled capacity (§24.4): it caps
-/// the search for a free ` (n)` name so a Trash directory already holding a
+/// A fixed fail-closed *bound*, not a hardware-scaled capacity: it caps the
+/// search for a free ` (n)` name so a Trash directory already holding a
 /// pathological run of same-named items can never make the resolution loop
-/// without limit (§26.6). Reaching it refuses the trash move (the app falls
-/// back to the irreversible unlink or reports the refusal) rather than spinning.
-/// Chosen far beyond any plausible number of same-named trashed items.
+/// without limit. Reaching it refuses the trash move (the app falls back to the
+/// irreversible unlink or reports the refusal) rather than spinning. Chosen far
+/// beyond any plausible number of same-named trashed items.
 pub const MAX_TRASH_NAME_ATTEMPTS: usize = 100_000;
 
-/// Why a Trash destination could not be resolved — every case fail closed
-/// (§5.4), so the app never fabricates a move that would lose or overwrite data.
+/// Why a Trash destination could not be resolved — every case fail closed, so
+/// the app never fabricates a move that would lose or overwrite data.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum TrashError {
     /// The Trash directory path was empty (it named the root): a Trash location
@@ -234,7 +233,7 @@ pub enum TrashError {
     /// destination can be spelled from it.
     InvalidName,
     /// A disambiguated name would exceed the per-name length limit
-    /// (`FS_NAME_MAX`); refused rather than silently truncated (§21-style
+    /// (`FS_NAME_MAX`); refused rather than silently truncated (-style
     /// no-silent-loss discipline).
     TooLong,
     /// No collision-free name was found within [`MAX_TRASH_NAME_ATTEMPTS`]; the
@@ -244,9 +243,8 @@ pub enum TrashError {
 }
 
 impl TrashError {
-    /// A terse, human-readable reason for an in-UI refusal line (§2.24 — a
-    /// denied action is an honest answer). It names no path and carries no
-    /// secret.
+    /// A terse, human-readable reason for an in-UI refusal line (a denied
+    /// action is an honest answer). It names no path and carries no secret.
     #[must_use]
     pub const fn message(self) -> &'static str {
         match self {

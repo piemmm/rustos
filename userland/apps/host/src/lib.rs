@@ -13,14 +13,13 @@
 //! # Where the answers come from
 //!
 //! Name resolution is done by the shared userland stub resolver
-//! ([`tairix_resolver`]): it reads the host's configured recursive DNS
-//! servers through the ungated `NET_RESOLVER_SERVERS` System Information
-//! query (the one active-server set `state:net/resolver/servers` also
-//! exposes) and drives the pure, RFC 1035 / RFC 5452-hardened DNS engine in
-//! `tairix-net` over an ordinary capability-gated UDP socket. There is no
-//! second DNS implementation and no `/etc/resolv.conf`; every response is
-//! validated by the engine before an address is surfaced (`AGENTS.md`
-//! §26.4).
+//! ([`tairix_resolver`]): it reads the host's configured recursive DNS servers
+//! through the ungated `NET_RESOLVER_SERVERS` System Information query (the one
+//! active-server set `state:net/resolver/servers` also exposes) and drives the
+//! pure, RFC 1035 / RFC 5452-hardened DNS engine in `tairix-net` over an
+//! ordinary capability-gated UDP socket. There is no second DNS implementation
+//! and no `/etc/resolv.conf`; every response is validated by the engine before
+//! an address is surfaced.
 //!
 //! # What this crate is
 //!

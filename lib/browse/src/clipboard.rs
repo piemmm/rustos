@@ -8,9 +8,9 @@
 //! directory they want to paste into. It is the one pure, host-provable model
 //! behind Move / Copy / Paste — the engine names *what* would move where and
 //! *why a paste is refused*; the app performs the capability-checked
-//! `fs_rename` / streamed copy under the user's own identity in its own tail
-//! (§4, §5.4). Composing this model grants nothing, so the read-only picker
-//! never builds a clipboard.
+//! `fs_rename` / streamed copy under the user's own identity in its own tail.
+//! Composing this model grants nothing, so the read-only picker never builds a
+//! clipboard.
 //!
 //! Paths are root-first component lists — the same
 //! [`components`](crate::Browser::components) vocabulary the whole engine uses —
@@ -19,11 +19,11 @@
 //! would confuse `/ab` with a child of `/a`).
 //!
 //! [`plan_paste`] is **fail closed**: a paste that would move an item into
-//! itself or its own subtree returns a [`PasteError`] and nothing is planned.
-//! A paste that would land an item back on its own current path is not refused
-//! — it is flagged
-//! ([`PasteItem::overwrites_source`]) so the app can ask for confirmation (or
-//! auto-rename a copy) rather than silently clobbering the original (§2.24).
+//! itself or its own subtree returns a [`PasteError`] and nothing is planned. A
+//! paste that would land an item back on its own current path is not refused —
+//! it is flagged ([`PasteItem::overwrites_source`]) so the app can ask for
+//! confirmation (or auto-rename a copy) rather than silently clobbering the
+//! original.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -143,9 +143,9 @@ impl PasteItem {
     /// be pasted back into the directory it already lives in.
     ///
     /// For a `Cut` this is a no-op the app can skip; for a `Copy` it is a
-    /// copy-onto-self the app resolves by confirming or by giving the copy a new
-    /// name. Either way the app decides — the model only flags it, never
-    /// silently clobbers the original (§2.24).
+    /// copy-onto-self the app resolves by confirming or by giving the copy a
+    /// new name. Either way the app decides — the model only flags it, never
+    /// silently clobbers the original.
     #[must_use]
     pub const fn overwrites_source(&self) -> bool {
         self.overwrites_source

@@ -7,7 +7,7 @@
 //! class-driver process). The class driver touches no controller register and
 //! holds no DMA: it binds the per-interface node the host-controller driver
 //! emits, submits interrupt-IN URBs over the bus-agnostic URB transport, and
-//! injects decoded keystrokes (`plans/USB.md` U4, `AGENTS.md` §2.20 / §17.4).
+//! injects decoded keystrokes (`plans/USB.md` U4).
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]

@@ -242,18 +242,17 @@ impl FrameOffload {
 /// Largest number of receive queues one region carries.
 ///
 /// A multiqueue device (`VIRTIO_NET_F_MQ`) steers received frames across
-/// several receive queues so a busy link's receive work can be spread
-/// rather than serialised behind one queue (`plans/NETWORK.md` N7c-2).
-/// Each receive queue reserves its **own** full ring inside the shared
-/// region, so the count is a pinned-memory resource bound, not an
-/// unbounded capacity: a hostile or buggy device advertising a huge
-/// queue count must not be able to demand an attacker-sized region.
-/// Eight receive queues is ample to spread device receive steering
-/// across the cores of a general-purpose machine while bounding the
-/// region; the *active* count is the device's own `rx_queues` clamped to
-/// this ceiling ([`RingGeometry::for_device`]). Transmit stays a single
-/// queue: the stack serialises its own egress, so a second transmit ring
-/// would add pinned memory and complexity without a consumer (§2.4).
+/// several receive queues so a busy link's receive work can be spread rather
+/// than serialised behind one queue (`plans/NETWORK.md` N7c-2). Each receive
+/// queue reserves its **own** full ring inside the shared region, so the count
+/// is a pinned-memory resource bound, not an unbounded capacity: a hostile or
+/// buggy device advertising a huge queue count must not be able to demand an
+/// attacker-sized region. Eight receive queues is ample to spread device
+/// receive steering across the cores of a general-purpose machine while
+/// bounding the region; the *active* count is the device's own `rx_queues`
+/// clamped to this ceiling ([`RingGeometry::for_device`]). Transmit stays a
+/// single queue: the stack serialises its own egress, so a second transmit ring
+/// would add pinned memory and complexity without a consumer.
 pub const MAX_RX_QUEUES: u16 = 8;
 
 /// Validated geometry of a receive + transmit frame ring set: how many

@@ -1,7 +1,7 @@
 //! The `Run` entry-point binary of the journal service, installed at
 //! `/System/Services/journald` — the long-running user-space service PID 1
-//! `init` launches to own authoritative system-log segment writes
-//! (`AGENTS.md` §16.2; SYSLOG §12/§15).
+//! `init` launches to own authoritative system-log segment writes (SYSLOG
+//! §12/§15).
 //!
 //! This is a **pure-Rust** program: TAIRiX is Rust-only, so it links the Rust
 //! userland runtime `tairix-rt` — never the C ABI, which exists solely for

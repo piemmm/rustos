@@ -28,7 +28,7 @@
 //! glyph's own ink with its left bearing, for laying out proportional text by
 //! per-glyph [`Face::advance`].
 //!
-//! Two consumers share this one engine (`AGENTS.md` §2.2):
+//! Two consumers share this one engine:
 //!
 //! * `cargo xtask font-atlas` rasterises every mapped scalar once, at the
 //!   native [`ATLAS_EM_PX`] size, to emit the generated `lib/font` console

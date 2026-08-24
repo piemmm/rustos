@@ -10,9 +10,9 @@
 //! that is only entitled to the line in front of it. TAIRiX has exactly
 //! **one** definition of that discipline, and this crate is it.
 //!
-//! Two consumers drive the same code (`AGENTS.md` §2.2): the kernel console
-//! device (`kernel/core::console`) that a hardware-console-backed shell reads
-//! and writes, and the pseudo-terminal (`plans/PTY.md`) whose slave gives the
+//! Two consumers drive the same code: the kernel console device
+//! (`kernel/core::console`) that a hardware-console-backed shell reads and
+//! writes, and the pseudo-terminal (`plans/PTY.md`) whose slave gives the
 //! graphical terminal's shell the identical console-like behaviour. Neither
 //! carries a private copy of the cooking rules.
 //!

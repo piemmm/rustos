@@ -12,13 +12,14 @@
 //!
 //! * **Spellings** — every locale directory parses as a [`Locale`] and every
 //!   file name is a `.md` document whose stem parses as a [`DocumentName`]
-//!   (§2.1).
+//!   (`plans/APPS.md` §2.1).
 //! * **Bounds** — every document parses whole under [`HelpDoc::parse`]'s
-//!   fail-closed limits (§6), so a malformed page never reaches an image.
+//!   fail-closed limits (`plans/APPS.md` §6), so a malformed page never
+//!   reaches an image.
 //! * **Completeness** — a bundle that ships help ships a canonical `en-US/`
 //!   document, every document exists in each [`REQUIRED_LOCALES`] directory,
-//!   and no translation carries a document absent from `en-US/` (§2.1,
-//!   §8.1).
+//!   and no translation carries a document absent from `en-US/`
+//!   (`plans/APPS.md` §2.1, §8.1).
 //! * **Switch keys** — every `OPTIONS` list item leads with a backticked,
 //!   language-neutral switch key, and each translation's key sequence equals
 //!   `en-US/`'s exactly (§3.1): the flags are properties of the parser,

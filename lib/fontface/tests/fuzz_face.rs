@@ -2,14 +2,13 @@
 //! OpenType variable-font instancer, and the scanline rasteriser
 //! [`tairix_fontface`].
 //!
-//! The font parser is the untrusted-input parser the charter (§19.5, §19.6)
-//! names explicitly: a face is bytes the outside world can supply, and the
-//! sandboxed font service (`fontd`) is the one process that parses one. A
-//! malformed face — static *or* variable — must fail closed with a typed
-//! `Err`, never a panic, an out-of-bounds read, or a runaway loop, and a
-//! *well-formed* face's outlines must rasterise into exactly the bitmap the
-//! caller sized, whatever glyph, cell height, and axis settings are asked for.
-//! This harness drives all of it:
+//! The font parser is the untrusted-input parser the charter names explicitly:
+//! a face is bytes the outside world can supply, and the sandboxed font service
+//! (`fontd`) is the one process that parses one. A malformed face — static *or*
+//! variable — must fail closed with a typed `Err`, never a panic, an
+//! out-of-bounds read, or a runaway loop, and a *well-formed* face's outlines
+//! must rasterise into exactly the bitmap the caller sized, whatever glyph,
+//! cell height, and axis settings are asked for. This harness drives all of it:
 //!
 //! * **The parser, against adversarial bytes.** Pure-random buffers and
 //!   bit-flipped copies of the committed static *and* variable faces are fed

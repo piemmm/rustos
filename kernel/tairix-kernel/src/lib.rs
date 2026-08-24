@@ -426,16 +426,15 @@ pub mod aarch64;
 #[cfg(kernel_isa = "riscv64")]
 pub mod riscv64;
 
-// The riscv64 PLIC `IrqController` bridge (`plans/NETWORK.md` N4e-riscv64):
-// the smallest local newtype implementing `kernel/irq`'s `IrqController` over
-// the arch port's `plic::PlicController` (orphan rules keep it out of the
-// arch port), mirroring how the x86_64 `IoApicController` lives in this crate.
-// It is generic over `PlicMmio`, so it is host-buildable: it lives at the
-// crate root — gated on the riscv64 image build *or* a host `cargo test` —
-// rather than inside the freestanding-only `riscv64` port module, so its
-// mask-before-wake / re-arm regression test runs under `cargo test` on the
-// CI host. The `virt`-board QEMU verticals re-export it from here (one
-// definition, `AGENTS.md` §2.2).
+// The riscv64 PLIC `IrqController` bridge (`plans/NETWORK.md` N4e-riscv64): the
+// smallest local newtype implementing `kernel/irq`'s `IrqController` over the
+// arch port's `plic::PlicController` (orphan rules keep it out of the arch
+// port), mirroring how the x86_64 `IoApicController` lives in this crate. It is
+// generic over `PlicMmio`, so it is host-buildable: it lives at the crate root
+// — gated on the riscv64 image build *or* a host `cargo test` — rather than
+// inside the freestanding-only `riscv64` port module, so its mask-before-wake /
+// re-arm regression test runs under `cargo test` on the CI host. The
+// `virt`-board QEMU verticals re-export it from here (one definition).
 #[cfg(any(kernel_isa = "riscv64", test))]
 pub mod riscv64_plic_irq;
 

@@ -183,11 +183,11 @@ fn family() -> Family<'static, CryptoBackend, Sha256Kat, Sha256Digest> {
 /// Decide the SHA-256 backend for a core with the given `features` and run the
 /// boot-time known-answer self-test as part of the decision.
 ///
-/// Returns the typed [`Decision`] for the caller to record on the audit log
-/// (§19.4). The framework filters the hardware candidate on the delivered
-/// feature bits, runs the FIPS known-answer self-test over the surviving path,
-/// and falls closed to the software baseline. It never benchmarks (the family
-/// is `ByPriority`), never panics, and never busy-waits.
+/// Returns the typed [`Decision`] for the caller to record on the audit log.
+/// The framework filters the hardware candidate on the delivered feature bits,
+/// runs the FIPS known-answer self-test over the surviving path, and falls
+/// closed to the software baseline. It never benchmarks (the family is
+/// `ByPriority`), never panics, and never busy-waits.
 ///
 /// Use [`self_test_passed`] on the returned decision to gate trust: a
 /// `BaselineUnverified` decision means even the software baseline failed the

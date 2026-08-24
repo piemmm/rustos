@@ -20,12 +20,12 @@
 //!   resolves to, so `/System`'s owner reads as `system` in listings and
 //!   audit output. Its ceiling is empty — powers come from capabilities,
 //!   and the boot floor holds none.
-//! * One account per system service (`devmgr`, `sysinfod`, `seatmgr`,
-//!   `login`, `netstack`, `fontd`, `greeter`, `confd`), each with its own uid in the system range and primary
-//!   group [`SERVICES_GROUP`] — never a shared service user, so §19.4
-//!   per-service log partitioning, IPC peer attestation, and blast-radius
-//!   containment all key off a real per-service principal. Each carries
-//!   exactly its own service's ceiling ([`crate::grants`]), so the
+//! * One account per system service (`devmgr`, `sysinfod`, `seatmgr`, `login`,
+//!   `netstack`, `fontd`, `greeter`, `confd`), each with its own uid in the
+//!   system range and primary group [`SERVICES_GROUP`] — never a shared service
+//!   user, so per-service log partitioning, IPC peer attestation, and
+//!   blast-radius containment all key off a real per-service principal. Each
+//!   carries exactly its own service's ceiling ([`crate::grants`]), so the
 //!   ceiling∩manifest intersection does real work.
 //! * The groups those records reference: `system` and `services`. The
 //!   well-known removable-storage group ([`crate::STORAGE_GROUP`]) is

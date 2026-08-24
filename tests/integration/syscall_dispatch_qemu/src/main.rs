@@ -72,15 +72,14 @@
 #[allow(unused_extern_crates)]
 extern crate alloc;
 
-// — test affordances must never reach a release binary.
-// `test-hooks` is on by default for this crate (see `Cargo.toml`);
-// release builds re-running with the feature on are a configuration
-// error rather than a soundness failure, but we belt-and-brace by
-// failing the build outright. `cargo build --release -p tairix-test-
-// syscall-dispatch-qemu --features test-hooks` therefore fails at
-// compile time with the message below; the `cargo deny check` rule
-// in `deny.toml` enforces the same posture for the production
-// `tairix-kernel` crate, which is forbidden from ever growing a
+// Test affordances must never reach a release binary. `test-hooks` is on by
+// default for this crate (see `Cargo.toml`); release builds re-running with the
+// feature on are a configuration error rather than a soundness failure, but we
+// belt-and-brace by failing the build outright.
+// `cargo build --release -p tairix-test-syscall-dispatch-qemu --features test-hooks`
+// therefore fails at compile time with the message below; the
+// `cargo deny check` rule in `deny.toml` enforces the same posture for the
+// production `tairix-kernel` crate, which is forbidden from ever growing a
 // `test-hooks` feature.
 #[cfg(all(feature = "test-hooks", not(debug_assertions)))]
 compile_error!(
@@ -459,11 +458,10 @@ mod kernel {
 
 // --- Stub when the test-hooks feature is off ----------------------
 //
-// The synthesised quartet only compiles when `feature = "test-hooks"`
-// is on. Disabling it leaves the bin as a no-op host stub so a layout
-// sanity check (`cargo build --no-default-features -p
-// tairix-test-syscall-dispatch-qemu`) still builds
-// (no hacks: a disabled test must compile cleanly).
+// The synthesised quartet only compiles when `feature = "test-hooks"` is on.
+// Disabling it leaves the bin as a no-op host stub so a layout sanity check
+// (`cargo build --no-default-features -p tairix-test-syscall-dispatch-qemu`)
+// still builds (no hacks: a disabled test must compile cleanly).
 #[cfg(all(itest_x86_64, not(feature = "test-hooks")))]
 #[no_mangle]
 pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {

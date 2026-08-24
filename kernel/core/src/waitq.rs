@@ -104,9 +104,9 @@ struct Waiter {
 
 /// The registered-waiter set behind a [`WaitQueue`]'s lock.
 ///
-/// A thin `Vec` scan was the P-2 slice; the complete primitive (§27) keeps
-/// three cross-indices so every load-bearing per-park operation is
-/// O(log n), never a linear scan under §26 load:
+/// A thin `Vec` scan was the P-2 slice; the complete primitive keeps three
+/// cross-indices so every load-bearing per-park operation is O(log n), never a
+/// linear scan under contended multi-user load:
 ///
 /// - [`by_task`](Self::by_task): the canonical set, keyed by [`TaskId`], for
 ///   O(log n) `register` / `deregister` / `wake_task` membership.

@@ -5,16 +5,16 @@
 //! Three sub-negotiations carry that direction, and all three are stateful, so
 //! this module is a state machine rather than a field codec:
 //!
-//! * `MODE` (§2) — a bit mask (`EDIT`, `TRAPSIG`, `SOFT_TAB`, `LIT_ECHO`) the
-//!   two ends agree on. Whoever receives a mask acknowledges it by echoing it
-//!   back with `MODE_ACK` set, and an acknowledgement is never itself
-//!   acknowledged: that is what terminates the exchange.
-//! * `SLC` (§3) — which local characters mean `interrupt`, `erase`, `kill` and
-//!   the rest, negotiated per function with a support *level* and an
+//! * `MODE` (RFC 1184 §2) — a bit mask (`EDIT`, `TRAPSIG`, `SOFT_TAB`,
+//!   `LIT_ECHO`) the two ends agree on. Whoever receives a mask acknowledges it
+//!   by echoing it back with `MODE_ACK` set, and an acknowledgement is never
+//!   itself acknowledged: that is what terminates the exchange.
+//! * `SLC` (RFC 1184 §3) — which local characters mean `interrupt`, `erase`,
+//!   `kill` and the rest, negotiated per function with a support *level* and an
 //!   acknowledgement bit. The level rules are the whole subtlety of RFC 1184
 //!   and are implemented in [`SlcTable::fold`].
-//! * `FORWARDMASK` (§2.3) — a 32-byte bit mask naming the characters that must
-//!   force a partial line to the server immediately.
+//! * `FORWARDMASK` (RFC 1184 §2.3) — a 32-byte bit mask naming the characters
+//!   that must force a partial line to the server immediately.
 //!
 //! The server is hostile like every other peer: a malformed sub-negotiation is
 //! discarded whole, an SLC triplet naming an unknown function is answered

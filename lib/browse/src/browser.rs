@@ -126,12 +126,12 @@ impl<S: DirectorySource> Browser<S> {
     /// [`open_root`](Self::open_root) is exactly `open_at(source, [])`).
     ///
     /// The browser starts *at* that directory: [`components`](Self::components)
-    /// is the given path and [`go_up`](Self::go_up) climbs toward the root from there, with
-    /// an empty back/forward history exactly as a fresh open has. This is how a
-    /// consumer opens where the user expects to start — the trusted file picker
-    /// opens at the user's home rather than dumping them at the storage-forest
-    /// root — without a second navigation model (§2.2): the same listing, sort,
-    /// and selection path `open_root` uses.
+    /// is the given path and [`go_up`](Self::go_up) climbs toward the root from
+    /// there, with an empty back/forward history exactly as a fresh open has.
+    /// This is how a consumer opens where the user expects to start — the
+    /// trusted file picker opens at the user's home rather than dumping them at
+    /// the storage-forest root — without a second navigation model: the same
+    /// listing, sort, and selection path `open_root` uses.
     ///
     /// # Errors
     ///
@@ -568,12 +568,11 @@ impl<S: DirectorySource> Browser<S> {
         Ok(())
     }
 
-    /// Spell the validated absolute path of a child named `name` in the
-    /// current directory — the one child-path spelling every write verb
-    /// (rename, create, launch/open) shares, so a verb can never name a
-    /// different node than the browser shows (§2.2). Surfaces the kernel's own
-    /// [`Errno`] on a spelling failure for each caller to map onto its own
-    /// error type.
+    /// Spell the validated absolute path of a child named `name` in the current
+    /// directory — the one child-path spelling every write verb (rename,
+    /// create, launch/open) shares, so a verb can never name a different node
+    /// than the browser shows. Surfaces the kernel's own [`Errno`] on a
+    /// spelling failure for each caller to map onto its own error type.
     fn spell_child(&self, name: &str) -> Result<String, Errno> {
         let mut components = self.components.clone();
         components.push(String::from(name));
@@ -873,12 +872,12 @@ impl<S: DirectorySource> Browser<S> {
     /// is).
     ///
     /// Unlike [`go_up`](Self::go_up) (which climbs to the immediate parent) and
-    /// [`open_index`](Self::open_index)
-    /// (which only *descends* into a listed child), this reaches any location
-    /// the source can list, so a caller that knows a path it wants to show —
-    /// not necessarily on the current directory's spine — can go straight
-    /// there without a second navigation model (§2.2). It records history and
-    /// clears the forward stack exactly as a fresh navigation does.
+    /// [`open_index`](Self::open_index) (which only *descends* into a listed
+    /// child), this reaches any location the source can list, so a caller that
+    /// knows a path it wants to show — not necessarily on the current
+    /// directory's spine — can go straight there without a second navigation
+    /// model. It records history and clears the forward stack exactly as a
+    /// fresh navigation does.
     ///
     /// Returns `Ok(true)` after moving and `Ok(false)` when `components`
     /// already names the current directory — a no-op, not an error.

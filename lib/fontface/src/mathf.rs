@@ -3,11 +3,11 @@
 //! The rasteriser needs `floor`, `ceil`, `min`, `max`, and `clamp` on `f64`,
 //! all of which live in `std` (they call the platform libm) and so are
 //! unavailable in this `no_std` crate. Every value they see here is a pixel
-//! coordinate or a coverage fraction — small and finite, well within `i64` —
-//! so `floor`/`ceil` are implemented by truncation toward zero and a one-step
+//! coordinate or a coverage fraction — small and finite, well within `i64` — so
+//! `floor`/`ceil` are implemented by truncation toward zero and a one-step
 //! correction, and `min`/`max` by a plain comparison. Rolling these tiny,
 //! obviously-correct helpers ourselves is preferable to pulling in an external
-//! libm crate (`AGENTS.md` §2.12).
+//! libm crate.
 
 /// Truncate `x` toward zero. Callers only pass finite values within `i64`.
 #[allow(

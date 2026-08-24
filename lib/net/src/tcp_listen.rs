@@ -12,14 +12,14 @@
 //!
 //! # Purity
 //!
-//! Like the rest of `lib/net`, the listener is pure: no I/O, no syscalls,
-//! no capability checks, and no randomness or cryptography of its own. Time
-//! is the caller's explicit [`Duration64`]; the keyed MAC that authenticates
-//! a cookie is an injected [`CookieSecret`] seam the service backs with
-//! `lib/crypto` over a per-boot secret (`AGENTS.md` §2.12 — the engine never
-//! hand-rolls crypto). Every buffer is bounded and every decision fails
-//! closed, so the same code the live `netstack` service runs is the code the
-//! unit, property, and fuzz tests exercise.
+//! Like the rest of `lib/net`, the listener is pure: no I/O, no syscalls, no
+//! capability checks, and no randomness or cryptography of its own. Time is the
+//! caller's explicit [`Duration64`]; the keyed MAC that authenticates a cookie
+//! is an injected [`CookieSecret`] seam the service backs with `lib/crypto`
+//! over a per-boot secret (the engine never hand-rolls crypto). Every buffer is
+//! bounded and every decision fails closed, so the same code the live
+//! `netstack` service runs is the code the unit, property, and fuzz tests
+//! exercise.
 //!
 //! # The SYN-cookie trade-off (RFC 4987)
 //!
@@ -69,20 +69,20 @@ pub struct Connection {
 
 /// An injected keyed-MAC seam for stateless SYN cookies.
 ///
-/// The engine never hand-rolls cryptography (`AGENTS.md` §2.12): it asks the
-/// caller for a keyed MAC over the connection identity `tuple` and the
-/// rotating `counter`. `netstack` backs this with `lib/crypto` over a
-/// per-boot secret drawn from the platform RNG; tests inject a deterministic
-/// MAC. Only the low 24 bits of the result are used.
+/// The engine never hand-rolls cryptography: it asks the caller for a keyed MAC
+/// over the connection identity `tuple` and the rotating `counter`. `netstack`
+/// backs this with `lib/crypto` over a per-boot secret drawn from the platform
+/// RNG; tests inject a deterministic MAC. Only the low 24 bits of the result
+/// are used.
 pub trait CookieSecret {
     /// A keyed MAC over `tuple` and `counter`. Must be deterministic for a
     /// given `(tuple, counter)` within the secret's lifetime.
     fn mac(&self, tuple: &[u8], counter: u32) -> u32;
 }
 
-/// Tuning for a [`Listener`]. Every capacity is a fixed, caller-chosen
-/// bound sized from the service's per-principal budget (`AGENTS.md` §24);
-/// nothing here is an attacker-influenced allocation.
+/// Tuning for a [`Listener`]. Every capacity is a fixed, caller-chosen bound
+/// sized from the service's per-principal budget; nothing here is an
+/// attacker-influenced allocation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ListenConfig {
     /// Maximum half-open (SYN-RECEIVED) connections held with full state.

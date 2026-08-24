@@ -12,21 +12,21 @@
 //! data-integrity or availability fault rather than a cosmetic one:
 //!
 //! - A rebuild that is never started leaves the array degraded until the
-//!   *next* fault loses data (`AGENTS.md` §26.5).
+//!   *next* fault loses data.
 //! - A rebuild that never yields starves the foreground workload the array
-//!   exists to serve (`AGENTS.md` §26.1, §26.2, §2.16).
+//!   exists to serve.
 //! - Re-probing a faulted member in a tight loop is the busy-wait the charter
-//!   forbids (`AGENTS.md` §2.23), and re-probing it *never* means a disk that
-//!   came back stays out of the array (`AGENTS.md` §18.4).
+//!   forbids, and re-probing it *never* means a disk that came back stays out
+//!   of the array.
 //! - Scrubbing an array that is mid-rebuild spends the bandwidth the rebuild
 //!   needs to restore redundancy.
 //! - A position that is never written down is a pass that starts over on every
 //!   restart, so a large array rebooted often enough is never verified and may
-//!   never finish a rebuild (`AGENTS.md` §26.5, §26.6) — while writing it down
-//!   after every chunk would burn a member's medium for nothing.
+//!   never finish a rebuild — while writing it down after every chunk would
+//!   burn a member's medium for nothing.
 //!
 //! So the decision lives here once, host-provable, rather than being
-//! hand-rolled per consumer (`AGENTS.md` §2.2, §27).
+//! hand-rolled per consumer.
 //!
 //! # Shape
 //!
@@ -39,7 +39,7 @@
 //! (`blkio::BlkHealth::grace_deadline_ns`). It is allocation-free: the
 //! per-member re-add backoff records live in a caller-owned slice exactly as
 //! the composition engines' members do, so a wide array imposes no fixed
-//! ceiling (`AGENTS.md` §24.1).
+//! ceiling.
 //!
 //! The serve loop's contract per turn is:
 //!
@@ -92,10 +92,10 @@
 //!   scheduler leaves it alone rather than inventing a spare.
 //! - It drives nothing on a [`Failed`](ArrayHealth::Failed) array. With no
 //!   in-sync member there is nothing to rebuild a returning copy from, and
-//!   admitting one as current would serve data the array cannot vouch for
-//!   (`AGENTS.md` §5.4, §26.5). Bringing a failed array back is a re-resolution
-//!   of its members' superblocks against their generation counters — an
-//!   assembly decision, not a maintenance one.
+//!   admitting one as current would serve data the array cannot vouch for.
+//!   Bringing a failed array back is a re-resolution of its members'
+//!   superblocks against their generation counters — an assembly decision, not
+//!   a maintenance one.
 //! - It drives nothing on a non-redundant RAID0 stripe, which has nothing to
 //!   scrub from, rebuild from, or hot-swap
 //!   ([`RaidLevel::is_redundant`](tairix_abi::raid::RaidLevel::is_redundant)).
@@ -121,13 +121,12 @@ const FOREGROUND_IDLE_NS: u64 = 1_000_000_000;
 ///
 /// This is the operator's tolerated *exposure window*: the time a latent media
 /// error may sit undetected on a copy the read path never consults before a
-/// scrub finds and heals it while redundancy still exists (`AGENTS.md` §26.5).
-/// It is a property of the risk accepted, not of the hardware, so it is one
-/// default for every class and is overridable per array through
-/// [`MaintenancePolicy::scrub_period_ns`]. A week matches the cadence a
-/// general-purpose desktop and a server both tolerate (`AGENTS.md` §24.2): long
-/// enough that the pass is unobtrusive, short enough that a second fault
-/// rarely arrives first.
+/// scrub finds and heals it while redundancy still exists. It is a property of
+/// the risk accepted, not of the hardware, so it is one default for every class
+/// and is overridable per array through [`MaintenancePolicy::scrub_period_ns`].
+/// A week matches the cadence a general-purpose desktop and a server both
+/// tolerate: long enough that the pass is unobtrusive, short enough that a
+/// second fault rarely arrives first.
 const SCRUB_PERIOD_NS: u64 = 7 * 24 * 60 * 60 * 1_000_000_000;
 
 /// How often an advancing pass writes its position to the members by default.
@@ -197,7 +196,7 @@ pub enum MaintenanceAction {
 /// array (an operator-set scrub cadence, a maintenance window) sets it
 /// directly; [`for_class`](Self::for_class) derives the default from the
 /// array's *discovered* device class rather than freezing one scalar for every
-/// machine (`AGENTS.md` §24.2).
+/// machine.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct MaintenancePolicy {
     /// How long a redundant array goes between proactive scrub passes,
@@ -227,9 +226,8 @@ impl MaintenancePolicy {
     /// The default policy for an array of `class` — the class its members'
     /// fold declares through [`Block::device_class`].
     ///
-    /// The two class-dependent quantities are derived from that class's own
-    /// I/O budget rather than a second hand-written table that could drift
-    /// from it (`AGENTS.md` §2.2):
+    /// The two class-dependent quantities are derived from that class's own I/O
+    /// budget rather than a second hand-written table that could drift from it:
     ///
     /// - The **first re-add delay** is the class's recovery grace window
     ///   (`IoBudget::grace_ns`). Re-probing a member sooner is pointless: it is
@@ -267,9 +265,9 @@ impl MaintenancePolicy {
 ///
 /// The scheduler holds one of these per array slot in storage the caller
 /// supplies — a borrowed slice or an owned buffer — so a wide array hits no
-/// fixed member ceiling (`AGENTS.md` §24.1), the same shape the composition
-/// engines' member buffers use. The contents are the scheduler's; a caller only
-/// supplies the storage, default-initialised.
+/// fixed member ceiling, the same shape the composition engines' member buffers
+/// use. The contents are the scheduler's; a caller only supplies the storage,
+/// default-initialised.
 ///
 /// The escalation itself is the shared [`RetryState`], so a member re-add and
 /// the member agent's registry re-offer pace themselves by one definition.
@@ -355,13 +353,12 @@ impl<R: AsRef<[MemberRetry]> + AsMut<[MemberRetry]>> ArrayMaintenance<R> {
     /// `retries` storage.
     ///
     /// `since_last_scrub_ns` is how long ago the array's last scrub pass
-    /// completed, as the caller knows it from the array's persisted
-    /// maintenance record; the first pass is then due once the remainder of
+    /// completed, as the caller knows it from the array's persisted maintenance
+    /// record; the first pass is then due once the remainder of
     /// [`MaintenancePolicy::scrub_period_ns`] has elapsed. A caller with **no**
     /// record passes [`u64::MAX`], which makes the first pass due immediately:
     /// an array whose verification history is unknown is verified rather than
-    /// assumed clean (`AGENTS.md` §5.4, §26.5), and the duty pacing bounds what
-    /// that costs.
+    /// assumed clean, and the duty pacing bounds what that costs.
     ///
     /// An array handed over **mid-pass** — one whose cursor was restored from
     /// its maintenance record ([`RaidArray::restore_progress`]) — is adopted as

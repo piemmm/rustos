@@ -1078,8 +1078,7 @@ pub(crate) fn chrome_panel(anchor: Point) -> Panel {
 /// header band and frame consume, and where the content region sits.
 ///
 /// Shared by the program-library popup and the notification popover so both
-/// measure the same shared [`Panel`] chrome rather than each re-deriving it
-/// (§2.2).
+/// measure the same shared [`Panel`] chrome rather than each re-deriving it.
 pub(crate) struct ChromeProbe {
     /// Total vertical pixels the chrome consumes (header plus frame).
     pub(crate) overhead: u32,

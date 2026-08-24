@@ -44,13 +44,12 @@ mod program {
 
     /// The production [`Sleeper`]: a clock-backed, off-CPU timed park.
     ///
-    /// Every wait goes through [`ClockDelay::delay_us`], which parks the
-    /// task on the runtime's timed wait-set — the CPU sleeps between the
-    /// deadline checks, it never spins (`AGENTS.md` §2.23). A finite
-    /// interval is parked in `u32`-microsecond chunks (each a real park);
-    /// an infinite interval (`sleep inf`) re-parks in maximal chunks
-    /// forever, so the process pauses until it is killed without ever
-    /// busy-looping.
+    /// Every wait goes through [`ClockDelay::delay_us`], which parks the task
+    /// on the runtime's timed wait-set — the CPU sleeps between the deadline
+    /// checks, it never spins. A finite interval is parked in `u32`-microsecond
+    /// chunks (each a real park); an infinite interval (`sleep inf`) re-parks
+    /// in maximal chunks forever, so the process pauses until it is killed
+    /// without ever busy-looping.
     struct RtSleeper;
 
     impl Sleeper for RtSleeper {

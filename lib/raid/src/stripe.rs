@@ -7,9 +7,9 @@
 //! logical blocks each) and round-robins them across the members, so a large
 //! transfer is spread over every member and their bandwidth aggregates. It is
 //! the sibling of the RAID1 [`MirrorArray`](crate::MirrorArray) over the same
-//! block seam (`AGENTS.md` §2.2 parallel implementations): both compose child
-//! `Block` endpoints and consume the shared block-health vocabulary
-//! ([`tairix_abi::blkio`]) rather than re-inventing it.
+//! block seam (parallel implementations): both compose child `Block` endpoints
+//! and consume the shared block-health vocabulary ([`tairix_abi::blkio`])
+//! rather than re-inventing it.
 //!
 //! # No redundancy — a stripe fails closed, it never degrades
 //!
@@ -31,8 +31,7 @@
 //!   [`member_faulting`] classification the mirror uses too), the stripe is
 //!   marked [`ArrayHealth::Failed`] and every subsequent I/O fails closed
 //!   ([`DriverError::DeviceOffline`]): the array can no longer serve a complete
-//!   logical block space, and it never pretends otherwise (`AGENTS.md` §5.4,
-//!   §26.5).
+//!   logical block space, and it never pretends otherwise.
 //! - **A per-block media error fails only that request.** A bad sector on a
 //!   member ([`DriverError::MediumError`]) means *that* logical block is
 //!   unrecoverable (no second copy to heal from, unlike the mirror), so the
@@ -46,8 +45,8 @@
 //! # Allocation-free
 //!
 //! Like the mirror, [`StripeArray`] borrows a caller-owned member slice, so it
-//! holds no allocation and imposes no fixed member ceiling (`AGENTS.md`
-//! §24.1); the growable member tier lives in the assembling serve process.
+//! holds no allocation and imposes no fixed member ceiling; the growable member
+//! tier lives in the assembling serve process.
 
 use crate::mirror::member_faulting;
 use tairix_abi::blkio::BlkDeviceClass;
@@ -128,10 +127,9 @@ pub enum StripeError {
 /// A RAID0 stripe presenting several child [`Block`] members as one logical
 /// device of their combined capacity.
 ///
-/// See this module's documentation for the striping layout and the
-/// fail-closed, no-redundancy fault model. The array borrows a caller-owned
-/// member slice, so it holds no allocation and imposes no fixed member ceiling
-/// (`AGENTS.md` §24.1).
+/// See this module's documentation for the striping layout and the fail-closed,
+/// no-redundancy fault model. The array borrows a caller-owned member slice, so
+/// it holds no allocation and imposes no fixed member ceiling.
 pub struct StripeArray<'a, B: Block> {
     members: &'a mut [StripeMember<B>],
     /// The logical geometry the array presents (block size shared with the
@@ -278,9 +276,9 @@ impl<'a, B: Block> StripeArray<'a, B> {
     /// The current [`ArrayHealth`]: [`ArrayHealth::Optimal`] while every member
     /// is live, [`ArrayHealth::Failed`] once any member has suffered a
     /// whole-device fault. A stripe has no `Degraded`/`Recovering` state of its
-    /// own — with no redundancy there is nothing to degrade to or rebuild
-    /// from, so it maps onto the shared array-health vocabulary using only
-    /// those two states (`AGENTS.md` §2.2).
+    /// own — with no redundancy there is nothing to degrade to or rebuild from,
+    /// so it maps onto the shared array-health vocabulary using only those two
+    /// states.
     #[must_use]
     pub const fn health(&self) -> ArrayHealth {
         if self.failed {
@@ -459,8 +457,8 @@ impl<B: Block> Block for StripeArray<'_, B> {
         }
         // Every member holds a disjoint slice of the block space, so durability
         // requires *all* of them to commit: a stripe with one member that
-        // cannot flush is not durable and fails closed (`AGENTS.md` §5.4). A
-        // member that faults its flush drops the array for good.
+        // cannot flush is not durable and fails closed. A member that faults
+        // its flush drops the array for good.
         for member in self.members.iter_mut() {
             if member.faulted {
                 self.failed = true;

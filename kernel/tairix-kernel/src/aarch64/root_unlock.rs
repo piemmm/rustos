@@ -648,7 +648,7 @@ fn virtio_blk_unlock<'a>(
             waiter,
         )));
 
-    // Admit the virtio-blk driver through the signed §8 load gate (Ed25519
+    // Admit the virtio-blk driver through the signed driver load gate (Ed25519
     // signature + `CAP_DRV_LOAD` / `CAP_DRV_KERNEL`) before it drives
     // hardware — a refusal fails closed.
     let loader = KernelDriverLoader::new(audit).ok_or("root-unlock: driver trust anchor")?;

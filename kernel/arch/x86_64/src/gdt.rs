@@ -275,7 +275,6 @@ impl Tss {
             // `TSS_BYTE_LEN` const-asserts that `size_of::<Tss>()` is
             // exactly `0x68`, which fits in a `u16` without loss.
             #[allow(clippy::cast_possible_truncation)]
-            // — see `TSS_BYTE_LEN` invariant above.
             iopb: size_of::<Tss>() as u16,
         }
     }
@@ -632,9 +631,8 @@ impl PerCpuGdt {
         // * `gdtr` / `kcs` / `kds` / `tss` are read-only `in(reg)`
         //   operands; the assembler picks any free GP register.
         // * `rax` is declared as a clobber once (covering both 16-bit
-        //   `ax` and 64-bit `rax` uses below). The `out("ax") _,
-        //   out("rax") _` pattern is invalid because the two register
-        //   classes overlap.
+        //   `ax` and 64-bit `rax` uses below). The `out("ax") _, out("rax") _`
+        //   pattern is invalid because the two register classes overlap.
         unsafe {
             core::arch::asm!(
                 "lgdt [{gdtr}]",

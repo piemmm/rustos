@@ -14,9 +14,8 @@
 //! trust anchor in with it: an architecture whose boot path builds a
 //! hardware tree (over its own FDT/ACPI source) reuses these observers
 //! without linking the catalogue. Input and network devices are
-//! discovered by one shared core (`observe_virtio_mmio_interrupt_devices`,
-//! §2.2); the block probe differs (a different resource shape) and stays
-//! separate.
+//! discovered by one shared core (`observe_virtio_mmio_interrupt_devices`);
+//! the block probe differs (a different resource shape) and stays separate.
 
 use tairix_abi::driver::bus::{Bus, BusDevice};
 use tairix_abi::driver::virtio_mmio::VirtioMmioBus;
@@ -291,7 +290,7 @@ pub fn observe_virtio_mmio_input_devices(
 /// driver — it parks its serve loop on the device interrupt rather than
 /// busy-polling — so its discovery is the *same* walk with only the
 /// probed device id and the emitted node class differing; both go through
-/// the shared `observe_virtio_mmio_interrupt_devices` core (§2.2).
+/// the shared `observe_virtio_mmio_interrupt_devices` core.
 /// Node ids are drawn from a base disjoint from the block- and
 /// input-probe bases so the leaked tree's node origins stay unambiguous.
 ///
@@ -319,14 +318,13 @@ pub fn observe_virtio_mmio_network_devices(
 
 /// The shared core of the interrupt-driven virtio-MMIO class probes
 /// ([`observe_virtio_mmio_input_devices`],
-/// [`observe_virtio_mmio_network_devices`]): enumerate the bus, and for
-/// every populated slot whose `DeviceID` equals `device_id` emit a node of
-/// `class` (numbered from `node_base_id`) carrying its register window, a
-/// coherent DMA constraint, and its discovered interrupt line. Input and
-/// network devices are identical here — both are autoloaded into a
-/// user-space process that parks on the device interrupt — so the walk is
-/// written once (§2.2); the block probe differs (a different resource
-/// shape) and stays separate.
+/// [`observe_virtio_mmio_network_devices`]): enumerate the bus, and for every
+/// populated slot whose `DeviceID` equals `device_id` emit a node of `class`
+/// (numbered from `node_base_id`) carrying its register window, a coherent DMA
+/// constraint, and its discovered interrupt line. Input and network devices are
+/// identical here — both are autoloaded into a user-space process that parks on
+/// the device interrupt — so the walk is written once; the block probe differs
+/// (a different resource shape) and stays separate.
 fn observe_virtio_mmio_interrupt_devices(
     bus: &dyn VirtioMmioBus,
     slot_irq: &dyn Fn(u64) -> Option<u32>,
@@ -451,21 +449,19 @@ fn observe_virtio_mmio_interrupt_devices(
 /// PCI-bus analogue of [`observe_virtio_mmio_network_devices`]
 /// (`plans/NETWORK.md` N4e-x86_64).
 ///
-/// A modern virtio-net PCI function reports vendor
-/// [`VIRTIO_PCI_VENDOR_ID`] and device ID
-/// `0x1040 + `[`VIRTIO_NET_DEVICE_ID`]. Unlike a single-aperture MMIO
+/// A modern virtio-net PCI function reports vendor [`VIRTIO_PCI_VENDOR_ID`] and
+/// device ID `0x1040 + `[`VIRTIO_NET_DEVICE_ID`]. Unlike a single-aperture MMIO
 /// device, its register blocks are scattered across BARs at
-/// capability-referenced offsets that only PCI-configuration-space access
-/// can resolve — which a user-space driver cannot do. So the kernel
-/// resolves the four windows here (through the frozen [`VirtioPciBus`]
-/// seam, never naming a concrete `drivers/bus/*` type) and emits each as a
-/// role-tagged [`virtio_pci_window_resource`] grant, so the autoloaded
-/// driver receives pre-resolved `(base, len)` windows it maps in its own
-/// address space (`AGENTS.md` §4 — no ambient authority, the driver never
-/// touches config space). The node is keyed by the shared
-/// [`HwMatchKey::virtio`]`(`[`VIRTIO_NET_DEVICE_ID`]`)` — the *virtio
-/// type*, not the PCI device ID — so the same signed bundle binds on the
-/// MMIO and PCI buses alike (§2.2).
+/// capability-referenced offsets that only PCI-configuration-space access can
+/// resolve — which a user-space driver cannot do. So the kernel resolves the
+/// four windows here (through the frozen [`VirtioPciBus`] seam, never naming a
+/// concrete `drivers/bus/*` type) and emits each as a role-tagged
+/// [`virtio_pci_window_resource`] grant, so the autoloaded driver receives
+/// pre-resolved `(base, len)` windows it maps in its own address space (no
+/// ambient authority, the driver never touches config space). The node is keyed
+/// by the shared [`HwMatchKey::virtio`]`(`[`VIRTIO_NET_DEVICE_ID`]`)` — the
+/// *virtio type*, not the PCI device ID — so the same signed bundle binds on
+/// the MMIO and PCI buses alike.
 ///
 /// `dev_irq(bdf)` resolves the interrupt line the platform routes the
 /// function to (arch-specific: the x86_64 port allocates a vector and
@@ -503,18 +499,18 @@ pub fn observe_virtio_pci_network_devices(
 /// interrupt line as the network PCI probe — the PCI-bus analogue of
 /// [`observe_virtio_mmio_input_devices`] (`plans/NETWORK.md` N4e-x86_64).
 ///
-/// A virtio-input device on a PC is presented on the PCI bus (`-device
-/// virtio-keyboard-pci` / `virtio-mouse-pci`), not on a single MMIO
+/// A virtio-input device on a PC is presented on the PCI bus
+/// (`-device virtio-keyboard-pci` / `virtio-mouse-pci`), not on a single MMIO
 /// aperture, so its register blocks are scattered across BARs at
 /// capability-referenced offsets only PCI-configuration-space access can
-/// resolve — which a user-space driver cannot do. The kernel resolves the
-/// four windows here (through the frozen [`VirtioPciBus`] seam, never
-/// naming a concrete `drivers/bus/*` type) and emits each as a role-tagged
-/// grant, so the autoloaded `drivers/input/virtio_kbd` process receives
-/// pre-resolved `(base, len)` windows it maps in its own address space
-/// (`AGENTS.md` §4 — no ambient authority). The node is keyed by the shared
-/// virtio *type* (not the PCI device ID), so the one signed input bundle
-/// binds on the MMIO and PCI buses alike (§2.2).
+/// resolve — which a user-space driver cannot do. The kernel resolves the four
+/// windows here (through the frozen [`VirtioPciBus`] seam, never naming a
+/// concrete `drivers/bus/*` type) and emits each as a role-tagged grant, so the
+/// autoloaded `drivers/input/virtio_kbd` process receives pre-resolved
+/// `(base, len)` windows it maps in its own address space (no ambient
+/// authority). The node is keyed by the shared virtio *type* (not the PCI
+/// device ID), so the one signed input bundle binds on the MMIO and PCI buses
+/// alike.
 ///
 /// `dev_irq(bdf)` resolves the interrupt line the platform routes the
 /// function to (a discovered value, never a board constant). A function
@@ -549,7 +545,7 @@ pub fn observe_virtio_pci_input_devices(
 /// four config windows and emit a role-tagged node of `class` (numbered
 /// from `node_base_id`). Written once and shared by the network
 /// ([`observe_virtio_pci_network_devices`]) and input
-/// ([`observe_virtio_pci_input_devices`]) probes (§2.2); the block PCI
+/// ([`observe_virtio_pci_input_devices`]) probes; the block PCI
 /// probe stays separate (its node carries no grants — the floor bring-up
 /// re-resolves the transport from config space), and the MMIO probes stay
 /// separate because their window shape (a single aperture) differs.

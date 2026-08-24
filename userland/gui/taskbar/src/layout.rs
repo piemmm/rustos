@@ -252,8 +252,8 @@ struct TrailingEnd {
     start: u32,
 }
 
-/// Place the trailing regions within `span` — `(the offset the leading
-/// launcher and its rule end at, the content region's main-axis length)`.
+/// Place the trailing regions within `span` —
+/// `(the offset the leading launcher and its rule end at, the content region's main-axis length)`.
 ///
 /// They clip against the permanent leading launcher and never the reverse, so
 /// a degenerate screen shrinks the clock and icons to nothing rather than
@@ -309,7 +309,7 @@ const NOTIF_CARD_HEIGHT: u32 = 64;
 /// The most notification cards shown at once. Extra notifications are simply
 /// not drawn — the model orders by severity then recency, so the ones that
 /// matter most are the ones shown (this is a *display* cap on a transient
-/// surface, not a stored-capacity ceiling, so §24 does not apply).
+/// surface, not a stored-capacity ceiling that has to scale with the machine).
 const NOTIF_MAX_CARDS: usize = 4;
 
 /// The notification popover's window title.

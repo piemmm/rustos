@@ -183,7 +183,7 @@ fn non_current_rows_stay_on_the_plate() {
     );
 }
 
-// --- §13 authority rendering -------------------------------------------
+// --- spec §13 authority rendering --------------------------------------
 
 #[test]
 fn denied_row_shows_the_lock_bead_and_disabled_does_not() {

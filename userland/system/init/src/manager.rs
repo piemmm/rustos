@@ -573,7 +573,7 @@ impl<'a> Init<'a> {
     /// A new connection always cancels a pending idle-linger stop: fresh
     /// interest keeps the service alive. Parked clients are woken through
     /// [`take_ready_clients`](Self::take_ready_clients) when the service
-    /// becomes ready — never by polling (§2.23).
+    /// becomes ready — never by polling.
     ///
     /// # Errors
     ///
@@ -3498,9 +3498,9 @@ mod tests {
 
     #[test]
     fn control_start_fails_closed_when_a_required_condition_is_unmet() {
-        // The headless case: a `display-present`-gated service is refused
-        // while the condition is unmet, and comes up once it is satisfied —
-        // never guessed into life (§17.3).
+        // The headless case: a `display-present`-gated service is refused while
+        // the condition is unmet, and comes up once it is satisfied — never
+        // guessed into life.
         let spawner = MockSpawner::new();
         let reaper = IdleReaper;
         let sink = RecordingSink::new();

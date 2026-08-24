@@ -8,12 +8,12 @@
 //! At each extent (the whole device, then each partition) a **RAID array
 //! member** is recognised first ([`tairix_fsprobe::probe_raid_member`]): a
 //! member carries a RAID superblock at its block 0, belongs to an array
-//! awaiting assembly, and must never be mounted as a bare filesystem — one
-//! copy of a mirror mounted read-write diverges the array, and a member that
-//! missed writes serves stale data (`AGENTS.md` §26.5). Such an extent is
-//! counted ([`PlanSummary::raid_members`]) and skipped, never attached. Only
-//! when an extent is *not* a member is it probed for a filesystem, in the
-//! fixed and documented order:
+//! awaiting assembly, and must never be mounted as a bare filesystem — one copy
+//! of a mirror mounted read-write diverges the array, and a member that missed
+//! writes serves stale data. Such an extent is counted
+//! ([`PlanSummary::raid_members`]) and skipped, never attached. Only when an
+//! extent is *not* a member is it probed for a filesystem, in the fixed and
+//! documented order:
 //!
 //! 1. **Whole-device filesystem first.** A supported signature at LBA 0
 //!    (`tairix_fsprobe::probe`) means an unpartitioned "superfloppy"
@@ -71,11 +71,11 @@ pub struct PlanSummary {
     pub planned: u32,
     /// Present partitions whose head matched no supported filesystem.
     pub unrecognised: u32,
-    /// Extents (the whole device, or a partition) recognised as a **RAID
-    /// array member** and deliberately *not* attached: a member belongs to a
-    /// RAID array awaiting assembly, and mounting one bare copy read-write
-    /// would diverge a mirror's copies or serve stale data (`AGENTS.md`
-    /// §26.5). Not an error, and never counted as blank/unrecognised.
+    /// Extents (the whole device, or a partition) recognised as a **RAID array
+    /// member** and deliberately *not* attached: a member belongs to a RAID
+    /// array awaiting assembly, and mounting one bare copy read-write would
+    /// diverge a mirror's copies or serve stale data. Not an error, and never
+    /// counted as blank/unrecognised.
     pub raid_members: u32,
     /// `true` when the device carried no partition table and no
     /// whole-device filesystem (nothing attachable, not an error).
@@ -175,8 +175,7 @@ fn bounded_extent(partition: &Partition, geometry: &BlockGeometry) -> Option<(u6
 ///
 /// One read serves both classifiers: the caller passes the returned slice to
 /// [`probe_raid_member`] (is this a RAID array member?) and, failing that, to
-/// [`probe`] (is this a supported filesystem?), so a device head is read once
-/// (`AGENTS.md` §2.16).
+/// [`probe`] (is this a supported filesystem?), so a device head is read once.
 fn read_head<B: Block>(
     dev: &mut B,
     geometry: &BlockGeometry,

@@ -529,14 +529,13 @@ pub fn build_raid_bundle(
 
 /// Build and sign the virtio-input keyboard/pointer driver bundle.
 ///
-/// The QEMU `virt` sibling of the USB keyboard: it maps its granted
-/// register window (`CAP_MMIO_MAP`), carves its virtqueue DMA slab
-/// (`CAP_MEM_DMA`), parks on the device's interrupt line (`CAP_IRQ_BIND`),
-/// and injects decoded key edges into the kernel input-focus arbiter
-/// (`CAP_INPUT_INJECT`) — and nothing more. Carries
-/// `tairix_drv_input_virtio_input::BIND_KEYS`, so it autoloads against a
-/// discovered virtio-input node (and stays unbound on the Pi, whose tree
-/// carries none — §18.4).
+/// The QEMU `virt` sibling of the USB keyboard: it maps its granted register
+/// window (`CAP_MMIO_MAP`), carves its virtqueue DMA slab (`CAP_MEM_DMA`),
+/// parks on the device's interrupt line (`CAP_IRQ_BIND`), and injects decoded
+/// key edges into the kernel input-focus arbiter (`CAP_INPUT_INJECT`) — and
+/// nothing more. Carries `tairix_drv_input_virtio_input::BIND_KEYS`, so it
+/// autoloads against a discovered virtio-input node (and stays unbound on the
+/// Pi, whose tree carries none).
 ///
 /// # Errors
 ///
@@ -565,16 +564,15 @@ pub fn build_virtio_kbd_bundle(
 ///
 /// The zero-copy, lease-gated display half of the desktop present path
 /// (`plans/DISPLAY.md` D7b/D7d): it maps its granted scan-out surface
-/// (`CAP_MMIO_MAP` — the geometry rides the node's `Framebuffer`
-/// resource), maps each session's granted frame region at `Configure`
-/// (`CAP_SHM`), binds the reserved `DISPLAY_ENDPOINT` rendezvous
-/// (`CAP_IPC_BIND_PRIVILEGED`), and emits its one-shot first-present
-/// record (`CAP_LOG_EMIT`) — and nothing more. Every present is gated
-/// kernel-side on the caller's live seat lease (`call_peer_seat`, no
-/// capability — the authority is serving the in-flight call). Carries
-/// `tairix_drv_display_framebuffer::BIND_KEYS`, so it autoloads against
-/// the boot display node the kernel publishes for its platform-programmed
-/// scan-out surface (and stays unbound on a headless boot, §18.4).
+/// (`CAP_MMIO_MAP` — the geometry rides the node's `Framebuffer` resource),
+/// maps each session's granted frame region at `Configure` (`CAP_SHM`), binds
+/// the reserved `DISPLAY_ENDPOINT` rendezvous (`CAP_IPC_BIND_PRIVILEGED`), and
+/// emits its one-shot first-present record (`CAP_LOG_EMIT`) — and nothing more.
+/// Every present is gated kernel-side on the caller's live seat lease
+/// (`call_peer_seat`, no capability — the authority is serving the in-flight
+/// call). Carries `tairix_drv_display_framebuffer::BIND_KEYS`, so it autoloads
+/// against the boot display node the kernel publishes for its
+/// platform-programmed scan-out surface (and stays unbound on a headless boot).
 ///
 /// # Errors
 ///
@@ -601,16 +599,16 @@ pub fn build_framebuffer_bundle(
 
 /// Build and sign the virtio-net link-layer driver bundle.
 ///
-/// The `-M virt` two-process netstack path's link driver: it maps its
-/// granted register window (`CAP_MMIO_MAP`), carves its virtqueue DMA slab
+/// The `-M virt` two-process netstack path's link driver: it maps its granted
+/// register window (`CAP_MMIO_MAP`), carves its virtqueue DMA slab
 /// (`CAP_MEM_DMA`), parks on the device interrupt its serve loop waits on
-/// (`CAP_IRQ_BIND`), maps the shared frame region (`CAP_SHM`), claims and
-/// binds the reserved device-channel endpoint (`CAP_IPC_ENDPOINT`,
+/// (`CAP_IRQ_BIND`), maps the shared frame region (`CAP_SHM`), claims and binds
+/// the reserved device-channel endpoint (`CAP_IPC_ENDPOINT`,
 /// `CAP_IPC_BIND_PRIVILEGED`), publishes its `netchan` node (`CAP_HW_EMIT`),
-/// and emits its readiness beacon (`CAP_LOG_EMIT`) — and nothing more.
-/// Carries `tairix_drv_network_virtio_net::BIND_KEYS`, so it autoloads
-/// against a discovered virtio-net node (and stays unbound on a machine
-/// whose tree carries none — §18.4).
+/// and emits its readiness beacon (`CAP_LOG_EMIT`) — and nothing more. Carries
+/// `tairix_drv_network_virtio_net::BIND_KEYS`, so it autoloads against a
+/// discovered virtio-net node (and stays unbound on a machine whose tree
+/// carries none).
 ///
 /// # Errors
 ///
@@ -642,15 +640,15 @@ pub fn build_virtio_net_bundle(
 /// Build and sign the GENET link-layer driver bundle.
 ///
 /// The Raspberry Pi 4B's on-board gigabit NIC: it maps its granted register
-/// window (`CAP_MMIO_MAP`), carves its frame buffers (`CAP_MEM_DMA`), parks
-/// on the device interrupt its serve loop waits on (`CAP_IRQ_BIND`), maps the
+/// window (`CAP_MMIO_MAP`), carves its frame buffers (`CAP_MEM_DMA`), parks on
+/// the device interrupt its serve loop waits on (`CAP_IRQ_BIND`), maps the
 /// shared frame region (`CAP_SHM`), claims and binds the reserved
 /// device-channel endpoint (`CAP_IPC_ENDPOINT`, `CAP_IPC_BIND_PRIVILEGED`),
-/// publishes its `netchan` node (`CAP_HW_EMIT`), and emits its readiness
-/// beacon (`CAP_LOG_EMIT`) — the same set the virtio-net bundle carries, and
-/// nothing more. Carries `tairix_drv_network_genet::BIND_KEYS`, so it
-/// autoloads against a discovered `brcm,bcm2711-genet-v5` node (and stays
-/// unbound on a machine whose tree carries none — §18.4).
+/// publishes its `netchan` node (`CAP_HW_EMIT`), and emits its readiness beacon
+/// (`CAP_LOG_EMIT`) — the same set the virtio-net bundle carries, and nothing
+/// more. Carries `tairix_drv_network_genet::BIND_KEYS`, so it autoloads against
+/// a discovered `brcm,bcm2711-genet-v5` node (and stays unbound on a machine
+/// whose tree carries none).
 ///
 /// # Errors
 ///

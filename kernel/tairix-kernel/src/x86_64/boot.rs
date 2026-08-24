@@ -130,13 +130,11 @@ struct KernelStack([u8; KERNEL_STACK_BYTES]);
 
 /// Per-CPU kernel stack pool, sized to the [`BOOT_CPUS`] this binary
 /// brings up (the BSP). A future AP-bring-up commit sizes it from the
-/// -discovered CPU count rather than re-introducing
-/// a fixed ceiling.
+/// discovered CPU count rather than re-introducing a fixed ceiling.
 ///
-/// — the only `static mut` in the bin crate, justified
-/// in `README.md` as the per-CPU bootstrap-stack arena. Access is
-/// exclusively through [`kernel_stack_top`], which derives a
-/// disjoint pointer per `cpu_index`.
+/// This is the only `static mut` in the bin crate, justified in `README.md`
+/// as the per-CPU bootstrap-stack arena. Access is exclusively through
+/// [`kernel_stack_top`], which derives a disjoint pointer per `cpu_index`.
 static mut KERNEL_STACKS: [KernelStack; BOOT_CPUS] =
     [const { KernelStack([0; KERNEL_STACK_BYTES]) }; BOOT_CPUS];
 

@@ -182,7 +182,7 @@ fn theme_switch_repaints_the_rim() {
     assert_ne!(dark.get(0, H / 2), light.get(0, H / 2));
 }
 
-// --- §13 authority rendering -------------------------------------------
+// --- spec §13 authority rendering --------------------------------------
 
 #[test]
 fn denied_and_disabled_render_distinctly() {
@@ -501,7 +501,7 @@ fn renders_at_a_larger_scale_without_panicking() {
     assert!(has_pixel(&surface, premul(theme.palette().surface_raised)));
 }
 
-// --- Accessibility: high contrast (§15) --------------------------------
+// --- Accessibility: high contrast (spec §15) -------------------------
 
 #[test]
 fn high_contrast_thickens_the_signal_rim() {
@@ -515,7 +515,7 @@ fn high_contrast_thickens_the_signal_rim() {
     assert_eq!(heavy.get(1, H / 2), Some(rim));
 }
 
-// --- Accessibility: shape-coded Signal Beads (§13, §15) ----------------
+// --- Accessibility: shape-coded Signal Beads (spec §13, §15) ---------
 
 #[test]
 fn completion_paints_a_success_bead() {

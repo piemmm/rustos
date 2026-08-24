@@ -1,12 +1,12 @@
 //! The parsed shape of a `stress` command line (`plans/STRESSTEST.md` §7.3).
 //!
-//! The option surface follows the established `stress`/`stress-ng`
-//! conventions (`AGENTS.md` §16.7): `--cpu`/`--io`/`--vm`/`--vm-bytes`/
-//! `--hdd`/`--hdd-bytes`/`--timeout`/`--quiet` keep their GNU `stress`
-//! meaning and value grammar (binary byte suffixes, `s`/`m`/`h` time
-//! suffixes). The TAIRiX-only options — `--cache`, `--all`, `--overcommit`,
-//! `--monitor`, `--background`, `--temp-path` — are additive and spelled so
-//! they cannot collide with the GNU set.
+//! The option surface follows the established `stress`/`stress-ng` conventions:
+//! `--cpu`/`--io`/`--vm`/`--vm-bytes`/
+//! `--hdd`/`--hdd-bytes`/`--timeout`/`--quiet` keep their GNU `stress` meaning
+//! and value grammar (binary byte suffixes, `s`/`m`/`h` time suffixes). The
+//! TAIRiX-only options — `--cache`, `--all`, `--overcommit`, `--monitor`,
+//! `--background`, `--temp-path` — are additive and spelled so they cannot
+//! collide with the GNU set.
 
 use alloc::string::{String, ToString};
 
@@ -89,7 +89,7 @@ pub enum Command {
     Worker(WorkerSpec),
     /// Render `stress`'s own short help (`-h`/`-?`/`--help`).
     Help,
-    /// Print the tool's name and version (`--version`, per §16.7).
+    /// Print the tool's name and version (`--version`, per).
     Version,
 }
 

@@ -62,7 +62,7 @@
 #![cfg_attr(itest_x86_64, no_main)]
 #![deny(missing_docs)]
 
-// — test affordances must never reach a release binary.
+// Test affordances must never reach a release binary.
 #[cfg(all(feature = "test-hooks", not(debug_assertions)))]
 compile_error!(
     "tairix-test-enter-user-qemu-x86_64: the `test-hooks` Cargo feature is a \

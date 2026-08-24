@@ -1,14 +1,13 @@
 //! Regression guard for the engine's allocation-free data-plane hot
 //! path (`plans/NETWORK.md` N7c-3).
 //!
-//! A network stack that heap-allocates per packet on its receive and
-//! transmit fast paths is a performance defect the charter forbids
-//! (§2.16). The [`tairix_net::stack::Stack`] engine therefore reuses a
-//! caller-owned [`tairix_net::stack::StackOutput`] scratch across every
-//! call: it recycles the previous call's frame and payload byte buffers
-//! into an internal pool before it fills the output again, so once the
-//! pool and the output vectors are warm the steady-state data path
-//! allocates **nothing**.
+//! A network stack that heap-allocates per packet on its receive and transmit
+//! fast paths is a performance defect the charter forbids. The
+//! [`tairix_net::stack::Stack`] engine therefore reuses a caller-owned
+//! [`tairix_net::stack::StackOutput`] scratch across every call: it recycles
+//! the previous call's frame and payload byte buffers into an internal pool
+//! before it fills the output again, so once the pool and the output vectors
+//! are warm the steady-state data path allocates **nothing**.
 //!
 //! This test proves that invariant with a counting global allocator: it
 //! warms two back-to-back stacks (resolving ARP so transmits no longer

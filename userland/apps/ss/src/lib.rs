@@ -13,16 +13,16 @@
 //!
 //! # Where the rows come from
 //!
-//! Live system state is read exclusively through the System Information
-//! API (`AGENTS.md` §16.6): the typed, versioned `sysinfo-v1` `NET_SOCKETS`
-//! query served by `/System/Services/sysinfod.app/Run`, which forwards to
-//! `netstack`'s capability-gated broker read. There is no `/proc/net` and
-//! no second query client — the paging walk is the shared
-//! `tairix_procinfo::for_each_net_socket`. The query names every
-//! principal's sockets and every connection's peer address, so it is
-//! gated on `CAP_SYSINFO_GLOBAL` and audited; a session without that
-//! capability is told so on standard error and the tool exits, rather than
-//! printing an empty table a reader would mistake for "no sockets".
+//! Live system state is read exclusively through the System Information API:
+//! the typed, versioned `sysinfo-v1` `NET_SOCKETS` query served by
+//! `/System/Services/sysinfod.app/Run`, which forwards to `netstack`'s
+//! capability-gated broker read. There is no `/proc/net` and no second query
+//! client — the paging walk is the shared
+//! `tairix_procinfo::for_each_net_socket`. The query names every principal's
+//! sockets and every connection's peer address, so it is gated on
+//! `CAP_SYSINFO_GLOBAL` and audited; a session without that capability is told
+//! so on standard error and the tool exits, rather than printing an empty table
+//! a reader would mistake for "no sockets".
 //!
 //! # What this crate is
 //!
@@ -39,10 +39,10 @@
 //!
 //! # Advisory output
 //!
-//! When the default view hides listening sockets, `ss` notes the omission
-//! on the standard information stream (fd 3) with the
-//! `net.listening_omitted` record (`AGENTS.md` §20.1) — advisory only,
-//! never affecting the table, the ordering, or the exit status.
+//! When the default view hides listening sockets, `ss` notes the omission on
+//! the standard information stream (fd 3) with the `net.listening_omitted`
+//! record — advisory only, never affecting the table, the ordering, or the exit
+//! status.
 //!
 //! The bundle's `Help/` documents are **not** embedded in this crate:
 //! they are authored once in the bundle's on-disk `Help/` tree, planted

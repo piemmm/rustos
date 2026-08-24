@@ -27,10 +27,10 @@ use crate::sysinfo::MountAvailability;
 /// syndrome by `g²ᵏ`), whose exponents `g⁰ … g²⁵⁴` are the 255 distinct
 /// non-zero field elements (`g = {02}`, polynomial `0x11d` — the Linux-md
 /// field). Beyond 255 data members those coefficients would repeat and the
-/// erasures could no longer be solved, so a GF-parity array admits at most
-/// this many data members. This is the single definition of that structural
-/// ceiling: [`RaidLevel::max_members`] and the parity composition engines'
-/// fields all derive from it (`AGENTS.md` §2.2).
+/// erasures could no longer be solved, so a GF-parity array admits at most this
+/// many data members. This is the single definition of that structural ceiling:
+/// [`RaidLevel::max_members`] and the parity composition engines' fields all
+/// derive from it.
 pub const MAX_PARITY_DATA_MEMBERS: u16 = 255;
 
 /// The composition a superblock describes. Encoded as one on-disk byte;
@@ -117,11 +117,11 @@ impl RaidLevel {
     /// spare, so it has nothing to scrub from, rebuild from, or hot-swap.
     ///
     /// This is the *single* definition of the redundancy question, beside
-    /// [`is_striped`](Self::is_striped) and [`data_members`](Self::data_members):
-    /// the composed-device dispatch refuses redundancy-only operations on a
-    /// non-redundant array with it, and the maintenance scheduler asks it
-    /// before driving any self-healing at all, so the two cannot disagree
-    /// about which arrays can heal themselves (`AGENTS.md` §2.2).
+    /// [`is_striped`](Self::is_striped) and
+    /// [`data_members`](Self::data_members): the composed-device dispatch
+    /// refuses redundancy-only operations on a non-redundant array with it, and
+    /// the maintenance scheduler asks it before driving any self-healing at
+    /// all, so the two cannot disagree about which arrays can heal themselves.
     #[must_use]
     pub const fn is_redundant(self) -> bool {
         !matches!(self, Self::Stripe)
@@ -161,7 +161,7 @@ impl RaidLevel {
     /// Every other level is bounded only by the on-disk `u16` member-count
     /// field. The 255 figure is the one [`MAX_PARITY_DATA_MEMBERS`] names, so
     /// the ceiling is defined once and shared with the parity composition
-    /// engines (`AGENTS.md` §2.2).
+    /// engines.
     #[must_use]
     pub const fn max_members(self) -> u16 {
         match self {
@@ -242,11 +242,11 @@ impl RaidLevel {
     /// member's own block count and the array's member count.
     ///
     /// This is `per_member_blocks × `[`data_members`](Self::data_members), the
-    /// one place the array's capacity is sized from its geometry (`AGENTS.md`
-    /// §2.2). Fails closed to [`None`] when the width is below the level's
-    /// structural floor (via [`data_members`](Self::data_members)) or when the
-    /// product overflows `u64`, so a composed device can never wrap to a
-    /// smaller array that would truncate addresses (`AGENTS.md` §5.4).
+    /// one place the array's capacity is sized from its geometry. Fails closed
+    /// to [`None`] when the width is below the level's structural floor (via
+    /// [`data_members`](Self::data_members)) or when the product overflows
+    /// `u64`, so a composed device can never wrap to a smaller array that would
+    /// truncate addresses.
     #[must_use]
     pub const fn logical_block_count(
         self,
@@ -264,13 +264,12 @@ impl RaidLevel {
     ///
     /// This is the *metadata-layer* precondition an assembling process asks
     /// before it composes anything: given the reassembled slot table
-    /// (`ArrayIdentity::fill_slots`), is the surviving set structurally
-    /// capable of reconstructing every logical block, or would the array be
-    /// serving data it cannot vouch for? An array that fails it is left
-    /// unassembled rather than brought online short (`AGENTS.md` §5.4, §26.5)
-    /// — a partial stripe or a twice-punctured RAID5 has holes no redundancy
-    /// can fill, and publishing it would hand a filesystem a device that
-    /// silently cannot read parts of itself.
+    /// (`ArrayIdentity::fill_slots`), is the surviving set structurally capable
+    /// of reconstructing every logical block, or would the array be serving
+    /// data it cannot vouch for? An array that fails it is left unassembled
+    /// rather than brought online short — a partial stripe or a twice-punctured
+    /// RAID5 has holes no redundancy can fill, and publishing it would hand a
+    /// filesystem a device that silently cannot read parts of itself.
     ///
     /// Each level's answer follows from its redundancy, and this is the single
     /// definition of it, beside [`is_redundant`](Self::is_redundant) and
@@ -395,10 +394,9 @@ impl ArrayHealth {
         !matches!(self, Self::Failed)
     }
 
-    /// The volume-availability this array health maps to, so a serving
-    /// process can surface array health through the same `sysinfo` mount
-    /// surface a leaf volume uses (`AGENTS.md` §2.2; `plans/FIX-IO.md`
-    /// IO2/IO5) rather than a second vocabulary.
+    /// The volume-availability this array health maps to, so a serving process
+    /// can surface array health through the same `sysinfo` mount surface a leaf
+    /// volume uses (`plans/FIX-IO.md` IO2/IO5) rather than a second vocabulary.
     #[must_use]
     pub const fn to_mount_availability(self) -> MountAvailability {
         match self {

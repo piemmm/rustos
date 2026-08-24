@@ -89,7 +89,7 @@ fn a_striped_superblock_round_trips_with_its_stripe_unit() {
 fn decode_rejects_a_level_stripe_unit_mismatch() {
     // A striped level with a zero stripe unit, and a mirror with a non-zero
     // one, each contradict themselves: both fail closed rather than being
-    // trusted (`AGENTS.md` §5.4).
+    // trusted.
     let mut striped_zero = stripe_sb(UUID_A, 2, 0, 1, 0);
     striped_zero.chunk_blocks = 0;
     assert_eq!(

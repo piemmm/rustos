@@ -16,7 +16,7 @@
 //! The compiled-in atlas covers every face of the console family — Latin,
 //! Greek, Cyrillic, box drawing, arrows, punctuation and currency from
 //! Inconsolata EX, the Japanese, Korean and Hebrew companions, and U+FFFD for
-//! anything outside them (§2.4 of `plans/FONT-SERVICE.md`). It is the
+//! anything outside them (`plans/FONT-SERVICE.md` §2.4). It is the
 //! boot/headless text console's glyph source (`lib/fbcon`, which brings its
 //! own allocator-free blitter via `default-features = false`), and it supplies
 //! the render path's monospace **geometry constants**. The console runs in the

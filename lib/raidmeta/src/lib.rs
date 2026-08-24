@@ -4,28 +4,27 @@
 //! reassembles an array from a set of discovered members (`plans/FIX-IO.md`
 //! IO6).
 //!
-//! A RAID array is not a hand-maintained list of devices: the assembling
-//! serve process discovers block devices (`AGENTS.md` §18) and reads a
-//! superblock from each. The superblock is what lets a member identify the
-//! array it belongs to, its slot in that array, the array geometry, and — via
-//! a monotonic **generation** counter — how current its copy is relative to
-//! its siblings. From those the assembler reconstructs the array with no
-//! external configuration, and knows which members hold a current copy and
-//! which are behind and must be rebuilt (`plans/FIX-IO.md` IO3 recovery /
-//! IO6 resync).
+//! A RAID array is not a hand-maintained list of devices: the assembling serve
+//! process discovers block devices and reads a superblock from each. The
+//! superblock is what lets a member identify the array it belongs to, its slot
+//! in that array, the array geometry, and — via a monotonic **generation**
+//! counter — how current its copy is relative to its siblings. From those the
+//! assembler reconstructs the array with no external configuration, and knows
+//! which members hold a current copy and which are behind and must be rebuilt
+//! (`plans/FIX-IO.md` IO3 recovery / IO6 resync).
 //!
 //! # On-disk shape
 //!
 //! [`ArraySuperblock`] is a fixed-size, little-endian record ([`WIRE_LEN`]
 //! bytes) protected by a trailing CRC-32C (`tairix_crc32c`) computed over
 //! everything before it. Every wire field is bounds- and shape-checked on
-//! decode and the record **fails closed** (`AGENTS.md` §5.4): a bad magic,
-//! an unknown version, a checksum mismatch, an unknown RAID level, a
-//! zero member count, a slot outside the array, or a degenerate geometry is
-//! a typed [`SuperblockError`], never a silently-trusted record. The CRC is a
-//! media/transport integrity check, not a security control: an array's
-//! authenticity rests on the signed driver bundle and the members' own
-//! capability-gated block endpoints, not on this value.
+//! decode and the record **fails closed**: a bad magic, an unknown version, a
+//! checksum mismatch, an unknown RAID level, a zero member count, a slot
+//! outside the array, or a degenerate geometry is a typed [`SuperblockError`],
+//! never a silently-trusted record. The CRC is a media/transport integrity
+//! check, not a security control: an array's authenticity rests on the signed
+//! driver bundle and the members' own capability-gated block endpoints, not on
+//! this value.
 //!
 //! The record is stored at a fixed offset within a reserved metadata block on
 //! each member; only the leading [`WIRE_LEN`] bytes are the superblock, so a
@@ -38,8 +37,8 @@
 //! [`ArrayUuid`]s present among them — the "which arrays are on these disks"
 //! step — so the assembler resolves each array in turn.
 //!
-//! [`ArrayIdentity::resolve`] establishes the authoritative array identity
-//! from a set of [`Candidate`] members: the member reporting the **highest
+//! [`ArrayIdentity::resolve`] establishes the authoritative array identity from
+//! a set of [`Candidate`] members: the member reporting the **highest
 //! generation** is freshest, so it fixes the array's level, member count,
 //! geometry, and current generation. [`ArrayIdentity::fill_slots`] then places
 //! each member into its slot, marking a member whose generation matches the
@@ -48,26 +47,24 @@
 //! the array cannot safely admit (a foreign array, a member disagreeing on the
 //! array shape, an out-of-range slot, or a duplicate claim on a slot). Both
 //! read the same [`ArrayIdentity::verdict_of`] decision, so the slot table and
-//! the per-member verdict can never disagree (`AGENTS.md` §2.2). The whole
-//! layer is pure and allocation-free — it borrows the caller's member slice
-//! and fills a caller-owned slot buffer, so it imposes no fixed member ceiling
-//! (`AGENTS.md` §24.1); the growable member tier lives in the assembling serve
-//! process.
+//! the per-member verdict can never disagree. The whole layer is pure and
+//! allocation-free — it borrows the caller's member slice and fills a
+//! caller-owned slot buffer, so it imposes no fixed member ceiling; the
+//! growable member tier lives in the assembling serve process.
 //!
 //! # Metadata updates (membership changes)
 //!
-//! Reassembly reads the generation counter; the write side *advances* it.
-//! When the array's membership changes — a member drops out on a fault, or a
-//! rebuilt member rejoins — the serve process calls
-//! [`ArrayIdentity::bump_generation`] and re-stamps every **current** member's
-//! superblock with [`ArrayIdentity::member_superblock`] at the new generation.
-//! A member that was absent for that bump keeps its lower generation, so on
-//! return it resolves as a stale rebuild target rather than being trusted as
-//! current: this is what closes the stale-read window (`AGENTS.md` §5.4,
-//! §26.5 — a disk that missed writes is a disk that can lie). Promoting a
-//! rebuilt member back to current is the same `member_superblock` write, so
-//! the read and write halves share one notion of "current" and cannot diverge
-//! (`AGENTS.md` §2.2).
+//! Reassembly reads the generation counter; the write side *advances* it. When
+//! the array's membership changes — a member drops out on a fault, or a rebuilt
+//! member rejoins — the serve process calls [`ArrayIdentity::bump_generation`]
+//! and re-stamps every **current** member's superblock with
+//! [`ArrayIdentity::member_superblock`] at the new generation. A member that
+//! was absent for that bump keeps its lower generation, so on return it
+//! resolves as a stale rebuild target rather than being trusted as current:
+//! this is what closes the stale-read window (a disk that missed writes is a
+//! disk that can lie). Promoting a rebuilt member back to current is the same
+//! `member_superblock` write, so the read and write halves share one notion of
+//! "current" and cannot diverge.
 //!
 //! # Maintenance progress
 //!
@@ -142,8 +139,8 @@ pub enum SuperblockError {
 pub const MAGIC: [u8; 8] = *b"TXRAIDSB";
 
 /// The only superblock format version this build reads or writes. The on-disk
-/// format is unfrozen pre-release (`AGENTS.md` §2.13): it is changed in place,
-/// never versioned alongside an old one.
+/// format is unfrozen pre-release: it is changed in place, never versioned
+/// alongside an old one.
 pub const FORMAT_VERSION: u16 = 1;
 
 // Field offsets within the fixed little-endian record. Laid out with no
@@ -188,16 +185,15 @@ pub struct ArraySuperblock {
     /// missed a membership change (it was faulted while the survivors advanced
     /// the array) carries a lower generation and is a rebuild target.
     pub generation: u64,
-    /// Wall-clock instant this superblock was last written (`AGENTS.md` §21 —
-    /// stored as a full [`Time64`], never a 32-bit second).
+    /// Wall-clock instant this superblock was last written (stored as a full
+    /// [`Time64`], never a 32-bit second).
     pub updated_at: Time64,
     /// The stripe unit in logical blocks for a striped level: the number of
     /// consecutive logical blocks placed on one member before the stripe moves
     /// to the next. It is `0` for a level that stores a full copy per member
     /// (the mirror) and non-zero for a striped level (RAID0); [`decode`] fails
     /// closed if the level and this field disagree. It is array policy, not a
-    /// fixed constant (`AGENTS.md` §24.1), so different arrays can be tuned to
-    /// their workload.
+    /// fixed constant, so different arrays can be tuned to their workload.
     ///
     /// [`decode`]: ArraySuperblock::decode
     pub chunk_blocks: u32,
@@ -280,7 +276,7 @@ impl ArraySuperblock {
         // structurally impossible — a RAID10 needs an *even* count to pair its
         // copies. `data_members` is the single oracle of composability, so the
         // on-disk boundary rejects exactly what an engine's `assemble` would
-        // (fail closed on malformed metadata; no drift, `AGENTS.md` §2.2).
+        // (fail closed on malformed metadata; no drift).
         if raid_level.data_members(u64::from(member_count)).is_none() {
             return Err(SuperblockError::MemberCountOutOfRange);
         }
@@ -488,7 +484,7 @@ impl ArrayIdentity {
     ///
     /// This is the single decision the slot table
     /// ([`fill_slots`](Self::fill_slots)) is built from, so a per-candidate
-    /// verdict and the slot table can never disagree (`AGENTS.md` §2.2).
+    /// verdict and the slot table can never disagree.
     ///
     /// # Panics / bounds
     ///
@@ -583,9 +579,9 @@ impl ArrayIdentity {
     /// ([`verdict_of`](Self::verdict_of) reports `in_sync == false`) rather
     /// than being trusted as current. This is the write-side counterpart of
     /// [`resolve`](Self::resolve) that closes the stale-read window: a disk
-    /// that missed writes while it was gone can never come back masquerading
-    /// as up to date (the charter's fail-closed rule; §26.5 "a disk that
-    /// missed writes is a disk that can lie").
+    /// that missed writes while it was gone can never come back masquerading as
+    /// up to date (the charter's fail-closed rule; "a disk that missed writes
+    /// is a disk that can lie").
     ///
     /// The bump saturates at [`u64::MAX`]: an array that somehow reached
     /// `2^64 - 1` membership changes stops advancing rather than wrapping to a
@@ -611,8 +607,7 @@ impl ArrayIdentity {
     /// makes a formerly-stale copy resolve as in sync again). It is never
     /// written to a member that is still behind: such a member must keep its
     /// lower generation until its rebuild finishes, so that it stays a
-    /// [`stale`](SlotDisposition) read-excluded rebuild target
-    /// (`AGENTS.md` §5.4, §26.5).
+    /// [`stale`](SlotDisposition) read-excluded rebuild target.
     ///
     /// # Errors / bounds
     ///
@@ -649,7 +644,7 @@ impl ArrayIdentity {
 /// Built by [`distinct_arrays`]. See that function for the contract; this type
 /// is its return value and holds only a borrow of the candidate slice and a
 /// cursor, so it allocates nothing and imposes no ceiling on the number of
-/// arrays it can enumerate (`AGENTS.md` §24.1).
+/// arrays it can enumerate.
 #[derive(Clone, Debug)]
 pub struct DistinctArrays<'a> {
     candidates: &'a [Candidate],
@@ -684,18 +679,18 @@ impl Iterator for DistinctArrays<'_> {
 /// assembling serve process can discover *which* arrays exist before resolving
 /// each one with [`ArrayIdentity::resolve`].
 ///
-/// Device discovery (`AGENTS.md` §18) hands the serve process a heterogeneous
-/// set of block devices whose superblocks decoded: some may be members of one
-/// array, some of another, and any two need not belong to the same array. This
-/// is the primitive that partitions that set by array identity — the "which
-/// arrays are on these disks" step that precedes assembly, so an array is
-/// *discovered*, never configured (`AGENTS.md` §18, §16.5).
+/// Device discovery hands the serve process a heterogeneous set of block
+/// devices whose superblocks decoded: some may be members of one array, some of
+/// another, and any two need not belong to the same array. This is the
+/// primitive that partitions that set by array identity — the "which arrays are
+/// on these disks" step that precedes assembly, so an array is *discovered*,
+/// never configured.
 ///
 /// The returned [`DistinctArrays`] yields each array's [`ArrayUuid`] exactly
 /// once, in the order it first appears in `candidates`, so enumeration is
 /// deterministic. It borrows `candidates` and allocates nothing, imposing no
-/// ceiling on the number of arrays (`AGENTS.md` §24.1); the caller drives it to
-/// build one [`ArrayIdentity`] per array:
+/// ceiling on the number of arrays; the caller drives it to build one
+/// [`ArrayIdentity`] per array:
 ///
 /// ```ignore
 /// for uuid in distinct_arrays(&candidates) {

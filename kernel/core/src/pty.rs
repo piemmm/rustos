@@ -17,7 +17,7 @@
 //!                                     ◄─[echo]──────────────  (echo of input)
 //! ```
 //!
-//! # The shared line discipline (`AGENTS.md` §2.2)
+//! # The shared line discipline
 //!
 //! The cooking is **not** re-implemented here: input local echo, the `ONLCR`
 //! output translation, and the cooked-mode `^C`/`^Z` classification are the
@@ -38,7 +38,7 @@
 //! # Capacity
 //!
 //! Each ring is bounded by [`crate::pipe::PIPE_CAPACITY`], the same deliberate
-//! flow-control bound a pipe uses (`plans/PTY.md`, `AGENTS.md` §24.4): bounding
+//! flow-control bound a pipe uses (`plans/PTY.md`): bounding
 //! the ring is what creates back-pressure, not a scaling capacity. Echo onto a
 //! full output ring is dropped best-effort (echo is cosmetic), never blocking
 //! the read the user asked for.

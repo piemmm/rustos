@@ -5,11 +5,10 @@
 //! `sysinfo-v1` [`SysinfoQueryId::NET_RESOLVER_SERVERS`] query, served by
 //! `sysinfod` (which forwards to `netstack`'s broker read). The set is the
 //! aggregated, deduplicated DHCP-learned ∪ statically-configured DNS servers
-//! the stack maintains (`plans/DNS.md` DNS2), the one source both this read
-//! and a userland resolver client share — so the two can never disagree
-//! (`AGENTS.md` §2.2). The paging loop is the generic
-//! [`walk_pages`](crate::list) the socket and mount walks use, so only the
-//! per-record decode lives here.
+//! the stack maintains (`plans/DNS.md` DNS2), the one source both this read and
+//! a userland resolver client share — so the two can never disagree. The paging
+//! loop is the generic [`walk_pages`](crate::list) the socket and mount walks
+//! use, so only the per-record decode lives here.
 
 use tairix_abi::net_ipc::{NetResolverServer, MAX_RESOLVER_SERVERS};
 use tairix_abi::sysinfo::{NetInterfaceListRequest, SysinfoQueryId};

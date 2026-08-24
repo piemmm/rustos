@@ -2,7 +2,7 @@
 //!
 //! This module is the one definition of the stateful `DHCPv6` client TAIRiX
 //! speaks (`plans/DHCP.md` D4): the RFC 8415 §8 message + §21 option wire
-//! codec plus the §18.2 client state machine. It is a *sibling* of the
+//! codec plus the RFC 8415 §18.2 client state machine. It is a *sibling* of the
 //! `DHCPv4` engine ([`crate::dhcp`]), not a `cfg`-fork of it: `DHCPv6` is a
 //! distinct protocol (UDP 546↔547, the `ff02::1:2` server multicast,
 //! DUID-keyed leases, `IA_NA/IAADDR` bindings, a four-message
@@ -542,8 +542,8 @@ pub const MAX_MESSAGE_LEN: usize = MESSAGE_HEADER_LEN
 
 /// A fully-specified client→server `DHCPv6` message, ready for
 /// [`write_message`]. The state machine produces one per transmission; the
-/// encoder is the single definition of the wire form (§2.2) that Solicit /
-/// Request / Renew / Rebind / Release / Decline all share.
+/// encoder is the single definition of the wire form that Solicit / Request /
+/// Renew / Rebind / Release / Decline all share.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MessageSpec {
     /// The message type.
@@ -792,7 +792,8 @@ pub enum Action {
 /// Both return the [`Action`]s the interface layer must perform. The engine
 /// owns no I/O and never blocks; the caller supplies monotonic `now` values
 /// and, through `rng`, the CSPRNG randomness RFC 8415 requires for the
-/// transaction id (§16.1) and the §15 randomised retransmission timeout.
+/// transaction id (§16.1) and the RFC 8415 §15 randomised retransmission
+/// timeout.
 #[derive(Clone, Debug)]
 pub struct Dhcp6Client {
     client_duid: Duid,
@@ -927,9 +928,9 @@ impl Dhcp6Client {
         Self::apply_jitter(irt, rng, signed)
     }
 
-    /// The next RT after a retransmission (RFC 8415 §15): `2*RTprev +
-    /// RAND*2*RTprev`, capped at `MRT + RAND*MRT` once `2*RTprev` exceeds
-    /// MRT (`mrt_secs == 0` means no cap).
+    /// The next RT after a retransmission (RFC 8415 §15):
+    /// `2*RTprev + RAND*2*RTprev`, capped at `MRT + RAND*MRT` once `2*RTprev`
+    /// exceeds MRT (`mrt_secs == 0` means no cap).
     fn grow_rt(&self, params: &RetransmitParams, rng: &mut dyn FnMut() -> u32) -> u128 {
         let doubled = self.rt.saturating_mul(2);
         let mrt = u128::from(params.mrt_secs) * ONE_SEC_NANOS;

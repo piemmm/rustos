@@ -1,15 +1,15 @@
 //! Freestanding (`aarch64-unknown-none`) half of the `plans/PI.md` P11
 //! Chunk B-2 root-mount->login integration test.
 //!
-//! The device-agnostic bring-up (boot harness, DTB MMIO walk, GICv2 + EL1
-//! IRQ wiring, static DMA pool, signed-`.rxe` load) *and* the unlock tail
-//! itself both live in the shared `tairix-test-virtio-qemu-support` crate:
-//! the tail ([`root_unlock_login`]) is generic over the transport, so the
-//! aarch64 virtio-MMIO and x86_64 virtio-PCI verticals drive one
-//! definition of the unlock policy proof rather than two sibling copies
-//! (`AGENTS.md` §2.2). This module supplies only what is unique to this
-//! vertical: the bare virtio-blk device id, the spawner registering the
-//! loaded image through the virtio-blk `register`, and the boot harness.
+//! The device-agnostic bring-up (boot harness, DTB MMIO walk, GICv2 + EL1 IRQ
+//! wiring, static DMA pool, signed-`.rxe` load) *and* the unlock tail itself
+//! both live in the shared `tairix-test-virtio-qemu-support` crate: the tail
+//! ([`root_unlock_login`]) is generic over the transport, so the aarch64
+//! virtio-MMIO and x86_64 virtio-PCI verticals drive one definition of the
+//! unlock policy proof rather than two sibling copies. This module supplies
+//! only what is unique to this vertical: the bare virtio-blk device id, the
+//! spawner registering the loaded image through the virtio-blk `register`, and
+//! the boot harness.
 
 use tairix_drv_storage_virtio_blk::register as virtio_blk_register;
 use tairix_test_virtio_qemu_support::{

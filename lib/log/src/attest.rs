@@ -17,11 +17,11 @@
 //!
 //! * **The log-attestation key** ([`LogAttestationKey`]). A per-installation
 //!   secret used to *seal* closed audit/security segments (SYSLOG §7.2) and to
-//!   *sign* the periodic anchors (§7.3) with HMAC-SHA256. The key is a secret:
-//!   it is scrubbed from memory on drop, never implements
+//!   *sign* the periodic anchors (SYSLOG §7.3) with HMAC-SHA256. The key is a
+//!   secret: it is scrubbed from memory on drop, never implements
 //!   [`ToFieldValue`](crate::ToFieldValue) (so it cannot be logged), and its
-//!   raw bytes never leave the type — callers
-//!   seal and verify *through* it, so the secret stays encapsulated.
+//!   raw bytes never leave the type — callers seal and verify *through* it, so
+//!   the secret stays encapsulated.
 //!
 //! All sealing uses the audited HMAC-SHA256 in `lib/crypto`; this module never
 //! names an upstream crypto crate and never hand-rolls a primitive.

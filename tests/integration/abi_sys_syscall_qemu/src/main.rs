@@ -60,7 +60,7 @@
 #![cfg_attr(itest_x86_64, no_main)]
 #![deny(missing_docs)]
 
-// — test affordances must never reach a release binary.
+// Test affordances must never reach a release binary.
 // `test-hooks` is on by default for this crate; a release build that
 // re-enables it is a configuration error, so we fail the build outright,
 // exactly as `tairix-test-syscall-dispatch-qemu` does.

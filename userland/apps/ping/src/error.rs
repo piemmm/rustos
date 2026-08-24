@@ -5,10 +5,10 @@ use tairix_abi::Errno;
 
 /// Why a `ping` invocation did not complete.
 ///
-/// A refused socket open (want of `CAP_NET`/`CAP_NET_RAW`) or an
-/// unreachable network defeats the tool's whole purpose, so it is fatal and
-/// reported with an actionable reason (§2.24 fail loud). The wire-level
-/// causes lean on the frozen [`Errno`] so no parallel error set is invented.
+/// A refused socket open (want of `CAP_NET`/`CAP_NET_RAW`) or an unreachable
+/// network defeats the tool's whole purpose, so it is fatal and reported with
+/// an actionable reason (fail loud). The wire-level causes lean on the frozen
+/// [`Errno`] so no parallel error set is invented.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PingError {
     /// Opening the ICMP echo socket was refused for want of the required

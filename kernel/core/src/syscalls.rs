@@ -5384,13 +5384,14 @@ where
         if program.is_none() && bundle.is_none() {
             return Err(Errno::NotFound);
         }
-        // The bundle read + signature/hash verification is **not** done
-        // here: it moves onto the child's own first slice (§2.6.5), so the
-        // spawning caller (a desktop, a shell) is never blocked on disk I/O
-        // + cryptography. The handler only resolves the *shape* synchronously;
-        // the heavy load is the child's `LoadPlan` below. An embedded
-        // boot-floor program's bytes are already `'static` and verified at
-        // build time, so it is a prebuilt plan with no deferred read.
+        // The bundle read + signature/hash verification is **not** done here:
+        // it moves onto the child's own first slice (`plans/FIX-DESKTOP.md`
+        // §2.6.5), so the spawning caller (a desktop, a shell) is never blocked
+        // on disk I/O + cryptography. The handler only resolves the *shape*
+        // synchronously; the heavy load is the child's `LoadPlan` below. An
+        // embedded boot-floor program's bytes are already `'static` and
+        // verified at build time, so it is a prebuilt plan with no deferred
+        // read.
 
         // The child's effective startup strings, captured as **owned** bytes
         // because the child materialises long after this handler returns and
@@ -5516,12 +5517,12 @@ where
             return Err(Errno::NotFound);
         };
 
-        // Admit the child in its loading state and return its PID at once —
-        // the caller keeps running while the child performs the disk read,
-        // verification, and image build on its own first slice. A load
-        // failure surfaces through the child's reserved-status exit, not this
-        // return value (§2.3). Only a synchronous admission failure (launch
-        // services unwired, or scheduler exhaustion) maps to an errno.
+        // Admit the child in its loading state and return its PID at once — the
+        // caller keeps running while the child performs the disk read,
+        // verification, and image build on its own first slice. A load failure
+        // surfaces through the child's reserved-status exit, not this return
+        // value. Only a synchronous admission failure (launch services unwired,
+        // or scheduler exhaustion) maps to an errno.
         ctx.admit_loading(plan, args, env).map_err(admit_errno)
     }
 
@@ -6234,11 +6235,11 @@ where
         // Resolve the device-visible base the driver programs into its
         // hardware. For a coherent (untranslated) constraint it is the carved
         // CPU-physical base; for a translating inbound viewport
-        // (`dma_translated`, e.g. the Pi 4's `IB MEM 0x0..0x1ffffffff ->
-        // 0x4_0000_0000`) it is that base re-based onto the far side of the
-        // viewport — checked, never wrapped. The
-        // carve already lies below `addr_limit`, so this only re-bases it; a
-        // base outside the viewport's CPU window fails closed.
+        // (`dma_translated`, e.g. the Pi 4's
+        // `IB MEM 0x0..0x1ffffffff -> 0x4_0000_0000`) it is that base re-based
+        // onto the far side of the viewport — checked, never wrapped. The carve
+        // already lies below `addr_limit`, so this only re-bases it; a base
+        // outside the viewport's CPU window fails closed.
         let device_addr = translate_device_addr(&constraint, carve.device_addr)?;
         // The carve grew the caller's live space; publish the buffer's own
         // pages into the registry snapshot before the copy below, so the new
@@ -11341,11 +11342,10 @@ where
     /// Build a new dispatch hook bound to the supplied kernel state.
     ///
     /// All borrows must outlive the slot the hook is published into.
-    /// `KernelState` (constructed by [`crate::kernel_main`]) holds the
-    /// targets for the lifetime of the running kernel; the hook is
-    /// `Box::leak`'d alongside it so the published `'static dyn
-    /// DispatchHook` is sound (no global mutable
-    /// static; the leak is a one-shot, immutable publish).
+    /// `KernelState` (constructed by [`crate::kernel_main`]) holds the targets
+    /// for the lifetime of the running kernel; the hook is `Box::leak`'d
+    /// alongside it so the published `'static dyn DispatchHook` is sound (no
+    /// global mutable static; the leak is a one-shot, immutable publish).
     #[must_use]
     // Mirrors `KernelSyscallHandlers::new`: the same distinct kernel-
     // state borrows threaded explicitly, not a

@@ -1,12 +1,10 @@
-//! The run's progress and summary reporting (`plans/STRESSTEST.md` §7.1,
-//! `AGENTS.md` §20.1).
+//! The run's progress and summary reporting (`plans/STRESSTEST.md` §7.1).
 //!
-//! Line shapes track GNU `stress` closely (`AGENTS.md` §16.7): the
-//! dispatch line names the hog counts, the completion line reports the
-//! elapsed run and its verdict. `--quiet` suppresses these stdout lines;
-//! stderr diagnostics are never silenced. The fd-3 `summary` record is
-//! additive advisory metadata and never changes stdout, the exit status,
-//! or pipeline semantics.
+//! Line shapes track GNU `stress` closely: the dispatch line names the hog
+//! counts, the completion line reports the elapsed run and its verdict.
+//! `--quiet` suppresses these stdout lines; stderr diagnostics are never
+//! silenced. The fd-3 `summary` record is additive advisory metadata and never
+//! changes stdout, the exit status, or pipeline semantics.
 
 use alloc::format;
 use alloc::string::String;

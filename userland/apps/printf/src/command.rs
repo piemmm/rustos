@@ -27,7 +27,7 @@ pub enum Command {
 /// GNU `printf` scans no options beyond the first argument: a first
 /// argument of `--` is skipped, and everything else — including a token
 /// starting with `-` — is the FORMAT, with the remaining arguments its
-/// operands. The one TAIRiX addition is the §4 short-help convention: a
+/// operands. The one TAIRiX addition is the short-help convention: a
 /// *first* argument of `-h`/`-?`/`--help` renders the tool's own short
 /// help (GNU `printf` would format it; spell such a format
 /// `printf -- -h…`).

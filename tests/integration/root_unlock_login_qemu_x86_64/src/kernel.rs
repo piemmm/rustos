@@ -5,11 +5,11 @@
 //! routing, per-device DMA pool, signed-`.rxe` load) *and* the unlock tail
 //! ([`root_unlock_login`]) both live in the shared
 //! `tairix-test-virtio-qemu-support` crate — the tail is generic over the
-//! transport, so this x86_64 vertical and the aarch64 MMIO vertical drive
-//! one definition of the unlock-policy proof (`AGENTS.md` §2.2). This
-//! module supplies only what is unique to this vertical: the modern
-//! virtio-blk PCI device id, the spawner registering the loaded image
-//! through the virtio-blk `register`, and the boot harness.
+//! transport, so this x86_64 vertical and the aarch64 MMIO vertical drive one
+//! definition of the unlock-policy proof. This module supplies only what is
+//! unique to this vertical: the modern virtio-blk PCI device id, the spawner
+//! registering the loaded image through the virtio-blk `register`, and the boot
+//! harness.
 
 use tairix_drv_storage_virtio_blk::register as virtio_blk_register;
 use tairix_test_virtio_qemu_support::{

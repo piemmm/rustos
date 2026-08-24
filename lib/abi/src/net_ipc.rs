@@ -17,9 +17,8 @@
 //!   answers whole state only to the sysinfo broker, and all
 //!   per-client narrowing lives in that audited broker.
 //!
-//! Every decode fails closed: an unknown magic, version, operation,
-//! family, name spelling, or a dirty reserved tail refuses rather
-//! than guessing (`AGENTS.md` §5.4).
+//! Every decode fails closed: an unknown magic, version, operation, family,
+//! name spelling, or a dirty reserved tail refuses rather than guessing.
 
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
 use crate::reply::{PAGE_HEADER_LEN, STATUS_REPLY_LEN};

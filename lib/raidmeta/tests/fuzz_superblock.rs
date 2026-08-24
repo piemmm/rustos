@@ -2,18 +2,18 @@
 //! decoder.
 //!
 //! A member's superblock is read from a disk that may be failing, foreign, or
-//! hostile (`AGENTS.md` §26.5, §19.5), so [`ArraySuperblock::decode`] takes an
-//! arbitrary byte slice and must refuse a malformed one cleanly — never a
-//! panic (`AGENTS.md` §2.9). This harness drives it two ways: random short
-//! inputs, and an exhaustive bit-flip sweep of a well-formed record. Every
-//! accepted record must survive an encode/decode round-trip unchanged, so a
-//! forged input can never decode to something the encoder disowns.
+//! hostile, so [`ArraySuperblock::decode`] takes an arbitrary byte slice and
+//! must refuse a malformed one cleanly — never a panic. This harness drives it
+//! two ways: random short inputs, and an exhaustive bit-flip sweep of a
+//! well-formed record. Every accepted record must survive an encode/decode
+//! round-trip unchanged, so a forged input can never decode to something the
+//! encoder disowns.
 //!
 //! Seed selection, the start-of-test seed log, and the smoke/soak loop are the
-//! shared `tairix_fuzzseed` seam (one definition, `AGENTS.md` §2.2): a plain
-//! `cargo test` runs the fixed [`SMOKE_ITERATIONS`] sweep once from a fresh,
-//! logged seed; `cargo xtask fuzz` sets the budget env var and the harness
-//! keeps drawing from the same continuing stream until the deadline elapses.
+//! shared `tairix_fuzzseed` seam (one definition): a plain `cargo test` runs
+//! the fixed [`SMOKE_ITERATIONS`] sweep once from a fresh, logged seed;
+//! `cargo xtask fuzz` sets the budget env var and the harness keeps drawing
+//! from the same continuing stream until the deadline elapses.
 
 use tairix_abi::driver::block::BlockGeometry;
 use tairix_abi::raid::RaidLevel;

@@ -4,10 +4,10 @@
 //! logical [`Block`] device whose usable capacity is that of `member_count - 1`
 //! members. It is the redundant-with-capacity sibling of the [`MirrorArray`]
 //! (full redundancy, one member's capacity) and the [`StripeArray`] (no
-//! redundancy, all members' capacity) over the same block seam (`AGENTS.md`
-//! §2.2 parallel implementations): it composes child `Block` endpoints and
-//! consumes the shared block-health vocabulary ([`tairix_abi::blkio`]) rather
-//! than re-inventing it.
+//! redundancy, all members' capacity) over the same block seam (parallel
+//! implementations): it composes child `Block` endpoints and consumes the
+//! shared block-health vocabulary ([`tairix_abi::blkio`]) rather than
+//! re-inventing it.
 //!
 //! [`MirrorArray`]: crate::MirrorArray
 //! [`StripeArray`]: crate::StripeArray
@@ -41,16 +41,15 @@
 //! every surviving member (data and parity), and a write recomputes the parity
 //! so the missing data stays reconstructable. A *second* lost member makes the
 //! stripe unrecoverable, so the array is [`ArrayHealth::Failed`] and every I/O
-//! fails closed (`AGENTS.md` §5.4, §26.5) — it never fabricates data it cannot
-//! reconstruct.
+//! fails closed — it never fabricates data it cannot reconstruct.
 //!
 //! # Allocation-free
 //!
 //! Like the mirror and stripe, [`ParityArray`] borrows a caller-owned member
-//! slice (no fixed member ceiling, `AGENTS.md` §24.1). Parity computation and
-//! reconstruction need a working buffer, so the array also borrows a
-//! caller-owned **scratch** buffer (at least two logical blocks); the growable
-//! tier and the scratch sizing live in the assembling serve process.
+//! slice (no fixed member ceiling). Parity computation and reconstruction need
+//! a working buffer, so the array also borrows a caller-owned **scratch**
+//! buffer (at least two logical blocks); the growable tier and the scratch
+//! sizing live in the assembling serve process.
 
 use crate::mirror::{member_faulting, MemberRole};
 use crate::superblock::ArrayProgress;
@@ -202,14 +201,13 @@ pub enum ParityError {
 /// See the [crate documentation](crate) for the left-symmetric layout and the
 /// fail-closed one-fault redundancy model. The array borrows a caller-owned
 /// member slice and a caller-owned scratch buffer, so it holds no allocation
-/// and imposes no fixed member ceiling (`AGENTS.md` §24.1).
+/// and imposes no fixed member ceiling.
 pub struct ParityArray<'a, B: Block> {
     members: &'a mut [ParityMember<B>],
-    /// A caller-owned working buffer for parity computation and
-    /// reconstruction, at least two logical blocks. Reconstruction and
-    /// read-modify-write parity need scratch the `Block` read/write methods
-    /// do not carry, so the array borrows it (no allocation, no fixed
-    /// ceiling; the caller sizes it, `AGENTS.md` §24.1).
+    /// A caller-owned working buffer for parity computation and reconstruction,
+    /// at least two logical blocks. Reconstruction and read-modify-write parity
+    /// need scratch the `Block` read/write methods do not carry, so the array
+    /// borrows it (no allocation, no fixed ceiling; the caller sizes it).
     scratch: &'a mut [u8],
     /// The logical geometry the array presents (block size shared with the
     /// members; block count is `(member_count - 1) * per_member_blocks`).
@@ -1019,8 +1017,8 @@ impl<B: Block> ParityArray<'_, B> {
     ///
     /// `blocks` bounds the work per call (a larger value rebuilds faster, a
     /// smaller one yields to other work sooner — bounded and interruptible,
-    /// never a busy-spin, `AGENTS.md` §26.6). A member whose cursor reaches the
-    /// end of its blocks becomes [`MemberState::InSync`].
+    /// never a busy-spin). A member whose cursor reaches the end of its blocks
+    /// becomes [`MemberState::InSync`].
     ///
     /// # Errors
     ///
@@ -1089,7 +1087,7 @@ impl<B: Block> ParityArray<'_, B> {
     /// latent media error on any member by reconstructing that block from the
     /// others and writing it back (forcing sector reallocation), so a bad
     /// sector is healed while the array still has the redundancy to reconstruct
-    /// it (`AGENTS.md` §26.5).
+    /// it.
     ///
     /// A parity scrub deliberately does **not** arbitrate a parity *content*
     /// disagreement between members that all read cleanly: a bare parity array
@@ -1110,12 +1108,12 @@ impl<B: Block> ParityArray<'_, B> {
     /// [`ArrayProgress::IDLE`] if neither is running.
     ///
     /// This is what the serving process checkpoints to the members' on-disk
-    /// maintenance record, so a pass measured in hours survives a restart
-    /// (`AGENTS.md` §26.6). Several members can rebuild at once with different
-    /// cursors, and one record can only carry a single position, so the
-    /// **least advanced** is reported: resuming from it re-copies blocks a
-    /// further-ahead member already had (harmless — a rebuild write is
-    /// idempotent) and can never skip a block that was still outstanding.
+    /// maintenance record, so a pass measured in hours survives a restart.
+    /// Several members can rebuild at once with different cursors, and one
+    /// record can only carry a single position, so the **least advanced** is
+    /// reported: resuming from it re-copies blocks a further-ahead member
+    /// already had (harmless — a rebuild write is idempotent) and can never
+    /// skip a block that was still outstanding.
     #[must_use]
     pub fn progress(&self) -> ArrayProgress {
         ArrayProgress {
@@ -1168,10 +1166,9 @@ impl<B: Block> ParityArray<'_, B> {
     /// pass, advancing the scrub cursor. A no-op once the pass is complete.
     ///
     /// `blocks` bounds the work per call (bounded, interruptible, never a
-    /// busy-spin, `AGENTS.md` §26.6). For each stripe row, every in-sync
-    /// member's block is read; a whole-device fault drops that member, and a
-    /// per-block media error is repaired by writing back the block
-    /// reconstructed from the others.
+    /// busy-spin). For each stripe row, every in-sync member's block is read; a
+    /// whole-device fault drops that member, and a per-block media error is
+    /// repaired by writing back the block reconstructed from the others.
     ///
     /// # Errors
     ///
@@ -1303,7 +1300,7 @@ impl<B: Block> ParityArray<'_, B> {
 
     /// Install a spare into a currently-[`MemberState::Absent`] slot and begin
     /// rebuilding it from the survivors — restoring a missing member's
-    /// redundancy without a reboot (`AGENTS.md` §18.4).
+    /// redundancy without a reboot.
     ///
     /// # Errors
     ///

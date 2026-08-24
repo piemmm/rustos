@@ -90,13 +90,12 @@ pub struct Crate {
 /// burn-down (`PLAN.md`); this list is append-never and may only shrink —
 /// a *new* violating edge is always rejected.
 ///
-/// Empty: every grandfathered edge has been burned down. The final
-/// entries were the x86_64 production binary's bring-up edges
-/// (`tairix-kernel → {tairix-kernel-core, tairix-arch-x86_64,
-/// tairix-drvhost, tairix-drv-bus-virtio}`). That binary is the
-/// image-assembly seam, not a kernel subsystem, so it is now classified
-/// as [`Layer::Tooling`] (see [`classify`]) — the x86_64 analogue of the
-/// downstream `tests/integration/riscv64_boot` consumer — rather than
+/// Empty: every grandfathered edge has been burned down. The final entries were
+/// the x86_64 production binary's bring-up edges
+/// (`tairix-kernel → {tairix-kernel-core, tairix-arch-x86_64, tairix-drvhost, tairix-drv-bus-virtio}`).
+/// That binary is the image-assembly seam, not a kernel subsystem, so it is now
+/// classified as [`Layer::Tooling`] (see [`classify`]) — the x86_64 analogue of
+/// the downstream `tests/integration/riscv64_boot` consumer — rather than
 /// grandfathered.
 const GRANDFATHERED: &[(&str, &str)] = &[];
 
@@ -501,12 +500,12 @@ mod tests {
 
     #[test]
     fn kernel_virtio_has_no_edge_to_drvhost() {
-        // Burn-down regression: the `VirtioHostFactory` seam was
-        // hoisted into `lib/virtio`, so the kernel-side factory crate
-        // (`kernel/virtio`) and the userland driver host (`drvhost`) both
-        // depend on `lib/*` instead of on each other. The former
-        // `kernel/virtio -> userland/drvhost` edge (a `KernelSubsystem ->
-        // Userland` inversion) must stay gone, not be re-grandfathered.
+        // Burn-down regression: the `VirtioHostFactory` seam was hoisted into
+        // `lib/virtio`, so the kernel-side factory crate (`kernel/virtio`) and
+        // the userland driver host (`drvhost`) both depend on `lib/*` instead
+        // of on each other. The former `kernel/virtio -> userland/drvhost` edge
+        // (a `KernelSubsystem -> Userland` inversion) must stay gone, not be
+        // re-grandfathered.
         let root = workspace_root();
         let crates = build_graph(&root).expect("graph");
         let kernel_virtio = crates
@@ -529,14 +528,14 @@ mod tests {
 
     #[test]
     fn kernel_virtio_has_no_edge_to_bus_driver() {
-        // Burn-down regression: the ring-0 virtio provisioning
-        // walks no longer name the concrete `drivers/bus/virtio`
-        // transports. `PciTransportWindows` moved into `lib/virtio` and
-        // the walks are generic over a caller-supplied transport builder,
-        // so `kernel/virtio` (a `KernelSubsystem`) depends only on
-        // `lib/*` and never on the bus driver. The former
-        // `kernel/virtio -> drivers/bus/virtio` edge (a `KernelSubsystem
-        // -> Driver` inversion) must stay gone, not be re-grandfathered.
+        // Burn-down regression: the ring-0 virtio provisioning walks no longer
+        // name the concrete `drivers/bus/virtio` transports.
+        // `PciTransportWindows` moved into `lib/virtio` and the walks are
+        // generic over a caller-supplied transport builder, so `kernel/virtio`
+        // (a `KernelSubsystem`) depends only on `lib/*` and never on the bus
+        // driver. The former `kernel/virtio -> drivers/bus/virtio` edge (a
+        // `KernelSubsystem -> Driver` inversion) must stay gone, not be
+        // re-grandfathered.
         let root = workspace_root();
         let crates = build_graph(&root).expect("graph");
         let kernel_virtio = crates
@@ -643,8 +642,8 @@ mod tests {
             ("tairix-drv-storage-virtio-blk", "tairix-virtio"),
             // The virtio-net driver shell consumes the bus-agnostic device
             // engine from `lib/virtio_net` (hoisted there so a user-space
-            // driver process could link it, §17.4); the engine in turn
-            // consumes the protocol from `lib/virtio`.
+            // driver process could link it); the engine in turn consumes the
+            // protocol from `lib/virtio`.
             ("tairix-drv-network-virtio-net", "tairix-virtio-net"),
             // The user-space virtio-input keyboard driver `rxe` builds its
             // bus-agnostic MMIO transport from `lib/virtio`, never the bus

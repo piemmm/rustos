@@ -238,14 +238,13 @@ pub const WIN_SIZING: WindowSizing = WindowSizing::Resizable {
 /// component-path filesystem walks will descend, counted in root-first path
 /// components.
 ///
-/// A fixed fail-closed *bound*, not a hardware-scaled capacity (§24.4): it caps
-/// how far a recursive removal ([`DeleteWalk`]) or a
-/// recursive copy ([`CopyWalk`]) descends, so a pathological
-/// or adversarial tree can never make the traversal recurse without limit
-/// (§26.6). Both walks share this single definition rather than each carrying
-/// their own copy of the value (§2.2); a tree deeper than the bound is refused
-/// rather than followed. Chosen far beyond any legitimate directory depth while
-/// staying comfortably bounded.
+/// A fixed fail-closed *bound*, not a hardware-scaled capacity: it caps how far
+/// a recursive removal ([`DeleteWalk`]) or a recursive copy ([`CopyWalk`])
+/// descends, so a pathological or adversarial tree can never make the traversal
+/// recurse without limit. Both walks share this single definition rather than
+/// each carrying their own copy of the value; a tree deeper than the bound is
+/// refused rather than followed. Chosen far beyond any legitimate directory
+/// depth while staying comfortably bounded.
 pub(crate) const MAX_WALK_DEPTH: usize = 256;
 
 #[cfg(test)]

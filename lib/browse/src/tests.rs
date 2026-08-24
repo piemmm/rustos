@@ -5168,9 +5168,9 @@ fn context_menu_command_rect_mirrors_the_hit_test_for_each_command() {
 
     // The forward rect of each command centres inside a row that the hit-test
     // resolves back to that same command — so the click point the harness aims
-    // at and the app's own hit-test can never disagree (§2.2). A disabled
-    // command still has a drawn (muted) row, so its rect exists but the
-    // hit-test declines it (fail closed).
+    // at and the app's own hit-test can never disagree. A disabled command
+    // still has a drawn (muted) row, so its rect exists but the hit-test
+    // declines it (fail closed).
     for &command in CONTEXT_COMMANDS {
         let rect = context_menu_command_rect(&menu, anchor, vp, Scale::ONE, &theme, command)
             .expect("every listed command has a drawn row");
@@ -5221,7 +5221,7 @@ fn open_with_index_at_mirrors_the_rows_and_fails_closed_off_the_menu() {
 
     // Scanning the whole window, every index the hit-test resolves is a valid
     // candidate index, and every candidate is reachable exactly once — so the
-    // drawn rows and the hit-test cover the same application list (§2.2).
+    // drawn rows and the hit-test cover the same application list.
     let mut seen: Vec<usize> = Vec::new();
     let mut y = 0;
     while y < i32::try_from(vp.height).unwrap() {
@@ -5453,7 +5453,7 @@ fn render_manager_tool_at_resolves_new_folder_disjoint_from_the_read_only_comman
 
     // Scan the toolbar's middle row: the manager write tool resolves somewhere,
     // and no pixel resolves to *both* a read-only command and a write tool —
-    // the two hit-tests cover disjoint regions (§2.2).
+    // the two hit-tests cover disjoint regions.
     let mut saw_new_folder = false;
     for x in 0..vp.width {
         let point = Point::new(i32::try_from(x).unwrap(), y);
@@ -6006,7 +6006,7 @@ fn permission_cell_at_mirrors_every_checkbox_and_fails_closed_off_grid() {
 
     // Scanning the whole window, every bit the hit-test resolves is one of the
     // nine settable bits, and all nine are reachable — so the drawn grid and
-    // the hit-test cover exactly the same nine distinct checkboxes (§2.2).
+    // the hit-test cover exactly the same nine distinct checkboxes.
     let mut seen: BTreeSet<u32> = BTreeSet::new();
     let mut y = 0;
     while y < i32::try_from(vp.height).unwrap() {
@@ -6053,7 +6053,7 @@ fn owner_field_at_mirrors_the_two_value_cells_and_fails_closed_off_grid() {
 
     // Scanning the whole window, every field the hit-test resolves is one of
     // the two owner values, and both are reachable — so the drawn underlines
-    // and the hit-test cover exactly the same two distinct cells (§2.2).
+    // and the hit-test cover exactly the same two distinct cells.
     let mut seen: BTreeSet<OwnerField> = BTreeSet::new();
     let mut y = 0;
     while y < i32::try_from(vp.height).unwrap() {
@@ -6165,10 +6165,10 @@ fn delete_dialog_titles_a_single_target_by_its_name() {
 #[test]
 fn delete_dialog_reports_the_honest_count_and_folder_warning() {
     let dialog = build_delete_dialog(&folder_plan(), DeleteDisposition::Permanent);
-    // More than one target: the honest count, not a single name (§2.24).
+    // More than one target: the honest count, not a single name.
     assert!(dialog.title().contains('2'));
     // A plan that includes a directory warns that folders (and their contents)
-    // are removed, so the confirmation is not misleading (§2.24).
+    // are removed, so the confirmation is not misleading.
     let message = dialog.message().expect("a message");
     assert!(message.to_ascii_lowercase().contains("folder"));
 }
@@ -6179,8 +6179,8 @@ fn delete_dialog_offers_a_destructive_delete_and_a_recommended_cancel() {
     let dialog = build_delete_dialog(&one_file_plan(), DeleteDisposition::Permanent);
     let actions = dialog.actions();
     assert_eq!(actions.len(), 2);
-    // The honest warmth is on the safe Cancel, never on the destructive Delete
-    // (§2.24): the delete carries the Destructive role, Cancel the Recommended.
+    // The honest warmth is on the safe Cancel, never on the destructive Delete:
+    // the delete carries the Destructive role, Cancel the Recommended.
     assert_eq!(
         actions[DELETE_CONFIRM_INDEX].role(),
         ControlRole::Destructive
@@ -6247,8 +6247,8 @@ fn delete_dialog_action_at_mirrors_both_buttons_and_fails_closed_off_grid() {
     let dialog = build_delete_dialog(&folder_plan(), DeleteDisposition::Permanent);
 
     // Scanning the whole window, every index the hit-test resolves is one of
-    // the two action buttons, and both are reachable — so the drawn buttons
-    // and the hit-test cover exactly the same two distinct actions (§2.2).
+    // the two action buttons, and both are reachable — so the drawn buttons and
+    // the hit-test cover exactly the same two distinct actions.
     let mut seen: BTreeSet<usize> = BTreeSet::new();
     let mut y = 0;
     while y < i32::try_from(vp.height).unwrap() {
@@ -6295,7 +6295,7 @@ fn trash_dialog_is_recoverable_and_worded_honestly() {
     use tairix_controls::state::ControlRole;
     let dialog = build_delete_dialog(&one_file_plan(), DeleteDisposition::Trash);
     // The recoverable move names the item and says "Trash", never "delete" or
-    // "cannot be undone" (§2.24 — the wording matches what will happen).
+    // "cannot be undone" (the wording matches what will happen).
     assert!(dialog.title().contains("Kernel"));
     assert!(dialog.title().contains("Trash"));
     let message = dialog.message().expect("a message");
@@ -6315,7 +6315,7 @@ fn trash_dialog_is_recoverable_and_worded_honestly() {
 #[test]
 fn permanent_dialog_names_the_irreversible_delete() {
     // The permanent wording is explicit that the removal is forever, so it can
-    // never be mistaken for the recoverable Trash move (§2.24).
+    // never be mistaken for the recoverable Trash move.
     let dialog = build_delete_dialog(&one_file_plan(), DeleteDisposition::Permanent);
     assert!(dialog.title().to_ascii_lowercase().contains("permanently"));
 }
@@ -6332,7 +6332,7 @@ fn trash_dir_is_the_library_trash_subtree_of_home() {
     );
     // It reads only `home` — nothing is fabricated for an empty home (that
     // parses to no components, the root, upstream), and the leaves are the
-    // shared constants, so the location cannot drift from the app's (§2.2).
+    // shared constants, so the location cannot drift from the app's.
     assert_eq!(trash_dir(&[]), comps(&["Library", "Trash"]));
 }
 
@@ -6353,7 +6353,7 @@ fn progress_model_reports_the_honest_count_and_never_a_percentage() {
     assert_eq!(model.status_line(), "1 item removed");
     model.set_done(42);
     assert_eq!(model.status_line(), "42 items removed");
-    // No fabricated percentage anywhere in the caption (§2.24).
+    // No fabricated percentage anywhere in the caption.
     assert!(!model.status_line().contains('%'));
 
     // A copy model reads with the copy verb.
@@ -6437,7 +6437,7 @@ fn progress_cancel_at_mirrors_the_cancel_button_and_fails_closed_off_grid() {
 
     // Scanning the whole window, the Cancel hit-test resolves true for a
     // contiguous, reachable region and false everywhere else — so the drawn
-    // button and the hit-test agree on exactly one target (§2.2).
+    // button and the hit-test agree on exactly one target.
     let mut hits = 0u32;
     let mut y = 0;
     while y < i32::try_from(vp.height).unwrap() {

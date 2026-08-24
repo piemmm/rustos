@@ -1,14 +1,13 @@
 //! The `ping` command shape and its parser.
 //!
-//! The option surface follows iputils/`ping(8)`: `-c count` bounds the
-//! number of requests (the default is unbounded), `-i interval` sets the
-//! seconds between requests, `-s size` sets the payload byte count, `-W
-//! timeout` bounds the wait for each reply, `-w deadline` bounds the whole
-//! run, `-4`/`-6` force the address family, `-n` prints numeric addresses
-//! (always in force on TAIRiX — there is no name resolver in this plan, so
-//! the target must be a literal address — and accepted for familiarity),
-//! and `-q` is quiet (summary only). Short help is the reserved `-?`/`--help`
-//! pair (plans/APPS.md §4).
+//! The option surface follows iputils/`ping(8)`: `-c count` bounds the number
+//! of requests (the default is unbounded), `-i interval` sets the seconds
+//! between requests, `-s size` sets the payload byte count, `-W timeout` bounds
+//! the wait for each reply, `-w deadline` bounds the whole run, `-4`/`-6` force
+//! the address family, `-n` prints numeric addresses (always in force on TAIRiX
+//! — there is no name resolver in this plan, so the target must be a literal
+//! address — and accepted for familiarity), and `-q` is quiet (summary only).
+//! Short help is the reserved `-?`/`--help` pair (plans/APPS.md §4).
 //!
 //! A value-taking short flag accepts its value attached (`-c5`) or as the
 //! next argument (`-c 5`); long options accept `--count 5` or `--count=5`.
@@ -317,7 +316,7 @@ fn build(builder: Builder) -> Result<Command, ParseError> {
 
 /// Resolve a literal IP address string into a [`Target`] of the required
 /// family. There is no name resolution in this plan, so a non-literal is a
-/// usage error rather than a silent failure (§2.24 fail loud).
+/// usage error rather than a silent failure (fail loud).
 fn resolve_target(literal: &str, family: Family) -> Result<Target, ParseError> {
     let v4 = literal.parse::<Ipv4Addr>().ok();
     let v6 = literal.parse::<Ipv6Addr>().ok();

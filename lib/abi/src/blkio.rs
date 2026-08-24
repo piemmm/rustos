@@ -91,9 +91,10 @@ pub struct BlkRequest {
     pub blocks: u32,
 }
 
-/// Encoded length of a [`BlkRequest`]: `op(1) || pad(3) || blocks(4) ||
-/// lba(8)`. Fixed — every request encodes to the same size, so this is
-/// both the encoding length and the endpoint's maximum request size.
+/// Encoded length of a [`BlkRequest`]:
+/// `op(1) || pad(3) || blocks(4) || lba(8)`. Fixed — every request encodes to
+/// the same size, so this is both the encoding length and the endpoint's
+/// maximum request size.
 pub const BLK_REQUEST_LEN: usize = 1 + 3 + 4 + 8;
 
 impl BlkRequest {
@@ -357,8 +358,8 @@ impl BlkStatus {
     }
 }
 
-/// Byte offsets of the completion frame: `status(4) || errno(4) ||
-/// block_size(4) || block_count(8) || flags(4) || class(4)`.
+/// Byte offsets of the completion frame:
+/// `status(4) || errno(4) || block_size(4) || block_count(8) || flags(4) || class(4)`.
 const COMPLETION_STATUS_OFF: usize = 0;
 const COMPLETION_ERRNO_OFF: usize = 4;
 const COMPLETION_GEOMETRY_OFF: usize = 8;
@@ -820,21 +821,19 @@ pub const BLK_HEALTH_COUNTERS_LEN: usize = 10 * 8;
 ///
 /// This is the single shared definition of the storage-health *counters*, so
 /// every consumer of a served block device — the kernel filesystem client
-/// today, a future user-space serve loop — folds outcomes into the same
-/// buckets and cannot drift apart in what a "reset" or a "medium error" counts
-/// as (`plans/FIX-IO.md` IO5). It is a pure value type: the live counters are
-/// held as atomics by whichever component owns the I/O path, and a
-/// [`BlkHealthCounters`] is a point-in-time snapshot the System Information
-/// API reports (`AGENTS.md` §16.6) — never `/proc`-style scraped.
+/// today, a future user-space serve loop — folds outcomes into the same buckets
+/// and cannot drift apart in what a "reset" or a "medium error" counts as
+/// (`plans/FIX-IO.md` IO5). It is a pure value type: the live counters are held
+/// as atomics by whichever component owns the I/O path, and a
+/// [`BlkHealthCounters`] is a point-in-time snapshot the System Information API
+/// reports — never `/proc`-style scraped.
 ///
 /// The per-status buckets partition every folded completion exactly once, so
-/// `ok + degraded + transient + timeouts + resets + medium_errors + offline +
-/// faults == completions` always holds; `reissues` is orthogonal (a single
-/// logical request that is reissued twice folds three completions). Every
-/// bucket saturates rather than wrapping: a tally is operational observability,
-/// never a security or format bound (`AGENTS.md` §24.4), so an
-/// implausibly-long-lived device pins a counter at [`u64::MAX`] instead of
-/// silently wrapping to a smaller, misleading value.
+/// `ok + degraded + transient + timeouts + resets + medium_errors + offline + faults == completions` always holds; `reissues` is orthogonal (a single logical request that is
+/// reissued twice folds three completions). Every bucket saturates rather than
+/// wrapping: a tally is operational observability, never a security or format
+/// bound, so an implausibly-long-lived device pins a counter at [`u64::MAX`]
+/// instead of silently wrapping to a smaller, misleading value.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct BlkHealthCounters {
     /// Total device-level completions folded (the sum of the buckets below).
@@ -1118,9 +1117,8 @@ impl BlkHealthState {
 pub struct BlkHealth {
     state: BlkHealthState,
     budget: IoBudget,
-    /// The recovery grace-window timer, open only while `state ==
-    /// Recovering`; the one shared with [`FaultDomain`] so the timing cannot
-    /// diverge.
+    /// The recovery grace-window timer, open only while `state == Recovering`;
+    /// the one shared with [`FaultDomain`] so the timing cannot diverge.
     grace: GraceWindow,
 }
 
@@ -1372,9 +1370,9 @@ pub enum RecoveryAction {
 /// data path, or give up escalating — bounded by the same per-class
 /// [`IoBudget::max_retries`] both this and the consumer's
 /// [`IoBudget::should_reissue`] read, so the driver's escalation and the
-/// consumer's reissue budget derive from one policy and cannot drift apart
-/// (§2.2). A device that keeps stalling therefore climbs a *finite* ladder and
-/// is never reset forever (the charter's ban on retry-until-it-works).
+/// consumer's reissue budget derive from one policy and cannot drift apart. A
+/// device that keeps stalling therefore climbs a *finite* ladder and is never
+/// reset forever (the charter's ban on retry-until-it-works).
 ///
 /// It is pure and holds no clock or timer: the escalation advances one rung
 /// per reissued attempt, and reissued attempts are already spaced by the
@@ -1715,11 +1713,11 @@ impl FaultDomain {
 /// subtree closed on time without a busy-poll (event-timed, never a spin).
 ///
 /// Its return convention matches [`recovery_wait_timeout`] exactly — both
-/// delegate to the same `nearest_relative_deadline` core (§2.2) — so a serve
-/// loop that owns *both* per-device and fault-domain windows takes the min of
-/// the two and cannot compute them by different rules: `Some(0)` for a window
-/// already due, `Some(ns)` for the soonest still `ns` away, and `None` when no
-/// domain has an armed window (park with no timeout).
+/// delegate to the same `nearest_relative_deadline` core — so a serve loop that
+/// owns *both* per-device and fault-domain windows takes the min of the two and
+/// cannot compute them by different rules: `Some(0)` for a window already due,
+/// `Some(ns)` for the soonest still `ns` away, and `None` when no domain has an
+/// armed window (park with no timeout).
 pub fn fault_domain_wait_timeout<'a, I>(domains: I, now_ns: u64) -> Option<u64>
 where
     I: IntoIterator<Item = &'a FaultDomain>,

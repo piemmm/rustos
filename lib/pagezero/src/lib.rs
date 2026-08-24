@@ -48,7 +48,7 @@
 //! 3. **fail-closed** — if the bit is absent or verification fails, the
 //!    portable baseline is used. [`zero`] before [`resolve`] runs (or after a
 //!    failed resolve) is the portable baseline too — never a trap, never a
-//!    panic (§2.9/§5.4).
+//!    panic.
 //!
 //! [`zero`] is the hot-path entry consumers call; it reads the resolved
 //! implementation from a set-once cell (no code patching — a plain function
@@ -130,7 +130,7 @@ const CANDIDATES: &[Candidate<PageZeroFn>] = &[];
 /// vectors exercise the head/aligned-middle/tail structure of a block-zero
 /// routine on the same size the kernel actually clears.
 ///
-/// A validation bound on a fixed self-verify set (§24.4), not a machine-scaling
+/// A validation bound on a fixed self-verify set, not a machine-scaling
 /// capacity, and small enough to live on the boot stack.
 const SCRATCH_CAP: usize = 4096;
 

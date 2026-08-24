@@ -117,9 +117,9 @@ mod program {
     /// The graphical desktop draws text through `fontd`, so login — the one
     /// holder of `CAP_SPAWN_AS_USER` on this path — starts it as the `fontd`
     /// service account the first round a display is available, and never on a
-    /// headless boot (`AGENTS.md` §17.3). A duplicate start would in any case
-    /// fail closed on the reserved `FONT_ENDPOINT` bind, so this guard only
-    /// avoids a redundant spawn on a later round.
+    /// headless boot. A duplicate start would in any case fail closed on the
+    /// reserved `FONT_ENDPOINT` bind, so this guard only avoids a redundant
+    /// spawn on a later round.
     static FONTD_STARTED: AtomicBool = AtomicBool::new(false);
 
     /// Start the sandboxed font service once, as the `fontd` service account.
@@ -128,15 +128,14 @@ mod program {
     /// run), whether the desktop is launched by a graphical login or on demand
     /// by the shell's `desktop` command. `fontd` is a graphics-only OS
     /// resource, so it is **not** a boot-floor service (a headless machine
-    /// never runs it, `AGENTS.md` §17.3); login brings it up here instead.
-    /// login holds `CAP_SPAWN_AS_USER`, so it drops `fontd` onto its own
-    /// service account (uid resolved from the kernel identity table, never
-    /// fabricated) exactly as it drops a session onto the authenticated user.
-    /// The service is detached — it outlives any one session and is not this
-    /// login's child to reap — and needs no console. A refused spawn is
-    /// audited loudly and login proceeds (fail loud, degrade gracefully,
-    /// `AGENTS.md` §2.24): desktop text simply will not render until a font
-    /// service is up.
+    /// never runs it); login brings it up here instead. login holds
+    /// `CAP_SPAWN_AS_USER`, so it drops `fontd` onto its own service account
+    /// (uid resolved from the kernel identity table, never fabricated) exactly
+    /// as it drops a session onto the authenticated user. The service is
+    /// detached — it outlives any one session and is not this login's child to
+    /// reap — and needs no console. A refused spawn is audited loudly and login
+    /// proceeds (fail loud, degrade gracefully): desktop text simply will not
+    /// render until a font service is up.
     fn ensure_fontd(sink: LogSink) {
         if FONTD_STARTED.swap(true, Ordering::SeqCst) {
             return;
@@ -1407,10 +1406,10 @@ mod program {
         // service, whether it is launched by a graphical login or on demand by
         // the shell's `desktop` command. So bring `fontd` up (once) as soon as
         // this machine is display-capable — not as a boot-floor service (a
-        // headless machine, where this stays false, never runs it, `AGENTS.md`
-        // §17.3) and not tied to one launch path. login holds
-        // `CAP_SPAWN_AS_USER`, the authority the graphics-only service account
-        // needs and neither the shell nor the desktop app has.
+        // headless machine, where this stays false, never runs it) and not tied
+        // to one launch path. login holds `CAP_SPAWN_AS_USER`, the authority
+        // the graphics-only service account needs and neither the shell nor the
+        // desktop app has.
         if graphical_available {
             ensure_fontd(sink);
         }

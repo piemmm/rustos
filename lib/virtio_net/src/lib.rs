@@ -6,14 +6,13 @@
 //! compiles against the PCI and MMIO transports
 //! — the queue protocol lives once, in the transport crate.
 //!
-//! This is a `lib/*` device-logic crate (the `lib/virtio_input`
-//! precedent): the virtio-net driver crate
-//! (`drivers/network/virtio_net`) links it, and so do the host tests
-//! and the QEMU verticals, so the device engine is written once and
-//! never re-implemented (§2.2, §17.4). Living in `lib/*` (rather than a
-//! `drivers/*` crate) is what lets a future user-space driver *process*
-//! link the engine directly: a process crate may depend on `lib/*` but
-//! never on another `drivers/*` crate (§17.4).
+//! This is a `lib/*` device-logic crate (the `lib/virtio_input` precedent): the
+//! virtio-net driver crate (`drivers/network/virtio_net`) links it, and so do
+//! the host tests and the QEMU verticals, so the device engine is written once
+//! and never re-implemented. Living in `lib/*` (rather than a `drivers/*`
+//! crate) is what lets a future user-space driver *process* link the engine
+//! directly: a process crate may depend on `lib/*` but never on another
+//! `drivers/*` crate.
 //!
 //! # Wire protocol
 //!
@@ -398,13 +397,13 @@ const RX_POOL: usize = wire::RX_QUEUE_SIZE as usize;
 
 /// One receive buffer in the [`VirtioNet`] pool.
 ///
-/// A buffer is either *posted* — the device owns it and `posted_head`
-/// names the descriptor it is queued under — or *held* by the driver
-/// (`posted_head` is `None`: the device completed it and the driver has
-/// not yet delivered its frame and re-posted it). Its slab is `hdr_len +
-/// max_frame_len` bytes: a received frame's first buffer carries the
-/// `virtio_net_hdr` inline followed by frame bytes, and a merged frame's
-/// subsequent buffers carry pure frame bytes (no header).
+/// A buffer is either *posted* — the device owns it and `posted_head` names the
+/// descriptor it is queued under — or *held* by the driver (`posted_head` is
+/// `None`: the device completed it and the driver has not yet delivered its
+/// frame and re-posted it). Its slab is `hdr_len + max_frame_len` bytes: a
+/// received frame's first buffer carries the `virtio_net_hdr` inline followed
+/// by frame bytes, and a merged frame's subsequent buffers carry pure frame
+/// bytes (no header).
 struct RxBuffer {
     slab: DmaSlab,
     posted_head: Option<u16>,

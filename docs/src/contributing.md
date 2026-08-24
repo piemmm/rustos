@@ -55,6 +55,7 @@ ask — never wave the failure through as transient, load, or environment.
 | `clippy`      | `-D warnings` for the host **and once per Tier-1 target** (see below) |
 | `deps-check`  | Enforces the [§17.4 modularity graph][modularity]           |
 | `cfg-check`   | Rejects target-conditional `cfg` outside the arch ports     |
+| `charter-cite`| Rejects a comment citing a charter section instead of the reason ([§2.11][cite]) |
 | `test`        | `cargo test --workspace --all-targets` + QEMU matrix, run once ([§7][test])                          |
 | `docs-check`  | `cargo doc` (deny warnings) + `mdbook build` (link checked) |
 | `deny`        | `cargo deny --all-features check` (license + advisory)      |
@@ -148,4 +149,5 @@ is why it runs automatically before every `build` and `image`.
 [modularity]: ./architecture/modularity.md
 [sc]: ./security/supply_chain.md
 [fz]: ./security/fuzzing.md
+[cite]: https://github.com/tairix-project/tairix/blob/main/AGENTS.md
 [test]: https://github.com/tairix-project/tairix/blob/main/AGENTS.md

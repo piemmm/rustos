@@ -1,13 +1,13 @@
 //! Multi-entry selection: the set of entries the user has marked in the
 //! current listing (`plans/NEW-FILEMANAGER.md` `FM7`).
 //!
-//! The [`Browser`](crate::Browser) has always carried a single *focus* cursor
-//! — the entry `Enter`, rename, and activate act on. A file manager also needs
-//! a *set* of selected entries so the management verbs (cut / copy / delete)
-//! can operate on many items at once. [`Selection`] is that set, modelled here
-//! as the one pure, host-provable definition the file manager and the trusted
-//! picker share (§2.2) — the picker composes the same [`Browser`](crate::Browser) and simply
-//! never invokes the write verbs the selection feeds.
+//! The [`Browser`](crate::Browser) has always carried a single *focus* cursor —
+//! the entry `Enter`, rename, and activate act on. A file manager also needs a
+//! *set* of selected entries so the management verbs (cut / copy / delete) can
+//! operate on many items at once. [`Selection`] is that set, modelled here as
+//! the one pure, host-provable definition the file manager and the trusted
+//! picker share — the picker composes the same [`Browser`](crate::Browser) and
+//! simply never invokes the write verbs the selection feeds.
 //!
 //! The selection is **per-listing**: its members are indices into the entries
 //! the browser is currently showing, so the browser collapses it to the single

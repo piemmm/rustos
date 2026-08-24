@@ -2,12 +2,12 @@
 //! network stack and a link-layer network driver process
 //! (`plans/NETWORK.md` §2.3, N4c).
 //!
-//! [`net_ring`](super::net_ring) defines the *in-region* frame transport;
-//! this module defines the *IPC control plane* that establishes and drives
-//! that region when the driver and the stack are **separate processes**
-//! (the true microkernel shape, `AGENTS.md` §4): the driver owns the
-//! device (MMIO/DMA/IRQ) and serves a call endpoint; the stack is the
-//! client that owns the shared frame-ring region.
+//! [`net_ring`](super::net_ring) defines the *in-region* frame transport; this
+//! module defines the *IPC control plane* that establishes and drives that
+//! region when the driver and the stack are **separate processes** (the true
+//! microkernel shape): the driver owns the device (MMIO/DMA/IRQ) and serves a
+//! call endpoint; the stack is the client that owns the shared frame-ring
+//! region.
 //!
 //! # Roles (the display D7a `shm_grant` pattern, inverted)
 //!
@@ -35,11 +35,10 @@
 //! * [`NetChannelRequest::Detach`] — the stack releases the channel; the
 //!   driver unmaps the region and forgets the notify port.
 //!
-//! Between doorbells the driver parks on its device IRQ; when frames arrive
-//! it wakes the stack with a [`NetChannelNotify`] `ipc_send` to the attach
-//! port, and the stack — parked on that port in its wait set — issues the
-//! next [`NetChannelRequest::Service`]. Neither side ever busy-polls
-//! (`AGENTS.md` §2.23).
+//! Between doorbells the driver parks on its device IRQ; when frames arrive it
+//! wakes the stack with a [`NetChannelNotify`] `ipc_send` to the attach port,
+//! and the stack — parked on that port in its wait set — issues the next
+//! [`NetChannelRequest::Service`]. Neither side ever busy-polls.
 //!
 //! # Fail closed
 //!
@@ -62,12 +61,11 @@ pub const NET_CHANNEL_NOTIFY_MAGIC: u32 = u32::from_le_bytes(*b"NCHN");
 /// The `netchan-v1` protocol version.
 pub const NET_CHANNEL_VERSION_V1: u16 = 1;
 
-/// Base of the reserved device-channel call-endpoint id block
-/// (`"NCHAN\0\0\0"` little-endian). Each NIC driver process claims the
-/// first free id in `NET_CHANNEL_ENDPOINT_BASE ..
-/// NET_CHANNEL_ENDPOINT_BASE + NET_CHANNEL_ENDPOINT_COUNT` by binding it
-/// (the `drivers/bus/usb/xhci` block-claim precedent), so two NIC drivers
-/// never collide on an id without a central allocator.
+/// Base of the reserved device-channel call-endpoint id block (`"NCHAN\0\0\0"`
+/// little-endian). Each NIC driver process claims the first free id in
+/// `NET_CHANNEL_ENDPOINT_BASE .. NET_CHANNEL_ENDPOINT_BASE + NET_CHANNEL_ENDPOINT_COUNT`
+/// by binding it (the `drivers/bus/usb/xhci` block-claim precedent), so two NIC
+/// drivers never collide on an id without a central allocator.
 ///
 /// The block is a reserved rendezvous
 /// ([`crate::ipc::is_reserved_endpoint`]): binding any id in it requires

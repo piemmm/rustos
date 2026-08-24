@@ -2,9 +2,9 @@
 //!
 //! The record is read from a disk that may be failing, foreign, recycled, or
 //! hostile, and its whole job is to let an array *skip* work it has already
-//! done. Every test here therefore checks one of two things: that a good
-//! record round-trips exactly, or that a record which cannot be fully vouched
-//! for is discarded rather than half-trusted (`AGENTS.md` §5.4, §26.5).
+//! done. Every test here therefore checks one of two things: that a good record
+//! round-trips exactly, or that a record which cannot be fully vouched for is
+//! discarded rather than half-trusted.
 
 use super::{ArrayProgress, MaintenanceRecord, MaintenanceRecordError};
 use crate::{ArrayIdentity, RaidLevel};
@@ -271,7 +271,7 @@ fn a_completion_stamp_from_the_future_is_not_credible() {
 #[test]
 fn a_completion_stamp_before_1970_or_after_2038_is_measured_exactly() {
     // 64-bit-native time: the stamp is a full `Time64`, so neither boundary
-    // truncates (`AGENTS.md` §21).
+    // truncates.
     for completed in [
         Time64::new(-2_147_483_648, 0).expect("canonical"),
         Time64::new(2_147_483_648, 0).expect("canonical"),

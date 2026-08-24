@@ -35,8 +35,8 @@
 //!
 //! When the default dotfile filter hides entries, `ls` notes the omission on
 //! the standard information stream (fd 3) with the canonical
-//! `fs.hidden_entries_omitted` record (`AGENTS.md` §20.1) — advisory only,
-//! never affecting the listing, ordering, or exit status.
+//! `fs.hidden_entries_omitted` record — advisory only, never affecting the
+//! listing, ordering, or exit status.
 //!
 //! # Symbolic links
 //!

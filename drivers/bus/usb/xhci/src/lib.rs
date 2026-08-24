@@ -7,7 +7,7 @@
 //! enumerates the attached device, and serves that device's transfers to an
 //! autoloaded **class** driver (`drivers/input/usb_kbd`, …) over the
 //! bus-agnostic URB transport seam — never touching a class driver, a board,
-//! or a bus by name (`plans/USB.md`, `AGENTS.md` §2.20 / §17.4).
+//! or a bus by name (`plans/USB.md`).
 //!
 //! This `lib` target holds the HCD's host-testable logic — the controller
 //! [`bringup`] orchestration and the per-interface URB-[`serve`] state

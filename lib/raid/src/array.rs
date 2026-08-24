@@ -4,16 +4,16 @@
 //!
 //! The six RAID compositions ([`MirrorArray`], [`StripeArray`],
 //! [`ParityArray`], [`DualParityArray`], [`TripleParityArray`],
-//! [`Raid10Array`]) are siblings over the same block
-//! seam (`AGENTS.md` §2.2). A serving process, once it has *discovered* an
-//! array from its members' superblocks and resolved its [`RaidLevel`], must
-//! present exactly one logical [`Block`] device to the filesystem layer and
-//! drive its self-recovery, regardless of level. [`RaidArray`] is that single
-//! composed-device abstraction (`AGENTS.md` §27, modelled on Linux md's
-//! per-personality dispatch): it wraps the level-specific engine and forwards
-//! both the [`Block`] I/O path and the level-agnostic health, maintenance, and
-//! member-reconfiguration surface, so neither the autoloaded serve process nor
-//! the ARXFS-native composition re-derives the level → engine mapping (§2.2).
+//! [`Raid10Array`]) are siblings over the same block seam. A serving process,
+//! once it has *discovered* an array from its members' superblocks and resolved
+//! its [`RaidLevel`], must present exactly one logical [`Block`] device to the
+//! filesystem layer and drive its self-recovery, regardless of level.
+//! [`RaidArray`] is that single composed-device abstraction (modelled on Linux
+//! md's per-personality dispatch): it wraps the level-specific engine and
+//! forwards both the [`Block`] I/O path and the level-agnostic health,
+//! maintenance, and member-reconfiguration surface, so neither the autoloaded
+//! serve process nor the ARXFS-native composition re-derives the level → engine
+//! mapping.
 //!
 //! The wrapper is a thin, allocation-free dispatch layer: it changes none of
 //! the engines' behaviour and adds no policy of its own. Where an operation is
@@ -160,9 +160,9 @@ impl From<TripleParityError> for RaidError {
 /// ([`readd_member`](Self::readd_member) / [`remove_member`](Self::remove_member)
 /// / [`add_member`](Self::add_member) / [`replace_member`](Self::replace_member)).
 ///
-/// The enum borrows the concrete engine, which in turn borrows its
-/// caller-owned member slice, so the composed device holds no allocation and
-/// imposes no fixed member ceiling (`AGENTS.md` §24.1).
+/// The enum borrows the concrete engine, which in turn borrows its caller-owned
+/// member slice, so the composed device holds no allocation and imposes no
+/// fixed member ceiling.
 pub enum RaidArray<'a, B: Block> {
     /// A RAID1 mirror ([`MirrorArray`]).
     Mirror(MirrorArray<'a, B>),
@@ -341,11 +341,10 @@ impl<B: Block> RaidArray<'_, B> {
     /// pass and rebuild have got, or [`ArrayProgress::IDLE`] if neither is
     /// running.
     ///
-    /// The serving process checkpoints this to the members' on-disk
-    /// maintenance record ([`MaintenanceRecord`](crate::superblock::MaintenanceRecord))
-    /// as the array works, so a pass measured in hours — which on a 100 TB+
-    /// array is the normal case — is not silently discarded by a reboot
-    /// (`AGENTS.md` §26.6).
+    /// The serving process checkpoints this to the members' on-disk maintenance
+    /// record ([`MaintenanceRecord`](crate::superblock::MaintenanceRecord)) as
+    /// the array works, so a pass measured in hours — which on a 100 TB+ array
+    /// is the normal case — is not silently discarded by a reboot.
     ///
     /// An observation, so it is answered for every level: a non-redundant
     /// stripe has no maintenance to record and reports
@@ -371,7 +370,7 @@ impl<B: Block> RaidArray<'_, B> {
     /// same generation, decoding cleanly — and otherwise yields
     /// [`ArrayProgress::IDLE`], which leaves the array at its fresh-start
     /// position: a lost, foreign, or corrupt record costs time and never
-    /// correctness (`AGENTS.md` §5.4, §26.5).
+    /// correctness.
     ///
     /// # Errors
     ///
@@ -394,11 +393,10 @@ impl<B: Block> RaidArray<'_, B> {
         }
     }
 
-    /// Verify and repair one bounded chunk of a scrub pass, advancing the
-    /// scrub cursor. The chunk is sized from `scratch` (its length in whole
-    /// array blocks): a larger buffer scrubs faster, a smaller one yields
-    /// sooner, so a 100 TB+ array never scrubs in one sweep (`AGENTS.md`
-    /// §26.6, §2.23).
+    /// Verify and repair one bounded chunk of a scrub pass, advancing the scrub
+    /// cursor. The chunk is sized from `scratch` (its length in whole array
+    /// blocks): a larger buffer scrubs faster, a smaller one yields sooner, so
+    /// a 100 TB+ array never scrubs in one sweep.
     ///
     /// # Errors
     ///

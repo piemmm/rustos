@@ -50,12 +50,12 @@ pub trait NetworkConfigSource {
 /// stack-wide [`NetworkSettings`] the network stack enforces.
 ///
 /// The mapping is exact and the single definition both the service binary and
-/// its tests use (`AGENTS.md` §2.2): `net.ipv4.enabled` / `net.ipv6.enabled`
-/// gate the families, `net.tcp.syncookies always` selects unconditional SYN
-/// cookies (`auto` leaves the bounded backlog), `net.ipv6.privacy` enables
-/// RFC 8981 temporary (privacy) IPv6 addresses, `net.tcp.keepalive`
-/// enables RFC 9293 §3.8.4 TCP keepalive probing on idle connections, and
-/// `net.tcp.ecn` enables RFC 3168 Explicit Congestion Notification.
+/// its tests use: `net.ipv4.enabled` / `net.ipv6.enabled` gate the families,
+/// `net.tcp.syncookies always` selects unconditional SYN cookies (`auto` leaves
+/// the bounded backlog), `net.ipv6.privacy` enables RFC 8981 temporary
+/// (privacy) IPv6 addresses, `net.tcp.keepalive` enables RFC 9293 §3.8.4 TCP
+/// keepalive probing on idle connections, and `net.tcp.ecn` enables RFC 3168
+/// Explicit Congestion Notification.
 #[cfg(feature = "program")]
 #[must_use]
 pub fn settings_from_config(config: &tairix_sysconfig::SystemConfig) -> NetworkSettings {
@@ -201,8 +201,8 @@ pub trait NetworkInterfaceConfigSource {
 /// Map a parsed [`network.conf`](tairix_netconfig::NetworkConfig) into the
 /// per-interface [`InterfaceConfigPlan`] the device manager delivers.
 ///
-/// The mapping is the single definition both the service binary and its
-/// tests use (`AGENTS.md` §2.2):
+/// The mapping is the single definition both the service binary and its tests
+/// use:
 ///
 /// * A **bond** interface yields a [`NetBondConfigMsg`] in
 ///   [`InterfaceConfigPlan::bonds`] (members, mode, primary, monitor

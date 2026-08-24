@@ -82,14 +82,13 @@ pub struct AuthenticatedUser {
     pub shell: String,
 }
 
-/// The default search path exported to a session: the machine-wide
-/// installed application store (`/Apps`). The two system stores and the
-/// user's own two stores are the fixed, non-overridable prefix the
-/// resolution policy itself searches first (`lib/cmdres`), so they must
-/// never be repeated here — doing so would be redundant and would
-/// misleadingly imply they are just another configurable `PATH` entry.
-/// TAIRiX has no `/usr/bin` (§16), so this is the analogue of a POSIX
-/// login's default `PATH`.
+/// The default search path exported to a session: the machine-wide installed
+/// application store (`/Apps`). The two system stores and the user's own two
+/// stores are the fixed, non-overridable prefix the resolution policy itself
+/// searches first (`lib/cmdres`), so they must never be repeated here — doing
+/// so would be redundant and would misleadingly imply they are just another
+/// configurable `PATH` entry. TAIRiX has no `/usr/bin`, so this is the analogue
+/// of a POSIX login's default `PATH`.
 pub const DEFAULT_PATH: &str = "/Apps";
 
 /// The default `TERM` exported to a session. The system text console
@@ -97,8 +96,8 @@ pub const DEFAULT_PATH: &str = "/Apps";
 /// starts assuming that terminal type.
 pub const DEFAULT_TERM: &str = "xterm-256color";
 
-/// The default `LANG` exported to a session: TAIRiX's default locale
-/// (`en-US`), the mandatory canonical help locale (§16.5).
+/// The default `LANG` exported to a session: TAIRiX's default locale (`en-US`),
+/// the mandatory canonical help locale.
 pub const DEFAULT_LANG: &str = "en-US";
 
 /// Build the environment login hands the session shell, as
@@ -147,14 +146,13 @@ pub const DESKTOP_SESSION_PATH: &str = "/System/Applications/desktop.app/Run";
 /// probe checks the same one, so the two can never name different bundles.
 pub const GREETER_SERVICE_PATH: &str = "/System/Services/greeter.app/Run";
 
-/// Absolute path of the sandboxed OS font service (`fontd`) `Run` binary —
-/// the service the graphical desktop draws text through (`FONT_ENDPOINT`,
-/// `plans/FONT-SERVICE.md`). login starts it (as the `fontd` service
-/// account) when launching a [`SessionKind::Graphical`] session, so text
-/// rendering is a single sandboxed OS resource that runs only when a
-/// graphical session needs it — never on a text-only or headless boot
-/// (`AGENTS.md` §17.3, §16.4). One OS-wide spelling, matching the bundle the
-/// image plants under `/System/Services`.
+/// Absolute path of the sandboxed OS font service (`fontd`) `Run` binary — the
+/// service the graphical desktop draws text through (`FONT_ENDPOINT`,
+/// `plans/FONT-SERVICE.md`). login starts it (as the `fontd` service account)
+/// when launching a [`SessionKind::Graphical`] session, so text rendering is a
+/// single sandboxed OS resource that runs only when a graphical session needs
+/// it — never on a text-only or headless boot. One OS-wide spelling, matching
+/// the bundle the image plants under `/System/Services`.
 pub const FONTD_SERVICE_PATH: &str = "/System/Services/fontd.app/Run";
 
 /// The program a session of `kind` runs for `user`: the authenticated
@@ -279,13 +277,13 @@ pub fn configured_session_kind(store: ConfigStore<'_>) -> SessionKind {
 /// The login this round runs, from the operator's one-boot Supervisor
 /// choice and the administrator's stored `os.loginType` default.
 ///
-/// The operator is at the machine and their `continue text` / `continue
-/// gui` is the more recent instruction, so it wins for this boot only;
-/// [`BootSession::Unset`] — a boot the operator never diverted — leaves
-/// the stored default in charge. Neither input can force a desktop onto a
-/// machine that cannot start one: the caller still intersects the result
-/// with what is available this round, which degrades to
-/// [`SessionKind::Text`] rather than erroring.
+/// The operator is at the machine and their `continue text` / `continue gui` is
+/// the more recent instruction, so it wins for this boot only;
+/// [`BootSession::Unset`] — a boot the operator never diverted — leaves the
+/// stored default in charge. Neither input can force a desktop onto a machine
+/// that cannot start one: the caller still intersects the result with what is
+/// available this round, which degrades to [`SessionKind::Text`] rather than
+/// erroring.
 ///
 /// One definition, so the binary and every test agree on the precedence.
 #[must_use]

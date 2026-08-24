@@ -3907,7 +3907,7 @@ fn health_baseline_survives_a_crash_during_its_update() {
 
 // ---------------------------------------------------------------------------
 // Stage 12: the fuzz / crash-replay / corruption-injection suites
-// (`docs/src/filesystem/arxfs-spec.md` §15.12, §16;).
+// (`docs/src/filesystem/arxfs-spec.md` §15.12, §16).
 //
 // These are the adversarial superset of the per-stage tests, built on the
 // same seams the earlier stages already provide: the
@@ -4389,8 +4389,8 @@ fn corruption_injection_both_copies_of_a_directory_block_are_reported_not_torn()
     // A directory block is metadata the mount-time free-space walk never reads,
     // so a both-copies-bad directory still mounts — but reading the directory
     // fails closed and scrub records it as unrepairable, never silently
-    // dropping or fabricating entries (`docs/src/filesystem/arxfs-spec.md`
-    // §8, §12;).
+    // dropping or fabricating entries (`docs/src/filesystem/arxfs-spec.md` §8,
+    // §12).
     let (baseline, t, _keep) = corruption_baseline();
     let mut bytes = baseline;
     wound_copy(&mut bytes, t.directory);
@@ -4452,11 +4452,11 @@ fn corruption_injection_both_copies_of_a_transient_record_recover_gracefully() {
 
 #[test]
 fn corruption_injection_data_block_faults_are_classified_not_repaired() {
-    // Data blocks are not mirrored (only metadata is). A wounded data block
-    // is therefore detected and classified by its `DataFault` layer, and scrub
+    // Data blocks are not mirrored (only metadata is). A wounded data block is
+    // therefore detected and classified by its `DataFault` layer, and scrub
     // records the fault rather than repairing it (deep data repair is out of
     // scope); the production read path fails closed
-    // (`docs/src/filesystem/arxfs-spec.md` §12;).
+    // (`docs/src/filesystem/arxfs-spec.md` §12).
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
     fs.create(root, b"f", NodeKind::RegularFile)
@@ -5156,8 +5156,8 @@ fn a_volume_smaller_than_the_device_mounts_and_leaves_the_tail_unused() {
 // ---------------------------------------------------------------------------
 // Scaling: a 100 TiB volume must format, mount, and serve on a tiny-RAM
 // machine. Every in-RAM structure scales with the working set, never with the
-// device block count (AGENTS.md §24.1, §26.6, §26.7: 100 TB+ volumes on a
-// machine with as little as 1 GiB of RAM).
+// device block count (100 TB+ volumes on a machine with as little as 1 GiB of
+// RAM).
 // ---------------------------------------------------------------------------
 
 #[test]

@@ -106,16 +106,15 @@ pub fn probe(head: &[u8]) -> Option<ProbedVolume> {
 /// (member block 0). This validates that record — magic, version, CRC-32C, and
 /// every bounds check the decoder enforces — through the one shared metadata
 /// definition, so the probe and the RAID composition driver can never disagree
-/// about what a member is (one definition, `AGENTS.md` §2.2).
+/// about what a member is (one definition).
 ///
 /// It is the discovery hook that lets a volume manager route a member to RAID
 /// assembly and, crucially, **refuse to mount it as a standalone filesystem**:
 /// a bare mirror copy holds a full filesystem at the array's data offset, so
 /// attaching one raw copy read-write would silently diverge the mirror's copies
-/// or serve stale data from a member that missed writes (`AGENTS.md` §26.5).
-/// A member is therefore recognised *before* the filesystem signatures are
-/// tried. Returns `None` for anything that is not a valid member — fail closed,
-/// never a guess (`AGENTS.md` §5.4).
+/// or serve stale data from a member that missed writes. A member is therefore
+/// recognised *before* the filesystem signatures are tried. Returns `None` for
+/// anything that is not a valid member — fail closed, never a guess.
 #[must_use]
 pub fn probe_raid_member(head: &[u8]) -> Option<[u8; 16]> {
     tairix_raidmeta::ArraySuperblock::decode(head)
@@ -446,9 +445,9 @@ mod tests {
         let uuid = [0x5A; 16];
         let head = raid_member_head(uuid);
         assert_eq!(probe_raid_member(&head), Some(uuid));
-        // A member is not a mountable filesystem: the filesystem probe must
-        // not claim it, so the volume manager routes it to assembly rather
-        // than mounting one bare copy read-write (`AGENTS.md` §26.5).
+        // A member is not a mountable filesystem: the filesystem probe must not
+        // claim it, so the volume manager routes it to assembly rather than
+        // mounting one bare copy read-write.
         assert_eq!(probe(&head), None);
     }
 
@@ -456,7 +455,7 @@ mod tests {
     fn probe_raid_member_fails_closed_on_non_members() {
         // Blank bytes, real filesystem heads, and a too-short buffer are all
         // rejected — a member is recognised only by a valid superblock, never
-        // guessed (`AGENTS.md` §5.4).
+        // guessed.
         assert_eq!(probe_raid_member(&[0u8; PROBE_HEAD_LEN]), None);
         assert_eq!(
             probe_raid_member(&fat32_boot(*b"SRLN", b"MYDISK     ")),

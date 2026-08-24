@@ -102,7 +102,7 @@ fn toggle_track_is_a_rounded_pill() {
     assert_eq!(surface.get(0, 0), Some(Color::TRANSPARENT.premultiply()));
 }
 
-// --- Toggle value: contact and thumb (§11.4) ---------------------------
+// --- Toggle value: contact and thumb (spec §11.4) --------------------
 
 #[test]
 fn toggle_on_shows_an_accent_contact_and_off_does_not() {
@@ -126,7 +126,7 @@ fn toggle_thumb_reads_on_the_accent_only_when_on() {
     assert!(has_pixel(&off, premul(theme.palette().on_surface_muted)));
 }
 
-// --- Checkbox value: filled square vs mixed bar (§11.5) ----------------
+// --- Checkbox value: filled square vs mixed bar (spec §11.5) ---------
 
 #[test]
 fn checked_checkbox_fills_a_square_mark() {
@@ -152,7 +152,7 @@ fn mixed_checkbox_draws_a_bar_not_a_full_square() {
     assert_ne!(mixed.get(mx + mw / 2, my), Some(accent));
 }
 
-// --- Radio value: centre bead (§11.5) ----------------------------------
+// --- Radio value: centre bead (spec §11.5) ---------------------------
 
 #[test]
 fn selected_radio_draws_a_centre_bead() {
@@ -175,7 +175,7 @@ fn theme_switch_repaints_the_rim() {
     assert_ne!(dark.get(0, H / 2), light.get(0, H / 2));
 }
 
-// --- §13 authority rendering -------------------------------------------
+// --- spec §13 authority rendering --------------------------------------
 
 #[test]
 fn denied_and_disabled_render_distinctly() {
@@ -219,7 +219,7 @@ fn pressure_paints_a_leading_rail() {
     assert!(has_pixel(&surface, premul(theme.palette().memory_pressure)));
 }
 
-// --- Pending heat seam (§11.4) -----------------------------------------
+// --- Pending heat seam (spec §11.4) ----------------------------------
 
 #[test]
 fn pending_toggle_shows_a_heat_seam() {

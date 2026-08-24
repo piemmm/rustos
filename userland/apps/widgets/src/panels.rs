@@ -4,8 +4,8 @@
 //! family, chosen to cover that family's variations — roles (neutral, primary,
 //! recommended, destructive), states (idle, disabled, denied-by-authority,
 //! invalid), and values — so the full behaviour of each control is visible in
-//! one place. Every widget is a shared [`tairix_controls`] control; this
-//! module only *composes* them (`AGENTS.md` §2.2).
+//! one place. Every widget is a shared [`tairix_controls`] control; this module
+//! only *composes* them.
 
 use alloc::vec;
 use alloc::vec::Vec;

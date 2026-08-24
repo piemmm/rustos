@@ -2678,9 +2678,9 @@ pub fn hw_tree_wait(last_generation: u64, timeout_ns: u64) -> i64 {
     ret as i64
 }
 
-/// Fill `buf` with cryptographically secure random bytes from the kernel
-/// random subsystem (`SyscallNumber::RANDOM_GET`, `AGENTS.md` §22),
-/// returning the number of bytes written.
+/// Fill `buf` with cryptographically secure random bytes from the kernel random
+/// subsystem (`SyscallNumber::RANDOM_GET`), returning the number of bytes
+/// written.
 ///
 /// The bytes are CSPRNG output, never raw entropy, and are drawn behind
 /// the single kernel random subsystem — no component rolls its own. With

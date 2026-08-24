@@ -6,12 +6,12 @@
 //! marked entry and whether that entry is directory-backed on disk, in listing
 //! order. It is the one model behind the Delete verb — the engine names *what*
 //! would be removed and *how many* items (so the app can confirm honestly, a
-//! `lib/controls` `Dialog` with truthful action warmth, §2.24); the app
-//! performs the capability-checked `fs_unlink` (with
+//! `lib/controls` `Dialog` with truthful action warmth); the app performs the
+//! capability-checked `fs_unlink` (with
 //! [`UnlinkFlags::DIRECTORY`](tairix_abi::UnlinkFlags::DIRECTORY) and a
 //! depth-bounded recursion for a directory-backed target) under the user's own
-//! identity in its own tail (§4, §5.4). Composing this model grants nothing, so
-//! the read-only picker never builds a delete plan.
+//! identity in its own tail. Composing this model grants nothing, so the
+//! read-only picker never builds a delete plan.
 //!
 //! Paths are root-first component lists — the same
 //! [`components`](crate::Browser::components) vocabulary the whole engine uses —
@@ -25,23 +25,24 @@
 //!
 //! # Carrying the plan out — [`DeleteWalk`]
 //!
-//! Where a [`DeletePlan`] names *what* would be removed, a [`DeleteWalk`] models
-//! *how* the removal is carried out: the depth-first traversal that removes a
-//! directory's contents before the directory itself. It is the delete-side
-//! analogue of the paste-side [`CopyCursor`](crate::execute::CopyCursor) — a
-//! pure, host-provable, driven cursor that touches no filesystem: the
-//! `files.app` `Run` binary reads each directory (`fs_readdir`) and unlinks each
-//! node (`fs_unlink`) with its own capability-checked syscalls under the user's
-//! own identity, feeding the results back to the walk (§4, §5.4). Composing the
-//! walk grants nothing, so the read-only picker never runs one.
+//! Where a [`DeletePlan`] names *what* would be removed, a [`DeleteWalk`]
+//! models *how* the removal is carried out: the depth-first traversal that
+//! removes a directory's contents before the directory itself. It is the
+//! delete-side analogue of the paste-side
+//! [`CopyCursor`](crate::execute::CopyCursor) — a pure, host-provable, driven
+//! cursor that touches no filesystem: the `files.app` `Run` binary reads each
+//! directory (`fs_readdir`) and unlinks each node (`fs_unlink`) with its own
+//! capability-checked syscalls under the user's own identity, feeding the
+//! results back to the walk. Composing the walk grants nothing, so the
+//! read-only picker never runs one.
 //!
 //! The walk keeps its own explicit stack rather than recursing on the call
 //! stack, so a deeply nested tree cannot overflow the kernel stack, and it is
 //! **bounded** ([`MAX_DELETE_DEPTH`]) and fail closed: a tree deeper than the
 //! bound is refused ([`DeleteError::TooDeep`]) rather than descended without
-//! limit (§26.6). It is **interruptible**: the app may stop between any two
-//! steps (a Cancel, or a preemption) and the walk holds exactly where it
-//! stopped — no unbounded buffer and no spin (§2.23).
+//! limit. It is **interruptible**: the app may stop between any two steps (a
+//! Cancel, or a preemption) and the walk holds exactly where it stopped — no
+//! unbounded buffer and no spin.
 //!
 //! This is the browser engine's *own* traversal over the root-first component
 //! paths it navigates, driven by an injected directory read — a different model
@@ -101,7 +102,7 @@ impl DeletePlan {
     ///
     /// Refusing an empty or root-naming plan here means the Delete verb is
     /// simply unavailable rather than a silent no-op or a catastrophic
-    /// whole-root removal (§5.4).
+    /// whole-root removal.
     #[must_use]
     pub fn new(targets: Vec<(Vec<String>, bool)>) -> Option<Self> {
         if targets.is_empty() || targets.iter().any(|(path, _)| path.is_empty()) {
@@ -121,7 +122,7 @@ impl DeletePlan {
     }
 
     /// The number of entries the plan would remove — the count an honest
-    /// confirmation reports (§2.24).
+    /// confirmation reports.
     #[must_use]
     pub fn len(&self) -> usize {
         self.targets.len()
@@ -137,7 +138,7 @@ impl DeletePlan {
 
     /// `true` when any target is directory-backed, so a confirmation can warn
     /// that folders (and their contents) will be removed recursively rather
-    /// than treating every deletion as a single file (§2.24).
+    /// than treating every deletion as a single file.
     #[must_use]
     pub fn has_directories(&self) -> bool {
         self.targets.iter().any(DeleteTarget::is_directory)
@@ -147,22 +148,21 @@ impl DeletePlan {
 /// The deepest directory nesting a single recursive removal will descend,
 /// counted in root-first path components.
 ///
-/// A fixed fail-closed *bound*, not a hardware-scaled capacity (§24.4): it caps
-/// how far a [`DeleteWalk`] recurses so a pathological or adversarial tree
-/// cannot make the traversal descend without limit (§26.6). A tree deeper than
-/// this is refused ([`DeleteError::TooDeep`]) rather than followed. It is the
-/// shared `MAX_WALK_DEPTH` value both the recursive removal and the recursive
-/// copy ([`CopyWalk`](crate::execute::CopyWalk)) obey, held in one place so the
-/// two walks' bounds cannot drift (§2.2).
+/// A fixed fail-closed *bound*, not a hardware-scaled capacity: it caps how far
+/// a [`DeleteWalk`] recurses so a pathological or adversarial tree cannot make
+/// the traversal descend without limit. A tree deeper than this is refused
+/// ([`DeleteError::TooDeep`]) rather than followed. It is the shared
+/// `MAX_WALK_DEPTH` value both the recursive removal and the recursive copy
+/// ([`CopyWalk`](crate::execute::CopyWalk)) obey, held in one place so the two
+/// walks' bounds cannot drift.
 pub const MAX_DELETE_DEPTH: usize = crate::MAX_WALK_DEPTH;
 
-/// Why a [`DeleteWalk`] cannot take the requested step — a fail-closed refusal
-/// (§5.4).
+/// Why a [`DeleteWalk`] cannot take the requested step — a fail-closed refusal.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum DeleteError {
     /// Expanding a directory would name a child deeper than
     /// [`MAX_DELETE_DEPTH`] components: refused rather than recursing without
-    /// bound (§26.6).
+    /// bound.
     TooDeep,
     /// The walk was driven against the wrong action — [`expand`](DeleteWalk::expand)
     /// on a leaf or an already-expanded directory, or
@@ -222,11 +222,11 @@ struct Frame {
 /// Built from a [`DeletePlan`], it drives the app through the removal one step
 /// at a time (see [`DeleteAction`]): it asks for a directory's listing before
 /// removing that directory, so contents are always removed before the directory
-/// that holds them. It does no I/O — the app performs each read and unlink — and
-/// it never recurses on the call stack (its own explicit stack cannot overflow),
-/// stays within [`MAX_DELETE_DEPTH`], and holds its exact position between steps
-/// so the app can cancel or be preempted without losing or repeating work
-/// (§2.23, §26.6).
+/// that holds them. It does no I/O — the app performs each read and unlink —
+/// and it never recurses on the call stack (its own explicit stack cannot
+/// overflow), stays within [`MAX_DELETE_DEPTH`], and holds its exact position
+/// between steps so the app can cancel or be preempted without losing or
+/// repeating work.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeleteWalk {
     stack: Vec<Frame>,
@@ -251,8 +251,8 @@ impl DeleteWalk {
     }
 
     /// The number of nodes removed so far — the honest figure a progress
-    /// indicator reports (§2.24). The total is not known in advance (it depends
-    /// on the tree the reads reveal), so progress is a rising count, never a
+    /// indicator reports. The total is not known in advance (it depends on the
+    /// tree the reads reveal), so progress is a rising count, never a
     /// fabricated percentage.
     #[must_use]
     pub const fn removed(&self) -> usize {

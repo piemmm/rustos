@@ -462,10 +462,10 @@ const MIN_MESSAGE_LEN: usize = 300;
 /// padding. A caller sizes its transmit buffer with this constant.
 pub const MAX_MESSAGE_LEN: usize = MIN_MESSAGE_LEN;
 
-/// A fully-specified client→server DHCP message, ready for
-/// [`write_message`]. The state machine produces one of these per
-/// transmission; the encoder is the single definition of the wire form
-/// (§2.2) that DISCOVER / REQUEST / DECLINE / RELEASE all share.
+/// A fully-specified client→server DHCP message, ready for [`write_message`].
+/// The state machine produces one of these per transmission; the encoder is the
+/// single definition of the wire form that DISCOVER / REQUEST / DECLINE /
+/// RELEASE all share.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MessageSpec {
     /// The message type (option 53).

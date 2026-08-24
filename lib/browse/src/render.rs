@@ -10,16 +10,15 @@
 //! compositor applies any corner radius through its single anti-aliased
 //! rounded-corner path. There is no rounding here.
 //!
-//! The top row is the command toolbar; below it the
-//! current directory is drawn in whichever [`ViewMode`] the browser holds — a
-//! column of full-width [`TableRow`]s (list) or a wrapped grid of
-//! [`IconTile`]s (grid) — over the one shared selection state, with a drawn
-//! [`ScrollBar`] in a reserved right-edge gutter. Painting through the same
-//! collection controls the trusted picker uses keeps the two views one coherent
-//! themed surface (§2.2). The visible window, each item's rectangle, the scroll
-//! offset, and the scrollbar geometry all come from the one shared
-//! [`ViewLayout`], so the pointer hit-test ([`entry_index_at`]) and the paint
-//! can never disagree.
+//! The top row is the command toolbar; below it the current directory is drawn
+//! in whichever [`ViewMode`] the browser holds — a column of full-width
+//! [`TableRow`]s (list) or a wrapped grid of [`IconTile`]s (grid) — over the
+//! one shared selection state, with a drawn [`ScrollBar`] in a reserved
+//! right-edge gutter. Painting through the same collection controls the trusted
+//! picker uses keeps the two views one coherent themed surface. The visible
+//! window, each item's rectangle, the scroll offset, and the scrollbar geometry
+//! all come from the one shared [`ViewLayout`], so the pointer hit-test
+//! ([`entry_index_at`]) and the paint can never disagree.
 //!
 //! Every length saturates and every blit clips, so a degenerate viewport paints
 //! nothing rather than panicking. The grid additionally confines its paint to
@@ -80,7 +79,7 @@ const ROW_PADDING: u32 = 2;
 /// [`TableRow::render`] scales these proportionally into the actual content
 /// width, so they act as weights independent of the window size: the name
 /// column dominates, with narrower size and date columns beside it. Defining
-/// them once here keeps the column layout a single definition (§2.2).
+/// them once here keeps the column layout a single definition.
 const COLUMNS: [u32; 3] = [240, 96, 128];
 
 /// Paint `browser`'s current directory into a [`Surface`] the size of
@@ -571,7 +570,7 @@ fn draw_scrollbar<S: DirectorySource>(
 /// `None` when the window is too narrow for a gutter or too short for any item
 /// area. This is the exact geometry the drawn scrollbar paints into (and that
 /// [`scroll_pointer`] hit-tests against), so a pointer hit-test and the drawn
-/// bar can never disagree (§2.2).
+/// bar can never disagree.
 #[must_use]
 pub fn scrollbar_bounds(scale: Scale, theme: &Theme, viewport: Rect) -> Option<Rect> {
     let gutter = gutter_width(scale, theme, viewport.width);
@@ -990,7 +989,7 @@ fn grid_view<S: DirectorySource>(
 /// The scroll model the drawn [`ScrollBar`] and the wheel share: the active
 /// view's clamped [`ScrollRange`], stepping one line at a time and one visible
 /// page per page gesture. `theme` supplies the scrollbar gutter width so the
-/// model measures the same content viewport the renderer draws (§2.2).
+/// model measures the same content viewport the renderer draws.
 #[must_use]
 pub fn scroll_model<S: DirectorySource>(
     browser: &Browser<S>,
@@ -1069,9 +1068,9 @@ pub fn entry_index_at<S: DirectorySource>(
 ///
 /// This is [`render`]'s own layout for the selected entry, through the shared
 /// [`ViewLayout`], so an overlay drawn there — the in-place rename editor —
-/// sits exactly over the item the renderer painted (§2.2). A caller reveals
-/// the selection first (via [`reveal_selection`]) if it needs the rect to be
-/// on screen.
+/// sits exactly over the item the renderer painted. A caller reveals the
+/// selection first (via [`reveal_selection`]) if it needs the rect to be on
+/// screen.
 #[must_use]
 pub fn selection_rect<S: DirectorySource>(
     browser: &Browser<S>,
@@ -1126,7 +1125,7 @@ pub const PROPERTY_ROW_COUNT: usize = 8;
 
 /// The Properties overlay field labels, in display order. One definition so
 /// [`properties_rows`] and the inline permission-toggle placement agree on the
-/// label column width and which row is the permissions row (§2.2).
+/// label column width and which row is the permissions row.
 const PROPERTY_LABELS: [&str; PROPERTY_ROW_COUNT] = [
     "Kind",
     "Size",
@@ -1143,10 +1142,10 @@ const PROPERTY_LABELS: [&str; PROPERTY_ROW_COUNT] = [
 /// octal), owner, and the four timestamps.
 ///
 /// One definition so the drawn panel and its tests agree on exactly which
-/// fields appear and how each reads (§2.2). Every value comes straight from
-/// the [`Properties`] model — itself taken straight from `fs_stat` — so a
-/// timestamp the backing does not keep renders blank rather than a fabricated
-/// wall time, and no field is invented.
+/// fields appear and how each reads. Every value comes straight from the
+/// [`Properties`] model — itself taken straight from `fs_stat` — so a timestamp
+/// the backing does not keep renders blank rather than a fabricated wall time,
+/// and no field is invented.
 #[must_use]
 pub fn properties_rows(props: &Properties) -> Vec<(&'static str, String)> {
     let mut size = props.size_display();
@@ -1186,7 +1185,7 @@ const PERMISSION_GRID_ROWS: usize = 5;
 /// yields a drawable — if clipped — panel rather than a panic.
 ///
 /// One definition so the read-only and editable popups differ only in how many
-/// rows they reserve, never in how the panel is placed or clamped (§2.2).
+/// rows they reserve, never in how the panel is placed or clamped.
 fn properties_panel_rect_for(
     viewport: Rect,
     scale: Scale,
@@ -1247,10 +1246,9 @@ pub fn properties_editable_panel_rect(viewport: Rect, scale: Scale, theme: &Them
     )
 }
 
-/// The shared column geometry of the Properties overlay content area: the
-/// label column x, the value column x, and the per-row pitch. One definition
-/// so the drawn fields and the inline permission toggles line up exactly
-/// (§2.2).
+/// The shared column geometry of the Properties overlay content area: the label
+/// column x, the value column x, and the per-row pitch. One definition so the
+/// drawn fields and the inline permission toggles line up exactly.
 struct FieldLayout {
     /// Left x of the label column.
     left: i32,
@@ -1281,7 +1279,7 @@ impl FieldLayout {
 
 /// Draw the [`properties_rows`] metadata fields as muted-label / solid-value
 /// rows within `content`, clipping at the content's bottom edge. Shared by the
-/// read-only and editable overlays so the fields read identically (§2.2).
+/// read-only and editable overlays so the fields read identically.
 fn draw_property_fields(
     surface: &mut Surface,
     props: &Properties,
@@ -1317,12 +1315,11 @@ fn draw_property_fields(
 /// solid-value rows in the panel's content area.
 ///
 /// The read-only and editable popups share this so the metadata reads
-/// identically and the panel is placed identically (§2.2); the editable popup
-/// then draws the permissions grid over the room its taller `bounds` reserve.
-/// Every blit clips, so a window too small for the whole panel simply shows
-/// what fits rather than panicking. It reads only the already-authorised
-/// [`Properties`] and draws — it performs no I/O and holds no authority
-/// (§4, §5.4).
+/// identically and the panel is placed identically; the editable popup then
+/// draws the permissions grid over the room its taller `bounds` reserve. Every
+/// blit clips, so a window too small for the whole panel simply shows what fits
+/// rather than panicking. It reads only the already-authorised [`Properties`]
+/// and draws — it performs no I/O and holds no authority.
 fn draw_properties_at(
     surface: &mut Surface,
     props: &Properties,
@@ -1343,7 +1340,7 @@ fn draw_properties_at(
 ///
 /// The trusted read-only picker draws this. It reads only the already-
 /// authorised [`Properties`] and draws — it performs no I/O and holds no
-/// authority (§4, §5.4).
+/// authority.
 pub fn draw_properties(
     surface: &mut Surface,
     props: &Properties,
@@ -1362,11 +1359,11 @@ pub fn draw_properties(
     );
 }
 
-/// The nine settable owner/group/other × read/write/execute permission bits,
-/// in the left-to-right order the inline permission control lays them out (the
+/// The nine settable owner/group/other × read/write/execute permission bits, in
+/// the left-to-right order the inline permission control lays them out (the
 /// owner triad, then group, then other) — the same order as the symbolic
 /// `rwxrwxrwx` spelling they sit over, so the drawn toggles and their hit-test
-/// share one definition of which cell carries which bit (§2.2).
+/// share one definition of which cell carries which bit.
 ///
 /// Only these nine `rwx` bits are offered as toggles — the familiar, legible
 /// permission set. The setuid/setgid/sticky bits stay visible in the
@@ -1381,9 +1378,8 @@ pub const PERMISSION_BITS: [u32; 9] = [
 ];
 
 /// Which of the nine [`PERMISSION_BITS`] `mode` currently sets, in the same
-/// left-to-right order — the one definition the drawn toggles' states and
-/// their tests read, so a toggle can never disagree with the mode it depicts
-/// (§2.2).
+/// left-to-right order — the one definition the drawn toggles' states and their
+/// tests read, so a toggle can never disagree with the mode it depicts.
 #[must_use]
 pub const fn permission_cells(mode: u32) -> [bool; 9] {
     let mut cells = [false; 9];
@@ -1411,7 +1407,7 @@ const PERMISSION_ROW_LABELS: [&str; 3] = ["Owner", "Group", "Other"];
 /// One definition so the painted grid, its headers and row labels, and the
 /// click hit-test all agree on where every cell sits — the checkboxes are laid
 /// out on a real grid pitch (never crammed one glyph apart), so they no longer
-/// overlap and each column and row reads under its own label (§2.2).
+/// overlap and each column and row reads under its own label.
 struct PermGrid {
     /// Left x of the row-label column (Owner / Group / Other).
     label_x: i32,
@@ -1454,7 +1450,7 @@ impl PermGrid {
 /// The editable Properties popup's permissions-grid geometry, or `None` when
 /// the grid does not fit the panel's content (a window too small) — so the
 /// painter and the hit-test both fail closed there rather than placing cells
-/// off the panel (§2.2, §5.4).
+/// off the panel.
 fn perm_grid(viewport: Rect, scale: Scale, theme: &Theme, font: BitmapFont) -> Option<PermGrid> {
     let bounds = properties_editable_panel_rect(viewport, scale, theme);
     let content = Panel::new(String::new()).content_rect(bounds, scale, theme)?;
@@ -1503,9 +1499,9 @@ fn perm_grid(viewport: Rect, scale: Scale, theme: &Theme, font: BitmapFont) -> O
 }
 
 /// The nine clickable permission-toggle rects, in [`PERMISSION_BITS`] order,
-/// laid out on the labelled permissions grid. `None` when the grid does not
-/// fit the panel's content (a window too small), so the painter and the
-/// hit-test both fail closed there (§2.2, §5.4).
+/// laid out on the labelled permissions grid. `None` when the grid does not fit
+/// the panel's content (a window too small), so the painter and the hit-test
+/// both fail closed there.
 pub(crate) fn permission_toggle_cells(
     viewport: Rect,
     scale: Scale,
@@ -1522,15 +1518,15 @@ pub(crate) fn permission_toggle_cells(
 /// the current mode. The grid replaces the old cramped single-row layout, so
 /// the toggles never overlap and each reads under its own label.
 ///
-/// Only the write-capable file manager calls this; the trusted read-only
-/// picker calls [`draw_properties`] and never draws or resolves a permission
-/// toggle (the editable surface is separated by call site, not a runtime flag
-/// — the manager-only write-tool precedent). Every blit clips, so a window too
-/// small simply shows what fits rather than panicking. It reads only the
+/// Only the write-capable file manager calls this; the trusted read-only picker
+/// calls [`draw_properties`] and never draws or resolves a permission toggle
+/// (the editable surface is separated by call site, not a runtime flag — the
+/// manager-only write-tool precedent). Every blit clips, so a window too small
+/// simply shows what fits rather than panicking. It reads only the
 /// already-authorised [`Properties`] and draws — the commit happens in the
 /// caller's own capability-checked
 /// [`Browser::set_mode_selected`](crate::Browser::set_mode_selected) tail, so
-/// this holds no authority (§4, §5.4).
+/// this holds no authority.
 pub fn draw_properties_editable(
     surface: &mut Surface,
     props: &Properties,
@@ -1599,12 +1595,11 @@ pub fn draw_properties_editable(
 /// window-local pixel `point`, or `None` when the click is not on a toggle.
 ///
 /// This mirrors [`draw_properties_editable`]'s placement through the shared
-/// `permission_toggle_cells` geometry, so a click toggles exactly the bit
-/// the user pressed (§2.2). Only the file manager calls it — the caller flips
-/// the returned bit in the current mode and commits through its own
-/// capability-checked
+/// `permission_toggle_cells` geometry, so a click toggles exactly the bit the
+/// user pressed. Only the file manager calls it — the caller flips the returned
+/// bit in the current mode and commits through its own capability-checked
 /// [`Browser::set_mode_selected`](crate::Browser::set_mode_selected). A click
-/// anywhere but a toggle returns `None`, changing nothing (fail closed, §5.4).
+/// anywhere but a toggle returns `None`, changing nothing (fail closed).
 #[must_use]
 pub fn permission_cell_at(
     viewport: Rect,
@@ -1655,7 +1650,7 @@ struct OwnerRowGeom {
 
 /// The owner row's geometry, or `None` when the owner row does not fit the
 /// panel's content (a window too small) — so the painter and the hit-test both
-/// fail closed there rather than placing a control off the row (§2.2, §5.4).
+/// fail closed there rather than placing a control off the row.
 ///
 /// The cells are measured from the same `uid N / gid N` spelling
 /// [`properties_rows`] draws, so a click lands exactly on the number it edits.
@@ -1702,10 +1697,10 @@ fn owner_row_geom(
 /// window-local pixel `point`, or `None` when the click is not on a value.
 ///
 /// This mirrors [`draw_owner_control`]'s placement through the shared
-/// `owner_row_geom`, so a click begins editing exactly the id the user pressed
-/// (§2.2). Only the file manager — and only where the user holds
-/// `CAP_FS_CHOWN` — calls it; a click anywhere but a value returns `None`,
-/// changing nothing (fail closed, §5.4).
+/// `owner_row_geom`, so a click begins editing exactly the id the user pressed.
+/// Only the file manager — and only where the user holds `CAP_FS_CHOWN` — calls
+/// it; a click anywhere but a value returns `None`, changing nothing (fail
+/// closed).
 #[must_use]
 pub fn owner_field_at(
     props: &Properties,
@@ -1781,13 +1776,13 @@ pub fn owner_editor_rect(
 /// `CAP_FS_CHOWN`, calls this: reassigning an owner is a privileged operation
 /// (unlike renaming or a mode change), so the control is offered only where it
 /// can be used, and a session without the capability is never shown a control
-/// it cannot use (§2.24). The trusted read-only picker never calls it (the
-/// write surface is separated by call site, the manager-only write-tool
-/// precedent). Every blit clips, so a window too small simply shows what fits
-/// rather than panicking. It reads only the already-authorised [`Properties`]
-/// and draws — the commit happens in the caller's own capability-checked
+/// it cannot use. The trusted read-only picker never calls it (the write
+/// surface is separated by call site, the manager-only write-tool precedent).
+/// Every blit clips, so a window too small simply shows what fits rather than
+/// panicking. It reads only the already-authorised [`Properties`] and draws —
+/// the commit happens in the caller's own capability-checked
 /// [`Browser::set_owner_selected`](crate::Browser::set_owner_selected) tail
-/// over `fs_set_owner`, so this holds no authority (§4, §5.4).
+/// over `fs_set_owner`, so this holds no authority.
 pub fn draw_owner_control(
     surface: &mut Surface,
     props: &Properties,
@@ -1836,8 +1831,8 @@ pub const DELETE_CONFIRM_INDEX: usize = 0;
 pub const DELETE_CANCEL_INDEX: usize = 1;
 
 /// Build the modal delete-confirmation [`Dialog`] for `plan`, worded honestly
-/// for the `disposition` the caller will actually carry out (§2.24): a
-/// recoverable **Move to Trash** or an irreversible **Delete Permanently**.
+/// for the `disposition` the caller will actually carry out: a recoverable
+/// **Move to Trash** or an irreversible **Delete Permanently**.
 ///
 /// The [`DeleteTarget`](crate::DeleteTarget) count and
 /// [`has_directories`](DeletePlan::has_directories) come straight from the
@@ -1926,9 +1921,9 @@ fn build_permanent_delete_dialog(plan: &DeletePlan) -> Dialog {
 ///
 /// Sized to comfortably show the title, the warning message, and the action
 /// button band, and clamped to the window so a small window still yields a
-/// drawable — if clipped — dialog rather than a panic (§2.9). One definition so
+/// drawable — if clipped — dialog rather than a panic. One definition so
 /// [`draw_delete_dialog`] and [`delete_dialog_action_at`] place and hit-test
-/// the same rectangle (§2.2).
+/// the same rectangle.
 #[must_use]
 pub fn delete_dialog_rect(viewport: Rect, scale: Scale, theme: &Theme) -> Rect {
     // Title bar, up to two message lines, and the action-button band, with
@@ -1939,10 +1934,10 @@ pub fn delete_dialog_rect(viewport: Rect, scale: Scale, theme: &Theme) -> Rect {
 /// A centered, clamped modal-overlay rectangle within `viewport`, sized to a
 /// title bar plus `content_lines` text rows and four-fifths of the window
 /// width, clamped so a small window still yields a drawable — if clipped —
-/// rectangle rather than a panic (§2.9).
+/// rectangle rather than a panic.
 ///
 /// The one sizing definition the delete-confirmation dialog and the progress
-/// panel share, so their placement stays consistent and cannot drift (§2.2).
+/// panel share, so their placement stays consistent and cannot drift.
 fn centered_overlay_rect(viewport: Rect, scale: Scale, theme: &Theme, content_lines: u32) -> Rect {
     let line = row_height(scale, theme);
     let title = scale.scale_length(theme.metrics().title_bar_height).max(1);
@@ -1970,7 +1965,7 @@ fn centered_overlay_rect(viewport: Rect, scale: Scale, theme: &Theme, content_li
 ///
 /// Every blit clips, so a window too small for the whole dialog simply shows
 /// what fits rather than panicking. It reads only the passed-in dialog and
-/// draws — it performs no I/O and holds no authority (§4, §5.4).
+/// draws — it performs no I/O and holds no authority.
 pub fn draw_delete_dialog(
     surface: &mut Surface,
     dialog: &Dialog,
@@ -1988,10 +1983,9 @@ pub fn draw_delete_dialog(
 /// This mirrors [`draw_delete_dialog`]'s placement through the shared
 /// [`delete_dialog_rect`] and the dialog's own
 /// [`action_rects`](Dialog::action_rects) geometry, so a click resolves to
-/// exactly the button the user pressed (§2.2) — [`DELETE_CONFIRM_INDEX`] for
-/// Delete, [`DELETE_CANCEL_INDEX`] for Cancel. Only the file manager calls it;
-/// a click anywhere but a button returns `None`, changing nothing (fail
-/// closed, §5.4).
+/// exactly the button the user pressed — [`DELETE_CONFIRM_INDEX`] for Delete,
+/// [`DELETE_CANCEL_INDEX`] for Cancel. Only the file manager calls it; a click
+/// anywhere but a button returns `None`, changing nothing (fail closed).
 #[must_use]
 pub fn delete_dialog_action_at(
     dialog: &Dialog,
@@ -2019,8 +2013,8 @@ pub fn delete_dialog_action_at(
 /// `viewport`.
 ///
 /// One definition so [`draw_progress_dialog`] and [`progress_cancel_at`] place
-/// and hit-test the same rectangle (§2.2), sized like the delete-confirmation
-/// dialog so the two modal surfaces sit consistently.
+/// and hit-test the same rectangle, sized like the delete-confirmation dialog
+/// so the two modal surfaces sit consistently.
 #[must_use]
 pub fn progress_dialog_rect(viewport: Rect, scale: Scale, theme: &Theme) -> Rect {
     centered_overlay_rect(viewport, scale, theme, 6)
@@ -2030,7 +2024,7 @@ pub fn progress_dialog_rect(viewport: Rect, scale: Scale, theme: &Theme) -> Rect
 /// bottom-right, sized to the "Cancel" label plus padding, clamped to the
 /// content so a small window never places it off the panel. The one definition
 /// [`draw_progress_dialog`] paints and [`progress_cancel_at`] hit-tests, so a
-/// click resolves to exactly the drawn button (§2.2).
+/// click resolves to exactly the drawn button.
 fn progress_cancel_rect(content: Rect, scale: Scale, theme: &Theme, font: BitmapFont) -> Rect {
     let pad = font.text_width("  ").max(scale.scale_length(LABEL_PADDING));
     let width = font
@@ -2052,9 +2046,9 @@ fn progress_cancel_rect(content: Rect, scale: Scale, theme: &Theme, font: Bitmap
 ///
 /// The total is unknown until the driving walk's reads reveal it, so the trace
 /// is [`ActivityState::Working`] (a bounded moving segment) rather than a
-/// fabricated percentage (§2.24). Its moving-segment phase is derived from the
-/// count, so the bar advances on real job-progress events, never an idle
-/// animation loop (§2.23).
+/// fabricated percentage. Its moving-segment phase is derived from the count,
+/// so the bar advances on real job-progress events, never an idle animation
+/// loop.
 #[must_use]
 pub fn build_progress(model: &ProgressModel) -> Progress {
     let mut progress = Progress::new().with_label(model.status_line());
@@ -2086,10 +2080,10 @@ pub fn build_progress_cancel(model: &ProgressModel) -> Button {
 /// trace captioned with the honest running count, and a Cancel button.
 ///
 /// Every blit clips, so a window too small for the whole panel simply shows
-/// what fits rather than panicking (§2.9). It reads only the passed-in model
-/// and draws — it performs no I/O and holds no authority (§4, §5.4). Only the
-/// write-capable file manager drives a long operation, so only it draws this;
-/// the read-only picker never does.
+/// what fits rather than panicking. It reads only the passed-in model and draws
+/// — it performs no I/O and holds no authority. Only the write-capable file
+/// manager drives a long operation, so only it draws this; the read-only picker
+/// never does.
 pub fn draw_progress_dialog(
     surface: &mut Surface,
     model: &ProgressModel,
@@ -2120,10 +2114,9 @@ pub fn draw_progress_dialog(
 ///
 /// Mirrors [`draw_progress_dialog`]'s placement through the shared
 /// [`progress_dialog_rect`] and the same private cancel-button rectangle it
-/// paints, so a click resolves to exactly the drawn button (§2.2). A click
-/// anywhere but the button — or on
-/// a panel too small to place it — returns `false`, changing nothing (fail
-/// closed, §5.4).
+/// paints, so a click resolves to exactly the drawn button. A click anywhere
+/// but the button — or on a panel too small to place it — returns `false`,
+/// changing nothing (fail closed).
 #[must_use]
 pub fn progress_cancel_at(viewport: Rect, scale: Scale, theme: &Theme, point: Point) -> bool {
     let bounds = progress_dialog_rect(viewport, scale, theme);
@@ -2188,7 +2181,7 @@ pub fn context_menu_rect(
 ///
 /// Every blit clips, so an anchor near an edge simply shows the shifted,
 /// possibly-clipped menu rather than panicking. It reads only the passed-in
-/// menu and draws — no I/O, no authority (§4, §5.4).
+/// menu and draws — no I/O, no authority.
 pub fn draw_context_menu(
     surface: &mut Surface,
     menu: &Menu,
@@ -2204,13 +2197,13 @@ pub fn draw_context_menu(
 /// The enabled [`ContextCommand`] the context `menu` (opened at `anchor`) draws
 /// at window-local pixel `point`, or `None` when the click is not on an
 /// actionable row — off the menu, or on a command rendered disabled (fail
-/// closed: a disabled row never acts, §5.4).
+/// closed: a disabled row never acts).
 ///
 /// This mirrors [`draw_context_menu`]'s placement through the shared
 /// [`context_menu_rect`] and the menu's own [`Menu::row_at`] geometry, so a
-/// click resolves to exactly the row the user pressed (§2.2). The menu is built
-/// from [`chrome::CONTEXT_COMMANDS`] in order, so the row index maps straight
-/// back to its command.
+/// click resolves to exactly the row the user pressed. The menu is built from
+/// [`chrome::CONTEXT_COMMANDS`] in order, so the row index maps straight back
+/// to its command.
 #[must_use]
 pub fn context_menu_command_at(
     menu: &Menu,
@@ -2231,7 +2224,7 @@ pub fn context_menu_command_at(
 /// and the menu's own [`Menu::row_rect`] geometry, so a caller that must aim
 /// *at* a command — the desktop integration harness that clicks Delete — reads
 /// the exact rectangle [`draw_context_menu`] paints and
-/// [`context_menu_command_at`] hit-tests, never a hand-copied position (§2.2).
+/// [`context_menu_command_at`] hit-tests, never a hand-copied position.
 #[must_use]
 pub fn context_menu_command_rect(
     menu: &Menu,
@@ -2250,12 +2243,12 @@ pub fn context_menu_command_rect(
 
 /// The index of the enabled row of `menu` (anchored at `anchor`) that
 /// window-local pixel `point` lands on, or `None` when the click is off the
-/// menu or on a disabled row (fail closed, §5.4).
+/// menu or on a disabled row (fail closed).
 ///
 /// The one placement + row geometry the drawn menus resolve a click through:
 /// both the right-click [`context_menu_command_at`] and the "Open With…"
 /// chooser [`open_with_index_at`] map a press to a row this way, so a menu's
-/// paint and its hit-test can never disagree (§2.2).
+/// paint and its hit-test can never disagree.
 fn menu_enabled_row_at(
     menu: &Menu,
     anchor: Point,
@@ -2280,10 +2273,10 @@ fn menu_enabled_row_at(
 /// The rows carry no keyboard shortcut (a chosen application is picked by
 /// pointer) and are all actionable, since each is a genuine candidate. The
 /// caller only opens this chooser when `apps` is non-empty — no application is
-/// an honest "no application" answer stated elsewhere, never an empty menu
-/// (§2.24). The menu performs nothing itself: launching the chosen bundle is
-/// the file manager's own capability-checked hand-off, so composing it grants
-/// no authority (the read-only picker never opens it).
+/// an honest "no application" answer stated elsewhere, never an empty menu. The
+/// menu performs nothing itself: launching the chosen bundle is the file
+/// manager's own capability-checked hand-off, so composing it grants no
+/// authority (the read-only picker never opens it).
 #[must_use]
 pub fn build_open_with_menu(apps: &[&AppAssociation]) -> Menu {
     let items: Vec<MenuItem> = apps.iter().map(|app| MenuItem::new(app.name())).collect();
@@ -2292,12 +2285,12 @@ pub fn build_open_with_menu(apps: &[&AppAssociation]) -> Menu {
 
 /// The index into the "Open With…" chooser's application list that the drawn
 /// `menu` (opened at `anchor`) resolves window-local pixel `point` to, or
-/// `None` when the click is off the menu (fail closed, §5.4).
+/// `None` when the click is off the menu (fail closed).
 ///
 /// [`build_open_with_menu`] builds the menu from the candidate list in order,
 /// so the returned index maps straight back to that application. It shares the
 /// placement and row geometry the right-click menu uses
-/// ([`context_menu_command_at`]), so paint and click agree (§2.2).
+/// ([`context_menu_command_at`]), so paint and click agree.
 #[must_use]
 pub fn open_with_index_at(
     menu: &Menu,

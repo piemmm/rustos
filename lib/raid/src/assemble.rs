@@ -1,22 +1,21 @@
 //! The shared **reassembly → member** bridge: turn a reassembled slot table
 //! ([`ArrayIdentity::fill_slots`](crate::ArrayIdentity::fill_slots)) into a
 //! redundant RAID engine's member buffer, in one place every consumer reuses
-//! (`AGENTS.md` §2.2, `plans/FIX-IO.md` IO6).
+//! (`plans/FIX-IO.md` IO6).
 //!
-//! The metadata layer resolves a discovered array to a [`SlotDisposition`]
-//! per slot (present-and-current, present-but-stale, or missing); the
-//! composition engines each consume a caller-owned member buffer
-//! ([`MirrorMember`] / [`ParityMember`] / [`DualParityMember`] /
-//! [`TripleParityMember`], and [`MirrorMember`] again for RAID10). Nothing
-//! else bridges the two, so every consumer that assembles a *discovered*
-//! array — the autoloaded serve process and the ARXFS-native multi-device
-//! composition alike (`plans/FIX-IO.md` IO6 remaining) — would otherwise
-//! hand-roll the same placement loop, and a subtle slip (admitting a slot the
-//! generation counter proved stale as a trusted read source, or losing a
-//! device when the buffer width and the slot table disagree) is a
-//! data-integrity fault, not a cosmetic one (`AGENTS.md` §5.4, §26.5 "a disk
-//! that missed writes is a disk that can lie"). Centralising the placement
-//! here makes that mapping impossible to get subtly wrong twice.
+//! The metadata layer resolves a discovered array to a [`SlotDisposition`] per
+//! slot (present-and-current, present-but-stale, or missing); the composition
+//! engines each consume a caller-owned member buffer ([`MirrorMember`] /
+//! [`ParityMember`] / [`DualParityMember`] / [`TripleParityMember`], and
+//! [`MirrorMember`] again for RAID10). Nothing else bridges the two, so every
+//! consumer that assembles a *discovered* array — the autoloaded serve process
+//! and the ARXFS-native multi-device composition alike (`plans/FIX-IO.md` IO6
+//! remaining) — would otherwise hand-roll the same placement loop, and a subtle
+//! slip (admitting a slot the generation counter proved stale as a trusted read
+//! source, or losing a device when the buffer width and the slot table
+//! disagree) is a data-integrity fault, not a cosmetic one ("a disk that missed
+//! writes is a disk that can lie"). Centralising the placement here makes that
+//! mapping impossible to get subtly wrong twice.
 //!
 //! The bridge is defined only over the **redundant** levels, whose members
 //! carry the current/stale/absent vocabulary. A RAID0 stripe is deliberately
@@ -42,9 +41,8 @@ use tairix_abi::raid::SlotDisposition;
 /// current/stale/absent vocabulary ([`MirrorMember`] — shared by the RAID1
 /// mirror and the RAID10 stripe of mirrors, [`ParityMember`],
 /// [`DualParityMember`], and [`TripleParityMember`]). It is a thin, uniform
-/// façade over each type's existing `with_role` / `absent` constructors so
-/// the placement loop in [`fill_members`] is written once, not once per level
-/// (`AGENTS.md` §2.2).
+/// façade over each type's existing `with_role` / `absent` constructors so the
+/// placement loop in [`fill_members`] is written once, not once per level.
 pub trait AssembleMember<B: Block>: Sized {
     /// Build a member backed by `device`, joining the array with `role`
     /// ([`MemberRole::Current`] for an in-sync copy, [`MemberRole::Stale`] for
@@ -134,12 +132,13 @@ pub enum AssembleError {
 /// Each slot is placed through the single role authority
 /// [`MemberRole::for_slot`], so a slot the generation counter proved stale
 /// (`in_sync == false`) becomes a [`MemberRole::Stale`] member — a rebuild
-/// target the engine admits [`Resyncing`](tairix_abi::raid::MemberState::Resyncing), never
-/// an immediate read source — and the composition layer can never disagree
-/// with the metadata layer on what "in sync" means (`AGENTS.md` §2.2, §5.4,
-/// §26.5). A missing slot becomes an [`AssembleMember::make_absent`] member so
-/// the array knows its true width and reports the reduced redundancy rather
-/// than masquerading as a smaller, optimal array.
+/// target the engine admits
+/// [`Resyncing`](tairix_abi::raid::MemberState::Resyncing), never an immediate
+/// read source — and the composition layer can never disagree with the metadata
+/// layer on what "in sync" means. A missing slot becomes an
+/// [`AssembleMember::make_absent`] member so the array knows its true width and
+/// reports the reduced redundancy rather than masquerading as a smaller,
+/// optimal array.
 ///
 /// The engine's own `assemble` still re-derives each present member's real
 /// state from a live geometry probe, so a device that is absent or unwell at

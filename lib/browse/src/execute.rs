@@ -4,11 +4,11 @@
 //! Where [`clipboard`](crate::clipboard) decides *what* moves where (a
 //! [`PastePlan`](crate::clipboard::PastePlan) of source→dest items), this
 //! module decides *how* each item is executed and *how a byte-for-byte copy is
-//! streamed* — both as pure, host-provable models that touch no filesystem.
-//! The `files.app` `Run` binary performs the actual `fs_rename` /
-//! `fs_read`→`fs_write` / `fs_unlink` under the user's own identity in its
-//! own capability-checked tail (§4, §5.4); the engine only names the plan, so
-//! composing it grants nothing and the read-only picker never runs it.
+//! streamed* — both as pure, host-provable models that touch no filesystem. The
+//! `files.app` `Run` binary performs the actual `fs_rename` /
+//! `fs_read`→`fs_write` / `fs_unlink` under the user's own identity in its own
+//! capability-checked tail; the engine only names the plan, so composing it
+//! grants nothing and the read-only picker never runs it.
 //!
 //! # Move vs. copy
 //!
@@ -16,33 +16,32 @@
 //! cannot rename and must copy-then-delete, exactly as `mv` decides from
 //! `st_dev`. [`paste_strategy`] makes that decision from the clipboard
 //! operation and the two items' [`VolumeId`]s, so the file manager and any
-//! future caller share one definition of it (§2.2).
+//! future caller share one definition of it.
 //!
 //! # Bounded, interruptible copy
 //!
-//! A copy never holds an unbounded buffer and never spins (§2.23): the
-//! [`CopyCursor`] walks a known-length source in fixed [`COPY_CHUNK_LEN`]
-//! steps, yielding the next [`CopyChunk`] to transfer. The app reads and
-//! writes that chunk, then reports the bytes actually carried with
-//! [`CopyCursor::advance`]; between chunks it may cancel or be preempted, and
-//! the cursor resumes from exactly where it stopped (see
-//! [`CopyCursor::resume`]). It is fail closed: advancing past the source's
-//! length — a source that shrank or a miscounted transfer — is
-//! [`CopyError::Overrun`], never a silent wrap.
+//! A copy never holds an unbounded buffer and never spins: the [`CopyCursor`]
+//! walks a known-length source in fixed [`COPY_CHUNK_LEN`] steps, yielding the
+//! next [`CopyChunk`] to transfer. The app reads and writes that chunk, then
+//! reports the bytes actually carried with [`CopyCursor::advance`]; between
+//! chunks it may cancel or be preempted, and the cursor resumes from exactly
+//! where it stopped (see [`CopyCursor::resume`]). It is fail closed: advancing
+//! past the source's length — a source that shrank or a miscounted transfer —
+//! is [`CopyError::Overrun`], never a silent wrap.
 //!
 //! # Recursive directory copy
 //!
 //! Where the [`CopyCursor`] streams one *file*, a [`CopyWalk`] copies a whole
 //! *tree*: the copy-side analogue of the delete-side
-//! [`DeleteWalk`](crate::delete::DeleteWalk). It drives a depth-first
-//! traversal that creates a destination directory *before* streaming its
-//! contents into it (the mirror of the delete walk removing contents before
-//! their container), keeps its own explicit stack so a deep tree cannot
-//! overflow the call stack, is bounded by [`MAX_COPY_DEPTH`], and holds its
-//! exact position between steps so the app can cancel or be preempted without
-//! losing or repeating work (§2.23, §26.6). It does no I/O — the app performs
-//! each `fs_mkdir` / `fs_readdir` / byte-streamed copy — so composing it grants
-//! nothing and the read-only picker never runs one.
+//! [`DeleteWalk`](crate::delete::DeleteWalk). It drives a depth-first traversal
+//! that creates a destination directory *before* streaming its contents into it
+//! (the mirror of the delete walk removing contents before their container),
+//! keeps its own explicit stack so a deep tree cannot overflow the call stack,
+//! is bounded by [`MAX_COPY_DEPTH`], and holds its exact position between steps
+//! so the app can cancel or be preempted without losing or repeating work. It
+//! does no I/O — the app performs each `fs_mkdir` / `fs_readdir` /
+//! byte-streamed copy — so composing it grants nothing and the read-only picker
+//! never runs one.
 //!
 //! [`fs_rename`]: tairix_abi::SyscallNumber::FS_RENAME
 
@@ -87,7 +86,7 @@ pub enum PasteStrategy {
     Rename,
     /// A cross-volume move: stream-copy the source to the destination, then
     /// remove the source once the copy has fully succeeded (never before, so a
-    /// failed copy loses no data, §5.4).
+    /// failed copy loses no data).
     CopyThenDelete,
     /// A copy: stream-copy the source to the destination and leave the source
     /// in place.
@@ -111,13 +110,13 @@ pub fn paste_strategy(op: ClipboardOp, source: VolumeId, dest: VolumeId) -> Past
 
 /// The maximum number of bytes one [`CopyChunk`] transfers.
 ///
-/// A fixed I/O transfer bound, not a hardware-scaled capacity (§24.4): it caps
-/// the buffer a single copy step reads and writes so a large copy stays
+/// A fixed I/O transfer bound, not a hardware-scaled capacity: it caps the
+/// buffer a single copy step reads and writes so a large copy stays
 /// interruptible and its memory fixed, exactly as the kernel bounds one
 /// `fs_read`/`fs_write` with [`FS_IO_MAX`](tairix_abi::fs::FS_IO_MAX). A copy
 /// of any size is handled by iterating chunks, so this never caps a file's
-/// length (§26.6). Chosen to match the per-call transfer bound so one chunk is
-/// one syscall's worth of work.
+/// length. Chosen to match the per-call transfer bound so one chunk is one
+/// syscall's worth of work.
 pub const COPY_CHUNK_LEN: u64 = tairix_abi::fs::FS_IO_MAX as u64;
 
 /// One bounded step of a streamed copy: the byte range to read from the source
@@ -151,7 +150,7 @@ impl CopyChunk {
     }
 }
 
-/// Why a copy cursor cannot advance — a fail-closed refusal (§5.4).
+/// Why a copy cursor cannot advance — a fail-closed refusal.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum CopyError {
     /// An advance (or a resume) would carry the copied count past the source's
@@ -174,15 +173,15 @@ impl core::fmt::Display for CopyError {
 /// tracks how many bytes of a known-length source have been carried and yields
 /// the next [`CopyChunk`]. The app performs the read/write for that chunk with
 /// its own capability-checked syscalls, then calls [`advance`](Self::advance)
-/// with the number of bytes actually transferred; between chunks it may stop
-/// (a Cancel) or the task may be preempted, and the cursor picks up exactly
-/// where it left off. There is no unbounded buffer and no spin (§2.23).
+/// with the number of bytes actually transferred; between chunks it may stop (a
+/// Cancel) or the task may be preempted, and the cursor picks up exactly where
+/// it left off. There is no unbounded buffer and no spin.
 ///
 /// A short transfer (fewer bytes than the chunk asked for) simply advances the
-/// cursor by that amount and the next chunk covers the remainder; a transfer
-/// of zero bytes with data still outstanding is a truncated or failing source
-/// the *app* reports and stops on (§26.5) — the cursor makes no progress and
-/// never loops on its own.
+/// cursor by that amount and the next chunk covers the remainder; a transfer of
+/// zero bytes with data still outstanding is a truncated or failing source the
+/// *app* reports and stops on — the cursor makes no progress and never loops on
+/// its own.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct CopyCursor {
     total: u64,
@@ -273,13 +272,12 @@ impl CopyCursor {
     }
 }
 
-/// Why a [`CopyWalk`] cannot take the requested step — a fail-closed refusal
-/// (§5.4).
+/// Why a [`CopyWalk`] cannot take the requested step — a fail-closed refusal.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum CopyWalkError {
     /// Listing a source directory would name a child deeper than
     /// [`MAX_COPY_DEPTH`] components: refused rather than recursing without
-    /// bound (§26.6). The walk is left unchanged.
+    /// bound. The walk is left unchanged.
     TooDeep,
     /// The walk was driven against the wrong action — reporting a directory
     /// [`created`](CopyWalk::created) or [`expand`](CopyWalk::expand)ed when the
@@ -304,10 +302,10 @@ impl core::fmt::Display for CopyWalkError {
 ///
 /// The copy-side counterpart of
 /// [`MAX_DELETE_DEPTH`](crate::delete::MAX_DELETE_DEPTH): both name the one
-/// shared `MAX_WALK_DEPTH` fail-closed recursion bound,
-/// held in a single place so the removal and copy walks can never disagree on
-/// how far they will descend (§2.2, §26.6). A source tree deeper than this is
-/// refused ([`CopyWalkError::TooDeep`]) rather than followed.
+/// shared `MAX_WALK_DEPTH` fail-closed recursion bound, held in a single place
+/// so the removal and copy walks can never disagree on how far they will
+/// descend. A source tree deeper than this is refused
+/// ([`CopyWalkError::TooDeep`]) rather than followed.
 pub const MAX_COPY_DEPTH: usize = crate::MAX_WALK_DEPTH;
 
 /// The next step a [`CopyWalk`] requires of its driver.
@@ -411,11 +409,11 @@ struct CopyFrame {
 ///
 /// It does no I/O — the app performs each `fs_mkdir`, `fs_readdir`, and
 /// byte-streamed `fs_read`/`fs_write` with its own capability-checked syscalls
-/// under the user's own identity (§4, §5.4) — and it never recurses on the call
-/// stack (its own explicit stack cannot overflow), stays within
-/// [`MAX_COPY_DEPTH`], and holds its exact position between steps so the app can
-/// cancel or be preempted without losing or repeating work (§2.23, §26.6).
-/// Composing the walk grants nothing, so the read-only picker never runs one.
+/// under the user's own identity — and it never recurses on the call stack (its
+/// own explicit stack cannot overflow), stays within [`MAX_COPY_DEPTH`], and
+/// holds its exact position between steps so the app can cancel or be preempted
+/// without losing or repeating work. Composing the walk grants nothing, so the
+/// read-only picker never runs one.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CopyWalk {
     stack: Vec<CopyFrame>,
@@ -428,10 +426,10 @@ impl CopyWalk {
     /// destination names the root (an empty component list).
     ///
     /// Each item is `(source, dest, kind)`: the source's root-first absolute
-    /// path, the destination path it takes under the paste target, and what
-    /// the source is ([`CopyKind`]). Refusing an empty or root-naming set here
+    /// path, the destination path it takes under the paste target, and what the
+    /// source is ([`CopyKind`]). Refusing an empty or root-naming set here
     /// means the copy verb is simply unavailable rather than a silent no-op or
-    /// a copy involving the root (§5.4), exactly as
+    /// a copy involving the root, exactly as
     /// [`DeletePlan::new`](crate::delete::DeletePlan::new) refuses one.
     #[must_use]
     pub fn from_items(items: Vec<(Vec<String>, Vec<String>, CopyKind)>) -> Option<Self> {
@@ -457,9 +455,9 @@ impl CopyWalk {
     }
 
     /// The number of nodes copied so far — the honest figure a progress
-    /// indicator reports (§2.24). The total is not known in advance (it depends
-    /// on the source tree the reads reveal), so progress is a rising count,
-    /// never a fabricated percentage.
+    /// indicator reports. The total is not known in advance (it depends on the
+    /// source tree the reads reveal), so progress is a rising count, never a
+    /// fabricated percentage.
     #[must_use]
     pub const fn copied(&self) -> usize {
         self.copied

@@ -123,8 +123,8 @@ pub struct ControllerHealth {
 impl ControllerHealth {
     /// A freshly-`Healthy` controller health owned by `owner` — the
     /// controller's own runtime-discovered identity (its URB endpoint block
-    /// base, never a board constant, `AGENTS.md` §2.20) used only to name the
-    /// owner in the audit log.
+    /// base, never a board constant) used only to name the owner in the audit
+    /// log.
     #[must_use]
     pub const fn new(owner: u32) -> Self {
         Self {

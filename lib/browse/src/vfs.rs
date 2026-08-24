@@ -203,14 +203,14 @@ pub fn push_child(path: &mut String, name: &str) {
 /// Parse an absolute path string into validated root-first components — the
 /// inverse of [`spell_absolute_path`].
 ///
-/// This is how a consumer turns a path it was *handed* (the `HOME`
-/// environment the desktop session reads to open its picker at the user's
-/// home) into the component list the [`Browser`](crate::Browser) navigates,
-/// using the *same* per-component rule [`absolute_path`] spells with (§2.2):
-/// every segment between `/`s must be a real single filesystem leaf name
-/// ([`tairix_path::validate_file_name`]). Leading, trailing, and repeated
-/// `/`s collapse (so `/Users/root/` and `/Users/root` parse alike); the bare
-/// root `/` (and the empty string) parse to no components.
+/// This is how a consumer turns a path it was *handed* (the `HOME` environment
+/// the desktop session reads to open its picker at the user's home) into the
+/// component list the [`Browser`](crate::Browser) navigates, using the *same*
+/// per-component rule [`absolute_path`] spells with: every segment between `/`s
+/// must be a real single filesystem leaf name
+/// ([`tairix_path::validate_file_name`]). Leading, trailing, and repeated `/`s
+/// collapse (so `/Users/root/` and `/Users/root` parse alike); the bare root
+/// `/` (and the empty string) parse to no components.
 ///
 /// # Errors
 ///
@@ -241,8 +241,8 @@ pub fn components_from_absolute_path(path: &str) -> Result<Vec<String>, Errno> {
 /// [`tairix_path::validate_file_name`] rule (non-empty, not `.` or `..`, no
 /// `/`, no control character or NUL, no `:`, within the name bound) — so a
 /// component can never name a different directory than the browser shows and
-/// the check is the *same* one the rename editor spells a new name through
-/// (§2.2). The spelled path is bounded by the kernel's own [`FS_PATH_MAX`].
+/// the check is the *same* one the rename editor spells a new name through. The
+/// spelled path is bounded by the kernel's own [`FS_PATH_MAX`].
 ///
 /// # Errors
 ///

@@ -1,30 +1,30 @@
 //! The service-manager control IPC protocol (`plans/NEW-SERVICEMANAGER.md`
 //! SVC-8).
 //!
-//! The service manager (PID 1, and a per-user manager instance) owns a
-//! reserved synchronous call endpoint, [`SERVICE_CONTROL_ENDPOINT`], through
-//! which a control tool (`servicectl`, the `systemctl` analogue) drives a
-//! registered service's runtime lifecycle: `start` a down service now, or
-//! `stop` a running one. Persistent enablement (`enable`/`disable`) and
-//! observability (`status`) are separate concerns — enablement mutates the
-//! registration store and status is served through the System Information API
-//! (§16.6), never a control-reply scrape — so they are not carried here.
+//! The service manager (PID 1, and a per-user manager instance) owns a reserved
+//! synchronous call endpoint, [`SERVICE_CONTROL_ENDPOINT`], through which a
+//! control tool (`servicectl`, the `systemctl` analogue) drives a registered
+//! service's runtime lifecycle: `start` a down service now, or `stop` a running
+//! one. Persistent enablement (`enable`/`disable`) and observability (`status`)
+//! are separate concerns — enablement mutates the registration store and status
+//! is served through the System Information API, never a control-reply scrape —
+//! so they are not carried here.
 //!
 //! This module is the wire contract for that endpoint, modelled on the
 //! read-only mailbox and font protocols ([`crate::mailbox_ipc`],
 //! [`crate::font_ipc`]): a fixed-size, bounds-checked request framing and a
-//! status-framed reply, both little-endian, `no_std` and allocation-free
-//! (the request name borrows the caller's buffer). Like those, it is an
-//! IPC-protocol module, so it is outside the generated C-ABI header and its
-//! decoders are enrolled in the `lib/abi` fuzz harness (§19.6).
+//! status-framed reply, both little-endian, `no_std` and allocation-free (the
+//! request name borrows the caller's buffer). Like those, it is an IPC-protocol
+//! module, so it is outside the generated C-ABI header and its decoders are
+//! enrolled in the `lib/abi` fuzz harness.
 //!
 //! **Authorization is the endpoint's, not this module's.** The kernel gates
 //! *reaching* the endpoint on the capability the manager binds it with (the
 //! reserved-bind gate plus a required send capability), so the receiver does
-//! not re-check a caller capability here (`AGENTS.md` §5.2). The request
-//! carries only the operation and the target service name; the manager
-//! validates the name against its own strict service-name policy before it
-//! touches any state (fail closed).
+//! not re-check a caller capability here. The request carries only the
+//! operation and the target service name; the manager validates the name
+//! against its own strict service-name policy before it touches any state (fail
+//! closed).
 //!
 //! The wire layout (little-endian) of a request is a fixed
 //! [`REQUEST_LEN`]-byte frame:

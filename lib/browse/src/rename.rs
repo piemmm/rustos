@@ -1,12 +1,12 @@
 //! The in-place **rename** model: the pure, host-tested core of the file
 //! manager's first write operation.
 //!
-//! Renaming an item is modelled here so every rule that decides whether a
-//! typed name is acceptable — the spelling ([`tairix_path::validate_file_name`],
-//! the *one* shared name rule, §2.2), a no-op rename to the same name, and a
-//! clash with an existing sibling — runs in `cargo test` with no kernel. The
-//! app supplies only the `fs_rename` seam and the text editor; the decision of
-//! *whether* to call the VFS, and *what* the two paths are, lives in
+//! Renaming an item is modelled here so every rule that decides whether a typed
+//! name is acceptable — the spelling ([`tairix_path::validate_file_name`], the
+//! *one* shared name rule), a no-op rename to the same name, and a clash with
+//! an existing sibling — runs in `cargo test` with no kernel. The app supplies
+//! only the `fs_rename` seam and the text editor; the decision of *whether* to
+//! call the VFS, and *what* the two paths are, lives in
 //! [`Browser::rename_selected`](crate::Browser::rename_selected).
 //!
 //! Authority is unchanged: the rename is an ordinary permission-checked VFS
@@ -73,9 +73,9 @@ impl RenameError {
         }
     }
 
-    /// A terse, human-readable reason for the in-UI refusal line (§2.24 — a
-    /// denied action is an honest answer, never a silent failure). It names no
-    /// path and carries no secret.
+    /// A terse, human-readable reason for the in-UI refusal line (a denied
+    /// action is an honest answer, never a silent failure). It names no path
+    /// and carries no secret.
     #[must_use]
     pub const fn message(self) -> &'static str {
         match self {

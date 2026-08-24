@@ -1,12 +1,11 @@
 //! Aggregating member device properties into one array-level answer.
 //!
 //! A composed array is itself a device, so it must answer a consumer's
-//! questions about *itself* from what its members report rather than inherit
-//! a trait default that hides them. This module is the *one* definition of
-//! how each such property folds, shared by every composition
-//! (`AGENTS.md` §2.2) so they cannot answer differently: health telemetry
-//! ([`aggregate_device_health`]) and the device class the consumer derives
-//! its I/O budget from ([`aggregate_device_class`]).
+//! questions about *itself* from what its members report rather than inherit a
+//! trait default that hides them. This module is the *one* definition of how
+//! each such property folds, shared by every composition so they cannot answer
+//! differently: health telemetry ([`aggregate_device_health`]) and the device
+//! class the consumer derives its I/O budget from ([`aggregate_device_class`]).
 //!
 //! # Health telemetry
 //!
@@ -18,12 +17,12 @@
 //! (`docs/src/filesystem/arxfs-spec.md` §11) queries the *array* through
 //! [`Block::device_health`](tairix_abi::driver::block::Block::device_health)
 //! and must still see the health of the disks underneath it. A composed array
-//! that inherited the trait's default (`Unavailable`) would silently hide
-//! every member's telemetry — a failing disk in an array would look like a
-//! device with no health data at all (`AGENTS.md` §26.5 "a disk may be
-//! failing"). This module is the *one* definition of how member telemetry is
-//! folded into the array-level answer, shared by all four compositions
-//! (`AGENTS.md` §2.2) so they cannot aggregate health differently.
+//! that inherited the trait's default (`Unavailable`) would silently hide every
+//! member's telemetry — a failing disk in an array would look like a device
+//! with no health data at all ("a disk may be failing"). This module is the
+//! *one* definition of how member telemetry is folded into the array-level
+//! answer, shared by all four compositions so they cannot aggregate health
+//! differently.
 //!
 //! # How the counters fold
 //!
@@ -35,9 +34,9 @@
 //! * **Independent per-device faults are summed** — `media_errors`,
 //!   `reallocated_sectors`, `pending_sectors`, `uncorrectable_sectors`, and
 //!   `crc_errors`. Each member's integrity errors are its own, so the array's
-//!   total is their sum; a rise in the sum is what schedules a deep scrub.
-//!   Sums saturate rather than wrap, so a very wide array of very old disks can
-//!   never overflow a counter into a smaller value (`AGENTS.md` §2.9, §26.6).
+//!   total is their sum; a rise in the sum is what schedules a deep scrub. Sums
+//!   saturate rather than wrap, so a very wide array of very old disks can
+//!   never overflow a counter into a smaller value.
 //! * **Shared / whole-array conditions take the worst member** — an unclean
 //!   shutdown or a power-on interval hits every member together, so
 //!   `unsafe_shutdowns` and `power_on_hours` are the maximum (summing would
@@ -50,17 +49,16 @@
 //!
 //! # What counts as a member
 //!
-//! Only live, participating devices contribute: an in-sync copy and a
-//! resyncing copy (a real device being rebuilt) report valid telemetry, while
-//! a faulted-and-dropped slot and an empty (absent) slot have none. A member
-//! that itself reports [`DeviceHealth::Unavailable`], or whose health read
-//! *errors*, is skipped rather than failing the whole array-level query: a
-//! single member with no telemetry, or a transient telemetry read fault, never
-//! denies the consumer the health of the members that *can* be read
-//! (`AGENTS.md` §26.5 degrade gracefully). Only when *no* participating member
-//! exposes telemetry does the array report [`DeviceHealth::Unavailable`], so an
-//! absence of data is never mistaken for a perfectly-healthy array (the ABI's
-//! "recorded, not failed" contract).
+//! Only live, participating devices contribute: an in-sync copy and a resyncing
+//! copy (a real device being rebuilt) report valid telemetry, while a
+//! faulted-and-dropped slot and an empty (absent) slot have none. A member that
+//! itself reports [`DeviceHealth::Unavailable`], or whose health read *errors*,
+//! is skipped rather than failing the whole array-level query: a single member
+//! with no telemetry, or a transient telemetry read fault, never denies the
+//! consumer the health of the members that *can* be read (degrade gracefully).
+//! Only when *no* participating member exposes telemetry does the array report
+//! [`DeviceHealth::Unavailable`], so an absence of data is never mistaken for a
+//! perfectly-healthy array (the ABI's "recorded, not failed" contract).
 
 use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::{DeviceHealth, HealthSnapshot};

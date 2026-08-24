@@ -89,8 +89,7 @@ pub const USERS_DB_NAME: &str = "Users";
 pub const GROUPS_DB_NAME: &str = "Groups";
 
 /// Name of the writable-Settings subdirectory that holds the network
-/// configuration store (`/System/Settings/Network`, `AGENTS.md` §16.1;
-/// `plans/NETWORK.md` §6.1).
+/// configuration store (`/System/Settings/Network`, `plans/NETWORK.md` §6.1).
 pub const NETWORK_SETTINGS_DIR: &str = "Network";
 
 /// Name of the per-interface network-configuration document under
@@ -99,11 +98,11 @@ pub const NETWORK_SETTINGS_DIR: &str = "Network";
 /// `configure`, later rewrites it through the one `tairix_netconfig` engine.
 pub const NETWORK_CONF_NAME: &str = "network.conf";
 
-/// Name of the per-installation machine-id file under `/System/Security`
-/// (`AGENTS.md` §16.2). Its bytes are the raw [`tairix_abi::MACHINE_ID_LEN`]
-/// machine-id — non-secret per-installation identity (the TAIRiX equivalent
-/// of `/etc/machine-id`) that the system log binds its stream-genesis to
-/// (`plans/SYSLOG.md` §7.1). The journal service reads it at startup.
+/// Name of the per-installation machine-id file under `/System/Security`. Its
+/// bytes are the raw [`tairix_abi::MACHINE_ID_LEN`] machine-id — non-secret
+/// per-installation identity (the TAIRiX equivalent of `/etc/machine-id`) that
+/// the system log binds its stream-genesis to (`plans/SYSLOG.md` §7.1). The
+/// journal service reads it at startup.
 pub const MACHINE_ID_NAME: &str = "MachineId";
 
 /// Mode for the machine-id file: world-readable, owner-writable (`0o644`).
@@ -403,11 +402,11 @@ fn create_system_subdirs(
     Ok(())
 }
 
-/// Create the fixed `Keys` and `Policy` subdirectories under a `Security`
-/// node. The one definition both the read-only `/System` volume and the
-/// encrypted root's writable-state subtree author their `Security/{Keys,
-/// Policy}` through, so the two cannot drift; `wrap` tags the failure with
-/// the partition the caller is authoring.
+/// Create the fixed `Keys` and `Policy` subdirectories under a `Security` node.
+/// The one definition both the read-only `/System` volume and the encrypted
+/// root's writable-state subtree author their `Security/{Keys, Policy}`
+/// through, so the two cannot drift; `wrap` tags the failure with the partition
+/// the caller is authoring.
 fn create_security_subdirs(
     fs: &mut ARXFS<MemBlock>,
     security: NodeId,

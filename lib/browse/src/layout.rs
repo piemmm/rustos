@@ -6,8 +6,8 @@
 //! offset — the single source both the renderer ([`render`](mod@crate::render))
 //! and the pointer hit-test ([`entry_index_at`](crate::render::entry_index_at))
 //! consume, so a click can never resolve to a different item than the one the
-//! user saw (§2.2). [`ViewLayout`] is the dispatch that lets a caller treat the
-//! two uniformly without branching on the browser's [`ViewMode`].
+//! user saw. [`ViewLayout`] is the dispatch that lets a caller treat the two
+//! uniformly without branching on the browser's [`ViewMode`].
 //!
 //! Each view is a fixed-height header (the toolbar) followed by the scrolling
 //! item area. The scroll offset — a *desired first visible line*, in the view's
@@ -216,12 +216,11 @@ impl ListView {
     }
 }
 
-/// The scroll offset (in the view's line unit) that keeps line index
-/// `selected` within a `visible`-line window while moving the least: the
-/// current `offset` when the line is already on screen, the line itself when
-/// it sits above the window, and the offset that puts it on the bottom edge
-/// when it sits below. Shared by both views so the reveal rule is one
-/// definition (§2.2).
+/// The scroll offset (in the view's line unit) that keeps line index `selected`
+/// within a `visible`-line window while moving the least: the current `offset`
+/// when the line is already on screen, the line itself when it sits above the
+/// window, and the offset that puts it on the bottom edge when it sits below.
+/// Shared by both views so the reveal rule is one definition.
 fn reveal_line(offset: u64, selected: Option<usize>, visible: usize) -> u64 {
     let (Some(sel), true) = (selected, visible > 0) else {
         return offset;
@@ -707,7 +706,7 @@ impl Run {
 ///
 /// This is the single dispatch both the renderer and the pointer hit-test go
 /// through, so the list and the grid expose one scrolling/hit-testing contract
-/// and a caller never has to branch on the mode itself (§2.2).
+/// and a caller never has to branch on the mode itself.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ViewLayout {
     /// The full-width row list.
@@ -747,11 +746,10 @@ impl ViewLayout {
     }
 
     /// The view-local pixel rectangle of the item at `index` for the desired
-    /// scroll `offset`, or `None` when the item is out of range or scrolled
-    /// out of the visible window. The exact inverse of
-    /// [`index_at`](Self::index_at) — the same rect the renderer draws that
-    /// item in — so an overlay (the in-place rename editor) sits precisely over
-    /// the item the user selected (§2.2).
+    /// scroll `offset`, or `None` when the item is out of range or scrolled out
+    /// of the visible window. The exact inverse of [`index_at`](Self::index_at)
+    /// — the same rect the renderer draws that item in — so an overlay (the
+    /// in-place rename editor) sits precisely over the item the user selected.
     #[must_use]
     pub fn item_rect(&self, offset: u64, index: usize) -> Option<Rect> {
         match self {

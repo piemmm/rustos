@@ -12,14 +12,14 @@
 //! [`Browser::set_owner_selected`](crate::Browser::set_owner_selected).
 //!
 //! Authority is the kernel's, not the engine's. Unlike a rename, mode, or
-//! `mkdir` change — which are the user's own §5.3-checked writes needing no
-//! new capability — reassigning the **owner** is a privileged operation: the
+//! `mkdir` change — which are the user's own permission-checked writes needing
+//! no new capability — reassigning the **owner** is a privileged operation: the
 //! secured VFS requires `CAP_FS_CHOWN` to change the uid or to set a group the
 //! caller is not a member of, and clears the set-*id* bits on any change. The
 //! engine models none of that policy; it names *what* to change and lets the
 //! kernel decide, so composing it grants nothing and the trusted read-only
-//! picker never calls the write path. A change this module accepts may still
-//! be refused by the VFS (the caller lacks `CAP_FS_CHOWN`, the group is not
+//! picker never calls the write path. A change this module accepts may still be
+//! refused by the VFS (the caller lacks `CAP_FS_CHOWN`, the group is not
 //! theirs, a read-only mount, a lost race), which surfaces as
 //! [`OwnerError::Refused`] with the kernel's own [`Errno`].
 

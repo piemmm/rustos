@@ -980,7 +980,7 @@ mod tests {
 
     #[test]
     fn the_unlock_kthread_holds_exactly_its_minimal_capability_set() {
-        // — no ambient authority: the kthread maps MMIO, allocs DMA,
+        // No ambient authority: the kthread maps MMIO, allocs DMA,
         // and drives the signed load gate, and nothing more.
         let caps = service_caps();
         assert!(caps.contains(CapabilityId::MMIO_MAP));

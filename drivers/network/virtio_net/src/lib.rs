@@ -1,24 +1,22 @@
 //! TAIRiX virtio-net link-layer driver identity.
 //!
 //! The device engine itself — the bus-agnostic virtio-net bring-up and
-//! frame-ring [`Net`](tairix_abi::driver::net::Net) service — lives in
-//! the `lib/virtio_net` crate and is re-exported here as [`VirtioNet`].
-//! It is hoisted into `lib/*` (rather than kept in this `drivers/*`
-//! crate) so a user-space driver *process* can link the engine directly:
-//! a process crate may depend on `lib/*` but never on another `drivers/*`
-//! crate (`AGENTS.md` §17.4). The concrete driver is the user-space
-//! process crate `drivers/network/virtio_net_driver`, which brings the
-//! device up over that shared engine in its own address space.
+//! frame-ring [`Net`](tairix_abi::driver::net::Net) service — lives in the
+//! `lib/virtio_net` crate and is re-exported here as [`VirtioNet`]. It is
+//! hoisted into `lib/*` (rather than kept in this `drivers/*` crate) so a
+//! user-space driver *process* can link the engine directly: a process crate
+//! may depend on `lib/*` but never on another `drivers/*` crate. The concrete
+//! driver is the user-space process crate `drivers/network/virtio_net_driver`,
+//! which brings the device up over that shared engine in its own address space.
 //!
 //! # Public surface
 //!
-//! This crate is the driver's discovery *identity*: [`BIND_KEYS`] is the
-//! single §18.3 bind table the signed manifest is authored from and the
-//! device manager (or the in-kernel bootstrap-floor catalogue) resolves a
-//! discovered virtio-net node against. [`VirtioNet`] and
-//! [`VIRTIO_NET_DEVICE_ID`] are re-exported so a driver process and the
-//! kernel's bootstrap-floor discovery share one definition of the engine
-//! and the device id (§2.2).
+//! This crate is the driver's discovery *identity*: [`BIND_KEYS`] is the single
+//! bind table the signed manifest is authored from and the device manager
+//! (or the in-kernel bootstrap-floor catalogue) resolves a discovered
+//! virtio-net node against. [`VirtioNet`] and [`VIRTIO_NET_DEVICE_ID`] are
+//! re-exported so a driver process and the kernel's bootstrap-floor discovery
+//! share one definition of the engine and the device id.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -28,12 +26,11 @@ use tairix_abi::{DriverBindKey, HwMatchKey};
 
 pub use tairix_virtio_net::VirtioNet;
 
-/// The virtio device id of a network device (virtio 1.1 §5.1 — `virtio-net`
-/// is device type 1), re-exported from `lib/virtio_net` (its single
-/// definition, shared with the kernel's bootstrap-floor discovery, §2.2).
-/// This driver's [`BIND_KEYS`] match key is built from it, so a discovered
-/// virtio node whose probed device id is 1 binds this driver and nothing
-/// else.
+/// The virtio device id of a network device (virtio 1.1 §5.1 — `virtio-net` is
+/// device type 1), re-exported from `lib/virtio_net` (its single definition,
+/// shared with the kernel's bootstrap-floor discovery). This driver's
+/// [`BIND_KEYS`] match key is built from it, so a discovered virtio node whose
+/// probed device id is 1 binds this driver and nothing else.
 pub use tairix_virtio_net::VIRTIO_NET_DEVICE_ID;
 
 /// The bind priority [`BIND_KEYS`] carries.

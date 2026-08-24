@@ -211,10 +211,10 @@ fn paint_row(
         );
     }
 
-    // The trailing Signal Bead band (denied lock / recovery diamond /
-    // complete check) is reserved unconditionally, exactly like the leading
-    // gutter above: only whether a bead actually paints inside it depends on
-    // the row's state, never the band's own width (§13, §15).
+    // The trailing Signal Bead band (denied lock / recovery diamond / complete
+    // check) is reserved unconditionally, exactly like the leading gutter
+    // above: only whether a bead actually paints inside it depends on the row's
+    // state, never the band's own width (spec §13, §15).
     let border = plate_border(theme, scale);
     let pad = scale.scale_length(theme.metrics().control_inset).max(1);
     let band = bead_band(theme, scale, h);
@@ -227,7 +227,7 @@ fn paint_row(
         }
     }
 
-    // The keyboard focus ring, distinct from a pointer hover tint (§15).
+    // The keyboard focus ring, distinct from a pointer hover tint (spec §15).
     if state.focus.focused {
         draw_outline(
             surface,

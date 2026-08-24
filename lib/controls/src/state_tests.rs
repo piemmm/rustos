@@ -1,9 +1,9 @@
 //! Unit tests for the typed control-state vocabulary.
 //!
 //! These cover the two pieces of derived behaviour the vocabulary owns — the
-//! §13 [`ControlDisposition`] taxonomy and the size-toggle "next action" — plus
-//! the fail-closed clamping of [`ProgressValue`]. The plain sub-state enums
-//! and the [`ControlState`] builders are exercised through those paths.
+//! spec §13 [`ControlDisposition`] taxonomy and the size-toggle "next action" —
+//! plus the fail-closed clamping of [`ProgressValue`]. The plain sub-state
+//! enums and the [`ControlState`] builders are exercised through those paths.
 
 use crate::state::{
     ActivityState, AuthorityState, ControlDisposition, ControlState, FocusState, PointerState,
@@ -32,7 +32,7 @@ fn disabled_beats_every_other_state() {
 
 #[test]
 fn denied_and_needs_capability_are_authority_denials_not_disabled() {
-    // The whole point of §13: an authority denial must not collapse into a
+    // The whole point of spec §13: an authority denial must not collapse into a
     // plain disabled look.
     for authority in [AuthorityState::Denied, AuthorityState::NeedsCapability] {
         let s = ControlState::idle().with_authority(authority);
@@ -79,7 +79,7 @@ fn non_pending_validation_does_not_block_an_allowed_control() {
         assert_eq!(s.disposition(), ControlDisposition::Interactive);
     }
     // Invalid does not by itself change the disposition taxonomy (a renderer
-    // still marks the value invalid via the field); it is not a §13 case.
+    // still marks the value invalid via the field); it is not a spec §13 case.
     let invalid = ControlState::idle().with_validation(ValidationState::Invalid);
     assert_eq!(invalid.disposition(), ControlDisposition::Interactive);
 }

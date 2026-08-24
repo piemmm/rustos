@@ -301,7 +301,7 @@ fn slider_drag_clamps_to_its_cap() {
     assert_eq!(slider.value(), 600);
 }
 
-// --- Slider §13 authority rendering ------------------------------------
+// --- Slider spec §13 authority rendering -------------------------------
 
 #[test]
 fn denied_slider_keeps_value_and_shows_a_lock_bead() {

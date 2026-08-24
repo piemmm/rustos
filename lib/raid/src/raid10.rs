@@ -3,26 +3,26 @@
 //! space striped in fixed-size chunks across the pairs (`plans/FIX-IO.md`
 //! IO6).
 //!
-//! RAID10 is the capacity-*and*-redundancy layout most commonly deployed in
-//! the field: it survives any member fault — and several at once — as long as
-//! no mirror pair loses *both* copies, while still spreading a large transfer
+//! RAID10 is the capacity-*and*-redundancy layout most commonly deployed in the
+//! field: it survives any member fault — and several at once — as long as no
+//! mirror pair loses *both* copies, while still spreading a large transfer
 //! across every pair for bandwidth. It is a sibling of the RAID0
-//! [`StripeArray`] and RAID1 [`MirrorArray`]
-//! over the same block seam (`AGENTS.md` §2.2 parallel implementations).
+//! [`StripeArray`] and RAID1 [`MirrorArray`] over the same block seam (parallel
+//! implementations).
 //!
 //! # It is a composition, not a re-implementation
 //!
 //! A stripe of mirrors *is* a stripe over mirrors, so this engine composes the
-//! two it is built from rather than copying their logic (`AGENTS.md` §2.2):
+//! two it is built from rather than copying their logic:
 //!
 //! * the **striping map** ([`StripeArray::locate`](crate::stripe::StripeArray::locate))
 //!   places each logical chunk on the pair (column) that holds it, exactly as
 //!   RAID0 does across members;
 //! * each **mirror pair** is driven through the one
-//!   [`MirrorArray`] implementation — recover-from-a-good-copy,
-//!   opportunistic read-repair, write fan-out, bounded rebuild, and scrub — by
-//!   building a transient [`MirrorArray::from_prepared`] view over the pair's
-//!   two members per operation (an allocation-free borrow, `AGENTS.md` §24.1).
+//!   [`MirrorArray`] implementation — recover-from-a-good-copy, opportunistic
+//!   read-repair, write fan-out, bounded rebuild, and scrub — by building a
+//!   transient [`MirrorArray::from_prepared`] view over the pair's two members
+//!   per operation (an allocation-free borrow).
 //!
 //! So RAID10 adds only the *pairing* and the *aggregation of pair health into
 //! array health*; the fault-recovery behaviour is the mirror's, verified once.
@@ -34,16 +34,16 @@
 //!   from the survivor — the read path recovers and repairs through the mirror.
 //! * A pair that loses *both* copies can no longer serve its stripes, so the
 //!   whole array is [`ArrayHealth::Failed`] and every I/O fails closed
-//!   ([`DriverError::DeviceOffline`], `AGENTS.md` §5.4): a stripe cannot present
-//!   a partial logical block space.
+//!   ([`DriverError::DeviceOffline`]): a stripe cannot present a partial
+//!   logical block space.
 //! * The array is [`ArrayHealth::Optimal`] only when every pair holds two
 //!   in-sync copies.
 //!
 //! # Allocation-free
 //!
 //! Like its siblings, [`Raid10Array`] borrows a caller-owned member slice, so
-//! it holds no allocation and imposes no fixed member ceiling (`AGENTS.md`
-//! §24.1); the growable member tier lives in the assembling serve process.
+//! it holds no allocation and imposes no fixed member ceiling; the growable
+//! member tier lives in the assembling serve process.
 
 use crate::mirror::{MirrorArray, MirrorError, MirrorMember};
 use crate::stripe::StripeArray;
@@ -119,10 +119,9 @@ impl From<MirrorError> for Raid10Error {
 /// [`Block`] members as one logical device of half their combined capacity.
 ///
 /// See this module's documentation for the layout, the composed fault model,
-/// and how each mirror pair is driven through the one
-/// [`MirrorArray`] implementation. The array borrows a
-/// caller-owned member slice, so it holds no allocation and imposes no fixed
-/// member ceiling (`AGENTS.md` §24.1).
+/// and how each mirror pair is driven through the one [`MirrorArray`]
+/// implementation. The array borrows a caller-owned member slice, so it holds
+/// no allocation and imposes no fixed member ceiling.
 pub struct Raid10Array<'a, B: Block> {
     /// The full member table in slot order; members `2k` and `2k+1` form
     /// mirror pair (column) `k`.
@@ -150,9 +149,9 @@ impl<'a, B: Block> Raid10Array<'a, B> {
     /// and `2k+1` form mirror pair `k`. A missing copy is passed as
     /// [`MirrorMember::absent`] so the array knows its true width. Each pair is
     /// probed through [`MirrorArray::assemble`] (so the mirror's probing and
-    /// state rules are reused, `AGENTS.md` §2.2); every present member must
-    /// report the same geometry, a non-degenerate one, and a block count that
-    /// is a whole number of `chunk_blocks`.
+    /// state rules are reused); every present member must report the same
+    /// geometry, a non-degenerate one, and a block count that is a whole number
+    /// of `chunk_blocks`.
     ///
     /// # Errors
     ///
@@ -477,12 +476,12 @@ impl<'a, B: Block> Raid10Array<'a, B> {
     /// [`ArrayProgress::IDLE`] if neither is running.
     ///
     /// This is what the serving process checkpoints to the members' on-disk
-    /// maintenance record, so a pass measured in hours survives a restart
-    /// (`AGENTS.md` §26.6). Copies in several pairs can rebuild at once with
-    /// different cursors, and one record can only carry a single position, so
-    /// the **least advanced** is reported: resuming from it re-copies blocks a
-    /// further-ahead copy already had (harmless — a rebuild write is
-    /// idempotent) and can never skip a block that was still outstanding.
+    /// maintenance record, so a pass measured in hours survives a restart.
+    /// Copies in several pairs can rebuild at once with different cursors, and
+    /// one record can only carry a single position, so the **least advanced**
+    /// is reported: resuming from it re-copies blocks a further-ahead copy
+    /// already had (harmless — a rebuild write is idempotent) and can never
+    /// skip a block that was still outstanding.
     #[must_use]
     pub fn progress(&self) -> ArrayProgress {
         ArrayProgress {
@@ -505,9 +504,8 @@ impl<'a, B: Block> Raid10Array<'a, B> {
     /// position, so a lost or foreign record costs time and never correctness.
     ///
     /// A rebuild cursor is planted only on the copies that are actually
-    /// rebuilding, through the same guarded member seam the mirror uses
-    /// (`AGENTS.md` §2.2), so a restored cursor can never un-sync a current
-    /// copy.
+    /// rebuilding, through the same guarded member seam the mirror uses, so a
+    /// restored cursor can never un-sync a current copy.
     ///
     /// # Errors
     ///

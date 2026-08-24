@@ -2,11 +2,11 @@
 //! (`plans/NEW-SERVICEMANAGER.md` §3.2).
 //!
 //! TAIRiX runs **one policy engine at two authority scopes**, never two
-//! codebases (§2.2): the single system service manager (PID 1's role) and one
-//! per-user manager instance per logged-in user. The scope an [`Init`] was
-//! created with is the security boundary between those two roles — it is fixed
-//! for the instance's whole life and decides which services that instance is
-//! allowed to manage.
+//! codebases: the single system service manager (PID 1's role) and one per-user
+//! manager instance per logged-in user. The scope an [`Init`] was created with
+//! is the security boundary between those two roles — it is fixed for the
+//! instance's whole life and decides which services that instance is allowed to
+//! manage.
 //!
 //! # The boundary this enforces
 //!

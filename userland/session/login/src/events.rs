@@ -51,10 +51,10 @@ pub const ELEVATE_UNAVAILABLE: EventId = EventId(10_009);
 /// login process; a duplicate would fail closed on the reserved
 /// `FONT_ENDPOINT` bind.
 pub const FONTD_STARTED: EventId = EventId(10_010);
-/// The font service could not be started for a graphical session (its spawn
-/// was refused). Login degrades gracefully — the graphical session still
-/// launches — but desktop text will not render until a font service is up,
-/// so the refusal is audited loudly (`AGENTS.md` §2.24).
+/// The font service could not be started for a graphical session (its spawn was
+/// refused). Login degrades gracefully — the graphical session still launches —
+/// but desktop text will not render until a font service is up, so the refusal
+/// is audited loudly.
 pub const FONTD_UNAVAILABLE: EventId = EventId(10_011);
 /// A [`tairix_abi::elevate::ElevateRequest::Verify`] request re-authenticated
 /// the caller's own attested account; nothing was run.

@@ -570,12 +570,12 @@ impl TaskbarRenderer {
     }
 }
 
-/// The shared notification card for `note`, its role and composed state
-/// mapping the notification's severity to the Reactive Alloy semantics: an
+/// The shared notification card for `note`, its role and composed state mapping
+/// the notification's severity to the Reactive Alloy semantics: an
 /// informational notice stays calm, a success shows the completion accent, a
 /// warning shows the caution rail, and a critical notification reads as a
 /// destructive, invalid state. Built once here so the popover render (and any
-/// later hit-test) compose the identical control (§2.2).
+/// later hit-test) compose the identical control.
 fn card_control(note: &TransientNotification) -> Notification {
     let (role, state) = match note.severity {
         NotifySeverity::Info => (ControlRole::Neutral, ControlState::idle()),

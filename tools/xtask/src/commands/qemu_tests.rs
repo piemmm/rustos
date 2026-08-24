@@ -198,12 +198,12 @@ enum NetPeerMode {
     /// deterministic link-local addressing as [`Self::V6LinkLocal`], but the
     /// peer accepts the guest `telnet` client's connection on
     /// `tairix_test_netstack_wire::PEER_TELNET_PORT` and speaks the *server*
-    /// half of RFC 854 — offering `SUPPRESS GO AHEAD`, asking for `TERMINAL
-    /// TYPE`, `NAWS` and `LINEMODE`, and driving the RFC 1184 `MODE` and `SLC`
-    /// exchange — before greeting the session and echoing the operator's probe
-    /// line back upper-cased. Its verdict requires every step, so a client
-    /// that connected but ignored the negotiation, declined LINEMODE, or never
-    /// reported its window fails the run loud.
+    /// half of RFC 854 — offering `SUPPRESS GO AHEAD`, asking for
+    /// `TERMINAL TYPE`, `NAWS` and `LINEMODE`, and driving the RFC 1184 `MODE`
+    /// and `SLC` exchange — before greeting the session and echoing the
+    /// operator's probe line back upper-cased. Its verdict requires every step,
+    /// so a client that connected but ignored the negotiation, declined
+    /// LINEMODE, or never reported its window fails the run loud.
     V6TelnetServer,
     /// A **static-addressing** ICMP-campaign peer (the N9b-3-2-β-2-ii-b
     /// `match.node` vertical): the peer takes its own static address in the
@@ -431,10 +431,9 @@ const UNLOCK_PASSPHRASE_LINE: &str = "unlock-vertical correct horse battery stap
 
 /// The pre-boot-Supervisor ESC boot-screen serial script
 /// (`plans/NEW-SUPERVISOR.md` §7), shared by every arch's Supervisor ESC
-/// vertical so the byte-exact boot-screen contract has one definition, never
-/// a per-arch copy (`AGENTS.md` §2.2). Each `(marker, delay, input)` step
-/// waits for the frozen boot-screen `marker` on the console, then types
-/// `input`:
+/// vertical so the byte-exact boot-screen contract has one definition, never a
+/// per-arch copy. Each `(marker, delay, input)` step waits for the frozen
+/// boot-screen `marker` on the console, then types `input`:
 ///
 /// 1. `[Press ESC for supervisor]` (`root_mount::SUPERVISOR_ANNOUNCE`) → a
 ///    lone `ESC` (`0x1b`), dropping into the REPL (race-robust: if the 2 s
@@ -1488,12 +1487,11 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
-    // Stage 4 deliverable: boot the production kernel pipeline,
-    // instantiate `tairix_drvhost::Host`, load a baked-in signed
-    // mock `.rxe` image, exercise `load → snapshot → reload →
-    // unload`, then flip `qemu_exit::exit_success`. Single CPU
-    // suffices and the 60-second budget matches the other Stage 3a
-    // boot-then-do-fixed-work tests.
+    // Stage 4 deliverable: boot the production kernel pipeline, instantiate
+    // `tairix_drvhost::Host`, load a baked-in signed mock `.rxe` image,
+    // exercise `load → snapshot → reload → unload`, then flip
+    // `qemu_exit::exit_success`. Single CPU suffices and the 60-second budget
+    // matches the other Stage 3a boot-then-do-fixed-work tests.
     QemuTest {
         package: "tairix-test-drvhost-qemu",
         binary: "tairix-test-drvhost-qemu",
@@ -1609,15 +1607,15 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
-    // Stage 5 end-to-end FAT32 vertical: `tairix-test-fat32-virtio-blk-
-    // pci-x86-64` reuses the exact virtio-blk-pci bring-up above, then
-    // instead of a raw sector round-trip it mounts the planted FAT32
-    // volume through the real FAT32 driver, verifies the planted file,
-    // and creates+writes+reads-back a fresh file before `qemu_exit`.
-    // The backing image is the shared `tairix-test-fat32-image` FAT32
-    // volume (`FsDisk::Fat32`), not the sector-0 pattern, so its geometry
-    // is the image's own size. Single CPU and a 60-second budget match
-    // the other boot-then-do-fixed-work tests.
+    // Stage 5 end-to-end FAT32 vertical:
+    // `tairix-test-fat32-virtio-blk-pci-x86-64` reuses the exact
+    // virtio-blk-pci bring-up above, then instead of a raw sector round-trip it
+    // mounts the planted FAT32 volume through the real FAT32 driver, verifies
+    // the planted file, and creates+writes+reads-back a fresh file before
+    // `qemu_exit`. The backing image is the shared `tairix-test-fat32-image`
+    // FAT32 volume (`FsDisk::Fat32`), not the sector-0 pattern, so its geometry
+    // is the image's own size. Single CPU and a 60-second budget match the
+    // other boot-then-do-fixed-work tests.
     QemuTest {
         package: "tairix-test-fat32-virtio-blk-pci-x86-64",
         binary: "tairix-test-fat32-virtio-blk-pci-x86-64",
@@ -1634,16 +1632,16 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
-    // Stage 5 end-to-end arxfs vertical: `tairix-test-arxfs-virtio-blk-
-    // pci-x86-64` reuses the exact virtio-blk-pci bring-up above, then
-    // instead of a raw sector round-trip it mounts the planted arxfs
-    // volume through the real arxfs driver, verifies the planted file,
-    // and creates+writes+reads-back a fresh file before `qemu_exit`.
-    // The backing image is the shared `tairix-test-arxfs-image` arxfs
-    // volume (`FsDisk::ARXFS`) — which the driver itself authored — not
-    // the sector-0 pattern, so its geometry is the image's own size.
-    // Single CPU and a 60-second budget match the FAT32 vertical and the
-    // other boot-then-do-fixed-work tests.
+    // Stage 5 end-to-end arxfs vertical:
+    // `tairix-test-arxfs-virtio-blk-pci-x86-64` reuses the exact
+    // virtio-blk-pci bring-up above, then instead of a raw sector round-trip it
+    // mounts the planted arxfs volume through the real arxfs driver, verifies
+    // the planted file, and creates+writes+reads-back a fresh file before
+    // `qemu_exit`. The backing image is the shared `tairix-test-arxfs-image`
+    // arxfs volume (`FsDisk::ARXFS`) — which the driver itself authored — not
+    // the sector-0 pattern, so its geometry is the image's own size. Single CPU
+    // and a 60-second budget match the FAT32 vertical and the other
+    // boot-then-do-fixed-work tests.
     QemuTest {
         package: "tairix-test-arxfs-virtio-blk-pci-x86-64",
         binary: "tairix-test-arxfs-virtio-blk-pci-x86-64",
@@ -1687,28 +1685,28 @@ static TESTS: &[QemuTest] = &[
     // `plans/NEW-SUPERVISOR.md` §9 Stage E:
     // `tairix-test-supervisor-memtest-takeover-qemu-riscv64` boots the
     // production riscv64 `virt` pipeline and, on `AuditEvent::BootCompleted`
-    // (the point where the Supervisor system is published and the kernel
-    // state is fully built), drives the pre-boot Supervisor's one-way
-    // `memtest` takeover through the real published
-    // `SupervisorSystem::memtest_takeover` seam. On the wired riscv64 port the
-    // caller first quiesces every other hart (the bounded cross-CPU IPI-halt
-    // handshake), then the `MachineTakeover` body masks interrupts, flattens
-    // paging to bare mode, and tests all of RAM continuously on a reserved
-    // stack (every pattern over all of RAM, looping until reset). Once the
-    // guest completes one full test loop the harness issues a QEMU-monitor
-    // `system_reset`; QEMU (`-no-reboot`) then exits status 0 and the runner
-    // registers `Outcome::Pass`. A boot that never completes a loop falls
-    // silent and times out; a takeover that *returned* (refused/unsupported)
-    // writes a fail finisher — so a regression that stops the test running
-    // fails loud. The production riscv64 port is single-hart
-    // (`BootInfo::new(BOOT_CPU, ...)`, `RiscvArchStorage<1>`; it brings up no
-    // secondaries), so this boots single-hart and the quiesce runs its "no
-    // online peers, succeed immediately" path — the same handshake code, with
-    // nothing to stop. (Booting `-smp 4` would only expose OpenSBI handing the
-    // kernel a non-zero boot hart it does not support; the genuine multi-core
-    // quiesce is proven by the aarch64 and x86_64 siblings, which do bring up
-    // secondaries.) The 60-second budget is the inactivity window between
-    // progress updates, not a total-runtime cap.
+    // (the point where the Supervisor system is published and the kernel state
+    // is fully built), drives the pre-boot Supervisor's one-way `memtest`
+    // takeover through the real published `SupervisorSystem::memtest_takeover`
+    // seam. On the wired riscv64 port the caller first quiesces every other
+    // hart (the bounded cross-CPU IPI-halt handshake), then the
+    // `MachineTakeover` body masks interrupts, flattens paging to bare mode,
+    // and tests all of RAM continuously on a reserved stack (every pattern over
+    // all of RAM, looping until reset). Once the guest completes one full test
+    // loop the harness issues a QEMU-monitor `system_reset`; QEMU
+    // (`-no-reboot`) then exits status 0 and the runner registers
+    // `Outcome::Pass`. A boot that never completes a loop falls silent and
+    // times out; a takeover that *returned* (refused/unsupported) writes a fail
+    // finisher — so a regression that stops the test running fails loud. The
+    // production riscv64 port is single-hart (`BootInfo::new(BOOT_CPU, ...)`,
+    // `RiscvArchStorage<1>`; it brings up no secondaries), so this boots
+    // single-hart and the quiesce runs its "no online peers, succeed
+    // immediately" path — the same handshake code, with nothing to stop.
+    // (Booting `-smp 4` would only expose OpenSBI handing the kernel a non-zero
+    // boot hart it does not support; the genuine multi-core quiesce is proven
+    // by the aarch64 and x86_64 siblings, which do bring up secondaries.) The
+    // 60-second budget is the inactivity window between progress updates, not a
+    // total-runtime cap.
     QemuTest {
         package: "tairix-test-supervisor-memtest-takeover-qemu-riscv64",
         binary: "tairix-test-supervisor-memtest-takeover-qemu-riscv64",
@@ -2412,25 +2410,24 @@ static TESTS: &[QemuTest] = &[
     // boots the *production* aarch64 `tairix-kernel` pipeline
     // (`boot_aarch64::boot`) on the `virt` board all the way to
     // `AuditEvent::BootCompleted` — the aarch64 analogue of the x86_64
-    // `kernel-arch-boot` and the riscv64 `kernel-arch-boot-riscv64`
-    // verticals. It enables the stage-1 identity MMU + EL1 vectors,
-    // discovers the board from the embedded `virt` device tree (QEMU's
-    // aarch64 `-kernel <ELF>` path passes no `x0` DTB pointer), builds the
-    // `BootMemoryMap`, installs the discovered-UART console + `svc`
-    // dispatch callback, and hands a validated `BootInfo` to
-    // `kernel_core::kernel_main`; the audit sink reports PASS through the
-    // ARM semihosting finisher — and only with the ramfb framebuffer boot
-    // console active: the run attaches `-device ramfb`, so the production
-    // pre-MMU video bring-up must discover the tree's `fw_cfg` node,
-    // program the scan-out over `lib/fwcfg`, and switch the console to
-    // the screen (`video::is_active`), proving the display path `cargo
-    // xtask run` relies on end to end. The run is `-smp 4` (matching the
-    // embedded tree's `/cpus`): after `EventId(4004)` the sink waits for
-    // the production SMP bring-up to PSCI-start all three secondaries and
-    // for each to attest `SecondaryCpuOnline` (`EventId(4072)`) from the
-    // kernel dispatch loop — the end-to-end multi-core boot proof; a
-    // `SecondaryCpuStartFailed` (`EventId(4071)`) is an immediate FAIL.
-    // A 60-second budget matches the other boot-then-do-fixed-work tests.
+    // `kernel-arch-boot` and the riscv64 `kernel-arch-boot-riscv64` verticals.
+    // It enables the stage-1 identity MMU + EL1 vectors, discovers the board
+    // from the embedded `virt` device tree (QEMU's aarch64 `-kernel <ELF>` path
+    // passes no `x0` DTB pointer), builds the `BootMemoryMap`, installs the
+    // discovered-UART console + `svc` dispatch callback, and hands a validated
+    // `BootInfo` to `kernel_core::kernel_main`; the audit sink reports PASS
+    // through the ARM semihosting finisher — and only with the ramfb
+    // framebuffer boot console active: the run attaches `-device ramfb`, so the
+    // production pre-MMU video bring-up must discover the tree's `fw_cfg` node,
+    // program the scan-out over `lib/fwcfg`, and switch the console to the
+    // screen (`video::is_active`), proving the display path `cargo xtask run`
+    // relies on end to end. The run is `-smp 4` (matching the embedded tree's
+    // `/cpus`): after `EventId(4004)` the sink waits for the production SMP
+    // bring-up to PSCI-start all three secondaries and for each to attest
+    // `SecondaryCpuOnline` (`EventId(4072)`) from the kernel dispatch loop —
+    // the end-to-end multi-core boot proof; a `SecondaryCpuStartFailed`
+    // (`EventId(4071)`) is an immediate FAIL. A 60-second budget matches the
+    // other boot-then-do-fixed-work tests.
     QemuTest {
         package: "tairix-test-kernel-arch-boot-aarch64",
         binary: "tairix-test-kernel-arch-boot-aarch64",
@@ -2760,33 +2757,33 @@ static TESTS: &[QemuTest] = &[
     },
     // PI Stage D2b-2b-A P-1c (`plans/PI.md`): the x86_64 involuntary-preemption
     // vertical — the cross-port sibling of the aarch64/riscv64 preempt tests,
-    // proving the production LAPIC-timer interrupt preempts a **runaway** ring-3
-    // task. Unlike the other ports, the ring-3 transition needs the GDT ring-3
-    // selectors, the TSS, and `syscall`/`IA32_LSTAR` entry installed, so the
-    // test boots the production `tairix-kernel` pipeline (which also programs
-    // the periodic LAPIC timer in `preempt::init_local_preempt`); only the audit
-    // sink is replaced. On `BootCompleted` it enables `IA32_EFER.NXE`, builds
-    // **one** hardware-isolated ring-3 address space from the pure-Rust
-    // `tairix-test-el0-spinner` fixture (a `black_box`-guarded busy loop that
-    // issues no syscall, built PIE + converted to `rxe` by `build.rs`) through
-    // the capability-checked, audited `kernel_core::spawn_image`, and admits it
-    // as a resumable user kthread whose `pre_resume` hook reloads CR3 and
-    // repoints **both** the per-CPU `syscall` entry stack
-    // (`syscall_entry::set_kernel_rsp0`) and the `TSS.RSP0` trap stack
-    // (`percpu::install_tss_rsp0`) at the task's own kernel stack. It then arms
-    // the **production** ring-3-preemption path verbatim (the
-    // `tairix_arch_x86_64::preempt::set_preempt_callback` surface the bin crate's
-    // `install_irq_dispatch` uses): a callback that `reschedule_current(_,
-    // Yield)`s the running task. Ring 3 runs preemptible (`userentry`'s `IF`-set
-    // `RFLAGS`), so a LAPIC-timer tick taken while the spinner runs lands on the
-    // timer ISR and (gated on the saved `CS` RPL) drives the preempt point.
-    // Because the loop never traps, the only way it leaves ring 3 before its
-    // final `exit` is an involuntary preemption. PASS once the preempt callback
-    // fired at least once AND the task — resumed mid-loop after each preemption —
-    // still completed and exited; a preemption that never fires (the `step`
-    // spins forever inside ring 3) or a botched resume (the task never exits)
-    // times out (fail-loud). Single CPU; a 120-second budget
-    // covers the multi-tick busy loop under QEMU TCG.
+    // proving the production LAPIC-timer interrupt preempts a **runaway**
+    // ring-3 task. Unlike the other ports, the ring-3 transition needs the GDT
+    // ring-3 selectors, the TSS, and `syscall`/`IA32_LSTAR` entry installed, so
+    // the test boots the production `tairix-kernel` pipeline (which also
+    // programs the periodic LAPIC timer in `preempt::init_local_preempt`); only
+    // the audit sink is replaced. On `BootCompleted` it enables
+    // `IA32_EFER.NXE`, builds **one** hardware-isolated ring-3 address space
+    // from the pure-Rust `tairix-test-el0-spinner` fixture (a
+    // `black_box`-guarded busy loop that issues no syscall, built PIE +
+    // converted to `rxe` by `build.rs`) through the capability-checked, audited
+    // `kernel_core::spawn_image`, and admits it as a resumable user kthread
+    // whose `pre_resume` hook reloads CR3 and repoints **both** the per-CPU
+    // `syscall` entry stack (`syscall_entry::set_kernel_rsp0`) and the
+    // `TSS.RSP0` trap stack (`percpu::install_tss_rsp0`) at the task's own
+    // kernel stack. It then arms the **production** ring-3-preemption path
+    // verbatim (the `tairix_arch_x86_64::preempt::set_preempt_callback` surface
+    // the bin crate's `install_irq_dispatch` uses): a callback that
+    // `reschedule_current(_, Yield)`s the running task. Ring 3 runs preemptible
+    // (`userentry`'s `IF`-set `RFLAGS`), so a LAPIC-timer tick taken while the
+    // spinner runs lands on the timer ISR and (gated on the saved `CS` RPL)
+    // drives the preempt point. Because the loop never traps, the only way it
+    // leaves ring 3 before its final `exit` is an involuntary preemption. PASS
+    // once the preempt callback fired at least once AND the task — resumed
+    // mid-loop after each preemption — still completed and exited; a preemption
+    // that never fires (the `step` spins forever inside ring 3) or a botched
+    // resume (the task never exits) times out (fail-loud). Single CPU; a
+    // 120-second budget covers the multi-tick busy loop under QEMU TCG.
     QemuTest {
         package: "tairix-test-preempt-el0-qemu-x86-64",
         binary: "tairix-test-preempt-el0-qemu-x86-64",
@@ -2923,19 +2920,20 @@ static TESTS: &[QemuTest] = &[
     // plans/USB.md U1: the aarch64 driver-*unload* vertical — the symmetric
     // partner of the driver-spawn handshake above. It reuses the same signed
     // driver-stub fixture and the production devmgr-driven autoload/spawn path
-    // (discover the `virt` board, build the live registries, `DeviceManager::
-    // autoload` through `SpawnDriverLoader` + `InitCtxDriverProcessSpawn` over
-    // `Aarch64ProcessSpawn` image builder), so the driver is admitted Ready with
-    // its capability record + address-space-registry entry minted. It then
-    // drives the production unload mechanism `InitSpawnCtx::
-    // terminate_driver_process` (the seam the driver-store server runs for
-    // `StoreRequest::Unload`) and asserts the scheduler task was reaped
-    // (live-task count 1→0) and its caps + address space reclaimed, and that a
-    // second unload of the now-gone handle fails closed with `NotFound`
-    // (idempotent). PASS once teardown reclaimed everything; any shortfall
-    // writes a distinct failure finisher or times out (fail-loud). The driver
-    // is never dispatched, so it issues no syscall and needs no reply port.
-    // Single CPU and a 60-second budget match the driver-spawn vertical.
+    // (discover the `virt` board, build the live registries,
+    // `DeviceManager::autoload` through `SpawnDriverLoader` +
+    // `InitCtxDriverProcessSpawn` over `Aarch64ProcessSpawn` image builder), so
+    // the driver is admitted Ready with its capability record +
+    // address-space-registry entry minted. It then drives the production unload
+    // mechanism `InitSpawnCtx::terminate_driver_process` (the seam the
+    // driver-store server runs for `StoreRequest::Unload`) and asserts the
+    // scheduler task was reaped (live-task count 1→0) and its caps + address
+    // space reclaimed, and that a second unload of the now-gone handle fails
+    // closed with `NotFound` (idempotent). PASS once teardown reclaimed
+    // everything; any shortfall writes a distinct failure finisher or times out
+    // (fail-loud). The driver is never dispatched, so it issues no syscall and
+    // needs no reply port. Single CPU and a 60-second budget match the
+    // driver-spawn vertical.
     QemuTest {
         package: "tairix-test-driver-unload-qemu-aarch64",
         binary: "tairix-test-driver-unload-qemu-aarch64",
@@ -4141,23 +4139,23 @@ static TESTS: &[QemuTest] = &[
         serial: &[],
     },
     // `plans/ARCHSUPPORT.md` A2: the x86_64 sibling of the users-database
-    // vertical above — the first *live-boot* exercise of the x86_64
-    // boot-time users-database read path over the virtio-**PCI** bus. It
-    // reuses the exact shared virtio-PCI bring-up the `root_unlock_login`
-    // /`virtio_blk_pci_x86_64` verticals use (PCI walk to the modern
-    // virtio-blk function, `PciTransport` provisioning through the
-    // capability-gated `KernelMmioMapper`, MSI-X routing) and then drives
-    // the *same* shared `users_db_load` tail the aarch64 vertical runs (one
-    // definition, generic over the transport, `AGENTS.md` §2.2) over the
-    // same planted users-root arxfs volume (`FsDisk::UsersRoot` — authored
-    // by the real arxfs driver): it mounts the plaintext users-root volume,
-    // runs `tairix_kernel_core::load_users_db` (/System/Security/Users read
-    // off the volume through the capability-checked VFS delegation), and
-    // proves the parsed database authenticates the planted account while a
-    // wrong password is refused — before the QEMU debug-exit PASS. Unlike the
-    // encrypted-root verticals it needs no passphrase (the users-root volume
-    // is plaintext), so there is no scripted console dialogue. Single CPU
-    // and a 60-second budget match the aarch64 vertical.
+    // vertical above — the first *live-boot* exercise of the x86_64 boot-time
+    // users-database read path over the virtio-**PCI** bus. It reuses the exact
+    // shared virtio-PCI bring-up the `root_unlock_login`
+    // /`virtio_blk_pci_x86_64` verticals use (PCI walk to the modern virtio-blk
+    // function, `PciTransport` provisioning through the capability-gated
+    // `KernelMmioMapper`, MSI-X routing) and then drives the *same* shared
+    // `users_db_load` tail the aarch64 vertical runs (one definition, generic
+    // over the transport) over the same planted users-root arxfs volume
+    // (`FsDisk::UsersRoot` — authored by the real arxfs driver): it mounts the
+    // plaintext users-root volume, runs `tairix_kernel_core::load_users_db`
+    // (/System/Security/Users read off the volume through the
+    // capability-checked VFS delegation), and proves the parsed database
+    // authenticates the planted account while a wrong password is refused —
+    // before the QEMU debug-exit PASS. Unlike the encrypted-root verticals it
+    // needs no passphrase (the users-root volume is plaintext), so there is no
+    // scripted console dialogue. Single CPU and a 60-second budget match the
+    // aarch64 vertical.
     QemuTest {
         package: "tairix-test-users-db-qemu-x86-64",
         binary: "tairix-test-users-db-qemu-x86-64",
@@ -4211,26 +4209,26 @@ static TESTS: &[QemuTest] = &[
     },
     // `plans/ARCHSUPPORT.md` A2: the x86_64 sibling of the root-mount->login
     // vertical above — the first *live-boot* exercise of the x86_64 unlock
-    // policy over the virtio-**PCI** bus. It reuses the exact shared
-    // virtio-PCI bring-up the `virtio_blk_pci_x86_64` vertical uses (PCI walk
-    // to the modern virtio-blk function, `PciTransport` provisioning through
-    // the capability-gated `KernelMmioMapper`, MSI-X routing) and then drives
-    // the *same* shared `root_unlock_login` tail the aarch64 vertical runs
-    // (one definition, generic over the transport, `AGENTS.md` §2.2) over the
-    // same planted whole-disk encrypted-root image (`FsDisk::EncryptedRootDisk`
-    // — MBR + FAT boot carrying `root.unlock` + a passphrase-derived encrypted
-    // ARXFS root): it reads the descriptor off the FAT boot partition, types
-    // the fixture passphrase over a scripted console, mounts the encrypted
-    // root, installs the loaded users database into a `LateUsersDb` cell, and
-    // proves the planted account authenticates through the installed cell
-    // while a wrong password is refused — before the QEMU debug-exit PASS.
-    // Like the aarch64 vertical this drives the unlock *policy* directly (a
-    // scripted console, not the production NULL-console read half), so it is
-    // independent of the A2 kthread-admission console work. The `/System`
-    // bundles the image plants are cross-compiled for x86_64 (`stores_for`);
-    // the root volume uses the format-floor PBKDF2 cost so the per-boot key
-    // derivation stays bounded under QEMU TCG; single CPU and a 60-second
-    // budget match the aarch64 vertical.
+    // policy over the virtio-**PCI** bus. It reuses the exact shared virtio-PCI
+    // bring-up the `virtio_blk_pci_x86_64` vertical uses (PCI walk to the
+    // modern virtio-blk function, `PciTransport` provisioning through the
+    // capability-gated `KernelMmioMapper`, MSI-X routing) and then drives the
+    // *same* shared `root_unlock_login` tail the aarch64 vertical runs (one
+    // definition, generic over the transport) over the same planted whole-disk
+    // encrypted-root image (`FsDisk::EncryptedRootDisk` — MBR + FAT boot
+    // carrying `root.unlock` + a passphrase-derived encrypted ARXFS root): it
+    // reads the descriptor off the FAT boot partition, types the fixture
+    // passphrase over a scripted console, mounts the encrypted root, installs
+    // the loaded users database into a `LateUsersDb` cell, and proves the
+    // planted account authenticates through the installed cell while a wrong
+    // password is refused — before the QEMU debug-exit PASS. Like the aarch64
+    // vertical this drives the unlock *policy* directly (a scripted console,
+    // not the production NULL-console read half), so it is independent of the
+    // A2 kthread-admission console work. The `/System` bundles the image plants
+    // are cross-compiled for x86_64 (`stores_for`); the root volume uses the
+    // format-floor PBKDF2 cost so the per-boot key derivation stays bounded
+    // under QEMU TCG; single CPU and a 60-second budget match the aarch64
+    // vertical.
     QemuTest {
         package: "tairix-test-root-unlock-login-qemu-x86-64",
         binary: "tairix-test-root-unlock-login-qemu-x86-64",
@@ -4272,21 +4270,20 @@ static TESTS: &[QemuTest] = &[
     // session-ceiling vertical's job (below), so both are out of this
     // vertical's scope.
     //
-    // The secret prompt's two timed-wake behaviours — the `[input
-    // active...]` animation advancing on the tickless one-shot, and the
-    // anti-brute-force delay park after a wrong attempt expiring on it —
-    // are proven deterministically by the `users_db_wait`/`irq_wait`
-    // epilogue host unit tests (which pin the one-shot staying armed for a
-    // console waiter's deadline across another queue's wait finishing) and
-    // the `console` secret-feedback tick tests. This wall-clock-bounded
-    // QEMU run therefore does *not* re-assert them: doing so keyed the run
-    // on guest-time console delays (a per-second animation tick, then a
-    // multi-second wrong-attempt park) that ballooned under parallel TCG
-    // saturation and blew the budget — the load-dependent flake the
-    // charter forbids papering over with a bigger ceiling. Typing the
-    // correct passphrase straight away keeps the vertical's timing bounded
-    // by real work (boot + two bounded PBKDF2 derivations), not by
-    // guest-time waits.
+    // The secret prompt's two timed-wake behaviours — the `[input active...]`
+    // animation advancing on the tickless one-shot, and the anti-brute-force
+    // delay park after a wrong attempt expiring on it — are proven
+    // deterministically by the `users_db_wait`/`irq_wait` epilogue host unit
+    // tests (which pin the one-shot staying armed for a console waiter's
+    // deadline across another queue's wait finishing) and the `console`
+    // secret-feedback tick tests. This wall-clock-bounded QEMU run therefore
+    // does *not* re-assert them: doing so keyed the run on guest-time console
+    // delays (a per-second animation tick, then a multi-second wrong-attempt
+    // park) that ballooned under parallel TCG saturation and blew the budget —
+    // the load-dependent flake the charter forbids papering over with a bigger
+    // ceiling. Typing the correct passphrase straight away keeps the vertical's
+    // timing bounded by real work (boot + two bounded PBKDF2 derivations), not
+    // by guest-time waits.
     //
     // The 120-second budget matches the session-ceiling vertical below,
     // which boots the same pipeline and unlocks the same disk before doing
@@ -4364,19 +4361,19 @@ static TESTS: &[QemuTest] = &[
     // entered at the *live passphrase prompt* rather than the announcement
     // window. It reuses the very same production `tairix-kernel` bin as the
     // Supervisor ESC vertical above — the guest is byte-identical; only the
-    // host-side serial script differs — so there is no duplicated bin
-    // (`AGENTS.md` §2.2). The runner disambiguates the two enrolments' planted
-    // backing images by their `TESTS` index (`sidecar_path`), so the
-    // shared binary is safe under the concurrent matrix. The
-    // `SUPERVISOR_ESC_AT_PROMPT_SCRIPT` waits for the redrawn
-    // `ARXFS passphrase: ` prompt to appear (which only happens after the 2 s
-    // window elapses untouched), then types a lone `ESC` as the line's first
-    // byte, exercising `read_passphrase_line`'s `PassphraseReadError::Escape`
-    // drop — the entry point the window-race-robust `SUPERVISOR_ESC_SCRIPT`
-    // reaches only incidentally. It then drives `help` → `continue` →
-    // passphrase, so PASS keys on the same install witness (`EventId(4139)`),
-    // proving the passphrase-prompt drop is equally transparent to boot. 120 s
-    // and single CPU match the ESC vertical it mirrors.
+    // host-side serial script differs — so there is no duplicated bin. The
+    // runner disambiguates the two enrolments' planted backing images by their
+    // `TESTS` index (`sidecar_path`), so the shared binary is safe under the
+    // concurrent matrix. The `SUPERVISOR_ESC_AT_PROMPT_SCRIPT` waits for the
+    // redrawn `ARXFS passphrase: ` prompt to appear (which only happens after
+    // the 2 s window elapses untouched), then types a lone `ESC` as the line's
+    // first byte, exercising `read_passphrase_line`'s
+    // `PassphraseReadError::Escape` drop — the entry point the
+    // window-race-robust `SUPERVISOR_ESC_SCRIPT` reaches only incidentally. It
+    // then drives `help` → `continue` → passphrase, so PASS keys on the same
+    // install witness (`EventId(4139)`), proving the passphrase-prompt drop is
+    // equally transparent to boot. 120 s and single CPU match the ESC vertical
+    // it mirrors.
     QemuTest {
         package: "tairix-test-supervisor-esc-qemu-aarch64",
         binary: "tairix-test-supervisor-esc-qemu-aarch64",
@@ -4394,14 +4391,14 @@ static TESTS: &[QemuTest] = &[
         serial: SUPERVISOR_ESC_AT_PROMPT_SCRIPT,
     },
     // `plans/NEW-SUPERVISOR.md` §7 (item 1): the pre-boot **Supervisor**
-    // `mount`-from-REPL path — the Supervisor performing the *real* root
-    // unlock itself, distinct from `continue` resuming the normal unlock. It
-    // reuses the same production bin as the two verticals above (no duplicated
-    // bin, `AGENTS.md` §2.2; `TESTS`-index-disambiguated backing image). The
-    // `SUPERVISOR_MOUNT_SCRIPT` enters at the announcement window, then types
-    // `mount` at the `*` prompt; `cmd_mount` prints its own
-    // `ARXFS passphrase: ` and the script types the fixture passphrase, so the
-    // Supervisor's `SupervisorHost::mount` runs `mount_root_disk_and_load_users`
+    // `mount`-from-REPL path — the Supervisor performing the *real* root unlock
+    // itself, distinct from `continue` resuming the normal unlock. It reuses
+    // the same production bin as the two verticals above (no duplicated bin,
+    // `TESTS`-index-disambiguated backing image). The `SUPERVISOR_MOUNT_SCRIPT`
+    // enters at the announcement window, then types `mount` at the `*` prompt;
+    // `cmd_mount` prints its own `ARXFS passphrase: ` and the script types the
+    // fixture passphrase, so the Supervisor's `SupervisorHost::mount` runs
+    // `mount_root_disk_and_load_users`
     // + `finish_install` and returns `SupervisorExit::Mounted`. The interactive
     // unlock then resolves to `Installed` and logs the install witness
     // (`EventId(4139)`) — the PASS the guest sink keys on — with no second
@@ -4468,27 +4465,27 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE)],
     },
-    // `plans/NEW-SUPERVISOR.md` §7 / `plans/ARCHSUPPORT.md`: the x86_64
-    // sibling of the aarch64 pre-boot **Supervisor** ESC vertical above.
+    // `plans/NEW-SUPERVISOR.md` §7 / `plans/ARCHSUPPORT.md`: the x86_64 sibling
+    // of the aarch64 pre-boot **Supervisor** ESC vertical above.
     // `tairix-test-supervisor-esc-qemu-x86-64` boots the *production* x86_64
     // `tairix-kernel` pipeline (`boot_x86_64::boot`) over the same planted
     // whole-disk encrypted-root image the x86_64 admission vertical uses
     // (`FsDisk::EncryptedRootDisk`), so the real `SupervisorHost` is installed
     // and the byte-exact ESC boot screen is drawn on COM1. It runs the shared
     // `SUPERVISOR_ESC_SCRIPT` — the one definition of the frozen boot-screen
-    // contract, never a per-arch copy (`AGENTS.md` §2.2) — walking the same
-    // ordered states as the aarch64 sibling: `ESC` at the announcement drops
-    // into the REPL, `help` renders the `Supervisor commands:` header,
-    // `continue` leaves the REPL, and the fixture passphrase then unlocks the
-    // redrawn `ARXFS passphrase: ` prompt. The guest audit sink reports PASS
-    // through the `isa-debug-exit` device the instant it sees the
-    // unlock-service install message (`EventId(4139)`) — which can only follow
-    // `continue` resuming the normal unlock and that unlock mounting the
-    // encrypted `ARXFS` root, proving a Supervisor session is transparent to
-    // boot on x86_64. A run where ESC never enters the REPL, `continue` never
-    // resumes, or the resumed unlock never mounts never reaches the message
-    // and the harness times out. 120 s matches the aarch64 sibling; single CPU
-    // like the other full-boot verticals.
+    // contract, never a per-arch copy — walking the same ordered states as the
+    // aarch64 sibling: `ESC` at the announcement drops into the REPL, `help`
+    // renders the `Supervisor commands:` header, `continue` leaves the REPL,
+    // and the fixture passphrase then unlocks the redrawn `ARXFS passphrase: `
+    // prompt. The guest audit sink reports PASS through the `isa-debug-exit`
+    // device the instant it sees the unlock-service install message
+    // (`EventId(4139)`) — which can only follow `continue` resuming the normal
+    // unlock and that unlock mounting the encrypted `ARXFS` root, proving a
+    // Supervisor session is transparent to boot on x86_64. A run where ESC
+    // never enters the REPL, `continue` never resumes, or the resumed unlock
+    // never mounts never reaches the message and the harness times out. 120 s
+    // matches the aarch64 sibling; single CPU like the other full-boot
+    // verticals.
     QemuTest {
         package: "tairix-test-supervisor-esc-qemu-x86-64",
         binary: "tairix-test-supervisor-esc-qemu-x86-64",
@@ -4605,17 +4602,16 @@ static TESTS: &[QemuTest] = &[
     // `plans/ALIAS.md` §6.2: the value-pipe vertical.
     // `tairix-test-value-pipe-qemu-aarch64` boots the *production* aarch64
     // pipeline with the planted encrypted-root disk, unlocks the root, logs in
-    // as `root`, and reads three value-backed references with `cat` — whose
-    // own manifest holds no `CAP_SYSINFO_*`, which is the point, since the
-    // shell resolves them and hands over a pipe. `info:system/machine-id` is
-    // ungated; `info:mem/page-size` is gated on `CAP_SYSINFO_KERNEL`, so
-    // `4096` proves `SHELL_MANIFEST ∩ administrator_ceiling()` armed it; and
+    // as `root`, and reads three value-backed references with `cat` — whose own
+    // manifest holds no `CAP_SYSINFO_*`, which is the point, since the shell
+    // resolves them and hands over a pipe. `info:system/machine-id` is ungated;
+    // `info:mem/page-size` is gated on `CAP_SYSINFO_KERNEL`, so `4096` proves
+    // `SHELL_MANIFEST ∩ administrator_ceiling()` armed it; and
     // `info:mem/physical` — the reference from the original defect report — is
     // asserted by `&& echo` on `cat`'s exit status, its value being
-    // machine-dependent, and read twice: once through the shell's pipe and
-    // once as a bare operand `cat` resolves itself under its own manifest, the
-    // two being separate readers. Then the negative half:
-    // `ls > info:mem/physical`
+    // machine-dependent, and read twice: once through the shell's pipe and once
+    // as a bare operand `cat` resolves itself under its own manifest, the two
+    // being separate readers. Then the negative half: `ls > info:mem/physical`
     // still reaches `resource_open` and is refused, because a value-backed
     // resource is changed by a typed service command.
     //
@@ -4682,30 +4678,29 @@ static TESTS: &[QemuTest] = &[
     },
     // `plans/APPS.md` "Immediate work" I2/I3: the memory-stability vertical.
     // `tairix-test-memsoak-qemu-aarch64` boots the *production* aarch64
-    // pipeline with the encrypted-root disk that carries the standard
-    // signed store bundles **plus** the test-only `memsoak` fixture bundle
+    // pipeline with the encrypted-root disk that carries the standard signed
+    // store bundles **plus** the test-only `memsoak` fixture bundle
     // (`FsDisk::MemsoakRootDisk`), unlocks the root, authenticates
-    // `root`/`root` at the console login, and types the bare word `memsoak`
-    // at the shell. The fixture warms up, samples
-    // `KernelMemoryStats.free_bytes` through sysinfod (its manifest's
-    // `CAP_SYSINFO_KERNEL`, enforced against the kernel-attested origin),
-    // drives 32 measured cycles — each a spawn+reap of `true.app` (the full
-    // teardown path), a timed `stream_read` whose bound elapses (the
-    // `top -d0` refresh park), a self-scoped process-list walk, and a live
-    // sysinfod IPC round trip — then requires the final sample to equal the
-    // baseline **exactly**. On a stable soak it prints `MEMSOAK PASS
-    // baseline=… final=…` and exits 0; on any failure it prints the reason
-    // and parks forever (it never exits), so the run times out fail-loud
-    // with the numbers in the transcript. The guest audit sink arms on the
-    // fixture's audited `exit` (`sc=exit`, `comm=memsoak`) and reports PASS
-    // on the next audited `exit` — the shell's, typed only after the
-    // `MEMSOAK PASS` marker appeared — so the numeric verdict provably
+    // `root`/`root` at the console login, and types the bare word `memsoak` at
+    // the shell. The fixture warms up, samples `KernelMemoryStats.free_bytes`
+    // through sysinfod (its manifest's `CAP_SYSINFO_KERNEL`, enforced against
+    // the kernel-attested origin), drives 32 measured cycles — each a
+    // spawn+reap of `true.app` (the full teardown path), a timed `stream_read`
+    // whose bound elapses (the `top -d0` refresh park), a self-scoped
+    // process-list walk, and a live sysinfod IPC round trip — then requires the
+    // final sample to equal the baseline **exactly**. On a stable soak it
+    // prints `MEMSOAK PASS baseline=… final=…` and exits 0; on any failure it
+    // prints the reason and parks forever (it never exits), so the run times
+    // out fail-loud with the numbers in the transcript. The guest audit sink
+    // arms on the fixture's audited `exit` (`sc=exit`, `comm=memsoak`) and
+    // reports PASS on the next audited `exit` — the shell's, typed only after
+    // the `MEMSOAK PASS` marker appeared — so the numeric verdict provably
     // reached the transcript before the run ended (the session-ceiling
     // arm-then-exit discipline). A 300-second budget covers boot + bounded
-    // PBKDF2 + the 36-cycle soak on QEMU TCG (each cycle is a full
-    // spawn/reap plus two sysinfod round trips, on top of the
-    // session-ceiling verticals' 120-second boot-and-dialogue baseline);
-    // single CPU like the other full-boot verticals.
+    // PBKDF2 + the 36-cycle soak on QEMU TCG (each cycle is a full spawn/reap
+    // plus two sysinfod round trips, on top of the session-ceiling verticals'
+    // 120-second boot-and-dialogue baseline); single CPU like the other
+    // full-boot verticals.
     QemuTest {
         package: "tairix-test-memsoak-qemu-aarch64",
         binary: "tairix-test-memsoak-qemu-aarch64",
@@ -9232,11 +9227,10 @@ fn net_root_fs_disk_image(t: &QemuTest, stores: StoreSet) -> Result<FsImage, Str
 /// Build a whole-disk encrypted-root image planting a driver set in
 /// `/System/Drivers/` plus an app/service set — the one builder every
 /// driver-store vertical (autoload, the two TCP verticals, `ping`, the
-/// static-addressing vertical) shares, never a per-vertical copy (`AGENTS.md`
-/// §2.2). `drivers` is the vertical's signed driver set and `apps` its
-/// app/service set (which may additionally carry a planted `network.conf`);
-/// `extension` names the backing file and `label` names the vertical in a
-/// build error.
+/// static-addressing vertical) shares, never a per-vertical copy. `drivers` is
+/// the vertical's signed driver set and `apps` its app/service set (which may
+/// additionally carry a planted `network.conf`); `extension` names the backing
+/// file and `label` names the vertical in a build error.
 fn net_root_image(
     t: &QemuTest,
     drivers: &[super::image_apps::AppStoreFile],
@@ -9937,9 +9931,9 @@ mod tests {
     /// All three pre-boot-Supervisor serial scripts must spell the frozen
     /// boot-screen states identically — the boot-screen wording is one
     /// contract, never a per-script copy that could silently drift
-    /// (`AGENTS.md` §2.2, `plans/NEW-SUPERVISOR.md` §0). The canonical
-    /// spellings live in [`SUPERVISOR_ESC_SCRIPT`]; the two sibling scripts
-    /// for the other trigger points reuse exactly those markers.
+    /// (`plans/NEW-SUPERVISOR.md` §0). The canonical spellings live in
+    /// [`SUPERVISOR_ESC_SCRIPT`]; the two sibling scripts for the other trigger
+    /// points reuse exactly those markers.
     #[test]
     fn supervisor_scripts_share_the_frozen_boot_screen_markers() {
         let announce = SUPERVISOR_ESC_SCRIPT[0].0;

@@ -3,40 +3,37 @@
 //! (`plans/FIX-IO.md` IO6).
 //!
 //! A RAID volume is itself a [`Block`](tairix_abi::driver::block::Block): it
-//! composes several child `Block` endpoints and presents one logical device
-//! to the filesystem layer, so a
-//! composed array nests naturally over the same seam every leaf device uses
-//! (`AGENTS.md` §2.2 one seam, §27 complete abstraction). It **consumes**
-//! the block-layer health vocabulary (`tairix_abi::blkio`); it does not
-//! re-invent it.
+//! composes several child `Block` endpoints and presents one logical device to
+//! the filesystem layer, so a composed array nests naturally over the same seam
+//! every leaf device uses (one seam, complete abstraction). It **consumes** the
+//! block-layer health vocabulary (`tairix_abi::blkio`); it does not re-invent
+//! it.
 //!
-//! Six compositions are provided as siblings over that one seam (`AGENTS.md`
-//! §2.2 parallel implementations): the redundant RAID1 mirror
-//! ([`MirrorArray`]), the capacity-aggregating RAID0 stripe
-//! ([`StripeArray`]), the RAID5 distributed-parity array ([`ParityArray`])
-//! that combines capacity aggregation with single-fault redundancy, the
-//! RAID6 double distributed-parity array ([`DualParityArray`]) that survives
-//! *two* member losses, the RAID-TP triple distributed-parity array
-//! ([`TripleParityArray`]) that survives *three*, and the RAID10 stripe of
-//! mirrors ([`Raid10Array`]) that combines mirror redundancy with stripe
-//! capacity and bandwidth.
+//! Six compositions are provided as siblings over that one seam (parallel
+//! implementations): the redundant RAID1 mirror ([`MirrorArray`]), the
+//! capacity-aggregating RAID0 stripe ([`StripeArray`]), the RAID5
+//! distributed-parity array ([`ParityArray`]) that combines capacity
+//! aggregation with single-fault redundancy, the RAID6 double
+//! distributed-parity array ([`DualParityArray`]) that survives *two* member
+//! losses, the RAID-TP triple distributed-parity array ([`TripleParityArray`])
+//! that survives *three*, and the RAID10 stripe of mirrors ([`Raid10Array`])
+//! that combines mirror redundancy with stripe capacity and bandwidth.
 //!
 //! # RAID10 stripe of mirrors ([`Raid10Array`])
 //!
-//! The sixth composition is a RAID10 stripe of two-copy mirrors: an even
-//! number of members are paired into mirrors and the logical block space is
-//! striped in fixed-size chunks across the pairs. It is a *composition* of the
-//! two engines above rather than a re-implementation (`AGENTS.md` §2.2): the
-//! RAID0 striping map places each chunk on its pair (column), and each pair is
-//! driven through the one [`MirrorArray`] implementation via an
-//! allocation-free transient view, so RAID10 inherits the mirror's
-//! recover/read-repair/write-fan-out/scrub/rebuild behaviour and adds only the
-//! pairing and the aggregation of per-pair health into array health. The array
-//! has the capacity of half its members, survives any member fault — and
-//! several at once — as long as no pair loses *both* copies
-//! ([`ArrayHealth::Degraded`]/[`ArrayHealth::Recovering`] meanwhile), and fails
-//! closed ([`ArrayHealth::Failed`]) only when a pair loses both copies and can
-//! no longer serve its stripes.
+//! The sixth composition is a RAID10 stripe of two-copy mirrors: an even number
+//! of members are paired into mirrors and the logical block space is striped in
+//! fixed-size chunks across the pairs. It is a *composition* of the two engines
+//! above rather than a re-implementation: the RAID0 striping map places each
+//! chunk on its pair (column), and each pair is driven through the one
+//! [`MirrorArray`] implementation via an allocation-free transient view, so
+//! RAID10 inherits the mirror's recover/read-repair/write-fan-out/scrub/rebuild
+//! behaviour and adds only the pairing and the aggregation of per-pair health
+//! into array health. The array has the capacity of half its members, survives
+//! any member fault — and several at once — as long as no pair loses *both*
+//! copies ([`ArrayHealth::Degraded`]/[`ArrayHealth::Recovering`] meanwhile),
+//! and fails closed ([`ArrayHealth::Failed`]) only when a pair loses both
+//! copies and can no longer serve its stripes.
 //!
 //! # RAID1 mirror ([`MirrorArray`])
 //!
@@ -53,12 +50,11 @@
 //!   This read-path repair is opportunistic (it only touches copies read
 //!   before the serving one), complemented by the proactive scrub below.
 //! - **Scrub** ([`MirrorArray::begin_scrub`]/[`MirrorArray::scrub_step`]) is a
-//!   bounded, interruptible pass that proactively reads *every* in-sync copy
-//!   of *every* block and repairs a latent media error on any copy from a good
+//!   bounded, interruptible pass that proactively reads *every* in-sync copy of
+//!   *every* block and repairs a latent media error on any copy from a good
 //!   one, so a bad sector on a copy the read path never consults is found and
-//!   healed while a good copy still exists (`AGENTS.md` §26.5) — the auto-scrub
-//!   a mirror exists to provide, chunked so a 100 TB+ array never scrubs in one
-//!   sweep (`AGENTS.md` §26.6).
+//!   healed while a good copy still exists — the auto-scrub a mirror exists to
+//!   provide, chunked so a 100 TB+ array never scrubs in one sweep.
 //! - **Writes** fan out to every copy. A member that fails a write is
 //!   dropped from the array (a write error is a member fault, not an array
 //!   fault); the write still succeeds as long as one copy accepted it.
@@ -73,29 +69,28 @@
 //!   (vacating its slot to [`MemberState::Absent`] and returning the device),
 //!   and a fresh spare is inserted into an empty slot with
 //!   [`MirrorArray::add_member`], which rebuilds it from a surviving copy — the
-//!   full remove-failed / add-spare replacement workflow, without a reboot
-//!   (`AGENTS.md` §18.4).
+//!   full remove-failed / add-spare replacement workflow, without a reboot.
 //! - A returning member is **rebuilt** by a bounded, interruptible resync
 //!   ([`MirrorArray::resync_step`]) that copies the array contents from an
-//!   in-sync member a caller-sized chunk at a time (`AGENTS.md` §26.6), so a
-//!   100 TB+ member rebuild never blocks the system or busy-spins. While a
-//!   member is resyncing it receives new writes to its already-synced region
-//!   so it never falls behind, and it becomes a read source only once fully
-//!   in sync. The array reports [`ArrayHealth::Recovering`] meanwhile.
+//!   in-sync member a caller-sized chunk at a time, so a 100 TB+ member rebuild
+//!   never blocks the system or busy-spins. While a member is resyncing it
+//!   receives new writes to its already-synced region so it never falls behind,
+//!   and it becomes a read source only once fully in sync. The array reports
+//!   [`ArrayHealth::Recovering`] meanwhile.
 //!
 //! # RAID0 stripe ([`StripeArray`])
 //!
 //! The second composition is a RAID0 stripe: the logical block space is cut
 //! into fixed-size chunks round-robined across the members, so the array's
 //! capacity is the *sum* of the members' and a large transfer is spread over
-//! all of them. A stripe has **no redundancy**, and the engine is honest
-//! about it (`AGENTS.md` §5.4, §26.5): [`StripeArray::assemble`] requires
-//! every member present and evenly striped (no coming up "degraded" over a
-//! gap it cannot serve), a whole-device fault fails the array closed for good
-//! ([`ArrayHealth::Failed`]), and a per-block media error fails only that one
-//! request while the still-reachable device keeps serving its other stripes.
-//! It shares the mirror's whole-device-fault classification and the
-//! [`ArrayHealth`] vocabulary rather than re-inventing them.
+//! all of them. A stripe has **no redundancy**, and the engine is honest about
+//! it: [`StripeArray::assemble`] requires every member present and evenly
+//! striped (no coming up "degraded" over a gap it cannot serve), a whole-device
+//! fault fails the array closed for good ([`ArrayHealth::Failed`]), and a
+//! per-block media error fails only that one request while the still-reachable
+//! device keeps serving its other stripes. It shares the mirror's
+//! whole-device-fault classification and the [`ArrayHealth`] vocabulary rather
+//! than re-inventing them.
 //!
 //! # RAID5 distributed parity ([`ParityArray`])
 //!
@@ -117,9 +112,9 @@
 //!   lost member's data stays reconstructable.
 //! - **Scrub** ([`ParityArray::begin_scrub`]/[`ParityArray::scrub_step`]) is a
 //!   bounded, interruptible pass that reads every member's copy of every stripe
-//!   row and repairs a latent media error from the survivors (`AGENTS.md`
-//!   §26.5); like the mirror it heals *media* errors and leaves *content*
-//!   arbitration to the checksummed filesystem layer.
+//!   row and repairs a latent media error from the survivors; like the mirror
+//!   it heals *media* errors and leaves *content* arbitration to the
+//!   checksummed filesystem layer.
 //! - A member going faulted, or a missing slot ([`MemberState::Absent`]),
 //!   **degrades the array, never the system** ([`ArrayHealth::Degraded`]); a
 //!   *second* loss makes a stripe unrecoverable and the array fails closed
@@ -127,13 +122,13 @@
 //!   reconstruct.
 //! - A returning or replaced member is **rebuilt** by a bounded, interruptible
 //!   resync ([`ParityArray::resync_step`]) that reconstructs its blocks from
-//!   the survivors a caller-sized budget at a time (`AGENTS.md` §26.6); the
-//!   same [`MirrorArray::remove_member`]/[`MirrorArray::add_member`]-style
+//!   the survivors a caller-sized budget at a time; the same
+//!   [`MirrorArray::remove_member`]/[`MirrorArray::add_member`]-style
 //!   disk-replacement workflow ([`ParityArray::remove_member`] /
 //!   [`ParityArray::add_member`] / [`ParityArray::replace_member`]) restores
-//!   redundancy without a reboot (`AGENTS.md` §18.4). Parity computation and
-//!   reconstruction borrow a caller-owned **scratch** buffer (at least two
-//!   logical blocks), so the engine stays allocation-free.
+//!   redundancy without a reboot. Parity computation and reconstruction borrow
+//!   a caller-owned **scratch** buffer (at least two logical blocks), so the
+//!   engine stays allocation-free.
 //!
 //! # RAID6 double distributed parity ([`DualParityArray`])
 //!
@@ -152,8 +147,7 @@
 //!   the surviving data members otherwise (a degraded write), so a lost
 //!   member's data stays reconstructable.
 //! - **Scrub** ([`DualParityArray::begin_scrub`]/[`DualParityArray::scrub_step`])
-//!   heals latent media errors from the survivors like the single-parity
-//!   array (`AGENTS.md` §26.5).
+//!   heals latent media errors from the survivors like the single-parity array.
 //! - A first or second lost member (or an [`MemberState::Absent`] slot)
 //!   **degrades the array, never the system** ([`ArrayHealth::Degraded`]); a
 //!   *third* loss makes a stripe unreconstructable and the array fails closed
@@ -163,10 +157,9 @@
 //!   [`remove_member`](DualParityArray::remove_member) /
 //!   [`add_member`](DualParityArray::add_member) /
 //!   [`replace_member`](DualParityArray::replace_member) disk-replacement
-//!   workflow restores redundancy without a reboot (`AGENTS.md` §18.4). Both
-//!   syndromes and the two-erasure solver borrow a caller-owned **scratch**
-//!   buffer of at least [`SCRATCH_BLOCKS`] logical blocks, so the engine stays
-//!   allocation-free.
+//!   workflow restores redundancy without a reboot. Both syndromes and the
+//!   two-erasure solver borrow a caller-owned **scratch** buffer of at least
+//!   [`SCRATCH_BLOCKS`] logical blocks, so the engine stays allocation-free.
 //!
 //! # RAID-TP triple distributed parity ([`TripleParityArray`])
 //!
@@ -186,8 +179,7 @@
 //!   from the surviving data members otherwise (a degraded write), so a lost
 //!   member's data stays reconstructable.
 //! - **Scrub** ([`TripleParityArray::begin_scrub`]/[`TripleParityArray::scrub_step`])
-//!   heals latent media errors from the survivors like the other parity
-//!   levels (`AGENTS.md` §26.5).
+//!   heals latent media errors from the survivors like the other parity levels.
 //! - A first, second, or third lost member (or an [`MemberState::Absent`]
 //!   slot) **degrades the array, never the system** ([`ArrayHealth::Degraded`]);
 //!   a *fourth* loss makes a stripe unreconstructable and the array fails
@@ -197,12 +189,12 @@
 //!   [`remove_member`](TripleParityArray::remove_member) /
 //!   [`add_member`](TripleParityArray::add_member) /
 //!   [`replace_member`](TripleParityArray::replace_member) disk-replacement
-//!   workflow restores redundancy without a reboot (`AGENTS.md` §18.4). The
-//!   three syndromes and the three-erasure solver borrow a caller-owned
-//!   **scratch** buffer of at least [`TRIPLE_SCRATCH_BLOCKS`] logical blocks,
-//!   so the engine stays allocation-free.
+//!   workflow restores redundancy without a reboot. The three syndromes and the
+//!   three-erasure solver borrow a caller-owned **scratch** buffer of at least
+//!   [`TRIPLE_SCRATCH_BLOCKS`] logical blocks, so the engine stays
+//!   allocation-free.
 //!
-//! # Fail closed (`AGENTS.md` §5.4)
+//! # Fail closed
 //!
 //! At the boundary of what the array can vouch for it returns a typed error
 //! and never serves data it cannot trust: a read with no surviving copy, a
@@ -210,7 +202,7 @@
 //! rather than fabricating success. The *operation* fails; the *system*
 //! keeps running.
 //!
-//! # Device-level answers: health and class (`AGENTS.md` §26.5)
+//! # Device-level answers: health and class
 //!
 //! Because every composition is itself a
 //! [`Block`](tairix_abi::driver::block::Block), a consumer queries the *array*
@@ -245,39 +237,37 @@
 //! a monotonic generation counter. [`distinct_arrays`] partitions a
 //! heterogeneous set of discovered [`Candidate`] members into the distinct
 //! arrays present among them, then [`ArrayIdentity::resolve`] reconstructs each
-//! array from its members — the freshest member fixes the authoritative
-//! shape — and [`ArrayIdentity::fill_slots`] places
-//! each member into its slot, marking one that is behind as a stale rebuild
-//! target and refusing a foreign, mis-shaped, or duplicate claimant. The
-//! decoder is fail-closed on any malformed on-disk byte (`AGENTS.md` §5.4,
-//! §26.5) and fuzzed for panic-freedom.
+//! array from its members — the freshest member fixes the authoritative shape —
+//! and [`ArrayIdentity::fill_slots`] places each member into its slot, marking
+//! one that is behind as a stale rebuild target and refusing a foreign,
+//! mis-shaped, or duplicate claimant. The decoder is fail-closed on any
+//! malformed on-disk byte and fuzzed for panic-freedom.
 //!
 //! The reassembly verdict is carried into composition through one mapping,
 //! [`MemberRole::for_slot`]: a slot the metadata proved is behind
 //! (`in_sync == false`) becomes a [`MemberRole::Stale`] member, which
 //! [`MirrorArray::assemble`] admits [`MemberState::Resyncing`] — a rebuild
 //! target, never an immediate read source — so the array can never serve a
-//! reader data from a copy known to be out of date (`AGENTS.md` §5.4, §26.5).
+//! reader data from a copy known to be out of date.
 //!
-//! Turning the whole [`SlotDisposition`] table into a
-//! redundant engine's member buffer is the shared [`fill_members`] bridge, so
-//! every consumer that assembles a discovered array places its members
-//! identically (through [`MemberRole::for_slot`]) rather than hand-rolling the
-//! stale/absent/device-tag loop (`AGENTS.md` §2.2, §27).
+//! Turning the whole [`SlotDisposition`] table into a redundant engine's member
+//! buffer is the shared [`fill_members`] bridge, so every consumer that
+//! assembles a discovered array places its members identically (through
+//! [`MemberRole::for_slot`]) rather than hand-rolling the
+//! stale/absent/device-tag loop.
 //!
 //! # Composed-device dispatch ([`RaidArray`])
 //!
 //! Once a serve process has *discovered* an array and resolved its
 //! [`RaidLevel`], it presents exactly one logical
-//! [`Block`](tairix_abi::driver::block::Block) device regardless
-//! of level. [`RaidArray`] is that single composed-device abstraction
-//! (`AGENTS.md` §27, modelled on Linux md's per-personality dispatch): it
-//! wraps the level-specific engine and forwards the `Block` I/O path
-//! together with the level-agnostic health, self-maintenance
-//! (scrub/resync), and member-reconfiguration surface, so neither the
-//! autoloaded serve process nor the ARXFS-native composition re-derives the
-//! level → engine mapping (`AGENTS.md` §2.2). Operations that are only
-//! meaningful for a *redundant* array fail closed on a RAID0 stripe with
+//! [`Block`](tairix_abi::driver::block::Block) device regardless of level.
+//! [`RaidArray`] is that single composed-device abstraction (modelled on Linux
+//! md's per-personality dispatch): it wraps the level-specific engine and
+//! forwards the `Block` I/O path together with the level-agnostic health,
+//! self-maintenance (scrub/resync), and member-reconfiguration surface, so
+//! neither the autoloaded serve process nor the ARXFS-native composition
+//! re-derives the level → engine mapping. Operations that are only meaningful
+//! for a *redundant* array fail closed on a RAID0 stripe with
 //! [`RaidError::NotRedundant`].
 //!
 //! # Maintenance scheduling ([`ArrayMaintenance`])
@@ -285,15 +275,14 @@
 //! Exposing a self-healing surface is not the same as driving it. An array
 //! heals itself only if something decides, turn by turn, whether to re-admit a
 //! returning member, advance a rebuild, or run a proactive scrub — and when it
-//! must do none of those so the foreground workload keeps the array
-//! (`AGENTS.md` §26.1, §2.16). [`ArrayMaintenance`] is that one decision
-//! (`AGENTS.md` §2.2, §27): a pure, event-timed, allocation-free policy that
-//! ranks restoring redundancy above verifying it, paces each chunk against a
-//! busy array's duty share, re-probes a faulted member on a bounded escalating
-//! cadence rather than a spin (`AGENTS.md` §2.23), and hands its caller the
-//! one-shot deadline to park on. Its cadences come from the array's own
-//! discovered [`BlkDeviceClass`](tairix_abi::blkio::BlkDeviceClass) through
-//! [`MaintenancePolicy::for_class`], never a frozen scalar (`AGENTS.md` §24.2).
+//! must do none of those so the foreground workload keeps the array.
+//! [`ArrayMaintenance`] is that one decision: a pure, event-timed,
+//! allocation-free policy that ranks restoring redundancy above verifying it,
+//! paces each chunk against a busy array's duty share, re-probes a faulted
+//! member on a bounded escalating cadence rather than a spin, and hands its
+//! caller the one-shot deadline to park on. Its cadences come from the array's
+//! own discovered [`BlkDeviceClass`](tairix_abi::blkio::BlkDeviceClass) through
+//! [`MaintenancePolicy::for_class`], never a frozen scalar.
 //!
 //! # Scope, and why this is a shared crate
 //!

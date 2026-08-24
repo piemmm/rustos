@@ -1,17 +1,16 @@
 //! TAIRiX `du` — estimate file space usage (Stage 6 `userland/apps/`, a
 //! `plans/APPS.md` command app).
 //!
-//! `du` walks each of its path operands and reports, per directory
-//! (post-order, deepest first), the on-disk storage the tree beneath it
-//! occupies. With no operand it walks the current directory (`.`). The
-//! option surface follows GNU coreutils (`AGENTS.md` §16.7): `-a` adds a
-//! row per file, `-s` reports only the operands, `-c` appends a grand
-//! total, `-d` bounds the reported depth, `-S` excludes subdirectories
-//! from a directory's own row, `-l` counts a multiply-named file once per
-//! name, `--apparent-size`/`-b` measure apparent
-//! byte lengths, and `-k`/`-m`/`-h`/`--si`/`-B <size>` select the scale.
-//! `-?`/`--help` render the tool's own short help from its bundled
-//! `Help/` tree through the shared `lib/help` engine (plans/APPS.md §4).
+//! `du` walks each of its path operands and reports, per directory (post-order,
+//! deepest first), the on-disk storage the tree beneath it occupies. With no
+//! operand it walks the current directory (`.`). The option surface follows GNU
+//! coreutils: `-a` adds a row per file, `-s` reports only the operands, `-c`
+//! appends a grand total, `-d` bounds the reported depth, `-S` excludes
+//! subdirectories from a directory's own row, `-l` counts a multiply-named file
+//! once per name, `--apparent-size`/`-b` measure apparent byte lengths, and
+//! `-k`/`-m`/`-h`/`--si`/`-B <size>` select the scale. `-?`/`--help` render the
+//! tool's own short help from its bundled `Help/` tree through the shared
+//! `lib/help` engine (plans/APPS.md §4).
 //!
 //! # What this crate is
 //!

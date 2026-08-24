@@ -6,8 +6,8 @@
 //! ([`crate::console::ConsoleDevice`]) or a pseudo-terminal
 //! ([`crate::pty::Pty`]); both carry exactly one [`ForegroundOwnership`] and
 //! share **this** definition of the ownership rules rather than each keeping a
-//! private copy (`AGENTS.md` §2.2). The `console_foreground` syscall routes to
-//! whichever backing a caller's standard stream resolves to.
+//! private copy. The `console_foreground` syscall routes to whichever backing a
+//! caller's standard stream resolves to.
 //!
 //! # The rules
 //!

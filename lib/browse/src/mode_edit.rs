@@ -47,9 +47,9 @@ pub enum ModeError {
 }
 
 impl ModeError {
-    /// A terse, human-readable reason for the in-UI refusal line (§2.24 — a
-    /// denied action is an honest answer, never a silent failure). It names no
-    /// path and carries no secret.
+    /// A terse, human-readable reason for the in-UI refusal line (a denied
+    /// action is an honest answer, never a silent failure). It names no path
+    /// and carries no secret.
     #[must_use]
     pub const fn message(self) -> &'static str {
         match self {

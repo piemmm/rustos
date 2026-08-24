@@ -16,11 +16,11 @@
 //!
 //! * [`parse`] — the [`Command`] a command line names, with GNU `sleep`'s
 //!   option rules: the only options are the reserved short-help switches
-//!   (plans/APPS.md §4), and — like GNU getopt — an option token is
-//!   diagnosed wherever it sits, so `sleep 1 --help` serves the help and
-//!   `sleep 1 -x` diagnoses `-x`. Every operand is parsed as an interval
-//!   through the shared [`tairix_util::cnum::scan_double`] scanner, so the
-//!   C number grammar lives in exactly one place (§2.2).
+//!   (plans/APPS.md §4), and — like GNU getopt — an option token is diagnosed
+//!   wherever it sits, so `sleep 1 --help` serves the help and `sleep 1 -x`
+//!   diagnoses `-x`. Every operand is parsed as an interval through the shared
+//!   [`tairix_util::cnum::scan_double`] scanner, so the C number grammar lives
+//!   in exactly one place.
 //! * [`run`] — the engine: render the short help, or pause for the summed
 //!   interval through the injected [`Sleeper`] seam. The seam keeps the
 //!   engine pure and makes the real, off-CPU park a production detail the
@@ -28,10 +28,10 @@
 //!
 //! # No busy-waiting
 //!
-//! The production [`Sleeper`] (in the `Run` binary) parks the task
-//! off-CPU on the runtime's timed wait — it never spins a core waiting for
-//! the clock (`AGENTS.md` §2.23). `sleep inf` re-parks in bounded chunks
-//! forever rather than looping on a clock read.
+//! The production [`Sleeper`] (in the `Run` binary) parks the task off-CPU on
+//! the runtime's timed wait — it never spins a core waiting for the clock.
+//! `sleep inf` re-parks in bounded chunks forever rather than looping on a
+//! clock read.
 //!
 //! # Layering & safety
 //!
@@ -129,11 +129,10 @@ impl fmt::Display for SleepError {
 
 /// The off-CPU pause the [`run`] engine performs for a [`Command::Sleep`].
 ///
-/// The production implementation (in the `Run` binary) parks the task on
-/// the runtime's timed wait so the CPU sleeps rather than spins
-/// (`AGENTS.md` §2.23); tests inject a recorder that captures the requested
-/// interval without waiting. The seam keeps the engine pure and its tests
-/// instant.
+/// The production implementation (in the `Run` binary) parks the task on the
+/// runtime's timed wait so the CPU sleeps rather than spins; tests inject a
+/// recorder that captures the requested interval without waiting. The seam
+/// keeps the engine pure and its tests instant.
 pub trait Sleeper {
     /// Pause for `seconds` (guaranteed `>= 0`; [`f64::INFINITY`] means
     /// pause until the process is killed) and then return.

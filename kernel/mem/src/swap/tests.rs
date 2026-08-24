@@ -175,8 +175,8 @@ fn tampered_nonce_is_rejected() {
 fn relocated_record_fails_authentication() {
     let mut swap = activate(2);
     swap.store(0, &page(0xDD)).expect("store");
-    // Move slot 0's record verbatim into slot 1; the slot-index AAD no
-    // longer matches, so authentication must fail (§ relocation defence).
+    // Move slot 0's record verbatim into slot 1; the slot-index AAD no longer
+    // matches, so authentication must fail: the relocation defence.
     swap.backend.copy_slot(0, 1);
     let mut out = page(0x00);
     assert_eq!(swap.load(1, &mut out), Err(SwapError::Authentication));

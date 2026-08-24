@@ -26,12 +26,11 @@ use crate::error::TeeError;
 ///
 /// TAIRiX has no `SIGPIPE`: a program's consumer going away surfaces as a
 /// *write error on standard output*, never a signal. The GNU modes key on
-/// `EPIPE`, and the one place that condition arises here is the standard
-/// output stream, so the "pipe" class maps to exactly that output: the
-/// `-nopipe` modes tolerate a failed standard output silently and the
-/// others treat it like any failed file. This confines the divergence to
-/// the concept that genuinely differs (`AGENTS.md` §16.7) and is
-/// documented in the tool's Help.
+/// `EPIPE`, and the one place that condition arises here is the standard output
+/// stream, so the "pipe" class maps to exactly that output: the `-nopipe` modes
+/// tolerate a failed standard output silently and the others treat it like any
+/// failed file. This confines the divergence to the concept that genuinely
+/// differs and is documented in the tool's Help.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum OutputError {
     /// No `--output-error`/`-p` was given: a failed standard output stops

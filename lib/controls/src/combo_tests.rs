@@ -281,7 +281,7 @@ fn unfocused_field_ignores_keys() {
     assert!(!combo.is_expanded());
 }
 
-// --- §13 authority ------------------------------------------------------
+// --- spec §13 authority -------------------------------------------------
 
 #[test]
 fn denied_field_never_opens() {

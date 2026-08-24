@@ -35,11 +35,11 @@ pub const LOGIN_PATH: &[u8] = b"/System/Services/login.app/Run";
 /// contract, identical on every target.
 pub const DEVMGR_PATH: &[u8] = b"/System/Services/devmgr.app/Run";
 
-/// Absolute path the System Information service program is registered under
-/// (`AGENTS.md` §16.6): the service store's `<name>.app` bundle. It must
-/// match exactly the `sysinfod` path PID 1 `init` hands to the `spawn`
-/// syscall at startup (`userland/system/init/src/startup.rs`). One OS-wide
-/// path contract, identical on every target.
+/// Absolute path the System Information service program is registered under:
+/// the service store's `<name>.app` bundle. It must match exactly the
+/// `sysinfod` path PID 1 `init` hands to the `spawn` syscall at startup
+/// (`userland/system/init/src/startup.rs`). One OS-wide path contract,
+/// identical on every target.
 pub const SYSINFOD_PATH: &[u8] = b"/System/Services/sysinfod.app/Run";
 
 /// Absolute path the seat-manager service program is registered under

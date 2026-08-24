@@ -1,12 +1,12 @@
 //! TAIRiX shared command-help engine (`lib/help`, `plans/APPS.md`).
 //!
-//! Every application bundle may ship a `Help/` tree (`tairix_abi::appinfo`,
-//! `AGENTS.md` §16.5): one structured-Markdown document per command or topic,
-//! under one directory per BCP-47 locale, with the mandatory `en-US/`
-//! directory as the canonical source. Three consumers read that tree — the
-//! `man` command, every command's short `-h`/`-?` help, and any graphical help
-//! viewer — and they must not each grow a private locale walker, Markdown
-//! parser, or escape vocabulary. This crate is the one engine they share.
+//! Every application bundle may ship a `Help/` tree (`tairix_abi::appinfo`):
+//! one structured-Markdown document per command or topic, under one directory
+//! per BCP-47 locale, with the mandatory `en-US/` directory as the canonical
+//! source. Three consumers read that tree — the `man` command, every command's
+//! short `-h`/`-?` help, and any graphical help viewer — and they must not each
+//! grow a private locale walker, Markdown parser, or escape vocabulary. This
+//! crate is the one engine they share.
 //!
 //! # What it does
 //!

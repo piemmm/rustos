@@ -16,6 +16,7 @@ mod abi_check;
 mod bench;
 mod c_header;
 mod cfg_check;
+mod charter_cite;
 mod ci_long;
 mod deps_check;
 mod devids;
@@ -66,6 +67,7 @@ pub enum Command {
     FsSoak,
     ModelCheck,
     SpecReview,
+    CharterCite,
     Bench,
     Ci,
     CiLong,
@@ -98,6 +100,7 @@ impl Command {
         Command::FsSoak,
         Command::ModelCheck,
         Command::SpecReview,
+        Command::CharterCite,
         Command::Bench,
         Command::Ci,
         Command::CiLong,
@@ -129,6 +132,7 @@ impl Command {
             "fssoak" => Command::FsSoak,
             "model-check" => Command::ModelCheck,
             "spec-review" => Command::SpecReview,
+            "charter-cite" => Command::CharterCite,
             "bench" => Command::Bench,
             "ci" => Command::Ci,
             "ci-long" => Command::CiLong,
@@ -162,6 +166,7 @@ impl Command {
             Command::FsSoak => "fssoak",
             Command::ModelCheck => "model-check",
             Command::SpecReview => "spec-review",
+            Command::CharterCite => "charter-cite",
             Command::Bench => "bench",
             Command::Ci => "ci",
             Command::CiLong => "ci-long",
@@ -215,6 +220,9 @@ impl Command {
                 "Exhaustively model-check the §19.7 Silver capability + IPC state machine."
             }
             Command::SpecReview => "Reject unreviewed AI draft markers in source (§19.7).",
+            Command::CharterCite => {
+                "Reject comments that cite a charter section instead of the reason (§2.11)."
+            }
             Command::Bench => {
                 "Time the raster and compositor families in ns/px and ns/frame (evidence, not a gate)."
             }
@@ -253,6 +261,7 @@ impl Command {
             Command::FsSoak => run_fssoak(ctx, args),
             Command::ModelCheck => run_model_check(args),
             Command::SpecReview => run_spec_review(ctx),
+            Command::CharterCite => run_charter_cite(ctx),
             Command::Bench => run_bench(args),
             Command::Ci => run_ci(ctx),
             Command::CiLong => run_ci_long(ctx, args),
@@ -993,6 +1002,13 @@ fn run_spec_review(ctx: &Context) -> Result<(), String> {
     spec_review::run(&ctx.workspace_root)
 }
 
+fn run_charter_cite(ctx: &Context) -> Result<(), String> {
+    // A comment must carry the reason, not a pointer to the rule. The scanner
+    // lives in `commands/charter_cite.rs`.
+    eprintln!("xtask: [charter-cite] {}", ctx.workspace_root.display());
+    charter_cite::run(&ctx.workspace_root)
+}
+
 fn run_ci(ctx: &Context) -> Result<(), String> {
     // The pipeline order is deliberate: cheap and deterministic checks run
     // first so a failing PR fails fast. The test phase opts in to `--qemu`
@@ -1084,6 +1100,9 @@ fn run_static_gates(ctx: &Context) -> Result<(), String> {
         // Reject any unreviewed AI-drafted artefact marker that reached the
         // tree; a source scan, fails closed.
         static_gate("spec-review", ctx, run_spec_review),
+        // Reject a comment that cites a charter section number in place of the
+        // reason; a source scan, fails closed.
+        static_gate("charter-cite", ctx, run_charter_cite),
         // Supply-chain integrity: the source-hash allow-list against
         // `Cargo.lock` and the advisory SLA, fails closed on drift.
         static_gate("supply-chain", ctx, |c| run_supply_chain(c, &[])),

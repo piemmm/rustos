@@ -1093,10 +1093,10 @@ pub fn decode_send_reply(bytes: &[u8]) -> Result<u32, Errno> {
 
 /// Why a stream connection ended, delivered in a [`SocketStreamEvent::Closed`].
 ///
-/// The receive half of a stream never fails silently (`AGENTS.md` §2.24):
-/// a connection always ends with exactly one `Closed` event stating the
-/// reason, so a client `recv` that returns end-of-stream can distinguish an
-/// orderly peer close from an abortive reset.
+/// The receive half of a stream never fails silently: a connection always ends
+/// with exactly one `Closed` event stating the reason, so a client `recv` that
+/// returns end-of-stream can distinguish an orderly peer close from an abortive
+/// reset.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum StreamCloseReason {

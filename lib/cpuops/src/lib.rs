@@ -8,11 +8,11 @@
 //! benchmarks it) and decides performance with an optional bounded benchmark.
 //!
 //! The crate is `no_std`, contains no `unsafe`, and names no architecture,
-//! board, or `SoC` (§2.20/§2.21): concrete routines live in their owning crates
-//! and are gated on the discovered feature bits this framework matches against.
-//! The selection algorithm allocates nothing; only the optional [`OpsTables`]
-//! uses the heap, behind the default-on `alloc` feature, so an allocator-free
-//! consumer depends on this crate with `default-features = false`.
+//! board, or `SoC`: concrete routines live in their owning crates and are gated
+//! on the discovered feature bits this framework matches against. The selection
+//! algorithm allocates nothing; only the optional [`OpsTables`] uses the heap,
+//! behind the default-on `alloc` feature, so an allocator-free consumer depends
+//! on this crate with `default-features = false`.
 
 #![no_std]
 
@@ -31,8 +31,8 @@ use alloc::vec::Vec;
 
 pub use bench::{BenchHarness, CycleCounter};
 // The capability vocabulary is shared with the Arch HAL from the one ABI
-// definition, so a candidate's required-feature gate is the exact set the
-// ports produce (§2.2).
+// definition, so a candidate's required-feature gate is the exact set the ports
+// produce.
 pub use tairix_abi::cpufeatures::{CpuFeature, CpuFeatureSet};
 
 /// The identity of a distinct core type — the key an [`OpsTables`] resolves one
@@ -82,7 +82,7 @@ pub struct Candidate<T: Copy> {
 pub enum Selection {
     /// Choose the first verified survivor in declared order. The only correct
     /// policy for a crypto-backend *availability* decision: it never lets a
-    /// benchmark near a secret (§19.1/§2.12).
+    /// benchmark near a secret.
     ByPriority,
     /// Choose the fastest verified survivor by a bounded benchmark. Permitted
     /// only for a family that is bit-identical in output and handles no secret
@@ -140,8 +140,8 @@ pub enum DecisionReason {
     BaselineUnverified,
 }
 
-/// The typed record of one selection, for the audit log (§19.4). The crate
-/// performs no I/O; the caller records this through a [`DecisionSink`].
+/// The typed record of one selection, for the audit log. The crate performs no
+/// I/O; the caller records this through a [`DecisionSink`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Decision {
     /// The family this decision is for.
@@ -179,17 +179,17 @@ pub trait DecisionSink {
 ///
 /// A family's candidate list is a tiny, compile-time-fixed `&'static` slice (a
 /// handful of implementations of one op), so this is a validation bound on a
-/// fixed set (§24.4), never a machine-scaling capacity — and it lets selection
-/// run on a bounded stack buffer with no heap allocation, so a consumer that
-/// only selects (never builds an [`OpsTables`]) needs no global allocator.
+/// fixed set, never a machine-scaling capacity — and it lets selection run on a
+/// bounded stack buffer with no heap allocation, so a consumer that only
+/// selects (never builds an [`OpsTables`]) needs no global allocator.
 const MAX_CANDIDATES: usize = 16;
 
 /// The maximum number of operator pins a [`Selector`] holds.
 ///
 /// Pins name at most one candidate per family and the set of pinnable families
 /// is tiny and compile-time-fixed, so this is likewise a validation bound on a
-/// fixed set (§24.4), not a scaling capacity — and it lets a `Selector` hold
-/// its pins on the stack, so the selection path allocates nothing.
+/// fixed set, not a scaling capacity — and it lets a `Selector` hold its pins
+/// on the stack, so the selection path allocates nothing.
 const MAX_PINS: usize = 16;
 
 /// The selection algorithm plus any operator pins.
@@ -260,7 +260,7 @@ impl Selector {
     /// needs; pass `None` for a [`Selection::ByPriority`] family (a
     /// `ByBenchmark` family with no harness deterministically falls to declared
     /// priority — correct, just not speed-optimal). The algorithm never panics
-    /// and never busy-waits (§5.4/§2.9/§2.23).
+    /// and never busy-waits.
     #[must_use]
     pub fn select<T, In, Out>(
         &self,
@@ -446,7 +446,7 @@ where
 /// struct of `extern "C" fn` pointers) consumed on the hot path. The map grows
 /// on demand as each distinct [`CoreKey`] comes up (`big.LITTLE`, Intel
 /// hybrid); the number of core types is tiny, so a linear scan is the right
-/// structure, and it is a *growable capacity*, never a fixed ceiling (§24.1).
+/// structure, and it is a *growable capacity*, never a fixed ceiling.
 ///
 /// Behind the default-on `alloc` feature: it is the crate's only heap user, so
 /// an allocator-free consumer that never builds one (`lib/crc32c`,

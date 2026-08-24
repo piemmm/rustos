@@ -63,12 +63,13 @@ pub const SEGMENT_HEADER_LEN: usize = 8   // magic
     + WallClockReading::WIRE_LEN
     + SHA256_OUTPUT_LEN; // header_checksum
 
-/// Fixed per-record framing overhead: `tag(1) || payload_len(4) || cpu(4) ||
-/// seq(8) || entry_hash(32) || monotonic(12)`.
+/// Fixed per-record framing overhead:
+/// `tag(1) || payload_len(4) || cpu(4) || seq(8) || entry_hash(32) || monotonic(12)`.
 ///
-/// `monotonic` is the record's own ordering time within the boot (§5.1). It is
-/// covered by the segment hash (like `seq`), not folded into the per-record
-/// chain link, which binds only the originating CPU and the payload digest.
+/// `monotonic` is the record's own ordering time within the boot (SYSLOG
+/// §5.1). It is covered
+/// by the segment hash (like `seq`), not folded into the per-record chain link,
+/// which binds only the originating CPU and the payload digest.
 pub const RECORD_PREFIX_LEN: usize = 1 + 4 + 4 + 8 + SHA256_OUTPUT_LEN + Duration64::WIRE_LEN;
 
 /// Byte length of the footer summary (everything the segment hash covers of
@@ -501,7 +502,7 @@ pub struct RecordBlockRef<'a> {
     pub seq: u64,
     /// The record's chain link hash.
     pub entry_hash: Sha256Digest,
-    /// The record's monotonic ordering time within the boot (§5.1).
+    /// The record's monotonic ordering time within the boot (SYSLOG §5.1).
     pub monotonic: Duration64,
     /// The opaque record payload bytes.
     pub payload: &'a [u8],
@@ -921,8 +922,9 @@ mod tests {
             assert_eq!(block.seq, 100 + u64::from(idx));
             assert_eq!(block.cpu, idx);
             assert_eq!(block.payload, payloads[i]);
-            // Each record carries its own monotonic time (§5.1), matching the
-            // `10 + i` seconds `build_runtime` stamped it with.
+            // Each record carries its own monotonic time (SYSLOG §5.1),
+            // matching the `10 + i`
+            // seconds `build_runtime` stamped it with.
             let secs = 10 + i64::try_from(i).expect("index fits i64");
             assert_eq!(block.monotonic, Duration64::from_secs(secs));
         }

@@ -396,8 +396,8 @@ fn decode_entry(ty: u8, body: &[u8]) -> MadtEntry {
 // 0..4 GiB window (`boot.s` SAFETY-INVARIANT 4) and are therefore
 // gated to the freestanding x86_64 target.
 //
-// — both the `tests/integration/kernel_arch_boot`
-// boot test (Stage 3a (c7-bin)) and the existing `scheduler_stress_qemu`
+// Both the `tests/integration/kernel_arch_boot` boot test (Stage 3a
+// (c7-bin)) and the existing `scheduler_stress_qemu`
 // integration test need to find the MADT this way. Centralising the
 // logic here removes the duplication that would otherwise grow with
 // every new bin.

@@ -4,13 +4,12 @@
 //! obtain a glyph's coverage bitmap, a family's line metrics, or the set of
 //! installed families.
 //!
-//! Text rendering is a single, sandboxed OS resource (§16.4, §19.5): no
-//! process but `fontd` holds a font face or an outline rasteriser, and a
-//! client draws by asking this endpoint for the 8-bit coverage of one
-//! Unicode scalar at a chosen pixel height. The transport carries no font
-//! bytes and no outlines — only the small coverage bitmap the client
-//! blits — so a malformed face can fault only the service's sandbox, never
-//! the compositor or a terminal.
+//! Text rendering is a single, sandboxed OS resource: no process but `fontd`
+//! holds a font face or an outline rasteriser, and a client draws by asking
+//! this endpoint for the 8-bit coverage of one Unicode scalar at a chosen pixel
+//! height. The transport carries no font bytes and no outlines — only the small
+//! coverage bitmap the client blits — so a malformed face can fault only the
+//! service's sandbox, never the compositor or a terminal.
 //!
 //! # Proportional and monospace families are one protocol
 //!
@@ -26,11 +25,11 @@
 //!
 //! The protocol is modelled on [`crate::display_ipc`] / [`crate::mailbox_ipc`]:
 //! a fixed-width [`FontRequest`] in, and a status-framed reply out. Drawing
-//! text is not a security boundary, so the endpoint requires no capability
-//! of its own (§5.2); the reply nonetheless validates every field and fails
-//! closed on a corrupt frame. Every request and reply is versioned and
-//! hashed under the same ABI discipline as the syscall table (§9) and
-//! frozen on the first release — mutable now, `abi-v1` is not frozen.
+//! text is not a security boundary, so the endpoint requires no capability of
+//! its own; the reply nonetheless validates every field and fails closed on a
+//! corrupt frame. Every request and reply is versioned and hashed under the
+//! same ABI discipline as the syscall table and frozen on the first release —
+//! mutable now, `abi-v1` is not frozen.
 
 use crate::le::{put_i32, put_u32, read_i32, read_u32};
 use crate::Errno;
@@ -599,10 +598,10 @@ pub fn decode_glyph_reply(reply: &[u8]) -> Result<GlyphCoverage<'_>, Errno> {
     })
 }
 
-/// Validate a glyph geometry and return the coverage length (`width *
-/// height`) it implies. The bounds are the same on both the encode and
-/// decode sides, so producer and consumer can never disagree on what a
-/// well-formed reply looks like.
+/// Validate a glyph geometry and return the coverage length (`width * height`)
+/// it implies. The bounds are the same on both the encode and decode sides, so
+/// producer and consumer can never disagree on what a well-formed reply looks
+/// like.
 fn glyph_coverage_len(width: u32, height: u32, advance: u32, left: i32) -> Result<usize, Errno> {
     let span = i32::try_from(FONT_MAX_GLYPH_WIDTH).map_err(|_| Errno::LengthOutOfRange)?;
     if width > FONT_MAX_GLYPH_WIDTH
