@@ -87,16 +87,6 @@ mod program {
     /// is starved.
     const PRESSURE_TOKEN: u64 = 2;
 
-    /// Recover the [`Errno`] a syscall encoded as a negative register
-    /// (`-ret`); an unrecognised code fails closed as
-    /// [`Errno::NotImplemented`] rather than being guessed.
-    fn errno_from(ret: i64) -> Errno {
-        i32::try_from(-ret)
-            .ok()
-            .and_then(Errno::from_i32)
-            .unwrap_or(Errno::NotImplemented)
-    }
-
     /// State a reason on `stderr`: an exit code alone is not a diagnosis, and
     /// a refused optional step still says so.
     fn report(reason: &str) {
@@ -141,7 +131,7 @@ mod program {
 
     impl WindowTransport for RtWindowTransport {
         fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
-            tairix_rt::ipc_call(WINDOW_ENDPOINT, request, reply).map_err(errno_from)
+            tairix_rt::ipc_call(WINDOW_ENDPOINT, request, reply).map_err(Errno::from_syscall)
         }
     }
 
@@ -180,7 +170,7 @@ mod program {
                         }
                         return Ok(());
                     }
-                    Err(err) if errno_from(err) == Errno::WouldBlock => {
+                    Err(err) if Errno::from_syscall(err) == Errno::WouldBlock => {
                         // Nothing queued: park until the session's next
                         // delivery wakes the wait-set — never a spin.
                         let mut token = 0u64;
@@ -191,7 +181,7 @@ mod program {
                             tairix_font::trim_glyph_cache();
                         }
                     }
-                    Err(err) => return Err(errno_from(err)),
+                    Err(err) => return Err(Errno::from_syscall(err)),
                 }
             }
         }
@@ -352,7 +342,7 @@ mod program {
             editor.set_status(Status::Applied);
             return;
         }
-        let err = errno_from(ret);
+        let err = Errno::from_syscall(ret);
         let status = if err == Errno::PermissionDenied {
             Status::Denied
         } else {

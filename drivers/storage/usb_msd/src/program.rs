@@ -150,8 +150,10 @@ impl UrbCall for IpcUrbCall {
         match tairix_rt::ipc_call(self.endpoint, request, reply) {
             Ok(len) => Ok(len),
             Err(neg) => {
-                let errno =
-                    Errno::from_i32(i32::try_from(-neg).unwrap_or(0)).unwrap_or(Errno::NotFound);
+                let errno = Errno::from_syscall(neg);
+                // Only a vanished endpoint is a detach. An unreadable refusal
+                // is not one, so it leaves the LUNs published and lets the
+                // unit's own recovery ladder fail it closed.
                 if errno == Errno::NotFound {
                     self.disconnected = true;
                 }
@@ -989,9 +991,7 @@ where
         if ret < 0 {
             // A timed-out wait is the grace one-shot firing, not a failure:
             // fold the elapsed windows and re-arm. Any other error is fatal.
-            let errno =
-                Errno::from_i32(i32::try_from(-ret).unwrap_or(0)).unwrap_or(Errno::NotFound);
-            if errno == Errno::TimedOut {
+            if Errno::from_syscall(ret) == Errno::TimedOut {
                 expire_idle_grace_windows(&mut luns, now_ns);
                 let domain_before = domain.state();
                 note_domain_edge(domain_before, domain.poll(now_ns), domain_owner);

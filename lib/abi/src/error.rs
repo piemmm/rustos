@@ -389,18 +389,50 @@ impl Errno {
     }
 
     /// Recover the [`Errno`] a syscall encoded as a negative signed result
+    /// (`-errno`, the standard `abi-v1` convention), or `None` when the
+    /// register carries no readable discriminant.
+    ///
+    /// The one definition of that decode. `None` covers every unreadable
+    /// register alike — a non-negative result (not an error at all), a
+    /// magnitude no `i32` can hold, a code this build has no variant for, and
+    /// [`i64::MIN`], whose negation overflows — so a caller that must tell
+    /// "unreadable" from a real refusal has that distinction. A caller with
+    /// nothing to do with it wants [`from_syscall`](Self::from_syscall).
+    #[must_use]
+    pub fn try_from_syscall(ret: i64) -> Option<Self> {
+        ret.checked_neg()
+            .and_then(|code| i32::try_from(code).ok())
+            .and_then(Self::from_i32)
+    }
+
+    /// Recover the [`Errno`] a reply frame's negative status word encodes
+    /// (`-errno`), or `None` when the word carries no readable discriminant.
+    ///
+    /// A status word arrives from a peer, not from the kernel, so the decode
+    /// must be total over all `2^32` inputs: `None` covers a non-negative
+    /// word, an unknown code, and [`i32::MIN`], whose negation overflows and
+    /// would otherwise abort the decoding process. The fail-closed answer is
+    /// the protocol's to choose — a corrupt frame is `BadMagic` in one wire
+    /// format and `OutOfRange` in another — so this yields the option and each
+    /// decoder names its own refusal.
+    #[must_use]
+    pub fn try_from_status(status: i32) -> Option<Self> {
+        Self::try_from_syscall(i64::from(status))
+    }
+
+    /// Recover the [`Errno`] a syscall encoded as a negative signed result
     /// (`-errno`, the standard `abi-v1` convention).
     ///
-    /// The one definition of that decode, so no caller re-derives it. A
-    /// non-negative `ret` is not an error and an unknown code cannot be
-    /// guessed at: both fail closed as
-    /// [`NotImplemented`](Self::NotImplemented).
+    /// An unreadable register (see [`try_from_syscall`](Self::try_from_syscall))
+    /// fails closed as [`NotImplemented`](Self::NotImplemented): this build
+    /// genuinely cannot say what the kernel meant. It deliberately never
+    /// becomes [`NotFound`](Self::NotFound), which asserts that a named object
+    /// does not exist and which callers act on — by creating it, by treating
+    /// an absence as benign, or by concluding a device was unplugged. An
+    /// unreadable result must not be able to masquerade as that answer.
     #[must_use]
     pub fn from_syscall(ret: i64) -> Self {
-        i32::try_from(-ret)
-            .ok()
-            .and_then(Self::from_i32)
-            .unwrap_or(Self::NotImplemented)
+        Self::try_from_syscall(ret).unwrap_or(Self::NotImplemented)
     }
 
     /// Recover an [`Errno`] from its ABI numeric value, or `None` if `value`
@@ -632,6 +664,105 @@ mod tests {
             alloc::format!("{}", Errno::PermissionDenied).as_str(),
             "permission denied",
         );
+    }
+
+    #[test]
+    fn every_errno_the_abi_defines_round_trips_through_a_syscall_result() {
+        // Walk the discriminant space rather than restating a list of variants,
+        // so a newly appended errno is covered the moment it is added.
+        let mut recovered = 0usize;
+        for code in 1..=256i32 {
+            if let Some(errno) = Errno::from_i32(code) {
+                let raw = -i64::from(code);
+                assert_eq!(Errno::try_from_syscall(raw), Some(errno));
+                assert_eq!(Errno::from_syscall(raw), errno);
+                recovered += 1;
+            }
+        }
+        assert!(
+            recovered > 20,
+            "the discriminant walk must reach the defined errnos, found {recovered}"
+        );
+    }
+
+    #[test]
+    fn a_success_value_is_not_mistaken_for_an_error_code() {
+        // A non-negative result is a success the caller should never have
+        // handed to the decode; it must not surface as a plausible refusal a
+        // caller would act on.
+        for raw in [0i64, 1, 7, 4096, i64::MAX] {
+            assert_eq!(Errno::try_from_syscall(raw), None);
+            assert_eq!(Errno::from_syscall(raw), Errno::NotImplemented);
+        }
+    }
+
+    #[test]
+    fn an_unreadable_result_fails_closed_rather_than_naming_a_wrong_errno() {
+        for raw in [
+            -(i64::from(i32::MAX) + 1),
+            -(i64::from(u32::MAX) + 12),
+            -100_000,
+        ] {
+            assert_eq!(Errno::try_from_syscall(raw), None);
+            assert_eq!(Errno::from_syscall(raw), Errno::NotImplemented);
+            assert_ne!(
+                Errno::from_syscall(raw),
+                Errno::NotFound,
+                "an unreadable result must never become the absence a caller acts on"
+            );
+        }
+    }
+
+    #[test]
+    fn the_most_negative_result_decodes_instead_of_aborting_the_process() {
+        // `-ret` overflows on `i64::MIN`, and the workspace builds every
+        // profile with overflow checks and `panic = "abort"`, so a decode
+        // spelled that way kills the program on one of its inputs instead of
+        // failing closed. `checked_neg` is what makes the decode total.
+        assert_eq!(Errno::try_from_syscall(i64::MIN), None);
+        assert_eq!(Errno::from_syscall(i64::MIN), Errno::NotImplemented);
+    }
+
+    #[test]
+    fn a_status_word_decodes_over_its_whole_domain() {
+        // A reply frame's status word is peer-supplied, so every `i32` must
+        // decode or refuse — `i32::MIN` included, whose negation overflows.
+        assert_eq!(Errno::try_from_status(i32::MIN), None);
+        assert_eq!(Errno::try_from_status(0), None);
+        assert_eq!(Errno::try_from_status(7), None);
+        assert_eq!(Errno::try_from_status(i32::MAX), None);
+        assert_eq!(
+            Errno::try_from_status(-Errno::PermissionDenied.as_i32()),
+            Some(Errno::PermissionDenied)
+        );
+        // The status word is the syscall decode at wire width, not a second
+        // rule: the two must not drift.
+        for status in [i32::MIN, i32::MIN + 1, -100_000, -7, -1, 0, 1, i32::MAX] {
+            assert_eq!(
+                Errno::try_from_status(status),
+                Errno::try_from_syscall(i64::from(status))
+            );
+        }
+    }
+
+    #[test]
+    fn the_total_decode_is_the_fallible_one_plus_its_fail_closed_answer() {
+        // The two must not drift into disagreeing about what a register means,
+        // which is the divergence a second definition of the decode invites.
+        for raw in [
+            i64::MIN,
+            i64::MIN + 1,
+            -100_000,
+            -33,
+            -7,
+            -1,
+            0,
+            1,
+            i64::MAX,
+        ] {
+            let expected = Errno::try_from_syscall(raw).unwrap_or(Errno::NotImplemented);
+            assert_eq!(Errno::from_syscall(raw), expected);
+        }
     }
 
     extern crate alloc;

@@ -16,16 +16,6 @@ use tairix_abi::Errno;
 
 use crate::server::{FrameRegion, ShmMapper};
 
-/// Recover the [`Errno`] a syscall encoded as a negative register
-/// (`-ret`); an unrecognised code fails closed as
-/// [`Errno::NotImplemented`] rather than being guessed.
-fn errno_from(ret: i64) -> Errno {
-    i32::try_from(-ret)
-        .ok()
-        .and_then(Errno::from_i32)
-        .unwrap_or(Errno::NotImplemented)
-}
-
 /// A client region mapped through `shm_map`, unmapped on drop (a
 /// reconfigure, a closed window, or an observed lease loss releases the
 /// old mapping).
@@ -83,7 +73,7 @@ impl ShmMapper for RtShmMapper {
         let mut raw_len: u64 = 0;
         let ret = tairix_rt::shm_map(handle, &mut raw_len);
         if ret < 0 {
-            return Err(errno_from(ret));
+            return Err(Errno::from_syscall(ret));
         }
         #[allow(clippy::cast_sign_loss)] // `ret >= 0` checked above; it is a user VA.
         let base = ret as u64;

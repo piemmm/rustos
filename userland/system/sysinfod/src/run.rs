@@ -78,23 +78,14 @@ mod program {
     /// Payload capacity a framed reply leaves after its status word.
     const REPLY_PAYLOAD_CAP: usize = SYSINFO_MAX_REPLY - SYSINFO_REPLY_STATUS_LEN;
 
-    /// Recover the [`Errno`] a syscall encoded as a negative register
-    /// (`-errno`); an unrecognised code fails closed as
-    /// [`Errno::NotImplemented`] rather than being guessed.
-    fn errno_from(ret: i64) -> Errno {
-        i32::try_from(-ret)
-            .ok()
-            .and_then(Errno::from_i32)
-            .unwrap_or(Errno::NotImplemented)
-    }
-
     /// Read one whole scalar domain (`KernelMemory`/`Identity`/`Uptime`) into
     /// an owned buffer via a single `sysinfo_introspect` call.
     fn read_scalar(domain: IntrospectDomain) -> Result<Vec<u8>, Errno> {
         // A page comfortably larger than any scalar record; the kernel writes
         // only the record's bytes and returns the count.
         let mut buf = [0u8; 256];
-        let n = tairix_rt::sysinfo_introspect(domain.as_u32(), 0, &mut buf).map_err(errno_from)?;
+        let n = tairix_rt::sysinfo_introspect(domain.as_u32(), 0, &mut buf)
+            .map_err(Errno::from_syscall)?;
         Ok(buf[..n].to_vec())
     }
 
@@ -109,7 +100,7 @@ mod program {
         let mut offset: u64 = 0;
         loop {
             let n = tairix_rt::sysinfo_introspect(domain.as_u32(), offset, &mut scratch)
-                .map_err(errno_from)?;
+                .map_err(Errno::from_syscall)?;
             if n == 0 {
                 break;
             }
@@ -168,7 +159,7 @@ mod program {
                         return Ok(buf);
                     }
                     Err(ret) => {
-                        let err = errno_from(ret);
+                        let err = Errno::from_syscall(ret);
                         // Grow once on a too-small buffer; any other error is
                         // surfaced fail-closed.
                         if err == Errno::BufferTooSmall && buf.len() < (1 << 20) {
@@ -381,7 +372,7 @@ mod program {
             buf[..PROC_ID_LEN].copy_from_slice(&proc_id);
             let n =
                 tairix_rt::sysinfo_introspect(IntrospectDomain::TaskLimits.as_u32(), 0, &mut buf)
-                    .map_err(errno_from)?;
+                    .map_err(Errno::from_syscall)?;
             if n < RESOURCE_LIMITS_REPORT_LEN {
                 return Err(Errno::BufferTooSmall);
             }
@@ -528,7 +519,7 @@ mod program {
         loop {
             let request = page.request(offset, NETSTACK_LIST_LIMIT_MAX);
             let n = tairix_rt::ipc_call(NETSTACK_ENDPOINT, &request.to_le_bytes(), &mut reply)
-                .map_err(errno_from)?;
+                .map_err(Errno::from_syscall)?;
             let record_len = P::RECORD_LEN;
             let (count, body) =
                 decode_page_reply(&reply[..n], record_len, NETSTACK_LIST_LIMIT_MAX)?;
@@ -553,7 +544,8 @@ mod program {
     fn read_netstack_defence() -> Result<NetStackDefenceCounters, Errno> {
         let mut reply = [0u8; NETSTACK_MAX_REPLY];
         let request = NetstackRequest::StackDefence.to_le_bytes();
-        let n = tairix_rt::ipc_call(NETSTACK_ENDPOINT, &request, &mut reply).map_err(errno_from)?;
+        let n = tairix_rt::ipc_call(NETSTACK_ENDPOINT, &request, &mut reply)
+            .map_err(Errno::from_syscall)?;
         if n != NetStackDefenceCounters::WIRE_LEN {
             return Err(Errno::BadMagic);
         }
@@ -626,7 +618,7 @@ mod program {
             let op = page.op(offset, RAID_LIST_LIMIT_MAX);
             let request_len = op.encode(&mut request)?;
             let n = tairix_rt::ipc_call(RAID_CONTROL_ENDPOINT, &request[..request_len], &mut reply)
-                .map_err(errno_from)?;
+                .map_err(Errno::from_syscall)?;
             let record_len = P::RECORD_LEN;
             let (count, body) = decode_page_reply(&reply[..n], record_len, RAID_LIST_LIMIT_MAX)?;
             for chunk in body.chunks_exact(record_len) {
@@ -700,7 +692,7 @@ mod program {
                         }
                     },
                     Err(ret) => {
-                        reply_error(&mut reply, ticket, errno_from(ret));
+                        reply_error(&mut reply, ticket, Errno::from_syscall(ret));
                         continue;
                     }
                 };

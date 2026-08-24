@@ -784,26 +784,125 @@ Structural findings worth keeping in mind while auditing the rest:
   replicated into 68 integration-test programs and one kernel binary. None of
   them suppressed anything.
 
-## Open sweep: the raw-syscall-result → `Errno` conversion
+### Done — one decode from a raw result to an `Errno`, and it is total
 
-`lib/rt::errno_from_raw` is now the one public, tested conversion from a raw
-`i64` syscall result to an `Errno`, and the four sites that motivated it (the
-private copy in `lib/rt`, and the ones in `drivers/storage/volmgr`,
-`drivers/storage/raid_member`, `drivers/storage/raid`) use it.
+`lib/rt::errno_from_raw` was not the seam; it was a **second** definition of
+one `lib/abi` already owned and documented as "the one definition of that
+decode, so no caller re-derives it" (`Errno::from_syscall`, ~350 callers
+against `errno_from_raw`'s handful). The two disagreed on exactly one input,
+which is the divergence a second definition always eventually buys.
 
-Roughly nineteen further private re-implementations remain, and they do **not**
-agree: three different fallbacks are in use for an unrecognised value
-(`NotImplemented`, `NotFound`, and `DeviceFault`), and none guards `i64::MIN`,
-whose negation overflows. A caller therefore gets a different error class for
-the same kernel refusal depending on which crate it happens to be in — the
-divergence duplication invites. Known sites: `drivers/display/framebuffer`,
-`drivers/network/virtio_net_driver`, `lib/blkclient`, `lib/display`,
-`lib/font`, `lib/sandbox`, `tests/integration/blkio_fault_program`,
-`userland/apps/{files,terminal,viewer,widgets}`, `userland/net/netstack`,
-`userland/session/login`, `userland/shell/elsh`, and
-`userland/system/{devmgr,init,journald,seatmgr,sysinfod}`.
+`Errno::from_syscall` **aborted the process on `i64::MIN`**. It spelled the
+recovery `i32::try_from(-ret)`, and the workspace sets `overflow-checks = true`
+with `panic = "abort"` in *both* the `release` and `dev` profiles, so negating
+the one value that cannot be negated killed the program — in the most-called
+conversion in the tree, on a register the caller had already classified as an
+error (`ret < 0` includes `i64::MIN`). A function total over every other input
+(unknown code, out-of-`i32` magnitude, non-negative value all fail closed to
+`NotImplemented`) took one input to an abort. `errno_from_raw` guarded it; the
+seam did not.
 
-The sweep is its own change: it spans a dozen crates, and each site's current
-fallback must be read before it is replaced, because adopting the shared
-`NotImplemented` where a caller today branches on `NotFound` would change that
-caller's behaviour rather than merely deduplicate it.
+The shape now is a fallible primitive plus its fail-closed binding, both on
+`Errno` in `lib/abi` — the bottom of the layering graph, so nothing links a
+runtime to decode a register:
+
+- `try_from_syscall(i64) -> Option<Errno>` — `checked_neg`, then `i32`, then
+  the discriminant. `None` is every unreadable register alike.
+- `from_syscall(i64) -> Errno` — that, `unwrap_or(NotImplemented)`.
+- `try_from_status(i32) -> Option<Errno>` — the wire-status entry point (below),
+  delegating, so there is still exactly one decode.
+
+`errno_from_raw` is deleted, not deprecated, and its tests moved to `lib/abi`
+rather than being duplicated there. **Twenty-two private re-implementations are
+gone**, across `lib/{blkclient,display,font,netchan,sandbox,drvrt}`,
+`lib/rt/src/{thread,sync}.rs`, `drivers/{display/framebuffer,storage/volmgr,
+storage/usb_msd,input/usb_kbd,input/usb_mouse,bus/usb/xhci}`,
+`userland/apps/{files,terminal,viewer,wallpaper,widgets,datetime}`,
+`userland/{net/netstack,session/login,shell/elsh,shell/users}`,
+`userland/system/{confd,devmgr,init,journald,seatmgr,sysinfod}`, and the
+`blkio_fault_program` / `sandbox_program` fixtures. `drivers/network/
+virtio_net_driver` was on the recorded list but has no `Errno` at all.
+
+**Three of the four divergent fallbacks were defects, not preferences.** Each
+site's fallback was read and each caller traced before it was replaced:
+
+- **`NotFound` (six sites) fabricated "the device was unplugged".** In
+  `usb_msd` it set `disconnected`, which retracts the LUN nodes and exits for a
+  reload; in `usb_kbd`/`usb_mouse` it became `DriverError::NotFound`, which the
+  pump loop logs as "transport disappeared" and exits `0` on. So a refusal the
+  build merely could not *read* tore the device down and reported a clean
+  unplug. It now reads as `NotImplemented`, the drivers report the concrete
+  failure, and the bounded consecutive-error ladder fails it closed — no spin
+  (the loops park on their wait-sets), and the diagnosis is stated rather than
+  invented.
+- **`DeviceFault` (`lib/netchan`, `lib/sandbox`) and `OutOfRange`
+  (`lib/rt/src/{thread,sync}.rs`)** each asserted a specific cause for a value
+  with no readable cause. No caller branched on either (the live branches are
+  `WouldBlock`, `AlreadyExists`, `TimedOut`, `Interrupted`, `PermissionDenied`),
+  so the change is observable only on a code no working kernel returns.
+- **`NotImplemented` (the rest)** was already the seam's answer.
+
+**`lib/drvrt::decode_errno` kept its `Option` shape, deliberately.** Folding it
+onto `from_syscall` would have been a regression: `msi_alloc_error` maps
+`NotImplemented` to "no MSI controller on this platform", so an unreadable code
+would have become a *confident claim about the hardware*. It is now
+`Errno::try_from_syscall` — the seam's fallible form — and its seven callers
+keep choosing their own fold. That consumer is why the primitive is fallible
+and the total form is derived, rather than the reverse.
+
+### Done — the same defect in the wire-status decoders (§23.1)
+
+Found by scanning what remained: nine `lib/abi` decoders recover an `Errno`
+from a **reply frame's** negative `i32` status word, and **three negated it
+unguarded** — `log_ingress::decode_reply`, `mailbox_ipc::decode_reply`, and
+`driver_store::reply_status`. A status word comes from a *peer process*, not the
+kernel, so `i32::MIN` in a reply frame aborted the decoding process: a
+remote-triggerable kill, and worse than the syscall-register case. Six sibling
+decoders already had `checked_neg` — `usb_urb` even documents why — which is the
+empirical case for one definition rather than nine chances to forget.
+
+All nine now go through `Errno::try_from_status`, which delegates to
+`try_from_syscall` (widening an `i32` makes the negation unconditionally safe).
+The fail-closed answer stays each protocol's: `BadMagic` for the wire formats
+that call a corrupt frame that, `OutOfRange` for the others. The three fixes
+each carry a test that aborts without the guard.
+
+Two things a later reviewer should not re-litigate:
+
+- **`try_from_status` is not a wrapper worth deleting.** It is one delegating
+  line, but it is the typed entry point for the wire family: it names the
+  distinction (a peer's status word is not a kernel result), it makes
+  `i64::from(status)` impossible to forget, and it has ten callers. Three
+  sites got the raw spelling wrong; the fourth kind of mistake is what a name
+  prevents.
+- **Three `lib/abi` sites that look similar are not this family.**
+  `blkio::decode_completion`, `field.rs`'s `ScalarType::Error`, and
+  `sysinfo.rs`'s reply status read an *unnegated* code, so they never negate and
+  need no guard. The four surviving `(-err.as_i32())` sites are **encoders** over
+  a small positive discriminant.
+
+### Done — `lib/hid` owns the boot-protocol pump's error policy (§2.2)
+
+Surfaced by the fallback work: `transport_error` and `pump_error_limit_reached`
+were byte-identical in `usb_kbd` and `usb_mouse`, and writing the same
+regression test twice was the signal. Both now live in `lib/hid`, beside the
+`pump_once` loop they serve, with the drivers' local copies and their
+now-redundant test modules deleted. The §2.2 sibling carve-out does not reach
+this: two identical helper functions are not parallel implementations of a
+trait.
+
+The tests moved up with them and gained the case neither driver had: an
+unreadable refusal (including `i64::MIN`) must not classify as a removed
+device. Probed both ways — restoring the drivers' old inline decode fails it on
+the abort, and restoring just the `NotFound` fallback fails it on the
+misattribution.
+
+### Note for the next context — the fixture check earns its keep
+
+The recorded trap is real and it fired here. `userland/system/confd`'s `Run`
+program is `cfg(freestanding)` and is built by **`kernel/tairix-kernel`'s build
+script**, so `cargo build --workspace`, `cargo test --workspace`, and host
+clippy all pass while it is broken. A rewrite of `errno(x)` call sites missed
+the bare `map_err(errno)` references, and the only thing that saw it was
+`cargo check --locked --target <t> -p …` over the 149 enrolled pairs. Run that
+before the gate whenever `lib/abi` changes — every fixture links it.

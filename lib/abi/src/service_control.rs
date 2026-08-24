@@ -263,10 +263,7 @@ pub fn decode_reply(reply: &[u8]) -> Result<ServiceState, Errno> {
             }
             Ok(state)
         }
-        negative => Err(negative
-            .checked_neg()
-            .and_then(Errno::from_i32)
-            .unwrap_or(Errno::BadMagic)),
+        negative => Err(Errno::try_from_status(negative).unwrap_or(Errno::BadMagic)),
     }
 }
 

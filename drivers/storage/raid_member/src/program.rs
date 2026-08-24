@@ -125,7 +125,7 @@ impl Waits {
     fn create() -> Result<Self, Errno> {
         let raw = tairix_rt::waitset_create();
         let Ok(set) = u64::try_from(raw) else {
-            return Err(tairix_rt::errno_from_raw(raw));
+            return Err(Errno::from_syscall(raw));
         };
         Ok(Self {
             set,
@@ -167,11 +167,11 @@ impl Waits {
 fn offer(transport: &Transport, node: u32) -> Result<u64, Errno> {
     let granted = tairix_rt::call_grant(transport.endpoint, RAID_REGISTRY_ENDPOINT);
     if granted < 0 {
-        return Err(tairix_rt::errno_from_raw(granted));
+        return Err(Errno::from_syscall(granted));
     }
     let shared = tairix_rt::shm_grant(transport.window, RAID_REGISTRY_ENDPOINT);
     if shared < 0 {
-        return Err(tairix_rt::errno_from_raw(shared));
+        return Err(Errno::from_syscall(shared));
     }
     let request = MemberOffer {
         endpoint: transport.endpoint,
@@ -184,7 +184,7 @@ fn offer(transport: &Transport, node: u32) -> Result<u64, Errno> {
     // and the composer going away cancels the call and wakes the agent, so
     // there is no wedge for a deadline to break.
     tairix_rt::call_post(RAID_REGISTRY_ENDPOINT, &frame[..len], u64::MAX)
-        .map_err(tairix_rt::errno_from_raw)
+        .map_err(Errno::from_syscall)
 }
 
 /// Claim the membership's outcome, parking until it is known.
@@ -193,7 +193,7 @@ fn await_end(waits: &Waits, ticket: u64) -> MembershipEnd {
     loop {
         match tairix_rt::call_reap(RAID_REGISTRY_ENDPOINT, ticket, &mut reply) {
             Ok(len) => return MembershipEnd::from_reply(Some(&reply[..len.min(reply.len())])),
-            Err(neg) if tairix_rt::errno_from_raw(neg) == Errno::WouldBlock => waits.park(u64::MAX),
+            Err(neg) if Errno::from_syscall(neg) == Errno::WouldBlock => waits.park(u64::MAX),
             // Anything else retires the ticket: the endpoint was torn down
             // (the composer went away), or the reply could not be claimed.
             // Either way this membership is over and the agent re-offers.

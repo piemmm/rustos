@@ -46,15 +46,12 @@ fn timeout_nanos(timeout: Duration64) -> u64 {
     timeout.saturating_total_nanos().min(MAX_TIMEOUT_NS)
 }
 
-/// The raw `-errno` a futex wait returned, or [`None`] when it completed.
+/// The `Errno` a futex wait refused with, or [`None`] when it completed.
+///
+/// `None` is success, so an unreadable refusal must still read as *some*
+/// error: the seam's fail-closed answer, never `None`.
 fn futex_error(ret: i64) -> Option<Errno> {
-    if ret >= 0 {
-        return None;
-    }
-    // The kernel encodes a refusal as `-errno`; a discriminant this build does
-    // not know reads as the generic refusal rather than as success.
-    let code = i32::try_from(-ret).unwrap_or(i32::MAX);
-    Errno::from_i32(code).or(Some(Errno::OutOfRange))
+    (ret < 0).then(|| Errno::from_syscall(ret))
 }
 
 /// Park until the word at `addr` is woken, unless it no longer holds `expected`.

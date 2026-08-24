@@ -109,16 +109,6 @@ mod program {
     /// than a second flood of loss records.
     const RATE_LOSS_REPORT_SECS: i64 = 5;
 
-    /// Recover the [`Errno`] a syscall encoded as a negative register
-    /// (`-errno`); an unrecognised code fails closed as
-    /// [`Errno::NotImplemented`] rather than being guessed.
-    fn errno_from(ret: i64) -> Errno {
-        i32::try_from(-ret)
-            .ok()
-            .and_then(Errno::from_i32)
-            .unwrap_or(Errno::NotImplemented)
-    }
-
     /// Read the whole of a fixed-size identity/key file at `path` into `buf`,
     /// returning `Ok(())` only when exactly `buf.len()` bytes were read. A
     /// missing file, a short read, or any I/O error fails closed.
@@ -154,22 +144,22 @@ mod program {
             // failure is surfaced.
             let mkdir = tairix_rt::fs_mkdir(dir.as_bytes());
             if mkdir < 0 {
-                let err = errno_from(mkdir);
+                let err = Errno::from_syscall(mkdir);
                 if err != Errno::AlreadyExists {
                     return Err(err);
                 }
             }
 
             // Create the immutable segment file and write the whole image.
-            let file = tairix_rt::create(path.as_bytes()).map_err(errno_from)?;
-            let written = file.write_at(0, bytes).map_err(errno_from)?;
+            let file = tairix_rt::create(path.as_bytes()).map_err(Errno::from_syscall)?;
+            let written = file.write_at(0, bytes).map_err(Errno::from_syscall)?;
             if written != bytes.len() {
                 return Err(Errno::NoSpace);
             }
             // Flush so an acknowledged segment survives a power loss.
             let synced = tairix_rt::fs_sync(file.fd());
             if synced < 0 {
-                return Err(errno_from(synced));
+                return Err(Errno::from_syscall(synced));
             }
             Ok(())
         }
@@ -313,7 +303,7 @@ mod program {
                         }
                     },
                     Err(ret) => {
-                        reply(&mut reply_buf, ticket, Err(errno_from(ret)));
+                        reply(&mut reply_buf, ticket, Err(Errno::from_syscall(ret)));
                         continue;
                     }
                 };

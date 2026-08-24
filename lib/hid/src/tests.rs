@@ -366,3 +366,43 @@ fn unload_then_reload_decodes_again() {
     assert_eq!(kbd.poll(&mut out), Ok(1));
     assert_eq!(out[0], key(0x05, 1));
 }
+
+#[test]
+fn only_a_vanished_endpoint_reads_as_the_transport_disappearing() {
+    assert_eq!(transport_error(Errno::NotFound), DriverError::NotFound);
+    for other in [
+        Errno::NotImplemented,
+        Errno::DeviceFault,
+        Errno::PermissionDenied,
+        Errno::TimedOut,
+    ] {
+        assert_eq!(transport_error(other), DriverError::DeviceFault);
+    }
+}
+
+#[test]
+fn an_unreadable_refusal_is_not_reported_as_the_transport_disappearing() {
+    // `DriverError::NotFound` makes a pump loop exit as a clean unplug, so a
+    // register this build cannot read must not decode into it: it is reported
+    // concretely and ridden out under the consecutive-error limit instead.
+    for raw in [i64::MIN, -100_000, -(i64::from(i32::MAX) + 1), 0, i64::MAX] {
+        assert_eq!(
+            transport_error(Errno::from_syscall(raw)),
+            DriverError::DeviceFault,
+            "the unreadable result {raw} must not read as a removed device"
+        );
+    }
+}
+
+#[test]
+fn the_pump_error_limit_saturates_rather_than_wrapping_under_it() {
+    let mut errors = 0u8;
+    assert!(!pump_error_limit_reached(&mut errors, 3));
+    assert!(!pump_error_limit_reached(&mut errors, 3));
+    assert!(pump_error_limit_reached(&mut errors, 3));
+    // A long-running driver must not be able to wrap the counter back under
+    // the limit and retry for ever.
+    errors = u8::MAX;
+    assert!(pump_error_limit_reached(&mut errors, 3));
+    assert_eq!(errors, u8::MAX);
+}

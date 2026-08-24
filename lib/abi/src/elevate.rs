@@ -367,10 +367,7 @@ impl ElevateReply {
             STATUS_VERIFIED => Ok(Self::Verified),
             STATUS_LAUNCHED if word >= 0 => Ok(Self::Launched { pid: word }),
             s if s < 0 => {
-                let errno = s
-                    .checked_neg()
-                    .and_then(Errno::from_i32)
-                    .ok_or(Errno::OutOfRange)?;
+                let errno = Errno::try_from_status(s).ok_or(Errno::OutOfRange)?;
                 Ok(Self::Refused(errno))
             }
             _ => Err(Errno::OutOfRange),

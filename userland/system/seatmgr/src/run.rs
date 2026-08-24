@@ -50,16 +50,6 @@ mod program {
     /// bound): seat administration is low-volume, so a small queue is ample.
     const CAPACITY: usize = 4;
 
-    /// Recover the [`Errno`] a syscall encoded as a negative register
-    /// (`-errno`); an unrecognised code fails closed as
-    /// [`Errno::NotImplemented`] rather than being guessed.
-    fn errno_from(ret: i64) -> Errno {
-        i32::try_from(-ret)
-            .ok()
-            .and_then(Errno::from_i32)
-            .unwrap_or(Errno::NotImplemented)
-    }
-
     /// The production [`SeatAdmin`]: a thin shim over the kernel's
     /// `seat_switch` / `seat_revoke` syscalls, which re-check
     /// `CAP_SEAT_ADMIN` and validate every index on each call.
@@ -71,7 +61,7 @@ mod program {
             if ret == 0 {
                 Ok(())
             } else {
-                Err(errno_from(ret))
+                Err(Errno::from_syscall(ret))
             }
         }
 
@@ -80,7 +70,7 @@ mod program {
             if ret == 0 {
                 Ok(())
             } else {
-                Err(errno_from(ret))
+                Err(Errno::from_syscall(ret))
             }
         }
     }
@@ -128,7 +118,7 @@ mod program {
                         Ok(origin) => serve(&admin, &origin, &LogSink, &request[..request_len]),
                         Err(err) => Err(err),
                     },
-                    Err(ret) => Err(errno_from(ret)),
+                    Err(ret) => Err(Errno::from_syscall(ret)),
                 };
 
             let reply = encode_status_reply(outcome);

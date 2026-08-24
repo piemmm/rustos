@@ -397,10 +397,7 @@ pub fn decode_facts_reply(bytes: &[u8]) -> Result<DeviceFacts, Errno> {
     status.copy_from_slice(&bytes[..4]);
     let status = i32::from_le_bytes(status);
     if status != 0 {
-        let errno = status
-            .checked_neg()
-            .and_then(Errno::from_i32)
-            .ok_or(Errno::OutOfRange)?;
+        let errno = Errno::try_from_status(status).ok_or(Errno::OutOfRange)?;
         return Err(errno);
     }
     let body = &bytes[4..];
@@ -494,10 +491,7 @@ pub fn decode_service_reply(bytes: &[u8]) -> Result<ServiceReport, Errno> {
     status.copy_from_slice(&bytes[..4]);
     let status = i32::from_le_bytes(status);
     if status != 0 {
-        let errno = status
-            .checked_neg()
-            .and_then(Errno::from_i32)
-            .ok_or(Errno::OutOfRange)?;
+        let errno = Errno::try_from_status(status).ok_or(Errno::OutOfRange)?;
         return Err(errno);
     }
     let body = &bytes[4..];

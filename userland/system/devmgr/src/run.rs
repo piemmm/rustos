@@ -91,16 +91,6 @@ mod program {
         }
     }
 
-    /// Recover the [`Errno`] a syscall encoded as a negative register
-    /// (`-errno`). An unrecognised code fails closed as
-    /// [`Errno::NotImplemented`] rather than being guessed.
-    fn errno_from(ret: i64) -> Errno {
-        i32::try_from(-ret)
-            .ok()
-            .and_then(Errno::from_i32)
-            .unwrap_or(Errno::NotImplemented)
-    }
-
     /// The production [`HwTreeService`] backing: the reactive observe loop
     /// ([`tairix_devmgr::run`]) reads, waits, and reports through this seam,
     /// which binds the `hw_tree_read` / `hw_tree_wait` `abi-v1` syscalls and
@@ -111,7 +101,7 @@ mod program {
 
     impl HwTreeService for RtTreeService {
         fn read_tree(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
-            tairix_rt::hw_tree_read(buf).map_err(errno_from)
+            tairix_rt::hw_tree_read(buf).map_err(Errno::from_syscall)
         }
 
         fn wait_for_change(&mut self, last_generation: u64) -> Result<(), Errno> {
@@ -121,7 +111,7 @@ mod program {
             // return is a `-errno` the loop fails closed on.
             let waited = tairix_rt::hw_tree_wait(last_generation, u64::MAX);
             if waited < 0 {
-                return Err(errno_from(waited));
+                return Err(Errno::from_syscall(waited));
             }
             Ok(())
         }
@@ -217,7 +207,7 @@ mod program {
         fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
             // `ipc_call` returns the raw `-errno` on failure; recover the
             // typed `Errno` and surface it fail-closed.
-            tairix_rt::ipc_call(DRIVER_STORE_ENDPOINT, request, reply).map_err(errno_from)
+            tairix_rt::ipc_call(DRIVER_STORE_ENDPOINT, request, reply).map_err(Errno::from_syscall)
         }
     }
 
@@ -244,32 +234,32 @@ mod program {
             }
             .to_le_bytes();
             let mut reply = [0u8; STATUS_REPLY_LEN];
-            let len =
-                tairix_rt::ipc_call(NETSTACK_ENDPOINT, &request, &mut reply).map_err(errno_from)?;
+            let len = tairix_rt::ipc_call(NETSTACK_ENDPOINT, &request, &mut reply)
+                .map_err(Errno::from_syscall)?;
             decode_status_reply(&reply[..len])
         }
 
         fn apply_settings(&mut self, settings: NetworkSettings) -> Result<(), Errno> {
             let request = NetstackRequest::ApplyNetworkSettings(settings).to_le_bytes();
             let mut reply = [0u8; STATUS_REPLY_LEN];
-            let len =
-                tairix_rt::ipc_call(NETSTACK_ENDPOINT, &request, &mut reply).map_err(errno_from)?;
+            let len = tairix_rt::ipc_call(NETSTACK_ENDPOINT, &request, &mut reply)
+                .map_err(Errno::from_syscall)?;
             decode_status_reply(&reply[..len])
         }
 
         fn apply_interface_config(&mut self, config: &NetInterfaceConfigMsg) -> Result<(), Errno> {
             let request = config.to_le_bytes();
             let mut reply = [0u8; STATUS_REPLY_LEN];
-            let len =
-                tairix_rt::ipc_call(NETSTACK_ENDPOINT, &request, &mut reply).map_err(errno_from)?;
+            let len = tairix_rt::ipc_call(NETSTACK_ENDPOINT, &request, &mut reply)
+                .map_err(Errno::from_syscall)?;
             decode_status_reply(&reply[..len])
         }
 
         fn apply_bond_config(&mut self, config: &NetBondConfigMsg) -> Result<(), Errno> {
             let request = config.to_le_bytes();
             let mut reply = [0u8; STATUS_REPLY_LEN];
-            let len =
-                tairix_rt::ipc_call(NETSTACK_ENDPOINT, &request, &mut reply).map_err(errno_from)?;
+            let len = tairix_rt::ipc_call(NETSTACK_ENDPOINT, &request, &mut reply)
+                .map_err(Errno::from_syscall)?;
             decode_status_reply(&reply[..len])
         }
     }

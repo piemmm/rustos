@@ -28,13 +28,6 @@ use tairix_abi::Errno;
 
 use crate::client::BlkCall;
 
-/// Recover an [`Errno`] from a raw negative kernel result (`-errno`),
-/// failing closed to [`Errno::NotFound`] for a code this vocabulary does not
-/// recognise — never a fabricated success.
-fn errno_from(neg: i64) -> Errno {
-    Errno::from_i32(i32::try_from(-neg).unwrap_or(0)).unwrap_or(Errno::NotFound)
-}
-
 /// The production blkio transport: one call endpoint plus the caller's
 /// wait-set, on which this endpoint's reply completions are observed.
 pub struct RtBlkCall {
@@ -79,8 +72,8 @@ impl RtBlkCall {
                 self.endpoint,
                 0,
             );
-            if ctl < 0 && errno_from(ctl) != Errno::AlreadyExists {
-                return Err(errno_from(ctl));
+            if ctl < 0 && Errno::from_syscall(ctl) != Errno::AlreadyExists {
+                return Err(Errno::from_syscall(ctl));
             }
             self.registered = true;
         }
@@ -97,13 +90,13 @@ impl BlkCall for RtBlkCall {
         deadline_ns: u64,
     ) -> Result<usize, Errno> {
         let set = self.ensure_registered()?;
-        let ticket =
-            tairix_rt::call_post(self.endpoint, request, deadline_ns).map_err(errno_from)?;
+        let ticket = tairix_rt::call_post(self.endpoint, request, deadline_ns)
+            .map_err(Errno::from_syscall)?;
         loop {
             match tairix_rt::call_reap(self.endpoint, ticket, reply) {
                 Ok(len) => return Ok(len),
                 Err(neg) => {
-                    let err = errno_from(neg);
+                    let err = Errno::from_syscall(neg);
                     // Not ready yet: park on the reply wait-set until the
                     // reply lands or the per-request deadline elapses (which
                     // makes the member ready and the next reap `TimedOut`),

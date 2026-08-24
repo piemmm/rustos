@@ -120,7 +120,7 @@ mod program {
         fn set_mode(&mut self, mode: InputMode) -> Result<(), Errno> {
             let ret = tairix_rt::set_input_mode(mode);
             if ret < 0 {
-                return Err(errno_from(ret));
+                return Err(Errno::from_syscall(ret));
             }
             Ok(())
         }
@@ -353,16 +353,6 @@ mod program {
         String::from_utf8_lossy(&name[..len]).into_owned()
     }
 
-    /// Recover the [`Errno`] a syscall encoded as a negative register
-    /// (`-errno`, the standard `abi-v1` convention). An unrecognised code
-    /// fails closed as [`Errno::NotImplemented`] rather than being guessed.
-    fn errno_from(ret: i64) -> Errno {
-        i32::try_from(-ret)
-            .ok()
-            .and_then(Errno::from_i32)
-            .unwrap_or(Errno::NotImplemented)
-    }
-
     /// The POSIX job-control stop signal number (SIGTSTP) the shell reports
     /// a stopped job under, so `$?` shows the familiar `128 + 20 = 148` a
     /// user scripts against — the shell-side vocabulary, deliberately the
@@ -394,7 +384,7 @@ mod program {
                 PlannedOpen::Path { path, flags } => {
                     let ret = tairix_rt::fs_open(path.as_bytes(), *flags);
                     if ret < 0 {
-                        return fail(&fds, pending_write, errno_from(ret));
+                        return fail(&fds, pending_write, Errno::from_syscall(ret));
                     }
                     // A descriptor register is a small non-negative number.
                     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -403,7 +393,7 @@ mod program {
                 PlannedOpen::Resource { reference, flags } => {
                     let ret = tairix_rt::resource_open(reference.as_bytes(), *flags);
                     if ret < 0 {
-                        return fail(&fds, pending_write, errno_from(ret));
+                        return fail(&fds, pending_write, Errno::from_syscall(ret));
                     }
                     // A descriptor register is a small non-negative number.
                     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -412,7 +402,7 @@ mod program {
                 PlannedOpen::ValuePipe { reference } => {
                     let (read, write) = match tairix_rt::pipe_create() {
                         Ok(ends) => ends,
-                        Err(ret) => return fail(&fds, pending_write, errno_from(ret)),
+                        Err(ret) => return fail(&fds, pending_write, Errno::from_syscall(ret)),
                     };
                     // Registered before the fill so a refusal releases it
                     // through the one all-or-nothing path.
@@ -428,7 +418,7 @@ mod program {
                 PlannedOpen::PipeRead => {
                     let (read, write) = match tairix_rt::pipe_create() {
                         Ok(ends) => ends,
-                        Err(ret) => return fail(&fds, pending_write, errno_from(ret)),
+                        Err(ret) => return fail(&fds, pending_write, Errno::from_syscall(ret)),
                     };
                     fds.push(read);
                     pending_write = Some(write);
@@ -543,7 +533,7 @@ mod program {
                 #[allow(clippy::cast_possible_truncation)]
                 return Ok(ret as i32);
             }
-            let err = errno_from(ret);
+            let err = Errno::from_syscall(ret);
             if err != Errno::NotFound {
                 return Err(err);
             }
@@ -569,7 +559,7 @@ mod program {
                 }
                 Ok(n) => written += n,
                 Err(ret) => {
-                    let err = errno_from(ret);
+                    let err = Errno::from_syscall(ret);
                     if err != Errno::BrokenPipe {
                         report_pump_error("write failed", err);
                     }
@@ -601,7 +591,7 @@ mod program {
                         Ok(0) => break,
                         Ok(n) => n,
                         Err(ret) => {
-                            report_pump_error("read failed", errno_from(ret));
+                            report_pump_error("read failed", Errno::from_syscall(ret));
                             break;
                         }
                     };
@@ -626,7 +616,7 @@ mod program {
                             Ok(0) => break,
                             Ok(n) => n,
                             Err(ret) => {
-                                report_pump_error("read failed", errno_from(ret));
+                                report_pump_error("read failed", Errno::from_syscall(ret));
                                 break;
                             }
                         };
@@ -655,7 +645,7 @@ mod program {
             match tairix_rt::fs_write(fd, offset + written as u64, &bytes[written..]) {
                 Ok(0) => return Err(Errno::NotImplemented),
                 Ok(n) => written += n,
-                Err(ret) => return Err(errno_from(ret)),
+                Err(ret) => return Err(Errno::from_syscall(ret)),
             }
         }
         Ok(())
@@ -816,7 +806,7 @@ mod program {
                 let _ = tairix_rt::console_foreground(tairix_abi::STDIN, 0);
             }
             if ret < 0 {
-                return Err(errno_from(ret));
+                return Err(Errno::from_syscall(ret));
             }
             Ok(match status {
                 tairix_abi::WaitStatus::Exited(code) => {
@@ -868,7 +858,7 @@ mod program {
             #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
             let ret = tairix_rt::signal(pid.as_u64() as i32, abi_signal);
             if ret < 0 {
-                return Err(errno_from(ret));
+                return Err(Errno::from_syscall(ret));
             }
             Ok(())
         }
@@ -887,13 +877,13 @@ mod program {
             // authority of its own.
             let ret = tairix_rt::fs_chdir(path.as_bytes());
             if ret < 0 {
-                return Err(errno_from(ret));
+                return Err(Errno::from_syscall(ret));
             }
             // Report the resolved absolute directory the kernel settled on
             // (for the prompt and `cd`'s echo). A normalised absolute path
             // never exceeds `FS_PATH_MAX`, so this buffer always holds it.
             let mut buf = alloc::vec![0u8; tairix_abi::FS_PATH_MAX];
-            let n = tairix_rt::fs_getcwd(&mut buf).map_err(errno_from)?;
+            let n = tairix_rt::fs_getcwd(&mut buf).map_err(Errno::from_syscall)?;
             core::str::from_utf8(&buf[..n])
                 .map(String::from)
                 .map_err(|_| Errno::OutOfRange)
@@ -907,13 +897,13 @@ mod program {
 
     impl LimitStore for RtLimitStore {
         fn get(&self, kind: LimitKind) -> Result<ResourceLimit, Errno> {
-            tairix_rt::rlimit_get(kind).map_err(errno_from)
+            tairix_rt::rlimit_get(kind).map_err(Errno::from_syscall)
         }
 
         fn set(&self, kind: LimitKind, value: ResourceLimit) -> Result<(), Errno> {
             let ret = tairix_rt::rlimit_set(kind, value);
             if ret < 0 {
-                return Err(errno_from(ret));
+                return Err(Errno::from_syscall(ret));
             }
             Ok(())
         }
@@ -966,7 +956,7 @@ mod program {
             // for the read and fail closed if it cannot be selected.
             let toggled = tairix_rt::set_input_mode(InputMode::Secret);
             if toggled < 0 {
-                return Err(errno_from(toggled));
+                return Err(Errno::from_syscall(toggled));
             }
             let result = Self::read_line_raw(buf);
             // Restoring the cooked default is best-effort — it cannot

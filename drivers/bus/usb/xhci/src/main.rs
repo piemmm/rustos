@@ -1552,9 +1552,7 @@ mod program {
                 .unwrap_or(super::WAIT_FOREVER_NS);
             let wait_ret = tairix_rt::waitset_wait(set, timeout, &mut token);
             if wait_ret < 0 {
-                let errno = Errno::from_i32(i32::try_from(-wait_ret).unwrap_or(0))
-                    .unwrap_or(Errno::NotFound);
-                if errno == Errno::TimedOut {
+                if Errno::from_syscall(wait_ret) == Errno::TimedOut {
                     // The controller grace one-shot fired. Retry the reset (a
                     // faulted controller raises no interrupt to wake us); this
                     // fails it closed once the window has elapsed. If it is no

@@ -106,16 +106,6 @@ mod program {
     /// The serve loop's opaque token for its single wait-set member.
     const ENDPOINT_TOKEN: u64 = 1;
 
-    /// Recover the [`Errno`] a syscall encoded as a negative register
-    /// (`-ret`); an unrecognised code fails closed as
-    /// [`Errno::NotImplemented`] rather than being guessed.
-    fn errno_from(ret: i64) -> Errno {
-        i32::try_from(-ret)
-            .ok()
-            .and_then(Errno::from_i32)
-            .unwrap_or(Errno::NotImplemented)
-    }
-
     /// The capability set the driver host re-checks up front before issuing
     /// an `mmio_map` trap, so a missing grant fails fast without a round
     /// trip. It mirrors the resources the matched node requested — the
@@ -142,7 +132,7 @@ mod program {
                 #[allow(clippy::cast_sign_loss)] // `ret >= 1` checked above.
                 Ok(ret as u64)
             } else {
-                Err(errno_from(ret))
+                Err(Errno::from_syscall(ret))
             }
         }
     }

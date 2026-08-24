@@ -61,7 +61,7 @@
 #![deny(missing_docs)]
 
 use tairix_abi::driver::input::{InputEvent, InputEventKind};
-use tairix_abi::DriverError;
+use tairix_abi::{DriverError, Errno};
 
 pub mod console;
 pub mod keyboard;
@@ -226,4 +226,31 @@ pub(crate) fn poll_source<S: ReportSource, D: ReportDecode<N>, const N: usize>(
         }
     }
     Ok(written)
+}
+
+/// Classify a URB-transport refusal for a boot-protocol pump loop.
+///
+/// Only [`Errno::NotFound`] — the transport endpoint itself has gone, so the
+/// host controller retracted the interface — becomes
+/// [`DriverError::NotFound`], which a pump loop reads as a clean unplug and
+/// exits on. Every other refusal, including a code this build cannot read,
+/// is a [`DriverError::DeviceFault`] the caller reports concretely and rides
+/// out under [`pump_error_limit_reached`]: an unreadable failure must not be
+/// able to pass itself off as the device having been removed.
+#[must_use]
+pub const fn transport_error(err: Errno) -> DriverError {
+    match err {
+        Errno::NotFound => DriverError::NotFound,
+        _ => DriverError::DeviceFault,
+    }
+}
+
+/// Count one consecutive pump failure and report whether `limit` is reached.
+///
+/// Saturating, so a long-running driver cannot wrap the counter back under the
+/// limit and retry for ever. A caller resets it on the first success.
+#[must_use]
+pub fn pump_error_limit_reached(consecutive_errors: &mut u8, limit: u8) -> bool {
+    *consecutive_errors = consecutive_errors.saturating_add(1);
+    *consecutive_errors >= limit
 }

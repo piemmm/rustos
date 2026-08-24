@@ -185,7 +185,7 @@ fn publish_raid_node(
             Level::Warn,
             refusal,
             "errno_hex",
-            tairix_rt::errno_from_raw(published) as u64,
+            Errno::from_syscall(published) as u64,
         );
     }
 }
@@ -231,8 +231,7 @@ fn attach_plan(endpoint: u64, window: u64, plan: &VolumePlan) -> Result<(), Errn
         if ret == 0 {
             return Ok(());
         }
-        let errno =
-            Errno::from_i32(i32::try_from(-ret).unwrap_or(0)).unwrap_or(Errno::NotImplemented);
+        let errno = Errno::from_syscall(ret);
         if errno != Errno::AlreadyExists {
             return Err(errno);
         }

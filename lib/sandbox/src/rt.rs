@@ -73,17 +73,6 @@ impl Channel for StdioChannel {
     }
 }
 
-/// Recover the typed [`Errno`] from a raw negative kernel result.
-///
-/// An unmappable code (a kernel newer than this vocabulary) folds to
-/// [`Errno::DeviceFault`] — still a failure, never silently ignored.
-fn errno_from(ret: i64) -> Errno {
-    i32::try_from(ret.checked_neg().unwrap_or(i32::MAX.into()))
-        .ok()
-        .and_then(Errno::from_i32)
-        .unwrap_or(Errno::DeviceFault)
-}
-
 /// [`Launcher`] that spawns `path` (normally the program's own binary) as
 /// a sandboxed worker over a fresh pipe pair per launch.
 pub struct RtLauncher {
@@ -116,14 +105,15 @@ impl Launcher for RtLauncher {
 
     fn launch(&mut self) -> Result<RtChannel, Errno> {
         // Request pipe: parent writes, worker fd 0 reads.
-        let (request_read, request_write) = tairix_rt::pipe_create().map_err(errno_from)?;
+        let (request_read, request_write) =
+            tairix_rt::pipe_create().map_err(Errno::from_syscall)?;
         // Reply pipe: worker fd 1 writes, parent reads.
         let (reply_read, reply_write) = match tairix_rt::pipe_create() {
             Ok(pair) => pair,
             Err(ret) => {
                 let _ = tairix_rt::fs_close(request_read);
                 let _ = tairix_rt::fs_close(request_write);
-                return Err(errno_from(ret));
+                return Err(Errno::from_syscall(ret));
             }
         };
         let mut wires = [FdWire::Closed; STD_STREAM_COUNT];
@@ -141,7 +131,7 @@ impl Launcher for RtLauncher {
         if pid < 0 {
             let _ = tairix_rt::fs_close(request_write);
             let _ = tairix_rt::fs_close(reply_read);
-            return Err(errno_from(pid));
+            return Err(Errno::from_syscall(pid));
         }
         Ok(RtChannel {
             pid: pid_from(pid),
@@ -178,11 +168,11 @@ pub struct RtChannel {
 impl Channel for RtChannel {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
         // A pipe ignores the file offset; end-of-stream reads 0.
-        tairix_rt::fs_read(self.read_fd, 0, buf).map_err(errno_from)
+        tairix_rt::fs_read(self.read_fd, 0, buf).map_err(Errno::from_syscall)
     }
 
     fn write(&mut self, buf: &[u8]) -> Result<usize, Errno> {
-        tairix_rt::fs_write(self.write_fd, 0, buf).map_err(errno_from)
+        tairix_rt::fs_write(self.write_fd, 0, buf).map_err(Errno::from_syscall)
     }
 }
 

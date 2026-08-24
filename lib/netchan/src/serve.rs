@@ -276,7 +276,7 @@ fn attach<N: Net>(
     let mut len_out = 0u64;
     let mapped = tairix_rt::shm_map(params.region_grant, &mut len_out);
     if mapped < 0 {
-        return encode_status_reply(Err(errno_from(mapped)));
+        return encode_status_reply(Err(Errno::from_syscall(mapped)));
     }
     // A non-negative result is the base virtual address of the mapping;
     // `len_out` is the kernel's own record of the mapped byte length.
@@ -321,14 +321,4 @@ fn attach<N: Net>(
         let _ = tairix_rt::shm_unmap(base, map_len);
     }
     status
-}
-
-/// Recover the [`Errno`] a syscall encoded as a negative register
-/// (`-errno`); an unrecognised code fails closed as [`Errno::DeviceFault`]
-/// rather than being guessed.
-fn errno_from(ret: i64) -> Errno {
-    i32::try_from(-ret)
-        .ok()
-        .and_then(Errno::from_i32)
-        .unwrap_or(Errno::DeviceFault)
 }

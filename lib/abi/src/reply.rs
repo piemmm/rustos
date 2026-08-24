@@ -69,10 +69,7 @@ pub fn decode_status_reply(bytes: &[u8]) -> Result<(), Errno> {
     if status == 0 {
         return Ok(());
     }
-    let errno = status
-        .checked_neg()
-        .and_then(Errno::from_i32)
-        .ok_or(Errno::OutOfRange)?;
+    let errno = Errno::try_from_status(status).ok_or(Errno::OutOfRange)?;
     Err(errno)
 }
 

@@ -274,16 +274,6 @@ mod program {
         Some((new_base, new_len))
     }
 
-    /// Recover the [`Errno`] a syscall encoded as a negative register
-    /// (`-ret`); an unrecognised code fails closed as
-    /// [`Errno::NotImplemented`] rather than being guessed.
-    fn errno_from(ret: i64) -> Errno {
-        i32::try_from(-ret)
-            .ok()
-            .and_then(Errno::from_i32)
-            .unwrap_or(Errno::NotImplemented)
-    }
-
     /// State the abnormal-exit reason on `stderr` (fail loud: an exit
     /// code alone is not a diagnosis) and hand back `code` for `main`.
     fn fail(code: i32, reason: &str) -> i32 {
@@ -342,7 +332,7 @@ mod program {
 
     impl WindowTransport for RtWindowTransport {
         fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
-            tairix_rt::ipc_call(WINDOW_ENDPOINT, request, reply).map_err(errno_from)
+            tairix_rt::ipc_call(WINDOW_ENDPOINT, request, reply).map_err(Errno::from_syscall)
         }
     }
 
@@ -1284,7 +1274,7 @@ mod program {
                             return Ok(());
                         }
                     }
-                    Err(err) if errno_from(err) == Errno::WouldBlock => {
+                    Err(err) if Errno::from_syscall(err) == Errno::WouldBlock => {
                         // Nothing queued: park until the session's next
                         // delivery — or a launched bundle's exit — wakes the
                         // wait-set, never a spin. A cache-report change the
@@ -1295,7 +1285,7 @@ mod program {
                         let timeout_ns = tairix_rt::cachereport::fold_wait_deadline_ns(u64::MAX);
                         let waited = tairix_rt::waitset_wait(self.set, timeout_ns, &mut token);
                         if waited != 0 {
-                            if errno_from(waited) != Errno::TimedOut {
+                            if Errno::from_syscall(waited) != Errno::TimedOut {
                                 return Err(Errno::NotFound);
                             }
                             // No member woke, so `token` names the *previous*
@@ -1322,7 +1312,7 @@ mod program {
                             tairix_font::trim_glyph_cache();
                         }
                     }
-                    Err(err) => return Err(errno_from(err)),
+                    Err(err) => return Err(Errno::from_syscall(err)),
                 }
             }
         }
@@ -2502,8 +2492,8 @@ mod program {
                     Ok(None)
                 }
             }
-            Err(err) if errno_from(err) == Errno::WouldBlock => Ok(None),
-            Err(err) => Err(errno_from(err)),
+            Err(err) if Errno::from_syscall(err) == Errno::WouldBlock => Ok(None),
+            Err(err) => Err(Errno::from_syscall(err)),
         }
     }
 
@@ -2519,7 +2509,7 @@ mod program {
     /// symbolic link.
     fn read_children(path: &[String]) -> Result<alloc::vec::Vec<(String, EntryKind)>, Errno> {
         let spelled = tairix_browse::vfs::absolute_path(path)?;
-        let stream = tairix_rt::read_dir_all(spelled.as_bytes()).map_err(errno_from)?;
+        let stream = tairix_rt::read_dir_all(spelled.as_bytes()).map_err(Errno::from_syscall)?;
         let entries =
             tairix_browse::vfs::entries_from_dir_stream(&spelled, &stream, &mut RtLinkReader)?;
         Ok(entries
@@ -3783,7 +3773,7 @@ mod program {
             if ret == 0 {
                 Ok(())
             } else {
-                Err(errno_from(ret))
+                Err(Errno::from_syscall(ret))
             }
         }) {
             Ok(()) => begin_rename(browser, rename, scale, theme, viewport),
@@ -3918,7 +3908,7 @@ mod program {
             if ret == 0 {
                 Ok(())
             } else {
-                Err(errno_from(ret))
+                Err(Errno::from_syscall(ret))
             }
         }) {
             Ok(()) => {
@@ -4076,7 +4066,7 @@ mod program {
             if ret == 0 {
                 Ok(())
             } else {
-                Err(errno_from(ret))
+                Err(Errno::from_syscall(ret))
             }
         }) {
             Ok(()) => {
@@ -4136,7 +4126,7 @@ mod program {
                     if ret == 0 {
                         Ok(())
                     } else {
-                        Err(errno_from(ret))
+                        Err(Errno::from_syscall(ret))
                     }
                 }) {
                     // A committed rename (or a no-op rename to the same name)
@@ -4342,7 +4332,7 @@ mod program {
     /// listing is an ordinary permission-checked read and the app holds no
     /// authority of its own.
     fn list_directory(path: &str) -> Result<alloc::vec::Vec<u8>, Errno> {
-        tairix_rt::read_dir_all(path.as_bytes()).map_err(errno_from)
+        tairix_rt::read_dir_all(path.as_bytes()).map_err(Errno::from_syscall)
     }
 
     /// The live folder-occupancy probe: open the directory, read at most one
@@ -4352,8 +4342,8 @@ mod program {
     /// does. It runs under the launching user's own identity, so a directory
     /// the user may not read simply refuses.
     fn probe_directory(path: &str, buf: &mut [u8]) -> Result<usize, Errno> {
-        let dir = tairix_rt::open_dir(path.as_bytes()).map_err(errno_from)?;
-        dir.read(buf).map_err(errno_from)
+        let dir = tairix_rt::open_dir(path.as_bytes()).map_err(Errno::from_syscall)?;
+        dir.read(buf).map_err(Errno::from_syscall)
     }
 
     /// The browser's live directory source. Named so a fresh one can be built

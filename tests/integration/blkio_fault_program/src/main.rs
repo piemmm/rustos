@@ -147,14 +147,9 @@ mod program {
         base.wrapping_mul(31).wrapping_add(index)
     }
 
-    /// Recover an [`Errno`] from a raw negative kernel result (`-errno`).
-    fn errno_from(neg: i64) -> Errno {
-        Errno::from_i32(i32::try_from(-neg).unwrap_or(0)).unwrap_or(Errno::NotFound)
-    }
-
     /// Claim `ticket`'s reply without blocking, with the raw `-errno` decoded.
     fn reap(endpoint: u64, ticket: u64, reply: &mut [u8]) -> Result<usize, Errno> {
-        tairix_rt::call_reap(endpoint, ticket, reply).map_err(errno_from)
+        tairix_rt::call_reap(endpoint, ticket, reply).map_err(Errno::from_syscall)
     }
 
     /// The fixture's served device: a deterministic pattern disk with three
@@ -294,7 +289,7 @@ mod program {
             let mut request = [0u8; BLK_REQUEST_LEN];
             let mut ticket = 0u64;
             let len = tairix_rt::call_recv_nonblock(self.endpoint, &mut request, &mut ticket)
-                .map_err(errno_from)?;
+                .map_err(Errno::from_syscall)?;
             let mut frame = [0u8; BLK_COMPLETION_LEN];
             let reply_len = serve_request_recovering(
                 &mut self.device,
@@ -307,7 +302,7 @@ mod program {
             );
             let ret = tairix_rt::call_reply(self.endpoint, ticket, &frame[..reply_len]);
             if ret < 0 {
-                return Err(errno_from(ret));
+                return Err(Errno::from_syscall(ret));
             }
             Ok(())
         }
@@ -322,8 +317,8 @@ mod program {
             deadline_ns: u64,
         ) -> Result<usize, Errno> {
             let set = self.ensure_waitset()?;
-            let ticket =
-                tairix_rt::call_post(self.endpoint, request, deadline_ns).map_err(errno_from)?;
+            let ticket = tairix_rt::call_post(self.endpoint, request, deadline_ns)
+                .map_err(Errno::from_syscall)?;
             self.serve_one(window)?;
             loop {
                 match reap(self.endpoint, ticket, reply) {
@@ -363,7 +358,7 @@ mod program {
     fn create_reply_waitset(endpoint: u64, token: u64) -> Result<u64, Errno> {
         let set = tairix_rt::waitset_create();
         if set < 0 {
-            return Err(errno_from(set));
+            return Err(Errno::from_syscall(set));
         }
         #[allow(clippy::cast_sign_loss)] // `set >= 0` is the minted handle.
         let set = set as u64;
@@ -375,7 +370,7 @@ mod program {
             token,
         );
         if ctl < 0 {
-            return Err(errno_from(ctl));
+            return Err(Errno::from_syscall(ctl));
         }
         Ok(set)
     }
@@ -389,7 +384,7 @@ mod program {
             blocks: 0,
         }
         .encode(&mut frame)?;
-        tairix_rt::call_post(EP_WEDGED, &frame[..len], deadline_ns).map_err(errno_from)
+        tairix_rt::call_post(EP_WEDGED, &frame[..len], deadline_ns).map_err(Errno::from_syscall)
     }
 
     /// Read one block and check it holds exactly the pattern the device stores

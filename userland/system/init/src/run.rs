@@ -81,17 +81,6 @@ mod program {
     /// a service has no console of its own, so it takes console 0.
     const SERVICE_CONSOLE: u64 = 0;
 
-    /// Recover the [`Errno`] a syscall encoded as a negative register
-    /// (`-errno`). An unrecognised code fails closed as
-    /// [`Errno::NotImplemented`] rather than being guessed — the same idiom
-    /// the other first-party services use.
-    fn errno_from(ret: i64) -> Errno {
-        i32::try_from(-ret)
-            .ok()
-            .and_then(Errno::from_i32)
-            .unwrap_or(Errno::NotImplemented)
-    }
-
     /// The production [`Spawner`]: launch a service's `Run` binary on the
     /// primary console as its own service account through `spawn_as`.
     ///
@@ -111,7 +100,7 @@ mod program {
                 spec.account(),
             );
             if ret < 0 {
-                Err(errno_from(ret))
+                Err(Errno::from_syscall(ret))
             } else {
                 // A non-negative kernel result is a valid pid.
                 #[allow(clippy::cast_sign_loss)]
@@ -127,7 +116,7 @@ mod program {
         let pid_i32 = i32::try_from(pid.as_u64()).map_err(|_| Errno::OutOfRange)?;
         let ret = tairix_rt::signal(pid_i32, signal);
         if ret < 0 {
-            Err(errno_from(ret))
+            Err(Errno::from_syscall(ret))
         } else {
             Ok(())
         }

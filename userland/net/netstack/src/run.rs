@@ -142,7 +142,7 @@ mod program {
 
     impl NetChannelTransport for RtNetChannelTransport {
         fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
-            tairix_rt::ipc_call(self.endpoint, request, reply).map_err(errno_from)
+            tairix_rt::ipc_call(self.endpoint, request, reply).map_err(Errno::from_syscall)
         }
     }
 
@@ -164,16 +164,6 @@ mod program {
             }
             let _ = tairix_rt::random_get(out, RandomFlags::empty());
         }
-    }
-
-    /// Recover the [`Errno`] a syscall encoded as a negative register
-    /// (`-errno`); an unrecognised code fails closed as
-    /// [`Errno::NotImplemented`] rather than being guessed.
-    fn errno_from(ret: i64) -> Errno {
-        i32::try_from(-ret)
-            .ok()
-            .and_then(Errno::from_i32)
-            .unwrap_or(Errno::NotImplemented)
     }
 
     /// The monotonic clock as the engine's `now`.
@@ -724,7 +714,7 @@ mod program {
                 }
             },
             Err(ret) => {
-                reply_error(endpoint, ticket, errno_from(ret));
+                reply_error(endpoint, ticket, Errno::from_syscall(ret));
                 None
             }
         }
@@ -820,7 +810,7 @@ mod program {
         // A negative return is the `-errno` encoding; a non-negative one is
         // this process's mapped base address.
         let Ok(base) = u64::try_from(created) else {
-            return Err(errno_from(created));
+            return Err(Errno::from_syscall(created));
         };
         // A base the pointer width cannot hold is refused and the mapping
         // released, never truncated into a wild pointer.
@@ -845,7 +835,7 @@ mod program {
         // the minted grant handle.
         let Ok(grant) = u64::try_from(granted) else {
             let _ = tairix_rt::shm_unmap(base, region_len);
-            return Err(errno_from(granted));
+            return Err(Errno::from_syscall(granted));
         };
 
         // Bind the notify mailbox the driver rings on receive. Its id is

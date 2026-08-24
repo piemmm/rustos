@@ -89,11 +89,6 @@ mod program {
     /// only because its manifest carries `CAP_APPDATA_ADMIN`.
     struct RealStorage;
 
-    /// Translate a raw negative kernel result into a typed [`Errno`].
-    fn errno(raw: i64) -> Errno {
-        Errno::from_syscall(raw)
-    }
-
     /// The randomness the sealed scope's key material and the temporary
     /// scope's names are drawn from, from the one kernel random subsystem.
     ///
@@ -109,8 +104,8 @@ mod program {
         fn fill(&mut self, out: &mut [u8]) -> Result<(), Errno> {
             let mut done = 0usize;
             while done < out.len() {
-                let drawn =
-                    tairix_rt::random_get(&mut out[done..], RandomFlags::empty()).map_err(errno)?;
+                let drawn = tairix_rt::random_get(&mut out[done..], RandomFlags::empty())
+                    .map_err(Errno::from_syscall)?;
                 if drawn == 0 {
                     return Err(Errno::EntropyNotReady);
                 }
@@ -122,8 +117,8 @@ mod program {
 
     impl Storage for RealStorage {
         fn read(&mut self, path: &str) -> Result<Vec<u8>, Errno> {
-            let file = File::open(path.as_bytes(), OpenFlags::READ).map_err(errno)?;
-            let size = usize::try_from(file.stat().map_err(errno)?.size)
+            let file = File::open(path.as_bytes(), OpenFlags::READ).map_err(Errno::from_syscall)?;
+            let size = usize::try_from(file.stat().map_err(Errno::from_syscall)?.size)
                 .map_err(|_| Errno::LengthOutOfRange)?;
             let mut buf = Vec::new();
             buf.try_reserve_exact(size)
@@ -131,7 +126,9 @@ mod program {
             buf.resize(size, 0);
             let mut done = 0usize;
             while done < size {
-                let read = file.read_at(done as u64, &mut buf[done..]).map_err(errno)?;
+                let read = file
+                    .read_at(done as u64, &mut buf[done..])
+                    .map_err(Errno::from_syscall)?;
                 if read == 0 {
                     break;
                 }
@@ -148,10 +145,12 @@ mod program {
                     .union(OpenFlags::CREATE)
                     .union(OpenFlags::TRUNCATE),
             )
-            .map_err(errno)?;
+            .map_err(Errno::from_syscall)?;
             let mut done = 0usize;
             while done < bytes.len() {
-                let written = file.write_at(done as u64, &bytes[done..]).map_err(errno)?;
+                let written = file
+                    .write_at(done as u64, &bytes[done..])
+                    .map_err(Errno::from_syscall)?;
                 if written == 0 {
                     return Err(Errno::NoSpace);
                 }
@@ -161,7 +160,7 @@ mod program {
             // the bytes must be on the medium before the rename makes them
             // the document: without the flush a crash could leave the name
             // pointing at a shorter file than the caller committed.
-            file.sync().map_err(errno)
+            file.sync().map_err(Errno::from_syscall)
         }
 
         fn rename(&mut self, src: &str, dst: &str) -> Result<(), Errno> {
@@ -169,20 +168,20 @@ mod program {
             if ret == 0 {
                 Ok(())
             } else {
-                Err(errno(ret))
+                Err(Errno::from_syscall(ret))
             }
         }
 
         fn mkdir(&mut self, path: &str, mode: u32) -> Result<(), Errno> {
             let ret = tairix_rt::fs_mkdir(path.as_bytes());
             if ret != 0 {
-                return Err(errno(ret));
+                return Err(Errno::from_syscall(ret));
             }
             let ret = tairix_rt::fs_set_mode(path.as_bytes(), mode);
             if ret == 0 {
                 Ok(())
             } else {
-                Err(errno(ret))
+                Err(Errno::from_syscall(ret))
             }
         }
 
@@ -193,7 +192,7 @@ mod program {
             if ret == 0 {
                 Ok(())
             } else {
-                Err(errno(ret))
+                Err(Errno::from_syscall(ret))
             }
         }
 
@@ -206,8 +205,9 @@ mod program {
             // but search permission on the path's own ancestors, which is
             // exactly what the transit grant confers, and its stat reports
             // both figures the store turns on.
-            let node = File::open(path.as_bytes(), OpenFlags::empty()).map_err(errno)?;
-            let stat = node.stat().map_err(errno)?;
+            let node =
+                File::open(path.as_bytes(), OpenFlags::empty()).map_err(Errno::from_syscall)?;
+            let stat = node.stat().map_err(Errno::from_syscall)?;
             Ok(NodeInfo {
                 uid: stat.uid,
                 len: stat.size,
@@ -215,7 +215,7 @@ mod program {
         }
 
         fn list_dir(&mut self, path: &str) -> Result<Vec<DirEntry>, Errno> {
-            let stream = tairix_rt::read_dir_all(path.as_bytes()).map_err(errno)?;
+            let stream = tairix_rt::read_dir_all(path.as_bytes()).map_err(Errno::from_syscall)?;
             let mut entries = Vec::new();
             for entry in DirEntries::new(&stream) {
                 let entry = entry?;
@@ -253,9 +253,9 @@ mod program {
             } else {
                 OpenFlags::READ
             };
-            let file = File::open(path.as_bytes(), flags).map_err(errno)?;
+            let file = File::open(path.as_bytes(), flags).map_err(Errno::from_syscall)?;
             let handle = tairix_rt::fd_grant(file.fd(), task, ceiling);
-            u64::try_from(handle).map_err(|_| errno(handle))
+            u64::try_from(handle).map_err(|_| Errno::from_syscall(handle))
         }
     }
 

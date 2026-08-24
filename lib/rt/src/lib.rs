@@ -3404,7 +3404,7 @@ pub fn self_origin() -> Result<Origin, i64> {
 /// encoding error, a transport failure, a protocol mismatch, or the broker's
 /// own refusal (for example `PermissionDenied` on a wrong password).
 pub fn elevate(request: &ElevateRequest<'_>) -> Result<ElevateReply, Errno> {
-    let console = self_origin().map_err(errno_from_raw)?.console();
+    let console = self_origin().map_err(Errno::from_syscall)?.console();
     let endpoint = elevate_endpoint(console)?;
     let mut buf = Wiped::<ELEVATE_MAX_REQUEST>::new();
     elevate_exchange(endpoint, request, &mut buf[..])
@@ -3424,32 +3424,8 @@ fn elevate_exchange(
 ) -> Result<ElevateReply, Errno> {
     let len = request.encode(buf)?;
     let mut reply = [0u8; ELEVATE_REPLY_LEN];
-    let reply_len = ipc_call(endpoint, &buf[..len], &mut reply).map_err(errno_from_raw)?;
+    let reply_len = ipc_call(endpoint, &buf[..len], &mut reply).map_err(Errno::from_syscall)?;
     ElevateReply::decode(&reply[..reply_len])
-}
-
-/// Convert a raw negative kernel result (`-errno`) into an [`Errno`].
-///
-/// A syscall that fails returns its error as a negated discriminant, so this is
-/// the one place the raw register becomes a typed error. Every consumer of a
-/// raw result — this runtime's own wrappers and the driver programs that issue
-/// syscalls directly — recovers its `Errno` here, so a refusal cannot be read
-/// one way in one program and another way in the next.
-///
-/// Anything the `abi-v1` source of truth does not recognise — a code this build
-/// has no variant for, a magnitude too large for an `i32`, or a non-negative
-/// value handed in by mistake — fails closed as
-/// [`Errno::NotImplemented`]: this build genuinely cannot say what the kernel
-/// meant. It deliberately never becomes [`Errno::NotFound`], which asserts that
-/// a named object does not exist and which callers act on (by creating it, or
-/// by treating an absence as benign); an unreadable result must not be able to
-/// masquerade as that answer.
-#[must_use]
-pub fn errno_from_raw(raw: i64) -> Errno {
-    raw.checked_neg()
-        .and_then(|code| i32::try_from(code).ok())
-        .and_then(Errno::from_i32)
-        .unwrap_or(Errno::NotImplemented)
 }
 
 /// Read the **unfiltered, global** kernel introspection view
@@ -5089,61 +5065,6 @@ mod tests {
     /// The negative register the kernel encodes `errno` as.
     fn refusal(errno: Errno) -> u64 {
         u64::from_ne_bytes((-i64::from(errno.as_i32())).to_ne_bytes())
-    }
-
-    #[test]
-    fn every_errno_the_abi_defines_round_trips_through_the_raw_result() {
-        // Walk the discriminant space rather than restating a list of variants,
-        // so a newly appended errno is covered the moment it is added.
-        let mut recovered = 0usize;
-        for code in 1..=256i32 {
-            if let Some(errno) = Errno::from_i32(code) {
-                assert_eq!(
-                    errno_from_raw(-i64::from(code)),
-                    errno,
-                    "the raw refusal -{code} must recover its own variant"
-                );
-                recovered += 1;
-            }
-        }
-        assert!(
-            recovered > 20,
-            "the discriminant walk must actually reach the defined errnos, found {recovered}"
-        );
-    }
-
-    #[test]
-    fn a_success_value_is_not_mistaken_for_an_error_code() {
-        // A non-negative result is a success the caller should never have
-        // handed to the conversion; it must not surface as a plausible-looking
-        // refusal a caller would act on.
-        for raw in [0i64, 1, 7, 4096, i64::MAX] {
-            assert_eq!(errno_from_raw(raw), Errno::NotImplemented);
-        }
-    }
-
-    #[test]
-    fn an_out_of_range_negative_fails_closed_rather_than_naming_a_wrong_errno() {
-        // An unknown code, a magnitude no `i32` can hold, and the one value
-        // that cannot be negated at all: each is unreadable, and each says so
-        // rather than claiming an object is absent.
-        for raw in [
-            -(i64::from(i32::MAX) + 1),
-            -(i64::from(u32::MAX) + 12),
-            i64::MIN,
-            -100_000,
-        ] {
-            assert_eq!(
-                errno_from_raw(raw),
-                Errno::NotImplemented,
-                "the unreadable result {raw} must not become a real errno"
-            );
-            assert_ne!(
-                errno_from_raw(raw),
-                Errno::NotFound,
-                "and never the absence a caller acts on"
-            );
-        }
     }
 
     #[test]

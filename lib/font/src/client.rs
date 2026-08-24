@@ -893,19 +893,9 @@ struct RtTransport;
 #[cfg(feature = "rt")]
 impl FontTransport for RtTransport {
     fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
-        tairix_rt::ipc_call(tairix_abi::font_ipc::FONT_ENDPOINT, request, reply).map_err(errno_from)
+        tairix_rt::ipc_call(tairix_abi::font_ipc::FONT_ENDPOINT, request, reply)
+            .map_err(Errno::from_syscall)
     }
-}
-
-/// Recover the [`Errno`] a syscall encoded as a negative register (`-ret`); an
-/// unrecognised code fails closed as [`Errno::NotImplemented`] rather than
-/// being guessed.
-#[cfg(feature = "rt")]
-fn errno_from(ret: i64) -> Errno {
-    i32::try_from(-ret)
-        .ok()
-        .and_then(Errno::from_i32)
-        .unwrap_or(Errno::NotImplemented)
 }
 
 /// A deterministic test transport for host tests: it answers every request

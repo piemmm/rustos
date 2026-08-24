@@ -21,6 +21,12 @@ See `docs/src/lib/hid.md` for the full description and test surface.
 - `bring_up_boot_keyboard`, `derive_keyboard_resources`, `KeyboardResources`,
   `KeyboardSource` — the user-space boot-keyboard bring-up over a
   `DriverHost` + the grant→BAR/DMA-aperture derivation.
+- `transport_error`, `pump_error_limit_reached` — the pump loop's error
+  policy: which refusal means the transport itself has gone (and so a clean
+  unplug), and the saturating consecutive-failure limit that fails a wedged
+  device closed. Shared by every boot-protocol driver, so an unreadable
+  refusal cannot read as a removed device in one driver and a fault in the
+  next.
 - `AXIS_X`, `AXIS_Y`, `REPORT_BUF_LEN`, `REPORT_POLL_BUDGET`, and the
   `ReportSource` re-export.
 

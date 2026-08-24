@@ -269,16 +269,6 @@ mod program {
         }
     }
 
-    /// Recover the [`Errno`] a syscall encoded as a negative register
-    /// (`-errno`, the standard `abi-v1` convention). An unrecognised code
-    /// fails closed as [`Errno::NotImplemented`] rather than being guessed.
-    fn errno_from(ret: i64) -> Errno {
-        i32::try_from(-ret)
-            .ok()
-            .and_then(Errno::from_i32)
-            .unwrap_or(Errno::NotImplemented)
-    }
-
     /// The waitset token naming this console's elevation call endpoint.
     const TOKEN_ELEVATE: u64 = 1;
     /// The waitset token naming the running child: the session, or the
@@ -645,7 +635,7 @@ mod program {
                     } else if matches!(serve(token), Watch::Release) {
                         break Ok(Watched::Released);
                     }
-                } else if errno_from(ret) != Errno::TimedOut {
+                } else if Errno::from_syscall(ret) != Errno::TimedOut {
                     // An unexpected wait failure must not wedge the round:
                     // reap directly rather than loop on a broken wait.
                     break plain_wait(pid).map(Watched::Exited);
@@ -720,7 +710,7 @@ mod program {
         let mut status = 0i32;
         let wret = tairix_rt::wait_exit(pid, &mut status);
         if wret < 0 {
-            return Err(errno_from(wret));
+            return Err(Errno::from_syscall(wret));
         }
         Ok(status)
     }
@@ -747,7 +737,7 @@ mod program {
         let mut status = WaitStatus::Exited(0);
         let ret = tairix_rt::try_wait(pid, &mut status);
         if ret < 0 {
-            return if errno_from(ret) == Errno::WouldBlock {
+            return if Errno::from_syscall(ret) == Errno::WouldBlock {
                 Reaped::Running
             } else {
                 Reaped::Gone
@@ -813,7 +803,7 @@ mod program {
         let program = session_program(user, kind);
         let ret = tairix_rt::spawn_with(program.as_bytes(), CONSOLE_INHERIT, user.uid.0, &[], &env);
         if ret < 0 {
-            return Err(errno_from(ret));
+            return Err(Errno::from_syscall(ret));
         }
         // `ret >= 0` here, so the cast preserves the PID value; PIDs fit an
         // `i32` on this ABI.
@@ -841,7 +831,7 @@ mod program {
             let mut status = 0i32;
             let wret = tairix_rt::wait_exit(pid, &mut status);
             if wret < 0 {
-                return Err(errno_from(wret));
+                return Err(Errno::from_syscall(wret));
             }
             Ok(status)
         }
@@ -861,7 +851,7 @@ mod program {
     fn spawn_elevated(program: &str, uid: u32) -> Result<i32, Errno> {
         let ret = tairix_rt::spawn_as(program.as_bytes(), CONSOLE_INHERIT, uid);
         if ret < 0 {
-            return Err(errno_from(ret));
+            return Err(Errno::from_syscall(ret));
         }
         // `ret >= 0` here, so the cast preserves the PID value; PIDs fit an
         // `i32` on this ABI.

@@ -571,10 +571,7 @@ pub fn decode_glyph_reply(reply: &[u8]) -> Result<GlyphCoverage<'_>, Errno> {
     }
     let status = read_i32(reply, 0);
     if status != 0 {
-        let errno = status
-            .checked_neg()
-            .and_then(Errno::from_i32)
-            .ok_or(Errno::OutOfRange)?;
+        let errno = Errno::try_from_status(status).ok_or(Errno::OutOfRange)?;
         return Err(errno);
     }
     if reply.len() < FONT_GLYPH_REPLY_HEADER_LEN {

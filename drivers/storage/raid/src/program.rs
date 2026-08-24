@@ -577,7 +577,7 @@ fn remove_node_orderly(node_id: u32) -> Result<(), Errno> {
     if outcome == 0 {
         return Ok(());
     }
-    Err(tairix_rt::errno_from_raw(outcome))
+    Err(Errno::from_syscall(outcome))
 }
 
 /// Record an administrative decision on the audit trail.

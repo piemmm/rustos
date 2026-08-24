@@ -132,18 +132,24 @@ containing `:` stays reachable as `./name`, and `File::open_resource` remains
 the explicit constructor for a caller that has already classified its target
 (the shell's parsed redirection targets).
 
-## Raw syscall results (`errno_from_raw`)
+## Raw syscall results (`Errno::from_syscall`)
 
 The low-level wrappers hand back the kernel's raw signed register, so a
-refusal arrives as a negated `Errno` discriminant. `errno_from_raw` is the
-**one** place that becomes a typed error — this runtime's own wrappers and the
-driver programs that issue syscalls directly all recover their `Errno` through
-it, so a refusal cannot be read one way in one program and another way in the
-next. Anything unrecognisable — a code this build has no variant for, a
-magnitude too large for an `i32`, or a success value handed in by mistake —
+refusal arrives as a negated `Errno` discriminant. `Errno::from_syscall` in
+`lib/abi` is the **one** place that becomes a typed error — this runtime's own
+wrappers, the driver programs that issue syscalls directly, and every
+application all recover their `Errno` through it, so a refusal cannot be read
+one way in one program and another way in the next. It lives beside `Errno`
+rather than here because a raw result reaches consumers that have no reason to
+link a runtime.
+
+Anything unrecognisable — a code this build has no variant for, a magnitude
+too large for an `i32`, `i64::MIN`, or a success value handed in by mistake —
 fails closed as `Errno::NotImplemented`. It deliberately never becomes
 `Errno::NotFound`, which asserts a named object is absent and which callers act
 on; an unreadable result must not be able to masquerade as that answer.
+`Errno::try_from_syscall` is the fallible form, for the caller that must tell
+an unreadable register from a real refusal instead of folding the two.
 
 ## Memory pressure (`pressure` module)
 

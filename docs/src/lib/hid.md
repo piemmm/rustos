@@ -53,6 +53,17 @@ dependency (`AGENTS.md` §17.4 /
   one definition of the `Key`→record translation (`AGENTS.md` §2.2). A driver
   loop (`pump_once`) injects each record through a `ConsoleSink`; the kernel
   input-focus arbiter decides the encoding and destination (`AGENTS.md` §17.4).
+- **Pump-loop error policy** (`transport_error`, `pump_error_limit_reached`):
+  the one classification every boot-protocol driver's service loop shares.
+  Only `Errno::NotFound` — the transport endpoint itself gone, so the host
+  controller retracted the interface — becomes `DriverError::NotFound`, which a
+  pump loop reads as a clean unplug and exits on. Every other refusal,
+  including a register this build cannot decode, is a `DriverError::DeviceFault`
+  the driver reports concretely and rides out under the saturating
+  consecutive-failure limit before failing closed (`AGENTS.md` §2.2, §5.4). An
+  unreadable refusal must not be able to pass itself off as a removed device,
+  and the counter saturates so a long-running driver cannot wrap it back under
+  the limit and retry for ever.
 - **Boot-keyboard orchestration** (`bring_up_boot_keyboard`,
   `derive_keyboard_resources`, `KeyboardResources`): the composition a
   user-space keyboard driver runs at start-up. Over its
@@ -107,6 +118,11 @@ and mock `DriverHost`:
 - Grant derivation: the Pi 4 shape (`BusWindow` BAR + translated `Dma`) and the
   `virt` shape (`Mmio` BAR + untranslated `Dma`) decode to the right bounds; an
   IRQ grant is ignored; missing / ambiguous / zero-length grants fail closed.
+- Pump-loop error policy: only a vanished endpoint reads as the transport
+  disappearing; a register the build cannot decode (including `i64::MIN`, whose
+  negation would abort the process) reads as a device fault rather than a
+  removed device; and the consecutive-failure counter saturates instead of
+  wrapping back under its limit.
 - Bind table: `KEYBOARD_BIND_KEYS` matches the published xHCI controller node
   (`tairix_usb::XHCI_COMPATIBLE`) and rejects a different `compatible` string.
 

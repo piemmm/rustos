@@ -265,12 +265,7 @@ pub fn decode_completion(reply: &[u8]) -> Result<u32, Errno> {
             }
             Ok(read_u32(reply, COMPLETION_STATUS_LEN))
         }
-        // `checked_neg` guards `i32::MIN`, whose negation overflows; such a
-        // status is not a valid negated discriminant, so it fails closed.
-        negative => Err(negative
-            .checked_neg()
-            .and_then(Errno::from_i32)
-            .unwrap_or(Errno::BadMagic)),
+        negative => Err(Errno::try_from_status(negative).unwrap_or(Errno::BadMagic)),
     }
 }
 

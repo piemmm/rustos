@@ -100,12 +100,7 @@ mod program {
 
     /// Whether a raw syscall result is the sandbox wall's refusal.
     fn is_denied(ret: i64) -> bool {
-        ret < 0
-            && ret
-                .checked_neg()
-                .and_then(|positive| i32::try_from(positive).ok())
-                .and_then(Errno::from_i32)
-                == Some(Errno::PermissionDenied)
+        Errno::try_from_syscall(ret) == Some(Errno::PermissionDenied)
     }
 
     /// The probe worker's service: attempt syscalls outside the sandbox

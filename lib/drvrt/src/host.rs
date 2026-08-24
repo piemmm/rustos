@@ -404,7 +404,7 @@ impl<S: GrantSyscalls> RtDriverHost<S> {
         let mut len: u64 = 0;
         let ret = self.syscalls.shm_map(slot.handle, &mut len);
         if ret < 0 {
-            return Err(match decode_errno(ret) {
+            return Err(match Errno::try_from_syscall(ret) {
                 Some(Errno::PermissionDenied) => DriverError::PermissionDenied,
                 _ => DriverError::Unsupported,
             });
@@ -602,7 +602,9 @@ impl<S: GrantSyscalls> MailboxChannel for RtDriverHost<S> {
             .syscalls
             .ipc_call(mailbox_ipc::MAILBOX_ENDPOINT, &request, &mut reply);
         if ret < 0 {
-            return Err(decode_errno(ret).map_or(DriverError::DeviceFault, ipc_driver_error));
+            return Err(
+                Errno::try_from_syscall(ret).map_or(DriverError::DeviceFault, ipc_driver_error)
+            );
         }
         // `ret >= 0` checked above; the result is then clamped to `reply.len()`,
         // so any truncation on a 32-bit target cannot drive an out-of-bounds
@@ -649,7 +651,9 @@ impl<S: GrantSyscalls> DriverHost for RtDriverHost<S> {
         // requests is covered by one of this driver's own grants (no ambient authority). A refusal fails closed.
         let ret = self.syscalls.hw_emit_node(&node);
         if ret < 0 {
-            return Err(decode_errno(ret).map_or(DriverError::DeviceFault, emit_node_error));
+            return Err(
+                Errno::try_from_syscall(ret).map_or(DriverError::DeviceFault, emit_node_error)
+            );
         }
         Ok(())
     }
@@ -661,9 +665,9 @@ impl<S: GrantSyscalls> DriverHost for RtDriverHost<S> {
         // publishes), and returns the doorbell to program into the function's
         // MSI capability. The host adds no authority — `CAP_IRQ_BIND` is
         // enforced kernel-side. A refusal fails closed.
-        self.syscalls
-            .msi_alloc()
-            .map_err(|ret| decode_errno(ret).map_or(DriverError::DeviceFault, msi_alloc_error))
+        self.syscalls.msi_alloc().map_err(|ret| {
+            Errno::try_from_syscall(ret).map_or(DriverError::DeviceFault, msi_alloc_error)
+        })
     }
 }
 
@@ -677,7 +681,7 @@ impl<S: GrantSyscalls> DriverHost for RtDriverHost<S> {
 /// window maps to [`MmioMapError::InvalidRegion`]; anything else is an
 /// [`MmioMapError::Unsupported`] platform refusal.
 fn mmio_error(ret: i64) -> MmioMapError {
-    match decode_errno(ret) {
+    match Errno::try_from_syscall(ret) {
         Some(Errno::PermissionDenied) => MmioMapError::CapabilityMissing,
         Some(Errno::OutOfRange | Errno::LengthOutOfRange | Errno::NotFound | Errno::BadAddress) => {
             MmioMapError::InvalidRegion
@@ -694,7 +698,7 @@ fn mmio_error(ret: i64) -> MmioMapError {
 /// [`DmaHost::alloc_dma_zeroed`] exhaustion error); anything else (an inert
 /// facility, an unknown code, a `0` base) is [`DriverError::Unsupported`].
 fn dma_error(ret: i64) -> DriverError {
-    match decode_errno(ret) {
+    match Errno::try_from_syscall(ret) {
         Some(Errno::PermissionDenied) => DriverError::PermissionDenied,
         Some(Errno::LengthOutOfRange | Errno::OutOfMemory | Errno::OutOfRange) => {
             DriverError::LengthOutOfRange
@@ -710,7 +714,7 @@ fn dma_error(ret: i64) -> DriverError {
 /// surfaced as [`DriverError::LengthOutOfRange`]; anything else is a kernel
 /// refusal surfaced as [`DriverError::Unsupported`].
 fn grants_query_error(ret: i64) -> DriverError {
-    match decode_errno(ret) {
+    match Errno::try_from_syscall(ret) {
         Some(Errno::BufferTooSmall) => DriverError::LengthOutOfRange,
         _ => DriverError::Unsupported,
     }
@@ -761,12 +765,4 @@ fn msi_alloc_error(errno: Errno) -> DriverError {
         Errno::OutOfRange => DriverError::OutOfRange,
         _ => DriverError::DeviceFault,
     }
-}
-
-/// Recover the [`Errno`] a negative `abi-v1` result register encodes (`-errno`),
-/// or `None` for a non-negative `ret` or an unknown discriminant.
-fn decode_errno(ret: i64) -> Option<Errno> {
-    let code = ret.checked_neg()?;
-    let code = i32::try_from(code).ok()?;
-    Errno::from_i32(code)
 }

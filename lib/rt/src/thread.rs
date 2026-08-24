@@ -473,7 +473,7 @@ impl Builder {
             // SAFETY: the kernel refused the creation, so no thread took the
             // payload; this reclaims the box built above, unconsumed.
             drop(unsafe { Box::from_raw(payload.cast::<Payload<F, T>>()) });
-            return Err(errno_of(created));
+            return Err(Errno::from_syscall(created));
         };
         Ok(JoinHandle {
             thread: Thread { id: ThreadId(id) },
@@ -487,13 +487,6 @@ impl Default for Builder {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Decode the [`Errno`] a negative `abi-v1` result carries.
-fn errno_of(result: i64) -> Errno {
-    let code = i32::try_from(-result).unwrap_or(i32::MAX);
-    // A refusal this build does not recognise still reads as a refusal.
-    Errno::from_i32(code).unwrap_or(Errno::OutOfRange)
 }
 
 /// The owning handle to a spawned thread: joining it yields the closure's
@@ -552,7 +545,7 @@ impl<T> JoinHandle<T> {
             // re-test, not a failure: `WouldBlock` means the word already
             // changed, and a spurious wake costs one loop.
             let outcome = unsafe { crate::futex_wait(word_of(&cell.alive), observed, u64::MAX) };
-            if outcome < 0 && errno_of(outcome) == Errno::Interrupted {
+            if outcome < 0 && Errno::from_syscall(outcome) == Errno::Interrupted {
                 // This thread is being terminated; do not loop against a wait
                 // that can no longer complete. The cell is left retired so the
                 // kernel's pending write has somewhere valid to land.
@@ -693,20 +686,6 @@ mod tests {
         // Distinct ids never compare equal, so a stale handle cannot be
         // mistaken for a live thread.
         assert_ne!(ThreadId(1), ThreadId(2));
-    }
-
-    #[test]
-    fn a_negative_result_decodes_to_the_kernel_s_refusal() {
-        assert_eq!(
-            errno_of(-i64::from(Errno::OutOfRange.as_i32())),
-            Errno::OutOfRange
-        );
-        assert_eq!(
-            errno_of(-i64::from(Errno::NotImplemented.as_i32())),
-            Errno::NotImplemented
-        );
-        // A discriminant this build does not know still reads as a refusal.
-        assert_eq!(errno_of(-9_999), Errno::OutOfRange);
     }
 
     /// The payload's runner sits at offset zero, which is what lets the one

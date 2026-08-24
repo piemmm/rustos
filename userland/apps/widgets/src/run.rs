@@ -77,14 +77,6 @@ mod program {
     /// Exit code when a present was refused or the event channel died.
     const EXIT_CHANNEL_LOST: i32 = 84;
 
-    /// Recover the [`Errno`] a syscall encoded as a negative register.
-    fn errno_from(ret: i64) -> Errno {
-        i32::try_from(-ret)
-            .ok()
-            .and_then(Errno::from_i32)
-            .unwrap_or(Errno::NotImplemented)
-    }
-
     /// Declare this application's presence on the desktop's icon bar: the
     /// shared convention's two rows — the session-drawn information row and
     /// *Quit* — with the primary click left to the session so it raises the
@@ -127,7 +119,7 @@ mod program {
 
     impl WindowTransport for RtWindowTransport {
         fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
-            tairix_rt::ipc_call(WINDOW_ENDPOINT, request, reply).map_err(errno_from)
+            tairix_rt::ipc_call(WINDOW_ENDPOINT, request, reply).map_err(Errno::from_syscall)
         }
     }
 
@@ -158,7 +150,7 @@ mod program {
                             return Ok(());
                         }
                     }
-                    Err(err) if errno_from(err) == Errno::WouldBlock => {
+                    Err(err) if Errno::from_syscall(err) == Errno::WouldBlock => {
                         let mut token = 0u64;
                         if tairix_rt::waitset_wait(self.set, u64::MAX, &mut token) != 0 {
                             return Err(Errno::NotFound);
@@ -167,7 +159,7 @@ mod program {
                             tairix_font::trim_glyph_cache();
                         }
                     }
-                    Err(err) => return Err(errno_from(err)),
+                    Err(err) => return Err(Errno::from_syscall(err)),
                 }
             }
         }

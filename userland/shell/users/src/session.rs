@@ -472,10 +472,7 @@ fn delete_group(io: &mut dyn ToolIo, channel: &mut dyn AdminChannel, args: &[&st
 /// Render a raw negative kernel result (`-errno`) as a terse, stable
 /// message.
 fn errno_message(err: i64) -> &'static str {
-    let decoded = i32::try_from(err.checked_neg().unwrap_or(0))
-        .ok()
-        .and_then(Errno::from_i32);
-    match decoded {
+    match Errno::try_from_syscall(err) {
         Some(Errno::PermissionDenied) => "permission denied",
         Some(Errno::NotFound) => "no such account or group",
         Some(Errno::AlreadyExists) => "already exists",

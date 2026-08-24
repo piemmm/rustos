@@ -325,7 +325,7 @@ pub fn reply_status(reply: &[u8]) -> Result<(), Errno> {
     }
     match read_i32(reply, 0) {
         0 => Ok(()),
-        negative => Errno::from_i32(-negative).map_or(Err(Errno::BadMagic), Err),
+        negative => Errno::try_from_status(negative).map_or(Err(Errno::BadMagic), Err),
     }
 }
 
@@ -907,5 +907,11 @@ mod tests {
         put_i32(&mut buf, 0, 0);
         put_u32(&mut buf, REPLY_STATUS_LEN, 100);
         assert_eq!(decode_config_reply(&buf), Err(Errno::BadMagic));
+    }
+    #[test]
+    fn the_most_negative_status_word_fails_closed_instead_of_aborting() {
+        let mut reply = [0u8; REPLY_STATUS_LEN];
+        reply.copy_from_slice(&i32::MIN.to_le_bytes());
+        assert_eq!(reply_status(&reply), Err(Errno::BadMagic));
     }
 }

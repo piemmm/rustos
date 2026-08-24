@@ -511,7 +511,7 @@ pub fn decode_reply(bytes: &[u8]) -> Result<(), Errno> {
     }
     match read_i32(bytes, 0) {
         0 => Ok(()),
-        neg if neg < 0 => Err(Errno::from_i32(-neg).ok_or(Errno::BadMagic)?),
+        neg if neg < 0 => Err(Errno::try_from_status(neg).ok_or(Errno::BadMagic)?),
         _ => Err(Errno::BadMagic),
     }
 }
@@ -575,6 +575,7 @@ mod tests {
     use crate::field::FieldValue;
     use crate::log::LOG_LEVEL_MAX;
     use crate::Errno;
+    use crate::LOG_INGRESS_REPLY_LEN;
 
     fn buf() -> [u8; 1024] {
         [0u8; 1024]
@@ -710,5 +711,14 @@ mod tests {
         assert_eq!(decode_reply(&b), Ok(()));
         encode_reply(Err(Errno::PermissionDenied), &mut b).unwrap();
         assert_eq!(decode_reply(&b), Err(Errno::PermissionDenied));
+    }
+    #[test]
+    fn the_most_negative_status_word_fails_closed_instead_of_aborting() {
+        // The status word comes from a peer, so the decode must be total over
+        // every `i32`: negating `i32::MIN` overflows, and the workspace builds
+        // every profile with overflow checks and `panic = "abort"`.
+        let mut reply = [0u8; LOG_INGRESS_REPLY_LEN];
+        reply[..4].copy_from_slice(&i32::MIN.to_le_bytes());
+        assert_eq!(decode_reply(&reply), Err(Errno::BadMagic));
     }
 }

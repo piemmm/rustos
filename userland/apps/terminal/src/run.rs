@@ -228,16 +228,6 @@ mod program {
         Some((new_base, new_len))
     }
 
-    /// Recover the [`Errno`] a syscall encoded as a negative register
-    /// (`-ret`); an unrecognised code fails closed as
-    /// [`Errno::NotImplemented`] rather than being guessed.
-    fn errno_from(ret: i64) -> Errno {
-        i32::try_from(-ret)
-            .ok()
-            .and_then(Errno::from_i32)
-            .unwrap_or(Errno::NotImplemented)
-    }
-
     /// State the abnormal-exit reason on `stderr` (fail loud: an exit
     /// code alone is not a diagnosis) and hand back `code` for `main`.
     fn fail(code: i32, reason: &str) -> i32 {
@@ -281,7 +271,7 @@ mod program {
 
     impl WindowTransport for RtWindowTransport {
         fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
-            tairix_rt::ipc_call(WINDOW_ENDPOINT, request, reply).map_err(errno_from)
+            tairix_rt::ipc_call(WINDOW_ENDPOINT, request, reply).map_err(Errno::from_syscall)
         }
     }
 
@@ -638,7 +628,8 @@ mod program {
     impl ShellSource for PtyShell {
         fn read(&mut self) -> Result<Vec<u8>, Errno> {
             let mut chunk = [0u8; 4096];
-            let read = tairix_rt::fs_read(self.master, 0, &mut chunk).map_err(errno_from)?;
+            let read =
+                tairix_rt::fs_read(self.master, 0, &mut chunk).map_err(Errno::from_syscall)?;
             match chunk.get(..read) {
                 Some(slice) => Ok(slice.to_vec()),
                 None => Err(Errno::OutOfRange),
@@ -649,7 +640,8 @@ mod program {
             let mut sent = 0;
             while sent < bytes.len() {
                 let slice = bytes.get(sent..).ok_or(Errno::OutOfRange)?;
-                let wrote = tairix_rt::fs_write(self.master, 0, slice).map_err(errno_from)?;
+                let wrote =
+                    tairix_rt::fs_write(self.master, 0, slice).map_err(Errno::from_syscall)?;
                 if wrote == 0 {
                     return Err(Errno::WouldBlock);
                 }
@@ -1223,7 +1215,7 @@ mod program {
             let mut token = 0u64;
             let waited = tairix_rt::waitset_wait(set, timeout, &mut token);
             if waited != 0 {
-                if errno_from(waited) == Errno::TimedOut {
+                if Errno::from_syscall(waited) == Errno::TimedOut {
                     // The frame deadline elapsed: advance every window's
                     // animation and repaint. Nothing else changed.
                     for open in &mut windows {
@@ -2129,7 +2121,7 @@ mod program {
                         | WindowEvent::DesktopChanged { .. } => {}
                     }
                 }
-                Err(err) if errno_from(err) == Errno::WouldBlock => {
+                Err(err) if Errno::from_syscall(err) == Errno::WouldBlock => {
                     return match redrawn {
                         Some(window) => EventOutcome::OverlayChanged { window },
                         None => EventOutcome::Continue,

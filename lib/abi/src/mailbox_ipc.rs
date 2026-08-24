@@ -148,7 +148,7 @@ pub fn decode_reply(reply: &[u8], out: &mut [u32; MAILBOX_PROPERTY_WORDS]) -> Re
             }
             Ok(())
         }
-        negative => Err(Errno::from_i32(-negative).unwrap_or(Errno::BadMagic)),
+        negative => Err(Errno::try_from_status(negative).unwrap_or(Errno::BadMagic)),
     }
 }
 
@@ -336,5 +336,12 @@ mod tests {
             decode_reply(&reply[..n], &mut out),
             Err(Errno::LengthOutOfRange)
         );
+    }
+    #[test]
+    fn the_most_negative_status_word_fails_closed_instead_of_aborting() {
+        let mut reply = [0u8; REPLY_LEN];
+        reply[..4].copy_from_slice(&i32::MIN.to_le_bytes());
+        let mut out = [0u32; MAILBOX_PROPERTY_WORDS];
+        assert_eq!(decode_reply(&reply, &mut out), Err(Errno::BadMagic));
     }
 }

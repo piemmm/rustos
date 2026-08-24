@@ -43,27 +43,9 @@
 // bind table — lives in the crate's `lib` target so the host image builder can
 // author the signed manifest from it; this binary is the `Run` entry point.
 
-#[cfg(any(test, freestanding))]
-use tairix_abi::{DriverError, Errno};
-
-#[cfg(any(test, freestanding))]
-fn pump_error_limit_reached(consecutive_errors: &mut u8, limit: u8) -> bool {
-    *consecutive_errors = consecutive_errors.saturating_add(1);
-    *consecutive_errors >= limit
-}
-
-#[cfg(any(test, freestanding))]
-fn transport_error(err: Errno) -> DriverError {
-    match err {
-        Errno::NotFound => DriverError::NotFound,
-        _ => DriverError::DeviceFault,
-    }
-}
-
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
-    use super::pump_error_limit_reached;
     use tairix_abi::driver::input::ReportSource;
     use tairix_abi::input::KeyInput;
     use tairix_abi::{CapabilityId, DriverError, Errno};
@@ -221,8 +203,7 @@ mod program {
                     Ok(len)
                 }
                 Err(neg) => {
-                    let errno = Errno::from_i32(i32::try_from(-neg).unwrap_or(0))
-                        .unwrap_or(Errno::NotFound);
+                    let errno = Errno::from_syscall(neg);
                     log_hex_event(
                         USB_KBD_URB_ERROR,
                         Level::Warn,
@@ -289,7 +270,7 @@ mod program {
                             "errno_hex",
                             err as u64,
                         );
-                        return Err(super::transport_error(err));
+                        return Err(tairix_hid::transport_error(err));
                     }
                 };
             let n = (transferred as usize).min(self.shm.len()).min(buf.len());
@@ -445,7 +426,7 @@ mod program {
                     return 0;
                 }
                 Err(err) => {
-                    let exhausted = pump_error_limit_reached(
+                    let exhausted = tairix_hid::pump_error_limit_reached(
                         &mut consecutive_pump_errors,
                         MAX_CONSECUTIVE_PUMP_ERRORS,
                     );
@@ -485,40 +466,4 @@ fn main() {
     // above is built only for the bare-metal driver targets. Keeping a host
     // `main` lets `cargo build --workspace`, clippy, and fmt still cover the
     // file, mirroring the other driver `Run` binaries.
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{pump_error_limit_reached, transport_error};
-    use tairix_abi::{DriverError, Errno};
-
-    #[test]
-    fn pump_error_limit_fails_closed_without_wrapping() {
-        let mut errors = u8::MAX - 1;
-        assert!(pump_error_limit_reached(&mut errors, u8::MAX));
-        assert_eq!(errors, u8::MAX);
-        assert!(pump_error_limit_reached(&mut errors, u8::MAX));
-        assert_eq!(errors, u8::MAX);
-    }
-
-    #[test]
-    fn pump_error_limit_allows_transient_errors() {
-        let mut errors = 0;
-        assert!(!pump_error_limit_reached(&mut errors, 3));
-        assert_eq!(errors, 1);
-        assert!(!pump_error_limit_reached(&mut errors, 3));
-        assert_eq!(errors, 2);
-        errors = 0;
-        assert!(!pump_error_limit_reached(&mut errors, 3));
-        assert_eq!(errors, 1);
-    }
-
-    #[test]
-    fn disconnected_transport_is_terminal_for_the_pump_loop() {
-        assert_eq!(transport_error(Errno::NotFound), DriverError::NotFound);
-        assert_eq!(
-            transport_error(Errno::NotImplemented),
-            DriverError::DeviceFault
-        );
-    }
 }
