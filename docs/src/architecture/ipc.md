@@ -19,6 +19,38 @@ Per the Stage 2.5 brief, the crate depends only on `kernel/{sync, mem,
 sched, sec}` and `lib/{abi, caps, log, util}`. The Stage 2.7 syscall
 dispatcher is out of scope here and consumes this crate's public API.
 
+## Payload confidentiality
+
+Every kernel-owned payload copy — a `Port` message, a `CallEndpoint`
+request, a `CallEndpoint` reply — is a
+[`SensitiveBuffer`](./memory.md#4-sensitive-region-api) and is therefore
+zeroed the moment the kernel releases it, whichever way the transfer ends:
+delivered and drained, refused for capability, size, or capacity, withdrawn
+by its poster, reaped on a deadline, or cancelled by teardown. The staging
+buffers the `ipc_send` / `ipc_call` / `call_post` / `call_reply` handlers
+copy user bytes into are the same type, so no stage of the path holds
+plaintext in a plain allocation.
+
+This is unconditional rather than a per-endpoint property. The kernel heap
+is shared across every principal and `lib/kalloc` does not zero on free, so
+an un-wiped release leaves the bytes readable by whatever allocates the
+block next; and the endpoints that carry a secret are not knowable at bind
+time — the session and elevation exchanges carry a passphrase, the app-data
+vault carries an application's sealed secrets, and a delegation carries a
+capability token. An opt-in "this endpoint carries secrets" bit would be
+open-by-default for every endpoint whose author did not anticipate one.
+
+The cost is one write pass over a payload the path already copies at least
+twice, and the copy is taken outside the endpoint's spinlock so the wipe is
+never paid inside a critical section. Both `post` and `reply` therefore
+report `Errno::OutOfMemory` if the kernel-owned copy cannot be allocated,
+rather than aborting on a failed `Vec` growth.
+
+`kernel/ipc/src/payload_wipe_tests.rs` holds the regression cover: a
+test-only global allocator scans every released block for the payload
+sentinel, and one of its cases leaks a payload deliberately so the scan
+cannot pass vacuously.
+
 ## Message ports
 
 ```text
@@ -283,6 +315,8 @@ Audit events live in the `kernel/ipc` reserved range `3_000..4_000`
 | 3049 | Error | `CALL_REPLY_DENIED`           | Unknown ticket, or reply exceeded `max_reply`. |
 | 3050 | Error | `CALL_ENDPOINT_REGISTER_DENIED` | A registry bind was refused because the `EndpointId` was already bound; the freshly created endpoint is dropped (mirrors `PORT_REGISTER_DENIED`, 3004). |
 | 3051 | Info  | `CALL_POSTER_VANISHED`        | A caller task exited with calls still in flight on this endpoint; the kernel cancelled them (queued requests dropped before service, in-service tickets retired so the server's reply fails closed, unclaimed replies discarded). |
+| 3052 | Info  | `CALL_ENDPOINT_GRANTS_REVOKED` | A destroyed endpoint's delegated per-endpoint grants were revoked. |
+| 3060 | Error | `PAYLOAD_ALLOC_FAILED`        | The kernel heap could not hold the wiped-on-drop copy of a port send, call post, or reply, so the transfer failed closed with `Errno::OutOfMemory`. Machine distress rather than back-pressure, hence `Error` where `MAILBOX_FULL` / `CALL_QUEUE_FULL` are `Debug`. |
 
 Adding a new event requires assigning the next free identifier in
 `kernel/ipc/src/audit.rs` and appending a row to this table.
@@ -297,6 +331,7 @@ Adding a new event requires assigning the next free identifier in
 | `WouldBlock`           | Receiver's mailbox full / endpoint's call queue full — transient back-pressure, retry |
 | `NotFound`             | Send to destroyed port, map of revoked shmem, unregister of an unbound endpoint, publish naming an unregistered endpoint, withdraw of an unbound name |
 | `AlreadyExists`        | Register of an already-bound `EndpointId`, publish of an already-bound `PortName` |
+| `OutOfMemory`          | The kernel-owned wiped-on-drop payload copy could not be allocated |
 
 Every error path emits a matching audit event before returning, so
 "fail closed" is observable in the security trail (`AGENTS.md` §5.4).

@@ -210,7 +210,8 @@ fn fuzz_send_is_fail_closed_and_recv_is_faithful() {
                     Some(msg) => {
                         let want = expected.pop_front().expect("model had a queued message");
                         assert_eq!(
-                            msg.payload, want,
+                            msg.payload.as_bytes(),
+                            want.as_slice(),
                             "recv must return the bytes that were sent"
                         );
                     }

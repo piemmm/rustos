@@ -42,11 +42,11 @@
 extern crate alloc;
 
 use alloc::collections::{BTreeMap, VecDeque};
-use alloc::vec::Vec;
 
 use tairix_abi::ipc::IPC_MESSAGE_MAX_PAYLOAD_LEN;
 use tairix_abi::{Errno, Origin};
 use tairix_caps::CapabilitySet;
+use tairix_kernel_mem::SensitiveBuffer;
 use tairix_kernel_sec::captable::TaskCapabilities;
 use tairix_log::{Field, Sink};
 use tairix_util::fmt::{format_hex_u64, format_usize};
@@ -82,7 +82,7 @@ pub struct CallTicket(pub u64);
 /// queued request. The in-kernel server passes
 /// [`usize::MAX`] and so only ever observes [`RecvCall::Empty`] or
 /// [`RecvCall::Received`].
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub enum RecvCall {
     /// No request is pending; the server should park and retry (this never
     /// blocks).
@@ -100,7 +100,7 @@ pub enum RecvCall {
 }
 
 /// A request handed to the server by [`CallEndpoint::recv_call`].
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub struct ReceivedCall {
     /// The ticket the server must [`reply`](CallEndpoint::reply) with.
     pub ticket: CallTicket,
@@ -108,18 +108,20 @@ pub struct ReceivedCall {
     /// scheduler id of the posting *thread* is carried separately, by
     /// `poster_sched`, because only that names the entity to wake.
     pub sender: u64,
-    /// The request payload (kernel-owned copy).
-    pub request: Vec<u8>,
+    /// The request payload (kernel-owned copy), wiped when this value is
+    /// dropped.
+    pub request: SensitiveBuffer,
 }
 
 /// The result of [`CallEndpoint::take_reply`] for a given ticket.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub enum ReplyOutcome {
     /// The request has been posted (and perhaps received) but the server
     /// has not replied yet. The caller should park and retry.
     Pending,
-    /// The reply is ready; its bytes are returned and the ticket retired.
-    Ready(Vec<u8>),
+    /// The reply is ready; its bytes are returned (wiped when dropped) and
+    /// the ticket retired.
+    Ready(SensitiveBuffer),
     /// The request's per-ticket deadline elapsed before a reply arrived; the
     /// ticket is retired so the caller fails closed with a timeout rather
     /// than parking forever on a wedged callee.
@@ -172,7 +174,7 @@ struct PendingCall {
     /// (`now` in [`CallEndpoint::take_reply`]) because the pure endpoint
     /// holds no clock.
     deadline: u64,
-    request: Vec<u8>,
+    request: SensitiveBuffer,
 }
 
 /// The lock-guarded request/reply state machine of a [`CallEndpoint`].
@@ -190,7 +192,7 @@ struct Inner {
     in_service: BTreeMap<u64, (u64, Origin, u64, u64)>,
     /// Replied, awaiting [`CallEndpoint::take_reply`]. Keyed by ticket; the
     /// value is the posting caller's task id and the reply bytes.
-    completed: BTreeMap<u64, (u64, Vec<u8>)>,
+    completed: BTreeMap<u64, (u64, SensitiveBuffer)>,
 }
 
 impl Inner {
@@ -504,7 +506,8 @@ impl CallEndpoint {
     /// Idempotent and fail-closed: subsequent [`post`](Self::post)s return
     /// [`Errno::NotFound`], outstanding [`take_reply`](Self::take_reply)s
     /// observe [`ReplyOutcome::Cancelled`], and any buffered request/reply
-    /// bytes are dropped. Records one [`AuditEvent::CallEndpointDestroyed`].
+    /// bytes are wiped as they are dropped. Records one
+    /// [`AuditEvent::CallEndpointDestroyed`].
     pub fn destroy<S: Sink + ?Sized>(&self, audit: &S) {
         self.state.store(state::CLOSED, Ordering::Release);
         let cancelled = {
@@ -537,7 +540,8 @@ impl CallEndpoint {
     /// exited: queued requests are dropped before service, in-service
     /// tickets are retired (a later [`reply`](Self::reply) for one is
     /// refused fail-closed, its bytes going nowhere), and unclaimed
-    /// replies are discarded. Returns the number of calls cancelled.
+    /// replies are discarded, every buffer wiped as it drops. Returns the
+    /// number of calls cancelled.
     ///
     /// Without this, a dead caller's queued request would later be served
     /// on its ticket — the observed Pi 4 defect: an unloaded USB class
@@ -598,10 +602,13 @@ impl CallEndpoint {
     ///    [`AuditEvent::CallQueueFull`] — the server merely has not drained
     ///    the queue yet, not a malformed request, so the caller may retry.
     ///
-    /// On success the request is copied into a kernel-owned buffer, a fresh
-    /// ticket is minted, and one [`AuditEvent::CallPosted`] is emitted. The
-    /// returned ticket is later surrendered to [`take_reply`](Self::take_reply)
-    /// by the *same* caller task.
+    /// On success the request is copied into a kernel-owned
+    /// [`SensitiveBuffer`] — so a request that carried a passphrase, key, or
+    /// capability token is wiped when the endpoint releases it, however the
+    /// call ends — a fresh ticket is minted, and one
+    /// [`AuditEvent::CallPosted`] is emitted. The returned ticket is later
+    /// surrendered to [`take_reply`](Self::take_reply) by the *same* caller
+    /// task.
     ///
     /// `poster_sched` is the posting task's kernel-attested *scheduler* id
     /// (never a caller-supplied value): [`reply`](Self::reply) returns it so
@@ -618,7 +625,8 @@ impl CallEndpoint {
     ///
     /// # Errors
     ///
-    /// As enumerated above.
+    /// As enumerated above, plus [`Errno::OutOfMemory`] if the kernel-owned
+    /// copy of the request cannot be allocated.
     pub fn post<S: Sink + ?Sized>(
         &self,
         caller: &TaskCapabilities,
@@ -671,7 +679,23 @@ impl CallEndpoint {
             return Err(Errno::MessageTooLarge);
         }
 
-        // 4. Enqueue under the lock; re-check destruction after acquiring,
+        // 4. Take the kernel-owned copy *before* the lock. The buffer wipes
+        //    itself on drop, so a request refused below leaves no plaintext
+        //    behind either, and the allocation is kept out of the critical
+        //    section so a contended endpoint does not serialise on the heap.
+        let request = match SensitiveBuffer::copy_from_slice(request) {
+            Ok(buf) => buf,
+            Err(err) => {
+                record(
+                    audit,
+                    AuditEvent::PayloadAllocFailed,
+                    &[id_field, sender_field, len_field],
+                );
+                return Err(err.as_errno());
+            }
+        };
+
+        // 5. Enqueue under the lock; re-check destruction after acquiring,
         //    because `destroy()` may have raced between step 1 and here.
         let mut g = self.inner.lock();
         if self.state.load(Ordering::Acquire) == state::CLOSED {
@@ -702,7 +726,7 @@ impl CallEndpoint {
             poster_sched,
             origin,
             deadline,
-            request: request.to_vec(),
+            request,
         });
         drop(g);
         record(
@@ -728,19 +752,21 @@ impl CallEndpoint {
     #[must_use]
     pub fn recv_call(&self, max_copy: usize) -> RecvCall {
         let mut g = self.inner.lock();
-        let Some(front) = g.pending.front() else {
+        let Some(request_len) = g.pending.front().map(|c| c.request.len()) else {
             return RecvCall::Empty;
         };
         // Refuse to dequeue a request the server's buffer cannot hold: leave
         // it queued and report its size so the server can resize (the kernel
         // maps this to `BufferTooSmall`). Without this the bounded copy would
         // have to drop the request after popping it.
-        if front.request.len() > max_copy {
-            return RecvCall::TooLarge {
-                request_len: front.request.len(),
-            };
+        if request_len > max_copy {
+            return RecvCall::TooLarge { request_len };
         }
-        let call = g.pending.pop_front().expect("front was present");
+        // The length read above proves a front entry exists; an empty queue
+        // here is unreachable and answered fail-closed rather than panicking.
+        let Some(call) = g.pending.pop_front() else {
+            return RecvCall::Empty;
+        };
         g.in_service.insert(
             call.ticket,
             (call.sender, call.origin, call.poster_sched, call.deadline),
@@ -794,6 +820,8 @@ impl CallEndpoint {
     /// * [`Errno::MessageTooLarge`] if the reply exceeds `max_reply`.
     /// * [`Errno::NotFound`] if `ticket` is not currently in service (unknown,
     ///   already replied, or cancelled by [`destroy`](Self::destroy)).
+    /// * [`Errno::OutOfMemory`] if the kernel-owned copy of the reply cannot
+    ///   be allocated.
     pub fn reply<S: Sink + ?Sized>(
         &self,
         ticket: CallTicket,
@@ -826,6 +854,21 @@ impl CallEndpoint {
             return Err(Errno::MessageTooLarge);
         }
 
+        // Copy before the lock, as `post` does: the buffer wipes itself on
+        // drop so a refused reply leaks nothing, and the allocation stays out
+        // of the critical section.
+        let reply = match SensitiveBuffer::copy_from_slice(reply) {
+            Ok(buf) => buf,
+            Err(err) => {
+                record(
+                    audit,
+                    AuditEvent::PayloadAllocFailed,
+                    &[id_field, ticket_field, len_field],
+                );
+                return Err(err.as_errno());
+            }
+        };
+
         let mut g = self.inner.lock();
         let Some((sender, _origin, poster_sched, _deadline)) = g.in_service.remove(&ticket.0)
         else {
@@ -837,7 +880,7 @@ impl CallEndpoint {
             );
             return Err(Errno::NotFound);
         };
-        g.completed.insert(ticket.0, (sender, reply.to_vec()));
+        g.completed.insert(ticket.0, (sender, reply));
         drop(g);
         record(
             audit,
@@ -1026,6 +1069,16 @@ mod tests {
             sink,
         )
         .expect("unrestricted endpoint")
+    }
+
+    /// The bytes of a `Ready` reply. Payload-carrying outcomes are not
+    /// comparable with `==` (a secret is never compared, only read), so the
+    /// tests assert the variant and the bytes separately.
+    fn ready_bytes(outcome: ReplyOutcome) -> alloc::vec::Vec<u8> {
+        match outcome {
+            ReplyOutcome::Ready(bytes) => bytes.as_bytes().to_vec(),
+            other => panic!("expected a ready reply, got {other:?}"),
+        }
     }
 
     /// Unbounded receive for the tests: the test buffers are never the
@@ -1350,25 +1403,22 @@ mod tests {
             .post(&caller, POSTER_SCHED, b"ping", u64::MAX, &sink)
             .expect("posted");
         // Before the server receives it, the caller sees Pending.
-        assert_eq!(ep.take_reply(7, ticket, 0), ReplyOutcome::Pending);
+        assert!(matches!(ep.take_reply(7, ticket, 0), ReplyOutcome::Pending));
 
         let received = recv_one(&ep).expect("a pending call");
         assert_eq!(received.ticket, ticket);
         assert_eq!(received.sender, 7);
-        assert_eq!(received.request, b"ping");
+        assert_eq!(received.request.as_bytes(), b"ping");
         // Received but unreplied is still Pending for the caller.
-        assert_eq!(ep.take_reply(7, ticket, 0), ReplyOutcome::Pending);
+        assert!(matches!(ep.take_reply(7, ticket, 0), ReplyOutcome::Pending));
 
         ep.reply(ticket, b"pong", &sink).expect("replied");
         assert!(sink.ids().contains(&AuditEvent::CallReplied.id().0));
 
         // The caller claims the reply exactly once.
-        assert_eq!(
-            ep.take_reply(7, ticket, 0),
-            ReplyOutcome::Ready(b"pong".to_vec())
-        );
+        assert_eq!(ready_bytes(ep.take_reply(7, ticket, 0)), b"pong");
         // A second claim finds nothing.
-        assert_eq!(ep.take_reply(7, ticket, 0), ReplyOutcome::Unknown);
+        assert!(matches!(ep.take_reply(7, ticket, 0), ReplyOutcome::Unknown));
         assert_eq!(ep.outstanding(), 0);
     }
 
@@ -1439,7 +1489,10 @@ mod tests {
 
         // A buffer too small for the front request reports its size and does
         // not dequeue it (no lost request).
-        assert_eq!(ep.recv_call(3), RecvCall::TooLarge { request_len: 4 });
+        assert!(matches!(
+            ep.recv_call(3),
+            RecvCall::TooLarge { request_len: 4 }
+        ));
         assert_eq!(ep.outstanding(), 1);
 
         // A buffer that fits then receives the very same call.
@@ -1473,7 +1526,10 @@ mod tests {
     fn take_reply_for_unknown_ticket_is_unknown() {
         let sink = RecordingSink::new();
         let ep = open_endpoint(&sink);
-        assert_eq!(ep.take_reply(7, CallTicket(999), 0), ReplyOutcome::Unknown);
+        assert!(matches!(
+            ep.take_reply(7, CallTicket(999), 0),
+            ReplyOutcome::Unknown
+        ));
     }
 
     #[test]
@@ -1488,12 +1544,9 @@ mod tests {
         ep.reply(ticket, b"r", &sink).expect("replied");
 
         // A different task may not claim it, and learns nothing.
-        assert_eq!(ep.take_reply(8, ticket, 0), ReplyOutcome::Unknown);
+        assert!(matches!(ep.take_reply(8, ticket, 0), ReplyOutcome::Unknown));
         // The reply is preserved for its rightful owner.
-        assert_eq!(
-            ep.take_reply(7, ticket, 0),
-            ReplyOutcome::Ready(b"r".to_vec())
-        );
+        assert_eq!(ready_bytes(ep.take_reply(7, ticket, 0)), b"r");
     }
 
     #[test]
@@ -1505,9 +1558,9 @@ mod tests {
             .post(&caller, POSTER_SCHED, b"q", u64::MAX, &sink)
             .expect("posted");
         // A non-poster polling the ticket while it is pending learns nothing.
-        assert_eq!(ep.take_reply(8, ticket, 0), ReplyOutcome::Unknown);
+        assert!(matches!(ep.take_reply(8, ticket, 0), ReplyOutcome::Unknown));
         recv_one(&ep).expect("received");
-        assert_eq!(ep.take_reply(8, ticket, 0), ReplyOutcome::Unknown);
+        assert!(matches!(ep.take_reply(8, ticket, 0), ReplyOutcome::Unknown));
     }
 
     #[test]
@@ -1565,10 +1618,7 @@ mod tests {
         assert!(sink.ids().contains(&AuditEvent::CallReplyDenied.id().0));
         // The call is still in service: a correctly-sized reply still works.
         ep.reply(ticket, b"ok", &sink).expect("retry");
-        assert_eq!(
-            ep.take_reply(7, ticket, 0),
-            ReplyOutcome::Ready(b"ok".to_vec())
-        );
+        assert_eq!(ready_bytes(ep.take_reply(7, ticket, 0)), b"ok");
     }
 
     #[test]
@@ -1633,7 +1683,7 @@ mod tests {
         ep.destroy(&sink);
 
         for t in [t_pending, t_in_service, t_done] {
-            assert_eq!(ep.take_reply(7, t, 0), ReplyOutcome::Cancelled);
+            assert!(matches!(ep.take_reply(7, t, 0), ReplyOutcome::Cancelled));
         }
         assert_eq!(ep.outstanding(), 0);
         assert!(sink
@@ -1685,8 +1735,11 @@ mod tests {
             Errno::NotFound
         );
         // ...and the unclaimed completed reply is discarded.
-        assert_eq!(ep.take_reply(7, t_pending, 0), ReplyOutcome::Unknown);
-        assert_eq!(ep.take_reply(7, t_done, 0), ReplyOutcome::Unknown);
+        assert!(matches!(
+            ep.take_reply(7, t_pending, 0),
+            ReplyOutcome::Unknown
+        ));
+        assert!(matches!(ep.take_reply(7, t_done, 0), ReplyOutcome::Unknown));
         assert_eq!(ep.outstanding(), 0);
         assert!(sink.ids().contains(&AuditEvent::CallPosterVanished.id().0));
     }
@@ -1710,10 +1763,7 @@ mod tests {
         assert_eq!(got.ticket, t_live);
         assert_eq!(got.sender, 8);
         ep.reply(t_live, b"r", &sink).expect("replied");
-        assert_eq!(
-            ep.take_reply(8, t_live, 0),
-            ReplyOutcome::Ready(b"r".to_vec())
-        );
+        assert_eq!(ready_bytes(ep.take_reply(8, t_live, 0)), b"r");
     }
 
     #[test]
@@ -1736,12 +1786,21 @@ mod tests {
             .post(&caller, POSTER_SCHED, b"slow", 100, &sink)
             .expect("posted");
         // Before the deadline the caller is still pending, even received.
-        assert_eq!(ep.take_reply(7, ticket, 50), ReplyOutcome::Pending);
+        assert!(matches!(
+            ep.take_reply(7, ticket, 50),
+            ReplyOutcome::Pending
+        ));
         recv_one(&ep).expect("received");
-        assert_eq!(ep.take_reply(7, ticket, 99), ReplyOutcome::Pending);
+        assert!(matches!(
+            ep.take_reply(7, ticket, 99),
+            ReplyOutcome::Pending
+        ));
         // At/after the deadline with no reply, it fails closed and the ticket
         // is retired so the endpoint slot is freed.
-        assert_eq!(ep.take_reply(7, ticket, 100), ReplyOutcome::TimedOut);
+        assert!(matches!(
+            ep.take_reply(7, ticket, 100),
+            ReplyOutcome::TimedOut
+        ));
         assert_eq!(ep.outstanding(), 0);
         // A late reply for the retired ticket is refused fail-closed.
         assert_eq!(
@@ -1762,10 +1821,7 @@ mod tests {
         ep.reply(ticket, b"r", &sink).expect("replied");
         // Even well past the deadline, a delivered reply is returned, never a
         // spurious timeout that would discard a completed answer.
-        assert_eq!(
-            ep.take_reply(7, ticket, 1_000_000),
-            ReplyOutcome::Ready(b"r".to_vec())
-        );
+        assert_eq!(ready_bytes(ep.take_reply(7, ticket, 1_000_000)), b"r");
     }
 
     #[test]

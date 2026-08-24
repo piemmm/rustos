@@ -141,6 +141,16 @@ pub enum AuditEvent {
     CallEndpointRegisterDenied,
     /// A caller exited with calls still in flight; the kernel cancelled them.
     CallPosterVanished,
+    /// A payload copy could not be allocated, so the transfer was refused.
+    ///
+    /// Every kernel-owned payload is a wiped-on-drop buffer, so a port send,
+    /// call post, or reply fails closed when the kernel heap cannot hold the
+    /// copy. One event covers all three: the condition, its severity, and the
+    /// operator's response are the same wherever it is hit, and the endpoint
+    /// and length are in the record's fields. Unlike
+    /// [`MailboxFull`](Self::MailboxFull) this is machine distress rather
+    /// than ordinary back-pressure, so it stays at `Error`.
+    PayloadAllocFailed,
     /// A destroyed endpoint's delegated per-endpoint grants were revoked.
     ///
     /// Endpoint ids are numeric and re-creatable, so a grant naming one must
@@ -189,6 +199,7 @@ impl AuditEvent {
             Self::CallEndpointRegisterDenied => 3050,
             Self::CallPosterVanished => 3051,
             Self::CallEndpointGrantsRevoked => 3052,
+            Self::PayloadAllocFailed => 3060,
         })
     }
 
@@ -252,7 +263,8 @@ impl AuditEvent {
             | Self::CallRequestTooLarge
             | Self::CallPostToClosedEndpoint
             | Self::CallReplyDenied
-            | Self::CallEndpointRegisterDenied => Level::Error,
+            | Self::CallEndpointRegisterDenied
+            | Self::PayloadAllocFailed => Level::Error,
         }
     }
 
@@ -297,6 +309,7 @@ impl AuditEvent {
             Self::CallEndpointRegisterDenied => "ipc call endpoint registration denied",
             Self::CallPosterVanished => "ipc calls cancelled, poster exited",
             Self::CallEndpointGrantsRevoked => "ipc call endpoint grants revoked",
+            Self::PayloadAllocFailed => "ipc payload allocation failed",
         }
     }
 }
@@ -408,6 +421,7 @@ mod tests {
         assert_eq!(AuditEvent::CallEndpointCreated.id(), EventId(3040));
         assert_eq!(AuditEvent::CallEndpointCreateDenied.id(), EventId(3041));
         assert_eq!(AuditEvent::CallEndpointDestroyed.id(), EventId(3042));
+        assert_eq!(AuditEvent::PayloadAllocFailed.id(), EventId(3060));
         assert_eq!(AuditEvent::CallPosted.id(), EventId(3043));
         assert_eq!(AuditEvent::CallPostDenied.id(), EventId(3044));
         assert_eq!(AuditEvent::CallRequestTooLarge.id(), EventId(3045));

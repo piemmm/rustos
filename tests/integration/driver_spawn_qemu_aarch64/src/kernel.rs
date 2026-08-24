@@ -594,7 +594,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
             .and_then(tairix_kernel_ipc::Port::recv);
         if let Some(message) = message {
             // Fail-closed decode: an inconsistent record is rejected whole.
-            let Ok(reply) = DriverRegisterReply::from_bytes(message.payload.as_slice()) else {
+            let Ok(reply) = DriverRegisterReply::from_bytes(message.payload.as_bytes()) else {
                 qemu_exit::exit_failure(FAIL_REPLY_DECODE);
             };
             match reply.outcome() {

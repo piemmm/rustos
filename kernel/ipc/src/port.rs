@@ -31,6 +31,7 @@ use alloc::vec::Vec;
 use tairix_abi::ipc::IPC_MESSAGE_MAX_PAYLOAD_LEN;
 use tairix_abi::{Errno, Origin};
 use tairix_caps::CapabilitySet;
+use tairix_kernel_mem::SensitiveBuffer;
 use tairix_kernel_sec::captable::TaskCapabilities;
 use tairix_log::{Field, Sink};
 use tairix_util::fmt::{format_hex_u64, format_usize};
@@ -62,10 +63,10 @@ mod state {
 
 /// A message in flight or queued for delivery on a [`Port`].
 ///
-/// Payload is owned by the kernel until `recv`; sender bytes are
-/// copied into a kernel-side `Vec<u8>` at enqueue time so the sender
-/// cannot mutate the buffer after the send has been accepted.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// Payload is owned by the kernel until `recv`; sender bytes are copied into
+/// a kernel-side buffer at enqueue time so the sender cannot mutate the
+/// buffer after the send has been accepted.
+#[derive(Debug)]
 pub struct Message {
     /// Sending **process** identifier, taken from the kernel-trusted
     /// capability record at enqueue time — never a caller-supplied value.
@@ -77,8 +78,10 @@ pub struct Message {
     /// authenticate each message's principal without trusting anything
     /// the sender wrote into the payload.
     pub origin: Origin,
-    /// Payload bytes; length is always `<= max_payload` of the port.
-    pub payload: Vec<u8>,
+    /// Payload bytes; length is always `<= max_payload` of the port. Wiped
+    /// when the message is dropped, so a payload that carried a passphrase,
+    /// key, or capability token leaves nothing in freed kernel heap.
+    pub payload: SensitiveBuffer,
 }
 
 /// One end of an IPC message channel.
@@ -344,8 +347,14 @@ impl Port {
     ///    [`Self::recv`]'s empty-mailbox case would report in reverse, and
     ///    distinct from a malformed request.
     ///
-    /// On success the payload is copied into a kernel-owned buffer
-    /// and one [`AuditEvent::MessageDelivered`] is emitted.
+    /// On success the payload is copied into a kernel-owned
+    /// [`SensitiveBuffer`] — wiped when the message is released, however the
+    /// send ends — and one [`AuditEvent::MessageDelivered`] is emitted.
+    ///
+    /// # Errors
+    ///
+    /// As enumerated above, plus [`Errno::OutOfMemory`] if the kernel-owned
+    /// copy of the payload cannot be allocated.
     pub fn send<S: Sink + ?Sized>(
         &self,
         sender: &TaskCapabilities,
@@ -403,7 +412,22 @@ impl Port {
             return Err(Errno::MessageTooLarge);
         }
 
-        // 4. Enqueue under the mailbox lock; re-check destruction
+        // 4. Take the kernel-owned copy *before* the lock: the buffer wipes
+        //    itself on drop, so a send refused below leaves no plaintext
+        //    behind, and the allocation stays out of the critical section.
+        let payload = match SensitiveBuffer::copy_from_slice(payload) {
+            Ok(buf) => buf,
+            Err(err) => {
+                record(
+                    audit,
+                    AuditEvent::PayloadAllocFailed,
+                    &[port_field, sender_field, len_field],
+                );
+                return Err(err.as_errno());
+            }
+        };
+
+        // 5. Enqueue under the mailbox lock; re-check destruction
         //    after acquiring, because `destroy()` may have raced
         //    between step 1 and here.
         let mut q = self.mailbox.lock();
@@ -431,7 +455,7 @@ impl Port {
         q.push_back(Message {
             sender: sender.process().0,
             origin: sender.attest_origin(),
-            payload: payload.to_vec(),
+            payload,
         });
         drop(q);
         record(
@@ -648,7 +672,7 @@ mod tests {
         assert_eq!(port.send(&sender, b"hello", &sink), Ok(()));
         let msg = port.recv().expect("delivered");
         assert_eq!(msg.sender, 7);
-        assert_eq!(msg.payload, b"hello");
+        assert_eq!(msg.payload.as_bytes(), b"hello");
         assert!(sink.ids().contains(&AuditEvent::MessageDelivered.id().0));
     }
 
@@ -802,7 +826,7 @@ mod tests {
         port.send(&sender, b"payload", &sink).expect("delivered");
 
         let seen = port
-            .recv_with(|msg| -> Result<Vec<u8>, ()> { Ok(msg.payload.clone()) })
+            .recv_with(|msg| -> Result<Vec<u8>, ()> { Ok(msg.payload.as_bytes().to_vec()) })
             .expect("a message was present")
             .expect("the closure succeeded");
         assert_eq!(seen, b"payload");
@@ -825,6 +849,6 @@ mod tests {
 
         // The very next receive still sees the original head message.
         let head = port.recv().expect("head still present");
-        assert_eq!(head.payload, b"first");
+        assert_eq!(head.payload.as_bytes(), b"first");
     }
 }

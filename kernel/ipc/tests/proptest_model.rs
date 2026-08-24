@@ -180,7 +180,7 @@ fn port_lifecycle_tracks_reference_model() {
                             let want = expected.pop_front().ok_or_else(|| {
                                 TestCaseError::fail("recv returned an unmodelled message")
                             })?;
-                            prop_assert_eq!(msg.payload, want);
+                            prop_assert_eq!(msg.payload.as_bytes(), want.as_slice());
                         }
                         None => prop_assert!(expected.is_empty(), "recv empty but model was not"),
                     },

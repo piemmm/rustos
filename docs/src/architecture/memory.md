@@ -438,10 +438,28 @@ back a fixed-size byte buffer that **zeroes itself on drop**, using
 the audited [`zeroize`](https://crates.io/crates/zeroize) crate (no
 hand-rolled crypto per `AGENTS.md` §6). `free_sensitive(buf)` is a
 named drop equivalent provided for documentation symmetry.
+`SensitiveBuffer::copy_from_slice(src)` is the same buffer holding a copy of
+existing bytes — the one place a borrowed slice becomes an owned sensitive
+region, used by every kernel IPC payload
+([IPC payload confidentiality](./ipc.md#payload-confidentiality)).
+
+Both constructors accept a zero length, yielding an empty buffer that
+allocates nothing. A caller whose length is *data* — an IPC payload, a read
+of unknown size — would otherwise have to special-case empty, and that
+special case is where a missed wipe hides; a caller that genuinely requires
+a non-empty region rejects zero itself with its own diagnostic, as
+`SharedMemory::create` does.
 
 `SensitiveBuffer` is fixed-size (`Box<[u8]>`, not `Vec<u8>`) to avoid
 silent reallocations that would leak a secret into the old
-allocation. Its `Debug` impl deliberately redacts the contents.
+allocation, and the copy constructor reserves exactly `src.len()` for the
+same reason. Its `Debug` impl deliberately redacts the contents, and it is
+deliberately not `Clone`, `PartialEq`, or `Eq` — a secret is read, never
+duplicated implicitly or compared with `==`.
+
+`AllocError::as_errno()` is the one mapping from an allocation failure to
+the stable `Errno` a syscall returns, so two subsystems cannot report
+different error classes for the same exhaustion.
 
 ## 5. DMA buffers
 

@@ -1,15 +1,12 @@
 //! Sensitive-region API: zero-on-free for credentials, keys, and
 //! capability tokens.
 //!
-//! the charter mandates:
-//!
-//! > Zero-on-free for any allocation that ever held credentials, keys,
-//! > or capability tokens.
-//!
-//! This module supplies the only blessed API for those allocations:
-//! [`alloc_sensitive`] hands back a [`SensitiveBuffer`] that wipes
-//! itself on drop. Zeroing is delegated to the audited `zeroize` crate
-//! ("audited crypto. No hand-rolled primitives.").
+//! Any allocation that ever held a credential, key, or capability token is
+//! zeroed on free, and this module is the only blessed API for one:
+//! [`alloc_sensitive`] hands back a zeroed [`SensitiveBuffer`] of a given
+//! length and [`SensitiveBuffer::copy_from_slice`] one holding a copy of
+//! existing bytes; both wipe themselves on drop. Zeroing is delegated to the
+//! audited `zeroize` crate rather than hand-rolled.
 //!
 //! Sensitive buffers are deliberately *not* `Clone`: every copy of a
 //! secret would need its own zero-on-free dance, and accidentally
@@ -26,10 +23,9 @@ use crate::error::AllocError;
 
 /// A heap-allocated byte buffer that is zeroed on drop.
 ///
-/// The buffer is fixed-size: it is exactly `len` bytes long, where
-/// `len` is the argument to [`alloc_sensitive`]. Resizing is not
-/// permitted (that would risk a re-allocation that left a copy of the
-/// secret in the old slab).
+/// The buffer is fixed-size: exactly as long as the length it was
+/// constructed with. Resizing is not permitted — a re-allocation would
+/// leave a copy of the secret in the old slab.
 ///
 /// # Why `Box<[u8]>` and not `Vec<u8>`?
 ///
@@ -41,15 +37,33 @@ pub struct SensitiveBuffer {
 }
 
 impl SensitiveBuffer {
+    /// A wiped-on-drop copy of `src`.
+    ///
+    /// The one place a borrowed slice becomes an owned sensitive buffer. The
+    /// copy is exact-capacity: an over-allocation would leave secret bytes
+    /// outside the length the wipe covers.
+    ///
+    /// # Errors
+    ///
+    /// [`AllocError::OutOfMemory`] if the heap cannot hold the copy.
+    pub fn copy_from_slice(src: &[u8]) -> Result<Self, AllocError> {
+        let mut v: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+        v.try_reserve_exact(src.len())
+            .map_err(|_| AllocError::OutOfMemory)?;
+        v.extend_from_slice(src);
+        Ok(Self {
+            buf: v.into_boxed_slice(),
+        })
+    }
+
     /// Length of the buffer in bytes.
     #[must_use]
     pub fn len(&self) -> usize {
         self.buf.len()
     }
 
-    /// `true` if the buffer is zero bytes long. Reserved here because
-    /// `len() == 0` cannot actually occur — [`alloc_sensitive`] rejects
-    /// zero-sized requests — but the lint exists nonetheless.
+    /// `true` if the buffer holds no bytes: a zero-length allocation or a
+    /// copy of an empty slice.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.buf.is_empty()
@@ -104,17 +118,17 @@ impl Drop for SensitiveBuffer {
 
 /// Allocate a `len`-byte sensitive buffer, initialised to zero.
 ///
+/// `len == 0` yields an empty buffer rather than an error: a caller whose
+/// length is data (an IPC payload, a read of unknown size) would otherwise
+/// have to special-case empty, and that special case is where the leak
+/// hides. A caller that genuinely requires a non-empty region rejects zero
+/// itself, with its own diagnostic — as the shared-memory object does.
+///
 /// # Errors
 ///
-/// - [`AllocError::ZeroSize`] for `len == 0` (see the module note).
-/// - [`AllocError::OutOfMemory`] if the underlying heap is exhausted.
-///   Detected through `Box::try_new_uninit_slice`-style logic via a
-///   `try_reserve` on a `Vec`, then `into_boxed_slice` — keeping the
-///   contract `Result`-only.
+/// [`AllocError::OutOfMemory`] if the underlying heap is exhausted; the
+/// `try_reserve_exact` keeps the contract `Result`-only.
 pub fn alloc_sensitive(len: usize) -> Result<SensitiveBuffer, AllocError> {
-    if len == 0 {
-        return Err(AllocError::ZeroSize);
-    }
     let mut v: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
     v.try_reserve_exact(len)
         .map_err(|_| AllocError::OutOfMemory)?;
@@ -142,8 +156,9 @@ mod tests {
     use std::format;
 
     #[test]
-    fn alloc_zero_rejected() {
-        assert_eq!(alloc_sensitive(0).err(), Some(AllocError::ZeroSize));
+    fn alloc_zero_yields_an_empty_buffer() {
+        let buf = alloc_sensitive(0).expect("zero length is representable");
+        assert!(buf.is_empty());
     }
 
     #[test]
@@ -205,5 +220,27 @@ mod tests {
     fn is_empty_is_always_false_for_alloced_buffers() {
         let buf = alloc_sensitive(1).unwrap();
         assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn copy_from_slice_owns_the_bytes() {
+        let buf = SensitiveBuffer::copy_from_slice(b"S3CR3T").unwrap();
+        assert_eq!(buf.as_bytes(), b"S3CR3T");
+        assert_eq!(buf.len(), 6);
+    }
+
+    #[test]
+    fn copy_from_slice_accepts_an_empty_source() {
+        let buf = SensitiveBuffer::copy_from_slice(&[]).unwrap();
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn copy_from_slice_is_exact_capacity() {
+        // A copy that over-allocated would leave secret bytes in a slab the
+        // wipe never covers, so the buffer must be exactly `src.len()`.
+        let buf = SensitiveBuffer::copy_from_slice(&[0xCD; 300]).unwrap();
+        assert_eq!(buf.len(), 300);
+        assert!(buf.as_bytes().iter().all(|b| *b == 0xCD));
     }
 }

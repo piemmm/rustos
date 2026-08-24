@@ -104,9 +104,10 @@ use tairix_kernel_ipc::{
 use tairix_kernel_irq::{
     block_until_ready, IrqController, IrqTable, IrqWaitAbort, IrqWaiter, WaitOutcome,
 };
+use tairix_kernel_mem::sensitive::alloc_sensitive;
 use tairix_kernel_mem::{
-    copy_in, copy_out, FrameAllocator, Page, PageCandidate, PhysMap, RamzipFaultOutcome,
-    UaccessError, UserAddressSpace, VirtAddr, PAGE_SIZE,
+    copy_in, copy_out, AllocError, FrameAllocator, Page, PageCandidate, PhysMap,
+    RamzipFaultOutcome, UaccessError, UserAddressSpace, VirtAddr, PAGE_SIZE,
 };
 use tairix_kernel_sched_api::Priority;
 use tairix_kernel_sec::{
@@ -4381,15 +4382,15 @@ where
         // kernel task, or one already withdrawn on `exit`) — fail closed
         // with the same `BadAddress` an actual fault produces, never
         // leaking which case occurred.
-        let mut payload = alloc::vec![0u8; len];
-        self.copy_in_user(caller, ptr, &mut payload)?;
+        let mut payload = alloc_sensitive(len).map_err(AllocError::as_errno)?;
+        self.copy_in_user(caller, ptr, payload.as_bytes_mut())?;
 
         // Enqueue. `Port::send` performs the per-send capability check
         // against the caller's effective set and
         // re-checks the payload size, returning a stable `Errno` for
         // every refusal.
         let owner = port.owner();
-        port.send(caller.caps, &payload, self.audit)?;
+        port.send(caller.caps, payload.as_bytes(), self.audit)?;
         drop(ipc);
         // Wake exactly the port's owner: a receiver parks off the run
         // queue on a wait-set observing this port (registered on
@@ -4452,7 +4453,7 @@ where
         // faulting pointer.
         let copied = self.with_caller_aspace(caller, |space, physmap| {
             port.recv_with(|msg| -> Result<usize, Errno> {
-                let payload = msg.payload.as_slice();
+                let payload = msg.payload.as_bytes();
                 // Refuse to truncate: a buffer smaller than the message
                 // fails closed and — because `recv_with` only commits on
                 // `Ok` — leaves the message queued for a retry with a
@@ -7328,14 +7329,14 @@ where
         }
 
         // Copy the request in from the caller's address space through the
-        // validated `copy_from_user` boundary. The bytes
-        // are staged in a kernel-owned buffer; `CallEndpoint::post` then
-        // takes its own copy, so the caller cannot mutate the request after
-        // it is posted. `with_caller_aspace` yields `None` when the caller
-        // has no registered address space — fail closed with the same
+        // validated `copy_from_user` boundary, staged in a kernel-owned
+        // buffer that wipes itself on drop; `CallEndpoint::post` then takes
+        // its own equally-wiped copy, so the caller cannot mutate the request
+        // after it is posted. `with_caller_aspace` yields `None` when the
+        // caller has no registered address space — fail closed with the same
         // `BadAddress` a fault produces, never leaking which case occurred.
-        let mut payload = alloc::vec![0u8; request_len];
-        self.copy_in_user(caller, request, &mut payload)?;
+        let mut payload = alloc_sensitive(request_len).map_err(AllocError::as_errno)?;
+        self.copy_in_user(caller, request, payload.as_bytes_mut())?;
 
         // Post the request. `CallEndpoint::post` performs the per-call
         // capability check against the caller's effective set (no ambient authority) and re-checks the size, returning a
@@ -7348,7 +7349,7 @@ where
         let ticket = ep.post(
             caller.caps,
             caller.task_id.0,
-            &payload,
+            payload.as_bytes(),
             u64::MAX,
             self.audit,
         )?;
@@ -7469,8 +7470,8 @@ where
         if request_len as u64 > u64::from(ep.max_request()) {
             return Err(Errno::MessageTooLarge);
         }
-        let mut payload = alloc::vec![0u8; request_len];
-        self.copy_in_user(caller, request, &mut payload)?;
+        let mut payload = alloc_sensitive(request_len).map_err(AllocError::as_errno)?;
+        self.copy_in_user(caller, request, payload.as_bytes_mut())?;
 
         // Convert the caller's *relative* deadline into the *absolute*
         // monotonic value the endpoint stores and the reap compares against;
@@ -7487,7 +7488,7 @@ where
         let ticket = ep.post(
             caller.caps,
             caller.task_id.0,
-            &payload,
+            payload.as_bytes(),
             deadline_abs,
             self.audit,
         )?;
@@ -7845,14 +7846,14 @@ where
         if reply_len as u64 > u64::from(ep.max_reply()) {
             return Err(Errno::MessageTooLarge);
         }
-        let mut payload = alloc::vec![0u8; reply_len];
-        self.copy_in_user(caller, reply, &mut payload)?;
+        let mut payload = alloc_sensitive(reply_len).map_err(AllocError::as_errno)?;
+        self.copy_in_user(caller, reply, payload.as_bytes_mut())?;
 
         // Complete the ticket and wake the caller blocked in `ipc_call` for
         // it — exactly that caller, by the poster scheduler id the endpoint
         // captured at post time. `reply` re-checks the ticket and size and
         // fails closed on an unknown/already-answered ticket.
-        let poster = ep.reply(CallTicket(ticket), &payload, self.audit)?;
+        let poster = ep.reply(CallTicket(ticket), payload.as_bytes(), self.audit)?;
         wake_replied_poster(Ok(poster));
         Ok(0)
     }
@@ -13184,7 +13185,7 @@ mod tests {
         let port = guard.lookup(EndpointId(1)).expect("port stays bound");
         let msg = port.recv().expect("a message was delivered");
         assert_eq!(msg.sender, 2);
-        assert_eq!(msg.payload.as_slice(), &payload);
+        assert_eq!(msg.payload.as_bytes(), payload.as_slice());
     }
 
     /// `log_emit` copies the encoded record in, decodes it, and emits it to
@@ -29609,7 +29610,7 @@ mod tests {
         let server_ep = ep.clone();
         let handle = std::thread::spawn(move || loop {
             if let RecvCall::Received(call) = server_ep.recv_call(usize::MAX) {
-                assert_eq!(call.request, b"ping");
+                assert_eq!(call.request.as_bytes(), b"ping");
                 server_ep
                     .reply(call.ticket, b"pong", &TestSink::new())
                     .expect("reply");
@@ -29741,7 +29742,7 @@ mod tests {
         // The server drains the posted call and answers it inline.
         match ep.recv_call(usize::MAX) {
             RecvCall::Received(call) => {
-                assert_eq!(call.request, b"ping");
+                assert_eq!(call.request.as_bytes(), b"ping");
                 ep.reply(call.ticket, b"pong", sink).expect("reply");
             }
             other => panic!("expected a received call, got {other:?}"),
@@ -30225,7 +30226,7 @@ mod tests {
         let server_ep = ep.clone();
         let handle = std::thread::spawn(move || loop {
             if let RecvCall::Received(call) = server_ep.recv_call(usize::MAX) {
-                assert_eq!(call.request, b"ping");
+                assert_eq!(call.request.as_bytes(), b"ping");
                 server_ep
                     .reply(call.ticket, b"pong", &TestSink::new())
                     .expect("reply");
@@ -33264,10 +33265,10 @@ mod tests {
         // `call_reply` sends page 3's payload back and completes the ticket.
         assert_eq!(h.call_reply(&ctx, id, recv_ticket, 0x3000, 4), Ok(0));
         // The client claims its reply exactly once.
-        assert_eq!(
-            ep.take_reply(7, CallTicket(recv_ticket), 0),
-            ReplyOutcome::Ready(b"pong".to_vec())
-        );
+        match ep.take_reply(7, CallTicket(recv_ticket), 0) {
+            ReplyOutcome::Ready(bytes) => assert_eq!(bytes.as_bytes(), b"pong"),
+            other => panic!("expected a ready reply, got {other:?}"),
+        }
         crate::callreg::unregister(EndpointId(id));
     }
 
@@ -36282,7 +36283,7 @@ mod tests {
                 while served < WARMUP + MEASURED {
                     match server_ep.recv_call(usize::MAX) {
                         RecvCall::Received(call) => {
-                            assert_eq!(call.request, request);
+                            assert_eq!(call.request.as_bytes(), request);
                             server_ep
                                 .reply(call.ticket, reply, &NULL_LOG_SINK)
                                 .expect("reply");

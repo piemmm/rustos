@@ -462,7 +462,7 @@ mod tests {
             .lookup(EndpointId(5))
             .and_then(Port::recv)
             .expect("the delivered message is reachable through the registry");
-        assert_eq!(msg.payload, b"ping");
+        assert_eq!(msg.payload.as_bytes(), b"ping");
     }
 
     #[test]

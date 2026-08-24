@@ -253,23 +253,47 @@ drop") or delete it. References to *other* files — `plans/*.md`,
 manual — are legitimate and stay. The one sanctioned exception is a generator
 stamping provenance onto a generated artefact.
 
-### Open — secret plaintext in kernel IPC payload buffers (§4, §23.1)
+### Done — kernel IPC payloads are wiped on release (§4, §23.1)
 
-A sealed-scope request and its reply cross the kernel as `Vec<u8>` payload
-copies (`kernel/ipc/src/call.rs`: `PendingCall::request` on post, the
-`completed` entry on reply), and `lib/kalloc` does not zero on free — so an
-application's secret is left in freed kernel heap on every `VaultSet` and
-`VaultRead`. §4 requires zero-on-free for any allocation that ever held a
-credential or key, so this is a genuine gap, and it is **not** app-data's: every
-secret over any endpoint (a login passphrase today, TLS key material later) has
-the same exposure.
+Every kernel-owned IPC payload copy is now a `tairix_kernel_mem`
+`SensitiveBuffer` and is zeroed when the kernel releases it: `PendingCall`,
+`ReceivedCall`, the `completed` reply entry, `Message::payload`, and the four
+syscall staging buffers (`ipc_send`, `ipc_call`, `call_post`, `call_reply`).
+That covers delivery, every refusal, poster withdrawal, deadline reap, poster
+exit, and endpoint teardown.
 
-It is escalated rather than fixed alongside the app-data audit because the
-choice is a design decision with a hot-path cost: wiping every request and
-reply payload on every `ipc_call` is unconditional overhead on the IPC fast
-path, while wiping only the endpoints that carry secrets needs a
-"carries-secrets" bit on the endpoint and so an ABI change. Decide which,
-measure it, then land it with the payload-wipe regression test.
+The choice was unconditional wiping, not a per-endpoint "carries-secrets" bit:
+an opt-in bit is open-by-default for every endpoint whose author did not
+anticipate a secret, and the endpoints that carry one are not knowable at bind
+time (session/elevation passphrases, app-data sealed secrets, delegated
+capability tokens). Cost is one write pass over bytes the path already copies
+at least twice, and the copy moved *out* of the endpoint spinlock, so the wipe
+is never paid inside a critical section. Both `post` and `reply` gained an
+`Errno::OutOfMemory` path (they previously grew a `Vec`, which aborts on
+exhaustion), reported through the new `PAYLOAD_ALLOC_FAILED` (3060) audit
+event rather than conflated with a capability denial.
+
+Two things a later reviewer should not re-litigate:
+
+- **`post` allocates before the capacity check**, so a caller spamming a full
+  endpoint churns one transient alloc/free per attempt where it previously
+  only took the lock. Deliberate: the footprint is O(1) per concurrent caller
+  (freed within the call), the full queue is the exceptional path, and
+  allocating under a spinlock is the worse defect. The syscall path's
+  behaviour is unchanged in kind — it already staged a buffer before `post`.
+- **The staging copy is still a second copy.** `post`/`reply`/`send` take
+  `&[u8]` and allocate internally, so the syscall layer stages once and the
+  endpoint copies again. Threading an owned buffer through would remove one
+  alloc and one copy, but it touches ~90 call sites and there is no
+  measurement saying the copy matters — that is the blind micro-optimisation
+  §2.16 warns against. It is a *measured* optimisation candidate, not a
+  defect.
+
+Regression cover is `kernel/ipc/src/payload_wipe_tests.rs`: a test-only global
+allocator scans every released block for the payload sentinel, across a served
+round trip, the refused paths, the abandoned paths, and a port message. One
+case leaks a payload deliberately so the scan cannot pass vacuously; all six
+fail with the wipe disabled.
 
 ### Open — the staging table has a per-session bound but no aggregate one (§24.4, §26.2)
 

@@ -50,6 +50,8 @@ pub mod audit;
 pub mod call;
 mod loom_compat;
 pub mod notify;
+#[cfg(all(test, not(loom)))]
+mod payload_wipe_tests;
 pub mod port;
 pub mod registry;
 pub mod shmem;

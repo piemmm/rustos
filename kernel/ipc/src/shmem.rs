@@ -31,6 +31,7 @@ use alloc::sync::Arc;
 use tairix_abi::Errno;
 use tairix_caps::CapabilitySet;
 use tairix_kernel_mem::sensitive::alloc_sensitive;
+use tairix_kernel_mem::AllocError;
 use tairix_kernel_mem::SensitiveBuffer;
 use tairix_kernel_sec::captable::TaskCapabilities;
 use tairix_log::{Field, Sink};
@@ -94,6 +95,7 @@ impl SharedMemory {
     /// * [`Errno::LengthOutOfRange`] if `len == 0` or `len > SHMEM_MAX_BYTES`.
     /// * [`Errno::PermissionDenied`] if the creator lacks the
     ///   required capabilities.
+    /// * [`Errno::OutOfMemory`] if the backing allocation cannot be made.
     pub fn create<S: Sink + ?Sized>(
         id: ShmemId,
         creator: &TaskCapabilities,
@@ -120,7 +122,7 @@ impl SharedMemory {
             record(audit, AuditEvent::ShmemMapDenied, &[id_field]);
             return Err(Errno::PermissionDenied);
         }
-        let buffer = alloc_sensitive(len).map_err(|_| Errno::LengthOutOfRange)?;
+        let buffer = alloc_sensitive(len).map_err(AllocError::as_errno)?;
         record(audit, AuditEvent::ShmemCreated, &[id_field, len_field]);
         Ok(Self {
             inner: Arc::new(Inner {

@@ -85,21 +85,6 @@ fn dma_errno(err: DmaError) -> Errno {
     }
 }
 
-/// Fold an [`AllocError`] onto a stable [`Errno`]: exhaustion is
-/// [`Errno::OutOfMemory`] (deterministic OOM), a too-large order is
-/// [`Errno::OutOfRange`], a zero-size request is [`Errno::LengthOutOfRange`],
-/// and any other (out-of-range frame/address) fails closed to
-/// [`Errno::OutOfRange`].
-fn alloc_errno(err: AllocError) -> Errno {
-    match err {
-        AllocError::OutOfMemory => Errno::OutOfMemory,
-        AllocError::ZeroSize => Errno::LengthOutOfRange,
-        // `SizeUnsupported`, `OutOfRange`, and any future variant fail closed
-        // to an out-of-range error.
-        _ => Errno::OutOfRange,
-    }
-}
-
 /// Fold a [`LiveSpaceError`] onto a stable [`Errno`].
 fn live_errno(err: LiveSpaceError) -> Errno {
     match err {
@@ -419,7 +404,10 @@ where
         // Allocate the backing as a set of physically-contiguous buddy chunks
         // (one for a small region, several for one larger than the 8 MiB
         // single-block ceiling), so the region size is bounded by RAM.
-        let blocks = self.frames.alloc_chunks(pages).map_err(alloc_errno)?;
+        let blocks = self
+            .frames
+            .alloc_chunks(pages)
+            .map_err(AllocError::as_errno)?;
         let mut chunks: Vec<SharedChunk> = Vec::new();
         if chunks.try_reserve_exact(blocks.len()).is_err() {
             // Bookkeeping OOM: return every just-allocated block and fail

@@ -258,7 +258,7 @@ fn end_to_end_port_shmem_and_notification() {
         )
         .unwrap();
 
-    assert_eq!(port.recv().unwrap().payload, b"ping");
+    assert_eq!(port.recv().unwrap().payload.as_bytes(), b"ping");
     assert_eq!(mapping.as_bytes().unwrap(), b"0123456789abcdef".to_vec());
     assert_eq!(
         channel.take_pending(),

@@ -1,11 +1,11 @@
 //! Allocation error type shared by every allocator in this crate.
 //!
-//! Per ("Deterministic OOM behaviour: allocation failure
-//! is a `Result`, never a panic.") every fallible memory operation
-//! returns [`Result<_, AllocError>`]. Callers handle the error explicitly;
-//! there is no `unwrap` or `expect` on hot paths.
+//! Every fallible memory operation returns [`Result<_, AllocError>`], so
+//! exhaustion is a value a caller handles rather than a panic.
 
 use core::fmt;
+
+use tairix_abi::Errno;
 
 /// Reason an allocation failed.
 ///
@@ -48,6 +48,27 @@ pub enum AllocError {
     /// allocator (e.g. freeing a frame that is already free, or freeing
     /// a frame that overlaps a reserved region).
     InvariantViolation,
+}
+
+impl AllocError {
+    /// Fold this error onto the stable [`Errno`] a syscall returns.
+    ///
+    /// The one definition every caller shares, so two subsystems cannot
+    /// report different error classes for the same exhaustion. Exhaustion is
+    /// [`Errno::OutOfMemory`]; a zero-sized request is a caller-shape error
+    /// ([`Errno::LengthOutOfRange`]); everything else fails closed to
+    /// [`Errno::OutOfRange`].
+    #[must_use]
+    pub fn as_errno(self) -> Errno {
+        match self {
+            Self::OutOfMemory => Errno::OutOfMemory,
+            Self::ZeroSize => Errno::LengthOutOfRange,
+            Self::SizeUnsupported
+            | Self::OutOfRange
+            | Self::MetadataAllocFailed
+            | Self::InvariantViolation => Errno::OutOfRange,
+        }
+    }
 }
 
 impl fmt::Display for AllocError {
@@ -93,5 +114,19 @@ mod tests {
         let b = a;
         assert_eq!(a, b);
         assert_ne!(a, AllocError::ZeroSize);
+    }
+
+    #[test]
+    fn as_errno_maps_exhaustion_and_fails_closed_otherwise() {
+        assert_eq!(AllocError::OutOfMemory.as_errno(), Errno::OutOfMemory);
+        assert_eq!(AllocError::ZeroSize.as_errno(), Errno::LengthOutOfRange);
+        for err in [
+            AllocError::SizeUnsupported,
+            AllocError::OutOfRange,
+            AllocError::MetadataAllocFailed,
+            AllocError::InvariantViolation,
+        ] {
+            assert_eq!(err.as_errno(), Errno::OutOfRange);
+        }
     }
 }

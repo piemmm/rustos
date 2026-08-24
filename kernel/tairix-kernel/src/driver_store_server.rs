@@ -422,7 +422,7 @@ pub fn serve_pending<F>(
 where
     F: FilesystemRead + FilesystemSecurity + ?Sized,
 {
-    // The in-kernel server owns the request `Vec` directly, so it imposes no
+    // The in-kernel server takes the request buffer whole, so it imposes no
     // buffer bound: `usize::MAX` never yields `TooLarge`, and an empty queue
     // means the kthread should park.
     let RecvCall::Received(call) = endpoint.recv_call(usize::MAX) else {
