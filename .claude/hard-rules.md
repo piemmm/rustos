@@ -36,3 +36,10 @@ PROCESS
 - Full test suite over the entire project before reporting done. (§15.6)
 - Check the `plans/` jump-sheet before touching a covered area. (§15.18)
 - Adversarial self-review against §23, then the §23.5 completion report.
+
+GENERAL
+- Do the most secure and 'correct' design and code options understanding that the intent of TAIRiX is to be as secure as possible from attack vectors as well as be well structured and efficient. The code also has to be performant and survive a review by a senior OS architect without embarrassment. The focus is to do a modular, correct system. No hacks or shortcuts. Do it properly, even if that means more work. The solution must be on par with or better than modern operating systems like Linux.
+- This is not a deployed system so it is OK to rip up things that are wrong and redo them correctly with no 'staged' migration.
+- Remember that abi-v1 is *NOT* frozen (despite what AGENTS.md and/or PLAN.md may say)
+- The work and design must be first class and able to survive a review by someone like Linus Torvalds
+
