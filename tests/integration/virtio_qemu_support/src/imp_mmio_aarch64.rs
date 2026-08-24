@@ -21,6 +21,7 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
+use core::num::NonZeroU16;
 use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 use tairix_abi::{CapabilityId, IrqHandle};
@@ -50,6 +51,7 @@ use tairix_log::{Event, EventId, Level, Sink};
 use tairix_virtio::{PoolId, VirtioHost, VirtioHostFactory};
 
 use crate::common::{drive_driver_lifecycle, QemuEnv, ScenarioConfig, IDENTITY_LIMIT};
+use tairix_itest_finisher::fail_point;
 
 /// Re-export so the verticals name the concrete transport for the shared
 /// device-tail turbofish under the same name as the riscv64 / PCI
@@ -120,6 +122,9 @@ fn static_dma_map() -> BootMemoryMap {
 
 /// Milestone event id namespace for the shared serial breadcrumbs.
 const MILESTONE_ID: EventId = EventId(9110);
+/// Failure finisher codes, distinct per failure site.
+const FAIL_SCENARIO: NonZeroU16 = fail_point!(1);
+const FAIL_REENTRY: NonZeroU16 = fail_point!(2);
 
 /// Synthetic owner process id for the bus-driver context.
 const TASK: ProcessId = ProcessId(0x5b3);
@@ -181,7 +186,7 @@ impl QemuEnv for AArch64QemuEnv {
 
     fn fail(&self, msg: &str) -> ! {
         self.log(msg);
-        qemu_exit::exit_failure(1)
+        qemu_exit::exit_failure(FAIL_SCENARIO)
     }
 
     fn succeed(&self) -> ! {
@@ -561,7 +566,7 @@ where
 /// must never re-run). Exposed for the boot-harness macro.
 #[doc(hidden)]
 pub fn harness_fail_reentry() -> ! {
-    qemu_exit::exit_failure(2)
+    qemu_exit::exit_failure(FAIL_REENTRY)
 }
 
 /// Generate the freestanding boot harness for an aarch64 virtio-MMIO QEMU

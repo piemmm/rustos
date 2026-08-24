@@ -432,19 +432,27 @@ That harness is a *build* dependency, so nothing it holds can be linked
 by a running test kernel. Logic the kernel bodies themselves share needs
 a second crate, `tests/integration/finisher`
 (`tairix-itest-finisher`): `no_std`, dependency-free, and a runtime
-dependency of each freestanding binary. It holds one function,
-`fail_code`, which composes the finisher code a fixture reports from its
-failure base and an observed value — a child's exit code, or the CPU mask
-a migration test saw.
+dependency of each freestanding binary. It owns the finisher-code
+vocabulary: `fail_point!(n)`, which mints the code naming one of a
+fixture's failure points, and `fail_code`, which composes the code a
+fixture reports from its failure base and an observed value — a child's
+exit code, or the CPU mask a migration test saw.
+
+A finisher code is a `NonZeroU16`, because both boards read a zero code
+as *success*: aarch64 passes it as the semihosting `SYS_EXIT` subcode and
+riscv64 packs it into the `sifive_test` high half, so a zero-coded
+failure exits QEMU with status 0 and the runner reads the failing run as
+a pass. `qemu_exit::exit_failure` therefore takes a `NonZeroU16` rather
+than checking one, `fail_point!` rejects a zero literal at compile time,
+and `fail_code` cannot compose one.
 
 The composition is there because it must be total and cannot be tested
 where it was written. The observed value comes from the program under
-test, so a fixture that panicked, wrapped, or composed a zero while
-reporting it would turn a real failure into a debug abort, another
-failure's code, or — because both boards read a zero finisher code as
-success — a pass. A fixture body compiles only for its bare-metal target,
-where no host test can reach it; in the shared crate the property is
-proven once by ordinary unit tests.
+test, so a fixture that panicked or wrapped while reporting it would turn
+a real failure into a debug abort or another failure's code. A fixture
+body compiles only for its bare-metal target, where no host test can
+reach it; in the shared crate the property is proven once by ordinary
+unit tests.
 
 ### Freestanding production kernel binary
 

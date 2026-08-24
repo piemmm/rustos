@@ -25,6 +25,7 @@
 //! The chassis reaps the parent through the producer's non-blocking poll
 //! and PASSes only on a parent exit of 0.
 
+use core::num::NonZeroU16;
 use core::panic::PanicInfo;
 
 use alloc::boxed::Box;
@@ -44,6 +45,7 @@ use tairix_arch_api::CpuId;
 use tairix_caps::CapabilitySet;
 use tairix_fdt::Fdt;
 use tairix_itest_finisher::fail_code;
+use tairix_itest_finisher::fail_point;
 use tairix_kalloc::FreeListAllocator;
 use tairix_kernel::aarch64::arch_wrapper::{Aarch64BinArch, UART_ONLY_CONSOLES};
 use tairix_kernel::aarch64::spawn_producer::{AARCH64_PROCESS_SPAWN, USER_IMAGE_BIAS};
@@ -141,23 +143,23 @@ const TEST_SPAWNED: EventId = EventId(4361);
 const TEST_PASS: EventId = EventId(4362);
 
 /// Failure finisher codes, distinct per failure site.
-const FAIL_ZERO_FREQ: u16 = 1;
-const FAIL_GIC: u16 = 2;
-const FAIL_POOL: u16 = 3;
-const FAIL_FRAMES: u16 = 4;
-const FAIL_SCHED_NEW: u16 = 5;
-const FAIL_SPAWN: u16 = 6;
-const FAIL_DEADLOCK: u16 = 7;
-const FAIL_NO_DISPATCH: u16 = 8;
-const FAIL_HOOK_INSTALL: u16 = 9;
-const FAIL_RESOLVER_INSTALL: u16 = 10;
-const FAIL_BIAS: u16 = 11;
-const FAIL_POLL: u16 = 12;
-const FAIL_DRAINED: u16 = 13;
-const FAIL_PARENT_STOPPED: u16 = 14;
+const FAIL_ZERO_FREQ: NonZeroU16 = fail_point!(1);
+const FAIL_GIC: NonZeroU16 = fail_point!(2);
+const FAIL_POOL: NonZeroU16 = fail_point!(3);
+const FAIL_FRAMES: NonZeroU16 = fail_point!(4);
+const FAIL_SCHED_NEW: NonZeroU16 = fail_point!(5);
+const FAIL_SPAWN: NonZeroU16 = fail_point!(6);
+const FAIL_DEADLOCK: NonZeroU16 = fail_point!(7);
+const FAIL_NO_DISPATCH: NonZeroU16 = fail_point!(8);
+const FAIL_HOOK_INSTALL: NonZeroU16 = fail_point!(9);
+const FAIL_RESOLVER_INSTALL: NonZeroU16 = fail_point!(10);
+const FAIL_BIAS: NonZeroU16 = fail_point!(11);
+const FAIL_POLL: NonZeroU16 = fail_point!(12);
+const FAIL_DRAINED: NonZeroU16 = fail_point!(13);
+const FAIL_PARENT_STOPPED: NonZeroU16 = fail_point!(14);
 /// Base finisher for a non-zero parent exit; the parent's diagnostic exit
 /// code is added so the failing role/site is identifiable in the finisher.
-const FAIL_EXIT_BASE: u16 = 100;
+const FAIL_EXIT_BASE: NonZeroU16 = fail_point!(100);
 
 /// Size of the test's bump heap. Lives in `.bss` (zeroed by the trampoline).
 const HEAP_SIZE: usize = 2 * 1024 * 1024;

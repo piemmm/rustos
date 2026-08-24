@@ -30,6 +30,7 @@ path = "src/main.rs"
 
 [target.'cfg(all(target_arch = "riscv64", target_os = "none"))'.dependencies]
 tairix-arch-riscv64 = { path = "../../../kernel/arch/riscv64", version = "=0.0.0" }
+tairix-itest-finisher = { path = "../finisher", version = "=0.0.0" }
 # The Arch HAL MMU / TLB surface (`AGENTS.md` §17.2): the guard page is
 # torn down through `tairix_arch_api::mmu::AddressSpace` (`unmap`) +
 # `tairix_arch_api::tlb::TlbShootdown` (`flush_page`), so the fault-form is

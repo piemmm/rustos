@@ -51,6 +51,7 @@
 
 #[cfg(itest_riscv64)]
 mod kernel {
+    use core::num::NonZeroU16;
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -58,6 +59,7 @@ mod kernel {
     use tairix_arch_riscv64::{
         fault, handle_panic_via_serial, paging, qemu_exit, trap, SERIAL_SINK,
     };
+    use tairix_itest_finisher::fail_point;
     use tairix_log::{log, Event, EventId, Level};
 
     /// Virtual address only the *victim* space maps. Chosen at 64 GiB —
@@ -81,13 +83,13 @@ mod kernel {
 
     /// `SiFive` Test failure codes, distinct per failure site so a
     /// failing run's exit status pinpoints the broken invariant.
-    const FAIL_POOL: u16 = 1;
-    const FAIL_VICTIM_WRONG_BYTE: u16 = 2;
-    const FAIL_ATTACKER_NO_FAULT: u16 = 3;
-    const FAIL_FAULT_BEFORE_ATTACK: u16 = 4;
-    const FAIL_WRONG_CAUSE: u16 = 5;
-    const FAIL_WRONG_STVAL: u16 = 6;
-    const FAIL_VICTIM_CORRUPTED: u16 = 7;
+    const FAIL_POOL: NonZeroU16 = fail_point!(1);
+    const FAIL_VICTIM_WRONG_BYTE: NonZeroU16 = fail_point!(2);
+    const FAIL_ATTACKER_NO_FAULT: NonZeroU16 = fail_point!(3);
+    const FAIL_FAULT_BEFORE_ATTACK: NonZeroU16 = fail_point!(4);
+    const FAIL_WRONG_CAUSE: NonZeroU16 = fail_point!(5);
+    const FAIL_WRONG_STVAL: NonZeroU16 = fail_point!(6);
+    const FAIL_VICTIM_CORRUPTED: NonZeroU16 = fail_point!(7);
 
     /// Page-table pool backing both address spaces (lives in `.bss`).
     static PAGE_TABLE_POOL: paging::PageTablePool = paging::PageTablePool::new();

@@ -62,10 +62,12 @@
 
 #[cfg(itest_aarch64)]
 mod kernel {
+    use core::num::NonZeroU16;
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
+    use tairix_itest_finisher::fail_point;
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
     use tairix_log::{Event, EventId, Sink};
@@ -114,6 +116,9 @@ mod kernel {
     /// tree's `/cpus` minus the boot core). Matches the harness `cpus`
     /// and the `build.rs` DTB dump — all three name the same topology.
     const EXPECTED_SECONDARIES: u32 = 3;
+    /// Failure finisher codes, distinct per failure site.
+    const FAIL_VIDEO_INACTIVE: NonZeroU16 = fail_point!(1);
+    const FAIL_SECONDARY_START: NonZeroU16 = fail_point!(2);
 
     /// Set once `BootCompleted` was observed (with the video console
     /// active); the PASS finisher additionally requires every secondary
@@ -165,7 +170,7 @@ mod kernel {
             SerialSink::new().write_event(event);
             if event.id == BOOT_COMPLETED_EVENT_ID {
                 if !tairix_arch_aarch64::video::is_active() {
-                    qemu_exit::exit_failure(1);
+                    qemu_exit::exit_failure(FAIL_VIDEO_INACTIVE);
                 }
                 BOOT_COMPLETED.store(true, Ordering::SeqCst);
                 Self::exit_if_complete();
@@ -173,7 +178,7 @@ mod kernel {
                 SECONDARIES_ONLINE.fetch_add(1, Ordering::SeqCst);
                 Self::exit_if_complete();
             } else if event.id == SECONDARY_START_FAILED_EVENT_ID {
-                qemu_exit::exit_failure(2);
+                qemu_exit::exit_failure(FAIL_SECONDARY_START);
             }
         }
     }

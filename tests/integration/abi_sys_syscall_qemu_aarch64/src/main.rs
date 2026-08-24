@@ -77,6 +77,7 @@ compile_error!(
 
 #[cfg(all(itest_aarch64, feature = "test-hooks"))]
 mod kernel {
+    use core::num::NonZeroU16;
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -89,6 +90,7 @@ mod kernel {
         SERIAL_SINK,
     };
     use tairix_arch_api::{EnterUser, UserEntry};
+    use tairix_itest_finisher::fail_point;
     use tairix_log::{log, Event, EventId, Level};
 
     /// Capability id `kernel_main` passes to `tairix_sys_cap_query` and
@@ -123,10 +125,10 @@ mod kernel {
 
     /// Semihosting failure codes, distinct per failure site so a failing
     /// run's exit status pinpoints the broken invariant.
-    const FAIL_SETUP: u16 = 1;
-    const FAIL_WRONG_NUMBER: u16 = 2;
-    const FAIL_WRONG_ARGS: u16 = 3;
-    const FAIL_SVC_RETURNED: u16 = 4;
+    const FAIL_SETUP: NonZeroU16 = fail_point!(1);
+    const FAIL_WRONG_NUMBER: NonZeroU16 = fail_point!(2);
+    const FAIL_WRONG_ARGS: NonZeroU16 = fail_point!(3);
+    const FAIL_SVC_RETURNED: NonZeroU16 = fail_point!(4);
 
     /// Page-table pool backing the address space (lives in `.bss`).
     static POOL: PageTablePool = PageTablePool::new();

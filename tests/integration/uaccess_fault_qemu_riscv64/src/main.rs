@@ -41,12 +41,14 @@
 
 #[cfg(itest_riscv64)]
 mod kernel {
+    use core::num::NonZeroU16;
     use core::panic::PanicInfo;
 
     use tairix_arch_api::mmu::AddressSpace as _;
     use tairix_arch_api::uaccess::conformance::{self, Verdict};
     use tairix_arch_riscv64::paging::{AddressSpace, PageTablePool};
     use tairix_arch_riscv64::{fault, handle_panic_via_serial, qemu_exit, trap, SERIAL_SINK};
+    use tairix_itest_finisher::fail_point;
     use tairix_log::{log, Event, EventId, Field, Level};
 
     /// Gigapages of identity map the space installs: `[0, 4 GiB)` covers
@@ -66,11 +68,11 @@ mod kernel {
 
     /// `SiFive` Test failure codes, distinct per failure site so a failing
     /// run's exit status pinpoints the broken invariant.
-    const FAIL_SETUP: u16 = 1;
-    const FAIL_FATAL_FAULT: u16 = 2;
-    const FAIL_NOT_INSTALLED: u16 = 3;
-    const FAIL_INTACT_COPY: u16 = 4;
-    const FAIL_FAULT_NOT_REPORTED: u16 = 5;
+    const FAIL_SETUP: NonZeroU16 = fail_point!(1);
+    const FAIL_FATAL_FAULT: NonZeroU16 = fail_point!(2);
+    const FAIL_NOT_INSTALLED: NonZeroU16 = fail_point!(3);
+    const FAIL_INTACT_COPY: NonZeroU16 = fail_point!(4);
+    const FAIL_FAULT_NOT_REPORTED: NonZeroU16 = fail_point!(5);
 
     /// Page-table pool backing the address space (lives in `.bss`).
     static POOL: PageTablePool = PageTablePool::new();
@@ -107,7 +109,7 @@ mod kernel {
     }
 
     /// Log a setup failure and report it to QEMU. Never returns.
-    fn fail(what: &'static str, code: u16) -> ! {
+    fn fail(what: &'static str, code: NonZeroU16) -> ! {
         log(
             &SERIAL_SINK,
             &Event {

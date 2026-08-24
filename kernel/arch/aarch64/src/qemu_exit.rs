@@ -18,10 +18,14 @@
 //!   x86_64's non-zero `isa-debug-exit`).
 //! * `exit_failure` passes `subcode == code`, exiting with that code.
 //!
+//! The subcode *is* the host exit status, so the
+//! [`NonZeroU16`](core::num::NonZeroU16) `exit_failure` takes is the whole
+//! guard against a failure being reported as a pass: this board has no
+//! encoding step in which a zero could be caught.
+//!
 //! The operation/reason constants must stay in step with
 //! `tools/qemu/src/aarch64.rs` (which decodes the exit status); the
-//! `constants_match_runner` unit test is the tie-down
-//! requires.
+//! `constants_match_runner` unit test is that tie-down.
 
 /// Semihosting operation number for `SYS_EXIT` (ARM DUI 0203).
 pub const SYS_EXIT: u64 = 0x18;
@@ -42,7 +46,7 @@ pub const SUCCESS_EXIT_STATUS: i32 = 0;
 /// Issues `SYS_EXIT` with subcode `0`, then parks the CPU. The park is
 /// unreachable under QEMU (the call terminates the process) but is the
 /// correct conservative behaviour on hardware without a semihosting
-/// host,.
+/// host.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub fn exit_success() -> ! {
     // SAFETY: the documented QEMU semihosting contract; the park
@@ -55,9 +59,9 @@ pub fn exit_success() -> ! {
 ///
 /// See [`exit_success`]; this differs only in the non-zero subcode.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
-pub fn exit_failure(code: u16) -> ! {
+pub fn exit_failure(code: core::num::NonZeroU16) -> ! {
     // SAFETY: identical to `exit_success`; see that function.
-    unsafe { semihosting_exit(u64::from(code)) }
+    unsafe { semihosting_exit(u64::from(code.get())) }
 }
 
 /// Issue the `SYS_EXIT` semihosting call with `subcode`, then park.
@@ -97,9 +101,8 @@ mod tests {
 
     #[test]
     fn constants_match_runner() {
-        // Belt-and-braces cross-check: the host runner's values live in
-        // `tools/qemu/src/aarch64.rs`. The charter forbids duplication
-        // without a tie-down; this test is that tie-down.
+        // The host runner's values live in `tools/qemu/src/aarch64.rs`;
+        // this is the tie-down for the duplicated set.
         assert_eq!(SYS_EXIT, 0x18);
         assert_eq!(ADP_STOPPED_APPLICATION_EXIT, 0x2_0026);
         assert_eq!(SUCCESS_EXIT_STATUS, 0);

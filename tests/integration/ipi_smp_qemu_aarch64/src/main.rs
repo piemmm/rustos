@@ -72,6 +72,7 @@
 
 #[cfg(itest_aarch64)]
 mod kernel {
+    use core::num::NonZeroU16;
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -82,6 +83,7 @@ mod kernel {
     };
     use tairix_arch_api::{CpuId, SchedulerArch, SecondaryBringup};
     use tairix_fdt::Fdt;
+    use tairix_itest_finisher::fail_point;
     use tairix_log::{log, Event, EventId, Level};
 
     // The canonical QEMU `virt` device tree, dumped and embedded at build
@@ -119,18 +121,18 @@ mod kernel {
     const SMP_TEST_FAIL: EventId = EventId(4233);
 
     /// Failure finisher code: the secondary core never came up.
-    const FAIL_SECONDARY_START: u16 = 1;
+    const FAIL_SECONDARY_START: NonZeroU16 = fail_point!(1);
     /// Failure finisher code: the IPI fired on the wrong core.
-    const FAIL_WRONG_CPU: u16 = 2;
+    const FAIL_WRONG_CPU: NonZeroU16 = fail_point!(2);
     /// Failure finisher code: `CNTFRQ_EL0` reported a zero frequency.
-    const FAIL_ZERO_FREQ: u16 = 3;
+    const FAIL_ZERO_FREQ: NonZeroU16 = fail_point!(3);
     /// Failure finisher code: the GICv2 bases were not discovered from the
     /// embedded `virt` device tree (P3).
-    const FAIL_GIC_NOT_DISCOVERED: u16 = 4;
+    const FAIL_GIC_NOT_DISCOVERED: NonZeroU16 = fail_point!(4);
     /// Failure finisher code: the PSCI conduit was not discovered from the
     /// embedded `virt` device tree, or did not match the board's `hvc`
     /// (P5).
-    const FAIL_PSCI_NOT_DISCOVERED: u16 = 5;
+    const FAIL_PSCI_NOT_DISCOVERED: NonZeroU16 = fail_point!(5);
 
     /// A deliberately-wrong GICv2 distributor/CPU-interface base installed
     /// before discovery runs. It is **not** the `virt` GICv2 base, so a

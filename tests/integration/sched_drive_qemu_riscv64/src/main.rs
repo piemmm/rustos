@@ -53,6 +53,7 @@ extern crate alloc;
 
 #[cfg(itest_riscv64)]
 mod kernel {
+    use core::num::NonZeroU16;
     use core::panic::PanicInfo;
     use core::ptr::addr_of_mut;
     use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
@@ -66,6 +67,7 @@ mod kernel {
         context, halt_current_hart, handle_panic_via_serial, preempt, qemu_exit, trap, RiscvArch,
         RiscvArchStorage, SERIAL_SINK,
     };
+    use tairix_itest_finisher::fail_point;
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel_sched_mlfq::{Priority, Scheduler, SchedulerConfig, TaskAction};
     use tairix_log::{log, Event, EventId, Level};
@@ -97,20 +99,20 @@ mod kernel {
     const TEST_PASS: EventId = EventId(4223);
 
     /// Failure finisher code: the device tree advertised no timebase.
-    const FAIL_NO_TIMEBASE: u16 = 1;
+    const FAIL_NO_TIMEBASE: NonZeroU16 = fail_point!(1);
     /// Failure finisher code: the boot hart was not hart 0.
-    const FAIL_UNEXPECTED_HART: u16 = 2;
+    const FAIL_UNEXPECTED_HART: NonZeroU16 = fail_point!(2);
     /// Failure finisher code: the context switch never ran the inbound task.
-    const FAIL_CTX_SWITCH: u16 = 3;
+    const FAIL_CTX_SWITCH: NonZeroU16 = fail_point!(3);
     /// Failure finisher code: the scheduler could not be constructed.
-    const FAIL_SCHED_NEW: u16 = 4;
+    const FAIL_SCHED_NEW: NonZeroU16 = fail_point!(4);
     /// Failure finisher code: a task failed to spawn.
-    const FAIL_SPAWN: u16 = 5;
+    const FAIL_SPAWN: NonZeroU16 = fail_point!(5);
     /// Failure finisher code: the cooperative loop did not drain every task.
-    const FAIL_DEADLOCK: u16 = 6;
+    const FAIL_DEADLOCK: NonZeroU16 = fail_point!(6);
     /// Failure finisher code: the executed-task count disagreed with the
     /// spawned count.
-    const FAIL_EXEC_COUNT: u16 = 7;
+    const FAIL_EXEC_COUNT: NonZeroU16 = fail_point!(7);
 
     /// Static boot heap, placed in the linker's dedicated `.heap` (NOLOAD)
     /// section so the boot trampoline does not zero it and it is excluded

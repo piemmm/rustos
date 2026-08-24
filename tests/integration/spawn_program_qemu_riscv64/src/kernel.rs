@@ -1,6 +1,7 @@
 //! The freestanding riscv64 test kernel: build a U-mode image for the fixture
 //! program and drop into it through the production spawn caller.
 
+use core::num::NonZeroU16;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -10,6 +11,7 @@ use tairix_arch_riscv64::{
     handle_panic_via_serial, paging, qemu_exit, syscall_entry, trap, userentry::UserMode,
     SERIAL_SINK,
 };
+use tairix_itest_finisher::fail_point;
 use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
 use tairix_kernel_core::{spawn_and_enter, SpawnMode, SpawnRequest};
 use tairix_kernel_mem::{AddressSpace, DirectPhysMap, Frame, PhysAddr, UserStack};
@@ -64,11 +66,11 @@ const TEST_START: EventId = EventId(4230);
 const TEST_FAIL: EventId = EventId(4232);
 
 /// `SiFive` Test failure codes, distinct per failure site.
-const FAIL_POOL: u16 = 1;
-const FAIL_PARSE: u16 = 2;
-const FAIL_SPAWN_RETURNED: u16 = 3;
-const FAIL_WRONG_SYSCALL: u16 = 4;
-const FAIL_WRONG_CODE: u16 = 5;
+const FAIL_POOL: NonZeroU16 = fail_point!(1);
+const FAIL_PARSE: NonZeroU16 = fail_point!(2);
+const FAIL_SPAWN_RETURNED: NonZeroU16 = fail_point!(3);
+const FAIL_WRONG_SYSCALL: NonZeroU16 = fail_point!(4);
+const FAIL_WRONG_CODE: NonZeroU16 = fail_point!(5);
 
 /// Page-table pool backing the Sv39 hierarchy (lives in `.bss`).
 static PAGE_TABLE_POOL: paging::PageTablePool = paging::PageTablePool::new();

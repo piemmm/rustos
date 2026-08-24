@@ -42,6 +42,7 @@
 
 #[cfg(itest_riscv64)]
 mod kernel {
+    use core::num::NonZeroU16;
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -51,6 +52,7 @@ mod kernel {
         halt_current_hart, handle_panic_via_serial, qemu_exit, sbi, smp, RiscvArch,
         RiscvArchStorage, SERIAL_SINK,
     };
+    use tairix_itest_finisher::fail_point;
     use tairix_log::{log, Event, EventId, Level};
 
     /// The two-hart `virt` board uses hart ids `0` and `1`; OpenSBI may
@@ -74,11 +76,11 @@ mod kernel {
     const TEST_FAIL: EventId = EventId(4263);
 
     /// Failure finisher code: the secondary hart never came up.
-    const FAIL_SECONDARY_START: u16 = 1;
+    const FAIL_SECONDARY_START: NonZeroU16 = fail_point!(1);
     /// Failure finisher code: the SBI remote fence reported an error.
-    const FAIL_RFENCE_ERROR: u16 = 2;
+    const FAIL_RFENCE_ERROR: NonZeroU16 = fail_point!(2);
     /// Failure finisher code: the boot hart id was outside `0..HART_COUNT`.
-    const FAIL_UNEXPECTED_HART: u16 = 3;
+    const FAIL_UNEXPECTED_HART: NonZeroU16 = fail_point!(3);
 
     /// Set to `1` by the secondary hart once it is up and idling, so the
     /// boot hart only shoots down against a live remote hart.

@@ -81,6 +81,7 @@ extern crate alloc;
 
 #[cfg(itest_riscv64)]
 mod kernel {
+    use core::num::NonZeroU16;
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -95,6 +96,7 @@ mod kernel {
     use tairix_arch_riscv64::{
         fault, handle_panic_via_serial, qemu_exit, trap, RiscvArch, RiscvArchStorage, SERIAL_SINK,
     };
+    use tairix_itest_finisher::fail_point;
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel_core::{spawn_kthread_with_stack, KernelStack, KTHREAD_STACK_BYTES};
     use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
@@ -134,12 +136,12 @@ mod kernel {
 
     /// `SiFive` Test failure codes, distinct per failure site so a failing
     /// run's exit status pinpoints the broken invariant.
-    const FAIL_NO_TIMEBASE: u16 = 1;
-    const FAIL_SETUP: u16 = 2;
-    const FAIL_SPAWN: u16 = 3;
-    const FAIL_WRONG_CAUSE: u16 = 4;
-    const FAIL_WRONG_STVAL: u16 = 5;
-    const FAIL_NO_FAULT: u16 = 6;
+    const FAIL_NO_TIMEBASE: NonZeroU16 = fail_point!(1);
+    const FAIL_SETUP: NonZeroU16 = fail_point!(2);
+    const FAIL_SPAWN: NonZeroU16 = fail_point!(3);
+    const FAIL_WRONG_CAUSE: NonZeroU16 = fail_point!(4);
+    const FAIL_WRONG_STVAL: NonZeroU16 = fail_point!(5);
+    const FAIL_NO_FAULT: NonZeroU16 = fail_point!(6);
 
     /// Page-table pool backing the address space (lives in `.bss`).
     static POOL: PageTablePool = PageTablePool::new();
@@ -423,7 +425,7 @@ mod kernel {
     }
 
     /// Log a setup failure and report it to QEMU. Never returns.
-    fn fail(what: &'static str, code: u16) -> ! {
+    fn fail(what: &'static str, code: NonZeroU16) -> ! {
         log(
             &SERIAL_SINK,
             &Event {

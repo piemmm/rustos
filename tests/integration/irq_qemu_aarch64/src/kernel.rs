@@ -2,12 +2,14 @@
 //! and prove its interrupt reaches a Rust handler through the EL1 IRQ
 //! path and the kernel/irq mask-before-wake table.
 
+use core::num::NonZeroU16;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use tairix_abi::IrqHandle;
 use tairix_arch_aarch64::gic::{self, GicController, Gicv2, VolatileGicMmio, MAX_INTID};
 use tairix_arch_aarch64::{exceptions, handle_panic_via_serial, qemu_exit, SERIAL_SINK};
+use tairix_itest_finisher::fail_point;
 use tairix_kalloc::FreeListAllocator;
 use tairix_kernel_irq::{IrqController, IrqTable, MaskError, WaitStep};
 use tairix_kernel_sec::{ProcessId, TaskId};
@@ -66,11 +68,11 @@ const TEST_START: EventId = EventId(4260);
 const TEST_PASS: EventId = EventId(4261);
 
 /// Semihosting failure codes, distinct per failure site.
-const FAIL_REENTRY: u16 = 1;
-const FAIL_BIND: u16 = 2;
-const FAIL_DISPATCH_INSTALL: u16 = 3;
-const FAIL_NOT_MASKED: u16 = 4;
-const FAIL_WAIT: u16 = 5;
+const FAIL_REENTRY: NonZeroU16 = fail_point!(1);
+const FAIL_BIND: NonZeroU16 = fail_point!(2);
+const FAIL_DISPATCH_INSTALL: NonZeroU16 = fail_point!(3);
+const FAIL_NOT_MASKED: NonZeroU16 = fail_point!(4);
+const FAIL_WAIT: NonZeroU16 = fail_point!(5);
 
 /// Set once the scenario has been driven so a re-entry cannot re-run it.
 static TEST_DRIVEN: AtomicU32 = AtomicU32::new(0);

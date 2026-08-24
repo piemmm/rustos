@@ -764,6 +764,14 @@ finisher word through `qemu_exit::exit_success` / `exit_failure(code)`;
 the failure word is built by the pure `qemu_exit::fail_word(code)`
 (`(code << 16) | FINISHER_FAIL`).
 
+`code` is a `NonZeroU16`. Zero is this board's *pass* status, so a
+zero-coded failure would put `FINISHER_FAIL` alone on the bus and exit
+QEMU with status 0 — a failing run reported as a passing one. The type is
+what forecloses it; `fail_word`'s unit test walks the whole `1..=0xFFFF`
+domain and asserts the reported status is never zero. Fixtures mint their
+codes with `tairix_itest_finisher::fail_point!`, which rejects a zero
+literal at compile time.
+
 ## Per-arch runner module
 
 | Surface | Module |

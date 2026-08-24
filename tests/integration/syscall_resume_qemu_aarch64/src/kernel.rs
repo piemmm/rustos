@@ -1,5 +1,6 @@
 //! Freestanding kernel for the deterministic syscall-continuation witness.
 
+use core::num::NonZeroU16;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
@@ -18,6 +19,7 @@ use tairix_arch_aarch64::{
 };
 use tairix_arch_api::{CpuId, EnterUser};
 use tairix_fdt::Fdt;
+use tairix_itest_finisher::fail_point;
 use tairix_kalloc::FreeListAllocator;
 use tairix_kernel_core::{
     note_preempt_tick, reschedule_current, spawn_image, spawn_user_kthread, take_preempt_pending,
@@ -45,18 +47,18 @@ const MAX_STEPS: u64 = 1_000_000;
 const TEST_START: EventId = EventId(4293);
 const TEST_PASS: EventId = EventId(4294);
 
-const FAIL_FDT: u16 = 1;
-const FAIL_PARSE: u16 = 2;
-const FAIL_POOL: u16 = 3;
-const FAIL_BUILD: u16 = 4;
-const FAIL_SCHEDULER: u16 = 5;
-const FAIL_PARENT: u16 = 6;
-const FAIL_CHILD: u16 = 7;
-const FAIL_UNEXPECTED_SYSCALL: u16 = 8;
-const FAIL_RESCHEDULE: u16 = 9;
-const FAIL_ORDER: u16 = 10;
-const FAIL_DEADLOCK: u16 = 11;
-const FAIL_RESULT: u16 = 12;
+const FAIL_FDT: NonZeroU16 = fail_point!(1);
+const FAIL_PARSE: NonZeroU16 = fail_point!(2);
+const FAIL_POOL: NonZeroU16 = fail_point!(3);
+const FAIL_BUILD: NonZeroU16 = fail_point!(4);
+const FAIL_SCHEDULER: NonZeroU16 = fail_point!(5);
+const FAIL_PARENT: NonZeroU16 = fail_point!(6);
+const FAIL_CHILD: NonZeroU16 = fail_point!(7);
+const FAIL_UNEXPECTED_SYSCALL: NonZeroU16 = fail_point!(8);
+const FAIL_RESCHEDULE: NonZeroU16 = fail_point!(9);
+const FAIL_ORDER: NonZeroU16 = fail_point!(10);
+const FAIL_DEADLOCK: NonZeroU16 = fail_point!(11);
+const FAIL_RESULT: NonZeroU16 = fail_point!(12);
 
 static CLOCK_CALLS: AtomicU64 = AtomicU64::new(0);
 static PARENT_EXIT_STATUS: AtomicU64 = AtomicU64::new(u64::MAX);

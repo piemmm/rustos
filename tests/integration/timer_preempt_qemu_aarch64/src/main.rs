@@ -47,6 +47,7 @@
 
 #[cfg(itest_aarch64)]
 mod kernel {
+    use core::num::NonZeroU16;
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -56,6 +57,7 @@ mod kernel {
         exceptions, gic, handle_panic_via_serial, preempt, qemu_exit, SERIAL_SINK,
     };
     use tairix_arch_api::{CpuId, Timer};
+    use tairix_itest_finisher::fail_point;
     use tairix_log::{log, Event, EventId, Level};
 
     /// Scheduler-tick frequency to drive the timer at.
@@ -69,6 +71,9 @@ mod kernel {
     /// Stable audit-event ids for the QEMU transcript.
     const TIMER_TEST_START: EventId = EventId(4220);
     const TIMER_TEST_PASS: EventId = EventId(4221);
+    /// Failure finisher codes, distinct per failure site.
+    const FAIL_ZERO_FREQ: NonZeroU16 = fail_point!(1);
+    const FAIL_PREEMPT_STORAGE: NonZeroU16 = fail_point!(2);
 
     /// Count of generic-timer interrupts the callback has serviced.
     static TICKS: AtomicU64 = AtomicU64::new(0);
@@ -126,7 +131,7 @@ mod kernel {
                     fields: &[],
                 },
             );
-            qemu_exit::exit_failure(1);
+            qemu_exit::exit_failure(FAIL_ZERO_FREQ);
         }
 
         // 2. Install the tick callback through the Arch HAL timer handle
@@ -147,7 +152,7 @@ mod kernel {
         //    physical timer at TICK_HZ and unmask IRQs.
         static PREEMPT_STORAGE: preempt::PreemptStorage<1> = preempt::PreemptStorage::new();
         if PREEMPT_STORAGE.register().is_err() {
-            qemu_exit::exit_failure(2);
+            qemu_exit::exit_failure(FAIL_PREEMPT_STORAGE);
         }
         let interval = preempt::interval_for_hz(counter_hz, TICK_HZ);
         INTERVAL.store(interval, Ordering::Relaxed);

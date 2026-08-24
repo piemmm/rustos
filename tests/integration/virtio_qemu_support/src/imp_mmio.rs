@@ -10,6 +10,8 @@
 //! IRQ table the production boot published, arm it through the
 //! boot-built PLIC controller, and park on a race-free `wfi`.
 
+use core::num::NonZeroU16;
+
 use tairix_abi::{CapabilityId, IrqHandle};
 use tairix_arch_riscv64::plic::VolatilePlicMmio;
 use tairix_arch_riscv64::{qemu_exit, SERIAL_SINK};
@@ -57,6 +59,7 @@ use crate::common::{
     carve_dma_map, drive_driver_lifecycle, dtb_total_size, QemuEnv, ScenarioConfig, IDENTITY_LIMIT,
 };
 
+use tairix_itest_finisher::fail_point;
 use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
 
 // --- Bump-allocator-backed `#[global_allocator]` ---------------------
@@ -83,6 +86,8 @@ static ALLOCATOR: FreeListAllocator =
 
 /// Milestone event id namespace for the shared serial breadcrumbs.
 const MILESTONE_ID: EventId = EventId(9100);
+/// Failure finisher codes, distinct per failure site.
+const FAIL_SCENARIO: NonZeroU16 = fail_point!(1);
 
 // --- Bring-up parameters ---------------------------------------------
 
@@ -139,7 +144,7 @@ impl QemuEnv for MmioEnv {
 
     fn fail(&self, msg: &str) -> ! {
         self.log(msg);
-        qemu_exit::exit_failure(1)
+        qemu_exit::exit_failure(FAIL_SCENARIO)
     }
 
     fn succeed(&self) -> ! {

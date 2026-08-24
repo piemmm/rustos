@@ -1,6 +1,7 @@
 //! The freestanding riscv64 test kernel: enter U-mode with the adversarial
 //! thread-pointer fixture and assert the kernel keeps its own hart identity.
 
+use core::num::NonZeroU16;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -10,6 +11,7 @@ use tairix_arch_riscv64::{
     handle_panic_via_serial, paging, qemu_exit, smp, syscall_entry, trap, userentry::UserMode,
     SERIAL_SINK,
 };
+use tairix_itest_finisher::fail_point;
 use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
 use tairix_kernel_core::{spawn_and_enter, SpawnMode, SpawnRequest};
 use tairix_kernel_mem::{AddressSpace, DirectPhysMap, Frame, PhysAddr, UserStack};
@@ -78,14 +80,14 @@ const TEST_START: EventId = EventId(4290);
 const TEST_FAIL: EventId = EventId(4292);
 
 /// `SiFive` Test failure codes, distinct per failure site.
-const FAIL_POOL: u16 = 1;
-const FAIL_PARSE: u16 = 2;
-const FAIL_SPAWN_RETURNED: u16 = 3;
-const FAIL_WRONG_SYSCALL: u16 = 4;
-const FAIL_HOSTILE_HART: u16 = 5;
-const FAIL_TP_CLOBBERED: u16 = 6;
-const FAIL_SHORT_RUN: u16 = 7;
-const FAIL_VACUOUS: u16 = 8;
+const FAIL_POOL: NonZeroU16 = fail_point!(1);
+const FAIL_PARSE: NonZeroU16 = fail_point!(2);
+const FAIL_SPAWN_RETURNED: NonZeroU16 = fail_point!(3);
+const FAIL_WRONG_SYSCALL: NonZeroU16 = fail_point!(4);
+const FAIL_HOSTILE_HART: NonZeroU16 = fail_point!(5);
+const FAIL_TP_CLOBBERED: NonZeroU16 = fail_point!(6);
+const FAIL_SHORT_RUN: NonZeroU16 = fail_point!(7);
+const FAIL_VACUOUS: NonZeroU16 = fail_point!(8);
 
 /// The hostile `tp` values the fixture writes, low bits first: the hart
 /// identity a broken trap vector would resolve for each round.

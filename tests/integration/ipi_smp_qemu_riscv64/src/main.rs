@@ -45,6 +45,7 @@
 
 #[cfg(itest_riscv64)]
 mod kernel {
+    use core::num::NonZeroU16;
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -54,6 +55,7 @@ mod kernel {
         halt_current_hart, handle_panic_via_serial, preempt, qemu_exit, smp, trap, RiscvArch,
         RiscvArchStorage, SERIAL_SINK,
     };
+    use tairix_itest_finisher::fail_point;
     use tairix_log::{log, Event, EventId, Level};
 
     /// `u32` sentinel for "no IPI callback has fired yet".
@@ -73,11 +75,11 @@ mod kernel {
     const SMP_TEST_FAIL: EventId = EventId(4213);
 
     /// Failure finisher code: the secondary hart never came up.
-    const FAIL_SECONDARY_START: u16 = 1;
+    const FAIL_SECONDARY_START: NonZeroU16 = fail_point!(1);
     /// Failure finisher code: the IPI fired on the wrong hart.
-    const FAIL_WRONG_HART: u16 = 2;
+    const FAIL_WRONG_HART: NonZeroU16 = fail_point!(2);
     /// Failure finisher code: the boot hart id was outside `0..HART_COUNT`.
-    const FAIL_UNEXPECTED_HART: u16 = 3;
+    const FAIL_UNEXPECTED_HART: NonZeroU16 = fail_point!(3);
 
     /// Set to `1` by the secondary hart once its trap vector and
     /// supervisor-software-interrupt enable are in place.

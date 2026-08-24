@@ -970,6 +970,14 @@ riscv64's zero-is-pass convention (and is the inverse of x86_64's
 non-zero `isa-debug-exit`), so the host-side decode is per-arch
 (`tairix_qemu::aarch64::outcome_from_status`).
 
+`exit_failure` takes a `NonZeroU16`. The `SYS_EXIT` subcode *is* the host
+exit status, so a zero-coded failure would exit QEMU with status 0 and
+the runner would read the failing run as a pass; unlike riscv64's
+`fail_word` this board has no encoding step in which a zero could be
+caught, so the type is the whole guard. Fixtures mint their codes with
+`tairix_itest_finisher::fail_point!`, which rejects a zero literal at
+compile time.
+
 ## Stage 3 architecture primitives
 
 Each keeps its pure math host-testable and gates only the

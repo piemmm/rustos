@@ -58,11 +58,13 @@
 
 #[cfg(itest_aarch64)]
 mod kernel {
+    use core::num::NonZeroU16;
     use core::panic::PanicInfo;
 
     use tairix_arch_aarch64::console::{self, ConsoleModel, DEFAULT_CONSOLE_BASE};
     use tairix_arch_aarch64::{enable_fp_el1, handle_panic_via_serial, qemu_exit, SERIAL_SINK};
     use tairix_fdt::Fdt;
+    use tairix_itest_finisher::fail_point;
     use tairix_log::{log, Event, EventId, Field, Level};
 
     // The canonical QEMU `virt` device tree, dumped and embedded at build
@@ -81,9 +83,9 @@ mod kernel {
     const POISON_BASE: usize = 0xdead_0000;
 
     /// Failure finisher codes, each pinpointing one way P2 can break.
-    const FAIL_DTB_PARSE: u16 = 1;
-    const FAIL_NOT_DISCOVERED: u16 = 2;
-    const FAIL_BASE_NOT_UPDATED: u16 = 3;
+    const FAIL_DTB_PARSE: NonZeroU16 = fail_point!(1);
+    const FAIL_NOT_DISCOVERED: NonZeroU16 = fail_point!(2);
+    const FAIL_BASE_NOT_UPDATED: NonZeroU16 = fail_point!(3);
 
     /// Forward to the shared aarch64 panic bridge (parks the CPU; the run
     /// then times out and the harness reports the failure).

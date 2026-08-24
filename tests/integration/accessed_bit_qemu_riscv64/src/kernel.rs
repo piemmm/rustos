@@ -3,11 +3,13 @@
 //! software-managed Accessed-bit clock through the Arch HAL — proving the
 //! A/D-setting page-fault path resolves a cleared-A access on a Svade CPU.
 
+use core::num::NonZeroU16;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use tairix_arch_api::mmu::{AccessTracking, AddressSpace as _, MapError, PageFlags};
 use tairix_arch_riscv64::{fault, handle_panic_via_serial, paging, qemu_exit, trap, SERIAL_SINK};
+use tairix_itest_finisher::fail_point;
 use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
 use tairix_log::{log, Event, EventId, Level};
 
@@ -39,19 +41,19 @@ const TEST_PASS: EventId = EventId(4321);
 const TEST_FAIL: EventId = EventId(4322);
 
 /// `SiFive` Test failure codes, distinct per failure site.
-const FAIL_POOL: u16 = 1;
-const FAIL_MAP: u16 = 2;
-const FAIL_NOT_SUPPORTED: u16 = 3;
-const FAIL_FAULT_INSTALL: u16 = 4;
-const FAIL_MISALIGNED_EDGE: u16 = 5;
-const FAIL_UNMAPPED_EDGE: u16 = 6;
-const FAIL_SEED_READBACK: u16 = 7;
-const FAIL_PROBE_FRESH: u16 = 8;
-const FAIL_PROBE_COLD: u16 = 9;
-const FAIL_PROBE_AFTER_FAULT: u16 = 10;
-const FAIL_PROBE_COLD_AGAIN: u16 = 11;
-const FAIL_PROBE_REACCESS: u16 = 12;
-const FAIL_UNEXPECTED_FAULT: u16 = 13;
+const FAIL_POOL: NonZeroU16 = fail_point!(1);
+const FAIL_MAP: NonZeroU16 = fail_point!(2);
+const FAIL_NOT_SUPPORTED: NonZeroU16 = fail_point!(3);
+const FAIL_FAULT_INSTALL: NonZeroU16 = fail_point!(4);
+const FAIL_MISALIGNED_EDGE: NonZeroU16 = fail_point!(5);
+const FAIL_UNMAPPED_EDGE: NonZeroU16 = fail_point!(6);
+const FAIL_SEED_READBACK: NonZeroU16 = fail_point!(7);
+const FAIL_PROBE_FRESH: NonZeroU16 = fail_point!(8);
+const FAIL_PROBE_COLD: NonZeroU16 = fail_point!(9);
+const FAIL_PROBE_AFTER_FAULT: NonZeroU16 = fail_point!(10);
+const FAIL_PROBE_COLD_AGAIN: NonZeroU16 = fail_point!(11);
+const FAIL_PROBE_REACCESS: NonZeroU16 = fail_point!(12);
+const FAIL_UNEXPECTED_FAULT: NonZeroU16 = fail_point!(13);
 
 /// `true` once setup is complete. Any unexpected fault before this is a
 /// setup bug; after it, a fault the software A/D path did not resolve.
@@ -96,7 +98,7 @@ fn note(id: EventId, message: &'static str) {
 }
 
 /// Report a failed expectation and exit QEMU with a failure code.
-fn fail(message: &'static str, code: u16) -> ! {
+fn fail(message: &'static str, code: NonZeroU16) -> ! {
     note(TEST_FAIL, message);
     qemu_exit::exit_failure(code);
 }

@@ -80,6 +80,7 @@ extern crate alloc;
 
 #[cfg(itest_aarch64)]
 mod kernel {
+    use core::num::NonZeroU16;
     use core::panic::PanicInfo;
 
     use alloc::sync::Arc;
@@ -94,6 +95,7 @@ mod kernel {
     use tairix_arch_api::tlb::TlbShootdown as _;
     use tairix_arch_api::CpuId;
     use tairix_fdt::Fdt;
+    use tairix_itest_finisher::fail_point;
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel_core::{spawn_kthread_with_stack, KernelStack, KTHREAD_STACK_BYTES};
     use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
@@ -134,6 +136,10 @@ mod kernel {
     const SO_TEST_SPAWNED: EventId = EventId(4307);
     const SO_TEST_PASS: EventId = EventId(4308);
     const SO_TEST_FAIL: EventId = EventId(4309);
+    /// Failure finisher codes, distinct per failure site.
+    const FAIL_NO_FAULT: NonZeroU16 = fail_point!(2);
+    const FAIL_UNEXPECTED_FAULT: NonZeroU16 = fail_point!(3);
+    const FAIL_SETUP: NonZeroU16 = fail_point!(4);
 
     /// A deliberately-wrong GICv2 base installed before discovery runs, so
     /// reaching the `virt` distributor base can only mean discovery
@@ -241,7 +247,7 @@ mod kernel {
                 fields: &[],
             },
         );
-        qemu_exit::exit_failure(3);
+        qemu_exit::exit_failure(FAIL_UNEXPECTED_FAULT);
     }
 
     /// Forward to the shared aarch64 panic bridge (parks the CPU; the run
@@ -404,7 +410,7 @@ mod kernel {
                 }],
             },
         );
-        qemu_exit::exit_failure(2);
+        qemu_exit::exit_failure(FAIL_NO_FAULT);
     }
 
     /// Log a setup failure and report it to QEMU. Never returns.
@@ -421,7 +427,7 @@ mod kernel {
                 }],
             },
         );
-        qemu_exit::exit_failure(4);
+        qemu_exit::exit_failure(FAIL_SETUP);
     }
 }
 

@@ -2,6 +2,7 @@
 //! prove the generic-timer IRQ is delivered **while it runs** (the EL1 handler
 //! accounts the tick) without ever preempting the kernel (`plans/PI.md` /).
 
+use core::num::NonZeroU16;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -16,6 +17,7 @@ use tairix_arch_aarch64::{
 };
 use tairix_arch_api::CpuId;
 use tairix_fdt::Fdt;
+use tairix_itest_finisher::fail_point;
 use tairix_kernel_core::{reschedule_current, spawn_kthread, RescheduleAction, Yielder};
 use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
 use tairix_log::{log, Event, EventId, Level};
@@ -104,17 +106,17 @@ const TEST_SPAWNED: EventId = EventId(4321);
 const TEST_PASS: EventId = EventId(4322);
 
 /// Semihosting failure codes, distinct per failure site.
-const FAIL_REENTRY: u16 = 1;
-const FAIL_FDT: u16 = 2;
-const FAIL_ZERO_FREQ: u16 = 3;
-const FAIL_GIC: u16 = 4;
-const FAIL_PREEMPT_STORAGE: u16 = 5;
-const FAIL_SCHED_NEW: u16 = 6;
-const FAIL_SPAWN: u16 = 7;
-const FAIL_DEADLOCK: u16 = 8;
-const FAIL_NO_TICK: u16 = 9;
-const FAIL_KERNEL_PREEMPTED: u16 = 10;
-const FAIL_KTHREAD_INCOMPLETE: u16 = 11;
+const FAIL_REENTRY: NonZeroU16 = fail_point!(1);
+const FAIL_FDT: NonZeroU16 = fail_point!(2);
+const FAIL_ZERO_FREQ: NonZeroU16 = fail_point!(3);
+const FAIL_GIC: NonZeroU16 = fail_point!(4);
+const FAIL_PREEMPT_STORAGE: NonZeroU16 = fail_point!(5);
+const FAIL_SCHED_NEW: NonZeroU16 = fail_point!(6);
+const FAIL_SPAWN: NonZeroU16 = fail_point!(7);
+const FAIL_DEADLOCK: NonZeroU16 = fail_point!(8);
+const FAIL_NO_TICK: NonZeroU16 = fail_point!(9);
+const FAIL_KERNEL_PREEMPTED: NonZeroU16 = fail_point!(10);
+const FAIL_KTHREAD_INCOMPLETE: NonZeroU16 = fail_point!(11);
 
 fn note(id: EventId, message: &'static str) {
     log(

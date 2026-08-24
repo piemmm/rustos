@@ -47,6 +47,7 @@
 
 #[cfg(itest_aarch64)]
 mod kernel {
+    use core::num::NonZeroU16;
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -55,6 +56,7 @@ mod kernel {
         fdt, handle_panic_via_serial, qemu_exit, smp, Aarch64Arch, Aarch64ArchStorage, SERIAL_SINK,
     };
     use tairix_arch_api::{CpuId, CrossCpuTlbShootdown};
+    use tairix_itest_finisher::fail_point;
     use tairix_log::{log, Event, EventId, Level};
 
     /// Dense id of the boot core (the `virt` board enters on affinity 0).
@@ -81,9 +83,9 @@ mod kernel {
     const TEST_PASS: EventId = EventId(4266);
 
     /// Failure finisher code: the secondary core never came up.
-    const FAIL_SECONDARY_START: u16 = 1;
+    const FAIL_SECONDARY_START: NonZeroU16 = fail_point!(1);
     /// Failure finisher code: `CNTFRQ_EL0` reported a zero frequency.
-    const FAIL_ZERO_FREQ: u16 = 3;
+    const FAIL_ZERO_FREQ: NonZeroU16 = fail_point!(3);
 
     /// Set to `1` by the secondary core once it is up and idling, so the
     /// inner-shareable domain genuinely contains a second PE when the boot

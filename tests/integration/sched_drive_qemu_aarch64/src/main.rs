@@ -71,6 +71,7 @@ extern crate alloc;
 
 #[cfg(itest_aarch64)]
 mod kernel {
+    use core::num::NonZeroU16;
     use core::panic::PanicInfo;
     use core::ptr::addr_of_mut;
     use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
@@ -85,6 +86,7 @@ mod kernel {
     };
     use tairix_arch_api::{CpuId, SchedulerArch};
     use tairix_fdt::Fdt;
+    use tairix_itest_finisher::fail_point;
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel_sched_mlfq::{Priority, Scheduler, SchedulerConfig, TaskAction};
     use tairix_log::{log, Event, EventId, Level};
@@ -122,21 +124,21 @@ mod kernel {
     const TEST_PASS: EventId = EventId(4243);
 
     /// Failure finisher code: `CNTFRQ_EL0` reported a zero frequency.
-    const FAIL_ZERO_FREQ: u16 = 1;
+    const FAIL_ZERO_FREQ: NonZeroU16 = fail_point!(1);
     /// Failure finisher code: the context switch never ran the inbound task.
-    const FAIL_CTX_SWITCH: u16 = 2;
+    const FAIL_CTX_SWITCH: NonZeroU16 = fail_point!(2);
     /// Failure finisher code: the scheduler could not be constructed.
-    const FAIL_SCHED_NEW: u16 = 3;
+    const FAIL_SCHED_NEW: NonZeroU16 = fail_point!(3);
     /// Failure finisher code: a task failed to spawn.
-    const FAIL_SPAWN: u16 = 4;
+    const FAIL_SPAWN: NonZeroU16 = fail_point!(4);
     /// Failure finisher code: the cooperative loop did not drain every task.
-    const FAIL_DEADLOCK: u16 = 5;
+    const FAIL_DEADLOCK: NonZeroU16 = fail_point!(5);
     /// Failure finisher code: the executed-task count disagreed with the
     /// spawned count.
-    const FAIL_EXEC_COUNT: u16 = 6;
+    const FAIL_EXEC_COUNT: NonZeroU16 = fail_point!(6);
     /// Failure finisher code: the GICv2 base was not discovered from the
     /// embedded `virt` device tree (P4).
-    const FAIL_GIC_NOT_DISCOVERED: u16 = 7;
+    const FAIL_GIC_NOT_DISCOVERED: NonZeroU16 = fail_point!(7);
 
     /// A deliberately-wrong GICv2 distributor/CPU-interface base installed
     /// before discovery runs. It is **not** the `virt` GICv2 base, so the

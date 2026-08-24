@@ -9,6 +9,11 @@
 //!   code in the high half (see [`fail_word`]) — makes QEMU exit with
 //!   that code.
 //!
+//! Zero is therefore this board's *success* status, which is why a
+//! failure code is a [`NonZeroU16`]: a zero-coded failure would exit
+//! QEMU with status `0` and the runner would read the failing run as a
+//! pass.
+//!
 //! The host-side [`tairix_qemu`][crate-runner] crate decodes that status
 //! back into Pass/Fail (zero ⇒ Pass on this board, unlike x86_64's
 //! `isa-debug-exit` where success is a *non-zero* status). The constants
@@ -16,9 +21,11 @@
 //! they are duplicated as a small set of `const`s on each side rather
 //! than shared through a common crate so the kernel side of the contract
 //! has zero dependencies beyond `core`. The `constants_match_runner`
-//! unit test is the tie-down the charter requires.
+//! unit test is that tie-down.
 //!
 //! [crate-runner]: ../../../tools/qemu/src/riscv64.rs
+
+use core::num::NonZeroU16;
 
 /// MMIO base address of the `virt` board's `SiFive` Test device. Must
 /// match `tairix_qemu::riscv64::SIFIVE_TEST_BASE`.
@@ -38,12 +45,13 @@ pub const FINISHER_FAIL: u32 = 0x3333;
 ///
 /// The `SiFive` Test device interprets a write whose low 16 bits equal
 /// [`FINISHER_FAIL`] as "exit the host process with the status carried in
-/// the high 16 bits". Encoding the word in a pure function keeps the
-/// shift/mask in one place and lets the host tests pin the layout without
-/// a riscv64 target.
+/// the high 16 bits". A [`NonZeroU16`] code therefore cannot encode the
+/// zero status the runner reads as a pass. Keeping the shift/mask in a
+/// pure function lets the host tests pin both properties without a
+/// riscv64 target.
 #[must_use]
-pub const fn fail_word(code: u16) -> u32 {
-    ((code as u32) << 16) | FINISHER_FAIL
+pub const fn fail_word(code: NonZeroU16) -> u32 {
+    ((code.get() as u32) << 16) | FINISHER_FAIL
 }
 
 /// Tell QEMU the test passed and **never return**.
@@ -51,7 +59,7 @@ pub const fn fail_word(code: u16) -> u32 {
 /// Writes [`FINISHER_PASS`] to the `SiFive` Test device, then parks the
 /// hart in a `wfi` loop. The park is unreachable under QEMU (the write
 /// terminates the process) but is the correct conservative behaviour on
-/// hardware without the device,.
+/// hardware without the device.
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub fn exit_success() -> ! {
     // SAFETY: `FINISHER_PASS` to `SIFIVE_TEST_BASE` is the documented
@@ -65,7 +73,7 @@ pub fn exit_success() -> ! {
 ///
 /// See [`exit_success`]; this differs only in writing [`fail_word`]`(code)`.
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
-pub fn exit_failure(code: u16) -> ! {
+pub fn exit_failure(code: NonZeroU16) -> ! {
     // SAFETY: identical to `exit_success`; see that function.
     unsafe { write_finisher(fail_word(code)) };
     park_forever();
@@ -101,9 +109,8 @@ mod tests {
 
     #[test]
     fn constants_match_runner() {
-        // Belt-and-braces cross-check: the host runner's values live in
-        // `tools/qemu/src/riscv64.rs`. The charter forbids duplication
-        // without a tie-down; this test is that tie-down.
+        // The host runner's values live in `tools/qemu/src/riscv64.rs`;
+        // this is the tie-down for the duplicated pair.
         assert_eq!(SIFIVE_TEST_BASE, 0x10_0000);
         assert_eq!(FINISHER_PASS, 0x5555);
         assert_eq!(FINISHER_FAIL, 0x3333);
@@ -113,17 +120,21 @@ mod tests {
     fn fail_word_packs_code_into_high_half() {
         // `(code << 16) | FINISHER_FAIL` — the encoding QEMU's
         // `sifive_test` device decodes into the host-process exit code.
-        assert_eq!(fail_word(0), FINISHER_FAIL);
-        assert_eq!(fail_word(1), (1 << 16) | 0x3333);
-        assert_eq!(fail_word(42), (42 << 16) | 0x3333);
-        assert_eq!(fail_word(0xFFFF), 0xFFFF_3333);
+        assert_eq!(fail_word(NonZeroU16::MIN), (1 << 16) | 0x3333);
+        assert_eq!(fail_word(NonZeroU16::new(42).unwrap()), (42 << 16) | 0x3333);
+        assert_eq!(fail_word(NonZeroU16::MAX), 0xFFFF_3333);
     }
 
     #[test]
-    fn fail_word_low_half_is_always_the_fail_marker() {
-        for code in [0u16, 1, 7, 0x1234, 0xFFFF] {
-            assert_eq!(fail_word(code) & 0xFFFF, FINISHER_FAIL);
-            assert_eq!(fail_word(code) >> 16, u32::from(code));
+    fn no_reportable_code_exits_with_the_pass_status() {
+        // The high half is the status QEMU reports, and the runner reads `0`
+        // as a pass. Widening `code` to `u16` admits `fail_word(0)`, whose
+        // high half is zero — a failing run reported as a passing one.
+        for raw in 1..=u16::MAX {
+            let word = fail_word(NonZeroU16::new(raw).unwrap());
+            assert_eq!(word & 0xFFFF, FINISHER_FAIL);
+            assert_eq!(word >> 16, u32::from(raw));
+            assert_ne!(word >> 16, 0, "code {raw} would exit QEMU with status 0");
         }
     }
 }

@@ -2,6 +2,7 @@
 //! through the production parameterised spawn path and complete the
 //! Stage 4.HW register handshake over production IPC (`PLAN.md` Stage 4.HW).
 
+use core::num::NonZeroU16;
 use core::panic::PanicInfo;
 
 use alloc::boxed::Box;
@@ -27,6 +28,7 @@ use tairix_crypto::Ed25519PublicKey;
 use tairix_devmgr::{DeviceManager, DriverCandidate};
 use tairix_drvhost::ImageSource;
 use tairix_fdt::Fdt;
+use tairix_itest_finisher::fail_point;
 use tairix_kalloc::FreeListAllocator;
 use tairix_kernel::aarch64::arch_wrapper::{Aarch64BinArch, UART_ONLY_CONSOLES};
 use tairix_kernel::aarch64::spawn_producer::{AARCH64_PROCESS_SPAWN, USER_IMAGE_BIAS};
@@ -110,21 +112,21 @@ const TEST_SPAWNED: EventId = EventId(4301);
 const TEST_PASS: EventId = EventId(4302);
 
 /// Failure finisher codes, distinct per failure site.
-const FAIL_ZERO_FREQ: u16 = 1;
-const FAIL_GIC: u16 = 2;
-const FAIL_POOL: u16 = 3;
-const FAIL_FRAMES: u16 = 4;
-const FAIL_BIAS: u16 = 5;
-const FAIL_TRUST: u16 = 6;
-const FAIL_PORT: u16 = 7;
-const FAIL_SCHED_NEW: u16 = 8;
-const FAIL_HOOK_INSTALL: u16 = 9;
-const FAIL_SPAWN: u16 = 10;
-const FAIL_NO_DISPATCH: u16 = 11;
-const FAIL_REPLY_DECODE: u16 = 12;
-const FAIL_REPLY_OUTCOME: u16 = 13;
-const FAIL_DRAINED_NO_REPLY: u16 = 14;
-const FAIL_DEADLOCK: u16 = 15;
+const FAIL_ZERO_FREQ: NonZeroU16 = fail_point!(1);
+const FAIL_GIC: NonZeroU16 = fail_point!(2);
+const FAIL_POOL: NonZeroU16 = fail_point!(3);
+const FAIL_FRAMES: NonZeroU16 = fail_point!(4);
+const FAIL_BIAS: NonZeroU16 = fail_point!(5);
+const FAIL_TRUST: NonZeroU16 = fail_point!(6);
+const FAIL_PORT: NonZeroU16 = fail_point!(7);
+const FAIL_SCHED_NEW: NonZeroU16 = fail_point!(8);
+const FAIL_HOOK_INSTALL: NonZeroU16 = fail_point!(9);
+const FAIL_SPAWN: NonZeroU16 = fail_point!(10);
+const FAIL_NO_DISPATCH: NonZeroU16 = fail_point!(11);
+const FAIL_REPLY_DECODE: NonZeroU16 = fail_point!(12);
+const FAIL_REPLY_OUTCOME: NonZeroU16 = fail_point!(13);
+const FAIL_DRAINED_NO_REPLY: NonZeroU16 = fail_point!(14);
+const FAIL_DEADLOCK: NonZeroU16 = fail_point!(15);
 
 /// Size of the test's bump heap (4 MiB): the frame-allocator bitmap + buddy
 /// lists, the leaked scheduler/hook/registries, and the spawn staging

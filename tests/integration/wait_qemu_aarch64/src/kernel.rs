@@ -3,6 +3,7 @@
 //! producer, and prove the parent reaps the child's exit code under the live
 //! scheduler (`plans/SPAWN.md` `SP6b`).
 
+use core::num::NonZeroU16;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
@@ -26,6 +27,7 @@ use tairix_arch_aarch64::{
 };
 use tairix_arch_api::{CpuId, EnterUser};
 use tairix_fdt::Fdt;
+use tairix_itest_finisher::fail_point;
 use tairix_kalloc::FreeListAllocator;
 use tairix_kernel_core::{
     reschedule_current, spawn_image, spawn_user_kthread, KernelProcessWait, ProcessWait,
@@ -78,19 +80,19 @@ const TEST_SPAWNED: EventId = EventId(4291);
 const TEST_PASS: EventId = EventId(4292);
 
 /// Failure finisher codes, distinct per failure site.
-const FAIL_ZERO_FREQ: u16 = 1;
-const FAIL_GIC: u16 = 2;
-const FAIL_POOL: u16 = 3;
-const FAIL_PARSE: u16 = 4;
-const FAIL_BUILD: u16 = 5;
-const FAIL_SCHED_NEW: u16 = 6;
-const FAIL_SPAWN: u16 = 7;
-const FAIL_DEADLOCK: u16 = 8;
-const FAIL_NO_CURRENT: u16 = 9;
-const FAIL_UNEXPECTED_SYSCALL: u16 = 10;
-const FAIL_COPY_STATUS: u16 = 11;
-const FAIL_PARENT_BAD_EXIT: u16 = 12;
-const FAIL_NO_PRODUCER: u16 = 13;
+const FAIL_ZERO_FREQ: NonZeroU16 = fail_point!(1);
+const FAIL_GIC: NonZeroU16 = fail_point!(2);
+const FAIL_POOL: NonZeroU16 = fail_point!(3);
+const FAIL_PARSE: NonZeroU16 = fail_point!(4);
+const FAIL_BUILD: NonZeroU16 = fail_point!(5);
+const FAIL_SCHED_NEW: NonZeroU16 = fail_point!(6);
+const FAIL_SPAWN: NonZeroU16 = fail_point!(7);
+const FAIL_DEADLOCK: NonZeroU16 = fail_point!(8);
+const FAIL_NO_CURRENT: NonZeroU16 = fail_point!(9);
+const FAIL_UNEXPECTED_SYSCALL: NonZeroU16 = fail_point!(10);
+const FAIL_COPY_STATUS: NonZeroU16 = fail_point!(11);
+const FAIL_PARENT_BAD_EXIT: NonZeroU16 = fail_point!(12);
+const FAIL_NO_PRODUCER: NonZeroU16 = fail_point!(13);
 
 /// Set once the producer reaped a child whose code matched [`CHILD_EXIT_CODE`].
 static REAP_OK: AtomicBool = AtomicBool::new(false);

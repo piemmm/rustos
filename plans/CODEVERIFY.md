@@ -322,27 +322,60 @@ its guard:
 The four fixtures that implement the `EXIT` arm themselves no longer open-code
 the register decode either; see the `lib/abi` entry below.
 
-### Open — `qemu_exit::exit_failure(0)` reports a pass, on aarch64 and riscv64
+### Done — a finisher code is a `NonZeroU16`, so no failure can report a pass
 
-`exit_failure` takes a bare `u16`, and zero is each board's *success* status:
-aarch64 passes the code as the semihosting `SYS_EXIT` subcode, and riscv64
-packs it into the `sifive_test` high half, so both exit QEMU with status 0 —
-which the runner reads as `Outcome::Pass`. A finisher whose whole job is
-reporting failure therefore fails **open** on one input.
+`exit_failure` took a bare `u16`, and zero is each board's *success* status:
+aarch64 passes the code as the semihosting `SYS_EXIT` subcode, riscv64 packs it
+into the `sifive_test` high half, and both exit QEMU with status 0 — which the
+runner reads as `Outcome::Pass`. The finisher whose whole job is reporting
+failure failed **open** on one input.
 
-Not reachable today: every call site passes either a non-zero literal or a
-`fail_code` result, which now floors at 1. It is one typo from live, in the
-mechanism that decides whether the QEMU matrix passes.
+The chosen shape is the unrepresentable one: `exit_failure(NonZeroU16)` on both
+boards, `fail_word(NonZeroU16)`, and `fail_code` returning `NonZeroU16` from a
+`NonZeroU16` base. The substitution alternative — mapping zero onto a reserved
+code inside each board — was rejected: it catches the typo at run time instead
+of build time, and it reports a code the fixture did not assign, which is the
+aliasing this sweep already fixed once in `fail_code`'s saturation.
 
-The clean fix is to make it unrepresentable — `exit_failure(NonZeroU16)` — and
-that is why this is its own item: 839 call sites across 100 crates, each with
-its own `FAIL_*` constants to convert. The cheaper shape is for each board's
-`exit_failure` to map zero onto a reserved non-zero code, which fails closed
-without touching a call site, at the cost of silently renaming a caller's bug;
-if that is chosen, extract the substitution as a pure `const fn` beside
-riscv64's `fail_word` so it is host-testable, and note that the two boards'
-copies are then the sibling-implementation carve-out rather than duplication.
-x86_64's `exit_failure()` takes no code and is unaffected.
+Fixtures mint their codes through `tairix_itest_finisher::fail_point!(n)`, a new
+sibling of `fail_code` in the same crate. It is a macro rather than a `const fn`
+so its body is an inline `const` block: a zero is a build error at *every* call,
+not merely at the `const` initialisers that happen to force evaluation, so the
+constructor has no runtime panic path. 541 constants across 54 fixture files
+became `NonZeroU16`, 22 bare literals became named codes beside them, and 50
+fixture manifests gained the `tairix-itest-finisher` edge (14 already had it).
+No reported code changed value. x86_64's `exit_failure()` takes no code and is
+untouched.
+
+Four guards, each probed by removing it:
+
+- **`fail_point!(0)`** is `error[E0080]: evaluation panicked: a zero finisher
+  code reports a failing run as a pass`.
+- **`exit_failure(0)`** is `error[E0308] … expected NonZero<u16>, found
+  integer`, on both boards.
+- **riscv64's encoding** is covered by
+  `no_reportable_code_exits_with_the_pass_status`, which walks the whole
+  `1..=0xFFFF` domain and asserts the status QEMU will report is never zero.
+  Widening `fail_word` back to `u16` (which widens the loop to `0..=`) fails it
+  on the first iteration.
+- **`fail_code`'s floor is now its return type**, not a `.max(1)` a later edit
+  could drop; `NonZeroU16::saturating_add` carries it. Reverting the pre-change
+  `u16` shape and deleting the `.max(1)` fails
+  `the_composed_code_is_never_the_success_status`.
+
+Two things a later reviewer should not re-litigate:
+
+- **aarch64 gets no encoding test, deliberately.** Its `SYS_EXIT` subcode *is*
+  the host exit status, so the only thing a host test could assert is that a
+  `NonZeroU16` is non-zero — a test of `core`, not of this code. The type is the
+  whole guard there, which is what the module doc now says; riscv64 has a real
+  encoding (`fail_word`) and therefore a real test. Adding an `exit_subcode`
+  wrapper for symmetry would be a helper around `u64::from(code.get())`.
+- **The `_program` fixtures' `FAIL_*` constants are `i32` process exit codes,
+  not finisher codes**, and stay untouched. Both families live under
+  `tests/integration` with the same naming, so a tree-wide rewrite of
+  `const FAIL_…: u16` is only safe because the two never share a crate — worth
+  re-checking before any similar sweep.
 
 ### Done — the `I32` argument slot has one decode, in `lib/abi`
 

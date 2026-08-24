@@ -5,6 +5,7 @@
 //! via the need-resched latch — the regression test for the
 //! interrupt-return-to-EL0 need-resched fix.
 
+use core::num::NonZeroU16;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
@@ -24,6 +25,7 @@ use tairix_arch_aarch64::{
 };
 use tairix_arch_api::{CpuId, EnterUser};
 use tairix_fdt::Fdt;
+use tairix_itest_finisher::fail_point;
 use tairix_kalloc::FreeListAllocator;
 use tairix_kernel_core::{
     note_preempt_tick, preempt_current, preemption_count, reschedule_current, spawn_image,
@@ -74,17 +76,17 @@ const TEST_SPAWNED: EventId = EventId(4291);
 const TEST_PASS: EventId = EventId(4292);
 
 /// Failure finisher codes, distinct per failure site.
-const FAIL_ZERO_FREQ: u16 = 1;
-const FAIL_GIC_NOT_DISCOVERED: u16 = 2;
-const FAIL_POOL: u16 = 3;
-const FAIL_PARSE: u16 = 4;
-const FAIL_BUILD: u16 = 5;
-const FAIL_SCHED_NEW: u16 = 6;
-const FAIL_SPAWN: u16 = 7;
-const FAIL_DEADLOCK: u16 = 8;
-const FAIL_NO_PREEMPT: u16 = 9;
-const FAIL_PREEMPT_STORAGE: u16 = 10;
-const FAIL_UNEXPECTED_SYSCALL: u16 = 11;
+const FAIL_ZERO_FREQ: NonZeroU16 = fail_point!(1);
+const FAIL_GIC_NOT_DISCOVERED: NonZeroU16 = fail_point!(2);
+const FAIL_POOL: NonZeroU16 = fail_point!(3);
+const FAIL_PARSE: NonZeroU16 = fail_point!(4);
+const FAIL_BUILD: NonZeroU16 = fail_point!(5);
+const FAIL_SCHED_NEW: NonZeroU16 = fail_point!(6);
+const FAIL_SPAWN: NonZeroU16 = fail_point!(7);
+const FAIL_DEADLOCK: NonZeroU16 = fail_point!(8);
+const FAIL_NO_PREEMPT: NonZeroU16 = fail_point!(9);
+const FAIL_PREEMPT_STORAGE: NonZeroU16 = fail_point!(10);
+const FAIL_UNEXPECTED_SYSCALL: NonZeroU16 = fail_point!(11);
 
 /// Count of latch-gated reschedules the preempt callback performed. The SGI
 /// is the only need-resched source (no timer armed, no device IRQ), so this

@@ -24,6 +24,7 @@
 //! PASS once teardown reclaimed everything and the idempotent miss was
 //! observed; any shortfall writes a distinct failure finisher (fail-loud).
 
+use core::num::NonZeroU16;
 use core::panic::PanicInfo;
 
 use alloc::boxed::Box;
@@ -48,6 +49,7 @@ use tairix_crypto::Ed25519PublicKey;
 use tairix_devmgr::{DeviceManager, DriverCandidate};
 use tairix_drvhost::ImageSource;
 use tairix_fdt::Fdt;
+use tairix_itest_finisher::fail_point;
 use tairix_kalloc::FreeListAllocator;
 use tairix_kernel::aarch64::arch_wrapper::Aarch64BinArch;
 use tairix_kernel::aarch64::spawn_producer::{AARCH64_PROCESS_SPAWN, USER_IMAGE_BIAS};
@@ -100,28 +102,28 @@ const TEST_UNLOADED: EventId = EventId(4312);
 const TEST_PASS: EventId = EventId(4313);
 
 /// Failure finisher codes, distinct per failure site.
-const FAIL_ZERO_FREQ: u16 = 1;
-const FAIL_GIC: u16 = 2;
-const FAIL_POOL: u16 = 3;
-const FAIL_FRAMES: u16 = 4;
-const FAIL_BIAS: u16 = 5;
-const FAIL_TRUST: u16 = 6;
-const FAIL_SCHED_NEW: u16 = 7;
-const FAIL_SPAWN: u16 = 8;
+const FAIL_ZERO_FREQ: NonZeroU16 = fail_point!(1);
+const FAIL_GIC: NonZeroU16 = fail_point!(2);
+const FAIL_POOL: NonZeroU16 = fail_point!(3);
+const FAIL_FRAMES: NonZeroU16 = fail_point!(4);
+const FAIL_BIAS: NonZeroU16 = fail_point!(5);
+const FAIL_TRUST: NonZeroU16 = fail_point!(6);
+const FAIL_SCHED_NEW: NonZeroU16 = fail_point!(7);
+const FAIL_SPAWN: NonZeroU16 = fail_point!(8);
 /// The freshly-autoloaded driver was not live (not admitted, or its caps /
 /// address space were never registered) — the spawn half is broken.
-const FAIL_NOT_LIVE: u16 = 9;
+const FAIL_NOT_LIVE: NonZeroU16 = fail_point!(9);
 /// `terminate_driver_process` refused to tear down a live driver.
-const FAIL_UNLOAD: u16 = 10;
+const FAIL_UNLOAD: NonZeroU16 = fail_point!(10);
 /// The scheduler task survived the unload (was not reaped).
-const FAIL_STILL_LIVE: u16 = 11;
+const FAIL_STILL_LIVE: NonZeroU16 = fail_point!(11);
 /// The driver's capability record survived the unload.
-const FAIL_CAPS_LEFT: u16 = 12;
+const FAIL_CAPS_LEFT: NonZeroU16 = fail_point!(12);
 /// The driver's address-space-registry entry survived the unload.
-const FAIL_ASPACE_LEFT: u16 = 13;
+const FAIL_ASPACE_LEFT: NonZeroU16 = fail_point!(13);
 /// A second unload of the now-gone handle did not fail closed with
 /// `NotFound` — the teardown is not idempotent.
-const FAIL_NOT_IDEMPOTENT: u16 = 14;
+const FAIL_NOT_IDEMPOTENT: NonZeroU16 = fail_point!(14);
 
 /// Size of the test's bump heap (4 MiB).
 const HEAP_SIZE: usize = 4 * 1024 * 1024;

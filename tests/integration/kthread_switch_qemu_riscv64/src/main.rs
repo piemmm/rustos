@@ -60,6 +60,7 @@ extern crate alloc;
 
 #[cfg(itest_riscv64)]
 mod kernel {
+    use core::num::NonZeroU16;
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -71,6 +72,7 @@ mod kernel {
     use tairix_arch_riscv64::{
         handle_panic_via_serial, qemu_exit, RiscvArch, RiscvArchStorage, SERIAL_SINK,
     };
+    use tairix_itest_finisher::fail_point;
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel_core::spawn_kthread;
     use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
@@ -95,19 +97,19 @@ mod kernel {
     const TEST_PASS: EventId = EventId(4272);
 
     /// Failure finisher code: the device tree advertised no timebase.
-    const FAIL_NO_TIMEBASE: u16 = 1;
+    const FAIL_NO_TIMEBASE: NonZeroU16 = fail_point!(1);
     /// Failure finisher code: the boot hart was not hart 0.
-    const FAIL_UNEXPECTED_HART: u16 = 2;
+    const FAIL_UNEXPECTED_HART: NonZeroU16 = fail_point!(2);
     /// Failure finisher code: the scheduler could not be constructed.
-    const FAIL_SCHED_NEW: u16 = 3;
+    const FAIL_SCHED_NEW: NonZeroU16 = fail_point!(3);
     /// Failure finisher code: a kthread failed to spawn.
-    const FAIL_SPAWN: u16 = 4;
+    const FAIL_SPAWN: NonZeroU16 = fail_point!(4);
     /// Failure finisher code: the cooperative loop did not drain the
     /// kthreads (a switch that never resumed, e.g.).
-    const FAIL_DEADLOCK: u16 = 5;
+    const FAIL_DEADLOCK: NonZeroU16 = fail_point!(5);
     /// Failure finisher code: a kthread's run count disagreed with the
     /// expected ping-pong count.
-    const FAIL_COUNT: u16 = 6;
+    const FAIL_COUNT: NonZeroU16 = fail_point!(6);
 
     /// Per-kthread run counters; index `i` counts kthread `i`'s yields.
     static RUNS: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];

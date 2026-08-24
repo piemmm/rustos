@@ -40,9 +40,8 @@
 //! # No `unwrap` / `expect` / `panic!`
 //!
 //! The `virt` argv assembly is infallible, so this module has no
-//! production `Result` to propagate. The only `expect`s
-//! in this file live inside `#[cfg(test)]` blocks 's tests
-//! carve-out.
+//! production `Result` to propagate. The only `expect`s in this file live
+//! inside `#[cfg(test)]` blocks.
 
 use std::ffi::OsString;
 use std::path::Path;

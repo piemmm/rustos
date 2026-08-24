@@ -10,6 +10,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
+use core::num::NonZeroU16;
 use core::ptr;
 
 use tairix_abi::driver::display::{Display, DisplayFormat};
@@ -32,6 +33,7 @@ use tairix_test_riscv64_boot::published_dtb;
 use tairix_fwcfg::{FwCfg, MmioDma, RamfbConfig, DRM_FORMAT_XRGB8888};
 
 use crate::fixture::{FB_IMAGE, SYSCALL_TABLE_HASH, TRUSTED_SIGNER_PUBKEY};
+use tairix_itest_finisher::fail_point;
 
 // --- Framebuffer geometry --------------------------------------------
 
@@ -51,6 +53,8 @@ const FB_BYTES: usize = (STRIDE * HEIGHT) as usize;
 /// Bookkeeping virtual base of the register-window map (the windows are
 /// reached through the identity map, so this only keys the slot bitmap).
 const MMIO_VBASE: u64 = 0x6000_0000;
+/// Failure finisher codes, distinct per failure site.
+const FAIL_SCENARIO: NonZeroU16 = fail_point!(1);
 /// Capacity in pages of the register-window map: the surface is
 /// `FB_BYTES` (4 pages) and the vertical mints three windows
 /// (two driver loads + one verification), each bracketed by two guard
@@ -99,7 +103,7 @@ fn log(msg: &str) {
 /// Log `msg` and flip QEMU to failure. Never returns.
 fn fail(msg: &str) -> ! {
     log(msg);
-    qemu_exit::exit_failure(1)
+    qemu_exit::exit_failure(FAIL_SCENARIO)
 }
 
 // --- Host plumbing ---------------------------------------------------

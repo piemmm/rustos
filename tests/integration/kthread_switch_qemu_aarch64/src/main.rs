@@ -59,6 +59,7 @@ extern crate alloc;
 
 #[cfg(itest_aarch64)]
 mod kernel {
+    use core::num::NonZeroU16;
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -71,6 +72,7 @@ mod kernel {
     };
     use tairix_arch_api::CpuId;
     use tairix_fdt::Fdt;
+    use tairix_itest_finisher::fail_point;
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel_core::spawn_kthread;
     use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
@@ -100,23 +102,23 @@ mod kernel {
     const TEST_PASS: EventId = EventId(4262);
 
     /// Failure finisher code: the discovered timer frequency was zero.
-    const FAIL_ZERO_FREQ: u16 = 1;
+    const FAIL_ZERO_FREQ: NonZeroU16 = fail_point!(1);
     /// Failure finisher code: the GICv2 base was not discovered from the
     /// embedded `virt` device tree (P4).
-    const FAIL_GIC_NOT_DISCOVERED: u16 = 2;
+    const FAIL_GIC_NOT_DISCOVERED: NonZeroU16 = fail_point!(2);
     /// Failure finisher code: the scheduler could not be constructed.
-    const FAIL_SCHED_NEW: u16 = 3;
+    const FAIL_SCHED_NEW: NonZeroU16 = fail_point!(3);
     /// Failure finisher code: a kthread failed to spawn.
-    const FAIL_SPAWN: u16 = 4;
+    const FAIL_SPAWN: NonZeroU16 = fail_point!(4);
     /// Failure finisher code: the cooperative loop did not drain the
     /// kthreads (a switch that never resumed, e.g.).
-    const FAIL_DEADLOCK: u16 = 5;
+    const FAIL_DEADLOCK: NonZeroU16 = fail_point!(5);
     /// Failure finisher code: a kthread's run count disagreed with the
     /// expected ping-pong count.
-    const FAIL_COUNT: u16 = 6;
+    const FAIL_COUNT: NonZeroU16 = fail_point!(6);
     /// Failure finisher code: a resumed kthread inherited another
     /// continuation's IRQ mask.
-    const FAIL_DAIF: u16 = 7;
+    const FAIL_DAIF: NonZeroU16 = fail_point!(7);
 
     /// A deliberately-wrong GICv2 base installed before discovery runs, so
     /// reaching the `virt` distributor base can only mean discovery

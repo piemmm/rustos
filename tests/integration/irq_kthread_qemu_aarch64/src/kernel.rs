@@ -3,6 +3,7 @@
 //! in-kernel service kthread parked on it through
 //! [`tairix_kernel_core::KthreadIrqWaiter`] under the live eevdf scheduler.
 
+use core::num::NonZeroU16;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -18,6 +19,7 @@ use tairix_arch_aarch64::{
     exceptions, handle_panic_via_serial, qemu_exit, Aarch64Arch, Aarch64ArchStorage, SERIAL_SINK,
 };
 use tairix_fdt::Fdt;
+use tairix_itest_finisher::fail_point;
 use tairix_kernel_core::{spawn_kthread, CooperativeYield, KthreadIrqWaiter, YielderHandle};
 use tairix_kernel_irq::{block_until_ready, IrqController, IrqTable, MaskError, WaitOutcome};
 use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
@@ -77,19 +79,19 @@ const TEST_SPAWNED: EventId = EventId(4301);
 const TEST_PASS: EventId = EventId(4302);
 
 /// Semihosting failure codes, distinct per failure site.
-const FAIL_REENTRY: u16 = 1;
-const FAIL_FDT: u16 = 2;
-const FAIL_ZERO_FREQ: u16 = 3;
-const FAIL_GIC: u16 = 4;
-const FAIL_NO_RTC: u16 = 5;
-const FAIL_NO_SPI: u16 = 6;
-const FAIL_BIND: u16 = 7;
-const FAIL_DISPATCH_INSTALL: u16 = 8;
-const FAIL_SCHED_NEW: u16 = 9;
-const FAIL_SPAWN: u16 = 10;
-const FAIL_DEADLOCK: u16 = 11;
-const FAIL_NOT_WOKEN: u16 = 12;
-const FAIL_NOT_MASKED: u16 = 13;
+const FAIL_REENTRY: NonZeroU16 = fail_point!(1);
+const FAIL_FDT: NonZeroU16 = fail_point!(2);
+const FAIL_ZERO_FREQ: NonZeroU16 = fail_point!(3);
+const FAIL_GIC: NonZeroU16 = fail_point!(4);
+const FAIL_NO_RTC: NonZeroU16 = fail_point!(5);
+const FAIL_NO_SPI: NonZeroU16 = fail_point!(6);
+const FAIL_BIND: NonZeroU16 = fail_point!(7);
+const FAIL_DISPATCH_INSTALL: NonZeroU16 = fail_point!(8);
+const FAIL_SCHED_NEW: NonZeroU16 = fail_point!(9);
+const FAIL_SPAWN: NonZeroU16 = fail_point!(10);
+const FAIL_DEADLOCK: NonZeroU16 = fail_point!(11);
+const FAIL_NOT_WOKEN: NonZeroU16 = fail_point!(12);
+const FAIL_NOT_MASKED: NonZeroU16 = fail_point!(13);
 
 /// Set once the scenario has been driven so a re-entry cannot re-run it.
 static TEST_DRIVEN: AtomicBool = AtomicBool::new(false);

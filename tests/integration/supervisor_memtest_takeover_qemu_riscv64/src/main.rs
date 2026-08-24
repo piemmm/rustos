@@ -56,11 +56,13 @@
 
 #[cfg(itest_riscv64)]
 mod kernel {
+    use core::num::NonZeroU16;
     use core::panic::PanicInfo;
 
     use tairix_arch_riscv64::{
         handle_panic_via_serial, qemu_exit, serial, SerialSink, SERIAL_SINK,
     };
+    use tairix_itest_finisher::fail_point;
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_log::{Event, EventId, Sink};
     use tairix_supervisor::Report;
@@ -86,6 +88,8 @@ mod kernel {
     /// it is live by the time this record is emitted). Pinned by the
     /// `event_ids_are_unique` test in `kernel/core/src/audit.rs`.
     const BOOT_COMPLETED_EVENT_ID: EventId = EventId(4004);
+    /// Failure finisher codes, distinct per failure site.
+    const FAIL_TAKEOVER_REFUSED: NonZeroU16 = fail_point!(1);
 
     /// A [`Report`] sink that streams the takeover's memtest86-style display
     /// straight to the SBI console, so the QEMU transcript records it.
@@ -120,7 +124,7 @@ mod kernel {
             }
             // Reaching here means the takeover was refused or unsupported —
             // a regression on a port that is supposed to reset. Fail loud.
-            qemu_exit::exit_failure(1);
+            qemu_exit::exit_failure(FAIL_TAKEOVER_REFUSED);
         }
     }
 

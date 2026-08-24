@@ -55,12 +55,14 @@
 
 #[cfg(itest_aarch64)]
 mod kernel {
+    use core::num::NonZeroU16;
     use core::panic::PanicInfo;
 
     use tairix_arch_aarch64::paging::{AddressSpace, PageTablePool, BLOCK_2MIB, PAGE_SIZE};
     use tairix_arch_aarch64::{exceptions, fault, handle_panic_via_serial, qemu_exit, SERIAL_SINK};
     use tairix_arch_api::mmu::AddressSpace as _;
     use tairix_arch_api::tlb::TlbShootdown as _;
+    use tairix_itest_finisher::fail_point;
     use tairix_log::{log, Event, EventId, Field, Level};
 
     /// Number of GiB the space identity-maps (device MMIO + RAM). The
@@ -77,6 +79,10 @@ mod kernel {
     const SA_TEST_START: EventId = EventId(4303);
     const SA_TEST_PASS: EventId = EventId(4304);
     const SA_TEST_FAIL: EventId = EventId(4305);
+    /// Failure finisher codes, distinct per failure site.
+    const FAIL_NO_FAULT: NonZeroU16 = fail_point!(2);
+    const FAIL_UNEXPECTED_FAULT: NonZeroU16 = fail_point!(3);
+    const FAIL_SETUP: NonZeroU16 = fail_point!(4);
 
     /// Page-table pool backing the address space (lives in `.bss`).
     static POOL: PageTablePool = PageTablePool::new();
@@ -125,7 +131,7 @@ mod kernel {
                 fields: &[],
             },
         );
-        qemu_exit::exit_failure(3);
+        qemu_exit::exit_failure(FAIL_UNEXPECTED_FAULT);
     }
 
     /// Forward to the shared aarch64 panic bridge (parks the CPU; the run
@@ -234,7 +240,7 @@ mod kernel {
                 }],
             },
         );
-        qemu_exit::exit_failure(2);
+        qemu_exit::exit_failure(FAIL_NO_FAULT);
     }
 
     /// Touch a chunk of the running kernel stack and read it back, proving
@@ -272,7 +278,7 @@ mod kernel {
                 }],
             },
         );
-        qemu_exit::exit_failure(4);
+        qemu_exit::exit_failure(FAIL_SETUP);
     }
 }
 

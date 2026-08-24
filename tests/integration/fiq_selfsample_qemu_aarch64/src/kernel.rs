@@ -2,6 +2,7 @@
 //! self-sample observes a `DAIF.I`-masked kernel busy-spin (`plans/WATCHDOG.md`
 //! B3, `plans/OPEN-DEFECTS.md` D13).
 
+use core::num::NonZeroU16;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
@@ -11,6 +12,7 @@ use tairix_arch_aarch64::{
 };
 use tairix_arch_api::{CpuId, FeatureSupport};
 use tairix_fdt::Fdt;
+use tairix_itest_finisher::fail_point;
 use tairix_log::{log, Event, EventId, Level};
 
 // The canonical QEMU `virt` device tree, dumped and embedded at build time.
@@ -65,19 +67,19 @@ const TEST_PROBED: EventId = EventId(4331);
 const TEST_PASS: EventId = EventId(4332);
 
 /// Semihosting failure codes, distinct per failure site.
-const FAIL_REENTRY: u16 = 1;
-const FAIL_FDT: u16 = 2;
-const FAIL_ZERO_FREQ: u16 = 3;
-const FAIL_GIC: u16 = 4;
-const FAIL_PROBE_UNSUPPORTED: u16 = 5;
-const FAIL_NO_SAMPLE: u16 = 6;
-const FAIL_IRQ_NOT_MASKED: u16 = 7;
-const FAIL_NOT_KERNEL: u16 = 8;
-const FAIL_PC_OUT_OF_RANGE: u16 = 9;
-const FAIL_BT_EMPTY: u16 = 10;
-const FAIL_BT_MISMATCH: u16 = 11;
-const FAIL_CADENCE_NOT_FIQ: u16 = 12;
-const FAIL_EL0_FIQ_MASKED: u16 = 13;
+const FAIL_REENTRY: NonZeroU16 = fail_point!(1);
+const FAIL_FDT: NonZeroU16 = fail_point!(2);
+const FAIL_ZERO_FREQ: NonZeroU16 = fail_point!(3);
+const FAIL_GIC: NonZeroU16 = fail_point!(4);
+const FAIL_PROBE_UNSUPPORTED: NonZeroU16 = fail_point!(5);
+const FAIL_NO_SAMPLE: NonZeroU16 = fail_point!(6);
+const FAIL_IRQ_NOT_MASKED: NonZeroU16 = fail_point!(7);
+const FAIL_NOT_KERNEL: NonZeroU16 = fail_point!(8);
+const FAIL_PC_OUT_OF_RANGE: NonZeroU16 = fail_point!(9);
+const FAIL_BT_EMPTY: NonZeroU16 = fail_point!(10);
+const FAIL_BT_MISMATCH: NonZeroU16 = fail_point!(11);
+const FAIL_CADENCE_NOT_FIQ: NonZeroU16 = fail_point!(12);
+const FAIL_EL0_FIQ_MASKED: NonZeroU16 = fail_point!(13);
 
 fn note(id: EventId, message: &'static str) {
     log(

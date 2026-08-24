@@ -4,6 +4,7 @@
 //! `SP5b-2`, the riscv64 sibling of `mem_map_qemu_aarch64`).
 
 use core::cell::UnsafeCell;
+use core::num::NonZeroU16;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -18,6 +19,7 @@ use tairix_arch_riscv64::{
     SERIAL_SINK,
 };
 use tairix_itest_finisher::fail_code;
+use tairix_itest_finisher::fail_point;
 use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
 use tairix_kernel_core::{spawn_image, MemMap, SpawnMode, SpawnRequest};
 use tairix_kernel_mem::{
@@ -59,15 +61,15 @@ const TEST_PASS: EventId = EventId(4286);
 const TEST_FAIL: EventId = EventId(4287);
 
 /// `SiFive` Test failure codes, distinct per failure site.
-const FAIL_POOL: u16 = 1;
-const FAIL_PARSE: u16 = 2;
-const FAIL_BUILD: u16 = 3;
-const FAIL_FAULT_INSTALL: u16 = 4;
-const FAIL_UNEXPECTED_SYSCALL: u16 = 5;
-const FAIL_FAULT_MISMATCH: u16 = 6;
+const FAIL_POOL: NonZeroU16 = fail_point!(1);
+const FAIL_PARSE: NonZeroU16 = fail_point!(2);
+const FAIL_BUILD: NonZeroU16 = fail_point!(3);
+const FAIL_FAULT_INSTALL: NonZeroU16 = fail_point!(4);
+const FAIL_UNEXPECTED_SYSCALL: NonZeroU16 = fail_point!(5);
+const FAIL_FAULT_MISMATCH: NonZeroU16 = fail_point!(6);
 /// Base finisher for an early `exit` from the fixture (a verification failure);
 /// the program's exit code is added so the site is identifiable.
-const FAIL_EXIT_BASE: u16 = 100;
+const FAIL_EXIT_BASE: NonZeroU16 = fail_point!(100);
 
 /// `true` once a `mem_map` call returned `Ok` to the program.
 static MAP_OK: AtomicBool = AtomicBool::new(false);
