@@ -17,7 +17,8 @@ use tairix_abi::{Errno, LimitKind, ResourceLimit};
 use crate::builtin::{dispatch, BuiltinContext};
 use crate::env::Environment;
 use crate::host::{
-    Console, Elevator, LaunchSpec, LimitStore, ProcessHost, ResolvedCommand, NULL_ELEVATOR,
+    Console, Elevator, LaunchError, LaunchSpec, LimitStore, ProcessHost, ResolvedCommand,
+    NULL_ELEVATOR,
 };
 use crate::job::{JobTable, Pid, Signal, WaitOutcome};
 
@@ -70,6 +71,7 @@ pub(crate) struct ScriptedHost {
     next_pid: RefCell<u64>,
     launches: RefCell<Vec<LaunchRecord>>,
     fail_launch: RefCell<Option<(String, Errno)>>,
+    fail_redirection: RefCell<Option<Errno>>,
     waits: RefCell<BTreeMap<u64, WaitOutcome>>,
     signals: RefCell<Vec<(Pid, Signal)>>,
     directories: RefCell<Vec<String>>,
@@ -82,6 +84,7 @@ impl ScriptedHost {
             next_pid: RefCell::new(100),
             launches: RefCell::new(Vec::new()),
             fail_launch: RefCell::new(None),
+            fail_redirection: RefCell::new(None),
             waits: RefCell::new(BTreeMap::new()),
             signals: RefCell::new(Vec::new()),
             directories: RefCell::new(Vec::new()),
@@ -100,6 +103,12 @@ impl ScriptedHost {
     /// resolved but is refused).
     pub(crate) fn fail_launch_with(&self, name: &str, errno: Errno) {
         *self.fail_launch.borrow_mut() = Some((name.to_string(), errno));
+    }
+
+    /// Make every `launch` fail while opening a redirection target, as a
+    /// host does for a missing input file or a refused resource reference.
+    pub(crate) fn fail_redirection_with(&self, errno: Errno) {
+        *self.fail_redirection.borrow_mut() = Some(errno);
     }
 
     /// Register the outcome `wait` returns for a given pid.
@@ -127,12 +136,15 @@ impl ScriptedHost {
 }
 
 impl ProcessHost for ScriptedHost {
-    fn launch(&self, spec: &LaunchSpec<'_>) -> Result<Pid, Errno> {
+    fn launch(&self, spec: &LaunchSpec<'_>) -> Result<Pid, LaunchError> {
         if let Some((name, errno)) = self.fail_launch.borrow().as_ref() {
             let first = spec.commands.first().and_then(|c| c.argv.first());
             if first == Some(name) {
-                return Err(*errno);
+                return Err(LaunchError::Spawn(*errno));
             }
+        }
+        if let Some(errno) = *self.fail_redirection.borrow() {
+            return Err(LaunchError::Redirection(errno));
         }
         self.launches.borrow_mut().push(LaunchRecord {
             commands: spec.commands.to_vec(),

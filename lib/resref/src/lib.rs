@@ -314,10 +314,14 @@ pub enum NamespaceBacking {
     /// A byte stream, opened through the kernel resource resolver: it can be
     /// read, written, redirected to, and `cat`-ed like a file.
     Stream,
-    /// A typed value read through the System Information API; never a byte
-    /// stream, so it can never be opened, redirected to, or `cat`-ed. A
-    /// consumer reads it through a broker client (`lib/procinfo`'s resolver)
-    /// instead.
+    /// A typed value read through the System Information API; never a kernel
+    /// byte stream, so the kernel resource resolver opens no descriptor on it
+    /// in any direction. A consumer reads it through a broker client
+    /// (`lib/procinfo`'s resolver) instead — as a printed value
+    /// (`sysinfo show <ref>`), as a tool's own operand (`cat <ref>`), or as
+    /// the shell's value-pipe redirection (`cmd < <ref>`). A *write* has no
+    /// such form: a value-backed resource is changed by a typed service
+    /// command.
     Value,
 }
 

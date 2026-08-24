@@ -43,9 +43,10 @@ como `sys:random`. Um espaço de nomes completa os seus seletores
 registados segmento a segmento (`state:` → `net/` → `wan/` → `link`). Onde o
 registo conhece apenas a forma — um nome de interface, uma linha de
 interrupção —, o Tab oferece os nomes reais da máquina, ou nada se esta sessão
-não os puder listar. Um destino de redireccionamento só oferece espaços de
-nomes que possam ser abertos: `info:`/`state:`/`stats:` aparecem como
-argumento (leem-se com `sysinfo show`), nunca depois de `>`.
+não os puder listar. `info:`/`state:`/`stats:` aparecem como
+argumento e depois de `<`, que lê o valor (`cat < info:mem/physical`), mas
+nunca depois de `>`: tal recurso nunca se escreve por
+redireccionamento.
 
 ## OPTIONS
 

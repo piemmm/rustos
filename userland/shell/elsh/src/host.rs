@@ -147,6 +147,20 @@ pub struct LaunchSpec<'a> {
     pub background: bool,
 }
 
+/// Why a pipeline could not be launched, and at which stage.
+///
+/// The stage decides how the shell words the failure: only a program the
+/// search order could not run is "command not found". A redirection target
+/// that is missing or refused says so against the *target*, so a missing
+/// input file is never reported as a missing command.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum LaunchError {
+    /// A redirection target could not be opened. Nothing was spawned.
+    Redirection(Errno),
+    /// The program could not be spawned.
+    Spawn(Errno),
+}
+
 /// Launches and controls the child processes a pipeline becomes.
 ///
 /// The implementation owns the trusted load pipeline (path resolution,
@@ -158,10 +172,8 @@ pub trait ProcessHost {
     ///
     /// # Errors
     ///
-    /// Returns the host's [`Errno`] verbatim if the pipeline cannot be
-    /// launched (program not found, permission denied, a redirection target
-    /// that cannot be opened, …).
-    fn launch(&self, spec: &LaunchSpec<'_>) -> Result<Pid, Errno>;
+    /// A [`LaunchError`] carrying the host's [`Errno`] and which stage failed.
+    fn launch(&self, spec: &LaunchSpec<'_>) -> Result<Pid, LaunchError>;
 
     /// Block until the foreground job led by `pid` exits or stops.
     ///

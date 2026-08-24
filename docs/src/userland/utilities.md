@@ -71,12 +71,28 @@ hatch from the "no raw query id" rule: a reference is a *name*, which the
 shared `lib/procinfo` resolver maps onto a registry-defined query and fails
 closed on anything outside its served set, so no new query surface is
 reachable. They exist because `info:`, `state:`, and `stats:` are
-*value-backed* — typed values read through the broker, never byte streams —
-so `cat info:mem/physical` cannot work by construction (the kernel resolver
-refuses it with `Errno::NotSupported`), and a command is how such a value is
-read. A denial names the capability the query declares, taken from the frozen
-registry, so the user learns which grant to ask for; a rate missing its
-mandatory `?window=` fails closed before any query is issued.
+*value-backed* — typed values read through the broker, never kernel byte
+streams — so the kernel resource resolver opens no descriptor on one and every
+reader goes through `sysinfod`. A denial names the capability the query
+declares, taken from the frozen registry, so the user learns which grant to
+ask for; a rate missing its mandatory `?window=` fails closed before any query
+is issued.
+
+There are two other spellings of the same read, both through the broker and
+both rendering identical bytes:
+
+- `cat info:mem/physical` — the reference as an **operand**. `cat` resolves it
+  itself through the shared `tairix_procinfo::NamedSource`, so its own
+  manifest carries the `CAP_SYSINFO_*` request (intersected with the account
+  ceiling, refused with the capability named otherwise).
+- `cat < info:mem/physical` — a **read redirection**. `elsh` resolves it and
+  hands the child a filled pipe, so the child reads an ordinary descriptor and
+  needs no `CAP_SYSINFO_*` of its own. This is the spelling that works for
+  every stdin-reading tool — `wc -l < stats:uptime`,
+  `head -c 8 < info:system/machine-id` — without widening each one.
+
+Writing at a value-backed reference stays refused in every direction: such a
+resource is changed by a typed service command.
 
 ### A request/render machine, not a data source
 

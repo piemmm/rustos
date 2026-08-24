@@ -4,11 +4,16 @@
 # the launching user's grants. The console pair covers the inherited
 # standard streams (`-` and the no-operand default read standard input);
 # CAP_FS_ACCESS is the tool's job — reading its file operands (and its own
-# bundle's Help/ documents) through the secured VFS.
+# bundle's Help/ documents) through the secured VFS. The CAP_SYSINFO_* trio
+# is for an info:/state:/stats: operand, whose value the tool reads through
+# the sysinfod broker because no kernel backing can serve a typed value; it
+# is an optional request above the session baseline, armed only when the
+# launching account's ceiling carries it and refused with a stated reason
+# otherwise, and every query is still gated at the broker.
 id = "os.tairix.cat"
 name = "cat"
 version = "0.1.0"
 kind = "command"
-capabilities = ["CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_FS_ACCESS"]
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_FS_ACCESS", "CAP_SYSINFO_GLOBAL", "CAP_SYSINFO_KERNEL", "CAP_SYSINFO_HW"]
 # This bundle's own 256x256 icon master in its Resources/ (plans/ICONS.md).
 library-icon = "cat.png"

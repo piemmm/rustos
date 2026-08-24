@@ -8,7 +8,10 @@
 //! which child, and which byte-pumping work the shell performs on its own
 //! pipe ends between spawn and wait. Keeping the lowering pure keeps every
 //! decision host-testable without a kernel; the runtime host merely executes
-//! the plan through `fs_open`/`resource_open`/`pipe_create`/`spawn_attached`.
+//! the plan through
+//! `fs_open`/`resource_open`/`pipe_create`/`spawn_attached`, plus one System
+//! Information API query for a read of a value-backed reference, which no
+//! kernel backing can represent.
 //!
 //! Fail closed: a redirection the attach block cannot express (a descriptor
 //! outside fd 0–3), a duplication of an unopened dynamic descriptor, or a
@@ -20,6 +23,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::fs::OpenFlags;
 use tairix_abi::Errno;
+use tairix_resref::{KnownNamespace, NamespaceBacking, ResourceRef};
 
 use crate::host::{LaunchSpec, RedirAction, RedirTarget, ResolvedCommand};
 use crate::parser::OpenMode;
@@ -52,6 +56,24 @@ pub enum PlannedOpen {
         reference: String,
         /// The open flags the redirection's mode derived.
         flags: OpenFlags,
+    },
+    /// Read the value-backed reference through the System Information API and
+    /// present it to the child as a pipe.
+    ///
+    /// The kernel resolver cannot serve `info:`/`state:`/`stats:` — resolving
+    /// a typed broker value kernel-side would bypass the broker's
+    /// per-principal scoping — so the shell reads it under its own attested
+    /// identity and the child reads an ordinary descriptor
+    /// (`plans/ALIAS.md` §6.2).
+    ///
+    /// This entry is the pipe's **read end** and, unlike
+    /// [`PlannedOpen::PipeRead`], has no paired write-end entry: the executor
+    /// fills and closes the write end within the open phase. Only the
+    /// reference spelling travels in the plan — a fact may be sensitive
+    /// (`info:system/machine-id` is), and the plan outlives the read.
+    ValuePipe {
+        /// The reference's canonical spelling (e.g. `info:mem/physical`).
+        reference: String,
     },
     /// Mint a pipe (`pipe_create`). This planned open is the pipe's **read
     /// end**; its paired write end is the [`PlannedOpen::PipeWrite`] that
@@ -325,13 +347,33 @@ fn plan_open(opens: &mut Vec<PlannedOpen>, mode: OpenMode, target: &RedirTarget)
             flags,
         },
         // `ResourceRef`'s `Display` renders the canonical spelling, which
-        // re-parses to an equal reference kernel-side.
+        // re-parses to an equal reference on whichever side resolves it.
+        RedirTarget::Resource(reference) if reads_a_value(mode, reference) => {
+            PlannedOpen::ValuePipe {
+                reference: reference.to_string(),
+            }
+        }
         RedirTarget::Resource(reference) => PlannedOpen::Resource {
             reference: reference.to_string(),
             flags,
         },
     });
     id
+}
+
+/// Whether this redirection is a *read* of a *value-backed* reference — the
+/// one shape the shell serves itself.
+///
+/// A value-backed resource is changed by a typed service command, never by
+/// writing text at it, so `>`, `>>`, and `<>` keep reaching the kernel
+/// resolver and its refusal (`plans/ALIAS.md` §6.4). `<>` is refused despite
+/// its read half: serving half a request would silently downgrade it. The
+/// backing comes from [`KnownNamespace::backing`], the same classifier the
+/// kernel refuses on, so the two cannot disagree about which are streams.
+fn reads_a_value(mode: OpenMode, reference: &ResourceRef) -> bool {
+    matches!(mode, OpenMode::Read)
+        && reference.namespace().known().map(KnownNamespace::backing)
+            == Some(NamespaceBacking::Value)
 }
 
 /// The [`OpenFlags`] each redirection [`OpenMode`] opens its target with —
@@ -473,6 +515,141 @@ mod tests {
             panic!("expected a resource open, got {:?}", plan.opens[0]);
         };
         assert_eq!(reference, "sys:null");
+    }
+
+    /// `cat < info:mem/physical`: a *read* of a value-backed reference lowers
+    /// to a value pipe, whose read end is wired to the child's fd 0. This is
+    /// the shape the kernel resolver cannot serve — a typed value is not a
+    /// kernel byte stream — so the shell reads it over the System Information
+    /// API instead (`plans/ALIAS.md` §6.2).
+    #[test]
+    fn reading_a_value_backed_reference_plans_a_value_pipe() {
+        for reference in [
+            "info:mem/physical",
+            "info:system/machine-id",
+            "state:net/resolver/servers",
+            "stats:uptime",
+        ] {
+            let commands = [command(&["cat"], vec![open(0, OpenMode::Read, reference)])];
+            let plan = spec_plan(&commands).expect("lowers");
+            assert_eq!(
+                plan.opens,
+                vec![PlannedOpen::ValuePipe {
+                    reference: reference.to_string()
+                }],
+                "{reference} reads as a value pipe"
+            );
+            // One planned open, not a read/write pair: the executor fills and
+            // closes the write end itself, so no pump retains it.
+            assert_eq!(plan.members[0].wires[0], PlannedWire::Handle(OpenId(0)));
+            assert!(plan.pumps.is_empty(), "{reference} needs no pump");
+            assert_eq!(plan.retained(), vec![], "{reference} retains nothing");
+            assert_eq!(plan.transferred(), vec![OpenId(0)]);
+        }
+    }
+
+    /// The plan carries the reference, never the value. A fact can be
+    /// sensitive (`info:system/machine-id`), and the plan is a `Debug`-able
+    /// structure that outlives the read, so the value belongs only in the
+    /// executor's hand for as long as the pipe write takes.
+    #[test]
+    fn a_value_pipe_plan_holds_no_value() {
+        let commands = [command(
+            &["cat"],
+            vec![open(0, OpenMode::Read, "info:system/machine-id")],
+        )];
+        let plan = spec_plan(&commands).expect("lowers");
+        let PlannedOpen::ValuePipe { reference } = &plan.opens[0] else {
+            panic!("expected a value pipe, got {:?}", plan.opens[0]);
+        };
+        assert_eq!(reference, "info:system/machine-id");
+        // Nothing anywhere in the plan but the spelling itself.
+        assert!(plan.pumps.is_empty());
+    }
+
+    /// Every *write* direction keeps lowering to a kernel `resource_open`, so
+    /// the kernel still refuses it with `Errno::NotSupported`: a value-backed
+    /// reference is changed by a typed service command, never by writing text
+    /// at it (`plans/ALIAS.md` §6.4). `<>` is refused too — half of what it
+    /// asks for is unserviceable, so granting the read half would silently
+    /// downgrade the request.
+    #[test]
+    fn writing_a_value_backed_reference_stays_the_kernels_refusal() {
+        for mode in [
+            OpenMode::Write { clobber: false },
+            OpenMode::Write { clobber: true },
+            OpenMode::Append { clobber: false },
+            OpenMode::ReadWrite,
+        ] {
+            let commands = [command(&["ls"], vec![open(1, mode, "info:mem/physical")])];
+            let plan = spec_plan(&commands).expect("lowers");
+            assert!(
+                matches!(&plan.opens[0], PlannedOpen::Resource { reference, .. }
+                    if reference == "info:mem/physical"),
+                "{mode:?} must reach the kernel resolver, got {:?}",
+                plan.opens[0]
+            );
+        }
+    }
+
+    /// A *stream* namespace read is untouched: `sys:random` is a kernel
+    /// backing, so it still opens through `resource_open`. The split is on the
+    /// registry's own backing classification, so exactly one reader serves
+    /// each namespace.
+    #[test]
+    fn reading_a_stream_reference_still_opens_through_the_kernel() {
+        let commands = [command(
+            &["head"],
+            vec![open(0, OpenMode::Read, "sys:random")],
+        )];
+        let plan = spec_plan(&commands).expect("lowers");
+        assert!(
+            matches!(&plan.opens[0], PlannedOpen::Resource { reference, .. }
+                if reference == "sys:random"),
+            "got {:?}",
+            plan.opens[0]
+        );
+    }
+
+    /// An all-input multios may mix value pipes with ordinary sources: each is
+    /// a read end the shared `Concat` pump drains in order, so
+    /// `cat < info:system/hostname < notes.txt` concatenates the two.
+    #[test]
+    fn an_input_multios_may_concatenate_a_value_pipe() {
+        let commands = [command(
+            &["cat"],
+            vec![ResolvedRedirection {
+                fd: 0,
+                action: RedirAction::Multi {
+                    targets: vec![
+                        (
+                            OpenMode::Read,
+                            classify_redirect_target("info:system/hostname".to_string())
+                                .expect("reference"),
+                        ),
+                        (
+                            OpenMode::Read,
+                            classify_redirect_target("notes.txt".to_string()).expect("path"),
+                        ),
+                    ],
+                },
+            }],
+        )];
+        let plan = spec_plan(&commands).expect("lowers");
+        assert_eq!(
+            plan.opens[0],
+            PlannedOpen::ValuePipe {
+                reference: "info:system/hostname".to_string()
+            }
+        );
+        assert!(matches!(&plan.opens[1], PlannedOpen::Path { path, .. } if path == "notes.txt"));
+        assert_eq!(
+            plan.pumps,
+            vec![PumpTask::Concat {
+                into: OpenId(3),
+                sources: vec![OpenId(0), OpenId(1)],
+            }]
+        );
     }
 
     #[test]

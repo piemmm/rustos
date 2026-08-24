@@ -131,6 +131,64 @@ impl ResolveInfoError {
             _ => None,
         }
     }
+
+    /// The stable [`Errno`] this refusal reports at a syscall or tool
+    /// boundary, which cannot carry the variant.
+    ///
+    /// Spelled to match the kernel resource resolver's own mapping where the
+    /// cases correspond, so one refusal reads the same whichever resolver
+    /// caught it: an unknown selector is [`Errno::NotFound`], an
+    /// unserviceable request [`Errno::OutOfRange`], and a namespace this
+    /// resolver does not own [`Errno::NotSupported`].
+    #[must_use]
+    pub fn to_errno(self) -> Errno {
+        match self {
+            Self::CapabilityDenied(_) => Errno::PermissionDenied,
+            Self::Service(errno) => errno,
+            Self::UnknownSelector => Errno::NotFound,
+            Self::UnsupportedRequest => Errno::OutOfRange,
+            // A reply the decoder rejected is a service fault, not a request
+            // the caller can respell.
+            Self::NamespaceNotServed | Self::Malformed => Errno::NotSupported,
+        }
+    }
+}
+
+/// Spell a refusal for a human, naming the missing capability when that is what
+/// was missing.
+///
+/// The one wording, shared by every reader of a value-backed reference, so the
+/// same refusal reads the same whether `sysinfo show` printed it, the shell
+/// refused a redirection, or a tool refused an operand. The capability comes
+/// from the frozen query registry the broker gates on, so a diagnostic can
+/// never name one the service does not require; a denial whose query the
+/// registry declares ungated names none, there being nothing to grant.
+impl core::fmt::Display for ResolveInfoError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NamespaceNotServed => f.write_str(
+                "not a readable resource: only info:, state:, and stats: references have values",
+            ),
+            Self::UnknownSelector => {
+                f.write_str("no such resource: the selector names nothing this system serves")
+            }
+            Self::UnsupportedRequest => f.write_str(
+                "unserviceable reference: an unsupported guard, facet, or query parameter, \
+                 or a rate missing its mandatory ?window=",
+            ),
+            Self::CapabilityDenied(_) => {
+                f.write_str("permission denied: this resource requires ")?;
+                match self.required_capability().and_then(CapabilityId::name) {
+                    Some(name) => f.write_str(name),
+                    None => f.write_str("a capability you do not hold"),
+                }
+            }
+            Self::Malformed => f.write_str(
+                "the system information service replied with a record that did not decode",
+            ),
+            Self::Service(errno) => write!(f, "system information service error: {errno}"),
+        }
+    }
 }
 
 /// Resolve an `info:`/`stats:` `reference` to a [`ResourceResponse`], reading
@@ -2741,6 +2799,41 @@ mod tests {
 
     /// A capability refusal names the authority that was missing, taken from
     /// the frozen `sysinfo-v1` registry the broker gates on rather than a
+    /// The one refusal-to-errno mapping every reader shares. Spelled to match
+    /// the kernel resource resolver where the cases correspond, so a caller
+    /// cannot tell which resolver refused from the errno alone.
+    #[test]
+    fn every_refusal_maps_to_its_stable_errno() {
+        assert_eq!(
+            ResolveInfoError::CapabilityDenied(SysinfoQueryId::KERNEL_MEMORY_STATS).to_errno(),
+            Errno::PermissionDenied
+        );
+        assert_eq!(
+            ResolveInfoError::UnknownSelector.to_errno(),
+            Errno::NotFound
+        );
+        assert_eq!(
+            ResolveInfoError::UnsupportedRequest.to_errno(),
+            Errno::OutOfRange
+        );
+        assert_eq!(
+            ResolveInfoError::NamespaceNotServed.to_errno(),
+            Errno::NotSupported
+        );
+        assert_eq!(ResolveInfoError::Malformed.to_errno(), Errno::NotSupported);
+        // A service refusal is passed through, never re-labelled.
+        assert_eq!(
+            ResolveInfoError::Service(Errno::EndpointStalled).to_errno(),
+            Errno::EndpointStalled
+        );
+        // The unknown-selector and unserviceable-request codes agree with the
+        // kernel resolver's own, which is the point of spelling them here.
+        assert_eq!(
+            ResolveInfoError::UnknownSelector.to_errno(),
+            Errno::NotFound
+        );
+    }
+
     /// second table here — so a caller can tell the user which grant to ask
     /// for instead of a bare "permission denied".
     #[test]

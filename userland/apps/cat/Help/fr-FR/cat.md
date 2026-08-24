@@ -15,9 +15,13 @@ opérande l'entrée standard est l'unique source.
 Un opérande peut aussi être une référence de ressource typée comme
 `sys:random` : elle est ouverte par le résolveur de ressources du
 système (contrôlé par capacités) plutôt que par le système de fichiers —
-`cat sys:random` produit des octets aléatoires. Une référence mal formée
-dans un espace de noms enregistré est une erreur, jamais un repli vers
-un nom de fichier.
+`cat sys:random` produit des octets aléatoires. Une référence `info:`,
+`state:` ou `stats:` nomme une valeur système typée plutôt qu'un flux ;
+elle est lue via le service d'informations système, donc
+`cat info:mem/physical` affiche cette valeur, et une lecture non
+autorisée est refusée en nommant la capacité requise. Une référence mal
+formée dans un espace de noms enregistré est une erreur, jamais un repli
+vers un nom de fichier.
 
 Avec `-n`, les lignes de sortie sont numérotées en continu sur toutes
 les sources, de sorte qu'une ligne à cheval sur deux sources n'est

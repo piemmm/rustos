@@ -5,13 +5,16 @@ command app registered at `/System/Commands/cat.app/Run` so the shell
 resolves the bare word `cat` to it. `cat` reads each of its sources in
 order and writes the bytes to the terminal. A source is a path, standard
 input (the `-` operand, and the default when no operand is given), or a
-typed resource reference (`sys:random`). The reference support is not
-cat's: `tairix_rt::File::open` — the one open-by-name path every
-command app uses — applies the shared `lib/resref` spelling rule and
-routes a reference to the kernel's capability-checked `resource_open`
-resolver rather than the filesystem, so `cat sys:random` streams the
-kernel CSPRNG; a malformed reference in a registered namespace fails
-closed, never a filename fallback. The option surface is
+typed resource reference (`sys:random`, `info:mem/physical`). The
+reference support is not cat's: `tairix_procinfo::NamedSource` — the one
+open-by-name path for a readable source — applies the shared `lib/resref`
+spelling rule, routes a path or stream reference to the kernel's
+capability-checked `fs_open`/`resource_open`, and reads an
+`info:`/`state:`/`stats:` value through the `sysinfod` broker, which no
+kernel backing can serve. So `cat sys:random` streams the kernel CSPRNG
+and `cat info:mem/physical` prints that fact; a malformed reference in a
+registered namespace fails closed, never a filename fallback, and a value
+the account may not read is refused naming the capability it needs. The option surface is
 the GNU `cat` set (`AGENTS.md` §16.7):
 numbering (`-n`, non-blank `-b`), blank-line squeezing (`-s`), and the
 visibility markers (`-E`, `-T`, `-v`, plus the combinations `-e`, `-t`,
@@ -22,12 +25,17 @@ usage banner when the tree is unavailable.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-dependencies are the audited `tairix-abi` vocabulary and the shared
-`tairix-help` engine, so it never links a kernel or driver crate
-(`AGENTS.md` §17.4). Its manifest (`AppInfo.toml`) requests
-`CAP_CONSOLE_WRITE`, `CAP_CONSOLE_READ`, and `CAP_FS_ACCESS` — within
-the session baseline — and the secured VFS still authorises every path
-per-inode under the caller's attested identity.
+dependencies are the audited `tairix-abi` vocabulary, the shared
+`tairix-help` engine, and — for the freestanding `Run` binary only — the
+shared `tairix-procinfo` client whose `NamedSource` opens its sources, so
+it never links a kernel or driver crate (`AGENTS.md` §17.4). Its manifest (`AppInfo.toml`) requests
+`CAP_CONSOLE_WRITE`, `CAP_CONSOLE_READ`, `CAP_FS_ACCESS`, and the three
+`CAP_SYSINFO_*` classes an `info:`/`state:`/`stats:` operand is gated on.
+The console and filesystem trio is within the session baseline; the
+sysinfo classes are optional above it, armed only when the launching
+account's ceiling carries them. The secured VFS still authorises every
+path per-inode, and `sysinfod` every value read, under the caller's
+attested identity.
 
 ## Usage
 

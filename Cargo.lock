@@ -723,6 +723,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-help",
+ "tairix-procinfo",
  "tairix-rt",
 ]
 
@@ -4863,6 +4864,19 @@ dependencies = [
  "tairix-drv-storage-virtio-blk",
  "tairix-itest-harness",
  "tairix-test-virtio-qemu-support",
+]
+
+[[package]]
+name = "tairix-test-value-pipe-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-arch-aarch64",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-log",
+ "tairix-util",
 ]
 
 [[package]]

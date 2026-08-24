@@ -82,12 +82,15 @@ tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 [target.'cfg(target_os = "none")'.dependencies]
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
 # For the freestanding `Run` binary only: the shared System Information API
-# client, whose `IpcTransport` and paged walks back the completion engine's
-# resource-name seam (the live interfaces, bonds, interrupt lines, and CPUs a
-# `<iface>`-style selector placeholder stands for). The interpreter library
-# never links it — the seam is injected — so a host test needs no service, and
-# linking it grants the shell no authority: every query is capability-checked
-# at the broker, and the shell holds no `CAP_SYSINFO_*`.
+# client, whose `IpcTransport`, paged walks, and value reader back two seams —
+# the completion engine's resource-name lister (the live interfaces, bonds,
+# interrupt lines, and CPUs a `<iface>`-style selector placeholder stands for)
+# and the value-pipe redirection that reads a value-backed reference for a
+# child (`cat < info:mem/physical`). The interpreter library never links it —
+# both seams are injected — so a host test needs no service. Linking it grants
+# no authority of its own: the shell's `CAP_SYSINFO_*` request lives in its
+# manifest (intersected with the account ceiling), and every query is still
+# capability-checked at the broker against the shell's attested set.
 tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = ["program"] }
 # The one help engine, with its syscall-backed own-bundle `HelpSource`
 # (`BundleHelp`): the freestanding `Run` binary's reserved `-h`/`-?`

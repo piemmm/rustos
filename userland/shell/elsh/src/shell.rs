@@ -20,8 +20,9 @@ use crate::builtin::{self, is_builtin, BuiltinContext};
 use crate::env::{split_prefix_assignments, Environment};
 use crate::error::ParseError;
 use crate::host::{
-    classify_redirect_target, Console, Elevator, LaunchSpec, LimitStore, ProcessHost, RedirAction,
-    RedirTarget, ResolvedCommand, ResolvedRedirection, NULL_ELEVATOR, NULL_LIMIT_STORE,
+    classify_redirect_target, Console, Elevator, LaunchError, LaunchSpec, LimitStore, ProcessHost,
+    RedirAction, RedirTarget, ResolvedCommand, ResolvedRedirection, NULL_ELEVATOR,
+    NULL_LIMIT_STORE,
 };
 use crate::job::{ExitStatus, JobState, JobTable, WaitOutcome};
 use crate::lexer::{FdSpec, Segment, Word};
@@ -609,15 +610,21 @@ impl<'a> Shell<'a> {
     }
 }
 
-/// Map a launch refusal onto its POSIX-style exit status and report text:
-/// [`tairix_abi::Errno::NotFound`] means the search exhausted every
-/// candidate (`127`, "command not found"); any other refusal means the
-/// command resolved but cannot run (`126`, reported with the host's error).
-fn launch_failure(err: tairix_abi::Errno) -> (i32, String) {
-    if err == tairix_abi::Errno::NotFound {
-        (NOT_FOUND_STATUS, String::from("command not found"))
-    } else {
-        (NOT_EXECUTABLE_STATUS, err.to_string())
+/// Map a launch refusal onto its POSIX-style exit status and report text.
+///
+/// Only a *spawn* that exhausted every search candidate is `127`,
+/// "command not found"; a redirection refusal names the redirection instead,
+/// because blaming the program for a missing input file sends the reader
+/// looking in the wrong place.
+fn launch_failure(err: LaunchError) -> (i32, String) {
+    match err {
+        // A redirection failure is not the program's fault, so it is never
+        // worded as a missing command however it failed.
+        LaunchError::Redirection(errno) => (NOT_EXECUTABLE_STATUS, format!("redirection: {errno}")),
+        LaunchError::Spawn(tairix_abi::Errno::NotFound) => {
+            (NOT_FOUND_STATUS, String::from("command not found"))
+        }
+        LaunchError::Spawn(errno) => (NOT_EXECUTABLE_STATUS, errno.to_string()),
     }
 }
 
@@ -791,6 +798,37 @@ mod tests {
         assert_eq!(shell.environment().last_status(), 127);
         assert!(console.stderr().contains("shell: nope: command not found"));
         assert!(host.launches().is_empty());
+    }
+
+    /// A redirection target that cannot be opened is reported against the
+    /// *redirection*, never as a missing command. Blaming the program for a
+    /// missing input file sends the reader looking in the wrong place, and
+    /// `127` would claim the command does not exist when it does.
+    #[test]
+    fn unopenable_redirection_target_is_not_a_missing_command() {
+        for errno in [
+            tairix_abi::Errno::NotFound,
+            tairix_abi::Errno::PermissionDenied,
+            tairix_abi::Errno::NotSupported,
+        ] {
+            let host = ScriptedHost::new();
+            host.fail_redirection_with(errno);
+            let console = RecordingConsole::new();
+            let mut shell = Shell::new(&host, &console);
+
+            shell.run_line("cat < missing.txt").unwrap();
+
+            assert_eq!(shell.environment().last_status(), 126, "{errno}");
+            let stderr = console.stderr();
+            assert!(
+                stderr.contains("redirection") && stderr.contains(&alloc::format!("{errno}")),
+                "{errno} reported as {stderr:?}"
+            );
+            assert!(
+                !stderr.contains("command not found"),
+                "{errno} blamed the command: {stderr:?}"
+            );
+        }
     }
 
     #[test]

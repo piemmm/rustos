@@ -44,9 +44,9 @@ complète ses sélecteurs enregistrés segment par segment
 (`state:` → `net/` → `wan/` → `link`). Là où le registre ne connaît que la
 forme — un nom d'interface, une ligne d'interruption —, Tab propose les vrais
 noms de la machine, ou rien du tout si cette session n'a pas le droit de les
-lister. Une cible de redirection ne propose que les espaces de noms ouvrables :
-`info:`/`state:`/`stats:` apparaissent comme argument (à lire avec
-`sysinfo show`), jamais après `>`.
+lister. `info:`/`state:`/`stats:` apparaissent comme argument et après `<`, qui en
+lit la valeur (`cat < info:mem/physical`), mais jamais après `>` : une telle
+ressource ne s'écrit jamais par redirection.
 
 ## OPTIONS
 

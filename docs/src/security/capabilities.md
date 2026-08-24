@@ -227,7 +227,8 @@ QEMU disk fixtures seed
 exactly `administrator_ceiling()` (`plans/CAPABILITY_USE.md` CU3). The
 baseline is a **ceiling**, never a program's manifest: the shell
 requests its own exercised set (`SHELL_MANIFEST` — the console pair,
-`CAP_FS_ACCESS`, `CAP_PROC_SPAWN`), the desktop session requests the
+`CAP_FS_ACCESS`, `CAP_PROC_SPAWN`, plus the three `CAP_SYSINFO_*`
+classes described below), the desktop session requests the
 graphical class plus `CAP_PROC_SPAWN` (its taskbar launchers and
 program-library popup), `CAP_FS_ACCESS` (its trusted file picker and the
 catalog stores), and `CAP_LOG_EMIT` (its cache ledgers and the one-shot
@@ -247,7 +248,22 @@ requests `CAP_SYSINFO_GLOBAL` (`-e`/`-A`), and `sysinfo` requests the
 three global observability capabilities its query surface exercises: an
 administrator's intersection arms these features, while a baseline
 account's strips them and each tool reports the refusal and continues
-with its self-scoped core function. Each list is one shared definition
+with its self-scoped core function.
+
+The shell requests the same three for the two System Information API
+reads it performs itself: the completion engine's resource-name lister,
+and the *value-pipe* redirection that reads a value-backed reference on a
+child's behalf (`cat < info:mem/physical` — `info:`/`state:`/`stats:` are
+broker values, so no kernel descriptor opens on one and the reading
+process has to hold the authority; `plans/ALIAS.md` §6.2). Widening the
+shell rather than every reader tool is the deliberate trade: one
+long-lived process gains the request instead of ten short-lived bundles,
+and it gains no *reach* — holding `CAP_PROC_SPAWN` already let the shell
+read any of these facts out of a spawned `sysinfo`, so the change makes
+the read direct and attributable rather than laundered through a child.
+Both features degrade the usual way: a selector domain is silently
+skipped, and a value redirection is refused naming the capability it
+needed, while the whole baseline REPL keeps working. Each list is one shared definition
 per program in the kernel's `program_manifests` module, pinned by an
 exact-set unit test, with the above-baseline subset of every session
 tool additionally pinned as its own audited, reviewed set (CU2, CU7).

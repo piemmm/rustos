@@ -12,7 +12,10 @@
 //!   closed);
 //! * a successful response is well-formed: the current envelope version, the
 //!   `sysinfod` producer, and every bounded field within its limit;
-//! * a reference outside `info:`/`stats:` is never resolved here.
+//! * a reference outside `info:`/`stats:` is never resolved here;
+//! * a rendered value ([`read_value`](tairix_procinfo::read_value)) is
+//!   line-shaped and never exceeds the bound a caller sizes a pipe write
+//!   against, whatever the broker replied.
 //!
 //! TAIRiX pulls in no external fuzz runner: a per-run-seeded LCG draws
 //! reference strings (mutated real templates, delimiter splices, pure noise)
@@ -32,8 +35,8 @@ use tairix_abi::sysinfo::{
 use tairix_abi::time::{Duration64, Time64};
 use tairix_abi::{Errno, LimitKind, ResourceLimit};
 use tairix_procinfo::{
-    resolve, Producer, ResponsePayload, Transport, MAX_INFO_VALUE_LEN, MAX_METRIC_NAME_LEN,
-    MAX_QUERY_LEN, RESINFO_VERSION_CURRENT,
+    read_value, resolve, Producer, ResponsePayload, Transport, MAX_INFO_VALUE_LEN,
+    MAX_METRIC_NAME_LEN, MAX_QUERY_LEN, MAX_VALUE_LEN, RESINFO_VERSION_CURRENT,
 };
 use tairix_resref::parse;
 
@@ -299,6 +302,13 @@ fn exercise(input: &str, broker: &HostileBroker) {
         return;
     };
     let now = Time64::from_secs(1_000);
+    // The byte-stream read of the same reference: a caller sizes a pipe write
+    // against `MAX_VALUE_LEN`, so no reply may render past it, and the render
+    // must be a complete line or nothing at all.
+    if let Ok(value) = read_value(&reference, now, broker) {
+        assert!(value.len() <= MAX_VALUE_LEN, "{value:?} exceeds the bound");
+        assert!(value.ends_with('\n'), "{value:?} is not line-shaped");
+    }
     let Ok(response) = resolve(&reference, now, broker) else {
         return;
     };

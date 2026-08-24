@@ -6,10 +6,19 @@
 # REPL, spawn for launching commands, and filesystem access for the
 # working-directory and redirection seams — not the wider account
 # baseline, whose graphical-session class the shell never exercises.
+# CAP_SYSINFO_GLOBAL/KERNEL/HW for the two System Information API reads the
+# shell itself performs: the completion engine's resource-name lister, and
+# the value-pipe redirection that reads a value-backed reference for a
+# child (`cat < info:mem/physical` — info:/state:/stats: are broker values,
+# so no kernel backing can serve them and the shell must be the reader).
+# Optional features above the session baseline, armed only when the
+# launching account's ceiling carries them and degrading with a stated
+# reason otherwise; every query is still capability-checked at the broker
+# against this shell's kernel-attested effective set.
 id = "os.tairix.elsh"
 name = "elsh"
 version = "0.1.0"
 kind = "command"
-capabilities = ["CAP_FS_ACCESS", "CAP_PROC_SPAWN", "CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ"]
+capabilities = ["CAP_FS_ACCESS", "CAP_PROC_SPAWN", "CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_SYSINFO_GLOBAL", "CAP_SYSINFO_KERNEL", "CAP_SYSINFO_HW"]
 # This bundle's own 256x256 icon master in its Resources/ (plans/ICONS.md).
 library-icon = "elsh.png"

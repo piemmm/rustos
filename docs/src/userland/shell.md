@@ -154,6 +154,56 @@ or when quoted. A target whose spelling names a registered namespace but is
 shell never falls back to creating a file, so a typo cannot silently write junk
 to disk (`AGENTS.md` §5.4).
 
+### Reading a value-backed reference: the value pipe
+
+`info:`, `state:`, and `stats:` are **value-backed**
+(`tairix_resref::NamespaceBacking::Value`): their members are typed values
+served by the `sysinfod` broker, so the kernel resource resolver opens no
+descriptor on one in any direction — serving them kernel-side would bypass the
+broker's per-principal scoping (`plans/ALIAS.md` §6.2). Every reader goes
+through the broker instead: `sysinfo show` prints the value, a tool can
+resolve the reference as its own operand (`cat info:mem/physical`, through
+`tairix_procinfo::NamedSource`), and the shell serves a read redirection.
+
+The redirection is the shell's part. `cat < info:mem/physical` lowers to
+`PlannedOpen::ValuePipe`, and the host resolves it in the *open* phase, before
+any member spawns:
+
+1. `pipe_create` mints a pipe.
+2. `tairix_procinfo::read_value` resolves the reference through the one
+   userspace resolver over the broker — under the **shell's** own
+   kernel-attested identity — and renders the bare value with the same
+   `display_value` `sysinfo show` prints, plus a trailing newline.
+3. The bytes go into the write end, which is then closed, so the child sees a
+   complete line followed by end-of-stream from its first read.
+
+Three properties make this safe rather than a bypass:
+
+- **The child gains nothing.** It reads an ordinary pipe descriptor, so every
+  stdin-consuming tool — `head`, `wc`, `grep` — reads a fact without its own
+  bundle requesting `CAP_SYSINFO_*`; that is what this spelling buys over the
+  operand form, where the reading tool must carry the request itself. The
+  authority is the shell's manifest ∩ the account ceiling, checked at the
+  broker as always.
+- **A refusal is a refused launch, never an empty value.** Resolution happens
+  before any spawn, so a denial takes the existing all-or-nothing path: every
+  descriptor already opened is closed and the launch aborts, with a line
+  naming the capability the query declares (`shell: redirection:
+  info:mem/physical: permission denied: this resource requires
+  CAP_SYSINFO_KERNEL`).
+- **The plan holds the reference, never the value.** `ValuePipe` carries only
+  the canonical spelling, so a sensitive fact (`info:system/machine-id`) never
+  enters the `Debug`-able plan; the executor holds the bytes only as long as
+  the pipe write takes. The value is bounded by
+  `tairix_procinfo::MAX_VALUE_LEN`, two orders of magnitude below one pipe's
+  64 KiB ring, so the pre-reader write cannot block.
+
+The **write** directions are untouched: `>`, `>>`, `<>`, and `&>` on a
+value-backed reference still lower to `resource_open` and are refused with
+`Errno::NotSupported`, because such a resource is changed by a typed service
+command, not by writing text at it. `<>` is refused despite its read half —
+serving half a request would silently downgrade it.
+
 Not yet implemented (tracked in `plans/SHELL.md`, deliberately failing closed
 rather than misbehaving): process substitution — the stream forms `<(…)` /
 `>(…)` await the launch plumbing, and the temporary-file form `=(…)` is
@@ -293,14 +343,17 @@ authorization, and a spelling grants nothing (`plans/ALIAS.md` §6.2), so
 `info:mem/physical` is still offered without `CAP_SYSINFO_KERNEL` and the read
 then fails naming that capability. Only placeholders adapt.
 
-A redirection target offers only *stream-backed* namespaces
+A *writing* redirection offers only *stream-backed* namespaces
 (`tairix_resref::NamespaceBacking`): `echo hi > info:` names typed values read
-through a broker, which no descriptor can be opened on, so neither the
-namespace prefix nor its selectors are offered there. `sys:` is unaffected.
-Reading such a value is `sysinfo show <reference>`'s job, and the kernel
-resolver refuses the open with `Errno::NotSupported` — "this backing cannot
-represent the request" — rather than the `Errno::NotImplemented` of a stream
-namespace still awaiting its resolver.
+through a broker and changed by typed service commands, so neither the
+namespace prefix nor its selectors are offered there, and the kernel resolver
+refuses the open with `Errno::NotSupported` — "this backing cannot represent
+the request" — rather than the `Errno::NotImplemented` of a stream namespace
+still awaiting its resolver.
+
+A *reading* redirection offers both classes, because the shell serves the
+value-backed one itself: `cat < info:mem/physical` lowers to a **value pipe**
+(above). `sys:` is unaffected in either direction.
 
 A selector whose reference needs a query parameter to be valid (a windowed
 rate) completes with that parameter in place of the closing space:
@@ -314,7 +367,8 @@ cmd` prefix overrides layered on top) as its environment, encoded into the
 kernel re-validates the block fail-closed before building the child's own
 copy. Pipes and redirections run end to end (`plans/SPAWN.md` SP10): the
 pure `tairix_elsh::wireplan` planner lowers each pipeline into pre-opened
-targets (`fs_open` / `resource_open` / `pipe_create`), one fd 0–3 wire map
+targets (`fs_open` / `resource_open` / `pipe_create` / the value pipe above),
+one fd 0–3 wire map
 per member, and the here-string / multios byte pumps; the host executes
 the plan over `spawn_attached` — all-or-nothing opens, kill-and-reap
 unwind on a mid-pipeline refusal, the shell's transferred ends closed

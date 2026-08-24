@@ -45,9 +45,9 @@ ddetholyddion cofrestredig fesul segment
 (`state:` → `net/` → `wan/` → `link`). Lle mae'r gofrestr yn gwybod y siâp
 yn unig — enw rhyngwyneb, llinell ymyriad — mae Tab yn cynnig enwau
 gwirioneddol y peiriant, neu ddim o gwbl os nad yw'r sesiwn hon yn cael eu
-rhestru. Nid yw targed ailgyfeirio ond yn cynnig gofodau enwau y gellir eu
-hagor: mae `info:`/`state:`/`stats:` yn ymddangos fel ymresymiad (darllenwch
-hwy â `sysinfo show`), byth ar ôl `>`.
+rhestru. Mae `info:`/`state:`/`stats:` yn ymddangos fel ymresymiad ac ar ôl `<`,
+sy'n darllen y gwerth (`cat < info:mem/physical`), ond byth ar ôl `>`: ni
+chaiff adnodd o'r fath ei ysgrifennu drwy ailgyfeirio.
 
 ## OPTIONS
 

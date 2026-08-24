@@ -10,8 +10,8 @@
 //! the descriptor layer serves, checking the caller's authority per
 //! namespace and failing closed on anything it does not recognise or serve.
 //!
-//! **This resolver serves only kernel-owned backings.** The `info:` and
-//! `stats:` namespaces are deliberately *not* served here: they are the
+//! **This resolver serves only kernel-owned backings.** The `info:`,
+//! `state:`, and `stats:` namespaces are deliberately *not* served here: they are the
 //! System Information API's facts and measurements, which must flow through
 //! the `sysinfod` broker so its per-principal scoping is applied. Resolving
 //! them in the kernel would bypass that broker — the forbidden bypass the
@@ -31,9 +31,13 @@
 //! * A **value-backed** namespace ([`NamespaceBacking::Value`] — `info:`,
 //!   `state:`, `stats:`) is [`ResolveError::NotAStream`] →
 //!   [`Errno::NotSupported`]. It will *never* be served here: a typed value
-//!   read through a broker is not a byte stream, so `cat info:mem/physical`
-//!   cannot succeed on any build and the caller is told so rather than being
-//!   left to wait for a resolver that is never coming.
+//!   read through a broker is not a kernel byte stream, so no build of this
+//!   resolver will open one and the caller is told so rather than being left
+//!   to wait for a resolver that is never coming. Such a value is read
+//!   *above* the kernel — by `sysinfo show`, by a tool resolving its own
+//!   operand, or by the shell's read redirection, each through the broker
+//!   under the caller's own identity — which is why nothing is lost by
+//!   refusing it here.
 //!
 //! Both are fail-closed refusals; the distinction is diagnostic, and it is
 //! made from the registry's own [`KnownNamespace::backing`] so the kernel and
@@ -110,7 +114,9 @@ pub enum ResolveError {
     /// says "not yet", this says "not ever". Retrying, or waiting for a
     /// future build, can never turn this into a success — the caller must
     /// read the value through a broker client instead
-    /// (`sysinfo show <reference>`).
+    /// (`sysinfo show <reference>`, or the shell's read redirection
+    /// `cmd < <reference>`, which resolves the value in userspace and hands
+    /// the child a pipe).
     NotAStream,
     /// The selector names no resource within its (served) namespace.
     UnknownSelector,
@@ -416,9 +422,14 @@ mod tests {
 
     /// A value-backed namespace is refused as "not a stream", not as "not
     /// implemented": `info:`/`state:`/`stats:` are typed values read through
-    /// the System Information API broker, so `cat info:mem/physical` can
-    /// never succeed and says so (`Errno::NotSupported`, 32) rather than
-    /// implying a resolver is merely missing (`NotImplemented`, 12).
+    /// the System Information API broker, so *this* resolver can never serve
+    /// one and says so (`Errno::NotSupported`, 32) rather than implying a
+    /// resolver is merely missing (`NotImplemented`, 12).
+    ///
+    /// The refusal is unconditional and stays that way. That userspace readers
+    /// serve these references over the broker changes nothing here: routing
+    /// them through the kernel would bypass the broker's per-principal
+    /// scoping, which is the whole reason this arm exists.
     #[test]
     fn a_value_backed_namespace_is_not_a_stream() {
         for reference in [

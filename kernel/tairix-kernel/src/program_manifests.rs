@@ -39,21 +39,47 @@ use tairix_abi::CapabilityId;
 pub use tairix_users::SESSION_BASELINE;
 
 /// The shell's manifest: the console pair for its REPL, `CAP_FS_ACCESS`
-/// for `cd`/redirection/completion through the secured VFS, and
-/// `CAP_PROC_SPAWN` to run programs. Exactly the capabilities the shell
-/// has code paths for — deliberately **not** the account baseline
-/// (`tairix_users::SESSION_BASELINE`), which additionally carries the
+/// for `cd`/redirection/completion through the secured VFS,
+/// `CAP_PROC_SPAWN` to run programs, and the three `CAP_SYSINFO_*` classes
+/// its System Information API reads are gated on. Exactly the capabilities
+/// the shell has code paths for — deliberately **not** the account baseline
+/// (`tairix_users::SESSION_BASELINE`), which carries the
 /// graphical-session class (`CAP_DISPLAY`/`CAP_INPUT_READ`/`CAP_SHM`)
 /// the shell never exercises: a manifest is sized to the program's code
 /// paths, never to what an account may hold. Nothing else: `wait`,
 /// `signal`, `rlimit_get`/`rlimit_set`, and `fs_getcwd` — the rest of
 /// what the shell calls — are ungated.
+///
+/// The `CAP_SYSINFO_*` trio is a manifest sized to the code paths the shell
+/// genuinely has, of which there are two: the completion engine's resource-name
+/// lister (live interfaces, bonds, interrupt lines, CPUs) and the value-pipe
+/// redirection that reads a value-backed reference for a child
+/// (`cat < info:mem/physical`, `plans/ALIAS.md` §6.2 — `info:`/`state:`/
+/// `stats:` are broker values, so no kernel backing can serve them and the
+/// shell must be the reader). `CAP_SYSINFO_KERNEL` covers the
+/// kernel-memory queries, `CAP_SYSINFO_GLOBAL` the surface-topology and
+/// interface queries, `CAP_SYSINFO_HW` the hardware inventory.
+///
+/// It grants the shell no reach it lacked. Holding `CAP_PROC_SPAWN` and
+/// `CAP_FS_ACCESS` already lets it obtain every one of these facts by
+/// spawning `sysinfo`, whose own manifest CU7 audited for exactly these
+/// queries and reading its output; what changes is that the read is now
+/// direct and attributable to the shell rather than laundered through a
+/// child. Each class stays an *optional* request above the baseline: the
+/// `manifest ∩ ceiling` intersection strips it for an account whose ceiling
+/// does not carry it, `sysinfod` still gates every query on the shell's
+/// kernel-attested effective set, and the affected feature degrades — a
+/// selector domain is silently skipped, a value redirection is refused
+/// naming the capability it needed.
 #[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
 pub const SHELL_MANIFEST: &[CapabilityId] = &[
     CapabilityId::CONSOLE_WRITE,
     CapabilityId::CONSOLE_READ,
     CapabilityId::FS_ACCESS,
     CapabilityId::PROC_SPAWN,
+    CapabilityId::SYSINFO_GLOBAL,
+    CapabilityId::SYSINFO_KERNEL,
+    CapabilityId::SYSINFO_HW,
 ];
 
 /// The login service's manifest: the console pair for its prompt
@@ -331,14 +357,25 @@ pub const LS_MANIFEST: &[CapabilityId] = &[CapabilityId::CONSOLE_WRITE, Capabili
 /// The `cat` tool's manifest: `CAP_CONSOLE_WRITE` for the concatenated
 /// stream on fd 1 and diagnostics on fd 2, `CAP_CONSOLE_READ` because the
 /// `-` operand (and the no-operand default) reads standard input on fd 0,
-/// and `CAP_FS_ACCESS` because reading its file operands *is* the tool's
-/// job — the secured VFS still authorises every path per-inode under the
-/// caller's attested identity.
+/// `CAP_FS_ACCESS` because reading its file operands *is* the tool's job —
+/// the secured VFS still authorises every path per-inode under the caller's
+/// attested identity — and the three `CAP_SYSINFO_*` classes because an
+/// operand may be an `info:`/`state:`/`stats:` reference, whose value the tool
+/// reads through the `sysinfod` broker (a typed value has no kernel backing).
+///
+/// The trio is an optional request above the session baseline: the
+/// intersection strips it for an account whose ceiling lacks it, the broker
+/// still gates every query on this process's attested set, and the refused
+/// read names the capability it needed while file and stream operands keep
+/// working.
 #[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
 pub const CAT_MANIFEST: &[CapabilityId] = &[
     CapabilityId::CONSOLE_WRITE,
     CapabilityId::CONSOLE_READ,
     CapabilityId::FS_ACCESS,
+    CapabilityId::SYSINFO_GLOBAL,
+    CapabilityId::SYSINFO_KERNEL,
+    CapabilityId::SYSINFO_HW,
 ];
 
 /// The `man` help tool's manifest: `CAP_CONSOLE_WRITE` for the rendered
@@ -460,12 +497,34 @@ mod tests {
                 CapabilityId::PROC_SPAWN,
                 CapabilityId::CONSOLE_WRITE,
                 CapabilityId::CONSOLE_READ,
+                CapabilityId::SYSINFO_GLOBAL,
+                CapabilityId::SYSINFO_KERNEL,
+                CapabilityId::SYSINFO_HW,
             ])
         );
-        // And stays strictly within the baseline, so under any account the
-        // intersection keeps the shell's whole request.
-        for cap in SHELL_MANIFEST {
-            assert!(set(SESSION_BASELINE).contains(*cap));
+        // Its core REPL — the console pair, spawn, and the filesystem — is
+        // within the baseline, so a baseline-only account still gets a
+        // fully working shell.
+        for cap in [
+            CapabilityId::FS_ACCESS,
+            CapabilityId::PROC_SPAWN,
+            CapabilityId::CONSOLE_WRITE,
+            CapabilityId::CONSOLE_READ,
+        ] {
+            assert!(set(SESSION_BASELINE).contains(cap));
+        }
+        // The `CAP_SYSINFO_*` trio is deliberately *above* the baseline: an
+        // optional, gracefully-degrading read surface (the completion
+        // engine's resource-name lister and the value-pipe redirection),
+        // armed only for an account whose ceiling carries it. The exact
+        // above-baseline set is pinned in
+        // `session_tool_requests_above_the_baseline_are_the_audited_set`.
+        for cap in [
+            CapabilityId::SYSINFO_GLOBAL,
+            CapabilityId::SYSINFO_KERNEL,
+            CapabilityId::SYSINFO_HW,
+        ] {
+            assert!(!set(SESSION_BASELINE).contains(cap));
         }
     }
 
@@ -704,6 +763,9 @@ mod tests {
                 CapabilityId::CONSOLE_WRITE,
                 CapabilityId::CONSOLE_READ,
                 CapabilityId::FS_ACCESS,
+                CapabilityId::SYSINFO_GLOBAL,
+                CapabilityId::SYSINFO_KERNEL,
+                CapabilityId::SYSINFO_HW,
             ])
         );
     }
@@ -785,6 +847,7 @@ mod tests {
             MAN_MANIFEST,
             PS_MANIFEST,
             RESET_MANIFEST,
+            SHELL_MANIFEST,
             SYSINFO_MANIFEST,
             SYSMON_MANIFEST,
             TOP_MANIFEST,
@@ -842,11 +905,39 @@ mod tests {
                 CapabilityId::SYSINFO_HW,
             ])
         );
+        // elsh: the completion engine's resource-name lister (live
+        // interfaces, bonds, interrupt lines, CPUs) and the value-pipe
+        // redirection that reads a value-backed reference for a child
+        // (`cat < info:mem/physical`). Both degrade: a selector domain is
+        // silently skipped and a value redirection is refused naming the
+        // capability it needed, while the whole baseline REPL keeps working.
+        // The trio adds no reach the shell lacked — `CAP_PROC_SPAWN` already
+        // let it read these facts out of a spawned `sysinfo` — it makes the
+        // read direct and attributable instead.
+        assert_eq!(
+            above(SHELL_MANIFEST),
+            set(&[
+                CapabilityId::SYSINFO_GLOBAL,
+                CapabilityId::SYSINFO_KERNEL,
+                CapabilityId::SYSINFO_HW,
+            ])
+        );
+        // cat: an `info:`/`state:`/`stats:` operand, whose value it reads
+        // through the broker because no kernel backing can serve one. Every
+        // file and stream operand still works when the intersection strips
+        // the trio.
+        assert_eq!(
+            above(CAT_MANIFEST),
+            set(&[
+                CapabilityId::SYSINFO_GLOBAL,
+                CapabilityId::SYSINFO_KERNEL,
+                CapabilityId::SYSINFO_HW,
+            ])
+        );
         // Every other session tool — including the desktop session, whose
         // whole graphical class is baseline (CU6) — requests nothing above
         // the baseline.
         for manifest in [
-            CAT_MANIFEST,
             CLEAR_MANIFEST,
             DESKTOP_SESSION_REQUEST,
             LS_MANIFEST,

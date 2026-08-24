@@ -16,9 +16,13 @@ An operand may also be a typed resource reference: a relative operand
 whose first path component is a registered namespace, such as
 `sys:random`, is opened through the system's capability-checked
 resource resolver rather than the filesystem, so `cat sys:random`
-streams random bytes. A malformed reference in a registered namespace
-is an error, never a filename fallback; an on-disk file whose name
-contains `:` stays reachable as `./name` or when quoted.
+streams random bytes. An `info:`, `state:`, or `stats:` reference names
+a typed system value rather than a stream; it is read through the
+system information service, so `cat info:mem/physical` prints that
+value and a read the account is not entitled to make is refused naming
+the capability it needs. A malformed reference in a registered
+namespace is an error, never a filename fallback; an on-disk file whose
+name contains `:` stays reachable as `./name` or when quoted.
 
 With `-n` output lines are numbered continuously across every source,
 so a line that straddles two sources is numbered exactly once, when

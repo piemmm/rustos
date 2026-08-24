@@ -1,7 +1,7 @@
 //! The outcomes of running a `sysinfo` command.
 
 use core::fmt;
-use tairix_abi::{CapabilityId, Errno};
+use tairix_abi::Errno;
 use tairix_procinfo::{CallError, ListError, ResolveInfoError};
 
 /// Why a `sysinfo` invocation did not complete.
@@ -80,45 +80,9 @@ impl fmt::Display for SysinfoError {
             Self::Service(errno) => write!(f, "system information service error: {errno}"),
             Self::Output(errno) => write!(f, "terminal write failed: {errno}"),
             Self::BadReference => f.write_str("not a well-formed resource reference"),
-            Self::Unresolvable(err) => write_unresolvable(f, *err),
-        }
-    }
-}
-
-/// Spell a resolver refusal, naming the missing capability when the refusal
-/// was a capability denial.
-///
-/// The capability comes from the frozen `sysinfo-v1` query registry through
-/// [`ResolveInfoError::required_capability`] — the same table the broker gates
-/// on — so the diagnostic tells the user which grant to ask for instead of a
-/// bare "permission denied". A denial whose query the registry declares
-/// ungated names none, because there would be nothing to grant.
-fn write_unresolvable(f: &mut fmt::Formatter<'_>, err: ResolveInfoError) -> fmt::Result {
-    match err {
-        ResolveInfoError::NamespaceNotServed => f.write_str(
-            "not a readable resource: only info:, state:, and stats: references have values",
-        ),
-        ResolveInfoError::UnknownSelector => {
-            f.write_str("no such resource: the selector names nothing this system serves")
-        }
-        ResolveInfoError::UnsupportedRequest => f.write_str(
-            "unserviceable reference: an unsupported guard, facet, or query parameter, \
-             or a rate missing its mandatory ?window=",
-        ),
-        ResolveInfoError::CapabilityDenied(_) => {
-            f.write_str("permission denied: this resource requires ")?;
-            match err.required_capability().and_then(CapabilityId::name) {
-                Some(name) => f.write_str(name),
-                None => f.write_str("a capability you do not hold"),
-            }
-        }
-        ResolveInfoError::Malformed => {
-            f.write_str("the system information service replied with a record that did not decode")
-        }
-        // Mapped to `SysinfoError::Service` by the conversion above, so this
-        // arm is unreachable in practice; spelled rather than panicking.
-        ResolveInfoError::Service(errno) => {
-            write!(f, "system information service error: {errno}")
+            // The one shared wording, so a refusal reads the same however
+            // it was reached.
+            Self::Unresolvable(err) => write!(f, "{err}"),
         }
     }
 }

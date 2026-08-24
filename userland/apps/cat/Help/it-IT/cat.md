@@ -15,8 +15,12 @@ operandi lo standard input è l'unica sorgente.
 Un operando può anche essere un riferimento a risorsa tipizzato come
 `sys:random`: viene aperto tramite il risolutore di risorse del sistema
 (verificato dalle capability) anziché dal filesystem — `cat sys:random`
-emette byte casuali. Un riferimento malformato in uno spazio dei nomi
-registrato è un errore, mai un ripiego su un nome di file.
+emette byte casuali. Un riferimento `info:`, `state:` o `stats:` nomina
+un valore di sistema tipizzato anziché un flusso; viene letto tramite il
+servizio di informazioni di sistema, quindi `cat info:mem/physical`
+stampa quel valore, e una lettura non autorizzata è rifiutata nominando
+la capability richiesta. Un riferimento malformato in uno spazio dei
+nomi registrato è un errore, mai un ripiego su un nome di file.
 
 Con `-n` le righe di output sono numerate in modo continuo attraverso
 tutte le sorgenti, cosicché una riga a cavallo di due sorgenti è
