@@ -185,4 +185,8 @@ generator at all. `src/run.rs` supplies the real seams over the `fs_*` and
 The `key = value` document format itself is not defined here: it has one home,
 `lib/appconf`, and this service never tokenises a settings line of its own. Nor
 is the wipe: a sealed document is one of those documents, and the engine wipes
-every line it discards, so no discard path here has to remember to.
+every line it discards, so no discard path here has to remember to. What *is*
+this service's own is the request frame: a sealed write carries its secret in
+the clear, so `serve` takes the frame by `&mut` and wipes it before it returns,
+which is what keeps a host that reuses one buffer across callers from leaving
+one behind.

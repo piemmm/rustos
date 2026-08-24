@@ -253,18 +253,94 @@ drop") or delete it. References to *other* files — `plans/*.md`,
 manual — are legitimate and stay. The one sanctioned exception is a generator
 stamping provenance onto a generated artefact.
 
-### Open — §23.1 security review of the new app-data subsystem
+### Open — secret plaintext in kernel IPC payload buffers (§4, §23.1)
+
+A sealed-scope request and its reply cross the kernel as `Vec<u8>` payload
+copies (`kernel/ipc/src/call.rs`: `PendingCall::request` on post, the
+`completed` entry on reply), and `lib/kalloc` does not zero on free — so an
+application's secret is left in freed kernel heap on every `VaultSet` and
+`VaultRead`. §4 requires zero-on-free for any allocation that ever held a
+credential or key, so this is a genuine gap, and it is **not** app-data's: every
+secret over any endpoint (a login passphrase today, TLS key material later) has
+the same exposure.
+
+It is escalated rather than fixed alongside the app-data audit because the
+choice is a design decision with a hot-path cost: wiping every request and
+reply payload on every `ipc_call` is unconditional overhead on the IPC fast
+path, while wiping only the endpoints that carry secrets needs a
+"carries-secrets" bit on the endpoint and so an ABI change. Decide which,
+measure it, then land it with the payload-wipe regression test.
+
+### Open — the staging table has a per-session bound but no aggregate one (§24.4, §26.2)
+
+`AppData::sessions` grows one entry per calling process instance and is
+reclaimed only by age (`STAGING_IDLE_NS`, 60 s). `MAX_PENDING_EDITS`
+(= `MAX_SETTINGS`, 512) bounds edits per session **per scope**, so one session
+caps at ~1.2 MiB of staged keys and values — but nothing bounds the sum across
+sessions. Staged bytes therefore scale with the `ConfigSet` calls any
+application of any account can issue inside the reclaim window, with no
+ceiling, in a boot-floor service every command app depends on. On the §26.7
+floor (1 GiB) that is a denial of service against every application's settings.
+`plans/APPDATA.md` reasons about the per-session and per-scope bounds and about
+age reclaim, and does not address the aggregate.
+
+Escalated rather than fixed here because the containment bound's *shape* is a
+fairness decision, not a constant: an aggregate edit ceiling lets one
+application starve another's staging (§26.2), a session-count ceiling has the
+same problem one level up, and LRU eviction bounds memory without refusing
+anyone but silently discards a settings sheet's unsaved edits. Pick the
+trade-off, then land it fail-closed with its test.
+
+### Done — §23.1 security review of the new app-data subsystem
 
 `lib/appdata`, `userland/system/confd` (`vault`, `store`, `bulk`, `owner`), and
-`lib/abi/src/appdata_ipc.rs` landed as ~9 000 lines of new, security-critical
-surface: the sealed scope holds per-application secrets under a key derived
-from a per-account master secret, and the store root is the gate that keeps one
-application out of another's data. Trace each entry point for
-capability-check-before-state, per-field input validation, fail-closed error
-paths, and secret zeroisation on every exit including the error ones — in
-particular whether the buffer a master-secret record is read into is wiped by
-its caller, since `MasterSecret::decode` deliberately leaves that to the reader.
-Read `plans/APPDATA.md` first.
+`lib/abi/src/appdata_ipc.rs` were traced entry point by entry point for
+capability-check-before-state, per-field validation, fail-closed error paths,
+and secret zeroisation on every exit. Two secret-hygiene defects were found and
+fixed; the two above were found and escalated.
+
+Fixed:
+
+- **The app-data client left every application's secrets in freed heap.**
+  `lib/appdata`'s `negotiate` read a `VaultRead` answer into a transport `Vec`,
+  parsed it into a `Document` (which wipes its lines on drop), and dropped the
+  `Vec` un-wiped — so every `Vault::open`/`reload` left a full plaintext copy of
+  the application's secrets in freed memory that the userland heap deliberately
+  does not scrub (§25). The read attempt is now `attempt`, which answers an
+  *owned* `Answer` so the buffer's borrow ends before it returns, and wipes it
+  on the success and the refusal path alike.
+- **`confd` skipped its request wipe on the fail-closed origin path.** The serve
+  loop wiped `request[..len]` only after a served request, so the two `continue`
+  routes taken when the caller's kernel-attested origin cannot be read left a
+  `VaultSet` frame's plaintext in a long-lived buffer that the next request only
+  partly overwrites. The wipe now lives in `AppData::serve` (which takes
+  `&mut [u8]`, so it covers every host of the engine and is host-testable), and
+  `run.rs` has one wipe for the single case the dispatcher never sees the frame.
+
+Confirmed sound, and needing no further pass:
+
+- **The master-secret buffer is wiped by its caller.** `MasterSecret::decode`
+  delegates the wipe to the reader, and `AppStore::master` honours it: the `Vec`
+  the record was read into is zeroized before the function returns, on the
+  accept *and* the refuse path, and `master_or_draw` wipes the encoded record
+  once the write has landed. `from_bytes` consumes the caller's array by `&mut`
+  so no `Copy` of a secret is left on a caller's stack.
+- **Authority precedes state on every operation.** `dispatch` resolves the
+  attested identity before the match, so a principal with no verified bundle is
+  refused whatever it sent; the store's gated root ownership is re-proved on
+  every call even for a cached home (`RootCache::root_of` against
+  `CONFD_UID_RAW`, a real `const` and therefore a pattern match rather than a
+  catch-all binding).
+- **No path composes a caller-supplied path component.** `AppIdentity::new`
+  runs `validate_bundle_id`, and `Origin::from_bytes` re-validates the identity
+  tail through it, so a bundle id used as a directory name cannot traverse,
+  hide, or case-fold; the wire's foreign identifier and every bulk name pass
+  the same store-name grammar, re-stated inside `bulk` rather than trusted from
+  the decoder.
+- **The descriptor delegation cannot land on the wrong task.** `fd_grant`
+  resolves the recipient under the same write lock that mints, and scheduler
+  task ids come from a monotonic counter, so the kernel-attested `origin.pid()`
+  resolves to the intended process or to nothing.
 
 ### Open — rustdoc waffle in the new surface (§2.11, `plans/WAFFLE.md`)
 

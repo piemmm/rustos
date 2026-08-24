@@ -156,6 +156,10 @@ requests one at a time, the whole read-modify-seal-publish is atomic — so two
 processes of one application sealing different secrets cannot lose each other's,
 which a stage-then-commit pair would allow.
 
+The span of that request ends with the frame it arrived in: the dispatcher wipes
+the request buffer before it returns the reply, refusals included, so a
+transport that reuses one buffer across callers cannot leave a secret in it.
+
 A vault that cannot be opened is **refused**, never answered as an empty one: a
 damaged record, a failed authentication, or missing key material are each a
 distinct audited refusal, because "your secrets are damaged" and "you have no

@@ -53,7 +53,7 @@ mod program {
     use tairix_abi::random::RandomFlags;
     use tairix_abi::{BootId, Errno, Origin, UnlinkFlags, ORIGIN_WIRE_LEN};
     use tairix_caps::CapabilitySet;
-    use tairix_confd::events::{SERVICE_READY, SERVICE_UNAVAILABLE};
+    use tairix_confd::events::{ORIGIN_UNREADABLE, SERVICE_READY, SERVICE_UNAVAILABLE};
     use tairix_confd::{AppData, DirEntry, Entropy, NodeInfo, Storage};
     use tairix_log::{Event, EventId, Level};
     use tairix_rt::{File, LogSink};
@@ -69,7 +69,8 @@ mod program {
     /// The audit sink every record is written through.
     static LOG_SINK: LogSink = LogSink;
 
-    /// Record a startup outcome.
+    /// Record an outcome this binary owns rather than the dispatcher: a startup
+    /// result, or a request abandoned before the dispatcher could see it.
     fn record(id: EventId, level: Level, message: &str) {
         let _ = tairix_log::log(
             &LOG_SINK,
@@ -302,31 +303,41 @@ mod program {
             // The caller's identity comes from the kernel, never from the
             // frame. A peer whose origin cannot be read is answered nothing:
             // there is no store to serve without knowing who is asking.
-            let Ok(origin_len) =
-                tairix_rt::call_peer_origin(APPDATA_ENDPOINT, ticket, &mut origin_buf)
-            else {
-                continue;
-            };
-            let Ok(origin) = Origin::from_bytes(&origin_buf[..origin_len]) else {
+            let attested = tairix_rt::call_peer_origin(APPDATA_ENDPOINT, ticket, &mut origin_buf)
+                .ok()
+                .and_then(|origin_len| Origin::from_bytes(&origin_buf[..origin_len]).ok());
+            let Some(origin) = attested else {
+                // The kernel answers a well-formed origin for every live
+                // ticket, so a request abandoned here is a defect rather than a
+                // caller's mistake, and it is dropped loudly rather than in
+                // silence.
+                record(
+                    ORIGIN_UNREADABLE,
+                    Level::Warn,
+                    "confd: the kernel would not attest the caller of a received request",
+                );
+                // The dispatcher never sees this frame, so it is not the thing
+                // that wipes it — and a sealed-scope request carries plaintext
+                // secret material this buffer is reused across callers for.
+                request[..len].zeroize();
                 continue;
             };
             let reply_len = service.serve(
                 &mut fs,
                 &origin,
                 tairix_rt::clock_get(),
-                &request[..len],
+                &mut request[..len],
                 &mut reply,
             );
             if reply_len > 0 {
                 let _ = tairix_rt::call_reply(APPDATA_ENDPOINT, ticket, &reply[..reply_len]);
             }
-            // Both buffers are reused for the life of the service, and a
-            // sealed-scope request or reply carries plaintext secret material,
-            // so neither is left holding one for the next caller's request to
-            // sit beside. Only the bytes actually used are wiped, so the cost
-            // is proportional to the frame just served rather than to the
-            // buffers' full width.
-            request[..len].zeroize();
+            // The reply buffer is reused for the life of the service and a
+            // sealed-scope answer carries plaintext, so it is not left holding
+            // one for the next caller's reply to sit beside; the dispatcher
+            // already wiped the request. Only the bytes actually used are
+            // wiped, so the cost is proportional to the frame just served
+            // rather than to the buffer's full width.
             reply[..reply_len].zeroize();
         }
     }

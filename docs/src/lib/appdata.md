@@ -64,7 +64,10 @@ scope's own:
   behave as though the user had never saved a password.
 
 The handle holds the opened plaintext, so it wipes it when it goes out of scope
-— and so does the format engine, for every line a document discards.
+— and so does the format engine, for every line a document discards, and so
+does each read of the transport buffer it was answered out of. The userland heap
+does not re-zero freed bytes, so a buffer left holding a secret would hand it to
+whatever allocated that memory next.
 
 `blobs` is the durable **bulk** scope, and it is not a document at all. An
 index, a cache, or a queue is reached as a *descriptor*, so its bytes never

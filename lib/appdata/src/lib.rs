@@ -860,17 +860,53 @@ fn negotiate<'a>(
             .try_reserve_exact(frame_len)
             .map_err(|_| Errno::OutOfMemory)?;
         reply.resize(frame_len, 0);
-        let got = host.call(&frame[..len], &mut reply)?;
-        match decode_document_reply(&reply[..got])? {
-            ConfigDocument::Whole(text) => {
-                return Document::parse(text).map_err(|_| Errno::OutOfRange)
-            }
-            ConfigDocument::NeedsCapacity(needed) => capacity = needed,
+        match attempt(host, &frame[..len], &mut reply)? {
+            Answer::Whole(document) => return Ok(document),
+            Answer::NeedsCapacity(needed) => capacity = needed,
         }
     }
     // A writer that grew the document under every attempt: say so rather than
     // chase it, and never answer with a document that is not whole.
     Err(Errno::Busy)
+}
+
+/// What one read attempt answered.
+///
+/// The whole document is carried **owned** rather than borrowed out of `reply`,
+/// which is what lets [`attempt`] wipe the buffer before it returns.
+enum Answer {
+    /// The document the service served, parsed.
+    Whole(Document),
+    /// The document did not fit; this is the length to ask again with.
+    NeedsCapacity(usize),
+}
+
+/// Issue one read of `request` into `reply` and answer what came back, wiping
+/// `reply` before returning.
+///
+/// The sealed scope's document is an application's secrets in the clear, and
+/// the userland heap does not re-zero freed bytes — so a transport buffer left
+/// holding one would hand it to whatever allocates that memory next. Wiping
+/// here, on the success and the refusal path alike, is what keeps the plaintext
+/// to the parsed document the caller can drop, and what makes the wipe cover a
+/// path added later.
+///
+/// The whole of `reply` is wiped rather than the length the host reported: the
+/// host was handed all of it, so its report bounds what may be *read* and says
+/// nothing about where it wrote.
+fn attempt(host: &mut dyn AppDataHost, request: &[u8], reply: &mut [u8]) -> Result<Answer, Errno> {
+    let read = host.call(request, reply);
+    let answered = read.and_then(|got| {
+        let seen = reply.get(..got).ok_or(Errno::OutOfRange)?;
+        match decode_document_reply(seen)? {
+            ConfigDocument::Whole(text) => Document::parse(text)
+                .map(Answer::Whole)
+                .map_err(|_| Errno::OutOfRange),
+            ConfigDocument::NeedsCapacity(needed) => Ok(Answer::NeedsCapacity(needed)),
+        }
+    });
+    reply.zeroize();
+    answered
 }
 
 /// The **bulk** scope: an application's blobs, reached as descriptors rather

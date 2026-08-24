@@ -104,6 +104,15 @@ pub const TEMP_LIMIT: EventId = EventId(21_017);
 /// rather than leaving files it could never reclaim.
 pub const TEMP_UNAVAILABLE: EventId = EventId(21_018);
 
+/// A request was abandoned because the kernel would not attest its caller: the
+/// origin could not be read for the ticket just received, or the record it
+/// answered with was not a well-formed one. There is no store to serve without
+/// knowing who is asking, so the request is dropped — and recorded, because the
+/// kernel produces a well-formed origin for every live ticket, so reaching this
+/// means a defect an operator has to be able to see rather than a caller doing
+/// something wrong.
+pub const ORIGIN_UNREADABLE: EventId = EventId(21_019);
+
 /// The event identifier recording `err`.
 ///
 /// One mapping, so the audit stream and the caller's typed refusal can never
@@ -132,7 +141,10 @@ pub const fn id_of(err: StoreError) -> EventId {
 
 #[cfg(test)]
 mod tests {
-    use super::{id_of, CONFD_RANGE_END, CONFD_RANGE_START, SERVICE_READY, SERVICE_UNAVAILABLE};
+    use super::{
+        id_of, CONFD_RANGE_END, CONFD_RANGE_START, ORIGIN_UNREADABLE, SERVICE_READY,
+        SERVICE_UNAVAILABLE,
+    };
     use crate::vault::VaultError;
     use crate::StoreError;
 
@@ -159,7 +171,7 @@ mod tests {
 
     #[test]
     fn ids_are_inside_the_reserved_range() {
-        let mut ids = alloc::vec![SERVICE_READY, SERVICE_UNAVAILABLE];
+        let mut ids = alloc::vec![SERVICE_READY, SERVICE_UNAVAILABLE, ORIGIN_UNREADABLE];
         ids.extend(EVERY_ERROR.iter().copied().map(id_of));
         for id in ids {
             assert!(
@@ -171,7 +183,13 @@ mod tests {
 
     #[test]
     fn every_refusal_has_its_own_identifier() {
-        let mut seen = alloc::vec![SERVICE_READY.0, SERVICE_UNAVAILABLE.0];
+        let mut seen = alloc::vec::Vec::new();
+        // The service's own identifiers go through the same check as the
+        // refusals', so a collision among them cannot hide either.
+        for id in [SERVICE_READY.0, SERVICE_UNAVAILABLE.0, ORIGIN_UNREADABLE.0] {
+            assert!(!seen.contains(&id), "identifier {id} is used twice");
+            seen.push(id);
+        }
         for err in EVERY_ERROR {
             let id = id_of(err).0;
             assert!(!seen.contains(&id), "{err:?} reuses identifier {id}");

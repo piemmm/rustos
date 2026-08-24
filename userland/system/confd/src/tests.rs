@@ -84,7 +84,7 @@ fn call_at(
     let mut frame = [0u8; APPDATA_MAX_REQUEST];
     let len = request.encode(&mut frame).expect("a legal request");
     let mut reply = alloc::vec![0u8; APPDATA_MAX_REPLY];
-    let reply_len = service.serve(fs, origin, now_ns, &frame[..len], &mut reply);
+    let reply_len = service.serve(fs, origin, now_ns, &mut frame[..len], &mut reply);
     reply.truncate(reply_len);
     reply
 }
@@ -744,7 +744,8 @@ fn a_malformed_frame_is_refused_without_touching_a_store() {
     let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
     let mut reply = alloc::vec![0u8; APPDATA_MAX_REPLY];
     for frame in [&b""[..], &b"not a frame at all"[..], &[0xFFu8; 32][..]] {
-        let len = svc.serve(&mut fs, &ada, 0, frame, &mut reply);
+        let mut frame = Vec::from(frame);
+        let len = svc.serve(&mut fs, &ada, 0, &mut frame, &mut reply);
         assert!(len > 0, "a refusal is still a reply");
         assert!(decode_status_reply(&reply[..len]).is_err());
     }
@@ -1396,6 +1397,64 @@ fn a_foreign_read_naming_a_traversal_is_refused_before_a_store_is_touched() {
 }
 
 // --- The sealed scope ----------------------------------------------------
+
+/// A sealed write carries its secret across the wire in the clear, so the
+/// frame it arrived in is the dispatcher's to end. The service's own request
+/// buffer is reused for the life of the machine and only the bytes of the
+/// frame just served are overwritten by the next one, so a frame left intact
+/// would keep a secret in the service's memory indefinitely.
+#[test]
+fn serving_a_sealed_write_wipes_the_frame_it_arrived_in() {
+    let (mut svc, mut fs) = service();
+    let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    let mut frame = [0u8; APPDATA_MAX_REQUEST];
+    let len = AppDataRequest::VaultSet {
+        key: "imap.password",
+        value: "hunter2",
+    }
+    .encode(&mut frame)
+    .expect("a legal request");
+    let mut reply = alloc::vec![0u8; APPDATA_MAX_REPLY];
+    let reply_len = svc.serve(&mut fs, &ada, 0, &mut frame[..len], &mut reply);
+    assert_eq!(decode_status_reply(&reply[..reply_len]), Ok(()));
+    assert!(
+        frame[..len].iter().all(|byte| *byte == 0),
+        "the frame that carried the secret is wiped before the reply is returned"
+    );
+    // And it really sealed what it was handed rather than a wiped frame.
+    assert_eq!(
+        read_vault(&mut svc, &mut fs, &ada)
+            .expect("reads")
+            .get("imap.password"),
+        Some("hunter2")
+    );
+}
+
+/// The refusal path wipes too: a frame the dispatcher would not act on may
+/// still carry a secret — a caller running no verified bundle, a key the
+/// format refuses — and "I did not serve it" must not mean "I kept it".
+#[test]
+fn a_refused_frame_is_wiped_as_well() {
+    let (mut svc, mut fs) = service();
+    let unattested = origin(ACCOUNT_UID, 1, None);
+    let mut frame = [0u8; APPDATA_MAX_REQUEST];
+    let len = AppDataRequest::VaultSet {
+        key: "imap.password",
+        value: "hunter2",
+    }
+    .encode(&mut frame)
+    .expect("a legal request");
+    let mut reply = alloc::vec![0u8; APPDATA_MAX_REPLY];
+    let reply_len = svc.serve(&mut fs, &unattested, 0, &mut frame[..len], &mut reply);
+    assert_eq!(
+        decode_status_reply(&reply[..reply_len]),
+        Err(Errno::PermissionDenied)
+    );
+    assert!(
+        frame[..len].iter().all(|byte| *byte == 0),
+        "a refused frame leaves no secret behind either"
+    );
+}
 
 #[test]
 fn a_secret_survives_the_round_trip_and_is_never_on_the_volume_in_the_clear() {

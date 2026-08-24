@@ -428,20 +428,28 @@ impl<S: Sink, R: Entropy> AppData<S, R> {
     ///
     /// A refusal is a reply, not an error: every path answers with a frame the
     /// caller can decode, and the security-relevant refusals are audited.
+    ///
+    /// `request` is **consumed**: a sealed-scope frame carries a secret in the
+    /// clear, so every byte of it is wiped before this returns, on the served
+    /// and the refused path alike. Doing it here rather than in each host is
+    /// what makes it cover a transport that would otherwise leave a plaintext
+    /// frame in a buffer it reuses across callers.
     #[must_use]
     pub fn serve<F: Storage + ?Sized>(
         &mut self,
         fs: &mut F,
         origin: &Origin,
         now_ns: u64,
-        request: &[u8],
+        request: &mut [u8],
         out: &mut [u8],
     ) -> usize {
         self.reclaim_idle(now_ns);
-        match self.dispatch(fs, origin, now_ns, request, out) {
+        let served = match self.dispatch(fs, origin, now_ns, request, out) {
             Ok(len) => len,
             Err(err) => reply(Err(err), out),
-        }
+        };
+        request.zeroize();
+        served
     }
 
     /// Decode, authorise, and perform one request.

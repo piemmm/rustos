@@ -11,9 +11,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::appdata_ipc::{
-    BlobMode, ConfigScope, APPDATA_BLOB_MAX_COUNT, APPDATA_BULK_FILE_MAX_BYTES,
-    APPDATA_DOCUMENT_MAX, APPDATA_MAX_REPLY, APPDATA_TEMP_MAX_COUNT,
+    AppDataRequest, BlobMode, ConfigScope, APPDATA_BLOB_MAX_COUNT, APPDATA_BULK_FILE_MAX_BYTES,
+    APPDATA_DOCUMENT_MAX, APPDATA_MAX_REPLY, APPDATA_MAX_REQUEST, APPDATA_TEMP_MAX_COUNT,
 };
+use tairix_abi::reply::encode_status_reply;
 use tairix_abi::Errno;
 use tairix_appconf::ConfError;
 
@@ -952,5 +953,115 @@ fn an_unreachable_store_refuses_every_temporary_operation() {
     assert_eq!(
         temp::release(&mut host, "scratch-1"),
         Err(Errno::DeviceOffline)
+    );
+}
+
+// --- The transport buffer ------------------------------------------------
+
+/// A read is answered out of a transport buffer, and for the sealed scope
+/// those bytes are the application's secrets in the clear. The userland heap
+/// does not re-zero freed bytes, so a buffer left holding them would hand
+/// them to whatever allocates that memory next: the parsed document must be
+/// the only copy a read leaves behind.
+#[test]
+fn a_read_wipes_the_transport_buffer_it_answered_out_of() {
+    let mut host = service().with_sealed("imap.password = hunter2\n");
+    let mut frame = [0u8; APPDATA_MAX_REQUEST];
+    let len = AppDataRequest::VaultRead {
+        capacity: u32::try_from(APPDATA_DOCUMENT_MAX).expect("fits"),
+    }
+    .encode(&mut frame)
+    .expect("a legal request");
+    let mut reply = alloc::vec![0u8; APPDATA_MAX_REPLY];
+    let answer = super::attempt(&mut host, &frame[..len], &mut reply).expect("a whole document");
+    match answer {
+        super::Answer::Whole(document) => {
+            assert_eq!(document.get("imap.password"), Some("hunter2"));
+        }
+        super::Answer::NeedsCapacity(needed) => panic!("the document fit, not {needed}"),
+    }
+    assert!(
+        reply.iter().all(|byte| *byte == 0),
+        "the buffer the secret arrived in is wiped before the read returns"
+    );
+}
+
+/// The refusal path wipes too. A frame the decoder rejects may still carry a
+/// sealed document — the service framed it wrongly, or the volume served a
+/// short answer — so "I could not read it" must not mean "I left it there".
+#[test]
+fn a_refused_read_wipes_the_transport_buffer_as_well() {
+    /// A host that answers with exactly the bytes it was built from, well
+    /// formed or not.
+    struct Scribble(Vec<u8>);
+
+    impl super::AppDataHost for Scribble {
+        fn call(&mut self, _request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
+            let len = self.0.len().min(reply.len());
+            reply[..len].copy_from_slice(&self.0[..len]);
+            Ok(len)
+        }
+
+        fn read_file(&mut self, _path: &str, _cap: usize) -> Result<Vec<u8>, Errno> {
+            Err(Errno::NotFound)
+        }
+
+        fn bundle_candidates(&mut self, _word: &str) -> Vec<String> {
+            Vec::new()
+        }
+    }
+
+    // A success status, a declared length no body could match, and a body
+    // that is nonetheless a secret: the decoder refuses it as a frame that is
+    // not the answer its own header described.
+    let secret = b"imap.password = hunter2\n";
+    let mut framed = Vec::from(encode_status_reply(Ok(())));
+    framed.extend_from_slice(&u32::MAX.to_le_bytes());
+    framed.extend_from_slice(secret);
+    let mut host = Scribble(framed);
+
+    let mut reply = alloc::vec![0u8; APPDATA_MAX_REPLY];
+    assert!(
+        super::attempt(&mut host, &[], &mut reply).is_err(),
+        "a frame whose body does not match its header is refused"
+    );
+    assert!(
+        reply.iter().all(|byte| *byte == 0),
+        "a refused read leaves nothing of the frame behind either"
+    );
+}
+
+/// A host that over-reports what it wrote must not be able to make the client
+/// index past its own buffer. The reported length bounds only what is *read*;
+/// the whole buffer is still wiped, because the host was handed all of it and
+/// the report says nothing about where it actually wrote.
+#[test]
+fn a_host_that_over_reports_its_reply_is_refused_rather_than_trusted() {
+    /// A host that claims to have written one byte more than it was given.
+    struct Overclaim;
+
+    impl super::AppDataHost for Overclaim {
+        fn call(&mut self, _request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
+            reply.fill(0xAB);
+            Ok(reply.len() + 1)
+        }
+
+        fn read_file(&mut self, _path: &str, _cap: usize) -> Result<Vec<u8>, Errno> {
+            Err(Errno::NotFound)
+        }
+
+        fn bundle_candidates(&mut self, _word: &str) -> Vec<String> {
+            Vec::new()
+        }
+    }
+
+    let mut reply = alloc::vec![0u8; 64];
+    assert_eq!(
+        super::attempt(&mut Overclaim, &[], &mut reply).err(),
+        Some(Errno::OutOfRange)
+    );
+    assert!(
+        reply.iter().all(|byte| *byte == 0),
+        "the buffer the host did write into is wiped even so"
     );
 }

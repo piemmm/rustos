@@ -38,7 +38,9 @@ your secrets" is not "you have none" — an application must report a damaged va
 rather than behave as though the user had never saved a password. A write ends by
 re-reading, so the handle reflects what the service holds rather than a guess.
 The plaintext is wiped when the handle goes out of scope, by the format engine
-that owns the document's storage.
+that owns the document's storage, and each read wipes the transport buffer it
+was answered out of — the userland heap does not re-zero freed bytes, so a
+buffer left holding a secret would hand it to the next allocation.
 
 `blobs` and `temp` are the **bulk** scopes, and neither is a document: an index,
 a cache, a queue, or a staged download is reached as a *descriptor*, so its
