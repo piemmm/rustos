@@ -16,9 +16,13 @@ Quelle.
 Ein Operand kann auch eine typisierte Ressourcenreferenz wie
 `sys:random` sein: Sie wird über den berechtigungsgeprüften
 Ressourcen-Resolver des Systems geöffnet, nicht über das Dateisystem —
-`cat sys:random` liefert Zufallsbytes. Eine fehlerhafte Referenz in
-einem registrierten Namensraum ist ein Fehler und fällt nie auf einen
-Dateinamen zurück.
+`cat sys:random` liefert Zufallsbytes. Eine `info:`-, `state:`- oder
+`stats:`-Referenz benennt einen typisierten Systemwert statt eines
+Datenstroms; er wird über den Systeminformationsdienst gelesen, sodass
+`cat info:mem/physical` diesen Wert ausgibt und ein Lesevorgang ohne
+Berechtigung mit Nennung der fehlenden Berechtigung abgelehnt wird.
+Eine fehlerhafte Referenz in einem registrierten Namensraum ist ein
+Fehler und fällt nie auf einen Dateinamen zurück.
 
 Mit `-n` werden die Ausgabezeilen fortlaufend über alle Quellen
 nummeriert, sodass eine Zeile, die sich über zwei Quellen erstreckt,

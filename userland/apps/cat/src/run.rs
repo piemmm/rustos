@@ -11,15 +11,15 @@
 //! `main` collects the inherited argument vector, reads the `LANG` locale
 //! preference from the inherited environment (plans/APPS.md §5 — the shell
 //! exports it; the tool invents no second source), and runs the parsed
-//! command against the production seams: `RtFileSource`, which reads named
-//! files through the kernel-authorised `fs_*` syscalls (every per-inode and
-//! mount check stays kernel-side) and resource references (`sys:random`)
-//! through the kernel's capability-checked resolver, `RtStdin`, which reads the inherited
-//! standard input, the shared `tairix_help::BundleHelp`, which reads the
-//! tool's own bundle's `Help/` tree for the short-help switches, and
-//! `RtOutput`, which writes the stream to the inherited standard output. The
-//! tool binds only to its inherited descriptors, never a console device, and
-//! holds no ambient authority.
+//! command against the production seams: `RtFileSource`, which reads every
+//! named source through the one shared `tairix_procinfo::NamedSource` — paths
+//! and stream references through the kernel, `info:`/`state:`/`stats:` values
+//! through the `sysinfod` broker, each checked under the caller's attested
+//! identity; `RtStdin`, which reads the inherited standard input; the shared
+//! `tairix_help::BundleHelp` for the short-help switches; and `RtOutput`,
+//! which writes the stream to the inherited standard output. The tool binds
+//! only to its inherited descriptors, never a console device, and holds no
+//! ambient authority.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy, and
 //! fmt still cover the file.
@@ -37,25 +37,22 @@ mod program {
     use alloc::string::String;
     use core::cell::RefCell;
 
-    use tairix_abi::fs::OpenFlags;
     use tairix_abi::Errno;
     use tairix_cat::{parse, run, FileSource, Input, Output, USAGE};
     use tairix_help::BundleHelp;
+    use tairix_procinfo::{NamedSource, OpenError};
     use tairix_rt::io::{self, write_stderr_line, Read, Stdin, Stdout, Write};
-    use tairix_rt::File;
 
-    /// The production [`FileSource`]: the kernel-authorised `fs_*` view of
-    /// the filesystem. It adds no authority — every path resolution,
-    /// per-inode permission, and mount-flag check happens kernel-side under
-    /// the caller's attested identity, and a refusal surfaces as the exact
-    /// [`Errno`] the kernel chose.
+    /// The production [`FileSource`]: the shared open-by-name view of a
+    /// readable source. It adds no authority — every path check stays
+    /// kernel-side and every value read is gated at the broker, both under
+    /// the caller's attested identity.
     ///
     /// The client streams one source at a time with an advancing offset, so
-    /// the handle of the file currently being streamed is kept open across
-    /// calls — a file is opened once, not once per chunk — and replaced when
-    /// the client moves to the next path.
+    /// the open source is kept across calls — opened once, not once per
+    /// chunk — and replaced when the client moves on.
     struct RtFileSource {
-        open: RefCell<Option<(String, File)>>,
+        open: RefCell<Option<(String, NamedSource)>>,
     }
 
     impl RtFileSource {
@@ -71,20 +68,29 @@ mod program {
             let mut open = self.open.borrow_mut();
             let cached = matches!(&*open, Some((name, _)) if name == path);
             if !cached {
-                // `File::open` applies the one shared spelling rule: a
-                // resource reference (`sys:random`) routes to the kernel's
-                // capability-checked resolver, a path to the filesystem —
-                // the tool carries no routing of its own.
-                let file =
-                    File::open(path.as_bytes(), OpenFlags::READ).map_err(Errno::from_syscall)?;
-                *open = Some((String::from(path), file));
+                let source = NamedSource::open(path.as_bytes()).map_err(|err| {
+                    report_open_refusal(path, err);
+                    err.errno()
+                })?;
+                *open = Some((String::from(path), source));
             }
             match &*open {
-                Some((_, file)) => file.read_at(offset, buf).map_err(Errno::from_syscall),
-                // Unreachable by construction (the handle was just installed),
+                Some((_, source)) => source.read_at(offset, buf),
+                // Unreachable by construction (the source was just installed),
                 // but fail closed rather than panic.
                 None => Err(Errno::NotFound),
             }
+        }
+    }
+
+    /// State why an `info:`/`state:`/`stats:` operand could not be read.
+    ///
+    /// The `cat: <errno>` line printed afterwards cannot say which resource was
+    /// refused or which grant it wanted; the shared wording can. A stream or
+    /// path refusal needs no extra line — the errno says it.
+    fn report_open_refusal(path: &str, err: OpenError) {
+        if let OpenError::Value(value) = err {
+            write_stderr_line(&format!("cat: {path}: {value}"));
         }
     }
 

@@ -358,17 +358,42 @@ info:tty/debug/driver
 virtual file or by text scraping.
 
 `info:` is therefore **value-backed**, not a byte stream: it is read as a typed
-value through the broker, so it can never be opened, redirected to, or
-`cat`-ed. That is a structural property, not a resolver that has yet to land,
-and every layer states it the same way. The registry classifies the namespace
+value through the broker, never opened as a kernel descriptor. That is a
+structural property, not a resolver that has yet to land, and every layer
+states it the same way. The registry classifies the namespace
 (`tairix_resref::NamespaceBacking::Value`); the kernel resource resolver
 refuses such a reference with `ResolveError::NotAStream` →
 `Errno::NotSupported` ("the subsystem is live, this backing cannot represent
 the request, and retrying can never succeed"), deliberately distinct from the
 `Errno::NotImplemented` a *stream* namespace with no resolver wired yet
-returns; and shell completion offers no value-backed namespace as a
-redirection target (§15.3). The shell-facing way to read one is `show`
-(§15.4).
+returns.
+
+**A value is still readable as bytes — by a reader that goes through the
+broker.** The kernel cannot serve one; userspace can, in three spellings that
+resolve through the one resolver (`lib/procinfo`) and render with the one
+`display_value`, so their bytes are identical:
+
+- `sysinfo show <ref>` — the value printed (§15.4).
+- `cat <ref>` — the reference as a tool's **operand**, resolved by the tool
+  itself through the shared `NamedSource`. The reading process is the tool, so
+  the tool's own manifest carries the `CAP_SYSINFO_*` request.
+- `cat < <ref>` — a **read redirection**, resolved by the shell, which hands
+  the child a filled pipe. The child reads an ordinary descriptor and needs no
+  `CAP_SYSINFO_*`, so every stdin-consuming tool gains the read at once
+  without each being widened.
+
+None bypasses the broker: the authority is always `manifest ∩ account
+ceiling`, checked at `sysinfod` against the reading process's attested set, so
+an account lacking the query's capability is refused with that capability
+named.
+
+Reading is the whole of it. A value-backed reference is still never a *write*
+target: `>`, `>>`, and `<>` keep reaching the kernel resolver and keep failing
+with `Errno::NotSupported`, because such a resource is changed by a typed
+service command, not by writing text at it (§6.4). Shell completion follows
+the same split — value-backed namespaces are offered after `<` and never after
+a writing operator (§15.3). The direct shell-facing way to read one, with no
+redirection, is `show` (§15.4).
 
 `info:` values may be sensitive. The resolver must not assume that information
 is public. Examples requiring policy review include hardware serial numbers,
@@ -404,8 +429,9 @@ stats:disk/backup/queue.depth
 ```
 
 `stats:` must be backed by the System Information API. It must not be served by
-a virtual file or by text scraping. Like `info:` it is value-backed and can
-never be opened as a stream (§6.2).
+a virtual file or by text scraping. Like `info:` it is value-backed: no kernel
+descriptor can be opened on it, and the shell's read redirection is how it is
+consumed as bytes (§6.2).
 
 Metric values must carry metadata:
 
@@ -447,9 +473,10 @@ under `state:security/mitigations`.
 
 `state:` reads must be capability-checked. State changes must be performed by
 typed service commands, not by writing text into a pseudo-file. `state:` is
-value-backed on the read side too and can never be opened as a stream (§6.2) —
-which is the same reason a *write* is a typed command rather than a
-redirection.
+value-backed on the read side too — no kernel descriptor opens on it, and a
+read is served through the broker (§6.2). The write side is why that
+asymmetry matters: a *write* is a typed command, never a redirection, so
+`> state:…` stays refused even though `< state:…` reads.
 
 ### 6.5 `disk:`
 
@@ -1215,9 +1242,20 @@ Rules:
 - Resource references used in redirection resolve to stream backings through the
   stream layer.
 - A **value-backed** namespace (`info:`, `state:`, `stats:` — §6.2) has no
-  stream facet and can never be a redirection target. Completion must not
-  offer one there, as a namespace prefix or as a selector, and the kernel
-  resolver refuses the open with `Errno::NotSupported`.
+  stream facet, so no kernel descriptor is ever opened on one: the resolver
+  refuses every direction with `Errno::NotSupported`.
+- It can nonetheless be a redirection **source**. `cmd < info:mem/physical`
+  is served by the shell, not the kernel: it reads the value through the
+  broker under its own attested identity and hands the child a pipe. The
+  child sees an ordinary descriptor and needs no `CAP_SYSINFO_*`.
+- It can never be a redirection **target**. `>`, `>>`, `<>`, and `&>` on a
+  value-backed reference reach the kernel resolver and are refused, because
+  such a resource is changed by a typed service command (§6.4). `<>` is
+  refused despite its read half: serving half a request would silently
+  downgrade it.
+- Completion follows exactly that split — value-backed namespaces and their
+  selectors are offered after a reading operator and never after a writing
+  one, as a namespace prefix or as a selector.
 
 ### 15.4 Standard commands
 
@@ -1239,16 +1277,26 @@ sysinfo show <resource-ref>        # the value
 sysinfo describe <resource-ref>    # the envelope: producer, authorization,
                                    # sensitivity, and a metric's
                                    # kind/unit/reset-behaviour/window (§14.5)
+cmd < <resource-ref>               # the value as the command's standard input
 ```
 
-Both resolve through the one userspace resolver (`lib/procinfo::resolve`) over
-the System Information API, so neither is a second reader and neither can
+All three resolve through the one userspace resolver (`lib/procinfo::resolve`)
+over the System Information API, so none is a second reader and none can
 bypass the broker's per-principal scoping. A denial names the capability the
 query declares, read from the frozen `sysinfo-v1` registry, so the user learns
-which grant to ask for. They live in the existing `sysinfo` tool rather than a
-new bundle: it already holds exactly `CAP_SYSINFO_GLOBAL|KERNEL|HW` and
-already links the resolver, so minting a second bundle with identical
-privilege would add attack surface and buy nothing.
+which grant to ask for.
+
+The two subcommands live in the existing `sysinfo` tool rather than a new
+bundle: it already holds exactly `CAP_SYSINFO_GLOBAL|KERNEL|HW` and already
+links the resolver, so minting a second bundle with identical privilege would
+add attack surface and buy nothing. The redirection form is the shell's,
+because the reading process has to be the one holding the authority and a
+redirection's child is chosen by the user — so the shell's own manifest
+carries the same trio (§15.3). That widens one long-lived process rather than
+every reader tool, and adds no reach: holding `CAP_PROC_SPAWN`, the shell
+could already read any of these facts out of a spawned `sysinfo`. Making the
+read direct makes it attributable to the shell instead of laundered through a
+child.
 
 `watch <stats-ref>`, `pin`, and `unpin` are not yet built: `watch` needs a
 sampling cadence and a display loop, and `pin`/`unpin` need the alias-record

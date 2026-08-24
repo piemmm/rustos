@@ -1491,14 +1491,28 @@ cmd 3> <TAB>
 
 Suggest paths, alias paths (`Home:/`, `System:/`, …), and — where a stream
 facet applies — registered resource namespaces (`sys:null`, `tty:debug`, …).
-A redirection target MUST offer only **stream-backed** namespaces: `info:`,
-`state:`, and `stats:` are typed values read through the System Information
-API broker, never byte streams, so no redirection could open one and offering
-their namespace prefixes or selectors there would lead the user into a dead
-end (`ALIAS.md` §15.3). The refusal is the kernel's too: a `resource_open` of
-a value-backed namespace fails with `Errno::NotSupported` ("this backing
-cannot represent the request"), distinct from the `Errno::NotImplemented` of a
-stream namespace whose resolver has not landed.
+
+A **writing** redirection (`>`, `>>`, `<>`, `&>`) MUST offer only
+**stream-backed** namespaces: `info:`, `state:`, and `stats:` are typed values
+read through the System Information API broker and changed by typed service
+commands, so no write could ever open one and offering their namespace
+prefixes or selectors there would lead the user into a dead end (`ALIAS.md`
+§15.3). The refusal is the kernel's: a `resource_open` of a value-backed
+namespace fails with `Errno::NotSupported` ("this backing cannot represent the
+request"), distinct from the `Errno::NotImplemented` of a stream namespace
+whose resolver has not landed.
+
+A **reading** redirection (`<`, `n<`) MUST offer them, because the shell
+serves such a read itself. `cat < info:mem/physical` lowers to a *value pipe*:
+the shell resolves the reference through the one userspace resolver
+(`lib/procinfo::valueread`) under its own kernel-attested identity, writes the
+rendered value into a pipe, and wires the read end to the child's descriptor.
+The child sees an ordinary stream and needs no `CAP_SYSINFO_*` of its own,
+which is what makes every stdin-consuming tool able to read a fact without
+each bundle requesting the authority. The read is resolved in the executor's
+*open* phase, before any member spawns, so a refusal aborts the whole launch
+with the capability named — a denied read can never reach the child as an
+empty stream that reads like an empty value.
 
 For `3>`, the completion menu SHOULD annotate the target as a `stdinfo` JSONL
 capture and MAY prefer `.jsonl` names, but it MUST still allow any valid path.

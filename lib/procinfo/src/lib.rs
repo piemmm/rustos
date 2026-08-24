@@ -78,6 +78,9 @@
 //! * [`resinfo`] — the structured `info:`/`stats:` response records
 //!   ([`ResourceResponse`], [`InfoValue`], [`Metric`]).
 //! * [`mod@resolve`] — the `info:`/`stats:` resource-reference resolver.
+//! * [`mod@valueread`] — reading a value-backed reference as the byte
+//!   stream a stdin-reading tool consumes, for the shell's input
+//!   redirection (`cat < info:mem/physical`).
 //!
 //! # Layering & safety
 //!
@@ -115,9 +118,10 @@ pub mod resolve;
 pub mod resolver;
 pub mod transport;
 pub mod users;
+pub mod valueread;
 
 #[cfg(all(freestanding, feature = "program"))]
-pub use client::{IpcTransport, RtOutput};
+pub use client::{IpcTransport, NamedSource, OpenError, RtOutput};
 pub use cputime::{for_each_cpu_time, CpuTotals, CPU_TIME_PAGE};
 pub use human::{
     format_count, format_load, format_mib, format_size, format_tenths, format_uptime, SIZE_WIDTH,
@@ -149,3 +153,4 @@ pub use resolve::{cpu_info, resolve, ResolveInfoError};
 pub use resolver::{for_each_resolver_server, RESOLVER_SERVER_PAGE};
 pub use transport::{Output, Transport};
 pub use users::{for_each_user, user_name, user_names, USER_DIRECTORY_PAGE};
+pub use valueread::{read_value, MAX_VALUE_LEN};

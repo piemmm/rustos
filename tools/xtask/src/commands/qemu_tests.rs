@@ -764,6 +764,36 @@ const OVERLONG_USERNAME: &str = match core::str::from_utf8(&OVERLONG_USERNAME_BY
 /// view's `Password` field.
 const SESSION_PASSWORD_LINE: &str = "root\n";
 
+/// Serial marker for a value-pipe read of `info:system/machine-id`: the
+/// unprovisioned machine id, sixteen zero bytes until an installer mints one,
+/// in the resolver's lowercase hex. Distinctive enough to be a marker and
+/// exact enough to prove the whole read arrived; pinned to the rendering's
+/// width by a unit test below.
+const UNPROVISIONED_MACHINE_ID_MARKER: &str = "00000000000000000000000000000000";
+
+/// The shell line reading the reference from the original defect report. Its
+/// value is the machine's RAM size, which this script cannot predict, so the
+/// assertion is on `cat`'s exit status: `&&` runs the `echo` only if the read
+/// succeeded, standing in for a number that differs per machine.
+const VALUE_PIPE_PHYSICAL_LINE: &str = "cat < info:mem/physical && echo VALUE-PIPE-PHYSICAL-OK\n";
+
+/// Serial marker [`VALUE_PIPE_PHYSICAL_LINE`]'s `echo` produces on success.
+const VALUE_PIPE_PHYSICAL_MARKER: &str = "VALUE-PIPE-PHYSICAL-OK";
+
+/// The shell line reading the same reference as a bare **operand**, which the
+/// tool resolves itself rather than the shell. Gated on `cat`'s exit status
+/// for the same reason as [`VALUE_PIPE_PHYSICAL_LINE`].
+const VALUE_OPERAND_PHYSICAL_LINE: &str =
+    "cat info:mem/physical && echo VALUE-OPERAND-PHYSICAL-OK\n";
+
+/// Serial marker [`VALUE_OPERAND_PHYSICAL_LINE`]'s `echo` produces on success.
+const VALUE_OPERAND_PHYSICAL_MARKER: &str = "VALUE-OPERAND-PHYSICAL-OK";
+
+/// Serial marker for a *write* of a value-backed reference: the errno the
+/// kernel resource resolver refuses one with, in the shell's launch-failure
+/// line. Pinned to the errno's own `Display` text by a unit test below.
+const VALUE_PIPE_WRITE_REFUSED_MARKER: &str = "not supported by the backing";
+
 /// Serial marker the memory-stability vertical waits for before typing the
 /// shell `exit` that completes its PASS chain: the leading prefix of the
 /// memsoak fixture's success report line. Pinned to the fixture's own
@@ -4570,6 +4600,84 @@ static TESTS: &[QemuTest] = &[
                 Duration::ZERO,
                 "exit\n",
             ),
+        ],
+    },
+    // `plans/ALIAS.md` §6.2: the value-pipe vertical.
+    // `tairix-test-value-pipe-qemu-aarch64` boots the *production* aarch64
+    // pipeline with the planted encrypted-root disk, unlocks the root, logs in
+    // as `root`, and reads three value-backed references with `cat` — whose
+    // own manifest holds no `CAP_SYSINFO_*`, which is the point, since the
+    // shell resolves them and hands over a pipe. `info:system/machine-id` is
+    // ungated; `info:mem/page-size` is gated on `CAP_SYSINFO_KERNEL`, so
+    // `4096` proves `SHELL_MANIFEST ∩ administrator_ceiling()` armed it; and
+    // `info:mem/physical` — the reference from the original defect report — is
+    // asserted by `&& echo` on `cat`'s exit status, its value being
+    // machine-dependent, and read twice: once through the shell's pipe and
+    // once as a bare operand `cat` resolves itself under its own manifest, the
+    // two being separate readers. Then the negative half:
+    // `ls > info:mem/physical`
+    // still reaches `resource_open` and is refused, because a value-backed
+    // resource is changed by a typed service command.
+    //
+    // The guest sink passes only once that audited rejection has been seen
+    // *and* the scripted `exit` after it dispatches, so the refusal provably
+    // reached the transcript; the positive steps are asserted by the runner's
+    // "every marker appeared and every line was sent" rule, which is what
+    // makes a silently-empty value pipe fail. A 120-second budget matches the
+    // sibling session-ceiling vertical; single CPU like the other full-boot
+    // verticals.
+    QemuTest {
+        package: "tairix-test-value-pipe-qemu-aarch64",
+        binary: "tairix-test-value-pipe-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(120),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        fs_disk: FsDisk::EncryptedRootDisk,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[
+            ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
+            ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
+            ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
+            // An **ungated** value first (the `SYSTEM_IDENTITY` query
+            // declares no capability), so a failure here isolates the value
+            // pipe itself from the capability intersection.
+            (
+                "root@tairix ~% ",
+                Duration::ZERO,
+                "cat < info:system/machine-id\n",
+            ),
+            // Then a **gated** one on the `KERNEL_MEMORY_STATS` query: its
+            // arrival proves `manifest ∩ ceiling` armed `CAP_SYSINFO_KERNEL`
+            // for the shell and that `sysinfod` served the read.
+            (
+                UNPROVISIONED_MACHINE_ID_MARKER,
+                Duration::ZERO,
+                "cat < info:mem/page-size\n",
+            ),
+            // The 4 KiB page size of the `virt` board — deterministic, and
+            // the value the previous line's read actually produced.
+            ("4096", Duration::ZERO, VALUE_PIPE_PHYSICAL_LINE),
+            // The same reference as a bare operand, which `cat` resolves
+            // itself under its own manifest's `CAP_SYSINFO_KERNEL` — the
+            // spelling from the original defect report.
+            (
+                VALUE_PIPE_PHYSICAL_MARKER,
+                Duration::ZERO,
+                VALUE_OPERAND_PHYSICAL_LINE,
+            ),
+            // The write direction is still the kernel's refusal.
+            (
+                VALUE_OPERAND_PHYSICAL_MARKER,
+                Duration::ZERO,
+                "ls > info:mem/physical\n",
+            ),
+            (VALUE_PIPE_WRITE_REFUSED_MARKER, Duration::ZERO, "exit\n"),
         ],
     },
     // `plans/APPS.md` "Immediate work" I2/I3: the memory-stability vertical.
@@ -9555,6 +9663,9 @@ mod tests {
         sidecar_path, FsDisk, PrimePlan, QemuTest, MEMSOAK_PASS_PREFIX,
         SUPERVISOR_ESC_AT_PROMPT_SCRIPT, SUPERVISOR_ESC_SCRIPT, SUPERVISOR_MOUNT_SCRIPT,
         TCPECHO_PASS_PREFIX, TCPSERVE_PASS_PREFIX, TESTS, UNLOCK_PASSPHRASE_LINE,
+        UNPROVISIONED_MACHINE_ID_MARKER, VALUE_OPERAND_PHYSICAL_LINE,
+        VALUE_OPERAND_PHYSICAL_MARKER, VALUE_PIPE_PHYSICAL_LINE, VALUE_PIPE_PHYSICAL_MARKER,
+        VALUE_PIPE_WRITE_REFUSED_MARKER,
     };
     use std::time::Duration;
 
@@ -9758,6 +9869,53 @@ mod tests {
             pass.starts_with(MEMSOAK_PASS_PREFIX),
             "fixture PASS line {pass:?} must start with the script marker {MEMSOAK_PASS_PREFIX:?}"
         );
+    }
+
+    /// The value-pipe vertical's machine-id marker is exactly what the
+    /// resolver renders for an *unprovisioned* machine id: the kernel reports
+    /// sixteen zero bytes until an installer mints one, and `info:` renders a
+    /// machine id as lowercase hex, so the marker is 32 `0` characters. Pinned
+    /// by width and content here so a change to either the sentinel or the
+    /// hex rendering fails this test instead of silently making the QEMU
+    /// vertical wait for a string the guest never prints.
+    #[test]
+    fn value_pipe_machine_id_marker_matches_the_unprovisioned_rendering() {
+        // Two hex digits per byte of a 16-byte machine id.
+        assert_eq!(UNPROVISIONED_MACHINE_ID_MARKER.len(), 16 * 2);
+        assert!(UNPROVISIONED_MACHINE_ID_MARKER
+            .bytes()
+            .all(|byte| byte == b'0'));
+    }
+
+    /// The value-pipe vertical's write-refusal marker is exactly the `Display`
+    /// text of the errno the kernel resource resolver refuses a value-backed
+    /// namespace with, so the script waits for the wording the shell actually
+    /// prints and the two cannot drift.
+    #[test]
+    fn value_pipe_write_refusal_marker_matches_the_errno_text() {
+        assert_eq!(
+            VALUE_PIPE_WRITE_REFUSED_MARKER,
+            tairix_abi::Errno::NotSupported.to_string()
+        );
+    }
+
+    /// The value-pipe vertical's success marker is the exact word its own
+    /// `echo` prints, so the gate and the command cannot drift apart.
+    #[test]
+    fn value_pipe_physical_marker_is_the_line_it_echoes() {
+        assert!(
+            VALUE_PIPE_PHYSICAL_LINE.contains(VALUE_PIPE_PHYSICAL_MARKER),
+            "{VALUE_PIPE_PHYSICAL_LINE:?} must echo {VALUE_PIPE_PHYSICAL_MARKER:?}"
+        );
+        // `&&` is what makes the marker an assertion about `cat`'s exit
+        // status rather than an unconditional print.
+        assert!(VALUE_PIPE_PHYSICAL_LINE.contains("&&"));
+        assert!(VALUE_OPERAND_PHYSICAL_LINE.contains(VALUE_OPERAND_PHYSICAL_MARKER));
+        assert!(VALUE_OPERAND_PHYSICAL_LINE.contains("&&"));
+        // The two spellings differ only in the redirection, so a regression in
+        // either reader cannot hide behind the other's marker.
+        assert!(VALUE_PIPE_PHYSICAL_LINE.contains("< info:mem/physical"));
+        assert!(!VALUE_OPERAND_PHYSICAL_LINE.contains('<'));
     }
 
     /// The stream vertical's serial-script marker is exactly the `tcpecho`

@@ -43,9 +43,9 @@ completa nomi di comandi, percorsi e riferimenti a risorse come
 segmento alla volta (`state:` → `net/` → `wan/` → `link`). Dove il registro
 conosce solo la forma — un nome di interfaccia, una linea di interrupt — Tab
 offre i nomi reali della macchina, o nulla se questa sessione non può
-elencarli. Una destinazione di redirezione offre solo spazi dei nomi
-apribili: `info:`/`state:`/`stats:` compaiono come argomento (si leggono con
-`sysinfo show`), mai dopo `>`.
+elencarli. `info:`/`state:`/`stats:` compaiono come argomento e dopo `<`, che ne legge
+il valore (`cat < info:mem/physical`), ma mai dopo `>`: una tale risorsa non
+si scrive mai per redirezione.
 
 ## OPTIONS
 

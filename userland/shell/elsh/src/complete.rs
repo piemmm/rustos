@@ -23,14 +23,15 @@
 //!   user's own two stores, then the `PATH` entries), so completion offers
 //!   exactly the names the shell would resolve. A word spelling a path (it
 //!   contains `/`) completes as a path.
-//! * **Redirection target**: filesystem paths *and* the resource references
-//!   that can actually be opened — the *stream-backed* registered namespaces
+//! * **Redirection source or target**: filesystem paths *and* the resource
+//!   references openable in that direction — the registered namespaces
 //!   (`sys:` …) and their catalogued selectors
 //!   ([`tairix_resref::KnownNamespace`]), the same registry the redirection
-//!   classifier applies. A value-backed namespace
-//!   ([`tairix_resref::NamespaceBacking::Value`] — `info:`, `state:`,
-//!   `stats:`) is never offered here: it is read through a broker, so no
-//!   redirection could ever open it (`plans/ALIAS.md` §15.3).
+//!   classifier applies. The directions differ by one class: a value-backed
+//!   namespace ([`tairix_resref::NamespaceBacking::Value`]) is offered after a
+//!   *read*, which the shell serves through the System Information API, and
+//!   never after a *write*, where it is a dead end — such a resource is
+//!   changed by a typed service command (`plans/ALIAS.md` §6.2, §15.3).
 //! * **Any other argument**: filesystem paths, plus resource references once
 //!   the word could begin one (a registered-namespace prefix).
 //!
@@ -83,6 +84,7 @@ pub use tairix_complete::{DirEntryInfo, DirLister};
 
 use crate::builtin::BUILTIN_NAMES;
 use crate::lexer::{tokenize_with_spans, RedirOp, Token};
+use crate::parser::OpenMode;
 
 /// One completion candidate.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -163,7 +165,15 @@ enum Role {
     Command,
     /// An ordinary argument word.
     Argument,
-    /// The target word of a file-opening redirection.
+    /// The source word of a read-only redirection (`<`, `n<`).
+    ///
+    /// Distinguished from [`RedirTarget`](Self::RedirTarget) because the
+    /// directions open different sets: only a read may name a value-backed
+    /// reference, which the shell serves through the System Information API
+    /// (`plans/ALIAS.md` §6.2).
+    RedirSource,
+    /// The target word of a writing redirection (`>`, `>>`, `<>`, `&>`) or a
+    /// here-string.
     RedirTarget,
     /// A here-document delimiter (never completed).
     HereDocDelim,
@@ -216,9 +226,8 @@ pub fn complete(
     // reference in every role — it can never name a path — so it completes
     // from the registry alone.
     let reference = tairix_resref::names_resource_reference(&word);
-    // A redirection can only ever open a stream, so a value-backed
-    // namespace is out of play there — as a bare prefix and as a
-    // reference-shaped word alike.
+    // A *writing* redirection can only open a stream, so a value-backed
+    // namespace is out of play there. A *reading* one may name either.
     let streams_only = role == Role::RedirTarget;
     match role {
         Role::HereDocDelim => {}
@@ -231,14 +240,19 @@ pub fn complete(
                 command_candidates(&word, env, lister, &mut candidates);
             }
         }
-        Role::Argument | Role::RedirTarget => {
+        Role::Argument | Role::RedirSource | Role::RedirTarget => {
             if reference {
                 selector_candidates(&word, streams_only, resources, &mut candidates);
             } else {
-                // A redirection target's blank slate offers every namespace
-                // it could open; an empty argument word offers none (it would
-                // bury the paths).
-                namespace_candidates(&word, streams_only, &mut candidates);
+                // A redirection's blank slate offers every namespace it could
+                // open; an empty argument word offers none (it would bury the
+                // paths).
+                namespace_candidates(
+                    &word,
+                    matches!(role, Role::RedirSource | Role::RedirTarget),
+                    streams_only,
+                    &mut candidates,
+                );
                 path_candidates(&word, lister, &mut candidates);
             }
         }
@@ -258,6 +272,14 @@ fn word_role(before: &[(Token, core::ops::Range<usize>)]) -> Role {
     // A redirection operator immediately before the word claims it.
     if let Some((Token::Redirect(op), _)) = before.last() {
         return match op {
+            // Only a plain read (`<`, `n<`) may name a value-backed
+            // reference. `<>` is a write direction too, and the shell refuses
+            // a value-backed reference there rather than silently serving
+            // half of what was asked for, so it completes as a target.
+            RedirOp::File {
+                mode: OpenMode::Read,
+                ..
+            } => Role::RedirSource,
             RedirOp::File { .. } | RedirOp::Combined { .. } | RedirOp::HereString { .. } => {
                 Role::RedirTarget
             }
@@ -377,26 +399,31 @@ fn command_candidates(
 }
 
 /// The registered namespace prefixes a plain (not yet reference-shaped) word
-/// could begin: `st` offers `state:` and `stats:`. `redirection` marks the
-/// word as a redirection target, which changes two things: the blank slate of
-/// an empty word offers every namespace (a namespace is as likely there as a
-/// filename, where an empty argument word would only bury the paths), and
-/// only *stream-backed* namespaces are offered at all.
+/// could begin: `st` offers `state:` and `stats:`.
 ///
-/// A value-backed namespace (`info:`, `state:`, `stats:`) is left out of a
-/// redirection: its members are typed values read through a broker, so
-/// `echo hi > info:…` could never open one whatever selector followed
-/// (`plans/ALIAS.md` §15.3, and the kernel resolver's own refusal). Offering
-/// it would be offering a dead end.
+/// The two flags are independent, and conflating them would be a bug:
+///
+/// * `redirection` marks any redirection's source or target, where an empty
+///   word offers every namespace — as likely there as a filename, whereas an
+///   empty *argument* word offering namespaces would bury the paths.
+/// * `streams_only` restricts the offer to *stream-backed* namespaces, set for
+///   a **writing** redirection where a value-backed one is a dead end
+///   (`plans/ALIAS.md` §15.3, and the kernel resolver's own refusal). A read
+///   leaves it clear: the shell serves that itself.
 ///
 /// The candidate stays open (no closing character): the user carries on into
 /// the selector.
-fn namespace_candidates(word: &str, redirection: bool, out: &mut Vec<Candidate>) {
+fn namespace_candidates(
+    word: &str,
+    redirection: bool,
+    streams_only: bool,
+    out: &mut Vec<Candidate>,
+) {
     if word.is_empty() && !redirection {
         return;
     }
     for namespace in KnownNamespace::ALL {
-        if redirection && namespace.backing() != NamespaceBacking::Stream {
+        if streams_only && namespace.backing() != NamespaceBacking::Stream {
             continue;
         }
         let name = namespace.as_str();
@@ -879,10 +906,82 @@ mod tests {
         assert_eq!(inserts(&narrowed.candidates), ["sys:random"]);
     }
 
-    /// A redirection can only open a stream, so a value-backed namespace is
-    /// offered nowhere in that role — neither as a prefix nor as a
-    /// reference-shaped word — while a stream namespace still completes
-    /// exactly as before.
+    /// A *reading* redirection offers value-backed namespaces as well as
+    /// streams, because the shell can now serve one: it reads the value
+    /// through the System Information API and feeds it to the child down a
+    /// pipe, so `cat < info:mem/physical` works and completing towards it
+    /// leads somewhere.
+    #[test]
+    fn a_redirection_source_also_offers_value_namespaces() {
+        let lister = MapLister::new(&[(".", &[])]);
+        let resources = MapResources::new(&[(SelectorDomain::Interface, &["wan"])]);
+
+        // The blank slate after `<` lists every namespace a read can open —
+        // the streams and the value-backed trio alike.
+        let blank = super::complete("cat < ", 6, CommandEnv::default(), &lister, &resources);
+        let offered = inserts(&blank.candidates);
+        for namespace in ["sys:", "info:", "state:", "stats:"] {
+            assert!(offered.contains(&namespace), "got {offered:?}");
+        }
+
+        // And a typed value-backed prefix completes its selectors, segment by
+        // segment, exactly as an argument does.
+        let namespace = super::complete(
+            "cat < info:",
+            11,
+            CommandEnv::default(),
+            &lister,
+            &resources,
+        );
+        assert!(
+            !namespace.candidates.is_empty(),
+            "`< info:` must offer its selectors"
+        );
+        let mem = super::complete(
+            "cat < info:mem/",
+            15,
+            CommandEnv::default(),
+            &lister,
+            &resources,
+        );
+        assert!(
+            displays(&mem.candidates).contains(&"physical"),
+            "got {:?}",
+            displays(&mem.candidates)
+        );
+
+        // An explicit-fd read (`3< ref`) is the same direction, so it offers
+        // the same set.
+        let explicit = super::complete(
+            "cat 3< stats:",
+            13,
+            CommandEnv::default(),
+            &lister,
+            &resources,
+        );
+        assert!(
+            !explicit.candidates.is_empty(),
+            "an explicit-fd read offers value selectors too"
+        );
+
+        // A placeholder segment still resolves to the live names, never the
+        // literal `<iface>` text — `/`-suffixed, since the interface's own
+        // leaves come next.
+        let iface = super::complete(
+            "cat < info:net/",
+            15,
+            CommandEnv::default(),
+            &lister,
+            &resources,
+        );
+        assert_eq!(displays(&iface.candidates), ["wan/"]);
+    }
+
+    /// A *writing* redirection can only open a stream, so a value-backed
+    /// namespace is offered nowhere in that role — neither as a prefix nor as
+    /// a reference-shaped word — while a stream namespace still completes
+    /// exactly as before. The read direction is the sibling test
+    /// [`a_redirection_source_also_offers_value_namespaces`].
     #[test]
     fn a_redirection_target_offers_only_stream_namespaces() {
         let lister = MapLister::new(&[(".", &[])]);
@@ -903,8 +1002,14 @@ mod tests {
             "echo hi > info",
             "echo hi > info:",
             "echo hi > info:net/",
-            "cat < stats:",
+            "echo hi >> stats:",
             "echo hi 2> state:net/",
+            // `<>` asks to write as well as read, and the shell refuses a
+            // value-backed reference there rather than serving half the
+            // request, so it is a dead end too.
+            "cat <> info:",
+            // A here-string's word is content, not a target to open.
+            "cat <<< info:",
         ] {
             let cursor = line.chars().count();
             let result = super::complete(line, cursor, CommandEnv::default(), &lister, &resources);

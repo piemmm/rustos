@@ -15,8 +15,12 @@ operand y mewnbwn safonol yw'r unig ffynhonnell.
 Gall operand hefyd fod yn gyfeiriad adnodd teipiedig fel `sys:random`:
 caiff ei agor drwy ddatryswr adnoddau'r system (gyda gwiriad galluoedd)
 yn hytrach na'r system ffeiliau — mae `cat sys:random` yn ffrydio
-beitiau ar hap. Mae cyfeiriad camffurfiedig mewn gofod enwau
-cofrestredig yn wall, byth yn enw ffeil.
+beitiau ar hap. Mae cyfeiriad `info:`, `state:` neu `stats:` yn enwi
+gwerth system teipiedig yn hytrach na ffrwd; caiff ei ddarllen drwy
+wasanaeth gwybodaeth y system, felly mae `cat info:mem/physical` yn
+argraffu'r gwerth hwnnw, a gwrthodir darlleniad nad yw'r cyfrif â hawl
+iddo gan enwi'r gallu sydd ei angen. Mae cyfeiriad camffurfiedig mewn
+gofod enwau cofrestredig yn wall, byth yn enw ffeil.
 
 Gydag `-n` rhifir llinellau'r allbwn yn ddi-dor ar draws pob
 ffynhonnell, felly rhifir llinell sy'n pontio dwy ffynhonnell unwaith

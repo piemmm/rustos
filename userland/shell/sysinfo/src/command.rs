@@ -86,10 +86,10 @@ pub enum Command<'a> {
     /// The reference is resolved through `lib/procinfo`'s userspace resolver
     /// over the System Information API — the one place those namespaces are
     /// resolved — so this is not a second reader and cannot bypass the
-    /// broker's per-principal scoping. `info:`/`state:`/`stats:` are
-    /// value-backed and can never be opened as byte streams
-    /// (`plans/ALIAS.md` §6.2), which is why reading one needs a command at
-    /// all rather than `cat`.
+    /// broker's per-principal scoping. `cat <ref>` and `cat < <ref>` are the
+    /// other two spellings of the same read; all three resolve through this
+    /// resolver and render through the same `display_value`, so their bytes
+    /// match exactly.
     Show {
         /// The resource reference to read, as spelled on the command line.
         reference: &'a str,

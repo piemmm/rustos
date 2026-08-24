@@ -34,7 +34,10 @@
 //! `tairix_elsh::wireplan` planner lowers each pipeline into pre-opened
 //! targets, per-member spawn attach blocks, and the here-string / multios
 //! byte pumps this host executes over
-//! `fs_open`/`resource_open`/`pipe_create`/`spawn_attached`.
+//! `fs_open`/`resource_open`/`pipe_create`/`spawn_attached`. A read of a
+//! value-backed reference (`cat < info:mem/physical`) is the one target the
+//! kernel cannot open, so this host reads it over the System Information API
+//! under its own attested identity and hands the child the filled pipe.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy, and
 //! fmt still cover the file.
@@ -57,11 +60,12 @@ mod program {
     use tairix_abi::fs::{DirEntry, FS_IO_MAX};
     use tairix_abi::origin::{CapabilitySummary, Origin};
     use tairix_abi::sysinfo::RECLAIM_CLASS_NAMES;
+    use tairix_abi::time::Time64;
     use tairix_abi::{CapabilityId, Errno, FileKind, InputMode, LimitKind, ResourceLimit};
     use tairix_elsh::{
         parse_invocation, Console, DirEntryInfo, DirLister, Elevator, Environment, Invocation,
-        LaunchSpec, LimitStore, Pid, PlannedOpen, PlannedWire, ProcessHost, PumpTask, ReplInput,
-        ResolvedCommand, ResourceLister, Shell, Signal, WaitOutcome, USAGE,
+        LaunchError, LaunchSpec, LimitStore, Pid, PlannedOpen, PlannedWire, ProcessHost, PumpTask,
+        ReplInput, ResolvedCommand, ResourceLister, Shell, Signal, WaitOutcome, USAGE,
     };
     use tairix_help::{own_short_help, BundleHelp};
     use tairix_procinfo::{
@@ -270,7 +274,7 @@ mod program {
                 // The records' own indices are used rather than a `0..count`
                 // range, so a sparse set is reported as it is.
                 SelectorDomain::Cpu => Ok(cpu_info(&transport)
-                    .map_err(query_errno)?
+                    .map_err(ResolveInfoError::to_errno)?
                     .iter()
                     .map(|record| record.cpu.to_string())
                     .collect()),
@@ -334,21 +338,6 @@ mod program {
         match err {
             ListError::Call(CallError::PermissionDenied) => Errno::PermissionDenied,
             ListError::Call(CallError::Service(errno)) | ListError::Sink(errno) => errno,
-        }
-    }
-
-    /// The same, for the resolver-shaped error the `CPU_INFO` walk returns.
-    fn query_errno(err: ResolveInfoError) -> Errno {
-        match err {
-            ResolveInfoError::CapabilityDenied(_) => Errno::PermissionDenied,
-            ResolveInfoError::Service(errno) => errno,
-            // The remaining variants are selector-level refusals a whole-table
-            // walk cannot raise; reported as an unserviceable request rather
-            // than guessed at.
-            ResolveInfoError::NamespaceNotServed
-            | ResolveInfoError::UnknownSelector
-            | ResolveInfoError::UnsupportedRequest
-            | ResolveInfoError::Malformed => Errno::NotSupported,
         }
     }
 
@@ -418,6 +407,22 @@ mod program {
                     }
                     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                     fds.push(ret as u32);
+                }
+                PlannedOpen::ValuePipe { reference } => {
+                    let (read, write) = match tairix_rt::pipe_create() {
+                        Ok(ends) => ends,
+                        Err(ret) => return fail(&fds, pending_write, errno_from(ret)),
+                    };
+                    // Registered before the fill so a refusal releases it
+                    // through the one all-or-nothing path.
+                    fds.push(read);
+                    let filled = fill_value_pipe(write, reference);
+                    // Closed either way: the whole value is already in the
+                    // ring, so the child must see end-of-stream immediately.
+                    let _ = tairix_rt::fs_close(write);
+                    if let Err(err) = filled {
+                        return fail(&fds, pending_write, err);
+                    }
                 }
                 PlannedOpen::PipeRead => {
                     let (read, write) = match tairix_rt::pipe_create() {
@@ -662,6 +667,48 @@ mod program {
         write_stderr_line(&alloc::format!("shell: redirection: {action}: {err}"));
     }
 
+    /// Read the value-backed `reference` through the System Information API
+    /// and leave its rendered bytes in the pipe `write` end.
+    ///
+    /// Deliberately the *shell's* read, not the child's: reading here is what
+    /// lets every stdin-consuming tool take `< info:mem/physical` without
+    /// requesting `CAP_SYSINFO_*` for itself. It adds no authority — the same
+    /// [`IpcTransport`] every client uses, so `sysinfod` gates the query on
+    /// this shell's attested set.
+    ///
+    /// The whole value is written before any spawn, which cannot block
+    /// because [`MAX_VALUE_LEN`](tairix_procinfo::MAX_VALUE_LEN) is far below
+    /// one pipe's ring.
+    ///
+    /// # Errors
+    ///
+    /// The [`Errno`] the refusal maps to, after reporting the reason on
+    /// standard error. Every error path aborts the launch before the child
+    /// exists, so a denied read is never a blank one.
+    fn fill_value_pipe(write: u32, reference: &str) -> Result<(), Errno> {
+        // The planner rendered this from a parsed reference, so it should
+        // always re-parse; a malformed one is refused, never guessed at.
+        let parsed = tairix_resref::parse(reference).map_err(|_| {
+            write_stderr_line(&alloc::format!(
+                "shell: redirection: {reference}: not a resource reference"
+            ));
+            // The kernel resolver's own errno for a malformed reference, so
+            // a spelling refusal reads the same wherever it is caught.
+            Errno::OutOfRange
+        })?;
+        let now = tairix_rt::wall_time().map_or(Time64::UNIX_EPOCH, |reading| reading.time());
+        // The launch failure reported afterwards carries only the errno, so
+        // the shared wording — which names the capability a denial wanted —
+        // is stated here against the reference itself.
+        let value = tairix_procinfo::read_value(&parsed, now, &IpcTransport).map_err(|err| {
+            write_stderr_line(&alloc::format!("shell: redirection: {reference}: {err}"));
+            err.to_errno()
+        })?;
+        write_all_at(write, 0, value.as_bytes()).inspect_err(|&err| {
+            report_pump_error("value write failed", err);
+        })
+    }
+
     /// Launches and reaps external commands through the `spawn` and `wait`
     /// syscalls (`plans/SPAWN.md` SP3 / SP6 / SP10), resolving each command
     /// word to a bundle `Run` path through the shared candidate policy
@@ -690,14 +737,17 @@ mod program {
     }
 
     impl ProcessHost for RtProcessHost {
-        fn launch(&self, spec: &LaunchSpec<'_>) -> Result<Pid, Errno> {
+        fn launch(&self, spec: &LaunchSpec<'_>) -> Result<Pid, LaunchError> {
             // Lower the pipeline + redirections into a wiring plan first
             // (pure, fail-closed: an inexpressible redirection refuses the
             // launch before anything is opened), then execute it: open
             // every target, spawn every member with its attach block,
             // close the transferred ends, and run the byte pumps.
-            let plan = tairix_elsh::lower_wire_plan(spec)?;
-            let fds = open_planned(&plan.opens)?;
+            // Both stages are redirection work: lowering refuses a
+            // redirection the attach block cannot express, and the open
+            // phase refuses a target that will not open.
+            let plan = tairix_elsh::lower_wire_plan(spec).map_err(LaunchError::Redirection)?;
+            let fds = open_planned(&plan.opens).map_err(LaunchError::Redirection)?;
             let mut pids: Vec<i32> = Vec::with_capacity(plan.members.len());
             for member in &plan.members {
                 let command = &spec.commands[member.command];
@@ -708,7 +758,7 @@ mod program {
                         // then release every descriptor the plan opened.
                         kill_and_reap(&pids);
                         close_fds(fds.iter().copied());
-                        return Err(err);
+                        return Err(LaunchError::Spawn(err));
                     }
                 }
             }
@@ -727,7 +777,9 @@ mod program {
             close_fds(plan.retained().iter().map(|id| fds[id.0]));
             // The last member is the job leader: its status becomes `$?`,
             // and the others are reaped after it (`wait`).
-            let leader = *pids.last().ok_or(Errno::NotImplemented)?;
+            let leader = *pids
+                .last()
+                .ok_or(LaunchError::Spawn(Errno::NotImplemented))?;
             // Spawn returned the PID as a non-negative register, so the
             // widening cast preserves the value.
             #[allow(clippy::cast_sign_loss)]

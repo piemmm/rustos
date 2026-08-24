@@ -2,7 +2,7 @@
 //! requests, decode the typed replies, and render human-readable lines.
 
 use alloc::format;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
 
@@ -152,6 +152,12 @@ fn resolve_reference(
 /// a unit. What the figure *means* — its unit, kind, and sampling window — is
 /// [`run_describe`]'s job, one command away, rather than decoration this
 /// command's callers would have to parse back off.
+///
+/// The rendering itself is the shared
+/// [`ResourceResponse::display_value`](tairix_procinfo::ResourceResponse::display_value),
+/// not a match in this tool: the shell's input redirection
+/// (`cat < info:mem/physical`) reads the same values through the same
+/// renderer, so the two spellings of one read can never disagree.
 fn run_show(
     reference: &str,
     now: Time64,
@@ -159,13 +165,7 @@ fn run_show(
     out: &dyn Output,
 ) -> Result<(), SysinfoError> {
     let response = resolve_reference(reference, now, transport)?;
-    let value = match &response.payload {
-        // A `state:` reading renders like an `info:` fact; that it may change
-        // between reads is the envelope's business, not the value's.
-        ResponsePayload::Info(info) | ResponsePayload::State(info) => String::from(info.value()),
-        ResponsePayload::Metric(metric) => metric.value.to_string(),
-    };
-    emit(out, &value)
+    emit(out, &response.display_value())
 }
 
 /// `describe <resource-ref>`: print the response envelope rather than the

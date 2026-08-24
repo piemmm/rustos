@@ -44,9 +44,10 @@ a reference-shaped word — resource references such as `sys:random`.
 A namespace completes its registered selectors a segment at a time
 (`state:` → `net/` → `wan/` → `link`); where the registry knows only the
 shape — an interface name, an interrupt line — Tab offers the machine's own
-names, or nothing at all when this session may not list them. A redirection
-target offers only namespaces that can be opened, so `info:`/`state:`/`stats:`
-appear as arguments (read them with `sysinfo show`) but never after `>`.
+names, or nothing at all when this session may not list them. `info:`/`state:`/`stats:` appear
+as arguments and after `<`, which reads the value
+(`cat < info:mem/physical`), but never after `>`: such a resource is never
+written by redirection.
 Piped or scripted input bypasses the editor and behaves identically
 with or without a terminal.
 

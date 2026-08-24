@@ -15,8 +15,13 @@ entrada padrão é a única fonte.
 Um operando também pode ser uma referência de recurso tipada como
 `sys:random`: é aberta através do resolvedor de recursos do sistema
 (verificado por capacidades) em vez do sistema de ficheiros — `cat
-sys:random` emite bytes aleatórios. Uma referência malformada num espaço
-de nomes registado é um erro, nunca um nome de ficheiro.
+sys:random` emite bytes aleatórios. Uma referência `info:`, `state:` ou
+`stats:` nomeia um valor de sistema tipado em vez de um fluxo; é lida
+através do serviço de informação do sistema, pelo que
+`cat info:mem/physical` imprime esse valor, e uma leitura sem
+autorização é recusada nomeando a capacidade necessária. Uma referência
+malformada num espaço de nomes registado é um erro, nunca um nome de
+ficheiro.
 
 Com `-n`, as linhas de saída são numeradas continuamente através de
 todas as fontes, pelo que uma linha que atravessa duas fontes é

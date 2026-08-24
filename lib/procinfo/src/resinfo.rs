@@ -312,6 +312,27 @@ impl ResourceResponse {
     pub fn query(&self) -> &str {
         &self.query
     }
+
+    /// The payload's bare value: no label, no unit, no envelope decoration.
+    ///
+    /// The one rendering, shared by every reader of a value-backed reference
+    /// (`sysinfo show`, [`crate::valueread`]), so they cannot disagree about
+    /// what a reference reads as. What a figure *means* is the envelope's
+    /// business, rendered by `sysinfo describe`, not decoration a caller
+    /// would have to parse back off. Bounded by [`InfoValue`]'s and
+    /// [`Metric`]'s own construction limits.
+    #[must_use]
+    pub fn display_value(&self) -> String {
+        match &self.payload {
+            // A `state:` reading renders like an `info:` fact; that it may
+            // change between reads is the envelope's business, not the
+            // value's.
+            ResponsePayload::Info(info) | ResponsePayload::State(info) => {
+                String::from(info.value())
+            }
+            ResponsePayload::Metric(metric) => metric.value.to_string(),
+        }
+    }
 }
 
 #[cfg(test)]

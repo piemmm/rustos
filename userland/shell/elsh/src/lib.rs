@@ -81,7 +81,7 @@ pub use complete::{complete, Candidate, Completion, DirEntryInfo, DirLister, Res
 pub use env::Environment;
 pub use error::ParseError;
 pub use host::{
-    Console, Elevator, LaunchSpec, LimitStore, ProcessHost, RedirAction, RedirTarget,
+    Console, Elevator, LaunchError, LaunchSpec, LimitStore, ProcessHost, RedirAction, RedirTarget,
     ResolvedCommand, ResolvedRedirection,
 };
 pub use invocation::{parse as parse_invocation, Invocation, UsageError, USAGE};

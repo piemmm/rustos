@@ -31,14 +31,18 @@
 //!
 //! [`Command::Show`] and [`Command::Describe`] read one `info:`/`state:`/`stats:`
 //! *resource reference* (`plans/ALIAS.md` §15.4). Those namespaces are
-//! value-backed: they are typed values served through this API, never byte
-//! streams, so `cat info:mem/physical` cannot work by construction
-//! (`plans/ALIAS.md` §6.2 — the kernel resolver refuses a value-backed
-//! namespace with `Errno::NotSupported`) and a command is how one is read.
-//! Both subcommands spell the reference with the one shared parser
-//! (`lib/resref`) and resolve it with the one userspace resolver
-//! (`lib/procinfo::resolve`), so this tool adds no second reference grammar,
-//! no second resolver, and no path around the broker.
+//! value-backed: typed values served through this API, never kernel byte
+//! streams, so the kernel resource resolver opens no descriptor on one and
+//! every reader goes through the broker.
+//!
+//! This tool is one such reader, not the only one: the shell's read
+//! redirection (`cat < info:mem/physical`) and a tool reading the reference
+//! as an operand (`cat info:mem/physical`) both resolve through the same
+//! `lib/procinfo` resolver and render with the same
+//! [`display_value`](tairix_procinfo::ResourceResponse::display_value), so a
+//! value captured any of the three ways is byte-identical. Every one spells
+//! the reference with the shared parser (`lib/resref`), so there is no second
+//! grammar, no second resolver, and no path around the broker.
 //!
 //! The two operations that touch the outside world — issuing the request and
 //! writing the terminal — are the injected [`Transport`] and [`Output`]

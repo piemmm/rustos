@@ -45,8 +45,10 @@ vervollständigt seine registrierten Selektoren segmentweise
 (`state:` → `net/` → `wan/` → `link`). Wo die Registry nur die Form kennt —
 ein Schnittstellenname, eine Interruptleitung —, bietet Tab die echten Namen
 der Maschine an, oder gar nichts, wenn diese Sitzung sie nicht auflisten
-darf. Ein Umleitungsziel bietet nur öffenbare Namensräume: `info:`/`state:`/`stats:`
-erscheinen als Argument (lesbar mit `sysinfo show`), nie nach `>`.
+darf. `info:`/`state:`/`stats:` erscheinen als
+Argument und nach `<`, das den Wert liest (`cat < info:mem/physical`), aber
+nie nach `>`: eine solche Ressource wird niemals durch Umleitung
+geschrieben.
 
 ## OPTIONS
 

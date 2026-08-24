@@ -42,6 +42,13 @@ The crate provides:
 - `pressure::refresh_into` — reading the published memory-pressure band and
   publishing it to a `tairix_reclaim::ReportedPressure` gauge, the one
   definition every caching program keeps its band current through.
+- `resolve` / `ResolveInfoError` — the userspace `info:`/`state:`/`stats:`
+  resolver, mapping a parsed `resref` reference onto a registry-defined query.
+  Its `Display` is the one wording of a refusal and its `to_errno` the one
+  stable code, so `sysinfo show`, the shell, and a tool reading an operand all
+  report the same refusal identically.
+- `read_value` / `MAX_VALUE_LEN` — that resolver's value rendered as the bytes
+  a reader consumes, bounded so a caller can size a pipe write against it.
 
 Each consuming tool keeps its own argument grammar, usage banner, and error
 enum; this crate owns only the parts they share.
@@ -58,6 +65,12 @@ binary lands):
   surfacing a per-query refusal as the exact `Errno`.
 - `RtOutput` — an `Output` that writes each rendered line to the inherited
   standard output (fd 1) through `tairix-rt`.
+- `NamedSource` / `OpenError` — the one open-by-name path for a readable
+  source a tool was given: a path or stream reference through the kernel, an
+  `info:`/`state:`/`stats:` value through the broker (which no kernel backing
+  can serve). `cat` reads its operands through it; a refusal keeps the
+  resolver's typed reason so the caller can name the capability a denial
+  wanted.
 - `args` / `write_stderr_line` — the shared argument-vector walk and the
   standard-error diagnostic sink the tool `Run` binaries use, written once
   here rather than pasted into each (`AGENTS.md` §2.2).
