@@ -10,10 +10,11 @@
 
 use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::{
-    spec_for, AbiType, CallRecvFlags, CapabilityId, Errno, IrqHandle, LinkFlags, MapFlags,
-    OpenFlags, PowerAction, RandomFlags, RealpathMode, SchedPriority, Signal, SignalIntakeOp,
-    SyscallNumber, SyscallSpec, UnlinkFlags, WaitFlags, ENCODED_TABLE, FS_ATTR_KEY_MAX,
-    FS_ATTR_VALUE_MAX, FS_MODE_MASK, PROC_ID_HEX_LEN, SYSCALL_MAX_ARGS,
+    i32_from_register, i32_register_is_canonical, spec_for, AbiType, CallRecvFlags, CapabilityId,
+    Errno, IrqHandle, LinkFlags, MapFlags, OpenFlags, PowerAction, RandomFlags, RealpathMode,
+    SchedPriority, Signal, SignalIntakeOp, SyscallNumber, SyscallSpec, UnlinkFlags, WaitFlags,
+    ENCODED_TABLE, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_MODE_MASK, PROC_ID_HEX_LEN,
+    SYSCALL_MAX_ARGS,
 };
 use tairix_crypto::{sha256, Sha256Digest};
 use tairix_kernel_sec::{ProcessId, TaskCapabilities, TaskId};
@@ -2873,12 +2874,7 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
         match spec.number {
             SyscallNumber::YIELD => self.handlers.yield_now(caller),
             SyscallNumber::EXIT => {
-                // `validate_arg` guarantees the value is a
-                // sign-extended `i32`. Recover the original `i32` by
-                // truncating the low 32 bits — equivalent to `as i32`
-                // but without the lint-flagged truncation cast.
-                #[allow(clippy::cast_possible_wrap)]
-                let code = (args.0[0] & 0xFFFF_FFFF) as i32;
+                let code = i32_from_register(args.0[0]);
                 self.handlers.exit(caller, code)
             }
             SyscallNumber::IPC_SEND => {
@@ -2984,13 +2980,10 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 self.handlers.sched_set_realtime(caller, realtime)
             }
             SyscallNumber::SCHED_SET_PRIORITY => {
-                // args[0] is a sign-extended `i32` PID recovered the same way
-                // `WAIT`/`SIGNAL` recover theirs; args[1] is the
-                // `SchedPriority` discriminant, rejected before dispatch if it
-                // is not one of the closed set (fail closed on an unknown or
-                // zeroed value).
-                #[allow(clippy::cast_possible_wrap)]
-                let pid = (args.0[0] & 0xFFFF_FFFF) as i32;
+                // args[1] is the `SchedPriority` discriminant, rejected
+                // before dispatch if it is not one of the closed set (fail
+                // closed on an unknown or zeroed value).
+                let pid = i32_from_register(args.0[0]);
                 let priority = SchedPriority::from_u32(decode_u32(args.0[1]))?;
                 self.handlers.sched_set_priority(caller, pid, priority)
             }
@@ -3003,22 +2996,17 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             }
             SyscallNumber::BOOT_SESSION_GET => self.handlers.boot_session_get(caller),
             SyscallNumber::WAIT => {
-                // `validate_arg` guarantees args[0] is a sign-extended
-                // `i32`; recover it by truncating the low 32 bits (the
-                // same recovery `EXIT` uses), and args[1] is a non-null
-                // `UserPtr`. `from_bits` rejects any reserved flag bit.
-                #[allow(clippy::cast_possible_wrap)]
-                let pid = (args.0[0] & 0xFFFF_FFFF) as i32;
+                // `validate_arg` guarantees args[1] is a non-null `UserPtr`;
+                // `from_bits` rejects any reserved flag bit.
+                let pid = i32_from_register(args.0[0]);
                 let flags = WaitFlags::from_bits(decode_u32(args.0[2]))?;
                 self.handlers.wait(caller, pid, args.0[1], flags)
             }
             SyscallNumber::SIGNAL => {
-                // args[0] is a sign-extended `i32` PID recovered the same way
-                // `WAIT`/`EXIT` recover theirs; args[1] is the `Signal`
-                // discriminant, rejected before dispatch if it is not one of
-                // the closed set (fail closed on an unknown or zeroed value).
-                #[allow(clippy::cast_possible_wrap)]
-                let pid = (args.0[0] & 0xFFFF_FFFF) as i32;
+                // args[1] is the `Signal` discriminant, rejected before
+                // dispatch if it is not one of the closed set (fail closed on
+                // an unknown or zeroed value).
+                let pid = i32_from_register(args.0[0]);
                 let signal = Signal::from_u32(decode_u32(args.0[1]))?;
                 self.handlers.signal(caller, pid, signal)
             }
@@ -3059,10 +3047,8 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             ),
             SyscallNumber::CONSOLE_FOREGROUND => {
                 // args[0] is the readable descriptor naming the console;
-                // args[1] is a sign-extended `i32` PID recovered the same
-                // way `WAIT`/`SIGNAL` recover theirs (`0` clears the slot).
-                #[allow(clippy::cast_possible_wrap)]
-                let pid = (args.0[1] & 0xFFFF_FFFF) as i32;
+                // a `0` PID clears the slot.
+                let pid = i32_from_register(args.0[1]);
                 self.handlers
                     .console_foreground(caller, decode_u32(args.0[0]), pid)
             }
@@ -3814,19 +3800,7 @@ fn validate_arg(ty: AbiType, raw: u64) -> Result<(), Errno> {
             }
         }
         AbiType::I32 => {
-            // Upper 32 bits must equal the sign extension of the low
-            // 32 bits — anything else is a malformed trampoline value.
-            // Truncating to `i32` and zero-extending back to a `u64`
-            // gives the canonical sign-extended representation; the
-            // raw value must equal it exactly.
-            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-            let low = (raw & 0xFFFF_FFFF) as i32;
-            // Re-widening the masked value and reinterpreting it is the ABI's
-            // sign-extension convention for an `i32` slot; the comparison
-            // below is what accepts or rejects the register.
-            #[allow(clippy::cast_sign_loss)]
-            let extended = i64::from(low) as u64;
-            if raw == extended {
+            if i32_register_is_canonical(raw) {
                 Ok(())
             } else {
                 Err(Errno::OutOfRange)
@@ -5724,6 +5698,32 @@ mod tests {
             d.dispatch(&ctx, u64::from(SyscallNumber::EXIT.as_u16()), bad),
             Err(Errno::OutOfRange)
         );
+    }
+
+    #[test]
+    fn i32_argument_reaches_the_handler_verbatim() {
+        // The accepted register's low half is what the handler acts on. The
+        // mock echoes its `i32` back as the bit pattern the ABI encodes, so a
+        // recovery that clamped, widened, or zeroed the value would show here
+        // — `i32_argument_must_be_sign_extended` only proves the refusal.
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[], &sink);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+
+        for code in [0i32, 1, -1, 42, -42, i32::MAX, i32::MIN] {
+            let mut args = RawArgs::ZERO;
+            args.0[0] = i64::from(code).cast_unsigned();
+            assert_eq!(
+                d.dispatch(&ctx, u64::from(SyscallNumber::EXIT.as_u16()), args),
+                Ok(u64::from(code.cast_unsigned())),
+                "exit({code}) must reach the handler unchanged"
+            );
+        }
     }
 
     #[test]

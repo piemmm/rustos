@@ -1,0 +1,15 @@
+[package]
+name = "tairix-itest-finisher"
+description = "Runtime support seam linked by the freestanding QEMU integration kernels: the one total composition of a QEMU finisher code from a fixture's failure base and an observed value (a child exit code, a CPU mask). `no_std` with no dependencies so a bare-metal test kernel can link it, and host-unit-tested so the arithmetic every fixture reports through is proven rather than re-derived per fixture."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"

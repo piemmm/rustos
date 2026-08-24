@@ -60,6 +60,7 @@ use tairix_arch_api::CpuId;
 use tairix_arch_api::SecondaryBringup;
 use tairix_caps::CapabilitySet;
 use tairix_fdt::Fdt;
+use tairix_itest_finisher::fail_code;
 use tairix_kalloc::FreeListAllocator;
 use tairix_kernel::aarch64::arch_wrapper::{Aarch64BinArch, UART_ONLY_CONSOLES};
 use tairix_kernel::aarch64::spawn_producer::{AARCH64_PROCESS_SPAWN, USER_IMAGE_BIAS};
@@ -862,10 +863,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
 
     let parent_code = drive_process(&sys, wait_producer, parent_pid);
     if parent_code != 0 {
-        // A child code outside the reportable range saturates, so it can
-        // neither wrap onto another fixture's code nor overflow the add.
-        let code = u16::try_from(parent_code).unwrap_or(u16::MAX);
-        qemu_exit::exit_failure(FAIL_EXIT_BASE.saturating_add(code));
+        qemu_exit::exit_failure(fail_code(FAIL_EXIT_BASE, parent_code));
     }
 
     let ipc_pid = match init_ctx.spawn_driver_process(
@@ -960,18 +958,13 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     };
 
     if ipc_code != 0 {
-        // A child code outside the reportable range saturates, so it can
-        // neither wrap onto another fixture's code nor overflow the add.
-        let code = u16::try_from(ipc_code).unwrap_or(u16::MAX);
-        qemu_exit::exit_failure(FAIL_IPC_CONTROL.saturating_add(code));
+        qemu_exit::exit_failure(fail_code(FAIL_IPC_CONTROL, ipc_code));
     }
 
     #[cfg(migration_smp)]
     if observed_cpus.0.count_ones() < 2 || observed_cpus.1 < 4 {
-        // The observed-CPU mask is reported alongside the failure; a mask
-        // wider than the report saturates rather than overflowing the add.
-        let code = u16::try_from(observed_cpus.0).unwrap_or(u16::MAX);
-        qemu_exit::exit_failure(FAIL_NO_MIGRATION.saturating_add(code));
+        // The observed-CPU mask is reported alongside the failure.
+        qemu_exit::exit_failure(fail_code(FAIL_NO_MIGRATION, observed_cpus.0));
     }
 
     note(

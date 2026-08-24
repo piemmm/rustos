@@ -35,6 +35,7 @@ tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
 tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
 tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 tairix-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
+tairix-itest-finisher = { path = "../finisher", version = "=0.0.0" }
 tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
 tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
 tairix-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }

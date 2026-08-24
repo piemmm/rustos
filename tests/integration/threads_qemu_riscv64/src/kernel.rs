@@ -50,6 +50,7 @@ use tairix_arch_riscv64::{
     SERIAL_SINK,
 };
 use tairix_caps::CapabilitySet;
+use tairix_itest_finisher::fail_code;
 use tairix_kalloc::FreeListAllocator;
 use tairix_kernel::dispatch_core::{dispatch_via_slot, read_raw_args, resolve_user_fault_via_slot};
 use tairix_kernel::riscv64::boot::{RiscvBinArch, RISCV_UART_CONSOLES};
@@ -644,10 +645,7 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
                     qemu_exit::exit_success();
                 }
                 WaitStatus::Exited(code) => {
-                    // A child code outside the reportable range saturates, so it can
-                    // neither wrap onto another fixture's code nor overflow the add.
-                    let code = u16::try_from(code).unwrap_or(u16::MAX);
-                    qemu_exit::exit_failure(FAIL_EXIT_BASE.saturating_add(code));
+                    qemu_exit::exit_failure(fail_code(FAIL_EXIT_BASE, code));
                 }
                 WaitStatus::Stopped(_) => {
                     qemu_exit::exit_failure(FAIL_PARENT_STOPPED);

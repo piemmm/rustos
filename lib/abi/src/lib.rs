@@ -193,8 +193,9 @@ pub use syscall::{
     IrqHandle, SyscallNumber, WaitFlags, RESOURCE_REF_MAX, SYSCALL_TABLE_HASH_LEN, WAIT_PID_ANY,
 };
 pub use syscalls::{
-    encoded_table, spec_for, AbiType, SyscallSpec, ENCODED_TABLE, ENCODED_TABLE_LEN, SYSCALLS,
-    SYSCALL_ENCODED_RECORD_LEN, SYSCALL_MAX_ARGS, SYSCALL_NAME_MAX,
+    encoded_table, i32_from_register, i32_register_is_canonical, spec_for, AbiType, SyscallSpec,
+    ENCODED_TABLE, ENCODED_TABLE_LEN, SYSCALLS, SYSCALL_ENCODED_RECORD_LEN, SYSCALL_MAX_ARGS,
+    SYSCALL_NAME_MAX,
 };
 pub use sysinfo::{
     decode_reply as decode_sysinfo_reply, encode_reply_err as encode_sysinfo_reply_err,

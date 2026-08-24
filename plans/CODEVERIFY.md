@@ -36,12 +36,20 @@ the next context can continue. The loop ends when no violations remain.
 - **This is not a comment refactor.** Comment "waffle" reduction is owned by
   `plans/WAFFLE.md`; do not conflate the two. CODEVERIFY targets *defects and
   bad code*, not comment style.
-- **The gate lints bare-metal code, so the lint-catchable classes need no
-  manual hunt.** `cargo xtask clippy` runs `-D warnings` for the host *and*
-  once per Tier-1 target, so a `freestanding` body is linted rather than only
-  compiled (`docs/src/contributing.md`). Scan for what a lint cannot see —
-  wrong invariants, ambient authority, duplication, dead code — not for what
-  the gate already rejects.
+- **The gate lints bare-metal *product* code, so the lint-catchable classes
+  need no manual hunt there.** `cargo xtask clippy` runs `-D warnings` for the
+  host *and* once per Tier-1 target, so a `freestanding` body in `kernel/*`,
+  `lib/*`, `drivers/*` or `userland/*` is linted rather than only compiled.
+  Scan those for what a lint cannot see — wrong invariants, ambient authority,
+  duplication, dead code — not for what the gate already rejects.
+- **`tests/*` and `tools/*` bodies are the exception: nothing lints them for a
+  bare-metal target.** The per-target passes exclude them by design
+  (`docs/src/contributing.md`), and the QEMU matrix only *builds* the fixtures,
+  without `-D warnings`. A dead import or an `unused_mut` in a fixture body
+  therefore survives a green gate, and only `cargo check --target <its target>`
+  over the enrolment table in `tools/xtask/src/commands/qemu_tests.rs` sees it.
+  Run that when a change touches fixture source; `cargo build --workspace`
+  compiles only the host stubs.
 
 ## 1. What counts as a violation (the hunt checklist)
 
@@ -231,6 +239,9 @@ pass: production-path `panic!`/`unwrap`/`expect` (§2.9 — every hit is a test,
 host build script, or fixture), `TODO`/`FIXME`/`HACK`/"for now" markers (§2.1,
 §2.19), `cfg(target_arch …)`/`cfg(target_pointer_width …)` outside the §17.2
 allow-list, and 32-bit absolute time in an ABI or persisted format (§21).
+Also clean, and worth re-checking only when fixture source changes: rustc
+warnings in the freestanding fixture bodies — a `cargo check --target` over all
+149 enrolled package/target pairs reports none.
 
 ### Done — every `#[allow(...)]` states an invariant, and three defects it hid
 
@@ -284,17 +295,93 @@ clippy). A bare `cargo clippy --target … -- -D warnings` on those crates
 reports ~10 pre-existing lints that the gate's own invocation does not; compare
 counts against a reverted file before treating any as yours.
 
-### Open — fixture exit-code reporting is duplicated sixteen ways, untested
+### Done — fixture finisher codes compose through one tested seam
 
-The `u16::try_from(code).unwrap_or(u16::MAX)` + `saturating_add` conversion
-above is now correct but written out at sixteen sites, and it has no host test:
-the fixture bodies compile only under `freestanding`, and
-`tests/integration/harness` is a **build**-dependency, so nothing a bare-metal
-fixture links at runtime can host the shared version. A `lib/*` crate for
-test-fixture arithmetic would be bloat (§2.3) and speculative production
-surface (§2.4), so the honest fix is a runtime fixture-support seam the
-bare-metal binaries can depend on — worth a context of its own, not a
-smuggled-in extra.
+The sixteen copies are gone. `tests/integration/finisher`
+(`tairix-itest-finisher`) is the runtime fixture-support seam the bare-metal
+binaries link — `no_std`, dependency-free, one function — and every fixture
+reports through `fail_code(base, observed)`. It is a second crate rather than
+a `harness` module because `harness` is a *build* dependency and links `std`;
+nothing it holds can reach a running test kernel. It is not in `lib/*` because
+fixture arithmetic is not production surface.
+
+`fail_code` is generic over `TryInto<u16>` so the fifteen `i32` exit-code sites
+and mem-pin's `u32` CPU-mask site share the one definition rather than adding a
+per-type conversion at the call site.
+
+Two properties beyond the deduplication, each with a test that fails without
+its guard:
+
+- **The composed code is never zero.** Both finishers read a zero code as
+  *success*, so a composition reaching zero would report a failing run as a
+  pass — the same class as the truncated `EXIT` decode this sweep already
+  fixed. `fail_code` floors at 1, which closes it for every *computed* code.
+- **Saturation is the top of the band, not a wrap.** The pre-seam form aborted
+  in debug and aliased onto a smaller assigned code in release.
+
+The four fixtures that implement the `EXIT` arm themselves no longer open-code
+the register decode either; see the `lib/abi` entry below.
+
+### Open — `qemu_exit::exit_failure(0)` reports a pass, on aarch64 and riscv64
+
+`exit_failure` takes a bare `u16`, and zero is each board's *success* status:
+aarch64 passes the code as the semihosting `SYS_EXIT` subcode, and riscv64
+packs it into the `sifive_test` high half, so both exit QEMU with status 0 —
+which the runner reads as `Outcome::Pass`. A finisher whose whole job is
+reporting failure therefore fails **open** on one input.
+
+Not reachable today: every call site passes either a non-zero literal or a
+`fail_code` result, which now floors at 1. It is one typo from live, in the
+mechanism that decides whether the QEMU matrix passes.
+
+The clean fix is to make it unrepresentable — `exit_failure(NonZeroU16)` — and
+that is why this is its own item: 839 call sites across 100 crates, each with
+its own `FAIL_*` constants to convert. The cheaper shape is for each board's
+`exit_failure` to map zero onto a reserved non-zero code, which fails closed
+without touching a call site, at the cost of silently renaming a caller's bug;
+if that is chosen, extract the substitution as a pure `const fn` beside
+riscv64's `fail_word` so it is host-testable, and note that the two boards'
+copies are then the sibling-implementation carve-out rather than duplication.
+x86_64's `exit_failure()` takes no code and is unaffected.
+
+### Done — the `I32` argument slot has one decode, in `lib/abi`
+
+`SyscallNumber::from_register` gave the syscall *number* register one checked
+decode; the `I32` *argument* register still had six copies of the recovery in
+`kernel/syscall/src/table.rs` (`exit`, `wait`, `signal`, `sched_set`,
+`console_foreground`, and `validate_arg`), each with its own
+`#[allow(clippy::cast_*)]` and a comment admitting it was "the same recovery
+`EXIT` uses" — and four more in the QEMU test kernels that implement the `EXIT`
+arm themselves, whose comment claimed the decode was "exactly as the dispatcher
+decodes it" while nothing held it to that.
+
+The rule now lives once, beside `AbiType`, as the two halves it actually has:
+`i32_register_is_canonical` (the acceptance `validate_arg` applies) and
+`i32_from_register` (the value an accepted register carries). Seven lint
+suppressions became none — the canonical check is expressed over the sign
+extension directly, so it needs no cast, and the recovery reinterprets through
+`u32::cast_signed`.
+
+The arms take the *infallible* recovery, not a `Result`: `validate_arg` has
+already accepted the register by the time an arm reads it, so a fallible decode
+there would be a dead error path — the shape the `hwtree.rs` item below calls
+out.
+
+Two things a later reviewer should not re-litigate:
+
+- **`fuzz_args.rs`'s `arg_is_well_typed` still re-implements the rule, on
+  purpose.** It is the harness's independent model of the dispatcher's
+  acceptance; pointing it at the same function would make the cross-check
+  vacuous. That independence is what proves the new bit arithmetic: the harness
+  compares its round-trip formulation against the live dispatcher over random
+  registers and fails on any divergence, so the two spellings of the rule are
+  machine-checked equivalent rather than argued equivalent. Its `narrow_for`
+  sibling builds a canonical register, which is the inverse operation and has
+  one caller.
+- **`i32_argument_must_be_sign_extended` only ever proved the *refusal*.** A
+  recovery that returned zero, clamped, or widened wrongly passed it, so the
+  dispatch tests gained `i32_argument_reaches_the_handler_verbatim`, which
+  asserts the value the mock handler receives.
 
 ### Open — three duplications noticed while sweeping the `#[allow]` sites
 

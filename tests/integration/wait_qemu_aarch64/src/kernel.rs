@@ -36,7 +36,7 @@ use tairix_kernel_mem::{
     VirtAddr,
 };
 use tairix_kernel_sched_cfq::{Priority, Scheduler, SchedulerConfig};
-use tairix_kernel_sec::{ProcessId, TaskId};
+use tairix_kernel_sec::ProcessId;
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 use tairix_log::{log, Event, EventId, Level};
 use tairix_sync::SpinLock;

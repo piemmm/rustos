@@ -8,12 +8,16 @@ use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use tairix_abi::rxe::LoadImage;
-use tairix_abi::{CapabilityId, CapabilityQuery, Errno, MapFlags, SyscallNumber, SYSCALL_MAX_ARGS};
+use tairix_abi::{
+    i32_from_register, CapabilityId, CapabilityQuery, Errno, MapFlags, SyscallNumber,
+    SYSCALL_MAX_ARGS,
+};
 use tairix_arch_api::EnterUser;
 use tairix_arch_riscv64::{
     fault, handle_panic_via_serial, paging, qemu_exit, syscall_entry, trap, userentry::UserMode,
     SERIAL_SINK,
 };
+use tairix_itest_finisher::fail_code;
 use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
 use tairix_kernel_core::{spawn_image, MemMap, SpawnMode, SpawnRequest};
 use tairix_kernel_mem::{
@@ -325,13 +329,7 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
         // branch. Report it with the program's exit code so the failing step
         // is identifiable (fail loud).
         note(TEST_FAIL, "mem_map test: fixture exited before faulting");
-        // The exit slot is an `i32`, decoded exactly as the dispatcher
-        // decodes it; a code outside the reportable range then saturates
-        // rather than aliasing onto another code — or onto 0, success.
-        #[allow(clippy::cast_possible_wrap)]
-        let exit_code = (args[0] & 0xFFFF_FFFF) as i32;
-        let code = u16::try_from(exit_code).unwrap_or(u16::MAX);
-        qemu_exit::exit_failure(FAIL_EXIT_BASE.saturating_add(code));
+        qemu_exit::exit_failure(fail_code(FAIL_EXIT_BASE, i32_from_register(args[0])));
     } else {
         note(
             TEST_FAIL,

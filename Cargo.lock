@@ -1676,6 +1676,10 @@ name = "tairix-installer"
 version = "0.0.0"
 
 [[package]]
+name = "tairix-itest-finisher"
+version = "0.0.0"
+
+[[package]]
 name = "tairix-itest-harness"
 version = "0.0.0"
 dependencies = [
@@ -2783,6 +2787,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-caps",
  "tairix-fdt",
+ "tairix-itest-finisher",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel",
@@ -3071,6 +3076,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-caps",
  "tairix-fdt",
+ "tairix-itest-finisher",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel",
@@ -3094,6 +3100,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-arch-riscv64",
  "tairix-caps",
+ "tairix-itest-finisher",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel",
@@ -3221,6 +3228,7 @@ dependencies = [
  "tairix-arch-aarch64",
  "tairix-arch-api",
  "tairix-fdt",
+ "tairix-itest-finisher",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel-core",
@@ -3415,6 +3423,7 @@ dependencies = [
  "tairix-arch-aarch64",
  "tairix-arch-api",
  "tairix-fdt",
+ "tairix-itest-finisher",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel-core",
@@ -3431,6 +3440,7 @@ dependencies = [
  "tairix-abi",
  "tairix-arch-api",
  "tairix-arch-riscv64",
+ "tairix-itest-finisher",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel-core",
@@ -3471,6 +3481,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-caps",
  "tairix-fdt",
+ "tairix-itest-finisher",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel",
@@ -3495,6 +3506,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-caps",
  "tairix-fdt",
+ "tairix-itest-finisher",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel",
@@ -3576,6 +3588,7 @@ dependencies = [
  "tairix-arch-aarch64",
  "tairix-arch-api",
  "tairix-fdt",
+ "tairix-itest-finisher",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel-core",
@@ -4041,6 +4054,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-caps",
  "tairix-fdt",
+ "tairix-itest-finisher",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel",
@@ -4115,6 +4129,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-caps",
  "tairix-fdt",
+ "tairix-itest-finisher",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel",
@@ -4400,6 +4415,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-caps",
  "tairix-fdt",
+ "tairix-itest-finisher",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel",
@@ -4423,6 +4439,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-arch-riscv64",
  "tairix-caps",
+ "tairix-itest-finisher",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel",
@@ -4702,6 +4719,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-caps",
  "tairix-fdt",
+ "tairix-itest-finisher",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel",
@@ -4725,6 +4743,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-arch-riscv64",
  "tairix-caps",
+ "tairix-itest-finisher",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel",

@@ -428,6 +428,24 @@ names (`#[cfg(itest_x86_64)]`, `#[cfg(not(itest_x86_64))]`, …) rather
 than on `cfg(target_arch …, target_os = "none")`, so `cfg-check` scans
 the tree with no grandfather entry for it.
 
+That harness is a *build* dependency, so nothing it holds can be linked
+by a running test kernel. Logic the kernel bodies themselves share needs
+a second crate, `tests/integration/finisher`
+(`tairix-itest-finisher`): `no_std`, dependency-free, and a runtime
+dependency of each freestanding binary. It holds one function,
+`fail_code`, which composes the finisher code a fixture reports from its
+failure base and an observed value — a child's exit code, or the CPU mask
+a migration test saw.
+
+The composition is there because it must be total and cannot be tested
+where it was written. The observed value comes from the program under
+test, so a fixture that panicked, wrapped, or composed a zero while
+reporting it would turn a real failure into a debug abort, another
+failure's code, or — because both boards read a zero finisher code as
+success — a pass. A fixture body compiles only for its bare-metal target,
+where no host test can reach it; in the shared crate the property is
+proven once by ordinary unit tests.
+
 ### Freestanding production kernel binary
 
 The `tairix-kernel` crate has the same two-form shape: a bare-metal

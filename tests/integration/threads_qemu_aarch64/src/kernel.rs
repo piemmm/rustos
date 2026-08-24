@@ -55,6 +55,7 @@ use tairix_arch_aarch64::{
 use tairix_arch_api::CpuId;
 use tairix_caps::CapabilitySet;
 use tairix_fdt::Fdt;
+use tairix_itest_finisher::fail_code;
 use tairix_kalloc::FreeListAllocator;
 use tairix_kernel::aarch64::arch_wrapper::{Aarch64BinArch, UART_ONLY_CONSOLES};
 use tairix_kernel::aarch64::spawn_producer::{AARCH64_PROCESS_SPAWN, USER_IMAGE_BIAS};
@@ -697,10 +698,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
                     qemu_exit::exit_success();
                 }
                 WaitStatus::Exited(code) => {
-                    // A child code outside the reportable range saturates, so it can
-                    // neither wrap onto another fixture's code nor overflow the add.
-                    let code = u16::try_from(code).unwrap_or(u16::MAX);
-                    qemu_exit::exit_failure(FAIL_EXIT_BASE.saturating_add(code));
+                    qemu_exit::exit_failure(fail_code(FAIL_EXIT_BASE, code));
                 }
                 WaitStatus::Stopped(_) => {
                     qemu_exit::exit_failure(FAIL_PARENT_STOPPED);

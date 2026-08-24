@@ -1745,6 +1745,14 @@ In addition the dispatcher refuses non-zero data in slots **past**
 trampoline from smuggling extra register state past a syscall's
 declared arity.
 
+The `I32` rule has one definition, in `lib/abi`:
+`i32_register_is_canonical` is the acceptance above, and
+`i32_from_register` recovers the value the accepted register carries.
+Every arm that reads an `I32` slot — `exit`, `wait`, `signal`,
+`sched_set`, `console_foreground` — recovers through it, as do the QEMU
+test kernels that stand in for the dispatcher, so the reserved upper bits
+cannot mean one thing to production and another to a fixture.
+
 ## Error map
 
 | `Errno`                 | When the dispatcher returns it                                                       |

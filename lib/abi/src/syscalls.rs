@@ -102,6 +102,32 @@ impl AbiType {
     }
 }
 
+/// Whether `raw` is the canonical encoding of an [`AbiType::I32`] slot.
+///
+/// The upper half must repeat bit 31 of the value, so the reserved half
+/// carries no information a caller could vary independently of the value the
+/// kernel acts on.
+#[must_use]
+pub const fn i32_register_is_canonical(raw: u64) -> bool {
+    let sign_extension = if raw & 0x8000_0000 == 0 {
+        0
+    } else {
+        0xFFFF_FFFF
+    };
+    raw >> 32 == sign_extension
+}
+
+/// Recover the `i32` an [`AbiType::I32`] slot carries.
+///
+/// The low half is the whole value once [`i32_register_is_canonical`] has
+/// accepted the register. Every entry path recovers it through here — the
+/// dispatcher and the QEMU test kernels alike — so the reserved upper bits
+/// cannot mean one thing to production and another to a fixture.
+#[must_use]
+pub const fn i32_from_register(raw: u64) -> i32 {
+    ((raw & 0xFFFF_FFFF) as u32).cast_signed()
+}
+
 /// One row of the frozen `abi-v1` syscall table.
 ///
 /// Fields are public and `const`-constructible so that the table can be
@@ -2965,8 +2991,9 @@ pub const fn encoded_table() -> &'static [u8] {
 #[cfg(test)]
 mod tests {
     use super::{
-        encoded_table, spec_for, AbiType, ENCODED_TABLE, ENCODED_TABLE_LEN, SYSCALLS,
-        SYSCALL_ENCODED_RECORD_LEN, SYSCALL_MAX_ARGS, SYSCALL_NAME_MAX,
+        encoded_table, i32_from_register, i32_register_is_canonical, spec_for, AbiType,
+        ENCODED_TABLE, ENCODED_TABLE_LEN, SYSCALLS, SYSCALL_ENCODED_RECORD_LEN, SYSCALL_MAX_ARGS,
+        SYSCALL_NAME_MAX,
     };
     use crate::{CapabilityId, SyscallNumber};
 
@@ -3439,5 +3466,51 @@ mod tests {
         let cap_le = u16::from_le_bytes([rec[11], rec[12]]);
         assert_eq!(cap_le, CapabilityId::USER_ADMIN.as_u16());
         assert_eq!(rec[13], 1, "audit flag");
+    }
+
+    #[test]
+    fn canonical_i32_register_accepts_both_signs() {
+        for value in [0i32, 1, -1, i32::MAX, i32::MIN, 4242, -4242] {
+            let raw = i64::from(value).cast_unsigned();
+            assert!(
+                i32_register_is_canonical(raw),
+                "sign-extended {value} must be canonical"
+            );
+            assert_eq!(i32_from_register(raw), value);
+        }
+    }
+
+    #[test]
+    fn non_sign_extended_i32_register_is_refused() {
+        // A positive low half with any upper bit set, and a negative low half
+        // whose upper half is not all-ones: both carry information the value
+        // does not, so neither is a value the kernel may act on.
+        for raw in [
+            0x1_0000_0000u64,
+            0xFFFF_FFFF_0000_0000,
+            0x0000_0001_0000_0007,
+            0x0000_0000_8000_0000,
+            0xFFFF_FFFE_FFFF_FFFF,
+            u64::MAX >> 1,
+        ] {
+            assert!(
+                !i32_register_is_canonical(raw),
+                "{raw:#x} must not be canonical"
+            );
+        }
+        assert!(i32_register_is_canonical(0xFFFF_FFFF_8000_0000));
+    }
+
+    #[test]
+    fn i32_register_recovery_keeps_the_low_half_verbatim() {
+        // The recovery reinterprets, never saturates or clamps: a fixture that
+        // reported a clamped code would name a different failure than the one
+        // the program signalled.
+        assert_eq!(i32_from_register(0xFFFF_FFFF_FFFF_FFFF), -1);
+        assert_eq!(i32_from_register(0x0000_0000_7FFF_FFFF), i32::MAX);
+        assert_eq!(i32_from_register(0xFFFF_FFFF_8000_0000), i32::MIN);
+        // Recovery is defined on the whole register so it is total; the
+        // canonical check is what refuses a malformed one.
+        assert_eq!(i32_from_register(0x1234_5678_9ABC_DEF0), -1_698_898_192);
     }
 }
