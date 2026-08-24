@@ -724,6 +724,86 @@ reclaimed by **age** (`STAGING_IDLE_NS`). Losing an abandoned session's edits is
 exactly the contract already stated: a caller that never commits changes
 nothing.
 
+**The table is bounded at every level of the ownership it describes.** The
+per-scope key bound and age reclaim above bound one caller and one moment; they
+say nothing about the sum, so staged bytes once grew with the `ConfigSet` calls
+any application of any account could issue inside the reclaim window — in a
+service every command app depends on, which on the 1 GiB floor is a denial of
+service against every application's settings. The ceilings that close it, each
+answering a question the others do not:
+
+| Ceiling | What it bounds |
+|---|---|
+| `MAX_PENDING_EDITS` | distinct keys one session may stage, per scope |
+| `STAGING_SESSION_MAX_BYTES` | charged bytes one calling process instance may hold |
+| `STAGING_ACCOUNT_MAX_BYTES` | charged bytes one account may hold |
+| `STAGING_ACCOUNT_MAX_SESSIONS` | table entries one account may hold |
+| `STAGING_MAX_SESSIONS` | table entries in all |
+| `STAGING_TOTAL_MAX_BYTES` | the service's whole staging footprint (8 MiB) |
+
+- **Charged bytes include the record, not just the text.** A thousand one-byte
+  keys cost the table a thousand `PendingEdit` records; charging only key and
+  value would let them past every ceiling by the record's size over again — some
+  fifty times the intended footprint. Allocator slack above the charge is a
+  bounded constant factor and is deliberately not modelled.
+- **The fairness unit is the account, and the shares are never over-committed.**
+  The two account ceilings are each `1/STAGING_ACCOUNT_SHARES` (16) of the
+  whole, so filling the table takes at least sixteen distinct accounts and no
+  single account can take it. A per-*app* share was rejected: nothing bounds the
+  number of applications an account may run, so it could yield no aggregate at
+  all. Instead a process may hold half its account's share, which is what stops
+  one application spending all of it and starving a sibling application of the
+  same user — all of a user's applications run as that user, so the per-account
+  ceiling alone would not.
+- **Fixed containment bounds, not capacities (§24.4).** Same reasoning as the
+  bulk ceilings in §3.8: they bound what untrusted callers may make a boot-floor
+  service hold, and a bigger machine letting them hold proportionally more is a
+  regression rather than flexibility. 8 MiB is under one percent of the 1 GiB
+  floor and some four orders of magnitude above any real load — the client
+  stages *locally* and only sends its `ConfigSet` calls inside `commit()`
+  (§3.9), so a well-behaved application's service-side session lives for
+  microseconds and holds only its dirty keys.
+- **The entry counts are not redundant with the byte ceilings.** A session
+  holding one one-byte key costs almost nothing yet still has to be searched on
+  every request, and the byte ceiling alone would admit tens of thousands of
+  them. Every session lookup is a scan of the table, so the count is what keeps
+  that scan cheap.
+- **Rejected: LRU eviction.** It bounds memory while refusing nobody, but a
+  session it evicted would make the next `ConfigCommit` succeed having written
+  nothing (the commit path answers `Ok` for a caller with nothing staged, which
+  is the correct answer for a caller that changed no setting). That is silent
+  loss of a settings sheet's unsaved edits reported as a successful save — worse
+  than a refusal, and a fail-*open* where the charter requires fail-closed.
+  Telling the two apart would need a tombstone per evicted session, which is
+  the unbounded state the bound exists to remove.
+- **A ceiling refuses no legal edit.** Half an account's share still holds a
+  rewrite of *both* of an application's documents at the format's maximum size
+  (~180 KiB against 256 KiB), which
+  `the_widest_legal_rewrite_of_both_documents_is_admitted` enforces rather than
+  asserts.
+- **The bound is on memory, not a prediction that a commit will succeed.**
+  Whether staged edits fit the document they publish into depends on the
+  committed document, which the service has not read at staging time; reading it
+  per staged edit would cost a file read each — the pessimisation the one-read
+  design exists to avoid. So an over-large set of edits is still refused at the
+  commit, by the format.
+- **What being refused reports, and to whom.** The reply is `LimitExceeded`
+  whichever ceiling was reached, so a refusal never reports another account's
+  staging back to this one. Only the audit stream distinguishes an allowance the
+  caller can free by committing (`STAGING_SPENT`, informational) from a table
+  with no room for it (`STAGING_UNAVAILABLE`, a warning an operator acts on).
+  The residual channel is inherent to any aggregate bound: an application can
+  learn that its account is near its share, hence that a sibling is staging.
+  It is contentless and crosses no authority boundary — sibling applications
+  already run as the same user and can see each other's processes through the
+  System Information API with no capability at all.
+
+**The fairness cost, stated.** Sixteen accounts genuinely mid-edit at once can
+refuse the seventeenth. No single principal can provoke that (it takes sixteen
+distinct accounts, and running as another uid needs privilege), the refusal is
+`LimitExceeded` rather than a loss, and the table drains on every commit and
+within `STAGING_IDLE_NS` of an abandonment.
+
 Every entry point follows §5.4: attest the caller, check authority before
 touching state, validate every input, log the security-relevant decisions, fail
 closed.

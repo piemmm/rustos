@@ -17,21 +17,27 @@ use tairix_abi::{AppIdentity, BootId, Errno, Origin, ProcId, BOOT_ID_LEN};
 use tairix_appconf::Document;
 use tairix_log::DiscardSink;
 
-use super::{AppData, MAX_PENDING_EDITS, STAGING_IDLE_NS};
+use super::{
+    AppData, MAX_PENDING_EDITS, STAGING_ACCOUNT_MAX_BYTES, STAGING_ACCOUNT_MAX_SESSIONS,
+    STAGING_ACCOUNT_SHARES, STAGING_IDLE_NS, STAGING_MAX_SESSIONS, STAGING_SESSION_MAX_BYTES,
+    STAGING_TOTAL_MAX_BYTES,
+};
 use crate::store::tests::{identity, publisher};
 use crate::testfs::{TestFs, ACCOUNT_UID, HOME};
 use crate::vault::tests::CountingEntropy;
 use crate::Storage as _;
 
 /// A distinct process instance. Never reused, exactly as the kernel's own
-/// identifiers are not.
-fn proc_id(tag: u8) -> ProcId {
-    ProcId::from_bytes(&[tag; PROC_ID_LEN]).expect("a full-width identifier")
+/// identifiers are not, and never the all-zero kernel sentinel for `tag >= 1`.
+fn proc_id(tag: u32) -> ProcId {
+    let mut raw = [0u8; PROC_ID_LEN];
+    raw[..4].copy_from_slice(&tag.to_le_bytes());
+    ProcId::from_bytes(&raw).expect("a full-width identifier")
 }
 
 /// An attested origin: account `uid`, process instance `tag`, running the app
 /// `identity`.
-fn origin(uid: u32, tag: u8, identity: Option<AppIdentity>) -> Origin {
+fn origin(uid: u32, tag: u32, identity: Option<AppIdentity>) -> Origin {
     let base = Origin::new(
         TrustDomain::User,
         uid,
@@ -2144,4 +2150,396 @@ fn a_temporary_operation_is_refused_when_the_volume_is_unreachable() {
             "{request:?} must report the volume rather than an absence"
         );
     }
+}
+
+/// Stage max-width edits in `scope` from `origin` until the service refuses
+/// one, and hand back how many landed.
+///
+/// Bounded by the per-scope key ceiling so a table that never refuses fails the
+/// test rather than looping.
+fn fill(
+    service: &mut AppData<DiscardSink, CountingEntropy>,
+    fs: &mut TestFs,
+    origin: &Origin,
+    scope: ConfigScope,
+) -> usize {
+    let value = "v".repeat(APPDATA_VALUE_MAX);
+    for index in 0..=MAX_PENDING_EDITS {
+        let key = alloc::format!("k{index}");
+        let reply = call(
+            service,
+            fs,
+            origin,
+            &AppDataRequest::ConfigSet {
+                scope,
+                key: &key,
+                value: &value,
+            },
+        );
+        if decode_status_reply(&reply) != Ok(()) {
+            assert_eq!(decode_status_reply(&reply), Err(Errno::LimitExceeded));
+            return index;
+        }
+    }
+    panic!("the staging table accepted an unbounded number of edits");
+}
+
+#[test]
+fn the_staging_table_is_bounded_across_every_account() {
+    // The per-scope and per-session ceilings bound one caller; nothing bounded
+    // the sum, so staged bytes grew with the calls every account's applications
+    // could make inside the reclaim window. On the smallest memory profile
+    // TAIRiX serves large volumes on that is a denial of service against every
+    // application's settings.
+    let (mut svc, mut fs) = service();
+    let mut tag = 1u32;
+    let mut refused = 0usize;
+    for account in 0..STAGING_ACCOUNT_SHARES + 4 {
+        let uid = ACCOUNT_UID + u32::try_from(account).expect("fits a u32");
+        for _ in 0..2 {
+            let who = origin(uid, tag, Some(identity(1)));
+            tag += 1;
+            if fill(&mut svc, &mut fs, &who, ConfigScope::Private) == 0 {
+                refused += 1;
+            }
+            assert!(
+                svc.staging_charged() <= STAGING_TOTAL_MAX_BYTES,
+                "the table holds {} of {STAGING_TOTAL_MAX_BYTES}",
+                svc.staging_charged()
+            );
+        }
+    }
+    // The ceiling *bound*, rather than staging having failed for some other
+    // reason: the table filled to within one session's admission of it, and the
+    // accounts that arrived after that got nothing at all.
+    assert!(
+        svc.staging_charged() > STAGING_TOTAL_MAX_BYTES - STAGING_ACCOUNT_MAX_BYTES,
+        "the table holds only {}",
+        svc.staging_charged()
+    );
+    assert!(refused > 0, "every caller was admitted");
+    assert!(svc.staging_sessions() <= STAGING_MAX_SESSIONS);
+}
+
+#[test]
+fn one_account_cannot_deny_another_its_staging() {
+    // The account is the fairness unit, so an account starting process after
+    // process must be held to its share rather than reaching past it into
+    // another account's — which is what the whole-table ceiling alone would
+    // allow, first come first served.
+    let (mut svc, mut fs) = service();
+    fs.add_home("/Users/grace", ACCOUNT_UID + 1);
+    let greedy_uid = ACCOUNT_UID;
+    let mut tag = 1u32;
+    for _ in 0..STAGING_ACCOUNT_MAX_SESSIONS {
+        let who = origin(greedy_uid, tag, Some(identity(1)));
+        tag += 1;
+        let _ = fill(&mut svc, &mut fs, &who, ConfigScope::Private);
+    }
+    assert!(
+        svc.staging_charged() <= STAGING_ACCOUNT_MAX_BYTES,
+        "one account holds {} of the table's {STAGING_TOTAL_MAX_BYTES}",
+        svc.staging_charged()
+    );
+    assert!(
+        svc.staging_charged() > STAGING_ACCOUNT_MAX_BYTES - STAGING_SESSION_MAX_BYTES,
+        "the account did not reach its share"
+    );
+
+    // A second account saves its settings as if the first were not there.
+    let other = origin(ACCOUNT_UID + 1, tag, Some(identity(1)));
+    set(&mut svc, &mut fs, &other, "scheme", "dark");
+    commit(&mut svc, &mut fs, &other);
+    assert_eq!(
+        get(&mut svc, &mut fs, &other, "scheme").as_deref(),
+        Ok("dark")
+    );
+    // And has its own full share to stage into, not the remains of the first's.
+    let landed = fill(&mut svc, &mut fs, &other, ConfigScope::Private);
+    assert!(
+        landed > 0,
+        "the second account was left no room to stage in"
+    );
+}
+
+#[test]
+fn one_process_cannot_spend_its_accounts_whole_share() {
+    // All of a user's applications run as that user, so the per-account share
+    // alone would let one of them starve a sibling. A process may hold half of
+    // it, so a sibling always has room for as much again.
+    let (mut svc, mut fs) = service();
+    let greedy = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    let greedy_landed = fill(&mut svc, &mut fs, &greedy, ConfigScope::Private);
+    assert!(greedy_landed > 0, "the first edit was refused");
+    assert!(
+        svc.staging_charged() <= STAGING_SESSION_MAX_BYTES,
+        "one process holds {} of {STAGING_SESSION_MAX_BYTES}",
+        svc.staging_charged()
+    );
+
+    // The refusal changed nothing: every ceiling is decided before an edit is
+    // written, so the caller's earlier work is exactly where it was.
+    let held = svc.staging_charged();
+    let reply = call(
+        &mut svc,
+        &mut fs,
+        &greedy,
+        &AppDataRequest::ConfigSet {
+            scope: ConfigScope::Private,
+            key: "one.too.many",
+            value: &"v".repeat(APPDATA_VALUE_MAX),
+        },
+    );
+    assert_eq!(decode_status_reply(&reply), Err(Errno::LimitExceeded));
+    assert_eq!(svc.staging_charged(), held);
+
+    let sibling = origin(ACCOUNT_UID, 2, Some(identity(2)));
+    let sibling_landed = fill(&mut svc, &mut fs, &sibling, ConfigScope::Private);
+    assert!(
+        sibling_landed * 2 >= greedy_landed,
+        "the sibling got {sibling_landed} edits against the first process's {greedy_landed}"
+    );
+    assert!(svc.staging_charged() <= STAGING_ACCOUNT_MAX_BYTES);
+}
+
+#[test]
+fn rewriting_a_staged_key_at_the_ceiling_is_admitted() {
+    // A replaced edit's charge is dropped before the new one is counted, so a
+    // caller sitting at its ceiling can still rewrite a key it already staged.
+    // Counting the new edit on top would refuse a change that costs nothing.
+    let (mut svc, mut fs) = service();
+    let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    fill(&mut svc, &mut fs, &ada, ConfigScope::Private);
+    let held = svc.staging_charged();
+    set(
+        &mut svc,
+        &mut fs,
+        &ada,
+        "k0",
+        &"w".repeat(APPDATA_VALUE_MAX),
+    );
+    assert_eq!(svc.staging_charged(), held);
+}
+
+#[test]
+fn one_account_cannot_take_every_table_entry() {
+    // Sessions too small to reach any byte ceiling would still take every entry
+    // in the table, so the entry count has a per-account share of its own.
+    let (mut svc, mut fs) = service();
+    for tag in 1..=u32::try_from(STAGING_ACCOUNT_MAX_SESSIONS).expect("fits a u32") {
+        let who = origin(ACCOUNT_UID, tag, Some(identity(1)));
+        set(&mut svc, &mut fs, &who, "scheme", "dark");
+    }
+    assert_eq!(svc.staging_sessions(), STAGING_ACCOUNT_MAX_SESSIONS);
+
+    let over = origin(
+        ACCOUNT_UID,
+        u32::try_from(STAGING_ACCOUNT_MAX_SESSIONS + 1).expect("fits a u32"),
+        Some(identity(1)),
+    );
+    let reply = call(
+        &mut svc,
+        &mut fs,
+        &over,
+        &AppDataRequest::ConfigSet {
+            scope: ConfigScope::Private,
+            key: "scheme",
+            value: "dark",
+        },
+    );
+    assert_eq!(decode_status_reply(&reply), Err(Errno::LimitExceeded));
+    assert_eq!(svc.staging_sessions(), STAGING_ACCOUNT_MAX_SESSIONS);
+
+    // Another account is unaffected: the entries it may claim are its own.
+    let other = origin(ACCOUNT_UID + 1, 200, Some(identity(1)));
+    set(&mut svc, &mut fs, &other, "scheme", "light");
+    assert_eq!(svc.staging_sessions(), STAGING_ACCOUNT_MAX_SESSIONS + 1);
+}
+
+#[test]
+fn the_table_holds_a_bounded_number_of_entries() {
+    // Sessions small enough to reach no byte ceiling would still fill the table
+    // with entries, and every lookup is a scan of it. Each account is held to
+    // its share of the entries and the table to their sum, so the scan cannot
+    // grow with the processes callers start.
+    let (mut svc, mut fs) = service();
+    let mut tag = 1u32;
+    for account in 0..=STAGING_ACCOUNT_SHARES {
+        let uid = ACCOUNT_UID + u32::try_from(account).expect("fits a u32");
+        for _ in 0..STAGING_ACCOUNT_MAX_SESSIONS {
+            let who = origin(uid, tag, Some(identity(1)));
+            tag += 1;
+            let reply = call(
+                &mut svc,
+                &mut fs,
+                &who,
+                &AppDataRequest::ConfigSet {
+                    scope: ConfigScope::Private,
+                    key: "scheme",
+                    value: "dark",
+                },
+            );
+            assert!(
+                svc.staging_sessions() <= STAGING_MAX_SESSIONS,
+                "the table holds {} entries",
+                svc.staging_sessions()
+            );
+            if account == STAGING_ACCOUNT_SHARES {
+                // The shares are all taken by now, so this account is refused
+                // every entry even though it holds none of its own.
+                assert_eq!(decode_status_reply(&reply), Err(Errno::LimitExceeded));
+            } else {
+                assert_eq!(decode_status_reply(&reply), Ok(()));
+            }
+        }
+    }
+    assert_eq!(svc.staging_sessions(), STAGING_MAX_SESSIONS);
+}
+
+#[test]
+fn the_widest_legal_rewrite_of_both_documents_is_admitted() {
+    // The per-session ceiling must refuse only what could never commit: a
+    // rewrite of both of an application's documents at the format's maximum
+    // size has to land, or the bound would be refusing legal work.
+    let (mut svc, mut fs) = service();
+    let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    let value = "v".repeat(APPDATA_DOCUMENT_MAX / MAX_PENDING_EDITS - 8);
+    for scope in [ConfigScope::Private, ConfigScope::Public] {
+        for index in 0..MAX_PENDING_EDITS {
+            set_in(
+                &mut svc,
+                &mut fs,
+                &ada,
+                scope,
+                &alloc::format!("k{index:03}"),
+                &value,
+            );
+        }
+    }
+    for scope in [ConfigScope::Private, ConfigScope::Public] {
+        commit_in(&mut svc, &mut fs, &ada, scope);
+    }
+    let document = read_in(&mut svc, &mut fs, &ada, ConfigScope::Private).expect("a document");
+    assert_eq!(document.get("k000"), Some(value.as_str()));
+    assert_eq!(document.get("k511"), Some(value.as_str()));
+    assert_eq!(svc.staging_charged(), 0, "the session is spent");
+}
+
+#[test]
+fn a_committed_scope_returns_its_charge_to_the_table() {
+    let (mut svc, mut fs) = service();
+    let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    set_in(
+        &mut svc,
+        &mut fs,
+        &ada,
+        ConfigScope::Private,
+        "scheme",
+        "dark",
+    );
+    set_in(&mut svc, &mut fs, &ada, ConfigScope::Public, "ready", "yes");
+    let both = svc.staging_charged();
+    assert!(both > 0);
+
+    commit_in(&mut svc, &mut fs, &ada, ConfigScope::Private);
+    let one = svc.staging_charged();
+    assert!(one > 0 && one < both, "{one} is not between 0 and {both}");
+    commit_in(&mut svc, &mut fs, &ada, ConfigScope::Public);
+    assert_eq!(svc.staging_charged(), 0);
+    assert_eq!(svc.staging_sessions(), 0);
+}
+
+#[test]
+fn replacing_a_staged_value_does_not_accumulate_charge() {
+    // A replaced edit's charge is dropped rather than added to, so a caller
+    // rewriting one key cannot walk past a ceiling one byte at a time.
+    let (mut svc, mut fs) = service();
+    let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    let wide = "v".repeat(APPDATA_VALUE_MAX);
+    set(&mut svc, &mut fs, &ada, "scheme", &wide);
+    let widest = svc.staging_charged();
+    set(&mut svc, &mut fs, &ada, "scheme", "dark");
+    let narrow = svc.staging_charged();
+    assert_eq!(widest - narrow, APPDATA_VALUE_MAX - "dark".len());
+
+    for _ in 0..64 {
+        set(&mut svc, &mut fs, &ada, "scheme", &wide);
+        set(&mut svc, &mut fs, &ada, "scheme", "dark");
+    }
+    assert_eq!(svc.staging_charged(), narrow);
+}
+
+#[test]
+fn a_refused_edit_leaves_the_callers_earlier_edits_intact() {
+    // Every ceiling is decided before anything is written, so a refusal is a
+    // reply and not a half-applied change.
+    let (mut svc, mut fs) = service();
+    let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    set(&mut svc, &mut fs, &ada, "scheme", "dark");
+    for index in 1..MAX_PENDING_EDITS {
+        set(&mut svc, &mut fs, &ada, &alloc::format!("k{index}"), "v");
+    }
+    let held = svc.staging_charged();
+    let reply = call(
+        &mut svc,
+        &mut fs,
+        &ada,
+        &AppDataRequest::ConfigSet {
+            scope: ConfigScope::Private,
+            key: "one.too.many",
+            value: "v",
+        },
+    );
+    assert_eq!(decode_status_reply(&reply), Err(Errno::LimitExceeded));
+    assert_eq!(svc.staging_charged(), held, "the refusal charged the table");
+
+    commit(&mut svc, &mut fs, &ada);
+    assert_eq!(
+        get(&mut svc, &mut fs, &ada, "scheme").as_deref(),
+        Ok("dark"),
+        "the edit staged before the refusal was lost"
+    );
+    assert_eq!(svc.staging_charged(), 0);
+}
+
+#[test]
+fn an_aged_out_session_returns_its_charge_to_the_table() {
+    // The bound and the reclaim window are one defence: a full table drains
+    // without a commit, so an abandoned session cannot hold a share for ever.
+    let (mut svc, mut fs) = service();
+    let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    fill(&mut svc, &mut fs, &ada, ConfigScope::Private);
+    assert!(svc.staging_charged() > 0);
+
+    let later = origin(ACCOUNT_UID, 2, Some(identity(1)));
+    let _ = call_at(
+        &mut svc,
+        &mut fs,
+        &later,
+        STAGING_IDLE_NS,
+        &AppDataRequest::ConfigRead {
+            scope: ConfigScope::Private,
+            capacity: 4096,
+        },
+    );
+    assert_eq!(svc.staging_charged(), 0);
+    assert_eq!(svc.staging_sessions(), 0);
+}
+
+#[test]
+fn a_staged_edit_is_charged_for_its_record_as_well_as_its_text() {
+    // A thousand one-byte keys cost the table a thousand records. Charging only
+    // the text would let a caller past every ceiling by the record's size over
+    // again, so the record is charged too.
+    let (mut svc, mut fs) = service();
+    let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    set(&mut svc, &mut fs, &ada, "a", "b");
+    let one = svc.staging_charged();
+    set(&mut svc, &mut fs, &ada, "c", "d");
+    let two = svc.staging_charged();
+    assert!(
+        two - one > "c".len() + "d".len(),
+        "a second edit added only {} bytes",
+        two - one
+    );
 }

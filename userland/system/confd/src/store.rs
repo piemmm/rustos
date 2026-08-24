@@ -181,6 +181,15 @@ pub enum StoreError {
     /// A name outside the store-name grammar reached the bulk store, which the
     /// wire's own decoder should already have refused.
     StoreNameRefused,
+    /// The caller's own staging allowance is spent: it has staged a whole
+    /// document's worth of keys in that scope, or as many bytes as one process
+    /// instance may hold. A commit frees it.
+    StagingSpent,
+    /// The staging table has no room for a new claim from this caller: its
+    /// account's share of the table is spent, or the whole table is. Nothing
+    /// the caller can act on, which is why it is told apart from
+    /// [`Self::StagingSpent`] in the audit stream.
+    StagingUnavailable,
 }
 
 impl StoreError {
@@ -204,7 +213,13 @@ impl StoreError {
             Self::NoHome | Self::BlobNotFound => Errno::NotFound,
             Self::DocumentRefused | Self::StoreNameRefused => Errno::OutOfRange,
             Self::Unavailable => Errno::DeviceOffline,
-            Self::BlobLimit | Self::TempLimit => Errno::LimitExceeded,
+            // A staging refusal reads as an ordinary limit whichever ceiling
+            // was reached, so being refused never reports the state of another
+            // account's staging back to this one. Only the audit stream tells
+            // the caller's own spent allowance from a table with no room.
+            Self::BlobLimit | Self::TempLimit | Self::StagingSpent | Self::StagingUnavailable => {
+                Errno::LimitExceeded
+            }
             Self::Vault(VaultError::MasterSecretRefused | VaultError::VaultMalformed) => {
                 Errno::BadMagic
             }
@@ -245,7 +260,11 @@ impl StoreError {
             | Self::BlobLimit
             | Self::TempLimit
             | Self::TempUnavailable
-            | Self::StoreNameRefused => false,
+            | Self::StoreNameRefused
+            // Staging is the caller's own uncommitted work; a foreign read
+            // reaches none of it.
+            | Self::StagingSpent
+            | Self::StagingUnavailable => false,
         }
     }
 
@@ -266,6 +285,8 @@ impl StoreError {
             Self::TempLimit => "the application already holds as many temporary files as it may",
             Self::TempUnavailable => "the running boot has no identity to name temporary files by",
             Self::StoreNameRefused => "the store name is outside the store-name grammar",
+            Self::StagingSpent => "the caller has staged as much as one process instance may",
+            Self::StagingUnavailable => "the staging table has no room for the caller's edit",
         }
     }
 }

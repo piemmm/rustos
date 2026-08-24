@@ -113,6 +113,16 @@ pub const TEMP_UNAVAILABLE: EventId = EventId(21_018);
 /// something wrong.
 pub const ORIGIN_UNREADABLE: EventId = EventId(21_019);
 
+/// The caller has staged as much as one process instance may — a whole
+/// document's worth of keys in one scope, or its byte allowance. A commit frees
+/// it, so this is a settings sheet that never saves, or a runaway writer.
+pub const STAGING_SPENT: EventId = EventId(21_020);
+
+/// The staging table had no room for a caller's edit: its account's share of
+/// the table is spent, or every share is. Uncommitted edits drain on commit and
+/// by age, so a table that stays full names the accounts holding it.
+pub const STAGING_UNAVAILABLE: EventId = EventId(21_021);
+
 /// The event identifier recording `err`.
 ///
 /// One mapping, so the audit stream and the caller's typed refusal can never
@@ -136,6 +146,8 @@ pub const fn id_of(err: StoreError) -> EventId {
         StoreError::TempLimit => TEMP_LIMIT,
         StoreError::TempUnavailable => TEMP_UNAVAILABLE,
         StoreError::StoreNameRefused => STORE_NAME_REFUSED,
+        StoreError::StagingSpent => STAGING_SPENT,
+        StoreError::StagingUnavailable => STAGING_UNAVAILABLE,
     }
 }
 
@@ -150,7 +162,7 @@ mod tests {
 
     /// Every [`StoreError`] variant, so a new one cannot be added without an
     /// identifier of its own.
-    const EVERY_ERROR: [StoreError; 16] = [
+    const EVERY_ERROR: [StoreError; 18] = [
         StoreError::NoAppIdentity,
         StoreError::NoHome,
         StoreError::RootNotOwned,
@@ -167,6 +179,8 @@ mod tests {
         StoreError::TempLimit,
         StoreError::TempUnavailable,
         StoreError::StoreNameRefused,
+        StoreError::StagingSpent,
+        StoreError::StagingUnavailable,
     ];
 
     #[test]

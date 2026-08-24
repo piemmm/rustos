@@ -88,6 +88,16 @@
 //! volume, and its own reads see its own pending edits so a settings sheet
 //! reads back what it just set.
 //!
+//! The table is bounded at every level of the ownership it describes: the keys
+//! one caller may stage in a scope, the bytes one process instance may hold,
+//! the bytes and entries one account may hold, and the sum across the service.
+//! The account ceilings are a fraction of the whole, so filling the table takes
+//! many distinct accounts and no one of them — nor any one application, which
+//! cannot outrank its account — can deny the others their settings. Every
+//! ceiling is decided before an edit is written, so a refusal leaves the
+//! caller's earlier work untouched, and a commit or the idle reclaim returns
+//! the space.
+//!
 //! # Layering
 //!
 //! This crate is `no_std` (with `alloc`) and performs **no I/O** and draws no
@@ -151,6 +161,60 @@ pub const STAGING_IDLE_NS: u64 = 60_000_000_000;
 /// scope because each scope is a document of its own, and one of them filling
 /// up must not deny the other.
 pub const MAX_PENDING_EDITS: usize = MAX_SETTINGS;
+
+/// Charged bytes the whole staging table may hold, across every account.
+///
+/// The service's worst-case staging footprint, and the figure to check against
+/// a small machine: 8 MiB is under one percent of the smallest memory profile
+/// TAIRiX serves large volumes on, and some four orders of magnitude above any
+/// real concurrent load — a settings save is a few hundred bytes and lives from
+/// the first edit to the commit. Nothing bounded the sum before, so the table
+/// grew with the calls every account's applications could make inside the
+/// reclaim window, which on that machine is a denial of service against every
+/// application's settings.
+///
+/// A fixed containment bound rather than a capacity derived from discovered
+/// memory: it bounds what untrusted callers may make a boot-floor service hold,
+/// and a bigger machine letting them hold proportionally more would be a
+/// regression, not flexibility.
+pub const STAGING_TOTAL_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// Staging sessions the whole table may hold, across every account.
+///
+/// Bounds the table's *entry* count, which the byte ceiling alone does not: a
+/// session holding one one-byte key costs almost nothing yet still has to be
+/// searched on every request. Every lookup is a scan of this table, so the
+/// count is what keeps that scan cheap.
+pub const STAGING_MAX_SESSIONS: usize = 512;
+
+/// How many accounts are guaranteed to be able to stage at the same time.
+///
+/// The fairness divisor: one account may hold this fraction of the table and no
+/// more, so filling it takes at least this many distinct accounts and no single
+/// account — or application, which cannot outrank its account — can deny the
+/// others their settings. Reaching for a larger number of accounts would shrink
+/// each one's share below a document, and the shares are the point.
+pub const STAGING_ACCOUNT_SHARES: usize = 16;
+
+/// Charged bytes one account may hold across all of its sessions.
+pub const STAGING_ACCOUNT_MAX_BYTES: usize = STAGING_TOTAL_MAX_BYTES / STAGING_ACCOUNT_SHARES;
+
+/// Staging sessions one account may hold at once.
+///
+/// Its share of the table's entries, for the same reason it has a share of the
+/// bytes: without it an account's applications could take every entry with
+/// sessions too small to reach the byte ceiling.
+pub const STAGING_ACCOUNT_MAX_SESSIONS: usize = STAGING_MAX_SESSIONS / STAGING_ACCOUNT_SHARES;
+
+/// Charged bytes one calling process instance may hold.
+///
+/// Half its account's share, so one application cannot spend the whole of it
+/// and deny a sibling application of the same user — which the per-account
+/// ceiling alone would allow, since all of a user's applications run as that
+/// user. Half of the share still holds a full rewrite of both of an
+/// application's documents at the format's maximum size, so no legal edit is
+/// refused by it.
+pub const STAGING_SESSION_MAX_BYTES: usize = STAGING_ACCOUNT_MAX_BYTES / 2;
 
 /// One node's metadata, as the store needs it.
 ///
@@ -273,8 +337,29 @@ struct PendingEdit {
     value: Option<String>,
 }
 
+impl PendingEdit {
+    /// Charged bytes for an edit of `key` to `value`.
+    ///
+    /// The record is charged as well as the text it owns, because a thousand
+    /// one-byte keys cost the table a thousand records and charging only the
+    /// text would let them past every ceiling. Allocator slack above this is a
+    /// bounded constant factor and is not modelled.
+    fn charge_of(key: &str, value: Option<&str>) -> usize {
+        core::mem::size_of::<Self>() + key.len() + value.map_or(0, str::len)
+    }
+
+    /// Charged bytes for this edit.
+    fn charge(&self) -> usize {
+        Self::charge_of(&self.key, self.value.as_deref())
+    }
+}
+
 /// The uncommitted edits of one calling process instance.
 struct Session {
+    /// The account the process runs as, so the table can be summed per
+    /// principal. Kernel-attested, never a wire claim, and re-read on every
+    /// touch so the table holds no stale principal.
+    uid: u32,
     /// The process instance that staged them. Unforgeable and never reused, so
     /// two processes of the same application can never share a session and one
     /// cannot publish the other's half-finished edits.
@@ -282,17 +367,36 @@ struct Session {
     /// The monotonic instant of the last request that touched this session.
     touched_ns: u64,
     edits: Vec<PendingEdit>,
+    /// Charged bytes this session holds, maintained by [`Self::recharge`] after
+    /// every change to `edits`. Kept rather than recomputed because the
+    /// per-account and whole-table sums are taken on every staged edit, and
+    /// walking every session's edits for each of them would make the check
+    /// itself the denial of service it exists to prevent.
+    charged: usize,
 }
 
 impl Session {
+    /// An empty session for `origin`, first touched at `now_ns`.
+    fn new(origin: &Origin, now_ns: u64) -> Self {
+        Self {
+            uid: origin.uid(),
+            proc_id: origin.proc_id(),
+            touched_ns: now_ns,
+            edits: Vec::new(),
+            charged: Self::EMPTY_CHARGE,
+        }
+    }
+
+    /// Charged bytes a session costs before it holds any edit.
+    const EMPTY_CHARGE: usize = core::mem::size_of::<Self>();
+
     /// Stage `key = value` in `scope`, or a removal when `value` is [`None`],
     /// replacing any edit already staged for that key in that scope.
     ///
-    /// # Errors
-    ///
-    /// [`Errno::LimitExceeded`] when the session already holds
-    /// [`MAX_PENDING_EDITS`] distinct keys in `scope`.
-    fn stage(&mut self, scope: ConfigScope, key: &str, value: Option<&str>) -> Result<(), Errno> {
+    /// Infallible: whether the table has room is the table's decision
+    /// ([`AppData::admit`]), taken before this is reached, so a session never
+    /// half-applies an edit it then has to refuse.
+    fn stage(&mut self, scope: ConfigScope, key: &str, value: Option<&str>) {
         let staged = value.map(String::from);
         if let Some(edit) = self
             .edits
@@ -300,17 +404,46 @@ impl Session {
             .find(|edit| edit.scope == scope && edit.key == key)
         {
             edit.value = staged;
-            return Ok(());
+        } else {
+            self.edits.push(PendingEdit {
+                scope,
+                key: String::from(key),
+                value: staged,
+            });
         }
-        if self.staged_in(scope) >= MAX_PENDING_EDITS {
-            return Err(Errno::LimitExceeded);
-        }
-        self.edits.push(PendingEdit {
-            scope,
-            key: String::from(key),
-            value: staged,
-        });
-        Ok(())
+        self.recharge();
+    }
+
+    /// Recompute [`Self::charged`] from the edits held.
+    fn recharge(&mut self) {
+        self.charged =
+            Self::EMPTY_CHARGE + self.edits.iter().map(PendingEdit::charge).sum::<usize>();
+    }
+
+    /// What [`Self::charged`] would become with `key = value` staged in
+    /// `scope`, without staging it.
+    ///
+    /// Summed over the edits that would survive rather than adjusted from
+    /// [`Self::charged`], so an edit that replaces one already staged cannot be
+    /// counted on top of it and the prediction stands on the edits themselves.
+    fn charge_with(&self, scope: ConfigScope, key: &str, value: Option<&str>) -> usize {
+        Self::EMPTY_CHARGE
+            + PendingEdit::charge_of(key, value)
+            + self
+                .edits
+                .iter()
+                .filter(|edit| edit.scope != scope || edit.key != key)
+                .map(PendingEdit::charge)
+                .sum::<usize>()
+    }
+
+    /// Whether staging `key` in `scope` would stay inside the per-scope key
+    /// bound: either the key is already staged there, or the scope has room.
+    fn admits(&self, scope: ConfigScope, key: &str) -> bool {
+        self.edits
+            .iter()
+            .any(|edit| edit.scope == scope && edit.key == key)
+            || self.staged_in(scope) < MAX_PENDING_EDITS
     }
 
     /// How many distinct keys are staged in `scope`.
@@ -334,6 +467,7 @@ impl Session {
     /// Drop every edit staged in `scope`, leaving the other scope's alone.
     fn clear(&mut self, scope: ConfigScope) {
         self.edits.retain(|edit| edit.scope != scope);
+        self.recharge();
     }
 
     /// Apply every edit staged in `scope` to `document`, in the order they
@@ -475,13 +609,12 @@ impl<S: Sink, R: Entropy> AppData<S, R> {
                 // staged, so a commit cannot fail on an edit accepted earlier.
                 let mut probe = Document::new();
                 probe.set(key, value).map_err(|_| Errno::OutOfRange)?;
-                self.session(origin, now_ns)
-                    .stage(scope, key, Some(value))?;
+                self.stage(origin, now_ns, scope, key, Some(value))?;
                 Ok(ok(out))
             }
             AppDataRequest::ConfigUnset { scope, key } => {
                 validate_key(key).map_err(|_| Errno::OutOfRange)?;
-                self.session(origin, now_ns).stage(scope, key, None)?;
+                self.stage(origin, now_ns, scope, key, None)?;
                 Ok(ok(out))
             }
             AppDataRequest::ConfigCommit { scope } => {
@@ -1010,20 +1143,107 @@ impl<S: Sink, R: Entropy> AppData<S, R> {
         );
     }
 
-    /// The calling process instance's staging session, creating it if absent.
-    fn session(&mut self, origin: &Origin, now_ns: u64) -> &mut Session {
-        let index = if let Some(index) = self.session_index(origin) {
-            index
+    /// Stage `key = value` in `scope` against the calling process instance's
+    /// session, creating it if absent, or refuse.
+    ///
+    /// Every ceiling is decided before anything is written, so a refused edit
+    /// leaves the caller's earlier work exactly as it was.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LimitExceeded`] when any staging ceiling has no room for the
+    /// edit. Which one is in the audit stream, not in the reply.
+    fn stage(
+        &mut self,
+        origin: &Origin,
+        now_ns: u64,
+        scope: ConfigScope,
+        key: &str,
+        value: Option<&str>,
+    ) -> Result<(), Errno> {
+        let index = self.session_index(origin);
+        let charged = match index {
+            Some(at) => {
+                let session = &self.sessions[at];
+                if !session.admits(scope, key) {
+                    return Err(Self::refuse(&self.sink, origin, StoreError::StagingSpent));
+                }
+                session.charge_with(scope, key, value)
+            }
+            None => Session::EMPTY_CHARGE + PendingEdit::charge_of(key, value),
+        };
+        self.admit(origin, index, charged)?;
+        let at = if let Some(at) = index {
+            at
         } else {
-            self.sessions.push(Session {
-                proc_id: origin.proc_id(),
-                touched_ns: now_ns,
-                edits: Vec::new(),
-            });
+            self.sessions.push(Session::new(origin, now_ns));
             self.sessions.len() - 1
         };
-        self.sessions[index].touched_ns = now_ns;
-        &mut self.sessions[index]
+        self.sessions[at].uid = origin.uid();
+        self.sessions[at].touched_ns = now_ns;
+        self.sessions[at].stage(scope, key, value);
+        Ok(())
+    }
+
+    /// Whether the table has room for the session at `index` — or for a new one
+    /// when that is [`None`] — to cost `charged` bytes.
+    ///
+    /// The one place every staging ceiling is decided. Each sum skips the
+    /// session being changed, so `charged` replaces its current cost rather
+    /// than adding to it.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LimitExceeded`] for whichever ceiling has no room. A ceiling
+    /// the caller can free by committing is told from one it cannot in the
+    /// audit stream; the reply is the same either way, so being refused reports
+    /// nothing about another account's staging.
+    fn admit(&self, origin: &Origin, index: Option<usize>, charged: usize) -> Result<(), Errno> {
+        if charged > STAGING_SESSION_MAX_BYTES {
+            return Err(Self::refuse(&self.sink, origin, StoreError::StagingSpent));
+        }
+        let uid = origin.uid();
+        let entry_taken = index.is_none()
+            && (self.sessions.len() >= STAGING_MAX_SESSIONS
+                || self.account_sessions(uid) >= STAGING_ACCOUNT_MAX_SESSIONS);
+        let share_spent = self.account_charge(uid, index) + charged > STAGING_ACCOUNT_MAX_BYTES
+            || self.total_charge(index) + charged > STAGING_TOTAL_MAX_BYTES;
+        if entry_taken || share_spent {
+            return Err(Self::refuse(
+                &self.sink,
+                origin,
+                StoreError::StagingUnavailable,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Charged bytes held by `uid`'s sessions, skipping the one at `except`.
+    fn account_charge(&self, uid: u32, except: Option<usize>) -> usize {
+        self.charge_where(except, |session| session.uid == uid)
+    }
+
+    /// Charged bytes held by every session, skipping the one at `except`.
+    fn total_charge(&self, except: Option<usize>) -> usize {
+        self.charge_where(except, |_| true)
+    }
+
+    /// Charged bytes held by the sessions `keep` selects, skipping `except`.
+    fn charge_where(&self, except: Option<usize>, keep: impl Fn(&Session) -> bool) -> usize {
+        self.sessions
+            .iter()
+            .enumerate()
+            .filter(|(at, session)| Some(*at) != except && keep(session))
+            .map(|(_, session)| session.charged)
+            .sum()
+    }
+
+    /// How many sessions `uid` holds.
+    fn account_sessions(&self, uid: u32) -> usize {
+        self.sessions
+            .iter()
+            .filter(|session| session.uid == uid)
+            .count()
     }
 
     /// The calling process instance's staging session, if it has one.
@@ -1054,6 +1274,13 @@ impl<S: Sink, R: Entropy> AppData<S, R> {
     pub fn staging_sessions(&self) -> usize {
         self.sessions.len()
     }
+
+    /// Charged bytes the staging table holds, against
+    /// [`STAGING_TOTAL_MAX_BYTES`]. Test and diagnostic surface.
+    #[must_use]
+    pub fn staging_charged(&self) -> usize {
+        self.total_charge(None)
+    }
 }
 
 /// The audit level a refusal is recorded at: an attack indication is a
@@ -1073,7 +1300,10 @@ fn level_of(err: StoreError) -> Level {
         | StoreError::StoreNameRefused
         // A boot with no identity means the kernel's random reserve never
         // seeded, which an operator has to know about.
-        | StoreError::TempUnavailable => Level::Warn,
+        | StoreError::TempUnavailable
+        // A staging table with no room denies every account's settings, so an
+        // operator has to see it whether the cause is abuse or genuine load.
+        | StoreError::StagingUnavailable => Level::Warn,
         StoreError::NoHome
         | StoreError::DocumentRefused
         | StoreError::Unavailable
@@ -1082,7 +1312,10 @@ fn level_of(err: StoreError) -> Level {
         // set that scope is for. Neither is an attack indication.
         | StoreError::BlobNotFound
         | StoreError::BlobLimit
-        | StoreError::TempLimit => Level::Info,
+        | StoreError::TempLimit
+        // A caller that has staged its whole allowance is a settings sheet that
+        // never saves, or a runaway writer; either way not an attack.
+        | StoreError::StagingSpent => Level::Info,
     }
 }
 

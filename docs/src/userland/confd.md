@@ -86,6 +86,54 @@ An abandoned session — a caller that stages and exits — is reclaimed by age.
 No primitive tells a server that a peer died, and losing an abandoned session's
 edits is exactly the contract already stated.
 
+### What bounds the staging table
+
+Staging is memory a caller makes a boot-floor service hold, so it is bounded at
+every level of the ownership it describes:
+
+| Ceiling | What it bounds |
+|---|---|
+| `MAX_PENDING_EDITS` | distinct keys one session may stage, **per scope** |
+| `STAGING_SESSION_MAX_BYTES` | charged bytes one calling process instance may hold |
+| `STAGING_ACCOUNT_MAX_BYTES` | charged bytes one account may hold, across its sessions |
+| `STAGING_ACCOUNT_MAX_SESSIONS` | table entries one account may hold |
+| `STAGING_MAX_SESSIONS` | table entries in all — every lookup is a scan of them |
+| `STAGING_TOTAL_MAX_BYTES` | the service's whole staging footprint |
+
+Charged bytes are an edit's key and value **plus its record**: a thousand
+one-byte keys cost the table a thousand records, and charging only the text
+would let them past every ceiling by the record's size over again.
+
+The account ceilings are each `1/STAGING_ACCOUNT_SHARES` of the whole, so
+filling the table takes at least that many distinct accounts, and no single
+account — nor any one application, which cannot outrank the account it runs
+as — can deny the others their settings. A process may hold half its account's
+share, so one application cannot spend all of it and starve a sibling
+application of the same user. Half a share still holds a rewrite of both of an
+application's documents at the format's maximum size, so the ceilings refuse no
+legal edit.
+
+These are fixed containment bounds, not capacities derived from discovered
+memory: they bound what untrusted callers may make the service hold, and a
+bigger machine letting them hold proportionally more would be a regression
+rather than flexibility.
+
+Every ceiling is decided before an edit is written, so a refusal is a reply and
+never a half-applied change, and the caller's earlier edits still commit. A
+commit returns that scope's space at once and the idle reclaim returns an
+abandoned session's, so a full table drains without anyone's intervention. The
+reply is the same `LimitExceeded` whichever ceiling was reached — being refused
+must not report another account's staging back to this one — and only the audit
+stream distinguishes an allowance the caller can free by committing
+(`STAGING_SPENT`) from a table that has no room for it (`STAGING_UNAVAILABLE`).
+
+The ceilings are a bound on memory, not a prediction that a commit will
+succeed. Whether staged edits fit the document they publish into depends on the
+committed document, which the service has not read at staging time; reading it
+per staged edit would cost a file read each and is exactly the pessimisation
+the one-read design exists to avoid. So an over-large set of edits is refused at
+the commit, by the format, as it always was.
+
 ## Five scopes: settings, what it publishes, its secrets, its bulk data, and its scratch
 
 `settings.conf` is the **private** scope — the user's settings for that

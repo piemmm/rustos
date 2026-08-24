@@ -295,25 +295,47 @@ round trip, the refused paths, the abandoned paths, and a port message. One
 case leaks a payload deliberately so the scan cannot pass vacuously; all six
 fail with the wipe disabled.
 
-### Open — the staging table has a per-session bound but no aggregate one (§24.4, §26.2)
+### Done — the staging table is bounded in aggregate, per account, and per process (§24.4, §26.2)
 
-`AppData::sessions` grows one entry per calling process instance and is
-reclaimed only by age (`STAGING_IDLE_NS`, 60 s). `MAX_PENDING_EDITS`
-(= `MAX_SETTINGS`, 512) bounds edits per session **per scope**, so one session
-caps at ~1.2 MiB of staged keys and values — but nothing bounds the sum across
-sessions. Staged bytes therefore scale with the `ConfigSet` calls any
-application of any account can issue inside the reclaim window, with no
-ceiling, in a boot-floor service every command app depends on. On the §26.7
-floor (1 GiB) that is a denial of service against every application's settings.
-`plans/APPDATA.md` reasons about the per-session and per-scope bounds and about
-age reclaim, and does not address the aggregate.
+`AppData::sessions` grew one entry per calling process instance, reclaimed only
+by age, with `MAX_PENDING_EDITS` bounding edits per session per scope and
+nothing bounding the sum. The chosen shape is **nested ceilings with the account
+as the fairness unit**: per scope (keys, unchanged), per process instance
+(bytes), per account (bytes and entries), and per service (bytes and entries).
+The account ceilings are each `1/STAGING_ACCOUNT_SHARES` (16) of the whole and a
+process may hold half its account's share, so filling the table takes at least
+sixteen distinct accounts and neither one account nor one application can deny
+the others their settings. `STAGING_TOTAL_MAX_BYTES` is 8 MiB — under one
+percent of the 1 GiB floor, and four orders of magnitude above any real load,
+because the client stages locally and only sends its `ConfigSet` calls inside
+`commit()`.
 
-Escalated rather than fixed here because the containment bound's *shape* is a
-fairness decision, not a constant: an aggregate edit ceiling lets one
-application starve another's staging (§26.2), a session-count ceiling has the
-same problem one level up, and LRU eviction bounds memory without refusing
-anyone but silently discards a settings sheet's unsaved edits. Pick the
-trade-off, then land it fail-closed with its test.
+The reasoning, the rejected alternatives (LRU eviction, a per-app share), the
+fairness cost, and the residual side channel are in `plans/APPDATA.md` §3.8;
+the reader-facing table is `docs/src/userland/confd.md`.
+
+Three things a later reviewer should not re-litigate:
+
+- **Charged bytes include the `PendingEdit` record, not just key and value.**
+  A thousand one-byte keys cost the table a thousand records; charging only the
+  text would have let a caller past every ceiling by some fifty times the
+  intended footprint. Allocator slack above the charge is a bounded constant
+  factor and deliberately unmodelled.
+- **The entry counts are not redundant with the byte ceilings.** A session
+  holding one one-byte key costs almost nothing yet is still scanned on every
+  request, and the byte ceiling alone admits tens of thousands of them.
+- **The ceilings bound memory; they do not predict that a commit will
+  succeed.** Whether staged edits fit the document they publish into depends on
+  the committed document, which the service has not read at staging time —
+  reading it per staged edit would cost a file read each. An over-large set of
+  edits is still refused at the commit, by the format.
+
+Regression cover is ten tests in `userland/system/confd/src/tests.rs`, one per
+guard, each verified to fail with its guard removed: the aggregate ceiling,
+the per-account and per-process byte shares, the two entry counts, the record
+charge, `recharge` on stage and on clear, the replaced-edit charge, and
+`the_widest_legal_rewrite_of_both_documents_is_admitted`, which enforces that no
+legal edit is refused rather than asserting it in prose.
 
 ### Done — §23.1 security review of the new app-data subsystem
 
