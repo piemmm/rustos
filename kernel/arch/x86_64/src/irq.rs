@@ -190,6 +190,8 @@ const GSI_UNMAPPED: u32 = u32::MAX;
 /// Once the kernel binary's `Phase::Irq` step completes, the table
 /// is read-only (one-shot publish).
 static GLOBAL_ROUTING: [AtomicU32; EXTERNAL_VECTOR_COUNT] = {
+    // The array initialiser needs a `const`, and copying it per slot is the
+    // point: each element must be its own independent cell.
     #[allow(clippy::declare_interior_mutable_const)]
     const Z: AtomicU32 = AtomicU32::new(GSI_UNMAPPED);
     [Z; EXTERNAL_VECTOR_COUNT]

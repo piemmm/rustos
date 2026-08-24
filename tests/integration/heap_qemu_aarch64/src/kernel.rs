@@ -316,30 +316,35 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
     // exception handler built from the saved register frame; reading it for the
     // duration of this call is sound.
     let args = unsafe { &*args_ptr };
-    #[allow(clippy::cast_possible_truncation)]
-    let raw = number as u16;
+    let call = SyscallNumber::from_register(number).ok();
 
-    if raw == SyscallNumber::MEM_MAP.as_u16() {
+    if call == Some(SyscallNumber::MEM_MAP) {
         let len = args[0] as usize;
         if len == 0 {
             return encode(Err(Errno::LengthOutOfRange));
         }
+        // The flags slot is a 32-bit word; `from_bits` then refuses any
+        // reserved bit, so a bad word fails closed.
         #[allow(clippy::cast_possible_truncation)]
         let flags = match MapFlags::from_bits(args[1] as u32) {
             Ok(flags) => flags,
             Err(err) => return encode(Err(err)),
         };
         encode(PRODUCER.map(len, flags, args[2]))
-    } else if raw == SyscallNumber::MEM_UNMAP.as_u16() {
+    } else if call == Some(SyscallNumber::MEM_UNMAP) {
         let base = args[0];
         let len = args[1] as usize;
         if len == 0 {
             return encode(Err(Errno::LengthOutOfRange));
         }
         encode(PRODUCER.unmap(base, len).map(|()| 0))
-    } else if raw == SyscallNumber::EXIT.as_u16() {
-        #[allow(clippy::cast_possible_truncation)]
-        let code = args[0] as u16;
+    } else if call == Some(SyscallNumber::EXIT) {
+        // The exit slot is an `i32`, decoded exactly as the dispatcher
+        // decodes it; a code outside the reportable range then saturates
+        // rather than aliasing onto another code — or onto 0, success.
+        #[allow(clippy::cast_possible_wrap)]
+        let exit_code = (args[0] & 0xFFFF_FFFF) as i32;
+        let code = u16::try_from(exit_code).unwrap_or(u16::MAX);
         if code == 0 {
             note(
                 TEST_PASS,
@@ -348,7 +353,7 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
             qemu_exit::exit_success();
         }
         note(TEST_FAIL, "heap test: fixture exited non-zero");
-        qemu_exit::exit_failure(FAIL_EXIT_BASE + code);
+        qemu_exit::exit_failure(FAIL_EXIT_BASE.saturating_add(code));
     } else {
         note(TEST_FAIL, "heap test: fixture issued an unexpected syscall");
         qemu_exit::exit_failure(FAIL_UNEXPECTED_SYSCALL);

@@ -191,6 +191,8 @@ mod kernel {
         unsafe {
             outb(0x43, 0x30);
             outb(0x40, (reload & 0xFF) as u8);
+            // The mask leaves exactly the PIT reload's high byte, which is
+            // what the counter port takes.
             #[allow(clippy::cast_possible_truncation)]
             outb(0x40, ((reload >> 8) & 0xFF) as u8);
         }

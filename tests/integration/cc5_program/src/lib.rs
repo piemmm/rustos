@@ -34,6 +34,8 @@ mod runtime {
     // does not apply.
     #[allow(unused_extern_crates)]
     extern crate tairix_abi_sys;
+    // The crate is linked for its startup object alone, so nothing here names
+    // an item from it.
     #[allow(unused_extern_crates)]
     extern crate tairix_crt0;
 

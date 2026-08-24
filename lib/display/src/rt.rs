@@ -43,6 +43,8 @@ pub struct RtShmRegion {
 }
 
 impl FrameRegion for RtShmRegion {
+    // The crate forbids `unsafe` by default; this one block reads the
+    // kernel-granted frame mapping, whose extent the kernel itself recorded.
     #[allow(unsafe_code)]
     fn bytes(&self) -> &[u8] {
         // SAFETY: the kernel mapped exactly `len` bytes of the granted

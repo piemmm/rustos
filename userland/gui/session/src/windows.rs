@@ -1502,11 +1502,7 @@ mod tests {
                 .find(|(k, _)| *k == kind)
                 .expect("the control has a slot")
                 .1;
-            #[allow(clippy::cast_possible_wrap)]
-            Point::new(
-                rect.left() + (rect.width / 2) as i32,
-                rect.top() + (rect.height / 2) as i32,
-            )
+            rect.center()
         };
 
         // A full primary click at `at`, returning the release outcome — a

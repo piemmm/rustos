@@ -97,7 +97,7 @@ mod kernel {
     use core::sync::atomic::{AtomicU32, Ordering};
 
     use alloc::boxed::Box;
-    use tairix_abi::{CapabilityId, SyscallNumber};
+    use tairix_abi::{CapabilityId, Errno, SyscallNumber};
     use tairix_arch_x86_64::qemu_exit;
     use tairix_caps::CapabilitySet;
     use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
@@ -369,7 +369,7 @@ mod kernel {
         //    in `lib/abi/src/syscalls.rs`).
         let mut args = RawArgs::ZERO;
         args.0[0] = u64::from(CapabilityId::TIME_SET.as_u16());
-        match dispatcher.dispatch(&caller, SyscallNumber::CAP_QUERY.as_u16(), args) {
+        match dispatcher.dispatch(&caller, u64::from(SyscallNumber::CAP_QUERY.as_u16()), args) {
             Ok(1) => {}
             // Any other outcome (wrong return value, or an `Errno`)
             // means the production dispatch path has regressed; fail
@@ -394,7 +394,18 @@ mod kernel {
         // re-targeting of the test to a non-zero exit code does not
         // accidentally trip `Errno::OutOfRange`.
         exit_args.0[0] = 0;
-        match dispatcher.dispatch(&caller, SyscallNumber::EXIT.as_u16(), exit_args) {
+
+        // 7a. The same `exit` number with a bit set above the identifier
+        //     space names no syscall: the dispatcher validates the whole
+        //     register, so this must refuse rather than run `exit`. A
+        //     narrowing dispatcher would terminate the fixture here and the
+        //     audit assertion below would never be reached.
+        let aliased = (1u64 << 16) | u64::from(SyscallNumber::EXIT.as_u16());
+        if dispatcher.dispatch(&caller, aliased, exit_args) != Err(Errno::OutOfRange) {
+            qemu_exit::exit_failure();
+        }
+
+        match dispatcher.dispatch(&caller, u64::from(SyscallNumber::EXIT.as_u16()), exit_args) {
             Ok(_) => {}
             // Any error — whether a typed `Errno::NotFound` /
             // `OutOfRange` or anything else — fails the test.

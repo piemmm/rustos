@@ -36,6 +36,9 @@
 #![cfg_attr(itest_x86_64, no_std)]
 #![cfg_attr(itest_x86_64, no_main)]
 #![deny(missing_docs)]
+// The bare-metal body narrows page-table and APIC register fields whose
+// widths the hardware fixes; each site's value is masked or shifted into
+// range first.
 #![cfg_attr(itest_x86_64, allow(clippy::cast_possible_truncation))]
 
 #[cfg(itest_x86_64)]

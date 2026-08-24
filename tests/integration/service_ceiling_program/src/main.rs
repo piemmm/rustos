@@ -124,6 +124,8 @@ mod program {
         if pid <= 0 {
             return 11;
         }
+        // A kernel-minted process id round-trips through the `i32` the wait
+        // ABI carries.
         #[allow(clippy::cast_possible_truncation)]
         let pid = pid as i32;
         let mut code = 0i32;

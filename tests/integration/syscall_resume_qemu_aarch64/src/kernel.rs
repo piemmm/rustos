@@ -120,9 +120,8 @@ impl CapabilityQuery for SpawnAuthority {
 }
 
 extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) -> u64 {
-    #[allow(clippy::cast_possible_truncation)]
-    let raw = number as u16;
-    if raw == SyscallNumber::CLOCK_GET.as_u16() {
+    let call = SyscallNumber::from_register(number).ok();
+    if call == Some(SyscallNumber::CLOCK_GET) {
         match CLOCK_CALLS.fetch_add(1, Ordering::SeqCst) {
             0 => {
                 note_preempt_tick(BOOT_CPU);
@@ -147,7 +146,7 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
             _ => qemu_exit::exit_failure(FAIL_UNEXPECTED_SYSCALL),
         }
         EXPECTED_READING
-    } else if raw == SyscallNumber::EXIT.as_u16() {
+    } else if call == Some(SyscallNumber::EXIT) {
         // SAFETY: the architecture syscall trampoline passes a live pointer to
         // its fixed-size copied argument array for the duration of this call.
         let status = unsafe { (*args_ptr)[0] };

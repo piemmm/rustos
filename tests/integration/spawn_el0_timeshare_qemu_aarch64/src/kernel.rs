@@ -190,16 +190,15 @@ impl CapabilityQuery for SpawnAuthority {
 /// the callback. Any other syscall is unexpected from the fixture program and
 /// fails the test loudly.
 extern "C" fn dispatch(number: u64, _args_ptr: *const [u64; SYSCALL_MAX_ARGS]) -> u64 {
-    #[allow(clippy::cast_possible_truncation)]
-    let raw = number as u16;
-    if raw == SyscallNumber::YIELD.as_u16() {
+    let call = SyscallNumber::from_register(number).ok();
+    if call == Some(SyscallNumber::YIELD) {
         YIELDS.fetch_add(1, Ordering::SeqCst);
         // Suspend the caller; control returns here when it is next dispatched.
         // A `false` would mean no user kthread is published on this CPU — never
         // the case here, since both tasks are user kthreads.
         let _ = reschedule_current(BOOT_CPU, RescheduleAction::Yield);
         0
-    } else if raw == SyscallNumber::EXIT.as_u16() {
+    } else if call == Some(SyscallNumber::EXIT) {
         EXITS.fetch_add(1, Ordering::SeqCst);
         // Reap the caller: this switches back to the dispatcher and never
         // resumes the task, so the `0` below is unreachable.

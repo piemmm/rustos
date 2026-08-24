@@ -332,6 +332,8 @@ mod program {
             tairix_rt::yield_now();
         }
         sibling.detach();
+        // The vertical pins a small exit status in the argument, and the exit
+        // ABI carries it as an `i32`.
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         tairix_rt::exit(code as i32)
     }
@@ -354,6 +356,8 @@ mod program {
         let Some(group_exit_code) = tairix_rt::arg(2).and_then(parse_u64) else {
             return FAIL_ARGS;
         };
+        // The vertical pins a small exit status in the argument, and the exit
+        // ABI carries it as an `i32`.
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         let group_exit_code = group_exit_code as i32;
 

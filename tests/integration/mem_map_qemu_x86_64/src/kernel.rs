@@ -292,6 +292,8 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
         if len == 0 {
             return encode(Err(Errno::LengthOutOfRange));
         }
+        // The flags slot is a 32-bit word; `from_bits` then refuses any
+        // reserved bit, so a bad word fails closed.
         #[allow(clippy::cast_possible_truncation)]
         let flags = match MapFlags::from_bits(args[1] as u32) {
             Ok(flags) => flags,

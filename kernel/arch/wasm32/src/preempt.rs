@@ -191,6 +191,8 @@ pub fn on_ipi_message() {
     let cpu = TICK_CPU_ID.load(Ordering::Acquire);
     if let Some(cb) = ipi_callback() {
         if cpu != NO_CPU {
+            // The index is bounded by the per-CPU table, which is sized from
+            // the `u32` CPU count.
             #[allow(clippy::cast_possible_truncation)]
             let cpu = cpu as u32;
             cb(cpu);

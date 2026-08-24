@@ -157,6 +157,8 @@ impl WasmArch {
         let mut cpu = 0;
         while cpu < self.cpu_to_worker.len() {
             if self.cpu_to_worker[cpu] == Some(worker) {
+                // The index is bounded by `cpu_to_worker`, which is sized
+                // from the `u32` CPU count.
                 #[allow(clippy::cast_possible_truncation)]
                 return Some(cpu as CpuId);
             }

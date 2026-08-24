@@ -11722,7 +11722,13 @@ impl<A> DispatchHook for KernelDispatchHook<'_, A>
 where
     A: KernelArch + 'static,
 {
-    fn dispatch(&self, raw_number: u16, args: RawArgs) -> DispatchOutcome {
+    fn dispatch(&self, raw_number: u64, args: RawArgs) -> DispatchOutcome {
+        // The completion path below decides on the syscall's *identity*, so
+        // decode the register once here through the same shared check the
+        // dispatcher applies; the two cannot disagree. `None` is a register
+        // that names no syscall, which the dispatcher refuses and which
+        // reschedules nothing.
+        let number = SyscallNumber::from_register(raw_number).ok();
         // Step 1 — identify the caller. The
         // scheduler's per-CPU current-task slot is the only sanctioned
         // source; no caller-supplied identity is accepted.
@@ -11736,7 +11742,7 @@ where
         crate::watchdog::note_kernel_breadcrumb(
             cpu,
             crate::watchdog::KernelBreadcrumb::Syscall,
-            u64::from(raw_number),
+            raw_number,
         );
         let Some(sched_task_id) = self.sched.current_task(cpu) else {
             self.audit_no_caller_context(cpu, "no_current_task");
@@ -11819,9 +11825,10 @@ where
             // A completing `exit` — or a `thread_exit` — already retired this
             // thread through the shared landing rule, so the taken pending kill
             // is superseded by the exit in flight.
-            if raw_number != SyscallNumber::EXIT.as_u16()
-                && raw_number != SyscallNumber::THREAD_EXIT.as_u16()
-            {
+            if !matches!(
+                number,
+                Some(SyscallNumber::EXIT | SyscallNumber::THREAD_EXIT)
+            ) {
                 return self.handlers.land_pending_kill(
                     caller_process,
                     SecTaskId(sched_task_id),
@@ -11845,7 +11852,7 @@ where
         // `completion_cpu` (re-read above) is the core the task is running
         // on now, so a blocking syscall that migrated mid-handler still
         // reschedules on the correct core.
-        completion_outcome(raw_number, result, completion_cpu)
+        completion_outcome(number, result, completion_cpu)
     }
 
     fn resolve_user_fault(
@@ -12033,8 +12040,12 @@ where
 /// competitor. An explicit reschedule takes precedence without
 /// consuming the latch: its suspension reaches the dispatcher anyway,
 /// which clears the latch before the next task switches in.
-fn completion_outcome(raw_number: u16, result: SyscallResult, cpu: CpuId) -> DispatchOutcome {
-    if let Some(action) = reschedule_action_for(raw_number) {
+fn completion_outcome(
+    number: Option<SyscallNumber>,
+    result: SyscallResult,
+    cpu: CpuId,
+) -> DispatchOutcome {
+    if let Some(action) = reschedule_action_for(number) {
         return DispatchOutcome::Reschedule {
             result,
             action,
@@ -12096,15 +12107,14 @@ fn ordinary_completion(result: SyscallResult, cpu: CpuId, woke: bool) -> Dispatc
 /// returns to the same EL0 task without a context switch, so it is `None`.
 /// This is the single place the dispatch path names the rescheduling
 /// syscalls.
-fn reschedule_action_for(raw_number: u16) -> Option<RescheduleAction> {
-    if raw_number == SyscallNumber::YIELD.as_u16() {
-        Some(RescheduleAction::Yield)
-    } else if raw_number == SyscallNumber::EXIT.as_u16()
-        || raw_number == SyscallNumber::THREAD_EXIT.as_u16()
-    {
-        Some(RescheduleAction::Exit)
-    } else {
-        None
+///
+/// `None` in means the caller's number register named no syscall at all —
+/// the dispatcher already refused it — and reschedules nothing.
+fn reschedule_action_for(number: Option<SyscallNumber>) -> Option<RescheduleAction> {
+    match number? {
+        SyscallNumber::YIELD => Some(RescheduleAction::Yield),
+        SyscallNumber::EXIT | SyscallNumber::THREAD_EXIT => Some(RescheduleAction::Exit),
+        _ => None,
     }
 }
 
@@ -12888,13 +12898,16 @@ mod tests {
     #[test]
     fn reschedule_action_for_maps_only_yield_and_exit() {
         assert_eq!(
-            reschedule_action_for(SyscallNumber::YIELD.as_u16()),
+            reschedule_action_for(Some(SyscallNumber::YIELD)),
             Some(RescheduleAction::Yield)
         );
         assert_eq!(
-            reschedule_action_for(SyscallNumber::EXIT.as_u16()),
+            reschedule_action_for(Some(SyscallNumber::EXIT)),
             Some(RescheduleAction::Exit)
         );
+        // A register that named no syscall at all reschedules nothing: the
+        // dispatcher refused it, so its caller returns with the refusal.
+        assert_eq!(reschedule_action_for(None), None);
         // Every non-rescheduling syscall returns straight to EL0.
         for n in [
             SyscallNumber::IPC_SEND,
@@ -12909,7 +12922,7 @@ mod tests {
             SyscallNumber::STREAM_WRITE,
         ] {
             assert_eq!(
-                reschedule_action_for(n.as_u16()),
+                reschedule_action_for(Some(n)),
                 None,
                 "{n:?} must return to user space without a reschedule"
             );
@@ -12981,7 +12994,7 @@ mod tests {
         const CPU: CpuId = 52;
         crate::preempt::note_preempt_tick(CPU);
         assert_eq!(
-            completion_outcome(SyscallNumber::EXIT.as_u16(), Ok(0), CPU),
+            completion_outcome(Some(SyscallNumber::EXIT), Ok(0), CPU),
             DispatchOutcome::Reschedule {
                 result: Ok(0),
                 action: RescheduleAction::Exit,
@@ -21329,7 +21342,7 @@ mod tests {
         args.0[1] = SPAWN_PATH.len() as u64;
         let d = Dispatcher::new(&h, sink);
         assert_eq!(
-            d.dispatch(&ctx, SyscallNumber::SPAWN.as_u16(), args),
+            d.dispatch(&ctx, u64::from(SyscallNumber::SPAWN.as_u16()), args),
             Err(Errno::PermissionDenied)
         );
     }
@@ -26163,7 +26176,7 @@ mod tests {
             let mut args = RawArgs::ZERO;
             args.0[0] = action;
             assert_eq!(
-                d.dispatch(&ctx, SyscallNumber::SYSTEM_POWER.as_u16(), args),
+                d.dispatch(&ctx, u64::from(SyscallNumber::SYSTEM_POWER.as_u16()), args),
                 Err(Errno::OutOfRange),
                 "action {action} is not one of the closed set"
             );

@@ -141,6 +141,7 @@ mod program {
         // Both narrowings are the point: the pattern is one byte wide.
         #[allow(clippy::cast_possible_truncation)]
         let base = lba as u8;
+        // Both narrowings are the point: the pattern is one byte wide.
         #[allow(clippy::cast_possible_truncation)]
         let index = offset as u8;
         base.wrapping_mul(31).wrapping_add(index)

@@ -21,6 +21,8 @@ const ID_B: [u8; 16] = [
     0xb1, 0x77, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
 
+// The builder takes one argument per rendered array field, which is what
+// makes each case readable at its call site.
 #[allow(clippy::too_many_arguments)]
 fn array(
     id: [u8; 16],

@@ -287,6 +287,8 @@ pub fn current_hartid() -> CpuId {
     unsafe {
         core::arch::asm!("mv {}, tp", out(reg) tp, options(nomem, nostack, preserves_flags));
     }
+    // The trampolines seed `tp` with the SBI hartid, which is inside the
+    // registered pool's hart count and so fits a `CpuId`.
     #[allow(clippy::cast_possible_truncation)]
     let id = tp as u32;
     id

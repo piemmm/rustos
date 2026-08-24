@@ -23,6 +23,8 @@
 //! References:
 //! * ACPI Specification, Revision 6.5, §5.2.5 (RSDP) and §5.2.12 (MADT).
 
+// The table types carry the ACPI specification's own names, which a reader
+// matching them against it needs spelled in full.
 #![allow(clippy::module_name_repetitions)]
 
 use core::mem::size_of;

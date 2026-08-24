@@ -318,6 +318,8 @@ pub mod conformance {
 
         #[test]
         fn reclaim_hierarchy_frees_every_table_post_order_and_only_tables() {
+            // The array initialiser needs a `const`, and copying it per slot
+            // is the point: each element must be its own independent cell.
             #[allow(clippy::declare_interior_mutable_const)]
             const ZERO: UnsafeCell<Table> = UnsafeCell::new(Table([0; PAGE_TABLE_ENTRIES]));
             static POOL: BumpFrames = BumpFrames {
@@ -369,6 +371,8 @@ pub mod conformance {
 
         #[test]
         fn suite_accepts_a_faithful_bump_source() {
+            // The array initialiser needs a `const`, and copying it per slot
+            // is the point: each element must be its own independent cell.
             #[allow(clippy::declare_interior_mutable_const)]
             const ZERO: UnsafeCell<Table> = UnsafeCell::new(Table([0; PAGE_TABLE_ENTRIES]));
             static POOL: BumpFrames = BumpFrames {

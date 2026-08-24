@@ -584,8 +584,12 @@ impl RecordingFrames {
     const CAPACITY: usize = 8;
 
     const fn new() -> Self {
+        // The array initialiser needs a `const`, and copying it per slot is
+        // the point: each element must be its own independent cell.
         #[allow(clippy::declare_interior_mutable_const)]
         const SLOT: core::cell::UnsafeCell<Table> = core::cell::UnsafeCell::new(Table::new());
+        // The array initialiser needs a `const`, and copying it per slot is
+        // the point: each element must be its own independent cell.
         #[allow(clippy::declare_interior_mutable_const)]
         const FREED: AtomicU64 = AtomicU64::new(0);
         // `const`, so the pool lives in `.bss` — never a runtime stack

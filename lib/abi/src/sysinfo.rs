@@ -1124,6 +1124,9 @@ pub fn decode_reply(bytes: &[u8]) -> Result<&[u8], Errno> {
     if status == 0 {
         return Ok(&bytes[SYSINFO_REPLY_STATUS_LEN..]);
     }
+    // The reinterpretation is the exact inverse of the encoder's; `from_i32`
+    // then rejects any word that names no `Errno`, so wire corruption fails
+    // closed.
     #[allow(clippy::cast_possible_wrap)]
     Err(Errno::from_i32(status as i32).unwrap_or(Errno::OutOfRange))
 }

@@ -908,6 +908,7 @@ fn heterogeneous_topology_preserves_liveness<S: SchedulerPolicy<TestArch>>() {
             Priority::High
         };
         let yielded = AtomicU64::new(0);
+        // A modulus by the `u32` CPU count is always a real CPU index.
         #[allow(clippy::cast_possible_truncation)]
         let home = (i % u64::from(CPUS)) as u32;
         sched

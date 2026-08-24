@@ -2346,6 +2346,24 @@ impl SyscallNumber {
         Ok(Self(raw))
     }
 
+    /// Decode the architecture's syscall-number register.
+    ///
+    /// The register is 64 bits wide on every hardware target while the
+    /// identifier space stops at [`SyscallNumber::MAX`], so the whole
+    /// register is checked: a value with any bit set above the identifier
+    /// space is not a syscall the kernel offers and is refused, never
+    /// truncated into one it does. Every entry path decodes through here so
+    /// the reserved upper bits cannot mean one thing to the dispatcher and
+    /// another to a test kernel.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] if `raw` exceeds [`SyscallNumber::MAX`].
+    pub fn from_register(raw: u64) -> Result<Self, Errno> {
+        let narrow = u16::try_from(raw).map_err(|_| Errno::OutOfRange)?;
+        Self::from_raw(narrow)
+    }
+
     /// Raw on-wire value.
     #[must_use]
     pub const fn as_u16(self) -> u16 {
@@ -2612,6 +2630,40 @@ mod tests {
         assert_eq!(
             SyscallNumber::from_raw(SyscallNumber::MAX + 1),
             Err(Errno::OutOfRange),
+        );
+    }
+
+    #[test]
+    fn from_register_validates_the_whole_register() {
+        assert_eq!(
+            SyscallNumber::from_register(0).map(SyscallNumber::as_u16),
+            Ok(0)
+        );
+        assert_eq!(
+            SyscallNumber::from_register(u64::from(SyscallNumber::MAX)).map(SyscallNumber::as_u16),
+            Ok(1023)
+        );
+        assert_eq!(
+            SyscallNumber::from_register(u64::from(SyscallNumber::MAX) + 1),
+            Err(Errno::OutOfRange)
+        );
+
+        // A bit set above the identifier space names no syscall. Narrowing
+        // the register instead would answer with the low half — `yield` for
+        // the first case here — so each of these must refuse.
+        for high_bit in 16..64 {
+            for low in [0u64, 1, u64::from(SyscallNumber::MAX)] {
+                let aliased = (1u64 << high_bit) | low;
+                assert_eq!(
+                    SyscallNumber::from_register(aliased),
+                    Err(Errno::OutOfRange),
+                    "{aliased:#x} must not decode"
+                );
+            }
+        }
+        assert_eq!(
+            SyscallNumber::from_register(u64::MAX),
+            Err(Errno::OutOfRange)
         );
     }
 

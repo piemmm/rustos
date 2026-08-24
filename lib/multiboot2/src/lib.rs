@@ -42,6 +42,9 @@
 #![no_std]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
+// The wire structures carry the spec's own names (`Multiboot2Header`,
+// `Multiboot2Tag`), which a reader matching them against the specification
+// needs spelled in full.
 #![allow(clippy::module_name_repetitions)]
 
 mod build;

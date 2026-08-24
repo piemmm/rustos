@@ -6383,6 +6383,8 @@ mod tests {
 
         // A refusal surfaces the raw negative errno unchanged.
         let want = -i64::from(tairix_abi::Errno::PermissionDenied.as_i32());
+        // The capture takes the raw register the kernel would return, which
+        // for a refusal is the negated errno's bit pattern.
         #[allow(clippy::cast_sign_loss)]
         let (_, _) = capture(want as u64, || {
             assert_eq!(users_admin(&req, &mut out), Err(want));

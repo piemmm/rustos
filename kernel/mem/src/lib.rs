@@ -43,6 +43,8 @@
 //! description.
 
 #![no_std]
+// The `loom` model-checking build compiles only the interleaving harnesses,
+// so items only production reaches read as dead there.
 #![cfg_attr(loom, allow(dead_code))]
 
 extern crate alloc;

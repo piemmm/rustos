@@ -213,9 +213,8 @@ extern "C" fn preempt_dispatch(cpu: CpuId) {
 /// `tairix-rt` routes `main`'s return through. Any other syscall is unexpected
 /// and fails the test loudly.
 extern "C" fn dispatch(number: u64, _args_ptr: *const [u64; SYSCALL_MAX_ARGS]) -> u64 {
-    #[allow(clippy::cast_possible_truncation)]
-    let raw = number as u16;
-    if raw == SyscallNumber::EXIT.as_u16() {
+    let call = SyscallNumber::from_register(number).ok();
+    if call == Some(SyscallNumber::EXIT) {
         EXITS.fetch_add(1, Ordering::SeqCst);
         // Reap the caller: this switches back to the dispatcher and never
         // resumes the task, so the `0` below is unreachable.

@@ -160,8 +160,12 @@ impl PageTablePool {
     /// Construct an empty pool. `const`, so the pool lives in `.bss`.
     #[must_use]
     pub const fn new() -> Self {
+        // The array initialiser needs a `const`, and copying it per slot is
+        // the point: each element must be its own independent table.
         #[allow(clippy::declare_interior_mutable_const)]
         const ZERO: UnsafeCell<Table> = UnsafeCell::new(Table::new());
+        // Built in a `const fn`, so the pool lands in `.bss` rather than on a
+        // stack frame.
         #[allow(clippy::large_stack_arrays)]
         let storage = [ZERO; POOL_SIZE];
         Self {

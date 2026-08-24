@@ -67,6 +67,7 @@ const _: () = {
 /// served at the wrong file offset can never match its probe.
 #[must_use]
 pub fn content() -> Vec<u8> {
+    // The modulus is by 256, so every byte of the pattern is in range.
     #[allow(clippy::cast_possible_truncation)]
     let mut bytes: Vec<u8> = (0..FILE_LEN)
         .map(|i| (i.wrapping_mul(31).wrapping_add(7) % 256) as u8)

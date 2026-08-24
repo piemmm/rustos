@@ -289,14 +289,15 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
     // SAFETY: the trap vector built the `[u64; SYSCALL_MAX_ARGS]` array and
     // passes a pointer valid for this call (`syscall_entry` contract).
     let args = unsafe { &*args_ptr };
-    #[allow(clippy::cast_possible_truncation)]
-    let raw = number as u16;
+    let call = SyscallNumber::from_register(number).ok();
 
-    if raw == SyscallNumber::MEM_MAP.as_u16() {
+    if call == Some(SyscallNumber::MEM_MAP) {
         let len = args[0] as usize;
         if len == 0 {
             return encode(Err(Errno::LengthOutOfRange));
         }
+        // The flags slot is a 32-bit word; `from_bits` then refuses any
+        // reserved bit, so a bad word fails closed.
         #[allow(clippy::cast_possible_truncation)]
         let flags = match MapFlags::from_bits(args[1] as u32) {
             Ok(flags) => flags,
@@ -307,7 +308,7 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
             MAP_OK.store(true, Ordering::SeqCst);
         }
         encode(result)
-    } else if raw == SyscallNumber::MEM_UNMAP.as_u16() {
+    } else if call == Some(SyscallNumber::MEM_UNMAP) {
         let base = args[0];
         let len = args[1] as usize;
         if len == 0 {
@@ -318,15 +319,19 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
             UNMAP_OK.store(true, Ordering::SeqCst);
         }
         encode(result)
-    } else if raw == SyscallNumber::EXIT.as_u16() {
+    } else if call == Some(SyscallNumber::EXIT) {
         // The success path is the deliberate fault-on-use-after-unmap, never an
         // exit; an exit therefore means the fixture hit a verification failure
         // branch. Report it with the program's exit code so the failing step
         // is identifiable (fail loud).
         note(TEST_FAIL, "mem_map test: fixture exited before faulting");
-        #[allow(clippy::cast_possible_truncation)]
-        let code = args[0] as u16;
-        qemu_exit::exit_failure(FAIL_EXIT_BASE + code);
+        // The exit slot is an `i32`, decoded exactly as the dispatcher
+        // decodes it; a code outside the reportable range then saturates
+        // rather than aliasing onto another code — or onto 0, success.
+        #[allow(clippy::cast_possible_wrap)]
+        let exit_code = (args[0] & 0xFFFF_FFFF) as i32;
+        let code = u16::try_from(exit_code).unwrap_or(u16::MAX);
+        qemu_exit::exit_failure(FAIL_EXIT_BASE.saturating_add(code));
     } else {
         note(
             TEST_FAIL,

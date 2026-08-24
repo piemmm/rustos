@@ -106,6 +106,7 @@ mod program {
             if ret < 0 {
                 return Err(Errno::from_syscall(ret));
             }
+            // `ret >= 0` is a descriptor by the syscall contract.
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let fd = ret as u32;
             let outcome = write_all(fd, text.as_bytes());

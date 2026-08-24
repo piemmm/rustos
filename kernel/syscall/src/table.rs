@@ -2767,6 +2767,11 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
     /// Run the full sequence for one syscall and return its
     /// result.
     ///
+    /// `raw_number` is the architecture's syscall-number register verbatim,
+    /// unnarrowed: the whole 64-bit caller-supplied value is validated here,
+    /// so a number outside the identifier space is refused and audited
+    /// rather than truncated into one that is inside it.
+    ///
     /// # Errors
     ///
     /// * [`Errno::OutOfRange`] — `raw_number` is not a valid
@@ -2783,10 +2788,10 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
     pub fn dispatch(
         &self,
         caller: &CallerContext<'_>,
-        raw_number: u16,
+        raw_number: u64,
         args: RawArgs,
     ) -> SyscallResult {
-        let Ok(number) = SyscallNumber::from_raw(raw_number) else {
+        let Ok(number) = SyscallNumber::from_register(raw_number) else {
             self.audit_unknown(caller, raw_number);
             return Err(Errno::OutOfRange);
         };
@@ -3706,19 +3711,17 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
         record(self.audit, event, &fields[..n]);
     }
 
-    fn audit_unknown(&self, caller: &CallerContext<'_>, number: u16) {
-        let mut n = [0u8; 12];
-        // The number always fits in `u32` (it is a `u16`); `format_usize`
-        // saturates above `i32::MAX` which never trips for a `u16`.
+    fn audit_unknown(&self, caller: &CallerContext<'_>, number: u64) {
+        let mut n = [0u8; 20];
+        // The refused register is logged whole: a probe that sets a reserved
+        // upper bit must be distinguishable in the trail from the low value
+        // it would otherwise have been confused with.
         self.audit_with_identity(
             AuditEvent::SyscallUnknown,
             caller,
             &[Field {
                 key: "no",
-                value: tairix_log::FieldValue::Str(tairix_util::fmt::format_usize(
-                    usize::from(number),
-                    &mut n,
-                )),
+                value: tairix_log::FieldValue::Str(tairix_util::fmt::format_u64(number, &mut n)),
             }],
         );
     }
@@ -3818,6 +3821,9 @@ fn validate_arg(ty: AbiType, raw: u64) -> Result<(), Errno> {
             // raw value must equal it exactly.
             #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
             let low = (raw & 0xFFFF_FFFF) as i32;
+            // Re-widening the masked value and reinterpreting it is the ABI's
+            // sign-extension convention for an `i32` slot; the comparison
+            // below is what accepts or rejects the register.
             #[allow(clippy::cast_sign_loss)]
             let extended = i64::from(low) as u64;
             if raw == extended {
@@ -3898,24 +3904,41 @@ mod tests {
     use tairix_kernel_sec::{ProcName, ProcessId, TaskCapabilities, TaskId, UserId};
     use tairix_log::{set_max_level, Event, Level};
 
-    /// Single-threaded sink that records every event identifier.
+    /// Single-threaded sink that records every event identifier and field.
     struct RecordingSink {
         events: RefCell<Vec<u32>>,
+        fields: RefCell<Vec<(alloc::string::String, alloc::string::String)>>,
     }
     impl RecordingSink {
         fn new() -> Self {
             set_max_level(Level::Trace);
             Self {
                 events: RefCell::new(Vec::new()),
+                fields: RefCell::new(Vec::new()),
             }
         }
         fn ids(&self) -> Vec<u32> {
             self.events.borrow().clone()
         }
+        fn field_values(&self, key: &str) -> Vec<alloc::string::String> {
+            self.fields
+                .borrow()
+                .iter()
+                .filter(|(k, _)| *k == key)
+                .map(|(_, v)| v.clone())
+                .collect()
+        }
     }
     impl Sink for RecordingSink {
         fn write_event(&self, event: &Event<'_>) {
             self.events.borrow_mut().push(event.id.0);
+            let mut fields = self.fields.borrow_mut();
+            for f in event.fields {
+                fields.push((
+                    alloc::string::String::from(f.key),
+                    alloc::string::ToString::to_string(&f.value),
+                ));
+            }
         }
     }
 
@@ -3957,6 +3980,8 @@ mod tests {
         }
         fn exit(&self, _c: &CallerContext<'_>, code: i32) -> SyscallResult {
             self.record("exit");
+            // The mock echoes the exit code back as the ABI encodes it: the
+            // bit pattern, not a widened value.
             #[allow(clippy::cast_sign_loss)]
             let bits = code as u32;
             Ok(u64::from(bits))
@@ -5136,7 +5161,7 @@ mod tests {
         for spec in tairix_abi::SYSCALLS {
             let mut args = RawArgs::ZERO;
             populate_valid_args(spec, &mut args);
-            let r = d.dispatch(&ctx, spec.number.as_u16(), args);
+            let r = d.dispatch(&ctx, u64::from(spec.number.as_u16()), args);
             assert!(r.is_ok(), "{} returned {r:?}", spec.name);
         }
     }
@@ -5180,7 +5205,7 @@ mod tests {
             let mut args = RawArgs::ZERO;
             populate_valid_args(spec, &mut args);
             assert!(d
-                .dispatch(&ctx, SyscallNumber::SPAWN.as_u16(), args)
+                .dispatch(&ctx, u64::from(SyscallNumber::SPAWN.as_u16()), args)
                 .is_ok());
             assert_eq!(h.last(), Some("spawn"));
             assert!(!sink
@@ -5203,7 +5228,7 @@ mod tests {
         let mut args = RawArgs::ZERO;
         args.0[0] = 1; // handle
         args.0[1] = u64::from(CapabilityId::FS_MOUNT.as_u16());
-        let r = d.dispatch(&ctx, SyscallNumber::CAP_REVOKE.as_u16(), args);
+        let r = d.dispatch(&ctx, u64::from(SyscallNumber::CAP_REVOKE.as_u16()), args);
         assert_eq!(r, Err(Errno::PermissionDenied));
         // Handler must NOT have been invoked.
         assert_eq!(h.last(), None);
@@ -5259,7 +5284,7 @@ mod tests {
             let d = Dispatcher::new(&h, &sink);
             let mut args = RawArgs::ZERO;
             populate_valid_args(spec, &mut args);
-            let r = d.dispatch(&ctx, spec.number.as_u16(), args);
+            let r = d.dispatch(&ctx, u64::from(spec.number.as_u16()), args);
             if sandbox_allows(spec.number) {
                 assert!(
                     r.is_ok(),
@@ -5333,7 +5358,7 @@ mod tests {
         args.0[0] = 1;
         args.0[1] = u64::from(CapabilityId::FS_MOUNT.as_u16());
         assert_eq!(
-            d.dispatch(&ctx, SyscallNumber::CAP_REVOKE.as_u16(), args),
+            d.dispatch(&ctx, u64::from(SyscallNumber::CAP_REVOKE.as_u16()), args),
             Err(Errno::PermissionDenied)
         );
 
@@ -5399,7 +5424,7 @@ mod tests {
         args.0[0] = 1;
         args.0[1] = u64::from(CapabilityId::FS_MOUNT.as_u16());
         assert_eq!(
-            d.dispatch(&ctx, SyscallNumber::CAP_REVOKE.as_u16(), args),
+            d.dispatch(&ctx, u64::from(SyscallNumber::CAP_REVOKE.as_u16()), args),
             Err(Errno::PermissionDenied)
         );
 
@@ -5462,7 +5487,7 @@ mod tests {
         args.0[0] = 1;
         args.0[1] = u64::from(CapabilityId::FS_MOUNT.as_u16());
         assert_eq!(
-            d.dispatch(&ctx, SyscallNumber::CAP_REVOKE.as_u16(), args),
+            d.dispatch(&ctx, u64::from(SyscallNumber::CAP_REVOKE.as_u16()), args),
             Err(Errno::PermissionDenied)
         );
 
@@ -5518,7 +5543,7 @@ mod tests {
         args.0[0] = 1;
         args.0[1] = u64::from(CapabilityId::FS_MOUNT.as_u16());
         assert_eq!(
-            d.dispatch(&ctx, SyscallNumber::CAP_REVOKE.as_u16(), args),
+            d.dispatch(&ctx, u64::from(SyscallNumber::CAP_REVOKE.as_u16()), args),
             Err(Errno::PermissionDenied)
         );
 
@@ -5543,11 +5568,11 @@ mod tests {
 
         // Past MAX = OutOfRange.
         assert_eq!(
-            d.dispatch(&ctx, SyscallNumber::MAX + 1, RawArgs::ZERO),
+            d.dispatch(&ctx, u64::from(SyscallNumber::MAX) + 1, RawArgs::ZERO),
             Err(Errno::OutOfRange)
         );
         // In range but unassigned = NotFound.
-        let unassigned = u16::try_from(tairix_abi::SYSCALLS.len()).unwrap();
+        let unassigned = u64::try_from(tairix_abi::SYSCALLS.len()).unwrap();
         assert_eq!(
             d.dispatch(&ctx, unassigned, RawArgs::ZERO),
             Err(Errno::NotFound)
@@ -5559,6 +5584,52 @@ mod tests {
         for id in ids {
             assert_eq!(id, AuditEvent::SyscallUnknown.id().0);
         }
+    }
+
+    #[test]
+    fn a_reserved_upper_bit_never_aliases_onto_a_real_syscall() {
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[CapabilityId::USER_ADMIN], &sink);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+
+        // Every syscall in the table, re-presented with a bit set above the
+        // 16 the identifier occupies. Narrowing the register would run each
+        // one; validating it refuses each one.
+        for spec in tairix_abi::SYSCALLS {
+            let aliased = (1u64 << 16) | u64::from(spec.number.as_u16());
+            assert_eq!(
+                d.dispatch(&ctx, aliased, RawArgs::ZERO),
+                Err(Errno::OutOfRange),
+                "{} aliased by a reserved bit",
+                spec.name
+            );
+            assert_eq!(h.last(), None, "{} ran from an aliased number", spec.name);
+        }
+
+        // The topmost register value is refused the same way; nothing in the
+        // 64-bit space maps onto a syscall except the identifiers themselves.
+        assert_eq!(
+            d.dispatch(&ctx, u64::MAX, RawArgs::ZERO),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(h.last(), None);
+
+        // Each refusal is audited, and the record names the register whole so
+        // an aliasing probe is distinguishable from the low value it wore.
+        let ids = sink.ids();
+        assert_eq!(ids.len(), tairix_abi::SYSCALLS.len() + 1);
+        for id in ids {
+            assert_eq!(id, AuditEvent::SyscallUnknown.id().0);
+        }
+        assert!(sink
+            .field_values("no")
+            .iter()
+            .any(|v| v == &alloc::format!("{}", (1u64 << 16))));
     }
 
     #[test]
@@ -5576,7 +5647,7 @@ mod tests {
         let mut args = RawArgs::ZERO;
         args.0[1] = 1;
         assert_eq!(
-            d.dispatch(&ctx, SyscallNumber::YIELD.as_u16(), args),
+            d.dispatch(&ctx, u64::from(SyscallNumber::YIELD.as_u16()), args),
             Err(Errno::LengthOutOfRange)
         );
         assert_eq!(h.last(), None);
@@ -5599,7 +5670,7 @@ mod tests {
         args.0[1] = 0; // user ptr — null, must be refused
         args.0[2] = 8; // len
         assert_eq!(
-            d.dispatch(&ctx, SyscallNumber::IPC_SEND.as_u16(), args),
+            d.dispatch(&ctx, u64::from(SyscallNumber::IPC_SEND.as_u16()), args),
             Err(Errno::BadAlignment)
         );
         assert_eq!(h.last(), None);
@@ -5622,7 +5693,7 @@ mod tests {
         let mut args = RawArgs::ZERO;
         args.0[0] = 1u64 << 20; // out of cap-id range
         assert_eq!(
-            d.dispatch(&ctx, SyscallNumber::CAP_QUERY.as_u16(), args),
+            d.dispatch(&ctx, u64::from(SyscallNumber::CAP_QUERY.as_u16()), args),
             Err(Errno::OutOfRange)
         );
         assert_eq!(h.last(), None);
@@ -5642,13 +5713,15 @@ mod tests {
         // -1 properly sign-extended.
         let mut args = RawArgs::ZERO;
         args.0[0] = u64::MAX;
-        assert!(d.dispatch(&ctx, SyscallNumber::EXIT.as_u16(), args).is_ok());
+        assert!(d
+            .dispatch(&ctx, u64::from(SyscallNumber::EXIT.as_u16()), args)
+            .is_ok());
 
         // High bits set without negative low — invalid.
         let mut bad = RawArgs::ZERO;
         bad.0[0] = 0x1_0000_0000;
         assert_eq!(
-            d.dispatch(&ctx, SyscallNumber::EXIT.as_u16(), bad),
+            d.dispatch(&ctx, u64::from(SyscallNumber::EXIT.as_u16()), bad),
             Err(Errno::OutOfRange)
         );
     }
@@ -5671,7 +5744,7 @@ mod tests {
         args.0[1] = 0x2000;
         args.0[2] = 4;
         assert_eq!(
-            d.dispatch(&ctx, SyscallNumber::IPC_SEND.as_u16(), args),
+            d.dispatch(&ctx, u64::from(SyscallNumber::IPC_SEND.as_u16()), args),
             Err(Errno::MessageTooLarge)
         );
         assert_eq!(sink.ids(), [AuditEvent::SyscallHandlerRejected.id().0]);
@@ -5702,7 +5775,7 @@ mod tests {
         args.0[1] = 0x2000;
         args.0[2] = 4;
         assert_eq!(
-            d.dispatch(&ctx, SyscallNumber::IPC_SEND.as_u16(), args),
+            d.dispatch(&ctx, u64::from(SyscallNumber::IPC_SEND.as_u16()), args),
             Err(Errno::NotFound)
         );
         assert_eq!(sink.ids(), [AuditEvent::SyscallHandlerNotFound.id().0]);
@@ -5736,7 +5809,7 @@ mod tests {
 
         // ipc_send returning WouldBlock (mailbox full)
         assert_eq!(
-            d.dispatch(&ctx, SyscallNumber::IPC_SEND.as_u16(), args),
+            d.dispatch(&ctx, u64::from(SyscallNumber::IPC_SEND.as_u16()), args),
             Err(Errno::WouldBlock)
         );
         assert_eq!(sink.ids(), [AuditEvent::SyscallHandlerWouldBlock.id().0]);
@@ -5765,7 +5838,7 @@ mod tests {
             if n == SyscallNumber::CAP_QUERY {
                 args.0[0] = u64::from(CapabilityId::FS_MOUNT.as_u16());
             }
-            assert!(d.dispatch(&ctx, n.as_u16(), args).is_ok());
+            assert!(d.dispatch(&ctx, u64::from(n.as_u16()), args).is_ok());
         }
         // No security-relevant audit traffic.
         assert!(sink.ids().is_empty());
@@ -5784,7 +5857,7 @@ mod tests {
         let mut args = RawArgs::ZERO;
         args.0[0] = 0xDEAD_BEEF;
         assert!(d
-            .dispatch(&ctx, SyscallNumber::EXIT.as_u16(), {
+            .dispatch(&ctx, u64::from(SyscallNumber::EXIT.as_u16()), {
                 let mut a = RawArgs::ZERO;
                 a.0[0] = 0u64.wrapping_sub(2); // -2 sign-extended
                 a
@@ -5812,7 +5885,7 @@ mod tests {
         let mut args = RawArgs::ZERO;
         args.0[0] = 42; // line — well-typed
         assert_eq!(
-            d.dispatch(&ctx, SyscallNumber::IRQ_BIND.as_u16(), args),
+            d.dispatch(&ctx, u64::from(SyscallNumber::IRQ_BIND.as_u16()), args),
             Err(Errno::PermissionDenied)
         );
         assert_eq!(h.last(), None);
@@ -5838,7 +5911,7 @@ mod tests {
 
         let mut args = RawArgs::ZERO;
         args.0[0] = 17;
-        let r = d.dispatch(&ctx, SyscallNumber::IRQ_BIND.as_u16(), args);
+        let r = d.dispatch(&ctx, u64::from(SyscallNumber::IRQ_BIND.as_u16()), args);
         assert_eq!(r, Ok(0x11 | 0xF000_0000_0000_0000));
         assert_eq!(h.last(), Some("irq_bind"));
         assert_eq!(sink.ids(), [AuditEvent::SyscallInvoked.id().0]);
@@ -5863,7 +5936,7 @@ mod tests {
         let mut args = RawArgs::ZERO;
         args.0[0] = 1u64 << 40; // high bits set — invalid `U32`
         assert_eq!(
-            d.dispatch(&ctx, SyscallNumber::IRQ_BIND.as_u16(), args),
+            d.dispatch(&ctx, u64::from(SyscallNumber::IRQ_BIND.as_u16()), args),
             Err(Errno::OutOfRange)
         );
         assert_eq!(h.last(), None);
@@ -5889,7 +5962,7 @@ mod tests {
         args.0[0] = 0xCAFE_F00D_DEAD_BEEF; // handle
         args.0[1] = 1_000_000_000; // timeout_ns
         assert!(d
-            .dispatch(&ctx, SyscallNumber::IRQ_WAIT.as_u16(), args)
+            .dispatch(&ctx, u64::from(SyscallNumber::IRQ_WAIT.as_u16()), args)
             .is_ok());
         assert_eq!(h.last(), Some("irq_wait"));
         assert!(sink.ids().is_empty(), "irq_wait must not audit on success");
@@ -5913,7 +5986,7 @@ mod tests {
         args.0[0] = 0x2000; // len
         args.0[1] = u64::from(MapFlags::FIXED.bits()); // flags
         args.0[2] = 0x10_0000; // addr_hint
-        let r = d.dispatch(&ctx, SyscallNumber::MEM_MAP.as_u16(), args);
+        let r = d.dispatch(&ctx, u64::from(SyscallNumber::MEM_MAP.as_u16()), args);
         // The Mock echoes `len` back as the fabricated base.
         assert_eq!(r, Ok(0x2000));
         assert_eq!(h.last(), Some("mem_map"));
@@ -5938,7 +6011,7 @@ mod tests {
         args.0[0] = 0x1000; // len
         args.0[1] = 1 << 1; // reserved flag bit
         assert_eq!(
-            d.dispatch(&ctx, SyscallNumber::MEM_MAP.as_u16(), args),
+            d.dispatch(&ctx, u64::from(SyscallNumber::MEM_MAP.as_u16()), args),
             Err(Errno::OutOfRange)
         );
         assert_eq!(h.last(), None);
@@ -5965,7 +6038,7 @@ mod tests {
         args.0[1] = 16; // path length
         args.0[2] = 0o10_0644; // a file-type bit above the mask
         assert_eq!(
-            d.dispatch(&ctx, SyscallNumber::FS_SET_MODE.as_u16(), args),
+            d.dispatch(&ctx, u64::from(SyscallNumber::FS_SET_MODE.as_u16()), args),
             Err(Errno::OutOfRange)
         );
         assert_eq!(h.last(), None);
@@ -5977,7 +6050,7 @@ mod tests {
         args.0[1] = 16;
         args.0[2] = u64::from(FS_MODE_MASK);
         assert!(d
-            .dispatch(&ctx, SyscallNumber::FS_SET_MODE.as_u16(), args)
+            .dispatch(&ctx, u64::from(SyscallNumber::FS_SET_MODE.as_u16()), args)
             .is_ok());
         assert_eq!(h.last(), Some("fs_set_mode"));
     }
@@ -5999,7 +6072,7 @@ mod tests {
         args.0[2] = 1000; // new uid
         args.0[3] = u64::from(tairix_abi::FS_OWNER_UNCHANGED); // gid unchanged
         assert!(d
-            .dispatch(&ctx, SyscallNumber::FS_SET_OWNER.as_u16(), args)
+            .dispatch(&ctx, u64::from(SyscallNumber::FS_SET_OWNER.as_u16()), args)
             .is_ok());
         assert_eq!(h.last(), Some("fs_set_owner"));
 
@@ -6013,7 +6086,11 @@ mod tests {
         let h_bare = MockHandlers::default();
         let d_bare = Dispatcher::new(&h_bare, &sink);
         assert_eq!(
-            d_bare.dispatch(&ctx_bare, SyscallNumber::FS_SET_OWNER.as_u16(), args),
+            d_bare.dispatch(
+                &ctx_bare,
+                u64::from(SyscallNumber::FS_SET_OWNER.as_u16()),
+                args
+            ),
             Err(Errno::PermissionDenied)
         );
         assert_eq!(h_bare.last(), None);
@@ -6042,7 +6119,7 @@ mod tests {
         args.0[4] = 0x3000; // value_out
         args.0[5] = 64;
         assert_eq!(
-            d.dispatch(&ctx, SyscallNumber::FS_ATTR_GET.as_u16(), args),
+            d.dispatch(&ctx, u64::from(SyscallNumber::FS_ATTR_GET.as_u16()), args),
             Err(Errno::LengthOutOfRange)
         );
         assert_eq!(h.last(), None);
@@ -6055,7 +6132,11 @@ mod tests {
         remove_args.0[2] = 0x2000;
         remove_args.0[3] = (FS_ATTR_KEY_MAX + 1) as u64;
         assert_eq!(
-            d.dispatch(&ctx, SyscallNumber::FS_ATTR_REMOVE.as_u16(), remove_args),
+            d.dispatch(
+                &ctx,
+                u64::from(SyscallNumber::FS_ATTR_REMOVE.as_u16()),
+                remove_args
+            ),
             Err(Errno::LengthOutOfRange)
         );
         assert_eq!(h.last(), None);
@@ -6064,7 +6145,7 @@ mod tests {
         args.0[3] = 9; // "user.demo"
         args.0[5] = (FS_ATTR_VALUE_MAX + 1) as u64;
         assert_eq!(
-            d.dispatch(&ctx, SyscallNumber::FS_ATTR_SET.as_u16(), args),
+            d.dispatch(&ctx, u64::from(SyscallNumber::FS_ATTR_SET.as_u16()), args),
             Err(Errno::LengthOutOfRange)
         );
         assert_eq!(h.last(), None);
@@ -6072,16 +6153,20 @@ mod tests {
         // In-bounds calls reach their handlers.
         args.0[5] = 64;
         assert!(d
-            .dispatch(&ctx, SyscallNumber::FS_ATTR_GET.as_u16(), args)
+            .dispatch(&ctx, u64::from(SyscallNumber::FS_ATTR_GET.as_u16()), args)
             .is_ok());
         assert_eq!(h.last(), Some("fs_attr_get"));
         assert!(d
-            .dispatch(&ctx, SyscallNumber::FS_ATTR_SET.as_u16(), args)
+            .dispatch(&ctx, u64::from(SyscallNumber::FS_ATTR_SET.as_u16()), args)
             .is_ok());
         assert_eq!(h.last(), Some("fs_attr_set"));
         remove_args.0[3] = 9;
         assert!(d
-            .dispatch(&ctx, SyscallNumber::FS_ATTR_REMOVE.as_u16(), remove_args)
+            .dispatch(
+                &ctx,
+                u64::from(SyscallNumber::FS_ATTR_REMOVE.as_u16()),
+                remove_args
+            )
             .is_ok());
         assert_eq!(h.last(), Some("fs_attr_remove"));
         let mut args = RawArgs::ZERO;
@@ -6091,7 +6176,7 @@ mod tests {
         args.0[3] = 0x2000; // key_out
         args.0[4] = 64;
         assert!(d
-            .dispatch(&ctx, SyscallNumber::FS_ATTR_LIST.as_u16(), args)
+            .dispatch(&ctx, u64::from(SyscallNumber::FS_ATTR_LIST.as_u16()), args)
             .is_ok());
         assert_eq!(h.last(), Some("fs_attr_list"));
     }
@@ -6117,7 +6202,7 @@ mod tests {
         args.0[5] = 64;
         for n in [SyscallNumber::FS_ATTR_GET, SyscallNumber::FS_ATTR_SET] {
             assert_eq!(
-                d.dispatch(&ctx, n.as_u16(), args),
+                d.dispatch(&ctx, u64::from(n.as_u16()), args),
                 Err(Errno::PermissionDenied)
             );
         }
@@ -6128,7 +6213,11 @@ mod tests {
         remove_args.0[2] = 0x2000;
         remove_args.0[3] = 9;
         assert_eq!(
-            d.dispatch(&ctx, SyscallNumber::FS_ATTR_REMOVE.as_u16(), remove_args),
+            d.dispatch(
+                &ctx,
+                u64::from(SyscallNumber::FS_ATTR_REMOVE.as_u16()),
+                remove_args
+            ),
             Err(Errno::PermissionDenied)
         );
         let mut list_args = RawArgs::ZERO;
@@ -6138,7 +6227,11 @@ mod tests {
         list_args.0[3] = 0x2000;
         list_args.0[4] = 64;
         assert_eq!(
-            d.dispatch(&ctx, SyscallNumber::FS_ATTR_LIST.as_u16(), list_args),
+            d.dispatch(
+                &ctx,
+                u64::from(SyscallNumber::FS_ATTR_LIST.as_u16()),
+                list_args
+            ),
             Err(Errno::PermissionDenied)
         );
         assert_eq!(h.last(), None);
@@ -6159,7 +6252,7 @@ mod tests {
         args.0[0] = 0x4000; // base
         args.0[1] = 0x2000; // len
         assert!(d
-            .dispatch(&ctx, SyscallNumber::MEM_UNMAP.as_u16(), args)
+            .dispatch(&ctx, u64::from(SyscallNumber::MEM_UNMAP.as_u16()), args)
             .is_ok());
         assert_eq!(h.last(), Some("mem_unmap"));
         assert!(sink.ids().is_empty(), "mem_unmap must not audit");
@@ -6186,7 +6279,7 @@ mod tests {
         // pid 5 as a sign-extended `i32` (low 32 bits only).
         args.0[0] = 5;
         args.0[1] = 0x1000; // status — a non-null user pointer
-        let r = d.dispatch(&ctx, SyscallNumber::WAIT.as_u16(), args);
+        let r = d.dispatch(&ctx, u64::from(SyscallNumber::WAIT.as_u16()), args);
         // The Mock echoes the decoded pid back as the fabricated reaped PID.
         assert_eq!(r, Ok(5));
         assert_eq!(h.last(), Some("wait"));
@@ -6208,12 +6301,14 @@ mod tests {
         // dispatcher must recover it as `i32::-1` and forward it. The Mock
         // echoes the pid back reinterpreted as `u32`, i.e. `u32::MAX`.
         let mut args = RawArgs::ZERO;
+        // The test builds the register a caller would pass: a sign-extended
+        // `i32` reinterpreted as the raw `u64`.
         #[allow(clippy::cast_sign_loss)]
         let extended = i64::from(tairix_abi::WAIT_PID_ANY) as u64;
         args.0[0] = extended;
         args.0[1] = 0x1000; // status
         assert_eq!(
-            d.dispatch(&ctx, SyscallNumber::WAIT.as_u16(), args),
+            d.dispatch(&ctx, u64::from(SyscallNumber::WAIT.as_u16()), args),
             Ok(u64::from(u32::MAX))
         );
 
@@ -6225,7 +6320,7 @@ mod tests {
         bad.0[0] = 1; // pid
         bad.0[1] = 0; // null status
         assert_eq!(
-            d2.dispatch(&ctx, SyscallNumber::WAIT.as_u16(), bad),
+            d2.dispatch(&ctx, u64::from(SyscallNumber::WAIT.as_u16()), bad),
             Err(Errno::BadAlignment)
         );
         assert_eq!(h2.last(), None);
@@ -6251,7 +6346,7 @@ mod tests {
         let mut args = RawArgs::ZERO;
         args.0[0] = 5; // pid 5 as a sign-extended `i32`
         args.0[1] = u64::from(Signal::Terminate.as_u32());
-        let r = d.dispatch(&ctx, SyscallNumber::SIGNAL.as_u16(), args);
+        let r = d.dispatch(&ctx, u64::from(SyscallNumber::SIGNAL.as_u16()), args);
         // The Mock echoes the decoded pid back.
         assert_eq!(r, Ok(5));
         assert_eq!(h.last(), Some("signal"));
@@ -6277,7 +6372,7 @@ mod tests {
             args.0[0] = 1; // pid
             args.0[1] = bad;
             assert_eq!(
-                d.dispatch(&ctx, SyscallNumber::SIGNAL.as_u16(), args),
+                d.dispatch(&ctx, u64::from(SyscallNumber::SIGNAL.as_u16()), args),
                 Err(Errno::OutOfRange)
             );
         }
@@ -6302,7 +6397,11 @@ mod tests {
         args.0[0] = 0; // fd 0 (stdin)
         args.0[1] = 9; // the child pid to mark foreground
         assert_eq!(
-            d.dispatch(&ctx, SyscallNumber::CONSOLE_FOREGROUND.as_u16(), args),
+            d.dispatch(
+                &ctx,
+                u64::from(SyscallNumber::CONSOLE_FOREGROUND.as_u16()),
+                args
+            ),
             Ok(9)
         );
         assert_eq!(h.last(), Some("console_foreground"));
@@ -6314,7 +6413,11 @@ mod tests {
             caps: &no_caps,
         };
         assert_eq!(
-            d.dispatch(&no_ctx, SyscallNumber::CONSOLE_FOREGROUND.as_u16(), args),
+            d.dispatch(
+                &no_ctx,
+                u64::from(SyscallNumber::CONSOLE_FOREGROUND.as_u16()),
+                args
+            ),
             Err(Errno::PermissionDenied)
         );
     }
@@ -6337,7 +6440,7 @@ mod tests {
         let mut args = RawArgs::ZERO;
         args.0[0] = 2; // kind
         args.0[1] = 0x1000; // out — a non-null user pointer
-        let r = d.dispatch(&ctx, SyscallNumber::RLIMIT_GET.as_u16(), args);
+        let r = d.dispatch(&ctx, u64::from(SyscallNumber::RLIMIT_GET.as_u16()), args);
         // The Mock echoes the decoded kind back.
         assert_eq!(r, Ok(2));
         assert_eq!(h.last(), Some("rlimit_get"));
@@ -6361,7 +6464,7 @@ mod tests {
         let mut args = RawArgs::ZERO;
         args.0[0] = 3; // kind
         args.0[1] = 0x1000; // value — a non-null user pointer
-        let r = d.dispatch(&ctx, SyscallNumber::RLIMIT_SET.as_u16(), args);
+        let r = d.dispatch(&ctx, u64::from(SyscallNumber::RLIMIT_SET.as_u16()), args);
         assert_eq!(r, Ok(3));
         assert_eq!(h.last(), Some("rlimit_set"));
         assert_eq!(sink.ids(), [AuditEvent::SyscallInvoked.id().0]);
@@ -6374,7 +6477,7 @@ mod tests {
         bad.0[0] = 0; // kind
         bad.0[1] = 0; // null pointer
         assert_eq!(
-            d2.dispatch(&ctx, SyscallNumber::RLIMIT_SET.as_u16(), bad),
+            d2.dispatch(&ctx, u64::from(SyscallNumber::RLIMIT_SET.as_u16()), bad),
             Err(Errno::BadAlignment)
         );
         assert_eq!(h2.last(), None);
@@ -6395,7 +6498,11 @@ mod tests {
         let h = MockHandlers::default();
         let d = Dispatcher::new(&h, &sink);
         assert_eq!(
-            d.dispatch(&ctx, SyscallNumber::MEM_PIN.as_u16(), RawArgs::ZERO),
+            d.dispatch(
+                &ctx,
+                u64::from(SyscallNumber::MEM_PIN.as_u16()),
+                RawArgs::ZERO
+            ),
             Err(Errno::PermissionDenied)
         );
         assert_eq!(h.last(), None, "handler must not be reached");
@@ -6410,7 +6517,11 @@ mod tests {
         let h2 = MockHandlers::default();
         let d2 = Dispatcher::new(&h2, &sink2);
         assert_eq!(
-            d2.dispatch(&ctx2, SyscallNumber::MEM_PIN.as_u16(), RawArgs::ZERO),
+            d2.dispatch(
+                &ctx2,
+                u64::from(SyscallNumber::MEM_PIN.as_u16()),
+                RawArgs::ZERO
+            ),
             Ok(0)
         );
         assert_eq!(h2.last(), Some("mem_pin"));
@@ -6431,7 +6542,11 @@ mod tests {
         let h = MockHandlers::default();
         let d = Dispatcher::new(&h, &sink);
         assert_eq!(
-            d.dispatch(&ctx, SyscallNumber::MEM_UNPIN.as_u16(), RawArgs::ZERO),
+            d.dispatch(
+                &ctx,
+                u64::from(SyscallNumber::MEM_UNPIN.as_u16()),
+                RawArgs::ZERO
+            ),
             Ok(0)
         );
         assert_eq!(h.last(), Some("mem_unpin"));
@@ -6461,7 +6576,7 @@ mod tests {
             args.0[0] = u64::from(op.as_u32());
             // The Mock echoes the decoded op back.
             assert_eq!(
-                d.dispatch(&ctx, SyscallNumber::SIGNAL_INTAKE.as_u16(), args),
+                d.dispatch(&ctx, u64::from(SyscallNumber::SIGNAL_INTAKE.as_u16()), args),
                 Ok(u64::from(op.as_u32()))
             );
             assert_eq!(h.last(), Some("signal_intake"));
@@ -6484,7 +6599,7 @@ mod tests {
         let mut args = RawArgs::ZERO;
         args.0[0] = 3; // one past the closed set
         assert_eq!(
-            d.dispatch(&ctx, SyscallNumber::SIGNAL_INTAKE.as_u16(), args),
+            d.dispatch(&ctx, u64::from(SyscallNumber::SIGNAL_INTAKE.as_u16()), args),
             Err(Errno::OutOfRange)
         );
         assert_eq!(h.last(), None, "handler must not be reached");
@@ -6507,7 +6622,7 @@ mod tests {
         args.0[0] = 0x2000; // buf
         args.0[1] = 4096; // len
         assert_eq!(
-            d.dispatch(&ctx, SyscallNumber::USERS_DB_READ.as_u16(), args),
+            d.dispatch(&ctx, u64::from(SyscallNumber::USERS_DB_READ.as_u16()), args),
             Err(Errno::PermissionDenied)
         );
         assert_eq!(h.last(), None);
@@ -6528,7 +6643,7 @@ mod tests {
         let mut args = RawArgs::ZERO;
         args.0[0] = 0x2000; // buf — a non-null user pointer
         args.0[1] = 4096; // len
-        let r = d.dispatch(&ctx, SyscallNumber::USERS_DB_READ.as_u16(), args);
+        let r = d.dispatch(&ctx, u64::from(SyscallNumber::USERS_DB_READ.as_u16()), args);
         // The Mock echoes the decoded capacity back.
         assert_eq!(r, Ok(4096));
         assert_eq!(h.last(), Some("users_db_read"));
@@ -6542,7 +6657,7 @@ mod tests {
         bad.0[0] = 0; // null buf
         bad.0[1] = 4096;
         assert_eq!(
-            d2.dispatch(&ctx, SyscallNumber::USERS_DB_READ.as_u16(), bad),
+            d2.dispatch(&ctx, u64::from(SyscallNumber::USERS_DB_READ.as_u16()), bad),
             Err(Errno::BadAlignment)
         );
         assert_eq!(h2.last(), None);

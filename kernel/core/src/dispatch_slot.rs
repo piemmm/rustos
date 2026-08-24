@@ -153,11 +153,12 @@ pub enum RescheduleAction {
 pub trait DispatchHook: Sync {
     /// Run one syscall and return its result.
     ///
-    /// `raw_number` is the bottom 16 bits of the architecture's
-    /// syscall-number register, exactly as the trampoline received
-    /// it (`tairix_kernel_syscall::Dispatcher::dispatch` validates
-    /// it). `args` is the caller's register tuple already
-    /// reinterpreted as a [`RawArgs`] by the trampoline.
+    /// `raw_number` is the architecture's syscall-number register whole and
+    /// unnarrowed, exactly as the trampoline received it;
+    /// `tairix_kernel_syscall::Dispatcher::dispatch` validates the full
+    /// value, so no caller-supplied bit is dropped on the way in. `args` is
+    /// the caller's register tuple already reinterpreted as a [`RawArgs`] by
+    /// the trampoline.
     ///
     /// The implementation:
     ///
@@ -177,7 +178,7 @@ pub trait DispatchHook: Sync {
     ///    bin-crate callback halts the CPU forever (fail closed).
     ///
     /// Never panic, never silently succeed.
-    fn dispatch(&self, raw_number: u16, args: RawArgs) -> DispatchOutcome;
+    fn dispatch(&self, raw_number: u64, args: RawArgs) -> DispatchOutcome;
 
     /// Handle a user-mode data abort at `fault_va` on the calling CPU:
     /// resolve it as demand-paged file backing (a `file_map` region) or
@@ -420,7 +421,7 @@ mod tests {
     /// handed. Used to verify the slot returns the registered hook
     /// untouched.
     struct RecordingHook {
-        log: tairix_sync::SpinLock<alloc::vec::Vec<(u16, RawArgs)>>,
+        log: tairix_sync::SpinLock<alloc::vec::Vec<(u64, RawArgs)>>,
     }
 
     impl RecordingHook {
@@ -432,11 +433,11 @@ mod tests {
     }
 
     impl DispatchHook for RecordingHook {
-        fn dispatch(&self, raw_number: u16, args: RawArgs) -> DispatchOutcome {
+        fn dispatch(&self, raw_number: u64, args: RawArgs) -> DispatchOutcome {
             self.log.lock().push((raw_number, args));
             // The trait contract permits any `DispatchOutcome`; the
             // tests below only assert against the recorded call.
-            DispatchOutcome::Returned(Ok(u64::from(raw_number)))
+            DispatchOutcome::Returned(Ok(raw_number))
         }
     }
 

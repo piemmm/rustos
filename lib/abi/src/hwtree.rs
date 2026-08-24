@@ -808,6 +808,8 @@ impl HwResource {
         if self.flags & !Self::FRAMEBUFFER_FLAGS_MASK != 0 {
             return Err(Errno::BadMagic);
         }
+        // The shift leaves only the bits the memory-kind field occupies;
+        // `from_u8` then rejects any value it does not name.
         #[allow(clippy::cast_possible_truncation)]
         let encoded = (self.flags >> Self::FRAMEBUFFER_MEMORY_SHIFT) as u8;
         FramebufferMemory::from_u8(encoded)
@@ -835,8 +837,13 @@ impl HwResource {
             return Err(Errno::BadMagic);
         }
         self.framebuffer_memory()?;
+        // `FRAMEBUFFER_FORMAT_MASK` is a byte mask, so nothing outside it
+        // survives; `from_u8` then rejects any value it does not name.
         #[allow(clippy::cast_possible_truncation)]
         let format = DisplayFormat::from_u8((self.flags & Self::FRAMEBUFFER_FORMAT_MASK) as u8)?;
+        // `xlate` packs the width into its low half and the height into its
+        // high, so keeping the low 32 bits is the exact inverse of the
+        // encoding.
         #[allow(clippy::cast_possible_truncation)]
         let width_px = self.xlate as u32;
         let height_px = u32::try_from(self.xlate >> 32).map_err(|_| Errno::LengthOutOfRange)?;

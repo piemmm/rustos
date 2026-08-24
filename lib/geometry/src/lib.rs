@@ -118,6 +118,19 @@ impl Rect {
         self.origin.y.saturating_add_unsigned(self.height)
     }
 
+    /// Centre point, rounding toward the top-left edge on an odd extent.
+    ///
+    /// Saturating like [`Rect::right`] and [`Rect::bottom`], so a rectangle
+    /// reaching the coordinate space's end yields a point on the edge rather
+    /// than a wrapped negative one.
+    #[must_use]
+    pub fn center(&self) -> Point {
+        Point::new(
+            self.origin.x.saturating_add_unsigned(self.width / 2),
+            self.origin.y.saturating_add_unsigned(self.height / 2),
+        )
+    }
+
     /// The intersection of two rectangles, or [`Rect::EMPTY`] if they
     /// do not overlap.
     #[must_use]

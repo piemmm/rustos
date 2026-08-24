@@ -92,19 +92,14 @@ pub const fn encode_result(result: tairix_kernel_syscall::SyscallResult) -> u64 
 /// `NoCallerContext`) and the caller must halt.
 ///
 /// Shared by every architecture's `production_dispatch` callback so
-/// the lookup → narrow → forward → encode sequence has one definition.
+/// the lookup → forward → encode sequence has one definition.
 pub fn dispatch_via_slot(slot: &DispatchCallbackSlot, number: u64, args: RawArgs) -> Option<u64> {
     let hook = slot.get()?;
-    // Narrow the syscall-number register to the bottom 16 bits the
-    // dispatcher inspects. `Dispatcher::dispatch` re-validates the
-    // value against `SyscallNumber::MAX`; truncating here is the
-    // documented ABI step (the upper bits are reserved). A value
-    // above `u16::MAX` is rejected by the dispatcher and surfaced
-    // as `Errno::OutOfRange` — fail-closed via a normal Errno
-    // return, not a halt.
-    #[allow(clippy::cast_possible_truncation)]
-    let raw_number = number as u16;
-    match hook.dispatch(raw_number, args) {
+    // The register is forwarded whole: `Dispatcher::dispatch` validates all
+    // 64 caller-supplied bits against the identifier space and refuses an
+    // out-of-space number with `Errno::OutOfRange`. Narrowing here instead
+    // would map a reserved-bit probe onto a real syscall.
+    match hook.dispatch(number, args) {
         DispatchOutcome::Returned(result) => Some(encode_result(result)),
         DispatchOutcome::NoCallerContext => None,
         DispatchOutcome::Reschedule {
@@ -249,7 +244,7 @@ mod tests {
         fault_outcome: UserFaultOutcome,
     }
     impl DispatchHook for StaticHook {
-        fn dispatch(&self, _raw_number: u16, _args: RawArgs) -> DispatchOutcome {
+        fn dispatch(&self, _raw_number: u64, _args: RawArgs) -> DispatchOutcome {
             self.outcome
         }
         fn resolve_user_fault(
@@ -330,12 +325,16 @@ mod tests {
             Errno::NotImplemented,
         ] {
             let encoded = encode_result(Err(e));
+            // Reading the encoded register back as signed is the userland
+            // convention `encode_result` produces.
             #[allow(clippy::cast_possible_wrap)]
             let signed = encoded as i64;
             assert!(
                 signed < 0,
                 "expected negative encoding for {e:?}, got {signed}"
             );
+            // An `Errno` discriminant fits an `i32` by construction, so
+            // negating the encoding recovers it exactly.
             #[allow(clippy::cast_possible_truncation)]
             let recovered = (-signed) as i32;
             assert_eq!(recovered, e.as_i32());
@@ -365,9 +364,13 @@ mod tests {
         slot.install_dispatcher(hook as &'static dyn DispatchHook)
             .expect("install");
         let got = dispatch_via_slot(&slot, 0, RawArgs::ZERO).expect("Some on Returned");
+        // Reading the encoded register back as signed is the userland
+        // convention `encode_result` produces.
         #[allow(clippy::cast_possible_wrap)]
         let signed = got as i64;
         assert!(signed < 0);
+        // An `Errno` discriminant fits an `i32` by construction, so negating
+        // the encoding recovers it exactly.
         #[allow(clippy::cast_possible_truncation)]
         let recovered = (-signed) as i32;
         assert_eq!(recovered, Errno::PermissionDenied.as_i32());

@@ -271,17 +271,20 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
     // SAFETY: `args_ptr` points at the live `[u64; SYSCALL_MAX_ARGS]` the
     // exception handler built from the saved register frame.
     let args = unsafe { &*args_ptr };
-    #[allow(clippy::cast_possible_truncation)]
-    let raw = number as u16;
+    let call = SyscallNumber::from_register(number).ok();
     let cur = current_task_id();
 
-    if raw == SyscallNumber::SIGNAL.as_u16() {
+    if call == Some(SyscallNumber::SIGNAL) {
         let signaller = match *SIGNAL_PRODUCER.lock() {
             Some(s) => s,
             None => qemu_exit::exit_failure(FAIL_NO_PRODUCER),
         };
+        // The slot is decoded exactly as the dispatcher decodes it: the
+        // register carries the argument sign-extended to 32 bits.
         #[allow(clippy::cast_possible_truncation)]
         let pid = args[0] as i32;
+        // The slot is a 32-bit word, and the typed decode below refuses any
+        // value it does not name.
         #[allow(clippy::cast_possible_truncation)]
         let signal = match Signal::from_u32(args[1] as u32) {
             Ok(signal) => signal,
@@ -293,11 +296,13 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
                 .and_then(|target| signaller.signal_task(target, signal))
                 .map(|()| 0),
         )
-    } else if raw == SyscallNumber::WAIT.as_u16() {
+    } else if call == Some(SyscallNumber::WAIT) {
         let producer = match *WAIT_PRODUCER.lock() {
             Some(p) => p,
             None => qemu_exit::exit_failure(FAIL_NO_PRODUCER),
         };
+        // The slot is decoded exactly as the dispatcher decodes it: the
+        // register carries the argument sign-extended to 32 bits.
         #[allow(clippy::cast_possible_truncation)]
         let pid = args[0] as i32;
         // Decode the flags fail-closed, exactly as the production dispatcher
@@ -332,7 +337,7 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
             }
             Err(err) => encode(Err(err)),
         }
-    } else if raw == SyscallNumber::SIGNAL_INTAKE.as_u16() {
+    } else if call == Some(SyscallNumber::SIGNAL_INTAKE) {
         // Route through the real kernel-core intake bookkeeping — the same
         // functions the production handler drives — keyed by the
         // kernel-trusted current task id. The chassis flags gate the `^C`
@@ -359,12 +364,14 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
                 Err(err) => encode(Err(err)),
             },
         }
-    } else if raw == SyscallNumber::YIELD.as_u16() {
+    } else if call == Some(SyscallNumber::YIELD) {
         // The child gives up the CPU each iteration; reschedule it and resume
         // on the next dispatch (until the parent terminates it).
         let _ = reschedule_current(BOOT_CPU, RescheduleAction::Yield);
         0
-    } else if raw == SyscallNumber::EXIT.as_u16() {
+    } else if call == Some(SyscallNumber::EXIT) {
+        // The slot is decoded exactly as the dispatcher decodes it: the
+        // register carries the argument sign-extended to 32 bits.
         #[allow(clippy::cast_possible_truncation)]
         let code = args[0] as i32;
         if cur == PARENT_TID.load(Ordering::SeqCst) {
@@ -517,6 +524,7 @@ fn u64_to_decimal(mut value: u64, buf: &mut [u8; 20]) -> &[u8] {
     let mut i = buf.len();
     while value > 0 {
         i -= 1;
+        // A decimal digit is `value % 10`, which is always below ten.
         #[allow(clippy::cast_possible_truncation)]
         {
             buf[i] = b'0' + (value % 10) as u8;

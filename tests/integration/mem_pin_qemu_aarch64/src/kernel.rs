@@ -598,6 +598,8 @@ fn install_echo_server(sys: &Subsystems) {
 
 /// Drive CPU 0 until the kernel-parented `pid` exits and return its code.
 fn drive_process(sys: &Subsystems, wait: &KernelProcessWait<Aarch64BinArch>, pid: u64) -> i32 {
+    // A kernel-minted process id round-trips through the `i32` the wait ABI
+    // carries.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let pid = pid as i32;
     for _ in 0..MAX_STEPS {
@@ -860,8 +862,10 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
 
     let parent_code = drive_process(&sys, wait_producer, parent_pid);
     if parent_code != 0 {
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        qemu_exit::exit_failure(FAIL_EXIT_BASE + parent_code as u16);
+        // A child code outside the reportable range saturates, so it can
+        // neither wrap onto another fixture's code nor overflow the add.
+        let code = u16::try_from(parent_code).unwrap_or(u16::MAX);
+        qemu_exit::exit_failure(FAIL_EXIT_BASE.saturating_add(code));
     }
 
     let ipc_pid = match init_ctx.spawn_driver_process(
@@ -881,6 +885,8 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
 
     #[cfg(migration_smp)]
     let (ipc_code, observed_cpus) = {
+        // A kernel-minted process id round-trips through the `i32` the wait
+        // ABI carries.
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         let poll_pid = ipc_pid as i32;
         let mut observed = 0u32;
@@ -954,14 +960,18 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     };
 
     if ipc_code != 0 {
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        qemu_exit::exit_failure(FAIL_IPC_CONTROL + ipc_code as u16);
+        // A child code outside the reportable range saturates, so it can
+        // neither wrap onto another fixture's code nor overflow the add.
+        let code = u16::try_from(ipc_code).unwrap_or(u16::MAX);
+        qemu_exit::exit_failure(FAIL_IPC_CONTROL.saturating_add(code));
     }
 
     #[cfg(migration_smp)]
     if observed_cpus.0.count_ones() < 2 || observed_cpus.1 < 4 {
-        #[allow(clippy::cast_possible_truncation)]
-        qemu_exit::exit_failure(FAIL_NO_MIGRATION + observed_cpus.0 as u16);
+        // The observed-CPU mask is reported alongside the failure; a mask
+        // wider than the report saturates rather than overflowing the add.
+        let code = u16::try_from(observed_cpus.0).unwrap_or(u16::MAX);
+        qemu_exit::exit_failure(FAIL_NO_MIGRATION.saturating_add(code));
     }
 
     note(

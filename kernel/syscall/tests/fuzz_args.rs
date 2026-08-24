@@ -931,11 +931,14 @@ type FlagsArg = (usize, fn(u32) -> bool);
 /// Mirror of the dispatcher's argument-acceptance predicate. Kept here
 /// so the fuzz harness cross-checks the public API against an
 /// independent implementation; if the two diverge, the test fails.
-fn would_accept(spec_idx: usize, raw_number: u16, args: &[u64; SYSCALL_MAX_ARGS]) -> bool {
-    if raw_number as usize != spec_idx {
+fn would_accept(spec_idx: usize, raw_number: u64, args: &[u64; SYSCALL_MAX_ARGS]) -> bool {
+    if usize::try_from(raw_number) != Ok(spec_idx) {
         return false; // number must be in the populated abi-v1 range
     }
-    let Some(spec) = spec_for(SyscallNumber::from_raw(raw_number).ok().unwrap()) else {
+    let Ok(number) = SyscallNumber::from_register(raw_number) else {
+        return false;
+    };
+    let Some(spec) = spec_for(number) else {
         return false;
     };
     // Trailing slots must be zero.
@@ -1115,6 +1118,8 @@ fn narrow_for(ty: AbiType, raw: u64) -> u64 {
             // Sign-extend the low 32 bits into the high 32.
             #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
             let low = (raw & 0xFFFF_FFFF) as i32;
+            // Re-widening the masked value and reinterpreting it is the ABI's
+            // sign-extension convention for an `i32` slot.
             #[allow(clippy::cast_sign_loss)]
             let extended = i64::from(low) as u64;
             extended
@@ -1136,8 +1141,12 @@ fn arg_is_well_typed(ty: AbiType, raw: u64) -> bool {
     match ty {
         AbiType::Unit => raw == 0,
         AbiType::I32 => {
+            // The mask leaves exactly 32 bits, so reinterpreting them is the
+            // slot's two's-complement value.
             #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
             let low = (raw & 0xFFFF_FFFF) as i32;
+            // Re-widening and reinterpreting mirrors the dispatcher's own
+            // check, which is what this predicate cross-checks.
             #[allow(clippy::cast_sign_loss)]
             let extended = i64::from(low) as u64;
             raw == extended
@@ -1192,16 +1201,12 @@ fn fuzz_dispatcher_matches_mirror() {
             // iterations for completely random `u16` values to also fuzz
             // the unknown-number paths.
             let raw_no = if rng.next_u64().trailing_zeros() >= 3 {
-                // Fully random `u16` — fuzzes the unknown-number paths.
-                #[allow(clippy::cast_possible_truncation)]
-                let n = (rng.next_u64() & 0xFFFF) as u16;
-                n
+                // A fully random register — fuzzes the unknown-number paths
+                // over the whole 64-bit space, reserved upper bits included.
+                rng.next_u64()
             } else {
                 // Inside the populated range.
-                let bucket = rng.next_u64() % (SYSCALLS.len() as u64);
-                #[allow(clippy::cast_possible_truncation)]
-                let narrowed = bucket as u16;
-                narrowed
+                rng.next_u64() % (SYSCALLS.len() as u64)
             };
 
             // Per-slot input generator: half-fuzzy. Half the time we hand
@@ -1211,11 +1216,8 @@ fn fuzz_dispatcher_matches_mirror() {
             // accepted-input counter meaningful coverage at the same time
             // as exercising every rejection path.
             let mut args = [0u64; SYSCALL_MAX_ARGS];
-            let valid_spec = if (raw_no as usize) < SYSCALLS.len() {
-                Some(&SYSCALLS[raw_no as usize])
-            } else {
-                None
-            };
+            let spec_idx = usize::try_from(raw_no).ok().filter(|i| *i < SYSCALLS.len());
+            let valid_spec = spec_idx.map(|i| &SYSCALLS[i]);
             for (slot_idx, slot) in args.iter_mut().enumerate() {
                 let raw = rng.next_u64();
                 let coin = rng.next_u64() & 1 == 0;
@@ -1228,11 +1230,7 @@ fn fuzz_dispatcher_matches_mirror() {
                 };
             }
 
-            let expected = if (raw_no as usize) < SYSCALLS.len() {
-                would_accept(raw_no as usize, raw_no, &args)
-            } else {
-                false
-            };
+            let expected = spec_idx.is_some_and(|i| would_accept(i, raw_no, &args));
             let result = dispatcher.dispatch(&ctx, raw_no, RawArgs(args));
             match (expected, &result) {
                 (true, Ok(_)) => accepted += 1,
@@ -1339,8 +1337,7 @@ fn pointer_shaped_user_ptr_inputs_are_handled_deterministically() {
         }
         saw_ptr_slot = true;
 
-        #[allow(clippy::cast_possible_truncation)]
-        let raw_number = spec_idx as u16;
+        let raw_number = u64::try_from(spec_idx).expect("a table index fits a register");
         for (base, is_null) in adversarial {
             let mut args = [benign_non_ptr_value(); SYSCALL_MAX_ARGS];
             // Trailing slots past arg_count must stay zero.

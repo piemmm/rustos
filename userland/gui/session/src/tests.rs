@@ -2968,11 +2968,7 @@ fn aw3_click_through_produces_the_staged_outcomes() {
 
     let centre = |rect: tairix_wm::Rect| -> Point {
         assert!(!rect.is_empty());
-        #[allow(clippy::cast_possible_wrap)]
-        Point::new(
-            rect.left() + (rect.width / 2) as i32,
-            rect.top() + (rect.height / 2) as i32,
-        )
+        rect.center()
     };
     let start = centre(shell.session().taskbar().layout(Scale::ONE).library);
     let row = |shell: &DesktopShell, label: &str| -> Point {
@@ -4324,11 +4320,7 @@ fn shell_set_apps_re_presents_and_updates_the_strip() {
 
 fn centre(rect: tairix_wm::Rect) -> Point {
     assert!(!rect.is_empty());
-    #[allow(clippy::cast_possible_wrap)]
-    Point::new(
-        rect.left() + (rect.width / 2) as i32,
-        rect.top() + (rect.height / 2) as i32,
-    )
+    rect.center()
 }
 
 fn app_slot_point(shell: &DesktopShell, index: usize) -> Point {
@@ -4461,12 +4453,7 @@ fn notifications_relay_raise_dismiss_and_isolate_producers() {
             .taskbar()
             .notifications_layout(Scale::ONE)
             .expect("popover");
-        let rect = layout.cards[0].card;
-        #[allow(clippy::cast_possible_wrap)]
-        Point::new(
-            rect.left() + (rect.width / 2) as i32,
-            rect.top() + (rect.height / 2) as i32,
-        )
+        layout.cards[0].card.center()
     };
     let _ = shell.handle(moved(card.x, card.y), &mut comp, 0);
     let outcome = shell.handle(PRIMARY_PRESS, &mut comp, 0);
@@ -4713,11 +4700,7 @@ fn tray_summary(jobs: u16) -> tairix_abi::switchboard_ipc::TraySummary {
 fn capsule_point(shell: &DesktopShell) -> Point {
     let slot = shell.session().taskbar().layout(Scale::ONE).switchboard;
     assert!(!slot.is_empty(), "the capsule slot has a region");
-    #[allow(clippy::cast_possible_wrap)]
-    Point::new(
-        slot.left() + (slot.width / 2) as i32,
-        slot.top() + (slot.height / 2) as i32,
-    )
+    slot.center()
 }
 
 /// The relay drives the capsule from the published summary and falls back to

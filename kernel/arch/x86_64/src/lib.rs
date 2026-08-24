@@ -37,6 +37,8 @@
 //! 3a checklist.
 
 #![no_std]
+// Off the bare-metal target the boot and trap entry points have no caller, so
+// the items they alone reach read as dead.
 #![cfg_attr(not(any(test, target_arch = "x86_64")), allow(dead_code))]
 #![deny(missing_docs)]
 

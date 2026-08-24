@@ -405,6 +405,7 @@ mod program {
                     if ret < 0 {
                         return fail(&fds, pending_write, errno_from(ret));
                     }
+                    // A descriptor register is a small non-negative number.
                     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                     fds.push(ret as u32);
                 }

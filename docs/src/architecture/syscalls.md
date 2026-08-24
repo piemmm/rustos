@@ -1996,6 +1996,15 @@ page-fault fix-up + publishing the input ports) remains.
 `Dispatcher::dispatch` is the *only* entry point. Calling it runs the
 following sequence — the order matches `AGENTS.md` §5.4 step for step:
 
+0. Number decoding — `raw_number` arrives as the architecture's whole
+   syscall-number register, unnarrowed, and is decoded through
+   `SyscallNumber::from_register`. The identifier space stops at
+   `SyscallNumber::MAX` (1023) while the register is 64 bits wide, so
+   every bit above that space is *validated*, not discarded: a register
+   with a reserved bit set names no syscall and is refused with
+   `OutOfRange` plus a `SyscallUnknown` audit record carrying the value
+   whole. Narrowing the register instead would alias such a probe onto a
+   real syscall (`0x1_0000` onto `yield`) and emit no record at all.
 1. Caller identification — the `CallerContext` comes from the per-CPU
    current-task slot owned by `kernel/sched`; the dispatcher does not
    accept caller-supplied identity.

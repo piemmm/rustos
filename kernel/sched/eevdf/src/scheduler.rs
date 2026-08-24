@@ -687,8 +687,7 @@ impl<A: SchedulerArch> Scheduler<A> {
         let start = self.next_victim(cpu);
         for offset in 0..n {
             let v = (start as usize + offset) % n;
-            #[allow(clippy::cast_possible_truncation)]
-            if v as u32 == cpu {
+            if v == cpu as usize {
                 continue;
             }
             if let Some(entry) = self.cpus[v].queue.steal() {
@@ -699,19 +698,16 @@ impl<A: SchedulerArch> Scheduler<A> {
                 let Ok(task) = self.lookup(entry.id) else {
                     continue;
                 };
-                #[allow(clippy::cast_possible_truncation)]
-                {
-                    self.cpus[v].queue.release_weight(task.weight());
-                    task.home_cpu.store(cpu, Ordering::Release);
-                    // Account the migrated weight on the stealing CPU. The
-                    // task is dispatched immediately by the caller (not
-                    // pushed): a fair task also rebases its virtual times
-                    // onto the new clock, a real-time task carries none.
-                    if task.load_sched_class().is_realtime() {
-                        self.cpus[cpu as usize].queue.add_weight(task.weight());
-                    } else {
-                        let _ = Self::admit(&task, &self.cpus[cpu as usize].queue);
-                    }
+                self.cpus[v].queue.release_weight(task.weight());
+                task.home_cpu.store(cpu, Ordering::Release);
+                // Account the migrated weight on the stealing CPU. The task
+                // is dispatched immediately by the caller (not pushed): a
+                // fair task also rebases its virtual times onto the new
+                // clock, a real-time task carries none.
+                if task.load_sched_class().is_realtime() {
+                    self.cpus[cpu as usize].queue.add_weight(task.weight());
+                } else {
+                    let _ = Self::admit(&task, &self.cpus[cpu as usize].queue);
                 }
                 return Some(entry.id);
             }
@@ -721,6 +717,8 @@ impl<A: SchedulerArch> Scheduler<A> {
 
     fn next_victim(&self, cpu: CpuId) -> u32 {
         let s = self.victim_rng[cpu as usize].lock().next_u64();
+        // The modulus is by the CPU count, which is the `u32` `config.cpus`
+        // every per-CPU vector was sized from, so the pick is a real `CpuId`.
         #[allow(clippy::cast_possible_truncation)]
         {
             let n = self.cpus.len() as u64;

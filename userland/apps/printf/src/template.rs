@@ -543,6 +543,8 @@ fn push_escape(
             // POSIX %b octal is \0NNN; GNU also reads \NNN.
             let (start, max) = if b == b'0' { (i + 1, 3) } else { (i, 3) };
             let (value, len) = octal_digits(bytes, start, max);
+            // A three-digit octal escape reaches 0o777, and GNU printf keeps
+            // the low byte (`\400` yields NUL); truncating matches it.
             #[allow(clippy::cast_possible_truncation)]
             out.push(value as u8);
             return Ok((start + len, false));

@@ -559,8 +559,10 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
                     qemu_exit::exit_success();
                 }
                 WaitStatus::Exited(code) => {
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                    qemu_exit::exit_failure(FAIL_EXIT_BASE + (code as u16));
+                    // A child code outside the reportable range saturates, so it can
+                    // neither wrap onto another fixture's code nor overflow the add.
+                    let code = u16::try_from(code).unwrap_or(u16::MAX);
+                    qemu_exit::exit_failure(FAIL_EXIT_BASE.saturating_add(code));
                 }
                 WaitStatus::Stopped(_) => {
                     qemu_exit::exit_failure(FAIL_PARENT_STOPPED);

@@ -179,10 +179,10 @@ impl PciTransport {
     /// `offset` as two `u32` halves (the window exposes no `u64`
     /// accessor).
     fn write_u64(&self, offset: usize, value: u64) -> Result<(), VirtioError> {
+        // The two halves reconstruct `value` exactly: the narrowing keeps its
+        // low 32 bits and the shift moves its high 32 into range first.
         #[allow(clippy::cast_possible_truncation)]
-        let lo = value as u32;
-        #[allow(clippy::cast_possible_truncation)]
-        let hi = (value >> 32) as u32;
+        let (lo, hi) = (value as u32, (value >> 32) as u32);
         self.windows
             .common
             .write_u32(offset, lo)
@@ -234,10 +234,10 @@ impl Transport for PciTransport {
     }
 
     fn set_driver_features(&mut self, features: u64) {
+        // The device takes the bitmap as two selected halves; together they
+        // reconstruct `features` exactly.
         #[allow(clippy::cast_possible_truncation)]
-        let lo = features as u32;
-        #[allow(clippy::cast_possible_truncation)]
-        let hi = (features >> 32) as u32;
+        let (lo, hi) = (features as u32, (features >> 32) as u32);
         self.write_feature_half(0, lo);
         self.write_feature_half(1, hi);
     }

@@ -930,6 +930,8 @@ unsafe fn wrmsr(msr: u32, value: u64) {
     // by construction, so the `as u32` truncations are lossless.
     #[allow(clippy::cast_possible_truncation)]
     let lo = value as u32;
+    // The MSR takes the value as two halves; the shift moves the high 32 bits
+    // into range, so the pair reconstructs it exactly.
     #[allow(clippy::cast_possible_truncation)]
     let hi = (value >> 32) as u32;
     // SAFETY: see function-level contract.

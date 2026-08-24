@@ -376,6 +376,8 @@ impl PortName {
         }
         Ok(Self {
             bytes,
+            // The length was checked against `PORT_NAME_MAX_LEN` (31) above,
+            // so it fits a byte.
             #[allow(clippy::cast_possible_truncation)]
             len: name.len() as u8,
         })
@@ -460,7 +462,7 @@ mod tests {
         is_reserved_endpoint, is_seat_scoped_endpoint, IpcMessageHeader, PortName,
         IPC_MESSAGE_HEADER_MAGIC, IPC_MESSAGE_MAX_PAYLOAD_LEN, PORT_NAME_MAX_LEN,
     };
-    use crate::{Errno, ABI_VERSION_CURRENT};
+    use crate::{Errno, ABI_VERSION_CURRENT_U16};
 
     #[test]
     fn reserved_endpoints_cover_every_well_known_id() {
@@ -527,8 +529,7 @@ mod tests {
     fn sample() -> IpcMessageHeader {
         IpcMessageHeader {
             magic: IPC_MESSAGE_HEADER_MAGIC,
-            #[allow(clippy::cast_possible_truncation)]
-            version: ABI_VERSION_CURRENT as u16,
+            version: ABI_VERSION_CURRENT_U16,
             flags: 0,
             endpoint: 0x0123_4567_89AB_CDEF,
             sender: 0,

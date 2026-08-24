@@ -182,10 +182,10 @@ impl MmioTransport {
     /// beginning at `low_offset` (the window exposes no `u64`
     /// accessor).
     fn write_u64_pair(&self, low_offset: usize, value: u64) -> Result<(), VirtioError> {
+        // The two halves reconstruct `value` exactly: the narrowing keeps its
+        // low 32 bits and the shift moves its high 32 into range first.
         #[allow(clippy::cast_possible_truncation)]
-        let lo = value as u32;
-        #[allow(clippy::cast_possible_truncation)]
-        let hi = (value >> 32) as u32;
+        let (lo, hi) = (value as u32, (value >> 32) as u32);
         self.window
             .write_u32(low_offset, lo)
             .map_err(|_| VirtioError::DeviceFault)?;
@@ -211,6 +211,8 @@ impl Transport for MmioTransport {
     }
 
     fn status(&self) -> Status {
+        // virtio 1.1 §4.2.2 gives the 32-bit `Status` register eight defined
+        // bits; the reserved remainder carries no status to drop.
         #[allow(clippy::cast_possible_truncation)]
         let bits = self.window.read_u32(regs::STATUS).unwrap_or(0) as u8;
         Status::from_bits(bits)
@@ -229,10 +231,10 @@ impl Transport for MmioTransport {
     }
 
     fn set_driver_features(&mut self, features: u64) {
+        // The device takes the bitmap as two selected halves; together they
+        // reconstruct `features` exactly.
         #[allow(clippy::cast_possible_truncation)]
-        let lo = features as u32;
-        #[allow(clippy::cast_possible_truncation)]
-        let hi = (features >> 32) as u32;
+        let (lo, hi) = (features as u32, (features >> 32) as u32);
         self.write_feature_half(0, lo);
         self.write_feature_half(1, hi);
     }
@@ -256,7 +258,6 @@ impl Transport for MmioTransport {
     }
 
     fn queue_max_size(&self) -> u16 {
-        #[allow(clippy::cast_possible_truncation)]
         let max = self.window.read_u32(regs::QUEUE_NUM_MAX).unwrap_or(0);
         u16::try_from(max).unwrap_or(u16::MAX)
     }

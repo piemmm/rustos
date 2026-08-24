@@ -648,8 +648,7 @@ impl<A: SchedulerArch> Scheduler<A> {
         let start = self.next_victim(cpu);
         for offset in 0..n {
             let v = (start as usize + offset) % n;
-            #[allow(clippy::cast_possible_truncation)]
-            if v as u32 == cpu {
+            if v == cpu as usize {
                 continue;
             }
             if let Some(entry) = self.cpus[v].queue.steal() {
@@ -680,6 +679,8 @@ impl<A: SchedulerArch> Scheduler<A> {
 
     fn next_victim(&self, cpu: CpuId) -> u32 {
         let s = self.victim_rng[cpu as usize].lock().next_u64();
+        // The modulus is by the CPU count, which is the `u32` `config.cpus`
+        // every per-CPU vector was sized from, so the pick is a real `CpuId`.
         #[allow(clippy::cast_possible_truncation)]
         {
             let n = self.cpus.len() as u64;

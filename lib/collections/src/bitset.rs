@@ -203,6 +203,8 @@ impl Iterator for BitSet256Iter {
             let lsb = word.trailing_zeros();
             // Clear the bit we are about to yield.
             self.words[self.word_index] = word & (word - 1);
+            // `word_index < WORDS` (4) and `lsb < 64`, so the bit number is
+            // below `BITSET256_BITS` and fits a `u16`.
             #[allow(clippy::cast_possible_truncation)]
             let bit = (self.word_index as u16) * 64 + (lsb as u16);
             return Some(bit);
@@ -244,6 +246,9 @@ mod tests {
     #[test]
     fn out_of_range_bits_are_ignored() {
         let mut set = BitSet256::new();
+        // The set's bit count is 256, well inside a `u16` — the point of the
+        // test is that the index is out of the set's range, not out of the
+        // type's.
         #[allow(clippy::cast_possible_truncation)]
         let oversize = BITSET256_BITS as u16;
         set.insert(oversize);

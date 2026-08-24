@@ -305,10 +305,9 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
     // exception handler built from the saved register frame; reading it for the
     // duration of this call is sound.
     let args = unsafe { &*args_ptr };
-    #[allow(clippy::cast_possible_truncation)]
-    let raw = number as u16;
+    let call = SyscallNumber::from_register(number).ok();
 
-    if raw == SyscallNumber::MMIO_MAP.as_u16() {
+    if call == Some(SyscallNumber::MMIO_MAP) {
         note(TEST_MMIO_ENTER, "mmio_map test: dispatch handling mmio_map");
         let handle = args[0];
         // Owner-check the handle: only the minted grant resolves; any other
@@ -336,6 +335,8 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
         // space and maps that region, caching disabled, never executable. No published space (a task admitted without one)
         // fails closed.
         let result = match with_current_live_space(BOOT_CPU, |space| {
+            // The sub-region length was bounded against the granted window
+            // above, so it fits the host's pointer width.
             #[allow(clippy::cast_possible_truncation)]
             space.map_device_window(GRANT_PHYS + offset, sub_len as usize)
         }) {
@@ -348,7 +349,7 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
             note(TEST_MMIO_MAPPED, "mmio_map test: granted window mapped");
         }
         encode(result)
-    } else if raw == SyscallNumber::MEM_MAP.as_u16() {
+    } else if call == Some(SyscallNumber::MEM_MAP) {
         // Non-`FIXED` `mem_map`: the program asks the kernel to place the
         // region, so route to the retained live space's placement allocator
         // (`plans/PI.md` 5d-0-ii (c)) — the production `LiveMemMap` non-`FIXED`
@@ -369,7 +370,7 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
             Err(_) => Err(Errno::LengthOutOfRange),
         };
         encode(result)
-    } else if raw == SyscallNumber::MEM_UNMAP.as_u16() {
+    } else if call == Some(SyscallNumber::MEM_UNMAP) {
         // Release the placed region. `args[0]` is the base, `args[1]` the byte
         // length. The placement record is validated + released inside
         // `unmap_anonymous` (fail closed on a wrong base/extent).
@@ -391,7 +392,7 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
             Err(_) => Err(Errno::LengthOutOfRange),
         };
         encode(result)
-    } else if raw == SyscallNumber::DMA_ALLOC.as_u16() {
+    } else if call == Some(SyscallNumber::DMA_ALLOC) {
         // Carve a coherent DMA buffer into the program's retained live space
         // via the production `LiveSpace::alloc_dma` (`plans/PI.md` 5d-0-ii (c)
         // DMA half). The registry-backed grant owner-check is host-proven in
@@ -417,9 +418,13 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
             None => Err(Errno::NotImplemented),
         };
         encode(result)
-    } else if raw == SyscallNumber::EXIT.as_u16() {
-        #[allow(clippy::cast_possible_truncation)]
-        let code = args[0] as u16;
+    } else if call == Some(SyscallNumber::EXIT) {
+        // The exit slot is an `i32`, decoded exactly as the dispatcher
+        // decodes it; a code outside the reportable range then saturates
+        // rather than aliasing onto another code — or onto 0, success.
+        #[allow(clippy::cast_possible_wrap)]
+        let exit_code = (args[0] & 0xFFFF_FFFF) as i32;
+        let code = u16::try_from(exit_code).unwrap_or(u16::MAX);
         if code == 0
             && MAP_OK.load(Ordering::SeqCst)
             && MEM_OK.load(Ordering::SeqCst)
@@ -435,7 +440,7 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
             TEST_FAIL,
             "mmio_map test: program exited with a failure code",
         );
-        qemu_exit::exit_failure(FAIL_EXIT_BASE + code);
+        qemu_exit::exit_failure(FAIL_EXIT_BASE.saturating_add(code));
     } else {
         note(
             TEST_FAIL,

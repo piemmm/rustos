@@ -232,16 +232,91 @@ host build script, or fixture), `TODO`/`FIXME`/`HACK`/"for now" markers (§2.1,
 §2.19), `cfg(target_arch …)`/`cfg(target_pointer_width …)` outside the §17.2
 allow-list, and 32-bit absolute time in an ABI or persisted format (§21).
 
-### Open — unjustified `#[allow(...)]`, 168 sites tree-wide (§15.10)
+### Done — every `#[allow(...)]` states an invariant, and three defects it hid
 
-An `#[allow]` with no comment tying it to a real invariant. Distribution:
-`tests/integration` 62, `kernel/arch` 16, `kernel/sched` 12, `userland/apps`
-11, `lib/virtio` 10, `userland/gui` 8, `lib/abi` 8, `kernel/tairix-kernel` 8,
-`kernel/syscall` 8, `kernel/core` 4, remainder in `lib/*`. Mostly
-`clippy::cast_*`. Each is either a lossless conversion whose invariant should
-be stated, or a cast that should be a checked conversion instead — decide per
-site; do not blanket-annotate. The `dead_code` allows are already resolved (see
-below) and are not part of this count.
+The sweep found 135 sites with no justification (the earlier 168 counted
+comments placed *below* the attribute, and `reason = "…"` inside it, as absent;
+both are real justifications). Each was decided per site: an invariant stated,
+a checked conversion put in its place, or the types fixed so the cast
+disappeared. Nothing was blanket-annotated, and a tree-wide scan now reports
+zero.
+
+Three of them were hiding defects, all with regression cover:
+
+- **The syscall-number register was truncated, so a reserved-bit probe ran a
+  real syscall.** `dispatch_via_slot` narrowed the caller's 64-bit number
+  register with `as u16`, so `x8 = 0x1_0000` executed `yield` (0) and
+  `0x1_0001` executed `exit` — while the `#[allow]`'s comment claimed the
+  opposite ("a value above `u16::MAX` is rejected by the dispatcher … fail
+  closed"). No `SyscallUnknown` record was emitted either, so probing above the
+  identifier space was invisible in the audit trail. The narrowing is gone:
+  `SyscallNumber::from_register` is the one checked decode from a raw register,
+  `DispatchHook::dispatch` and `Dispatcher::dispatch` take the register whole,
+  and the single validation point is the one that already owned the refusal and
+  its audit event. `audit_unknown` now logs all 64 bits, so an aliasing probe is
+  distinguishable from the low value it wore.
+- **Two `#[allow]`s were silencing nothing at all** — `queue_max_size` in
+  `lib/virtio/src/transport_mmio.rs` and the migration block in
+  `kernel/sched/eevdf`, neither of which contains a cast. Removed; the crates
+  lint clean without them. This is the same false-justification class the
+  `dead_code` sweep found fourteen of, so it is worth probing rather than
+  trusting any remaining annotation.
+- **A QEMU fixture could report PASS for a failing exit code.** The `EXIT`
+  arm of four test kernels read the code as `args[0] as u16`, so a child
+  exiting `0x1_0000` decoded to `0` — which `heap_qemu_aarch64` reads as
+  success. The decode is now the dispatcher's own (`(args[0] & 0xFFFF_FFFF) as
+  i32`) and saturates into the report. Twelve further sites composed
+  `FAIL_* + (code as u16)`, which overflows `u16` for a large code: panicking
+  in debug, or aliasing onto another fixture's code in release. All are
+  `saturating_add` now.
+
+Two structural wins came out of it rather than annotations: `Rect::center()`
+in `lib/geometry` (five byte-identical copies of the same centre computation,
+one of them production), and `SyscallNumber::from_register`, which replaced the
+`number as u16` narrowing open-coded in nineteen QEMU test kernels — those
+fixtures now validate the register exactly as production does, which is the
+point of a fixture that mirrors the dispatcher.
+
+Worth knowing for the next context: `cargo build --workspace` does not compile
+the bare-metal fixture bodies, so a change to them is only checked by
+`cargo check -p <crate> --target <its target>` (or the gate's per-target
+clippy). A bare `cargo clippy --target … -- -D warnings` on those crates
+reports ~10 pre-existing lints that the gate's own invocation does not; compare
+counts against a reverted file before treating any as yours.
+
+### Open — fixture exit-code reporting is duplicated sixteen ways, untested
+
+The `u16::try_from(code).unwrap_or(u16::MAX)` + `saturating_add` conversion
+above is now correct but written out at sixteen sites, and it has no host test:
+the fixture bodies compile only under `freestanding`, and
+`tests/integration/harness` is a **build**-dependency, so nothing a bare-metal
+fixture links at runtime can host the shared version. A `lib/*` crate for
+test-fixture arithmetic would be bloat (§2.3) and speculative production
+surface (§2.4), so the honest fix is a runtime fixture-support seam the
+bare-metal binaries can depend on — worth a context of its own, not a
+smuggled-in extra.
+
+### Open — three duplications noticed while sweeping the `#[allow]` sites
+
+Recorded rather than folded into that change (§2.18), each small enough for one
+context:
+
+- **Four near-identical field-capturing sinks** in `kernel/syscall/src/table.rs`
+  tests (`ProcFieldSink`, `PparentFieldSink`, `CommFieldSink`,
+  `StartFieldSink`), each differing only in the key it watches. The shared
+  `RecordingSink` in the same module now captures every field and answers
+  `field_values(key)`, so all four collapse into it.
+- **`write_u64` / `write_u64_pair`** in `lib/virtio`'s PCI and MMIO transports
+  are the same algorithm over a different window type. They are sibling
+  `Transport` implementations, so the §2.2 carve-out arguably covers them —
+  but the *helper* is not the sibling behaviour, and deduplicating it needs a
+  shared "has a `write_u32`" seam. Decide deliberately; do not collapse the
+  transports themselves.
+- **A dead error path in `lib/abi/src/hwtree.rs`**:
+  `u32::try_from(self.xlate >> 32).map_err(|_| Errno::LengthOutOfRange)?`
+  cannot fail — shifting a `u64` right by 32 leaves at most 32 bits — so the
+  `LengthOutOfRange` arm is unreachable. The sibling width decode above it is a
+  stated-invariant cast. One of the two shapes is right for both; pick it.
 
 ### Open — charter section numbers cited in comments, 278 lines in 98 files (§2.11)
 

@@ -964,7 +964,7 @@ fn program(universe_len: usize) -> impl Strategy<Value = Vec<Call>> {
 fn dispatch_capability_gate_tracks_oracle() {
     set_max_level(Level::Error);
     let universe = required_universe();
-    let unassigned = u16::try_from(SYSCALLS.len()).expect("table length fits u16");
+    let unassigned = u64::try_from(SYSCALLS.len()).expect("table length fits a register");
 
     tairix_fuzzseed::prop::drive(
         "dispatch_capability_gate_tracks_oracle",
@@ -1006,12 +1006,12 @@ fn dispatch_capability_gate_tracks_oracle() {
                                 Ok(0)
                             }
                         };
-                        (spec.number.as_u16(), want)
+                        (u64::from(spec.number.as_u16()), want)
                     }
                     // In range but unassigned (no gaps in abi-v1 today).
                     s if s == SYSCALLS.len() => (unassigned, Err(Errno::NotFound)),
                     // Out of range.
-                    _ => (SyscallNumber::MAX + 1, Err(Errno::OutOfRange)),
+                    _ => (u64::from(SyscallNumber::MAX) + 1, Err(Errno::OutOfRange)),
                 };
 
                 let got = dispatcher.dispatch(&ctx, raw_number, RawArgs(args));

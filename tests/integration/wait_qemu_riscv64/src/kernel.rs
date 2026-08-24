@@ -229,15 +229,16 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
     // SAFETY: `args_ptr` points at the live `[u64; SYSCALL_MAX_ARGS]` the trap
     // handler built from the saved register frame.
     let args = unsafe { &*args_ptr };
-    #[allow(clippy::cast_possible_truncation)]
-    let raw = number as u16;
+    let call = SyscallNumber::from_register(number).ok();
     let producer = match *PRODUCER.lock() {
         Some(p) => p,
         None => qemu_exit::exit_failure(FAIL_NO_PRODUCER),
     };
     let cur = current_task_id();
 
-    if raw == SyscallNumber::WAIT.as_u16() {
+    if call == Some(SyscallNumber::WAIT) {
+        // The slot is decoded exactly as the dispatcher decodes it: the
+        // register carries the argument sign-extended to 32 bits.
         #[allow(clippy::cast_possible_truncation)]
         let pid = args[0] as i32;
         // Decode the flags fail-closed, exactly as the production dispatcher
@@ -262,7 +263,9 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
             }
             Err(err) => encode(Err(err)),
         }
-    } else if raw == SyscallNumber::EXIT.as_u16() {
+    } else if call == Some(SyscallNumber::EXIT) {
+        // The slot is decoded exactly as the dispatcher decodes it: the
+        // register carries the argument sign-extended to 32 bits.
         #[allow(clippy::cast_possible_truncation)]
         let code = args[0] as i32;
         producer.record_exit(ProcessId(cur), code);

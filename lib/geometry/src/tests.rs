@@ -148,3 +148,23 @@ fn to_i32_carries_ordinary_extents_through() {
 fn to_i32_saturates_rather_than_wrapping() {
     assert_eq!(to_i32(u32::MAX), i32::MAX);
 }
+
+#[test]
+fn center_rounds_toward_the_top_left_on_an_odd_extent() {
+    assert_eq!(Rect::new(10, 20, 4, 6).center(), Point::new(12, 23));
+    assert_eq!(Rect::new(10, 20, 5, 7).center(), Point::new(12, 23));
+    assert_eq!(Rect::new(-10, -20, 4, 6).center(), Point::new(-8, -17));
+}
+
+#[test]
+fn center_saturates_rather_than_wrapping() {
+    // The widest rectangle the space admits: half its extent is exactly
+    // `i32::MAX`, so a wrapping add would land negative.
+    let r = Rect::new(1, 1, u32::MAX, u32::MAX);
+    assert_eq!(r.center(), Point::new(i32::MAX, i32::MAX));
+}
+
+#[test]
+fn center_of_the_empty_rect_is_its_origin() {
+    assert_eq!(Rect::new(7, 9, 0, 0).center(), Point::new(7, 9));
+}

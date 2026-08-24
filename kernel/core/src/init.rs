@@ -1419,6 +1419,9 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         self.audit
     }
 
+    // Every argument is a distinct piece of the first process's admission
+    // state; bundling them into a struct would only move the same list one
+    // level out.
     #[allow(clippy::too_many_arguments)]
     unsafe fn admit_init(
         &self,
@@ -3240,7 +3243,7 @@ mod tests {
 
         struct Dummy;
         impl DispatchHook for Dummy {
-            fn dispatch(&self, _raw_number: u16, _args: RawArgs) -> DispatchOutcome {
+            fn dispatch(&self, _raw_number: u64, _args: RawArgs) -> DispatchOutcome {
                 DispatchOutcome::NoCallerContext
             }
         }

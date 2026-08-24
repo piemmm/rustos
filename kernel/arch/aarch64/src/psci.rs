@@ -170,6 +170,8 @@ pub unsafe fn cpu_on(
         PsciMethod::Hvc => unsafe { psci_smccc!("hvc #0") },
         PsciMethod::Smc => unsafe { psci_smccc!("smc #0") },
     }
+    // PSCI returns a 32-bit signed status in the low half of x0 (Arm DEN
+    // 0022, §5.2.2), so the high half carries nothing.
     #[allow(clippy::cast_possible_truncation)]
     PsciRet {
         status: status as i32,
@@ -218,6 +220,8 @@ pub unsafe fn system_control(method: PsciMethod, function_id: u32) -> PsciRet {
         PsciMethod::Hvc => unsafe { psci_smccc!("hvc #0") },
         PsciMethod::Smc => unsafe { psci_smccc!("smc #0") },
     }
+    // PSCI returns a 32-bit signed status in the low half of x0 (Arm DEN
+    // 0022, §5.2.2), so the high half carries nothing.
     #[allow(clippy::cast_possible_truncation)]
     PsciRet {
         status: status as i32,

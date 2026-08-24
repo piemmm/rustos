@@ -256,6 +256,8 @@ impl<M: IoApicMmio + Send + 'static> IoApicController<M> {
         let block = &self.blocks[idx];
         let mut inner = block.inner.lock();
         let cache_slot = inner.pin_cache[pin as usize].ok_or(ProgramError::GsiOutOfRange)?;
+        // `pin < pin_count` by construction, and an IO-APIC's max redirection
+        // entry fits a `u8`.
         #[allow(clippy::cast_possible_truncation)]
         let pin_u8 = pin as u8;
         inner.ioapic.set_redirection_entry(
