@@ -1401,6 +1401,7 @@ You are not exempt from any rule above. In addition:
     | The desktop pinboard: the wallpaper (default set, fit modes, sandboxed decode, the per-user settings the session publishes), the `Desktop` folder's icon arrangement and sort order, the backdrop context menu, and the wallpaper chooser app | `plans/PINBOARD.md` |
     | The taskbar / icon bar: the program-library launcher + folder catalog, the file-manager icon, the per-application slot strip with its app-declared menu and hover window picker, the notification area, and the always-rightmost Switchboard system-overview icon | `plans/NEW-TASKBAR.md` |
     | The Switchboard window: its sections, chrome, the controls it composes, and which readings are real measurements versus awaiting an interface | `plans/NEW-SWITCHBOARD.md` |
+    | The Settings application: its pane registry, the authority map (who owns each write), the three write paths, and which categories state an absent interface | `plans/NEW-DESKTOP-SETTINGS.md` |
     | Service manager: service lifecycle/readiness, discovery vs registration vs on-demand endpoint activation, system- vs user-scope managers, idle linger, stop/shutdown ordering, restart policy | `plans/NEW-SERVICEMANAGER.md` |
     | The shell (`elsh`) | `plans/SHELL.md` |
     | The graphical terminal (`terminal.app`): the size it opens at, the per-user profile store, the right-click menu, the settings sheet, the colour schemes, and the screen effects (translucency, backdrop blur, scan lines, fuzz, phosphor, wobble) | `plans/GUI-TERMINAL.md` |
