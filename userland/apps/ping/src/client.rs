@@ -8,7 +8,6 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use core::fmt::Write as _;
-use core::net::{Ipv4Addr, Ipv6Addr};
 
 use tairix_abi::net_ipc::NetAddrFamily;
 use tairix_help::{own_short_help, HelpSource};
@@ -184,7 +183,7 @@ fn await_reply(
                 rtt.record(rtt_ns);
                 summary.received += 1;
                 if !config.quiet {
-                    let line = reply_line(&reply, rtt_ns);
+                    let line = reply_line(&reply, rtt_ns, target.name.as_deref());
                     out.write_all(line.as_bytes()).map_err(PingError::Output)?;
                 }
                 return Ok(());
@@ -211,10 +210,18 @@ fn resolve(config: &Config, io: &mut dyn PingIo) -> Result<Target, PingError> {
                 host: host.to_string(),
                 reason,
             })?;
+    // A reverse lookup only when the peer will actually be named: `-n`
+    // means numeric output *and* no query.
+    let name = if config.numeric {
+        None
+    } else {
+        io.reverse(family, addr)
+    };
     Ok(Target {
         display: host.to_string(),
         family,
         addr,
+        name,
     })
 }
 
@@ -270,19 +277,25 @@ fn header(config: &Config, target: &Target) -> String {
     }
 }
 
-/// One `<n> bytes from <addr>: icmp_seq=<seq> time=<ms> ms` line.
+/// One `<n> bytes from <peer>: icmp_seq=<seq> time=<ms> ms` line, where
+/// `<peer>` is `<name> (<addr>)` when the address reverse-resolved and the
+/// bare address otherwise (iputils' shape, and what `-n` forces).
 ///
 /// The IP TTL is not surfaced through the echo-socket abstraction, so —
 /// unlike iputils — the line carries no `ttl=` field (a documented
 /// TAIRiX-specific divergence).
-fn reply_line(reply: &crate::net::EchoReply, rtt_ns: u64) -> String {
+fn reply_line(reply: &crate::net::EchoReply, rtt_ns: u64, name: Option<&str>) -> String {
     let addr = render_addr(reply.family, &reply.addr);
+    let peer = match name {
+        Some(name) => format!("{name} ({addr})"),
+        None => addr,
+    };
     // "bytes from" counts the ICMP message: the 8-byte header plus data.
     let bytes = reply.payload.len() + 8;
     format!(
         "{} bytes from {}: icmp_seq={} time={} ms\n",
         bytes,
-        addr,
+        peer,
         u32::from(reply.seq),
         format_ms(rtt_ns),
     )
@@ -330,17 +343,7 @@ fn format_ms(ns: u64) -> String {
 
 /// Render an address for display.
 fn render_addr(family: NetAddrFamily, addr: &[u8; 16]) -> String {
-    match family {
-        NetAddrFamily::V4 => {
-            let a = Ipv4Addr::new(addr[0], addr[1], addr[2], addr[3]);
-            format!("{a}")
-        }
-        NetAddrFamily::V6 => {
-            let mut octets = [0u8; 16];
-            octets.copy_from_slice(addr);
-            format!("{}", Ipv6Addr::from(octets))
-        }
-    }
+    tairix_abi::net_ipc::ip_from_parts(family, *addr).to_string()
 }
 
 #[cfg(test)]
@@ -371,6 +374,10 @@ mod tests {
         resolve_failure: ResolveFailure,
         /// Hosts `resolve` was asked about, in order.
         asked: Vec<String>,
+        /// The name a reverse lookup answers with, or `None` for no record.
+        reverse: Option<String>,
+        /// Addresses `reverse` was asked about, in order.
+        reversed: Vec<[u8; 16]>,
         /// A scripted connect refusal.
         connect_err: Option<Errno>,
         /// Counter driving the fake entropy, so successive payloads differ.
@@ -394,6 +401,8 @@ mod tests {
                 resolves: Some((NetAddrFamily::V4, addr)),
                 resolve_failure: ResolveFailure::Unknown,
                 asked: Vec::new(),
+                reverse: None,
+                reversed: Vec::new(),
                 connect_err: None,
                 entropy: 0,
                 sent: Vec::new(),
@@ -409,6 +418,11 @@ mod tests {
         ) -> Result<(NetAddrFamily, [u8; 16]), ResolveFailure> {
             self.asked.push(host.to_string());
             self.resolves.ok_or(self.resolve_failure)
+        }
+
+        fn reverse(&mut self, _family: NetAddrFamily, addr: [u8; 16]) -> Option<String> {
+            self.reversed.push(addr);
+            self.reverse.clone()
         }
 
         fn connect(&mut self, _family: NetAddrFamily, _addr: [u8; 16]) -> Result<(), Errno> {
@@ -500,7 +514,57 @@ mod tests {
             deadline_ns: None,
             size: 4,
             quiet,
+            numeric: true,
         }
+    }
+
+    /// The same configuration with the default (name-resolving) output.
+    fn resolving_config(count: Option<u32>) -> Config {
+        Config {
+            numeric: false,
+            ..config(count, false)
+        }
+    }
+
+    #[test]
+    fn a_reply_from_a_named_peer_shows_the_name_and_the_address() {
+        let mut io = FakeIo::v4();
+        io.reverse = Some("gateway.example".to_string());
+        let out = BufOut::new();
+        ping(&resolving_config(Some(1)), &mut io, &out).expect("run");
+        let text = out.text();
+        assert!(
+            text.contains("bytes from gateway.example (10.0.2.2): icmp_seq=1"),
+            "{text}"
+        );
+        assert_eq!(
+            io.reversed.len(),
+            1,
+            "the peer is looked up once, not once per reply"
+        );
+    }
+
+    #[test]
+    fn a_peer_with_no_pointer_record_stays_numeric() {
+        let mut io = FakeIo::v4();
+        io.reverse = None;
+        let out = BufOut::new();
+        ping(&resolving_config(Some(1)), &mut io, &out).expect("run");
+        assert!(out.text().contains("bytes from 10.0.2.2: icmp_seq=1"));
+    }
+
+    #[test]
+    fn numeric_output_issues_no_reverse_lookup() {
+        let mut io = FakeIo::v4();
+        io.reverse = Some("gateway.example".to_string());
+        let out = BufOut::new();
+        ping(&config(Some(1), false), &mut io, &out).expect("run");
+        let text = out.text();
+        assert!(text.contains("bytes from 10.0.2.2: icmp_seq=1"), "{text}");
+        assert!(
+            io.reversed.is_empty(),
+            "-n must not put a PTR query on the wire"
+        );
     }
 
     #[test]

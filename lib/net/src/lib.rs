@@ -153,6 +153,7 @@ pub mod tcp;
 #[cfg(test)]
 mod test_support;
 mod timeutil;
+pub mod txoffload;
 pub mod udp;
 
 pub use addr::{IpAddr, Ipv4Addr, Ipv6Addr};

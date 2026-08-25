@@ -261,8 +261,11 @@ fn parse_success_a_record() {
     let parsed = DnsResponse::parse(&resp, &spec).unwrap();
     assert_eq!(parsed.rcode, Rcode::NoError);
     assert!(!parsed.truncated);
-    assert_eq!(parsed.addresses.len(), 1);
-    assert_eq!(parsed.addresses.first().unwrap(), v4(93, 184, 216, 34));
+    assert_eq!(parsed.answer.addresses().len(), 1);
+    assert_eq!(
+        *parsed.answer.addresses().first().unwrap(),
+        v4(93, 184, 216, 34)
+    );
     assert_eq!(parsed.min_ttl, 300);
 }
 
@@ -283,7 +286,10 @@ fn parse_success_aaaa_record() {
         )],
     );
     let parsed = DnsResponse::parse(&resp, &spec).unwrap();
-    assert_eq!(parsed.addresses.first().unwrap(), IpAddr::V6(addr));
+    assert_eq!(
+        *parsed.answer.addresses().first().unwrap(),
+        IpAddr::V6(addr)
+    );
     assert_eq!(parsed.min_ttl, 120);
 }
 
@@ -371,7 +377,7 @@ fn parse_follows_cname_chain() {
         ],
     );
     let parsed = DnsResponse::parse(&resp, &spec).unwrap();
-    assert_eq!(parsed.addresses.first().unwrap(), v4(10, 0, 0, 1));
+    assert_eq!(*parsed.answer.addresses().first().unwrap(), v4(10, 0, 0, 1));
     assert_eq!(parsed.min_ttl, 30, "minimum TTL across the chain");
 }
 
@@ -381,7 +387,7 @@ fn parse_nodata_is_empty_success() {
     let resp = ok_response(0x4444, "example.com", TYPE_A, &[]);
     let parsed = DnsResponse::parse(&resp, &spec).unwrap();
     assert_eq!(parsed.rcode, Rcode::NoError);
-    assert!(parsed.addresses.is_empty());
+    assert!(parsed.answer.addresses().is_empty());
     assert_eq!(parsed.min_ttl, 0);
 }
 
@@ -440,8 +446,8 @@ fn parse_ignores_wrong_class_and_wrong_length_records() {
         ],
     );
     let parsed = DnsResponse::parse(&resp, &spec).unwrap();
-    assert_eq!(parsed.addresses.len(), 1);
-    assert_eq!(parsed.addresses.first().unwrap(), v4(5, 6, 7, 8));
+    assert_eq!(parsed.answer.addresses().len(), 1);
+    assert_eq!(*parsed.answer.addresses().first().unwrap(), v4(5, 6, 7, 8));
 }
 
 #[test]
@@ -459,7 +465,7 @@ fn parse_caps_address_list() {
     }
     let resp = ok_response(0x7777, "example.com", TYPE_A, &answers);
     let parsed = DnsResponse::parse(&resp, &spec).unwrap();
-    assert_eq!(parsed.addresses.len(), MAX_ADDRESSES);
+    assert_eq!(parsed.answer.addresses().len(), MAX_ADDRESSES);
 }
 
 #[test]
@@ -511,7 +517,7 @@ fn resolver_success_first_server() {
     );
     let res = finished(&r.on_response(secs(0), &resp, &mut rng).unwrap());
     assert_eq!(res.status, ResolveStatus::Success);
-    assert_eq!(res.addresses.first().unwrap(), v4(93, 184, 216, 34));
+    assert_eq!(*res.addresses().first().unwrap(), v4(93, 184, 216, 34));
     assert_eq!(res.ttl_secs, 300);
     assert!(r.is_done());
     assert!(r.next_deadline().is_none());
@@ -545,7 +551,7 @@ fn resolver_retransmits_then_fails_over_then_times_out() {
     // All servers exhausted: timeout.
     let res = finished(&r.poll(secs(400), &mut rng).unwrap());
     assert_eq!(res.status, ResolveStatus::Timeout);
-    assert!(res.addresses.is_empty());
+    assert!(res.addresses().is_empty());
     assert!(r.is_done());
 }
 
@@ -739,7 +745,7 @@ fn driver_resolves_on_first_server() {
     )
     .expect("transport ok");
     assert_eq!(res.status, ResolveStatus::Success);
-    assert_eq!(res.addresses.first().unwrap(), v4(93, 184, 216, 34));
+    assert_eq!(*res.addresses().first().unwrap(), v4(93, 184, 216, 34));
     assert_eq!(transport.sends, 1, "one query, one answer");
 }
 
@@ -763,7 +769,7 @@ fn driver_retransmits_and_fails_over() {
     )
     .expect("transport ok");
     assert_eq!(res.status, ResolveStatus::Success);
-    assert_eq!(res.addresses.first().unwrap(), v4(1, 1, 1, 1));
+    assert_eq!(*res.addresses().first().unwrap(), v4(1, 1, 1, 1));
     // Two attempts to the dead server (initial + one retransmit), then one to
     // the live one.
     assert_eq!(transport.sends, 3);
@@ -795,7 +801,7 @@ fn driver_drops_spoofed_datagram_then_accepts_real_answer() {
     )
     .expect("transport ok");
     assert_eq!(res.status, ResolveStatus::Success);
-    assert_eq!(res.addresses.first().unwrap(), v4(203, 0, 113, 7));
+    assert_eq!(*res.addresses().first().unwrap(), v4(203, 0, 113, 7));
     assert_eq!(transport.sends, 1, "no retransmit was needed");
 }
 
@@ -829,4 +835,270 @@ fn driver_aborts_fail_closed_on_transport_send_error() {
     )
     .expect_err("a transport send failure aborts the resolution");
     assert_eq!(err, Errno::NetworkUnreachable);
+}
+
+// -- Reverse (PTR) resolution --------------------------------------------
+
+/// A `PTR` RDATA holding `dotted` uncompressed.
+fn ptr_rdata(dotted: &str) -> Vec<u8> {
+    Name::encode(dotted).unwrap().as_wire().to_vec()
+}
+
+#[test]
+fn reverse_name_v4_is_in_addr_arpa_least_significant_first() {
+    let name = Name::reverse(v4(192, 0, 2, 133));
+    assert_eq!(name, Name::encode("133.2.0.192.in-addr.arpa").unwrap());
+    assert_eq!(alloc::format!("{name}"), "133.2.0.192.in-addr.arpa");
+}
+
+#[test]
+fn reverse_name_v4_spells_every_octet_width() {
+    // One-, two-, and three-digit octets, and the boundary values.
+    let name = Name::reverse(v4(255, 10, 9, 0));
+    assert_eq!(name, Name::encode("0.9.10.255.in-addr.arpa").unwrap());
+}
+
+#[test]
+fn reverse_name_v6_is_nibble_reversed_ip6_arpa() {
+    let addr = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
+    let name = Name::reverse(addr);
+    let expected = "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.\
+                    0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa";
+    assert_eq!(name, Name::encode(expected).unwrap());
+    // 32 one-octet labels, the two zone labels, and the root label.
+    assert_eq!(name.as_wire().len(), 32 * 2 + 4 + 5 + 1);
+}
+
+#[test]
+fn reverse_name_v6_spells_every_hex_digit() {
+    let addr = IpAddr::V6(Ipv6Addr::new(
+        0x0123, 0x4567, 0x89ab, 0xcdef, 0xfedc, 0xba98, 0x7654, 0x3210,
+    ));
+    let expected = "0.1.2.3.4.5.6.7.8.9.a.b.c.d.e.f.\
+                    f.e.d.c.b.a.9.8.7.6.5.4.3.2.1.0.ip6.arpa";
+    assert_eq!(Name::reverse(addr), Name::encode(expected).unwrap());
+}
+
+#[test]
+fn ptr_query_carries_the_ptr_type() {
+    let spec = query_spec(0x4242, "133.2.0.192.in-addr.arpa", RecordType::Ptr);
+    let mut buf = [0u8; MAX_QUERY_LEN];
+    let n = write_query(&spec, &mut buf).unwrap();
+    let qtype = u16::from_be_bytes([buf[n - 4], buf[n - 3]]);
+    assert_eq!(qtype, 12, "PTR is wire type 12");
+}
+
+#[test]
+fn ptr_answer_surfaces_the_pointed_at_name() {
+    let spec = query_spec(0x0BAD, "1.2.0.192.in-addr.arpa", RecordType::Ptr);
+    let msg = ok_response(
+        0x0BAD,
+        "1.2.0.192.in-addr.arpa",
+        12,
+        &[(
+            "1.2.0.192.in-addr.arpa",
+            12,
+            CLASS_IN,
+            600,
+            ptr_rdata("host.example.com"),
+        )],
+    );
+    let parsed = DnsResponse::parse(&msg, &spec).expect("a well-formed PTR answer parses");
+    let name = parsed.answer.pointer().expect("the PTR name is surfaced");
+    assert_eq!(*name, Name::encode("host.example.com").unwrap());
+    assert_eq!(parsed.min_ttl, 600);
+    assert!(
+        parsed.answer.addresses().is_empty(),
+        "a PTR answer carries no addresses"
+    );
+}
+
+#[test]
+fn ptr_answer_follows_a_cname_delegation() {
+    // The RFC 2317 classless-delegation shape: the reverse name is a CNAME
+    // into the delegated zone, whose PTR carries the answer.
+    let spec = query_spec(0x0C0C, "7.0.113.203.in-addr.arpa", RecordType::Ptr);
+    let msg = ok_response(
+        0x0C0C,
+        "7.0.113.203.in-addr.arpa",
+        12,
+        &[
+            (
+                "7.0.113.203.in-addr.arpa",
+                5,
+                CLASS_IN,
+                300,
+                ptr_rdata("7.0-31.0.113.203.in-addr.arpa"),
+            ),
+            (
+                "7.0-31.0.113.203.in-addr.arpa",
+                12,
+                CLASS_IN,
+                300,
+                ptr_rdata("delegated.example"),
+            ),
+        ],
+    );
+    let parsed = DnsResponse::parse(&msg, &spec).expect("the delegated chain parses");
+    assert_eq!(
+        *parsed.answer.pointer().unwrap(),
+        Name::encode("delegated.example").unwrap()
+    );
+}
+
+#[test]
+fn ptr_answer_keeps_only_the_first_record() {
+    let spec = query_spec(0x0D0D, "1.2.0.192.in-addr.arpa", RecordType::Ptr);
+    let msg = ok_response(
+        0x0D0D,
+        "1.2.0.192.in-addr.arpa",
+        12,
+        &[
+            (
+                "1.2.0.192.in-addr.arpa",
+                12,
+                CLASS_IN,
+                60,
+                ptr_rdata("first.example"),
+            ),
+            (
+                "1.2.0.192.in-addr.arpa",
+                12,
+                CLASS_IN,
+                30,
+                ptr_rdata("second.example"),
+            ),
+        ],
+    );
+    let parsed = DnsResponse::parse(&msg, &spec).unwrap();
+    assert_eq!(
+        *parsed.answer.pointer().unwrap(),
+        Name::encode("first.example").unwrap()
+    );
+    assert_eq!(parsed.min_ttl, 60, "only the used record's TTL counts");
+}
+
+#[test]
+fn ptr_rdata_shorter_than_the_name_is_rejected() {
+    // RDLENGTH must span exactly the encoded name; a record that claims
+    // fewer octets than the name occupies is malformed and is not used.
+    let mut rdata = ptr_rdata("host.example.com");
+    rdata.push(0); // one octet past the name's root label
+    let spec = query_spec(0x0E0E, "1.2.0.192.in-addr.arpa", RecordType::Ptr);
+    let msg = ok_response(
+        0x0E0E,
+        "1.2.0.192.in-addr.arpa",
+        12,
+        &[("1.2.0.192.in-addr.arpa", 12, CLASS_IN, 60, rdata)],
+    );
+    let parsed = DnsResponse::parse(&msg, &spec).unwrap();
+    assert!(
+        parsed.answer.pointer().is_none(),
+        "a PTR record whose RDLENGTH overruns the name is skipped"
+    );
+    assert_eq!(parsed.min_ttl, 0);
+}
+
+#[test]
+fn a_record_with_a_sixteen_octet_rdata_is_not_read_as_ipv6() {
+    // A hostile server answering an `A` query with a 16-octet record must
+    // not have it accepted as an IPv6 address.
+    let spec = query_spec(0x0F0F, "example.com", RecordType::A);
+    let msg = ok_response(
+        0x0F0F,
+        "example.com",
+        1,
+        &[("example.com", 1, CLASS_IN, 60, alloc::vec![0u8; 16])],
+    );
+    let parsed = DnsResponse::parse(&msg, &spec).unwrap();
+    assert!(parsed.answer.addresses().is_empty());
+}
+
+#[test]
+fn reverse_resolution_finishes_with_the_name() {
+    let mut rng = counter();
+    let mut resolver = DnsResolver::new(
+        Name::reverse(v4(192, 0, 2, 1)),
+        RecordType::Ptr,
+        &SERVERS[..1],
+    );
+    let action = resolver.poll(secs(0), &mut rng).unwrap();
+    let (spec, _) = send_parts(&action);
+    let msg = ok_response(
+        spec.id,
+        "1.2.0.192.in-addr.arpa",
+        12,
+        &[(
+            "1.2.0.192.in-addr.arpa",
+            12,
+            CLASS_IN,
+            120,
+            ptr_rdata("gateway.example"),
+        )],
+    );
+    let res = finished(&resolver.on_response(secs(0), &msg, &mut rng).unwrap());
+    assert_eq!(res.status, ResolveStatus::Success);
+    assert_eq!(
+        *res.pointer().unwrap(),
+        Name::encode("gateway.example").unwrap()
+    );
+    assert!(res.addresses().is_empty());
+}
+
+#[test]
+fn reverse_resolution_with_no_ptr_record_is_nodata() {
+    let mut rng = counter();
+    let mut resolver = DnsResolver::new(
+        Name::reverse(v4(192, 0, 2, 1)),
+        RecordType::Ptr,
+        &SERVERS[..1],
+    );
+    let action = resolver.poll(secs(0), &mut rng).unwrap();
+    let (spec, _) = send_parts(&action);
+    let msg = ok_response(spec.id, "1.2.0.192.in-addr.arpa", 12, &[]);
+    let res = finished(&resolver.on_response(secs(0), &msg, &mut rng).unwrap());
+    assert_eq!(res.status, ResolveStatus::NoData);
+    assert!(res.pointer().is_none());
+}
+
+#[test]
+fn reverse_timeout_carries_an_empty_pointer_answer() {
+    let mut rng = counter();
+    let mut transport = MockTransport::new(|_server, _q| Vec::new());
+    let res = resolve(
+        Name::reverse(v4(198, 51, 100, 9)),
+        RecordType::Ptr,
+        &SERVERS,
+        &mut transport,
+        &mut rng,
+    )
+    .expect("transport ok");
+    assert_eq!(res.status, ResolveStatus::Timeout);
+    assert_eq!(res.answer, Answer::Pointer(None));
+}
+
+// -- Presentation rendering ----------------------------------------------
+
+#[test]
+fn name_renders_without_a_trailing_root_dot() {
+    let name = Name::encode("www.example.com.").unwrap();
+    assert_eq!(alloc::format!("{name}"), "www.example.com");
+    assert_eq!(alloc::format!("{}", Name::root()), ".");
+}
+
+#[test]
+fn name_rendering_escapes_bytes_a_terminal_could_act_on() {
+    // A hostile PTR answer whose labels carry control bytes, a separator,
+    // and a backslash must reach a terminal only as escapes.
+    let msg = {
+        let mut out = Vec::new();
+        out.extend_from_slice(&[4, 0x1b, b'[', b'2', b'J']);
+        out.extend_from_slice(&[3, b'a', b'.', b'\\']);
+        out.push(0);
+        out
+    };
+    let (name, end) = Name::read(&msg, 0).expect("a bounded name of any octets decodes");
+    assert_eq!(end, msg.len());
+    // Case is folded on decode (RFC 4343), so the `J` reads back as `j`.
+    assert_eq!(alloc::format!("{name}"), "\\027[2j.a\\.\\\\");
 }

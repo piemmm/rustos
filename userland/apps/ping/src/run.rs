@@ -39,6 +39,7 @@ mod program {
     extern crate alloc;
 
     use alloc::format;
+    use alloc::string::String;
     use alloc::vec;
 
     use tairix_abi::net::{SocketAddr, SocketEcho, SocketId};
@@ -177,7 +178,7 @@ mod program {
             // literal needs no query, which is what makes `ping <address>`
             // work with no resolver configured.
             if let Some(address) = tairix_resolver::host_address(host, family) {
-                return Ok(tairix_resolver::address_parts(address));
+                return Ok(tairix_abi::net_ipc::address_parts(address));
             }
             // An operand that *is* a literal, merely of the excluded family,
             // gets its own diagnosis: the fix is to drop the `-4`/`-6`.
@@ -185,6 +186,10 @@ mod program {
                 return Err(ResolveFailure::FamilyMismatch);
             }
             Err(ResolveFailure::Unknown)
+        }
+
+        fn reverse(&mut self, family: NetAddrFamily, addr: [u8; 16]) -> Option<String> {
+            tairix_resolver::reverse_name(tairix_abi::net_ipc::ip_from_parts(family, addr))
         }
 
         fn connect(&mut self, family: NetAddrFamily, addr: [u8; 16]) -> Result<(), Errno> {
@@ -288,6 +293,9 @@ mod program {
             _family: Option<NetAddrFamily>,
         ) -> Result<(NetAddrFamily, [u8; 16]), ResolveFailure> {
             Err(ResolveFailure::Unknown)
+        }
+        fn reverse(&mut self, _family: NetAddrFamily, _addr: [u8; 16]) -> Option<String> {
+            None
         }
         fn connect(&mut self, _family: NetAddrFamily, _addr: [u8; 16]) -> Result<(), Errno> {
             Err(Errno::NotImplemented)

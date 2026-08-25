@@ -3,13 +3,17 @@
 //! The option surface follows iproute2 `ss`: `-t`/`-u` select the TCP and
 //! UDP protocol families (both when neither is given), `-a` shows both
 //! listening and connected sockets, `-l` shows only listening sockets
-//! (the default hides them), `-n` prints numeric ports and addresses
-//! (TAIRiX has no service-name database, so this is always in force and
-//! the switch is accepted for familiarity), `-p` adds the owning-process
-//! column, `-4`/`-6` restrict the family, and `-H` suppresses the header
-//! line, and `-s` prints the stack-wide connection-defence summary instead
-//! of the socket table. Short help is the reserved `-?`/`--help` pair
-//! (plans/APPS.md §4).
+//! (the default hides them), `-r` resolves addresses to host names over
+//! DNS, `-n` keeps *service* names numeric (TAIRiX has no service-name
+//! database, so ports are always numeric and the switch is accepted for
+//! familiarity), `-p` adds the owning-process column, `-4`/`-6` restrict
+//! the family, `-H` suppresses the header line, and `-s` prints the
+//! stack-wide connection-defence summary instead of the socket table. Short
+//! help is the reserved `-?`/`--help` pair (plans/APPS.md §4).
+//!
+//! `-r` and `-n` are independent, exactly as in iproute2: `-n` governs
+//! service names and `-r` governs host names, so `ss -rn` resolves hosts
+//! and leaves ports numeric.
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -43,9 +47,13 @@ pub struct Options {
     pub all: bool,
     /// Show only listening sockets (`-l`).
     pub listening: bool,
-    /// Numeric ports/addresses (`-n`). Always in force on TAIRiX (there
-    /// is no service-name database); accepted for familiarity.
+    /// Numeric *service* names (`-n`). Always in force on TAIRiX (there is
+    /// no service-name database); accepted for familiarity. Host-name
+    /// resolution is `resolve`'s job, not this switch's.
     pub numeric: bool,
+    /// Resolve addresses to host names over DNS (`-r`). Off by default, so
+    /// the listing puts no query on the wire unless asked.
+    pub resolve: bool,
     /// Add the owning-process column (`-p`).
     pub processes: bool,
     /// Restrict to IPv4 sockets (`-4`). With neither, both families show.
@@ -105,6 +113,7 @@ pub fn parse(args: &[&str]) -> Result<Command, ParseError> {
                 "all" => options.all = true,
                 "listening" => options.listening = true,
                 "numeric" => options.numeric = true,
+                "resolve" => options.resolve = true,
                 "processes" => options.processes = true,
                 "ipv4" => options.ipv4 = true,
                 "ipv6" => options.ipv6 = true,
@@ -122,6 +131,7 @@ pub fn parse(args: &[&str]) -> Result<Command, ParseError> {
                 'a' => options.all = true,
                 'l' => options.listening = true,
                 'n' => options.numeric = true,
+                'r' => options.resolve = true,
                 'p' => options.processes = true,
                 '4' => options.ipv4 = true,
                 '6' => options.ipv6 = true,

@@ -40,6 +40,12 @@ trasmessi e ricevuti, la percentuale di perdita e i tempi di andata e
 ritorno minimo, medio e massimo. `-q` mostra solo l'intestazione e il
 riepilogo.
 
+Ogni risposta nomina il pari come `nome (indirizzo)` quando l'indirizzo
+ha un record `PTR`, risolto una sola volta per esecuzione con lo stesso
+resolver; un indirizzo senza nome, e ogni esecuzione sotto `-n`, stampa
+l'indirizzo nudo. `-n` significa inoltre che nessuna query `PTR` viene
+messa sulla rete.
+
 Il time-to-live IP non è esposto dall'interfaccia del socket di eco;
 diversamente da alcune implementazioni di `ping`, una riga di risposta
 non porta quindi un campo `ttl=`.
@@ -56,9 +62,9 @@ non porta quindi un campo `ttl=`.
 - `-w, --deadline` — scadenza complessiva dell'esecuzione, in secondi.
 - `-4, --ipv4` — richiedere una destinazione IPv4.
 - `-6, --ipv6` — richiedere una destinazione IPv6.
-- `-n, --numeric` — output numerico. Accettato e senza effetto: non viene
-  mai eseguita una risoluzione inversa, quindi gli indirizzi delle
-  risposte sono già numerici.
+- `-n, --numeric` — output numerico: non risolvere il pari all'indietro,
+  quindi nessuna query `PTR` viene emessa e le righe di risposta portano
+  l'indirizzo nudo.
 - `-q, --quiet` — silenzioso: solo l'intestazione e il riepilogo finale.
 - `-?, --help` — mostrare la guida breve di questo comando.
 

@@ -13,9 +13,13 @@ shape and is the first consumer of the shared userland stub resolver,
   - `<name> has address <ipv4>`
   - `<name> has IPv6 address <ipv6>`
   - `<name> has no A record` / `<name> has no AAAA record` for an empty answer.
-- `host -t <type> <name>` — restrict the lookup to one record type (`A` or
-  `AAAA`, case-insensitive). Any other type (`MX`, `TXT`, …) is rejected
-  honestly — the stub resolver looks up only address records in this stage.
+- `host <address>` — the reverse direction: an IPv4 or IPv6 literal operand
+  is rewritten to its `in-addr.arpa` / `ip6.arpa` name and looked up as
+  `PTR`, printing `<reverse-name> domain name pointer <name>.`
+- `host -t <type> <operand>` — restrict the lookup to one record type (`A`,
+  `AAAA`, or `PTR`, case-insensitive). Any other type (`MX`, `TXT`, …) is
+  rejected honestly — the stub resolver looks up address and pointer records
+  only.
 - A name that does not exist prints `Host <name> not found: 3(NXDOMAIN)`; an
   unreachable server prints `;; connection timed out; no servers could be
   reached` on standard error.

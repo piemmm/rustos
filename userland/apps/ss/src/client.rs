@@ -5,8 +5,9 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt::Write as _;
-use core::net::{Ipv4Addr, Ipv6Addr};
+use core::net::IpAddr;
 
+use tairix_abi::net_ipc::ip_from_parts;
 use tairix_abi::net_ipc::{
     NetAddrFamily, NetSockProto, NetSockState, NetSocketRecord, NetStackDefenceCounters,
 };
@@ -18,9 +19,48 @@ use crate::command::{Command, Options};
 use crate::error::SsError;
 use crate::io::Output;
 
+/// The reverse-lookup seam `-r` drives.
+///
+/// Injected so the whole render engine stays pure and host-tested: the
+/// production implementation drives the shared `lib/resolver` stub resolver
+/// over one reused socket, and the tests drive a scripted map. Without `-r`
+/// it is never called, so the default listing puts nothing on the wire.
+pub trait NameLookup {
+    /// The host name `address` maps back to, or [`None`] when it has no
+    /// `PTR` record or the lookup did not conclude.
+    fn reverse(&mut self, address: IpAddr) -> Option<String>;
+}
+
+/// A memo of the reverse lookups this listing has already made, so a peer
+/// that appears on many rows — and an address that resolves to nothing —
+/// costs exactly one query.
+///
+/// Kept sorted so the lookup is a binary search rather than a scan: a busy
+/// server's table is long enough that a linear memo would be quadratic in
+/// the row count.
+#[derive(Default)]
+struct ReverseCache {
+    entries: Vec<(IpAddr, Option<String>)>,
+}
+
+impl ReverseCache {
+    /// The name for `address`, querying `names` only on a miss.
+    fn name(&mut self, names: &mut dyn NameLookup, address: IpAddr) -> Option<&str> {
+        let index = match self.entries.binary_search_by(|(key, _)| key.cmp(&address)) {
+            Ok(index) => index,
+            Err(index) => {
+                let resolved = names.reverse(address);
+                self.entries.insert(index, (address, resolved));
+                index
+            }
+        };
+        self.entries[index].1.as_deref()
+    }
+}
+
 /// The one-line usage banner, printed on a usage error and as the fallback
 /// when the bundled help document is unavailable.
-pub const USAGE: &str = "usage: ss [-tualnpH46] [-s] [--]";
+pub const USAGE: &str = "usage: ss [-tualnrpH46] [-s] [--]";
 
 /// The command word this bundle is named by, for the own-help lookup.
 const OWN_WORD: &str = "ss";
@@ -37,10 +77,12 @@ const OWN_WORD: &str = "ss";
 /// * [`SsError::Service`] — the `NET_SOCKETS` (or, for `-s`,
 ///   `NET_STACK_DEFENCE`) query otherwise failed.
 /// * [`SsError::Output`] — a row (or the short help) could not be written.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     command: Command,
     locale: Option<&str>,
     transport: &dyn Transport,
+    names: &mut dyn NameLookup,
     help: &dyn HelpSource,
     out: &dyn Output,
     err: &dyn Output,
@@ -84,6 +126,7 @@ pub fn run(
         text.push_str(&render_header(&options));
         text.push('\n');
     }
+    let mut cache = ReverseCache::default();
     for record in &rows {
         if !passes_proto(record, &options)
             || !passes_family(record, &options)
@@ -91,7 +134,7 @@ pub fn run(
         {
             continue;
         }
-        text.push_str(&render_row(record, &options));
+        text.push_str(&render_row(record, &options, names, &mut cache));
         text.push('\n');
     }
     out.write_all(text.as_bytes()).map_err(SsError::Output)?;
@@ -204,16 +247,32 @@ fn render_header(options: &Options) -> String {
     line
 }
 
-/// Render one socket row.
-fn render_row(record: &NetSocketRecord, options: &Options) -> String {
+/// Render one socket row, resolving both endpoints' host names when `-r`
+/// asked for them.
+fn render_row(
+    record: &NetSocketRecord,
+    options: &Options,
+    names: &mut dyn NameLookup,
+    cache: &mut ReverseCache,
+) -> String {
     let netid = match record.proto {
         NetSockProto::Tcp => "tcp",
         NetSockProto::Udp => "udp",
         NetSockProto::Icmp => "icmp",
         NetSockProto::Icmpv6 => "icmp6",
     };
-    let local = format_endpoint(record.family, &record.local_addr, record.local_port);
-    let peer = format_endpoint(record.family, &record.peer_addr, record.peer_port);
+    let local = format_endpoint(
+        record.family,
+        &record.local_addr,
+        record.local_port,
+        resolved(options, names, cache, record.family, &record.local_addr),
+    );
+    let peer = format_endpoint(
+        record.family,
+        &record.peer_addr,
+        record.peer_port,
+        resolved(options, names, cache, record.family, &record.peer_addr),
+    );
     let mut line = format!(
         "{:<netid$}{:<state$}{:>queue$} {:>queue$} {:<addr$}{}",
         netid,
@@ -234,21 +293,45 @@ fn render_row(record: &NetSocketRecord, options: &Options) -> String {
     line
 }
 
+/// The host name for one endpoint under `-r`, or [`None`] without it.
+///
+/// The unspecified address renders as the wildcard `*` and is never
+/// queried: `0.0.0.0` names no host, so a lookup for it is pure latency.
+fn resolved(
+    options: &Options,
+    names: &mut dyn NameLookup,
+    cache: &mut ReverseCache,
+    family: NetAddrFamily,
+    addr: &[u8; 16],
+) -> Option<String> {
+    if !options.resolve || addr.iter().all(|&b| b == 0) {
+        return None;
+    }
+    cache
+        .name(names, ip_from_parts(family, *addr))
+        .map(String::from)
+}
+
 /// Format an `address:port` endpoint the iproute2 way: an all-zero
 /// address is the unspecified wildcard `*`, a zero port is `*`, and an
-/// IPv6 address is bracketed so the `:port` separator is unambiguous.
-fn format_endpoint(family: NetAddrFamily, addr: &[u8; 16], port: u16) -> String {
+/// IPv6 address is bracketed so the `:port` separator is unambiguous. A
+/// `name` resolved under `-r` replaces the address and needs no brackets,
+/// having no colons of its own.
+fn format_endpoint(
+    family: NetAddrFamily,
+    addr: &[u8; 16],
+    port: u16,
+    name: Option<String>,
+) -> String {
     let unspecified = addr.iter().all(|&b| b == 0);
-    let host = if unspecified {
+    let host = if let Some(name) = name {
+        name
+    } else if unspecified {
         String::from("*")
     } else {
-        match family {
-            NetAddrFamily::V4 => Ipv4Addr::new(addr[0], addr[1], addr[2], addr[3]).to_string(),
-            NetAddrFamily::V6 => {
-                let mut octets = [0u8; 16];
-                octets.copy_from_slice(addr);
-                format!("[{}]", Ipv6Addr::from(octets))
-            }
+        match ip_from_parts(family, *addr) {
+            IpAddr::V4(v4) => v4.to_string(),
+            IpAddr::V6(v6) => format!("[{v6}]"),
         }
     };
     let port = if port == 0 {
@@ -296,13 +379,14 @@ fn emit_omission_record(out: &dyn Output, omitted: u64) {
 
 #[cfg(test)]
 mod tests {
-    use super::{run, USAGE};
+    use super::{run, NameLookup, USAGE};
     use crate::command::{parse, Options};
     use crate::error::SsError;
     use crate::io::Output;
-    use alloc::string::String;
+    use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use core::cell::RefCell;
+    use core::net::{IpAddr, Ipv4Addr};
     use tairix_abi::net_ipc::{
         NetAddrFamily, NetSockProto, NetSockState, NetSocketRecord, NetStackDefenceCounters,
     };
@@ -421,7 +505,56 @@ mod tests {
         }
     }
 
+    /// A reverse-lookup seam that resolves nothing and counts the queries
+    /// it was asked to make, so a test can assert that `-r`'s absence puts
+    /// nothing on the wire.
+    #[derive(Default)]
+    struct NoNames {
+        asked: Vec<IpAddr>,
+    }
+
+    impl NameLookup for NoNames {
+        fn reverse(&mut self, address: IpAddr) -> Option<String> {
+            self.asked.push(address);
+            None
+        }
+    }
+
+    /// A scripted reverse-lookup seam: answers from a fixed map and records
+    /// every address it was asked about, in order.
+    struct MapNames {
+        entries: Vec<(IpAddr, &'static str)>,
+        asked: Vec<IpAddr>,
+    }
+
+    impl MapNames {
+        fn new(entries: Vec<(IpAddr, &'static str)>) -> Self {
+            Self {
+                entries,
+                asked: Vec::new(),
+            }
+        }
+    }
+
+    impl NameLookup for MapNames {
+        fn reverse(&mut self, address: IpAddr) -> Option<String> {
+            self.asked.push(address);
+            self.entries
+                .iter()
+                .find(|(key, _)| *key == address)
+                .map(|(_, name)| (*name).to_string())
+        }
+    }
+
     fn report(records: Vec<NetSocketRecord>, args: &[&str]) -> (String, Vec<u8>) {
+        report_with(records, args, &mut NoNames::default())
+    }
+
+    fn report_with(
+        records: Vec<NetSocketRecord>,
+        args: &[&str],
+        names: &mut dyn NameLookup,
+    ) -> (String, Vec<u8>) {
         let command = parse(args).expect("parse");
         let capture = Capture::default();
         let errs = Capture::default();
@@ -429,7 +562,7 @@ mod tests {
             records,
             deny: false,
         };
-        run(command, None, &fixture, &NoHelp, &capture, &errs).expect("run");
+        run(command, None, &fixture, names, &NoHelp, &capture, &errs).expect("run");
         (capture.text.into_inner(), capture.info.into_inner())
     }
 
@@ -521,7 +654,16 @@ mod tests {
             records: Vec::new(),
             deny: false,
         };
-        run(command, None, &fixture, &NoHelp, &capture, &errs).expect("run");
+        run(
+            command,
+            None,
+            &fixture,
+            &mut NoNames::default(),
+            &NoHelp,
+            &capture,
+            &errs,
+        )
+        .expect("run");
         assert!(capture.text.into_inner().contains(USAGE));
     }
 
@@ -534,7 +676,15 @@ mod tests {
             records: Vec::new(),
             deny: true,
         };
-        let result = run(command, None, &fixture, &NoHelp, &capture, &errs);
+        let result = run(
+            command,
+            None,
+            &fixture,
+            &mut NoNames::default(),
+            &NoHelp,
+            &capture,
+            &errs,
+        );
         assert_eq!(result, Err(SsError::Denied));
         assert!(capture.text.into_inner().is_empty(), "no partial table");
     }
@@ -573,7 +723,15 @@ mod tests {
             deny: true,
         };
         assert_eq!(
-            run(command, None, &fixture, &NoHelp, &capture, &errs),
+            run(
+                command,
+                None,
+                &fixture,
+                &mut NoNames::default(),
+                &NoHelp,
+                &capture,
+                &errs
+            ),
             Err(SsError::Denied)
         );
         assert!(capture.text.into_inner().is_empty());
@@ -582,5 +740,88 @@ mod tests {
     #[test]
     fn options_default_is_all_false() {
         assert_eq!(Options::default(), Options::default());
+    }
+
+    // -- Host-name resolution (`-r`) --------------------------------------
+
+    fn v4_ip(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(a, b, c, d))
+    }
+
+    #[test]
+    fn the_default_listing_puts_no_query_on_the_wire() {
+        let records = alloc::vec![tcp(NetSockState::Established, 4321, v4(10, 0, 2, 2), 80)];
+        let mut names = NoNames::default();
+        report_with(records, &[], &mut names);
+        assert!(
+            names.asked.is_empty(),
+            "host-name resolution is opt-in; the default view must not resolve"
+        );
+    }
+
+    #[test]
+    fn resolve_names_both_endpoints() {
+        let records = alloc::vec![tcp(NetSockState::Established, 4321, v4(10, 0, 2, 2), 80)];
+        let mut names = MapNames::new(alloc::vec![
+            (v4_ip(10, 0, 2, 15), "self.example"),
+            (v4_ip(10, 0, 2, 2), "gateway.example"),
+        ]);
+        let (text, _) = report_with(records, &["-r"], &mut names);
+        assert!(text.contains("self.example:4321"), "{text}");
+        assert!(text.contains("gateway.example:80"), "{text}");
+    }
+
+    #[test]
+    fn an_unresolvable_address_stays_numeric() {
+        let records = alloc::vec![tcp(NetSockState::Established, 4321, v4(10, 0, 2, 2), 80)];
+        let mut names = MapNames::new(Vec::new());
+        let (text, _) = report_with(records, &["-r"], &mut names);
+        assert!(text.contains("10.0.2.15:4321"), "{text}");
+        assert!(text.contains("10.0.2.2:80"), "{text}");
+    }
+
+    #[test]
+    fn the_wildcard_address_is_never_looked_up() {
+        let records = alloc::vec![udp_unconn(5353)];
+        let mut names = MapNames::new(Vec::new());
+        let (text, _) = report_with(records, &["-r", "-l"], &mut names);
+        assert!(text.contains("*:5353"), "{text}");
+        assert!(
+            names.asked.is_empty(),
+            "the unspecified address names no host, so querying it is pure latency"
+        );
+    }
+
+    #[test]
+    fn a_repeated_address_is_resolved_once() {
+        // Three rows over two distinct addresses, one of which resolves to
+        // nothing: the memo must remember the negative answer too.
+        let records = alloc::vec![
+            tcp(NetSockState::Established, 1, v4(10, 0, 2, 2), 80),
+            tcp(NetSockState::Established, 2, v4(10, 0, 2, 2), 443),
+            tcp(NetSockState::Established, 3, v4(10, 0, 2, 9), 22),
+        ];
+        let mut names = MapNames::new(alloc::vec![(v4_ip(10, 0, 2, 2), "gateway.example")]);
+        report_with(records, &["-r"], &mut names);
+        let mut asked = names.asked.clone();
+        asked.sort_unstable();
+        asked.dedup();
+        assert_eq!(
+            names.asked.len(),
+            asked.len(),
+            "each distinct address is queried exactly once"
+        );
+        assert_eq!(asked.len(), 3, "the local address and the two peers");
+    }
+
+    #[test]
+    fn numeric_and_resolve_are_independent() {
+        let records = alloc::vec![tcp(NetSockState::Established, 4321, v4(10, 0, 2, 2), 80)];
+        let mut names = MapNames::new(alloc::vec![(v4_ip(10, 0, 2, 2), "gateway.example")]);
+        let (text, _) = report_with(records, &["-rn"], &mut names);
+        assert!(
+            text.contains("gateway.example:80"),
+            "-n governs service names, not host names: {text}"
+        );
     }
 }

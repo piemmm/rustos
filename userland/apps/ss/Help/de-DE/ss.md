@@ -25,11 +25,15 @@ zeigt nur lauschende Sockets und `-a` beide; die Anzahl der verborgenen
 Lauscher wird auf dem Standard-Informationsstrom (fd 3) vermerkt,
 niemals in der Tabelle. `-t` und `-u` schränken das Protokoll ein und
 `-4`/`-6` die Adressfamilie; ohne Angabe werden alle Protokolle und
-Familien gezeigt. Ports und Adressen sind stets numerisch (TAIRiX hat
-keine Dienstnamen-Datenbank), daher wird `-n` angenommen, ist aber immer
-in Kraft. Eine nicht angegebene Adresse erscheint als `*` und ein
-ungebundener Port als `*`; eine IPv6-Adresse wird in Klammern gesetzt,
-damit der `:port`-Trenner eindeutig bleibt.
+Familien gezeigt. Ports sind stets numerisch (TAIRiX hat keine
+Dienstnamen-Datenbank), daher wird `-n` angenommen, ist für sie aber
+immer in Kraft. Adressen sind ebenfalls numerisch, sofern nicht `-r`
+Hostnamen verlangt: `-r` löst jede über den Stub-Resolver des Systems
+auf (eine `PTR`-Abfrage), fragt jede verschiedene Adresse einmal ab und
+belässt eine Adresse ohne Namen numerisch. Eine nicht angegebene Adresse
+erscheint als `*` und ein ungebundener Port als `*`; eine IPv6-Adresse
+wird in Klammern gesetzt, damit der `:port`-Trenner eindeutig bleibt —
+ein aufgelöster Name braucht keine Klammern.
 
 `ss` nimmt nur Optionen entgegen. Die Filterausdruck-Grammatik von
 iproute2 (Zustands- und Adressfilter) ist nicht implementiert, daher ist
@@ -44,7 +48,9 @@ ignorierten Arguments.
 - `-a, --all` — lauschende und verbundene Sockets zeigen.
 - `-l, --listening` — nur lauschende Sockets zeigen.
 - `-n, --numeric` — keine Dienstnamen auflösen. Auf TAIRiX immer in
-  Kraft; aus Vertrautheit angenommen.
+  Kraft; aus Vertrautheit angenommen. Hostnamen sind Sache von `-r`.
+- `-r, --resolve` — Adressen über DNS zu Hostnamen auflösen.
+  Standardmäßig aus, damit die Liste ungefragt keine Abfrage sendet.
 - `-p, --processes` — die Spalte des besitzenden Prozesses ergänzen
   (`pid=N`).
 - `-4, --ipv4` — die Liste auf IPv4-Sockets beschränken.
@@ -61,6 +67,7 @@ ignorierten Arguments.
 - `ss -l` — nur die lauschenden Sockets.
 - `ss -tlp` — lauschende TCP-Sockets, mit dem besitzenden Prozess.
 - `ss -u4` — die UDP-Sockets über IPv4.
+- `ss -r` — dieselbe Liste mit zu Hostnamen aufgelösten Adressen.
 
 ## EXIT STATUS
 

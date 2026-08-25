@@ -26,11 +26,15 @@ ne montre que les sockets en écoute et `-a` montre les deux ; le nombre
 d'entrées en écoute masquées est noté sur le flux d'information standard
 (fd 3), jamais dans la table. `-t` et `-u` restreignent le protocole et
 `-4`/`-6` la famille d'adresses ; sans aucun, tout protocole et toute
-famille sont affichés. Les ports et les adresses sont toujours
-numériques (TAIRiX n'a pas de base de noms de services), donc `-n` est
-accepté mais toujours actif. Une adresse non spécifiée s'affiche `*` et
-un port non lié `*` ; une adresse IPv6 est entre crochets pour que le
-séparateur `:port` reste sans ambiguïté.
+famille sont affichés. Les ports sont toujours numériques (TAIRiX n'a
+pas de base de noms de services), donc `-n` est accepté mais toujours
+actif pour eux. Les adresses le sont aussi, sauf si `-r` demande des
+noms d'hôtes : `-r` résout chacune via le résolveur du système (une
+requête `PTR`), n'interroge chaque adresse distincte qu'une fois, et
+laisse numérique celle qui n'a pas de nom. Une adresse non spécifiée
+s'affiche `*` et un port non lié `*` ; une adresse IPv6 est entre
+crochets pour que le séparateur `:port` reste sans ambiguïté — un nom
+résolu n'a pas besoin de crochets.
 
 `ss` n'accepte que des options. La grammaire d'expressions de filtre
 d'iproute2 (filtres d'état et d'adresse) n'est pas implémentée, donc un
@@ -45,7 +49,10 @@ ignoré.
 - `-a, --all` — montrer les sockets en écoute et connectés.
 - `-l, --listening` — ne montrer que les sockets en écoute.
 - `-n, --numeric` — ne pas résoudre les noms de services. Toujours
-  actif sur TAIRiX ; accepté par familiarité.
+  actif sur TAIRiX ; accepté par familiarité. Les noms d'hôtes sont
+  l'affaire de `-r`.
+- `-r, --resolve` — résoudre les adresses en noms d'hôtes via DNS.
+  Désactivé par défaut : la liste n'émet aucune requête sans demande.
 - `-p, --processes` — ajouter la colonne du processus propriétaire
   (`pid=N`).
 - `-4, --ipv4` — restreindre la liste aux sockets IPv4.
@@ -62,6 +69,7 @@ ignoré.
 - `ss -l` — seulement les sockets en écoute.
 - `ss -tlp` — les sockets TCP en écoute, avec le processus propriétaire.
 - `ss -u4` — les sockets UDP sur IPv4.
+- `ss -r` — la même liste, adresses résolues en noms d'hôtes.
 
 ## EXIT STATUS
 

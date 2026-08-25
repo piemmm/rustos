@@ -19,7 +19,20 @@
 //! is surfaced). A response is accepted only when its id matches the
 //! outstanding query's random id and its echoed question section matches
 //! the queried name (case-insensitively), type, and class; anything else is
-//! discarded.
+//! discarded. A name decoded from a response renders through
+//! [`Name`]'s [`Display`](core::fmt::Display) in RFC 1035 §5.1 presentation
+//! form, so a hostile `PTR` answer reaches a terminal escaped rather than as
+//! raw control bytes.
+//!
+//! # Forward and reverse
+//!
+//! [`RecordType::A`] / [`RecordType::Aaaa`] resolve a name to addresses;
+//! [`RecordType::Ptr`] resolves the other way, querying the `in-addr.arpa` /
+//! `ip6.arpa` name [`Name::reverse`] builds from an address. Both directions
+//! run through the same codec, the same acceptance test, and the same
+//! retry/failover state machine — there is no second resolver.
+
+use core::fmt::{self, Write};
 
 use tairix_abi::time::Duration64;
 use tairix_abi::Errno;
@@ -71,6 +84,7 @@ const CLASS_IN: u16 = 1;
 // Resource-record TYPE values (RFC 1035 §3.2.2, RFC 3596 §2.1).
 const TYPE_A: u16 = 1;
 const TYPE_CNAME: u16 = 5;
+const TYPE_PTR: u16 = 12;
 const TYPE_AAAA: u16 = 28;
 
 /// A record type this stub resolver can query for.
@@ -80,6 +94,9 @@ pub enum RecordType {
     A,
     /// An IPv6 host address (RFC 3596 `AAAA`).
     Aaaa,
+    /// The domain name an address maps back to (RFC 1035 `PTR`), queried
+    /// under [`Name::reverse`]'s `in-addr.arpa` / `ip6.arpa` spelling.
+    Ptr,
 }
 
 impl RecordType {
@@ -89,6 +106,18 @@ impl RecordType {
         match self {
             Self::A => TYPE_A,
             Self::Aaaa => TYPE_AAAA,
+            Self::Ptr => TYPE_PTR,
+        }
+    }
+
+    /// The presentation spelling (`A`, `AAAA`, `PTR`) a diagnostic or a
+    /// `-t` option names the type by.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::A => "A",
+            Self::Aaaa => "AAAA",
+            Self::Ptr => "PTR",
         }
     }
 }
@@ -147,6 +176,67 @@ const fn ascii_lower(b: u8) -> u8 {
         b + 32
     } else {
         b
+    }
+}
+
+/// The `in-addr.arpa` reverse zone, already in length-prefixed wire form so
+/// appending it is a copy with no length arithmetic.
+const REVERSE_V4_SUFFIX: &[u8] = b"\x07in-addr\x04arpa";
+
+/// The `ip6.arpa` reverse zone, in wire form.
+const REVERSE_V6_SUFFIX: &[u8] = b"\x03ip6\x04arpa";
+
+// The longest name [`Name::reverse`] builds must fit the fixed bound, which
+// is what makes it infallible: four 3-digit labels for IPv4, 32 one-nibble
+// labels for IPv6, each zone suffix, and the root label.
+const _: () = assert!(4 * 4 + REVERSE_V4_SUFFIX.len() < MAX_NAME_LEN);
+const _: () = assert!(32 * 2 + REVERSE_V6_SUFFIX.len() < MAX_NAME_LEN);
+
+/// The lower-case hexadecimal digit of `nibble`'s low four bits.
+const fn hex_digit(nibble: u8) -> u8 {
+    match nibble & 0x0F {
+        d @ 0..=9 => b'0' + d,
+        d => b'a' + (d - 10),
+    }
+}
+
+/// Write `octet`'s decimal spelling into `out` as one length-prefixed
+/// label, returning the octets written (2, 3, or 4).
+fn write_decimal_label(out: &mut [u8], octet: u8) -> usize {
+    let (len, digits) = if octet >= 100 {
+        (
+            3usize,
+            [
+                b'0' + octet / 100,
+                b'0' + (octet / 10) % 10,
+                b'0' + octet % 10,
+            ],
+        )
+    } else if octet >= 10 {
+        (2, [b'0' + octet / 10, b'0' + octet % 10, 0])
+    } else {
+        (1, [b'0' + octet, 0, 0])
+    };
+    // `len` is 1..=3, so the narrowing is exact.
+    out[0] = u8::try_from(len).unwrap_or(1);
+    out[1..=len].copy_from_slice(&digits[..len]);
+    1 + len
+}
+
+/// Write one octet of a label in RFC 1035 §5.1 presentation form.
+///
+/// Everything outside printable ASCII becomes a `\DDD` escape and the two
+/// syntactic characters are backslash-escaped. A `PTR` answer is
+/// attacker-controlled text that ends up on a terminal, so it never reaches
+/// one as raw control bytes.
+fn write_presentation_byte(f: &mut fmt::Formatter<'_>, byte: u8) -> fmt::Result {
+    match byte {
+        b'.' | b'\\' => {
+            f.write_char('\\')?;
+            f.write_char(char::from(byte))
+        }
+        0x21..=0x7e => f.write_char(char::from(byte)),
+        _ => write!(f, "\\{byte:03}"),
     }
 }
 
@@ -225,6 +315,44 @@ impl Name {
         Ok(Self { wire, len })
     }
 
+    /// The reverse-lookup name of `addr`: `d.c.b.a.in-addr.arpa` for IPv4
+    /// (RFC 1035 §3.5) and the address's 32 nibbles, least significant
+    /// first, under `ip6.arpa` for IPv6 (RFC 3596 §2.5). This is the name a
+    /// [`RecordType::Ptr`] query for that address asks about.
+    ///
+    /// Total and infallible: the longest form is 74 octets, well inside
+    /// [`MAX_NAME_LEN`] (the `const` guards below hold it so).
+    #[must_use]
+    pub fn reverse(addr: IpAddr) -> Self {
+        let mut wire = [0u8; MAX_NAME_LEN];
+        let mut len = 0usize;
+        let suffix = match addr {
+            IpAddr::V4(v4) => {
+                for &octet in v4.octets().iter().rev() {
+                    len += write_decimal_label(&mut wire[len..], octet);
+                }
+                REVERSE_V4_SUFFIX
+            }
+            IpAddr::V6(v6) => {
+                for &byte in v6.octets().iter().rev() {
+                    wire[len..len + 4].copy_from_slice(&[
+                        1,
+                        hex_digit(byte & 0x0F),
+                        1,
+                        hex_digit(byte >> 4),
+                    ]);
+                    len += 4;
+                }
+                REVERSE_V6_SUFFIX
+            }
+        };
+        wire[len..len + suffix.len()].copy_from_slice(suffix);
+        len += suffix.len();
+        wire[len] = 0;
+        len += 1;
+        Self { wire, len }
+    }
+
     /// The canonical wire encoding, including the terminating root label.
     #[must_use]
     pub fn as_wire(&self) -> &[u8] {
@@ -299,6 +427,38 @@ impl Name {
                 _ => return None,
             }
         }
+    }
+}
+
+/// Renders the name in RFC 1035 §5.1 presentation form — labels joined by
+/// `.`, without the trailing root dot, every non-printable octet escaped —
+/// so a hostile `PTR` answer cannot smuggle control bytes onto a terminal.
+/// The root name renders as `.`.
+impl fmt::Display for Name {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let wire = self.as_wire();
+        if wire == [0] {
+            return f.write_str(".");
+        }
+        let mut pos = 0usize;
+        let mut first = true;
+        while let Some(&label_len) = wire.get(pos) {
+            let Some(label) = wire.get(pos + 1..pos + 1 + usize::from(label_len)) else {
+                break;
+            };
+            if label.is_empty() {
+                break;
+            }
+            if !first {
+                f.write_char('.')?;
+            }
+            first = false;
+            for &byte in label {
+                write_presentation_byte(f, byte)?;
+            }
+            pos += 1 + usize::from(label_len);
+        }
+        Ok(())
     }
 }
 
@@ -430,11 +590,68 @@ impl AddrList {
     }
 }
 
+/// What a response or a finished resolution answered with, by query type.
+///
+/// One value rather than parallel fields, so an address answer cannot carry
+/// a name nor a `PTR` answer an address.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Answer {
+    /// `A`/`AAAA`: the addresses, in wire order. Empty for a negative,
+    /// timed-out, or unanswered lookup.
+    Addresses(AddrList),
+    /// `PTR`: the domain name the queried address maps back to, absent for
+    /// a negative, timed-out, or unanswered lookup.
+    ///
+    /// Only the first `PTR` record of an answer is surfaced — the
+    /// `getnameinfo` contract every consumer of a reverse lookup wants, and
+    /// RFC 1912 §2.1 discourages several records at one address.
+    Pointer(Option<Name>),
+}
+
+impl Answer {
+    /// The empty answer to a query of `record_type`: what a negative,
+    /// timed-out, or not-yet-started resolution carries.
+    #[must_use]
+    pub fn empty(record_type: RecordType) -> Self {
+        match record_type {
+            RecordType::A | RecordType::Aaaa => Self::Addresses(AddrList::default()),
+            RecordType::Ptr => Self::Pointer(None),
+        }
+    }
+
+    /// Whether nothing was answered.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::Addresses(list) => list.is_empty(),
+            Self::Pointer(name) => name.is_none(),
+        }
+    }
+
+    /// The addresses answered, in wire order; empty for a `PTR` answer.
+    #[must_use]
+    pub fn addresses(&self) -> &[IpAddr] {
+        match self {
+            Self::Addresses(list) => list.as_slice(),
+            Self::Pointer(_) => &[],
+        }
+    }
+
+    /// The name a `PTR` answer pointed at, or `None`.
+    #[must_use]
+    pub fn pointer(&self) -> Option<&Name> {
+        match self {
+            Self::Pointer(name) => name.as_ref(),
+            Self::Addresses(_) => None,
+        }
+    }
+}
+
 /// A parsed, validated DNS response to an outstanding [`QuerySpec`].
 ///
 /// Only the fields a stub resolver acts on are surfaced: the response code,
-/// the truncation flag, the resolved addresses (with any CNAME chain in the
-/// answer section followed to the queried type), and the minimum TTL across
+/// the truncation flag, the answer for the queried type (with any CNAME
+/// chain in the answer section followed first), and the minimum TTL across
 /// the records used.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DnsResponse {
@@ -446,8 +663,8 @@ pub struct DnsResponse {
     /// means the answer did not fit; the resolver treats it as a soft
     /// per-server failure.
     pub truncated: bool,
-    /// The resolved addresses of the queried type, in wire order.
-    pub addresses: AddrList,
+    /// What the answer section resolved to for the queried type.
+    pub answer: Answer,
     /// The minimum TTL (seconds) across the records used, or `0` when none
     /// were used.
     pub min_ttl: u32,
@@ -463,8 +680,9 @@ impl DnsResponse {
     /// §9 acceptance test that, together with the random id, bounds off-path
     /// spoofing. Any structural error in the header, question, or answer
     /// section rejects the whole message. Answer records are followed
-    /// through a CNAME chain from the queried name to collect matching-type
-    /// addresses (bounded by [`MAX_ADDRESSES`]).
+    /// through a CNAME chain from the queried name to collect the
+    /// matching-type answer (addresses bounded by [`MAX_ADDRESSES`]; the
+    /// first `PTR` name for a reverse lookup).
     #[must_use]
     pub fn parse(bytes: &[u8], query: &QuerySpec) -> Option<Self> {
         if bytes.len() < HEADER_LEN {
@@ -497,7 +715,7 @@ impl DnsResponse {
             return None;
         }
 
-        let mut addresses = AddrList::default();
+        let mut answer = Answer::empty(query.record_type);
         let mut min_ttl = u32::MAX;
         let mut used_any = false;
         // The owner name we are currently resolving; a CNAME record retargets
@@ -518,10 +736,7 @@ impl DnsResponse {
             bytes.get(rdata_start..rdata_start + rdlength)?;
             if rclass == CLASS_IN && owner == target {
                 if rtype == wanted {
-                    if let Some(addr) =
-                        address_from_rdata(query.record_type, bytes, rdata_start, rdlength)
-                    {
-                        addresses.push(addr);
+                    if fold_rdata(&mut answer, query.record_type, bytes, rdata_start, rdlength) {
                         min_ttl = min_ttl.min(ttl);
                         used_any = true;
                     }
@@ -540,33 +755,53 @@ impl DnsResponse {
             id,
             rcode,
             truncated,
-            addresses,
+            answer,
             min_ttl: if used_any { min_ttl } else { 0 },
         })
     }
 }
 
-/// Decode an address from a resource record's RDATA for the queried type,
-/// or `None` when the length does not match the type (a malformed record is
-/// skipped, not accepted).
-fn address_from_rdata(
+/// Fold one matching-type record's RDATA into `answer`, reporting whether it
+/// was well-formed and used. A record whose length or shape does not match
+/// the queried type is skipped, never accepted — an `A` record claiming 16
+/// octets of RDATA is malformed, not an IPv6 address.
+fn fold_rdata(
+    answer: &mut Answer,
     record_type: RecordType,
     msg: &[u8],
     start: usize,
     rdlength: usize,
-) -> Option<IpAddr> {
-    match record_type {
-        RecordType::A if rdlength == 4 => {
-            let b = msg.get(start..start + 4)?;
-            Some(IpAddr::V4(Ipv4Addr::new(b[0], b[1], b[2], b[3])))
+) -> bool {
+    match (record_type, answer) {
+        (RecordType::A, Answer::Addresses(list)) if rdlength == 4 => {
+            let Some(b) = msg.get(start..start + 4) else {
+                return false;
+            };
+            list.push(IpAddr::V4(Ipv4Addr::new(b[0], b[1], b[2], b[3])));
+            true
         }
-        RecordType::Aaaa if rdlength == 16 => {
-            let b = msg.get(start..start + 16)?;
+        (RecordType::Aaaa, Answer::Addresses(list)) if rdlength == 16 => {
+            let Some(b) = msg.get(start..start + 16) else {
+                return false;
+            };
             let mut octets = [0u8; 16];
             octets.copy_from_slice(b);
-            Some(IpAddr::V6(Ipv6Addr::from(octets)))
+            list.push(IpAddr::V6(Ipv6Addr::from(octets)));
+            true
         }
-        _ => None,
+        // The RDATA is one (possibly compressed) domain name that must span
+        // exactly the declared length; only the first record answers.
+        (RecordType::Ptr, Answer::Pointer(slot @ None)) => {
+            let Some((name, end)) = Name::read(msg, start) else {
+                return false;
+            };
+            if end != start + rdlength {
+                return false;
+            }
+            *slot = Some(name);
+            true
+        }
+        _ => false,
     }
 }
 
@@ -591,7 +826,7 @@ pub enum ResolveStatus {
     /// A server answered `NoError` with at least one address of the queried
     /// type.
     Success,
-    /// A server answered `NoError` but the answer held no address of the
+    /// A server answered `NoError` but the answer held no record of the
     /// queried type (RFC 2308 NODATA, or a CNAME chain whose target this
     /// stub did not itself pursue).
     NoData,
@@ -608,12 +843,27 @@ pub enum ResolveStatus {
 pub struct Resolution {
     /// How the resolution concluded.
     pub status: ResolveStatus,
-    /// The resolved addresses (empty unless `status` is
+    /// What was resolved (empty unless `status` is
     /// [`ResolveStatus::Success`]).
-    pub addresses: AddrList,
+    pub answer: Answer,
     /// The minimum TTL (seconds) a caching caller may hold the answer for,
     /// or `0` when there is nothing to cache.
     pub ttl_secs: u32,
+}
+
+impl Resolution {
+    /// The resolved addresses, in wire order; empty for a reverse lookup or
+    /// a negative answer.
+    #[must_use]
+    pub fn addresses(&self) -> &[IpAddr] {
+        self.answer.addresses()
+    }
+
+    /// The name a reverse lookup resolved to, or `None`.
+    #[must_use]
+    pub fn pointer(&self) -> Option<&Name> {
+        self.answer.pointer()
+    }
 }
 
 /// An action a [`DnsResolver`] poll or response-fold asks the caller to
@@ -781,16 +1031,18 @@ impl DnsResolver {
         match resp.rcode {
             Rcode::NoError if resp.truncated => Some(self.next_server(now, rng)),
             Rcode::NoError => {
-                let status = if resp.addresses.is_empty() {
+                let status = if resp.answer.is_empty() {
                     ResolveStatus::NoData
                 } else {
                     ResolveStatus::Success
                 };
-                Some(self.finish(status, resp.addresses, resp.min_ttl))
+                Some(self.finish(status, &resp.answer, resp.min_ttl))
             }
-            Rcode::NxDomain => {
-                Some(self.finish(ResolveStatus::NonExistent, AddrList::default(), 0))
-            }
+            Rcode::NxDomain => Some(self.finish(
+                ResolveStatus::NonExistent,
+                &Answer::empty(self.record_type),
+                0,
+            )),
             // A transient or policy failure: try the next server.
             Rcode::ServFail | Rcode::Refused | Rcode::NotImp | Rcode::FormErr | Rcode::Other(_) => {
                 Some(self.next_server(now, rng))
@@ -804,8 +1056,9 @@ impl DnsResolver {
         self.server_idx = 0;
         self.attempts = 0;
         self.timeout_secs = INITIAL_TIMEOUT_SECS;
-        self.send_to_current(now, rng, true)
-            .unwrap_or_else(|| self.finish(ResolveStatus::Timeout, AddrList::default(), 0))
+        self.send_to_current(now, rng, true).unwrap_or_else(|| {
+            self.finish(ResolveStatus::Timeout, &Answer::empty(self.record_type), 0)
+        })
     }
 
     /// Handle a fired retransmit deadline: resend to the current server
@@ -815,8 +1068,9 @@ impl DnsResolver {
             self.timeout_secs = (self.timeout_secs * 2).min(MAX_TIMEOUT_SECS);
             // Retransmit to the same server with the same id (a duplicate the
             // server simply re-answers).
-            self.send_to_current(now, rng, false)
-                .unwrap_or_else(|| self.finish(ResolveStatus::Timeout, AddrList::default(), 0))
+            self.send_to_current(now, rng, false).unwrap_or_else(|| {
+                self.finish(ResolveStatus::Timeout, &Answer::empty(self.record_type), 0)
+            })
         } else {
             self.next_server(now, rng)
         }
@@ -828,8 +1082,9 @@ impl DnsResolver {
         self.server_idx += 1;
         self.attempts = 0;
         self.timeout_secs = INITIAL_TIMEOUT_SECS;
-        self.send_to_current(now, rng, true)
-            .unwrap_or_else(|| self.finish(ResolveStatus::Timeout, AddrList::default(), 0))
+        self.send_to_current(now, rng, true).unwrap_or_else(|| {
+            self.finish(ResolveStatus::Timeout, &Answer::empty(self.record_type), 0)
+        })
     }
 
     /// Send the query to the current server, arming the retransmit deadline.
@@ -867,12 +1122,12 @@ impl DnsResolver {
     }
 
     /// Mark the resolution finished and build its [`Resolution`].
-    fn finish(&mut self, status: ResolveStatus, addresses: AddrList, ttl_secs: u32) -> Action {
+    fn finish(&mut self, status: ResolveStatus, answer: &Answer, ttl_secs: u32) -> Action {
         self.phase = Phase::Done;
         self.retransmit = NEVER;
         Action::Finished(Resolution {
             status,
-            addresses,
+            answer: *answer,
             ttl_secs,
         })
     }
@@ -972,7 +1227,7 @@ pub fn resolve<T: DnsTransport + ?Sized>(
     let Some(mut action) = resolver.poll(now, rng) else {
         return Ok(Resolution {
             status: ResolveStatus::Timeout,
-            addresses: AddrList::default(),
+            answer: Answer::empty(record_type),
             ttl_secs: 0,
         });
     };

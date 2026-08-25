@@ -38,6 +38,12 @@ imprime uma linha de expiração. O resumo final indica os pacotes
 transmitidos e recebidos, a percentagem de perda e os tempos de ida e
 volta mínimo, médio e máximo. `-q` mostra apenas o cabeçalho e o resumo.
 
+Cada resposta nomeia o par como `nome (endereço)` quando o endereço tem
+um registo `PTR`, resolvido uma só vez por execução pelo mesmo
+resolvedor; um endereço sem nome, e toda a execução sob `-n`, imprime o
+endereço nu. `-n` significa ainda que nenhuma consulta `PTR` vai para a
+rede.
+
 O time-to-live IP não é exposto pela interface do socket de eco; ao
 contrário de algumas implementações de `ping`, uma linha de resposta não
 tem, por isso, um campo `ttl=`.
@@ -54,8 +60,9 @@ tem, por isso, um campo `ttl=`.
 - `-w, --deadline` — prazo global da execução, em segundos.
 - `-4, --ipv4` — exigir um destino IPv4.
 - `-6, --ipv6` — exigir um destino IPv6.
-- `-n, --numeric` — saída numérica. Aceite e sem efeito: nunca é feita
-  resolução inversa, pelo que os endereços de resposta já são numéricos.
+- `-n, --numeric` — saída numérica: não resolver o par inversamente, pelo
+  que não se faz consulta `PTR` e as linhas de resposta levam o endereço
+  nu.
 - `-q, --quiet` — silencioso: apenas o cabeçalho e o resumo final.
 - `-?, --help` — mostrar a ajuda breve deste comando.
 

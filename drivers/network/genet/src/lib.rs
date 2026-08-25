@@ -45,11 +45,28 @@
 //!
 //! # Offloads
 //!
-//! The driver advertises [`NetOffloads::empty`]: the GENET has checksum and
-//! segmentation engines, but a driver may advertise only what it has
-//! *verified* it can do, and this device is not emulable. The software path
-//! in the stack is the canonical implementation, so the NIC is complete
-//! without them.
+//! **Receive checksum.** `RBUF_RXCHK_EN` puts the checksum engine in front of
+//! the receiver; it parses the frame's L3/L4 headers and reports its verdict
+//! in bit 15 of the completed descriptor. The frame itself is untouched, so
+//! the 64-byte receive status block (`RBUF_64B_EN` in the reference driver)
+//! is deliberately **not** enabled and the receive-buffer layout is
+//! exactly what it was without the offload. A frame the engine verified is
+//! delivered as [`FrameOffload::Validated`]; anything it did not parse simply
+//! keeps the stack's software fold.
+//!
+//! **Transmit checksum.** `TBUF_64B_EN` prefixes every transmitted buffer
+//! with a [`regs::TSB_LEN`]-byte status block whose one live word directs the
+//! engine at the transport checksum the stack left partial. The block is
+//! consumed by the controller and never reaches the wire.
+//!
+//! **Segmentation.** The GENET has no segmentation engine, so the driver
+//! splits a [`FrameOffload::TxSegment`] super-frame itself through the shared
+//! [`TcpSegmenter`] and hands each wire segment to the
+//! transmit checksum engine — the same shape Linux's `net/core/tso.c` gives
+//! `mvneta` and `fec`. The win is the offload's real one: one ring slot and
+//! one stack transmit pass for tens of packets. A super-frame the ring cannot
+//! absorb in one doorbell stays staged and resumes at the next, so a full
+//! ring defers segments rather than dropping them.
 //!
 //! # Public surface
 //!
@@ -74,7 +91,9 @@ use tairix_abi::driver::mmio::WindowError;
 use tairix_abi::driver::net::{
     DeviceFacts, LinkState, MacAddress, McastFilter, Net, NetOffloads, ETHERNET_HEADER_LEN,
 };
-use tairix_abi::driver::net_ring::{FrameOffload, FrameRings, RxDelivery, ServiceReport};
+use tairix_abi::driver::net_ring::{
+    FrameOffload, FrameRings, RingGeometry, RxDelivery, ServiceReport,
+};
 use tairix_abi::driver::timing::Delay;
 use tairix_abi::{
     CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, Errno, HwMatchKey,
@@ -87,6 +106,9 @@ pub mod wiring;
 
 #[cfg(test)]
 mod tests;
+
+use tairix_net::txoffload::{transport_protocol, TcpSegmenter};
+use tairix_net::udp::PROTOCOL_UDP;
 
 use mdio::{Link, PHY_ADDRESS};
 
@@ -146,9 +168,22 @@ pub const RING_SLOTS: u32 = 64;
 /// cache-line-aligned stride.
 pub const BUF_LEN: u32 = 2048;
 
+/// Bytes the per-descriptor frame buffers occupy: one [`BUF_LEN`] buffer per
+/// receive and per transmit descriptor.
+const BUFFER_BYTES: usize = 2 * (RING_SLOTS as usize) * (BUF_LEN as usize);
+
+/// Bytes of transmit staging the segmentation path uses, at the end of the
+/// carve so it and the frame buffers can be borrowed apart.
+///
+/// One whole transmit ring slot: that is what the transport sizes a slot to
+/// once segmentation is negotiated, so it is the largest super-frame the
+/// stack can hand over. Ordinary memory as far as the CPU is concerned — the
+/// device never masters it, and no descriptor names it.
+const TX_STAGING_LEN: usize = RingGeometry::MAX_SLOT_CAPACITY as usize;
+
 /// Bytes of device-visible DMA the driver carves once at [`Genet::open`]:
-/// one [`BUF_LEN`] buffer per receive and per transmit descriptor.
-pub const DMA_REGION_BYTES: usize = 2 * (RING_SLOTS as usize) * (BUF_LEN as usize);
+/// the frame buffers and the transmit staging area.
+pub const DMA_REGION_BYTES: usize = BUFFER_BYTES + TX_STAGING_LEN;
 
 /// Destination addresses bring-up admits through the receive filter before
 /// any group address: this station's own unicast address and the broadcast
@@ -179,6 +214,29 @@ const FCS_LEN: u32 = 4;
 /// MAC may see, rounded up to the controller's 8-byte granularity.
 const MAX_FRAME_LEN: u32 =
     (MTU + ETHERNET_HEADER_LEN + VLAN_TAG_LEN + BRCM_TAG_LEN + FCS_LEN + 7) & !7;
+
+/// A transmit buffer holds the status block the checksum engine reads and
+/// then the longest frame the MAC will send, so neither can ever be split
+/// across buffers.
+const _: () = assert!(regs::TSB_LEN + MAX_FRAME_LEN <= BUF_LEN);
+
+/// The descriptor's length field must span both.
+const _: () = assert!(regs::TSB_LEN + MAX_FRAME_LEN <= regs::DMA_BUFLENGTH_MASK);
+
+/// The offload set this driver serves: the receive checksum verdict, the
+/// transmit checksum engine for both transports, and driver-side TCP
+/// segmentation over it.
+const OFFLOADS: NetOffloads = match NetOffloads::from_bits(
+    NetOffloads::RX_CSUM_VALIDATED.bits()
+        | NetOffloads::TX_CSUM_TCP.bits()
+        | NetOffloads::TX_CSUM_UDP.bits()
+        | NetOffloads::TX_SEGMENT_TCP.bits(),
+) {
+    Ok(set) => set,
+    // Unreachable: every bit named above is defined. A bit that were not
+    // would be a compile-time const-eval error here, never a runtime panic.
+    Err(_) => panic!("every advertised offload bit is defined"),
+};
 
 /// Microseconds the reset pulses are held. The GENET reset paths are
 /// register-strobe resets that settle in a few controller clocks; the
@@ -268,6 +326,22 @@ pub struct Genet<R: GenetRegs, D: Delay> {
     /// Frames the receive pre-filter has shed since open. A cumulative
     /// device statistic, so a consumer that misses a report loses nothing.
     filtered_frames: u64,
+    /// A segmentation super-frame sitting in the staging area with part of
+    /// its payload still to reach the wire, because the transmit ring filled
+    /// mid-split. It is finished before any later frame is dequeued, so one
+    /// stream's wire order is never disturbed.
+    staged: Option<Staged>,
+}
+
+/// A staged segmentation super-frame and how far its split has got.
+#[derive(Copy, Clone, Debug)]
+struct Staged {
+    /// Bytes of the super-frame in the staging area.
+    length: usize,
+    /// The segmentation descriptor the stack attached to it.
+    offload: FrameOffload,
+    /// Payload bytes already segmented onto the wire.
+    emitted: usize,
 }
 
 impl<R: GenetRegs, D: Delay> Genet<R, D> {
@@ -304,6 +378,7 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
             tx_producer: 0,
             tx_consumer: 0,
             filtered_frames: 0,
+            staged: None,
         };
         device.check_revision()?;
         // Mask every level-2 source before touching the device, so a
@@ -377,8 +452,17 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
         let rbuf = self.regs.read(regs::RBUF_CTRL)?;
         self.regs
             .write(regs::RBUF_CTRL, rbuf | regs::RBUF_ALIGN_2B)?;
+        // The receive checksum engine reports per descriptor and leaves the
+        // frame alone, so the 64-byte receive status block stays off and the
+        // buffer layout is unchanged. `RBUF_SKIP_FCS` is only for a MAC that
+        // forwards the frame check sequence, which this one does not.
+        self.regs.write(regs::RBUF_CHK_CTRL, regs::RBUF_RXCHK_EN)?;
         self.regs
             .write(regs::RBUF_TBUF_SIZE_CTRL, regs::TBUF_SIZE_ONE_PORT)?;
+        // Every transmitted buffer now begins with the status block that
+        // carries the checksum directive; the controller strips it.
+        let tbuf = self.regs.read(regs::TBUF_CTRL)?;
+        self.regs.write(regs::TBUF_CTRL, tbuf | regs::TBUF_64B_EN)?;
 
         // The Pi 4 wires an external gigabit PHY on RGMII.
         self.regs
@@ -577,10 +661,28 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
         (start, start + BUF_LEN as usize)
     }
 
-    /// Byte range of transmit buffer `slot` within the carve.
+    /// Byte range of transmit buffer `slot` within the carve: the transmit
+    /// status block, then the frame.
     fn tx_buffer_range(slot: u32) -> (usize, usize) {
         let start = ((RING_SLOTS + slot) * BUF_LEN) as usize;
         (start, start + BUF_LEN as usize)
+    }
+
+    /// Byte range of the frame area inside transmit buffer `slot`, past the
+    /// status block the controller reads first.
+    fn tx_frame_range(slot: u32) -> (usize, usize) {
+        let (start, end) = Self::tx_buffer_range(slot);
+        (start + regs::TSB_LEN as usize, end)
+    }
+
+    /// Transmit descriptors free for a frame right now.
+    fn tx_free_slots(producer: u32, consumer: u32) -> u32 {
+        RING_SLOTS - Self::in_flight(producer, consumer).min(RING_SLOTS)
+    }
+
+    /// Descriptors the device still owns, from a producer/consumer pair.
+    fn in_flight(producer: u32, consumer: u32) -> u32 {
+        producer.wrapping_sub(consumer) & regs::RING_INDEX_MASK
     }
 
     /// Read the device's own index register for a ring, masked to the
@@ -617,62 +719,253 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
 
     /// Transmit descriptors the device still owns.
     fn tx_in_flight(&self) -> u32 {
-        self.tx_producer.wrapping_sub(self.tx_consumer) & regs::RING_INDEX_MASK
+        Self::in_flight(self.tx_producer, self.tx_consumer)
     }
 
     /// Move every frame the stack queued into a free transmit slot and ring
     /// the device's producer index, stopping when the ring runs dry or the
     /// device has no free slot left.
+    ///
+    /// An ordinary frame is popped straight into its slot's buffer. A
+    /// segmentation super-frame does not fit one — the transport sizes a ring
+    /// slot for it, the device's buffers only for a wire frame — so the
+    /// refused pop is what identifies it, and it is staged and split.
     fn drain_tx(
         &mut self,
         rings: &mut FrameRings<'_>,
         report: &mut ServiceReport,
+        sensitive: bool,
     ) -> Result<(), DriverError> {
-        let ring = regs::ring_regs(regs::TDMA_DESC, regs::DEFAULT_RING);
+        // A super-frame a full ring left part-split goes first: the wire
+        // order of one TCP stream must not be disturbed by a later frame.
+        if !self.drain_staged(report, sensitive)? {
+            return Ok(());
+        }
         loop {
             if self.tx_in_flight() >= RING_SLOTS {
                 return Ok(());
             }
             let slot = self.tx_producer % RING_SLOTS;
-            let (start, end) = Self::tx_buffer_range(slot);
-            let length = match rings.tx.pop(&mut self.frames.as_bytes_mut()[start..end]) {
+            let (start, end) = Self::tx_frame_range(slot);
+            let mut offload = FrameOffload::None;
+            let popped = rings
+                .tx
+                .pop_with(&mut offload, &mut self.frames.as_bytes_mut()[start..end]);
+            let length = match popped {
                 Ok(Some(length)) => length,
                 Ok(None) => return Ok(()),
                 // A corrupt ring slot was consumed by the failed pop; skip it
                 // rather than let a malformed producer wedge the frames queued
                 // behind it.
                 Err(Errno::LengthOutOfRange) => continue,
-                // The ring's slots are wider than this device's buffers, and
-                // the queued frame does not fit one. It is longer than the MAC
-                // would accept anyway, so release the slot explicitly (a
-                // refused pop leaves it) and keep the queue flowing.
+                // Longer than one wire frame. Only a segmentation super-frame
+                // legitimately is; a refused pop leaves the slot, so staging
+                // re-reads it and anything else is released and dropped.
                 Err(Errno::BufferTooSmall) => {
-                    rings.tx.skip().map_err(|_| DriverError::BadMagic)?;
+                    self.stage_super_frame(rings)?;
+                    if !self.drain_staged(report, sensitive)? {
+                        return Ok(());
+                    }
                     continue;
                 }
                 Err(_) => return Err(DriverError::BadMagic),
             };
+            if matches!(offload, FrameOffload::TxSegment { .. }) {
+                // A super-frame small enough to have fitted one slot still
+                // needs its per-segment header fix-ups, so it takes the same
+                // staged path rather than a second, near-identical one.
+                self.stage_from_slot(slot, length, offload);
+                if !self.drain_staged(report, sensitive)? {
+                    return Ok(());
+                }
+                continue;
+            }
             // A runt the device would refuse, or a frame past what the MAC
-            // accepts, is consumed and dropped for the same reason.
+            // accepts, is consumed and dropped.
             let Ok(length) = u32::try_from(length) else {
                 continue;
             };
             if !(ETHERNET_HEADER_LEN..=MAX_FRAME_LEN).contains(&length) {
                 continue;
             }
-            let length_status = (length << regs::DMA_BUFLENGTH_SHIFT)
-                | (regs::DMA_TX_QTAG_MASK << regs::DMA_TX_QTAG_SHIFT)
-                | regs::DMA_TX_APPEND_CRC
-                | regs::DMA_SOP
-                | regs::DMA_EOP;
-            let desc = regs::desc(regs::TDMA_DESC, slot);
-            self.regs
-                .write(desc + regs::DESC_LENGTH_STATUS, length_status)?;
-            self.tx_producer = self.tx_producer.wrapping_add(1) & regs::RING_INDEX_MASK;
-            self.regs
-                .write(ring + regs::RING_DRIVER_INDEX, self.tx_producer)?;
-            report.transmitted += 1;
+            if Self::queue_slot(
+                self.frames.as_bytes_mut(),
+                &mut self.regs,
+                &mut self.tx_producer,
+                slot,
+                length,
+                offload,
+            )? {
+                report.transmitted += 1;
+            }
         }
+    }
+
+    /// Dequeue the over-size frame at the head of the transmit ring into the
+    /// staging area, ready to be split.
+    ///
+    /// A frame that is over-size for any reason other than segmentation — no
+    /// segmentation descriptor, or one the frame does not bear out — is
+    /// released and dropped: the device could not have transmitted it, and
+    /// leaving it would wedge everything queued behind it.
+    fn stage_super_frame(&mut self, rings: &mut FrameRings<'_>) -> Result<(), DriverError> {
+        let mut offload = FrameOffload::None;
+        let staging = BUFFER_BYTES;
+        let popped = rings
+            .tx
+            .pop_with(&mut offload, &mut self.frames.as_bytes_mut()[staging..]);
+        // A pop that refuses leaves the slot occupied — longer than a whole
+        // ring slot, or corrupt — so release it explicitly rather than let it
+        // wedge the queue behind it.
+        let Ok(Some(length)) = popped else {
+            rings.tx.skip().map_err(|_| DriverError::BadMagic)?;
+            return Ok(());
+        };
+        self.stage(length, offload);
+        Ok(())
+    }
+
+    /// Move a super-frame that already fits one transmit slot into the
+    /// staging area, so both super-frame paths split from one place.
+    fn stage_from_slot(&mut self, slot: u32, length: usize, offload: FrameOffload) {
+        let (start, _) = Self::tx_frame_range(slot);
+        self.frames
+            .as_bytes_mut()
+            .copy_within(start..start + length, BUFFER_BYTES);
+        self.stage(length, offload);
+    }
+
+    /// Accept the staged bytes as a super-frame, unless they do not describe
+    /// one — a descriptor the frame does not bear out, or one whose segments
+    /// would not fit a transmit buffer, is dropped rather than transmitted
+    /// half-fixed-up or split against a buffer that is not there.
+    fn stage(&mut self, length: usize, offload: FrameOffload) {
+        let staging = BUFFER_BYTES;
+        let frame = &self.frames.as_bytes()[staging..staging + length];
+        let segment_fits = |segmenter: &TcpSegmenter<'_>| {
+            u32::try_from(segmenter.max_segment_len()).is_ok_and(|max| max <= MAX_FRAME_LEN)
+        };
+        self.staged = TcpSegmenter::new(frame, offload)
+            .ok()
+            .filter(segment_fits)
+            .map(|_| Staged {
+                length,
+                offload,
+                emitted: 0,
+            });
+    }
+
+    /// Zero a finished super-frame's staged bytes when the ring is carrying
+    /// sensitive traffic, so its plaintext does not outlive its transmission.
+    fn scrub_staging(staging: &mut [u8], length: usize, sensitive: bool) {
+        if sensitive {
+            if let Some(bytes) = staging.get_mut(..length) {
+                bytes.fill(0);
+            }
+        }
+    }
+
+    /// Split the staged super-frame into wire frames, one transmit slot each.
+    ///
+    /// Returns `false` when the ring filled before the split finished: the
+    /// remainder stays staged and the next doorbell — which a transmit
+    /// completion interrupt provokes — picks it up, so nothing is dropped and
+    /// nothing spins.
+    fn drain_staged(
+        &mut self,
+        report: &mut ServiceReport,
+        sensitive: bool,
+    ) -> Result<bool, DriverError> {
+        let Some(mut staged) = self.staged.take() else {
+            return Ok(true);
+        };
+        let Self {
+            regs,
+            frames,
+            tx_producer,
+            tx_consumer,
+            ..
+        } = self;
+        // The staging area sits past every frame buffer, so the source frame
+        // and the destination slot are disjoint borrows of the one carve.
+        let (buffers, staging) = frames.as_bytes_mut().split_at_mut(BUFFER_BYTES);
+        let frame = &staging[..staged.length];
+        let Ok(mut segmenter) = TcpSegmenter::resume(frame, staged.offload, staged.emitted) else {
+            // Unreachable: `stage` validated the same frame. Dropping it is
+            // the fail-closed answer if it ever were reached.
+            return Ok(true);
+        };
+        let offload = segmenter.checksum_offload();
+        loop {
+            if Self::tx_free_slots(*tx_producer, *tx_consumer) == 0 {
+                staged.emitted = segmenter.emitted();
+                self.staged = Some(staged);
+                return Ok(false);
+            }
+            let slot = *tx_producer % RING_SLOTS;
+            let (start, end) = Self::tx_frame_range(slot);
+            // `stage` refused any super-frame whose segments could not fit a
+            // buffer, so a short-buffer refusal here cannot arise; treating it
+            // as the end of the split drops the remainder rather than wedging
+            // the device.
+            let Ok(Some(length)) = segmenter.next_segment(&mut buffers[start..end]) else {
+                Self::scrub_staging(staging, staged.length, sensitive);
+                return Ok(true);
+            };
+            let Ok(length) = u32::try_from(length) else {
+                Self::scrub_staging(staging, staged.length, sensitive);
+                return Ok(true);
+            };
+            if Self::queue_slot(buffers, regs, tx_producer, slot, length, offload)? {
+                report.transmitted += 1;
+            }
+        }
+    }
+
+    /// Fill the transmit status block for the frame already sitting in
+    /// `slot`'s buffer, program the descriptor, and publish it.
+    ///
+    /// Returns `false` when the frame was dropped instead: a checksum
+    /// directive the frame does not bear out cannot be honoured, and a frame
+    /// carrying only a partial checksum must not reach the wire.
+    fn queue_slot(
+        buffers: &mut [u8],
+        regs: &mut R,
+        tx_producer: &mut u32,
+        slot: u32,
+        frame_len: u32,
+        offload: FrameOffload,
+    ) -> Result<bool, DriverError> {
+        let (start, _) = Self::tx_buffer_range(slot);
+        let frame_start = start + regs::TSB_LEN as usize;
+        let frame_end = frame_start + frame_len as usize;
+        let Some(directive) = csum_directive(&buffers[frame_start..frame_end], offload) else {
+            return Ok(false);
+        };
+        // The controller reads only the directive word; the rest is zeroed so
+        // no byte of a previous frame is handed to a DMA master.
+        let block = &mut buffers[start..frame_start];
+        block.fill(0);
+        block[regs::TSB_CSUM_INFO..regs::TSB_CSUM_INFO + 4]
+            .copy_from_slice(&directive.to_le_bytes());
+
+        let checksummed = if directive == 0 {
+            0
+        } else {
+            regs::DMA_TX_DO_CSUM
+        };
+        let length_status = ((regs::TSB_LEN + frame_len) << regs::DMA_BUFLENGTH_SHIFT)
+            | (regs::DMA_TX_QTAG_MASK << regs::DMA_TX_QTAG_SHIFT)
+            | regs::DMA_TX_APPEND_CRC
+            | checksummed
+            | regs::DMA_SOP
+            | regs::DMA_EOP;
+        let desc = regs::desc(regs::TDMA_DESC, slot);
+        regs.write(desc + regs::DESC_LENGTH_STATUS, length_status)?;
+        *tx_producer = tx_producer.wrapping_add(1) & regs::RING_INDEX_MASK;
+        let ring = regs::ring_regs(regs::TDMA_DESC, regs::DEFAULT_RING);
+        regs.write(ring + regs::RING_DRIVER_INDEX, *tx_producer)?;
+        Ok(true)
     }
 
     /// Deliver every frame the device has completed into the receive ring,
@@ -753,10 +1046,19 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
         }
         let (start, _) = Self::rx_buffer_range(slot);
         let from = start + regs::RX_FRAME_OFFSET as usize;
+        // Bit 15 of a *completed* receive descriptor is the checksum
+        // engine's verdict, not the ownership flag it means while the device
+        // still holds the descriptor. Absent, the stack simply folds the
+        // frame itself.
+        let offload = if status & regs::DMA_RX_CHK_OK != 0 {
+            FrameOffload::Validated
+        } else {
+            FrameOffload::None
+        };
         // `deliver` applies the shared receive pre-filter, so a frame with
         // no possible local consumer is neither copied nor woken for.
         let frame = &self.frames.as_bytes()[from..from + length];
-        match rings.deliver(0, FrameOffload::None, frame) {
+        match rings.deliver(0, offload, frame) {
             Ok(RxDelivery::Accepted) => Ok(RxOutcome::Delivered),
             Ok(RxDelivery::Filtered) => Ok(RxOutcome::Filtered),
             Ok(RxDelivery::RingFull) => Ok(RxOutcome::RingFull),
@@ -795,7 +1097,7 @@ impl<R: GenetRegs, D: Delay> Net for Genet<R, D> {
             } else {
                 LinkState::Down
             },
-            offloads: NetOffloads::empty(),
+            offloads: OFFLOADS,
             rx_queues: 1,
             multicast_filter: McastFilter::Slots(MCAST_SLOTS),
         })
@@ -815,7 +1117,7 @@ impl<R: GenetRegs, D: Delay> Net for Genet<R, D> {
         }
         let mut report = ServiceReport::default();
         self.reclaim_tx(sensitive)?;
-        self.drain_tx(rings, &mut report)?;
+        self.drain_tx(rings, &mut report, sensitive)?;
         self.harvest_rx(rings, &mut report, sensitive)?;
         report.filtered = self.filtered_frames;
         Ok(report)
@@ -853,6 +1155,44 @@ impl<R: GenetRegs, D: Delay> Net for Genet<R, D> {
         };
         self.regs.write(register, regs::IRQ_COMPLETION)
     }
+}
+
+/// The transmit status block's checksum directive for `frame`, or [`None`]
+/// when the offload cannot be honoured and the frame must be dropped.
+///
+/// A directive tells the engine to fold the frame from `csum_start` and store
+/// the result at `csum_start + csum_offset`, both relative to the frame's
+/// first octet — the status block is not counted. Zero directs it at nothing,
+/// which is what a frame already carrying a complete software checksum wants.
+///
+/// The stack's offsets arrive over a shared-memory ring, so they are
+/// re-validated against the frame here: a field past its end would have a DMA
+/// master checksum bytes that are not there, and a frame whose partial
+/// checksum could not be completed must never reach the wire.
+fn csum_directive(frame: &[u8], offload: FrameOffload) -> Option<u32> {
+    let FrameOffload::TxChecksum {
+        csum_start,
+        csum_offset,
+    } = offload
+    else {
+        return Some(0);
+    };
+    let start = u32::from(csum_start);
+    let field = start + u32::from(csum_offset);
+    let frame_len = u32::try_from(frame.len()).unwrap_or(u32::MAX);
+    if field + 2 > frame_len
+        || start > regs::TSB_CSUM_OFFSET_MASK
+        || field > regs::TSB_CSUM_OFFSET_MASK
+    {
+        return None;
+    }
+    let mut directive = regs::TSB_CSUM_LV | (start << regs::TSB_CSUM_START_SHIFT) | field;
+    // RFC 768: a computed UDP checksum of zero is transmitted as `0xFFFF`,
+    // and the engine applies that rule only when told the transport is UDP.
+    if transport_protocol(frame) == Some(PROTOCOL_UDP) {
+        directive |= regs::TSB_CSUM_PROTO_UDP;
+    }
+    Some(directive)
 }
 
 /// Split a device address into the descriptor's `address_lo` and

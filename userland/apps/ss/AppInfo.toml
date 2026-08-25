@@ -8,11 +8,12 @@
 # every principal's sockets and every connection's peer address, so it is a
 # privileged system-wide diagnostic (never open by default), and a refusal is
 # reported on stderr and the tool exits rather than fabricating an empty
-# list. It reads no standard input.
+# list. CAP_NET opens the ordinary UDP socket the `-r` reverse-lookup path
+# uses; without `-r` no socket is opened at all. It reads no standard input.
 id = "os.tairix.ss"
 name = "ss"
 version = "0.1.0"
 kind = "command"
-capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_SYSINFO_GLOBAL"]
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_NET", "CAP_SYSINFO_GLOBAL"]
 # This bundle's own 256x256 icon master in its Resources/ (plans/ICONS.md).
 library-icon = "ss.png"

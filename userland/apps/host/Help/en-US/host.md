@@ -4,7 +4,7 @@ host — look up a name over DNS
 
 ## SYNOPSIS
 
-`host [-t type] name`
+`host [-t type] name|address`
 
 ## DESCRIPTION
 
@@ -18,21 +18,28 @@ through the System Information API — the same active set the
 before an address is shown. There is no `/etc/resolv.conf` and no local host
 file.
 
-Only the `A` and `AAAA` address records are supported; other record types
+An operand that is an IPv4 or IPv6 address literal is a **reverse** lookup:
+it is rewritten to the `in-addr.arpa` / `ip6.arpa` name the address maps to,
+the default record type becomes `PTR`, and a found record prints as
+`<reverse-name> domain name pointer <name>.`
+
+Only the `A`, `AAAA`, and `PTR` records are supported; other record types
 (`MX`, `TXT`, and so on) are rejected rather than silently treated as `A`. A
 name that does not exist prints `Host <name> not found: 3(NXDOMAIN)`; when no
 server can be reached, `host` reports a timeout on standard error.
 
 ## OPTIONS
 
-- `-t, --type` — the DNS record type to look up: `A` or `AAAA`
-  (case-insensitive). Without it, both are looked up.
+- `-t, --type` — the DNS record type to look up: `A`, `AAAA`, or `PTR`
+  (case-insensitive). Without it, a name looks up both `A` and `AAAA`, and
+  an address looks up `PTR`.
 - `-?, --help` — show this command's own short help.
 
 ## EXAMPLES
 
 - `host example.com` — the IPv4 and IPv6 addresses of the name.
 - `host -t AAAA example.com` — only the IPv6 addresses.
+- `host 10.0.2.2` — the name that address maps back to.
 
 ## EXIT STATUS
 

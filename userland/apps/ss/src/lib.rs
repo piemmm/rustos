@@ -70,7 +70,7 @@ pub mod command;
 pub mod error;
 pub mod io;
 
-pub use client::{run, USAGE};
+pub use client::{run, NameLookup, USAGE};
 pub use command::{parse, Command, Options, ParseError};
 pub use error::SsError;
 pub use io::Output;

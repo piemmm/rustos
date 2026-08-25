@@ -17,13 +17,17 @@
 //!   then drive [`tairix_net::dns::resolve`] over a caller-supplied
 //!   [`tairix_net::dns::DnsTransport`] and CSPRNG. Both seams are injected,
 //!   so the whole path is exercised against in-memory fakes with no kernel.
+//! * [`resolve_pointer`] — the reverse direction: the `PTR` lookup of the
+//!   `in-addr.arpa` / `ip6.arpa` name an address maps back to, over the same
+//!   servers and the same engine, with [`pointer_name`] rendering what a tool
+//!   prints.
 //! * [`resolve_host`] — the pure *host-operand* policy every connecting tool
 //!   shares: an address literal resolves with no query at all, otherwise the
 //!   wanted record types are tried in family-preference order. One definition,
 //!   so `ping` and `telnet` cannot disagree about what `-4 ::1` means.
-//! * `RtDnsTransport` and `resolve` (the `program` feature; documented on a
-//!   freestanding target) — the production glue: a [`DnsTransport`] over
-//!   the `netsock-v1` UDP datagram socket (`tairix_rt::net`), with RFC 5452
+//! * `RtDnsTransport`, `resolve`, and `reverse_name` (the `program` feature;
+//!   documented on a freestanding target) — the production glue: a
+//!   [`DnsTransport`] over the `netsock-v1` UDP socket, with RFC 5452
 //!   source-port randomisation from the port-0 bind and a kernel-attested
 //!   stack-origin check on every received datagram (fail closed — the
 //!   delivery port is otherwise an unauthenticated inbox), plus a
@@ -52,16 +56,16 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use tairix_abi::net_ipc::{NetAddrFamily, NetResolverServer, MAX_RESOLVER_SERVERS};
+use tairix_abi::net_ipc::{ip_from_parts, NetAddrFamily, MAX_RESOLVER_SERVERS};
 use tairix_abi::Errno;
-use tairix_net::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
+use tairix_net::addr::IpAddr;
 use tairix_net::dns::{self, DnsError, DnsTransport, Name, RecordType, Resolution, ResolveStatus};
 use tairix_procinfo::{for_each_resolver_server, CallError, ListError, Transport, WalkStep};
 
 #[cfg(all(feature = "program", target_os = "none"))]
 mod rt;
 #[cfg(all(feature = "program", target_os = "none"))]
-pub use rt::{host_address, resolve, RtDnsTransport};
+pub use rt::{host_address, resolve, reverse_name, RtDnsTransport};
 
 /// Why a name resolution did not produce an answer.
 ///
@@ -103,7 +107,7 @@ impl core::fmt::Display for ResolveError {
 }
 
 /// Fetch the host's active recursive-resolver server set through `sysinfo`,
-/// converting each [`NetResolverServer`] record to an [`IpAddr`].
+/// converting each `NetResolverServer` record to an [`IpAddr`].
 ///
 /// The set is the aggregated, deduplicated statically-configured ∪
 /// DHCP-learned servers the network stack maintains, read through the
@@ -119,7 +123,7 @@ impl core::fmt::Display for ResolveError {
 pub fn configured_servers(sysinfo: &dyn Transport) -> Result<Vec<IpAddr>, Errno> {
     let mut servers = Vec::with_capacity(MAX_RESOLVER_SERVERS);
     for_each_resolver_server(sysinfo, |record| {
-        servers.push(server_addr(record));
+        servers.push(ip_from_parts(record.family, record.addr));
         Ok(WalkStep::Continue)
     })
     .map_err(list_error_to_errno)?;
@@ -155,11 +159,42 @@ pub fn resolve_name(
     rng: &mut dyn FnMut() -> u32,
 ) -> Result<Resolution, ResolveError> {
     let name = Name::encode(name).map_err(ResolveError::InvalidName)?;
+    query(&name, record_type, sysinfo, udp, rng)
+}
+
+/// Resolve the domain name `address` maps back to: a `PTR` lookup of the
+/// `in-addr.arpa` / `ip6.arpa` name [`Name::reverse`] builds.
+///
+/// The same orchestration, servers, and engine as [`resolve_name`] — a
+/// reverse lookup is an ordinary query, not a second resolver.
+///
+/// # Errors
+///
+/// As [`resolve_name`], except that [`ResolveError::InvalidName`] cannot
+/// arise: every address has a well-formed reverse name.
+pub fn resolve_pointer(
+    address: IpAddr,
+    sysinfo: &dyn Transport,
+    udp: &mut dyn DnsTransport,
+    rng: &mut dyn FnMut() -> u32,
+) -> Result<Resolution, ResolveError> {
+    query(&Name::reverse(address), RecordType::Ptr, sysinfo, udp, rng)
+}
+
+/// The shared "fetch the servers, then drive the engine" step both the
+/// forward and the reverse entry point run.
+fn query(
+    name: &Name,
+    record_type: RecordType,
+    sysinfo: &dyn Transport,
+    udp: &mut dyn DnsTransport,
+    rng: &mut dyn FnMut() -> u32,
+) -> Result<Resolution, ResolveError> {
     let servers = configured_servers(sysinfo).map_err(ResolveError::ServerSource)?;
     if servers.is_empty() {
         return Err(ResolveError::NoServers);
     }
-    dns::resolve(name, record_type, &servers, udp, rng).map_err(ResolveError::Transport)
+    dns::resolve(*name, record_type, &servers, udp, rng).map_err(ResolveError::Transport)
 }
 
 /// The record types to query for `family`, in the order to try them.
@@ -176,29 +211,6 @@ pub const fn wanted_records(family: Option<NetAddrFamily>) -> &'static [RecordTy
     }
 }
 
-/// The address family an [`IpAddr`] belongs to.
-#[must_use]
-pub const fn address_family(address: IpAddr) -> NetAddrFamily {
-    match address {
-        IpAddr::V4(_) => NetAddrFamily::V4,
-        IpAddr::V6(_) => NetAddrFamily::V6,
-    }
-}
-
-/// Split an [`IpAddr`] into the `(family, 16-byte address)` pair every
-/// `netsock-v1` address field carries (IPv4 occupies the first four bytes).
-#[must_use]
-pub fn address_parts(address: IpAddr) -> (NetAddrFamily, [u8; 16]) {
-    match address {
-        IpAddr::V4(v4) => {
-            let mut bytes = [0u8; 16];
-            bytes[..4].copy_from_slice(&v4.octets());
-            (NetAddrFamily::V4, bytes)
-        }
-        IpAddr::V6(v6) => (NetAddrFamily::V6, v6.octets()),
-    }
-}
-
 /// Parse `host` as an address literal of the wanted `family`.
 ///
 /// A literal of the wrong family is not a match: `-4 ::1` names nothing.
@@ -206,7 +218,7 @@ pub fn address_parts(address: IpAddr) -> (NetAddrFamily, [u8; 16]) {
 pub fn literal_address(host: &str, family: Option<NetAddrFamily>) -> Option<IpAddr> {
     let address: IpAddr = host.parse().ok()?;
     family
-        .is_none_or(|wanted| wanted == address_family(address))
+        .is_none_or(|wanted| wanted == NetAddrFamily::of(address))
         .then_some(address)
 }
 
@@ -238,24 +250,23 @@ pub fn resolve_host(
         if resolution.status != ResolveStatus::Success {
             continue;
         }
-        if let Some(&address) = resolution.addresses.as_slice().first() {
+        if let Some(&address) = resolution.addresses().first() {
             return Some(address);
         }
     }
     None
 }
 
-/// Convert a [`NetResolverServer`] record to an [`IpAddr`].
-fn server_addr(record: &NetResolverServer) -> IpAddr {
-    match record.family {
-        NetAddrFamily::V4 => IpAddr::V4(Ipv4Addr::new(
-            record.addr[0],
-            record.addr[1],
-            record.addr[2],
-            record.addr[3],
-        )),
-        NetAddrFamily::V6 => IpAddr::V6(Ipv6Addr::from(record.addr)),
-    }
+/// The display name a finished reverse lookup yielded, rendered in RFC 1035
+/// presentation form (control octets escaped), or [`None`] when the address
+/// has no `PTR` record or the lookup did not conclude successfully.
+///
+/// One definition of "did the reverse lookup give me something to print?",
+/// so no tool renders a negative answer as a host name.
+#[must_use]
+pub fn pointer_name(resolution: &Resolution) -> Option<alloc::string::String> {
+    use alloc::string::ToString;
+    resolution.pointer().map(ToString::to_string)
 }
 
 /// Collapse the paged-walk [`ListError`] onto the wire-level [`Errno`] the

@@ -424,11 +424,31 @@ that, with the random id, bounds off-path spoofing (source-port
 randomisation, the other RFC 5452 defence, is the socket layer's job in
 DNS2, not the engine's). Any structural error rejects the whole message.
 Answer records are followed through a CNAME chain from the queried name to
-collect matching-type (A / AAAA) addresses, capped at `MAX_ADDRESSES`; a
+collect the matching-type answer, capped at `MAX_ADDRESSES` for addresses; a
 record of the wrong class, a CNAME target this stub does not itself pursue,
 or a record whose RDATA length does not match its type is skipped rather
 than trusted. The surfaced `min_ttl` is the minimum TTL across the records
 used, so a caching caller knows how long the answer holds.
+
+**Forward and reverse.** `RecordType::A` / `Aaaa` resolve a name to
+addresses; `RecordType::Ptr` resolves the other way, querying the
+`in-addr.arpa` / `ip6.arpa` name `Name::reverse` builds from an address
+(RFC 1035 §3.5, RFC 3596 §2.5 — total and infallible, since the longest
+such name is 74 octets). Both directions run through the same codec, the
+same acceptance test, and the same state machine; the CNAME chase covers
+RFC 2317 classless reverse delegation for free. What was resolved is one
+`Answer` value rather than parallel fields, so an address answer cannot
+carry a name nor a pointer answer an address; a reverse lookup surfaces the
+first `PTR` record, which is the `getnameinfo` contract every consumer of
+one wants and what RFC 1912 §2.1 expects there to be.
+
+A decoded name renders through `Name`'s `Display` in RFC 1035 §5.1
+presentation form — labels joined by `.`, no trailing root dot, every octet
+outside printable ASCII escaped as `\DDD` and the two syntactic characters
+backslash-escaped. That is a security property, not a cosmetic one: a `PTR`
+answer is attacker-controlled text that `ss -r`, `ping`, and `host` print to
+a terminal, and the reader is permissive about label octets (RFC 2181 §11)
+precisely so a legitimate but odd name is not rejected.
 
 `DnsResolver` is the retry/failover state machine, event-driven exactly like
 `DhcpClient`: `poll(now, rng)` starts the query and advances its
@@ -505,6 +525,45 @@ IPv6 Hop-by-Hop, TTL/hop-limit 1). The `stack` joins each address's
 solicited-node group (formalising ND's listening) and the all-systems
 group, and filters the receive path by membership; `join_multicast` /
 `leave_multicast` expose explicit application membership.
+
+### `txoffload` — transmit-offload support for a driver
+
+What a NIC driver needs above the shared-memory ring to serve a
+`FrameOffload` request that its silicon cannot serve alone
+(`plans/NETWORK.md` N18a). Device-independent, so it lives here once rather
+than in each such driver.
+
+`TcpSegmenter` splits a `FrameOffload::TxSegment` super-frame into wire
+segments. A device with a segmentation engine forwards the request (the
+`virtio_net` path); a device without one — the Broadcom GENET, and the case
+Linux's `net/core/tso.c` serves for `mvneta`, `mvpp2`, and `fec` — splits it
+here and still gets the offload's real win: one ring slot and one stack
+transmit pass for tens of wire packets. Each emitted segment is the
+super-frame's `hdr_len`-byte header plus at most `gso_size` payload bytes,
+with the header retargeted: the IPv4 total length and a distinct
+identification per segment (or the IPv6 payload length), the IPv4 header
+checksum, the TCP sequence number, `FIN`/`PSH` only on the last segment and
+`CWR` only on the first (RFC 3168 §6.1.2), and the TCP checksum field
+advanced from the super-frame's length-zero pseudo-header partial to the
+segment's own. The transport checksum is left **partial** — the caller
+completes it, which for the intended consumer means the device's
+transmit-checksum engine, named by `checksum_offload()`.
+
+The super-frame arrives over a shared-memory ring, so `new` re-validates
+every field against the frame — the header fits, the checksum field sits at
+TCP's fixed offset inside it, the IP version and header length agree with
+`csum_start`, the TCP data offset agrees with `hdr_len`, `gso_size` is
+non-zero — and refuses the whole frame otherwise rather than transmitting a
+partially fixed-up one. `resume` picks a split up at a segment boundary, so a
+driver whose transmit ring fills mid-split defers the remainder to its next
+doorbell instead of dropping it. Nothing is allocated: each segment is
+written into a caller-supplied buffer, which for a NIC is the transmit slot's
+own DMA buffer.
+
+`transport_protocol(frame)` is the one accessor a transmit-checksum engine
+that must be told the transport reads — the GENET applies RFC 768's "a
+computed zero is sent as `0xFFFF`" rule only when told the datagram is UDP,
+and getting that wrong would silently disable a UDP checksum.
 
 ### `rxfilter` — the receive pre-filter
 

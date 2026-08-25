@@ -14,7 +14,9 @@
 //!
 //! [`host_address`] is the entry point a connecting tool uses for its target
 //! operand: it answers an address literal without opening a socket, so a
-//! literal target works with no resolver configured.
+//! literal target works with no resolver configured. [`reverse_name`] is its
+//! mirror: the display name an address maps back to, for a tool that shows
+//! peers by name unless asked to stay numeric.
 //!
 //! This module is compiled only for a freestanding userland program that
 //! opts into the `program` feature; the pure orchestration in the crate root
@@ -22,6 +24,7 @@
 
 extern crate alloc;
 
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -34,7 +37,7 @@ use tairix_net::addr::IpAddr;
 use tairix_net::dns::{DnsTransport, RecordType, Resolution, Wait, PORT};
 use tairix_procinfo::IpcTransport;
 
-use crate::{resolve_name, ResolveError};
+use crate::{pointer_name, resolve_name, resolve_pointer, ResolveError};
 
 /// The client's delivery-port endpoint id — an app-local, unrestricted
 /// well-known value (not a reserved kernel id), so binding it needs no
@@ -173,6 +176,31 @@ impl RtDnsTransport {
         resolve_name(name, record_type, &IpcTransport, self, &mut rng)
     }
 
+    /// Resolve the domain name `address` maps back to over this transport,
+    /// reusing its bound delivery port and open sockets.
+    ///
+    /// # Errors
+    ///
+    /// As [`resolve`](Self::resolve).
+    pub fn resolve_reverse(&mut self, address: IpAddr) -> Result<Resolution, ResolveError> {
+        let mut rng = || {
+            let mut bytes = [0u8; 4];
+            let _ = tairix_rt::random_get(&mut bytes, RandomFlags::empty());
+            u32::from_le_bytes(bytes)
+        };
+        resolve_pointer(address, &IpcTransport, self, &mut rng)
+    }
+
+    /// The display name `address` maps back to, or [`None`] when it has no
+    /// `PTR` record or the lookup did not conclude — the shape a tool that
+    /// falls back to the numeric address wants.
+    ///
+    /// Reusing one transport across many addresses is what lets a table
+    /// renderer resolve a whole listing without rebinding a port per row.
+    pub fn reverse_name(&mut self, address: IpAddr) -> Option<String> {
+        pointer_name(&self.resolve_reverse(address).ok()?)
+    }
+
     /// Resolve a command-line host operand to one address over this
     /// transport, reusing its bound delivery port and open sockets.
     ///
@@ -260,6 +288,18 @@ pub fn resolve(name: &str, record_type: RecordType) -> Result<Resolution, Resolv
     udp.resolve(name, record_type)
 }
 
+/// The display name `address` maps back to over the production seams, or
+/// [`None`] when it has no `PTR` record or the lookup did not conclude.
+///
+/// The one call a tool makes for a *single* reverse lookup; a tool resolving
+/// many addresses opens one [`RtDnsTransport`] and calls its
+/// [`reverse_name`](RtDnsTransport::reverse_name) instead, so the delivery
+/// port is bound once.
+#[must_use]
+pub fn reverse_name(address: IpAddr) -> Option<String> {
+    RtDnsTransport::open().ok()?.reverse_name(address)
+}
+
 /// Resolve a command-line host operand to one address over the production
 /// seams — the one call a connecting tool makes for its target operand.
 ///
@@ -276,7 +316,7 @@ pub fn host_address(host: &str, family: Option<NetAddrFamily>) -> Option<IpAddr>
 /// Turn a resolver [`IpAddr`] into the `netsock-v1` destination
 /// [`SocketAddr`] on DNS [`PORT`] (53).
 fn server_socket_addr(server: IpAddr) -> SocketAddr {
-    let (family, addr) = crate::address_parts(server);
+    let (family, addr) = tairix_abi::net_ipc::address_parts(server);
     SocketAddr {
         family,
         addr,

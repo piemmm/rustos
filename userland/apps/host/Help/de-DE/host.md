@@ -4,7 +4,7 @@ host — einen Namen über DNS auflösen
 
 ## SYNOPSIS
 
-`host [-t type] name`
+`host [-t type] name|address`
 
 ## DESCRIPTION
 
@@ -19,7 +19,13 @@ die System-Informations-API gelesen — dieselbe aktive Menge, die der Abruf
 eine Adresse angezeigt wird. Es gibt kein `/etc/resolv.conf` und keine lokale
 Hosts-Datei.
 
-Nur die Adresseinträge `A` und `AAAA` werden unterstützt; andere Typen (`MX`,
+Ein Operand, der eine IPv4- oder IPv6-Adresse ist, bedeutet eine
+**Rückwärts**-Abfrage: er wird auf den `in-addr.arpa`- bzw.
+`ip6.arpa`-Namen der Adresse umgeschrieben, der Standardtyp wird `PTR`, und
+ein gefundener Eintrag erscheint als
+`<reverse-name> domain name pointer <name>.`
+
+Nur die Einträge `A`, `AAAA` und `PTR` werden unterstützt; andere Typen (`MX`,
 `TXT` und so weiter) werden abgelehnt, statt stillschweigend als `A` behandelt
 zu werden. Ein nicht vorhandener Name gibt `Host <name> not found:
 3(NXDOMAIN)` aus; ist kein Server erreichbar, meldet `host` eine
@@ -27,15 +33,16 @@ Zeitüberschreitung auf der Standardfehlerausgabe.
 
 ## OPTIONS
 
-- `-t, --type` — der abzufragende DNS-Eintragstyp: `A` oder `AAAA`
-  (Groß-/Kleinschreibung wird ignoriert). Ohne diese Option werden beide
-  abgefragt.
+- `-t, --type` — der abzufragende DNS-Eintragstyp: `A`, `AAAA` oder `PTR`
+  (Groß-/Kleinschreibung wird ignoriert). Ohne diese Option fragt ein Name
+  `A` und `AAAA` ab, eine Adresse `PTR`.
 - `-?, --help` — die eigene Kurzhilfe dieses Befehls zeigen.
 
 ## EXAMPLES
 
 - `host example.com` — die IPv4- und IPv6-Adressen des Namens.
 - `host -t AAAA example.com` — nur die IPv6-Adressen.
+- `host 10.0.2.2` — der Name, auf den diese Adresse zurückverweist.
 
 ## EXIT STATUS
 

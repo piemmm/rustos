@@ -24,9 +24,10 @@ Each row carries the transport protocol (`tcp`/`udp`), the connection
 state, the receive and send queue depths, the local and peer
 `address:port`, and — with `-p` — the owning process. An unspecified
 address or port prints as `*`; an IPv6 address is bracketed
-(`[fe80::1]:80`) so the `:port` separator is unambiguous. Ports and
-addresses are always numeric: TAIRiX has no service-name database, so
-`-n` is accepted for familiarity but is always in force.
+(`[fe80::1]:80`) so the `:port` separator is unambiguous. Ports are always
+numeric: TAIRiX has no service-name database, so `-n` is accepted for
+familiarity but is always in force for them. Addresses are numeric too
+unless `-r` asks for host names.
 
 ### Options
 
@@ -36,12 +37,24 @@ addresses are always numeric: TAIRiX has no service-name database, so
 | `-u`, `--udp` | show UDP sockets |
 | `-a`, `--all` | show both listening and connected sockets |
 | `-l`, `--listening` | show only listening sockets |
-| `-n`, `--numeric` | numeric ports/addresses (always in force) |
+| `-n`, `--numeric` | numeric *service* names (always in force) |
+| `-r`, `--resolve` | resolve addresses to host names over DNS |
 | `-p`, `--processes` | add the owning-process column (`pid=N`) |
 | `-4`, `--ipv4` | restrict to IPv4 sockets |
 | `-6`, `--ipv6` | restrict to IPv6 sockets |
 | `-H`, `--no-header` | suppress the header line |
 | `-?`, `--help` | show the tool's own short help |
+
+`-n` and `-r` are independent, exactly as in iproute2: `-n` governs service
+names and `-r` host names, so `ss -rn` resolves hosts and leaves ports
+numeric. Under `-r` each endpoint is looked up through the shared stub
+resolver (`lib/resolver`, a `PTR` query) over **one** transport for the whole
+listing, memoised per distinct address — a negative answer included — so a
+peer on many rows costs one query, and the unspecified address is never
+queried because it names no host. An address with no record stays numeric,
+and without `-r` no socket is opened and nothing goes on the wire. On a host
+whose resolver is unreachable each distinct address costs that resolution's
+retry budget once, which is why the switch is opt-in.
 
 By default `ss` shows connected, non-listening sockets, matching the
 iproute2 default; the count of hidden listeners is noted on the standard
@@ -153,10 +166,19 @@ example.com has address 93.184.216.34
 example.com has IPv6 address 2606:2800:220::1
 ```
 
-With no `-t` it looks up both the `A` (IPv4) and `AAAA` (IPv6) records the
-stub resolver supports; `-t A` / `-t AAAA` (case-insensitive) restricts the
-lookup to one. Other record types (`MX`, `TXT`, …) are rejected rather than
-silently treated as `A` — the stub resolver looks up only address records.
+An **address** operand is the reverse direction:
+
+```
+$ host 10.0.2.2
+2.2.0.10.in-addr.arpa domain name pointer gateway.example.
+```
+
+With no `-t` a name looks up both the `A` (IPv4) and `AAAA` (IPv6) records
+and an address looks up `PTR`; `-t A` / `-t AAAA` / `-t PTR`
+(case-insensitive) restricts the lookup to one, applied to the operand's
+reverse name when the operand is an address (the `bind-utils` behaviour).
+Other record types (`MX`, `TXT`, …) are rejected rather than silently
+treated as `A` — the stub resolver looks up address and pointer records only.
 A name that does not exist prints `Host <name> not found: 3(NXDOMAIN)`; when
 no server can be reached, the timeout is reported on standard error. `host`
 exits `0` when at least one address was found, `1` when the name resolved to
@@ -179,9 +201,9 @@ closing statistics block, in the familiar iputils shape.
 ```
 $ ping -c 3 gateway.example
 PING gateway.example (10.0.2.2) 56(84) bytes of data.
-64 bytes from 10.0.2.2: icmp_seq=1 time=0.412 ms
-64 bytes from 10.0.2.2: icmp_seq=2 time=0.388 ms
-64 bytes from 10.0.2.2: icmp_seq=3 time=0.401 ms
+64 bytes from gateway.example (10.0.2.2): icmp_seq=1 time=0.412 ms
+64 bytes from gateway.example (10.0.2.2): icmp_seq=2 time=0.388 ms
+64 bytes from gateway.example (10.0.2.2): icmp_seq=3 time=0.401 ms
 
 --- gateway.example ping statistics ---
 3 packets transmitted, 3 received, 0% packet loss, time 2003ms
@@ -213,9 +235,15 @@ drawing every payload from the CSPRNG would spend the reserve for nothing.
 
 * No `ttl=` field on a reply line: the IP time-to-live is not exposed
   through the echo-socket interface.
-* `-n` is accepted and inert. Reverse (`PTR`) resolution does not exist —
-  the stub resolver has no `PTR` record type — so reply addresses are
-  always numeric already and there is nothing to suppress.
+* The peer is reverse-resolved once per run, so a reply line reads
+  `<n> bytes from <name> (<address>)` when the address has a `PTR` record
+  and carries the bare address when it does not. `-n` suppresses the lookup
+  entirely: no `PTR` query goes on the wire and every line stays numeric.
+  (Not a divergence — iputils behaves the same way; it is listed here
+  because the header line keeps the operand as typed rather than the
+  resolved name.) The lookup precedes the first request, so on a host whose
+  resolver is unreachable it costs that resolution's retry budget before any
+  packet leaves — `-n` is the switch for exactly that case.
 
 ## `telnet` — the Network Virtual Terminal client
 

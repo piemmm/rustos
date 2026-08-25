@@ -10,6 +10,7 @@
 //! `lib/rng`'s fast generator, and the clock/wait-set syscalls; host tests
 //! drive it with an in-memory fake.
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::net_ipc::NetAddrFamily;
@@ -56,6 +57,14 @@ pub trait PingIo {
         host: &str,
         family: Option<NetAddrFamily>,
     ) -> Result<(NetAddrFamily, [u8; 16]), ResolveFailure>;
+
+    /// The name `addr` reverse-resolves to (a `PTR` lookup), or [`None`]
+    /// when it has no record or the lookup did not conclude.
+    ///
+    /// Called once per run, after [`Self::resolve`] and only when the
+    /// command line did not ask for numeric output, so `-n` issues no DNS
+    /// query at all.
+    fn reverse(&mut self, family: NetAddrFamily, addr: [u8; 16]) -> Option<String>;
 
     /// Open the echo socket and connect it to the resolved peer, so the
     /// stack filters replies to that peer and assigns the ICMP identifier.

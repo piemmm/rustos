@@ -64,15 +64,22 @@ use (`plans/DHCP.md`), so the resolver has a real input the moment it lands.
     encoding of a domain name; `Name::encode` parses a dotted string with
     the LDH/label/length rules and `read_name` decompresses RFC 1035 §4.1.4
     pointers with a bounded follow count so a pointer loop cannot hang),
-    `RecordType` (`A` / `AAAA`, the query types the stub resolves, plus the
-    `CNAME` it must chase), `Rcode` (RFC 1035 §4.1.1 response codes), and the
-    12-byte header field pack/unpack.
+    `RecordType` (`A` / `AAAA` / `PTR`, the query types the stub resolves,
+    plus the `CNAME` it must chase), `Name::reverse` (the `in-addr.arpa` /
+    `ip6.arpa` spelling of an address), `Name`'s RFC 1035 §5.1 presentation
+    `Display` (every non-printable octet escaped, because a `PTR` answer is
+    attacker-controlled text bound for a terminal), `Rcode` (RFC 1035 §4.1.1
+    response codes), and the 12-byte header field pack/unpack.
   - **Codec** — `write_query(&QuerySpec, buf)` emits one standard query
     (header with RD, one question); `DnsResponse::parse(bytes, &QuerySpec)`
     validates the header + echoed question against the outstanding query and
-    surfaces the `Rcode`, the resolved address list (following any CNAME
-    chain to the queried type), and the minimum answer TTL. Every decode is
-    total/bounded/fail-closed.
+    surfaces the `Rcode`, the `Answer` for the queried type (following any
+    CNAME chain first — which RFC 2317 classless reverse delegation needs),
+    and the minimum answer TTL. `Answer` is an enum, so an address answer
+    cannot carry a name nor a `PTR` answer an address; a reverse lookup
+    surfaces the first `PTR` record, the `getnameinfo` contract every
+    consumer wants and what RFC 1912 §2.1 expects there to be. Every decode
+    is total/bounded/fail-closed.
   - **Resolver state machine** (`DnsResolver`) — construct with the name, the
     record type, and the bounded configured server list; `poll(now, rng)`
     starts/advances the query (picking a server, drawing a fresh random id,
@@ -170,15 +177,28 @@ Remaining:
 ### DNS3 — a `host`/`nslookup`-class command app `[x]`
 
 The `host` command app (`userland/apps/host`) is landed as `lib/resolver`'s
-first consumer: `host [-t type] name` resolves the `A`+`AAAA` records the stub
-resolver supports (or one, with `-t A`/`-t AAAA`) and prints the `bind-utils`
-shape (`<name> has address …` / `has IPv6 address …`, `has no <TYPE> record`,
+first consumer: `host [-t type] name|address` resolves the `A`+`AAAA` records
+of a name (or one, with `-t`), the `PTR` record of an address, and prints the
+`bind-utils` shape (`<name> has address …` / `has IPv6 address …`, `has no <TYPE> record`,
 `Host <name> not found: 3(NXDOMAIN)`, a timed-out diagnostic on stderr).
 Exit `0` on a found address (or help), `1` on no address, `2` on a usage or
 output error. Pure `parse`/`run` engine with injected `Resolver`/`Output`
 seams (host-tested), an `AppInfo` requesting `CAP_CONSOLE_WRITE`/
 `CAP_FS_ACCESS`/`CAP_NET`, and a 13-locale `Help/` bundle. A future
 `nslookup`-class tool would reuse the same `lib/resolver` client.
+
+### DNS4 — reverse (`PTR`) resolution `[x]`
+
+`RecordType::Ptr` and `Name::reverse` in the engine (§1), `resolve_pointer`
+and the `program`-feature `reverse_name` in `lib/resolver`, and the three
+consumers: `ss -r` resolves both endpoints of every row, memoising each
+distinct address — a negative answer included — so a peer on many rows costs
+one query and the wildcard address costs none; `ping` names the peer as
+`name (address)` once per run unless `-n`, which now suppresses a real lookup
+rather than describing an absent one; and `host <address>` rewrites an address
+operand to its reverse name and prints the `bind-utils`
+`<reverse-name> domain name pointer <name>.` line. `ss` gains `CAP_NET` for
+the socket the lookup opens, which a run without `-r` never opens.
 
 ## 4. Tests, docs, and gate (binding)
 
@@ -197,5 +217,7 @@ report.
 - No DNSSEC validation, no DNS-over-TLS / DNS-over-HTTPS, no EDNS0 (a later
   in-place extension, not speculated here — §2.4).
 - No mDNS / LLMNR / NetBIOS name resolution.
+- No record types beyond `A`, `AAAA`, and `PTR` (no `MX`, `TXT`, `SRV`): a
+  stub resolver's consumers here are name→address and address→name.
 - No `/etc/hosts`-style static host file (TAIRiX has no `/etc`, §16.1); a
   local static-name store, if ever wanted, is its own decision.

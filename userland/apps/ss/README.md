@@ -8,8 +8,14 @@ state, receive/send queue depths, the local and peer `address:port`, and
 — with `-p` — the owning process. The default view shows connected,
 non-listening sockets; `-l` shows only listeners and `-a` shows both.
 `-t`/`-u` filter by protocol, `-4`/`-6` by address family, `-H` drops the
-header, and `-n` is accepted but always in force (TAIRiX has no
+header, `-r` resolves addresses to host names over DNS, and `-n` is
+accepted but always in force for *service* names (TAIRiX has no
 service-name database). `-?`/`--help` render the tool's own short help.
+
+`-r` drives the shared userland stub resolver (`lib/resolver`) over one
+transport for the whole listing, memoising each distinct address — a
+negative answer included — so a peer on many rows costs one `PTR` query.
+Without `-r` no socket is opened and nothing goes on the wire.
 
 ## Where the rows come from
 

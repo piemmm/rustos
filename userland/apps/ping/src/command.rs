@@ -66,7 +66,8 @@ pub struct HostTarget {
     pub family: Option<NetAddrFamily>,
 }
 
-/// A resolved ping target: the operand as typed, its family, and its bytes.
+/// A resolved ping target: the operand as typed, its family, its bytes, and
+/// the name it reverse-resolved to.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Target {
     /// The operand exactly as the user typed it (for display).
@@ -75,6 +76,9 @@ pub struct Target {
     pub family: NetAddrFamily,
     /// The address bytes (IPv4 uses the first four).
     pub addr: [u8; 16],
+    /// The name the address reverse-resolved to, or [`None`] under `-n` and
+    /// when the address has no `PTR` record.
+    pub name: Option<String>,
 }
 
 /// What the echo payload is filled with.
@@ -117,6 +121,8 @@ pub struct Config {
     pub size: usize,
     /// Quiet: print only the header and the final statistics.
     pub quiet: bool,
+    /// Numeric output (`-n`): no reverse lookup of the peer address.
+    pub numeric: bool,
 }
 
 /// Why an argument vector was not a valid `ping` invocation.
@@ -161,6 +167,7 @@ struct Builder {
     deadline_ns: Option<u64>,
     size: usize,
     quiet: bool,
+    numeric: bool,
     family: Option<NetAddrFamily>,
     payload: PayloadKind,
     target: Option<String>,
@@ -175,6 +182,7 @@ impl Default for Builder {
             deadline_ns: None,
             size: DEFAULT_SIZE,
             quiet: false,
+            numeric: false,
             family: None,
             payload: PayloadKind::Random,
             target: None,
@@ -250,9 +258,9 @@ fn parse_long(
         }
     };
     match key {
-        // `help` is detected by the caller (`builder_help`); `numeric` is
-        // always in force. Both need no builder change.
-        "help" | "numeric" => {}
+        // `help` is detected by the caller (`builder_help`).
+        "help" => {}
+        "numeric" => builder.numeric = true,
         "count" => builder.count = Some(parse_count(&take_value(key)?, "--count")?),
         "interval" => builder.interval_ns = parse_seconds(&take_value(key)?, "--interval")?,
         "timeout" => builder.timeout_ns = parse_seconds(&take_value(key)?, "--timeout")?,
@@ -281,9 +289,7 @@ fn parse_short(
             '?' => return Ok(true),
             '4' => builder.family = Some(NetAddrFamily::V4),
             '6' => builder.family = Some(NetAddrFamily::V6),
-            // Numeric output: no reverse lookup is ever performed, so the
-            // addresses printed are already numeric.
-            'n' => {}
+            'n' => builder.numeric = true,
             'q' => builder.quiet = true,
             'c' | 'i' | 's' | 'W' | 'w' | 'p' => {
                 // The value is the rest of this argument, or the next one.
@@ -350,6 +356,7 @@ fn build(builder: Builder) -> Result<Command, ParseError> {
         deadline_ns: builder.deadline_ns,
         size: builder.size,
         quiet: builder.quiet,
+        numeric: builder.numeric,
     }))
 }
 
@@ -480,6 +487,10 @@ mod tests {
         assert_eq!(config.timeout_ns, DEFAULT_TIMEOUT_NS);
         assert_eq!(config.size, DEFAULT_SIZE);
         assert!(!config.quiet);
+        assert!(
+            !config.numeric,
+            "naming the peer is the default; -n opts out"
+        );
         assert_eq!(
             config.payload,
             PayloadKind::Random,
@@ -625,5 +636,16 @@ mod tests {
             parse(&["--bogus", "10.0.0.1"]),
             Err(ParseError::UnknownOption("--bogus".to_string()))
         );
+    }
+
+    #[test]
+    fn numeric_is_settable_short_clustered_and_long() {
+        for args in [
+            alloc::vec!["-n", "10.0.0.1"],
+            alloc::vec!["-qn", "10.0.0.1"],
+            alloc::vec!["--numeric", "10.0.0.1"],
+        ] {
+            assert!(config(&args).numeric, "args {args:?}");
+        }
     }
 }

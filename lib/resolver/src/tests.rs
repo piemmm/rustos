@@ -17,9 +17,15 @@ use tairix_abi::sysinfo::{NetInterfaceListRequest, SysinfoQueryId, SysinfoReques
 use tairix_abi::time::Duration64;
 use tairix_abi::Errno;
 use tairix_net::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
-use tairix_net::dns::{AddrList, DnsTransport, RecordType, Resolution, ResolveStatus, Wait};
+use tairix_net::dns::{
+    AddrList, Answer, DnsTransport, Name, RecordType, Resolution, ResolveStatus, Wait,
+};
 
-use super::{address_parts, configured_servers, resolve_host, resolve_name, ResolveError};
+use tairix_abi::net_ipc::address_parts;
+
+use super::{
+    configured_servers, pointer_name, resolve_host, resolve_name, resolve_pointer, ResolveError,
+};
 
 // -- The System Information API fake -------------------------------------
 
@@ -173,6 +179,27 @@ fn a_response(q: &[u8], addr: [u8; 4]) -> Vec<u8> {
     out
 }
 
+/// Build a positive PTR-record response echoing the encoded query `q`'s id
+/// and question, answering with the domain name `name`.
+fn ptr_response(q: &[u8], name: &str) -> Vec<u8> {
+    let rdata = Name::encode(name).expect("a valid name").as_wire().to_vec();
+    let mut out = Vec::new();
+    out.extend_from_slice(&[q[0], q[1]]);
+    out.extend_from_slice(&0x8180u16.to_be_bytes());
+    out.extend_from_slice(&1u16.to_be_bytes());
+    out.extend_from_slice(&1u16.to_be_bytes());
+    out.extend_from_slice(&0u16.to_be_bytes());
+    out.extend_from_slice(&0u16.to_be_bytes());
+    out.extend_from_slice(&q[12..]);
+    out.extend_from_slice(&0xC00Cu16.to_be_bytes());
+    out.extend_from_slice(&12u16.to_be_bytes());
+    out.extend_from_slice(&1u16.to_be_bytes());
+    out.extend_from_slice(&300u32.to_be_bytes());
+    out.extend_from_slice(&u16::try_from(rdata.len()).expect("bounded").to_be_bytes());
+    out.extend_from_slice(&rdata);
+    out
+}
+
 fn counter_rng() -> impl FnMut() -> u32 {
     let mut n: u32 = 0;
     move || {
@@ -217,7 +244,7 @@ fn resolves_a_record_via_the_configured_server() {
         .expect("no transport error");
     assert_eq!(resolution.status, ResolveStatus::Success);
     assert_eq!(
-        resolution.addresses.first(),
+        resolution.addresses().first().copied(),
         Some(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)))
     );
     // The query went to the one configured server.
@@ -297,7 +324,7 @@ fn a_server_source_failure_is_reported() {
 fn answered(address: IpAddr) -> Resolution {
     Resolution {
         status: ResolveStatus::Success,
-        addresses: AddrList::from_addrs(&[address]),
+        answer: Answer::Addresses(AddrList::from_addrs(&[address])),
         ttl_secs: 60,
     }
 }
@@ -306,7 +333,7 @@ fn answered(address: IpAddr) -> Resolution {
 fn negative(status: ResolveStatus) -> Resolution {
     Resolution {
         status,
-        addresses: AddrList::default(),
+        answer: Answer::Addresses(AddrList::default()),
         ttl_secs: 0,
     }
 }
@@ -365,7 +392,7 @@ fn a_name_prefers_ipv6_then_falls_back_to_ipv4() {
         order.push(record);
         match record {
             RecordType::Aaaa => Some(negative(ResolveStatus::NoData)),
-            RecordType::A => Some(answered(v4)),
+            RecordType::A | RecordType::Ptr => Some(answered(v4)),
         }
     };
     assert_eq!(resolve_host("example.com", None, &mut query), Some(v4));
@@ -400,7 +427,7 @@ fn a_query_failure_moves_on_to_the_next_record_type() {
         // A failed AAAA query (no server, transport error) must not mask a
         // usable A record.
         RecordType::Aaaa => None,
-        RecordType::A => Some(answered(v4)),
+        RecordType::A | RecordType::Ptr => Some(answered(v4)),
     };
     assert_eq!(resolve_host("example.com", None, &mut query), Some(v4));
 }
@@ -410,7 +437,7 @@ fn a_success_with_no_address_is_not_an_answer() {
     let mut query = |_name: &str, _record: RecordType| {
         Some(Resolution {
             status: ResolveStatus::Success,
-            addresses: AddrList::default(),
+            answer: Answer::Addresses(AddrList::default()),
             ttl_secs: 60,
         })
     };
@@ -432,4 +459,72 @@ fn address_parts_places_ipv4_in_the_first_four_octets() {
     let (family, bytes) = address_parts(IpAddr::V6(v6));
     assert_eq!(family, NetAddrFamily::V6);
     assert_eq!(bytes, v6.octets());
+}
+
+// -- Reverse resolution ---------------------------------------------------
+
+#[test]
+fn resolves_a_pointer_record_for_an_ipv4_address() {
+    let sysinfo = SysinfoFake::new(alloc::vec![v4_record(10, 0, 2, 3)]);
+    let mut udp = DnsFake::new(|_server, q| alloc::vec![ptr_response(q, "gateway.example")]);
+    let mut rng = counter_rng();
+    let address = IpAddr::V4(Ipv4Addr::new(10, 0, 2, 2));
+    let resolution =
+        resolve_pointer(address, &sysinfo, &mut udp, &mut rng).expect("no transport error");
+    assert_eq!(resolution.status, ResolveStatus::Success);
+    assert_eq!(
+        pointer_name(&resolution).as_deref(),
+        Some("gateway.example")
+    );
+    assert!(resolution.addresses().is_empty());
+}
+
+#[test]
+fn a_reverse_query_asks_the_in_addr_arpa_name() {
+    let sysinfo = SysinfoFake::new(alloc::vec![v4_record(10, 0, 2, 3)]);
+    let asked = alloc::rc::Rc::new(core::cell::RefCell::new(Vec::new()));
+    let seen = alloc::rc::Rc::clone(&asked);
+    let mut udp = DnsFake::new(move |_server, q: &[u8]| {
+        seen.borrow_mut().push(q.to_vec());
+        alloc::vec![ptr_response(q, "host.example")]
+    });
+    let mut rng = counter_rng();
+    let address = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 133));
+    resolve_pointer(address, &sysinfo, &mut udp, &mut rng).expect("no transport error");
+    let query = asked.borrow();
+    let question = &query.first().expect("one query")[12..];
+    let expected = Name::encode("133.2.0.192.in-addr.arpa").expect("valid");
+    assert_eq!(&question[..expected.as_wire().len()], expected.as_wire());
+    // QTYPE = PTR (12), QCLASS = IN (1).
+    let tail = &question[expected.as_wire().len()..];
+    assert_eq!(tail, &[0, 12, 0, 1]);
+}
+
+#[test]
+fn a_reverse_lookup_with_no_record_yields_no_name() {
+    let sysinfo = SysinfoFake::new(alloc::vec![v4_record(10, 0, 2, 3)]);
+    // An empty inbox: no server answers, so the resolution times out.
+    let mut udp = DnsFake::new(|_server, _q| Vec::new());
+    let mut rng = counter_rng();
+    let address = IpAddr::V6(Ipv6Addr::from([0x20; 16]));
+    let resolution =
+        resolve_pointer(address, &sysinfo, &mut udp, &mut rng).expect("no transport error");
+    assert_eq!(resolution.status, ResolveStatus::Timeout);
+    assert_eq!(pointer_name(&resolution), None);
+}
+
+#[test]
+fn a_reverse_lookup_needs_a_configured_server() {
+    let sysinfo = SysinfoFake::new(Vec::new());
+    let mut udp = DnsFake::new(|_server, _q| Vec::new());
+    let mut rng = counter_rng();
+    assert_eq!(
+        resolve_pointer(
+            IpAddr::V4(Ipv4Addr::new(10, 0, 2, 2)),
+            &sysinfo,
+            &mut udp,
+            &mut rng
+        ),
+        Err(ResolveError::NoServers)
+    );
 }

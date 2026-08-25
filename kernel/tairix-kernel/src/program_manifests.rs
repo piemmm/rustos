@@ -1169,13 +1169,15 @@ mod tests {
 
     // The socket-listing tool `ss` (plans/NETWORK.md N8b-2): console write
     // for its output/diagnostics, filesystem access to read its own bundle
-    // Help/ payload, and `CAP_SYSINFO_GLOBAL` for the system-wide
-    // `NET_SOCKETS` query the listing renders (the socket table names every
-    // principal's sockets, so it is privileged and audited). Not an embedded
-    // spawn-floor program, so the list lives only in this pin.
+    // Help/ payload, `CAP_NET` for the UDP socket the `-r` reverse lookups
+    // use (a run without `-r` opens none), and `CAP_SYSINFO_GLOBAL` for the
+    // system-wide `NET_SOCKETS` query the listing renders (the socket table
+    // names every principal's sockets, so it is privileged and audited). Not
+    // an embedded spawn-floor program, so the list lives only in this pin.
     const SS_TOOL_REQUEST: &[CapabilityId] = &[
         CapabilityId::CONSOLE_WRITE,
         CapabilityId::FS_ACCESS,
+        CapabilityId::NET,
         CapabilityId::SYSINFO_GLOBAL,
     ];
 

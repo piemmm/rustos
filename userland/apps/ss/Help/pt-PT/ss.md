@@ -24,12 +24,16 @@ Por omissão a lista mostra os sockets ligados, não em escuta. `-l`
 mostra apenas os sockets em escuta e `-a` ambos; a contagem de ouvintes
 ocultos é anotada no fluxo de informação padrão (fd 3), nunca na tabela.
 `-t` e `-u` restringem o protocolo e `-4`/`-6` a família de endereços;
-sem nenhum, mostram-se todos os protocolos e famílias. As portas e os
-endereços são sempre numéricos (o TAIRiX não tem base de nomes de
-serviço), pelo que `-n` é aceite mas está sempre em vigor. Um endereço
-não especificado imprime-se como `*` e uma porta não vinculada como `*`;
-um endereço IPv6 fica entre parênteses retos para que o separador
-`:port` permaneça sem ambiguidade.
+sem nenhum, mostram-se todos os protocolos e famílias. As portas são
+sempre numéricas (o TAIRiX não tem base de nomes de serviço), pelo que
+`-n` é aceite mas está sempre em vigor para elas. Os endereços também
+são numéricos, a menos que `-r` peça nomes de anfitrião: `-r` resolve
+cada um pelo resolvedor do sistema (uma consulta `PTR`), consulta cada
+endereço distinto uma só vez e deixa numérico o que não tem nome. Um
+endereço não especificado imprime-se como `*` e uma porta não vinculada
+como `*`; um endereço IPv6 fica entre parênteses retos para que o
+separador `:port` permaneça sem ambiguidade — um nome resolvido não
+precisa deles.
 
 `ss` aceita apenas opções. A gramática de expressões de filtro do
 iproute2 (filtros de estado e de endereço) não está implementada, pelo
@@ -44,7 +48,10 @@ silêncio.
 - `-a, --all` — mostrar os sockets em escuta e ligados.
 - `-l, --listening` — mostrar apenas os sockets em escuta.
 - `-n, --numeric` — não resolver nomes de serviço. Sempre em vigor no
-  TAIRiX; aceite por familiaridade.
+  TAIRiX; aceite por familiaridade. Os nomes de anfitrião são de `-r`.
+- `-r, --resolve` — resolver os endereços em nomes de anfitrião por
+  DNS. Desligado por omissão, pelo que a lista não consulta sem que lho
+  peçam.
 - `-p, --processes` — acrescentar a coluna do processo proprietário
   (`pid=N`).
 - `-4, --ipv4` — restringir a lista a sockets IPv4.
@@ -61,6 +68,7 @@ silêncio.
 - `ss -l` — apenas os sockets em escuta.
 - `ss -tlp` — os sockets TCP em escuta, com o processo proprietário.
 - `ss -u4` — os sockets UDP sobre IPv4.
+- `ss -r` — a mesma lista com os endereços resolvidos em nomes.
 
 ## EXIT STATUS
 

@@ -442,7 +442,7 @@ mod program {
 
     /// The socket endpoint for a resolved address.
     fn endpoint_for(address: IpAddr, port: u16) -> Endpoint {
-        let (family, addr) = tairix_resolver::address_parts(address);
+        let (family, addr) = tairix_abi::net_ipc::address_parts(address);
         Endpoint { family, addr, port }
     }
 

@@ -25,11 +25,15 @@ Por omisión el listado muestra los sockets conectados, no en escucha.
 oyentes ocultos se anota en el flujo de información estándar (fd 3),
 nunca en la tabla. `-t` y `-u` restringen el protocolo y `-4`/`-6` la
 familia de direcciones; sin ninguno, se muestran todos los protocolos y
-familias. Los puertos y las direcciones son siempre numéricos (TAIRiX no
-tiene base de nombres de servicio), así que `-n` se acepta pero siempre
-está en vigor. Una dirección no especificada se imprime como `*` y un
-puerto no ligado como `*`; una dirección IPv6 va entre corchetes para
-que el separador `:port` quede sin ambigüedad.
+familias. Los puertos son siempre numéricos (TAIRiX no tiene base de
+nombres de servicio), así que `-n` se acepta pero está siempre en vigor
+para ellos. Las direcciones también son numéricas salvo que `-r` pida
+nombres de host: `-r` resuelve cada una con el resolvedor del sistema
+(una consulta `PTR`), consulta cada dirección distinta una sola vez y
+deja numérica la que no tiene nombre. Una dirección no especificada se
+imprime como `*` y un puerto no ligado como `*`; una dirección IPv6 va
+entre corchetes para que el separador `:port` quede sin ambigüedad — un
+nombre resuelto no necesita corchetes.
 
 `ss` solo acepta opciones. La gramática de expresiones de filtro de
 iproute2 (filtros de estado y de dirección) no está implementada, así
@@ -44,7 +48,11 @@ silencio.
 - `-a, --all` — mostrar los sockets en escucha y conectados.
 - `-l, --listening` — mostrar solo los sockets en escucha.
 - `-n, --numeric` — no resolver nombres de servicio. Siempre en vigor
-  en TAIRiX; aceptado por familiaridad.
+  en TAIRiX; aceptado por familiaridad. Los nombres de host son asunto
+  de `-r`.
+- `-r, --resolve` — resolver las direcciones a nombres de host por DNS.
+  Desactivado por omisión, así que el listado no consulta sin que se lo
+  pidan.
 - `-p, --processes` — añadir la columna del proceso propietario
   (`pid=N`).
 - `-4, --ipv4` — restringir el listado a sockets IPv4.
@@ -61,6 +69,7 @@ silencio.
 - `ss -l` — solo los sockets en escucha.
 - `ss -tlp` — los sockets TCP en escucha, con el proceso propietario.
 - `ss -u4` — los sockets UDP sobre IPv4.
+- `ss -r` — el mismo listado con las direcciones resueltas a nombres.
 
 ## EXIT STATUS
 

@@ -39,6 +39,12 @@ ben. Mae'r crynodeb yn nodi'r pecynnau a drosglwyddwyd ac a dderbyniwyd,
 y ganran colled, a'r amseroedd mynd a dod lleiaf, cyfartalog a mwyaf. Mae
 `-q` yn dangos y pennyn a'r crynodeb yn unig.
 
+Mae pob ateb yn enwi'r cymar fel `enw (cyfeiriad)` pan fo gan y cyfeiriad
+gofnod `PTR`, wedi'i ddatrys unwaith ar gyfer y rhediad drwy'r un
+datryswr; mae cyfeiriad heb enw, a phob rhediad dan `-n`, yn argraffu'r
+cyfeiriad noeth. Mae `-n` hefyd yn golygu na roddir ymholiad `PTR` ar y
+wifren o gwbl.
+
 Nid yw'r amser byw IP yn cael ei ddatgelu gan ryngwyneb y soced atsain;
 yn wahanol i rai gweithrediadau `ping`, nid yw llinell ateb felly'n cario
 maes `ttl=`.
@@ -55,9 +61,9 @@ maes `ttl=`.
 - `-w, --deadline` — terfyn amser cyffredinol y rhediad, mewn eiliadau.
 - `-4, --ipv4` — mynnu nod IPv4.
 - `-6, --ipv6` — mynnu nod IPv6.
-- `-n, --numeric` — allbwn rhifol. Derbynnir ac nid oes iddo effaith: ni
-  chyflawnir datrysiad gwrthdro erioed, felly mae cyfeiriadau'r atebion yn
-  rhifol yn barod.
+- `-n, --numeric` — allbwn rhifol: peidio â datrys y cymar yn wrthdro,
+  felly ni wneir ymholiad `PTR` ac mae'r llinellau ateb yn cario'r
+  cyfeiriad noeth.
 - `-q, --quiet` — tawel: y pennyn a'r crynodeb terfynol yn unig.
 - `-?, --help` — dangos cymorth byr y gorchymyn hwn.
 

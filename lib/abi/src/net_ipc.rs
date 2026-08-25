@@ -81,6 +81,37 @@ const fn max_usize(a: usize, b: usize) -> usize {
     }
 }
 
+/// Split an address into the `(family, 16-byte block)` pair every address
+/// field on this protocol carries; an IPv4 address occupies the first four
+/// bytes and the rest are zero.
+///
+/// This and [`ip_from_parts`] are the one definition of that conversion, so
+/// the stack, its socket clients, and the tools that render a wire address
+/// cannot spell it three different ways.
+#[must_use]
+pub fn address_parts(address: core::net::IpAddr) -> (NetAddrFamily, [u8; 16]) {
+    match address {
+        core::net::IpAddr::V4(v4) => {
+            let mut bytes = [0u8; 16];
+            bytes[..4].copy_from_slice(&v4.octets());
+            (NetAddrFamily::V4, bytes)
+        }
+        core::net::IpAddr::V6(v6) => (NetAddrFamily::V6, v6.octets()),
+    }
+}
+
+/// Rebuild an address from the `(family, 16-byte block)` pair — the inverse
+/// of [`address_parts`].
+#[must_use]
+pub fn ip_from_parts(family: NetAddrFamily, addr: [u8; 16]) -> core::net::IpAddr {
+    match family {
+        NetAddrFamily::V4 => {
+            core::net::IpAddr::V4(core::net::Ipv4Addr::new(addr[0], addr[1], addr[2], addr[3]))
+        }
+        NetAddrFamily::V6 => core::net::IpAddr::V6(core::net::Ipv6Addr::from(addr)),
+    }
+}
+
 /// An IP address family as carried on this protocol.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -92,6 +123,15 @@ pub enum NetAddrFamily {
 }
 
 impl NetAddrFamily {
+    /// The family an [`IpAddr`](core::net::IpAddr) belongs to.
+    #[must_use]
+    pub const fn of(address: core::net::IpAddr) -> Self {
+        match address {
+            core::net::IpAddr::V4(_) => Self::V4,
+            core::net::IpAddr::V6(_) => Self::V6,
+        }
+    }
+
     /// The wire value for this family.
     #[must_use]
     pub const fn as_u8(self) -> u8 {

@@ -186,7 +186,7 @@ region itself; that remains the stack's responsibility.
 | Driver                    | Crate                           | Supported buses     | Status                                             |
 |---------------------------|---------------------------------|---------------------|----------------------------------------------------|
 | [virtio-net](./virtio.md) | `tairix-drv-network-virtio-net` | virtio (PCI / MMIO) | ring transport + facts; receive-checksum offload (`VIRTIO_NET_F_GUEST_CSUM` → `RX_CSUM_VALIDATED`); TCP transmit-checksum offload (`VIRTIO_NET_F_CSUM` → `TX_CSUM_TCP`); TCP segmentation offload (`VIRTIO_NET_F_HOST_TSO4`+`TSO6` → `TX_SEGMENT_TCP`); mergeable receive buffers (`VIRTIO_NET_F_MRG_RXBUF`); multiqueue receive (`VIRTIO_NET_F_MQ` + `VIRTIO_NET_F_CTRL_VQ`) |
-| GENET v5                  | `tairix-drv-network-genet`       | platform MMIO (aarch64) | ring transport + facts; MDIO/PHY autonegotiation at 10/100/1000; unicast + broadcast + 15-slot group receive filter; completion-interrupt masking; no offloads advertised (see below) |
+| GENET v5                  | `tairix-drv-network-genet`       | platform MMIO (aarch64) | ring transport + facts; MDIO/PHY autonegotiation at 10/100/1000; unicast + broadcast + 15-slot group receive filter; completion-interrupt masking; receive-checksum offload (`RBUF_RXCHK_EN` → `RX_CSUM_VALIDATED`); transmit-checksum offload (`TBUF_64B_EN` status block → `TX_CSUM_TCP`+`TX_CSUM_UDP`); driver-side TCP segmentation (`TX_SEGMENT_TCP`, no hardware engine — see below) |
 
 Both driver *processes* share one control plane: `lib/netchan` carries the
 `netchan-v1` server (`NetChannelServer`) and the process loop that claims a
@@ -247,11 +247,9 @@ whole, leaving the previously admitted set in force, and `netstack` audits the
 refusal: the groups that did not fit are genuinely not delivered, so it is
 never silent.
 
-It advertises **no offloads**. The GENET has checksum and segmentation
-engines, but a driver may advertise only what it has *verified* it can do
-(`plans/NETWORK.md` §0) and QEMU models no GENET, so claiming them would be a
-claim about untested silicon. The stack's software path is the canonical
-implementation, so the NIC is complete without them.
+It advertises `RX_CSUM_VALIDATED | TX_CSUM_TCP | TX_CSUM_UDP |
+TX_SEGMENT_TCP`; the IPv4 header checksum has no engine on this MAC and is
+never claimed. The "GENET offloads" section below is the detail.
 
 #### The link-layer address comes from discovery
 
@@ -366,24 +364,55 @@ guest sees `max_virtqueue_pairs = 1` and correctly stays single-queue —
 the host test is the authoritative proof, exactly as for the other
 offloads (`plans/NETWORK.md` N7c-2).
 
-### GENET hardware checksum offload: an open question, not a gap
+### GENET offloads
 
-The GENET has checksum engines, and reaching them means enabling
-`RBUF_64B_EN` — the 64-byte status-block descriptor mode. That mode changes
-the layout of **every received frame**, and how it interacts with the
-`RBUF_ALIGN_2B` two-byte pad this driver already programs is a hardware
-fact this tree does not establish. QEMU models no GENET, so no test here
-can establish it either, and getting it wrong costs *all* receive on the
-device.
+The question this section used to record — whether `RBUF_64B_EN`'s 64-byte
+receive status block can coexist with the `RBUF_ALIGN_2B` two-byte pad —
+turned out not to need answering: **the receive checksum offload does not
+need the status block.** `RBUF_CHK_CTRL = RBUF_RXCHK_EN` alone puts the
+engine in front of the receiver, and it reports its verdict in bit 15 of the
+*completed* descriptor (the bit that means "device owns this" before
+completion), leaving the frame exactly where it was. The receive-buffer
+layout is unchanged, so the risk the question named does not arise.
 
-So it is not guessed at. The driver advertises `NetOffloads::empty()`, the
-`lib/net` software path (which is the byte-for-byte oracle for every
-offload anyway, and allocates nothing in steady state) carries the work,
-and the question is recorded as an on-metal acceptance item in
-`plans/PI.md`. This is a deliberate refusal to write speculative MMIO on a
-receive path, not an oversight: the measured cost on this device was
-interrupt and IPC overhead, which `plans/NETWORK.md` N17 removes, and not
-checksum arithmetic.
+- **Receive.** A frame the engine parsed and verified is delivered
+  `FrameOffload::Validated` and the stack skips the fold; a frame it did not
+  parse arrives `FrameOffload::None` and keeps the software fold. The offload
+  can therefore only ever *save* work — it can never admit an unchecked
+  frame — which is why the narrower parsed verdict is preferred here to the
+  status block's whole-frame sum.
+- **Transmit checksum.** `TBUF_64B_EN` — the *transmit* buffer's own
+  register, so it touches no receive path — prefixes each transmitted buffer
+  with a 64-byte transmit status block. Its one live word carries a validity
+  bit, the offset where the fold starts, the offset of the checksum field
+  (both relative to the frame, the block excluded), and a UDP flag, without
+  which RFC 768's "a computed zero is sent as `0xFFFF`" rule would not be
+  applied and a 1-in-65 536 UDP datagram would go out with its checksum
+  silently disabled. The controller consumes the block; it never reaches the
+  wire. Offsets the frame does not bear out are refused and the frame is
+  dropped — a partial checksum must never be transmitted.
+- **Segmentation without a segmentation engine.** The GENET has none (the
+  reference driver advertises scatter-gather, `HW_CSUM`, and `RXCSUM`, and
+  no `TSO`), so the driver splits the super-frame itself through the shared
+  `tairix_net::txoffload::TcpSegmenter` and hands each wire segment to the
+  transmit checksum engine — the shape Linux's `net/core/tso.c` gives
+  `mvneta`, `mvpp2`, and `fec`. That still buys the offload's real win: one
+  ring slot and one stack transmit pass for tens of wire packets, with each
+  segment's TCP checksum still done in hardware. The split itself is
+  device-independent arithmetic (per-segment IP length and identification,
+  IPv4 header checksum, TCP sequence, `FIN`/`PSH` on the last segment and
+  `CWR` on the first, and the pseudo-header partial advanced to each
+  segment's own length), so it lives in `lib/net` once and is proven there
+  by folding each emitted segment against an independent oracle.
+- **A full ring defers, never drops.** A super-frame needs one descriptor
+  per segment. When the ring fills mid-split the remainder stays staged in
+  the driver and resumes at the next doorbell — which the transmit-completion
+  interrupt provokes — so nothing is lost and nothing spins, and no later
+  frame overtakes the stream being split.
+
+QEMU models no GENET, so the coverage is the register-level model suite in
+the driver plus the segmenter's own tests in `lib/net`; what metal still owes
+is the *measurement*, recorded as an acceptance item in `plans/PI.md`.
 
 ### Per-architecture offload state
 

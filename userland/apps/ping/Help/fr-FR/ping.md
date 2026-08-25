@@ -39,6 +39,12 @@ affiche une ligne d'expiration. Le bilan final indique les paquets émis
 et reçus, le pourcentage de perte, et les temps d'aller-retour minimum,
 moyen et maximum. `-q` n'affiche que l'en-tête et le bilan.
 
+Chaque réponse nomme le pair sous la forme `nom (adresse)` lorsque
+l'adresse possède un enregistrement `PTR`, résolu une seule fois pour
+l'exécution via le même résolveur ; une adresse sans nom, et toute
+exécution avec `-n`, affiche l'adresse nue. `-n` signifie en outre
+qu'aucune requête `PTR` n'est émise sur le réseau.
+
 La durée de vie IP n'est pas exposée par l'interface de socket d'écho ;
 contrairement à certaines implémentations de `ping`, une ligne de réponse
 ne porte donc pas de champ `ttl=`.
@@ -55,8 +61,9 @@ ne porte donc pas de champ `ttl=`.
 - `-w, --deadline` — délai global de l'exécution, en secondes.
 - `-4, --ipv4` — exiger une cible IPv4.
 - `-6, --ipv6` — exiger une cible IPv6.
-- `-n, --numeric` — sortie numérique. Toujours active sur TAIRiX ;
-  acceptée par familiarité.
+- `-n, --numeric` — sortie numérique : ne pas résoudre le pair à
+  l'envers, donc aucune requête `PTR` n'est émise et les lignes de réponse
+  portent l'adresse nue.
 - `-q, --quiet` — silencieux : seulement l'en-tête et le bilan final.
 - `-?, --help` — afficher l'aide courte de cette commande.
 

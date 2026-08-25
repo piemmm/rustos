@@ -35,14 +35,14 @@ use tairix_abi::net::{
     StreamCloseReason, SOCKET_MAX_DATAGRAM, SOCKET_PRIVILEGED_PORT_MAX,
 };
 use tairix_abi::net_ipc::{
-    NetAddrFamily, NetSockProto, NetSockState, NetSocketRecord, NetStackDefenceCounters,
-    NetworkSettings, IF_NAME_LEN,
+    address_parts, ip_from_parts, NetAddrFamily, NetSockProto, NetSockState, NetSocketRecord,
+    NetStackDefenceCounters, NetworkSettings, IF_NAME_LEN,
 };
 use tairix_abi::origin::ProcId;
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::{CapabilityId, Duration64, Errno};
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level, Sink};
-use tairix_net::addr::{Ecn, IpAddr, Ipv4Addr, Ipv6Addr};
+use tairix_net::addr::{Ecn, IpAddr, Ipv4Addr};
 use tairix_net::checksum::Pseudo;
 use tairix_net::stack::StackEvent;
 use tairix_net::tcp::conn::{ResetReason, State, Tcb, TcpConfig};
@@ -794,7 +794,7 @@ impl SocketService {
                 _ => Vec::new(),
             };
             for group in &groups {
-                let ip = family_addr_to_ip(family, *group);
+                let ip = ip_from_parts(family, *group);
                 tx.extend(interfaces.leave_multicast_all(ip, now));
             }
             self.sockets.swap_remove(index);
@@ -1238,7 +1238,7 @@ impl SocketService {
         let Some(seg) = TcpSegment::parse(pseudo, segment) else {
             return StreamIo::default();
         };
-        let (fam, src_bytes) = parts_of(source);
+        let (fam, src_bytes) = address_parts(source);
         let (dst_port, src_port) = (seg.destination_port, seg.source_port);
         // 1. An established connection (active open, or a child accepted off
         //    a listener) claims the segment by its full four-tuple.
@@ -1386,7 +1386,7 @@ impl SocketService {
             let Ok((iface, _mss)) = interfaces.egress_mss_for(conn.peer.addr, now) else {
                 continue;
             };
-            let (pfam, paddr) = parts_of(conn.peer.addr);
+            let (pfam, paddr) = address_parts(conn.peer.addr);
             let peer = SocketAddr {
                 family: pfam,
                 addr: paddr,
@@ -1664,7 +1664,7 @@ impl SocketService {
         else {
             return Vec::new();
         };
-        let (src_family, src_bytes) = parts_of(*source);
+        let (src_family, src_bytes) = address_parts(*source);
         let mut out = Vec::new();
         for entry in &self.sockets {
             let Proto::Echo(echo) = &entry.proto else {
@@ -1716,8 +1716,8 @@ impl SocketService {
         else {
             return Vec::new();
         };
-        let (dest_family, dest_bytes) = parts_of(*destination);
-        let (src_family, src_bytes) = parts_of(*source);
+        let (dest_family, dest_bytes) = address_parts(*destination);
+        let (src_family, src_bytes) = address_parts(*source);
         let dest_multicast = is_multicast_ip(*destination);
         let mut out = Vec::new();
         for entry in &self.sockets {
@@ -1964,27 +1964,7 @@ fn refuse(audit: &dyn Sink, message: &str, err: Errno) -> Result<SocketReply, Er
 
 /// The IP address a [`SocketAddr`] denotes.
 fn ip_of(addr: SocketAddr) -> IpAddr {
-    family_addr_to_ip(addr.family, addr.addr)
-}
-
-/// Build an [`IpAddr`] from a family and its 16-byte address block.
-fn family_addr_to_ip(family: NetAddrFamily, addr: [u8; 16]) -> IpAddr {
-    match family {
-        NetAddrFamily::V4 => IpAddr::V4(Ipv4Addr::new(addr[0], addr[1], addr[2], addr[3])),
-        NetAddrFamily::V6 => IpAddr::V6(Ipv6Addr::from(addr)),
-    }
-}
-
-/// The family and 16-byte block of an [`IpAddr`].
-fn parts_of(ip: IpAddr) -> (NetAddrFamily, [u8; 16]) {
-    match ip {
-        IpAddr::V4(a) => {
-            let mut bytes = [0u8; 16];
-            bytes[..4].copy_from_slice(&a.octets());
-            (NetAddrFamily::V4, bytes)
-        }
-        IpAddr::V6(a) => (NetAddrFamily::V6, a.octets()),
-    }
+    ip_from_parts(addr.family, addr.addr)
 }
 
 /// Whether a [`SocketAddr`] names a multicast group.

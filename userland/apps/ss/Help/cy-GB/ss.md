@@ -23,12 +23,15 @@ Yn ddiofyn mae'r rhestr yn dangos socedau cysylltiedig, nad ydynt yn
 gwrando. Mae `-l` yn dangos socedau sy'n gwrando yn unig ac `-a` y ddau;
 nodir nifer y gwrandawyr cudd ar y ffrwd wybodaeth safonol (fd 3), byth
 yn y tabl. Mae `-t` ac `-u` yn cyfyngu'r protocol ac `-4`/`-6` deulu'r
-cyfeiriadau; heb yr un, dangosir pob protocol a theulu. Mae'r pyrth a'r
-cyfeiriadau bob amser yn rhifol (nid oes gan TAIRiX gronfa enwau
-gwasanaeth), felly derbynnir `-n` ond mae bob amser mewn grym. Argreffir
-cyfeiriad heb ei bennu fel `*` a phorth heb ei rwymo fel `*`; rhoddir
-cyfeiriad IPv6 mewn cromfachau sgwâr fel bod y gwahanydd `:port` yn aros
-yn ddiamwys.
+cyfeiriadau; heb yr un, dangosir pob protocol a theulu. Mae'r pyrth bob
+amser yn rhifol (nid oes gan TAIRiX gronfa enwau gwasanaeth), felly
+derbynnir `-n` ond mae bob amser mewn grym arnynt. Mae'r cyfeiriadau'n
+rhifol hefyd oni bai bod `-r` yn gofyn am enwau gwesteiwyr: mae `-r` yn
+datrys pob un drwy ddatryswr y system (ymholiad `PTR`), yn ymholi pob
+cyfeiriad gwahanol unwaith, ac yn gadael cyfeiriad heb enw yn rhifol.
+Argreffir cyfeiriad heb ei bennu fel `*` a phorth heb ei rwymo fel `*`;
+rhoddir cyfeiriad IPv6 mewn cromfachau sgwâr fel bod y gwahanydd `:port`
+yn aros yn ddiamwys — nid oes angen cromfachau ar enw a ddatryswyd.
 
 Dim ond opsiynau y mae `ss` yn eu derbyn. Nid yw gramadeg mynegiadau
 hidlo iproute2 (hidlau cyflwr a chyfeiriad) wedi'i weithredu, felly mae
@@ -43,7 +46,10 @@ dawel.
 - `-a, --all` — dangos socedau sy'n gwrando a rhai cysylltiedig.
 - `-l, --listening` — dangos socedau sy'n gwrando yn unig.
 - `-n, --numeric` — peidio â datrys enwau gwasanaeth. Bob amser mewn
-  grym ar TAIRiX; derbynnir er cyfarwydd-dra.
+  grym ar TAIRiX; derbynnir er cyfarwydd-dra. Mater i `-r` yw enwau
+  gwesteiwyr.
+- `-r, --resolve` — datrys cyfeiriadau'n enwau gwesteiwyr dros DNS. I
+  ffwrdd yn ddiofyn, felly nid yw'r rhestr yn anfon ymholiad heb ofyn.
 - `-p, --processes` — ychwanegu colofn y broses berchennog (`pid=N`).
 - `-4, --ipv4` — cyfyngu'r rhestr i socedau IPv4.
 - `-6, --ipv6` — cyfyngu'r rhestr i socedau IPv6.
@@ -59,6 +65,7 @@ dawel.
 - `ss -l` — y socedau sy'n gwrando yn unig.
 - `ss -tlp` — socedau TCP sy'n gwrando, gyda'r broses berchennog.
 - `ss -u4` — y socedau UDP dros IPv4.
+- `ss -r` — yr un rhestr gyda'r cyfeiriadau wedi'u datrys yn enwau.
 
 ## EXIT STATUS
 

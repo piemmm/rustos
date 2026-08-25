@@ -1222,6 +1222,7 @@ dependencies = [
  "tairix-abi",
  "tairix-caps",
  "tairix-drvrt",
+ "tairix-net",
  "tairix-netchan",
  "tairix-rt",
 ]
@@ -2427,6 +2428,7 @@ dependencies = [
  "tairix-abi",
  "tairix-help",
  "tairix-procinfo",
+ "tairix-resolver",
  "tairix-rt",
 ]
 

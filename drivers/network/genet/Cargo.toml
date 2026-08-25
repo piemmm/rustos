@@ -40,6 +40,11 @@ workspace = true
 # resolves its window and link address from, and the `CapabilityId` /
 # `DriverError` / `Errno` vocabulary it fails closed with — one ABI definition.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The one transmit-offload engine: the driver-side TCP segmentation this
+# device needs because its silicon has no segmentation engine, and the frame
+# accessor its transmit-checksum engine's UDP rule reads. Never a second copy
+# of the header arithmetic.
+tairix-net = { path = "../../../lib/net", version = "=0.0.0" }
 
 # Everything the freestanding program links beyond the device logic is pulled
 # in only for the bare-metal targets the binary is actually built for; on the

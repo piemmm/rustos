@@ -6,9 +6,14 @@
 //! `<name> has IPv6 address <ipv6>`), a `has no <TYPE> record` line for an
 //! empty answer, and the `not found` / `connection timed out` diagnostics
 //! for a negative or unreachable lookup. With no `-t`, it looks up both the
-//! `A` and `AAAA` records the stub resolver supports; `-t <type>` restricts
-//! the lookup to one. `-?`/`--help` render the tool's own short help from
-//! its bundled `Help/` tree through the shared `lib/help` engine.
+//! `A` and `AAAA` records; `-t <type>` restricts the lookup to one.
+//! `-?`/`--help` render the tool's own short help from its bundled `Help/`
+//! tree through the shared `lib/help` engine.
+//!
+//! An **address literal** operand is a reverse lookup: the operand becomes
+//! the `in-addr.arpa` / `ip6.arpa` name it maps to, the default type becomes
+//! `PTR`, and a found record prints as
+//! `<reverse-name> domain name pointer <name>.`
 //!
 //! # Where the answers come from
 //!
@@ -60,12 +65,13 @@ use core::fmt;
 
 use tairix_abi::Errno;
 use tairix_help::{own_short_help, HelpSource};
-use tairix_net::dns::{RecordType, Resolution, ResolveStatus};
+use tairix_net::addr::IpAddr;
+use tairix_net::dns::{Name, RecordType, Resolution, ResolveStatus};
 use tairix_resolver::ResolveError;
 
 /// The one-line usage banner, printed on a usage error and as the fallback
 /// when the bundled help document is unavailable.
-pub const USAGE: &str = "usage: host [-t type] name";
+pub const USAGE: &str = "usage: host [-t type] name|address";
 
 /// The command word this bundle is named by, for the own-help lookup.
 const OWN_WORD: &str = "host";
@@ -113,10 +119,13 @@ pub enum Command {
 /// A resolved lookup request: the name and the ordered record types to query.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Lookup {
-    /// The name to resolve.
+    /// The name to resolve, and the name echoed in each answer line. An
+    /// address operand is already turned into its `in-addr.arpa` /
+    /// `ip6.arpa` reverse name here, so the engine has one kind of query.
     pub name: String,
     /// The record types to query, in order. With no `-t` this is `A` then
-    /// `AAAA`; with `-t <type>` it is the single requested type.
+    /// `AAAA` for a name and `PTR` for an address; with `-t <type>` it is
+    /// the single requested type.
     pub types: Vec<RecordType>,
 }
 
@@ -144,7 +153,7 @@ impl fmt::Display for ParseError {
             Self::UnknownType(ty) => {
                 write!(
                     f,
-                    "unsupported record type '{ty}' (only A and AAAA are supported)"
+                    "unsupported record type '{ty}' (only A, AAAA, and PTR are supported)"
                 )
             }
             Self::MissingTypeValue => f.write_str("option '-t' requires a record type"),
@@ -153,23 +162,30 @@ impl fmt::Display for ParseError {
 }
 
 /// Parse the record type named by `-t`/`--type`, case-insensitively. Only the
-/// `A` and `AAAA` records the stub resolver can look up are accepted; any
-/// other type (`MX`, `TXT`, …) is rejected honestly rather than silently
-/// treated as `A`.
+/// records the stub resolver can look up are accepted; any other type (`MX`,
+/// `TXT`, …) is rejected honestly rather than silently treated as `A`.
 fn parse_record_type(value: &str) -> Option<RecordType> {
-    match value.to_ascii_uppercase().as_str() {
-        "A" => Some(RecordType::A),
-        "AAAA" => Some(RecordType::Aaaa),
-        _ => None,
-    }
+    let wanted = value.to_ascii_uppercase();
+    // Matched against the type's own spelling, so the accepted set and the
+    // one diagnostics print can never drift apart.
+    SUPPORTED_TYPES
+        .iter()
+        .copied()
+        .find(|record| record.label() == wanted)
 }
+
+/// The record types the stub resolver looks up, in the order `-t` names them.
+const SUPPORTED_TYPES: [RecordType; 3] = [RecordType::A, RecordType::Aaaa, RecordType::Ptr];
 
 /// Parse a `host` argument vector.
 ///
-/// Options precede the single name operand; `--` ends option processing.
+/// Options precede the single operand; `--` ends option processing.
 /// `-t`/`--type` takes a record type, attached (`-tA`, `--type=A`) or as the
 /// following argument (`-t A`, `--type A`). `-?`, `-h`, and `--help` request
 /// the short help and win over any operand.
+///
+/// An operand that parses as an IPv4 or IPv6 address literal is rewritten to
+/// its reverse name and, absent `-t`, looked up as `PTR`.
 ///
 /// # Errors
 ///
@@ -221,10 +237,16 @@ pub fn parse(args: &[&str]) -> Result<Command, ParseError> {
     if want_help {
         return Ok(Command::Help);
     }
-    let name = name.ok_or(ParseError::MissingName)?;
-    let types = match record_type {
-        Some(ty) => alloc::vec![ty],
-        None => alloc::vec![RecordType::A, RecordType::Aaaa],
+    let operand = name.ok_or(ParseError::MissingName)?;
+    let address: Option<IpAddr> = operand.parse().ok();
+    let name = match address {
+        Some(address) => Name::reverse(address).to_string(),
+        None => operand,
+    };
+    let types = match (record_type, address) {
+        (Some(ty), _) => alloc::vec![ty],
+        (None, Some(_)) => alloc::vec![RecordType::Ptr],
+        (None, None) => alloc::vec![RecordType::A, RecordType::Aaaa],
     };
     Ok(Command::Lookup(Lookup { name, types }))
 }
@@ -315,17 +337,22 @@ fn render_resolution(
 ) -> Result<bool, Errno> {
     match resolution.status {
         ResolveStatus::Success => {
-            for addr in resolution.addresses.as_slice() {
+            if let Some(pointer) = resolution.pointer() {
+                // `bind-utils` prints the pointed-at name fully qualified.
+                out.write_all(format!("{name} domain name pointer {pointer}.\n").as_bytes())?;
+                return Ok(true);
+            }
+            for addr in resolution.addresses() {
                 let line = match record_type {
-                    RecordType::A => format!("{name} has address {addr}\n"),
                     RecordType::Aaaa => format!("{name} has IPv6 address {addr}\n"),
+                    RecordType::A | RecordType::Ptr => format!("{name} has address {addr}\n"),
                 };
                 out.write_all(line.as_bytes())?;
             }
-            Ok(!resolution.addresses.is_empty())
+            Ok(!resolution.addresses().is_empty())
         }
         ResolveStatus::NoData => {
-            let line = format!("{name} has no {} record\n", type_label(record_type));
+            let line = format!("{name} has no {} record\n", record_type.label());
             out.write_all(line.as_bytes())?;
             Ok(false)
         }
@@ -347,14 +374,6 @@ fn render_error(name: &str, error: ResolveError, err: &dyn Output) -> Result<(),
         other => format!("host: {other}\n"),
     };
     err.write_all(line.as_bytes())
-}
-
-/// The wire spelling of a record type for the `has no <TYPE> record` line.
-fn type_label(record_type: RecordType) -> &'static str {
-    match record_type {
-        RecordType::A => "A",
-        RecordType::Aaaa => "AAAA",
-    }
 }
 
 #[cfg(test)]

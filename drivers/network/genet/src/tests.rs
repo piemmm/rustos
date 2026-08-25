@@ -611,8 +611,14 @@ fn a_negotiated_gigabit_link_is_programmed_into_the_mac() {
     assert_eq!(facts.mac.as_octets(), &MAC);
     assert_eq!(facts.mtu, MTU);
     assert_eq!(facts.rx_queues, 1);
-    // A driver advertises only what it verified it can do.
-    assert_eq!(facts.offloads, NetOffloads::empty());
+    // The receive-checksum verdict, the transmit-checksum engine for both
+    // transports, and the driver-side segmentation built over it.
+    assert!(facts.offloads.contains(NetOffloads::RX_CSUM_VALIDATED));
+    assert!(facts.offloads.contains(NetOffloads::TX_CSUM_TCP));
+    assert!(facts.offloads.contains(NetOffloads::TX_CSUM_UDP));
+    assert!(facts.offloads.contains(NetOffloads::TX_SEGMENT_TCP));
+    // The IPv4 header checksum has no engine on this MAC.
+    assert!(!facts.offloads.contains(NetOffloads::TX_CSUM_IPV4));
 
     let cmd = device.regs.peek(regs::UMAC_CMD);
     assert_eq!(
@@ -829,19 +835,24 @@ fn a_queued_frame_is_written_into_a_transmit_slot_and_rung_through() {
     let report = service(&mut device, &mut region, BufferClass::NonSensitive);
     assert_eq!(report.transmitted, 1);
 
-    // The frame reached slot 0's buffer, its descriptor names the length and
-    // asks the MAC to append the frame check sequence, and the producer index
-    // advanced by exactly one.
-    let (start, _) = Genet::<MockRegs, MockDelay>::tx_buffer_range(0);
+    // The frame reached slot 0's buffer past the transmit status block, its
+    // descriptor names both lengths and asks the MAC to append the frame
+    // check sequence, and the producer index advanced by exactly one.
+    let (start, _) = Genet::<MockRegs, MockDelay>::tx_frame_range(0);
     assert_eq!(&device.frames.as_bytes()[start..start + 64], &[0xAB; 64]);
     let status = device
         .regs
         .peek(regs::desc(regs::TDMA_DESC, 0) + regs::DESC_LENGTH_STATUS);
     assert_eq!(
         (status >> regs::DMA_BUFLENGTH_SHIFT) & regs::DMA_BUFLENGTH_MASK,
-        64
+        regs::TSB_LEN + 64
     );
     assert!(status & regs::DMA_TX_APPEND_CRC != 0);
+    assert_eq!(
+        status & regs::DMA_TX_DO_CSUM,
+        0,
+        "a frame with no offload leaves the checksum engine idle"
+    );
     assert_eq!(
         status & (regs::DMA_SOP | regs::DMA_EOP),
         regs::DMA_SOP | regs::DMA_EOP
@@ -899,7 +910,7 @@ fn runt_and_oversize_frames_are_dropped_without_wedging_the_queue() {
     let report = service(&mut device, &mut region, BufferClass::NonSensitive);
     // The runt was consumed and dropped; the good frame behind it flowed.
     assert_eq!(report.transmitted, 1);
-    let (start, _) = Genet::<MockRegs, MockDelay>::tx_buffer_range(0);
+    let (start, _) = Genet::<MockRegs, MockDelay>::tx_frame_range(0);
     assert_eq!(device.frames.as_bytes()[start], 0x02);
 }
 
@@ -956,10 +967,11 @@ fn a_frame_too_large_for_a_device_buffer_is_dropped_not_wedged() {
     let mut rings =
         FrameRings::bind(&mut region, geometry, BufferClass::NonSensitive).expect("bind");
     let report = device.service(&mut rings).expect("service");
-    // The oversize frame was dropped and the one behind it flowed.
+    // The oversize frame carried no segmentation descriptor, so it was
+    // dropped, and the one behind it flowed.
     assert_eq!(report.transmitted, 1);
     assert_eq!(rings.tx.len(), Ok(0), "the queue drained, nothing stuck");
-    let (start, _) = Genet::<MockRegs, MockDelay>::tx_buffer_range(0);
+    let (start, _) = Genet::<MockRegs, MockDelay>::tx_frame_range(0);
     assert_eq!(device.frames.as_bytes()[start], 0x3D);
 }
 
@@ -1202,4 +1214,449 @@ fn the_bind_table_matches_only_a_genet_v5_node() {
     let v4 = HwMatchKey::compatible(b"brcm,genet-v4").expect("fits");
     assert!(!BIND_KEYS[0].key.matches(&v4));
     assert!(!BIND_KEYS[0].key.matches(&HwMatchKey::virtio(1)));
+}
+
+// --- offloads -----------------------------------------------------------
+
+/// The ring geometry the transport offers once segmentation is negotiated:
+/// transmit slots sized for a whole super-frame.
+fn tso_geometry() -> RingGeometry {
+    let facts = DeviceFacts {
+        mac: MacAddress::new(MAC),
+        mtu: MTU,
+        link: LinkState::Up,
+        offloads: OFFLOADS,
+        rx_queues: 1,
+        multicast_filter: McastFilter::Slots(MCAST_SLOTS),
+    };
+    RingGeometry::for_device(&facts, 8).expect("valid geometry")
+}
+
+/// The transmit status block's directive word for slot `slot`.
+fn tsb_directive(device: &Genet<MockRegs, MockDelay>, slot: u32) -> u32 {
+    let (start, _) = Genet::<MockRegs, MockDelay>::tx_buffer_range(slot);
+    let block = &device.frames.as_bytes()[start..start + regs::TSB_LEN as usize];
+    u32::from_le_bytes([
+        block[regs::TSB_CSUM_INFO],
+        block[regs::TSB_CSUM_INFO + 1],
+        block[regs::TSB_CSUM_INFO + 2],
+        block[regs::TSB_CSUM_INFO + 3],
+    ])
+}
+
+/// The descriptor status word for transmit slot `slot`.
+fn tx_status(device: &Genet<MockRegs, MockDelay>, slot: u32) -> u32 {
+    device
+        .regs
+        .peek(regs::desc(regs::TDMA_DESC, slot) + regs::DESC_LENGTH_STATUS)
+}
+
+/// One Ethernet + IPv4 + TCP frame carrying `payload` bytes, of the shape
+/// the stack emits for a checksum or segmentation offload.
+fn tcp_frame(protocol: u8, payload: usize) -> Vec<u8> {
+    let mut frame = alloc::vec![0u8; 14 + 20 + 20 + payload];
+    frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
+    frame[14] = 0x45;
+    let total = u16::try_from(20 + 20 + payload).expect("bounded");
+    frame[16..18].copy_from_slice(&total.to_be_bytes());
+    frame[18..20].copy_from_slice(&0x1234u16.to_be_bytes());
+    frame[22] = 64;
+    frame[23] = protocol;
+    frame[26..30].copy_from_slice(&[10, 0, 2, 15]);
+    frame[30..34].copy_from_slice(&[10, 0, 2, 2]);
+    frame[34..36].copy_from_slice(&1234u16.to_be_bytes());
+    frame[36..38].copy_from_slice(&80u16.to_be_bytes());
+    frame[38..42].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+    frame[46] = 5 << 4;
+    frame[47] = 0x18; // ACK | PSH
+    frame
+}
+
+#[test]
+fn bring_up_arms_both_checksum_engines() {
+    let device = open();
+    assert_eq!(
+        device.regs.peek(regs::RBUF_CHK_CTRL) & regs::RBUF_RXCHK_EN,
+        regs::RBUF_RXCHK_EN,
+        "the receive checksum engine is enabled"
+    );
+    assert_eq!(
+        device.regs.peek(regs::RBUF_CHK_CTRL) & regs::RBUF_SKIP_FCS,
+        0,
+        "the MAC strips the frame check sequence, so the engine must not skip it"
+    );
+    assert_eq!(
+        device.regs.peek(regs::TBUF_CTRL) & regs::TBUF_64B_EN,
+        regs::TBUF_64B_EN,
+        "the transmit status block carries the checksum directive"
+    );
+    // Bit 0 of `RBUF_CTRL` is the receive status block, which would move
+    // every frame 64 octets further into its buffer. It stays off.
+    assert_eq!(device.regs.peek(regs::RBUF_CTRL) & 1, 0);
+}
+
+#[test]
+fn a_verified_receive_checksum_reaches_the_stack_as_validated() {
+    let mut device = open();
+    let (start, _) = Genet::<MockRegs, MockDelay>::rx_buffer_range(0);
+    let from = start + regs::RX_FRAME_OFFSET as usize;
+    device.frames.as_bytes_mut()[from..from + 68].fill(0xC3);
+    let reported = 68 + regs::RX_FRAME_OFFSET;
+    device.regs.set_rx_desc(
+        0,
+        (reported << regs::DMA_BUFLENGTH_SHIFT)
+            | regs::DMA_SOP
+            | regs::DMA_EOP
+            | regs::DMA_RX_CHK_OK,
+    );
+    device.regs.set_rx_produced(1);
+    let mut region = alloc::vec![0u8; geometry().region_len()];
+    let report = service(&mut device, &mut region, BufferClass::NonSensitive);
+    assert_eq!(report.received, 1);
+
+    let mut rings =
+        FrameRings::bind(&mut region, geometry(), BufferClass::NonSensitive).expect("bind");
+    let mut offload = FrameOffload::None;
+    let mut out = alloc::vec![0u8; 2048];
+    rings
+        .rx_ring(0)
+        .expect("rx0")
+        .pop_with(&mut offload, &mut out)
+        .expect("pop")
+        .expect("a frame");
+    assert_eq!(offload, FrameOffload::Validated);
+}
+
+#[test]
+fn an_unparsed_receive_frame_keeps_the_software_fold() {
+    let mut device = open();
+    let (start, _) = Genet::<MockRegs, MockDelay>::rx_buffer_range(0);
+    let from = start + regs::RX_FRAME_OFFSET as usize;
+    device.frames.as_bytes_mut()[from..from + 68].fill(0xC3);
+    let reported = 68 + regs::RX_FRAME_OFFSET;
+    device.regs.set_rx_desc(
+        0,
+        (reported << regs::DMA_BUFLENGTH_SHIFT) | regs::DMA_SOP | regs::DMA_EOP,
+    );
+    device.regs.set_rx_produced(1);
+    let mut region = alloc::vec![0u8; geometry().region_len()];
+    service(&mut device, &mut region, BufferClass::NonSensitive);
+
+    let mut rings =
+        FrameRings::bind(&mut region, geometry(), BufferClass::NonSensitive).expect("bind");
+    let mut offload = FrameOffload::None;
+    let mut out = alloc::vec![0u8; 2048];
+    rings
+        .rx_ring(0)
+        .expect("rx0")
+        .pop_with(&mut offload, &mut out)
+        .expect("pop");
+    assert_eq!(offload, FrameOffload::None);
+}
+
+#[test]
+fn a_partial_checksum_frame_directs_the_transmit_engine() {
+    let mut device = open();
+    let frame = tcp_frame(6, 100);
+    let mut region = alloc::vec![0u8; geometry().region_len()];
+    {
+        let mut rings =
+            FrameRings::bind(&mut region, geometry(), BufferClass::NonSensitive).expect("bind");
+        rings
+            .tx
+            .push_with(
+                FrameOffload::TxChecksum {
+                    csum_start: 34,
+                    csum_offset: 16,
+                },
+                &frame,
+            )
+            .expect("queue");
+    }
+    let report = service(&mut device, &mut region, BufferClass::NonSensitive);
+    assert_eq!(report.transmitted, 1);
+
+    let directive = tsb_directive(&device, 0);
+    assert_eq!(directive & regs::TSB_CSUM_LV, regs::TSB_CSUM_LV);
+    assert_eq!(
+        (directive >> regs::TSB_CSUM_START_SHIFT) & regs::TSB_CSUM_OFFSET_MASK,
+        34,
+        "the fold starts at the transport header, the status block excluded"
+    );
+    assert_eq!(directive & regs::TSB_CSUM_OFFSET_MASK, 50);
+    assert_eq!(
+        directive & regs::TSB_CSUM_PROTO_UDP,
+        0,
+        "TCP takes no RFC 768 zero-checksum rule"
+    );
+    assert_eq!(
+        tx_status(&device, 0) & regs::DMA_TX_DO_CSUM,
+        regs::DMA_TX_DO_CSUM
+    );
+}
+
+#[test]
+fn a_udp_frame_is_flagged_so_a_zero_checksum_is_sent_as_all_ones() {
+    let mut device = open();
+    let frame = tcp_frame(17, 40);
+    let mut region = alloc::vec![0u8; geometry().region_len()];
+    {
+        let mut rings =
+            FrameRings::bind(&mut region, geometry(), BufferClass::NonSensitive).expect("bind");
+        rings
+            .tx
+            .push_with(
+                FrameOffload::TxChecksum {
+                    csum_start: 34,
+                    csum_offset: 6,
+                },
+                &frame,
+            )
+            .expect("queue");
+    }
+    service(&mut device, &mut region, BufferClass::NonSensitive);
+    assert_eq!(
+        tsb_directive(&device, 0) & regs::TSB_CSUM_PROTO_UDP,
+        regs::TSB_CSUM_PROTO_UDP
+    );
+}
+
+#[test]
+fn a_checksum_offset_past_the_frame_drops_it_rather_than_sending_a_partial() {
+    let mut device = open();
+    let frame = tcp_frame(6, 0);
+    let mut region = alloc::vec![0u8; geometry().region_len()];
+    {
+        let mut rings =
+            FrameRings::bind(&mut region, geometry(), BufferClass::NonSensitive).expect("bind");
+        rings
+            .tx
+            .push_with(
+                FrameOffload::TxChecksum {
+                    csum_start: 34,
+                    // Past the end of a 54-byte frame.
+                    csum_offset: 400,
+                },
+                &frame,
+            )
+            .expect("queue");
+        rings.tx.push(&[0x5E; 64]).expect("queue good");
+    }
+    let report = service(&mut device, &mut region, BufferClass::NonSensitive);
+    assert_eq!(
+        report.transmitted, 1,
+        "the unhonourable frame is dropped, never sent half-checksummed"
+    );
+    let (start, _) = Genet::<MockRegs, MockDelay>::tx_frame_range(0);
+    assert_eq!(device.frames.as_bytes()[start], 0x5E);
+}
+
+#[test]
+fn a_super_frame_is_split_into_wire_frames_the_engine_checksums() {
+    let mut device = open();
+    let geometry = tso_geometry();
+    // Three segments at an MSS of 1000.
+    let frame = tcp_frame(6, 2_500);
+    let mut region = alloc::vec![0u8; geometry.region_len()];
+    {
+        let mut rings =
+            FrameRings::bind(&mut region, geometry, BufferClass::NonSensitive).expect("bind");
+        rings
+            .tx
+            .push_with(
+                FrameOffload::TxSegment {
+                    csum_start: 34,
+                    csum_offset: 16,
+                    gso_size: 1_000,
+                    hdr_len: 54,
+                    ipv6: false,
+                },
+                &frame,
+            )
+            .expect("queue");
+    }
+    let mut rings =
+        FrameRings::bind(&mut region, geometry, BufferClass::NonSensitive).expect("bind");
+    let report = device.service(&mut rings).expect("service");
+    assert_eq!(
+        report.transmitted, 3,
+        "one ring slot became three wire frames"
+    );
+
+    let sizes = [1_000u32, 1_000, 500];
+    for (slot, payload) in sizes.iter().enumerate() {
+        let slot = u32::try_from(slot).expect("bounded");
+        let status = tx_status(&device, slot);
+        assert_eq!(
+            (status >> regs::DMA_BUFLENGTH_SHIFT) & regs::DMA_BUFLENGTH_MASK,
+            regs::TSB_LEN + 54 + payload
+        );
+        assert_eq!(
+            status & (regs::DMA_SOP | regs::DMA_EOP),
+            regs::DMA_SOP | regs::DMA_EOP,
+            "each segment is a whole frame of its own"
+        );
+        assert_eq!(
+            status & regs::DMA_TX_DO_CSUM,
+            regs::DMA_TX_DO_CSUM,
+            "every segment's checksum is completed by the engine"
+        );
+        assert_eq!(
+            tsb_directive(&device, slot) & regs::TSB_CSUM_LV,
+            regs::TSB_CSUM_LV
+        );
+    }
+    // The payload ran in order across the three slots.
+    let mut seen = 0usize;
+    for (slot, payload) in sizes.iter().enumerate() {
+        let (start, _) =
+            Genet::<MockRegs, MockDelay>::tx_frame_range(u32::try_from(slot).expect("bounded"));
+        let bytes = &device.frames.as_bytes()[start + 54..start + 54 + *payload as usize];
+        assert_eq!(bytes, &frame[54 + seen..54 + seen + *payload as usize]);
+        seen += *payload as usize;
+    }
+    assert_eq!(seen, 2_500);
+}
+
+#[test]
+fn a_full_transmit_ring_defers_the_rest_of_a_split_rather_than_dropping_it() {
+    let mut device = open();
+    let geometry = tso_geometry();
+    // More segments than the device has descriptors, so the split cannot
+    // finish in one doorbell.
+    let payload = (RING_SLOTS as usize + 3) * 100;
+    let frame = tcp_frame(6, payload);
+    let mut region = alloc::vec![0u8; geometry.region_len()];
+    {
+        let mut rings =
+            FrameRings::bind(&mut region, geometry, BufferClass::NonSensitive).expect("bind");
+        rings
+            .tx
+            .push_with(
+                FrameOffload::TxSegment {
+                    csum_start: 34,
+                    csum_offset: 16,
+                    gso_size: 100,
+                    hdr_len: 54,
+                    ipv6: false,
+                },
+                &frame,
+            )
+            .expect("queue");
+    }
+    let mut rings =
+        FrameRings::bind(&mut region, geometry, BufferClass::NonSensitive).expect("bind");
+    let first = device.service(&mut rings).expect("service");
+    assert_eq!(first.transmitted, RING_SLOTS, "the ring filled");
+    assert!(
+        device.staged.is_some(),
+        "the remainder is kept, not dropped"
+    );
+
+    // The device drains its ring; the next doorbell finishes the split.
+    device.regs.set_tx_consumed(RING_SLOTS);
+    let second = device.service(&mut rings).expect("service");
+    assert_eq!(second.transmitted, 3);
+    assert!(device.staged.is_none(), "the super-frame is complete");
+}
+
+#[test]
+fn a_segmentation_descriptor_the_frame_does_not_bear_out_is_dropped() {
+    let mut device = open();
+    let geometry = tso_geometry();
+    let frame = tcp_frame(6, 2_000);
+    let mut region = alloc::vec![0u8; geometry.region_len()];
+    {
+        let mut rings =
+            FrameRings::bind(&mut region, geometry, BufferClass::NonSensitive).expect("bind");
+        rings
+            .tx
+            .push_with(
+                FrameOffload::TxSegment {
+                    csum_start: 34,
+                    csum_offset: 16,
+                    gso_size: 1_000,
+                    // Claims a 40-octet TCP header the frame's data offset
+                    // does not agree with.
+                    hdr_len: 74,
+                    ipv6: false,
+                },
+                &frame,
+            )
+            .expect("queue");
+        rings.tx.push(&[0x77; 64]).expect("queue good");
+    }
+    let mut rings =
+        FrameRings::bind(&mut region, geometry, BufferClass::NonSensitive).expect("bind");
+    let report = device.service(&mut rings).expect("service");
+    assert_eq!(report.transmitted, 1, "only the well-formed frame flowed");
+    assert!(device.staged.is_none());
+    let (start, _) = Genet::<MockRegs, MockDelay>::tx_frame_range(0);
+    assert_eq!(device.frames.as_bytes()[start], 0x77);
+}
+
+#[test]
+fn a_sensitive_ring_scrubs_the_staged_super_frame_after_the_split() {
+    let mut device = open();
+    let geometry = tso_geometry();
+    let frame = tcp_frame(6, 1_500);
+    let mut region = alloc::vec![0u8; geometry.region_len()];
+    {
+        let mut rings =
+            FrameRings::bind(&mut region, geometry, BufferClass::Sensitive).expect("bind");
+        rings
+            .tx
+            .push_with(
+                FrameOffload::TxSegment {
+                    csum_start: 34,
+                    csum_offset: 16,
+                    gso_size: 1_000,
+                    hdr_len: 54,
+                    ipv6: false,
+                },
+                &frame,
+            )
+            .expect("queue");
+    }
+    let mut rings = FrameRings::bind(&mut region, geometry, BufferClass::Sensitive).expect("bind");
+    device.service(&mut rings).expect("service");
+    let staged = &device.frames.as_bytes()[BUFFER_BYTES..BUFFER_BYTES + frame.len()];
+    assert!(
+        staged.iter().all(|&b| b == 0),
+        "the staged plaintext must not outlive its transmission"
+    );
+}
+
+#[test]
+fn a_segment_size_past_a_transmit_buffer_is_refused_rather_than_wedging() {
+    let mut device = open();
+    let geometry = tso_geometry();
+    let frame = tcp_frame(6, 8_000);
+    let mut region = alloc::vec![0u8; geometry.region_len()];
+    {
+        let mut rings =
+            FrameRings::bind(&mut region, geometry, BufferClass::NonSensitive).expect("bind");
+        rings
+            .tx
+            .push_with(
+                FrameOffload::TxSegment {
+                    csum_start: 34,
+                    csum_offset: 16,
+                    // Larger than any frame the MAC will send.
+                    gso_size: 4_000,
+                    hdr_len: 54,
+                    ipv6: false,
+                },
+                &frame,
+            )
+            .expect("queue");
+        rings.tx.push(&[0x2A; 64]).expect("queue good");
+    }
+    let mut rings =
+        FrameRings::bind(&mut region, geometry, BufferClass::NonSensitive).expect("bind");
+    let report = device.service(&mut rings).expect("service");
+    assert_eq!(report.transmitted, 1);
+    assert!(device.staged.is_none());
+    let (start, _) = Genet::<MockRegs, MockDelay>::tx_frame_range(0);
+    assert_eq!(device.frames.as_bytes()[start], 0x2A);
 }

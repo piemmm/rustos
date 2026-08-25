@@ -13,7 +13,9 @@
 //! exports it; the tool invents no second source), and runs the parsed
 //! command against the production seams: the shared
 //! `tairix_procinfo::IpcTransport` for the `sysinfo-v1` `NET_SOCKETS` query,
-//! the shared `tairix_help::BundleHelp` for the short-help switches, and
+//! one lazily opened `lib/resolver` transport for the `-r` host-name
+//! lookups, the shared `tairix_help::BundleHelp` for the short-help switches,
+//! and
 //! `RtOutput`/`RtErrors`, which write the table to the inherited standard
 //! output (with the omission advisory on fd 3, best-effort) and the
 //! diagnostics to standard error. The tool binds only to its inherited
@@ -33,11 +35,14 @@ mod program {
 
     use alloc::format;
 
+    use alloc::string::String;
+
     use tairix_abi::Errno;
     use tairix_help::BundleHelp;
     use tairix_procinfo::IpcTransport;
+    use tairix_resolver::RtDnsTransport;
     use tairix_rt::io::{write_stderr_line, StdInfo, Stderr, Stdout, Write};
-    use tairix_ss::{parse, run, Output, USAGE};
+    use tairix_ss::{parse, run, NameLookup, Output, USAGE};
 
     /// The production standard-output stream: the table goes to fd 1 and
     /// the omission advisory to fd 3 (best-effort). The tool names only
@@ -68,6 +73,26 @@ mod program {
         }
     }
 
+    /// The production reverse-lookup seam: the shared `lib/resolver` stub
+    /// resolver over **one** transport reused across the whole listing, so
+    /// the delivery port is bound once rather than per row.
+    ///
+    /// The transport is opened lazily on the first lookup, so a run without
+    /// `-r` — which never calls this — binds no port and opens no socket.
+    #[derive(Default)]
+    struct RtNames {
+        transport: Option<RtDnsTransport>,
+    }
+
+    impl NameLookup for RtNames {
+        fn reverse(&mut self, address: core::net::IpAddr) -> Option<String> {
+            if self.transport.is_none() {
+                self.transport = RtDnsTransport::open().ok();
+            }
+            self.transport.as_mut()?.reverse_name(address)
+        }
+    }
+
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
@@ -92,6 +117,7 @@ mod program {
             command,
             locale,
             &IpcTransport,
+            &mut RtNames::default(),
             &BundleHelp::new("ss"),
             &RtOutput,
             &RtErrors,

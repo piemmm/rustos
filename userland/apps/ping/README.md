@@ -9,9 +9,8 @@ sequence number and round-trip time, then a closing statistics block.
 `-c` bounds the request count, `-i` sets the interval, `-s` the payload
 size, `-W` the per-reply timeout, `-w` an overall deadline, `-p` a fixed
 payload pattern, `-4`/`-6` force the address family, `-q` is quiet, and
-`-n` is accepted and inert (no reverse lookup is ever performed, so the
-addresses printed are already numeric). `-?`/`--help` render the tool's
-own short help.
+and `-n` keeps the output numeric. `-?`/`--help` render the tool's own
+short help.
 
 The target operand is an IPv4 or IPv6 address literal **or a host name**.
 
@@ -41,9 +40,11 @@ literal-first, family-preference policy (`resolve_host`) is shared with
 an address literal resolves with no query at all — so a literal target
 still works on a machine with no resolver configured.
 
-Reverse (`PTR`) lookup is not available: the stub resolver has no `PTR`
-record type, so reply addresses are always printed numerically and `-n`
-has nothing to suppress.
+The peer is reverse-resolved once per run through the same resolver, so a
+reply line reads `<n> bytes from <name> (<address>)` when the address has
+a `PTR` record and carries the bare address when it does not. `-n`
+suppresses the lookup entirely: no `PTR` query goes on the wire and every
+line stays numeric.
 
 ## How it reaches the network
 

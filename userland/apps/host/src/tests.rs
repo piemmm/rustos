@@ -12,7 +12,7 @@ use core::cell::RefCell;
 use tairix_abi::Errno;
 use tairix_help::{HelpSource, SourceError};
 use tairix_net::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
-use tairix_net::dns::{AddrList, RecordType, Resolution, ResolveStatus};
+use tairix_net::dns::{AddrList, Answer, Name, RecordType, Resolution, ResolveStatus};
 use tairix_resolver::ResolveError;
 
 use super::{parse, run, Command, Lookup, Output, ParseError, Resolver, USAGE};
@@ -24,7 +24,9 @@ use super::{parse, run, Command, Lookup, Output, ParseError, Resolver, USAGE};
 struct ScriptResolver {
     a: Option<Result<Resolution, ResolveError>>,
     aaaa: Option<Result<Resolution, ResolveError>>,
+    ptr: Option<Result<Resolution, ResolveError>>,
     queried: RefCell<Vec<RecordType>>,
+    names: RefCell<Vec<String>>,
 }
 
 impl ScriptResolver {
@@ -32,31 +34,36 @@ impl ScriptResolver {
         Self {
             a: None,
             aaaa: None,
+            ptr: None,
             queried: RefCell::new(Vec::new()),
+            names: RefCell::new(Vec::new()),
         }
     }
 
-    fn with_a(mut self, result: Result<Resolution, ResolveError>) -> Self {
-        self.a = Some(result);
+    fn with_a(mut self, result: &Result<Resolution, ResolveError>) -> Self {
+        self.a = Some(*result);
         self
     }
 
-    fn with_aaaa(mut self, result: Result<Resolution, ResolveError>) -> Self {
-        self.aaaa = Some(result);
+    fn with_aaaa(mut self, result: &Result<Resolution, ResolveError>) -> Self {
+        self.aaaa = Some(*result);
+        self
+    }
+
+    fn with_ptr(mut self, result: &Result<Resolution, ResolveError>) -> Self {
+        self.ptr = Some(*result);
         self
     }
 }
 
 impl Resolver for ScriptResolver {
-    fn resolve(
-        &mut self,
-        _name: &str,
-        record_type: RecordType,
-    ) -> Result<Resolution, ResolveError> {
+    fn resolve(&mut self, name: &str, record_type: RecordType) -> Result<Resolution, ResolveError> {
         self.queried.borrow_mut().push(record_type);
+        self.names.borrow_mut().push(name.to_string());
         let scripted = match record_type {
             RecordType::A => self.a,
             RecordType::Aaaa => self.aaaa,
+            RecordType::Ptr => self.ptr,
         };
         scripted.unwrap_or(Ok(timeout()))
     }
@@ -95,7 +102,16 @@ impl HelpSource for NoHelp {
 fn success(addrs: &[IpAddr]) -> Resolution {
     Resolution {
         status: ResolveStatus::Success,
-        addresses: AddrList::from_addrs(addrs),
+        answer: Answer::Addresses(AddrList::from_addrs(addrs)),
+        ttl_secs: 300,
+    }
+}
+
+/// A successful reverse resolution pointing at `name`.
+fn pointer(name: &str) -> Resolution {
+    Resolution {
+        status: ResolveStatus::Success,
+        answer: Answer::Pointer(Some(Name::encode(name).expect("a valid name"))),
         ttl_secs: 300,
     }
 }
@@ -103,7 +119,7 @@ fn success(addrs: &[IpAddr]) -> Resolution {
 fn nodata() -> Resolution {
     Resolution {
         status: ResolveStatus::NoData,
-        addresses: AddrList::default(),
+        answer: Answer::Addresses(AddrList::default()),
         ttl_secs: 0,
     }
 }
@@ -111,7 +127,7 @@ fn nodata() -> Resolution {
 fn nxdomain() -> Resolution {
     Resolution {
         status: ResolveStatus::NonExistent,
-        addresses: AddrList::default(),
+        answer: Answer::Addresses(AddrList::default()),
         ttl_secs: 0,
     }
 }
@@ -119,7 +135,7 @@ fn nxdomain() -> Resolution {
 fn timeout() -> Resolution {
     Resolution {
         status: ResolveStatus::Timeout,
-        addresses: AddrList::default(),
+        answer: Answer::Addresses(AddrList::default()),
         ttl_secs: 0,
     }
 }
@@ -212,8 +228,8 @@ fn parse_errors_are_precise() {
 #[test]
 fn a_success_prints_the_address_line() {
     let mut resolver = ScriptResolver::new()
-        .with_a(Ok(success(&[v4(93, 184, 216, 34)])))
-        .with_aaaa(Ok(nodata()));
+        .with_a(&Ok(success(&[v4(93, 184, 216, 34)])))
+        .with_aaaa(&Ok(nodata()));
     let (found, out, err) = run_lookup(&mut resolver, &["example.com"]);
     assert!(found);
     assert!(out.contains("example.com has address 93.184.216.34"));
@@ -229,7 +245,7 @@ fn a_success_prints_the_address_line() {
 #[test]
 fn an_aaaa_success_uses_the_ipv6_phrasing() {
     let addr = IpAddr::V6(Ipv6Addr::new(0x2606, 0x2800, 0x220, 0, 0, 0, 0, 0x1));
-    let mut resolver = ScriptResolver::new().with_aaaa(Ok(success(&[addr])));
+    let mut resolver = ScriptResolver::new().with_aaaa(&Ok(success(&[addr])));
     let (found, out, _err) = run_lookup(&mut resolver, &["-t", "AAAA", "example.com"]);
     assert!(found);
     assert!(out.contains("example.com has IPv6 address 2606:2800:220::1"));
@@ -239,8 +255,8 @@ fn an_aaaa_success_uses_the_ipv6_phrasing() {
 #[test]
 fn nxdomain_is_reported_once_and_stops_further_queries() {
     let mut resolver = ScriptResolver::new()
-        .with_a(Ok(nxdomain()))
-        .with_aaaa(Ok(success(&[v4(1, 2, 3, 4)])));
+        .with_a(&Ok(nxdomain()))
+        .with_aaaa(&Ok(success(&[v4(1, 2, 3, 4)])));
     let (found, out, _err) = run_lookup(&mut resolver, &["nope.invalid"]);
     assert!(!found);
     assert!(out.contains("Host nope.invalid not found: 3(NXDOMAIN)"));
@@ -250,7 +266,7 @@ fn nxdomain_is_reported_once_and_stops_further_queries() {
 
 #[test]
 fn a_timeout_goes_to_stderr_and_stops() {
-    let mut resolver = ScriptResolver::new().with_a(Ok(timeout()));
+    let mut resolver = ScriptResolver::new().with_a(&Ok(timeout()));
     let (found, out, err) = run_lookup(&mut resolver, &["slow.example"]);
     assert!(!found);
     assert!(out.is_empty(), "no answer on stdout");
@@ -260,7 +276,7 @@ fn a_timeout_goes_to_stderr_and_stops() {
 
 #[test]
 fn no_configured_server_is_a_stderr_diagnostic() {
-    let mut resolver = ScriptResolver::new().with_a(Err(ResolveError::NoServers));
+    let mut resolver = ScriptResolver::new().with_a(&Err(ResolveError::NoServers));
     let (found, out, err) = run_lookup(&mut resolver, &["example.com"]);
     assert!(!found);
     assert!(out.is_empty());
@@ -281,4 +297,93 @@ fn help_falls_back_to_usage() {
         resolver.queried.borrow().is_empty(),
         "help touches no resolver"
     );
+}
+
+// -- Reverse lookup ------------------------------------------------------
+
+#[test]
+fn an_ipv4_operand_becomes_a_ptr_lookup_of_its_reverse_name() {
+    let command = parse(&["192.0.2.133"]).expect("parse");
+    assert_eq!(
+        command,
+        Command::Lookup(Lookup {
+            name: "133.2.0.192.in-addr.arpa".to_string(),
+            types: alloc::vec![RecordType::Ptr],
+        })
+    );
+}
+
+#[test]
+fn an_ipv6_operand_becomes_a_ptr_lookup_of_its_reverse_name() {
+    let command = parse(&["2001:db8::1"]).expect("parse");
+    let expected = "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.\
+                    0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa";
+    assert_eq!(
+        command,
+        Command::Lookup(Lookup {
+            name: expected.to_string(),
+            types: alloc::vec![RecordType::Ptr],
+        })
+    );
+}
+
+#[test]
+fn an_explicit_type_still_applies_to_an_address_operand() {
+    // `bind-utils` rewrites the operand to its reverse name and queries the
+    // requested type against it, so `-t A <address>` is a well-defined (if
+    // unusual) question rather than a usage error.
+    let command = parse(&["-t", "A", "10.0.2.2"]).expect("parse");
+    assert_eq!(
+        command,
+        Command::Lookup(Lookup {
+            name: "2.2.0.10.in-addr.arpa".to_string(),
+            types: alloc::vec![RecordType::A],
+        })
+    );
+}
+
+#[test]
+fn ptr_is_an_accepted_type_name() {
+    let command = parse(&["-t", "ptr", "1.2.0.192.in-addr.arpa"]).expect("parse");
+    assert_eq!(
+        command,
+        Command::Lookup(Lookup {
+            name: "1.2.0.192.in-addr.arpa".to_string(),
+            types: alloc::vec![RecordType::Ptr],
+        })
+    );
+}
+
+#[test]
+fn a_found_pointer_prints_the_bind_utils_line() {
+    let mut resolver = ScriptResolver::new().with_ptr(&Ok(pointer("gateway.example")));
+    let (found, out, err) = run_lookup(&mut resolver, &["10.0.2.2"]);
+    assert!(found);
+    assert_eq!(
+        out,
+        "2.2.0.10.in-addr.arpa domain name pointer gateway.example.\n"
+    );
+    assert!(err.is_empty());
+    assert_eq!(
+        resolver.names.borrow().as_slice(),
+        &["2.2.0.10.in-addr.arpa".to_string()],
+        "the reverse name is what gets queried"
+    );
+    assert_eq!(resolver.queried.borrow().as_slice(), &[RecordType::Ptr]);
+}
+
+#[test]
+fn an_address_with_no_pointer_reports_no_ptr_record() {
+    let mut resolver = ScriptResolver::new().with_ptr(&Ok(nodata()));
+    let (found, out, _err) = run_lookup(&mut resolver, &["10.0.2.2"]);
+    assert!(!found);
+    assert_eq!(out, "2.2.0.10.in-addr.arpa has no PTR record\n");
+}
+
+#[test]
+fn an_unknown_reverse_name_reports_nxdomain_against_the_reverse_name() {
+    let mut resolver = ScriptResolver::new().with_ptr(&Ok(nxdomain()));
+    let (found, out, _err) = run_lookup(&mut resolver, &["10.0.2.2"]);
+    assert!(!found);
+    assert_eq!(out, "Host 2.2.0.10.in-addr.arpa not found: 3(NXDOMAIN)\n");
 }

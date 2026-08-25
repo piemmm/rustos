@@ -41,6 +41,12 @@ Zeitüberschreitungszeile aus. Die Abschlussstatistik nennt gesendete und
 empfangene Pakete, den Verlustanteil sowie die minimale, mittlere und
 maximale Umlaufzeit. `-q` zeigt nur den Kopf und die Statistik.
 
+Jede Antwort nennt die Gegenstelle als `Name (Adresse)`, wenn die Adresse
+einen `PTR`-Eintrag hat — einmal pro Lauf über denselben Stub-Resolver
+aufgelöst. Eine Adresse ohne Namen, und jeder Lauf unter `-n`, zeigt die
+nackte Adresse; `-n` heißt außerdem, dass gar keine `PTR`-Abfrage auf die
+Leitung geht.
+
 Die IP-Lebensdauer wird über die Echo-Socket-Schnittstelle nicht
 offengelegt; anders als manche `ping`-Implementierungen trägt eine
 Antwortzeile daher kein `ttl=`-Feld.
@@ -57,9 +63,9 @@ Antwortzeile daher kein `ttl=`-Feld.
 - `-w, --deadline` — Gesamtlaufzeit-Frist in Sekunden.
 - `-4, --ipv4` — ein IPv4-Ziel verlangen.
 - `-6, --ipv6` — ein IPv6-Ziel verlangen.
-- `-n, --numeric` — numerische Ausgabe. Akzeptiert und wirkungslos: es
-  wird nie eine Rückwärtsauflösung durchgeführt, Antwortadressen sind
-  also ohnehin numerisch.
+- `-n, --numeric` — numerische Ausgabe: die Gegenstelle nicht rückwärts
+  auflösen, also keine `PTR`-Abfrage senden und in den Antwortzeilen die
+  nackte Adresse zeigen.
 - `-q, --quiet` — still: nur Kopf und Abschlussstatistik.
 - `-?, --help` — die eigene Kurzhilfe dieses Befehls anzeigen.
 

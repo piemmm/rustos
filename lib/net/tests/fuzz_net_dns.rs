@@ -3,12 +3,15 @@
 //! Invariants, for any input bits a hostile server crafts:
 //!
 //! 1. [`DnsResponse::parse`] never panics, on any bytes, for any query.
-//! 2. A parsed response's surfaced address list stays within its fixed
-//!    capacity ([`MAX_ADDRESSES`]) — never an attacker-sized allocation.
+//! 2. A parsed response's answer matches the query's type and, for an
+//!    address answer, stays within its fixed capacity ([`MAX_ADDRESSES`]) —
+//!    never an attacker-sized allocation.
 //! 3. [`write_query`] never panics and always fits [`MAX_QUERY_LEN`].
 //! 4. Driving the [`DnsResolver`] state machine with arbitrary datagrams at
 //!    arbitrary times never panics and always yields a coherent
 //!    next-deadline decision.
+//! 5. Rendering any decoded name is total and emits printable ASCII only —
+//!    a hostile `PTR` answer never reaches a terminal as control bytes.
 //!
 //! Runs the fixed smoke sweep under plain `cargo test`; keeps drawing from
 //! the same seeded stream until `TAIRIX_FUZZ_BUDGET_SECS` elapses under
@@ -16,19 +19,19 @@
 
 use tairix_abi::time::Duration64;
 use tairix_net::dns::{
-    write_query, DnsResolver, DnsResponse, Name, QuerySpec, RecordType, MAX_ADDRESSES,
+    write_query, Answer, DnsResolver, DnsResponse, Name, QuerySpec, RecordType, MAX_ADDRESSES,
     MAX_QUERY_LEN,
 };
-use tairix_net::{IpAddr, Ipv4Addr};
+use tairix_net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 20_000;
 
 fn record_type(rng: &mut Lcg) -> RecordType {
-    if rng.next_u64() & 1 == 0 {
-        RecordType::A
-    } else {
-        RecordType::Aaaa
+    match rng.next_u64() % 3 {
+        0 => RecordType::A,
+        1 => RecordType::Aaaa,
+        _ => RecordType::Ptr,
     }
 }
 
@@ -43,14 +46,41 @@ fn query_name(rng: &mut Lcg) -> Name {
         "host",
         "tairix.test",
     ];
-    Name::encode(NAMES[rng.index(NAMES.len())]).expect("fixed names encode")
+    // A third of the draws are reverse names, so the `PTR` path explores
+    // real `in-addr.arpa` / `ip6.arpa` questions rather than only rejecting.
+    match rng.next_u64() % 3 {
+        0 => Name::reverse(IpAddr::V4(Ipv4Addr::from(rng.next_u32().to_be_bytes()))),
+        1 => {
+            let mut octets = [0u8; 16];
+            rng.fill(&mut octets);
+            Name::reverse(IpAddr::V6(Ipv6Addr::from(octets)))
+        }
+        _ => Name::encode(NAMES[rng.index(NAMES.len())]).expect("fixed names encode"),
+    }
 }
 
 /// Feed arbitrary bytes to the parser and assert the bounded invariants.
 fn exercise_parse(bytes: &[u8], spec: &QuerySpec) {
     if let Some(resp) = DnsResponse::parse(bytes, spec) {
         assert_eq!(resp.id, spec.id);
-        assert!(resp.addresses.len() <= MAX_ADDRESSES);
+        assert!(resp.answer.addresses().len() <= MAX_ADDRESSES);
+        match spec.record_type {
+            RecordType::Ptr => {
+                assert!(matches!(resp.answer, Answer::Pointer(_)));
+                assert!(resp.answer.addresses().is_empty());
+            }
+            RecordType::A | RecordType::Aaaa => {
+                assert!(matches!(resp.answer, Answer::Addresses(_)));
+                assert!(resp.answer.pointer().is_none());
+            }
+        }
+        if let Some(name) = resp.answer.pointer() {
+            let rendered = format!("{name}");
+            assert!(
+                rendered.bytes().all(|b| (0x21..=0x7e).contains(&b)),
+                "a decoded name renders as printable ASCII only"
+            );
+        }
     }
 }
 

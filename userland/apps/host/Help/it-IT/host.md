@@ -4,7 +4,7 @@ host — risolvere un nome tramite DNS
 
 ## SYNOPSIS
 
-`host [-t type] name`
+`host [-t type] name|address`
 
 ## DESCRIPTION
 
@@ -18,7 +18,12 @@ riportato dalla lettura `state:net/resolver/servers` — e ogni risposta è
 convalidata prima di mostrare un indirizzo. Non esiste `/etc/resolv.conf` né
 un file host locale.
 
-Sono supportati solo i record di indirizzo `A` e `AAAA`; gli altri tipi
+Un operando che è un indirizzo IPv4 o IPv6 letterale è una ricerca
+**inversa**: viene riscritto nel nome `in-addr.arpa` / `ip6.arpa` a cui
+l'indirizzo corrisponde, il tipo predefinito diventa `PTR`, e un record
+trovato si stampa come `<reverse-name> domain name pointer <name>.`
+
+Sono supportati solo i record `A`, `AAAA` e `PTR`; gli altri tipi
 (`MX`, `TXT` e così via) vengono rifiutati anziché trattati silenziosamente
 come `A`. Un nome inesistente stampa `Host <name> not found: 3(NXDOMAIN)`;
 quando nessun server è raggiungibile, `host` segnala un timeout sull'uscita
@@ -26,15 +31,16 @@ di errore.
 
 ## OPTIONS
 
-- `-t, --type` — il tipo di record DNS da interrogare: `A` o `AAAA` (senza
-  distinzione di maiuscole). Senza questa opzione vengono interrogati
-  entrambi.
+- `-t, --type` — il tipo di record DNS da interrogare: `A`, `AAAA` o `PTR`
+  (senza distinzione di maiuscole). Senza questa opzione un nome interroga
+  `A` e `AAAA`, e un indirizzo interroga `PTR`.
 - `-?, --help` — mostrare la guida breve di questo comando.
 
 ## EXAMPLES
 
 - `host example.com` — gli indirizzi IPv4 e IPv6 del nome.
 - `host -t AAAA example.com` — solo gli indirizzi IPv6.
+- `host 10.0.2.2` — il nome a cui quell'indirizzo rimanda.
 
 ## EXIT STATUS
 

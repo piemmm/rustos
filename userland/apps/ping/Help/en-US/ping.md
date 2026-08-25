@@ -36,6 +36,11 @@ The closing block reports the packets transmitted and received, the loss
 percentage, and the minimum, average, and maximum round-trip times. `-q`
 prints only the header and the statistics.
 
+Each reply names the peer as `name (address)` when the address has a
+`PTR` record, resolved once for the run through the same stub resolver;
+an address with no name, and every run under `-n`, prints the bare
+address. `-n` also means no `PTR` query is put on the wire at all.
+
 The IP time-to-live is not exposed through the echo-socket interface, so —
 unlike some `ping` implementations — a reply line carries no `ttl=` field.
 
@@ -51,8 +56,8 @@ unlike some `ping` implementations — a reply line carries no `ttl=` field.
 - `-w, --deadline` — overall run deadline in seconds.
 - `-4, --ipv4` — require an IPv4 target.
 - `-6, --ipv6` — require an IPv6 target.
-- `-n, --numeric` — numeric output. Accepted and inert: no reverse lookup
-  is ever performed, so reply addresses are always numeric already.
+- `-n, --numeric` — numeric output: do not reverse-resolve the peer, so
+  no `PTR` query is made and reply lines carry the bare address.
 - `-q, --quiet` — quiet: only the header and the final statistics.
 - `-?, --help` — show this command's own short help.
 

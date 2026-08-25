@@ -23,11 +23,14 @@ By default the listing shows connected, non-listening sockets. `-l`
 shows only listening sockets and `-a` shows both; the hidden-listener
 count is noted on the standard information stream (fd 3), never in the
 table. `-t` and `-u` restrict the protocol and `-4`/`-6` the address
-family; with none given, every protocol and family is shown. Ports and
-addresses are always numeric (TAIRiX has no service-name database), so
-`-n` is accepted but always in force. An unspecified address prints as
+family; with none given, every protocol and family is shown. Ports are
+always numeric (TAIRiX has no service-name database), so `-n` is
+accepted but always in force for them. Addresses are numeric too unless
+`-r` asks for host names: `-r` resolves each one through the system's
+stub resolver (a `PTR` lookup), queries each distinct address once, and
+leaves an address with no name numeric. An unspecified address prints as
 `*` and an unbound port as `*`; an IPv6 address is bracketed so the
-`:port` separator is unambiguous.
+`:port` separator is unambiguous — a resolved name needs no brackets.
 
 `-s` reports something different from the table: the network stack's
 stack-wide TCP connection-defence totals — the SYN backlog, the stateless
@@ -49,7 +52,9 @@ error rather than a silently ignored argument.
 - `-a, --all` — show both listening and connected sockets.
 - `-l, --listening` — show only listening sockets.
 - `-n, --numeric` — do not resolve service names. Always in force on
-  TAIRiX; accepted for familiarity.
+  TAIRiX; accepted for familiarity. Host names are `-r`'s business.
+- `-r, --resolve` — resolve addresses to host names over DNS. Off by
+  default, so the listing puts no query on the wire unless asked.
 - `-p, --processes` — add the owning-process column (`pid=N`).
 - `-4, --ipv4` — restrict the listing to IPv4 sockets.
 - `-6, --ipv6` — restrict the listing to IPv6 sockets.
@@ -66,6 +71,7 @@ error rather than a silently ignored argument.
 - `ss -tlp` — listening TCP sockets, with the owning process.
 - `ss -u4` — the UDP sockets over IPv4.
 - `ss -s` — the stack-wide connection-defence totals.
+- `ss -r` — the same listing with addresses resolved to host names.
 
 ## EXIT STATUS
 

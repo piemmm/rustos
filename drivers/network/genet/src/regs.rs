@@ -13,7 +13,8 @@
 //! | `SYS`      | `0x0000` | core revision, port mode, RBUF/TBUF flush   |
 //! | `EXT`      | `0x0080` | RGMII out-of-band control                   |
 //! | `INTRL2_0` | `0x0200` | level-2 interrupt controller (DMA + link)   |
-//! | `RBUF`     | `0x0300` | receive buffer control                      |
+//! | `RBUF`     | `0x0300` | receive buffer control, receive checksum    |
+//! | `TBUF`     | `0x0600` | transmit buffer control                     |
 //! | `UMAC`     | `0x0800` | UniMAC: command, address, MIB, MDIO         |
 //! | `RDMA`     | `0x2000` | receive descriptor RAM, then ring registers |
 //! | `TDMA`     | `0x4000` | transmit descriptor RAM, then ring regs      |
@@ -168,12 +169,62 @@ pub const RBUF_ALIGN_2B: u32 = 1 << 1;
 /// Bytes of receive-buffer padding [`RBUF_ALIGN_2B`] inserts.
 pub const RX_FRAME_OFFSET: u32 = 2;
 
+/// `RBUF_CHK_CTRL`: the receive checksum engine.
+pub const RBUF_CHK_CTRL: usize = RBUF + 0x14;
+
+/// Enable the receive checksum engine. It parses the frame's L3/L4 headers
+/// and reports its verdict per descriptor in [`DMA_RX_CHK_OK`]; the frame
+/// itself is untouched, so no receive-buffer layout changes with it.
+pub const RBUF_RXCHK_EN: u32 = 1 << 0;
+
+/// Skip the frame check sequence when computing the receive checksum. Only
+/// meaningful when the MAC forwards the FCS (`CMD_CRC_FWD`), which this
+/// driver never enables, so it stays clear.
+pub const RBUF_SKIP_FCS: u32 = 1 << 4;
+
 /// `RBUF_TBUF_SIZE_CTRL`: transmit-buffer size selector; `1` is the
 /// single-port setting the Pi 4's one MAC uses.
 pub const RBUF_TBUF_SIZE_CTRL: usize = RBUF + 0xB4;
 
 /// The single-port transmit-buffer size selector.
 pub const TBUF_SIZE_ONE_PORT: u32 = 1;
+
+// --- TBUF block ---------------------------------------------------------
+
+/// Base of the `TBUF` block.
+pub const TBUF: usize = 0x0600;
+
+/// `TBUF_CTRL`: transmit-buffer behaviour.
+pub const TBUF_CTRL: usize = TBUF;
+
+/// Prefix every transmitted buffer with a [`TSB_LEN`]-byte transmit status
+/// block, whose [`TSB_CSUM_INFO`] word directs the transmit checksum engine.
+/// The block is consumed by the controller and never reaches the wire.
+pub const TBUF_64B_EN: u32 = 1 << 0;
+
+/// Bytes of transmit status block [`TBUF_64B_EN`] prepends. The descriptor's
+/// length covers it; the frame follows.
+pub const TSB_LEN: u32 = 64;
+
+/// Byte offset of the checksum-directive word within the transmit status
+/// block. Every other word is reserved and written zero.
+pub const TSB_CSUM_INFO: usize = 48;
+
+/// [`TSB_CSUM_INFO`]: the directive is valid; without it the engine leaves
+/// the frame alone whatever the offsets say.
+pub const TSB_CSUM_LV: u32 = 1 << 31;
+
+/// [`TSB_CSUM_INFO`]: shift of the offset, from the frame's first octet, at
+/// which the checksummed range starts.
+pub const TSB_CSUM_START_SHIFT: u32 = 16;
+
+/// Mask of the start offset and of the checksum-field offset, each a
+/// 15-bit value relative to the frame (the status block excluded).
+pub const TSB_CSUM_OFFSET_MASK: u32 = 0x7FFF;
+
+/// [`TSB_CSUM_INFO`]: the transport is UDP, whose zero checksum means "no
+/// checksum" and must therefore be written as `0xFFFF` (RFC 768).
+pub const TSB_CSUM_PROTO_UDP: u32 = 1 << 15;
 
 // --- UMAC block ---------------------------------------------------------
 
@@ -283,11 +334,20 @@ pub const DMA_WRAP: u32 = 0x1000;
 
 /// Transmit: have the MAC append the frame check sequence.
 pub const DMA_TX_APPEND_CRC: u32 = 0x0040;
+/// Transmit: apply the transmit status block's checksum directive to this
+/// frame. Set on the descriptor holding the start of the frame.
+pub const DMA_TX_DO_CSUM: u32 = 0x0010;
 /// Shift of the transmit queue tag.
 pub const DMA_TX_QTAG_SHIFT: u32 = 7;
 /// The queue-tag value for an untagged frame on GENET v5 (the full 6-bit
 /// mask — the switch-tag pass-through encoding).
 pub const DMA_TX_QTAG_MASK: u32 = 0x3F;
+
+/// Receive: the checksum engine parsed the frame's transport header and the
+/// checksum verified. On a completed receive descriptor bit 15 carries this
+/// verdict rather than the ownership flag it means before completion, so it
+/// is read only from a descriptor the device has already handed back.
+pub const DMA_RX_CHK_OK: u32 = 0x8000;
 
 /// Receive: frame longer than the configured maximum.
 pub const DMA_RX_LG: u32 = 0x0010;

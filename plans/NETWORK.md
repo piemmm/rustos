@@ -2386,21 +2386,64 @@ Every such frame otherwise costs a stack wake, a full parse, and a drop.
   surfaced as `stats:net/<iface>/rx.filtered`. Distinct from `rx.dropped`,
   which counts frames the stack received and then discarded.
 
+### N18 — GENET offloads and reverse resolution `[x]`
+
+The two items N17 left open, both now closed.
+
+#### N18a — GENET checksum and segmentation offload
+
+The open question was whether `RBUF_64B_EN`'s 64-byte receive status block
+can coexist with the `RBUF_ALIGN_2B` pad. It is moot: **the receive
+checksum offload does not need the status block at all.** With
+`RBUF_CHK_CTRL = RBUF_RXCHK_EN` the engine parses the frame's L3/L4
+headers and reports its verdict in bit 15 of the *completed* descriptor
+(the bit that means "device owns this" before completion), leaving the
+frame where it was. The reference driver read it exactly that way until it
+switched, for generality rather than for a defect, to the status block's
+whole-frame sum. So the receive-buffer layout is unchanged — still the
+two-byte pad and nothing else — and the risk the question named does not
+arise.
+
+- **Receive** — a verified frame is delivered `FrameOffload::Validated`;
+  anything the engine did not parse keeps the stack's software fold, so
+  the offload can only save work, never admit an unchecked frame.
+- **Transmit** — `TBUF_64B_EN` (the *transmit* buffer's own register, so
+  it touches no receive path) prefixes each buffer with a 64-byte status
+  block whose one live word directs the engine at the partial checksum the
+  stack left, plus the UDP flag RFC 768's zero-checksum rule needs.
+  Offsets the frame does not bear out are refused and the frame dropped: a
+  partial checksum must never reach the wire.
+- **Segmentation** — the GENET has no segmentation engine, so the driver
+  splits the super-frame itself through `lib/net::txoffload::TcpSegmenter`
+  and hands each wire segment to the checksum engine (the shape Linux's
+  `net/core/tso.c` gives `mvneta`/`fec`). The segmenter is device-
+  independent, host-tested arithmetic — per-segment IP length and
+  identification, IPv4 header checksum, TCP sequence, `FIN`/`PSH` on the
+  last segment and `CWR` on the first, and the pseudo-header partial
+  advanced to each segment's own length. A super-frame the ring cannot
+  absorb in one doorbell stays staged and **resumes** at the next, so a
+  full ring defers segments rather than dropping them and no later frame
+  overtakes the stream being split.
+- **What still needs metal** is the measurement, not the correctness
+  (`plans/PI.md` P12).
+
+#### N18b — reverse (`PTR`) resolution
+
+`lib/net::dns` gains `RecordType::Ptr`, `Name::reverse` (the
+`in-addr.arpa` / `ip6.arpa` spelling of an address), `PTR` RDATA decoding,
+and an `Answer` enum so an address answer cannot carry a name nor a
+pointer answer an address. A decoded name renders through `Display` in RFC
+1035 presentation form with every non-printable octet escaped — a `PTR`
+answer is attacker-controlled text that ends up on a terminal.
+`lib/resolver` adds `resolve_pointer`/`reverse_name` over the same servers
+and engine. Consumers: `ss -r` (memoised per distinct address, so a peer
+on many rows costs one query), `ping` without `-n` (the peer named once
+per run), and `host <address>`.
+
 #### N17e — what N17 does *not* do
 
-- **No GENET hardware checksum offload.** The `RBUF_64B_EN` 64-byte
-  status-block mode the offload requires changes the layout of every
-  received frame, and its interaction with the `RBUF_ALIGN_2B` pad this
-  driver already uses is a hardware fact that is not established here and
-  that QEMU cannot be used to establish (it models no GENET). Getting it
-  wrong costs all receive on the Pi 4, so it is not guessed at. Raised as
-  an open question rather than shipped speculatively; the software
-  checksum path in `lib/net` remains canonical and allocation-free
-  (N7c-3), and the interrupt and IPC costs above — not checksum
-  arithmetic — were the measured bottleneck.
-- **No reverse (`PTR`) resolution**, so `ss -r` and reverse display of
-  reply addresses stay unavailable (`lib/net::dns::RecordType` has only
-  `A`/`Aaaa`).
+Nothing remains from N17's original list: both items it deferred are
+closed by N18 above.
 
 ## 5. Observability: `info:` / `state:` / `stats:` for every interface
 
@@ -2642,5 +2685,6 @@ changes (§17.4 — the seam is the contract).
   same seam later, as the Pi 4B's GENET MAC already does (N14).
 - No kernel-resident fast path: if profiling ever motivates one, that
   is a design conflict to raise (§15.7), not a quiet migration.
-- No GENET hardware checksum offload, and no reverse (`PTR`) name
-  resolution — both stated with their reasons in N17e.
+- No DNS-over-TLS / DNS-over-HTTPS, no DNSSEC, and no EDNS0 — the stub
+  resolver's own non-goals (`plans/DNS.md` §5). Forward and reverse
+  resolution over plain UDP both land in N18b.

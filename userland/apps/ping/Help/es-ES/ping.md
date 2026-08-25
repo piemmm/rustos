@@ -40,6 +40,12 @@ paquetes transmitidos y recibidos, el porcentaje de pérdida y los tiempos
 de ida y vuelta mínimo, medio y máximo. `-q` solo muestra la cabecera y el
 resumen.
 
+Cada respuesta nombra al par como `nombre (dirección)` cuando la
+dirección tiene un registro `PTR`, resuelto una sola vez por ejecución con
+el mismo resolvedor; una dirección sin nombre, y toda ejecución con `-n`,
+imprime la dirección desnuda. `-n` significa además que no se pone
+ninguna consulta `PTR` en la red.
+
 El tiempo de vida IP no se expone por la interfaz del socket de eco; a
 diferencia de algunas implementaciones de `ping`, una línea de respuesta
 no lleva un campo `ttl=`.
@@ -56,9 +62,9 @@ no lleva un campo `ttl=`.
 - `-w, --deadline` — plazo global de la ejecución, en segundos.
 - `-4, --ipv4` — exigir un destino IPv4.
 - `-6, --ipv6` — exigir un destino IPv6.
-- `-n, --numeric` — salida numérica. Aceptada y sin efecto: nunca se hace
-  resolución inversa, así que las direcciones de respuesta ya son
-  numéricas.
+- `-n, --numeric` — salida numérica: no resolver el par a la inversa, así
+  que no se hace ninguna consulta `PTR` y las líneas de respuesta llevan
+  la dirección desnuda.
 - `-q, --quiet` — silencioso: solo la cabecera y el resumen final.
 - `-?, --help` — mostrar la ayuda breve de este comando.
 

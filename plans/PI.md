@@ -5042,6 +5042,14 @@ such device) and its `raspi*` machines hand the kernel no device tree, so
 this stage has no emulated vertical by construction (§0.4 — never fake a
 passing vertical). The driver's coverage is its register-level model suite.
 
+**Landed since — offloads (`plans/NETWORK.md` N18a).** The driver advertises
+`RX_CSUM_VALIDATED | TX_CSUM_TCP | TX_CSUM_UDP | TX_SEGMENT_TCP`: the receive
+checksum engine reports per descriptor (no receive status block, so the frame
+layout is untouched), the transmit status block directs the transmit engine,
+and the driver splits a segmentation super-frame itself because the silicon
+has no segmentation engine. The split is device-independent arithmetic in
+`lib/net::txoffload`, host-tested there and against the register model here.
+
 **Remaining — the on-metal acceptance item.** Flash the emitted image to a
 Pi 4B with a cable in the RJ45 socket and confirm, from the operator's UART
 log: `devmgr` autoloads the bundle against the GENET node, `devmgr` logs
@@ -5121,11 +5129,15 @@ GENET.
    a busy segment now costs approximately nothing, and that
    `stats:net/<iface>/rx.filtered` climbs while `rx.packets` does not — that
    is the pre-filter shedding foreign broadcast.
-2. **The open question on hardware checksum offload.** Enabling GENET's
-   `RBUF_64B_EN` 64-byte status-block mode is what its RX/TX checksum
-   engines require, and it changes the layout of *every* received frame.
-   How it interacts with the `RBUF_ALIGN_2B` two-byte pad this driver
-   already programs is not established, and getting it wrong costs all
-   receive on the device. It is deliberately not guessed at (N17e); it
-   needs either the BCM2711 register documentation or a metal experiment
-   before any code is written.
+2. **The offload measurement.** The open question — whether the 64-byte
+   receive status block can coexist with the `RBUF_ALIGN_2B` pad — turned
+   out to be moot: the receive checksum offload does not need the status
+   block, only `RBUF_CHK_CTRL = RBUF_RXCHK_EN` and bit 15 of the completed
+   descriptor, so the receive-buffer layout is unchanged. Receive and
+   transmit checksum offload and driver-side TCP segmentation are landed
+   (`plans/NETWORK.md` N18a). What metal still owes is the *measurement*:
+   confirm a bulk TCP transfer reaches gigabit line rate at a lower CPU
+   cost than before, that `ss`/`sysinfo` show no rise in checksum errors
+   or retransmissions, and that a peer on the LAN accepts every segment
+   the driver split (a wrong per-segment checksum would show as loss, not
+   as corruption).

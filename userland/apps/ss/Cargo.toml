@@ -18,7 +18,7 @@ workspace = true
 # `_start` / `#[global_allocator]` / panic handler.
 [features]
 default = ["program"]
-program = ["dep:tairix-rt"]
+program = ["dep:tairix-rt", "tairix-resolver/program"]
 
 # The package is both the `tairix-ss` library (the pure select + render
 # engine below) and the `Run` entry-point binary of the `ss` tool. The binary
@@ -40,6 +40,10 @@ tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
 # The shared System Information API client: the `NET_SOCKETS` paging walk
 # (`for_each_net_socket`) — never a second query client.
 tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
+# The one userland stub resolver, for the `-r` reverse (`PTR`) lookups: never
+# a second DNS client. Only the `Run` binary drives it, so its socket-backed
+# transport is behind the `program` feature.
+tairix-resolver = { path = "../../../lib/resolver", version = "=0.0.0" }
 
 # For the freestanding `Run` binary only: the userland runtime `tairix-rt`
 # (`_start`, canary, panic handler, `mem_map` allocator, and the

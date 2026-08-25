@@ -31,9 +31,10 @@ than driven against a register layout that may not describe it.
   `0x4000`), so the only DMA is the frame buffers.
 - **One ring per direction**, the descriptor-based default queue (ring 16);
   the 16 priority queues are unused.
-- **Frame buffers**: 64 receive and 64 transmit buffers of 2 KiB — a single
-  256 KiB carve taken once at `open` and reused for every frame. At line rate
-  that is roughly 96 KB of 1500-byte frames in flight each way.
+- **Frame buffers**: 64 receive and 64 transmit buffers of 2 KiB, plus one
+  64 KiB transmit staging area for the segmentation path — a single carve
+  taken once at `open` and reused for every frame. At line rate the ring
+  holds roughly 96 KB of 1500-byte frames in flight each way.
 - **Receive filter**: the UniMAC's address registers identify the station for
   MAC control frames; the receiver's own destination-address filter (`MDF`) is
   what admits a frame, and a controller whose filter slots are all disabled
@@ -53,9 +54,12 @@ than driven against a register layout that may not describe it.
   register per frame. `RBUF_ALIGN_2B` is enabled, so a frame starts two bytes
   into its buffer and the reported length includes the pad. `CMD_CRC_FWD` is
   left clear, so the MAC strips the frame check sequence.
-- **Transmit**: each descriptor's buffer address is written once at bring-up;
-  the per-frame path writes only `length_status` (length, queue tag,
-  `APPEND_CRC`, `SOP`, `EOP`) and rings the producer index.
+- **Transmit**: each descriptor's buffer address is written once at bring-up.
+  A buffer holds the 64-byte transmit status block the checksum engine reads
+  and then the frame, so the per-frame path writes the status block, the
+  `length_status` word (both lengths, queue tag, `APPEND_CRC`, `DO_CSUM` when
+  the frame carries a partial checksum, `SOP`, `EOP`), and rings the producer
+  index.
 - **Link**: standard IEEE 802.3 clause-22 autonegotiation over the UniMAC's
   MDIO master — reset, advertise 10/100/1000 half and full, resolve the
   negotiated mode from the partner's ability registers, then program
@@ -74,11 +78,45 @@ than driven against a register layout that may not describe it.
 
 ## Offloads
 
-`NetOffloads::empty()`. The GENET has checksum and segmentation engines, but
-a driver may advertise only what it has *verified* it can do and this device
-is not emulable, so claiming them would be a claim about untested silicon.
-The stack's software path is the canonical implementation, so the NIC is
-complete without them.
+`RX_CSUM_VALIDATED | TX_CSUM_TCP | TX_CSUM_UDP | TX_SEGMENT_TCP`. The IPv4
+header checksum has no engine on this MAC and is never claimed.
+
+- **Receive checksum.** `RBUF_RXCHK_EN` puts the checksum engine in front of
+  the receiver. It parses the frame's L3/L4 headers and reports its verdict
+  in bit 15 of the *completed* descriptor — the bit that means "device owns
+  this" before completion. The frame itself is untouched, so the 64-byte
+  receive status block (`RBUF_64B_EN`) is deliberately **not** enabled and the
+  receive-buffer layout is exactly what it was without the offload: still the
+  two-byte `RBUF_ALIGN_2B` pad and nothing else. A verified frame is delivered
+  as `FrameOffload::Validated`; anything the engine did not parse simply keeps
+  the stack's software fold, so the offload can only ever save work, never
+  admit an unchecked frame.
+- **Transmit checksum.** `TBUF_64B_EN` prefixes every transmitted buffer with
+  a 64-byte transmit status block. Its one live word directs the engine at the
+  transport checksum the stack left partial — a start offset and a field
+  offset, both relative to the frame with the status block excluded — and
+  carries the UDP flag, without which RFC 768's "a computed zero is sent as
+  `0xFFFF`" rule would not be applied and a 1-in-65 536 UDP datagram would go
+  out with its checksum silently disabled. The controller consumes the block;
+  it never reaches the wire. Offsets the frame does not bear out are refused
+  and the frame is dropped — a partial checksum must never be transmitted.
+- **Segmentation.** The GENET has **no** segmentation engine (the reference
+  driver advertises `NETIF_F_SG | NETIF_F_HW_CSUM | NETIF_F_RXCSUM` and no
+  `NETIF_F_TSO`), so the driver splits a `FrameOffload::TxSegment` super-frame
+  itself through the shared `tairix_net::txoffload::TcpSegmenter` and hands
+  each wire segment to the transmit checksum engine — the same shape Linux's
+  `net/core/tso.c` gives `mvneta`, `mvpp2`, and `fec`. The win is the
+  offload's real one: one ring slot and one stack transmit pass for tens of
+  wire packets, with each segment's TCP checksum still done in hardware. A
+  super-frame the ring cannot absorb in one doorbell stays staged and resumes
+  at the next — which a transmit-completion interrupt provokes — so a full
+  ring defers segments rather than dropping them, and no later frame overtakes
+  the stream being split.
+
+The register programming is the published Broadcom map as carried by the
+Linux `bcmgenet` driver; the split itself is device-independent arithmetic
+proven host-side in `lib/net`. What still needs metal is the measurement, not
+the correctness: `plans/PI.md` carries the on-metal acceptance item.
 
 ## The device is not trusted
 
@@ -89,7 +127,8 @@ index claiming more completed descriptors than the ring holds, is refused with
 `DeviceFault` — honouring either would free slots still in flight or deliver
 whatever the descriptor RAM happened to hold. A frame the ring offers that is
 wider than a device buffer is released and dropped rather than left to wedge
-the queue behind it.
+the queue behind it, as is a segmentation descriptor the frame does not bear
+out or whose segments would not fit a transmit buffer.
 
 ## Interrupts
 
@@ -115,10 +154,10 @@ unloadable at runtime.
 ## Zero-on-free
 
 A `BufferClass::Sensitive` ring is honoured in both directions: a transmit
-buffer is scrubbed when the device has consumed it, and a receive buffer
-after its frame has been delivered and before its slot is handed back. The
-caller-owned frame rings are not zeroed; that stays the caller's
-responsibility.
+buffer is scrubbed when the device has consumed it, a receive buffer after its
+frame has been delivered and before its slot is handed back, and the transmit
+staging area as soon as a super-frame's split completes. The caller-owned
+frame rings are not zeroed; that stays the caller's responsibility.
 
 ## Test surface
 

@@ -20,6 +20,11 @@ operator inspecting the configuration can never disagree (`AGENTS.md` §2.2).
   paging walk) and then drives `tairix_net::dns::resolve` over an injected
   `tairix_net::dns::DnsTransport` and CSPRNG. Both seams are injected, so the
   whole path is exercised against in-memory fakes with no kernel.
+- `resolve_pointer(address, sysinfo, udp, rng)` — the reverse direction: the
+  `PTR` lookup of the `in-addr.arpa` / `ip6.arpa` name an address maps back
+  to, over the same servers, the same engine, and the same orchestration.
+  `pointer_name(&resolution)` renders what a tool prints, or `None` when the
+  address has no record.
 - `configured_servers(sysinfo)` — the server-set fetch on its own, converting
   each `NetResolverServer` record to an `IpAddr`.
 - `ResolveError` — the distinct, actionable failure causes: `InvalidName`,
@@ -35,6 +40,11 @@ operator inspecting the configuration can never disagree (`AGENTS.md` §2.2).
   busy spin (`AGENTS.md` §2.23). `RtDnsTransport::resolve` reuses one bound
   port across several record-type lookups (the `host` A+AAAA default), so the
   port is bound once.
+- `RtDnsTransport::reverse_name(address)` and the one-shot free
+  `reverse_name(address)` (the `program` feature) — the reverse lookup over
+  the production seams. A tool resolving many addresses opens one transport
+  and calls the method, so the delivery port is bound once for a whole
+  listing; a tool with a single lookup calls the free function.
 
 ## Security
 

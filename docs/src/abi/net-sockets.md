@@ -109,7 +109,10 @@ fields.
 and `ShutdownHow` serves `Read` (`1`), `Write` (`2`), and `Both` (`3`);
 any other value fails closed at decode. A `SocketAddr` is a family, a 16-byte
 address (IPv4 uses the first four; the tail must be zero), and a host-order
-port. For a stream socket `Send` carries no destination (`dest` must be
+port. `tairix_abi::net_ipc::address_parts` and `ip_from_parts` are the one
+definition of the conversion between that pair and a `core::net::IpAddr`, so
+the stack, its socket clients, and the tools that render a wire address
+cannot spell it three different ways. For a stream socket `Send` carries no destination (`dest` must be
 `None` — the peer is fixed at `Connect`) and its reply is the accepted byte
 count (`encode_send_reply`), since a stream `send` is flow-controlled and may
 accept fewer bytes than offered; a datagram `Send` is all-or-nothing and
