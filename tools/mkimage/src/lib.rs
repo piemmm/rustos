@@ -488,13 +488,13 @@ pub struct RpiImage {
 /// 8). As with `drivers`, the caller composes and signs the files; this
 /// crate only plants them.
 ///
-/// # Errors
-///
-/// `network_conf` is the `/System/Settings/Network/network.conf` the image
-/// ships. The caller composes it (so *which* interfaces an image manages is a
-/// property of the image, not of this writer) and this crate validates it
-/// through the one `tairix_netconfig` engine before planting it, so an image
-/// can never ship an addressing default its own stack would reject.
+/// `network_conf` is the per-interface network configuration the image ships,
+/// planted on the read-only `/System` volume at the volume-relative path its
+/// only reader — the device manager's pre-unlock store read — resolves. The
+/// caller composes it (so *which* interfaces an image manages is a property
+/// of the image, not of this writer) and this crate validates it through the
+/// one `tairix_netconfig` engine before planting it, so an image can never
+/// ship an addressing default its own stack would reject.
 ///
 /// # Errors
 ///
@@ -562,8 +562,13 @@ pub fn build_rpi_image(
         &descriptor,
         CONSOLE_BAUD,
     )?;
-    let system =
-        rootfs::build_system_partition(u64::from(SYSTEM_PART_SECTORS), entropy, drivers, apps)?;
+    let system = rootfs::build_system_partition(
+        u64::from(SYSTEM_PART_SECTORS),
+        entropy,
+        drivers,
+        apps,
+        network_conf,
+    )?;
     let root = rootfs::build_root_partition(
         u64::from(ROOT_PART_SECTORS),
         &root_key,
@@ -575,7 +580,6 @@ pub fn build_rpi_image(
             log_attestation_key: log_key_file.as_deref(),
             machine_id: machine_id.as_ref().map(<[u8; MACHINE_ID_LEN]>::as_slice),
             library_conf: &library_conf,
-            network_conf,
         },
     )?;
 
@@ -904,6 +908,56 @@ mod tests {
         let mut buf = vec![0u8; BUNDLE.len() + 16];
         let read = sys.read_at(node, 0, &mut buf).expect("bundle reads back");
         assert_eq!(&buf[..read], BUNDLE);
+    }
+
+    #[test]
+    fn the_network_configuration_reads_back_from_the_readonly_system_store() {
+        use tairix_abi::driver_store::SystemConfigFile;
+        use tairix_drv_fs_arxfs::SYSTEM_VOLUME_KEY;
+        use tairix_partition::{parse_partition_table, PartitionBlock, PartitionType};
+
+        // The device manager reads this document off the read-only `/System`
+        // volume through the pre-unlock store endpoint, so the whole assembly
+        // has to land it there — not on the encrypted root, whose
+        // `/System/Settings` sub-mount no bootstrap client can reach. An
+        // image that plants it anywhere else boots with no managed interface
+        // and never starts its DHCP client.
+        let conf = "wan.kind ethernet\nwan.match.node 0xfd580000\nwan.ipv4.method dhcp\n";
+        let built = build_rpi_image(
+            &test_kernel_elf(),
+            &test_firmware(),
+            &mut TestEntropy(23),
+            ImageProfile::Installer,
+            &[],
+            &[],
+            conf,
+        )
+        .expect("image builds");
+
+        let mut disk = MemBlock::from_bytes(built.image).expect("whole sectors");
+        let table = parse_partition_table(&mut disk).expect("the MBR parses");
+        let system = table
+            .first_of_type(PartitionType::ARXFSSystem)
+            .expect("a /System partition is present");
+        let window = PartitionBlock::from_partition(disk, &system).expect("the /System window");
+        let mut sys = ARXFS::open_read_only(window, &SYSTEM_VOLUME_KEY)
+            .expect("/System mounts read-only under the public key");
+
+        let mut node = sys.root();
+        for component in SystemConfigFile::Network.volume_path().split('/') {
+            node = sys
+                .lookup(node, component.as_bytes())
+                .expect("the ABI volume path resolves on the /System volume");
+        }
+        let mut buf = [0u8; tairix_netconfig::MAX_CONFIG_LEN];
+        let read = sys.read_at(node, 0, &mut buf).expect("the document reads");
+        let parsed = tairix_netconfig::NetworkConfig::parse(
+            core::str::from_utf8(&buf[..read]).expect("utf-8"),
+        )
+        .expect("the planted document parses");
+        let wan = parsed.interface("wan").expect("the planted interface");
+        assert_eq!(wan.match_node, Some(0xfd58_0000));
+        assert_eq!(wan.ipv4_method(), tairix_netconfig::Ipv4Method::Dhcp);
     }
 
     #[test]

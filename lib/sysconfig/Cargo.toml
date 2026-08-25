@@ -12,6 +12,9 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+# The closed `/System/Settings/` file set names this store's canonical path,
+# so the engine and the pre-unlock reader that serves it cannot disagree.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
 # The one `#`-comment line grammar every line-oriented configuration store
 # in the tree shares, so a comment is recognised identically here, in
 # `lib/netconfig`, and in init's service registry and startup list.

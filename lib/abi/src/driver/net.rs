@@ -24,6 +24,9 @@ pub const ETHERNET_HEADER_LEN: u32 = 14;
 pub struct MacAddress(pub [u8; MAC_ADDRESS_LEN]);
 
 impl MacAddress {
+    /// The all-ones link-layer broadcast address.
+    pub const BROADCAST: Self = Self([0xFF; MAC_ADDRESS_LEN]);
+
     /// Construct a [`MacAddress`] from its six byte octets.
     #[must_use]
     pub const fn new(octets: [u8; MAC_ADDRESS_LEN]) -> Self {

@@ -5009,6 +5009,24 @@ discovered node; the flashable image also ships a `network.conf` selecting
 DHCPv4 + IPv6 SLAAC on it (`plans/DHCP.md` D5), so a booted board
 self-configures with nothing for the operator to edit.
 
+**On-metal run 1 found the document unplanted where its reader looks.** The
+board autoloaded the driver, published its `netchan`, and `netstack` bound
+the interface — then nothing: no `INTERFACE_CONFIG_APPLIED`, no
+`DHCP_LEASE_ACQUIRED`. The shipped `network.conf` was written to the
+encrypted root's `/System/Settings`, while the only reader — `devmgr`,
+pre-unlock over the read-only `/System` store endpoint — resolves the
+volume-relative path the ABI names, so the default was read by nothing and
+the machine managed no interface. Both sides now derive that path from
+`SystemConfigFile::volume_path` (`plans/DHCP.md` D5).
+
+Reviewing the driver for what else stood between a bound interface and a
+lease found a second, independent blocker: bring-up programmed **no receive
+destination-address filter**, and the UniMAC drops every frame that matches
+no enabled filter slot, so the NIC would have received nothing at all. It now
+enables broadcast + its own unicast address before enabling the receiver
+(`plans/NETWORK.md` N14). Multicast still has no slot and no seam to ask for
+one, so IPv6 cannot complete on this NIC yet (N14d); IPv4 is unaffected.
+
 Every base, IRQ, DMA aperture, and even the MAC address is a discovered
 value: the register window and both INTIDs come from the node's `reg` and
 `interrupts`, the DMA reach from the parent `/scb` bus's `dma-ranges`, and
@@ -5025,12 +5043,13 @@ passing vertical). The driver's coverage is its register-level model suite.
 
 **Remaining — the on-metal acceptance item.** Flash the emitted image to a
 Pi 4B with a cable in the RJ45 socket and confirm, from the operator's UART
-log: `devmgr` autoloads the bundle against the GENET node, `netstack` logs
-`DRIVER_BOUND` then `DHCP_LEASE_ACQUIRED`, the board answers a ping at its
-leased address from another host on the LAN, and the address matches the MAC
-printed on the board (so the firmware-published address was used, not an
-invented one). Then unplug and re-plug the cable and confirm the link event
-re-resolves without a driver restart.
+log: `devmgr` autoloads the bundle against the GENET node, `devmgr` logs
+`NETWORK_IFCONFIG_DELIVERED` for `wan`, `netstack` logs `DRIVER_BOUND` then
+`DHCP_LEASE_ACQUIRED`, the board answers a ping at its leased address from
+another host on the LAN, and the address matches the MAC printed on the board
+(so the firmware-published address was used, not an invented one). Then
+unplug and re-plug the cable and confirm the link event re-resolves without a
+driver restart. Expect no IPv6 global address until N14d lands.
 
 **Done when:** the checklist above is recorded against a real Pi 4B.
 

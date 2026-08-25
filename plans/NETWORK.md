@@ -1549,9 +1549,12 @@ alias).
   retrying silently on `NotFound` (interface not bound yet) each hw-tree
   generation bump and recording each success (events `13_014`/`13_015`).
   Reuses `CAP_FS_ACCESS`; `netstack` stays filesystem-free.
-- **`tools/mkimage`**: the writable root ships an **empty** `network.conf`
+- **`tools/mkimage`**: the read-only `/System` volume carries the shipped
+  `network.conf`, planted at the volume-relative path the ABI's closed
+  `SystemConfigFile` set names — the one location the pre-unlock reader
+  resolves. An image planting no NIC driver ships the **empty** document
   ("no managed interfaces beyond loopback") via the `lib/netconfig` default
-  render; the installer/`configure` write the operator's interfaces.
+  render.
 - **Docs**: `docs/src/userland/{netstack,networking}.md`.
 - **Deferred to N9b-3-2**: bonding, `match.node` binding, runtime reload,
   bond `info:`/`state:`/`stats:`, and the live QEMU vertical (this
@@ -2050,6 +2053,33 @@ device-support crate (§2.22). Key facts for the next worker:
   machines hand the kernel no device tree. The register-level suite is the
   coverage; the live path is an on-metal acceptance item (`plans/PI.md`), as
   for the Pi's EMMC2, PCIe and HVS drivers.
+- **The receive destination-address filter** (`UMAC_MDF_CTRL` + its slots) is
+  what admits an arriving frame; the UniMAC's address registers only identify
+  the station for MAC control frames. Bring-up enables two slots — broadcast
+  and this station's unicast address — before it enables the receiver, and a
+  test asserts that ordering. Promiscuous reception is refused: it would hand
+  the stack frames addressed to other hosts. Bring-up originally programmed no
+  slot at all, which on metal means the NIC receives nothing; the omission was
+  invisible to the register-level suite until it asserted the filter.
+
+##### N14d — the driver-side multicast group filter `[ ]`
+The GENET admits a frame only if its destination matches an enabled filter
+slot, so a group address needs a slot. There is no seam through which the
+stack can ask a driver for one, so IPv6 — whose neighbour discovery, router
+solicitation, and DAD are multicast — cannot complete on the GENET. IPv4
+(including DHCPv4) is unaffected, and the virtio NICs are unaffected because
+their backends do no destination filtering.
+
+The increment is a `netchan-v1` group-membership operation the stack drives
+from the multicast set it already tracks (`lib/net::mcast`), and a `Net` trait
+method the driver implements by programming the group into a filter slot. It
+is the same shape for every NIC that filters in hardware, so it belongs on
+the shared device-channel contract rather than in one driver. Deliberately
+**not** solved by promiscuous reception: admitting every frame on the segment
+to work around a missing filter API is the security regression the charter
+forbids. Bound the slot budget fail-closed (17 slots, two already spent) and
+refuse a membership that does not fit rather than silently widening the
+filter.
 
 #### N15 — the socket half-close (`shutdown`) `[x]`
 
@@ -2278,12 +2308,23 @@ No hidden state, no per-driver config files, no imperative boot scripts.
   §5.4); a malformed file never yields a half-configured stack. An
   absent file means "no managed interfaces beyond loopback", not an
   error.
-- Writes go through the secured VFS under the caller's kernel-attested
-  identity; the per-inode policy on `/System/Settings` decides who may
-  write (the `configure` precedent — no new capability for the file
-  itself). Applying it to the live stack is the `CAP_NET_ADMIN` admin
-  IPC: `netstack` re-reads, diffs, and applies atomically per interface,
-  auditing each change (§19.4).
+- **The shipped document lives on the read-only `/System` volume**, at the
+  volume-relative path `SystemConfigFile::volume_path` names, because its
+  only reader — the device manager — reads it over the pre-unlock store
+  endpoint so interfaces are addressed as their drivers autoload, headless.
+  It is image- and installer-authored; the build validates it through this
+  engine, so an image cannot ship a document its own stack would reject.
+- **Runtime rewriting is not yet wired, and is the next increment here.**
+  The intended shape is a writable override on `/System/Settings` (the
+  `configure` precedent — writes through the secured VFS under the caller's
+  kernel-attested identity, the per-inode policy deciding who may write, no
+  new capability for the file itself) layered *above* the shipped default,
+  with the `CAP_NET_ADMIN` admin IPC applying it: `netstack` re-reads,
+  diffs, and applies atomically per interface, auditing each change
+  (§19.4). Today no writer exists (`configure` grows no interface
+  sub-grammar) and the device manager reads only the pre-unlock store, so
+  there is deliberately no second copy of the document anywhere — one
+  would look authoritative while being read by nothing.
 
 ### 6.2 `configure net.*` — stack-wide knobs
 
@@ -2315,6 +2356,21 @@ tree, exactly like `os.*`:
   registry, and `configure` grows no interface sub-grammar — interface
   changes are edits to `network.conf` plus the typed admin reload.
   Both stores surface as `state:net/…` reads (§5).
+
+**Open defect — `configure net.*` does not reach the stack.** `configure`
+writes `system.conf` through the VFS at `tairix_sysconfig::CONFIG_PATH`,
+which resolves to the writable `/System/Settings` sub-mount on the encrypted
+root; the device manager reads the `net.*` policy it delivers off the
+read-only `/System` volume through the pre-unlock store endpoint. The two
+are different files, so an edited `net.*` key is never delivered — the stack
+keeps its registry defaults. (The `os.*` keys are unaffected: the kernel and
+`login` read them through the same VFS path `configure` writes.) The fix is
+the writable-override layer 6.1 describes, applied to *both* stores: the
+device manager reads the shipped default pre-unlock, then re-reads the
+authoritative document once the root is mounted and re-delivers what
+changed. Until that lands, a `net.*` policy is an image/installer decision
+only. Landing it must not reintroduce a second *shipped* copy of either
+document — the divergence is precisely the defect.
 
 ### 6.3 Bonding and failover
 

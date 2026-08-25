@@ -86,15 +86,16 @@ extern crate alloc;
 use alloc::string::String;
 use core::fmt;
 
+use tairix_abi::driver_store::SystemConfigFile;
 use tairix_util::conf::strip_comment;
 
-/// The directory that holds the boot-time configuration store, inside the
-/// writable `/System/Settings` subtree of the encrypted root volume.
+/// The directory that holds the boot-time configuration store.
 pub const CONFIG_DIR: &str = "/System/Settings/Configuration";
 
-/// The configuration store document the `configure` command writes and
-/// every boot-time consumer reads.
-pub const CONFIG_PATH: &str = "/System/Settings/Configuration/system.conf";
+/// The configuration store document, named by the closed
+/// `/System/Settings/` file set so this engine and the pre-unlock reader that
+/// serves it cannot name different files.
+pub const CONFIG_PATH: &str = SystemConfigFile::System.path();
 
 /// Maximum length, in bytes, of a store text [`SystemConfig::parse`] will
 /// consider. A larger input is refused outright ([`ConfigError::TooLong`])

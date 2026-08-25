@@ -2497,6 +2497,7 @@ dependencies = [
 name = "tairix-sysconfig"
 version = "0.0.0"
 dependencies = [
+ "tairix-abi",
  "tairix-util",
 ]
 

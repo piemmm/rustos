@@ -45,7 +45,7 @@ use tairix_caps::CapabilitySet;
 use tairix_crypto::Ed25519PublicKey;
 use tairix_devmgr::DriverLoader;
 use tairix_drvhost::store::{scan_store, DriverStore};
-use tairix_kernel_core::{CooperativeYield, SYSTEM_VOLUME_SETTINGS_PATH, SYSTEM_VOLUME_STORE_PATH};
+use tairix_kernel_core::{CooperativeYield, SYSTEM_VOLUME_STORE_PATH};
 use tairix_kernel_ipc::{CallEndpoint, CallEndpointLimits, EndpointId, RecvCall};
 use tairix_kernel_sec::captable::TaskCapabilities;
 use tairix_log::Sink;
@@ -275,7 +275,7 @@ fn catalogue_reply(buf: &mut [u8], store: &DriverStore) -> Result<usize, Errno> 
 /// always-mounted read-only store endpoint — because the general VFS path
 /// is not mounted until the encrypted root unlocks, yet it must configure
 /// interfaces on the same read-only volume the drivers autoload from. The
-/// read is confined strictly below [`SYSTEM_VOLUME_SETTINGS_PATH`] to the
+/// read is confined strictly below the volume's settings tree to the
 /// closed [`tairix_abi::driver_store::SystemConfigFile`] set, under the same
 /// bootstrap identity as a bundle read, and adds no authority; an absent
 /// file is a benign in-band
@@ -290,7 +290,7 @@ where
     F: FilesystemRead + FilesystemSecurity + ?Sized,
 {
     let mut bytes = Vec::new();
-    match service.read_system_config(SYSTEM_VOLUME_SETTINGS_PATH, which, &mut bytes) {
+    match service.read_system_config(which, &mut bytes) {
         Ok(()) => driver_store::encode_config_reply(buf, &bytes),
         Err(err) => driver_store::encode_error_reply(buf, err),
     }

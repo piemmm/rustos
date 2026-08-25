@@ -333,6 +333,59 @@ fn bring_up_resets_the_mac_and_programs_its_identity() {
 }
 
 #[test]
+fn bring_up_admits_the_station_address_and_broadcast_through_the_receive_filter() {
+    let device = open();
+    let mock = &device.regs;
+    // The address registers identify the station; the destination-address
+    // filter is what admits a frame. Both slots must be programmed *and*
+    // enabled, or the receiver delivers nothing: no ARP, no DHCP offer, no
+    // unicast reply.
+    let broadcast = *MacAddress::BROADCAST.as_octets();
+    let station = MAC;
+    for (slot, address) in [broadcast, station].iter().enumerate() {
+        let base = regs::UMAC_MDF_ADDR + slot * regs::MDF_SLOT_STRIDE;
+        assert_eq!(
+            mock.peek(base),
+            u32::from(u16::from_be_bytes([address[0], address[1]])),
+            "slot {slot} high half"
+        );
+        assert_eq!(
+            mock.peek(base + 4),
+            u32::from_be_bytes([address[2], address[3], address[4], address[5]]),
+            "slot {slot} low word"
+        );
+    }
+    // Exactly those two slots are enabled — slot 0 by the top bit, slot 1 by
+    // the next — and no third address is admitted.
+    let top = 1u32 << (regs::MDF_SLOTS - 1);
+    assert_eq!(mock.peek(regs::UMAC_MDF_CTRL), top | (top >> 1));
+    // Promiscuous reception is never enabled: the stack sees frames addressed
+    // to this host, not everything on the segment.
+    assert_eq!(
+        mock.peek(regs::UMAC_CMD) & (1 << 4),
+        0,
+        "PROMISC stays clear"
+    );
+}
+
+#[test]
+fn the_receive_filter_is_programmed_before_the_receiver_is_enabled() {
+    let device = open();
+    let mock = &device.regs;
+    let filter = mock
+        .first_write_index(regs::UMAC_MDF_CTRL)
+        .expect("the receive filter is programmed during bring-up");
+    // `apply_link` is what sets CMD_RX_EN; a filter written after it would
+    // leave a window in which the receiver drops every arriving frame.
+    let rx_enabled = mock
+        .writes
+        .iter()
+        .position(|(offset, value)| *offset == regs::UMAC_CMD && value & regs::CMD_RX_EN != 0)
+        .expect("bring-up enables the receiver");
+    assert!(filter < rx_enabled);
+}
+
+#[test]
 fn bring_up_arms_both_rings_over_the_dma_carve() {
     let device = open();
     let phys = FRAMES_PHYS;

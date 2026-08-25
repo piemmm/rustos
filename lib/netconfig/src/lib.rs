@@ -54,15 +54,16 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+use tairix_abi::driver_store::SystemConfigFile;
 use tairix_util::conf::strip_comment;
 
-/// The directory that holds the network-configuration store, inside the
-/// writable `/System/Settings` subtree of the encrypted root volume.
+/// The directory that holds the network-configuration store.
 pub const CONFIG_DIR: &str = "/System/Settings/Network";
 
-/// The configuration store document the `configure` command and installer
-/// write and the `netstack` service reads.
-pub const CONFIG_PATH: &str = "/System/Settings/Network/network.conf";
+/// The configuration store document, named by the closed
+/// `/System/Settings/` file set so this engine and the pre-unlock reader that
+/// serves it cannot name different files.
+pub const CONFIG_PATH: &str = SystemConfigFile::Network.path();
 
 /// Maximum length, in bytes, of a store text [`NetworkConfig::parse`] will
 /// consider. A larger input is refused outright ([`ConfigError::TooLong`])

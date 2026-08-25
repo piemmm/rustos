@@ -5,10 +5,17 @@ per-interface network configuration store: the document at
 `/System/Settings/Network/network.conf` (`tairix_netconfig::CONFIG_PATH`).
 It owns the per-interface line grammar, the **closed** key registry, each
 key's typed value set, the bounded fail-closed parser, and the canonical
-render. The `configure` command app and the installer write the store
-through this engine; the one reader — the `netstack` service, at start and
-on a typed `CAP_NET_ADMIN` reload — reads it through the same engine, so
-producer and consumer can never diverge.
+render. The image builder and the installer write the store through this
+engine; the one reader — the device manager, which maps it into the
+per-interface admin messages `netstack` applies — reads it through the same
+engine, so producer and consumer can never diverge.
+
+`CONFIG_PATH` is the document's `/System` **view** path. The bytes live on
+the read-only `/System` volume at the volume-relative path the ABI's closed
+`SystemConfigFile` set names, because the device manager reads it over the
+pre-unlock store endpoint (see `docs/src/userland/netstack.md`); at runtime
+the view path resolves to the writable sub-mount on the encrypted root,
+which no bootstrap client can reach.
 
 ## The store
 

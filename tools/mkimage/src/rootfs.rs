@@ -26,6 +26,7 @@
 //! image.
 
 use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeId, NodeKind};
+use tairix_abi::driver_store::SystemConfigFile;
 use tairix_drv_fs_arxfs::{
     plant_nested_file, EntropySource, Security, VolumeKey, ARXFS, SYSTEM_VOLUME_KEY,
 };
@@ -88,16 +89,6 @@ pub const USERS_DB_NAME: &str = "Users";
 /// Name of the group registry file under `/System/Security`.
 pub const GROUPS_DB_NAME: &str = "Groups";
 
-/// Name of the writable-Settings subdirectory that holds the network
-/// configuration store (`/System/Settings/Network`, `plans/NETWORK.md` §6.1).
-pub const NETWORK_SETTINGS_DIR: &str = "Network";
-
-/// Name of the per-interface network-configuration document under
-/// `/System/Settings/Network` (`network.conf`). Its content is the image
-/// builder's ([`RootSeed::network_conf`]); the first-boot installer, or
-/// `configure`, later rewrites it through the one `tairix_netconfig` engine.
-pub const NETWORK_CONF_NAME: &str = "network.conf";
-
 /// Name of the per-installation machine-id file under `/System/Security`. Its
 /// bytes are the raw [`tairix_abi::MACHINE_ID_LEN`] machine-id — non-secret
 /// per-installation identity (the TAIRiX equivalent of `/etc/machine-id`) that
@@ -148,18 +139,6 @@ pub struct RootSeed<'a> {
     /// — the canonical empty document when no planted application lists
     /// itself.
     pub library_conf: &'a str,
-    /// The per-interface network-configuration document
-    /// (`/System/Settings/Network/network.conf`).
-    ///
-    /// The image builder supplies it, so *which* interfaces an image manages
-    /// stays a property of the image being built rather than of this
-    /// board-neutral writer: a platform image whose NIC sits at a known bus
-    /// location ships an addressing default keyed to it, while an image with
-    /// no such NIC ships the canonical empty document ("no managed
-    /// interfaces beyond loopback"). Either way it is authored and validated
-    /// through the one `tairix_netconfig` engine `netstack` reads it with, so
-    /// a shipped default can never fail the parser.
-    pub network_conf: &'a str,
 }
 
 /// Author the `ARXFS` root partition: format `sectors` sectors under
@@ -258,16 +237,26 @@ fn create_home_dir(
 /// `create_system_subdirs` helper used by the encrypted root too. No users database is written here — that secret
 /// stays on the encrypted root.
 ///
+/// `network_conf` is the per-interface network-configuration document this
+/// image ships. The caller composes it, so *which* interfaces an image
+/// manages stays a property of the image being built rather than of this
+/// board-neutral writer: a platform image whose NIC sits at a known bus
+/// location ships an addressing default keyed to it, while an image with no
+/// such NIC ships the canonical empty document ("no managed interfaces
+/// beyond loopback").
+///
 /// # Errors
 ///
 /// [`MkimageError::SystemPartition`] if formatting or any directory
 /// creation fails (including an entropy failure provisioning the volume's
-/// key hierarchy).
+/// key hierarchy), or [`MkimageError::NetworkConfig`] if `network_conf` does
+/// not parse.
 pub fn build_system_partition(
     sectors: u64,
     entropy: &mut dyn EntropySource,
     drivers: &[(&[&[u8]], &[u8])],
     apps: &[(&[&[u8]], &[u8])],
+    network_conf: &str,
 ) -> Result<Vec<u8>, MkimageError> {
     let dev = MemBlock::new(sectors).map_err(MkimageError::SystemPartition)?;
     let mut fs = ARXFS::format(dev, ROOT_INODE_HINT, &SYSTEM_VOLUME_KEY, entropy)
@@ -310,6 +299,7 @@ pub fn build_system_partition(
         plant_nested_file(&mut fs, root, components, bytes)
             .map_err(MkimageError::SystemPartition)?;
     }
+    plant_network_config(&mut fs, root, network_conf)?;
     fs.flush().map_err(MkimageError::SystemPartition)?;
     Ok(fs.into_block().into_bytes())
 }
@@ -341,7 +331,6 @@ fn populate_system_subtree(
         .map_err(MkimageError::RootPartition)?;
     write_security_file(fs, security, USERS_DB_NAME, seed.users_db)?;
     write_security_file(fs, security, GROUPS_DB_NAME, seed.groups_db)?;
-    write_network_config(fs, system, seed.network_conf)?;
     write_library_config(fs, system, seed.library_conf)?;
     if let Some(key_bytes) = seed.log_attestation_key {
         let keys = fs
@@ -442,44 +431,36 @@ fn write_security_file(
     Ok(())
 }
 
-/// Lay out the network-configuration store on the writable root: create
-/// `/System/Settings/Network` and write `document` through the one
-/// `tairix_netconfig` engine.
+/// Plant the per-interface network-configuration document on the read-only
+/// `/System` volume, at the volume-relative path the ABI names
+/// ([`SystemConfigFile::volume_path`]).
+///
+/// That path — not the `/System/Settings` *view* path — is where the document
+/// has to live: its only reader is the device manager, which reads it through
+/// the pre-unlock store endpoint before the encrypted root is unlocked, so it
+/// can configure interfaces on the same volume the NIC drivers autoload from.
+/// At runtime `/System/Settings` is the writable sub-mount backed by that
+/// encrypted root, which no bootstrap client can reach.
 ///
 /// The document is **parsed and re-rendered** rather than copied: the engine
 /// that validates it here is the same one `netstack` reads it with, so an
 /// image can never ship an addressing default its own stack would reject
 /// (fail closed at build time, not at first boot). An unparseable document is
 /// a build failure, as is a short write — never a truncated store.
-fn write_network_config(
+fn plant_network_config(
     fs: &mut ARXFS<MemBlock>,
-    system: NodeId,
+    root: NodeId,
     document: &str,
 ) -> Result<(), MkimageError> {
-    let settings = fs
-        .lookup(system, b"Settings")
-        .map_err(MkimageError::RootPartition)?;
-    let network = fs
-        .create(
-            settings,
-            NETWORK_SETTINGS_DIR.as_bytes(),
-            NodeKind::Directory,
-        )
-        .map_err(MkimageError::RootPartition)?;
     let text = tairix_netconfig::NetworkConfig::parse(document)
         .map_err(|_| MkimageError::NetworkConfig)?
         .render();
-    fs.create(network, NETWORK_CONF_NAME.as_bytes(), NodeKind::RegularFile)
-        .map_err(MkimageError::RootPartition)?;
-    let written = fs
-        .write_at(network, NETWORK_CONF_NAME.as_bytes(), 0, text.as_bytes())
-        .map_err(MkimageError::RootPartition)?;
-    if written != text.len() {
-        return Err(MkimageError::RootPartition(
-            tairix_abi::DriverError::DeviceFault,
-        ));
-    }
-    Ok(())
+    let components: Vec<&[u8]> = SystemConfigFile::Network
+        .volume_path()
+        .split('/')
+        .map(str::as_bytes)
+        .collect();
+    plant_nested_file(fs, root, &components, text.as_bytes()).map_err(MkimageError::SystemPartition)
 }
 
 /// Lay out the program-library store on the writable root: create
@@ -589,7 +570,7 @@ mod tests {
     const TEST_LIBRARY: &str =
         "editor.name = Editor\neditor.bundle = /Apps/Editor.app\neditor.category = Office\n";
 
-    /// A recognisable managed-interface document for the seeding contract:
+    /// A recognisable managed-interface document for the planting contract:
     /// the writer must parse and re-render it rather than copy it blindly, so
     /// a malformed default fails the build.
     const TEST_NETWORK: &str =
@@ -604,7 +585,6 @@ mod tests {
         log_attestation_key: None,
         machine_id: None,
         library_conf: TEST_LIBRARY,
-        network_conf: TEST_NETWORK,
     };
 
     /// Deterministic test entropy; production uses the host RNG.
@@ -664,38 +644,61 @@ mod tests {
         }
     }
 
+    /// Build a `/System` volume carrying `network_conf` and nothing else,
+    /// then walk to the document through the ABI's own volume-relative path.
+    fn system_volume_network_conf(network_conf: &str) -> Result<Vec<u8>, MkimageError> {
+        let bytes =
+            build_system_partition(TEST_SECTORS, &mut TestEntropy(11), &[], &[], network_conf)?;
+        let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
+        let mut fs = ARXFS::open(dev, &SYSTEM_VOLUME_KEY).expect("the system volume mounts");
+        let mut node = fs.root();
+        let path = SystemConfigFile::Network.volume_path();
+        let mut components = path.split('/').peekable();
+        while let Some(component) = components.next() {
+            node = fs
+                .lookup(node, component.as_bytes())
+                .unwrap_or_else(|_| panic!("{path}: {component} exists"));
+            if components.peek().is_none() {
+                let mut buf = [0u8; tairix_netconfig::MAX_CONFIG_LEN];
+                let read = fs.read_at(node, 0, &mut buf).expect("the document reads");
+                return Ok(buf[..read].to_vec());
+            }
+        }
+        unreachable!("the volume path always names a leaf")
+    }
+
     #[test]
-    fn the_writable_root_ships_the_seeded_network_config() {
+    fn the_read_only_system_volume_ships_the_network_config_where_its_reader_looks() {
+        // The device manager reads this document through the pre-unlock store
+        // endpoint, which serves the read-only `/System` volume at the ABI's
+        // volume-relative path. Planting it anywhere else — the `/System`
+        // *view* path on the encrypted root, say — leaves it unread and the
+        // machine with no managed interface.
+        let bytes = system_volume_network_conf(TEST_NETWORK).expect("the volume builds");
+        let text = core::str::from_utf8(&bytes).expect("utf-8");
+        let expected =
+            tairix_netconfig::NetworkConfig::parse(TEST_NETWORK).expect("the document parses");
+        assert_eq!(text, expected.render(), "canonically rendered, not copied");
+        let parsed = tairix_netconfig::NetworkConfig::parse(text).expect("parses back");
+        let wan = parsed.interface("wan").expect("the planted interface");
+        assert_eq!(wan.match_node, Some(0xfd58_0000));
+        assert_eq!(wan.ipv4_method(), tairix_netconfig::Ipv4Method::Dhcp);
+    }
+
+    #[test]
+    fn the_writable_root_ships_no_network_config() {
+        // A second copy on the encrypted root would be read by nothing while
+        // looking authoritative: an operator editing it would see no effect.
         let bytes = build();
         let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
         let mut fs = ARXFS::open(dev, &TEST_KEY).expect("mounts");
         let root = fs.root();
         let system = fs.lookup(root, b"System").expect("/System exists");
         let settings = fs.lookup(system, b"Settings").expect("Settings exists");
-        let network = fs
-            .lookup(settings, NETWORK_SETTINGS_DIR.as_bytes())
-            .expect("Settings/Network exists");
-        let conf = fs
-            .lookup(network, NETWORK_CONF_NAME.as_bytes())
-            .expect("network.conf exists");
-        // The seeded document lands, canonically rendered, and parses back to
-        // exactly the interface the image builder asked for. The buffer is
-        // sized well past the document so a truncated read can never make
-        // this assertion pass vacuously.
-        let mut buf = [0u8; tairix_netconfig::MAX_CONFIG_LEN];
-        let read = fs.read_at(conf, 0, &mut buf).expect("network.conf reads");
-        let text = core::str::from_utf8(&buf[..read]).expect("utf-8");
-        let parsed = tairix_netconfig::NetworkConfig::parse(text).expect("parses");
-        let expected =
-            tairix_netconfig::NetworkConfig::parse(TEST_NETWORK).expect("the seed parses");
-        assert_eq!(
-            text,
-            expected.render(),
-            "the seeded document lands verbatim"
+        assert!(
+            fs.lookup(settings, b"Network").is_err(),
+            "the network store belongs on the read-only /System volume alone"
         );
-        let wan = parsed.interface("wan").expect("the seeded interface");
-        assert_eq!(wan.match_node, Some(0xfd58_0000));
-        assert_eq!(wan.ipv4_method(), tairix_netconfig::Ipv4Method::Dhcp);
     }
 
     #[test]
@@ -703,12 +706,8 @@ mod tests {
         // A malformed addressing default must fail the *image build*, not the
         // boot: the writer validates through the same engine `netstack` reads
         // the store with, so a document the stack would reject never ships.
-        let seed = RootSeed {
-            network_conf: "wan.kind ethernet\nwan.ipv4.method wireless\n",
-            ..TEST_SEED
-        };
         assert!(matches!(
-            build_root_partition(TEST_SECTORS, &TEST_KEY, &mut TestEntropy(7), &seed),
+            system_volume_network_conf("wan.kind ethernet\nwan.ipv4.method wireless\n"),
             Err(MkimageError::NetworkConfig)
         ));
     }

@@ -754,8 +754,8 @@ pub fn net_driver_store_files(
         .map_err(Clone::clone)
 }
 
-/// The `/System/Settings/Network/network.conf` the flashable Raspberry Pi
-/// image ships: DHCPv4 plus IPv6 SLAAC on the board's on-board gigabit NIC.
+/// The per-interface network configuration the flashable Raspberry Pi image
+/// ships: DHCPv4 plus IPv6 SLAAC on the board's on-board gigabit NIC.
 ///
 /// The interface is bound by its **stable hardware location** — the GENET
 /// register aperture the discovered node names, taken from the driver's own
@@ -770,7 +770,9 @@ pub fn net_driver_store_files(
 /// hardware: a booted Pi 4 acquires its address without an operator editing
 /// anything. `mkimage` re-parses the document through the same
 /// `tairix_netconfig` engine `netstack` reads it with, so a malformed default
-/// fails the image build rather than the boot.
+/// fails the image build rather than the boot, and plants it on the read-only
+/// `/System` volume — the one place the device manager's pre-unlock read
+/// resolves it.
 #[must_use]
 pub fn genet_network_conf() -> String {
     format!(
@@ -778,7 +780,7 @@ pub fn genet_network_conf() -> String {
          # The board's on-board gigabit NIC, bound by the stable bus location\n\
          # of its GENET register aperture, addressed by DHCPv4 with IPv6\n\
          # stateless autoconfiguration -- the default every desktop system\n\
-         # ships. Edit here (or with `configure`) to pin a static address.\n\
+         # ships.\n\
          wan.kind ethernet\n\
          wan.match.node {:#x}\n\
          wan.ipv4.method dhcp\n\

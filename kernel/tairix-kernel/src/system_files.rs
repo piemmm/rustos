@@ -49,7 +49,10 @@ use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemSecurity};
 use tairix_abi::driver_store::SystemConfigFile;
 use tairix_abi::Errno;
 use tairix_drvhost::ImageSource;
-use tairix_kernel_core::{enumerate_driver_store, DriverImageError, DriverImageReader, VfsError};
+use tairix_kernel_core::{
+    enumerate_driver_store, DriverImageError, DriverImageReader, VfsError,
+    SYSTEM_VOLUME_SETTINGS_PATH,
+};
 use tairix_log::Sink;
 
 /// A read-only file service over the mounted `/System` volume: it lists the
@@ -118,40 +121,31 @@ where
     /// The device manager needs `network.conf` / `system.conf` before the
     /// encrypted root is unlocked — while the general VFS path is not yet
     /// mounted — but this always-mounted read-only `/System` service can
-    /// reach them. `settings_root` is the settings tree's path relative to
-    /// the volume's root ([`tairix_kernel_core::SYSTEM_VOLUME_SETTINGS_PATH`]
-    /// on a `/System` volume); the read is confined strictly below it and
-    /// runs under the same bootstrap identity and fail-closed
-    /// [`DriverImageReader`] delegation as a bundle read — no new authority.
+    /// reach them. The read is confined strictly below
+    /// [`SYSTEM_VOLUME_SETTINGS_PATH`] and runs under the same bootstrap
+    /// identity and fail-closed [`DriverImageReader`] delegation as a bundle
+    /// read — no new authority.
     ///
-    /// The file set is closed ([`SystemConfigFile`]): the ABI path is mapped
-    /// onto this volume's settings root, so only those two files are ever
+    /// The file set is closed ([`SystemConfigFile`]) and each member names
+    /// its own volume-relative path ([`SystemConfigFile::volume_path`]) — the
+    /// same spelling an image builder plants — so only those files are ever
     /// reachable and never an arbitrary caller-named path.
     ///
     /// # Errors
     ///
     /// [`Errno::NotFound`] when the file is absent (the benign "no
-    /// configuration" case) or the path does not lie under the settings
-    /// tree; otherwise the [`Errno`] the fail-closed read refused with.
+    /// configuration" case); otherwise the [`Errno`] the fail-closed read
+    /// refused with.
     pub fn read_system_config(
         &self,
-        settings_root: &str,
         which: SystemConfigFile,
         buf: &mut Vec<u8>,
     ) -> Result<(), Errno> {
-        // Map the ABI's absolute path (`/System/Settings/…`) onto this
-        // volume's own root (`/Settings/…`), so the read is confined below
-        // `settings_root`. A path that is not under `/System/Settings` is
-        // not a settings file — fail closed rather than read elsewhere.
-        let sub = which
-            .path()
-            .strip_prefix("/System/Settings")
-            .ok_or(Errno::NotFound)?;
-        let mut full = String::from(settings_root);
-        full.push_str(sub);
+        let mut full = String::from("/");
+        full.push_str(which.volume_path());
         let mut fs = self.fs.borrow_mut();
         self.reader
-            .read_image(&mut **fs, settings_root, &full, buf)
+            .read_image(&mut **fs, SYSTEM_VOLUME_SETTINGS_PATH, &full, buf)
             .map_err(DriverImageError::to_errno)
     }
 }
@@ -179,6 +173,7 @@ mod tests {
     use super::*;
 
     use alloc::vec;
+    use tairix_kernel_core::SYSTEM_VOLUME_STORE_PATH;
 
     use crate::test_support::MockRootFs;
 
@@ -283,31 +278,52 @@ mod tests {
 
     #[test]
     fn read_system_config_reads_a_whitelisted_settings_file() {
-        // On a whole-root fixture the settings tree is at the absolute
-        // `/System/Settings`; the closed file set maps onto it.
+        // Planted at the volume-relative path the ABI names, which is where
+        // an image builder writes it — the read and the plant agree by
+        // construction, never by two copied spellings.
         let mut fs = MockRootFs::new();
-        fs.add_file(
-            "/System/Settings/Network/network.conf",
-            b"wan.kind ethernet\n",
-        );
-        fs.add_file(
-            "/System/Settings/Configuration/system.conf",
-            b"os.loginType graphical\n",
-        );
+        for (which, bytes) in [
+            (SystemConfigFile::Network, &b"wan.kind ethernet\n"[..]),
+            (SystemConfigFile::System, &b"os.loginType graphical\n"[..]),
+            (SystemConfigFile::SystemServices, &b"netstack\n"[..]),
+        ] {
+            fs.add_file(&alloc::format!("/{}", which.volume_path()), bytes);
+        }
         let service =
-            SystemFileService::open(&mut fs, "/System/Drivers").expect("root mount builds");
+            SystemFileService::open(&mut fs, SYSTEM_VOLUME_STORE_PATH).expect("root mount builds");
 
-        let mut buf = Vec::new();
-        service
-            .read_system_config("/System/Settings", SystemConfigFile::Network, &mut buf)
-            .expect("the network config reads");
-        assert_eq!(buf, b"wan.kind ethernet\n");
+        for (which, expected) in [
+            (SystemConfigFile::Network, &b"wan.kind ethernet\n"[..]),
+            (SystemConfigFile::System, &b"os.loginType graphical\n"[..]),
+            (SystemConfigFile::SystemServices, &b"netstack\n"[..]),
+        ] {
+            let mut buf = Vec::new();
+            service
+                .read_system_config(which, &mut buf)
+                .expect("the whitelisted config reads");
+            assert_eq!(buf, expected, "{which:?}");
+        }
+    }
 
-        buf.clear();
-        service
-            .read_system_config("/System/Settings", SystemConfigFile::System, &mut buf)
-            .expect("the system config reads");
-        assert_eq!(buf, b"os.loginType graphical\n");
+    #[test]
+    fn every_whitelisted_config_lies_under_the_confinement_root() {
+        // The read is confined below the settings tree, so a file whose
+        // volume path escaped it would be refused rather than read: the two
+        // spellings must agree or the whole set becomes unreachable.
+        let root = SYSTEM_VOLUME_SETTINGS_PATH
+            .strip_prefix('/')
+            .expect("the confinement root is absolute");
+        for which in [
+            SystemConfigFile::System,
+            SystemConfigFile::Network,
+            SystemConfigFile::SystemServices,
+        ] {
+            let rest = which
+                .volume_path()
+                .strip_prefix(root)
+                .unwrap_or_else(|| panic!("{which:?} lies outside {SYSTEM_VOLUME_SETTINGS_PATH}"));
+            assert!(rest.starts_with('/'), "{which:?}");
+        }
     }
 
     #[test]
@@ -321,7 +337,7 @@ mod tests {
 
         let mut buf = Vec::new();
         assert_eq!(
-            service.read_system_config("/System/Settings", SystemConfigFile::Network, &mut buf),
+            service.read_system_config(SystemConfigFile::Network, &mut buf),
             Err(Errno::NotFound)
         );
         assert!(buf.is_empty());

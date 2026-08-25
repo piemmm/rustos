@@ -77,7 +77,8 @@ for filesystems, the feature section below.
 | Graphical login screen (`greeter.app`) | ◐ | ◐ | ▢ | ▢ |
 | Fast user switching (concurrent desktop sessions) | ◐ | ◐ | ▢ | ▢ |
 | Block storage | ✓ virtio | ✓ virtio + eMMC + USB | ✓ virtio | — |
-| Networking | ◐ virtio | ◐ virtio | ◐ virtio | — |
+| Networking | ◐ virtio | ◐ virtio + GENET | ◐ virtio | — |
+| DHCPv4 / DHCPv6 address configuration | ✓ | ✓ | ✓ | — |
 | Network offloads (RX/TX csum, TSO, mergeable RX, multiqueue RX) | ✓ virtio | ✓ virtio | ✓ virtio | — |
 | Input devices | ✓ ps2 + USB | ✓ virtio + USB | ✓ virtio | ✓ host |
 | Production kernel binary | ✓ | ✓ | ▢ | ▢ |

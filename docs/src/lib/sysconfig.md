@@ -54,9 +54,10 @@ free-form key namespace and no second store.
 The `net.*` family is the stack-wide network configuration; its consumer is
 the user-space network stack (`netstack`). Because `netstack` is the
 network-parsing sandbox and holds **no** filesystem capability, it cannot
-read the store itself: the **device manager** (`devmgr`, which is FS-capable
-and already drives the stack's admin endpoint) reads these keys after the
-root unlock and delivers them once over the capability-gated
+read the store itself: the **device manager** (`devmgr`, which already
+drives the stack's admin endpoint) reads these keys off the read-only
+`/System` volume over the pre-unlock store endpoint and delivers them once
+over the capability-gated
 (`CAP_NET_ADMIN`) `ApplyNetworkSettings` admin op — audited, and
 fail-soft-retried until the stack accepts them (`plans/NETWORK.md` N9b-2).
 Until then the stack holds these same registry defaults. Per-interface

@@ -34,6 +34,20 @@ than driven against a register layout that may not describe it.
 - **Frame buffers**: 64 receive and 64 transmit buffers of 2 KiB — a single
   256 KiB carve taken once at `open` and reused for every frame. At line rate
   that is roughly 96 KB of 1500-byte frames in flight each way.
+- **Receive filter**: the UniMAC's address registers identify the station for
+  MAC control frames; the receiver's own destination-address filter (`MDF`) is
+  what admits a frame, and a controller whose filter slots are all disabled
+  delivers nothing. Bring-up enables exactly two slots — the broadcast address
+  and this station's unicast address — which is the minimum a host needs to be
+  addressable (ARP, a DHCP offer, a unicast reply). Promiscuous reception is
+  never enabled: it would hand the network stack frames addressed to other
+  hosts on the segment.
+- **Multicast is not yet received** (`plans/NETWORK.md` N14d). The MDF has 17
+  slots and admitting a group address is one more slot, but the driver has no
+  seam through which the stack can ask for one, so IPv6 — whose neighbour
+  discovery and router solicitation are multicast — cannot complete on this
+  NIC yet. IPv4 is unaffected. The alternative, promiscuous reception, is
+  refused above.
 - **Receive**: descriptors are armed once with `DMA_OWN` and never rewritten;
   the consumer index alone hands a slot back, so the hot path writes one
   register per frame. `RBUF_ALIGN_2B` is enabled, so a frame starts two bytes

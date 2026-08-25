@@ -144,13 +144,26 @@ Each managed interface's addressing is declared in one document,
 `/System/Settings/Network/network.conf`, whose grammar, closed key
 registry, typed values, bounded fail-closed parser, and canonical render
 are the one `lib/netconfig` engine (`plans/NETWORK.md` §6.1). As with the
-stack-wide policy, `netstack` never reads it: the FS-capable device
-manager reads it post-unlock, maps each managed interface that carries a
-stable hardware identity — its `match.mac` (MAC) or `match.node` (bus
-location) — into a `NetInterfaceConfigMsg`, and delivers it over the
-`CAP_NET_ADMIN` admin endpoint. A managed interface carrying neither
-selector cannot be bound to hardware by identity and is surfaced loud
-(`devmgr` event `13_016`), never silently ignored.
+stack-wide policy, `netstack` never reads it: the device manager does, maps
+each managed interface that carries a stable hardware identity — its
+`match.mac` (MAC) or `match.node` (bus location) — into a
+`NetInterfaceConfigMsg`, and delivers it over the `CAP_NET_ADMIN` admin
+endpoint. A managed interface carrying neither selector cannot be bound to
+hardware by identity and is surfaced loud (`devmgr` event `13_016`), never
+silently ignored.
+
+The read happens **before the encrypted root is unlocked**, over the
+always-mounted read-only `/System` store endpoint
+(`StoreRequest::ReadConfig`), because NIC drivers autoload from that same
+volume and their interfaces must be addressed as they come up — headless,
+with nobody at a passphrase prompt. So the document lives on the read-only
+`/System` volume, at the volume-relative path the closed
+`SystemConfigFile` set names (`SystemConfigFile::volume_path`), which is
+also where the image builder plants it: writer and reader derive that path
+from the one definition, so they cannot land on different volumes. It is
+**not** planted through the `/System/Settings` view path — at runtime that
+is the writable sub-mount backed by the encrypted root, which no bootstrap
+client can reach, so a document written there is read by nothing.
 
 `netstack` locates the interface by its **stable hardware identity** — the
 device MAC it holds from the driver's facts, or the hardware location the
@@ -166,9 +179,18 @@ configuration is a success, not a duplicate). Because interfaces bind
 asynchronously as their drivers come up, delivery of an interface not yet
 present returns `NotFound` and is retried silently on the next
 hardware-tree generation bump; a successful apply is recorded so it is not
-re-pushed (`devmgr` events `13_014`/`13_015`). The image ships an **empty**
-`network.conf` ("no managed interfaces beyond loopback"); the installer,
-or `configure`, writes the operator's interfaces through the same engine.
+re-pushed (`devmgr` events `13_014`/`13_015`).
+
+An image ships the addressing default its own hardware warrants, validated
+at build time through the same `lib/netconfig` engine the stack reads it
+with, so an image can never ship a document its own parser would reject.
+The Raspberry Pi image binds the board's on-board GENET NIC by its register
+aperture and selects DHCPv4 + SLAAC; an image that plants no NIC driver
+ships the canonical **empty** document ("no managed interfaces beyond
+loopback"). Rewriting the shipped default at runtime is not yet wired: the
+writable override layer `plans/NETWORK.md` §6.1 describes has no writer
+(`configure` grows no interface sub-grammar), so today the document is
+image- and installer-authored only.
 
 ## Link aggregation (bonds)
 

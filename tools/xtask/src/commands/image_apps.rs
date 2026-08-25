@@ -30,6 +30,7 @@
 
 use std::sync::OnceLock;
 
+use tairix_abi::driver_store::SystemConfigFile;
 use tairix_abi::{AppInfoHeader, BundleEntry, BundleFileDigest, APPINFO_MAGIC};
 use tairix_fontface::FAMILY_MANIFEST;
 use tairix_image::{DecodeLimits, ImageFormat};
@@ -300,6 +301,20 @@ pub fn tcpecho_store_files(
     )
 }
 
+/// A planted `/System/Settings/` configuration file, addressed by the ABI's
+/// own volume-relative path so a fixture and the pre-unlock reader that
+/// resolves it can never name different files.
+fn planted_config(which: SystemConfigFile, document: &str) -> AppStoreFile {
+    AppStoreFile {
+        components: which
+            .volume_path()
+            .split('/')
+            .map(|c| c.as_bytes().to_vec())
+            .collect(),
+        bytes: document.as_bytes().to_vec(),
+    }
+}
+
 /// The composed store files the ECN vertical's disk plants: the stream
 /// vertical's `tcpecho`-augmented set (so the client fixture and the standard
 /// service bundles are on disk exactly as the stream vertical plants them)
@@ -325,16 +340,10 @@ pub fn ecn_net_store_files(
     FILES[memo_slot(arch, profile)]
         .get_or_init(|| {
             let mut files = tcpecho_store_files(ctx, arch, profile)?.to_vec();
-            files.push(AppStoreFile {
-                components: vec![
-                    b"Settings".to_vec(),
-                    b"Configuration".to_vec(),
-                    b"system.conf".to_vec(),
-                ],
-                bytes: tairix_test_netstack_wire::ECN_SYSTEM_CONF
-                    .as_bytes()
-                    .to_vec(),
-            });
+            files.push(planted_config(
+                SystemConfigFile::System,
+                tairix_test_netstack_wire::ECN_SYSTEM_CONF,
+            ));
             Ok(files)
         })
         .as_ref()
@@ -400,14 +409,7 @@ pub fn static_net_store_files(
                 PieArch::Riscv64 => tairix_test_netstack_wire::STATIC_NETWORK_CONF_RISCV64,
                 PieArch::Aarch64 => tairix_test_netstack_wire::STATIC_NETWORK_CONF_AARCH64,
             };
-            files.push(AppStoreFile {
-                components: vec![
-                    b"Settings".to_vec(),
-                    b"Network".to_vec(),
-                    b"network.conf".to_vec(),
-                ],
-                bytes: conf.as_bytes().to_vec(),
-            });
+            files.push(planted_config(SystemConfigFile::Network, conf));
             Ok(files)
         })
         .as_ref()
@@ -437,16 +439,10 @@ pub fn bond_net_store_files(
     FILES[memo_slot(arch, profile)]
         .get_or_init(|| {
             let mut files = app_store_files(ctx, arch, profile)?.to_vec();
-            files.push(AppStoreFile {
-                components: vec![
-                    b"Settings".to_vec(),
-                    b"Network".to_vec(),
-                    b"network.conf".to_vec(),
-                ],
-                bytes: tairix_test_netstack_wire::BOND_NETWORK_CONF
-                    .as_bytes()
-                    .to_vec(),
-            });
+            files.push(planted_config(
+                SystemConfigFile::Network,
+                tairix_test_netstack_wire::BOND_NETWORK_CONF,
+            ));
             Ok(files)
         })
         .as_ref()
@@ -490,14 +486,7 @@ pub fn dhcp_net_store_files(
                 PieArch::Riscv64 => tairix_test_netstack_wire::DHCP_NETWORK_CONF_RISCV64,
                 PieArch::Aarch64 => tairix_test_netstack_wire::DHCP_NETWORK_CONF_AARCH64,
             };
-            files.push(AppStoreFile {
-                components: vec![
-                    b"Settings".to_vec(),
-                    b"Network".to_vec(),
-                    b"network.conf".to_vec(),
-                ],
-                bytes: conf.as_bytes().to_vec(),
-            });
+            files.push(planted_config(SystemConfigFile::Network, conf));
             Ok(files)
         })
         .as_ref()
@@ -540,14 +529,7 @@ pub fn dhcp6_net_store_files(
                 PieArch::Riscv64 => tairix_test_netstack_wire::DHCP6_NETWORK_CONF_RISCV64,
                 PieArch::Aarch64 => tairix_test_netstack_wire::DHCP6_NETWORK_CONF_AARCH64,
             };
-            files.push(AppStoreFile {
-                components: vec![
-                    b"Settings".to_vec(),
-                    b"Network".to_vec(),
-                    b"network.conf".to_vec(),
-                ],
-                bytes: conf.as_bytes().to_vec(),
-            });
+            files.push(planted_config(SystemConfigFile::Network, conf));
             Ok(files)
         })
         .as_ref()

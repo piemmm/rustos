@@ -1219,10 +1219,12 @@ mod tests {
         &[CapabilityId::CONSOLE_WRITE, CapabilityId::SHM];
 
     // The Switchboard monitor service (plans/NEW-TASKBAR.md T10/T11): console
-    // write for its fail-loud stderr diagnostics, and the two sysinfo reads
+    // write for its fail-loud stderr diagnostics, and the three sysinfo reads
     // its sampler has code paths for — `CAP_SYSINFO_GLOBAL` (the system-wide
-    // process list) and `CAP_SYSINFO_KERNEL` (the memory-pressure bands),
-    // both optional features that degrade to the self-scoped view when the
+    // process list), `CAP_SYSINFO_KERNEL` (the memory-pressure bands), and
+    // `CAP_SYSINFO_HW` (the network-interface facts its Network page and tile
+    // are built from, and the seat list its Session page reads) — all
+    // optional features that degrade to an honest unmeasured mark when the
     // launching user's ceiling strips them. `CAP_SHM` creates and grants the
     // zero-copy frame region the desktop session maps for its overview
     // window, exactly as any other windowed program; `CAP_PROC_CONTROL`
@@ -1240,6 +1242,7 @@ mod tests {
         CapabilityId::CONSOLE_WRITE,
         CapabilityId::SYSINFO_GLOBAL,
         CapabilityId::SYSINFO_KERNEL,
+        CapabilityId::SYSINFO_HW,
         CapabilityId::SHM,
         CapabilityId::PROC_CONTROL,
         CapabilityId::SYSTEM_POWER,

@@ -124,6 +124,25 @@ impl SystemConfigFile {
             Self::SystemServices => "/System/Settings/Services/enabled",
         }
     }
+
+    /// The file's path relative to the read-only `/System` **volume's own
+    /// root** (`Settings/Network/network.conf`) — [`Self::path`] with the
+    /// `/System/` view prefix removed.
+    ///
+    /// This is the one location the pre-unlock store endpoint reads and the
+    /// one an image builder plants, so the writer and the reader cannot
+    /// drift onto different volumes: at runtime `/System/Settings` is the
+    /// *writable* sub-mount backed by the encrypted root, which no
+    /// bootstrap client can reach, so a document planted at [`Self::path`]
+    /// through the VFS is invisible to every reader of this set.
+    #[must_use]
+    pub const fn volume_path(self) -> &'static str {
+        match self {
+            Self::System => "Settings/Configuration/system.conf",
+            Self::Network => "Settings/Network/network.conf",
+            Self::SystemServices => "Settings/Services/enabled",
+        }
+    }
 }
 
 /// Encoded length of a [`StoreRequest::Load`]: opcode + `bundle_id` (u32) +
@@ -866,6 +885,25 @@ mod tests {
             SystemConfigFile::SystemServices.path(),
             "/System/Settings/Services/enabled"
         );
+    }
+
+    #[test]
+    fn every_volume_path_is_its_view_path_without_the_system_prefix() {
+        // The pre-unlock reader resolves `volume_path` on the `/System`
+        // volume while a VFS consumer resolves `path`; if the two ever named
+        // different files, an image would plant its configuration where
+        // nothing reads it.
+        for which in [
+            SystemConfigFile::System,
+            SystemConfigFile::Network,
+            SystemConfigFile::SystemServices,
+        ] {
+            assert_eq!(
+                which.path().strip_prefix("/System/"),
+                Some(which.volume_path()),
+                "{which:?}"
+            );
+        }
     }
 
     #[test]

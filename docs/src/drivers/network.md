@@ -115,7 +115,7 @@ region itself; that remains the stack's responsibility.
 | Driver                    | Crate                           | Supported buses     | Status                                             |
 |---------------------------|---------------------------------|---------------------|----------------------------------------------------|
 | [virtio-net](./virtio.md) | `tairix-drv-network-virtio-net` | virtio (PCI / MMIO) | ring transport + facts; receive-checksum offload (`VIRTIO_NET_F_GUEST_CSUM` → `RX_CSUM_VALIDATED`); TCP transmit-checksum offload (`VIRTIO_NET_F_CSUM` → `TX_CSUM_TCP`); TCP segmentation offload (`VIRTIO_NET_F_HOST_TSO4`+`TSO6` → `TX_SEGMENT_TCP`); mergeable receive buffers (`VIRTIO_NET_F_MRG_RXBUF`); multiqueue receive (`VIRTIO_NET_F_MQ` + `VIRTIO_NET_F_CTRL_VQ`) |
-| GENET v5                  | `tairix-drv-network-genet`       | platform MMIO (aarch64) | ring transport + facts; MDIO/PHY autonegotiation at 10/100/1000; no offloads advertised (see below) |
+| GENET v5                  | `tairix-drv-network-genet`       | platform MMIO (aarch64) | ring transport + facts; MDIO/PHY autonegotiation at 10/100/1000; unicast + broadcast receive filter (no multicast yet); no offloads advertised (see below) |
 
 Both driver *processes* share one control plane: `lib/netchan` carries the
 `netchan-v1` server (`NetChannelServer`) and the process loop that claims a
@@ -150,6 +150,28 @@ the level-2 interrupt controller wholesale *before* programming anything, and
 afterwards unmasks exactly `{RXDMA done, TXDMA done, link up, link down}`. A
 link event re-resolves and re-programs the negotiated link on the next service
 doorbell, so a cable change needs no driver restart.
+
+#### The receive destination-address filter
+
+The UniMAC's address registers identify the station for MAC control frames;
+the receiver's own destination-address filter (`UMAC_MDF_CTRL` plus its
+address slots) is what admits an arriving frame, and a controller left with
+every slot disabled delivers **nothing**. Bring-up therefore enables exactly
+two slots before it enables the receiver — the broadcast address and this
+station's unicast address — the minimum a host needs to be addressable: ARP,
+a DHCP offer, and a unicast reply. Programming it after `CMD_RX_EN` would
+leave a window in which every arriving frame is dropped, so the ordering is
+asserted by a test.
+
+Promiscuous reception is deliberately never enabled. It would admit every
+frame on the segment, including those addressed to other hosts — authority
+the network stack has no reason to hold.
+
+**Multicast reception is not wired yet** (`plans/NETWORK.md` N14d): admitting
+a group address costs one more of the 17 filter slots, but there is no seam
+through which the stack can ask the driver for one. IPv6 neighbour discovery
+and router solicitation are multicast, so IPv6 cannot complete on this NIC
+until that seam lands; IPv4 (including DHCPv4) is unaffected.
 
 It advertises **no offloads**. The GENET has checksum and segmentation
 engines, but a driver may advertise only what it has *verified* it can do

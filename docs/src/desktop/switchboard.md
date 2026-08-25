@@ -584,21 +584,24 @@ system-wide metrics expose no change event to park on.
 ## Capability sizing
 
 The manifest requests exactly `CAP_CONSOLE_WRITE`, `CAP_SYSINFO_GLOBAL`,
-`CAP_SYSINFO_KERNEL`, `CAP_SHM` (the zero-copy window frame region the
-session maps, as for any windowed app), `CAP_PROC_CONTROL` (delivering a
-control signal to a task this service did not spawn — the Force action), and
-`CAP_SYSTEM_POWER` (the machine transition the session relays here rather
-than performing itself); the kernel intersects them with the launching
-user's ceiling at spawn, so an ordinary account's instance simply publishes
-that it is not power-capable and the desktop's power rows stay refused. The
-two optional sampling scopes are probed **once** at startup (capability sets
-are fixed at spawn; re-probing would only spam the audit log with denied
-audited queries):
+`CAP_SYSINFO_KERNEL`, `CAP_SYSINFO_HW` (the hardware inventory — the
+per-interface network facts the Network page and the network tile are built
+from, and the seat list the Session page reads), `CAP_SHM` (the zero-copy
+window frame region the session maps, as for any windowed app),
+`CAP_PROC_CONTROL` (delivering a control signal to a task this service did
+not spawn — the Force action), and `CAP_SYSTEM_POWER` (the machine
+transition the session relays here rather than performing itself); the
+kernel intersects them with the launching user's ceiling at spawn, so an
+ordinary account's instance simply publishes that it is not power-capable
+and the desktop's power rows stay refused. The three optional sampling
+scopes are probed **once** at startup (capability sets are fixed at spawn;
+re-probing would only spam the audit log with denied audited queries):
 
-- an administrator's instance sees the system-wide process list and the
-  memory-pressure gauge;
+- an administrator's instance sees the system-wide process list, the
+  memory-pressure gauge, and the hardware inventory;
 - an ordinary user's instance degrades cleanly to self-scope — its own
-  processes, the ungated overall CPU fraction, no memory signal.
+  processes, the ungated overall CPU fraction, no memory signal, and no
+  interface or seat inventory.
 
 A refused scope is an answer, not an error; the service publishes what it
 can honestly see.

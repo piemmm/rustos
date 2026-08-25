@@ -219,6 +219,23 @@ pub const MIB_RESET_TX: u32 = 1 << 2;
 /// `UMAC_TX_FLUSH`: drains the transmit path while set.
 pub const UMAC_TX_FLUSH: usize = UMAC + 0x334;
 
+/// `UMAC_MDF_CTRL`: per-slot enables for the receive destination-address
+/// filter. Slot `n` is enabled by bit ([`MDF_SLOTS`] `- 1 - n`); a frame
+/// whose destination matches no enabled slot is dropped by the MAC, so a
+/// controller left with this register clear receives nothing at all.
+pub const UMAC_MDF_CTRL: usize = UMAC + 0x650;
+
+/// Base of the destination-address filter slots. Each slot spans two
+/// registers — octets 0..2 in the low half-word of the first, octets 2..6 in
+/// the second — so slot `n` starts [`MDF_SLOT_STRIDE`]`* n` bytes in.
+pub const UMAC_MDF_ADDR: usize = UMAC + 0x654;
+
+/// Destination-address filter slots the UniMAC provides.
+pub const MDF_SLOTS: u32 = 17;
+
+/// Bytes one destination-address filter slot occupies.
+pub const MDF_SLOT_STRIDE: usize = 8;
+
 /// `MDIO_CMD`: the UniMAC's clause-22 MDIO master.
 pub const MDIO_CMD: usize = UMAC + 0x614;
 

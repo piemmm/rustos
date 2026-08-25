@@ -294,10 +294,19 @@ Key facts for the next worker:
   neither `match.mac` nor `match.node` rather than guessing, and
   `plans/NETWORK.md` §6.1 binds an alias to hardware "by stable identity,
   never discovery order". A board-neutral default is therefore impossible; the
-  default is a property of the *image*, which is why `mkimage`'s
-  `RootSeed::network_conf` now carries it instead of hard-coding the empty
-  document. The low-level `tools/mkimage` CLI, which plants no NIC driver,
-  still ships the empty one.
+  default is a property of the *image*, which is why the composed document is
+  a `build_rpi_image` argument rather than a hard-coded empty one. The
+  low-level `tools/mkimage` CLI, which plants no NIC driver, still ships the
+  empty document.
+- **It is planted on the read-only `/System` volume**, at the volume-relative
+  path `SystemConfigFile::volume_path` names — the one location `devmgr`'s
+  pre-unlock store read resolves. Planting it on the writable root through
+  the `/System/Settings` view path instead is the defect that kept DHCP from
+  ever starting on a flashed board: at runtime that path is the writable
+  sub-mount backed by the encrypted root, which no bootstrap client can
+  reach, so the shipped default was read by nothing and the machine ran with
+  no managed interface. Reader and writer now derive the path from the one
+  ABI definition, and `tools/mkimage` proves the plant lands there.
 - **It is validated at build time through the one engine that reads it**:
   `mkimage` parses the document with `tairix_netconfig` and re-renders it, so
   an image can never ship an addressing default its own stack would reject

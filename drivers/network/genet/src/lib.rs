@@ -72,7 +72,7 @@
 use tairix_abi::driver::dma::DmaSlab;
 use tairix_abi::driver::mmio::WindowError;
 use tairix_abi::driver::net::{
-    DeviceFacts, LinkState, MacAddress, Net, NetOffloads, ETHERNET_HEADER_LEN,
+    DeviceFacts, LinkState, MacAddress, Net, NetOffloads, ETHERNET_HEADER_LEN, MAC_ADDRESS_LEN,
 };
 use tairix_abi::driver::net_ring::{FrameRings, ServiceReport};
 use tairix_abi::driver::timing::Delay;
@@ -149,6 +149,12 @@ pub const BUF_LEN: u32 = 2048;
 /// Bytes of device-visible DMA the driver carves once at [`Genet::open`]:
 /// one [`BUF_LEN`] buffer per receive and per transmit descriptor.
 pub const DMA_REGION_BYTES: usize = 2 * (RING_SLOTS as usize) * (BUF_LEN as usize);
+
+/// Destination addresses bring-up admits through the receive filter: this
+/// station's own unicast address and the broadcast address.
+const RX_FILTER_ADDRESSES: usize = 2;
+
+const _: () = assert!(RX_FILTER_ADDRESSES <= regs::MDF_SLOTS as usize);
 
 /// The link MTU this driver reports: standard Ethernet.
 pub const MTU: u32 = 1500;
@@ -303,6 +309,7 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
             .write(regs::INTRL2_CPU_CLEAR, regs::INTRL2_ALL)?;
         device.reset_umac()?;
         device.write_hwaddr()?;
+        device.write_rx_filter()?;
         device.disable_dma()?;
         device.init_rx()?;
         device.init_tx()?;
@@ -377,6 +384,40 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
         let low = u32::from(u16::from_be_bytes([a[4], a[5]]));
         self.regs.write(regs::UMAC_MAC0, high)?;
         self.regs.write(regs::UMAC_MAC1, low)
+    }
+
+    /// Admit exactly this station's own unicast address and the broadcast
+    /// address through the receiver's destination-address filter.
+    ///
+    /// The address registers are not the receive filter — they identify the
+    /// station for MAC control frames — so a controller whose filter slots
+    /// are all disabled delivers nothing. Two slots are the minimum a host
+    /// needs to be addressable: without broadcast there is no ARP and no
+    /// DHCP offer, and without its own address no unicast reply arrives.
+    /// Promiscuous reception is deliberately not used — it would hand the
+    /// network stack every frame on the segment, including those addressed
+    /// to other hosts.
+    fn write_rx_filter(&mut self) -> Result<(), DriverError> {
+        let admitted: [[u8; MAC_ADDRESS_LEN]; RX_FILTER_ADDRESSES] =
+            [*MacAddress::BROADCAST.as_octets(), *self.mac.as_octets()];
+        // Slot 0 is enabled by the highest bit, each later slot by the next
+        // one down.
+        let mut enable = 1u32 << (regs::MDF_SLOTS - 1);
+        let mut enabled = 0u32;
+        for (slot, address) in admitted.iter().enumerate() {
+            let base = regs::UMAC_MDF_ADDR + slot * regs::MDF_SLOT_STRIDE;
+            self.regs.write(
+                base,
+                u32::from(u16::from_be_bytes([address[0], address[1]])),
+            )?;
+            self.regs.write(
+                base + 4,
+                u32::from_be_bytes([address[2], address[3], address[4], address[5]]),
+            )?;
+            enabled |= enable;
+            enable >>= 1;
+        }
+        self.regs.write(regs::UMAC_MDF_CTRL, enabled)
     }
 
     /// Stop both DMA engines and drain the transmit path, so the rings can

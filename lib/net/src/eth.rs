@@ -21,7 +21,7 @@ pub const ETHERTYPE_IPV4: u16 = 0x0800;
 pub const ETHERTYPE_IPV6: u16 = 0x86DD;
 
 /// The all-ones link-layer broadcast address.
-pub const BROADCAST: MacAddress = MacAddress([0xFF; MAC_ADDRESS_LEN]);
+pub const BROADCAST: MacAddress = MacAddress::BROADCAST;
 
 /// A parsed view over the header of an Ethernet II frame.
 ///
