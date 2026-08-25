@@ -163,17 +163,36 @@ pub fn default_concurrency(count: usize) -> usize {
     count.min(host_parallelism()).max(1)
 }
 
+/// Order jobs heaviest-weight first, keeping equal weights in the order given.
+///
+/// Admission is head-of-line: a job waits until its weight fits the remaining
+/// budget. A whole-budget job therefore starts only once nothing else is
+/// running, so meeting one part-way through drains the runner to empty and
+/// leaves the host idle while it finishes — one bubble per heavy job. Taking
+/// the heavy jobs while the runner is *already* empty pays that drain once, at
+/// the start, and the lighter jobs then pack in behind them. Simulated over the
+/// measured QEMU matrix (11 whole-budget guests among 151) this lands within
+/// three seconds of the theoretical floor, where the given order costs fifty
+/// more.
+///
+/// A stable sort, so a set of equal-weight jobs keeps its caller's order and
+/// the uniform weight-one gate groups are unaffected.
+fn heaviest_first(jobs: &mut [Job]) {
+    jobs.sort_by_key(|job| core::cmp::Reverse(job.weight));
+}
+
 /// Run every job, keeping the sum of in-flight weights within `budget`, and
 /// fail closed.
 ///
 /// All jobs run to completion regardless of earlier failures, so one broken
 /// job never hides another. The returned error names every job that failed.
-pub fn run(jobs: Vec<Job>, budget: usize) -> Result<(), String> {
+pub fn run(mut jobs: Vec<Job>, budget: usize) -> Result<(), String> {
     let total = jobs.len();
     if total == 0 {
         return Ok(());
     }
     let budget = budget.max(1);
+    heaviest_first(&mut jobs);
 
     if budget == 1 {
         // At most one job can ever be in flight (every weight is >= 1), so
@@ -371,7 +390,7 @@ mod tests {
     use super::{default_concurrency, host_parallelism, run, Job};
     use std::process::Command;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     fn ok_job(label: &str) -> Job {
@@ -614,5 +633,57 @@ mod tests {
         ];
         assert!(run(jobs, 4).is_ok());
         assert_eq!(ran.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_whole_budget_job_is_admitted_before_the_lighter_ones() {
+        // Admission is head-of-line, so a whole-budget job listed last drains
+        // the runner to empty first and leaves the host idle while it runs.
+        // Recording the admission order proves the heavy job goes first.
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let mut jobs = Vec::new();
+        for label in ["light-a", "light-b", "light-c"] {
+            let seen = Arc::clone(&order);
+            jobs.push(Job::closure(label, 2, move || {
+                seen.lock().expect("order").push(label);
+                Ok(())
+            }));
+        }
+        let seen = Arc::clone(&order);
+        jobs.push(Job::closure("heavy", 8, move || {
+            seen.lock().expect("order").push("heavy");
+            Ok(())
+        }));
+
+        assert!(run(jobs, 8).is_ok());
+        let seen = order.lock().expect("order");
+        assert_eq!(
+            seen.first().copied(),
+            Some("heavy"),
+            "the whole-budget job must run before the lighter ones, got {seen:?}"
+        );
+        assert_eq!(seen.len(), 4, "every job must still run: {seen:?}");
+    }
+
+    #[test]
+    fn equal_weight_jobs_keep_the_order_they_were_given() {
+        // The gate groups are all weight one, so reordering must be a no-op
+        // for them: a stable sort is what keeps their reporting deterministic.
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let mut jobs = Vec::new();
+        for label in ["first", "second", "third"] {
+            let seen = Arc::clone(&order);
+            jobs.push(Job::closure(label, 1, move || {
+                seen.lock().expect("order").push(label);
+                Ok(())
+            }));
+        }
+        // Budget one takes the streaming path, which runs strictly one at a
+        // time, so the recorded order is the admission order exactly.
+        assert!(run(jobs, 1).is_ok());
+        assert_eq!(
+            *order.lock().expect("order"),
+            vec!["first", "second", "third"]
+        );
     }
 }

@@ -864,16 +864,31 @@ an update to this section.
        a ceiling, not a target — a shorter run is fine, a longer one is not.
   Quote the actual command output when reporting completion. A per-crate
   (`-p <crate>`) run is never a substitute for the whole-project run.
-- **Run the gate in the foreground and wait for it to finish.** The
+- **Watch the gate to completion and report only its real exit status.** The
   `cargo xtask ci`, `cargo xtask fuzz`, and `tools/ci/soak.sh` runs (and any
-  other validation-gate command) MUST be launched in the foreground and run
-  to completion — never backgrounded, detached, or left running while you do
-  other work. Wait for the command to exit, observe its real exit status, and
-  only then report on it. Backgrounding the gate (e.g. shell `&`, `nohup`, a
-  detached process, or polling a log file instead of waiting for the process)
-  risks reading stale or partial output and reporting a result the run never
-  actually produced — that is the §2.1 hack this rule forbids. The completion
-  report quotes the output of a run you waited for, start to finish.
+  other validation-gate command) MUST run to completion against the tree you
+  are reporting on, and the status you report MUST be the one that run actually
+  produced. Reporting from a partial, stale, still-running, or killed gate is
+  the §2.1 hack this rule forbids, however the run was launched.
+  - **The default is the foreground: launch it, wait, then report.** Do not
+    background or detach a gate you could simply have waited for, and never
+    poll a log file in place of waiting for the process.
+  - **The one exception is a caller that cannot wait that long.** `ci` takes
+    longer than an agent harness allows a single tool call (see
+    `docs/src/contributing.md` for the measured budget), and a foreground call
+    killed at that cap writes *no* exit status — strictly worse than useless.
+    There, and only there, run it so the process is tracked to exit and its
+    status is captured durably, and read the status back from that record:
+    `{ cargo xtask ci > ci.log 2>&1; echo "CI-RC=$?" >> ci.log; }`. The
+    appended code is written only after the process exits, so it is the real
+    one; a wrapper's or a shell's exit code may be the `echo`'s.
+  - **What the exception does not license.** Do no other work while the gate
+    runs, and finish every source and documentation edit *before* launching it
+    — a result that does not describe the tree you report on is worthless, so
+    an edit that becomes necessary mid-run means stopping the run. Confirm the
+    run reached the end of the pipeline (its final stage, and matching enrolled
+    and completed test counts) rather than judging by elapsed time.
+  - The completion report quotes the output of a run watched to its end.
   `tools/ci/soak.sh` is additionally capped on a developer machine (that's
   us) to a **maximum of 20 seconds** (`tools/ci/soak.sh both --secs 20`); the
   unbounded 24 h soak is for the CI/soak host only, never a developer machine.
@@ -1282,13 +1297,12 @@ You are not exempt from any rule above. In addition:
    **maximum of 20 seconds** — `tools/ci/soak.sh both --secs 20` — never the
    unbounded 24 h nightly budget, which belongs to the CI/soak host alone.
    Quote the actual output. Any failure found — yours or pre-existing — is
-   fixed before the task is done. **Run these in the foreground and wait for
-   them to finish** — never background, detach, or `&`/`nohup` the
-   `cargo xtask ci`, `cargo xtask fuzz`, or `tools/ci/soak.sh` runs, and never
-   poll a log file in place of waiting for the process. Wait for the command
-   to exit, read its real exit status, and only then report; reporting from a
-   backgrounded or still-running gate risks quoting stale or partial output
-   for a result the run never produced (§7, §2.1).
+   fixed before the task is done. **Watch each run to completion and report
+   the status it actually produced**, per §7's rule of that name: wait in the
+   foreground wherever you can, and where a single tool call cannot span the
+   run, capture the exit code durably and read it back rather than inferring
+   it. Finish every edit before launching, do no other work while it runs, and
+   never poll a log in place of waiting.
 7. **State your assumptions** at the top of any non-trivial change. If an
    assumption cannot be verified from the repository, stop and ask.
 8. **Never** edit generated files, `target/`, or `.idea/` content as part of

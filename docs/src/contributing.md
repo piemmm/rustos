@@ -17,6 +17,51 @@ rules, it points to them.
 4. Update documentation in the same commit as the code it describes —
    rustdoc on every public item and the relevant page in `docs/src/`.
 
+## How long `cargo xtask ci` takes, and how to run it under a tool cap
+
+Budget **about 15 minutes** on a warm `target/` and a 24-core host, and
+substantially longer on a cold one, where `-Z build-std` recompiles
+`core`/`alloc` per target and every image profile links from scratch.
+
+Every stage reports its own wall clock, so `grep 'done in' ci.log` profiles a
+run rather than leaving you to guess which phase to blame. A measured warm run:
+
+| Phase | Cost | Shape |
+| --- | --- | --- |
+| QEMU guest runs | 658 s over 151 guests | concurrent, `nproc/3` weighted budget; ~285 s makespan |
+| image gate | 193 s over 319 spawns | sequential |
+| QEMU fixture cross-compiles | 148 s over 3 spawns | sequential (one per target) |
+| host test matrix | 77 s | one cargo invocation |
+| `clippy` host + 11 target passes | 73 s | sequential |
+| `docs-check`, and all 11 static gates | 22 s | static gates concurrent |
+
+The pipeline **cannot** be squeezed under ten minutes: the QEMU phase's
+theoretical floor alone is around five minutes, and the stages above it are
+serialised by cargo's build-directory lock, which makes concurrent `cargo`
+invocations against one target directory wait rather than overlap.
+
+That matters when an AI agent runs the gate, because an agent harness caps a
+single tool call — ten minutes in Claude Code. A foreground call is **killed
+mid-pipeline** at the cap and writes no exit status at all, so it is strictly
+worse than useless: it burns the ten minutes and tells you nothing. Run it so
+the process is tracked to exit and its status is recorded:
+
+```sh
+{ cargo xtask ci > ci.log 2>&1; echo "CI-RC=$?" >> ci.log; }
+```
+
+Then read `CI-RC=` from the log. That value is written only after the process
+exits, so it is the real status — a wrapper's or a shell's exit code may be the
+`echo`'s, and partial log output is not evidence of anything. Confirm the run
+reached the end (the stage list finishes at `[image]`, and the enrolled and
+completed QEMU counts match) rather than judging by elapsed time.
+
+This is the case [§7][test] names in "watch the gate to completion and report
+only its real exit status". It is not licence to start the gate and move on:
+finish every source and documentation edit first, so the run covers the tree you
+will report on, do no other work while it runs, and stop the run if an edit
+becomes necessary — its result would no longer describe the tree you report on.
+
 ## Flaky tests are defects — fix them, never re-run them
 
 A test that fails intermittently is a **bug**, and it is fixed like any other

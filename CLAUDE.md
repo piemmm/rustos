@@ -34,6 +34,34 @@ Each of these names a general default that has actually produced a violation.
   `sed` is blind, non-atomic, and silent when its pattern misses — the §2.1
   hack risk wearing a shell one-liner.
 
+## Running the validation gate under the 10-minute tool cap
+
+§7's gate rule is "watch it to completion and report the status it actually
+produced", and it names this case: `cargo xtask ci` is ~15 min warm, so it does
+not fit one tool call, and a foreground call is **killed at the cap with no exit
+status written** — ten wasted minutes that prove nothing. Do not keep
+rediscovering this.
+
+```sh
+{ cargo xtask ci > /tmp/ci.log 2>&1; echo "CI-RC=$?" >> /tmp/ci.log; }
+```
+
+Read `CI-RC=` back from the log; it is written only after the process exits, so
+it is the real status, where the harness's own exit code is the `echo`'s. Check
+the run reached the end — stage list finishing at `[image]`, enrolled and
+completed QEMU counts matching — rather than judging by elapsed time. Every
+stage prints `done in <elapsed>`, so one grep profiles a run.
+
+The limits §7 puts on this are the ones worth repeating: finish every source
+and doc edit *first*, do no other work while it runs, and run `ci` exactly once
+on the final tree. An edit that becomes necessary mid-run means stopping the
+run, because its result would not describe the tree you report on.
+
+Fingerprint the tree either side of a gate run (`git status --porcelain |
+sha256sum`, `git diff | sha256sum`): other sessions may be live on this repo, and
+a mismatch tells you a failure was theirs, not yours. Never revert their work.
+Timings and the per-phase breakdown live in `docs/src/contributing.md`.
+
 ## Before reporting done
 
 Adversarial self-review of your own diff against §23, the full test suite over

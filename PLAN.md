@@ -4326,6 +4326,45 @@ These never "finish"; they are part of every PR.
 - **No duplication:** code reviewers reject duplication; refactor into
   `lib/` instead.
 
+### Open — parallelise the cross-compiled program builds (`~90 s` of `ci`)
+
+`cargo xtask ci` is ~15 min warm on 24 cores. Every stage reports `done in`
+(`Context::run_with_timeout`), so a run profiles itself; measured warm, the
+QEMU guest phase is 658 s of work over 151 guests (concurrent, `nproc/3`
+weighted budget, ~285 s makespan) and everything else is **serial**: 319
+`pie_build` spawns totalling 193 s, three fixture cross-compiles at 148 s, the
+host test matrix at 77 s, and `clippy` host + 11 target passes at 73 s.
+
+The remaining win is the 319 `pie_build` program/driver spawns, each paying a
+cargo startup and resolve. They are serial today and need not all be: the
+private target directory is per **triple** (`target/image-apps/<triple>`), so
+spawns for *different* triples contend on no build-directory lock and can
+overlap — worth roughly 90 s. Two things make it more than a `parallel::run`
+call, which is why it is staged rather than done:
+
+- The `image:`-labelled spawns come from several callers of the one
+  `pie_build` (the image pipeline, the kernel build script's embedded `Run`
+  programs, the QEMU fixture stage). Same-triple callers share one target
+  directory, so the grouping has to be by triple, across callers.
+- The output is shipped image content, so the change needs proof the produced
+  ELFs are unchanged — not merely that the gate stays green.
+
+Two levers are deliberately **not** available, both measured. Concurrent
+`cargo` invocations against one target directory serialise on the
+build-directory lock (`Blocking waiting for file lock on build directory`), so
+naive fan-out buys only lock churn; and `target_clippy`'s per-stratum split
+cannot be merged into one invocation per target, because cargo unifies features
+across everything named in one invocation and would link `lib/rt`'s
+`#[global_allocator]`/`#[panic_handler]` into the kernel. The QEMU weighted
+budget (`nproc/3`, an SMP guest charged the whole budget so it runs alone) is
+also not a lever: it is deliberate headroom against guests tripping their own
+in-guest watchdogs, and raising it manufactures exactly the load-dependent
+timeout §7 forbids.
+
+Note the ceiling: even at the floor the pipeline cannot fit a ten-minute agent
+tool call (the QEMU phase alone floors at ~5 min), so the run procedure in
+`docs/src/contributing.md` is the fix for that, not more speed.
+
 ---
 
 ## §17 Modularity Enforcement and Burn-down
@@ -6952,6 +6991,23 @@ of how much code was produced.
 
 Amendments to `AGENTS.md` (the binding charter) are logged here so an agent
 can see *why* a rule exists without diffing the charter's history.
+
+- **2026-08-25 — The gate rule is "watch it to completion", not "run it in
+  the foreground".** Amended §7's gate-running bullet and its §15.6 agent
+  mirror (owner decision). The requirement was always that the reported status
+  be the one the run actually produced; "foreground, never backgrounded" was
+  the *mechanism* assumed to guarantee it, and it stops guaranteeing anything
+  once the caller cannot hold a call for the whole run. `cargo xtask ci` is
+  ~15 min warm and cannot be squeezed under an agent harness's per-call cap —
+  the QEMU phase alone floors near five minutes and the stages above it are
+  serialised by cargo's build-directory lock — so a foreground call was being
+  killed at the cap having written *no* exit status, which satisfied neither
+  the letter nor the intent. The rule now states the requirement first and
+  permits a tracked run whose exit code is captured durably and read back,
+  while newly forbidding what the old wording never said out loud: doing other
+  work while the gate runs, editing the tree mid-run, and judging completion by
+  elapsed time. §15.6 now points at §7 instead of restating it (§2.2). The
+  measured budget and per-phase breakdown live in `docs/src/contributing.md`.
 
 - **2026-08-21 — `/System/Zoneinfo` for the shipped civil-time zone rules.**
   Amended §16.2's store list (owner decision, `plans/TIMEZONES.md`): the

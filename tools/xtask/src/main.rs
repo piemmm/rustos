@@ -118,7 +118,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 mod commands;
 mod floor;
@@ -276,7 +276,16 @@ impl Context {
         let mut child = spawn_in_own_group(&mut cmd)
             .map_err(|err| format!("{label} could not be spawned: {err}"))?;
         let pid = child.id();
+        let started = Instant::now();
         let status = await_within(label, pid, budget, move || child.wait())?;
+        // Every stage reports its wall clock in the same shape the concurrent
+        // job runner uses, so one grep over a pipeline log profiles the whole
+        // run. Without it there is no evidence for which phase to make faster.
+        eprintln!(
+            "xtask: [{label}] {} in {:?}",
+            if status.success() { "done" } else { "FAILED" },
+            started.elapsed()
+        );
         if status.success() {
             Ok(())
         } else {
