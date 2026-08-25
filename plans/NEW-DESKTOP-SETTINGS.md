@@ -24,13 +24,16 @@ guard enforces.
 
 ## Status
 
-`in progress` — DS1 is `done`, DS2–DS14 remain. The form family every pane
-composes is `lib/controls::form` (`FieldRow`, `FieldGroup`, `FieldControl`,
-`FieldLayout`), specified in `plans/GUI-CONTROLS-DESIGN.md` §11.40; the row
-chrome it shares with `ListRow`/`TableRow` lives in that crate's `paint` core,
-and a control's own measured width comes from `Button::measured_width` /
-`ComboBox::measured_width`. Nothing of the Settings application itself exists
-yet: DS2 is the first stage that puts a window on screen.
+`planned` — no stage has landed. DS1 is the prerequisite for every stage after
+it and does not exist in the tree: `lib/controls` has no `form` module, and the
+only form arithmetic anywhere is the file manager's private `FieldLayout`
+(`lib/browse/src/render.rs`), which DS14 retires. DS1 lands the family
+(`FieldRow`, `FieldGroup`, `FieldControl`, `FieldLayout`) with its
+specification in `plans/GUI-CONTROLS-DESIGN.md` beside the other control
+families, reuses the row chrome `ListRow`/`TableRow` already share in
+`lib/controls`' `paint` core, and adds the measured-width accessors its slot
+model needs to `Button` and `ComboBox` — neither carries one today. DS2 is the
+first stage that puts a window on screen.
 
 **The honest shape of the deliverable.** Seven of the categories the desktop
 should offer have no subsystem beneath them today: there is no audio stack, no
@@ -58,8 +61,9 @@ write path on landing.
   one reader: the shared System Information API query. Where both would want
   the same *command*, only one has it — the machine's power transitions stay
   in the system quick-actions menu, behind its existing confirmation, and
-  Settings' Power pane does not offer a second route to them (§2.2, and
-  macOS parity: shutting down is not a settings pane there either).
+  Settings' Power pane does not offer a second route to them
+  (`AGENTS.md` §2.2, and macOS parity: shutting down is not a settings pane
+  there either).
 
   Concretely, the one reader is `lib/procinfo`: it already owns the paged
   walks over `MOUNT_LIST`, `USER_DIRECTORY`, the process list, the CPU-time
@@ -80,12 +84,12 @@ write path on landing.
   name would be holding every hash on the machine. So the account roster comes
   from the ungated, credential-free `USER_DIRECTORY` query instead (DS9).
   An application that could change everything is precisely the ambient-
-  authority god-app §4 and §5.2 forbid, and a settings *browser* does not need
-  to be one: every change is either a request to the process that already owns
-  that domain, or a re-authenticated run of the tool that already writes that
-  store. §2 is the authority map, pane by pane. A pane whose write path is
-  refused states the refusal and changes nothing (§2.24) — it never reports a
-  success it did not get.
+  authority god-app `AGENTS.md` §4 and §5.2 forbid, and a settings *browser*
+  does not need to be one: every change is either a request to the process that
+  already owns that domain, or a re-authenticated run of the tool that already
+  writes that store. §2 is the authority map, pane by pane. A pane whose write
+  path is refused states the refusal and changes nothing (`AGENTS.md` §2.24) —
+  it never reports a success it did not get.
 
 - **Three write paths, and no fourth.** Every settable in this plan reaches
   one of exactly three owners:
@@ -119,8 +123,8 @@ write path on landing.
   hand-rolled a permissions grid, the wallpaper chooser a column of four
   drop-downs, and `datetime.app` a row of six fields. `lib/controls::form` is
   the one family (DS1), and DS4/DS14 rebuild those three surfaces on it,
-  because two form idioms in one desktop is the duplication §2.2 forbids. The
-  family composes the existing row chrome and control families; it
+  because two form idioms in one desktop is the duplication `AGENTS.md` §2.2
+  forbids. The family composes the existing row chrome and control families; it
   re-implements no plate, press, focus, disabled or Authority-Mark rendering.
 
 - **The pane registry is one closed table, and it is data.** `Category` and
@@ -202,9 +206,8 @@ write path on landing.
   *setting* label matches — the index is derived from the one `CATEGORIES`
   table plus each pane's declared setting labels, so a searchable setting
   cannot exist without a row that shows it. Matching a setting selects its
-  pane and scrolls that row into view; this is the one thing macOS's settings
-  search does well and it is cheap here because the registry already knows
-  every label.
+  pane and scrolls that row into view, which is cheap because the registry
+  already knows every label.
 - **The location band** carries a `nav::Breadcrumb` reading
   `Settings › <category> › <pane>`. Its trailing crumb is the current
   location and is inert; the leading crumbs are the route back, which is what
@@ -279,7 +282,7 @@ owner the change goes to; the last column is what a refusal looks like.
 | Accessibility | active `Theme` (contrast, density, motion), scale, cursor size | session apply | apply refused, stated |
 | Language & Region | the bundle `Help/` locale set, `lib/sysconfig` | elevated `configure`; zones → `plans/TIMEZONES.md` | Authority Mark |
 | Sharing | — | — | pane states absence (§3) |
-| Users & Groups | ungated `USER_DIRECTORY` / `GROUP_DIRECTORY` (no credential material) | elevated user-admin tool (DS9) | Authority Mark, account unchanged |
+| Users & Groups | ungated `USER_DIRECTORY` / `GROUP_DIRECTORY` roster + own record; other accounts' fields, lock state and grants only after admin authentication (DS9) | elevated user-admin tool (DS9) | Authority Mark, account unchanged |
 | Storage | `MOUNT_LIST` + each volume's `VolumeStats`, `VOLUME_IO_HEALTH` | — (read-only; mounting is the file manager's) | reading renders unmeasured |
 
 **The one rule behind the table.** Settings never performs a privileged
@@ -362,17 +365,17 @@ built-in vector glyph so the sidebar can never blank: `Settings`, `Appearance`,
 ## 5. Stages
 
 Each stage is one fully-gated increment: it lands with its host tests, its
-rustdoc and `docs/` page, and a green whole-workspace validation gate
-(`cargo xtask ci`), and — where the behaviour is only observable end-to-end —
-extends the QEMU vertical rather than a faked run. A stage that turns out
-larger than one clean increment is split and staged here, never shipped
-half-done.
+rustdoc and `docs/` page, and a green whole-workspace validation gate (the
+whole `AGENTS.md` §7 sequence, not `cargo xtask ci` alone), and — where the
+behaviour is only observable end-to-end — extends the QEMU vertical rather
+than a faked run. A stage that turns out larger than one clean increment is
+split and staged here, never shipped half-done.
 
-### DS1 — `lib/controls::form`: the form-field family — `done`
+### DS1 — `lib/controls::form`: the form-field family
 
 `FieldRow` and `FieldGroup` per §4, over the existing row chrome, plate,
-metrics, and state vocabulary, with a `widgets.app` gallery tab. What a later
-stage may rely on, and must not re-derive:
+metrics, and state vocabulary, with a `widgets.app` gallery tab. The contract
+it delivers, which no later stage re-derives:
 
 - **Room is given out control, label, description.** The slot is reserved
   first, the label elides into what remains, and the description draws only
@@ -393,10 +396,14 @@ stage may rely on, and must not re-derive:
 
 ### DS2 — the Settings shell, every category reachable, nothing faked
 
-The bundle: `userland/apps/settings` (`tairix-settings`), `AppInfo.toml` with
-`id = "os.tairix.settings"`, `kind = "application"`, `library = "SystemTools"`,
-`purpose`, `author`, `capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM"]`, its
-own SVG icon in `Resources/`, a `Help/en-US/` tree, and a `README.md`.
+The crate: `userland/apps/settings` (`tairix-settings`), with `AppInfo.toml`
+carrying `id = "os.tairix.settings"`, `name`, `version`,
+`kind = "application"`, `library = "SystemTools"`, `purpose`, `author`,
+`capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM"]`, and `library-icon` naming
+its own SVG master in `Resources/` — a declared icon the build cannot draw is
+a build failure, never a silent fallback glyph. Plus a `Help/en-US/` tree and
+the crate's `README.md`, which is a source file: the installed bundle carries
+only the top-level names `AGENTS.md` §16.5 permits.
 `build.rs` mirrors the sibling apps' `freestanding` cfg so the library target
 is host-testable and `Run` is a freestanding program.
 
@@ -414,7 +421,7 @@ The **launch row**: `userland/gui/taskbar/src/system.rs` grows
 identifier, and a `settings_installed` permit resolved against the catalog the
 session handed the bar — exactly as `TaskShell` already is. It maps to the
 bar's existing `TaskbarResponse::LibraryLaunch`, so the session gains **no new
-launch path** for it (§2.2), and the row renders non-actionable with
+launch path** for it (`AGENTS.md` §2.2), and the row renders non-actionable with
 `REASON_NOT_INSTALLED` when the bundle is absent. It sits at the head of the
 appearance group, above *Light Appearance*, because it is the general form of
 the two rows beneath it.
@@ -453,6 +460,23 @@ decoding an untrusted image needs the sandbox worker the chooser spawns, and
 Settings must not acquire `CAP_PROC_SPAWN` to grow a second gallery. In the
 same stage the chooser's own four drop-downs are rebuilt on `FieldGroup`/
 `FieldRow` so the two surfaces share one form idiom.
+
+**Open decision, and DS4 does not start until it is settled.** Nothing in the
+tree lets Settings launch that chooser under the manifest §0 fixes. There is no
+launch request on the window channel (`WindowRequest` opens windows and popups,
+it starts no program), `ElevateRequest::Launch` re-authenticates with a
+password — absurd for an unprivileged gallery — and every app that launches
+another today (`files`, `wallpaper`, `man`, `terminal`) holds `CAP_PROC_SPAWN`
+itself. So exactly one of three has to be chosen, and the choice is not this
+plan's to guess: (a) Settings holds `CAP_PROC_SPAWN`, which costs it the clean
+sizing §0 rests on; (b) the session gains a user-gesture-mediated launch
+request on the window channel, which is a real new interface and belongs in
+`plans/APPWIN.md` with its own authority argument — the session spawns on a
+gesture *it* witnessed, never on an app's word; or (c) the button goes, and the
+gallery is reached only from the backdrop menu and the program library, with
+the Wallpaper pane naming where it is. The same question governs Date & Time,
+which reaches `datetime.app` through the broker's `Launch` and so pays a
+password prompt for a clock the account may already set.
 
 ### DS5 — Storage
 
@@ -524,25 +548,42 @@ stage: the runtime-reload increment it defers is this one.
 
 **The read.** The whole `users_admin` syscall is gated on `CAP_USER_ADMIN`, and
 the only other account read — `users_db_read` under `CAP_USERS_READ` — answers
-the credential database itself. Settings takes neither. It reads the ungated
-`USER_DIRECTORY` query, which exists for exactly this purpose and carries no
-credential material, and identifies the user's own account by the uid the
-kernel attests for it.
+the credential database itself. Settings takes neither.
 
-That query answers uid and username alone today, which is not a Users pane. So
-this stage extends the **directory** rather than reaching for a capability: the
-`UserDirectoryRecord` grows the non-secret display fields the database already
-holds (full name, shell, home, primary gid, lock state) and a sibling
-`GROUP_DIRECTORY` query answers groups and their members. Both stay ungated for
-the reason `USER_DIRECTORY` already is: this is the display pairing every
-`ls -l`, `ps` and `top` needs to render a name instead of a number, it carries
-no credential material and no per-principal secret, and the added fields are of
-exactly that class. The password records stay exactly where they are, behind
-`CAP_USERS_READ`, and the extension is reviewed field by field against that
-line. The capability
-**grant ceiling** is deliberately *not* directory data: it is a map of the
-machine's authority, so it stays behind `CAP_USER_ADMIN` and is shown only
-after an administrator has authenticated.
+`USER_DIRECTORY` answers uid and username alone, which is not a Users pane. The
+pane is therefore built from three reads of *different* authority, rather than
+from one ungated query widened until it is enough:
+
+- **The roster** — every account's uid and username — is the existing ungated
+  `USER_DIRECTORY`, walked paged. A sibling ungated `GROUP_DIRECTORY` answers
+  gid and group name on the same ground and nothing else: rendering a gid is
+  the same display need as rendering a uid.
+- **The caller's own account** — full name, shell, home, primary gid, group
+  memberships — is read for the uid the kernel attests, ungated, because a
+  principal reading its own record crosses no boundary.
+- **Any other account's fields, every account's lock state, and the grant
+  ceiling** are answered by the administrator-authenticated run the write path
+  already performs, and are shown only after it. This needs no new interface:
+  `users_admin` already carries `ListUsers` and `ListGroups` behind
+  `CAP_USER_ADMIN`, so the gated half of the pane is a read the elevated tool
+  can already serve.
+
+The third line is the one to be explicit about, because widening the directory
+is the tempting shortcut and it is a real loss. An ungated lock state is an
+enumeration of which accounts are live and so worth attacking; an ungated shell
+and home path are reconnaissance any unprivileged process — a compromised
+parser sandbox included — learns nothing of today. None of them is a display
+pairing, so none rides the directory's justification, and TAIRiX has no
+world-readable `passwd` file to inherit the habit from. The default is closed: a
+field enters the ungated directory only where the DS9 review positively shows a
+name cannot be rendered without it, and the burden is on the field. Password
+records stay behind `CAP_USERS_READ`, the grant ceiling behind
+`CAP_USER_ADMIN` — it is a map of the machine's authority, not directory data —
+and no new capability is added for any of this.
+
+Both directory frames are fixed-width, fail closed on decode, and enter the
+`lib/abi` fuzz seed like every other frame; the roster is walked paged, so a
+machine with many thousands of accounts leaves no whole-set copy resident.
 
 **The write.** The user's own full name and password are changed through the
 broker's re-authentication of that same account. Administering another account
@@ -578,16 +619,21 @@ gesture does), which is two intervals waiting to disagree. The session
 therefore *publishes* it alongside the scale and appearance the window channel
 already carries in `DesktopInfo`, and the file manager's private constant is
 deleted and read from there in this stage — one interval for the desktop, set
-once. Cursor set and size come from DS3. Layout, modifier remap, and shortcuts
-state §3's absence and name what each needs.
+once. The document spells the intervals in milliseconds, because a file a human
+edits should; every ABI-visible and in-memory form of them — the `DesktopInfo`
+field included — is `Duration64`, like every other span `lib/abi` carries, and
+`lib/abi` has no millisecond field to copy. Cursor set and size come from DS3.
+Layout, modifier remap, and shortcuts state §3's absence and name what each
+needs.
 
 ### DS12 — Lock Screen and Screensaver: the idle interface
 
 The one new subsystem this plan builds. The session gains a single idle
-deadline: the timestamp of the last input event, and one timer armed **only**
-while a policy has a deadline pending — never a tick, never a poll, so an idle
-desktop still wakes no core it did not have to. Two policies ride it, both in
-DS3's document: blank-or-screensaver after *M* minutes, and lock after *N*.
+deadline: the `Time64` timestamp of the last input event, and one timer armed
+**only** while a policy has a deadline pending — never a tick, never a poll, so
+an idle desktop still wakes no core it did not have to. Two policies ride it,
+both in DS3's document: blank-or-screensaver after *M* minutes, and lock after
+*N*.
 The Screensaver pane offers what the desktop can actually draw — blank, the
 desktop backdrop dimmed, and the wallpaper slideshow the chooser's catalog
 already enumerates — and nothing it cannot. The Lock Screen pane sets the
@@ -621,10 +667,10 @@ entry, the `Help/en-US/settings.md` topic, and updates to
 
 The file manager's hand-rolled permissions grid (`lib/browse`'s `PermGrid`) and
 `datetime.app`'s six-field row are rebuilt on `FieldGroup`/`FieldRow`, and the
-private layout arithmetic each carries is deleted. This is not polish: leaving
-three form idioms in one desktop after DS1 is exactly the duplication §2.2
-forbids, and the conversion is what proves the family is genuinely general
-rather than shaped around one app. Their existing tests are retargeted, not
+private layout arithmetic each carries is deleted. Leaving three form idioms in
+one desktop after DS1 is exactly the duplication `AGENTS.md` §2.2 forbids, and
+the conversion is what proves the family is genuinely general rather than shaped
+around one app. Their existing tests are retargeted, not
 weakened, and the QEMU verticals that dump those surfaces re-baselined.
 
 ---
@@ -632,11 +678,16 @@ weakened, and the QEMU verticals that dump those surfaces re-baselined.
 ## 6. Sequencing and dependencies
 
 DS1 is the only true prerequisite for everything after it, and it is
-host-provable on its own. DS2 lands the shell and the launch row over DS1 and is
+host-provable on its own — but it does not land alone. A shared family whose
+only caller is its own gallery tab is one caller, not the two independent ones
+`AGENTS.md` §23.3 requires of a shared helper, so DS1 lands with the first of
+DS14's two conversions in the same increment (`datetime.app`'s six-field row is
+the smaller, and its private arithmetic dies with it). The family is then proven
+by a surface that already had a form to draw, rather than by a gallery shaped
+around it. DS2 lands the shell and the launch row over DS1 and is
 independently useful the day it lands: every category is reachable and every
-absence is honest, which is already better than a settings app that hides what
-it cannot do. DS3 establishes the user-scope document and the session's apply
-policy, and DS4, DS10, DS11 and DS12 are all further keys in that one document
+absence is honest. DS3 establishes the user-scope document and the session's
+apply policy, and DS4, DS10, DS11 and DS12 are all further keys in that document
 — they can land in any order once DS3 has. DS5 depends only on DS2 (it is
 read-only) and can land beside DS3. DS6 gates every machine-scope write, so
 DS7's options, DS8, and DS9 all follow it; DS7's *readings* need only DS2 and
@@ -647,7 +698,7 @@ time after DS4.
 
 The two stages that touch shared machinery — DS6's argv extension and DS8's
 `configure` extension — each land with their consumer in the same increment, so
-nothing speculative is added ahead of a caller (§2.4).
+nothing speculative is added ahead of a caller (`AGENTS.md` §2.4).
 
 ---
 
