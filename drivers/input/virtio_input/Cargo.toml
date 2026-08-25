@@ -1,6 +1,6 @@
 [package]
 name = "tairix-drv-input-virtio-input"
-description = "TAIRiX virtio-input driver (keyboard / pointer): the §8 `register` entry and the §18.3 bind table. The open/poll/decode device logic lives in `lib/virtio_input` (§2.2 / §17.4)."
+description = "TAIRiX virtio-input driver (keyboard / pointer): the `register` entry and the bind table. The open/poll/decode device logic lives in `lib/virtio_input`."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,13 +10,13 @@ publish.workspace = true
 
 [dependencies]
 # The capability / bind-key / driver-host vocabulary the `register` entry and
-# the §18.3 bind table are written against — one ABI definition (§2.2).
+# the bind table are written against — one ABI definition.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The arch-neutral virtio-input device logic (open/poll/decode) and the
 # canonical `VIRTIO_INPUT_DEVICE_ID` the bind table's match key is built from.
 # It lives in `lib/*` so both this driver and the user-space input-driver
-# process compose it without a `drivers/*`→`drivers/*` edge (`AGENTS.md`
-# §17.4 / §2.2). This crate keeps only the §8 `register` entry and the §18.3
+# process compose it without a `drivers/*`→`drivers/*` edge. This crate keeps
+# only the `register` entry and the
 # bind table; it never names the `drivers/bus/virtio` transport crate.
 tairix-virtio-input = { path = "../../../lib/virtio_input", version = "=0.0.0" }
 

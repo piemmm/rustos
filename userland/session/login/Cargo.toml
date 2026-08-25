@@ -13,7 +13,7 @@ workspace = true
 
 # The package is both the `tairix-login` policy library (above) and the `Run`
 # entry-point binary of the login service installed at
-# `/System/Services/login.app/Run` (`AGENTS.md` §16.2, `plans/PI.md` P11) — the
+# `/System/Services/login.app/Run` (`plans/PI.md` P11) — the
 # program PID 1 `init` launches as the per-console session supervisor. The
 # binary is a freestanding pure-Rust program on the native Tier-1 targets and
 # an inert host stub elsewhere (see `src/run.rs` / `build.rs`).
@@ -23,18 +23,18 @@ path = "src/run.rs"
 
 [dependencies]
 # The frozen `abi-v1` surface: login reports terminal and authentication
-# failures as the stable `Errno`, so it invents no parallel error set (§2.2).
+# failures as the stable `Errno`, so it invents no parallel error set.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # Capability primitives: an authenticated user carries the capability ceiling
-# kernel/sec granted it, handed to the session at launch (§5.2).
+# kernel/sec granted it, handed to the session at launch.
 tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
-# Structured audit logging for every security-relevant login decision (§19.4).
+# Structured audit logging for every security-relevant login decision.
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 # The user-account database: the `/System/Security/Users` format, the
 # account identity types, and the timing-equalised password verification
-# the `UsersAuthenticator` seam is built on (§5.1).
+# the `UsersAuthenticator` seam is built on.
 tairix-users = { path = "../../../lib/users", version = "=0.0.0" }
-# The single ANSI/VT terminal-control vocabulary (`AGENTS.md` §2.2): the
+# The single ANSI/VT terminal-control vocabulary: the
 # read line discipline's buffer half (`tairix_vt::line`) recognises the same
 # erase (rub-out) control the kernel console echo does, from one shared
 # definition.
@@ -48,7 +48,7 @@ tairix-termcap = { path = "../../../lib/termcap", version = "=0.0.0" }
 # The one civil-calendar definition: the view's header clock converts the
 # wall-clock Time64 through the shared day/date arithmetic.
 tairix-fsmeta = { path = "../../../lib/fsmeta", version = "=0.0.0" }
-# The one volatile secret erase (`AGENTS.md` §2.2, §4): the offered password,
+# The one volatile secret erase: the offered password,
 # the elevation request that carries it, and the user-database image are
 # wiped through it. A plain `fill(0)` on a buffer nothing reads again is a
 # dead store an optimiser may delete, which would leave the credential in
@@ -61,10 +61,10 @@ tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # `configure` command writes with, so producer and consumer never diverge.
 tairix-sysconfig = { path = "../../../lib/sysconfig", version = "=0.0.0" }
 
-# The pure-Rust userland runtime (`AGENTS.md` §1): `tairix-rt` provides the
+# The pure-Rust userland runtime: `tairix-rt` provides the
 # `Run` binary's `_start`, stack canary, panic handler, allocator, and
 # syscall wrappers (including `users_db_read`). TAIRiX is Rust-only, so
-# login links this runtime, never the C ABI (`AGENTS.md` §16.4). Pulled in
+# login links this runtime, never the C ABI. Pulled in
 # only for the bare-metal targets the program is actually built for; on the
 # host the binary is an inert stub.
 [target.'cfg(target_os = "none")'.dependencies]

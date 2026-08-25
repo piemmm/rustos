@@ -21,7 +21,7 @@ workspace = true
 # into `Scheduler::on_timer_tick`, and drives a cooperative `step` loop
 # over spawned tasks. Keeping the QEMU-exit shortcut in a dedicated bin
 # (not a Cargo feature on the arch crate) prevents feature unification
-# from leaking it into any production build (`AGENTS.md` §5.4.5 — fail
+# from leaking it into any production build (fail
 # closed).
 
 [[bin]]

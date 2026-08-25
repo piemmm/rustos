@@ -1,6 +1,6 @@
 [package]
 name = "tairix-test-supervisor-esc-qemu-x86-64"
-description = "plans/NEW-SUPERVISOR.md §7 / plans/ARCHSUPPORT.md QEMU integration test: the x86_64 sibling of the aarch64 pre-boot-Supervisor ESC vertical. Boot the production x86_64 tairix-kernel pipeline (boot_x86_64::boot) with a planted whole-disk encrypted-root image attached as a virtio-blk-pci device, press ESC at the pre-mount boot screen to drop into the in-kernel pre-boot Supervisor REPL, run a read-only command, `continue` back to the normal unlock, and unlock the encrypted ARXFS root. It drives the byte-exact boot-screen contract end to end (the frozen `[Press ESC for supervisor]` announcement and the `ARXFS`/`Supervisor`/`*` collapse) and proves a Supervisor session is transparent to boot on x86_64: PASS once the unlock-service install message is observed, which can only follow `continue` resuming the normal unlock after the REPL. It reuses the entire production boot pipeline and only swaps the audit sink (AGENTS.md §2.2 — no duplication)."
+description = "plans/NEW-SUPERVISOR.md §7 / plans/ARCHSUPPORT.md QEMU integration test: the x86_64 sibling of the aarch64 pre-boot-Supervisor ESC vertical. Boot the production x86_64 tairix-kernel pipeline (boot_x86_64::boot) with a planted whole-disk encrypted-root image attached as a virtio-blk-pci device, press ESC at the pre-mount boot screen to drop into the in-kernel pre-boot Supervisor REPL, run a read-only command, `continue` back to the normal unlock, and unlock the encrypted ARXFS root. It drives the byte-exact boot-screen contract end to end (the frozen `[Press ESC for supervisor]` announcement and the `ARXFS`/`Supervisor`/`*` collapse) and proves a Supervisor session is transparent to boot on x86_64: PASS once the unlock-service install message is observed, which can only follow `continue` resuming the normal unlock after the REPL. It reuses the entire production boot pipeline and only swaps the audit sink (no duplication)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -23,10 +23,9 @@ path = "src/main.rs"
 # same path the x86_64 root-unlock-admission vertical drives, which already
 # installs the real `SupervisorHost` and draws the ESC boot screen — and only
 # swaps the audit sink to observe the unlock-service install message
-# (`AGENTS.md` §2.2 — no duplication). Keeping the QEMU-exit shortcut in a
+# (no duplication). Keeping the QEMU-exit shortcut in a
 # dedicated bin (not a Cargo feature on a production crate) prevents feature
-# unification from leaking it into any production build (`AGENTS.md` §5.4 —
-# fail closed).
+# unification from leaking it into any production build (fail closed).
 [target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
 tairix-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
 tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }

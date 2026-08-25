@@ -5,7 +5,7 @@
 //
 // Calling convention: System V AMD64. %rdi = prev, %rsi = next.
 //
-// SAFETY-INVARIANTS (audited per AGENTS.md §10):
+// SAFETY-INVARIANTS:
 //
 //   1. The function is called with `prev` and `next` non-null. The
 //      Rust-side safe wrapper `crate::context::switch` documents this

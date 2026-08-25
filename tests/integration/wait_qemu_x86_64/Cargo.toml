@@ -23,11 +23,11 @@ workspace = true
 # reaped exit code out to the parent's `status` pointer. PASS once the parent
 # reaped the child, read back the agreed code, and exited 0; any shortfall (an
 # unexpected syscall, a wrong code, a missing reap, or a deadlock) flips
-# `qemu_exit::exit_failure` or times out (fail-loud, `AGENTS.md` §7).
+# `qemu_exit::exit_failure` or times out (fail-loud).
 #
 # The `test-hooks` feature is on by default. Release builds that enable it are
-# rejected by the `compile_error!` guard in `src/main.rs` (AGENTS.md §1 — no
-# hacks; §5.4.5 — fail closed), mirroring the other EL0 verticals.
+# rejected by the `compile_error!` guard in `src/main.rs` (no
+# hacks; fail closed), mirroring the other EL0 verticals.
 [features]
 default = ["test-hooks"]
 test-hooks = []

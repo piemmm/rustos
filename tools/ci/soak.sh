@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# soak.sh — run the nightly 24 h soaks (AGENTS.md §19.6 fuzz, §19.7 proptest,
-# and the §7 repeated-test soak) with every harness, model, and the test
-# matrix running IN PARALLEL, one log per job.
+# soak.sh — run the nightly 24 h soaks (fuzz, proptest, and the repeated-test
+# soak) with every harness, model, and the test matrix running IN PARALLEL,
+# one log per job.
 #
 # `cargo xtask fuzz --soak` and `cargo xtask proptest --soak` already run
 # their registries concurrently in-process (bounded by host parallelism).
@@ -12,7 +12,7 @@
 # (and `--list`), and the registries stay the single source of truth — this
 # script never hard-codes the target list.
 #
-# `cargo xtask test --soak` is the §7 counterpart: it repeats the whole test
+# `cargo xtask test --soak` is the test-matrix counterpart: it repeats it
 # matrix for the same 24 h budget so a flake too rare to surface in the
 # per-PR single-pass run (where `ci` runs each test once) still gets a full
 # night of exposure. It is a single job
@@ -36,7 +36,7 @@
 # oversubscribing the timed guests — it is NOT a licence to tolerate a timeout.
 # A QEMU vertical's deadline is sized to the actual work with headroom; if a
 # guest still misses it, that is a genuine defect (a too-tight budget, a missing
-# completion signal, an unsynchronised wait) fixed under `AGENTS.md` §7. It is
+# completion signal, an unsynchronised wait) to be fixed, not tolerated. It is
 # NEVER dismissed as a "machine load" flake and NEVER "resolved" by re-running
 # the vertical on its own until it passes — every such timeout has turned out to
 # be a real bug the load merely exposed.
@@ -45,18 +45,18 @@
 #   tools/ci/soak.sh [fuzz|proptest|fssoak|test|both|all] [--sequential] \
 #                    [--secs N] [--dry-run]
 #
-#   (no kind)      same as `both`: the §19.6 fuzz and §19.7 proptest soaks
-#   fuzz           run only the §19.6 fuzz harnesses
-#   proptest       run only the §19.7 proptest models
+#   (no kind)      same as `both`: the fuzz and proptest soaks
+#   fuzz           run only the fuzz harnesses
+#   proptest       run only the proptest models
 #   fssoak         run only the docs/src/filesystem/soak.md filesystem soak
-#   test           run only the §7 repeated-test soak
+#   test           run only the repeated-test soak
 #   both           run the fuzz and proptest soaks
 #   all            run fuzz, proptest, the filesystem soak, and the test soak
 #   --sequential   run jobs one at a time (default is parallel)
 #   --secs N       override the per-job budget (for smoke runs; CI uses 24 h)
 #   --dry-run      print the planned jobs and exit without running anything
 #
-# Exit status is non-zero if any job fails — §7/§19.6/§19.7 fail closed.
+# Exit status is non-zero if any job fails — fail closed.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -179,7 +179,7 @@ if [ "$kind" = "all" ] || [ "$kind" = "fssoak" ]; then
         [ -n "$f" ] && launch "fssoak-$f" fssoak "$f"
     done < <(enumerate fssoak)
 fi
-# The §7 repeated-test soak: one job that repeats the whole test matrix
+# The repeated-test soak: one job that repeats the whole test matrix
 # (host + the bare-metal QEMU verticals) for the per-job budget. `cargo xtask
 # test` owns the repeat loop, so the budget covers the matrix as a unit.
 # The test matrix runs at normal priority (`-`): it is the deadline-bound job

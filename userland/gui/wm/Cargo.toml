@@ -10,65 +10,64 @@ publish.workspace = true
 
 [dependencies]
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-# The shared software rasteriser (§6, §17.4): the premultiplied-alpha
+# The shared software rasteriser: the premultiplied-alpha
 # `Color`/`Pixel` algebra and the `Surface` pixel buffer are defined once in
 # `lib/raster` and re-exported here, so the taskbar — which may not depend on
 # the window manager — paints into the same surface type without duplicating
-# the colour algebra (§2.2).
+# the colour algebra.
 tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
-# The shared integer screen geometry (§6, §17.4): `Point`/`Rect` are defined
+# The shared integer screen geometry: `Point`/`Rect` are defined
 # once in `lib/geometry` and re-exported here, so the taskbar and apps — which
-# may not depend on the window manager — reuse the same vocabulary (§2.2).
+# may not depend on the window manager — reuse the same vocabulary.
 tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
 # The scan-out encode: how large a frame is, which byte order the format
 # wants, and whether damage is a sub-region. Shared with the graphical login
 # screen, which may not depend on the window manager, so the pixel-exact
 # answers have one definition rather than two that can drift.
 tairix-display = { path = "../../../lib/display", version = "=0.0.0" }
-# The shared desktop theme definition (§10): the compositor sources its
+# The shared desktop theme definition: the compositor sources its
 # root background colour, and windows their corner radii, from the active
 # theme. `lib/theme` is the single source the taskbar and apps read too, so
-# the colours stay consistent without any sibling-crate dependency (§17.4).
+# the colours stay consistent without any sibling-crate dependency.
 tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
-# The shared pointer-cursor library (§10, §17.4): the compositor resolves a
+# The shared pointer-cursor library: the compositor resolves a
 # `CursorKind` to a scalable, colourful vector cursor and composites the
 # rasterised `CursorImage` as a top overlay. The cursor format lives in
-# `lib/cursor`, not the window manager, so a different cursor set is data
-# (§2.2 / §2.4).
+# `lib/cursor`, not the window manager, so a different cursor set is data.
 tairix-cursor = { path = "../../../lib/cursor", version = "=0.0.0" }
-# The shared pointer input-event vocabulary (§6, §17.4): `PointerButton` and
+# The shared pointer input-event vocabulary: `PointerButton` and
 # `InputEvent` are defined once in `lib/input` and re-exported here, so the
 # taskbar — which may not depend on the window manager — routes the same
-# device events without duplicating the vocabulary (§2.2).
+# device events without duplicating the vocabulary.
 tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
-# The shared Reactive Alloy scroll geometry engine (§2.2, §17.4 —
-# plans/GUI-CONTROLS-DESIGN.md §11.28): the one orientation-independent
+# The shared Reactive Alloy scroll geometry engine
+# (plans/GUI-CONTROLS-DESIGN.md §11.28): the one orientation-independent
 # range/thumb/offset behaviour the root-viewport scrollbars drive. The window
 # manager is the first consumer; nested application content (e.g. the viewer
 # app) is the second, so the behaviour lives in `lib/controls`, never here.
 tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
-# The shared text rasteriser (§6, §16.4, §17.4): the window manager draws the
+# The shared text rasteriser: the window manager draws the
 # title-bar identity/title through the one `lib/font` blitter every consumer
-# uses, so decorated windows render text without a second font path (§2.2).
+# uses, so decorated windows render text without a second font path.
 tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
-# The shared icon vocabulary (§6, §17.4): a decorated window carries its
+# The shared icon vocabulary: a decorated window carries its
 # owning application's `IconKind` so the title bar reserves and draws the
-# identity slot through the one shared icon path, never a second one (§2.2).
+# identity slot through the one shared icon path, never a second one.
 tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
 # The shared reclaimable-memory model (plans/SMARTRAM.md section 6.4): the
 # cursor controller's rasterised-image cache is a bounded, pressure-governed
 # `ReclaimCache` built from the shared desktop cache policy, never an
-# unbounded cache of its own (§2.2).
+# unbounded cache of its own.
 tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
 # The structured `Event`/`Sink`/`Level` logging vocabulary the cursor cache's
-# audit sink is typed against (§2.2): the controller never invents its own
+# audit sink is typed against: the controller never invents its own
 # logging vocabulary.
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 # The `JobRunner` contract a composite's independent row bands are handed
 # through. `default-features = false` takes the contract and the serial runner
 # alone: the compositor never creates a thread, it composes on whatever runner
 # its embedder installed, so a headless or single-core build links no thread
-# machinery at all (§2.16, §17.3).
+# machinery at all.
 tairix-parallel = { path = "../../../lib/parallel", version = "=0.0.0", default-features = false }
 
 # The compositor's host tests draw window-title text, so they inject the

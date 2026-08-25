@@ -1,6 +1,6 @@
 [package]
 name = "tairix-groupadd"
-description = "TAIRiX `groupadd` CLI: create a group (§3 `userland/apps/` — a plans/APPS.md command app)."
+description = "TAIRiX `groupadd` CLI: create a group (`userland/apps/` — a plans/APPS.md command app)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -32,8 +32,8 @@ path = "src/run.rs"
 [dependencies]
 # The stable `Errno` and the `users_admin` request/response vocabulary: the
 # tool writes a record to the group registry through an injected seam that
-# speaks the frozen `Errno`, so it invents no parallel error set (§2.2) and
-# never links a kernel or driver crate (§17.4).
+# speaks the frozen `Errno`, so it invents no parallel error set and
+# never links a kernel or driver crate.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The one help engine: locale fallback, the bounded structured-Markdown
 # parser, and the shared own-bundle short-help render the `-h`/`-?`
@@ -41,7 +41,7 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
 # The shared account policy (`next_id`) and the registry size bound the
 # production database client sizes its reply buffer from — one definition,
-# never a private copy (§2.2).
+# never a private copy.
 tairix-users = { path = "../../../lib/users", version = "=0.0.0" }
 
 # For the freestanding `Run` binary only: the userland runtime `tairix-rt`

@@ -15,12 +15,12 @@ workspace = true
 # CFQ is the default scheduler policy: a non-tickless, Linux-CFS-like
 # Completely-Fair-Queuing policy. It is the one scheduler the charter
 # permits to keep a fixed-frequency periodic tick armed for a running
-# task (the tickless carve-out, `AGENTS.md` §17.1). The tickless EEVDF
+# task (the tickless carve-out). The tickless EEVDF
 # and MLFQ siblings stay available behind their own features (and are
 # still tested).
 default = ["scheduler-cfq"]
 
-# Scheduler selection (`AGENTS.md` §17.1). `kernel/core` is the single
+# Scheduler selection. `kernel/core` is the single
 # selection point: exactly one `scheduler-*` feature must be active per
 # image, pulling in that one concrete `kernel/sched/<impl>` crate. The
 # `compile_error!` guards in `src/sched.rs` enforce the "exactly one"
@@ -49,7 +49,7 @@ watchdog-diagnostics = ["tairix-sync/lock-diagnostics"]
 # `test-arch` exposes the host-only `TestArch` mock used by the
 # host-side init-order and panic-behaviour tests. It is intentionally
 # not in the default feature set so production (`no_std`) builds never
-# link the mock (`AGENTS.md` §1 — no hacks).
+# link the mock (no hacks).
 test-arch = ["tairix-kernel-sched-api/test-arch"]
 
 # `fs-conformance` exposes the shared forwarding-conformance suite for the
@@ -64,35 +64,34 @@ fs-conformance = []
 # Stage 2.6 dependency rules (issue brief): kernel/core may depend on
 # every kernel/* crate that has landed (Stages 2.1–2.5) and on the
 # shared lib/* crates `abi`, `caps`, `crypto`, `log`, `rng`, and `util`
-# (`AGENTS.md` §17.4 — kernel/* may depend on lib/*). Nothing else.
+# (kernel/* may depend on lib/*). Nothing else.
 tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }
 # The arch-neutral pre-boot Supervisor console engine (`plans/NEW-SUPERVISOR.md`):
 # kernel/core hosts the live `SupervisorSystem` provider (`src/supervisor_system.rs`)
 # the Supervisor's version/mem/cpu/uptime/memtest/reboot commands read through,
-# built once over the leaked `KernelState`. A `lib/*` crate (`AGENTS.md` §17.4).
+# built once over the leaked `KernelState`. A `lib/*` crate.
 tairix-supervisor = { path = "../../lib/supervisor", version = "=0.0.0" }
 tairix-log = { path = "../../lib/log", version = "=0.0.0" }
 tairix-sync = { path = "../../lib/sync", version = "=0.0.0" }
 tairix-kernel-mem = { path = "../mem", version = "=0.0.0" }
-# The shared reclaimable-memory model (`plans/SMARTRAM.md`, `AGENTS.md`
-# §2.2): the filesystem, block, transform, and launch caches (`src/fs/`,
+# The shared reclaimable-memory model (`plans/SMARTRAM.md`): the filesystem,
+# block, transform, and launch caches (`src/fs/`,
 # `src/launch_cache.rs`) classify and account their entries through
 # `tairix_reclaim` rather than a second copy of the model.
 tairix-reclaim = { path = "../../lib/reclaim", version = "=0.0.0" }
-# The shared kernel heap allocator (`AGENTS.md` §2.2): kernel/core hosts the
+# The shared kernel heap allocator: kernel/core hosts the
 # growable-heap wiring (`src/kheap.rs`) that lets the bin's
 # `#[global_allocator]` (a `tairix_kalloc::FreeListAllocator`) draw fresh
 # physical frames on demand, so the heap is not capped at its bootstrap
 # `.bss` region.
 tairix-kalloc = { path = "../../lib/kalloc", version = "=0.0.0" }
 tairix-kernel-sec = { path = "../sec", version = "=0.0.0" }
-# The Arch HAL "enter user mode" primitive (`EnterUser`, §17.2) the
+# The Arch HAL "enter user mode" primitive (`EnterUser`) the
 # capability-checked spawn caller (`src/spawn.rs`) reaches through. As the
-# single selection point, kernel/core may depend on the arch surface
-# (`AGENTS.md` §17.4).
+# single selection point, kernel/core may depend on the arch surface.
 tairix-arch-api = { path = "../arch/api", version = "=0.0.0" }
 # The scheduler contract (`SchedulerPolicy` + vocabulary) is always
-# present; the concrete policy is feature-selected above (§17.1).
+# present; the concrete policy is feature-selected above.
 tairix-kernel-sched-api = { path = "../sched/api", version = "=0.0.0" }
 tairix-kernel-sched-cfq = { path = "../sched/cfq", version = "=0.0.0", optional = true }
 tairix-kernel-sched-eevdf = { path = "../sched/eevdf", version = "=0.0.0", optional = true }
@@ -101,65 +100,65 @@ tairix-kernel-ipc = { path = "../ipc", version = "=0.0.0" }
 tairix-kernel-irq = { path = "../irq", version = "=0.0.0" }
 tairix-kernel-syscall = { path = "../syscall", version = "=0.0.0" }
 tairix-util = { path = "../../lib/util", version = "=0.0.0" }
-# The single shared path-spelling parser (`AGENTS.md` §2.2): the `fs_chdir` /
-# `copy_path_in` cwd-relative resolver normalises a caller's path string
+# The single shared path-spelling parser: the `fs_chdir` / `copy_path_in`
+# cwd-relative resolver normalises a caller's path string
 # (relative → absolute, `.`/`..` collapsed, escape blocked) through
 # `tairix_path` rather than a second path normaliser.
 tairix-path = { path = "../../lib/path", version = "=0.0.0" }
-# The single extended-attribute key grammar (`AGENTS.md` §2.2): the secured
+# The single extended-attribute key grammar: the secured
 # VFS attribute operations (`src/fs/delegate.rs`) validate every key and
 # resolve its namespace's access class through `tairix_fsmeta` rather than a
 # second key parser.
 tairix-fsmeta = { path = "../../lib/fsmeta", version = "=0.0.0" }
-# The single shared resource-reference parser (`AGENTS.md` §2.2): the
+# The single shared resource-reference parser: the
 # `resource_open` resolver (`src/resource.rs`) lexes a caller's reference
 # string (`sys:random`, …) through `tairix_resref` rather than a second
 # reference parser, then resolves the typed value to a resource backing.
 tairix-resref = { path = "../../lib/resref", version = "=0.0.0" }
-# The single ANSI/VT terminal-control vocabulary (`AGENTS.md` §2.2): the
+# The single ANSI/VT terminal-control vocabulary: the
 # console read line discipline (`src/console.rs`) echoes line terminators and
 # the erase (rub-out) control through `tairix_vt::control` rather than a second
 # definition of those bytes.
 tairix-vt = { path = "../../lib/vt", version = "=0.0.0" }
 tairix-fbcon = { path = "../../lib/fbcon", version = "=0.0.0" }
-# The single tty line discipline (`AGENTS.md` §2.2, `plans/PTY.md`): the
+# The single tty line discipline (`plans/PTY.md`): the
 # console device (`src/console.rs`) cooks output (`ONLCR`), echoes input, and
 # classifies cooked-mode `^C`/`^Z` through `tairix_tty` — the one definition
 # the coming pseudo-terminal slave shares — rather than a second copy of the
 # discipline.
 tairix-tty = { path = "../../lib/tty", version = "=0.0.0" }
-# The single boot-time system-configuration store engine (`AGENTS.md` §2.2):
+# The single boot-time system-configuration store engine:
 # the `cache_control` module reuses `tairix_sysconfig::{CacheClass, CacheMode}`
 # (the closed cache-switch vocabulary) so the kernel's live cache-admission
 # control and the `configure`/`system.conf` store can never diverge.
 tairix-sysconfig = { path = "../../lib/sysconfig", version = "=0.0.0" }
-# The single terminal key map (`AGENTS.md` §2.2): the seat registry's text
+# The single terminal key map: the seat registry's text
 # sink (`src/seat.rs`) encodes a decoded `KeyInput` record to the console
 # (tty) bytes a terminal sends through `tairix_keymap::encode_key_input`
 # rather than a second copy of the layout-to-tty mapping (`plans/PI.md` P11).
 tairix-keymap = { path = "../../lib/keymap", version = "=0.0.0" }
-# The one seat owner/lease/routing state machine (`AGENTS.md` §2.2,
-# `plans/DISPLAY.md`): the kernel seat registry (`src/seat.rs`) hosts
+# The one seat owner/lease/routing state machine (`plans/DISPLAY.md`): the
+# kernel seat registry (`src/seat.rs`) hosts
 # `tairix_seat::SeatState` for the owner-checked `display_acquire` /
 # `display_release` and the owner-gated desktop keyboard drain, never a
 # second definition of the lease rules.
 tairix-seat = { path = "../../lib/seat", version = "=0.0.0" }
 tairix-caps = { path = "../../lib/caps", version = "=0.0.0" }
-# The one shared application-bundle load gate (`AGENTS.md` §16.5): the
+# The one shared application-bundle load gate: the
 # `spawn` syscall's store-bundle path judges an on-disk `.app` through the
 # same `tairix_appload` pipeline the user-space `appmgr` re-exports, never a
-# second verifier (`AGENTS.md` §2.2).
+# second verifier.
 tairix-appload = { path = "../../lib/appload", version = "=0.0.0" }
-# The audited crypto wrappers (`AGENTS.md` §2.12): the store-bundle spawn
+# The audited crypto wrappers: the store-bundle spawn
 # path verifies the `AppInfo` Ed25519 signature against the build's embedded
 # app trust anchor and streams the bundle content SHA-256 through
 # `Sha256Stream`.
 tairix-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
 # The `/System/Security/Users` database format the boot-time root-volume
 # read path (`src/users.rs`) parses and the login path authenticates
-# against (`AGENTS.md` §5.1, `plans/PI.md` P11).
+# against (`plans/PI.md` P11).
 tairix-users = { path = "../../lib/users", version = "=0.0.0" }
-# The kernel's single cryptographic random subsystem (`AGENTS.md` §22):
+# The kernel's single cryptographic random subsystem:
 # `KernelState` composes a `tairix_rng::OutputReserve` and the `random_get`
 # syscall serves bytes from it.
 tairix-rng = { path = "../../lib/rng", version = "=0.0.0" }
@@ -167,29 +166,29 @@ tairix-rng = { path = "../../lib/rng", version = "=0.0.0" }
 # `kernel_main` resolves it once against the finalised common CPU-feature set
 # (`src/cpuops.rs`) so the in-kernel ARXFS physical-integrity checksum uses the
 # `crc32c*`/SSE4.2 hardware path where present, self-verified against the
-# portable baseline (never hand-rolled per op — one shared definition, §2.2).
+# portable baseline (never hand-rolled per op — one shared definition).
 tairix-crc32c = { path = "../../lib/crc32c", version = "=0.0.0" }
 # The self-optimising page-zero dispatch (`plans/FIX-HARDWARE-FEATURES.md` P3):
 # `kernel_main` resolves it once against the finalised common CPU-feature set
 # (`src/cpuops.rs`) so the in-kernel frame scrub (`kernel/mem`) uses the
 # `DC ZVA`/ERMS hardware block-zero where present, self-verified bit-identical
-# to the byte fill (never hand-rolled per op — one shared definition, §2.2).
+# to the byte fill (never hand-rolled per op — one shared definition).
 # `default-features = false` drops the unused heap-backed `OpsTables`.
 tairix-pagezero = { path = "../../lib/pagezero", version = "=0.0.0", default-features = false }
 # The generic self-optimising dispatch framework: `src/cpuops.rs` names its
 # `Decision`/`DecisionReason` to record which accelerated routine won through
-# the audit log (`plans/FIX-HARDWARE-FEATURES.md` P2, `AGENTS.md` §19.4).
+# the audit log (`plans/FIX-HARDWARE-FEATURES.md` P2).
 # `default-features = false` drops the framework's optional heap-backed
 # `OpsTables`, which the bring-up does not build yet (it records selection
 # decisions only): this keeps the freestanding multi-bin build's shared
 # `tairix-cpuops` free of `alloc`, so a minimal allocator-free integration-test
 # kernel linked in the same cargo invocation is not forced to define a global
-# allocator by feature unification (§2.16). The P3 per-core-type `OpsTables`
+# allocator by feature unification. The P3 per-core-type `OpsTables`
 # wiring re-enables it here (`features = ["alloc"]`).
 tairix-cpuops = { path = "../../lib/cpuops", version = "=0.0.0", default-features = false }
 # Audited volatile-wipe for the kernel staging buffer `random_get` copies
-# CSPRNG output through on its way to user memory (`AGENTS.md` §22 — zeroed
-# on consumption; §2.12 — never hand-roll the wipe).
+# CSPRNG output through on its way to user memory (zeroed
+# on consumption; never hand-roll the wipe).
 zeroize = { version = "1.8.1", default-features = false }
 
 [dev-dependencies]
@@ -199,19 +198,19 @@ zeroize = { version = "1.8.1", default-features = false }
 # force-enabling the default `scheduler-cfq` policy, so a build that
 # selects a sibling with `--no-default-features --features
 # scheduler-mlfq,test-arch` (or `scheduler-eevdf`) is not silently turned
-# into a forbidden two-policy image by the test scaffolding (`AGENTS.md`
-# §17.1). The normal `cargo test` run still gets `scheduler-cfq` from the
+# into a forbidden two-policy image by the test scaffolding. The normal `cargo
+# test` run still gets `scheduler-cfq` from the
 # package's own default feature set.
 tairix-kernel-core = { path = ".", version = "=0.0.0", default-features = false, features = ["test-arch"] }
 # The per-task address-space registry's host tests (`src/aspace.rs`)
 # exercise `AddressSpaceRegistry` end-to-end through `kernel/mem`'s
 # `HostPageTable` + `SimPhysMap` test doubles, gated behind the
-# `host-tests` feature so production builds never link them
-# (`AGENTS.md` §2.3). The normal `[dependencies]` entry above stays
+# `host-tests` feature so production builds never link them. The normal
+# `[dependencies]` entry above stays
 # feature-free; dev-dependency features apply only to test builds.
 tairix-kernel-mem = { path = "../mem", version = "=0.0.0", features = ["host-tests"] }
 # The host-only signed-bundle composer (`compose_signed_appinfo`): the
 # store-bundle spawn tests sign their fixtures through the same one
 # definition the image build uses, so the kernel verifier and the composer
-# can never drift (`AGENTS.md` §2.2).
+# can never drift.
 tairix-itest-harness = { path = "../../tests/integration/harness", version = "=0.0.0", features = ["app-image"] }

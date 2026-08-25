@@ -67,10 +67,10 @@
 //! - `fuzz`         — drive the in-tree fuzz harnesses for a wall-clock
 //!   budget: `--quick` (≥ 60 s each, the `ci` budget) or
 //!   `--soak` (≥ 24 h each, nightly)
-//! - `charter-cite` — reject a comment that cites a charter section number
-//!   in place of the reason it states; a reference to another document
-//!   (a plan, a `docs/` page, an RFC, a hardware manual) passes when that
-//!   document is named beside the section number
+//! - `charter-cite` — reject a comment or package description that cites a
+//!   charter section number in place of the reason it states; a reference to
+//!   another document (a plan, a `docs/` page, an RFC, a hardware manual)
+//!   passes when that document is named beside the section number
 //! - `model-check` — exhaustively model-check the Silver capability +
 //!   IPC state machine (an in-tree explicit-state checker; the TLA+
 //!   equivalent), failing closed on any invariant counterexample

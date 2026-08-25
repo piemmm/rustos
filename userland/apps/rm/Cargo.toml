@@ -1,6 +1,6 @@
 [package]
 name = "tairix-rm"
-description = "TAIRiX `rm` CLI: remove files and directories (§3 `userland/apps/` — a plans/APPS.md command app)."
+description = "TAIRiX `rm` CLI: remove files and directories (`userland/apps/` — a plans/APPS.md command app)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -32,7 +32,7 @@ path = "src/run.rs"
 [dependencies]
 # The stable `Errno`: the tool removes paths through an injected filesystem
 # seam that speaks the frozen `Errno`, so it invents no parallel error set
-# (§2.2) and never links a kernel or driver crate (§17.4).
+#  and never links a kernel or driver crate.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The one path-spelling grammar: `join` places a child inside a directory,
 # so this tool carries no second path parser.

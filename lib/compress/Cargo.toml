@@ -1,6 +1,6 @@
 [package]
 name = "tairix-compress"
-description = "First-party TAIRiX LZ (zstd-fast-style) compression codec — no external zstd/compression dependency (AGENTS.md §2.12, §16.4; arxfs-spec §3, §10)."
+description = "First-party TAIRiX LZ (zstd-fast-style) compression codec — no external zstd/compression dependency (arxfs-spec §3, §10)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,15 +12,15 @@ publish.workspace = true
 workspace = true
 
 # No dependencies on purpose. The compression codec is first-party
-# (`AGENTS.md` §2.12 — roll our own; this is *not* the crypto carve-out):
+# (roll our own; this is *not* the crypto carve-out):
 # ARXFS must have no external zstd/compression dependency
 # (`docs/src/filesystem/arxfs-spec.md` §3, §17). The crate is `no_std` and
 # allocation-free; it compresses and decompresses through caller-provided
 # slices so it fits the kernel/driver stack-buffer style with no heap.
 
 [dev-dependencies]
-# The §19.6 fuzz harness draws its inputs through the shared seed/budget
+# The fuzz harness draws its inputs through the shared seed/budget
 # seam (`tairix_fuzzseed`): one place picks the per-run seed, logs it at
-# the start of the test, and bounds the smoke/soak loop (`AGENTS.md`
-# §2.2). Test scaffolding only; never in a TAIRiX build.
+# the start of the test, and bounds the smoke/soak loop. Test scaffolding only;
+# never in a TAIRiX build.
 tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

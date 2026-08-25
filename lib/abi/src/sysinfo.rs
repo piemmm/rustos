@@ -2476,7 +2476,7 @@ impl BlkHealthTransition {
     /// [`MountAvailability::health_transition`], sharing the **same**
     /// vocabulary so a driver process and the kernel block client cannot
     /// classify a recovery or a degrade differently
-    /// (`plans/FIX-IO.md` IO5, §2.2). Both are edge-triggered: an unchanged
+    /// (`plans/FIX-IO.md` IO5). Both are edge-triggered: an unchanged
     /// state yields [`None`], so a run of identical outcomes logs one event,
     /// not one per request.
     ///
@@ -2533,7 +2533,7 @@ impl BlkHealthTransition {
     /// [`for_device`](Self::for_device) and the consumer-side
     /// [`MountAvailability::health_transition`], sharing the **same**
     /// vocabulary so a hub reset, a leaf-device blip, and a mount overlay
-    /// cannot classify a recovery differently (`plans/FIX-IO.md` IO5, §2.2).
+    /// cannot classify a recovery differently (`plans/FIX-IO.md` IO5).
     /// It is edge-triggered exactly like its siblings: an unchanged state
     /// yields [`None`], so an owner that keeps resetting logs one grace-window
     /// event, not one per reset.

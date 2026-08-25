@@ -22,10 +22,10 @@ ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zer
 
 # The freestanding bin links only on the aarch64 `virt` target; a host
 # `cargo build --workspace` compiles `src/main.rs` to an inert stub
-# (`AGENTS.md` §17.2 — the instruction-set choice lives in `build.rs`).
+# (the instruction-set choice lives in `build.rs`).
 # The global allocator, the EL1 bring-up, and the boot-harness macro all
-# come from the shared `tairix-test-virtio-qemu-support` crate
-# (`AGENTS.md` §2.2); this bin adds only the shared `lib/display`
+# come from the shared `tairix-test-virtio-qemu-support` crate; this bin adds
+# only the shared `lib/display`
 # framebuffer surface engine, the capability/host plumbing, and the
 # shared fw_cfg/ramfb client.
 [target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]

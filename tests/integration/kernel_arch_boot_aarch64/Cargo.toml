@@ -23,8 +23,7 @@ workspace = true
 # observing `EventId(4004)` (`AuditEvent::BootCompleted`) flips
 # `qemu_exit::exit_success`. Keeping the QEMU-exit shortcut in a
 # dedicated bin (not a Cargo feature on the arch crate) prevents feature
-# unification from leaking it into any production build (`AGENTS.md`
-# §5.4.5 — fail closed).
+# unification from leaking it into any production build (fail closed).
 
 [[bin]]
 name = "tairix-test-kernel-arch-boot-aarch64"
@@ -35,7 +34,7 @@ tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0
 tairix-itest-finisher = { path = "../finisher", version = "=0.0.0" }
 # The production aarch64 boot pipeline lives in `tairix-kernel`'s library
 # half; this vertical reuses it verbatim and only swaps the audit sink
-# (`AGENTS.md` §2.2 — no duplication).
+# (no duplication).
 tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
 # The boot heap the `kernel_core::kernel_main` allocations (the leaked
 # `KernelState`, the scheduler) draw from.

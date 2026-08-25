@@ -15,7 +15,7 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-fsprobe = { path = "../../../lib/fsprobe", version = "=0.0.0" }
 # The keyed metadata authenticator that seals every metadata block
 # (`docs/src/filesystem/arxfs-spec.md` §5, §8). Crypto is the standing
-# "don't roll your own" exception (`AGENTS.md` §2.12): the MAC routes through
+# "don't roll your own" exception: the MAC routes through
 # `lib/crypto`, never a hand-rolled primitive.
 tairix-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
 # The fast, non-cryptographic block-integrity checksum (CRC-32C): the one
@@ -26,17 +26,17 @@ tairix-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
 tairix-crc32c = { path = "../../../lib/crc32c", version = "=0.0.0" }
 # The first-party LZ codec every file-data record is compressed with before
 # encryption (`docs/src/filesystem/arxfs-spec.md` §6, §10). It is first-party,
-# not an external zstd/compression crate (`AGENTS.md` §2.12; this is *not* the
+# not an external zstd/compression crate (this is *not* the
 # crypto carve-out): ARXFS must have no external compression dependency.
 tairix-compress = { path = "../../../lib/compress", version = "=0.0.0" }
 # The shared extended-metadata model: the namespaced attribute-key grammar and
 # the bounded AttrSet with its self-identifying encoding, the one definition of
 # the on-disk attribute store ARXFS keeps and the foreign-metadata registry
-# the copy tools use (`docs/src/filesystem/arxfs-spec.md` §21; `AGENTS.md` §2.2).
+# the copy tools use (`docs/src/filesystem/arxfs-spec.md` §21).
 tairix-fsmeta = { path = "../../../lib/fsmeta", version = "=0.0.0" }
 # Structured, stable-event-id logging for the security-relevant findings the
-# online scrub reports (`docs/src/filesystem/arxfs-spec.md` §12; `AGENTS.md`
-# §5.4 — log security decisions with a stable event ID; §19.4).
+# online scrub reports (`docs/src/filesystem/arxfs-spec.md` §12;
+# log security decisions with a stable event ID).
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 # Volatile wiping of decrypted scratch and transform-cache plaintext before
 # the buffers return to the heap (`plans/SMARTRAM.md` §6.2): a plain zeroing
@@ -48,8 +48,8 @@ zeroize = { version = "1.8.1", default-features = false }
 workspace = true
 
 [dev-dependencies]
-# The §19.6 fuzz harness draws its inputs through the shared seed/budget
+# The fuzz harness draws its inputs through the shared seed/budget
 # seam (`tairix_fuzzseed`): one place picks the per-run seed, logs it at
-# the start of the test, and bounds the smoke/soak loop (`AGENTS.md`
-# §2.2). Test scaffolding only; never in a TAIRiX build.
+# the start of the test, and bounds the smoke/soak loop. Test scaffolding only;
+# never in a TAIRiX build.
 tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }

@@ -1,6 +1,6 @@
 [package]
 name = "tairix-virtio-net"
-description = "TAIRiX arch-neutral, transport-agnostic virtio-net link-layer device logic over the bus-agnostic `lib/virtio` transport (§2.2, §6, §17.4 — plans/NETWORK.md N4d): the open/service frame-ring `Net` engine both the user-space virtio-net driver process and the host tests compose, so neither the driver nor the harness re-implements it. The device-agnostic `netchan-v1` control plane above it lives in `lib/netchan`. no_std, fail-closed (§2.9)."
+description = "TAIRiX arch-neutral, transport-agnostic virtio-net link-layer device logic over the bus-agnostic `lib/virtio` transport (plans/NETWORK.md N4d): the open/service frame-ring `Net` engine both the user-space virtio-net driver process and the host tests compose, so neither the driver nor the harness re-implements it. The device-agnostic `netchan-v1` control plane above it lives in `lib/netchan`. no_std, fail-closed."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,13 +11,12 @@ publish.workspace = true
 [dependencies]
 # The platform-neutral `Net`/`DeviceFacts`/`FrameRings` driver surface the
 # device speaks and the `BufferClass` / `DriverError` / `Errno` vocabulary it
-# fails closed with — one ABI definition (§2.2).
+# fails closed with — one ABI definition.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
 # The bus-agnostic virtio split-virtqueue protocol (the `Transport` trait,
 # `SplitQueue`, DMA slabs, `VirtioHost`, and the `MockHost`/`MockTransport`
 # host doubles) the device-class logic is written against, so it consumes the
-# protocol without naming a concrete bus driver (`AGENTS.md` §17.4 —
-# `lib/* → lib/*` only).
+# protocol without naming a concrete bus driver (`lib/* → lib/*` only).
 tairix-virtio = { path = "../virtio", version = "=0.0.0" }
 
 [lints]

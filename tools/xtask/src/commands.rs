@@ -221,7 +221,7 @@ impl Command {
             }
             Command::SpecReview => "Reject unreviewed AI draft markers in source (§19.7).",
             Command::CharterCite => {
-                "Reject comments that cite a charter section instead of the reason (§2.11)."
+                "Reject a comment or description citing a charter section, not the reason (§2.11)."
             }
             Command::Bench => {
                 "Time the raster and compositor families in ns/px and ns/frame (evidence, not a gate)."
@@ -1003,7 +1003,7 @@ fn run_spec_review(ctx: &Context) -> Result<(), String> {
 }
 
 fn run_charter_cite(ctx: &Context) -> Result<(), String> {
-    // A comment must carry the reason, not a pointer to the rule. The scanner
+    // A comment carries the reason, not a pointer to the rule. The scanner
     // lives in `commands/charter_cite.rs`.
     eprintln!("xtask: [charter-cite] {}", ctx.workspace_root.display());
     charter_cite::run(&ctx.workspace_root)
@@ -1100,8 +1100,8 @@ fn run_static_gates(ctx: &Context) -> Result<(), String> {
         // Reject any unreviewed AI-drafted artefact marker that reached the
         // tree; a source scan, fails closed.
         static_gate("spec-review", ctx, run_spec_review),
-        // Reject a comment that cites a charter section number in place of the
-        // reason; a source scan, fails closed.
+        // Reject a comment or package description that cites a charter section
+        // number in place of the reason; a source scan, fails closed.
         static_gate("charter-cite", ctx, run_charter_cite),
         // Supply-chain integrity: the source-hash allow-list against
         // `Cargo.lock` and the advisory SLA, fails closed on drift.

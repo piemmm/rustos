@@ -25,7 +25,7 @@
 //! crate, because the device-support carve-out only permits that when a
 //! *charter-legal non-driver* consumer (a bootstrap-floor path, or a
 //! driver of a different class) shares it — and this driver has none. A VL805
-//! USB driver sits **above** the §18.6 bootstrap floor (it is discovered and
+//! USB driver sits **above** the bootstrap floor (it is discovered and
 //! autoloaded into user space), so the firmware policy's only consumer
 //! is this crate's own `Run` binary. The logic therefore lives here, in the
 //! driver, as a host-testable `lib` target the freestanding bin links — there

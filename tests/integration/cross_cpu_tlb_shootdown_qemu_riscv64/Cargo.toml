@@ -17,11 +17,11 @@ workspace = true
 # port: the boot hart starts a second hart through `smp::start_secondary`
 # (SBI HSM `hart_start`), waits for it to come up, then drives
 # `RiscvArch::shootdown_page` — a local `sfence.vma` plus the SBI RFENCE
-# `remote_sfence_vma` firmware call that reaches the live secondary hart —
-# and confirms the firmware honours the remote fence. Keeping the
+# `remote_sfence_vma` firmware call that reaches the live secondary hart — and
+# confirms the firmware honours the remote fence. Keeping the
 # QEMU-exit shortcut in a dedicated bin (not a Cargo feature on the arch
 # crate) prevents feature unification from leaking it into any production
-# build (`AGENTS.md` §5.4.5 — fail closed).
+# build (fail closed).
 
 [[bin]]
 name = "tairix-test-cross-cpu-tlb-shootdown-qemu-riscv64"

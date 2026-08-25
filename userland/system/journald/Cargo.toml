@@ -23,7 +23,7 @@ program = ["dep:tairix-rt"]
 
 # The package is both the `tairix-journald` dispatch-core library and the `Run`
 # entry-point binary of the journal service installed at
-# `/System/Services/journald` (`AGENTS.md` §16.2) — the long-running
+# `/System/Services/journald` — the long-running
 # user-space service PID 1 `init` launches to own authoritative system-log
 # segment writes. The binary is a freestanding pure-Rust program on the native
 # Tier-1 targets and an inert host stub elsewhere (see `src/run.rs`).
@@ -40,7 +40,7 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # and the admission authority all live here.
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 
-# The `Run` binary's freestanding userland runtime (`AGENTS.md` §1): `tairix-rt`
+# The `Run` binary's freestanding userland runtime: `tairix-rt`
 # provides `_start`, the stack canary, the panic handler, the
 # `#[global_allocator]`, and the syscall wrappers (`call_create`/`call_recv`/
 # `call_reply`/`call_peer_origin`/`self_origin`/`boot_id`/`clock_get`/

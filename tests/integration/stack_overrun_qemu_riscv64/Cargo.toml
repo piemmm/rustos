@@ -25,7 +25,7 @@ workspace = true
 # `fault` handler reports the result through the `SiFive` Test finisher.
 # Keeping the QEMU-exit shortcut in a dedicated bin (not a Cargo feature on a
 # library crate) prevents feature unification from leaking it into any
-# production build (`AGENTS.md` §5.4.5 — fail closed).
+# production build (fail closed).
 
 [[bin]]
 name = "tairix-test-stack-overrun-qemu-riscv64"
@@ -35,7 +35,7 @@ path = "src/main.rs"
 tairix-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
 tairix-arch-riscv64 = { path = "../../../kernel/arch/riscv64", version = "=0.0.0" }
 tairix-itest-finisher = { path = "../finisher", version = "=0.0.0" }
-# The Arch HAL MMU + TLB surface (`AGENTS.md` §17.2): the guard page is torn
+# The Arch HAL MMU + TLB surface: the guard page is torn
 # down through `tairix_arch_api::mmu::AddressSpace::unmap` and the stale entry
 # flushed through `tairix_arch_api::tlb::TlbShootdown::flush_page`, so the
 # fault-form is proven *through the HAL*.

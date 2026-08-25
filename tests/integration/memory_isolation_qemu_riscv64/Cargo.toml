@@ -23,7 +23,7 @@ workspace = true
 # writes the `SiFive` Test PASS finisher. Keeping the QEMU-exit shortcut
 # in a dedicated bin (not a Cargo feature on the arch crate) prevents
 # feature unification from leaking it into any production build
-# (`AGENTS.md` §5.4.5 — fail closed).
+# (fail closed).
 
 [[bin]]
 name = "tairix-test-memory-isolation-qemu-riscv64"
@@ -32,7 +32,7 @@ path = "src/main.rs"
 [target.'cfg(all(target_arch = "riscv64", target_os = "none"))'.dependencies]
 tairix-arch-riscv64 = { path = "../../../kernel/arch/riscv64", version = "=0.0.0" }
 tairix-itest-finisher = { path = "../finisher", version = "=0.0.0" }
-# The Arch HAL MMU surface (`AGENTS.md` §17.2): the victim/attacker Sv39
+# The Arch HAL MMU surface: the victim/attacker Sv39
 # spaces are driven through `tairix_arch_api::mmu::AddressSpace`
 # (`map_page` / `activate`) so isolation is proven *through the HAL*
 # (`plans/WIRING.md` W5b).

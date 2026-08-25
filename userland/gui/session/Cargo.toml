@@ -1,6 +1,6 @@
 [package]
 name = "tairix-desktop-session"
-description = "TAIRiX desktop session glue: owns the shared theme registry and the taskbar model, loads and merges the program-library catalog, and resolves taskbar responses (launch, files, tasks) with the capabilities the bar cannot hold (§10 — PLAN.md Stage 7)."
+description = "TAIRiX desktop session glue: owns the shared theme registry and the taskbar model, loads and merges the program-library catalog, and resolves taskbar responses (launch, files, tasks) with the capabilities the bar cannot hold (PLAN.md Stage 7)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,20 +9,20 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-# The single shared theme definition (§10): the session owns the runtime
+# The single shared theme definition: the session owns the runtime
 # `ThemeRegistry`, performs the light/dark switch on it, and hands the active
 # theme out to the rest of the desktop. `lib/theme` is the one definition the
-# window manager, taskbar, and apps all read (§6, §17.4).
+# window manager, taskbar, and apps all read.
 tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
-# The taskbar model (§10): the session owns it so it can re-theme the bar in
+# The taskbar model: the session owns it so it can re-theme the bar in
 # place on a runtime switch and hand its program-library popup the resolved
 # catalog the bar cannot read itself. Composing two GUI crates is the
-# permitted `userland/gui/*` edge (§17.4).
+# permitted `userland/gui/*` edge.
 tairix-taskbar = { path = "../taskbar", version = "=0.0.0" }
-# The compositing window manager (§10): the session presents the taskbar bar
+# The compositing window manager: the session presents the taskbar bar
 # and its program-library popup as compositor windows, placed and rounded
-# through the window manager's single anti-aliased rounded-corner path (§2.2).
-# Composing two GUI crates is the permitted `userland/gui/*` edge (§17.4).
+# through the window manager's single anti-aliased rounded-corner path.
+# Composing two GUI crates is the permitted `userland/gui/*` edge.
 tairix-wm = { path = "../wm", version = "=0.0.0" }
 # The window-frame pixel codec (`winframe`): the one definition of the
 # straight-alpha conversion between an app's presented frame and the
@@ -41,14 +41,14 @@ tairix-proglib = { path = "../../../lib/proglib", version = "=0.0.0" }
 # session is the party that knows the output's frame size, the seat, and the
 # process pressure gauge, so it builds the window manager's cursor cache and
 # the taskbar's glyph cache from the one classified, budgeted, band-governed
-# desktop policy and hands each crate its ready-made cache (§2.2, §24.1).
+# desktop policy and hands each crate its ready-made cache.
 tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
-# The one structured-logging surface (§5.4): the caches audit a
+# The one structured-logging surface: the caches audit a
 # classification refusal or a detected ledger defect through it.
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
-# The shared System Information client (§16.6): the session reads the
+# The shared System Information client: the session reads the
 # ungated memory-pressure band through it when the kernel wakes the loop on
-# a band change, rather than opening a second query path of its own (§2.2).
+# a band change, rather than opening a second query path of its own.
 tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
 # The compositing worker pool the session sizes from the discovered online CPU
 # count and hands to the compositor. The default `pool` feature is what makes
@@ -58,18 +58,18 @@ tairix-parallel = { path = "../../../lib/parallel", version = "=0.0.0" }
 # is rebuilt into the premultiplied surface the taskbar's shared control blits
 # (one colour-algebra home).
 tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
-# The one logical->physical UI scale (§10): the picker resolves the theme's
+# The one logical->physical UI scale: the picker resolves the theme's
 # authored text sizes to physical cell heights through `Scale`, the same shared
 # conversion the window manager and taskbar use.
 tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
-# The cursor and icon set builders (§10): the session reads the desktop's
+# The cursor and icon set builders: the session reads the desktop's
 # on-disk SVG assets from `/System/Graphics` and builds a `CursorTheme` /
 # `IconSet` for the window manager and taskbar. The decode/fallback logic
 # lives in these `lib/*` crates; the session only owns the filesystem
-# capability to read the bytes (§17.4 / §19.5).
+# capability to read the bytes.
 tairix-cursor = { path = "../../../lib/cursor", version = "=0.0.0" }
 tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
-# The kernel-boundary `Errno` returned by the filesystem-read seam (§5.4).
+# The kernel-boundary `Errno` returned by the filesystem-read seam.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The window-channel protocol engine (plans/APPWIN.md AW2/AW3): the session
 # composes `WindowServer` over the `WindowHost` bridge in `src/windows.rs`,
@@ -78,21 +78,21 @@ tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
 # The one shared directory-browser engine (plans/APPWIN.md AW5): the trusted
 # file picker in `src/picker.rs` composes the same `Browser`/`render` the
 # files app drives, so the picker and the file manager can never diverge in
-# navigation semantics, listing policy, or look (§2.2, §6).
+# navigation semantics, listing policy, or look.
 tairix-browse = { path = "../../../lib/browse", version = "=0.0.0" }
 # The one civil-date calendar (`CivilTime`): the taskbar clock breaks a
 # wall-clock instant into UTC calendar fields through the same decomposition
 # `ls`'s date column and the login clock read, never a second copy of the
-# day/minute arithmetic (§2.2).
+# day/minute arithmetic.
 tairix-fsmeta = { path = "../../../lib/fsmeta", version = "=0.0.0" }
 # The one shared filesystem name rule (plans/SYMLINKS.md S5): the desktop
 # validates a shortcut's name through `validate_file_name`, the same rule a
 # typed folder or rename name obeys, rather than carrying a second opinion
-# about what a name may be (§2.2).
+# about what a name may be.
 tairix-path = { path = "../../../lib/path", version = "=0.0.0" }
 # The shared text rasteriser: the trusted file picker renders (and hit-tests)
 # its listing at the theme's font size, so it resolves the `BitmapFont` it
-# hands to `tairix_browse::render` (§2.2).
+# hands to `tairix_browse::render`.
 tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
 # The one authentication surface (plans/NEW-DESKTOP-LOGIN.md G2): the screen
 # lock is that surface with the account fixed to this session's own, so the
@@ -170,11 +170,11 @@ tairix-display = { path = "../../../lib/display", version = "=0.0.0", features =
 # The `CapabilitySet` wire images the reserved window-endpoint bind
 # marshals (empty sender/receiver sets: the engine attests every caller).
 tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
-# The pure-Rust userland runtime (`AGENTS.md` §1): `_start`, the stack
+# The pure-Rust userland runtime: `_start`, the stack
 # canary, the panic handler, the allocator, and the syscall wrappers
 # (`display_acquire`, `pointer_read`/`keyboard_read`, `shm_create`/
 # `shm_grant`, `ipc_call`, `waitset_*`). TAIRiX is Rust-only, so the session
-# links this runtime, never the C ABI (`AGENTS.md` §16.4).
+# links this runtime, never the C ABI.
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
 # The one help engine: the syscall-backed own-bundle `HelpSource`
 # (`BundleHelp`) and the shared short-help render the `-h`/`-?` switches

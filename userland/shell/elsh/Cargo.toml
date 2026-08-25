@@ -12,8 +12,8 @@ publish.workspace = true
 workspace = true
 
 # The package is both the `tairix-elsh` interpreter library (above) and the
-# `Run` entry-point binary of the `Shell` application bundle (`AGENTS.md`
-# §16.5) — the program PID 1 `init` launches as the user's session
+# `Run` entry-point binary of the `Shell` application bundle — the program PID
+# 1 `init` launches as the user's session
 # (`plans/SPAWN.md` SP3b / `plans/PI.md` P6e). The binary is a freestanding
 # pure-Rust program on the native Tier-1 targets and an inert host stub
 # elsewhere (see `src/run.rs` / `build.rs`); wiring the interpreter library
@@ -25,8 +25,7 @@ path = "src/run.rs"
 [dependencies]
 # The frozen `abi-v1` surface. The shell's process-host seam reports failures
 # as the stable `Errno`, so the same error vocabulary the kernel returns
-# flows back to the user verbatim — the shell invents no parallel error set
-# (§2.2).
+# flows back to the user verbatim — the shell invents no parallel error set.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 
 # The single shared command-word resolution policy (`plans/APPS.md` §8–§9):
@@ -34,7 +33,7 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # user's own two — and only then the alias-aware `PATH` split. The shell's
 # process host attempts the candidates this crate spells and its completion
 # offers the same directories; `man` walks the same order to find a command's
-# bundle — one policy, never two (§2.2). Spelling only: it performs no I/O
+# bundle — one policy, never two. Spelling only: it performs no I/O
 # and grants nothing.
 tairix-cmdres = { path = "../../../lib/cmdres", version = "=0.0.0" }
 
@@ -42,7 +41,7 @@ tairix-cmdres = { path = "../../../lib/cmdres", version = "=0.0.0" }
 # (directory-part/leaf split, dotfile rule, prefix filter) and the
 # longest-common-prefix Tab discipline. The shell dresses its candidates in
 # shell escaping and merges them with its command and resource-reference
-# classes; the policy itself is never re-derived here (§2.2).
+# classes; the policy itself is never re-derived here.
 tairix-complete = { path = "../../../lib/complete", version = "=0.0.0" }
 
 # The single shared resource-reference spelling parser. The shell classifies a
@@ -54,30 +53,30 @@ tairix-resref = { path = "../../../lib/resref", version = "=0.0.0" }
 
 # The shared curses/TUI input decoder (`plans/CURSES.md` C4): the REPL's raw
 # interactive mode decodes key bytes into typed events through this one
-# `lib/vt`-backed decoder — never a shell-private key table (`AGENTS.md`
-# §2.2; `plans/SHELL.md` "Interactive terminal").
+# `lib/vt`-backed decoder — never a shell-private key table (`plans/SHELL.md`
+# "Interactive terminal").
 tairix-curses = { path = "../../../lib/curses", version = "=0.0.0" }
 
-# The single ANSI/VT terminal-control vocabulary (`AGENTS.md` §2.2): the
+# The single ANSI/VT terminal-control vocabulary: the
 # REPL's line reader runs the read line discipline's buffer half
 # (`tairix_vt::line::LineEditor`) — CR and LF both terminate a line
 # (a serial terminal sends CR for Return) and an erase (the rub-out
-# controls or the Delete key's `CSI 3 ~` sequence) edits the kept bytes —
-# from the one definition the kernel console echo also keys off, so screen
+# controls or the Delete key's `CSI 3 ~` sequence) edits the kept bytes — from
+# the one definition the kernel console echo also keys off, so screen
 # and buffer can never disagree.
 tairix-vt = { path = "../../../lib/vt", version = "=0.0.0" }
 
-# The one volatile secret erase (`AGENTS.md` §2.2, §4): the `elevate`
+# The one volatile secret erase: the `elevate`
 # builtin wipes the password it read before returning. A plain `fill(0)` on
 # a buffer nothing reads again is a dead store an optimiser may delete,
 # which would leave the credential in memory exactly where the code claims
 # it is gone.
 tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 
-# The pure-Rust userland runtime (`AGENTS.md` §1): `tairix-rt` provides the
+# The pure-Rust userland runtime: `tairix-rt` provides the
 # `Run` binary's `_start`, stack canary, panic handler, and syscall wrappers.
-# TAIRiX is Rust-only, so the shell links this runtime, never the C ABI
-# (`AGENTS.md` §16.4). Pulled in only for the bare-metal targets the program
+# TAIRiX is Rust-only, so the shell links this runtime, never the C ABI. Pulled
+# in only for the bare-metal targets the program
 # is actually built for; on the host the binary is an inert stub.
 [target.'cfg(target_os = "none")'.dependencies]
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }

@@ -26,7 +26,7 @@ workspace = true
 # reached U-mode, wrote its banner, and trapped back. Keeping the QEMU-exit
 # shortcut in a dedicated bin (not a Cargo feature on a production crate)
 # prevents feature unification from leaking it into any production build
-# (`AGENTS.md` §5.4.5 — fail closed).
+# (fail closed).
 
 [[bin]]
 name = "tairix-test-spawn-init-qemu-riscv64"
@@ -36,7 +36,7 @@ path = "src/main.rs"
 tairix-arch-riscv64 = { path = "../../../kernel/arch/riscv64", version = "=0.0.0" }
 # The production riscv64 boot pipeline (with the `InitSpawn` seam) lives in
 # `tairix-kernel`'s library half; this vertical reuses it verbatim and only
-# swaps the audit sink (`AGENTS.md` §2.2 — no duplication).
+# swaps the audit sink (no duplication).
 tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
 # The boot heap the `kernel_core::kernel_main` allocations (the leaked
 # `KernelState`, the scheduler) draw from.

@@ -24,12 +24,11 @@ workspace = true
 # routes the program's `mem_map` / `mem_unmap` `ecall`s through the producer.
 # The fault handler reports the deliberate use-after-unmap page fault as PASS.
 # Any shortfall (the program returning a failure exit code, or no fault) writes
-# a distinct `SiFive` Test failure finisher or times out (fail-loud,
-# `AGENTS.md` §7).
+# a distinct `SiFive` Test failure finisher or times out (fail-loud).
 #
 # The `test-hooks` feature is on by default. Release builds that enable it are
-# rejected by the `compile_error!` guard in `src/main.rs` (AGENTS.md §1 — no
-# hacks; §5.4.5 — fail closed), mirroring the other EL0 verticals.
+# rejected by the `compile_error!` guard in `src/main.rs` (no
+# hacks; fail closed), mirroring the other EL0 verticals.
 [features]
 default = ["test-hooks"]
 test-hooks = []

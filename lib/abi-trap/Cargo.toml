@@ -12,7 +12,7 @@ publish.workspace = true
 workspace = true
 
 [features]
-# Host-only test scaffolding (`AGENTS.md` §7). A thread-local seam that stands
+# Host-only test scaffolding. A thread-local seam that stands
 # in for the trap instruction so a *consuming* crate's host unit tests can
 # assert how a syscall marshals its number and arguments without a kernel. It
 # pulls `std` (for thread-local storage), so it is enabled only through a

@@ -1,6 +1,6 @@
 [package]
 name = "tairix-appload"
-description = "TAIRiX application-bundle load gate: validates a `<Name>.app/` bundle's fixed layout, verifies its signed `AppInfo` manifest and content hash, computes the granted capability set as the user's grants intersected with the manifest request, and enforces the dynamic-loader shared-library policy — the one gate the kernel boot-floor spawn path and the user-space `appmgr` service share (`AGENTS.md` §16.4, §16.5, §17.4)."
+description = "TAIRiX application-bundle load gate: validates a `<Name>.app/` bundle's fixed layout, verifies its signed `AppInfo` manifest and content hash, computes the granted capability set as the user's grants intersected with the manifest request, and enforces the dynamic-loader shared-library policy — the one gate the kernel boot-floor spawn path and the user-space `appmgr` service share."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,8 +16,8 @@ workspace = true
 # manifest + dynamic-loader library policy, the shared `decode_capability_ids`
 # body decoder, the `CapabilityId` registry, and the `Errno` table.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
-# `CapabilitySet` and its intersection algebra — the one place the §5.2
-# grant rule lives, so the loader never re-implements it (§2.2).
+# `CapabilitySet` and its intersection algebra — the one place the
+# grant rule lives, so the loader never re-implements it.
 tairix-caps = { path = "../caps", version = "=0.0.0" }
 # The audited primitives the load gate calls directly, because they carry no
 # host policy: the Ed25519 verification of a manifest's publisher delegation
@@ -28,7 +28,7 @@ tairix-caps = { path = "../caps", version = "=0.0.0" }
 # manifest *signer* stays behind the `Verifier` seam, because that policy
 # genuinely differs between the kernel's embedded anchor and `appmgr`.
 tairix-crypto = { path = "../crypto", version = "=0.0.0" }
-# §19.4 structured audit log: every load, refusal, and library decision is
+# structured audit log: every load, refusal, and library decision is
 # recorded through a `tairix_log::Sink`.
 tairix-log = { path = "../log", version = "=0.0.0" }
 # The one path-spelling grammar: `join` places a bundle's own entries (`Run`,

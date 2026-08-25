@@ -1,6 +1,6 @@
 [package]
 name = "tairix-test-preempt-inkernel-qemu-aarch64"
-description = "P-5 QEMU integration test (plans/PI.md / AGENTS.md §17.1): prove the fully-preemptive kernel delivers a device/timer interrupt WHILE a long in-kernel kthread runs, yet never preempts the kernel itself. Where the preempt-el0 verticals prove a runaway EL0 task IS preempted, this proves the dual property the serial-stall saga turned on: a busy in-kernel kthread that never yields still takes the generic-timer IRQ mid-span (the EL1 handler runs and accounts the tick), but the interrupt returns to the SAME task without rescheduling (the kernel is non-preemptible, §4) — so the EL0-preemption callback never fires. The old cooperative dispatch loop ran in-kernel tasks with device IRQs masked, so this test would time out under it; the P-5 fix enables device IRQs while in-kernel code runs, so the tick is taken and the kthread completes."
+description = "P-5 QEMU integration test (plans/PI.md /): prove the fully-preemptive kernel delivers a device/timer interrupt WHILE a long in-kernel kthread runs, yet never preempts the kernel itself. Where the preempt-el0 verticals prove a runaway EL0 task IS preempted, this proves the dual property the serial-stall saga turned on: a busy in-kernel kthread that never yields still takes the generic-timer IRQ mid-span (the EL1 handler runs and accounts the tick), but the interrupt returns to the SAME task without rescheduling (the kernel is non-preemptible) — so the EL0-preemption callback never fires. The old cooperative dispatch loop ran in-kernel tasks with device IRQs masked, so this test would time out under it; the P-5 fix enables device IRQs while in-kernel code runs, so the tick is taken and the kthread completes."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,10 +11,10 @@ publish = false
 [lints]
 workspace = true
 
-# P-5 deliverable (`plans/PI.md` / `AGENTS.md` §17.1 2026-06-23 amendment): the
+# P-5 deliverable (`plans/PI.md` / 2026-06-23 amendment): the
 # aarch64 in-kernel interrupt-delivery / non-preemption vertical. It boots the
 # `virt` board, brings up the EL1 vectors + GICv2, registers the production
-# `tairix_arch_aarch64::preempt` surface verbatim (`AGENTS.md` §2.2 — a per-CPU
+# `tairix_arch_aarch64::preempt` surface verbatim (a per-CPU
 # `PreemptStorage`, the EL0-preemption callback, a timer-tick callback, and the
 # enabled generic-timer PPI), builds a live eevdf `Scheduler`, and admits ONE
 # in-kernel kthread whose body arms the generic-timer one-shot and then
@@ -30,11 +30,11 @@ workspace = true
 # voluntary completion. Under the old cooperative loop (IRQs masked across the
 # whole task run) no tick would ever be taken and the kthread would spin
 # forever, so the run fails loudly — by a failure code or the harness
-# `Outcome::Timeout` (`AGENTS.md` §7).
+# `Outcome::Timeout`.
 #
 # The `test-hooks` feature is on by default. Release builds that enable it are
-# rejected by the `compile_error!` guard in `src/main.rs` (AGENTS.md §1 — no
-# hacks; §5.4.5 — fail closed), mirroring the other aarch64 verticals.
+# rejected by the `compile_error!` guard in `src/main.rs` (no
+# hacks; fail closed), mirroring the other aarch64 verticals.
 [features]
 default = ["test-hooks"]
 test-hooks = []

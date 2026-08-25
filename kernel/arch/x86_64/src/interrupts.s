@@ -6,9 +6,9 @@
 //     in the order pinned by `SavedRegs` (see `interrupts.rs`) and calls
 //     into `tairix_arch_x86_64_default_interrupt(&mut SavedRegs)`. That
 //     Rust callee is `-> !`; reaching the `iretq` below is a kernel
-//     bug. Belt-and-braces per AGENTS.md §2.9.
+//     bug. Belt-and-braces
 //
-// SAFETY-INVARIANTS (audited per AGENTS.md §10):
+// SAFETY-INVARIANTS:
 //
 //   1. Entry from the IDT delivery: the CPU has already pushed the
 //      5-word InterruptStackFrame (RIP, CS, RFLAGS, RSP, SS) on the
@@ -70,8 +70,8 @@ tairix_arch_x86_64_isr_default:
 
     call    tairix_arch_x86_64_default_interrupt
 
-    // The callee is `-> !`. Reaching here is a kernel bug; AGENTS.md
-    // §2.9 belt-and-braces.
+    // The callee is `-> !`. Reaching here is a kernel bug;
+    // belt-and-braces.
     addq    $8, %rsp
 
     // Epilogue (dead today; kept for the (c5) commit).

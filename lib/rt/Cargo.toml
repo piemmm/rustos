@@ -18,18 +18,18 @@ tairix-abi = { path = "../abi", version = "=0.0.0" }
 
 # The `CapabilitySet` wire image (`to_le_bytes`/`WIRE_LEN`) the `call_create`
 # server-side wrapper marshals to the kernel — the one capability-set type the
-# workspace shares (`AGENTS.md` §2.2).
+# workspace shares.
 tairix-caps = { path = "../caps", version = "=0.0.0" }
 
-# The single per-architecture syscall trap (`AGENTS.md` §2.2): the wrappers
+# The single per-architecture syscall trap: the wrappers
 # marshal into register form and hand off to the shared `raw_syscall`, so the
 # trap assembly is not duplicated here.
 tairix-abi-trap = { path = "../abi-trap", version = "=0.0.0" }
 
 # The one shared spelling rule that decides whether a name a program opens
 # is a filesystem path or a resource reference (`sys:random`), so
-# `File::open` routes it to the right kernel resolver and every program —
-# not each tool privately — supports resource references (`AGENTS.md` §2.2).
+# `File::open` routes it to the right kernel resolver and every program — not
+# each tool privately — supports resource references.
 tairix-resref = { path = "../resref", version = "=0.0.0" }
 
 # The `SpinLock` guarding the process-wide cache-report registry
@@ -44,8 +44,8 @@ tairix-sync = { path = "../sync", version = "=0.0.0" }
 # implements: a first-party program builds `tairix_log::Event`s and the
 # `LogSink` marshals each through the `log_emit` syscall to the kernel's
 # diagnostic sink, so a service's diagnostics reach the same log the kernel's
-# do (the serial UART on a debug build) instead of fd 2 (`AGENTS.md` §19.4 /
-# §20). The one logging vocabulary the workspace shares (`AGENTS.md` §2.2).
+# do (the serial UART on a debug build) instead of fd 2. The one logging
+# vocabulary the workspace shares.
 tairix-log = { path = "../log", version = "=0.0.0" }
 
 # The shared reclaimable-memory model: the process-wide pressure gauge
@@ -56,11 +56,11 @@ tairix-reclaim = { path = "../reclaim", version = "=0.0.0" }
 # The volatile secret erase the elevation client wipes its request buffer
 # with. A plain `fill(0)` on a buffer nothing reads again is a dead store the
 # optimiser may delete, so "the password is gone" has exactly one definition
-# in the workspace and every credential site shares it (`AGENTS.md` §2.2, §4).
+# in the workspace and every credential site shares it.
 tairix-util = { path = "../util", version = "=0.0.0" }
 
-# The host trap seam used to assert the wrappers' marshalling without a kernel
-# (`AGENTS.md` §7). Enabled only for this crate's own tests, so the
+# The host trap seam used to assert the wrappers' marshalling without a kernel.
+# Enabled only for this crate's own tests, so the
 # `std`-pulling seam never reaches a shipping build.
 [dev-dependencies]
 tairix-abi-trap = { path = "../abi-trap", version = "=0.0.0", features = ["host-seam"] }

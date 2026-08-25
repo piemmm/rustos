@@ -1,6 +1,6 @@
 [package]
 name = "tairix-test-virtio-qemu-support"
-description = "Shared bring-up scaffolding for the Stage 4.D Item 4 virtio QEMU integration tests. The production boot pipeline runs to AuditEvent::BootCompleted, then an arch-specific scenario carves a per-device DMA region, provisions a transport (x86_64 PCI / riscv64 virt-board MMIO), wires the device interrupt, mints a KernelVirtioHost, loads a signed `.rxe` through tairix_drvhost::Host, and drives a load/reload/unload cycle with a device-specific tail. The device round-trip tails are shared, generic over the transport, so the PCI and MMIO verticals run identical device code (AGENTS.md §2.2)."
+description = "Shared bring-up scaffolding for the Stage 4.D Item 4 virtio QEMU integration tests. The production boot pipeline runs to AuditEvent::BootCompleted, then an arch-specific scenario carves a per-device DMA region, provisions a transport (x86_64 PCI / riscv64 virt-board MMIO), wires the device interrupt, mints a KernelVirtioHost, loads a signed `.rxe` through tairix_drvhost::Host, and drives a load/reload/unload cycle with a device-specific tail. The device round-trip tails are shared, generic over the transport, so the PCI and MMIO verticals run identical device code."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -107,7 +107,7 @@ tairix-itest-finisher = { path = "../finisher", version = "=0.0.0" }
 # The riscv64 boot pipeline (`boot`), the boot-state slots
 # (`published_*`), and the `IrqController` bridge (`PlicIrqController`)
 # live in the downstream boot consumer now that the arch port is a pure
-# Arch HAL implementation (`AGENTS.md` §17.2).
+# Arch HAL implementation.
 tairix-test-riscv64-boot = { path = "../riscv64_boot", version = "=0.0.0" }
 tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
 tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }

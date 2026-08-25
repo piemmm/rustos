@@ -24,11 +24,11 @@ workspace = true
 # `svc`s through the producer + `reschedule_current`. PASS once the parent reaped
 # the child, read back its exit code, and exited 0; any mismatch (or a
 # never-draining loop) writes a distinct failure finisher or times out
-# (fail-loud, `AGENTS.md` §7).
+# (fail-loud).
 #
 # The `test-hooks` feature is on by default. Release builds that enable it are
-# rejected by the `compile_error!` guard in `src/main.rs` (AGENTS.md §1 — no
-# hacks; §5.4.5 — fail closed), mirroring the other spawn verticals.
+# rejected by the `compile_error!` guard in `src/main.rs` (no
+# hacks; fail closed), mirroring the other spawn verticals.
 [features]
 default = ["test-hooks"]
 test-hooks = []

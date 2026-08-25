@@ -23,7 +23,7 @@ workspace = true
 # tail (`unlock_orchestrate::finish_unlock`, which binds the store endpoint
 # independently of the encrypted-root passphrase) — and only swaps the audit
 # sink to report PASS on the one-shot `AuditEvent::InputDelivered` witness
-# (`AGENTS.md` §2.2 — no duplication). Keeping the QEMU-exit shortcut in a
+# (no duplication). Keeping the QEMU-exit shortcut in a
 # dedicated bin (not a Cargo feature on a production crate) prevents feature
 # unification from leaking it into any production build (fail closed).
 
@@ -35,7 +35,7 @@ path = "src/main.rs"
 tairix-arch-riscv64 = { path = "../../../kernel/arch/riscv64", version = "=0.0.0" }
 # The production riscv64 boot pipeline (with the unlock/autoload seam) lives in
 # `tairix-kernel`'s library half; this vertical reuses it verbatim and only
-# swaps the audit sink (`AGENTS.md` §2.2 — no duplication).
+# swaps the audit sink (no duplication).
 tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
 # The kernel/core audit vocabulary: the `InputDelivered` event id the witness
 # keys on — the shared definition, never a magic number.

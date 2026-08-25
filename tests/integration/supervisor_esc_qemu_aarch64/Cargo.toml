@@ -1,6 +1,6 @@
 [package]
 name = "tairix-test-supervisor-esc-qemu-aarch64"
-description = "plans/NEW-SUPERVISOR.md §7 QEMU integration test: boot the production aarch64 tairix-kernel pipeline (boot_aarch64::boot) on the virt board with a planted whole-disk encrypted-root image, press ESC at the pre-mount boot screen to drop into the in-kernel pre-boot Supervisor REPL, run a read-only command, `continue` back to the normal unlock, and unlock the encrypted ARXFS root. It drives the byte-exact boot-screen contract end to end (the frozen `[Press ESC for supervisor]` announcement and the `ARXFS`/`Supervisor`/`*` collapse) and proves a Supervisor session is transparent to boot: PASS once the unlock-service install message is observed, which can only follow `continue` resuming the normal unlock after the REPL. It reuses the entire production boot pipeline and only swaps the audit sink (AGENTS.md §2.2 — no duplication)."
+description = "plans/NEW-SUPERVISOR.md §7 QEMU integration test: boot the production aarch64 tairix-kernel pipeline (boot_aarch64::boot) on the virt board with a planted whole-disk encrypted-root image, press ESC at the pre-mount boot screen to drop into the in-kernel pre-boot Supervisor REPL, run a read-only command, `continue` back to the normal unlock, and unlock the encrypted ARXFS root. It drives the byte-exact boot-screen contract end to end (the frozen `[Press ESC for supervisor]` announcement and the `ARXFS`/`Supervisor`/`*` collapse) and proves a Supervisor session is transparent to boot: PASS once the unlock-service install message is observed, which can only follow `continue` resuming the normal unlock after the REPL. It reuses the entire production boot pipeline and only swaps the audit sink (no duplication)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -22,10 +22,10 @@ path = "src/main.rs"
 # through `tairix-kernel`'s library half (`boot_aarch64::boot`) — the same path
 # the root-unlock-admission vertical drives, which already installs the real
 # `SupervisorHost` and draws the ESC boot screen — and only swaps the audit
-# sink to observe the unlock-service install message (`AGENTS.md` §2.2 — no
+# sink to observe the unlock-service install message (no
 # duplication). Keeping the QEMU-exit shortcut in a dedicated bin (not a Cargo
 # feature on a production crate) prevents feature unification from leaking it
-# into any production build (`AGENTS.md` §5.4 — fail closed).
+# into any production build (fail closed).
 [target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
 tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
 tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }

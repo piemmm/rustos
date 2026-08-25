@@ -20,11 +20,11 @@ workspace = true
 # reschedule SGI — a NON-timer interrupt — is the only thing that can return
 # control to the scheduler. PASS proves the SGI, taken from EL0, drove the
 # preempt point via the latch; a runaway that never preempts times out
-# (fail-loud, `AGENTS.md` §7).
+# (fail-loud).
 #
 # The `test-hooks` feature is on by default. Release builds that enable it are
-# rejected by the `compile_error!` guard in `src/main.rs` (AGENTS.md §1 — no
-# hacks; §5.4.5 — fail closed).
+# rejected by the `compile_error!` guard in `src/main.rs` (no
+# hacks; fail closed).
 [features]
 default = ["test-hooks"]
 test-hooks = []

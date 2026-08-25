@@ -15,7 +15,7 @@ workspace = true
 name = "tairix-test-sandbox"
 path = "src/main.rs"
 
-# The program is a pure-Rust TAIRiX program (`AGENTS.md` §1), so it links the
+# The program is a pure-Rust TAIRiX program, so it links the
 # pure-Rust userland runtime `tairix-rt` — never the C ABI. `tairix-sandbox`
 # is built with its `program` feature so the production transport
 # (`tairix_sandbox::rt`) is compiled in. Only on the native Tier-1 targets

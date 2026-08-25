@@ -1,6 +1,6 @@
 [package]
 name = "tairix-test-spawn-session-qemu-riscv64"
-description = "plans/PI.md stage RV-X3 QEMU integration test (riscv64 sibling of spawn_session_qemu_aarch64 / _x86_64): prove the riscv64 runtime `spawn` concurrent producer on the virt board. The build script compiles the pure-Rust spawn-session fixture (tests/integration/spawn_session_program) twice — once as the PARENT and once as the CHILD (session) — PIE, and converts each to an rxe blob. On boot the test reads the generic-timer rate from the firmware device tree, builds the PARENT a hardware-isolated Sv39 U-mode address space via tairix_kernel_core::spawn_image, admits it as a resumable user kthread, and drives the cooperative Scheduler::step loop. The parent issues a real CAP_PROC_SPAWN-gated `spawn` ecall; the dispatch callback routes it to a riscv64 ProcessSpawn producer that builds the CHILD a fresh, hardware-isolated Sv39 space through the identity window WITHOUT switching the running parent's satp and admits it Ready concurrently. PASS once the producer built the child and both the parent and the child ran to exit; a failed spawn, an unexpected syscall, a wrong drain count, or a stall flips qemu_exit::exit_failure or times out (fail-loud, AGENTS.md §7)."
+description = "plans/PI.md stage RV-X3 QEMU integration test (riscv64 sibling of spawn_session_qemu_aarch64 / _x86_64): prove the riscv64 runtime `spawn` concurrent producer on the virt board. The build script compiles the pure-Rust spawn-session fixture (tests/integration/spawn_session_program) twice — once as the PARENT and once as the CHILD (session) — PIE, and converts each to an rxe blob. On boot the test reads the generic-timer rate from the firmware device tree, builds the PARENT a hardware-isolated Sv39 U-mode address space via tairix_kernel_core::spawn_image, admits it as a resumable user kthread, and drives the cooperative Scheduler::step loop. The parent issues a real CAP_PROC_SPAWN-gated `spawn` ecall; the dispatch callback routes it to a riscv64 ProcessSpawn producer that builds the CHILD a fresh, hardware-isolated Sv39 space through the identity window WITHOUT switching the running parent's satp and admits it Ready concurrently. PASS once the producer built the child and both the parent and the child ran to exit; a failed spawn, an unexpected syscall, a wrong drain count, or a stall flips qemu_exit::exit_failure or times out (fail-loud)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,8 +12,8 @@ publish = false
 workspace = true
 
 # The `test-hooks` feature is on by default. Release builds that enable it are
-# rejected by the `compile_error!` guard in `src/main.rs` (AGENTS.md §1 — no
-# hacks; §5.4.5 — fail closed), mirroring the other EL0 verticals.
+# rejected by the `compile_error!` guard in `src/main.rs` (no
+# hacks; fail closed), mirroring the other EL0 verticals.
 [features]
 default = ["test-hooks"]
 test-hooks = []

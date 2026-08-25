@@ -1,6 +1,6 @@
 [package]
 name = "tairix-ps"
-description = "TAIRiX `ps` CLI: list processes via the System Information API (§3 `userland/apps/` — `PLAN.md` Stage 6)."
+description = "TAIRiX `ps` CLI: list processes via the System Information API (`userland/apps/` — `PLAN.md` Stage 6)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -30,13 +30,13 @@ path = "src/run.rs"
 
 [dependencies]
 # The frozen `Errno` plus the `sysinfo-v1` query ids the tool issues; `ps`
-# invents no parallel error set (§2.2) and never links a kernel or driver
-# crate (§17.4).
+# invents no parallel error set and never links a kernel or driver
+# crate.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The shared System Information API client helpers: the request/response
 # seams, the capability-aware call mapping, and the process-list paging +
 # render shared with the `sysinfo` CLI. `ps` consumes these rather than
-# duplicating them (§2.2, §16.6).
+# duplicating them.
 tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
 # The one help engine: locale fallback, the bounded structured-Markdown
 # parser, and the shared own-bundle short-help render the `-h`/`-?`

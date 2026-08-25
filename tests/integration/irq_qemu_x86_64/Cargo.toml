@@ -19,8 +19,8 @@ workspace = true
 # Layout mirrors `tests/integration/syscall_dispatch_qemu`. The
 # `test-hooks` default feature gates the synthetic-IRQ scenario; a
 # release build that enables it is rejected by the `compile_error!`
-# guard in `src/main.rs` (AGENTS.md §1 — no hacks; §5.4.5 — fail
-# closed; §15 — test affordances stay in test crates).
+# guard in `src/main.rs` (no hacks; fail
+# closed; test affordances stay in test crates).
 [features]
 default = ["test-hooks"]
 test-hooks = []

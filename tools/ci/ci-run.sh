@@ -5,7 +5,7 @@
 # Usage:
 #   tools/ci/ci-run.sh [xtask-subcommand and args...]
 #
-# With no arguments it runs `ci` — the full per-PR gate (AGENTS.md §7): fmt,
+# With no arguments it runs `ci` — the full per-PR gate: fmt,
 # clippy, deps-check, cfg-check, test, docs-check, deny, supply-chain,
 # fuzz --quick, proptest --quick, model-check, spec-review, abi-check.
 #
@@ -14,8 +14,8 @@
 #   tools/ci/ci-run.sh build --headless --target x86_64-unknown-none
 #   tools/ci/ci-run.sh test --qemu
 #
-# `cargo xtask` is the single source of truth for what each check does
-# (AGENTS.md §15): this wrapper only adds environment setup and logging, never
+# `cargo xtask` is the single source of truth for what each check does: this
+# wrapper only adds environment setup and logging, never
 # new pipeline steps. The process exit status mirrors the xtask exit status so
 # cron/launchd and CI dashboards see real pass/fail.
 set -euo pipefail

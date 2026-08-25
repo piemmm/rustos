@@ -15,7 +15,7 @@ workspace = true
 # x86_64-only `tairix-kernel` binary crate so that every architecture's
 # boot pipeline — x86_64 (PCI) and riscv64 / aarch64 (`virt`-board MMIO)
 # — provisions a transport and mints a per-driver DMA host through the
-# *same* code (`AGENTS.md` §2.2 — no duplication, §6 — shared code).
+# *same* code (no duplication, shared code).
 # This crate names no `kernel/arch/*` port, so it builds for every
 # Tier-1 freestanding target.
 [dependencies]
@@ -27,13 +27,13 @@ tairix-caps = { path = "../../lib/caps", version = "=0.0.0" }
 # `KernelVirtioFactory` implements. The walks are generic over a
 # caller-supplied transport builder, so this crate names only `lib/*`
 # types and never the `drivers/bus/virtio` concrete transports
-# (`AGENTS.md` §17.4 — `kernel/* → lib/*`, never a driver). Both the
+# (`kernel/* → lib/*`, never a driver). Both the
 # userland `drvhost` and this kernel crate depend on this seam instead
 # of on each other, so there is no `kernel/virtio -> userland/drvhost`
 # edge either. The kernel-side host (`kernel_host` / `kernel_mmio`)
 # implements its seams against `kernel/{mem,sec,irq}`; it used to live in
-# `drivers/bus/virtio`, but a driver crate may not depend on `kernel/*`
-# (`AGENTS.md` §17.4), so the kernel-linking host moved here.
+# `drivers/bus/virtio`, but a driver crate may not depend on `kernel/*`, so the
+# kernel-linking host moved here.
 tairix-virtio = { path = "../../lib/virtio", version = "=0.0.0" }
 tairix-kernel-irq = { path = "../irq", version = "=0.0.0" }
 tairix-kernel-mem = { path = "../mem", version = "=0.0.0" }
@@ -41,13 +41,13 @@ tairix-kernel-sec = { path = "../sec", version = "=0.0.0" }
 tairix-log = { path = "../../lib/log", version = "=0.0.0" }
 # Synchronisation primitives: the `SpinLock` that makes `KernelVirtioHost`
 # `Sync` so a `&'static` host can back a disk shared (behind the
-# block-sharing layer's own lock) by more than one task (`AGENTS.md` §4 /
-# §2.16 — uncontended on the hot path).
+# block-sharing layer's own lock) by more than one task (uncontended on the hot
+# path).
 tairix-sync = { path = "../../lib/sync", version = "=0.0.0" }
 
 [dev-dependencies]
 # The factory unit tests drive a real `DmaPool` through `kernel/mem`'s
 # in-memory `HostPageTable` / `SimPhysMap` test doubles, gated behind the
 # `host-tests` feature so production builds never link them
-# (`AGENTS.md` §2.3, mirrors `tairix-kernel`).
+# (mirrors `tairix-kernel`).
 tairix-kernel-mem = { path = "../mem", version = "=0.0.0", features = ["host-tests"] }

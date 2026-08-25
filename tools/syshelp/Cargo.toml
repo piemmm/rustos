@@ -1,6 +1,6 @@
 [package]
 name = "tairix-syshelp"
-description = "Build-discovered system program-store Help payload for image authoring: scans the program bundles' on-disk `Help/` trees and exposes them as data, so the image builder plants help without a hand-maintained per-bundle list (plans/APPS.md §2.1, AGENTS.md §2.2)."
+description = "Build-discovered system program-store Help payload for image authoring: scans the program bundles' on-disk `Help/` trees and exposes them as data, so the image builder plants help without a hand-maintained per-bundle list (plans/APPS.md §2.1)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -19,7 +19,7 @@ path = "src/lib.rs"
 # freestanding QEMU image fixture (`tests/integration/encrypted_root_image`,
 # which also links into the aarch64 guest tail) can consume it unchanged. No
 # dependency on any app crate: the trees are discovered from the source tree
-# by `build.rs`, never hand-listed (AGENTS.md §2.2).
+# by `build.rs`, never hand-listed.
 [dependencies]
 
 # Build-only: the desktop-graphics discovery walk validates every asset it

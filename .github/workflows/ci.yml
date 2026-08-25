@@ -2,11 +2,11 @@ name: ci
 
 # Run on every push and PR. The workflow runs the exact `cargo xtask ci`
 # pipeline contributors run locally — a green CI run and a green local run
-# check the same things — then drives the §19.6 fuzz harnesses and §19.7
+# check the same things — then drives the fuzz harnesses and
 # proptest models as a time-limited, parallel soak.
 #
-# `cargo xtask ci` runs the whole test matrix exactly **once** (AGENTS.md §7:
-# `ci` runs each test a single time, on a developer machine and a CI runner
+# `cargo xtask ci` runs the whole test matrix exactly **once** (`ci` runs each
+# test a single time, on a developer machine and a CI runner
 # alike). It likewise runs the fuzz and proptest gates for a single iteration
 # (`--once`, a fresh+logged seed per harness). The flake-hunting repetition is
 # *not* in `ci`: it lives in the time-limited GitHub soaks. This workflow runs
@@ -14,8 +14,8 @@ name: ci
 # `tools/ci/soak.sh` (the same thin parallel-soak wrapper the nightly `soak`
 # workflow uses), and the nightly `soak` workflow runs the 24 h budget. Each
 # soak run draws a fresh seed, logged per job, so consecutive runs explore new
-# inputs and any failure replays from its logged seed (AGENTS.md §2.1/§15:
-# pipeline logic lives in `cargo xtask`, never in tools/ci).
+# inputs and any failure replays from its logged seed (pipeline logic lives in
+# `cargo xtask`, never in tools/ci).
 
 # SECURITY (public repo + self-hosted runner): this workflow must never run
 # untrusted code on the self-hosted runner. It therefore triggers ONLY on a
@@ -128,7 +128,7 @@ jobs:
       - name: cargo xtask ci
         run: cargo xtask ci
 
-      # §19.6/§19.7: run every fuzz harness and proptest model in parallel for
+      # Run every fuzz harness and proptest model in parallel for
       # a minimum of 120 s each. soak.sh enumerates both registries (the
       # single source of truth) and fans them out one process per target, all
       # sharing the 120 s per-job budget set with `--secs`. This is more than
@@ -137,14 +137,14 @@ jobs:
       # invariant/counterexample failure fails the job.
       - name: Run soaks (fuzz + proptest, parallel, >= 120 s each)
         env:
-          # Keep soak logs out of the tracked tree (AGENTS.md §3); upload them
+          # Keep soak logs out of the tracked tree; upload them
           # below so a failing reproducer can be pulled off the run.
           TAIRIX_CI_LOGDIR: ${{ runner.temp }}/tairix-soak-logs
         run: tools/ci/soak.sh both --secs 120
 
       - name: Upload soak logs
-        # Logs are the whole point on failure: §19.6/§19.7 want the crashing
-        # input turned into a regression test + corpus entry.
+        # Logs are the whole point on failure: a crashing input becomes a
+        # regression test + corpus entry.
         if: always()
         uses: actions/upload-artifact@v4
         with:

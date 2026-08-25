@@ -40,8 +40,8 @@ workspace = true
 # builds that enable it are rejected by the `compile_error!` guard in
 # `src/main.rs` and by `cargo deny check`'s `[[bans.features]]` rule
 # on the production `tairix-kernel` crate, which is forbidden from
-# ever growing a `test-hooks` feature (AGENTS.md §1 — no hacks;
-# §5.4.5 — fail closed; §15 — test affordances stay in test crates).
+# ever growing a `test-hooks` feature (no hacks;
+# fail closed; test affordances stay in test crates).
 [features]
 default = ["test-hooks"]
 # `test-hooks` gates the synthesised-quartet entry point. The feature

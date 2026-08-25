@@ -7,7 +7,7 @@
 //! survive, so the scan distinguishes the two by the source named next to the
 //! reference rather than by the notation alone.
 //!
-//! Two rules, both over comments in tracked `.rs` sources:
+//! Two rules, both over comments in tracked sources:
 //!
 //! 1. A comment must not name the charter file beside a section reference.
 //!    Naming it in prose ("the charter forbids this duplication") is fine; it
@@ -18,6 +18,19 @@
 //!    only resolve as the charter — does not. The source may sit anywhere in
 //!    the same comment paragraph, so a reference wrapped across lines still
 //!    reads as anchored.
+//!
+//! A comment is a comment whatever the file spells it with, so the scan covers
+//! every tracked file type that has one: Rust, the assembly stubs, `Cargo.toml`
+//! and its siblings, the CI shell scripts, and the workflow YAML. Prose
+//! *documents* — `README.md`, `docs/src/**`, `plans/*.md` — are deliberately
+//! outside it: they cite the rules they explain or implement, and naming the
+//! charter as a source there is the cross-reference the charter asks for.
+//!
+//! A `Cargo.toml` `description` is scanned too, as a third rule. It is a value
+//! rather than a comment, but it is the crate's own prose about why it exists —
+//! the same job its module doc does — and it is read through `cargo metadata`
+//! and the generated SBOM, away from the charter, where a bare section number
+//! resolves to nothing at all.
 //!
 //! A generated file is skipped: the charter's one sanctioned citation is the
 //! provenance a generator stamps onto what it emits, and hand-editing that
@@ -40,20 +53,102 @@ const SELF_FILE: &str = "charter_cite.rs";
 /// The banner every in-tree generator stamps onto what it emits.
 const GENERATED: &str = "GENERATED FILE";
 
+/// The comment and literal spelling of a scanned file type.
+///
+/// One variant per spelling rather than per extension: the CI shell scripts
+/// and the workflow YAML share a comment and string grammar, so they share a
+/// scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Syntax {
+    /// `//`, nesting `/* … */`, `"…"` and `r#"…"#` strings, `'c'` chars.
+    Rust,
+    /// The LLVM integrated assembler: `//` and `/* … */` whatever the target,
+    /// plus `#` where a target spells its comment that way.
+    Asm,
+    /// `#` to the end of the line, `'…'`/`"…"` and their triple-quoted forms.
+    Toml,
+    /// `#` at the start of a word, `'…'`/`"…"` scalars. Shell and YAML.
+    Script,
+}
+
+impl Syntax {
+    /// The syntax a file named `name` is scanned with, or `None` to skip it.
+    fn of(name: &str) -> Option<Self> {
+        let (_, ext) = name.rsplit_once('.')?;
+        match ext {
+            "rs" => Some(Self::Rust),
+            "s" => Some(Self::Asm),
+            "toml" => Some(Self::Toml),
+            "sh" | "yml" | "yaml" => Some(Self::Script),
+            _ => None,
+        }
+    }
+
+    /// Whether `//` opens a comment and `/* … */` a block.
+    fn slash_comments(self) -> bool {
+        matches!(self, Self::Rust | Self::Asm)
+    }
+
+    /// Whether a `#` with these neighbours opens a comment.
+    ///
+    /// TOML spells one with `#` outside a string unconditionally. Shell and
+    /// YAML need it at the start of a word, so `${#list[@]}` and `"$#"` stay
+    /// code. The assembler needs whitespace after it, which is what tells a
+    /// comment marker from the AArch64 immediate prefix that binds to its
+    /// value with none.
+    fn hash_comment(self, prev: Option<char>, next: Option<char>) -> bool {
+        match self {
+            Self::Rust => false,
+            Self::Toml => true,
+            Self::Script => prev.is_none_or(char::is_whitespace),
+            Self::Asm => next.is_none_or(char::is_whitespace),
+        }
+    }
+
+    /// Whether `quote` opens a string rather than a character constant.
+    ///
+    /// Rust and the assembler spell a character constant with single quotes,
+    /// so only the double quote opens a string there; TOML, shell, and YAML
+    /// take both.
+    fn opens_string(self, quote: char) -> bool {
+        match quote {
+            '"' => true,
+            '\'' => matches!(self, Self::Toml | Self::Script),
+            _ => false,
+        }
+    }
+
+    /// Whether an unterminated `"…"` stays open across the newline.
+    ///
+    /// Rust and the assembler continue one only through a trailing `\`; TOML
+    /// forbids a raw newline in either single-line form; a shell or YAML
+    /// quoted scalar simply carries on.
+    fn string_spans_lines(self, line: &str) -> bool {
+        match self {
+            Self::Rust | Self::Asm => line.trim_end().ends_with('\\'),
+            Self::Toml => false,
+            Self::Script => true,
+        }
+    }
+}
+
 /// Whether `src` declares itself generated.
 ///
 /// Every in-tree generator writes the banner as the emitted file's *first*
-/// line, as a plain `//` comment. Requiring exactly that keeps a hand-written
-/// generator — whose own `//!` module doc naturally mentions the banner it
-/// writes — inside the scan.
-fn is_generated(src: &str) -> bool {
+/// line, as a plain comment in that file's own syntax. Requiring exactly that
+/// keeps a hand-written generator — whose own `//!` module doc naturally
+/// mentions the banner it writes — inside the scan.
+fn is_generated(src: &str, syntax: Syntax) -> bool {
     let Some(first) = src.lines().next().map(str::trim_start) else {
         return false;
     };
-    first.starts_with("//")
-        && !first.starts_with("///")
-        && !first.starts_with("//!")
-        && first.contains(GENERATED)
+    let opens = match syntax {
+        Syntax::Rust | Syntax::Asm => {
+            first.starts_with("//") && !first.starts_with("///") && !first.starts_with("//!")
+        }
+        Syntax::Toml | Syntax::Script => first.starts_with('#'),
+    };
+    opens && first.contains(GENERATED)
 }
 
 /// How far back from a `§` a named source is looked for. One clause: long
@@ -121,11 +216,30 @@ const SOURCES: &[&str] = &[
     "ext4",
 ];
 
-/// A comment that cites the charter.
+/// What kind of text a citation sits in, so the report names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Surface {
+    Comment,
+    /// A `Cargo.toml` `description`: the crate's own prose, not a comment.
+    Description,
+}
+
+impl Surface {
+    /// How the report names this surface.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Comment => "comment",
+            Self::Description => "package description",
+        }
+    }
+}
+
+/// A comment or package description that cites the charter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Violation {
     pub path: String,
     pub line: usize,
+    pub surface: Surface,
     /// Why the citation was refused, phrased for the developer.
     pub reason: &'static str,
     pub text: String,
@@ -209,29 +323,41 @@ fn leading_label(s: &str) -> Option<String> {
 enum Lex {
     #[default]
     Code,
-    /// Inside a `"…"` literal (possibly continued with a trailing `\\`).
-    Str,
+    /// Inside a single-line quoted literal, holding its delimiter.
+    Str(char),
+    /// Inside a triple-quoted literal, holding its delimiter.
+    Triple(char),
     /// Inside an `r#"…"#` literal, holding its hash count.
     Raw(usize),
     /// Inside a `/* … */` comment, holding its nesting depth.
     Block(usize),
 }
 
-/// Advance `state` across `line`, returning the line's `//` comment body.
-fn comment_body<'a>(line: &'a str, state: &mut Lex) -> Option<&'a str> {
+/// Advance `state` across `line`, returning the line's line-comment body.
+fn comment_body<'a>(line: &'a str, state: &mut Lex, syntax: Syntax) -> Option<&'a str> {
     let chars: Vec<(usize, char)> = line.char_indices().collect();
     let mut k = 0;
     let at = |k: usize| chars.get(k).map(|(_, c)| *c);
     let byte = |k: usize| chars.get(k).map_or(line.len(), |(i, _)| *i);
     while k < chars.len() {
         match *state {
-            Lex::Str => {
+            // Only a double-quoted literal takes backslash escapes; every
+            // single-quoted form the scan meets is literal.
+            Lex::Str(quote) => {
                 match at(k) {
-                    Some('\\') => k += 1,
-                    Some('"') => *state = Lex::Code,
+                    Some('\\') if quote == '"' => k += 1,
+                    Some(c) if c == quote => *state = Lex::Code,
                     _ => {}
                 }
                 k += 1;
+            }
+            Lex::Triple(quote) => {
+                if (0..3).all(|d| at(k + d) == Some(quote)) {
+                    *state = Lex::Code;
+                    k += 3;
+                } else {
+                    k += 1;
+                }
             }
             Lex::Raw(h) => {
                 if at(k) == Some('"') && (1..=h).all(|d| at(k + d) == Some('#')) {
@@ -257,16 +383,26 @@ fn comment_body<'a>(line: &'a str, state: &mut Lex) -> Option<&'a str> {
                 }
             }
             Lex::Code => match at(k) {
-                Some('/') if at(k + 1) == Some('/') => return Some(&line[byte(k)..]),
-                Some('/') if at(k + 1) == Some('*') => {
+                Some('/') if syntax.slash_comments() && at(k + 1) == Some('/') => {
+                    return Some(&line[byte(k)..]);
+                }
+                Some('/') if syntax.slash_comments() && at(k + 1) == Some('*') => {
                     *state = Lex::Block(1);
                     k += 2;
                 }
-                Some('"') => {
-                    *state = Lex::Str;
+                Some('#') if syntax.hash_comment(k.checked_sub(1).and_then(at), at(k + 1)) => {
+                    return Some(&line[byte(k)..]);
+                }
+                Some(quote) if syntax.opens_string(quote) => {
+                    *state = if (1..3).all(|d| at(k + d) == Some(quote)) {
+                        k += 2;
+                        Lex::Triple(quote)
+                    } else {
+                        Lex::Str(quote)
+                    };
                     k += 1;
                 }
-                Some('r') => {
+                Some('r') if syntax == Syntax::Rust => {
                     let h = (1..chars.len() - k)
                         .take_while(|d| at(k + d) == Some('#'))
                         .count();
@@ -277,8 +413,8 @@ fn comment_body<'a>(line: &'a str, state: &mut Lex) -> Option<&'a str> {
                         k += 1;
                     }
                 }
-                // A char literal cannot open a string, so skip its body: `'"'`
-                // must not read as a quote.
+                // A character constant cannot open a string, so skip its body:
+                // a quote between the ticks must not read as one.
                 Some('\'') => {
                     let len = if at(k + 1) == Some('\\') { 2 } else { 1 };
                     k += if at(k + 1 + len) == Some('\'') {
@@ -291,10 +427,12 @@ fn comment_body<'a>(line: &'a str, state: &mut Lex) -> Option<&'a str> {
             },
         }
     }
-    // A `"…\` continuation keeps the literal open across the newline; without
-    // one the literal is closed by the line's end.
-    if *state == Lex::Str && !line.trim_end().ends_with('\\') {
-        *state = Lex::Code;
+    if let Lex::Str(quote) = *state {
+        // A single-quoted literal never carries an escape, so nothing can
+        // continue it past the newline.
+        if quote == '\'' || !syntax.string_spans_lines(line) {
+            *state = Lex::Code;
+        }
     }
     None
 }
@@ -341,7 +479,7 @@ fn scan_paragraph(text: &str, labels: &BTreeSet<String>) -> Vec<(usize, &'static
     out
 }
 
-/// Scan the workspace rooted at `root` for comments that cite the charter.
+/// Scan the workspace rooted at `root` for citations of the charter.
 pub fn scan(root: &Path) -> Result<Vec<Violation>, String> {
     let labels = charter_labels(root)?;
     let mut out = Vec::new();
@@ -362,8 +500,10 @@ pub fn scan(root: &Path) -> Result<Vec<Violation>, String> {
                     continue;
                 }
                 dirs.push(path);
-            } else if file_type.is_file() && name.ends_with(".rs") && name != SELF_FILE {
-                scan_file(&path, &relative(root, &path), &labels, &mut out)?;
+            } else if file_type.is_file() && name != SELF_FILE {
+                if let Some(syntax) = Syntax::of(&name) {
+                    scan_file(&path, &relative(root, &path), syntax, &labels, &mut out)?;
+                }
             }
         }
     }
@@ -374,12 +514,13 @@ pub fn scan(root: &Path) -> Result<Vec<Violation>, String> {
 fn scan_file(
     path: &Path,
     rel: &str,
+    syntax: Syntax,
     labels: &BTreeSet<String>,
     out: &mut Vec<Violation>,
 ) -> Result<(), String> {
     let src = std::fs::read_to_string(path)
         .map_err(|e| format!("charter-cite: cannot read {}: {e}", path.display()))?;
-    if is_generated(&src) {
+    if is_generated(&src, syntax) {
         return Ok(());
     }
     // A paragraph is a run of comment lines with text; the citations in one are
@@ -388,8 +529,8 @@ fn scan_file(
     let mut paragraphs: Vec<Vec<(usize, &str)>> = Vec::new();
     let mut para: Vec<(usize, &str)> = Vec::new();
     for (idx, line) in src.lines().enumerate() {
-        let body = comment_body(line, &mut state)
-            .map(|b| b.trim_start_matches('/').trim_start_matches('!').trim())
+        let body = comment_body(line, &mut state, syntax)
+            .map(comment_text)
             .filter(|b| !b.is_empty());
         match body {
             Some(b) => para.push((idx + 1, b)),
@@ -409,12 +550,65 @@ fn scan_file(
             out.push(Violation {
                 path: rel.to_string(),
                 line,
+                surface: Surface::Comment,
                 reason,
                 text: body.to_string(),
             });
         }
     }
+    if syntax == Syntax::Toml {
+        if let Some((line, text)) = description(&src) {
+            for (_, reason) in scan_paragraph(&text, labels) {
+                out.push(Violation {
+                    path: rel.to_string(),
+                    line,
+                    surface: Surface::Description,
+                    reason,
+                    text: text.clone(),
+                });
+            }
+        }
+    }
     Ok(())
+}
+
+/// A comment body stripped of its marker, so the citation scan sees prose.
+fn comment_text(body: &str) -> &str {
+    body.trim_start_matches(['/', '#'])
+        .trim_start_matches('!')
+        .trim()
+}
+
+/// The `description` value of a manifest, with the line it starts on.
+///
+/// A manifest declares at most one, and a `description.workspace = true`
+/// inherits rather than states prose, so it is not one.
+fn description(src: &str) -> Option<(usize, String)> {
+    let mut lines = src.lines().enumerate();
+    let (idx, first) = lines.by_ref().find_map(|(idx, line)| {
+        let rest = line.trim_start().strip_prefix("description")?;
+        Some((idx + 1, rest.trim_start().strip_prefix('=')?.trim_start()))
+    })?;
+    for quote in ['"', '\''] {
+        let triple: String = std::iter::repeat_n(quote, 3).collect();
+        if let Some(open) = first.strip_prefix(triple.as_str()) {
+            let mut text = String::from(open.trim_start_matches('\\'));
+            for (_, line) in lines {
+                if let Some(end) = line.find(triple.as_str()) {
+                    text.push_str(&line[..end]);
+                    return Some((idx, text));
+                }
+                text.push(' ');
+                text.push_str(line);
+            }
+            return Some((idx, text));
+        }
+        if let Some(open) = first.strip_prefix(quote) {
+            let end = open.rfind(quote)?;
+            return Some((idx, open[..end].to_string()));
+        }
+    }
+    None
 }
 
 /// The paragraph line carrying byte offset `at` of the joined text.
@@ -448,13 +642,22 @@ pub fn run(root: &Path) -> Result<(), String> {
         return Ok(());
     }
     let mut msg = String::from(
-        "charter-cite: a comment must state the reason, not cite a charter \
-         section (AGENTS.md §2.11 / §15.17). Replace each with the prose reason \
-         (\"fail closed\", \"zeroed on drop\"), or, for a reference to another \
-         document, name that document beside the section number:\n",
+        "charter-cite: a comment or package description must state the reason, \
+         not cite a charter section (AGENTS.md §2.11 / §15.17). Replace each \
+         with the prose reason (\"fail closed\", \"zeroed on drop\"), or, for a \
+         reference to another document, name that document beside the section \
+         number:\n",
     );
     for v in &violations {
-        let _ = writeln!(msg, "  {}:{}: {} — {}", v.path, v.line, v.reason, v.text);
+        let _ = writeln!(
+            msg,
+            "  {}:{}: {} {} — {}",
+            v.path,
+            v.line,
+            v.surface.label(),
+            v.reason,
+            v.text
+        );
     }
     Err(msg)
 }
@@ -552,17 +755,21 @@ mod tests {
     }
 
     /// Comment bodies of `src`, threading the lexer state across its lines.
-    fn bodies(src: &str) -> Vec<&str> {
+    fn bodies_of(src: &str, syntax: Syntax) -> Vec<&str> {
         let mut state = Lex::default();
         src.lines()
-            .filter_map(|l| comment_body(l, &mut state))
+            .filter_map(|l| comment_body(l, &mut state, syntax))
             .collect()
+    }
+
+    /// [`bodies_of`] for a Rust source, the common case.
+    fn bodies(src: &str) -> Vec<&str> {
+        bodies_of(src, Syntax::Rust)
     }
 
     /// The reasons [`scan_paragraph`] gives for one comment body.
     fn reasons(body: &str) -> Vec<&'static str> {
-        let text = body.trim_start_matches('/').trim_start_matches('!').trim();
-        scan_paragraph(text, &labels())
+        scan_paragraph(comment_text(body), &labels())
             .into_iter()
             .map(|(_, r)| r)
             .collect()
@@ -590,7 +797,7 @@ mod tests {
         )
         .expect("write");
         let mut out = Vec::new();
-        scan_file(&file, "atlas.rs", &labels(), &mut out).expect("scan");
+        scan_file(&file, "atlas.rs", Syntax::Rust, &labels(), &mut out).expect("scan");
         std::fs::remove_dir_all(&dir).ok();
         assert!(out.is_empty(), "{out:#?}");
     }
@@ -608,7 +815,7 @@ mod tests {
         )
         .expect("write");
         let mut out = Vec::new();
-        scan_file(&file, "gen.rs", &labels(), &mut out).expect("scan");
+        scan_file(&file, "gen.rs", Syntax::Rust, &labels(), &mut out).expect("scan");
         std::fs::remove_dir_all(&dir).ok();
         assert_eq!(out.len(), 1, "{out:#?}");
         assert_eq!(
@@ -650,11 +857,9 @@ mod tests {
         // `//!` must read as blank, or a whole module doc becomes one
         // paragraph and a citation borrows an unrelated source.
         let src = "//! (`plans/APPS.md` §4) names the source.\n//!\n//! one definition (§2.2).";
-        let mut state = Lex::default();
-        let bodies: Vec<&str> = src
-            .lines()
-            .filter_map(|l| comment_body(l, &mut state))
-            .map(|b| b.trim_start_matches('/').trim_start_matches('!').trim())
+        let bodies: Vec<&str> = bodies(src)
+            .into_iter()
+            .map(comment_text)
             .filter(|b| !b.is_empty())
             .collect();
         assert_eq!(bodies.len(), 2, "{bodies:?}");
@@ -684,6 +889,213 @@ mod tests {
             "/// (`docs/src/architecture/scheduler.md` §\"Starvation freedom\").",
         ] {
             assert!(reasons(body).is_empty(), "wrongly refused: {body}");
+        }
+    }
+
+    #[test]
+    fn a_syntax_is_chosen_by_extension_and_prose_documents_are_out_of_scope() {
+        for (name, want) in [
+            ("lib.rs", Some(Syntax::Rust)),
+            ("boot.s", Some(Syntax::Asm)),
+            ("Cargo.toml", Some(Syntax::Toml)),
+            ("soak.sh", Some(Syntax::Script)),
+            ("ci.yml", Some(Syntax::Script)),
+            ("action.yaml", Some(Syntax::Script)),
+        ] {
+            assert_eq!(Syntax::of(name), want, "{name}");
+        }
+        // The charter is a legitimate cross-reference in a prose document, so
+        // those are deliberately never scanned.
+        for name in [
+            "README.md",
+            "AGENTS.md",
+            "PLAN.md",
+            "Cargo.lock",
+            "linker.ld",
+        ] {
+            assert_eq!(Syntax::of(name), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_manifest_comment_is_scanned_and_a_string_value_is_not() {
+        let src = "# one definition (§2.2)\n\
+                   name = \"a # b (§5.4)\"\n\
+                   path = 'c # d (§17.4)'\n";
+        assert_eq!(
+            bodies_of(src, Syntax::Toml),
+            vec!["# one definition (§2.2)"]
+        );
+    }
+
+    #[test]
+    fn a_shell_comment_needs_a_word_boundary() {
+        // A parameter expansion spells `#` inside a word, quoted or not.
+        let src = "n=${#list[@]} # fail closed (§5.4)\n\
+                   rc=${pid#done:}\n\
+                   echo \"$#\"\n";
+        assert_eq!(bodies_of(src, Syntax::Script), vec!["# fail closed (§5.4)"]);
+    }
+
+    #[test]
+    fn an_assembler_comment_is_scanned_but_an_immediate_prefix_is_not() {
+        // AArch64 spells an immediate `#0xff`, with no space; a comment marker
+        // is followed by its text. Both `//` and `/* … */` are comments on
+        // every target the integrated assembler serves.
+        let src = "    mov     x5, #0xffff             // one definition (§2.2)\n\
+                   /* fail closed (§5.4) */\n\
+                   # one definition (§2.2)\n\
+                       ldp     x21, x22, [sp, #16]\n";
+        assert_eq!(
+            bodies_of(src, Syntax::Asm),
+            vec!["// one definition (§2.2)", "# one definition (§2.2)"]
+        );
+        assert_eq!(
+            reasons("// one definition (§2.2)"),
+            vec!["section number with no source named beside it"]
+        );
+    }
+
+    /// Scan one file body of `syntax`, as the workspace walk would.
+    ///
+    /// `tag` names the scratch directory, so tests sharing a file name do not
+    /// race each other under the parallel test runner.
+    fn scan_source(tag: &str, name: &str, src: &str, syntax: Syntax) -> Vec<Violation> {
+        let dir = std::env::temp_dir().join(format!("tairix-cc-{}-{tag}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let file = dir.join(name);
+        std::fs::write(&file, src).expect("write");
+        let mut out = Vec::new();
+        let res = scan_file(&file, name, syntax, &labels(), &mut out);
+        std::fs::remove_dir_all(&dir).ok();
+        res.expect("scan");
+        out
+    }
+
+    #[test]
+    fn a_package_description_citing_the_charter_is_refused() {
+        let out = scan_source(
+            "desc-charter",
+            "Cargo.toml",
+            "[package]\ndescription = \"The one definition (`AGENTS.md` §2.2).\"\n",
+            Syntax::Toml,
+        );
+        assert_eq!(out.len(), 1, "{out:#?}");
+        assert_eq!(out[0].surface, Surface::Description);
+        assert_eq!(out[0].line, 2);
+        assert_eq!(out[0].reason, "cites the charter by section");
+    }
+
+    #[test]
+    fn a_package_description_naming_its_own_source_is_accepted() {
+        for value in [
+            "\"The netchan-v1 driver side (plans/NETWORK.md §2.3).\"",
+            "\"An inert host stub; see `plans/PI.md` §0.2.\"",
+        ] {
+            let src = format!("[package]\ndescription = {value}\n");
+            assert!(
+                scan_source("desc-sourced", "Cargo.toml", &src, Syntax::Toml).is_empty(),
+                "wrongly refused: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_description_value_is_read() {
+        // A neighbouring key's value is not the crate's own prose, and an
+        // inherited `description.workspace = true` states none of its own.
+        let src = "[package]\n\
+                   readme = \"See `AGENTS.md` §2.2.\"\n\
+                   description.workspace = true\n";
+        assert!(
+            scan_source("desc-inherited", "Cargo.toml", src, Syntax::Toml).is_empty(),
+            "only a description is prose about the crate"
+        );
+    }
+
+    #[test]
+    fn a_multi_line_description_is_read_whole() {
+        let src = "[package]\ndescription = \"\"\"\n\
+                   The one definition\n\
+                   (`AGENTS.md` §2.2).\n\
+                   \"\"\"\n";
+        let out = scan_source("desc-multiline", "Cargo.toml", src, Syntax::Toml);
+        assert_eq!(out.len(), 1, "{out:#?}");
+        assert_eq!(out[0].surface, Surface::Description);
+    }
+
+    #[test]
+    fn a_generated_manifest_is_skipped() {
+        // A generator stamps the governing rule onto what it emits, in that
+        // file's own comment syntax.
+        let out = scan_source(
+            "generated",
+            "generated.toml",
+            "# GENERATED FILE — DO NOT EDIT.\n# (AGENTS.md §2.2).\n",
+            Syntax::Toml,
+        );
+        assert!(out.is_empty(), "{out:#?}");
+    }
+
+    #[test]
+    fn the_lexer_survives_adversarial_bytes_in_every_syntax() {
+        // A panic here would block `ci` on a file the scan merely could not
+        // lex, so the corpus drives every partial construct the four grammars
+        // share: unterminated literals, a lone marker, multibyte boundaries.
+        const ALPHABET: [&str; 24] = [
+            "//",
+            "/*",
+            "*/",
+            "#",
+            "\"",
+            "'",
+            "\"\"\"",
+            "'''",
+            "r#\"",
+            "\"#",
+            "\\",
+            "§",
+            "§2.2",
+            "AGENTS.md",
+            "§",
+            "0xff",
+            " ",
+            "\t",
+            "€",
+            "→",
+            "—",
+            "(",
+            ")",
+            "[",
+        ];
+        let syntaxes = [Syntax::Rust, Syntax::Asm, Syntax::Toml, Syntax::Script];
+        let labels = labels();
+        // Fixed seed: a failure reproduces without one being recorded.
+        let mut x: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut next = |bound: usize| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            usize::try_from(x % bound as u64).unwrap_or(0)
+        };
+        for _ in 0..4_000 {
+            let mut src = String::new();
+            for _ in 0..=next(12) {
+                for _ in 0..=next(10) {
+                    src.push_str(ALPHABET[next(ALPHABET.len())]);
+                }
+                src.push('\n');
+            }
+            for syntax in syntaxes {
+                let mut state = Lex::default();
+                for line in src.lines() {
+                    if let Some(body) = comment_body(line, &mut state, syntax) {
+                        scan_paragraph(comment_text(body), &labels);
+                    }
+                }
+            }
+            description(&format!("description = {src}"));
+            description(&src);
         }
     }
 

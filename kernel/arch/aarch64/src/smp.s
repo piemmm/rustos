@@ -11,8 +11,8 @@
 // Unlike the boot core, a secondary core has no stack: this stub gives it
 // a private slice of a secondary-stack pool, indexed by the context id,
 // before calling into Rust. The pool is **not** a fixed `.bss` reserve
-// (which would cap the machine at a compile-time core count, `AGENTS.md`
-// §24.1). Instead the boot core publishes the pool it sized for the
+// (which would cap the machine at a compile-time core count). Instead the boot
+// core publishes the pool it sized for the
 // machine's discovered core count through `smp::SecondaryStackPool::
 // register`, which writes the pool base and per-core stride into the
 // `SECONDARY_STACK_BASE` / `SECONDARY_STACK_STRIDE` globals below before
@@ -20,7 +20,7 @@
 // slice; the `register` call's `dsb sy` (and the PSCI `CPU_ON` firmware
 // barrier) order the publish ahead of this core's first read.
 //
-// SAFETY-INVARIANTs (audited per AGENTS.md §1):
+// SAFETY-INVARIANTs:
 //   1. Entered at EL1 with the MMU off, exactly once per secondary core,
 //      only after the boot core issued `CPU_ON` for it. The known MMU-off
 //      `SCTLR_EL1` (`paging::SCTLR_MMU_OFF`) is written before the first
@@ -102,7 +102,7 @@ _start_secondary_aarch64:
 //   4. joins `_start_secondary_aarch64` above with the dense id in x0,
 //      sharing the one stack-selection + Rust hand-off path.
 //
-// SAFETY-INVARIANTs (audited per AGENTS.md §1):
+// SAFETY-INVARIANTs:
 //   1. Entered with the MMU off, at EL1 or EL2, only after
 //      `start_secondary_spintable` validated that the secondary entry,
 //      the stack pool, and the affinity table were all published (and

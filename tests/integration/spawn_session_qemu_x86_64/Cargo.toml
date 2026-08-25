@@ -28,7 +28,7 @@ workspace = true
 # plans/PI.md §X).
 # Keeping the bin separate from the production binary (rather than a Cargo
 # feature) prevents feature unification from leaking the QEMU-exit behaviour
-# into a production image (`AGENTS.md` §5.4.5 — fail closed).
+# into a production image (fail closed).
 
 [[bin]]
 name = "tairix-test-spawn-session-qemu-x86-64"

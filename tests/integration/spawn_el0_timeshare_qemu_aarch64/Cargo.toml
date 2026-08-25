@@ -22,11 +22,11 @@ workspace = true
 # the cooperative `step` loop; the dispatch callback maps each task's `yield`/
 # `exit` `svc` to `reschedule_current`. PASS once both tasks yielded their full
 # count and exited; any shortfall (or a never-draining loop) writes a distinct
-# failure finisher or times out (fail-loud, `AGENTS.md` §7).
+# failure finisher or times out (fail-loud).
 #
 # The `test-hooks` feature is on by default. Release builds that enable it are
-# rejected by the `compile_error!` guard in `src/main.rs` (AGENTS.md §1 — no
-# hacks; §5.4.5 — fail closed), mirroring the spawn-program round-trip tests.
+# rejected by the `compile_error!` guard in `src/main.rs` (no
+# hacks; fail closed), mirroring the spawn-program round-trip tests.
 [features]
 default = ["test-hooks"]
 test-hooks = []

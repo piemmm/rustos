@@ -20,7 +20,7 @@ workspace = true
 # and reports PASS through the ARM semihosting finisher once enough ticks
 # have been observed. Keeping the QEMU-exit shortcut in a dedicated bin
 # (not a Cargo feature on the arch crate) prevents feature unification
-# from leaking it into any production build (`AGENTS.md` §5.4.5 — fail
+# from leaking it into any production build (fail
 # closed).
 
 [[bin]]

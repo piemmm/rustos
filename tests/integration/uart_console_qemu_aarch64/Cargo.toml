@@ -20,7 +20,7 @@ workspace = true
 # because QEMU's `raspi*` models do not hand the kernel a device tree in
 # x0; see the bin's module docs. The QEMU-exit shortcut lives in this
 # dedicated bin, never behind a Cargo feature on the arch crate
-# (`AGENTS.md` §5.4.5 — fail closed).
+# (fail closed).
 
 [[bin]]
 name = "tairix-test-uart-console-qemu-aarch64"

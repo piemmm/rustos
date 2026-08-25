@@ -1,6 +1,6 @@
 [package]
 name = "tairix-devmgr"
-description = "TAIRiX userland device manager: matches hardware-tree nodes against driver bind tables and autoloads the winners through the driver-host load gate (Stage 4.HW — `AGENTS.md` §18.3)."
+description = "TAIRiX userland device manager: matches hardware-tree nodes against driver bind tables and autoloads the winners through the driver-host load gate (Stage 4.HW —)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,17 +14,17 @@ workspace = true
 # The `Run` binary's freestanding userland runtime (`tairix-rt`) is an
 # optional, on-by-default build feature. `cargo build -p tairix-devmgr`
 # builds the service program with it; the kernel — which links only the
-# match-policy *library* (`DeviceManager` / `DriverLoader`, `AGENTS.md`
-# §18.3) — depends with `default-features = false`, so ring 0 never pulls
+# match-policy *library* (`DeviceManager` / `DriverLoader`) — depends with
+# `default-features = false`, so ring 0 never pulls
 # the userland runtime's `_start`, `#[global_allocator]`, and `panic_impl`
-# into the kernel image (E0152 / allocator clash, `AGENTS.md` §17.4 / §1).
+# into the kernel image (E0152 / allocator clash).
 [features]
 default = ["program"]
 program = ["dep:tairix-rt", "dep:tairix-sysconfig", "dep:tairix-netconfig"]
 
 # The package is both the `tairix-devmgr` match-policy library (above) and the
 # `Run` entry-point binary of the device-manager service installed at
-# `/System/Services/devmgr.app/Run` (`AGENTS.md` §16.2, §18.3) — the long-running
+# `/System/Services/devmgr.app/Run` — the long-running
 # user-space service PID 1 `init` launches to observe the discovered hardware
 # tree and react to it. The binary is a freestanding pure-Rust program on the
 # native Tier-1 targets and an inert host stub elsewhere (see `src/run.rs` /
@@ -36,14 +36,14 @@ path = "src/run.rs"
 [dependencies]
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
-# The deterministic node ↔ bind-table match policy (`AGENTS.md` §18.3)
+# The deterministic node ↔ bind-table match policy
 # lives in `lib/devmatch` so the kernel's interim in-kernel
 # driver-candidate catalogue shares the one definition without a
-# kernel→userland dependency edge (§2.2 / §17.4).
+# kernel→userland dependency edge.
 tairix-devmatch = { path = "../../../lib/devmatch", version = "=0.0.0" }
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
-# The boot-time system-configuration store engine (`AGENTS.md` §16.2): the
+# The boot-time system-configuration store engine: the
 # one definition of the `system.conf` grammar the device manager reads the
 # stack-wide `net.*` policy from post-unlock, to deliver it to `netstack`
 # over the capability-gated admin op (`plans/NETWORK.md` N9b-2). Optional
@@ -51,18 +51,18 @@ tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # store, so the kernel — which links the match-policy library with
 # `default-features = false` — never pulls it into the ring-0 image.
 tairix-sysconfig = { path = "../../../lib/sysconfig", version = "=0.0.0", optional = true }
-# The per-interface network-configuration store engine (`AGENTS.md` §16.1;
-# `plans/NETWORK.md` §6.1): the one definition of the `network.conf` grammar
+# The per-interface network-configuration store engine (`plans/NETWORK.md`
+# §6.1): the one definition of the `network.conf` grammar
 # the device manager reads post-unlock and maps into the per-interface
 # `NetInterfaceConfigMsg` it pushes to `netstack` (`plans/NETWORK.md`
 # N9b-3-1). Optional and program-gated exactly like `tairix-sysconfig`, so
 # the kernel never pulls it into the ring-0 image.
 tairix-netconfig = { path = "../../../lib/netconfig", version = "=0.0.0", optional = true }
 
-# The pure-Rust userland runtime (`AGENTS.md` §1): `tairix-rt` provides the
+# The pure-Rust userland runtime: `tairix-rt` provides the
 # `Run` binary's `_start`, stack canary, panic handler, and syscall wrappers
 # (including `hw_tree_read` / `hw_tree_wait`). TAIRiX is Rust-only, so the
-# service links this runtime, never the C ABI (`AGENTS.md` §16.4). It is an
+# service links this runtime, never the C ABI. It is an
 # optional dependency gated behind the default `program` feature (above) and
 # pulled in only for the bare-metal targets the program is actually built
 # for; on the host the binary is an inert stub. The kernel links the library

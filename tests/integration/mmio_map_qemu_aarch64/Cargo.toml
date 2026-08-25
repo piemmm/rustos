@@ -26,13 +26,13 @@ workspace = true
 # program reads the device's `MagicValue` register back through the mapped
 # window and exits 0, which the dispatch callback reports as PASS. Any shortfall
 # (a refused map, the wrong register value, an unexpected syscall) writes a
-# distinct failure finisher or times out (fail-loud, `AGENTS.md` §7). The
-# registry-backed grant owner-check (§5.4) is host-proven in `kernel/core`;
+# distinct failure finisher or times out (fail-loud). The
+# registry-backed grant owner-check is host-proven in `kernel/core`;
 # this vertical proves the retained-space mapping mechanism on the board.
 #
 # The `test-hooks` feature is on by default. Release builds that enable it are
-# rejected by the `compile_error!` guard in `src/main.rs` (AGENTS.md §1 — no
-# hacks; §5.4.5 — fail closed), mirroring the other EL0 verticals.
+# rejected by the `compile_error!` guard in `src/main.rs` (no
+# hacks; fail closed), mirroring the other EL0 verticals.
 [features]
 default = ["test-hooks"]
 test-hooks = []

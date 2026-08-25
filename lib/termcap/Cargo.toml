@@ -1,6 +1,6 @@
 [package]
 name = "tairix-termcap"
-description = "TAIRiX first-party compiled-in terminal capability database (CURSES.md Stage C3): the closed, versioned set of recognised `TERM` values and a capability record per terminal expressed entirely in `lib/vt` terms (AGENTS.md §2.2) — colour depth, cursor addressing, erase, scroll region, alt-screen, cursor visibility, title, arrow-key input, mouse reporting, and bracketed paste. `from_term` parses an untrusted `TERM` and fails closed to `dumb` (§2.9, §5.4); there is no terminfo/termcap file read (§16.1). no_std + alloc, never panics."
+description = "TAIRiX first-party compiled-in terminal capability database (CURSES.md Stage C3): the closed, versioned set of recognised `TERM` values and a capability record per terminal expressed entirely in `lib/vt` terms — colour depth, cursor addressing, erase, scroll region, alt-screen, cursor visibility, title, arrow-key input, mouse reporting, and bracketed paste. `from_term` parses an untrusted `TERM` and fails closed to `dumb`; there is no terminfo/termcap file read. no_std + alloc, never panics."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

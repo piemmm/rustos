@@ -1,6 +1,6 @@
 [package]
 name = "tairix-cat"
-description = "TAIRiX `cat` CLI: concatenate files (and standard input) to the terminal (§3 `userland/apps/` — `PLAN.md` Stage 6)."
+description = "TAIRiX `cat` CLI: concatenate files (and standard input) to the terminal (`userland/apps/` — `PLAN.md` Stage 6)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -32,8 +32,8 @@ path = "src/run.rs"
 [dependencies]
 # The stable `Errno` is the only ABI vocabulary `cat` needs: the tool reads
 # its sources and writes the terminal through injected seams that speak the
-# frozen `Errno`, so it invents no parallel error set (§2.2) and never links
-# a kernel or driver crate (§17.4).
+# frozen `Errno`, so it invents no parallel error set and never links
+# a kernel or driver crate.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The one help engine: locale fallback, the bounded structured-Markdown
 # parser, and the shared own-bundle short-help render the `-h`/`-?`

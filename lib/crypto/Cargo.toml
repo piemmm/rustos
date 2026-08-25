@@ -12,7 +12,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-# `AGENTS.md` §1 forbids hand-rolled cryptography. The only crates pulled in
+# The charter forbids hand-rolled cryptography. The only crates pulled in
 # here are the vetted RustCrypto SHA-2 and dalek-cryptography Ed25519
 # implementations. Versions are pinned; bumping a pin requires an audit pass.
 sha2 = { version = "=0.10.9", default-features = false }
@@ -24,7 +24,7 @@ sha2 = { version = "=0.10.9", default-features = false }
 # already pulled in above, so the audit footprint grows by one crate.
 hmac = { version = "=0.12.1", default-features = false }
 # RustCrypto's audited ChaCha20-Poly1305 AEAD. It backs the encrypted-swap
-# layer (`AGENTS.md` §4): the kernel pages secrets out only through an
+# layer: the kernel pages secrets out only through an
 # authenticated cipher. `default-features = false` keeps this `no_std` and
 # pulls in neither `alloc`, `getrandom`, nor `rand_core` — the wrapper uses
 # only the in-place detached `AeadInPlace` trait, so nonces and keys are
@@ -34,16 +34,15 @@ chacha20poly1305 = { version = "=0.10.1", default-features = false }
 # into `zeroize::Zeroize` on drop. `lib/crypto` itself never names the
 # `zeroize` crate (we expose verification only, no private-key handling),
 # so it is *not* a direct dependency here — adding one would violate
-# `AGENTS.md` §2.3.
 ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zeroize"] }
 # The generic self-optimising dispatch framework: the capability gate,
 # mandatory self-verify, and fail-closed baseline selection are written once
-# there and reused for the crypto backend-availability decision (§2.2), never
+# there and reused for the crypto backend-availability decision, never
 # re-implemented here.
 # `default-features = false` drops the framework's optional heap-backed
 # `OpsTables`, which the crypto backend decision does not use — so this
 # foundational crate stays allocation-free and never forces a global allocator
-# onto an allocator-free consumer that links it (§2.16).
+# onto an allocator-free consumer that links it.
 tairix-cpuops = { path = "../cpuops", version = "=0.0.0", default-features = false }
 # The arch-neutral capability vocabulary (`CpuFeature`/`CpuFeatureSet`) the
 # crypto backend-availability candidate's required-feature gate is expressed in.

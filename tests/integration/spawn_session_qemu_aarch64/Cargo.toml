@@ -26,7 +26,7 @@ workspace = true
 # session's gated exit — flips `qemu_exit::exit_success`. Keeping the
 # QEMU-exit shortcut in a dedicated bin (not a Cargo feature on a production
 # crate) prevents feature unification from leaking it into any production
-# build (`AGENTS.md` §5.4.5 — fail closed).
+# build (fail closed).
 
 [[bin]]
 name = "tairix-test-spawn-session-qemu-aarch64"
@@ -37,7 +37,7 @@ tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0
 # The production aarch64 boot pipeline (with the `InitSpawn` seam and the
 # runtime `ProcessSpawn` producer) lives in `tairix-kernel`'s library half;
 # this vertical reuses it verbatim and only swaps the audit sink
-# (`AGENTS.md` §2.2 — no duplication).
+# (no duplication).
 tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
 # The boot heap the `kernel_core::kernel_main` allocations (the leaked
 # `KernelState`, the scheduler, the spawned address spaces) draw from.

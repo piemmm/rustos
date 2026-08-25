@@ -1,6 +1,6 @@
 [package]
 name = "tairix-applib"
-description = "TAIRiX `applib` CLI: administer the desktop's program-library catalog (§3 `userland/apps/` — a plans/NEW-TASKBAR.md command app)."
+description = "TAIRiX `applib` CLI: administer the desktop's program-library catalog (`userland/apps/` — a plans/NEW-TASKBAR.md command app)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -34,7 +34,7 @@ path = "src/run.rs"
 # `AppInfo` manifest decoder the `add`/`rescan` bundle reads go through
 # (`AppInfoHeader`, `LibraryCategory`), the app-store path spellings, and
 # the `stdinfo` record type for the fd-3 advisory records. Never a kernel
-# or driver crate (§17.4).
+# or driver crate.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The one help engine: locale fallback, the bounded structured-Markdown
 # parser, and the shared own-bundle short-help render the `-h`/`-?`
@@ -44,7 +44,7 @@ tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
 # model, the `<id>.<field>` key registry, the fail-closed read, the canonical
 # render, the machine ∪ overlay merge, and the discovery reconcile this tool
 # administers — shared with the image builder and the desktop session so a
-# writer and its readers can never diverge (§2.2).
+# writer and its readers can never diverge.
 tairix-proglib = { path = "../../../lib/proglib", version = "=0.0.0" }
 # The one `key = value` document engine a catalog is written in, and the one
 # both store backings trade in.

@@ -34,7 +34,7 @@ ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zer
 # The device-agnostic bring-up scaffolding (boot harness, PCI/MSI-X walk,
 # DMA carve, signed-`.rxe` load) lives in the shared support crate; this
 # bin pulls in only the abi, the virtio-blk driver, and the driver host it
-# resolves the loaded image to (`AGENTS.md` §2.2).
+# resolves the loaded image to.
 [target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-drvhost = { path = "../../../userland/system/drvhost", version = "=0.0.0" }

@@ -1,6 +1,6 @@
 [package]
 name = "tairix-test-users-db-qemu-x86-64"
-description = "plans/ARCHSUPPORT.md A2 QEMU integration test (x86_64 sibling of the aarch64 users-database vertical): boot the tairix-kernel pipeline, walk PCI to the modern virtio-blk-pci function, provision a PciTransport through the capability-gated KernelMmioMapper, route its MSI-X interrupt, load the signed virtio-blk `.rxe`, then drive the *shared* users-database device tail (tairix_test_virtio_qemu_support::users_db_load — the exact one-definition tail the aarch64 vertical runs, AGENTS.md §2.2) over a planted users-root arxfs volume (FsDisk::UsersRoot, authored by the real arxfs driver): mount the plaintext users-root volume, run the boot-time tairix_kernel_core::load_users_db read path for /System/Security/Users over virtio-PCI, and prove the parsed database authenticates the planted account and refuses a wrong password — the first live-boot exercise of the x86_64 users-database load path over virtio-PCI."
+description = "plans/ARCHSUPPORT.md A2 QEMU integration test (x86_64 sibling of the aarch64 users-database vertical): boot the tairix-kernel pipeline, walk PCI to the modern virtio-blk-pci function, provision a PciTransport through the capability-gated KernelMmioMapper, route its MSI-X interrupt, load the signed virtio-blk `.rxe`, then drive the *shared* users-database device tail (tairix_test_virtio_qemu_support::users_db_load — the exact one-definition tail the aarch64 vertical runs) over a planted users-root arxfs volume (FsDisk::UsersRoot, authored by the real arxfs driver): mount the plaintext users-root volume, run the boot-time tairix_kernel_core::load_users_db read path for /System/Security/Users over virtio-PCI, and prove the parsed database authenticates the planted account and refuses a wrong password — the first live-boot exercise of the x86_64 users-database load path over virtio-PCI."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -25,7 +25,7 @@ ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zer
 # `tairix_kernel_core::load_users_db` read path over the users-root arxfs
 # fixture) both live in the shared support crate, so this bin names only
 # that crate plus the virtio-blk driver whose `register` it wires into the
-# spawner (`AGENTS.md` §2.2).
+# spawner.
 [target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
 tairix-drv-storage-virtio-blk = { path = "../../../drivers/storage/virtio_blk", version = "=0.0.0" }
 tairix-test-virtio-qemu-support = { path = "../virtio_qemu_support", version = "=0.0.0" }

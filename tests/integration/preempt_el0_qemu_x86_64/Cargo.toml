@@ -29,11 +29,11 @@ workspace = true
 # ring 3, gated on the saved `CS` RPL). PASS once the preempt callback fired at
 # least once AND the task still completed and exited; a runaway that never
 # preempts (the `step` never returns) or a botched resume (the task never exits)
-# times out (fail-loud, `AGENTS.md` §7).
+# times out (fail-loud).
 #
 # The `test-hooks` feature is on by default. Release builds that enable it are
-# rejected by the `compile_error!` guard in `src/main.rs` (AGENTS.md §1 — no
-# hacks; §5.4.5 — fail closed), mirroring the other EL0 verticals.
+# rejected by the `compile_error!` guard in `src/main.rs` (no
+# hacks; fail closed), mirroring the other EL0 verticals.
 [features]
 default = ["test-hooks"]
 test-hooks = []

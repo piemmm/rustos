@@ -20,7 +20,7 @@ workspace = true
 # registers the test as `Outcome::Pass`. Keeping the bin separate from
 # the production binary (rather than a Cargo feature) prevents feature
 # unification from leaking the QEMU-exit behaviour into a production
-# image (`AGENTS.md` §5.4.5 — fail closed).
+# image (fail closed).
 
 [[bin]]
 name = "tairix-test-spawn-init-qemu-x86-64"

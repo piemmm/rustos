@@ -28,7 +28,7 @@ path = "src/lib.rs"
 
 # The wasm32 port, the driver host, and the framebuffer driver are
 # linked only when building for the browser target; a host build has no
-# dependencies and an empty body (`AGENTS.md` §2.2 — the `itest_wasm32`
+# dependencies and an empty body (the `itest_wasm32`
 # cfg, not a raw target predicate, selects the kernel body in source).
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }

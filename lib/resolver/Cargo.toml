@@ -27,11 +27,11 @@ program = ["dep:tairix-rt"]
 tairix-abi = { path = "../abi", version = "=0.0.0" }
 # The one pure DNS engine: the RFC 1035 codec, the RFC 5452-hardened resolver
 # state machine, and the shared `DnsTransport`/`resolve` driver this crate
-# supplies I/O for — never a second DNS implementation (§2.2).
+# supplies I/O for — never a second DNS implementation.
 tairix-net = { path = "../net", version = "=0.0.0" }
 # The single shared System Information API client: the ungated
 # `NET_RESOLVER_SERVERS` paging walk (`for_each_resolver_server`) that surfaces
-# the active recursive-server set — never a second sysinfo query client (§2.2).
+# the active recursive-server set — never a second sysinfo query client.
 tairix-procinfo = { path = "../procinfo", version = "=0.0.0" }
 
 # For the `program` feature only: the userland runtime `tairix-rt`, which

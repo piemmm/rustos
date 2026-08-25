@@ -1,6 +1,6 @@
 [package]
 name = "tairix-configure"
-description = "TAIRiX `configure` CLI: read and set the boot-time system-configuration store (§3 `userland/apps/` — a plans/APPS.md command app)."
+description = "TAIRiX `configure` CLI: read and set the boot-time system-configuration store (`userland/apps/` — a plans/APPS.md command app)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -32,7 +32,7 @@ path = "src/run.rs"
 [dependencies]
 # The stable `Errno`: the tool reads and writes the store through an
 # injected filesystem seam that speaks the frozen `Errno`, so it invents no
-# parallel error set (§2.2) and never links a kernel or driver crate (§17.4).
+# parallel error set and never links a kernel or driver crate.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The one help engine: locale fallback, the bounded structured-Markdown
 # parser, and the shared own-bundle short-help render the `-h`/`-?`
@@ -41,7 +41,7 @@ tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
 # The one configuration-store engine: the store grammar, the closed key
 # registry, the fail-closed parse, and the canonical render this tool
 # writes with — shared with every boot-time consumer so producer and
-# consumer can never diverge (§2.2).
+# consumer can never diverge.
 tairix-sysconfig = { path = "../../../lib/sysconfig", version = "=0.0.0" }
 
 # For the freestanding `Run` binary only: the userland runtime `tairix-rt`

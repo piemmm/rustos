@@ -20,4 +20,4 @@ path = "src/bin/run.rs"
 
 # The library is host-only (`std`). It is invoked by `cargo xtask test --qemu`
 # to build, launch, and reap QEMU instances. Keeping it as a workspace member
-# means the same code path runs in CI and locally (`AGENTS.md` §14).
+# means the same code path runs in CI and locally.

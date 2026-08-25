@@ -1,5 +1,5 @@
 # Signed-AppInfo manifest source for the `sysinfod` System Information
-# service (a service is an app, AGENTS.md §16.2; plans/APPS.md
+# service (a service is an app; plans/APPS.md
 # deliverable 8). Discovered by the build's app-bundle composer and
 # planted under /System/Services/. The capability list is the bundle's
 # request: CAP_SYSINFO_INTROSPECT (the privileged global introspection

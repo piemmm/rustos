@@ -13,7 +13,7 @@ workspace = true
 
 # This crate is the *QEMU-on-real-cores* sibling of
 # `tests/integration/scheduler_stress`. The host-side crate already
-# satisfies the AGENTS.md §7 unit/workspace contract by simulating
+# satisfies the unit/workspace contract by simulating
 # 4 cores through `TestArch`; this crate satisfies the Stage-2
 # deliverable that mandates the same workload run under QEMU on
 # `-smp 4` with the actual x86_64 AP-bring-up code from
@@ -24,8 +24,8 @@ workspace = true
 # with a `[lib] + tests/` integration test in the same package: the
 # former requires `#![no_std]`/`#![no_main]` and only builds for
 # `x86_64-unknown-none`, while the latter must compile for the host
-# triple under `cargo test --workspace`. AGENTS.md §2.2 forbids
-# duplicating the workload itself; the actual task body and assertions
+# triple under `cargo test --workspace`. Duplicating the workload itself is
+# forbidden; the actual task body and assertions
 # live in shared constants on `tairix-test-scheduler-stress`, which this
 # crate depends on.
 

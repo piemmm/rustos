@@ -1,6 +1,6 @@
 [package]
 name = "tairix-sysinfo"
-description = "TAIRiX `sysinfo` CLI: the terminal client of the System Information API (§16.6 — `PLAN.md` Stage 6)."
+description = "TAIRiX `sysinfo` CLI: the terminal client of the System Information API (`PLAN.md` Stage 6)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -31,12 +31,12 @@ path = "src/run.rs"
 [dependencies]
 # The frozen `sysinfo-v1` wire surface plus the stable `Errno`: the CLI
 # builds the typed request and decodes the typed response through these
-# ABI types and invents no parallel format or error set (§2.2, §16.6).
+# ABI types and invents no parallel format or error set.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The shared System Information API client helpers: the request/response
 # seams, the capability-aware call mapping, and the process-list paging +
 # render shared with `ps`. The CLI consumes these rather than duplicating
-# them (§2.2, §16.6).
+# them.
 tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
 # The one help engine: locale fallback, the bounded structured-Markdown
 # parser, and the shared own-bundle short-help render the `-h`/`-?`

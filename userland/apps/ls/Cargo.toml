@@ -1,6 +1,6 @@
 [package]
 name = "tairix-ls"
-description = "TAIRiX `ls` CLI: list directory contents (§3 `userland/apps/` — a plans/APPS.md command app)."
+description = "TAIRiX `ls` CLI: list directory contents (`userland/apps/` — a plans/APPS.md command app)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -32,7 +32,7 @@ path = "src/run.rs"
 [dependencies]
 # The frozen `Errno`, the VFS `FileKind` vocabulary, and the `stdinfo` record
 # types for the hidden-entries advisory; `ls` invents no parallel error or
-# kind set (§2.2) and never links a kernel or driver crate (§17.4).
+# kind set and never links a kernel or driver crate.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The one path-spelling grammar: `join` places a child inside a directory,
 # so this tool carries no second path parser.
@@ -43,24 +43,24 @@ tairix-path = { path = "../../../lib/path", version = "=0.0.0" }
 tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
 # The one character display-width table (`str_width`), so the multi-column
 # layout measures glyph widths through the shared definition every cell grid
-# uses — never a second width table (§2.2).
+# uses — never a second width table.
 tairix-vt = { path = "../../../lib/vt", version = "=0.0.0" }
 # The one terminal-capability judgement: `TERM` → colour depth, and the
 # shared `--color[=WHEN]` (`ColorChoice`/`resolve_color`) decision every
-# colour-capable tool uses — never a per-tool colour probe (§2.2).
+# colour-capable tool uses — never a per-tool colour probe.
 tairix-termcap = { path = "../../../lib/termcap", version = "=0.0.0" }
 # The one colour-depth downgrade (`downgrade`): a scheme colour the terminal
 # cannot render is reduced through the single shared path (truecolour → 256 →
-# 16 → mono), never a second quantiser (§2.2).
+# 16 → mono), never a second quantiser.
 tairix-curses = { path = "../../../lib/curses", version = "=0.0.0" }
 # The one civil-date calendar (`CivilTime`): the long-format date column and
 # `-t` time sort decompose a `Time64` through the shared breakdown every
 # date-rendering consumer uses (login clock, fstree stamp), never a second
-# copy of the day/time arithmetic (§2.2).
+# copy of the day/time arithmetic.
 tairix-fsmeta = { path = "../../../lib/fsmeta", version = "=0.0.0" }
 # The one filename-glob matcher: the `-I`/`--ignore` and `--hide` patterns
 # compile through the shared, bounded, fail-closed matcher the shell's
-# filename generation uses — never a second glob engine (§2.2).
+# filename generation uses — never a second glob engine.
 tairix-glob = { path = "../../../lib/glob", version = "=0.0.0" }
 
 # For the freestanding `Run` binary only: the userland runtime `tairix-rt`

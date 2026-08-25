@@ -558,7 +558,8 @@ Five defects surfaced while sweeping, each fixed here:
   reference that named no document.
 
 The guard is `cargo xtask charter-cite`, a static gate in `ci` beside
-`spec-review`. Two rules over `.rs` comments: a comment must not name the
+`spec-review`. It scans every file type that has a comment (see the entry
+below); over each, two rules: a comment must not name the
 charter file beside a section reference (naming it in prose is fine — the
 charter asks for that), and a `§N` whose number is one of the charter's own
 section labels must have its source named within the same comment paragraph, so
@@ -598,25 +599,123 @@ Three things about the checker a later reviewer should not re-litigate:
   `kernel/tairix-kernel/src/hwdiscovery.rs`, whose paragraphs discuss the PCI
   bus. Those are fixed, and 36 unused entries are gone. A newly-cited
   specification adds its name in the change that cites it — the diagnostic says
-  so.
+  so. The audit is the standing mitigation for this class and is repeated, not
+  assumed: the widening below found five more accidental anchors in `.rs` that
+  this pass had missed.
 - **`§X`, `§SYSRET`, and `§"Overflow"` are accepted.** A section named rather
   than numbered cannot be a charter citation; only a sign attached to nothing
   is refused.
 
-### Open — the same citations in non-`.rs` comments (§2.11)
+### Done — a comment is a comment whatever the file spells it with
 
-The sweep above is `.rs` only. A comment is a comment whatever the file type,
-and the tree still carries, by the same detector: **1044** in `.toml` comments
-across **286** files (mostly `Cargo.toml` rationale blocks and `deny.toml`),
-**20** in `.s` assembly headers, **19** in `.sh`, and **18** in `.yml`. A
-`Cargo.toml` `description` field adds **173** more, which are package metadata
-rather than comments and want a separate decision.
+`charter-cite` now scans every tracked file type that *has* a comment — Rust,
+the assembly stubs, `Cargo.toml` and its siblings, the CI shell scripts, and
+the workflow YAML — and 1036 citations across 300 files are gone. Only the
+extension filter, the comment-marker set, and the third rule below changed; the
+label derivation, the source vocabulary, and the anchoring test are the same
+ones the `.rs` sweep used.
 
-`README.md` and `docs/src/**` are deliberately **excluded**: they are prose
-documents where naming the charter as a source is a legitimate cross-reference,
-and `plans/*.md` are binding sub-plans that must cite the rules they implement.
-`charter-cite` scans `.rs` only for the same reason; widening it to `.toml`
-belongs with that sweep, not before it.
+`README.md`, `docs/src/**`, and `plans/*.md` stay outside it, and now by
+construction rather than by an exclusion list: they map to no comment syntax.
+They are prose documents that cite the rules they explain or implement, which
+is the cross-reference the charter asks for.
+
+**A `Cargo.toml` `description` is scanned, as a third rule.** It is a value
+rather than a comment, so the decision needed making rather than assuming: it
+is scanned because it is the crate's own prose about why it exists — the same
+job its `//!` module doc does, which the `.rs` sweep already cleaned — and it is
+read through `cargo metadata` and the generated SBOM, away from the charter,
+where a bare section number resolves to nothing at all. 148 of the 173
+`description` citations were refused (the rest name a plan or a spec beside the
+number); the report names the surface, so a `description` finding is not read as
+a comment finding.
+
+Four things about the widening a later reviewer should not re-litigate:
+
+- **`#` is not one marker.** TOML spells a comment with `#` outside a string,
+  unconditionally. Shell and YAML need it at the start of a word, or
+  `${#list[@]}` and `"$#"` read as comments. The assembler needs *whitespace
+  after* it, which is what tells a comment marker from the AArch64 immediate
+  prefix that binds to its value with none (`mov x5, #0xffff`) — and `//` plus
+  `/* … */` are comments on every target the integrated assembler serves, so
+  aarch64 and x86_64 headers need no target knowledge. Each of the three rules
+  is probed by a test that fails when it is loosened to "`#` anywhere".
+- **The lexer had to grow single-quoted and triple-quoted strings.** Rust
+  spells a character constant `'c'`, so only the double quote opens a string
+  there; TOML, shell, and YAML take both, and TOML's `"""…"""` spans lines. The
+  `description` rule needs the triple-quoted form read whole, so it is not
+  optional machinery.
+- **`.md` is not on the extension list**, so the prose documents are skipped
+  without an exclusion path to keep in sync. The test pins that.
+- **The generated-file skip is per-syntax.** A generator stamping the governing
+  rule onto what it emits writes the banner in that file's own comment
+  spelling, so the skip tests `#` for a manifest and `//` for Rust.
+
+The 1036 removals are the same shape the `.rs` sweep found: a trailing
+parenthetical whose content is nothing but citations (deleted whole, because the
+prose beside it already carried the reason — "one ABI definition", "never
+re-implemented", "the same premultiplied-alpha primitives"), or a citation
+introducing its reason after an em dash (`(AGENTS.md §1 — no hacks; §5.4.5 —
+fail closed)` → `(no hacks; fail closed)`). Six kinds of collateral damage were
+found by auditing the diff rather than by the gate, and each is worth knowing
+about before any similar sweep:
+
+- **A citation can be the sentence's subject or object.** `§17.4 permits
+  `kernel/mem` to name `kernel/arch/api`` and `is permitted by §17.4` leave a
+  verb with nothing attached; `the belt-and-braces fallback `AGENTS.md` §2.9
+  requires` leaves a dangling verb. Twenty-three such sites were rewritten in
+  prose, not mechanically.
+- **A citation run can straddle a line break**, leaving the separator or the em
+  dash orphaned on the next line (`(—`, `(/)`, `(fail-loud,)`). Deleting in
+  place per line and joining only the smallest straddling run fixes it; the
+  first attempt reflowed whole paragraphs and merged a hanging-indent register
+  list and an aligned vector-table into prose.
+- **A punctuation tidy eats real syntax.** Collapsing `(` + separator ate the
+  `-` of `(-> !)`, the `::` of `[::facet]`, the `--` of `[--sequential]`, and
+  the leading `/` of `(/System/Services/…)`; dropping an empty `()` ate the call
+  parentheses of ``halt()``, ``FnMut()``, ``UserMode::new()``. Fourteen sites,
+  all restored, all found by a token-level old-vs-new diff of every changed
+  file — which is the audit any such sweep needs, because none of this fails a
+  build.
+- **Collapsing runs of spaces destroys an aligned table.** `tools/ci/soak.sh`'s
+  usage block was the one casualty; restored.
+
+**The false-anchor audit is the real finding.** The source vocabulary anchors a
+reference when the source name sits within one clause of the `§`, so a comment
+*about* USB, PCI, virtio, DNS, or HID can have a charter citation accepted by
+accident. Auditing which entry anchored each of the 121 accepted references in
+the newly-scanned files found 20 such citations, and repeating the audit over
+`.rs` found 5 more the earlier sweep had left — `§18.6` in
+`drivers/bus/usb/vl805` (both the manifest and `src/lib.rs`), `§2.2` twice in
+`lib/abi/src/sysinfo.rs` behind a `plans/FIX-IO.md` reference, `§8` in
+`lib/virtio_input/src/lib.rs`, `§16.7` in `userland/apps/applib/src/lib.rs`.
+All 25 are fixed. The anchoring rule itself is unchanged: tightening it to
+"the source must be adjacent" was measured and rejected — it newly flags 17
+`.rs` sites of which 13 are *legitimate* references (`HID Usage Tables §3`,
+`Arm DEN 0022, §5.2.2`, `RFC 6298 §2.2 vs §2.3`), so it trades a documented
+heuristic limit for churn on correct citations. Blanking `AGENTS.md` as an
+anchor was also measured and rejected as bloat: it newly flags 679 citations
+and every one is already refused by the charter-name rule.
+
+Every remaining charter-shaped `§` in the scanned tree — 92 in the new file
+types, all of them — names its document adjacently (`plans/APPS.md §4, §6`,
+`docs/src/filesystem/arxfs-spec.md §5, §8`, `tests/SECURITY.md §5`, `SYSLOG
+§14`). That list is the audit's output and is what a future reviewer re-derives
+rather than trusting.
+
+Nine tests cover the widening, each probed by loosening its guard: the
+extension map (and that `.md` is not on it), the manifest string lexer, the
+shell word boundary, the assembler immediate prefix, the description rule, the
+"only a `description` is prose" restriction, the multi-line description, and the
+per-syntax generated-file skip. The whole-tree assertion now covers every
+scanned type.
+
+A tenth drives a fixed-seed adversarial corpus — unterminated literals, lone
+markers, multibyte boundaries — through all four grammars and the description
+reader, because the scan is the first gate in `ci` and a panic there would block
+the pipeline on a file it merely could not lex. It proves the lexer is total;
+the `checked_sub` on the `#` lookbehind is the one boundary guard that has
+independent cover (removing it panics).
 
 ### Done — kernel IPC payloads are wiped on release (§4, §23.1)
 
@@ -896,6 +995,31 @@ unreadable refusal (including `i64::MIN`) must not classify as a removed
 device. Probed both ways — restoring the drivers' old inline decode fails it on
 the abort, and restoring just the `NotFound` fallback fails it on the
 misattribution.
+
+### Note for the next context — a text sweep needs its own audit
+
+Nothing in the validation gate can tell you a comment sweep broke a sentence:
+`cargo check`, clippy, and `docs-check` are all silent on prose. The audits that
+*did* find the damage in the widening above, and that any similar sweep should
+run before the gate, are all cheap:
+
+1. **A token-level old-vs-new diff of every changed file**, with citation runs
+   and the charter name stripped from both sides. Anything left over is either a
+   deliberate rewrite or collateral damage — 14 eaten `()`/`::`/`--`/`/` tokens
+   surfaced this way and by nothing else.
+2. **A survival check for every external reference.** For each `<source> §N` in
+   `HEAD` whose source is not the charter, assert it survives verbatim. Five
+   legitimate references had been deleted because the charter was named in the
+   same clause and the paragraph-level charter-name rule condemns everything in
+   its window; the rewriter must remove the charter citation *first* and
+   re-evaluate, not process a paragraph's citations in one pass.
+3. **A prose-shape scan of every changed paragraph** for a citation that was the
+   sentence's subject or object (`§17.4 permits …`, `… is permitted by §17.4`,
+   `the fallback §2.9 requires`), an orphaned separator or em dash at a line
+   edge, an empty parenthetical, and collapsed column alignment.
+4. **`cargo metadata --locked`, `bash -n`, and a YAML parse** over the changed
+   manifests, scripts, and workflows — a comment sweep that corrupts one of
+   those is otherwise found only much later.
 
 ### Note for the next context — the fixture check earns its keep
 

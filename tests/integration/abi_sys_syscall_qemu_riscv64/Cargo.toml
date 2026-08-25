@@ -29,8 +29,8 @@ workspace = true
 #
 # The `test-hooks` feature is on by default for this crate. Release builds
 # that enable it are rejected by the `compile_error!` guard in
-# `src/main.rs` (AGENTS.md §1 — no hacks; §5.4.5 — fail closed; §15 —
-# test affordances stay in test crates), mirroring
+# `src/main.rs` (no hacks; fail closed; — test affordances stay in test
+# crates), mirroring
 # `tairix-test-abi-sys-syscall-qemu`.
 [features]
 default = ["test-hooks"]

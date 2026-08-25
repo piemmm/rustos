@@ -19,7 +19,7 @@ workspace = true
 # request/reply codecs, the `Net`/`DeviceFacts`/`FrameRings` device surface,
 # the reserved endpoint block, the hardware-tree node/resource vocabulary,
 # and the `Errno`/`DriverError` types it fails closed with — one ABI
-# definition (§2.2).
+# definition.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
 
 # The serve loop is a freestanding user-space program path, so its runtime
@@ -27,12 +27,12 @@ tairix-abi = { path = "../abi", version = "=0.0.0" }
 # the host only the pure handler (and its tests) compiles.
 [target.'cfg(target_os = "none")'.dependencies]
 # The capability set the restricted-sender endpoint bind is scoped by
-# (`CAP_NET_RAW`) — the one capability-primitive definition (§5.2).
+# (`CAP_NET_RAW`) — the one capability-primitive definition.
 tairix-caps = { path = "../caps", version = "=0.0.0" }
 # The pure-Rust userland runtime whose `call_create`/`call_recv`/`call_reply`
 # / `ipc_send` / `shm_map` / `waitset_*` / `hw_emit_node` wrappers the serve
-# loop issues (§2.2 — one syscall trap).
+# loop issues (one syscall trap).
 tairix-rt = { path = "../rt", version = "=0.0.0" }
-# Structured audit logging over the `log_emit` syscall (§19.4): the one-shot
+# Structured audit logging over the `log_emit` syscall: the one-shot
 # "device channel published, serving" readiness beacon.
 tairix-log = { path = "../log", version = "=0.0.0" }

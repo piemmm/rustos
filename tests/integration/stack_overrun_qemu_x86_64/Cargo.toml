@@ -23,7 +23,7 @@ workspace = true
 #
 # The `test-hooks` feature is on by default. Release builds that enable it
 # are rejected by the `compile_error!` guard in `src/main.rs`
-# (`AGENTS.md` §1 — no hacks; §5.4.5 — fail closed), mirroring the other
+# (no hacks; fail closed), mirroring the other
 # x86_64 production-pipeline verticals.
 [features]
 default = ["test-hooks"]
@@ -34,7 +34,7 @@ name = "tairix-test-stack-overrun-qemu-x86_64"
 path = "src/main.rs"
 
 [target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
-# The Arch HAL MMU / TLB surface (`AGENTS.md` §17.2): the guard page is
+# The Arch HAL MMU / TLB surface: the guard page is
 # split + torn down through `tairix_arch_api::mmu::AddressSpace`
 # (`prepare_guard_arena` / `unmap`) + `tairix_arch_api::tlb::TlbShootdown`
 # (`flush_page`), so the fault-form is proven *through the HAL*.

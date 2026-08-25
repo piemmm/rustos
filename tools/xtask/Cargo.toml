@@ -37,11 +37,11 @@ tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }
 # `font-atlas` rasterises the committed TrueType faces into the generated
 # `lib/font` atlas through the shared `lib/fontface` glyph engine — the same
 # parser + rasteriser the runtime font uses to resize UI glyphs, so the atlas
-# and live text can never diverge (`AGENTS.md` §2.2).
+# and live text can never diverge.
 tairix-fontface = { path = "../../lib/fontface", version = "=0.0.0" }
 # `devids` imports, vets, and compiles the public PCI/USB ID databases
 # through the one grammar/vetting/codec definition in `lib/devids` (shared
-# with the runtime consumers, AGENTS.md §2.2), and drift-checks the
+# with the runtime consumers), and drift-checks the
 # committed tables in `ci`.
 tairix-devids = { path = "../../lib/devids", version = "=0.0.0" }
 # `devids` stamps its import provenance with a UTC date through the one
@@ -53,13 +53,13 @@ tairix-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
 # scripts locate `clang`/`ld.lld` through the audited `tairix-cc` wrapper. xtask
 # resolves that toolchain *once* up front and exports its path so each build
 # script uses the authoritative override instead of re-running the full search
-# per crate/target (AGENTS.md §2.2 — the discovery logic lives only in
-# `tairix-cc`; xtask merely primes it). Host-only build glue (AGENTS.md §12).
+# per crate/target (the discovery logic lives only in
+# `tairix-cc`; xtask merely primes it). Host-only build glue.
 tairix-cc = { path = "../cc", version = "=0.0.0" }
 # `help-lint` (plans/APPS.md §8.1) judges every discovered Help/ document
 # through the one shared lint in the help engine (`tairix_help::lint_help_trees`,
 # behind its host-only `lint` feature), so the gate and the `tools/syshelp`
-# aggregator tests can never diverge (AGENTS.md §2.2).
+# aggregator tests can never diverge.
 tairix-help = { path = "../../lib/help", version = "=0.0.0", features = [
     "lint",
 ] }
@@ -72,7 +72,7 @@ tairix-syshelp = { path = "../syshelp", version = "=0.0.0" }
 # `test --qemu` (Stage 2 deliverable) drives the bare-metal integration
 # tests through the audited `tools/qemu` runner. Sharing the runner
 # crate keeps the test-execution contract (`isa-debug-exit`, strict
-# timeouts, no retries) in exactly one place — see AGENTS.md §2.2.
+# timeouts, no retries) in exactly one place.
 tairix-qemu = { path = "../qemu", version = "=0.0.0" }
 # The interactive login negative fixture derives its over-limit username from
 # the account database format's own bound, so production validation and the
@@ -92,26 +92,25 @@ tairix-test-netstack-wire = { path = "../../tests/integration/netstack_wire", ve
 # `test --qemu` plants the Stage 5 end-to-end FAT32 vertical's backing
 # image from the same `tairix-test-fat32-image` fixture the kernel-side
 # tail reads, so the planted layout and the guest's expectations share
-# one source of truth (`AGENTS.md` §2.2).
+# one source of truth.
 tairix-test-fat32-image = { path = "../../tests/integration/fat32_image", version = "=0.0.0" }
 # `test --qemu` likewise plants the Stage 5 arxfs vertical's backing
 # image from the `tairix-test-arxfs-image` fixture, which the real
 # arxfs driver itself authors (format + plant), so the planted layout
-# and the guest's expectations share one source of truth (`AGENTS.md`
-# §2.2).
+# and the guest's expectations share one source of truth.
 tairix-test-arxfs-image = { path = "../../tests/integration/arxfs_image", version = "=0.0.0" }
 # `test --qemu` plants the `plans/PI.md` P11 Chunk B-2 root-mount->login
-# vertical's backing from the `tairix-test-encrypted-root-image` fixture —
-# the whole-disk MBR + FAT-boot(`root.unlock`) + encrypted-ARXFS-root
+# vertical's backing from the `tairix-test-encrypted-root-image` fixture — the
+# whole-disk MBR + FAT-boot(`root.unlock`) + encrypted-ARXFS-root
 # image authored by the real in-tree drivers, the same bytes the
 # `root_mount` host tests split — so the planted layout and the guest's
-# unlock share one source of truth (`AGENTS.md` §2.2).
+# unlock share one source of truth.
 # The `plans/PI.md` P10 5d-2-ii(b-2-iii) / `plans/NETWORK.md` N4e autoload
 # verticals boot the same encrypted-root image, additionally carrying the
 # kernel-signed virtio-input keyboard driver, framebuffer display service, and
 # virtio-net link-layer driver bundles in `/System/Drivers/`. Those bundles are
 # now cross-compiled and signed by the `image_drivers` pipeline (the one
-# definition every image consumer shares, `AGENTS.md` §2.2) and planted through
+# definition every image consumer shares) and planted through
 # this same encrypted-root fixture, so there is no separate fixed-arch fixture
 # crate baking them at build time.
 tairix-test-encrypted-root-image = { path = "../../tests/integration/encrypted_root_image", version = "=0.0.0" }
@@ -141,20 +140,18 @@ tairix-test-tcpserve = { path = "../../tests/integration/tcpserve_program", vers
 # The fuzz/proptest orchestrators and the in-tree harnesses share one
 # per-run seed/budget vocabulary: the orchestrator picks and logs the
 # seed, the harness reads it. Both sides use `tairix-fuzzseed` so the
-# seed primitives and the env-var names live in exactly one place
-# (`AGENTS.md` §2.2).
+# seed primitives and the env-var names live in exactly one place.
 tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
 # `image` / `build --target aarch64-rpi` (Stage 8 / plans/PI.md P9) author
 # the flashable platform images through the `tools/mkimage` library, so the
 # image pipeline is ordinary Rust driven by the same xtask entry point as
-# every other build step (AGENTS.md §12).
+# every other build step.
 tairix-mkimage = { path = "../mkimage", version = "=0.0.0" }
 # `image` cross-compiles and signs the autoloaded `/System/Drivers/` bundles
 # the flashable Pi image ships (`plans/PI.md` P10 D4). The signed-bundle
 # composer and the ELF->rxe converter live in the shared harness — the single
-# definition the kernel `build.rs` and the autoload fixtures also use
-# (`AGENTS.md` §2.2) — so `image` reuses them rather than re-rolling the wire
-# layout. Host-only build glue (`AGENTS.md` §1 / §12); the `driver-image`
+# definition the kernel `build.rs` and the autoload fixtures also use — so
+# `image` reuses them rather than re-rolling the wire layout. Host-only build glue; the `driver-image`
 # feature pulls in the Ed25519 signer, and `app-image` the signed
 # application-bundle composer + `AppInfo.toml` discovery the `image_apps`
 # pipeline composes the self-contained `/System/Commands` +
@@ -164,15 +161,15 @@ tairix-itest-harness = { path = "../../tests/integration/harness", version = "=0
     "driver-image",
     "app-image",
 ] }
-# The autoloaded `/System/Drivers/` bundles' own canonical §18.3 bind tables,
+# The autoloaded `/System/Drivers/` bundles' own canonical bind tables,
 # copied verbatim into each signed bundle so the autoload match data never
-# drifts from the driver it binds (`AGENTS.md` §2.2 / §18.3): the mailbox
+# drifts from the driver it binds: the mailbox
 # service driver (via `tairix-vcmailbox`), the BCM2711 PCIe root-complex bus
 # driver, the VL805 USB host bus driver, the xHCI host-controller driver, and
 # the USB boot-keyboard class driver — each `BIND_KEYS` lives in the driver
-# crate's own `lib` target (the device logic is co-located in the driver,
-# `AGENTS.md` §2.22). These are `drivers/*` crates; xtask is host build glue
-# (`Tooling`, outside the §17.4 product layering), so depending on them is
+# crate's own `lib` target (the device logic is co-located in the driver).
+# These are `drivers/*` crates; xtask is host build glue
+# (`Tooling`, outside the product layering), so depending on them is
 # permitted.
 tairix-vcmailbox = { path = "../../lib/vcmailbox", version = "=0.0.0" }
 tairix-drv-bus-pcie-brcm = { path = "../../drivers/bus/pcie_brcm", version = "=0.0.0" }
@@ -181,21 +178,21 @@ tairix-drv-bus-usb = { path = "../../drivers/bus/usb/xhci", version = "=0.0.0" }
 tairix-drv-input-usb-kbd = { path = "../../drivers/input/usb_kbd", version = "=0.0.0" }
 tairix-drv-input-usb-mouse = { path = "../../drivers/input/usb_mouse", version = "=0.0.0" }
 tairix-drv-input-virtio-input = { path = "../../drivers/input/virtio_input", version = "=0.0.0" }
-# The virtio-net link-layer driver's canonical §18.3 bind table (and its
+# The virtio-net link-layer driver's canonical bind table (and its
 # single-source virtio device id, used by the autoload-match tests): the
 # `image_drivers` pipeline signs `BIND_KEYS` into the bundle it cross-compiles
 # from the sibling driver-process crate (`tairix-drv-network-virtio-net-driver`),
-# so the on-disk bundle and the driver never drift (`AGENTS.md` §2.2 / §18.3).
+# so the on-disk bundle and the driver never drift.
 tairix-drv-network-virtio-net = { path = "../../drivers/network/virtio_net", version = "=0.0.0" }
-# The GENET link-layer driver's canonical §18.3 bind table and the BCM2711
+# The GENET link-layer driver's canonical bind table and the BCM2711
 # register base its shipped `network.conf` default binds the interface by: the
 # `image_drivers` pipeline signs `BIND_KEYS` into the bundle it cross-compiles
 # from the same crate, so the on-disk bundle, the planted addressing default,
-# and the driver never drift (`AGENTS.md` §2.2 / §18.3).
+# and the driver never drift.
 tairix-drv-network-genet = { path = "../../drivers/network/genet", version = "=0.0.0" }
 # The one `network.conf` grammar engine: the shipped Raspberry Pi addressing
 # default is authored here and validated through the same parser `netstack`
-# reads it with, so a malformed default fails the image build (§2.2).
+# reads it with, so a malformed default fails the image build.
 tairix-netconfig = { path = "../../lib/netconfig", version = "=0.0.0" }
 tairix-drv-display-framebuffer = { path = "../../drivers/display/framebuffer", version = "=0.0.0" }
 tairix-drv-storage-usb-msd = { path = "../../drivers/storage/usb_msd", version = "=0.0.0" }
@@ -242,7 +239,7 @@ tairix-proglib = { path = "../../lib/proglib", version = "=0.0.0" }
 # The Switchboard monitor service and the shared icon vocabulary: the
 # desktop verticals measure a served window's own envelope in the dumped
 # scan-out and rebuild the bar's slots with the same class glyph the session
-# seeds one with — the one definition of each (AGENTS.md §2.2).
+# seeds one with — the one definition of each.
 tairix-switchboard = { path = "../../userland/gui/switchboard", version = "=0.0.0" }
 tairix-icon = { path = "../../lib/icon", version = "=0.0.0" }
 # The desktop's own PNG decoder. The image build decodes every icon it is
@@ -298,7 +295,7 @@ tairix-util = { path = "../../lib/util", version = "=0.0.0" }
 # the AW3 pointer script builds a real `DesktopShell`, which owns the
 # seat's rasterised-asset caches, so it must hand that shell the same
 # pressure gauge and audit-sink types the live session does — truthfully
-# wired for a tool that never draws (`AGENTS.md` §2.2, plans/SMARTRAM.md
+# wired for a tool that never draws (plans/SMARTRAM.md
 # SMART5).
 tairix-reclaim = { path = "../../lib/reclaim", version = "=0.0.0" }
 tairix-log = { path = "../../lib/log", version = "=0.0.0" }
@@ -337,7 +334,7 @@ libc = "0.2"
 # The `image_drivers` autoload-decision tests drive the real production match
 # over the bundles the pipeline signs: the drvhost store scanner decodes each
 # manifest bind table and the shared devmatch policy resolves it against a
-# discovered node (`AGENTS.md` §2.2 / §18.3 / §18.6). The single-source
+# discovered node. The single-source
 # virtio-input device id keys the input node; the framebuffer compatible string
 # and the virtio-net device id come from `tairix-abi` / the network driver dep
 # above.

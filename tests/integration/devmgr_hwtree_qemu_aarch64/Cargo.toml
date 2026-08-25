@@ -22,12 +22,12 @@ workspace = true
 # `WitnessSource` (the same dependency-injection seam the boot path exposes for
 # the log/audit sinks). The source, driven by devmgr's own `hw_tree_wait`
 # `generation()` polls, detects devmgr's true park, appends a node to the
-# authoritative `HwTreeStore` (a real generation bump / simulated hotplug,
-# §18.4), and reports PASS once devmgr has woken, re-read, and re-parked —
+# authoritative `HwTreeStore` (a real generation bump / simulated hotplug), and
+# reports PASS once devmgr has woken, re-read, and re-parked —
 # deterministically, with no dependence on incidental audit traffic. Keeping
 # the QEMU-exit shortcut in a dedicated bin (not a Cargo feature on a
 # production crate) prevents feature unification from leaking it into any
-# production build (`AGENTS.md` §5.4.5 — fail closed).
+# production build (fail closed).
 
 [[bin]]
 name = "tairix-test-devmgr-hwtree-qemu-aarch64"
@@ -38,7 +38,7 @@ tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0
 # The production aarch64 boot pipeline (with the `InitSpawn` seam and the
 # runtime `ProcessSpawn` producer) lives in `tairix-kernel`'s library half;
 # this vertical reuses it verbatim and only swaps the injected hardware-tree
-# source (`AGENTS.md` §2.2 — no duplication). It also re-exports the
+# source (no duplication). It also re-exports the
 # authoritative `hwtree_store::HW_TREE` / `HW_TREE_SOURCE` the witness bumps
 # and forwards to.
 tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }

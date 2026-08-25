@@ -27,7 +27,7 @@ lock-diagnostics = []
 
 # Loom is only pulled in when the consumer explicitly opts in with
 # `RUSTFLAGS="--cfg loom" cargo test ...`. It is *not* a runtime dependency.
-# See `tests/loom.rs` for the model-checking harness and AGENTS.md §7.
+# See `tests/loom.rs` for the model-checking harness and
 [target.'cfg(loom)'.dependencies]
 loom = "0.7"
 

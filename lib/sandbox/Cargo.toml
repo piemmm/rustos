@@ -1,6 +1,6 @@
 [package]
 name = "tairix-sandbox"
-description = "TAIRiX parser-sandbox seam (AGENTS.md §19.5): the one typed request/reply path a program uses to run a parser of untrusted input inside a minimum-capability sandbox process — length-framed protocol, crash containment with worker replacement and stable log events, and the container/disassembly decode service (`lib/binfmt` + `lib/disasm`) as its first consumers."
+description = "TAIRiX parser-sandbox seam: the one typed request/reply path a program uses to run a parser of untrusted input inside a minimum-capability sandbox process — length-framed protocol, crash containment with worker replacement and stable log events, and the container/disassembly decode service (`lib/binfmt` + `lib/disasm`) as its first consumers."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -68,8 +68,8 @@ tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }
 workspace = true
 
 [dev-dependencies]
-# The §19.6 fuzz harness draws its inputs through the shared seed/budget
+# The fuzz harness draws its inputs through the shared seed/budget
 # seam (`tairix_fuzzseed`): one place picks the per-run seed, logs it at
-# the start of the test, and bounds the smoke/soak loop (`AGENTS.md`
-# §2.2). Test scaffolding only; never in a TAIRiX build.
+# the start of the test, and bounds the smoke/soak loop. Test scaffolding only;
+# never in a TAIRiX build.
 tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

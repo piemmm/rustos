@@ -15,9 +15,9 @@ workspace = true
 name = "tairix-test-el0-yielder"
 path = "src/main.rs"
 
-# The program is a pure-Rust TAIRiX program (`AGENTS.md` §1), so it links the
+# The program is a pure-Rust TAIRiX program, so it links the
 # pure-Rust userland runtime `tairix-rt` — never the C ABI (`crt0` + `abi-sys`),
-# which exists solely for non-Rust programs (`AGENTS.md` §16.4). Only on the
+# which exists solely for non-Rust programs. Only on the
 # three native Tier-1 targets (`target_os = "none"`); on the host it is an inert
 # stub so `cargo build --workspace` / clippy still cover it.
 [target.'cfg(target_os = "none")'.dependencies]

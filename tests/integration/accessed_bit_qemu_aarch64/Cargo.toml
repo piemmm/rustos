@@ -37,7 +37,7 @@ path = "src/main.rs"
 [target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
 tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
 tairix-itest-finisher = { path = "../finisher", version = "=0.0.0" }
-# The Arch HAL MMU surface (`AGENTS.md` §17.2): the test drives the
+# The Arch HAL MMU surface: the test drives the
 # referenced bit through `tairix_arch_api::mmu::AddressSpace`
 # (`map_page` / `activate` / `access_tracking` / `test_and_clear_accessed`)
 # so the property is proven *through the HAL*, not the port's inherent

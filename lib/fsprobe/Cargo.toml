@@ -18,7 +18,7 @@ tairix-abi = { path = "../abi", version = "=0.0.0" }
 # The shared RAID on-disk metadata definition (`tairix_raidmeta`), so the probe
 # recognises a RAID array member through the same fail-closed superblock decode
 # the RAID composition driver assembles from — one definition, never a second
-# copy of the format (`AGENTS.md` §2.2). This lets the volume manager refuse to
+# copy of the format. This lets the volume manager refuse to
 # mount a bare, un-assembled array member as a standalone filesystem.
 tairix-raidmeta = { path = "../raidmeta", version = "=0.0.0" }
 

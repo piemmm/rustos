@@ -1,5 +1,5 @@
 # Signed-AppInfo manifest source for the `netstack` network-stack
-# service (a service is an app, AGENTS.md §16.2; plans/NETWORK.md §2.2).
+# service (a service is an app; plans/NETWORK.md §2.2).
 # Discovered by the build's app-bundle composer and planted under
 # /System/Services/. The capability list is the bundle's request:
 # CAP_NET_RAW for the NIC frame rings it alone drives (and to call a

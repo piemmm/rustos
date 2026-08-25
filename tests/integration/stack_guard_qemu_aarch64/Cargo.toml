@@ -12,16 +12,15 @@ publish = false
 workspace = true
 
 # Freestanding "split a coarse identity block down to 4 KiB pages, unmap
-# one page, and prove the MMU faults the access to it" integration test —
-# the `-M virt` proof of the `plans/PI.md` guard-page fault-form
+# one page, and prove the MMU faults the access to it" integration test — the
+# `-M virt` proof of the `plans/PI.md` guard-page fault-form
 # foundation (`AddressSpace::split_block`). The kernel image and stack are
 # never the unmapped page, so the split is safe against the running region
 # (it only *adds* table levels reproducing the existing translation). It
 # links only the `tairix-arch-aarch64` port and reports the result through
 # the ARM semihosting finisher. Keeping the QEMU-exit shortcut in a
 # dedicated bin (not a Cargo feature on the arch crate) prevents feature
-# unification from leaking it into any production build (`AGENTS.md`
-# §5.4.5 — fail closed).
+# unification from leaking it into any production build (fail closed).
 
 [[bin]]
 name = "tairix-test-stack-guard-qemu-aarch64"
@@ -30,7 +29,7 @@ path = "src/main.rs"
 [target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
 tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
 tairix-itest-finisher = { path = "../finisher", version = "=0.0.0" }
-# The Arch HAL MMU + TLB surface (`AGENTS.md` §17.2): the page is torn
+# The Arch HAL MMU + TLB surface: the page is torn
 # down through `tairix_arch_api::mmu::AddressSpace::unmap` and the stale
 # entry flushed through `tairix_arch_api::tlb::TlbShootdown::flush_page`,
 # so the fault-form is proven *through the HAL*.

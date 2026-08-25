@@ -18,7 +18,7 @@
 //   5. Pops the GPRs in reverse order, drops the vector qword, and
 //      `iretq`s.
 //
-// SAFETY-INVARIANTs (audited per AGENTS.md §10):
+// SAFETY-INVARIANTs:
 //
 //   1. None of the targeted vectors (0x30..=0xFE) push a hardware
 //      error code, so the synthetic-vector qword sits at a known
@@ -31,7 +31,7 @@
 //      `kernel/tairix-kernel::boot` can take the address of each stub
 //      without having to know its name.
 //   3. The shared trampoline is `tairix_arch_x86_64_external_irq_common`
-//      and is the single chokepoint AGENTS.md §2.2 (no duplication)
+//      and is the single chokepoint (no duplication)
 //      requires for code that would otherwise be duplicated across
 //      207 ISRs.
 //   4. The Rust dispatcher must NOT return (or, if it does, the
@@ -117,7 +117,7 @@ tairix_arch_x86_64_external_irq_common:
 
 // --- Per-vector stubs ---------------------------------------------
 //
-// Generated through `.altmacro` + `.rept` so AGENTS.md §2.2 (no
+// Generated through `.altmacro` + `.rept` so (no
 // duplication) is satisfied. The macro produces one labelled stub
 // per vector in [EXTERNAL_VECTOR_FIRST, EXTERNAL_VECTOR_LAST]
 // (0x30..=0xFE inclusive — 207 vectors).

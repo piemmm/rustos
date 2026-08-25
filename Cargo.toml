@@ -14,8 +14,8 @@ members = [
     "kernel/syscall",
     "kernel/virtio",
 
-    # Kernel — architecture HAL (the §17.2 trait surface every port
-    # implements; the §17.4 boundary between arch-neutral kernel and ports)
+    # Kernel — architecture HAL (the trait surface every port
+    # implements; the boundary between arch-neutral kernel and ports)
     "kernel/arch/api",
 
     # Kernel — architecture ports
@@ -159,7 +159,6 @@ members = [
 
     # Userland — grouped by class (system, session, shell, gui, apps),
     # mirroring the `drivers/<class>/<name>` layout documented in
-    # AGENTS.md §3.
     "userland/system/confd",
     "userland/system/devmgr",
     "userland/system/drvhost",
@@ -250,8 +249,8 @@ members = [
     "tools/syshelp",
 
     # Shared host test-support: the per-run PRNG seed / start-of-test seed
-    # logging / smoke-iteration + soak-budget seam used by the fuzz (§19.6),
-    # proptest (§19.7), and filesystem-soak harnesses (AGENTS.md §2.2). A
+    # logging / smoke-iteration + soak-budget seam used by the fuzz,
+    # proptest, and filesystem-soak harnesses. A
     # dev-dependency of those harness crates only; never in a TAIRiX build.
     "tests/fuzzseed",
 
@@ -259,8 +258,8 @@ members = [
     # kernel binary built for `x86_64-unknown-none` and launched through
     # `tools/qemu` by `cargo xtask test --qemu`). Stage 3b/3c/3d add their
     # own per-arch trees alongside this one. `harness` is the shared
-    # build-glue crate that emits their `freestanding`/`itest_*` cfgs
-    # (AGENTS.md §17.2), keeping target selection out of test source.
+    # build-glue crate that emits their `freestanding`/`itest_*` cfgs, keeping
+    # target selection out of test source.
     "tests/integration/harness",
     "tests/integration/finisher",
     "tests/integration/memory_isolation",

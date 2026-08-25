@@ -356,7 +356,7 @@ pub struct Stores<'a> {
 ///
 /// The reserved short-help switches (`-h`/`-?`/`--help`) win wherever they
 /// appear. Long options accept both `--option value` and `--option=value`,
-/// and `--` ends option parsing (plans/APPS.md; the GNU convention §16.7).
+/// and `--` ends option parsing (plans/APPS.md; the GNU convention).
 ///
 /// # Errors
 ///

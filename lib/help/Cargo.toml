@@ -1,6 +1,6 @@
 [package]
 name = "tairix-help"
-description = "TAIRiX shared command-help engine (plans/APPS.md): the one implementation that locates a bundle's internationalised Help/ tree through an injected, capability-scoped read seam, applies the deterministic locale fallback chain (exact tag -> same language -> default en-US), parses one structured-Markdown help document into the fixed section model under hard fail-closed security bounds, and renders both the short `-h`/`-?` view and the full `man` page as `lib/vt` operations — so `man`, every command's short help, and any graphical viewer share one engine (AGENTS.md §2.2). no_std + alloc, forbids unsafe, never panics (§2.9)."
+description = "TAIRiX shared command-help engine (plans/APPS.md): the one implementation that locates a bundle's internationalised Help/ tree through an injected, capability-scoped read seam, applies the deterministic locale fallback chain (exact tag -> same language -> default en-US), parses one structured-Markdown help document into the fixed section model under hard fail-closed security bounds, and renders both the short `-h`/`-?` view and the full `man` page as `lib/vt` operations — so `man`, every command's short help, and any graphical viewer share one engine. no_std + alloc, forbids unsafe, never panics."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -42,8 +42,8 @@ tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }
 workspace = true
 
 [dev-dependencies]
-# The §19.6 fuzz harness draws its inputs through the shared seed/budget
+# The fuzz harness draws its inputs through the shared seed/budget
 # seam (`tairix_fuzzseed`): one place picks the per-run seed, logs it at
-# the start of the test, and bounds the smoke/soak loop (`AGENTS.md`
-# §2.2). Test scaffolding only; never in a TAIRiX build.
+# the start of the test, and bounds the smoke/soak loop. Test scaffolding only;
+# never in a TAIRiX build.
 tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

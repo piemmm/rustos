@@ -15,7 +15,7 @@ workspace = true
 # Stage 2.4 dependency rules (issue brief): kernel/sec may depend only on
 # kernel/sync, kernel/mem, and the shared lib/* crates `abi`, `caps`,
 # `crypto`, `log`, and `util`. `kernel/mem` is pulled in at Stage 4.D
-# (DMA capability gate, AGENTS.md §4) to wrap the per-process DMA pool
+# (DMA capability gate) to wrap the per-process DMA pool
 # in a `CapabilityId::MEM_DMA` check that emits a structured audit
 # record on every grant or denial.
 tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }
@@ -31,14 +31,14 @@ tairix-util = { path = "../../lib/util", version = "=0.0.0" }
 # Matching the pinned version already audited by `lib/caps`/`lib/crypto`.
 ed25519-dalek = { version = "=2.1.1", default-features = false }
 proptest = { version = "=1.5.0", default-features = false, features = ["std"] }
-# The §19.7 model drives its programs through the shared seed/budget runner
+# The model drives its programs through the shared seed/budget runner
 # (`tairix_fuzzseed::prop::drive`), so the seed selection, start-of-test
-# seed log, and smoke/soak loop live in one place (`AGENTS.md` §2.2). Test
+# seed log, and smoke/soak loop live in one place. Test
 # scaffolding only; never in a TAIRiX build.
 tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0", features = ["proptest"] }
 
 # The capability-gated DMA tests in `dma::tests` exercise the
 # `kernel/mem` allocator end-to-end through its `HostPageTable` test
 # double, which is gated behind the `host-tests` feature so production
-# builds do not link it (`AGENTS.md` §2.3).
+# builds do not link it.
 tairix-kernel-mem = { path = "../mem", version = "=0.0.0", features = ["host-tests"] }

@@ -1,6 +1,6 @@
 [package]
 name = "tairix-drvrt"
-description = "TAIRiX user-space driver runtime host (§6, §2.2 — plans/PI.md P10 chunk 5d): the rt-backed `DriverHost` a first-party driver process links. It turns kernel-issued device-resource grant handles into the `MmioMapper` (register windows via the `mmio_map` syscall) and DMA host (coherent buffers via the `dma_alloc` syscall) a bus driver's `register()` consumes — every check stays kernel-side (§5.4). no_std, allocation-free, fail-closed (§2.9)."
+description = "TAIRiX user-space driver runtime host (plans/PI.md P10 chunk 5d): the rt-backed `DriverHost` a first-party driver process links. It turns kernel-issued device-resource grant handles into the `MmioMapper` (register windows via the `mmio_map` syscall) and DMA host (coherent buffers via the `dma_alloc` syscall) a bus driver's `register()` consumes — every check stays kernel-side. no_std, allocation-free, fail-closed."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,13 +12,13 @@ publish.workspace = true
 # The `DriverHost` / `MmioMapper` / `RegisterWindow` / `VirtioHost` / `DmaSlab`
 # trait + type surface this host implements, the `HwResource` grant descriptor
 # it resolves a requested window against, and the `CapabilityId` / `DriverError`
-# / `Errno` vocabulary it fails closed with — all the one ABI definition (§2.2).
+# / `Errno` vocabulary it fails closed with — all the one ABI definition.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
 # The capability set the host reports through `DriverHost::has_capability`; the
-# load-time grants the kernel already enforced (§5.2).
+# load-time grants the kernel already enforced.
 tairix-caps = { path = "../caps", version = "=0.0.0" }
 # The pure-Rust userland runtime whose `mmio_map` / `dma_alloc` syscall wrappers
-# the production `GrantSyscalls` impl forwards to (§2.2 — one syscall trap). The
+# the production `GrantSyscalls` impl forwards to (one syscall trap). The
 # crate is generic over the seam so its logic is host-tested without a kernel.
 tairix-rt = { path = "../rt", version = "=0.0.0" }
 

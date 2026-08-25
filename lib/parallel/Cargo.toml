@@ -1,6 +1,6 @@
 [package]
 name = "tairix-parallel"
-description = "TAIRiX bounded data-parallel work engine: the JobRunner contract a pass expresses its independent work through, the allocation-free index-to-element erasure (for_each), the one band-split policy, and — behind the default `pool` feature — the process-wide fork-join worker pool over lib/rt threads whose workers park on a futex and never spin (AGENTS.md §2.16/§2.23/§24.1; plans/THREADS.md)."
+description = "TAIRiX bounded data-parallel work engine: the JobRunner contract a pass expresses its independent work through, the allocation-free index-to-element erasure (for_each), the one band-split policy, and — behind the default `pool` feature — the process-wide fork-join worker pool over lib/rt threads whose workers park on a futex and never spin (plans/THREADS.md)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -1,6 +1,6 @@
 [package]
 name = "tairix-netconfig"
-description = "TAIRiX network interface-configuration store engine: the one definition of the `/System/Settings/Network/network.conf` document — its per-interface `<iface>.<key>` grammar, closed key registry, typed value sets, bounded fail-closed parser, and canonical render — shared by the writer (`configure`, the installer) and the one reader (`netstack`) so producer and consumer can never diverge (§3 `lib/`)."
+description = "TAIRiX network interface-configuration store engine: the one definition of the `/System/Settings/Network/network.conf` document — its per-interface `<iface>.<key>` grammar, closed key registry, typed value sets, bounded fail-closed parser, and canonical render — shared by the writer (`configure`, the installer) and the one reader (`netstack`) so producer and consumer can never diverge (`lib/`)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,7 +14,7 @@ workspace = true
 [dependencies]
 # The single definition of the bond member-count bound lives with the
 # `netstack-v1` wire message; this grammar keys its own limit to it so the
-# store, the engine, and the wire can never disagree (§2.2).
+# store, the engine, and the wire can never disagree.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
 # The one `#`-comment line grammar every line-oriented configuration store
 # in the tree shares, so a comment is recognised identically here, in

@@ -1,6 +1,6 @@
 [package]
 name = "tairix-dma-barrier"
-description = "DMA memory-ordering barriers for user-space drivers: the single per-architecture dsb/dmb (or fence) carve-out that orders a driver's writes to device-shared Normal Non-Cacheable memory against the MMIO doorbell, and orders reads of device-written ring entries (AGENTS.md §1 / §2.2)."
+description = "DMA memory-ordering barriers for user-space drivers: the single per-architecture dsb/dmb (or fence) carve-out that orders a driver's writes to device-shared Normal Non-Cacheable memory against the MMIO doorbell, and orders reads of device-written ring entries."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

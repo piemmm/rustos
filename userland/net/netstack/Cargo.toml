@@ -23,8 +23,8 @@ program = ["dep:tairix-rt"]
 
 # The package is both the `tairix-netstack` engine library (above) and the
 # `Run` entry-point binary of the network-stack service installed at
-# `/System/Services/netstack.app/Run` (`AGENTS.md` §16.2; `plans/NETWORK.md`
-# §2.2) — the long-running user-space service PID 1 `init` launches to own
+# `/System/Services/netstack.app/Run` (`plans/NETWORK.md` §2.2) — the long-running
+# user-space service PID 1 `init` launches to own
 # the network interfaces and serve the `netstack-v1` admin/broker IPC. The
 # binary is a freestanding pure-Rust program on the native Tier-1 targets and
 # an inert host stub elsewhere (see `src/run.rs`).
@@ -36,17 +36,17 @@ path = "src/run.rs"
 # The `netstack-v1` wire surface, the frame-ring transport, the `Errno`
 # table, and the `CapabilityId` registry the dispatcher gates on.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-# §19.4 structured audit log: every admin mutation and every capability
+# structured audit log: every admin mutation and every capability
 # denial is recorded through a `tairix_log::Sink`.
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 # The pure dual-stack protocol engine (`plans/NETWORK.md` §2.1) this
 # service is the thin glue around: one `Stack` per managed interface.
 tairix-net = { path = "../../../lib/net", version = "=0.0.0" }
-# Audited crypto (§2.12): the per-boot HMAC-SHA256 SYN-cookie secret
+# Audited crypto: the per-boot HMAC-SHA256 SYN-cookie secret
 # backing the listener's `CookieSecret` seam (`plans/NETWORK.md` N6b-2).
 tairix-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
 
-# The `Run` binary's freestanding userland runtime (`AGENTS.md` §1):
+# The `Run` binary's freestanding userland runtime:
 # `tairix-rt` provides `_start`, the stack canary, the panic handler, the
 # `#[global_allocator]`, and the syscall wrappers (`call_create`/`call_recv`/
 # `call_reply`/`call_peer_origin`/`waitset_*`/`clock_get`), plus the
@@ -64,5 +64,5 @@ tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }
 # The driver-side `NetChannelServer` the host round-trip test drives the
 # `NetChannelClient` against, so the two halves of `netchan-v1` are proven
-# against the one shared server (§2.2). Test scaffolding only.
+# against the one shared server. Test scaffolding only.
 tairix-netchan = { path = "../../../lib/netchan", version = "=0.0.0" }

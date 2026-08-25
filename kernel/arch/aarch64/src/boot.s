@@ -1,7 +1,7 @@
 // TAIRiX aarch64 boot trampoline. Board-independent: it serves both the
 // QEMU `virt` board and the Raspberry Pi 4 (BCM2711). Only the load
 // address differs between boards, and that lives in the per-board linker
-// script (`aarch64-virt.ld` / `aarch64-rpi4.ld`) — the `AGENTS.md` §1
+// script (`aarch64-virt.ld` / `aarch64-rpi4.ld`) — the
 // "boot stubs" carve-out (`plans/PI.md` §0.2). Every other board
 // difference is discovered device-tree data, never a fork of this stub.
 //
@@ -36,11 +36,11 @@
 // up now, and a woken core proceeds only when that target equals its own
 // affinity — the rest re-park. Bring-up is therefore strictly one core
 // at a time (never a concurrent MMU-adopt / GIC-init race). This fails
-// closed (`AGENTS.md` §2.1 — never race the secondaries onto a shared
+// closed (never race the secondaries onto a shared
 // stack): nothing is released until the boot CPU has published the
 // secondary stacks, entry, and affinity table.
 //
-// SAFETY-INVARIANTs (audited per AGENTS.md §10):
+// SAFETY-INVARIANTs:
 //   1. The body below `_start` runs exactly once, on the boot CPU
 //      (affinity 0); every other CPU is trapped in the `wfe` park above
 //      it. Interrupts are masked before any handler exists.

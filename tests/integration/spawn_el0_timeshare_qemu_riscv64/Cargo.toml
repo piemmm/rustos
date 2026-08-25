@@ -19,7 +19,7 @@ workspace = true
 # carrying the kernel's compiled-in syscall CFI tag. On boot the test reads the
 # generic-timer rate from the firmware device tree, installs the trap vector + a
 # dispatch callback, builds two hardware-isolated U-mode address spaces (two
-# `PageTablePool`s + a shared frame pool, `AGENTS.md` §4) via
+# `PageTablePool`s + a shared frame pool) via
 # `tairix_kernel_core::spawn_image` (capability-checked + audited), and admits
 # each as a resumable user kthread whose `pre_resume` hook reactivates that
 # task's own `satp` root (`paging::activate_user_root`). The cooperative
@@ -27,11 +27,11 @@ workspace = true
 # `yield`/`exit` `ecall`s to `reschedule_current`, so the two ping-pong with the
 # dispatcher across the RV1 park-safe trap path, each on its own kernel stack.
 # Any shortfall (an unexpected syscall, a wrong-count drain, or a deadlock)
-# flips `qemu_exit::exit_failure` or times out (fail-loud, `AGENTS.md` §7).
+# flips `qemu_exit::exit_failure` or times out (fail-loud).
 #
 # The `test-hooks` feature is on by default. Release builds that enable it are
-# rejected by the `compile_error!` guard in `src/main.rs` (AGENTS.md §1 — no
-# hacks; §5.4.5 — fail closed), mirroring the other EL0 verticals.
+# rejected by the `compile_error!` guard in `src/main.rs` (no
+# hacks; fail closed), mirroring the other EL0 verticals.
 [features]
 default = ["test-hooks"]
 test-hooks = []

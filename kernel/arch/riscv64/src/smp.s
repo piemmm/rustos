@@ -12,7 +12,7 @@
 # Unlike the boot hart, a secondary hart has no stack: this stub gives it
 # a private slice of a secondary-stack pool, indexed by hartid, before
 # calling into Rust. The pool is **not** a fixed `.bss` reserve (which
-# would cap the machine at a compile-time hart count, `AGENTS.md` §24.1).
+# would cap the machine at a compile-time hart count).
 # Instead the boot hart publishes the pool it sized for the machine's
 # discovered hart count through `smp::SecondaryStackPool::register`, which
 # writes the pool base and the per-hart slice's log2 size into the

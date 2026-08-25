@@ -18,8 +18,8 @@ workspace = true
 # bespoke dispatch shim.
 #
 # The `test-hooks` feature is on by default. Release builds that enable it
-# are rejected by the `compile_error!` guard in `src/main.rs` (AGENTS.md §1 —
-# no hacks; §5.4.5 — fail closed), mirroring the file-map vertical.
+# are rejected by the `compile_error!` guard in `src/main.rs` (no hacks; fail
+# closed), mirroring the file-map vertical.
 [features]
 default = ["test-hooks"]
 test-hooks = []
@@ -49,8 +49,8 @@ tairix-sync = { path = "../../../lib/sync", version = "=0.0.0" }
 
 [build-dependencies]
 # The shared harness: the target cfg emitter, the `virt` DTB dump helper,
-# and the ELF→rxe converter. Host-only build glue (`AGENTS.md` §12).
+# and the ELF→rxe converter. Host-only build glue.
 tairix-itest-harness = { path = "../harness", version = "=0.0.0" }
 # The build script stamps the kernel's compiled-in syscall CFI tag into the
-# converted `rxe` so the production loader admits it (`AGENTS.md` §9).
+# converted `rxe` so the production loader admits it.
 tairix-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }

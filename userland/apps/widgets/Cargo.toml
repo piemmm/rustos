@@ -14,7 +14,7 @@ publish.workspace = true
 # reacts a widget's own typed state back into it), exactly as the file
 # manager keeps its logic in a host-tested engine and only *composes* it in
 # the `Run` binary. It is `no_std` + `alloc` so it links unchanged into the
-# freestanding `Run` binary and runs under the host test harness (§2.2, §7).
+# freestanding `Run` binary and runs under the host test harness.
 [lib]
 name = "tairix_widgets"
 path = "src/lib.rs"

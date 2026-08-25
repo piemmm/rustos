@@ -21,7 +21,7 @@ workspace = true
 # ticks have been observed. Keeping the QEMU-exit shortcut in a
 # dedicated bin (not a Cargo feature on the arch crate) prevents feature
 # unification from leaking it into any production build
-# (`AGENTS.md` §5.4.5 — fail closed).
+# (fail closed).
 
 [[bin]]
 name = "tairix-test-timer-preempt-qemu-riscv64"

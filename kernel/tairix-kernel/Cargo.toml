@@ -32,11 +32,11 @@ workspace = true
 #   crate brings its own copies of all four so that the audit sink can
 #   observe `AuditEvent::BootCompleted` and exit QEMU successfully
 #   without leaking that behaviour into the production binary
-#   (`AGENTS.md` §5.4.5 — fail closed, no harness-driven shortcuts in
+#   (fail closed, no harness-driven shortcuts in
 #   production).
 #
 # Pulling the boot pipeline into the library half is the only way to
-# satisfy `AGENTS.md` §2.2 (no duplication) without exposing the audit
+# satisfy (no duplication) without exposing the audit
 # sink through a Cargo feature, which would risk feature-unification
 # leaking the QEMU-exit behaviour into the production bin during a
 # `cargo build --workspace`.
@@ -67,21 +67,21 @@ tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }
 # The boot-heap bump allocator lives in `lib/kalloc` so the
 # production bin, the QEMU integration test bins, and the architecture
 # ports' boot harnesses all register the identical implementation
-# (`AGENTS.md` §2.2 — no duplication, §6 — shared code lives in `lib/`).
+# (no duplication, shared code lives in `lib/`).
 # The `kalloc` module re-exports it under the historical path.
 tairix-kalloc = { path = "../../lib/kalloc", version = "=0.0.0" }
 tairix-caps = { path = "../../lib/caps", version = "=0.0.0" }
 # The `virtio_boot` wiring config names `Ed25519PublicKey` for the
 # driver-host trust-anchor list (`drvhost::HostConfig::trusted_signers`).
 tairix-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
-# The deterministic node ↔ bind-table match policy (`AGENTS.md` §18.3),
-# shared with the user-space `devmgr` (`AGENTS.md` §2.2 / §17.4): the
+# The deterministic node ↔ bind-table match policy,
+# shared with the user-space `devmgr`: the
 # in-kernel `driver_catalog` resolves a discovered hardware node against
 # the chain drivers' bind tables through the one definition.
 tairix-devmatch = { path = "../../lib/devmatch", version = "=0.0.0" }
 tairix-log = { path = "../../lib/log", version = "=0.0.0" }
 tairix-kernel-core = { path = "../core", version = "=0.0.0" }
-# The synchronous call/reply endpoint primitive (`AGENTS.md` §5.2): the
+# The synchronous call/reply endpoint primitive: the
 # kernel-resident `/System` driver-store file-read server
 # (`driver_store_server`) creates and drains a `CallEndpoint` the reactive
 # `devmgr` reaches over the `ipc_call` syscall (Design D D2b-2). `tairix-kernel`
@@ -105,9 +105,9 @@ tairix-kernel-syscall = { path = "../syscall", version = "=0.0.0" }
 tairix-vt = { path = "../../lib/vt", version = "=0.0.0" }
 # The architecture-neutral virtio factory + provisioning walks (shared
 # with the riscv64 / aarch64 `virt`-board MMIO verticals) live here so
-# no architecture port duplicates them (`AGENTS.md` §2.2).
+# no architecture port duplicates them.
 tairix-kernel-virtio = { path = "../virtio", version = "=0.0.0" }
-# The Arch HAL surface (`AGENTS.md` §17.2): the kernel binary names
+# The Arch HAL surface: the kernel binary names
 # `tairix_arch_api::IrqController` so the production `IoApicController`
 # implements the same interrupt-controller HAL trait every port does
 # (`plans/WIRING.md` Stage W3).
@@ -116,7 +116,7 @@ tairix-arch-api = { path = "../arch/api", version = "=0.0.0" }
 # lines: the aarch64 `/memory` discovery summary (`plans/PI.md` P6c-1)
 # and the x86_64 guard-arena install decision (`boot`, `plans/PI.md`
 # G3b-2). The project-wide first-party formatter; re-implementing it
-# locally would duplicate `lib/util` (`AGENTS.md` §2.2). Consumed by
+# locally would duplicate `lib/util`. Consumed by
 # both ports' boot paths, so it is a common dependency.
 tairix-util = { path = "../../lib/util", version = "=0.0.0" }
 
@@ -125,11 +125,11 @@ tairix-util = { path = "../../lib/util", version = "=0.0.0" }
 # encrypted root through the real `ARXFS` driver under the
 # passphrase-derived volume key, then runs the `kernel/core` users-database
 # read. `tairix-kernel` (`Layer::Tooling`) is the one crate permitted to
-# name a filesystem driver across strata (`AGENTS.md` §17.4 / §8); the
+# name a filesystem driver across strata; the
 # composition is architecture-neutral, so it is a common dependency and its
 # host tests run on the CI host.
 tairix-drv-fs-arxfs = { path = "../../drivers/filesystem/arxfs", version = "=0.0.0" }
-# The user-database parser (`AGENTS.md` §2.2): the root-unlock path re-parses
+# The user-database parser: the root-unlock path re-parses
 # the validated `users-v1` text it just loaded to feed the kernel identity
 # table build (`kernel/core::build_identity_table`), reusing the one
 # definition the users database is parsed and serialised through rather than
@@ -138,16 +138,16 @@ tairix-drv-fs-arxfs = { path = "../../drivers/filesystem/arxfs", version = "=0.0
 tairix-users = { path = "../../lib/users", version = "=0.0.0" }
 # The FAT boot partition holds the plaintext `root.unlock` key-derivation
 # descriptor the boot path reads *before* the encrypted root is mounted
-# (`AGENTS.md` §11, `plans/PI.md` P11 Chunk B). `root_mount` reads it back
+# (`plans/PI.md` P11 Chunk B). `root_mount` reads it back
 # through the same real FAT32 driver that authored it (`tools/mkimage`), so
-# author and reader share one on-disk definition (`AGENTS.md` §2.2).
+# author and reader share one on-disk definition.
 # `tairix-kernel` (`Layer::Tooling`) is the one crate permitted to name a
-# filesystem driver across strata (`AGENTS.md` §17.4 / §8); the read is
+# filesystem driver across strata; the read is
 # architecture-neutral, so it is a common dependency and its host tests run
 # on the CI host.
 tairix-drv-fs-fat32 = { path = "../../drivers/filesystem/fat32", version = "=0.0.0" }
 tairix-drv-fs-ext4 = { path = "../../drivers/filesystem/ext4", version = "=0.0.0" }
-# The shared, scheme-neutral partition layer (`AGENTS.md` §2.2): the boot
+# The shared, scheme-neutral partition layer: the boot
 # path splits the single whole-disk block device into its FAT boot and
 # `ARXFS` root partitions through `parse_partition_table` + the
 # bounds-checked `PartitionBlock` window — the same MBR/GPT definition
@@ -158,7 +158,7 @@ tairix-partition = { path = "../../lib/partition", version = "=0.0.0" }
 # The arch-neutral pre-boot Supervisor console engine (`plans/NEW-SUPERVISOR.md`).
 # The kernel binary implements its `SupervisorHost` seam (`supervisor_host`) over
 # the already-computed bootstrap-floor state and drives `run_supervisor` from the
-# ESC boot-screen window; the engine names no kernel or arch type (§17.4), so it
+# ESC boot-screen window; the engine names no kernel or arch type, so it
 # is a common dependency and its host tests run on the CI host.
 tairix-supervisor = { path = "../../lib/supervisor", version = "=0.0.0" }
 # The shared filesystem signature/identity probe and its mutation-evidence
@@ -168,7 +168,7 @@ tairix-supervisor = { path = "../../lib/supervisor", version = "=0.0.0" }
 # retained writes — the same definitions the volmgr policy driver and the
 # filesystem drivers import, so probe and verifier can never disagree.
 tairix-fsprobe = { path = "../../lib/fsprobe", version = "=0.0.0" }
-# The bootstrap-floor storage path (`AGENTS.md` §18.6): the block driver
+# The bootstrap-floor storage path: the block driver
 # that must be up before the signed driver store under `/System/Drivers/`
 # is reachable. It is compiled in (not discovered from the store) and
 # registered in `driver_catalog::IN_KERNEL_DRIVERS` as a floor
@@ -176,9 +176,9 @@ tairix-fsprobe = { path = "../../lib/fsprobe", version = "=0.0.0" }
 # riscv64 root volume on **every** target, so it is a common dependency;
 # the Raspberry-Pi-4 EMMC2 SD-host driver is floor **only on aarch64** and
 # is therefore an aarch64-only dependency (below), never linked into an
-# x86_64 / riscv64 image that has no such controller (`AGENTS.md` §2.20).
+# x86_64 / riscv64 image that has no such controller.
 # `tairix-kernel` (`Layer::Tooling`) is the one crate permitted to name
-# driver crates across strata (`AGENTS.md` §17.4 / §8); the engine is
+# driver crates across strata; the engine is
 # architecture-neutral (it consumes only `lib/abi` / `lib/virtio` seams),
 # so its host tests run on the CI host.
 tairix-drv-storage-virtio-blk = { path = "../../drivers/storage/virtio_blk", version = "=0.0.0" }
@@ -186,33 +186,33 @@ tairix-drv-storage-virtio-blk = { path = "../../drivers/storage/virtio_blk", ver
 # bootstrap-floor discovery walk (`hwdiscovery::observe_virtio_mmio_input_devices`)
 # matches a probed `virtio,mmio` slot's `DeviceID` against to emit a
 # user-space-autoloadable input node — the single source of truth the
-# `drivers/input/virtio_*` bind tables are also built from (`AGENTS.md`
-# §2.2 / §18.3). A `lib/*` crate, arch-neutral, so its host tests run on
+# `drivers/input/virtio_*` bind tables are also built from. A `lib/*` crate,
+# arch-neutral, so its host tests run on
 # the CI host.
 tairix-virtio-input = { path = "../../lib/virtio_input", version = "=0.0.0" }
 # The canonical virtio-net device id (`VIRTIO_NET_DEVICE_ID = 1`) the
 # bootstrap-floor discovery walk (`hwdiscovery::observe_virtio_mmio_network_devices`)
 # matches a probed `virtio,mmio` slot's `DeviceID` against to emit a
 # user-space-autoloadable network node — the single source of truth the
-# `drivers/network/virtio_net` bind table is also built from (`AGENTS.md`
-# §2.2 / §18.3). A `lib/*` device-logic crate (the `lib/virtio_input`
+# `drivers/network/virtio_net` bind table is also built from. A `lib/*`
+# device-logic crate (the `lib/virtio_input`
 # precedent), arch-neutral, so its host tests run on the CI host; the kernel
-# names it without a kernel→driver dependency (§17.4).
+# names it without a kernel→driver dependency.
 tairix-virtio-net = { path = "../../lib/virtio_net", version = "=0.0.0" }
 # Zero-on-drop for the passphrase-derived `VolumeKey` on the boot stack
-# (`AGENTS.md` §4 — secret hygiene). The same audited crate `kernel/mem`
-# delegates its sensitive-region zeroing to (`AGENTS.md` §6 / §2.12 — no
+# (secret hygiene). The same audited crate `kernel/mem`
+# delegates its sensitive-region zeroing to (no
 # hand-rolled zeroing primitive); pinned to the workspace version.
 zeroize = { version = "1.8.1", default-features = false }
 
 # --- Per-architecture boot dependencies ----------------------------
 #
 # The production kernel binary selects exactly one architecture port at
-# build time — the single `AGENTS.md` §17.1/§17.2 selection point. The
+# build time — the single selection point. The
 # arch port (and the x86_64-only boot-support crates the x86_64 boot
 # pipeline links) are therefore target-conditional dependencies, keyed
-# off the target instruction set in the build glue (`AGENTS.md` §17.2
-# allow-list: `[target.'cfg(target_arch = …)']` in a manifest is build
+# off the target instruction set in the build glue (allow-list:
+# `[target.'cfg(target_arch = …)']` in a manifest is build
 # glue, not a `cfg(target_arch)` in the crate body). The crate body
 # gates each port's modules on the build-script-emitted `kernel_isa`
 # name (`build.rs`).
@@ -220,27 +220,26 @@ zeroize = { version = "1.8.1", default-features = false }
 # x86_64: the architecture port plus the driver-host / virtio-bus crates
 # the x86_64 boot pipeline (`boot`, `virtio_boot`, `ioapic_controller`)
 # links. `drvhost` itself stays free of `kernel/*` deps; the kernel-side
-# DMA/MMIO hosts live in `kernel/virtio` (`AGENTS.md` §17.4).
+# DMA/MMIO hosts live in `kernel/virtio`.
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 tairix-arch-x86_64 = { path = "../arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
 tairix-drvhost = { path = "../../userland/system/drvhost", version = "=0.0.0" }
 tairix-drv-bus-virtio = { path = "../../drivers/bus/virtio", version = "=0.0.0" }
-# The PCI configuration-access library (`AGENTS.md` §17.4, kernel → lib/*):
+# The PCI configuration-access library (kernel → lib/*):
 # `boot_x86_64::seed_hardware_tree` builds an ECAM configuration-space bus
 # (`mechanism_ecam`) over the firmware MCFG window to enumerate the
 # virtio-PCI NIC and resolve its config windows for the two-process
 # virtio-net driver (`plans/NETWORK.md` N4e-x86_64). PCI config-access
-# mechanism logic is shared `lib/*` (`AGENTS.md` §2.2), so the kernel names
+# mechanism logic is shared `lib/*`, so the kernel names
 # no `drivers/bus/*` PCI type.
 tairix-pci = { path = "../../lib/pci", version = "=0.0.0" }
-# The user-space device manager's autoload policy (`AGENTS.md` §18.3): the
+# The user-space device manager's autoload policy: the
 # kernel binary's `driver_spawn_loader` implements its `DriverLoader` seam to
 # spawn a discovered user-space driver, bridging `devmgr` policy to the
-# kernel spawn mechanism. `devmgr` stays on `lib/*` only (§17.4); the kernel
+# kernel spawn mechanism. `devmgr` stays on `lib/*` only; the kernel
 # binary (`Layer::Tooling`) is the permitted integration point. Linked with
 # `default-features = false` so the device manager's `program` feature (its
-# `tairix-rt` userland runtime) never enters the kernel image (`AGENTS.md`
-# §17.4 / §1).
+# `tairix-rt` userland runtime) never enters the kernel image.
 tairix-devmgr = { path = "../../userland/system/devmgr", version = "=0.0.0", default-features = false }
 
 # aarch64: the Raspberry Pi 4 production kernel links the aarch64 port
@@ -253,29 +252,28 @@ tairix-arch-aarch64 = { path = "../arch/aarch64", version = "=0.0.0" }
 # floor's second storage driver (`driver_catalog`, `#[cfg(kernel_isa =
 # "aarch64")]`). It backs the Pi 4 SD card, so it is compiled into the
 # aarch64 image alone — never into an x86_64 / riscv64 image that has no
-# such controller (`AGENTS.md` §2.20). Architecture-neutral in the sense
+# such controller. Architecture-neutral in the sense
 # that it consumes only `lib/abi` seams; the aarch64 root-unlock bring-up
 # (`aarch64/root_unlock`) also names it.
 tairix-drv-storage-emmc2 = { path = "../../drivers/storage/emmc2", version = "=0.0.0" }
-# The user-space device manager's autoload policy (`AGENTS.md` §18.3): the
+# The user-space device manager's autoload policy: the
 # aarch64 `driver_spawn_loader` implements its `DriverLoader` seam to spawn a
 # discovered user-space driver with the matched node's device-resource
-# grants (`plans/PI.md` P10 5d-2-ii). `devmgr` stays on `lib/*` only (§17.4);
+# grants (`plans/PI.md` P10 5d-2-ii). `devmgr` stays on `lib/*` only;
 # the kernel binary (`Layer::Tooling`) is the permitted integration point.
 # Linked with `default-features = false` so the device manager's `program`
-# feature (its `tairix-rt` userland runtime) never enters the kernel image
-# (`AGENTS.md` §17.4 / §1).
+# feature (its `tairix-rt` userland runtime) never enters the kernel image.
 tairix-devmgr = { path = "../../userland/system/devmgr", version = "=0.0.0", default-features = false }
-# The shared FDT reader (`AGENTS.md` §2.2): `boot_aarch64` parses the
+# The shared FDT reader: `boot_aarch64` parses the
 # firmware device tree the loader hands the kernel to discover the board
 # console base (`plans/PI.md` P2).
 tairix-fdt = { path = "../../lib/fdt", version = "=0.0.0" }
-# The signed-manifest driver-load gate (`AGENTS.md` §8 / §9; `plans/PI.md`
+# The signed-manifest driver-load gate (`plans/PI.md`
 # P10 5c-ii): the root-storage bring-up admits each statically-linked
 # bootstrap-floor block driver through `drvhost::Host::load` (Ed25519
 # signature + `CAP_DRV_LOAD` / `CAP_DRV_KERNEL`) before it reads the volume,
 # exactly as the x86_64 `virtio_boot` path does. `drvhost` stays free of
-# `kernel/*` deps (`AGENTS.md` §17.4); the in-kernel resource hosts live
+# `kernel/*` deps; the in-kernel resource hosts live
 # elsewhere.
 tairix-drvhost = { path = "../../userland/system/drvhost", version = "=0.0.0" }
 # The virtio-MMIO bus + transport the in-kernel root-unlock service
@@ -284,7 +282,7 @@ tairix-drvhost = { path = "../../userland/system/drvhost", version = "=0.0.0" }
 # `virtio_mmio_bus_from_dtb` builds the bus from the discovered device
 # tree; `MmioTransport` is the concrete transport the provisioning walk
 # constructs. The kernel binary (`Layer::Tooling`) is the permitted point
-# to name driver-bus crates (`AGENTS.md` §17.4 / §8), exactly as the
+# to name driver-bus crates, exactly as the
 # x86_64 boot path names `tairix-drv-bus-virtio`.
 tairix-drv-bus-mmio = { path = "../../drivers/bus/mmio", version = "=0.0.0" }
 tairix-drv-bus-virtio = { path = "../../drivers/bus/virtio", version = "=0.0.0" }
@@ -303,7 +301,7 @@ tairix-arch-riscv64 = { path = "../arch/riscv64", version = "=0.0.0" }
 # bus from the discovered device tree, and `hwdiscovery::observe_*` emit
 # the probed Block/Input/Network nodes into the seeded hardware tree. The
 # kernel binary (`Layer::Tooling`) is the permitted point to name
-# driver-bus crates (`AGENTS.md` §17.4 / §8), exactly as the aarch64 and
+# driver-bus crates, exactly as the aarch64 and
 # x86_64 boot paths name their bus crates.
 tairix-drv-bus-mmio = { path = "../../drivers/bus/mmio", version = "=0.0.0" }
 # The concrete virtio transport the in-kernel root-unlock service
@@ -311,22 +309,22 @@ tairix-drv-bus-mmio = { path = "../../drivers/bus/mmio", version = "=0.0.0" }
 # on over the `virt`-board virtio-MMIO bus (`plans/NETWORK.md`
 # N4e-riscv64), exactly as the aarch64 root-unlock path names it.
 tairix-drv-bus-virtio = { path = "../../drivers/bus/virtio", version = "=0.0.0" }
-# The signed-manifest driver-load gate (`AGENTS.md` §8 / §9): the riscv64
+# The signed-manifest driver-load gate: the riscv64
 # root-unlock bring-up admits the bootstrap-floor virtio-blk driver through
 # `drvhost::Host::load` before it reads the volume, and the persistent
 # driver-store serve loop autoloads signed `/System` drivers through the
 # same gate — exactly as the aarch64 boot path does. `drvhost` stays free
-# of `kernel/*` deps (`AGENTS.md` §17.4); the in-kernel resource hosts live
+# of `kernel/*` deps; the in-kernel resource hosts live
 # in `kernel/virtio`.
 tairix-drvhost = { path = "../../userland/system/drvhost", version = "=0.0.0" }
-# The user-space device manager's autoload policy (`AGENTS.md` §18.3): the
+# The user-space device manager's autoload policy: the
 # riscv64 `driver_spawn_loader` implements its `DriverLoader` seam to spawn
 # a discovered user-space driver with the matched node's device-resource
-# grants (`plans/NETWORK.md` N4e-riscv64). `devmgr` stays on `lib/*` only
-# (§17.4); the kernel binary (`Layer::Tooling`) is the permitted
+# grants (`plans/NETWORK.md` N4e-riscv64). `devmgr` stays on `lib/*` only; the
+# kernel binary (`Layer::Tooling`) is the permitted
 # integration point. Linked with `default-features = false` so the device
 # manager's `program` feature (its `tairix-rt` userland runtime) never
-# enters the kernel image (`AGENTS.md` §17.4 / §1).
+# enters the kernel image.
 tairix-devmgr = { path = "../../userland/system/devmgr", version = "=0.0.0", default-features = false }
 
 [build-dependencies]
@@ -334,10 +332,10 @@ tairix-devmgr = { path = "../../userland/system/devmgr", version = "=0.0.0", def
 # spawn PID 1 into EL0 (`plans/PI.md` P6c-3). It compiles the pure-Rust
 # `tairix-init-run` program PIE and converts the linked ELF to an `rxe` blob
 # (carrying the kernel's compiled-in syscall CFI tag) exactly as the cc3 /
-# spawn fixtures do, reusing the shared converter rather than re-rolling it
-# (`AGENTS.md` §2.2). Host-only build glue — the production kernel image stays
-# Rust-only (`AGENTS.md` §1). `tairix-kernel` is the image-assembly seam
-# (`Layer::Tooling`), so naming the harness here is not a §17.4 layering
+# spawn fixtures do, reusing the shared converter rather than re-rolling it.
+# Host-only build glue — the production kernel image stays
+# Rust-only. `tairix-kernel` is the image-assembly seam
+# (`Layer::Tooling`), so naming the harness here is not a layering
 # violation.
 tairix-itest-harness = { path = "../../tests/integration/harness", version = "=0.0.0" }
 tairix-kernel-syscall = { path = "../syscall", version = "=0.0.0" }
@@ -347,19 +345,19 @@ tairix-kernel-syscall = { path = "../syscall", version = "=0.0.0" }
 # `DriverManifest` from the one ABI definition (`tairix-abi`), stamps the
 # kernel's compiled-in `SYSCALL_TABLE_HASH` (`tairix-kernel-syscall`), copies
 # the driver crate's own canonical `BIND_KEYS` into the signed bind table (so
-# the match data never drifts, `AGENTS.md` §2.2 / §18.3), and signs with the
+# the match data never drifts), and signs with the
 # build's deterministic Ed25519 driver-signing key — the trust anchor the
-# kernel embeds. The compiled-in floor is storage-only (`AGENTS.md` §18.6):
+# kernel embeds. The compiled-in floor is storage-only:
 # the bus chain (`pcie_brcm` / `vl805` / `usb_kbd`) is installed as signed
 # `/System/Drivers/` bundles by the image pipeline (`tools/xtask`), not baked
-# here. Host-only build glue (`AGENTS.md` §1, §12); the production image stays
+# here. Host-only build glue; the production image stays
 # Rust-only.
 tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }
 tairix-drv-storage-virtio-blk = { path = "../../drivers/storage/virtio_blk", version = "=0.0.0" }
 tairix-drv-storage-emmc2 = { path = "../../drivers/storage/emmc2", version = "=0.0.0" }
 # Deterministic Ed25519 signing of the baked driver manifests. The same
 # audited, version-pinned crate `lib/crypto` wraps and the `drvhost`
-# fixtures use (`AGENTS.md` §2.12 / §19.3); only build glue and test code
+# fixtures use; only build glue and test code
 # name it, never a production runtime path.
 ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zeroize"] }
 
@@ -370,7 +368,7 @@ ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zer
 # in-memory mock under `cargo test` on the CI host. The arch port is only a
 # production dependency under `cfg(target_arch = "riscv64")`; the host test
 # build needs it too, so it is also a dev-dependency (the same crate the
-# freestanding riscv64 image links, `AGENTS.md` §2.2).
+# freestanding riscv64 image links).
 tairix-arch-riscv64 = { path = "../arch/riscv64", version = "=0.0.0" }
 # The transform-cache host tests capture the reclaim audit records
 # (`plans/SMARTRAM.md` SMART9) through `kernel/core`'s `TestSink`,
@@ -393,16 +391,15 @@ tairix-itest-harness = { path = "../../tests/integration/harness", version = "=0
 ] }
 # The `virtio_factory` unit tests drive a real `DmaPool` through
 # `kernel/mem`'s in-memory `HostPageTable` test double, gated behind
-# the `host-tests` feature so production builds never link it
-# (`AGENTS.md` §2.3).
+# the `host-tests` feature so production builds never link it.
 tairix-kernel-mem = { path = "../mem", version = "=0.0.0", features = ["host-tests"] }
 # The `root_mount` host tests author a real users-root arxfs volume under
 # a passphrase-derived key through the shared fixture (one on-disk-layout
-# source of truth, `AGENTS.md` §2.2) and re-open it through the production
+# source of truth) and re-open it through the production
 # composition. `tairix-kernel` (`Layer::Tooling`) already names
 # tests/integration crates as build/dev glue (cf. `tairix-itest-harness`).
 tairix-test-arxfs-image = { path = "../../tests/integration/arxfs_image", version = "=0.0.0" }
-# The single-source-of-truth whole-disk image fixture (`AGENTS.md` §2.2):
+# The single-source-of-truth whole-disk image fixture:
 # the `mount_root_disk_and_load_users` end-to-end test consumes the same
 # MBR + FAT-boot(`root.unlock`) + encrypted-`ARXFS`-root bytes the
 # `-M virt` root-mount->login QEMU vertical plants, so the disk layout and
@@ -416,5 +413,5 @@ tairix-users = { path = "../../lib/users", version = "=0.0.0" }
 # known keypair so the live `drvhost::Host` accepts it. Pinned to the
 # same version `lib/crypto` audits and `drvhost`'s fixtures use; only
 # test code names `ed25519-dalek`, never production paths
-# (`AGENTS.md` §2.3, mirrors `userland/system/drvhost`).
+# (mirrors `userland/system/drvhost`).
 ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zeroize"] }

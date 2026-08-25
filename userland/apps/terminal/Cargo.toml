@@ -1,6 +1,6 @@
 [package]
 name = "tairix-terminal"
-description = "TAIRiX terminal emulator: a character-cell screen model fed by an injected shell byte stream and rendered with the shared theme (§10 — PLAN.md Stage 7)."
+description = "TAIRiX terminal emulator: a character-cell screen model fed by an injected shell byte stream and rendered with the shared theme (PLAN.md Stage 7)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,29 +10,28 @@ publish.workspace = true
 
 [dependencies]
 # The frozen `Errno` the shell I/O seam reports failures with; the terminal
-# invents no parallel error set for the kernel boundary (§2.2) and never links
-# a kernel or driver crate (§17.4).
+# invents no parallel error set for the kernel boundary and never links
+# a kernel or driver crate.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The single shared ANSI/VT/xterm escape + attribute vocabulary (`plans/CURSES.md`
 # C1/C2): the terminal is a *consumer* of `lib/vt`'s `Parser`/`Op`/`Cell`, so
 # there is exactly one escape-sequence definition in the tree — never a second,
-# divergent parser in this app (`AGENTS.md` §2.2).
+# divergent parser in this app.
 tairix-vt = { path = "../../../lib/vt", version = "=0.0.0" }
 # Shared integer screen geometry (`Rect`) — the same vocabulary the window
 # manager and taskbar use, lifted to `lib/*` so the app reuses it without
-# depending on the window manager (§17.4, §2.2).
+# depending on the window manager.
 tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
-# The single shared theme definition (§10): the terminal takes its colours from
+# The single shared theme definition: the terminal takes its colours from
 # the active theme so it stays consistent with the window manager and taskbar.
 tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
 # Shared software rasteriser (`Color`/`Surface`) — the same premultiplied-alpha
 # primitives the window manager paints with, lifted to `lib/*` so the app
-# renders its screen into a `Surface` without duplicating the colour algebra
-# (§17.4, §2.2).
+# renders its screen into a `Surface` without duplicating the colour algebra.
 tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
 # Shared text rasteriser (`BitmapFont`) — the built-in monospace face and glyph
-# blitter, lifted to `lib/*` (§16.4) so the app draws its cells without
-# depending on the window manager (§17.4).
+# blitter, lifted to `lib/*` so the app draws its cells without
+# depending on the window manager.
 tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
 # The shared Reactive Alloy control family: the context menu and its anchoring
 # rule, the settings sheet's panel/tabs/sliders/selectors/buttons, and the one
@@ -50,14 +49,14 @@ tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0" }
 # The one `key = value` document engine, for the key-grammar assertion the
 # profile registry's own test makes against every key it publishes.
 tairix-appconf = { path = "../../../lib/appconf", version = "=0.0.0" }
-# The app half of the window channel: `WindowClient` (create / present /
-# close over the `WindowTransport` seam), the shared app event-mailbox naming
+# The app half of the window channel: `WindowClient` (create / present / close
+# over the `WindowTransport` seam), the shared app event-mailbox naming
 # rule (`event_endpoint_for`), and the desktop's one icon-bar menu convention
 # (`tairix_window::declaration` — the information row first, the app's own
 # rows next, then a rule and *Quit*). `src/appbar.rs` composes its *New
 # window* row through that convention and is host-tested, so this is a plain
 # dependency rather than a `Run`-only one: the terminal states its own row and
-# never restates the order around it (§2.2).
+# never restates the order around it.
 tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
 
 # The package is both the terminal-emulator engine library (above) and the
@@ -87,10 +86,10 @@ tairix-display = { path = "../../../lib/display", version = "=0.0.0" }
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
 # The one shared Key+Modifiers → console-byte encoder: the terminal's key
 # presses become shell input through the same rule the kernel text sink
-# uses, never a second layout table (§2.2).
+# uses, never a second layout table.
 tairix-keymap = { path = "../../../lib/keymap", version = "=0.0.0" }
 # The shared account-authoring policy: `DEFAULT_SHELL`, the one definition
-# of the login shell's bundle path, imported rather than respelled (§2.2).
+# of the login shell's bundle path, imported rather than respelled.
 tairix-users = { path = "../../../lib/users", version = "=0.0.0" }
 # On the real target the `Run` binary reaches the sandboxed font service over
 # the runtime `ipc_call` transport; this augments the host-neutral base

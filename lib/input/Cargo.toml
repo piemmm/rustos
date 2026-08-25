@@ -1,6 +1,6 @@
 [package]
 name = "tairix-input"
-description = "TAIRiX shared pointer input-event vocabulary (buttons and device events) for the window manager and taskbar (§6, §17.4 — PLAN.md Stage 7)."
+description = "TAIRiX shared pointer input-event vocabulary (buttons and device events) for the window manager and taskbar (PLAN.md Stage 7)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,7 +12,7 @@ publish.workspace = true
 # Shared integer screen geometry (`Point`): a pointer-motion event names an
 # absolute screen position, so this crate speaks the same coordinate
 # vocabulary the window manager and taskbar already share, lifted to `lib/*`
-# so neither GUI crate depends on the other (§17.4, §2.2).
+# so neither GUI crate depends on the other.
 tairix-geometry = { path = "../geometry", version = "=0.0.0" }
 
 [lints]

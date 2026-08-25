@@ -18,13 +18,12 @@ path = "src/lib.rs"
 #
 # - `tairix-abi` provides the frozen `SYSCALL_MAX_ARGS = 6` constant
 #   consumed by `syscall_entry.rs`. Re-declaring it locally would
-#   violate AGENTS.md §2.2 (no duplication) and §9 (one ABI source of
-#   truth).
-# - `tairix-arch-api` is the Arch HAL (`AGENTS.md` §17.2). It provides
+#   duplicate it and give the ABI a second source of truth.
+# - `tairix-arch-api` is the Arch HAL. It provides
 #   the `SchedulerArch` / `CpuId` trait surface that `kernel_arch.rs`
-#   implements for [`X86_64Arch`]. §17.4 lets an architecture port
-#   name `kernel/arch/api` and `lib/*` only; naming the HAL here —
-#   rather than the concrete `kernel/sched` crate — is exactly what
+#   implements for [`X86_64Arch`]. lets an architecture port
+#   name `kernel/arch/api` and `lib/*` only; naming the HAL here — rather than
+#   the concrete `kernel/sched` crate — is exactly what
 #   keeps this port off a concrete kernel subsystem. The HAL crate is
 #   `no_std` and dependency-free, so depending on it pulls **no**
 #   `#[global_allocator]` requirement into the arch crate.
@@ -38,19 +37,19 @@ path = "src/lib.rs"
 # crate exports a free `halt() -> !` function on this side of the
 # boundary and the downstream `tairix-kernel` bin crate brings the
 # allocator, implements `KernelArch` for `X86_64Arch`, and wires both
-# halves together. AGENTS.md §3 / §6 / §17.4 — drivers, kernel/mem,
-# kernel/sec, kernel/ipc remain forbidden as arch-crate deps.
+# halves together. Drivers, `kernel/mem`, `kernel/sec`, and `kernel/ipc`
+# remain forbidden as arch-crate deps.
 [features]
 # `sched-arch` opts the crate into compiling the `kernel_arch` module
 # (the [`X86_64Arch`] `SchedulerArch` impl) and the other scheduler-,
 # side-channel-, timer-, per-CPU-, platform-, and user-entry HAL impls.
 # The Arch HAL `tairix-arch-api` itself is **not** optional: the
-# always-compiled `paging` module implements the §17.2 MMU/page-table
+# always-compiled `paging` module implements the MMU/page-table
 # HAL slice ([`tairix_arch_api::mmu::AddressSpace`]) and so every build
 # of this crate names the HAL. The crate is `no_std` and
-# dependency-free, so the dep pulls no `#[global_allocator]` burden
-# (`AGENTS.md` §17.4); `sched-arch` therefore only gates which HAL
-# *modules* compile, not the dependency (`AGENTS.md` §2.3).
+# dependency-free, so the dep pulls no `#[global_allocator]` burden;
+# `sched-arch` therefore only gates which HAL
+# *modules* compile, not the dependency.
 default = []
 sched-arch = []
 
@@ -72,14 +71,14 @@ tairix-sync = { path = "../../../lib/sync", version = "=0.0.0" }
 
 # The Multiboot2 information-structure wire layout is defined once in
 # `lib/multiboot2` (the shared home the kernel parser and the first-party
-# loader builder both depend on, so they can never drift — AGENTS.md §2.2).
+# loader builder both depend on, so they can never drift —).
 # The `multiboot2` module here is a thin re-export of that crate's parser.
 tairix-multiboot2 = { path = "../../../lib/multiboot2", version = "=0.0.0" }
 
 # `kernel/mem` is a **dev-dependency** so the host-side unit tests can
 # round-trip our `bootmemory::RegionKind` mirror against the canonical
 # `tairix_kernel_mem::RegionKind` and refuse to compile if the two
-# enums ever drift (AGENTS.md §2.2 — no duplication).
+# enums ever drift (no duplication).
 #
 # The crate self-references with `sched-arch` so `cargo test` always
 # exercises the (c7-arch) `kernel_arch` module — mirrors the

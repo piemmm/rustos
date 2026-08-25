@@ -14,13 +14,13 @@ workspace = true
 [features]
 # `test-arch` re-exports the host-only `TestArch` mock from the scheduler
 # API. It is intentionally not in the default feature set so production
-# (`no_std`) builds never link the mock (`AGENTS.md` §1 — no hacks).
+# (`no_std`) builds never link the mock (no hacks).
 test-arch = ["tairix-kernel-sched-api/test-arch"]
 
 [dependencies]
 # The scheduler contract (`SchedulerPolicy`, the lifecycle vocabulary, the
 # re-exported Arch HAL surface). This is a `kernel/sched/<impl>` crate per
-# §17.4 and so may name `kernel/sched/api`, `kernel/arch/api`, and `lib/*`
+# and so may name `kernel/sched/api`, `kernel/arch/api`, and `lib/*`
 # only.
 tairix-kernel-sched-api = { path = "../api", version = "=0.0.0" }
 
@@ -30,12 +30,12 @@ tairix-kernel-sched-api = { path = "../api", version = "=0.0.0" }
 tairix-arch-api = { path = "../../arch/api", version = "=0.0.0" }
 
 # Synchronisation primitives (run-queue registry `RwLock`, overflow
-# `SpinLock`, the loom compatibility convention). These live in `lib/sync`
-# (`AGENTS.md` §6 / §17.4), reachable by a `SchedImpl` crate.
+# `SpinLock`, the loom compatibility convention). These live in `lib/sync`,
+# reachable by a `SchedImpl` crate.
 tairix-sync = { path = "../../../lib/sync", version = "=0.0.0" }
 
-# The single project-wide source of randomness (`AGENTS.md` §1 / §2.2 —
-# no second PRNG). Work-stealing victim selection is a non-cryptographic
+# The single project-wide source of randomness (no second PRNG). Work-stealing
+# victim selection is a non-cryptographic
 # "scheduler decision", so it draws from `lib/rng`'s fast xoshiro256++
 # `FastRng` rather than a hand-rolled generator.
 tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }

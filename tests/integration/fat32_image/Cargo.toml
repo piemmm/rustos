@@ -1,6 +1,6 @@
 [package]
 name = "tairix-test-fat32-image"
-description = "Shared, specification-shaped FAT32 disk-image fixture for the end-to-end QEMU FAT32-over-virtio_blk vertical. The host harness (xtask) plants the image returned by `build_image` on the backing disk; the freestanding guest tail mounts the same volume through the real FAT32 driver and round-trips the planted file plus a fresh write, so both sides agree on the layout through one source of truth (AGENTS.md §2.2)."
+description = "Shared, specification-shaped FAT32 disk-image fixture for the end-to-end QEMU FAT32-over-virtio_blk vertical. The host harness (xtask) plants the image returned by `build_image` on the backing disk; the freestanding guest tail mounts the same volume through the real FAT32 driver and round-trips the planted file plus a fresh write, so both sides agree on the layout through one source of truth."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

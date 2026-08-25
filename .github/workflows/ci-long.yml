@@ -9,8 +9,8 @@ name: ci-long
 # cargo deny, supply-chain, model-check, spec-review, abi-check, c-header, and
 # the image gate) are pass/fail checks whose result cannot change between runs,
 # so they run once — repeating them would burn the runner's time for no signal.
-# All pipeline logic lives in `cargo xtask`, never in the workflow (AGENTS.md
-# §15): a green run here and a green `cargo xtask ci-long` on a builder are
+# All pipeline logic lives in `cargo xtask`, never in the workflow: a green run
+# here and a green `cargo xtask ci-long` on a builder are
 # equivalent by construction; this workflow adds only scheduling.
 #
 # This is a slow, deliberately exhaustive run (2 × 20 executions of every

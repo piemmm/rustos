@@ -31,11 +31,7 @@ const DEVICE_CLASS: BlkDeviceClass = BlkDeviceClass::Removable;
 
 fn fill(buf: &mut [u8], byte_base: u64) {
     for (i, out) in buf.iter_mut().enumerate() {
-        // The modulus is by 251, so every byte of the pattern is in range.
-        #[allow(clippy::cast_possible_truncation)]
-        {
-            *out = ((byte_base + i as u64) % 251) as u8;
-        }
+        *out = ((byte_base + i as u64) % 251) as u8;
     }
 }
 

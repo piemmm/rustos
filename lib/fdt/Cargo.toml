@@ -1,6 +1,6 @@
 [package]
 name = "tairix-fdt"
-description = "TAIRiX shared flattened-device-tree (FDT/DTB) reader: the one device-tree parser every architecture port builds its platform discovery on (AGENTS.md §2.2 / §18.2)."
+description = "TAIRiX shared flattened-device-tree (FDT/DTB) reader: the one device-tree parser every architecture port builds its platform discovery on."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -18,7 +18,7 @@ path = "src/lib.rs"
 # `test-fixtures` exposes the `fixture` module — a minimal in-memory DTB
 # builder — so the architecture ports' discovery tests drive the same
 # fixture as this crate's own parser tests rather than re-rolling a second
-# builder (`AGENTS.md` §2.2). It pulls `alloc`, so it is off by default and
+# builder. It pulls `alloc`, so it is off by default and
 # enabled only in the dependent crates' [dev-dependencies].
 default = []
 test-fixtures = []
@@ -26,15 +26,15 @@ test-fixtures = []
 [dependencies]
 
 [dev-dependencies]
-# The §19.6 fuzz harness draws its inputs through the shared seed/budget
+# The fuzz harness draws its inputs through the shared seed/budget
 # seam (`tairix_fuzzseed`): one place picks the per-run seed, logs it at
-# the start of the test, and bounds the smoke/soak loop (`AGENTS.md`
-# §2.2). Test scaffolding only; never in a TAIRiX build.
+# the start of the test, and bounds the smoke/soak loop. Test scaffolding only;
+# never in a TAIRiX build.
 tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
-# The §19.6 fuzz harness (`tests/fuzz_fdt.rs`) drives the parser against
+# The fuzz harness (`tests/fuzz_fdt.rs`) drives the parser against
 # mutated-but-structured device trees. It builds those templates with the
-# crate's own `fixture` DTB builder rather than re-rolling a second builder
-# (`AGENTS.md` §2.2), so the harness needs the `test-fixtures` feature on.
+# crate's own `fixture` DTB builder rather than re-rolling a second builder, so
+# the harness needs the `test-fixtures` feature on.
 # Depending on the crate itself in `[dev-dependencies]` is the canonical way
 # to turn a feature on only for this crate's own tests; it never reaches the
 # `default = []` production surface (the `fixture`/`alloc` code stays out of

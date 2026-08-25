@@ -1,6 +1,6 @@
 [package]
 name = "tairix-kernel-sched-api"
-description = "TAIRiX scheduler contract (AGENTS.md §17.1): the SchedulerPolicy trait, the lifecycle vocabulary every policy shares, and the conformance suite every concrete scheduler must pass."
+description = "TAIRiX scheduler contract: the SchedulerPolicy trait, the lifecycle vocabulary every policy shares, and the conformance suite every concrete scheduler must pass."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,10 +15,10 @@ workspace = true
 # `test-arch` exposes the host-only `TestArch` mock used by the
 # conformance suite and by every scheduler implementation's tests. It is
 # not in the default set so production (`no_std`) builds never link the
-# mock (`AGENTS.md` §1 — no hacks).
+# mock (no hacks).
 test-arch = []
-# `conformance` exposes the shared `SchedulerPolicy` conformance suite
-# (`AGENTS.md` §17.1). It pulls in `std` for the multi-core stress
+# `conformance` exposes the shared `SchedulerPolicy` conformance suite. It
+# pulls in `std` for the multi-core stress
 # driver, so it is opt-in and consumed only from test targets.
 conformance = ["test-arch"]
 
@@ -27,16 +27,16 @@ conformance = ["test-arch"]
 # `conformance` turns the suite (and `TestArch`) on for the API crate's
 # own integration tests; the `mlfq` dev-dep supplies a concrete
 # `SchedulerPolicy` to drive. Dev-dependency cycles are permitted by
-# Cargo and are excluded from the §17.4 build graph (`deps-check`).
+# Cargo and are excluded from the build graph (`deps-check`).
 [dev-dependencies]
 tairix-kernel-sched-api = { path = ".", version = "=0.0.0", features = ["conformance"] }
 tairix-kernel-sched-mlfq = { path = "../mlfq", version = "=0.0.0" }
 
 [dependencies]
 # The scheduler-facing Arch HAL surface (`CpuId`, `SchedulerArch`) is the
-# single canonical definition in the Arch HAL crate `kernel/arch/api`
-# (`AGENTS.md` §17.2). The scheduler API re-exports it so the contract,
-# the implementations, and `kernel/core` all name one type (`AGENTS.md`
-# §2.2). `kernel/sched/api` is a §17.4 `SchedApi` crate and so may name
+# single canonical definition in the Arch HAL crate `kernel/arch/api`. The
+# scheduler API re-exports it so the contract,
+# the implementations, and `kernel/core` all name one type. `kernel/sched/api`
+# is a `SchedApi` crate and so may name
 # `kernel/arch/api` and `lib/*` only.
 tairix-arch-api = { path = "../../arch/api", version = "=0.0.0" }

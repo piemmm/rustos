@@ -27,12 +27,11 @@ workspace = true
 # InitCtxDriverProcessSpawn over the Aarch64ProcessSpawn image builder), and drains the
 # cooperative `step` loop polling `Port::recv` under a bounded budget. PASS
 # once the decoded DriverRegisterReply round-trips the stub's handle; any
-# shortfall writes a distinct failure finisher or times out (fail-loud,
-# `AGENTS.md` §7).
+# shortfall writes a distinct failure finisher or times out (fail-loud).
 #
 # The `test-hooks` feature is on by default. Release builds that enable it
-# are rejected by the `compile_error!` guard in `src/main.rs` (AGENTS.md §1 —
-# no hacks; §5.4.5 — fail closed), mirroring the timeshare vertical.
+# are rejected by the `compile_error!` guard in `src/main.rs` (no hacks; fail
+# closed), mirroring the timeshare vertical.
 [features]
 default = ["test-hooks"]
 test-hooks = []
@@ -54,7 +53,7 @@ tairix-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
 # `devmgr`-driven driver-spawn path end to end (`plans/PI.md` P10 5d-2-ii).
 # Linked with `default-features = false` so the device manager's `program`
 # feature (its `tairix-rt` userland runtime) never enters this kernel-harness
-# image (`AGENTS.md` §17.4 / §1) — the same opt-out the kernel binary makes.
+# image — the same opt-out the kernel binary makes.
 tairix-devmgr = { path = "../../../userland/system/devmgr", version = "=0.0.0", default-features = false }
 tairix-drvhost = { path = "../../../userland/system/drvhost", version = "=0.0.0" }
 tairix-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
@@ -70,15 +69,15 @@ tairix-sync = { path = "../../../lib/sync", version = "=0.0.0" }
 
 [build-dependencies]
 # The build script wraps the converted stub `rxe` as the payload of a signed
-# `DriverManifest` image (`AGENTS.md` §8 / §9) the `SpawnDriverLoader` gate
+# `DriverManifest` image the `SpawnDriverLoader` gate
 # admits, signed with a deterministic Ed25519 key whose public half the test
 # trusts. The signing + bundle assembly is the shared harness composer
-# (`driver_image`, `AGENTS.md` §2.2), so the manifest wire format is encoded
-# in exactly one place. Host-only build glue (`AGENTS.md` §12).
+# (`driver_image`), so the manifest wire format is encoded
+# in exactly one place. Host-only build glue.
 tairix-itest-harness = { path = "../harness", version = "=0.0.0", features = [
     "driver-image",
 ] }
 tairix-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
 # The build script names the `CapabilityId` / `DriverKind` the signed manifest
-# requests from the one ABI definition (`AGENTS.md` §2.2).
+# requests from the one ABI definition.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }

@@ -22,7 +22,7 @@ workspace = true
 # expressed through the `IrqHost` trait so this crate stays free of a
 # transitive scheduler dep — the `kernel/core` orchestrator composes
 # the production `IrqHost` impl on top of `Scheduler::park` /
-# `Scheduler::unpark` (`AGENTS.md` §6 — `no_std` shared-code crates,
+# `Scheduler::unpark` (`no_std` shared-code crates,
 # minimum surface).
 tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }
 tairix-kernel-sec = { path = "../sec", version = "=0.0.0" }

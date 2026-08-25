@@ -1,6 +1,6 @@
 [package]
 name = "tairix-fontd"
-description = "TAIRiX font service: the sandboxed OS text-rasterisation service that owns the system faces and serves glyph coverage over FONT_ENDPOINT (plans/FONT-SERVICE.md FS-3, AGENTS.md §16.4, §19.5)."
+description = "TAIRiX font service: the sandboxed OS text-rasterisation service that owns the system faces and serves glyph coverage over FONT_ENDPOINT (plans/FONT-SERVICE.md FS-3)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -23,8 +23,8 @@ program = ["dep:tairix-rt", "dep:tairix-procinfo"]
 
 # The package is both the `tairix-fontd` dispatcher library (the host-testable
 # `FontService` rasteriser + bounded glyph cache) and the `Run` entry-point
-# binary of the font service installed at `/System/Services/fontd.app/Run`
-# (`AGENTS.md` §16.2). The binary is a freestanding pure-Rust program on the
+# binary of the font service installed at `/System/Services/fontd.app/Run`. The
+# binary is a freestanding pure-Rust program on the
 # native Tier-1 targets and an inert host stub elsewhere (see `src/run.rs`).
 [[bin]]
 name = "tairix-fontd-run"
@@ -35,16 +35,16 @@ path = "src/run.rs"
 # encoders) and the `Errno` table the dispatcher fails closed with.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The shared first-party TrueType reader + scanline rasteriser — the *one*
-# engine the atlas generator and this service share (`AGENTS.md` §2.2). Only
-# this service ever parses a face at runtime (§19.5).
+# engine the atlas generator and this service share. Only
+# this service ever parses a face at runtime.
 tairix-fontface = { path = "../../../lib/fontface", version = "=0.0.0" }
-# §19.4 structured audit log: startup, skipped-family, and bind decisions are
+# structured audit log: startup, skipped-family, and bind decisions are
 # recorded through a `tairix_log::Sink`.
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 # The one shared cached-glyph declaration — the retained value type, its
 # classification, and the RAM-derived byte budget — that this service and the
 # render-path client on the other side of FONT_ENDPOINT both build their cache
-# from (§2.2). Only that module is wanted here: the service rasterises glyphs
+# from. Only that module is wanted here: the service rasterises glyphs
 # itself and never draws through the crate's blitter, so its drawing
 # dependencies stay out of this build.
 tairix-font = { path = "../../../lib/font", version = "=0.0.0", default-features = false, features = [
@@ -60,7 +60,7 @@ tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
 # the pen by the same count, so both must read the same table.
 tairix-vt = { path = "../../../lib/vt", version = "=0.0.0" }
 
-# The `Run` binary's freestanding userland runtime (`AGENTS.md` §1): `tairix-rt`
+# The `Run` binary's freestanding userland runtime: `tairix-rt`
 # provides `_start`, the stack canary, the panic handler, the
 # `#[global_allocator]`, the filesystem read wrappers used to load
 # `/System/Fonts`, and the endpoint syscall wrappers (`call_create`/

@@ -24,8 +24,8 @@ workspace = true
 # mask-before-wake invariant, `docs/src/security/irq.md`).
 #
 # The `test-hooks` feature is on by default. Release builds that enable it
-# are rejected by the `compile_error!` guard in `src/main.rs` (AGENTS.md §1
-# — no hacks; §5.4.5 — fail closed), mirroring the other aarch64 verticals.
+# are rejected by the `compile_error!` guard in `src/main.rs` (no hacks; fail
+# closed), mirroring the other aarch64 verticals.
 [features]
 default = ["test-hooks"]
 test-hooks = []

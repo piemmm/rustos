@@ -14,12 +14,12 @@ workspace = true
 # Bus-agnostic xHCI protocol shared by `drivers/bus/usb` (the concrete
 # PCI host-controller driver) and the arch-neutral user-space keyboard
 # driver. It lives in `lib/` because more than one crate consumes it
-# (`AGENTS.md` §2.2 / §6 / §17.4 — `drivers/* → lib/*` only) and depends
+# (`drivers/* → lib/*` only) and depends
 # only on the stable ABI types in `lib/abi`, so it builds for every
 # Tier-1 target. This is the USB analogue of `lib/virtio`.
 [dependencies]
 tairix-abi = { path = "../abi", version = "=0.0.0" }
-# DMA memory-ordering barriers (`AGENTS.md` §2.2): the controller is a
+# DMA memory-ordering barriers: the controller is a
 # separate, possibly non-I/O-coherent, bus master, so the driver must order
 # its TRB/ring writes before the doorbell that hands them over, and order the
 # event-ring cycle-bit read before the entry body. Arch-specific instruction,
@@ -29,7 +29,7 @@ tairix-dma-barrier = { path = "../dma-barrier", version = "=0.0.0" }
 # enumeration engine runs a report-protocol HID device (so `SET_IDLE` quiesces
 # an idle device instead of it streaming a duplicate report every interval) and
 # rewrites each report-protocol report back into the fixed boot layout the
-# class drivers already consume — one HID decode definition (§2.2), reused
+# class drivers already consume — one HID decode definition, reused
 # rather than a second parser here. No cycle: `lib/hid` does not depend on this
 # crate.
 tairix-hid = { path = "../hid", version = "=0.0.0" }

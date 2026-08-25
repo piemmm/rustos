@@ -31,10 +31,10 @@ path = "src/main.rs"
 # `InitSpawn` seam, the runtime `ProcessSpawn` producer, the device-IRQ wiring,
 # `unlock_service::spawn_if_present`, and the post-mount `AutoloadHook` — and
 # only swaps the audit sink to report PASS on the one-shot
-# `AuditEvent::InputDelivered` witness (`AGENTS.md` §2.2 — no duplication).
+# `AuditEvent::InputDelivered` witness (no duplication).
 # Keeping the QEMU-exit shortcut in a dedicated bin (not a Cargo feature on a
 # production crate) prevents feature unification from leaking it into any
-# production build (`AGENTS.md` §5.4.5 — fail closed).
+# production build (fail closed).
 [target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
 tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
 tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }

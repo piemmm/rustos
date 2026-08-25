@@ -16,7 +16,7 @@ workspace = true
 # downstream crates' unit and integration tests. The feature must not
 # be enabled in production kernel builds — it adds the test double's
 # `BTreeMap` storage to the address-space machinery and serves no
-# purpose outside cargo-test. Per `AGENTS.md` §2.3 the feature flag
+# purpose outside cargo-test. Per the feature flag
 # exists rather than a duplicate definition in every consumer crate.
 host-tests = []
 
@@ -24,23 +24,21 @@ host-tests = []
 # Stage 2.1 — the only kernel/* crate `kernel/mem` is permitted to depend on.
 tairix-sync = { path = "../../lib/sync", version = "=0.0.0" }
 
-# The Arch HAL surface. §17.4 permits `kernel/mem` to name `kernel/arch/api`.
-# The slab allocator's software use-after-free tag check (`AGENTS.md` §19.10)
+# The Arch HAL surface — the one kernel crate `kernel/mem` may name.
+# The slab allocator's software use-after-free tag check
 # shares the architecture-neutral `MemTag` / `next_free_tag` rotation defined
 # there, so a tagged hardware port (Arm MTE) and the software check agree on
-# the tag space — no duplicated tag algebra (`AGENTS.md` §2.2).
+# the tag space — no duplicated tag algebra.
 tairix-arch-api = { path = "../arch/api", version = "=0.0.0" }
 
-# The stable ABI types: `kernel/mem` consumes the `rxe` load-image format
-# (`AGENTS.md` §9 / §19.2) so the loader can map a validated image into an
-# `AddressSpace`. §17.4 permits a kernel subsystem to depend on `lib/*`.
+# The stable ABI types: `kernel/mem` consumes the `rxe` load-image format so
+# the loader can map a validated image into an `AddressSpace`.
 tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }
 
 # Structured logging for the reclaimable-cache audit events
 # (`plans/SMARTRAM.md` SMART9): a cache classification refusal or a
 # detected ledger defect emits a stable `EventId` record in the
-# `kernel/mem` range (`2_000..3_000`). §17.4 permits a kernel subsystem
-# to depend on `lib/*`.
+# `kernel/mem` range (`2_000..3_000`).
 tairix-log = { path = "../../lib/log", version = "=0.0.0" }
 
 # The shared reclaimable-memory model (`plans/SMARTRAM.md`): the
@@ -61,18 +59,17 @@ tairix-compress = { path = "../../lib/compress", version = "=0.0.0" }
 # through the one resolved implementation, so on a core with `DC ZVA` / ERMS it
 # uses the hardware block-zero (self-verified bit-identical to the byte fill
 # before it can be selected). `default-features = false` keeps it allocation-
-# free. §17.4 permits a kernel subsystem to depend on `lib/*`.
+# free.
 tairix-pagezero = { path = "../../lib/pagezero", version = "=0.0.0", default-features = false }
 
-# Audited AEAD for the encrypted-swap layer (`AGENTS.md` §4): pages the
+# Audited AEAD for the encrypted-swap layer: pages the
 # kernel writes to a swap device are sealed with `lib/crypto`'s
 # ChaCha20-Poly1305 wrapper so a swap device never holds plaintext secrets.
-# §17.4 permits a kernel subsystem to depend on `lib/*`; §1/§2.12 require
-# the cipher come from `lib/crypto`, never hand-rolled here.
+# The cipher comes from `lib/crypto`, never hand-rolled here.
 tairix-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
 
 # Sensitive-region zero-on-free is delegated to the audited `zeroize` crate
-# per AGENTS.md §1 ("no hand-rolled crypto", §6 "audited crypto"). The
+# rather than hand-rolled here. The
 # `derive` feature is intentionally omitted: we use the `Zeroize` trait
 # directly on byte buffers, no macro magic.
 zeroize = { version = "1.8.1", default-features = false }
@@ -89,9 +86,9 @@ loom = "0.7"
 # tamper hooks; a self-referencing dev-dependency enables the feature for
 # tests only, mirroring `lib/fdt` and `kernel/sched/*`.
 tairix-kernel-mem = { path = ".", version = "=0.0.0", features = ["host-tests"] }
-# The §19.6 fuzz harness draws its inputs through the shared seed/budget
+# The fuzz harness draws its inputs through the shared seed/budget
 # seam (`tairix_fuzzseed`): one place picks the per-run seed, logs it at
-# the start of the test, and bounds the smoke/soak loop (`AGENTS.md`
-# §2.2). Test scaffolding only; never in a TAIRiX build.
+# the start of the test, and bounds the smoke/soak loop. Test scaffolding only;
+# never in a TAIRiX build.
 tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
 proptest = { version = "=1.5.0", default-features = false, features = ["std"] }

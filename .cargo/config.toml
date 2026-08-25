@@ -26,12 +26,11 @@ rustflags = [
     # `x86_64-unknown-none` cannot lower (`rustc-LLVM ERROR: Do not
     # know how to split the result of this operator!`). The `serial`
     # backend is what the upstream crate ships for freestanding
-    # targets, so pin it explicitly here. `AGENTS.md` §15.10 — every
-    # `--cfg` carries a justifying comment.
+    # targets, so pin it explicitly here.
     "--cfg", "curve25519_dalek_backend=\"serial\"",
     # `chacha20` and `poly1305` (pulled in transitively through
     # `tairix-crypto` → `chacha20poly1305`, which backs the encrypted-swap
-    # layer, `AGENTS.md` §4) unconditionally compile their AVX2/SSE2
+    # layer) unconditionally compile their AVX2/SSE2
     # intrinsics backends on `x86_64`, selecting one at runtime via
     # `cpufeatures`. `x86_64-unknown-none` is a soft-float, SSE-disabled
     # kernel target, and lowering those SIMD intrinsics there crashes the
@@ -40,7 +39,6 @@ rustflags = [
     # escape hatch for exactly this case, so pin the portable backend on
     # this target. (Only `x86_64` ships an always-on intrinsics backend;
     # the other bare-metal targets already use soft by default.)
-    # `AGENTS.md` §15.10 — every `--cfg` carries a justifying comment.
     "--cfg", "chacha20_force_soft",
     "--cfg", "poly1305_force_soft",
 ]

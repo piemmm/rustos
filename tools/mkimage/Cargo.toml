@@ -1,6 +1,6 @@
 [package]
 name = "tairix-mkimage"
-description = "Platform image builders for TAIRiX (AGENTS.md §12)."
+description = "Platform image builders for TAIRiX."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -18,11 +18,11 @@ path = "src/lib.rs"
 name = "tairix-mkimage"
 path = "src/main.rs"
 
-# mkimage is a host-side build tool (AGENTS.md §12): it authors the
+# mkimage is a host-side build tool: it authors the
 # flashable platform images in pure Rust. The partition contents are laid
 # down by the *real* in-tree filesystem drivers — the same code the booted
 # system mounts the volumes with — so the image author and the consumer can
-# never drift (AGENTS.md §2.2). It mirrors how the QEMU vertical fixtures
+# never drift. It mirrors how the QEMU vertical fixtures
 # (`tests/integration/{fat32,arxfs}_image`) author their backing disks.
 [dependencies]
 tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }
@@ -32,20 +32,20 @@ tairix-drv-fs-fat32 = { path = "../../drivers/filesystem/fat32", version = "=0.0
 tairix-drv-fs-arxfs = { path = "../../drivers/filesystem/arxfs", version = "=0.0.0" }
 # The per-installation log-attestation key file is authored through the one
 # `tairix_log::LogAttestationKey` on-disk format, so the image author and the
-# journal principal that later reads it cannot drift (AGENTS.md §2.2).
+# journal principal that later reads it cannot drift.
 tairix-log = { path = "../../lib/log", version = "=0.0.0" }
 # The command store's Help/ trees, discovered from the command-app
 # bundles' own on-disk `Help/` sources and embedded at build time
 # (`tairix_syshelp`), so the image is planted from data — never a
 # hand-maintained per-bundle list here, and no help text is hardcoded into an
-# app crate (AGENTS.md §2.2, §16.5).
+# app crate.
 tairix-syshelp = { path = "../syshelp", version = "=0.0.0" }
 tairix-partition = { path = "../../lib/partition", version = "=0.0.0" }
 tairix-users = { path = "../../lib/users", version = "=0.0.0" }
 # The per-interface network-configuration store is authored through the one
 # `tairix_netconfig` engine, so the image skeleton's `network.conf` and the
-# `netstack`/`configure`/`devmgr` readers of it cannot drift (AGENTS.md
-# §2.2; the empty default document means "no managed interfaces beyond
+# `netstack`/`configure`/`devmgr` readers of it cannot drift (the empty default
+# document means "no managed interfaces beyond
 # loopback", which the first-boot installer later fills in).
 tairix-netconfig = { path = "../../lib/netconfig", version = "=0.0.0" }
 # The machine-wide program-library catalog is derived from the planted

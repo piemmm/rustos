@@ -1,6 +1,6 @@
 [package]
 name = "tairix-test-netstack-wire"
-description = "Shared wire-topology fixture for the end-to-end QEMU netstack verticals. The freestanding guest tail (tests/integration/virtio_qemu_support) and the host-side peer the harness runs (tools/xtask) both configure their protocol engines from these constants, so the two ends of the emulated link agree on addresses, identifiers, and the ping choreography through one source of truth (AGENTS.md §2.2)."
+description = "Shared wire-topology fixture for the end-to-end QEMU netstack verticals. The freestanding guest tail (tests/integration/virtio_qemu_support) and the host-side peer the harness runs (tools/xtask) both configure their protocol engines from these constants, so the two ends of the emulated link agree on addresses, identifiers, and the ping choreography through one source of truth."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

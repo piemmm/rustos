@@ -1,6 +1,6 @@
 [package]
 name = "tairix-browse"
-description = "TAIRiX shared directory-browser engine: the transactional navigation model and themed listing renderer the files app's Run binary and the desktop session's trusted file picker both compose (§2.2, §6 — plans/APPWIN.md AW5)."
+description = "TAIRiX shared directory-browser engine: the transactional navigation model and themed listing renderer the files app's Run binary and the desktop session's trusted file picker both compose (plans/APPWIN.md AW5)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -21,21 +21,21 @@ rt = ["dep:tairix-rt"]
 # For the `rt` feature's `RtLinkReader` only: the userland `fs_*` wrappers.
 tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }
 # The frozen `Errno` the directory source reports failures with; the browser
-# invents no parallel error set for the kernel boundary (§2.2) and never links
-# a kernel or driver crate (§17.4).
+# invents no parallel error set for the kernel boundary and never links
+# a kernel or driver crate.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
 # The one shared filesystem-name spelling: the browser validates a path
 # component and a rename target through `tairix_path` rather than growing a
-# second copy of the "is this a legal name" rule (§2.2).
+# second copy of the "is this a legal name" rule.
 tairix-path = { path = "../path", version = "=0.0.0" }
 # Shared integer screen geometry (`Point`/`Rect`) — the same vocabulary the
-# window manager and taskbar use (§17.4, §2.2).
+# window manager and taskbar use.
 tairix-geometry = { path = "../geometry", version = "=0.0.0" }
-# The single shared theme definition (§10): the browser takes its colours from
+# The single shared theme definition: the browser takes its colours from
 # the active theme so it stays consistent with the window manager and taskbar.
 tairix-theme = { path = "../theme", version = "=0.0.0" }
 # Shared software rasteriser (`Color`/`Surface`) — the same premultiplied-alpha
-# primitives the window manager paints with (§17.4, §2.2).
+# primitives the window manager paints with.
 tairix-raster = { path = "../raster", version = "=0.0.0" }
 # Shared text rasterisation: the built-in bitmap face and glyph blitter the
 # toolbar and entry names are drawn with.
@@ -43,16 +43,16 @@ tairix-font = { path = "../font", version = "=0.0.0" }
 # Shared Reactive Alloy GUI controls: the item view paints entries through the
 # collection controls (`TableRow`/`TableCell`) and clamps its scroll window
 # through the one shared `scroll` geometry, so the file manager and the trusted
-# picker share one themed surface rather than a private row painter (§2.2, §17.4).
+# picker share one themed surface rather than a private row painter.
 tairix-controls = { path = "../controls", version = "=0.0.0" }
 # Shared desktop icon vocabulary: the browser classifies each entry to an
-# `IconKind` (the one file-type classifier the manager and picker share, §2.2),
+# `IconKind` (the one file-type classifier the manager and picker share),
 # and the grid tile draws that glyph. A display hint only; it gates no operation.
 tairix-icon = { path = "../icon", version = "=0.0.0" }
 # Shared pointer/keyboard input vocabulary: the interactive scrollbar consumes
 # the same `InputEvent`/`PointerButton` the window manager and every control
 # use, so the file manager routes a scrollbar press/drag through one input
-# vocabulary rather than a private one (§2.2, §17.4).
+# vocabulary rather than a private one.
 tairix-input = { path = "../input", version = "=0.0.0" }
 
 # The renderer's host tests draw text, so they inject the shared solid test

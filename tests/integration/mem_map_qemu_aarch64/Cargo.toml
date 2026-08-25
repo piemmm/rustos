@@ -22,12 +22,11 @@ workspace = true
 # `unmap_anonymous`, and routes the program's `mem_map` / `mem_unmap` syscalls
 # through it; a fault handler reports the deliberate use-after-unmap data abort
 # as PASS. Any shortfall (the program returning a failure exit code, or no
-# fault) writes a distinct failure finisher or times out (fail-loud,
-# `AGENTS.md` §7).
+# fault) writes a distinct failure finisher or times out (fail-loud).
 #
 # The `test-hooks` feature is on by default. Release builds that enable it are
-# rejected by the `compile_error!` guard in `src/main.rs` (AGENTS.md §1 — no
-# hacks; §5.4.5 — fail closed), mirroring the other EL0 verticals.
+# rejected by the `compile_error!` guard in `src/main.rs` (no
+# hacks; fail closed), mirroring the other EL0 verticals.
 [features]
 default = ["test-hooks"]
 test-hooks = []

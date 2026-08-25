@@ -21,7 +21,7 @@ workspace = true
 # and reports the result through the ARM semihosting finisher. Keeping the
 # QEMU-exit shortcut in a dedicated bin (not a Cargo feature on the arch
 # crate) prevents feature unification from leaking it into any production
-# build (`AGENTS.md` §5.4.5 — fail closed).
+# build (fail closed).
 
 [[bin]]
 name = "tairix-test-stack-arena-qemu-aarch64"
@@ -30,7 +30,7 @@ path = "src/main.rs"
 [target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
 tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
 tairix-itest-finisher = { path = "../finisher", version = "=0.0.0" }
-# The Arch HAL MMU + TLB surface (`AGENTS.md` §17.2): the guard page is
+# The Arch HAL MMU + TLB surface: the guard page is
 # torn down through `tairix_arch_api::mmu::AddressSpace::unmap` and the
 # stale entry flushed through `tairix_arch_api::tlb::TlbShootdown::flush_page`,
 # so the fault-form is proven *through the HAL*.

@@ -17,7 +17,7 @@
 // `%esi` = boot-info physical address; the Rust side (`entry.rs`)
 // re-validates the magic and records which protocol delivered the blob.
 //
-// SAFETY-INVARIANTS (audited per AGENTS.md §10):
+// SAFETY-INVARIANTS:
 //
 //  1. The multiboot2 header sits in `.multiboot_header`, placed by the
 //     linker script (`linker.ld`) within the first 32 KiB of the kernel
@@ -54,15 +54,14 @@
 //     selector 0x10. Both are flat (base 0, limit ignored in 64-bit).
 //  6. On entry to `long_mode_start` interrupts are disabled (CLI is the
 //     bootloader default) and the IDTR is invalid; the Rust side must
-//     install an IDT before enabling interrupts (`AGENTS.md` §10).
+//     install an IDT before enabling interrupts.
 //  7. `tairix_arch_x86_64_main` receives the boot magic (multiboot2 or
 //     PVH) in `%rdi` and the boot-info pointer in `%rsi` (System V
 //     AMD64 ABI). The Rust prologue re-validates the magic before
 //     touching the info blob (validate every input).
 //  8. If `tairix_arch_x86_64_main` ever returns we halt the CPU with
 //     interrupts masked. The Rust contract (`-> !`) makes this branch
-//     unreachable; the `hlt`/`jmp` loop is the belt-and-braces fallback
-//     `AGENTS.md` §2.9 requires.
+//     unreachable; the `hlt`/`jmp` loop is the belt-and-braces fallback.
 //  9. The kernel is a -2 GiB higher-half kernel (`linker.ld`): its Rust
 //     sections are linked at virtual `KERNEL_VMA_BASE (0xFFFFFFFF80000000)
 //     + phys` but loaded into low physical memory. Before the long-mode

@@ -13,7 +13,7 @@ workspace = true
 
 # This bin is the x86_64 ring-3 exercise for the Arch HAL "enter user
 # mode" primitive (`kernel/arch/x86_64/src/userentry.rs`,
-# `tairix_arch_api::EnterUser`, `AGENTS.md` §17.2) — the analogue of the
+# `tairix_arch_api::EnterUser`) — the analogue of the
 # riscv64/aarch64 CC2 round-trips, which already reach the transition
 # through the same HAL handle. It boots the production kernel pipeline
 # and, on `AuditEvent::BootCompleted` (by which point the GDT user
@@ -34,8 +34,8 @@ workspace = true
 #
 # The `test-hooks` feature is on by default for this crate. Release
 # builds that enable it are rejected by the `compile_error!` guard in
-# `src/main.rs` (AGENTS.md §1 — no hacks; §5.4.5 — fail closed; §15 —
-# test affordances stay in test crates), mirroring
+# `src/main.rs` (no hacks; fail closed; — test affordances stay in test
+# crates), mirroring
 # `tairix-test-abi-sys-syscall-qemu`.
 [features]
 default = ["test-hooks"]

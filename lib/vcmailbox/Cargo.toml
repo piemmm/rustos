@@ -1,6 +1,6 @@
 [package]
 name = "tairix-vcmailbox"
-description = "TAIRiX BCM2711 VideoCore firmware mailbox property-channel client: the one definition of the display-size query and framebuffer-allocation protocol (§2.2), shared by the aarch64 port's framebuffer boot console and the rpi_hvs display driver (plans/PI.md P7/P7b)."
+description = "TAIRiX BCM2711 VideoCore firmware mailbox property-channel client: the one definition of the display-size query and framebuffer-allocation protocol, shared by the aarch64 port's framebuffer boot console and the rpi_hvs display driver (plans/PI.md P7/P7b)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

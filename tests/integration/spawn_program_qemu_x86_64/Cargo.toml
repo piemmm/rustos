@@ -30,8 +30,8 @@ workspace = true
 # `qemu_exit::exit_failure`.
 #
 # The `test-hooks` feature is on by default. Release builds that enable it are
-# rejected by the `compile_error!` guard in `src/main.rs` (AGENTS.md §1 — no
-# hacks; §5.4.5 — fail closed), mirroring the other CC3 round-trip tests.
+# rejected by the `compile_error!` guard in `src/main.rs` (no
+# hacks; fail closed), mirroring the other CC3 round-trip tests.
 [features]
 default = ["test-hooks"]
 test-hooks = []

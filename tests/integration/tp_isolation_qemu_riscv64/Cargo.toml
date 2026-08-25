@@ -23,8 +23,8 @@ workspace = true
 # rather than an unmapped id that would fall back safely.
 #
 # The `test-hooks` feature is on by default. Release builds that enable it are
-# rejected by the `compile_error!` guard in `src/main.rs` (AGENTS.md §1 — no
-# hacks; §5.4.5 — fail closed), mirroring the sibling riscv64 verticals.
+# rejected by the `compile_error!` guard in `src/main.rs` (no
+# hacks; fail closed), mirroring the sibling riscv64 verticals.
 [features]
 default = ["test-hooks"]
 test-hooks = []

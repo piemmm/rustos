@@ -28,7 +28,7 @@ path = "src/lib.rs"
 
 # The wasm32 port and the Arch HAL are linked only when building for the
 # browser target; a host build has no dependencies and an empty body
-# (`AGENTS.md` §2.2 — the `itest_wasm32` cfg, not a raw target predicate,
+# (the `itest_wasm32` cfg, not a raw target predicate,
 # selects the kernel body in source).
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tairix-arch-wasm32 = { path = "../../../kernel/arch/wasm32", version = "=0.0.0" }

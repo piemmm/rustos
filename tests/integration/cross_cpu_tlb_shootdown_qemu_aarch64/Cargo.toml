@@ -22,8 +22,7 @@ workspace = true
 # Reaching the PASS finisher proves the broadcast executes on a real
 # two-core machine without faulting. Keeping the QEMU-exit shortcut in a
 # dedicated bin (not a Cargo feature on the arch crate) prevents feature
-# unification from leaking it into any production build (`AGENTS.md`
-# §5.4.5 — fail closed).
+# unification from leaking it into any production build (fail closed).
 
 [[bin]]
 name = "tairix-test-cross-cpu-tlb-shootdown-qemu-aarch64"

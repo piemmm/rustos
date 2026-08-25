@@ -1,6 +1,6 @@
 [package]
 name = "tairix-sysconfig"
-description = "TAIRiX boot-time system-configuration store engine: the one definition of the `/System/Settings/Configuration/system.conf` grammar, its closed key registry, and the fail-closed parse + canonical render every producer and consumer shares (§3 `lib/`)."
+description = "TAIRiX boot-time system-configuration store engine: the one definition of the `/System/Settings/Configuration/system.conf` grammar, its closed key registry, and the fail-closed parse + canonical render every producer and consumer shares (`lib/`)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

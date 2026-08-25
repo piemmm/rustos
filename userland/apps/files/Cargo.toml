@@ -1,6 +1,6 @@
 [package]
 name = "tairix-files"
-description = "TAIRiX filesystem browser app: the `Run` entry-point binary of the on-disk files.app bundle, composing the shared lib/browse engine over the live capability-checked directory source (§10/§16 — PLAN.md Stage 7, plans/APPWIN.md AW3/AW5)."
+description = "TAIRiX filesystem browser app: the `Run` entry-point binary of the on-disk files.app bundle, composing the shared lib/browse engine over the live capability-checked directory source (PLAN.md Stage 7, plans/APPWIN.md AW3/AW5)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,7 +13,7 @@ publish.workspace = true
 # desktop session autostarts as a core component. Its engine — the navigation model,
 # the themed renderer, and the validated path spelling — is the shared
 # `lib/browse` crate (the same engine the desktop session's trusted file
-# picker composes, §2.2/§6), so this package carries no library of its
+# picker composes), so this package carries no library of its
 # own. The binary is a freestanding pure-Rust program on the native
 # Tier-1 targets and an inert host stub elsewhere (see `src/run.rs` /
 # `build.rs`).
@@ -28,11 +28,11 @@ path = "src/run.rs"
 # only what the *program* needs on top.
 [dependencies]
 # The frozen `Errno`, the input/display vocabulary, and the window-channel
-# wire types the binary speaks (§2.2, §17.4).
+# wire types the binary speaks.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The one shared directory-browser engine: `Browser`, the themed
 # `render`, the `VfsDirectorySource` composition, and the canonical
-# browser-view geometry (§2.2, §6).
+# browser-view geometry.
 tairix-browse = { path = "../../../lib/browse", version = "=0.0.0" }
 # Shared integer screen geometry (`Point`/`Rect`/`Scale`) for the render
 # viewport, the rail's hit-test, and the inline rename editor's overlay.
@@ -84,7 +84,7 @@ tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0", features =
 tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = ["program"] }
 # The shared Reactive Alloy GUI controls: the in-place rename editor is the
 # one shared `TextField` (its caret/selection editor and validation-message
-# surface), never a browser-private text box (§2.2, §17.4).
+# surface), never a browser-private text box.
 tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
 # The desktop input vocabulary (`Key`/`NamedKey`/`Modifiers`) the shared
 # controls consume; the binary maps the window channel's wire `KeyInput`

@@ -15,8 +15,8 @@ workspace = true
 path = "src/lib.rs"
 
 # Like the bare-metal ports (`kernel/arch/{x86_64,aarch64,riscv64}`),
-# this crate is a pure Arch HAL implementation (`AGENTS.md` §17.2 /
-# §17.4): it names only the Arch HAL (`kernel/arch/api`) and `lib/*`,
+# this crate is a pure Arch HAL implementation: it names only the Arch HAL
+# (`kernel/arch/api`) and `lib/*`,
 # never a concrete kernel subsystem. `WasmArch` implements
 # `tairix_arch_api::SchedulerArch`; the downstream boot consumer wraps it
 # in a `kernel/core::KernelArch` type.
@@ -28,12 +28,12 @@ path = "src/lib.rs"
 # `cfg(target_arch = "wasm32")`. The remainder — the `WasmArch` struct,
 # the cooperative-scheduler bookkeeping, the WASM-memory isolation
 # model, and the syscall-argument marshalling — builds on the host so
-# its unit tests run under `cargo test` (`AGENTS.md` §7).
+# its unit tests run under `cargo test`.
 [dependencies]
 tairix-arch-api = { path = "../api", version = "=0.0.0" }
 tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
 # `tairix-abi` provides the frozen `SYSCALL_MAX_ARGS = 6` constant the
 # syscall entry path marshals user arguments into — the same `lib/*`
-# dependency the other arch ports take (`AGENTS.md` §17.4).
+# dependency the other arch ports take.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }

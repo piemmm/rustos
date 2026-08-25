@@ -1,6 +1,6 @@
 [package]
 name = "tairix-image"
-description = "First-party TAIRiX raster-image decoding: complete, fail-closed PNG and JPEG decoders for untrusted artwork, with reduced-scale JPEG decode for wallpapers (§3 `lib/`)."
+description = "First-party TAIRiX raster-image decoding: complete, fail-closed PNG and JPEG decoders for untrusted artwork, with reduced-scale JPEG decode for wallpapers (`lib/`)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -19,7 +19,7 @@ workspace = true
 tairix-compress = { path = "../compress", version = "=0.0.0" }
 
 [dev-dependencies]
-# The §19.6 fuzz harness draws its inputs through the shared seed/budget
+# The fuzz harness draws its inputs through the shared seed/budget
 # seam: one place picks the per-run seed, logs it, and bounds the smoke/soak
 # loop. Test scaffolding only; never in a TAIRiX build.
 tairix-fuzzseed = { path = "../../tests/fuzzseed" }

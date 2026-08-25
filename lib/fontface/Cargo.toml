@@ -1,6 +1,6 @@
 [package]
 name = "tairix-fontface"
-description = "TAIRiX shared TrueType glyph-outline engine: the one parser + anti-aliased non-zero-winding rasteriser that turns a committed TrueType face into 4-bit coverage bitmaps at any requested pixel size, plus the merged-family codepoint resolution the atlas generator and the runtime font both build on (§6, §2.2)."
+description = "TAIRiX shared TrueType glyph-outline engine: the one parser + anti-aliased non-zero-winding rasteriser that turns a committed TrueType face into 4-bit coverage bitmaps at any requested pixel size, plus the merged-family codepoint resolution the atlas generator and the runtime font both build on."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -19,5 +19,5 @@ tairix-abi = { path = "../abi", version = "=0.0.0" }
 
 [dev-dependencies]
 # The shared per-run PRNG seed + wall-clock budget seam for the deterministic
-# `fuzz_face` face-parser/rasteriser fuzz harness (§19.6).
+# `fuzz_face` face-parser/rasteriser fuzz harness.
 tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

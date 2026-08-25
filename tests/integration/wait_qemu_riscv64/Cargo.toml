@@ -1,6 +1,6 @@
 [package]
 name = "tairix-test-wait-qemu-riscv64"
-description = "plans/PI.md stage RV-X4 QEMU integration test (riscv64 sibling of wait_qemu_aarch64 / _x86_64): prove a parent process can wait on, reap, and read the exit code of its own child under the live scheduler on the riscv64 virt board. The build script compiles the pure-Rust EL0 program (tests/integration/wait_program) twice (child + parent roles) PIE and converts each to an rxe blob; the kernel materialises two hardware-isolated Sv39 U-mode address spaces with tairix_kernel_core::spawn_image, registers the parent/child link with a KernelProcessWait producer, admits each as a resumable user kthread, and drains the cooperative step loop while a dispatch callback routes wait/exit through the producer and reschedule_current — PASS once the parent reaped the child, read back its exit code, and exited 0; a wrong code, a missing reap, an unexpected syscall, or a stall flips qemu_exit::exit_failure or times out (fail-loud, AGENTS.md §7)."
+description = "plans/PI.md stage RV-X4 QEMU integration test (riscv64 sibling of wait_qemu_aarch64 / _x86_64): prove a parent process can wait on, reap, and read the exit code of its own child under the live scheduler on the riscv64 virt board. The build script compiles the pure-Rust EL0 program (tests/integration/wait_program) twice (child + parent roles) PIE and converts each to an rxe blob; the kernel materialises two hardware-isolated Sv39 U-mode address spaces with tairix_kernel_core::spawn_image, registers the parent/child link with a KernelProcessWait producer, admits each as a resumable user kthread, and drains the cooperative step loop while a dispatch callback routes wait/exit through the producer and reschedule_current — PASS once the parent reaped the child, read back its exit code, and exited 0; a wrong code, a missing reap, an unexpected syscall, or a stall flips qemu_exit::exit_failure or times out (fail-loud)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,8 +12,8 @@ publish = false
 workspace = true
 
 # The `test-hooks` feature is on by default. Release builds that enable it are
-# rejected by the `compile_error!` guard in `src/main.rs` (AGENTS.md §1 — no
-# hacks; §5.4.5 — fail closed), mirroring the other EL0 verticals.
+# rejected by the `compile_error!` guard in `src/main.rs` (no
+# hacks; fail closed), mirroring the other EL0 verticals.
 [features]
 default = ["test-hooks"]
 test-hooks = []

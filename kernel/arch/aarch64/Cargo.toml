@@ -26,7 +26,7 @@ watchdog-diagnostics = []
 path = "src/lib.rs"
 
 # Like `kernel/arch/x86_64` and `kernel/arch/riscv64`, this crate is a
-# pure Arch HAL implementation (`AGENTS.md` §17.2 / §17.4): it names only
+# pure Arch HAL implementation: it names only
 # the Arch HAL (`kernel/arch/api`) and `lib/*`, never a concrete kernel
 # subsystem. `Aarch64Arch` implements `tairix_arch_api::SchedulerArch`;
 # the downstream boot consumer wraps it in its own `KernelArch` type.
@@ -42,14 +42,14 @@ tairix-arch-api = { path = "../api", version = "=0.0.0" }
 tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
 # `tairix-abi` provides the frozen `SYSCALL_MAX_ARGS = 6` constant the
 # `svc` entry path marshals user arguments into — the same dependency
-# the x86_64 and riscv64 ports take. It is a `lib/*` crate, so this edge
-# is permitted by `AGENTS.md` §17.4.
+# the x86_64 and riscv64 ports take. It is a `lib/*` crate, so the layering
+# permits this edge.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-# The flattened-device-tree parser is architecture-neutral and shared
-# (`AGENTS.md` §2.2); this port builds its `fdt`/`platform` discovery on it.
+# The flattened-device-tree parser is architecture-neutral and shared; this
+# port builds its `fdt`/`platform` discovery on it.
 tairix-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
-# The shared, architecture-neutral framebuffer text-console engine
-# (`AGENTS.md` §2.2 / §2.20 / §2.21): the full ANSI/VT/xterm-256color
+# The shared, architecture-neutral framebuffer text-console engine: the full
+# ANSI/VT/xterm-256color
 # terminal (`Geometry`/`TextConsole`/`DirtyBand`, palette, glyph blit,
 # scroll) lives here so every arch port renders through one definition;
 # this port supplies only the board-specific surface discovery below. It is
@@ -67,11 +67,11 @@ tairix-conout = { path = "../../../lib/conout", version = "=0.0.0" }
 # primitive plugs into. Needs only `core`, so the freestanding boot binaries
 # here still link no global allocator.
 tairix-sync = { path = "../../../lib/sync", version = "=0.0.0" }
-# The shared VideoCore firmware mailbox protocol (`AGENTS.md` §2.2):
+# The shared VideoCore firmware mailbox protocol:
 # the framebuffer boot console's display probe + surface allocation,
 # also spoken by drivers/display/rpi_hvs.
 tairix-vcmailbox = { path = "../../../lib/vcmailbox", version = "=0.0.0" }
-# The shared QEMU fw_cfg DMA client (`AGENTS.md` §2.2): the framebuffer
+# The shared QEMU fw_cfg DMA client: the framebuffer
 # boot console's `virt`-board ramfb fallback programs the scan-out
 # through it, the same protocol definition the display verticals use.
 tairix-fwcfg = { path = "../../../lib/fwcfg", version = "=0.0.0" }
@@ -81,7 +81,7 @@ tairix-fwcfg = { path = "../../../lib/fwcfg", version = "=0.0.0" }
 # tests (off in production builds — `[dev-dependencies]` only).
 tairix-fdt = { path = "../../../lib/fdt", version = "=0.0.0", features = ["test-fixtures"] }
 # The protocol-faithful mock firmware for the video boot-console host
-# tests (QEMU does not model the VideoCore, `AGENTS.md` §2.1).
+# tests (QEMU does not model the VideoCore).
 tairix-vcmailbox = { path = "../../../lib/vcmailbox", version = "=0.0.0", features = [
     "mock-firmware",
 ] }

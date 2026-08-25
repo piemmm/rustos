@@ -5,7 +5,7 @@
 #
 # Calling convention: RISC-V integer ABI. a0 = prev, a1 = next.
 #
-# SAFETY-INVARIANTS (audited per AGENTS.md §10):
+# SAFETY-INVARIANTS:
 #
 #   1. Called with `prev` and `next` non-null. The Rust-side safe
 #      wrapper `crate::context::switch` documents this contract;

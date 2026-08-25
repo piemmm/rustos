@@ -1,6 +1,6 @@
 [package]
 name = "tairix-crc32c"
-description = "TAIRiX CRC-32C (Castagnoli) checksum: the one first-party definition of the fast, non-cryptographic block-integrity checksum, with a portable table-driven baseline and per-arch hardware-accelerated candidates (aarch64 crc32c*, x86_64 SSE4.2 crc32 — both GPR-based) selected and self-verified through lib/cpuops from a delivered CpuFeatureSet, always falling closed to the portable baseline. no_std, no cfg(target_arch) (build.rs-emitted per-arch cfg, the lib/abi-trap precedent), fuzzed against the reference (AGENTS.md §2.2/§2.16/§2.20; plans/FIX-HARDWARE-FEATURES.md P2)."
+description = "TAIRiX CRC-32C (Castagnoli) checksum: the one first-party definition of the fast, non-cryptographic block-integrity checksum, with a portable table-driven baseline and per-arch hardware-accelerated candidates (aarch64 crc32c*, x86_64 SSE4.2 crc32 — both GPR-based) selected and self-verified through lib/cpuops from a delivered CpuFeatureSet, always falling closed to the portable baseline. no_std, no cfg(target_arch) (build.rs-emitted per-arch cfg, the lib/abi-trap precedent), fuzzed against the reference (plans/FIX-HARDWARE-FEATURES.md P2)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,20 +14,20 @@ workspace = true
 [dependencies]
 # The self-optimising dispatch framework: the registry, capability gate,
 # mandatory self-verify, and fail-closed baseline selection are written once
-# there and reused here (§2.2), never re-implemented per accelerated op.
+# there and reused here, never re-implemented per accelerated op.
 # `default-features = false` drops the framework's optional heap-backed
 # `OpsTables` (unused here — this crate only *selects*), so the checksum stays
-# allocation-free and never forces a global allocator onto a consumer (§2.16).
+# allocation-free and never forces a global allocator onto a consumer.
 tairix-cpuops = { path = "../cpuops", version = "=0.0.0", default-features = false }
 # The arch-neutral capability vocabulary (`CpuFeature`/`CpuFeatureSet`) a
 # candidate's required-feature gate is expressed in.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
 # The set-once cell holding the resolved implementation for the whole process
 # (a fn pointer is `Copy + Send + Sync`), so no ad-hoc atomic/`unsafe` is
-# rolled here (§2.2).
+# rolled here.
 tairix-sync = { path = "../sync", version = "=0.0.0" }
 
 [dev-dependencies]
-# Shared per-run seed / budget seam for the §19.6 fuzz harness (never in a
+# Shared per-run seed / budget seam for the fuzz harness (never in a
 # shipping build).
 tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

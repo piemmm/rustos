@@ -5,7 +5,7 @@
 // (`smp.rs::AP_TRAMPOLINE_PHYS`, currently `0x8000`) before sending the
 // INIT-SIPI-SIPI sequence documented in Intel SDM Vol 3A §8.4.4.1.
 //
-// SAFETY-INVARIANTS (audited per AGENTS.md §10):
+// SAFETY-INVARIANTS:
 //
 //  1. The payload is assembled into a dedicated `.ap_trampoline` section
 //     so it is loaded into the kernel image as opaque bytes. All
@@ -38,7 +38,7 @@
 //        %rsi = AP_TRAMPOLINE_PHYS + AP_BOOT_SLOT_OFFSET
 //        %rsp = slot.stack_top (16-byte aligned by the BSP installer)
 //     The Rust callee is `-> !`. If it ever returns the trampoline halts
-//     the AP with interrupts masked (belt-and-braces per AGENTS.md §2.9).
+//     the AP with interrupts masked (belt-and-braces).
 //  8. Interrupts are disabled on the AP throughout this payload. The
 //     IDTR is invalid; the Rust-side `ap_entry` must install one (or
 //     keep interrupts masked) before re-enabling them.

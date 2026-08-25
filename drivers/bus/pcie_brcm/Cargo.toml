@@ -1,6 +1,6 @@
 [package]
 name = "tairix-drv-bus-pcie-brcm"
-description = "TAIRiX autoloaded user-space BCM2711 (Raspberry Pi 4) PCIe root-complex bus driver: binds the discovered brcm,bcm2711-pcie node, trains the link, enumerates the VL805 USB host controller behind the bridge, assigns/enables its register BAR, and publishes it into the live hardware tree as a bindable xHCI node (AGENTS.md §4 / §18; plans/PI.md P10 D5b.2b)."
+description = "TAIRiX autoloaded user-space BCM2711 (Raspberry Pi 4) PCIe root-complex bus driver: binds the discovered brcm,bcm2711-pcie node, trains the link, enumerates the VL805 USB host controller behind the bridge, assigns/enables its register BAR, and publishes it into the live hardware tree as a bindable xHCI node (plans/PI.md P10 D5b.2b)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,19 +12,18 @@ publish.workspace = true
 workspace = true
 
 # This driver crate has two targets. The host-testable device logic — the
-# BCM2711 PCIe root-complex bring-up engine (`BrcmPcieRc`), the §18.3
+# BCM2711 PCIe root-complex bring-up engine (`BrcmPcieRc`), the
 # `BIND_KEYS` match table, and the `wiring` (`pcie_bringup_from_resources` +
 # `emit_vl805_node`) — lives in the `lib` target (`src/lib.rs`), co-located *in
-# the driver* because a BCM2711 PCIe bus driver sits above the §18.6 bootstrap
+# the driver* because a BCM2711 PCIe bus driver sits above the bootstrap
 # floor (the kernel floor is the storage path only) and so has no charter-legal
-# non-driver consumer for a `lib/*` device-support crate (`AGENTS.md` §2.22).
+# non-driver consumer for a `lib/*` device-support crate.
 # The `Run` entry-point binary (`src/main.rs`) is the bundle installed under
 # `/System/Drivers/` and autoloaded into user space by `devmgr` when the
-# `brcm,bcm2711-pcie` node is discovered (`AGENTS.md` §18). It links the
+# `brcm,bcm2711-pcie` node is discovered. It links the
 # userland runtime `tairix-rt`, so those bin-only deps are pulled in **only**
 # for the bare-metal targets the binary is built for; on the host the binary is
-# an inert stub and only the `lib` target (and its host tests) compiles
-# (`AGENTS.md` §2.2).
+# an inert stub and only the `lib` target (and its host tests) compiles.
 
 # The device-logic dependencies the `lib` target needs on every target (host
 # tests + the freestanding build alike).
@@ -32,7 +31,7 @@ workspace = true
 # The frozen `abi-v1` surface: the `DriverHost` / `RegisterWindow` / `MmioMapper`
 # seams the bring-up runs over, the `HwNode` / `HwResource` / `HwMatchKey`
 # vocabulary the controller node is published with, and the `CapabilityId` /
-# `DriverError` types it fails closed with — one ABI definition (§2.2).
+# `DriverError` types it fails closed with — one ABI definition.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The PCI/PCIe configuration-access mechanism + shared bus-driver locate/BAR
 # primitives (`mechanism_brcm`, `find_function_by_class`, `assign_and_map_bar`,
@@ -41,20 +40,20 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-pci = { path = "../../../lib/pci", version = "=0.0.0" }
 # The xHCI-protocol facts the published node's grants are sized by:
 # `XHCI_BAR_INDEX` (the controller's register BAR), one definition shared
-# with the xHCI driver (`AGENTS.md` §2.2).
+# with the xHCI driver.
 tairix-usb = { path = "../../../lib/usb", version = "=0.0.0" }
 
 # Everything the freestanding program links beyond the device logic is pulled
 # in only for the bare-metal targets the binary is actually built for; on the
 # host the binary is an inert stub.
 [target.'cfg(target_os = "none")'.dependencies]
-# The capability-set type the rt-backed `DriverHost` is built over (§5.2).
+# The capability-set type the rt-backed `DriverHost` is built over.
 tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 # The user-space driver runtime: turns the kernel-issued device-resource grants
 # into the `DriverHost` (`mmio_map` / `resource_grants` / `hw_emit_node` over
-# the syscall surface, §5.4).
+# the syscall surface).
 tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
-# The pure-Rust userland runtime (`AGENTS.md` §1 / §16.4): `_start`, the stack
-# canary §19.2, the panic handler, the syscall wrappers, the `ClockDelay`, and
+# The pure-Rust userland runtime: `_start`, the stack
+# canary, the panic handler, the syscall wrappers, the `ClockDelay`, and
 # `yield_now`.
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }

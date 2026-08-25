@@ -26,11 +26,11 @@ workspace = true
 # (`syscall_entry::set_kernel_rsp0`), and drives the cooperative `step` loop;
 # the dispatch callback maps the task's `yield`/`exit` to `reschedule_current`.
 # Any shortfall (an unexpected syscall, a wrong-count drain, or a deadlock)
-# flips `qemu_exit::exit_failure` or times out (fail-loud, `AGENTS.md` §7).
+# flips `qemu_exit::exit_failure` or times out (fail-loud).
 #
 # The `test-hooks` feature is on by default. Release builds that enable it are
-# rejected by the `compile_error!` guard in `src/main.rs` (AGENTS.md §1 — no
-# hacks; §5.4.5 — fail closed), mirroring the other EL0 verticals.
+# rejected by the `compile_error!` guard in `src/main.rs` (no
+# hacks; fail closed), mirroring the other EL0 verticals.
 [features]
 default = ["test-hooks"]
 test-hooks = []

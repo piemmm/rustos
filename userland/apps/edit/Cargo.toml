@@ -1,6 +1,6 @@
 [package]
 name = "tairix-edit"
-description = "TAIRiX `edit`: a full-screen curses text editor in the spirit of the QuickBasic/MS-DOS editor (§3 `userland/apps/` — plans/APPS.md)."
+description = "TAIRiX `edit`: a full-screen curses text editor in the spirit of the QuickBasic/MS-DOS editor (`userland/apps/` — plans/APPS.md)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -33,7 +33,7 @@ path = "src/run.rs"
 # refusal; the tool invents no parallel error set and never links a kernel
 # or driver crate.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-# The OS-provided Terminal/TUI library (§16.4): the curses screen model,
+# The OS-provided Terminal/TUI library: the curses screen model,
 # minimal-diff renderer, and typed input. `edit` draws through it instead of
 # emitting escape sequences by hand.
 tairix-curses = { path = "../../../lib/curses", version = "=0.0.0" }

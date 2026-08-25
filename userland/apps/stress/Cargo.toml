@@ -1,6 +1,6 @@
 [package]
 name = "tairix-stress"
-description = "TAIRiX `stress`: a load-generation command app in the spirit of the established `stress`/`stress-ng` surface — an unswappable controller spawning swappable CPU/memory/I-O/disk/cache workers, with overcommit, timeout, signal teardown, and a `sysmon` monitor option (§3 `userland/apps/` — `plans/STRESSTEST.md` ST5)."
+description = "TAIRiX `stress`: a load-generation command app in the spirit of the established `stress`/`stress-ng` surface — an unswappable controller spawning swappable CPU/memory/I-O/disk/cache workers, with overcommit, timeout, signal teardown, and a `sysmon` monitor option (`userland/apps/` — `plans/STRESSTEST.md` ST5)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -32,11 +32,11 @@ path = "src/run.rs"
 [dependencies]
 # The frozen `Errno`, the `Signal` set and its termination statuses, the
 # spawn/wait/waitset vocabulary, and the fd-3 `StdInfoRecord` this tool
-# emits; `stress` invents no parallel error set (§2.2) and never links a
-# kernel or driver crate (§17.4).
+# emits; `stress` invents no parallel error set and never links a
+# kernel or driver crate.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The shared System Information API client helpers: the mount-table walk the
-# disk-worker sizing reads its free-space figure from (§16.6) — never a
+# disk-worker sizing reads its free-space figure from — never a
 # second data channel.
 tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
 # The one help engine: locale fallback, the bounded structured-Markdown

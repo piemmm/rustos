@@ -1,6 +1,6 @@
 [package]
 name = "tairix-cc"
-description = "Audited, version-pinned, checksummed C toolchain wrapper (clang + ld.lld) used to build the CCOMPAT end-to-end C program against the abi-v1 C surface. Host-only build glue (AGENTS.md §12); TAIRiX itself stays Rust-only (§1)."
+description = "Audited, version-pinned, checksummed C toolchain wrapper (clang + ld.lld) used to build the CCOMPAT end-to-end C program against the abi-v1 C surface. Host-only build glue; TAIRiX itself stays Rust-only."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,7 +15,7 @@ workspace = true
 path = "src/lib.rs"
 
 # The SHA-256 used to checksum every external toolchain binary comes from the
-# audited `lib/crypto` (AGENTS.md §2.12 — never hand-roll crypto), not a
+# audited `lib/crypto` (never hand-roll crypto), not a
 # bespoke hasher. The crate is host-only build glue invoked from a QEMU
 # integration test's build script; it never links into the OS image.
 [dependencies]

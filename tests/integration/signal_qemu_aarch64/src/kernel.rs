@@ -526,11 +526,7 @@ fn u64_to_decimal(mut value: u64, buf: &mut [u8; 20]) -> &[u8] {
     let mut i = buf.len();
     while value > 0 {
         i -= 1;
-        // A decimal digit is `value % 10`, which is always below ten.
-        #[allow(clippy::cast_possible_truncation)]
-        {
-            buf[i] = b'0' + (value % 10) as u8;
-        }
+        buf[i] = b'0' + (value % 10) as u8;
         value /= 10;
     }
     &buf[i..]

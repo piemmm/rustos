@@ -17,7 +17,7 @@ workspace = true
 # so that on observing `AuditEvent::BootCompleted` (`EventId(4004)`) it:
 #
 #   1. loads the signed PS/2 driver `.rxe` through `tairix_drvhost::Host`
-#      (exercising the §8 load gate against the real
+#      (exercising the load gate against the real
 #      `tairix_drv_input_ps2::register` entry point), then
 #   2. mints the x86_64 `PortIo8` backend (`tairix_arch_x86_64::pio`),
 #      binds the keyboard line (ISA IRQ-1 -> GSI 1) in the production

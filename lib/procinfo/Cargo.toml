@@ -1,6 +1,6 @@
 [package]
 name = "tairix-procinfo"
-description = "TAIRiX shared System Information API client helpers: the request/response seams and the process-list paging + render shared by the `sysinfo` and `ps` tools, plus the userspace `info:`/`stats:` resolver that maps a parsed `resref` reference onto a sysinfo query and returns the ALIAS §14 response envelope (§6, §16.6 — `PLAN.md` Stage 6)."
+description = "TAIRiX shared System Information API client helpers: the request/response seams and the process-list paging + render shared by the `sysinfo` and `ps` tools, plus the userspace `info:`/`stats:` resolver that maps a parsed `resref` reference onto a sysinfo query and returns the ALIAS response envelope (`PLAN.md` Stage 6)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -23,20 +23,19 @@ program = ["dep:tairix-rt"]
 [dependencies]
 # The frozen `sysinfo-v1` wire surface plus the stable `Errno`: this crate
 # builds the typed request and decodes the typed process-list response
-# through these ABI types and invents no parallel format or error set
-# (§2.2, §16.6). As a `lib/*` crate it depends only on other `lib/*` crates
-# (§17.4).
+# through these ABI types and invents no parallel format or error set. As a
+# `lib/*` crate it depends only on other `lib/*` crates.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
 
 # The single shared resource-reference parser: the `info:`/`stats:` resolver
 # dispatches on a parsed `ResourceRef` rather than re-lexing references, so it
-# never embeds a second reference parser (§2.2).
+# never embeds a second reference parser.
 tairix-resref = { path = "../resref", version = "=0.0.0" }
 
 # The shared reclaimable-memory model: `pressure` publishes the band it reads
 # into a `ReportedPressure` gauge, so a caching program learns the band through
 # the one model every other cache on the machine obeys rather than a private
-# copy of the band vocabulary (§2.2).
+# copy of the band vocabulary.
 tairix-reclaim = { path = "../reclaim", version = "=0.0.0" }
 
 # The `program`-feature client seams (`IpcTransport`, `RtOutput`) link the

@@ -11,7 +11,7 @@
 //! and the user-space input-driver process compose it without a
 //! `drivers/*`→`drivers/*` dependency (the
 //! virtio analogue of `lib/hid` ↔ `drivers/input/usb_kbd`). The thin
-//! `drivers/input/virtio_input` crate keeps only the §8 `register` entry
+//! `drivers/input/virtio_input` crate keeps only the `register` entry
 //! and the bind table built from [`VIRTIO_INPUT_DEVICE_ID`].
 //!
 //! # Wire protocol

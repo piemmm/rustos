@@ -1,6 +1,6 @@
 [package]
 name = "tairix-test-encrypted-root-image"
-description = "Shared whole-disk encrypted-root image fixture for the plans/PI.md P11 Chunk B-2 root-mount->login QEMU vertical. Composes the same on-disk artefacts tools/mkimage writes a real installable disk from — an MBR table, a FAT32 boot partition carrying the plaintext root.unlock key-derivation descriptor, and a passphrase-derived encrypted ARXFS root carrying /System/Security/Users — through the real in-tree drivers, so the fixture and the booted system cannot drift (AGENTS.md §2.2). The host harness (xtask) plants build_image's bytes on the test's virtio-blk backing; the freestanding guest tail drives the production interactive unlock policy over that disk."
+description = "Shared whole-disk encrypted-root image fixture for the plans/PI.md P11 Chunk B-2 root-mount->login QEMU vertical. Composes the same on-disk artefacts tools/mkimage writes a real installable disk from — an MBR table, a FAT32 boot partition carrying the plaintext root.unlock key-derivation descriptor, and a passphrase-derived encrypted ARXFS root carrying /System/Security/Users — through the real in-tree drivers, so the fixture and the booted system cannot drift. The host harness (xtask) plants build_image's bytes on the test's virtio-blk backing; the freestanding guest tail drives the production interactive unlock policy over that disk."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -20,8 +20,7 @@ path = "src/lib.rs"
 # and the planted account to drive the unlock and assert authentication).
 # The on-disk artefacts are laid down by the real in-tree drivers (FAT32 +
 # ARXFS) and the real descriptor + partition-table encoders, so the
-# fixture cannot drift from the system that mounts the disk (`AGENTS.md`
-# §2.2).
+# fixture cannot drift from the system that mounts the disk.
 [dependencies]
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-drv-fs-fat32 = { path = "../../../drivers/filesystem/fat32", version = "=0.0.0" }
@@ -32,7 +31,7 @@ tairix-drv-fs-arxfs = { path = "../../../drivers/filesystem/arxfs", version = "=
 # exactly as `tools/mkimage` plants it on a real image — so the session
 # vertical can type `man man` and `ls` against the same bytes a real image
 # ships, with no hand-maintained per-bundle list and no help hardcoded into
-# an app crate (AGENTS.md §2.2, §16.5). It is `no_std` (data only), so it
+# an app crate. It is `no_std` (data only), so it
 # links into the freestanding guest tail unchanged.
 tairix-syshelp = { path = "../../../tools/syshelp", version = "=0.0.0" }
 tairix-partition = { path = "../../../lib/partition", version = "=0.0.0" }

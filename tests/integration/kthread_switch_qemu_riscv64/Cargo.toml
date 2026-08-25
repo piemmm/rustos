@@ -18,13 +18,13 @@ workspace = true
 # `tairix-kernel-core` kthread runtime, the `tairix-arch-riscv64` port,
 # and the default `tairix-kernel-sched-eevdf` policy (matching
 # `kernel-core`'s default scheduler feature — selecting a different policy
-# would trip the §17.1 "exactly one policy" guard under feature
+# would trip the "exactly one policy" guard under feature
 # unification), then drives the cooperative `step` loop over two kthreads
-# whose bodies `yield_now` back and forth, so the §17.2
+# whose bodies `yield_now` back and forth, so the
 # `ContextSwitch::switch` primitive runs on a production scheduling path.
 # Keeping the QEMU-exit shortcut in a dedicated bin (not a Cargo feature
 # on a library crate) prevents feature unification from leaking it into
-# any production build (`AGENTS.md` §5.4.5 — fail closed).
+# any production build (fail closed).
 
 [[bin]]
 name = "tairix-test-kthread-switch-qemu-riscv64"

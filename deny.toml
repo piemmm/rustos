@@ -40,12 +40,12 @@ wildcards = "deny"
 # First-party `path` dependencies legitimately omit a version (a crate
 # depending on itself with extra features for its own test fixtures, e.g.
 # `lib/fdt`'s `test-fixtures` dev-dependency). Those are not the
-# supply-chain risk the wildcard ban targets (§19.3) — that risk is
+# supply-chain risk the wildcard ban targets — that risk is
 # unpinned *registry* crates — so exempt path deps while still denying
 # wildcard versions on anything fetched from a registry.
 allow-wildcard-paths = true
 highlight = "all"
-# Crates explicitly forbidden by `AGENTS.md` §1: hand-rolled crypto and
+# Crates the charter forbids outright: hand-rolled crypto and
 # unaudited globals. Extend this list when a problem dependency is found.
 deny = []
 skip = []
@@ -60,8 +60,8 @@ skip-tree = []
 # unification cannot leak QEMU-exit behaviour or any other test-only
 # branch into the shipping kernel image. This rule is the
 # cargo-deny half of the compile-time `compile_error!` guard the
-# test bin carries (`AGENTS.md` §1 — no hacks; §5.4.5 — fail
-# closed; §15 — test affordances stay in test crates).
+# test bin carries (no hacks; fail
+# closed; test affordances stay in test crates).
 [[bans.features]]
 crate = "tairix-kernel"
 deny = ["test-hooks"]

@@ -1,6 +1,6 @@
 [package]
 name = "tairix-appmgr"
-description = "TAIRiX application-manager service: loads and launches an installed `/Apps/<Name>.app/` bundle for a user through the shared `lib/appload` load gate (validates the fixed layout, verifies the signed `AppInfo` manifest and content hash, intersects capabilities with the user's grants, enforces the dynamic-loader shared-library policy) — Stage 6, `AGENTS.md` §16.4, §16.5, §17.4."
+description = "TAIRiX application-manager service: loads and launches an installed `/Apps/<Name>.app/` bundle for a user through the shared `lib/appload` load gate (validates the fixed layout, verifies the signed `AppInfo` manifest and content hash, intersects capabilities with the user's grants, enforces the dynamic-loader shared-library policy) — Stage 6, "
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,5 +15,5 @@ workspace = true
 # The shared bundle load gate (`lib/appload`): the one place a bundle is
 # judged, used by both this service and the kernel boot-floor spawn path so
 # the security-relevant layout/signature/capability policy is never
-# re-implemented (§2.2, §17.4). `appmgr` is its user-space consumer.
+# re-implemented. `appmgr` is its user-space consumer.
 tairix-appload = { path = "../../../lib/appload", version = "=0.0.0" }

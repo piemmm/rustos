@@ -2,9 +2,9 @@
 # lib.sh — shared helpers for the TAIRiX CI/build-host scripts.
 #
 # This file is *sourced*, never executed. It centralises the three things
-# every CI-host script needs (AGENTS.md §2.2 — no duplication): the pinned
+# every CI-host script needs (no duplication): the pinned
 # toolchain on PATH, the repository root, and a log directory that lives
-# OUTSIDE the source tree (AGENTS.md §3 — no file may exist outside the
+# OUTSIDE the source tree (no file may exist outside the
 # defined layout).
 #
 # Every value is overridable from the environment so the same scripts drive a
@@ -16,7 +16,7 @@
 TAIRIX_CI_REPO="${TAIRIX_CI_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 
 # Where run logs land. Deliberately outside the repo: CI artefacts must not
-# land in the tracked tree (AGENTS.md §3).
+# land in the tracked tree.
 TAIRIX_CI_LOGDIR="${TAIRIX_CI_LOGDIR:-$HOME/ci-logs/tairix}"
 
 # The branch a dedicated CI host tracks. Only consulted when TAIRIX_CI_SYNC=1.

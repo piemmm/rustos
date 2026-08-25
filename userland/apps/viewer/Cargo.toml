@@ -9,16 +9,16 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-# The frozen `Errno` the viewer's seams report failures with (§2.2).
+# The frozen `Errno` the viewer's seams report failures with.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-# The single shared theme definition (§10): the viewer takes its colours
+# The single shared theme definition: the viewer takes its colours
 # from the active theme so it stays consistent with the desktop.
 tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
 # Shared software rasteriser (`Surface`) — the same premultiplied-alpha
-# primitives the window manager paints with (§17.4, §2.2).
+# primitives the window manager paints with.
 tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
 # Shared text rasterisation: the built-in monospace face and glyph
-# blitter the content lines are drawn with (§16.4, §17.4).
+# blitter the content lines are drawn with.
 tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
 # The shared Reactive Alloy scroll geometry engine and drawn controls
 # (plans/GUI-CONTROLS-DESIGN.md): the viewer's vertical scroll offset

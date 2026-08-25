@@ -24,7 +24,7 @@ workspace = true
 # binary (rather than gating the audit sink behind a Cargo feature)
 # is deliberate: feature unification under `cargo build --workspace`
 # would otherwise leak the QEMU-exit behaviour into the production
-# kernel image. `AGENTS.md` §5.4.5 — fail closed; the harness never
+# kernel image. It fails closed; the harness never
 # decides what the kernel does next.
 
 [[bin]]

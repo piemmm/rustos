@@ -1,6 +1,6 @@
 [package]
 name = "tairix-proglib"
-description = "TAIRiX program-library catalog engine: the one definition of the `/System/Settings/ProgramLibrary/library.conf` document — its closed folder taxonomy, `<id>.<key>` grammar, validated entry model, bounded fail-closed parser, canonical render, and the machine-catalog/user-overlay merge every producer and consumer shares (§3 `lib/`)."
+description = "TAIRiX program-library catalog engine: the one definition of the `/System/Settings/ProgramLibrary/library.conf` document — its closed folder taxonomy, `<id>.<key>` grammar, validated entry model, bounded fail-closed parser, canonical render, and the machine-catalog/user-overlay merge every producer and consumer shares (`lib/`)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

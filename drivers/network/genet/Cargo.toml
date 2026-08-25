@@ -1,6 +1,6 @@
 [package]
 name = "tairix-drv-network-genet"
-description = "TAIRiX autoloaded user-space Broadcom GENET v5 link-layer driver (Raspberry Pi 4B on-board gigabit Ethernet): binds the discovered brcm,bcm2711-genet-v5 node, brings the UniMAC and both DMA rings up over its granted register window and frame-buffer carve, negotiates the external RGMII PHY over the embedded MDIO master, and serves the netchan-v1 device-channel contract to the network stack (AGENTS.md §4 / §18; plans/NETWORK.md N14)."
+description = "TAIRiX autoloaded user-space Broadcom GENET v5 link-layer driver (Raspberry Pi 4B on-board gigabit Ethernet): binds the discovered brcm,bcm2711-genet-v5 node, brings the UniMAC and both DMA rings up over its granted register window and frame-buffer carve, negotiates the external RGMII PHY over the embedded MDIO master, and serves the netchan-v1 device-channel contract to the network stack (plans/NETWORK.md N14)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,15 +13,15 @@ workspace = true
 
 # This driver crate has two targets. The host-testable device logic — the
 # GENET v5 register map, the MDIO/PHY link bring-up, the `Genet` engine, the
-# §18.3 `BIND_KEYS` match table, and the `wiring` grant resolution — lives in
+# `BIND_KEYS` match table, and the `wiring` grant resolution — lives in
 # the `lib` target (`src/lib.rs`), co-located *in the driver* because a NIC
-# driver sits above the §18.6 bootstrap floor (the kernel floor is the storage
+# driver sits above the bootstrap floor (the kernel floor is the storage
 # path only) and so has no charter-legal non-driver consumer for a `lib/*`
-# device-support crate (`AGENTS.md` §2.22).
+# device-support crate.
 #
 # The `Run` entry-point binary (`src/main.rs`) is the bundle installed under
 # `/System/Drivers/` and autoloaded into user space by `devmgr` when the
-# `brcm,bcm2711-genet-v5` node is discovered (`AGENTS.md` §18). It links the
+# `brcm,bcm2711-genet-v5` node is discovered. It links the
 # userland runtime `tairix-rt`, so those bin-only deps are pulled in **only**
 # for the bare-metal targets the binary is built for; on the host the binary is
 # an inert stub and only the `lib` target (and its host tests) compiles.
@@ -38,27 +38,26 @@ workspace = true
 # contract the engine serves, the `RegisterWindow` / `MmioMapper` / `DmaHost` /
 # `Delay` seams it runs over, the `HwResource` grant descriptor `wiring`
 # resolves its window and link address from, and the `CapabilityId` /
-# `DriverError` / `Errno` vocabulary it fails closed with — one ABI definition
-# (§2.2).
+# `DriverError` / `Errno` vocabulary it fails closed with — one ABI definition.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 
 # Everything the freestanding program links beyond the device logic is pulled
 # in only for the bare-metal targets the binary is actually built for; on the
 # host the binary is an inert stub.
 [target.'cfg(target_os = "none")'.dependencies]
-# The capability-set type the rt-backed `DriverHost` is built over (§5.2).
+# The capability-set type the rt-backed `DriverHost` is built over.
 tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 # The user-space driver runtime: turns the kernel-issued device-resource grants
 # into the `MmioMapper` + `DmaHost` the bring-up consumes, and surfaces the
 # node's published link address (`mmio_map` / `dma_alloc` / `resource_grants`
-# over the syscall surface, §5.4).
+# over the syscall surface).
 tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
 # The device-agnostic driver side of the `netchan-v1` device channel: the pure
 # `NetChannelServer` handler plus the serve loop (claim the reserved endpoint,
 # publish the `netchan` node, park on {call endpoint, device IRQ}) every NIC
-# driver process shares — one definition (§2.2).
+# driver process shares — one definition.
 tairix-netchan = { path = "../../../lib/netchan", version = "=0.0.0" }
-# The pure-Rust userland runtime (`AGENTS.md` §1 / §16.4): `_start`, the stack
+# The pure-Rust userland runtime: `_start`, the stack
 # canary, the panic handler, the allocator, the `ClockDelay` the bounded
 # hardware handshakes park on, and the `irq_bind` / `entry!` surface.
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }

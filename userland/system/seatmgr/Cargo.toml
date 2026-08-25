@@ -23,7 +23,7 @@ program = ["dep:tairix-rt"]
 
 # The package is both the `tairix-seatmgr` dispatcher library (above) and the
 # `Run` entry-point binary of the seat-manager service installed at
-# /System/Services/seatmgr.app/Run (`AGENTS.md` §16.2; `plans/DISPLAY.md` D3)
+# /System/Services/seatmgr.app/Run (`plans/DISPLAY.md` D3)
 # — the long-running user-space service PID 1 `init` launches to hold the
 # seat-multiplexing authority. The binary is a freestanding pure-Rust program
 # on the native Tier-1 targets and an inert host stub elsewhere (see
@@ -37,11 +37,11 @@ path = "src/run.rs"
 # `SEATMGR_ENDPOINT`), the `Errno` table, the `CapabilityId` registry, and
 # the attested `Origin` the dispatcher gates on.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-# §19.4 structured audit log: every applied operation, every refusal, and
+# structured audit log: every applied operation, every refusal, and
 # every malformed request is recorded through a `tairix_log::Sink`.
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 
-# The `Run` binary's freestanding userland runtime (`AGENTS.md` §1):
+# The `Run` binary's freestanding userland runtime:
 # `tairix-rt` provides `_start`, the stack canary, the panic handler, the
 # `#[global_allocator]`, and the syscall wrappers (`call_create`/`call_recv`/
 # `call_reply`/`call_peer_origin`/`seat_switch`/`seat_revoke`), plus the

@@ -1,6 +1,6 @@
 [package]
 name = "tairix-raster"
-description = "TAIRiX shared software rasterisation primitives: premultiplied-alpha colours, the Porter–Duff over operator, and a pixel surface, used by the window manager and the taskbar without either depending on the other (§6, §17.4 — PLAN.md Stage 7)."
+description = "TAIRiX shared software rasterisation primitives: premultiplied-alpha colours, the Porter–Duff over operator, and a pixel surface, used by the window manager and the taskbar without either depending on the other (PLAN.md Stage 7)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,17 +11,17 @@ publish.workspace = true
 [dependencies]
 # The `JobRunner` contract a frost's independent pieces are handed through.
 # `default-features = false` takes the contract and the serial runner alone: this
-# crate creates no thread and must stay linkable where there is none (§17.4).
+# crate creates no thread and must stay linkable where there is none.
 tairix-parallel = { path = "../parallel", version = "=0.0.0", default-features = false }
-# The single shared theme definition (§10): a theme `Rgba` token meets the
+# The single shared theme definition: a theme `Rgba` token meets the
 # compositing arithmetic at exactly one edge — `From<Rgba> for Color` — so the
 # window manager and the taskbar turn a theme colour into a renderable colour
-# the same way, with no duplicated conversion (§2.2).
+# the same way, with no duplicated conversion.
 tairix-theme = { path = "../theme", version = "=0.0.0" }
 # `Surface` is one of the two rendered forms the window manager's and the
 # taskbar's bounded rasterisation caches hold (`plans/SMARTRAM.md` section
 # 6.4); its `CachedBytes` impl belongs here, not duplicated into both GUI
-# crates (§2.2).
+# crates.
 tairix-reclaim = { path = "../reclaim", version = "=0.0.0" }
 # `mathf`: the workspace's bounded `no_std` float maths, for the sine, cosine,
 # tangent and square root the affine transform and a gradient's focal ray need.

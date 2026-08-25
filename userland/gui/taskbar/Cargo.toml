@@ -1,6 +1,6 @@
 [package]
 name = "tairix-taskbar"
-description = "TAIRiX traditional desktop icon bar: edge-pinned layout, permanent Library/Files launchers with the program-library popup, a per-application slot strip with an app-declared menu and hover window picker, and the notification area + clock (§10 — PLAN.md Stage 7)."
+description = "TAIRiX traditional desktop icon bar: edge-pinned layout, permanent Library/Files launchers with the program-library popup, a per-application slot strip with an app-declared menu and hover window picker, and the notification area + clock (PLAN.md Stage 7)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,35 +11,34 @@ publish.workspace = true
 [dependencies]
 # Shared integer screen geometry (`Point`/`Rect`) — the same vocabulary the
 # window manager uses, lifted to `lib/*` so the taskbar reuses it without
-# depending on the window manager (§17.4, §2.2).
+# depending on the window manager.
 tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
 # Shared pointer input-event vocabulary (`PointerButton`/`InputEvent`) — the
 # same device events the window manager routes, lifted to `lib/*` so the
-# taskbar routes them to its regions without depending on the window manager
-# (§17.4, §2.2).
+# taskbar routes them to its regions without depending on the window manager.
 tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
 # Shared software rasteriser (`Color`/`Surface`) — the same premultiplied-alpha
 # primitives the window manager paints with, lifted to `lib/*` so the taskbar
 # renders its regions into a `Surface` without depending on the window manager
-# and without duplicating the colour algebra (§17.4, §2.2).
+# and without duplicating the colour algebra.
 tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
 # Shared text rasteriser (`BitmapFont`) — the built-in bitmap face and glyph
-# blitter, lifted to `lib/*` (§16.4) so the taskbar draws the clock and task
-# titles without depending on the window manager (§17.4).
+# blitter, lifted to `lib/*` so the taskbar draws the clock and task
+# titles without depending on the window manager.
 tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
 # Shared desktop-icon library (`builtin_icon`/`IconKind`) — scalable, themeable
 # vector notification glyphs rasterised through `lib/raster`'s single polygon
-# path, lifted to `lib/*` (§10) so the taskbar draws status icons without
-# depending on the window manager and without a second scan converter (§2.2).
+# path, lifted to `lib/*` so the taskbar draws status icons without
+# depending on the window manager and without a second scan converter.
 tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
-# The single shared theme definition (§10): the taskbar takes its corner
+# The single shared theme definition: the taskbar takes its corner
 # radius (and, in later increments, colours/fonts) from the active theme so
 # it stays consistent with the window manager and apps.
 tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
 # The shared Reactive Alloy control vocabulary (plans/GUI-CONTROLS-DESIGN.md):
 # the two leading launcher buttons and the program-library popup's panel,
 # search field, list rows, and scrollbar are composed from it rather than
-# hand-painted a second time (§2.2).
+# hand-painted a second time.
 tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
 # The program-library catalog engine (plans/NEW-TASKBAR.md): the popup lists
 # a resolved `Catalog` the session hands it — typed entries and the closed
@@ -49,7 +48,7 @@ tairix-proglib = { path = "../../../lib/proglib", version = "=0.0.0" }
 # The stable user/kernel ABI (`lib/abi`): the notification-channel severity
 # (`notify_ipc::NotifySeverity`) is the one vocabulary the producer wire, the
 # session relay, and this model share, so a transient notification's severity
-# is never re-spelled per layer (§2.2).
+# is never re-spelled per layer.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The shared reclaimable-memory model (plans/SMARTRAM.md section 6.4): the
 # renderer's notification-glyph cache is a bounded, pressure-governed
@@ -57,7 +56,7 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # unbounded cache of its own.
 tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
 # The structured `Event`/`Sink`/`Level` logging vocabulary the icon cache's
-# audit sink is typed against (§2.2): the renderer never invents its own
+# audit sink is typed against: the renderer never invents its own
 # logging vocabulary.
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 # The bar renderer's host tests draw text, so they inject the shared solid

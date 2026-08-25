@@ -1,6 +1,6 @@
 [package]
 name = "tairix-theme"
-description = "TAIRiX shared desktop theme definition: the runtime-switchable dark/light palettes, corner-radius metrics, fonts, and cursors that drive the window manager, taskbar, and default apps from one place (§6, §10 — PLAN.md Stage 7)."
+description = "TAIRiX shared desktop theme definition: the runtime-switchable dark/light palettes, corner-radius metrics, fonts, and cursors that drive the window manager, taskbar, and default apps from one place (PLAN.md Stage 7)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -1,6 +1,6 @@
 name: soak
 
-# Nightly soak window (AGENTS.md §19.6 fuzz, §19.7 proptest, the §7
+# Nightly soak window (fuzz, proptest, the
 # repeated-test soak, and the docs/src/filesystem/soak.md filesystem soak).
 # The default `all` runs every fuzz harness, every proptest model, every
 # registered filesystem soak (each target on its own ≥1 GiB RAM volume, so
@@ -19,7 +19,7 @@ name: soak
 # the same `tools/ci/soak.sh` a cron/systemd/launchd builder runs, so a green
 # soak here and a green soak on a standalone builder are equivalent by
 # construction — the workflow adds only scheduling and log upload, never
-# pipeline logic (AGENTS.md §15: every check lives in `cargo xtask`).
+# pipeline logic (every check lives in `cargo xtask`).
 #
 # This job targets a *dedicated* `soak` label, not the bare `[self-hosted,
 # linux]` that `ci.yml` uses. A self-hosted runner executes one job at a time,
@@ -153,7 +153,7 @@ jobs:
 
       - name: Run soak window (parallel)
         env:
-          # Keep soak logs out of the tracked tree (AGENTS.md §3); upload them
+          # Keep soak logs out of the tracked tree; upload them
           # below so a failing reproducer can be pulled off the run.
           TAIRIX_CI_LOGDIR: ${{ runner.temp }}/tairix-soak-logs
         run: |
@@ -167,8 +167,8 @@ jobs:
           tools/ci/soak.sh "$KIND" --secs "$SECS"
 
       - name: Upload soak logs
-        # Logs are the whole point on failure: §19.6/§19.7 want the crashing
-        # input turned into a regression test + corpus entry.
+        # Logs are the whole point on failure: a crashing input becomes a
+        # regression test + corpus entry.
         if: always()
         uses: actions/upload-artifact@v4
         with:

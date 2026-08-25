@@ -13,7 +13,7 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The bus-agnostic split-virtqueue protocol (Transport trait, SplitQueue,
 # DMA slabs, MockHost) lives in `lib/virtio` so that the device-class
 # drivers can consume it without depending on this bus driver crate
-# (`AGENTS.md` §17.4 — `drivers/* → lib/*` only). This crate provides the
+# (`drivers/* → lib/*` only). This crate provides the
 # concrete PCI / MMIO `Transport` implementations on top of it.
 tairix-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
 

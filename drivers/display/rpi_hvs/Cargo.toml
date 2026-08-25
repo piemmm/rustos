@@ -10,14 +10,14 @@ publish.workspace = true
 
 [dependencies]
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-# The shared VideoCore firmware mailbox protocol (§2.2): framebuffer
+# The shared VideoCore firmware mailbox protocol: framebuffer
 # discovery and bus↔physical translation, also spoken by the aarch64
 # port's framebuffer boot console.
 tairix-vcmailbox = { path = "../../../lib/vcmailbox", version = "=0.0.0" }
 
 [dev-dependencies]
 # Host tests additionally pull in the protocol-faithful mock firmware
-# (QEMU does not model the VideoCore, §2.1).
+# (QEMU does not model the VideoCore).
 tairix-vcmailbox = { path = "../../../lib/vcmailbox", version = "=0.0.0", features = [
     "mock-firmware",
 ] }

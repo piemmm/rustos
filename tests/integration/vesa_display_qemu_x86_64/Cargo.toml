@@ -22,7 +22,7 @@ ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zer
 
 # The freestanding bin links only on the `x86_64-unknown-none` target; a
 # host `cargo build --workspace` compiles `src/main.rs` to an inert stub
-# (`AGENTS.md` §17.2 — the instruction-set choice lives in `build.rs`).
+# (the instruction-set choice lives in `build.rs`).
 [target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }

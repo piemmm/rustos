@@ -26,7 +26,7 @@ ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zer
 # `tairix_kernel::root_mount` unlock policy over the whole-disk
 # encrypted-root fixture) both live in the shared support crate, so this bin
 # names only that crate plus the virtio-blk driver whose `register` it wires
-# into the spawner (`AGENTS.md` §2.2).
+# into the spawner.
 [target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
 tairix-drv-storage-virtio-blk = { path = "../../../drivers/storage/virtio_blk", version = "=0.0.0" }
 tairix-test-virtio-qemu-support = { path = "../virtio_qemu_support", version = "=0.0.0" }

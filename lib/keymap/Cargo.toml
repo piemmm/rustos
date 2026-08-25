@@ -1,6 +1,6 @@
 [package]
 name = "tairix-keymap"
-description = "TAIRiX shared terminal key map (§6, §2.2 — plans/PI.md P11): the one definition that turns a decoded keyboard `Key` + held `Modifiers` into the console (tty) byte sequence a console-input producer injects, reusing the canonical `lib/vt` escape vocabulary. no_std, allocation-free, fail-closed (§2.9)."
+description = "TAIRiX shared terminal key map (plans/PI.md P11): the one definition that turns a decoded keyboard `Key` + held `Modifiers` into the console (tty) byte sequence a console-input producer injects, reusing the canonical `lib/vt` escape vocabulary. no_std, allocation-free, fail-closed."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,16 +12,15 @@ publish.workspace = true
 # The wire keyboard-event vocabulary (`KeyInput` / `KeyValue` / `Modifiers` /
 # `NamedKeyCode`) the abi<->tty bridge (`encode_key_input` / `key_input`)
 # crosses to. Shared here as the single definition of the `Key`<->`KeyValue`
-# mapping the driver (input side) and the kernel arbiter (output side) both use
-# (§2.2), so neither owns a private copy.
+# mapping the driver (input side) and the kernel arbiter (output side) both
+# use, so neither owns a private copy.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
 # The decoded keyboard vocabulary (`Key` / `NamedKey` / `Modifiers`) this map
-# translates. Shared in `lib/*` so neither a driver nor a GUI crate owns it
-# (§17.4, §2.2).
+# translates. Shared in `lib/*` so neither a driver nor a GUI crate owns it.
 tairix-input = { path = "../input", version = "=0.0.0" }
 # The single canonical ANSI / VT / xterm escape + control-byte definition
 # (`vt::control` constants, `vt::key` SS3 / `~` tables). Reused here so there is
-# no second escape-sequence definition anywhere in the tree (§2.2). Only its
+# no second escape-sequence definition anywhere in the tree. Only its
 # `const` tables are touched, so this crate stays allocation-free.
 tairix-vt = { path = "../vt", version = "=0.0.0" }
 

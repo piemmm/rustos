@@ -24,7 +24,7 @@ ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zer
 # GICv2 + EL1 IRQ wiring, static DMA pool, signed-`.rxe` load) and the
 # users-database device tail both live in the shared support crate; this
 # bin pulls in only the abi and the virtio-blk driver it resolves the
-# loaded image to (`AGENTS.md` §2.2).
+# loaded image to.
 [target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-drv-storage-virtio-blk = { path = "../../../drivers/storage/virtio_blk", version = "=0.0.0" }

@@ -1,6 +1,6 @@
 [package]
 name = "tairix-partition"
-description = "TAIRiX shared, scheme-neutral partition-table model (MBR encode + fail-closed parse, GPT fail-closed parse) and a bounds-checked partition-window Block adapter: the one definition the mkimage image author and the kernel root-mount reader share across MBR and GPT disks on every architecture (AGENTS.md §2.2)."
+description = "TAIRiX shared, scheme-neutral partition-table model (MBR encode + fail-closed parse, GPT fail-closed parse) and a bounds-checked partition-window Block adapter: the one definition the mkimage image author and the kernel root-mount reader share across MBR and GPT disks on every architecture."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -1,6 +1,6 @@
 [package]
 name = "tairix-tty"
-description = "TAIRiX shared tty line discipline (PTY.md PTY1): the one, sink-agnostic definition of terminal cooking — ONLCR output translation, the local-echo state machine (CR/LF -> CR LF, bounded rub-out, Delete CSI-3~ recognition), and the cooked-mode ^C/^Z -> signal classifier. Assembled over the `lib/vt` control/EraseSeq vocabulary (never a second copy, AGENTS.md §2.2); driven by both the kernel console device and the coming pseudo-terminal. no_std, fail-closed, never panics (§2.9)."
+description = "TAIRiX shared tty line discipline (PTY.md PTY1): the one, sink-agnostic definition of terminal cooking — ONLCR output translation, the local-echo state machine (CR/LF -> CR LF, bounded rub-out, Delete CSI-3~ recognition), and the cooked-mode ^C/^Z -> signal classifier. Assembled over the `lib/vt` control/EraseSeq vocabulary (never a second copy); driven by both the kernel console device and the coming pseudo-terminal. no_std, fail-closed, never panics."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,7 +14,7 @@ publish.workspace = true
 tairix-abi = { path = "../abi", version = "=0.0.0" }
 # The single control-byte and Delete-escape (`EraseSeq`) vocabulary the
 # discipline is assembled over — this crate is the assembly, not a second
-# definition of those primitives (`AGENTS.md` §2.2).
+# definition of those primitives.
 tairix-vt = { path = "../vt", version = "=0.0.0" }
 
 [lints]

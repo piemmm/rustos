@@ -1,6 +1,6 @@
 [package]
 name = "tairix-curses"
-description = "TAIRiX first-party curses / TUI screen-model library (CURSES.md Stage C4): a no_std + alloc, I/O-injected client screen model (windows, sub-windows, pads), a minimal-diff renderer that emits the smallest `lib/vt` sequence set the active `tairix_termcap::TermType` supports (degrading truecolour -> 256 -> 16 -> mono by colour depth), and an input decoder that turns `lib/vt`-parsed escape sequences into typed key/mouse/paste events. One shared vocabulary (AGENTS.md §2.2); statically linked by apps (§16.4); fail-closed, never panics (§2.9)."
+description = "TAIRiX first-party curses / TUI screen-model library (CURSES.md Stage C4): a no_std + alloc, I/O-injected client screen model (windows, sub-windows, pads), a minimal-diff renderer that emits the smallest `lib/vt` sequence set the active `tairix_termcap::TermType` supports (degrading truecolour -> 256 -> 16 -> mono by colour depth), and an input decoder that turns `lib/vt`-parsed escape sequences into typed key/mouse/paste events. One shared vocabulary; statically linked by apps; fail-closed, never panics."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -34,8 +34,8 @@ tairix-abi = { path = "../abi", version = "=0.0.0", optional = true }
 workspace = true
 
 [dev-dependencies]
-# The §19.6 fuzz harness draws its inputs through the shared seed/budget
+# The fuzz harness draws its inputs through the shared seed/budget
 # seam (`tairix_fuzzseed`): one place picks the per-run seed, logs it at
-# the start of the test, and bounds the smoke/soak loop (`AGENTS.md`
-# §2.2). Test scaffolding only; never in a TAIRiX build.
+# the start of the test, and bounds the smoke/soak loop. Test scaffolding only;
+# never in a TAIRiX build.
 tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

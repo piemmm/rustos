@@ -24,11 +24,11 @@ workspace = true
 # FIQ fired while `DAIF.I` was masked (the record confirms it), and the sampled
 # PC and backtrace top land inside the masked-spin function — `sampled=live`.
 # Any shortfall writes a distinct semihosting failure code or the harness times
-# out (fail-loud, AGENTS.md §7).
+# out (fail-loud).
 #
 # The `test-hooks` feature is on by default. Release builds that enable it are
-# rejected by the `compile_error!` guard in `src/main.rs` (AGENTS.md §1 — no
-# hacks; §5.4 — fail closed), mirroring the other aarch64 verticals.
+# rejected by the `compile_error!` guard in `src/main.rs` (no
+# hacks; fail closed), mirroring the other aarch64 verticals.
 [features]
 default = ["test-hooks"]
 test-hooks = []

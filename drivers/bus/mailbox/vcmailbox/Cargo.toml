@@ -1,6 +1,6 @@
 [package]
 name = "tairix-drv-bus-mailbox-vcmailbox"
-description = "TAIRiX autoloaded user-space VideoCore firmware property-mailbox service driver: owns the discovered BCM2711 mailbox doorbell window and a DMA-carved property buffer, builds `lib/vcmailbox::MmioMailbox`, and serves synchronous property exchanges to other user-space drivers over the `MAILBOX_ENDPOINT` call endpoint (`AGENTS.md` §4 / §18; plans/PI.md P10 D3)."
+description = "TAIRiX autoloaded user-space VideoCore firmware property-mailbox service driver: owns the discovered BCM2711 mailbox doorbell window and a DMA-carved property buffer, builds `lib/vcmailbox::MmioMailbox`, and serves synchronous property exchanges to other user-space drivers over the `MAILBOX_ENDPOINT` call endpoint (plans/PI.md P10 D3)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,12 +14,11 @@ workspace = true
 # The crate is **only** a binary: the `Run` entry point of the VideoCore
 # mailbox service-driver bundle, installed under `/System/Drivers/` and
 # autoloaded into user space by `devmgr` when the BCM2711 mailbox node is
-# discovered (`AGENTS.md` §18). It links the userland runtime `tairix-rt`, so it
+# discovered. It links the userland runtime `tairix-rt`, so it
 # is a separate crate from the kernel, and depends only on `lib/*` crates so the
-# §17.4 layering holds (no `drivers/*`→`drivers/*` edge). It is a freestanding
+# layering holds (no `drivers/*`→`drivers/*` edge). It is a freestanding
 # pure-Rust program on the native Tier-1 targets and an inert host stub
-# elsewhere (`src/main.rs` / `build.rs`), mirroring `drivers/input/virtio_kbd`
-# (`AGENTS.md` §2.2).
+# elsewhere (`src/main.rs` / `build.rs`), mirroring `drivers/input/virtio_kbd`.
 
 # Everything the freestanding program links is pulled in only for the bare-metal
 # targets the binary is actually built for; on the host the binary is an inert
@@ -30,18 +29,18 @@ workspace = true
 # `RegisterWindow`, `MmioMapper`, the DMA host, and `sole_register_window`.
 tairix-abi = { path = "../../../../lib/abi", version = "=0.0.0" }
 # The capability-set type the rt-backed `DriverHost` and the served endpoint's
-# send/receive gates are built over (§5.2).
+# send/receive gates are built over.
 tairix-caps = { path = "../../../../lib/caps", version = "=0.0.0" }
 # The BCM2711 VideoCore property-mailbox transport this service drives over its
-# granted doorbell window + DMA buffer — a `lib/*` crate, so the §17.4 layering
-# holds (the device's own client lives in `lib/`, the `AGENTS.md` §2.20
+# granted doorbell window + DMA buffer — a `lib/*` crate, so the layering
+# holds (the device's own client lives in `lib/`, the
 # carve-out).
 tairix-vcmailbox = { path = "../../../../lib/vcmailbox", version = "=0.0.0" }
 # The user-space driver runtime: turns the kernel-issued device-resource grants
 # into the `MmioMapper` + `DmaHost` the bring-up consumes (`mmio_map` /
-# `dma_alloc` / `resource_grants` over the syscall surface, §5.4).
+# `dma_alloc` / `resource_grants` over the syscall surface).
 tairix-drvrt = { path = "../../../../lib/drvrt", version = "=0.0.0" }
-# The pure-Rust userland runtime (`AGENTS.md` §1 / §16.4): `_start`, the stack
+# The pure-Rust userland runtime: `_start`, the stack
 # canary, the panic handler, and the syscall wrappers (`call_create` /
 # `call_recv` / `call_reply` / `yield`).
 tairix-rt = { path = "../../../../lib/rt", version = "=0.0.0" }

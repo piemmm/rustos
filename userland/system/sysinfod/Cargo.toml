@@ -1,6 +1,6 @@
 [package]
 name = "tairix-sysinfod"
-description = "TAIRiX System Information service: the capability-checked dispatcher that serves the `sysinfo` API (Stage 6 — `AGENTS.md` §16.6)."
+description = "TAIRiX System Information service: the capability-checked dispatcher that serves the `sysinfo` API (Stage 6 —)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -23,7 +23,7 @@ program = ["dep:tairix-rt"]
 
 # The package is both the `tairix-sysinfod` dispatcher library (above) and the
 # `Run` entry-point binary of the System Information service installed at
-# `/System/Services/sysinfod.app/Run` (`AGENTS.md` §16.2, §16.6) — the long-running
+# `/System/Services/sysinfod.app/Run` — the long-running
 # user-space service PID 1 `init` launches to serve the `sysinfo` API. The
 # binary is a freestanding pure-Rust program on the native Tier-1 targets and
 # an inert host stub elsewhere (see `src/run.rs`).
@@ -36,14 +36,15 @@ path = "src/run.rs"
 # `CapabilityId` registry, and the object-safe `CapabilityQuery` seam the
 # dispatcher gates on.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-# §19.4 structured audit log: every cross-principal invocation and every
+# structured audit log: every cross-principal invocation and every
 # capability denial is recorded through a `tairix_log::Sink`.
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 
-# The `Run` binary's freestanding userland runtime (`AGENTS.md` §1): `tairix-rt`
+# The `Run` binary's freestanding userland runtime: `tairix-rt`
 # provides `_start`, the stack canary, the panic handler, the
 # `#[global_allocator]`, and the syscall wrappers (`call_create`/`call_recv`/
-# `call_reply`/`call_peer_origin`/`sysinfo_introspect`/`hw_tree_read`), plus the
+# `call_reply`/`call_peer_origin`/`sysinfo_introspect`/`hw_tree_read`), plus
+# the
 # `CapabilitySet` primitive the endpoint bind names. Both are pulled in only
 # for the bare-metal targets the program is actually built for; on the host the
 # binary is an inert stub and neither is linked.

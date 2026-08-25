@@ -1,6 +1,6 @@
 [package]
 name = "tairix-sysmon"
-description = "TAIRiX `sysmon`: a live, fullscreen kernel-memory and load monitor over the System Information API, drawn with the OS curses library (§3 `userland/apps/` — `plans/STRESSTEST.md` ST4)."
+description = "TAIRiX `sysmon`: a live, fullscreen kernel-memory and load monitor over the System Information API, drawn with the OS curses library (`userland/apps/` — `plans/STRESSTEST.md` ST4)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -30,24 +30,23 @@ path = "src/run.rs"
 
 [dependencies]
 # The frozen `Errno` plus the `sysinfo-v1` statistics records the monitor
-# renders; `sysmon` invents no parallel error set (§2.2) and never links a
-# kernel or driver crate (§17.4).
+# renders; `sysmon` invents no parallel error set and never links a
+# kernel or driver crate.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The shared System Information API client helpers: the request/response
 # seams, the capability-aware call mapping, the process/CPU-time paging
 # walks, and the shared kernel-statistics fetches (`kstats`) this monitor
-# consumes rather than duplicating (§2.2, §16.6).
+# consumes rather than duplicating.
 tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
-# The OS-provided Terminal/TUI library (§16.4): the curses screen model,
+# The OS-provided Terminal/TUI library: the curses screen model,
 # minimal-diff renderer, and typed input. `sysmon` draws through it instead
-# of emitting escape sequences by hand (§2.2).
+# of emitting escape sequences by hand.
 tairix-curses = { path = "../../../lib/curses", version = "=0.0.0" }
 # The closed `TermType` set the screen driver is configured with (the honest
 # terminal the session advertises).
 tairix-termcap = { path = "../../../lib/termcap", version = "=0.0.0" }
 # The shared escape/attribute vocabulary: `sysmon` styles cells with
-# `tairix_vt::Attributes`/`Color`, the one vocabulary the renderer emits
-# (§2.2).
+# `tairix_vt::Attributes`/`Color`, the one vocabulary the renderer emits.
 tairix-vt = { path = "../../../lib/vt", version = "=0.0.0" }
 # The one help engine: locale fallback, the bounded structured-Markdown
 # parser, and the shared own-bundle short-help render the `-h`/`-?`

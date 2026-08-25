@@ -21,13 +21,13 @@ tairix-crypto = { path = "../crypto", version = "=0.0.0" }
 # never sign — they only verify via `tairix-crypto`. The dev-only dependency
 # keeps the signing surface out of the audited build.
 ed25519-dalek = { version = "=2.1.1", default-features = false }
-# The §19.7 Bronze stateful model (`tests/proptest_model.rs`) drives the
+# The Bronze stateful model (`tests/proptest_model.rs`) drives the
 # capability-critical paths under randomised command sequences. Same pinned,
 # already-audited version `kernel/sec` uses; dev-only, so it never reaches
 # the production capability surface.
 proptest = { version = "=1.5.0", default-features = false, features = ["std"] }
-# The §19.7 model drives its programs through the shared seed/budget runner
+# The model drives its programs through the shared seed/budget runner
 # (`tairix_fuzzseed::prop::drive`), so the seed selection, start-of-test seed
-# log, and smoke/soak loop live in one place (`AGENTS.md` §2.2). Test
+# log, and smoke/soak loop live in one place. Test
 # scaffolding only; never in a TAIRiX build.
 tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0", features = ["proptest"] }

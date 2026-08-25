@@ -13,8 +13,8 @@ workspace = true
 
 # Freestanding "boot the riscv64 kernel pipeline, then drive the confirmed
 # `memtest` machine-takeover seam" integration test. It links the
-# production riscv64 boot pipeline and only supplies its own audit Sink —
-# one that, on observing `EventId(4004)` (`AuditEvent::BootCompleted`, the
+# production riscv64 boot pipeline and only supplies its own audit Sink — one
+# that, on observing `EventId(4004)` (`AuditEvent::BootCompleted`, the
 # point where the Supervisor system is published and the kernel state is
 # fully built), drives `supervisor_system().memtest_takeover(...)`. On the
 # wired riscv64 port that never returns: it quiesces (single-hart, so no

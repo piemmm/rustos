@@ -22,11 +22,11 @@ workspace = true
 # and routes the program's allocator-issued `mem_map` / `mem_unmap` syscalls
 # through it; a clean `exit(0)` from the fixture is reported as PASS. Any
 # shortfall (a non-zero exit code, an unexpected syscall, or a fault) writes a
-# distinct failure finisher or times out (fail-loud, `AGENTS.md` §7).
+# distinct failure finisher or times out (fail-loud).
 #
 # The `test-hooks` feature is on by default. Release builds that enable it are
-# rejected by the `compile_error!` guard in `src/main.rs` (AGENTS.md §1 — no
-# hacks; §5.4.5 — fail closed), mirroring the other EL0 verticals.
+# rejected by the `compile_error!` guard in `src/main.rs` (no
+# hacks; fail closed), mirroring the other EL0 verticals.
 [features]
 default = ["test-hooks"]
 test-hooks = []

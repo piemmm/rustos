@@ -20,10 +20,10 @@ path = "src/main.rs"
 # virtio-PCI discovery, the `InitSpawn` seam, the runtime `ProcessSpawn`
 # producer, the MSI-X device-IRQ wiring, and `unlock_service::spawn_if_present`
 # — and only swaps the audit sink to observe the unlock-service install
-# message (`AGENTS.md` §2.2 — no duplication). Keeping the QEMU-exit shortcut
+# message (no duplication). Keeping the QEMU-exit shortcut
 # in a dedicated bin (not a Cargo feature on a production crate) prevents
 # feature unification from leaking it into any production build
-# (`AGENTS.md` §5.4 — fail closed).
+# (fail closed).
 [target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
 tairix-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
 tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }

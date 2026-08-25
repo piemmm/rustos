@@ -1,6 +1,6 @@
 [package]
 name = "tairix-appdata"
-description = "TAIRiX app-data client: the one way an application reaches its own settings — the bundle-defaults fallback layer, the whole-document read over APPDATA_ENDPOINT, local staging, and one atomic commit. No app spells a path or names its own bundle identifier (plans/APPDATA.md, §3 lib/)."
+description = "TAIRiX app-data client: the one way an application reaches its own settings — the bundle-defaults fallback layer, the whole-document read over APPDATA_ENDPOINT, local staging, and one atomic commit. No app spells a path or names its own bundle identifier (plans/APPDATA.md §3)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

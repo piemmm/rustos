@@ -1,6 +1,6 @@
 [package]
 name = "tairix-test-arxfs-image"
-description = "Shared arxfs disk-image fixture for the end-to-end QEMU arxfs-over-virtio_blk vertical. The image is laid down by the real arxfs driver itself (format + plant), so the on-disk layout has exactly one source of truth (AGENTS.md §2.2). The host harness (xtask) plants the bytes returned by `build_image` on the backing disk; the freestanding guest tail mounts the same volume through the real arxfs driver and round-trips the planted file plus a fresh write."
+description = "Shared arxfs disk-image fixture for the end-to-end QEMU arxfs-over-virtio_blk vertical. The image is laid down by the real arxfs driver itself (format + plant), so the on-disk layout has exactly one source of truth. The host harness (xtask) plants the bytes returned by `build_image` on the backing disk; the freestanding guest tail mounts the same volume through the real arxfs driver and round-trips the planted file plus a fresh write."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -19,8 +19,8 @@ path = "src/lib.rs"
 # test tail (`tests/integration/virtio_qemu_support`, which knows the
 # fixed file names and contents to verify). Unlike the hand-built FAT32
 # fixture, the bytes come from the real arxfs driver formatting and
-# planting an in-memory volume, so the fixture and the driver cannot drift
-# (`AGENTS.md` §2.2). The round-trip unit tests re-mount the built image
+# planting an in-memory volume, so the fixture and the driver cannot drift. The
+# round-trip unit tests re-mount the built image
 # through the driver on the host.
 [dependencies]
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }

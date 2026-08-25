@@ -23,7 +23,7 @@ ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zer
 # The device-agnostic bring-up scaffolding and the virtio-input
 # key-decode tail both live in the shared support crate; this bin pulls
 # in only the abi and the virtio-input driver it resolves the loaded
-# image to (`AGENTS.md` §2.2).
+# image to.
 [target.'cfg(all(target_arch = "riscv64", target_os = "none"))'.dependencies]
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-drv-input-virtio-input = { path = "../../../drivers/input/virtio_input", version = "=0.0.0" }

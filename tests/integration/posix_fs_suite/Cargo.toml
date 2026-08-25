@@ -1,6 +1,6 @@
 [package]
 name = "tairix-test-posix-fs-suite"
-description = "pjdfstest-equivalent POSIX filesystem conformance suite (PLAN.md Stage 5). Drives the real arxfs driver through the real kernel/core VFS policy layer on the host and asserts POSIX namespace, I/O, §5.3 permission/capability-gate, §16 layout, and errno semantics. The QEMU mount-over-virtio_blk path is covered separately by the arxfs/fat32 verticals; this crate is the semantics suite, exercising the very code that runs in the kernel."
+description = "pjdfstest-equivalent POSIX filesystem conformance suite (PLAN.md Stage 5). Drives the real arxfs driver through the real kernel/core VFS policy layer on the host and asserts POSIX namespace, I/O, permission/capability-gate, layout, and errno semantics. The QEMU mount-over-virtio_blk path is covered separately by the arxfs/fat32 verticals; this crate is the semantics suite, exercising the very code that runs in the kernel."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,7 +16,7 @@ path = "src/lib.rs"
 
 # The harness binds the real arxfs driver to the real VFS policy layer.
 # Both halves are the exact code paths the kernel uses; the suite adds no
-# parallel re-implementation of any FS semantics (AGENTS.md §2.2).
+# parallel re-implementation of any FS semantics.
 [dependencies]
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
