@@ -2,116 +2,54 @@
 //! settings, and the only way it can.
 //!
 //! ```ignore
-//! let mut host = RtHost;
-//! let mut settings = Settings::open(&mut host, OWN_WORD);
+//! let mut settings = Settings::open(&mut RtHost, OWN_WORD);
 //! let size = settings.u32("font.size")?.unwrap_or(14);
 //! settings.set_u32("font.size", 16)?;
 //! settings.commit()?;                       // one atomic publish
-//!
-//! let mut mine = Settings::open_published(&mut host);   // what others may read
-//! mine.set("font.family", "berkeley")?;
-//! mine.commit()?;
-//!
-//! let theirs = read_published(&mut host, "os.tairix.terminal")?;
-//! let family = theirs.get("font.family");
-//!
-//! let mut vault = Vault::open(&mut host)?;      // the sealed scope
-//! vault.set("imap.password", secret)?;          // sealed before it returns
-//! let saved = vault.get("imap.password");
-//!
-//! // The bulk scope: a grant handle, redeemed into an owned descriptor.
-//! let handle = blobs::open(&mut host, "mail.index", BlobMode::ReadWrite)?;
-//! let index = tairix_rt::File::from_delegation(handle)?;
-//! index.write_at(0, b"...")?;                   // straight to the VFS
-//!
-//! let scratch = temp::create(&mut host)?;       // a fresh file, service-named
-//! let spill = tairix_rt::File::from_delegation(scratch.grant)?;
-//! temp::release(&mut host, &scratch.name)?;     // done with it
 //! ```
-//!
-//! # No app spells a path, and none names itself
 //!
 //! Nothing here takes a store path or a user, and nothing but
 //! [`read_published`] takes a bundle identifier: the app-data service derives
-//! every one of those from the identity the kernel attests for the calling
-//! task. So an application cannot reach outside its own scope by construction
-//! rather than by a check some caller might forget, and this library has no
-//! privileged surface to misuse. The one identifier a caller does name selects
-//! a *published* document and nothing else — there is no request shape that
-//! reaches another application's private settings.
+//! all of those from the identity the kernel attests for the calling task. So
+//! an application cannot reach outside its own scope by construction rather
+//! than by a check some caller might forget, and this library has no
+//! privileged surface to misuse.
 //!
-//! # Five scopes
+//! One entry point per scope: [`Settings::open`] for the **private** document,
+//! [`Settings::open_published`] for what the application publishes about
+//! itself and [`read_published`] for another application's, [`Vault`] for its
+//! **sealed** secrets, and [`blobs`] and [`temp`] for the durable and per-boot
+//! **bulk** scopes, which are descriptors rather than documents so their bytes
+//! never cross the channel ([`bulk_quota`] reports both).
 //!
-//! [`Settings::open`] is the application's **private** scope: the user's
-//! settings for it, which nothing else can read. [`Settings::open_published`]
-//! is its **published** scope: what the application says about itself for
-//! other applications to read, through [`read_published`]. The two are
-//! separate documents with separate commits, because one atomic publish
-//! replaces one document.
+//! Four contracts a caller depends on:
 //!
-//! [`Vault`] is the **sealed** scope: the application's secrets, encrypted at
-//! rest under a key the service derives per (account, application). It differs
-//! from the other two in three ways, each of them the sealed scope's own: it has
-//! no layer beneath it, because a secret an application did not write is not one
-//! it may be made to believe; it has no staging and no commit, because the
-//! service seals each write before it replies; and opening it can *fail*,
-//! because "I could not read your secrets" is not "you have none".
+//! - [`Settings::open`] costs the one round trip and never fails: a store the
+//!   service cannot serve leaves the bundle's shipped defaults standing and
+//!   [`Settings::store_refusal`] says why. [`Vault::open`] does fail, because
+//!   "I could not read your secrets" is not "you have none".
+//! - Every read after the open is a lookup in memory, and every
+//!   [`Settings::set`] is memory too until [`Settings::commit`] publishes the
+//!   changed keys as one atomic document replacement. A handle that is never
+//!   committed changes nothing on the volume.
+//! - A commit ends by re-reading the store, so the handle reflects what the
+//!   service holds — which matters after a [`Settings::unset`], where the
+//!   effective value comes back from a layer below.
+//! - The sealed scope has no staging and no commit: the service seals each
+//!   write before it replies.
 //!
-//! [`blobs`] is the durable **bulk** scope, and it is not a document at all:
-//! an application's index, cache, or queue is reached as a *descriptor*, so
-//! the bytes never cross this channel and the application reads, writes,
-//! truncates, and memory-maps directly against the kernel VFS at full speed.
-//!
-//! [`temp`] is the **scratch** of one run, reached the same way. It differs
-//! from [`blobs`] in who names the file: the service does, so a fresh file is
-//! fresh without two instances of one application having to agree on a name —
-//! and nothing *opens* a temporary file, so an application can never read
-//! scratch it did not write in this process. [`bulk_quota`] reports both
-//! scopes' usage in one answer.
-//!
-//! # Three layers, and which of them this library owns
-//!
-//! Layering is the **private** scope's; the published scope is one document
-//! (see [`Settings::open_published`]). A private read answers from the highest
-//! layer that sets the key:
-//!
-//! 1. `<Bundle>.app/DefaultSettings/settings.conf` — the defaults the bundle
-//!    ships. **This library's layer**: it needs the *bundle's* path, and
-//!    nothing attested gives the service one, while a program can name its own
-//!    bundle through the one shared command-word resolution order. A wrong pick
-//!    there could only hand an application another build of *itself*'s
-//!    defaults, so no boundary is crossed.
-//! 2. `/System/Settings/<bundle-id>/settings.conf` — optional machine-wide
-//!    administrator policy. The service's layer.
-//! 3. The user's own document — overrides only. The service's layer.
-//!
-//! Layers 2 and 3 arrive already merged, as one document, in one call. That is
-//! also what makes the "no service, degrade to the shipped defaults" path one
-//! code path instead of two: an unreachable store simply leaves layer 1
-//! standing, [`Settings::store_refusal`] says why, and a write fails with that
-//! same typed error rather than silently going nowhere.
-//!
-//! # Reads are local; writes are staged and published once
-//!
-//! Opening does the one round trip. Every read after it is a lookup
-//! in memory, so an application that consults forty settings issues no further
-//! calls — and every [`Settings::set`] is memory too, until
-//! [`Settings::commit`] stages the keys that changed and publishes them as one
-//! atomic document replacement. A handle that is never committed changes
-//! nothing on the volume.
-//!
-//! A commit ends by re-reading the store, so the handle always reflects what
-//! the service actually holds — which matters after a [`Settings::unset`],
-//! where the effective value comes back from a layer below rather than from
-//! the value that was removed.
-//!
-//! # Layering
+//! Only the private scope is layered, and layer 1 of it is **this library's**:
+//! the bundle's own `DefaultSettings/settings.conf`, which needs a bundle path
+//! nothing attested gives the service. That is the one thing
+//! [`Settings::open`]'s command word selects. The machine-wide policy layer
+//! and the user's own document arrive already merged, in one call.
 //!
 //! The crate is `no_std` (with `alloc`) and performs no I/O of its own: every
-//! syscall it needs sits behind the [`AppDataHost`] seam, so the whole client
-//! — the layered read, the capacity negotiation, staging, the commit, and the
-//! sealed scope — is exercised on the host. The `rt` feature supplies the real
-//! seam over `ipc_call` and `fs_*`.
+//! syscall sits behind the [`AppDataHost`] seam, so the whole client is
+//! exercised on the host. The `rt` feature supplies the real seam.
+//!
+//! The scope walkthrough and the design behind it are
+//! `docs/src/lib/appdata.md`.
 
 #![no_std]
 #![forbid(unsafe_code)]

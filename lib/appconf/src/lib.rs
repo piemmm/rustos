@@ -1,81 +1,29 @@
 //! The per-app configuration document engine (`tairix-appconf`).
 //!
 //! One document is one [`Document`]: an ordered list of lines, each either a
-//! `key = value` setting or text the grammar does not read as one (a comment,
-//! a blank line, something a hand-edit got wrong). The engine parses such a
+//! `key = value` setting or text the grammar does not read as one (a comment, a
+//! blank line, something a hand edit got wrong). The engine parses such a
 //! document, answers typed reads against it, rewrites single settings, and
-//! renders it back — with **no I/O**, so it is entirely host-testable and the
-//! same code serves the app-data daemon, a client, and a test.
+//! renders it back — with **no I/O**, so the same code serves the app-data
+//! daemon, a client, and a host test.
 //!
-//! # Why a line format, and why this one
+//! Three contracts a caller depends on:
 //!
-//! The requirement is that a human can open the file in a text editor and
-//! that bad formatting is survivable. A nested document format fails the
-//! second outright — one misplaced delimiter loses the whole file — so the
-//! grammar is one setting per line and structure comes from dotted keys
-//! (`effects.blur`), never from nesting syntax a hand-editor can get wrong.
+//! - [`Document::set`] rewrites the one line it must and leaves every other
+//!   byte — comments, blank lines, the user's own alignment, key order, and
+//!   lines the grammar refused — as it found them, so an app that saves its
+//!   settings cannot destroy what a user hand-edited in.
+//! - A line the grammar cannot read is retained verbatim and reported by
+//!   [`Document::unparsed`] instead of aborting the read, so one bad line
+//!   cannot cost a user every other setting. That tolerance stops at line
+//!   content: the document-level bounds fail closed with a [`ConfError`].
+//! - The sealed app-data scope is a document of this format, so the engine
+//!   treats a line's bytes as secret unconditionally and wipes every line it
+//!   discards. The one copy it does not own is [`Document::render`]'s return
+//!   value.
 //!
-//! ```text
-//! # The user's own comment survives a save.
-//! scheme       = dark
-//! font.size    = 14
-//! effects.blur = 500
-//! recent.0     = /Users/ada/Documents/notes.txt
-//! greeting     = "  leading space, a # sign, and \n an escape "
-//! ```
-//!
-//! # A rewrite never destroys what a human wrote
-//!
-//! This is the engine's hard requirement, not a nicety. A document is modelled
-//! as an ordered list of *lines*, not as a map: [`Document::set`] rewrites the
-//! one line it must and leaves every other byte — comments, blank lines, the
-//! user's own alignment, key order, and lines the grammar refused — exactly as
-//! it found them. An app that saves its settings therefore cannot silently
-//! destroy what a user hand-edited in.
-//!
-//! # Tolerance, and where it stops
-//!
-//! A line that is not a valid setting is *retained verbatim* and reported by
-//! [`Document::unparsed`]; it never aborts the read, so one bad line cannot
-//! cost a user every other setting. That tolerance is deliberately confined to
-//! line *content*: the document-level bounds ([`MAX_DOCUMENT_LEN`],
-//! [`MAX_LINES`], [`MAX_SETTINGS`]) are fixed security bounds on untrusted
-//! input and fail closed with a typed [`ConfError`], never by truncating.
-//!
-//! # A document may hold secrets
-//!
-//! The app-data store's **sealed** scope is a document of this format, so the
-//! engine treats a line's bytes as secret unconditionally: every line it
-//! discards — an overwritten setting, a collapsed duplicate, an
-//! [`Document::unset`] removal — and every line of a document that goes out of
-//! scope is wiped before it is freed. That lives in the engine rather than in
-//! its callers so no discard path can forget it. The one copy the engine does
-//! not own is [`Document::render`]'s return value, and its rustdoc says so.
-//!
-//! # Where the bounds live
-//!
-//! The three bounds a key, a value, and a whole document also cross the
-//! app-data channel under — [`MAX_KEY_LEN`], [`MAX_VALUE_LEN`], and
-//! [`MAX_DOCUMENT_LEN`] — are `abi-v1` wire field widths as well as this
-//! grammar's bounds, so their one definition lives in `lib/abi`
-//! (`appdata_ipc`) and this engine imports it. The remaining bounds
-//! ([`MAX_KEY_DEPTH`], [`MAX_LINES`], [`MAX_SETTINGS`]) bound a document's
-//! *shape* rather than its width, never cross the wire, and are this crate's
-//! own.
-//!
-//! # Relationship to the other line-oriented stores
-//!
-//! `lib/sysconfig`, `lib/netconfig`, and the service registry read a
-//! *space*-separated `key value` line with a closed key registry, and refuse a
-//! whole document that deviates — the right semantics for a store the system
-//! boots from. This engine is deliberately different on both counts: an open
-//! key namespace an app owns, and per-line tolerance. It also cannot share
-//! their comment tokenisation ([`tairix_util::conf::strip_comment`], which cuts
-//! at the first `#` unconditionally), because here a `#` inside a quoted value
-//! is a literal character; the tokenisation has to know about quoting, so it
-//! lives with the grammar that has quotes.
-//!
-//! [`tairix_util::conf::strip_comment`]: https://docs.rs/tairix-util
+//! The grammar, the bounds table, and why the format is line-oriented are
+//! `docs/src/lib/appconf.md`.
 
 #![no_std]
 #![forbid(unsafe_code)]

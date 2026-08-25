@@ -4,30 +4,21 @@
 //! (`plans/APPDATA.md` AD4).
 //!
 //! This is a **pure-Rust** program: TAIRiX is Rust-only, so it links the Rust
-//! userland runtime `tairix-rt`, never the C ABI. `tairix-rt` provides
-//! `_start`, the per-process stack canary, the panic handler, the
-//! `#[global_allocator]`, the `fs_*` file API the store reads and writes
-//! through, the `random_get` draw the sealed scope's key material and nonces
-//! come from, and the endpoint syscall wrappers; `tairix_rt::entry!` names this
-//! program's `main`.
-//!
-//! # What this service does
+//! userland runtime `tairix-rt`, never the C ABI. `tairix-rt` provides `_start`,
+//! the per-process stack canary, the panic handler, the `#[global_allocator]`,
+//! the `fs_*` file API the store reads and writes through, the `random_get`
+//! draw the sealed scope's key material and nonces come from, and the endpoint
+//! syscall wrappers; `tairix_rt::entry!` names this program's `main`.
 //!
 //! It binds the reserved [`APPDATA_ENDPOINT`](tairix_abi::appdata_ipc::APPDATA_ENDPOINT)
 //! — a rendezvous whose bind needs the manifest's `CAP_IPC_BIND_PRIVILEGED`,
 //! because a squatter that claimed it first could serve forged settings to
 //! every application on the machine — and then blocks in a serve loop: receive
-//! a request, read the caller's kernel-attested origin, answer, reply.
-//!
-//! It is a **boot-floor** service, not a graphical one: a headless machine
-//! needs it exactly as much as a desktop does, because the shell and every
-//! command app reach their own settings through it. It comes up before any
-//! volume is unlocked and answers `DeviceOffline` until storage is reachable,
-//! so an early caller gets a typed refusal rather than a guess.
-//!
-//! If the endpoint cannot be bound the service records `SERVICE_UNAVAILABLE`
-//! and exits fail-closed; PID 1 supervises and relaunches it. It never serves
-//! settings it could not authorise.
+//! a request, read the caller's kernel-attested origin, answer, reply. It comes
+//! up before any volume is unlocked and answers `DeviceOffline` until storage is
+//! reachable, so an early caller gets a typed refusal rather than a guess. If
+//! the endpoint cannot be bound it records `SERVICE_UNAVAILABLE` and exits
+//! fail-closed; PID 1 supervises and relaunches it.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy, and
 //! fmt still cover the file.

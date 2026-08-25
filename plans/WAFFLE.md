@@ -63,6 +63,17 @@ code itself does not?* If no → delete. If yes → keep.
 - Essay-length prose: multi-paragraph exposition, tutorials, narration of the
   change that produced the code, and body comments restating the rustdoc above
   them. Keep the load-bearing *why* in a line or two; delete the rest.
+- **A design essay as module rustdoc, where the subsystem already has a
+  `docs/src/` page.** rustdoc states the contract a caller or reader could get
+  wrong at this item; the mdBook page holds the design narrative — the
+  alternatives considered, the threat reasoning, the performance argument — and
+  the module doc ends with a pointer to it. That is the split §3 names
+  (`docs/` is the long-form home), §13 requires (a page per subsystem), and
+  92 module docs already followed before this rule was written down
+  (`lib/sync`, `kernel/sec/src/audit.rs`, most of `drivers/filesystem/arxfs`).
+  Before trimming, check each claim survives in that page or in the item's own
+  rustdoc, and *move* any that lives only in the module doc. This is
+  "improved for brevity" per §0, not deletion.
 - **Charter section citations** — `AGENTS.md §5.4`, `§2.9`, `sec.5.4`,
   "Section 5.4", or a bare trailing `(§5.4)`. `AGENTS.md` §2.11 / §15.17 forbid
   them outright: the rule lives in the charter, so citing its number restates
@@ -124,6 +135,9 @@ These carry the densest rustdoc surface (public ABI/library items, §6) and the
 `// SAFETY:` cores (`kalloc`, `sync`, `raster`, `crypto`) — strict §1 keep
 rules apply.
 
+`lib/abi/src/appdata_ipc.rs`, `lib/appconf`, and `lib/appdata` are already done
+(`plans/CODEVERIFY.md`, the app-data entry); the rest of the area is untouched.
+
 ### Stage W2 — `kernel/*` — Status: planned
 
 All kernel crates (`core`, `mem`, `sched/*`, `ipc`, `irq`, `sec`, `syscall`,
@@ -142,6 +156,7 @@ behaviour (§8 `README.md`-adjacent *why*).
 ### Stage W4 — `userland/*` — Status: planned
 
 All userland crates across `system`, `session`, `shell`, `gui`, `apps`, `net`.
+`userland/system/confd`'s module docs are already done (`plans/CODEVERIFY.md`).
 
 ### Stage W5 — `tools/*` and `tests/*` — Status: planned
 

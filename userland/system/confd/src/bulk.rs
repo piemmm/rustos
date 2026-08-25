@@ -2,63 +2,38 @@
 //! application reaches as descriptors rather than as bytes on the app-data
 //! channel — the durable [`BlobStore`] and the per-boot [`TempStore`].
 //!
-//! # Why a descriptor and not a payload
+//! A mail index, a thumbnail cache, or a staged download is the wrong shape for
+//! a message: the IPC payload ceiling is far below what one holds, so a store
+//! that proxied bytes could not serve them at all. The service decides once —
+//! is this the caller's own file, does the store belong to this publisher, is
+//! the count ceiling reached — and hands back a one-shot descriptor delegation.
 //!
-//! A mail index, a search index, a thumbnail cache, or a staged download is
-//! the wrong shape for a message: the IPC payload ceiling is far below what
-//! one holds, so a store that proxied bytes could not serve them at all. So
-//! the service makes the policy decision once — is this the caller's own file,
-//! does the store belong to this publisher, is the count ceiling reached — and
-//! hands back a one-shot descriptor delegation. The application then reads,
-//! writes, truncates, and memory-maps the file directly against the kernel VFS
-//! at full speed, and the service never touches a byte of payload.
+//! The delegation is the bound: it carries only the access the operation asked
+//! for, and a writable one carries a byte-extent ceiling
+//! ([`APPDATA_BULK_FILE_MAX_BYTES`]) the kernel enforces on every write and
+//! truncate through it. Admission enforces the other dimension, the file
+//! *count*, and **nothing else** — summing sizes at open time and
+//! refusing the next open would do nothing about the file a caller already
+//! holds open, and a defence a hostile application defeats in one line is worse
+//! than none because it reads as an assurance.
 //!
-//! # What bounds direct access
-//!
-//! The delegation is the bound. It carries only the access the operation asked
-//! for, and a writable one carries a byte-extent ceiling the kernel enforces on
-//! every write and truncate through it, so an application cannot grow a file
-//! past [`APPDATA_BULK_FILE_MAX_BYTES`] however it uses the descriptor.
-//! Admission enforces the other dimension, the file *count*, and nothing else:
-//! summing sizes at open time and refusing the next open would do nothing about
-//! the file a caller already holds open, and a defence a hostile application
-//! defeats in one line is worse than none because it reads as an assurance.
-//!
-//! Why the store must bound this at all rather than leaning on a filesystem
-//! quota: the gated tree is owned by the app-data service precisely so the
-//! account's own shell cannot reach it, so every byte written here is charged
-//! to the *service's* uid. No per-user filesystem quota, present or future,
-//! would ever see it.
-//!
-//! # Two scopes, and the one difference between them
-//!
-//! A blob is *durable* and the application names it: it expects the same bytes
-//! under the same name after a reboot. A temporary file is the scratch of one
-//! run, and the **service** names it — freshness without coordination is what a
-//! temporary file is for, and two instances of one application that both chose
-//! a name would overwrite each other's work. That is also why nothing here
-//! *opens* a temporary file: the only way to hold one is to have just created
-//! it, so an application can never read scratch it did not write in this
-//! process.
-//!
-//! Their lifetime is the boot, and the name says which one ([`TempNames`]). An
-//! earlier boot's files are invisible to every answer [`TempStore`] gives and
-//! are reclaimed before the next file is created, so no marker record has to be
-//! kept in step with the directory and no boot-time walk of every account's
-//! every store is paid.
-//!
+//! A blob is durable and the application names it. A temporary file is the
+//! service's to name, and nothing here *opens* one, so the only way to hold one
+//! is to have just created it. Their lifetime is the boot and the name says
+//! which one ([`TempNames`]), so no marker record has to be kept in step with
+//! the directory and no boot-time walk of every account's every store is paid.
 //! The two share everything but that: one inner scope resolves the directory,
 //! proves the gated root, enumerates it, unlinks from it, and mints its
 //! delegations, and the two public faces add only the rule that is their own.
 //!
-//! # One pin, both trees
-//!
-//! Bulk data lives under `Library/`, configuration under `Settings/`, and one
-//! `.owner` record in the configuration store governs both: it attests who owns
-//! the *application's data*, not who owns one file. A bulk operation therefore
+//! Bulk data lives under `Library/` and configuration under `Settings/`, and one
+//! `.owner` record in the configuration store governs both. So a bulk operation
 //! resolves and pins through [`AppStore`] first and reaches this tree only
-//! behind that check, so a publisher squatting another developer's identifier
+//! behind that check, and a publisher squatting another developer's identifier
 //! is refused before a byte of its data is reachable.
+//!
+//! Why the ceilings are fixed and why the service must have them are
+//! `docs/src/userland/confd.md`.
 
 use alloc::string::String;
 use alloc::vec::Vec;

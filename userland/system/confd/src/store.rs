@@ -8,34 +8,15 @@
 //! ([`published_document`]) names, which crossed the wire only after the one
 //! identifier grammar accepted it.
 //!
-//! # Three scopes, and why only one of them is layered
+//! [`ConfigScope::Private`] is the only layered scope: an unset key falls back
+//! to the machine-wide policy an administrator may ship beneath it.
+//! [`ConfigScope::Public`] is one document with no layer, and the **sealed**
+//! scope ([`VAULT_FILE`], [`crate::vault`]) has none either. The sealed scope is
+//! also not a [`ConfigScope`]: the two families of frame have no field in common
+//! that could select the other's file.
 //!
-//! [`ConfigScope::Private`] is the user's settings for an application, so it
-//! reads through the machine-wide policy layer an administrator may ship
-//! beneath it: an unset key falls back to the machine's answer rather than to
-//! nothing.
-//!
-//! [`ConfigScope::Public`] is what the application *publishes about itself*
-//! for other applications to read, and it is deliberately **one document with
-//! no layer beneath it**. Two reasons, and the first is structural: a bundle's
-//! own directory is not something this service can name — nothing attested
-//! gives it a bundle path — so a bundle-shipped published document could never
-//! be read on the foreign path at all, and a layer that only worked for the
-//! publishing app itself would mean two applications disagreeing about what a
-//! third publishes. The second is the scope's contract: a reader must be able
-//! to attribute a published value to the application, and a machine-wide layer
-//! beneath it would let an administrator make an application appear to say
-//! something it never said.
-//!
-//! The **sealed** scope ([`VAULT_FILE`]) is the application's secrets,
-//! encrypted at rest under a key derived per (account, application)
-//! ([`crate::vault`]). It has no layer beneath it for a third reason of its
-//! own: a layer an administrator or a bundle could ship would be a secret an
-//! application had not written, and a secret an application did not put there
-//! is not one it may be made to believe. It is also not a [`ConfigScope`] — no
-//! configuration request can name it and no sealed request can name a
-//! configuration document, in either direction, because the two families of
-//! frame have no field in common that could select the other's file.
+//! Why each scope is layered or not, and the two checks that authorise every
+//! open, are `docs/src/userland/confd.md`.
 
 use alloc::string::String;
 use alloc::vec::Vec;

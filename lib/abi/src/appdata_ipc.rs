@@ -1,132 +1,48 @@
-//! The app-data channel: the reserved rendezvous every application reaches
-//! its own per-app configuration store through (`plans/APPDATA.md` §3.6).
+//! The app-data channel: the reserved rendezvous every application reaches its
+//! own per-app configuration store through (`plans/APPDATA.md` §3.6).
 //!
-//! # Why a service owns the store
+//! Four properties of the request shapes, each holding by construction rather
+//! than by a check the daemon performs:
 //!
-//! All of a user's applications run as that one user, so the per-inode
-//! owner/mode/ACL model cannot separate them — uid is the only principal it
-//! keys on. App-from-app isolation *within* one account is therefore not
-//! expressible in the filesystem model at all, and a service that keys every
-//! answer on the caller's kernel-attested app identity is the mechanism that
-//! provides it. The store trees carry
-//! [`CapabilityId::APPDATA_ADMIN`](crate::CapabilityId::APPDATA_ADMIN) as
-//! their per-inode gate and the service is its only holder, so there is no
-//! second path to the bytes.
+//! - No *configuration* operation carries a bundle identifier. The daemon
+//!   derives which store to open from the [`Origin`](crate::Origin) the kernel
+//!   attests for the calling task, so no frame can claim to be another
+//!   application. A caller with no attested app identity has no store and is
+//!   refused whichever operation it sent.
+//! - [`AppDataRequest::PublicRead`] is the one operation that names a foreign
+//!   application, and it is a distinct operation precisely so that it carries
+//!   no scope field at all: another application's private document is
+//!   unreachable because no frame can ask for it.
+//! - The sealed scope is deliberately **not** a [`ConfigScope`] variant.
+//!   [`AppDataRequest::VaultRead`], [`AppDataRequest::VaultSet`], and
+//!   [`AppDataRequest::VaultUnset`] carry no scope field and have no foreign
+//!   counterpart, so no configuration frame can name a secret, no vault frame
+//!   can name a configuration document, and "one application reads another's
+//!   secrets" is unrepresentable rather than refused.
+//! - [`AppDataRequest::TempCreate`] names nothing on the way in and no
+//!   operation opens a temporary file by name, so an application can only hold
+//!   scratch it just created.
 //!
-//! # Five scopes, and the one request shape that names another app
+//! [`AppDataRequest::ConfigRead`] answers a **whole** merged document or
+//! nothing: a document that exceeds the declared reply capacity comes back as
+//! the byte count it needs ([`ConfigDocument::NeedsCapacity`]) with no body, so
+//! a caller never parses a truncated prefix and never assembles a store out of
+//! two snapshots. [`AppDataRequest::ConfigSet`] and
+//! [`AppDataRequest::ConfigUnset`] stage against the caller's own session and
+//! [`AppDataRequest::ConfigCommit`] publishes one scope, because one document
+//! is what a rename can replace atomically. There is no `VaultCommit`: the
+//! daemon seals a vault write and publishes it before it replies.
 //!
-//! An application's store holds a [`ConfigScope::Private`] document — the
-//! user's settings for that app, which nothing else may read — a
-//! [`ConfigScope::Public`] one, which the app publishes for other
-//! applications to read, a **sealed** one, encrypted at rest under a key
-//! derived per (account, application) and reached only through the `Vault`
-//! operations, a **blob** store for durable bulk data reached as a descriptor
-//! rather than as bytes on this channel, and a **temporary** store for the
-//! scratch of one run. Every *configuration* operation carries the scope; none
-//! of them carries a bundle identifier, because the daemon derives which store
-//! to open from the [`Origin`](crate::Origin) the kernel attests for the
-//! calling task. So there is no request shape by which an app can claim to be
-//! another app.
-//!
-//! The single exception is [`AppDataRequest::PublicRead`], which names a
-//! *foreign* application's identifier — and it is a distinct operation
-//! precisely so that it cannot carry a scope at all: a request that names
-//! another app is public by construction, and the private scope is
-//! unreachable across applications because no frame can ask for it. A caller
-//! with no attested app identity — a kernel principal, a boot-floor program
-//! with no signed manifest, a parser-sandbox child — has no store and is
-//! refused whichever operation it sends.
-//!
-//! The sealed scope is deliberately **not** a [`ConfigScope`] variant. It is
-//! reached by [`AppDataRequest::VaultRead`], [`AppDataRequest::VaultSet`], and
-//! [`AppDataRequest::VaultUnset`], none of which carries a scope field — so no
-//! configuration frame can name a secret and no vault frame can name a
-//! configuration document, in either direction, by construction rather than by
-//! a check. It also has no foreign counterpart at all, which is what makes
-//! "one application reads another's secrets" unrepresentable rather than
-//! refused.
-//!
-//! # One read for the whole document, not one per key
-//!
-//! [`AppDataRequest::ConfigRead`] answers with the caller's **whole** merged
-//! document for one scope — for the private scope, the machine-wide policy
-//! layer with the user's own overrides applied — as canonical `key = value`
-//! text the client parses with the one format engine. So an application's
-//! start-up costs one call, one store read, and one parse however many
-//! settings it goes on to consult; a per-key read would have cost the daemon a
-//! file read and a parse *per key*, and a client that reads one setting pays
-//! no more than one that reads forty.
-//!
-//! The reply is a whole document or nothing: the request declares the reply
-//! buffer the caller has, and a document that does not fit comes back as the
-//! byte count it needs ([`ConfigDocument::NeedsCapacity`]) with no body at
-//! all. A caller therefore never parses a truncated prefix, and never reads a
-//! document assembled out of two different snapshots — every answer is one
-//! point-in-time view.
-//!
-//! # Staged writes, one atomic publish per scope
-//!
-//! [`AppDataRequest::ConfigSet`] and [`AppDataRequest::ConfigUnset`] *stage* a
-//! change against the caller's own session with the daemon;
-//! [`AppDataRequest::ConfigCommit`] publishes the staged document whole. A
-//! caller that never commits changes nothing on disk, and a crash mid-publish
-//! leaves either the old document or the new one — never a torn one. A staged
-//! change is visible to the staging caller's own [`AppDataRequest::ConfigRead`]
-//! and to no other principal, so a settings sheet reads back what it just set.
-//!
-//! Staging and committing are **per scope**: a commit publishes one document,
-//! because one document is what a rename can replace atomically. Naming a
-//! scope on the commit is what keeps that honest rather than implying an
-//! atomicity across two files that no filesystem offers.
-//!
-//! # A sealed write is immediate, and has no commit
-//!
-//! [`AppDataRequest::VaultSet`] and [`AppDataRequest::VaultUnset`] carry no
-//! staging and there is no `VaultCommit`: the daemon opens the sealed
-//! document, applies the one change, re-seals it, and publishes it before it
-//! replies. Plaintext secret material therefore exists in the daemon for the
-//! span of one request instead of for the life of a staging session, and
-//! because the daemon serves requests one at a time the whole
-//! read-modify-seal-publish is atomic — so two processes of one application
-//! sealing different secrets cannot lose each other's, which a
-//! stage-then-commit pair would allow.
-//!
-//! # Bulk data leaves the daemon off the byte path entirely
-//!
-//! An application's **blobs** — a mail index, a search index, a thumbnail
-//! cache — are reached by [`AppDataRequest::BlobOpen`], which answers with a
-//! one-shot `fd_grant` handle rather than with bytes. The caller redeems it
-//! and then reads, writes, truncates, and memory-maps the file directly
-//! against the kernel VFS at full speed, so the daemon makes the policy
-//! decision once at open and never touches a byte of payload. Proxying bulk
-//! data through this channel is not merely slower, it is impossible: the IPC
-//! payload ceiling is far below what a blob holds.
-//!
-//! The delegation is what bounds the authority handed over. It carries the
-//! access the mode asked for and, for a writable blob, a byte-extent ceiling
-//! the kernel enforces — so an application cannot grow a bulk file past
-//! [`APPDATA_BULK_FILE_MAX_BYTES`] however it uses the descriptor, and
-//! [`APPDATA_BLOB_MAX_COUNT`] bounds how many blobs it may hold at all. Both
-//! are fixed containment bounds rather than capacities: they bound what one
-//! application may take from the *user's* volume, and a bigger machine must
-//! not let it hide a bigger unmanaged pile of data in a store the user cannot
-//! list or delete.
-//!
-//! # Scratch that no request can open
-//!
-//! [`AppDataRequest::TempCreate`] answers with a descriptor for a **fresh**
-//! temporary file and the name the daemon gave it. The caller names nothing on
-//! the way in, and there is no operation that opens a temporary file by name —
-//! so an application can never read scratch it did not just create, not even
-//! its own from an earlier run. The name it is handed back is good for exactly
-//! one thing, [`AppDataRequest::TempRelease`].
-//!
-//! Their lifetime is the boot: a file left behind by an earlier one is
-//! reclaimed before the next is created and is reachable by nothing in the
-//! meantime. [`APPDATA_TEMP_MAX_COUNT`] bounds how many an application may
-//! hold at once, and [`APPDATA_BULK_FILE_MAX_BYTES`] bounds each, by the same
-//! containment argument the blob scope makes: the bytes are charged to the
-//! daemon's own uid, so no per-user filesystem quota would ever see them.
+//! [`AppDataRequest::BlobOpen`] and [`AppDataRequest::TempCreate`] answer an
+//! `fd_grant` handle rather than bytes — the IPC payload ceiling is far below
+//! what a blob holds, so proxying them is impossible rather than merely slower.
+//! The delegation is what bounds the authority handed over: it carries the
+//! access the mode asked for and, for a writable blob, a byte-extent ceiling the
+//! kernel enforces — so an application cannot grow a file past
+//! [`APPDATA_BULK_FILE_MAX_BYTES`] however it uses the descriptor.
+//! [`APPDATA_BLOB_MAX_COUNT`] and [`APPDATA_TEMP_MAX_COUNT`] bound the other
+//! dimension, the file count, at admission. All three are fixed containment
+//! bounds rather than capacities, so a larger machine does not raise them.
 //!
 //! # Wire shape
 //!
@@ -149,33 +65,31 @@
 //! ```
 //!
 //! The **name** slot carries whichever single store name the operation names —
-//! a foreign application's bundle identifier for
-//! [`AppDataRequest::PublicRead`], a blob name for the blob operations, a
-//! temporary file's for [`AppDataRequest::TempRelease`] — and each validates it
-//! under the grammar for its own kind. All are one path component in a store
-//! the daemon composes, so they share one width and one character grammar;
-//! what they do not share is a request shape, so no frame can name an
-//! application where a file belongs or the reverse.
-//!
-//! The record is variable-width rather than padded to its widest form: a
-//! `ConfigRead` is twenty bytes and a `ConfigCommit` is twenty, so padding
-//! every request to the width of the longest value would put a kilobyte of
-//! zeroes on the hot settings path for nothing.
+//! a foreign bundle identifier, a blob name, a temporary file's for
+//! [`AppDataRequest::TempRelease`] — and each validates it under the grammar
+//! for its own kind. All are one path component
+//! in a store the daemon composes, so they share one width and one character
+//! grammar; what they do not share is a request shape, so no frame can name an
+//! application where a file belongs or the reverse. The record is
+//! variable-width rather than padded to its widest form, so a twenty-byte
+//! `ConfigRead` does not carry a kilobyte of zeroes on the hot settings path.
 //!
 //! Every decode fails closed. An unknown magic, version, operation, scope, or
 //! blob mode, a declared length that does not match the record, a field an
 //! operation does not use left non-zero, non-UTF-8 text, a name outside its
 //! grammar, or a trailing byte past the payload all refuse rather than guess.
 //!
-//! The **grammar** of a key and a value is not judged here: it has one home,
-//! the `key = value` engine in `lib/appconf`, and the daemon applies it
-//! through that engine's own validators. This module bounds the transport —
-//! the record's shape, its lengths, and its text encoding — exactly as the
-//! `users_admin` request codec bounds a record whose field rules live in
-//! `lib/users`. The grammars it *does* apply are the two store-name ones
+//! The grammar of a key and a value is not judged here: it has one home, the
+//! `key = value` engine in `lib/appconf`, and the daemon applies it through
+//! that engine's own validators. This module bounds the transport — the
+//! record's shape, its lengths, and its text encoding. The grammars it *does*
+//! apply are the two store-name ones
 //! ([`validate_bundle_id`](crate::validate_bundle_id),
 //! [`validate_bulk_name`]), because a name that becomes a path component in a
 //! store is crossing a trust boundary and that grammar lives in this crate.
+//!
+//! What the daemon does with each request, and why the store is a service at
+//! all, are `docs/src/userland/confd.md`.
 
 use crate::appinfo::BUNDLE_ID_MAX;
 use crate::le::{put_u16, put_u32, read_u16, read_u32};

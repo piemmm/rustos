@@ -232,7 +232,7 @@ records an empty backlog.
 The twenty-five commits ending at `a66f6a27` landed roughly 60 000 lines across
 545 files without the charter applied throughout, so that surface and the code
 around it are being re-reviewed adversarially under §23. The scan matrix below
-is the audit's coverage record; the areas marked open are the remaining work.
+is the audit's coverage record. No item on it is open.
 
 Clean on the commit-range surface, verified by scan and needing no further
 pass: production-path `panic!`/`unwrap`/`expect` (§2.9 — every hit is a test,
@@ -852,13 +852,74 @@ Confirmed sound, and needing no further pass:
   task ids come from a monotonic counter, so the kernel-attested `origin.pid()`
   resolves to the intended process or to nothing.
 
-### Open — rustdoc waffle in the new surface (§2.11, `plans/WAFFLE.md`)
+### Done — the app-data module docs are terse, and the design lives in the book
 
-Several new modules carry multi-section design essays as module rustdoc
-(`userland/system/confd/src/vault.rs` opens with ~52 lines under "# The
-hierarchy", "# What protects the master secret, stated plainly", "# What the
-sealing does buy"). Mandatory rustdoc is held to the same terseness as any
-comment. Coordinate with `plans/WAFFLE.md` rather than opening a second sweep.
+Eight module rustdoc essays in the app-data surface were **section-for-section
+duplicates of their own mdBook pages** — same headings, byte-identical example
+blocks, arguments repeated phrase for phrase against
+`docs/src/{lib/appconf.md, lib/appdata.md, userland/confd.md}` (932 lines).
+`lib/appconf`'s "Where the bounds live" was a *third* copy: each of
+`MAX_KEY_LEN` / `MAX_VALUE_LEN` / `MAX_DOCUMENT_LEN` already carries its
+`lib/abi` provenance in its own item rustdoc, which §2.11 names outright ("a
+restatement of the rustdoc above it"). 662 module-doc lines became 327.
+
+The rule applied, and the one to reuse for the rest of the `plans/WAFFLE.md`
+backlog: **rustdoc states the contract a caller or reader could get wrong at
+this item; the mdBook page holds the design narrative** — the alternatives
+considered, the threat reasoning, the performance argument — and the module doc
+ends with a pointer to it. That is the split §3 already names (`docs/` is
+"Long-form documentation (mdBook)"), §13 already requires (a page per
+subsystem), and 92 module docs in the tree already followed (`lib/sync`,
+`kernel/sec/src/audit.rs`, `lib/reclaim/src/audit.rs`, …).
+
+Nothing was dropped that was not already documented elsewhere. Each of the 45
+code spans and intra-doc links the trim removed was checked individually
+against the doc pages and the item rustdoc, three were restored where the
+module is where the code *applies* the thing named (`Origin`, `vault`,
+`APPDATA_BULK_FILE_MAX_BYTES`), and the one claim that lived **only** in
+rustdoc — why sealing is not redundant with the capability gate — was moved
+into `docs/src/userland/confd.md` rather than deleted.
+
+Two defects the read surfaced, both from compressing accurate prose:
+
+- **The trim itself introduced one and it was caught by re-checking the code**,
+  not by the gate: a first draft of `lib/abi/src/appdata_ipc.rs` said the byte
+  *and* count ceilings "hold however the descriptor is used". Only
+  `APPDATA_BULK_FILE_MAX_BYTES` is kernel-enforced through the delegation; the
+  two count ceilings are enforced at admission, which `bulk.rs` states
+  correctly. Compressing two clauses into one is how a prose sweep breaks a
+  claim, and no check in the pipeline can see it.
+- `Line::drop`'s rustdoc read "an `Document::unset` removal".
+
+Three things a later context should not re-litigate:
+
+- **`lib/appdata/src/fake.rs` is deliberately untouched.** Its 32 lines are
+  five *contract* paragraphs — the deliberate non-goals a test author needs (it
+  does not encrypt, does not mint a real descriptor, does not reproduce the boot
+  half of temp naming) — not a multi-section design essay. Restructuring it into
+  bullets would not shorten it, so it would be churn.
+- **A tree-wide "no essay in module rustdoc" lint is not landable yet.** Any
+  honest heuristic (a `//!` block over N lines, or with two or more `#`
+  headings) flags the whole unswept `plans/WAFFLE.md` backlog — `lib/sync` and
+  `kernel/sched/cfq` both carry multi-section module docs — so it would fail the
+  gate on files no change has reached. It becomes landable when W1–W5 close; the
+  standing guard until then is `docs-check`, which fails on a lost intra-doc
+  link, plus §23 review.
+- **The prose facts were read against the code, and hold.** Spot-checked and
+  true: `APPDATA_HEADER_LEN == 20` (so a `ConfigRead` is twenty bytes),
+  `APPDATA_NAME_MAX == BUNDLE_ID_MAX` (so the store-name grammars "share one
+  width"), `STORE_DIR_MODE == 0o700`, `Settings::commit` ends in `reload()`,
+  `impl Drop for Line` wipes, `bulk.rs` has exactly one inner `Scope` behind
+  two public faces, and `run.rs`'s serve loop is a single-threaded `loop` (so
+  "requests are served one at a time", which the sealed scope's atomicity
+  claim rests on, is real).
+
+The four audits `plans/CODEVERIFY.md` records for a text sweep were run, plus a
+stronger one this sweep could use because it touched *only* leading `//!`
+blocks: **everything after the module-doc block is byte-identical to `HEAD`** in
+all eight files, which proves no code moved, the way `tomllib` equality proves
+it for a manifest sweep. `cargo xtask charter-cite` is clean and the one
+surviving `§` (`plans/APPDATA.md §3.6`) is an anchored sibling-plan reference.
 
 ### Done — dead code and false-justification lint silencing (§2.14, §15.3, §15.10)
 

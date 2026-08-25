@@ -98,7 +98,7 @@ impl Drop for Line {
     ///
     /// The app-data store's sealed scope is a document of this format, so a
     /// line the engine discards — an overwritten setting, a collapsed
-    /// duplicate, an [`Document::unset`] removal, or a whole document going
+    /// duplicate, a [`Document::unset`] removal, or a whole document going
     /// out of scope — may hold a secret. Wiping here rather than at each call
     /// site is what makes it hold for *every* discard path, including ones
     /// added later: a caller cannot forget.

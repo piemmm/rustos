@@ -5,108 +5,48 @@
 //! and that capability is the per-inode gate on every user's per-app store
 //! tree. So it is the only path to an application's stored settings, and it
 //! answers each request against the store it derives from the caller's
-//! **kernel-attested** identity.
+//! kernel-attested [`Origin`] — never from anything on the wire. A caller
+//! running no verified bundle has no store and is refused whichever operation
+//! it sent.
 //!
-//! # Why a service and not a file mode
+//! What the engine does that a reader of it should not have to infer:
 //!
-//! All of a user's applications run as that one user. The per-inode
-//! owner/mode/ACL model keys on uid, so it cannot separate two applications of
-//! the same account at all — app-from-app isolation inside one account is not
-//! expressible in it. Keying on the identity the kernel attests for the
-//! calling *bundle* is, and that is what this service exists to do. It is not
-//! a convenience wrapper over the filesystem.
-//!
-//! # What a caller can and cannot ask for
-//!
-//! A configuration request carries a scope, a key, and a value. It never
-//! carries a bundle identifier, a user, or a path: the service resolves all
-//! three from the attested [`Origin`], so no request shape can name another
-//! application's store. A caller running no verified bundle — a kernel
-//! principal, a boot-floor program with no signed manifest, a parser-sandbox
-//! child — has no store and is refused, whichever operation it sent.
-//!
-//! The one request that *does* name an application is `PublicRead`, and it can
-//! reach nothing but that application's **published** document: it carries no
-//! scope field, so no frame can ask for another app's private settings. An
-//! application that publishes nothing, has never run for this account, or
-//! whose store cannot be attested all answer the same empty document, so a
-//! foreign read is never an oracle for more than what an app chose to publish.
-//!
-//! # The sealed scope
-//!
-//! `VaultRead`, `VaultSet`, and `VaultUnset` reach the caller's **secrets**,
-//! encrypted at rest under a key derived per (account, application) from the
-//! account's master secret ([`vault`]). They carry no scope field and have no
-//! foreign counterpart, so no configuration frame can name a secret, no vault
-//! frame can name a configuration document, and no frame at all reaches
-//! another application's secrets.
-//!
-//! A sealed write is **immediate**: the service opens the sealed document,
-//! applies the one change, re-seals it, and publishes it before it replies.
-//! Plaintext secret material therefore exists here for the span of one request
-//! rather than for the life of a staging session, and because requests are
-//! served one at a time the whole read-modify-seal-publish is atomic — so two
-//! processes of one application sealing different secrets cannot lose each
-//! other's, which a stage-then-commit pair would allow. A sealed document that
-//! cannot be opened is refused, never answered as an empty vault.
-//!
-//! # The bulk scopes
-//!
-//! `BlobOpen`, `BlobDelete`, `BlobList`, `TempCreate`, `TempRelease`, and
-//! `QuotaGet` reach the caller's **bulk** data ([`bulk`]) — durable blobs and
-//! the scratch of one run. Neither is a document: an open answers a one-shot
-//! descriptor delegation, so the service decides once and never touches a byte
-//! of payload, and what it hands over is bounded by the access asked for and,
-//! for a write, an extent ceiling the kernel enforces.
-//!
-//! The two differ in who names the file. A blob is durable and the application
-//! names it. A temporary file is the service's to name — `TempCreate` carries
-//! no name and nothing *opens* one, so the only way to hold one is to have just
-//! created it, and an application can never read scratch it did not write in
-//! this process. Their lifetime is the boot, carried in the name itself, so an
-//! earlier boot's file is invisible to every answer and is reclaimed before the
-//! next is created.
-//!
-//! # One read for the whole document
-//!
-//! A `ConfigRead` answers with the caller's whole merged document for one
-//! scope — for the private scope, the machine-wide policy layer, the app's own
-//! settings over it, and the caller's own staged edits over those — as
-//! canonical `key = value` text. An application's start-up therefore costs one
-//! call, one store read, and one parse however many settings it goes on to
-//! consult; answering per key would have cost a file read and a parse each.
-//!
-//! # Staged writes
-//!
-//! A `ConfigSet` or `ConfigUnset` records a *pending edit* against the calling
-//! process instance, in the scope it named; `ConfigCommit` loads that scope's
-//! committed document, applies the pending edits for it, and publishes the
-//! result as one atomic replacement. Edits staged against the caller's other
-//! scope are untouched, because one rename replaces one name and a commit that
-//! claimed to publish two documents at once would be claiming an atomicity no
-//! filesystem offers. A caller that never commits changes nothing on the
-//! volume, and its own reads see its own pending edits so a settings sheet
-//! reads back what it just set.
-//!
-//! The table is bounded at every level of the ownership it describes: the keys
-//! one caller may stage in a scope, the bytes one process instance may hold,
-//! the bytes and entries one account may hold, and the sum across the service.
-//! The account ceilings are a fraction of the whole, so filling the table takes
-//! many distinct accounts and no one of them — nor any one application, which
-//! cannot outrank its account — can deny the others their settings. Every
-//! ceiling is decided before an edit is written, so a refusal leaves the
-//! caller's earlier work untouched, and a commit or the idle reclaim returns
-//! the space.
-//!
-//! # Layering
+//! - **A foreign read is no oracle.** An application that publishes nothing,
+//!   has never run for this account, or whose store cannot be attested all
+//!   answer the same empty document, so `PublicRead` reveals only what an
+//!   application chose to publish. The *caller's* own refusals — no home, a
+//!   root the service does not own, an unreachable volume — are reported as
+//!   themselves, because only those are worth a retry.
+//! - **A sealed write is immediate and atomic.** The service opens the sealed
+//!   document, applies the one change, re-seals it, and publishes it before it
+//!   replies, so plaintext secret material exists here for the span of one
+//!   request rather than for the life of a staging session. Requests are served
+//!   one at a time, so two processes of one application sealing different
+//!   secrets cannot lose each other's — which a stage-then-commit pair would
+//!   allow.
+//! - **A sealed document that cannot be opened is refused** ([`vault`]), never
+//!   answered as an empty vault: "your secrets are damaged" and "you have none"
+//!   must not look alike to an application deciding whether to prompt.
+//! - **A commit publishes one scope.** Edits staged against the caller's other
+//!   scope are untouched, because one rename replaces one name. A caller that
+//!   never commits changes nothing on the volume, and its own reads see its own
+//!   pending edits, so a settings sheet reads back what it just set.
+//! - **Every staging ceiling is decided before an edit is written**, so a
+//!   refusal leaves the caller's earlier work untouched, and a commit or the
+//!   idle reclaim returns the space.
+//! - **A temporary file's lifetime is the boot, carried in its name**, so an
+//!   earlier boot's file is invisible to every answer and is reclaimed before
+//!   the next is created ([`bulk`]).
 //!
 //! This crate is `no_std` (with `alloc`) and performs **no I/O** and draws no
 //! randomness of its own: every read and write goes through the injected
 //! [`Storage`] seam and every draw through the injected [`Entropy`] seam, so
-//! the whole engine — authorisation, the ownership pin, the layered read,
-//! staging, the atomic publish, and the sealed scope's key hierarchy — is
-//! exercised on the host. The service *binary* (`src/run.rs`) supplies the real
-//! seams over the `fs_*` and `random_get` syscalls.
+//! the whole engine is exercised on the host. The service *binary*
+//! (`src/run.rs`) supplies the real seams over the `fs_*` and `random_get`
+//! syscalls.
+//!
+//! The request table, the tree it serves from, the staging ceilings, and why
+//! the store is a service at all are `docs/src/userland/confd.md`.
 
 #![no_std]
 #![forbid(unsafe_code)]

@@ -189,6 +189,12 @@ squatting the same bundle identifier derives a different key and cannot read it
 even if the ownership pin were somehow bypassed. That is defence in depth behind
 the pin, not a substitute for it.
 
+Sealing is not redundant with the gate either. The key is bound to the
+*application*, so the compromise that matters — a defect that let one
+application's request reach another's store directory — yields ciphertext it has
+no key for, and the AEAD authenticates the record, so an altered sealed document
+is refused rather than parsed.
+
 It is reached by three operations that carry **no scope field** and have **no
 foreign counterpart**, so a configuration frame cannot name a secret, a vault
 frame cannot name a configuration document, and no frame at all reaches another

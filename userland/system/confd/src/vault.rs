@@ -1,54 +1,32 @@
 //! The sealed scope: the per-account master secret, the per-application key
 //! derived from it, and the sealed document record on the volume.
 //!
-//! # The hierarchy
-//!
 //! ```text
 //! per-account master secret          (32 random bytes, drawn once per account)
 //!   └─ derive_key(master, "tairix-appdata-secret/v1" ‖ 0x00 ‖ publisher ‖ bundle-id)
 //!        └─ per-(account, application) AEAD key
 //! ```
 //!
-//! The derivation binds the **publisher** rather than the signing key, so a
-//! release signed with a fresh build key still opens the vault it wrote, while
-//! a different developer squatting the same bundle identifier derives a
-//! different key and cannot read it even if the ownership pin were somehow
-//! bypassed. That is defence in depth behind the pin, not a substitute for it.
-//!
-//! Every primitive comes from `lib/crypto`: the single-block HKDF-Expand the
+//! Every primitive comes from `lib/crypto` — the single-block HKDF-Expand the
 //! `ARXFS` key hierarchy derives its own subkeys through, and
-//! ChaCha20-Poly1305. Nothing here is a new construction — only a new
+//! ChaCha20-Poly1305. Nothing here is a new construction, only a new
 //! domain-separating context label.
 //!
-//! # What protects the master secret, stated plainly
+//! The derivation binds the **publisher** rather than the signing key, so a
+//! release signed with a fresh build key still opens the vault it wrote while a
+//! different developer squatting the same bundle identifier derives a different
+//! key. The AEAD authenticates the record, so a damaged or altered sealed
+//! document is refused rather than parsed.
 //!
-//! The master secret is stored as drawn, in the gated store root: a directory
-//! owned by the app-data service, mode `0700`, carrying the app-data
-//! capability as its per-inode gate. At rest it is protected by the encrypted
-//! root volume, which `ARXFS` has no plaintext mode for. So secrets are
-//! exactly as safe at rest as the volume, they survive an administrative
-//! password reset, and an application — including the account's own shell —
-//! cannot reach the record at all.
+//! The master secret is stored as drawn, in the gated store root, and is
+//! deliberately **not** wrapped under a second key: there is no second secret
+//! to wrap it with yet, so a wrap would use a key derivable by anyone who could
+//! read the record. Hence no protector type and no keyslot here — the record
+//! carries a version, and the stage that brings a login-passphrase protector or
+//! TPM sealing (`plans/TPM.md`) reshapes it in place.
 //!
-//! It is deliberately **not** wrapped under a second key today, and there is
-//! deliberately no protector abstraction: at this stage there is no second
-//! secret to wrap it with, so a wrap would have to use a key derivable by
-//! anyone who could read the record, which is theatre rather than defence. A
-//! login-passphrase protector (secrets locked while logged out) and TPM
-//! sealing (`plans/TPM.md`) each bring a real second secret; the record
-//! carries a version, and the stage that brings the first of them reshapes it
-//! in place to carry a keyslot. Writing that keyslot now — a protector enum
-//! with one variant and a salt, nonce, and tag with nothing to put in them —
-//! would be interface built for a stage that has not landed.
-//!
-//! # What the sealing does buy
-//!
-//! Sealing the document is not redundant with the gate. The key is bound to
-//! the *application*, so the compromise that matters — a defect that lets one
-//! application's request reach another's store directory — yields ciphertext
-//! it has no key for. And the AEAD authenticates the record, so a damaged or
-//! altered sealed document is refused rather than parsed: a vault that cannot
-//! be opened never reads as "this application has no secrets".
+//! What protects the record at rest, and what the sealing buys behind the gate,
+//! are `docs/src/userland/confd.md`.
 
 use alloc::vec::Vec;
 
