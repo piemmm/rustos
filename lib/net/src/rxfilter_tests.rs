@@ -93,16 +93,14 @@ fn traffic_directed_at_another_host_is_dropped() {
 }
 
 #[test]
-fn an_unrecognised_ethertype_is_admitted_not_shed() {
-    // The bias to admit, on the rule most likely to be wrong about real
-    // hardware: a link that frames differently from the assumption here (a
-    // Broadcom switch tag ahead of the Ethernet header, say) makes every
-    // ethertype unrecognisable, and shedding on that would silently kill
-    // the interface. The stack drops what it cannot consume anyway.
+fn an_ethertype_the_stack_does_not_speak_is_dropped() {
+    // Wake-on-LAN, LLDP, 802.1X, IPX, AoE: nothing local consumes them, and
+    // recognising that is a positive identification rather than a parse the
+    // filter is unsure of.
     for ethertype in [0x0842_u16, 0x88CC, 0x888E, 0x8137, 0x22F0] {
         assert!(
-            ours().admit(&frame(ethertype, &[0u8; 40])),
-            "ethertype {ethertype:#06x} must be admitted, not guessed about"
+            !ours().admit(&frame(ethertype, &[0u8; 40])),
+            "ethertype {ethertype:#06x} has no local consumer"
         );
     }
 }

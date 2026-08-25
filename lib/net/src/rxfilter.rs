@@ -143,16 +143,13 @@ impl RxAdmit for RxClassifier {
                 .is_none_or(|destination| self.admits_v4(destination)),
             ETHERTYPE_IPV6 => ipv6::peek_destination(parsed.payload)
                 .is_none_or(|destination| self.admits_v6(destination)),
-            // An ethertype this does not recognise is **admitted**, not
-            // shed. The bias to admit is the whole contract, and a
-            // link-layer that frames differently from the assumption here
-            // (a Broadcom switch tag ahead of the header, say) would make
-            // every ethertype unrecognisable and this filter would silently
-            // kill the interface. The stack drops what it cannot consume
-            // anyway, cheaply. The address rules above are where the real
-            // noise reduction is, and they refuse only on a *positive*
-            // identification of a destination that is not ours.
-            _ => true,
+            // The stack speaks no other ethertype, so nothing local can
+            // consume one: spanning tree, LLDP, 802.1X, Wake-on-LAN and the
+            // rest are shed here rather than parsed and dropped. This is a
+            // *positive* identification, not a parse the filter is unsure
+            // of — which is why it refuses where a malformed frame is
+            // admitted.
+            _ => false,
         }
     }
 }

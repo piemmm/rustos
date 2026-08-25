@@ -369,8 +369,7 @@ fn attached(net: OneFrameNet) -> (NetChannelServer<OneFrameNet>, alloc::vec::Vec
 #[test]
 fn a_frame_the_filter_sheds_never_reaches_the_ring() {
     // An IPv4 unicast addressed to another host on the segment: the rule
-    // that carries the real noise reduction, and the only kind that refuses
-    // on a *positive* identification rather than on a parse it is unsure of.
+    // that carries the real noise reduction on a busy LAN.
     let mut header = alloc::vec![0u8; 20];
     header[0] = 0x45;
     header[16..20].copy_from_slice(&[10, 0, 2, 99]);
