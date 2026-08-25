@@ -520,6 +520,7 @@ const STATS_SELECTORS: &[SelectorEntry] = &[
     SelectorEntry::bare("mem/user-resident"),
     SelectorEntry::bare("net/<iface>/rx.bytes"),
     SelectorEntry::bare("net/<iface>/rx.dropped"),
+    SelectorEntry::bare("net/<iface>/rx.filtered"),
     SelectorEntry::bare("net/<iface>/rx.packets"),
     SelectorEntry::bare("net/<iface>/tx.bytes"),
     SelectorEntry::bare("net/<iface>/tx.dropped"),

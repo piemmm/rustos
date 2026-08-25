@@ -8,8 +8,11 @@
 
 use tairix_abi::driver::net::{MacAddress, MAC_ADDRESS_LEN};
 
-/// Length of the fixed Ethernet II header (no VLAN tag).
-pub const ETHERNET_HEADER_LEN: usize = 2 * MAC_ADDRESS_LEN + 2;
+/// Length of the fixed Ethernet II header (no VLAN tag), as a byte count.
+///
+/// The one definition is the driver-facing constant the ring geometry is
+/// sized from; this is only its `usize` spelling.
+pub const ETHERNET_HEADER_LEN: usize = tairix_abi::driver::net::ETHERNET_HEADER_LEN as usize;
 
 /// `EtherType` identifying an ARP payload (RFC 826).
 pub const ETHERTYPE_ARP: u16 = 0x0806;

@@ -16,19 +16,25 @@
 //!   [`NetChannelTransport`] so it stays pure and host-testable.
 //!
 //! The frame region a [`FrameService`] owns is exactly
-//! [`RingGeometry::region_len`] bytes; the pump binds a [`FrameRings`] view
-//! over it for each phase and never touches ring bytes across the doorbell,
-//! so the call boundary is the whole synchronisation (`net_ring`).
+//! [`RingGeometry::region_len`] bytes and the pump binds a [`FrameRings`]
+//! view over it for each phase. The doorbell is *not* the synchronisation:
+//! a driver process fills the receive ring from its own device interrupt,
+//! concurrently with this side draining it, so the rings' atomic counters
+//! are what order the two (`net_ring`). That is also why the pump can skip
+//! the doorbell entirely when it has nothing to transmit —
+//! [`FrameService::receive_needs_doorbell`] is how the in-process shape,
+//! which has no interrupt, says it cannot.
 
 use tairix_abi::driver::net::{DeviceFacts, MacAddress, Net};
 use tairix_abi::driver::net_channel::{
     decode_facts_reply, decode_service_reply, AttachParams, McastGroups, NetChannelRequest,
-    NET_CHANNEL_MAX_REPLY,
+    RxFilterPolicy, NET_CHANNEL_MAX_REPLY,
 };
-use tairix_abi::driver::net_ring::{FrameRings, RingGeometry, ServiceReport};
+use tairix_abi::driver::net_ring::{aligned_region, FrameRings, RingGeometry, ServiceReport};
 use tairix_abi::driver::BufferClass;
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::Errno;
+use tairix_net::rxfilter::RxClassifier;
 
 /// A link-layer frame service the interface pump drives.
 ///
@@ -55,6 +61,15 @@ pub trait FrameService {
     /// A device fault or a corrupt ring state as a typed [`Errno`].
     fn service(&mut self) -> Result<ServiceReport, Errno>;
 
+    /// Whether receive progress depends on the pump ringing the doorbell.
+    ///
+    /// A cross-process driver has its own device interrupt and harvests into
+    /// the shared ring before it wakes the stack, so a pump with nothing to
+    /// transmit need not call it at all. An in-process device has no
+    /// interrupt — the doorbell *is* what runs it — so the pump must always
+    /// ring, or a received frame would sit in the device forever.
+    fn receive_needs_doorbell(&self) -> bool;
+
     /// Replace the group addresses the device admits.
     ///
     /// # Errors
@@ -63,6 +78,16 @@ pub trait FrameService {
     /// that does not filter groups, or [`Errno::LengthOutOfRange`] when the
     /// set exceeds its slots (the previously admitted set stays in force).
     fn set_multicast_groups(&mut self, groups: &[MacAddress]) -> Result<(), Errno>;
+
+    /// Replace the local addresses the receive pre-filter matches against,
+    /// so a frame with no possible local consumer is dropped before this
+    /// stack is woken for it.
+    ///
+    /// # Errors
+    ///
+    /// A transport failure. There is nothing for a driver to refuse: the
+    /// filter can only shed work.
+    fn set_rx_filter(&mut self, policy: RxFilterPolicy) -> Result<(), Errno>;
 }
 
 /// An in-process [`Net`] device engine presented as a [`FrameService`] over
@@ -76,29 +101,41 @@ pub struct LocalFrameService<'r, N: Net> {
     region: &'r mut [u8],
     geometry: RingGeometry,
     class: BufferClass,
+    /// The receive pre-filter, applied here exactly as a driver process
+    /// applies it, so the in-process and cross-process shapes shed the same
+    /// frames.
+    filter: RxClassifier,
 }
 
 impl<'r, N: Net> LocalFrameService<'r, N> {
-    /// Wrap `net` over `region` with the agreed `geometry` and `class`.
+    /// Wrap `net` over `buffer` with the agreed `geometry` and `class`.
+    ///
+    /// `buffer` supplies the frame region and needs
+    /// [`RingGeometry::region_len`] bytes plus up to
+    /// [`REGION_ALIGN_PADDING`](tairix_abi::driver::net_ring::REGION_ALIGN_PADDING)
+    /// more: the ring headers' counters are
+    /// atomics, so the region must be aligned for them, and an in-process
+    /// buffer (unlike a page-aligned `shm` mapping) is only byte-aligned.
+    /// The aligned cut is made here, so the single-address-space form is the
+    /// one place that knows about it.
     ///
     /// # Errors
     ///
-    /// [`Errno::BufferTooSmall`] if `region` is not exactly
-    /// [`RingGeometry::region_len`] bytes.
+    /// [`Errno::BufferTooSmall`] if no aligned region of the geometry's
+    /// length fits in `buffer`.
     pub fn new(
         net: N,
-        region: &'r mut [u8],
+        buffer: &'r mut [u8],
         geometry: RingGeometry,
         class: BufferClass,
     ) -> Result<Self, Errno> {
-        if region.len() != geometry.region_len() {
-            return Err(Errno::BufferTooSmall);
-        }
+        let region = aligned_region(buffer, geometry.region_len()).ok_or(Errno::BufferTooSmall)?;
         Ok(Self {
             net,
             region,
             geometry,
             class,
+            filter: RxClassifier::new(RxFilterPolicy::admit_all()),
         })
     }
 
@@ -129,16 +166,28 @@ impl<N: Net> FrameService for LocalFrameService<'_, N> {
     }
 
     fn service(&mut self) -> Result<ServiceReport, Errno> {
-        let mut rings = FrameRings::bind(self.region, self.geometry, self.class)?;
+        let mut rings =
+            FrameRings::bind(self.region, self.geometry, self.class)?.with_admit(&self.filter);
         self.net
             .service(&mut rings)
             .map_err(tairix_abi::DriverError::as_errno)
+    }
+
+    fn receive_needs_doorbell(&self) -> bool {
+        // No interrupt exists in one address space: this call is the only
+        // thing that moves a frame out of the device.
+        true
     }
 
     fn set_multicast_groups(&mut self, groups: &[MacAddress]) -> Result<(), Errno> {
         self.net
             .set_multicast_groups(groups)
             .map_err(tairix_abi::DriverError::as_errno)
+    }
+
+    fn set_rx_filter(&mut self, policy: RxFilterPolicy) -> Result<(), Errno> {
+        self.filter = RxClassifier::new(policy);
+        Ok(())
     }
 }
 
@@ -290,7 +339,22 @@ impl<T: NetChannelTransport> FrameService for NetChannelClient<'_, T> {
         self.doorbell()
     }
 
+    fn receive_needs_doorbell(&self) -> bool {
+        // The driver process harvests into the shared ring on its own device
+        // interrupt and wakes this stack afterwards, so a pump with nothing
+        // to transmit reads the frames without a call.
+        false
+    }
+
     fn set_multicast_groups(&mut self, groups: &[MacAddress]) -> Result<(), Errno> {
         self.set_multicast(groups)
+    }
+
+    fn set_rx_filter(&mut self, policy: RxFilterPolicy) -> Result<(), Errno> {
+        let mut request = [0u8; NetChannelRequest::MAX_WIRE_LEN];
+        let len = NetChannelRequest::SetRxFilter(policy).encode(&mut request)?;
+        let mut reply = [0u8; NET_CHANNEL_MAX_REPLY];
+        let reply_len = self.transport.call(&request[..len], &mut reply)?;
+        decode_status_reply(&reply[..reply_len])
     }
 }

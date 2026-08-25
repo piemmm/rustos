@@ -21,6 +21,11 @@ workspace = true
 # and the `Errno`/`DriverError` types it fails closed with — one ABI
 # definition.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The one receive-frame classifier: the pre-filter the harvest path applies
+# so a frame with no possible local consumer never wakes the stack. It lives
+# beside the wire formats it reads (Ethernet, ARP, IPv4/IPv6 destinations),
+# never re-derived here.
+tairix-net = { path = "../net", version = "=0.0.0" }
 
 # The serve loop is a freestanding user-space program path, so its runtime
 # is linked only for the bare-metal targets a driver binary is built for; on

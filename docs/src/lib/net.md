@@ -506,6 +506,38 @@ solicited-node group (formalising ND's listening) and the all-systems
 group, and filters the receive path by membership; `join_multicast` /
 `leave_multicast` expose explicit application membership.
 
+### `rxfilter` — the receive pre-filter
+
+The classifier a NIC driver applies on its harvest path to decide, *before*
+the network stack is woken, whether a frame could have a local consumer
+(`plans/NETWORK.md` N17d). On a busy segment most broadcast traffic is
+addressed to other hosts, and each such frame otherwise costs a stack wake,
+a full protocol parse and a drop.
+
+`RxClassifier` evaluates the `RxFilterPolicy` the stack published: an
+ethertype allow-list (IPv4/IPv6/ARP), an ARP target-address match, and an
+IPv4/IPv6 destination match against the interface's own addresses, its
+subnet's directed broadcast, the limited broadcast, and any multicast. It
+reads a destination through `ipv4::peek_destination` /
+`ipv6::peek_destination` rather than a full parse, because folding the
+header checksum twice per frame is exactly the wasted work a filter exists
+to avoid.
+
+It matches on **slow-changing L3 address state only** — no listening ports
+and no group memberships. Per-socket state could fall behind a socket
+opening and drop a frame someone wanted, for a share of the noise that does
+not justify the risk; multicast is admitted wholesale because a device's own
+group filter already sheds unjoined groups where it has one.
+
+**Its bias is to admit.** It is never load-bearing for security: the stack
+still validates every admitted frame, and a driver process already owns its
+device and could drop whatever it liked, so refusing here grants nothing.
+Anything it cannot parse with confidence is admitted, and a policy that
+could not name every local address (`is_exhaustive` false) widens to admit
+all unicast. `Stack::rx_filter_policy` assembles the policy beside the
+addresses it describes, so the classifier and what it evaluates are never
+derived twice.
+
 ### `rate` — the tickless windowed throughput meter
 
 `RateMeter` turns an interface's monotonic byte/packet counters into the

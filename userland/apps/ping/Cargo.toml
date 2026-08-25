@@ -11,14 +11,15 @@ publish.workspace = true
 [lints]
 workspace = true
 
-# The `Run` binary's freestanding userland runtime (`tairix-rt`) is an
+# The `Run` binary's freestanding userland runtime (`tairix-rt`) and the
+# socket-backed name resolver (`tairix-resolver`'s `program` feature) are an
 # optional, on-by-default build feature, mirroring the other command apps.
-# `cargo build -p tairix-ping` builds the tool program with it; host tooling
+# `cargo build -p tairix-ping` builds the tool program with them; host tooling
 # builds only the pure *library*, so the host test build never pulls the
 # userland runtime's `_start` / `#[global_allocator]` / panic handler.
 [features]
 default = ["program"]
-program = ["dep:tairix-rt"]
+program = ["dep:tairix-rt", "tairix-resolver/program"]
 
 # The package is both the `tairix-ping` library (the pure ping-loop engine
 # below) and the `Run` entry-point binary of the `ping` tool. The binary is a
@@ -36,6 +37,11 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # parser, and the shared own-bundle short-help render the `-?`/`--help`
 # switches use (plans/APPS.md).
 tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
+# The shared userland stub resolver: the one literal-first, family-preference
+# host-operand policy (`resolve_host`) and the `address_parts` split every
+# connecting tool uses — never a second copy of "what does this operand mean".
+# The socket-backed transport is behind its `program` feature.
+tairix-resolver = { path = "../../../lib/resolver", version = "=0.0.0" }
 
 # For the freestanding `Run` binary only: the userland runtime `tairix-rt`
 # (`_start`, canary, panic handler, `mem_map` allocator, the standard-stream
@@ -44,6 +50,11 @@ tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
 # not linked.
 [target.'cfg(target_os = "none")'.dependencies]
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+# The one RNG crate: `FastRng` (xoshiro256++) generates the high-entropy
+# payload bytes, seeded from the kernel CSPRNG. Bulk uncompressible data is
+# not a security surface, so the fast generator is the right layer — and
+# rolling a private PRNG is forbidden.
+tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
 # The freestanding `Run` binary also enables the help engine's syscall-backed
 # own-bundle `HelpSource` (`BundleHelp`).
 tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }

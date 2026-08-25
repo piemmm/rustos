@@ -2121,6 +2121,7 @@ dependencies = [
  "tairix-abi",
  "tairix-caps",
  "tairix-log",
+ "tairix-net",
  "tairix-rt",
 ]
 
@@ -2193,6 +2194,8 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-help",
+ "tairix-resolver",
+ "tairix-rng",
  "tairix-rt",
 ]
 

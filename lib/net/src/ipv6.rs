@@ -511,6 +511,19 @@ fn options(body: &[u8], base: usize, dest_is_multicast: bool) -> Result<(), Walk
     Ok(())
 }
 
+/// The destination address of an IPv6 header, without validating the rest
+/// of it.
+///
+/// The receive pre-filter's counterpart to [`crate::ipv4::peek_destination`]:
+/// it needs only the destination, ahead of the stack's full parse.
+#[must_use]
+pub fn peek_destination(bytes: &[u8]) -> Option<Ipv6Addr> {
+    if bytes.len() < IPV6_HEADER_LEN || bytes[0] >> 4 != 6 {
+        return None;
+    }
+    Some(address(&bytes[24..40]))
+}
+
 fn address(bytes: &[u8]) -> Ipv6Addr {
     let mut octets = [0u8; 16];
     octets.copy_from_slice(bytes);

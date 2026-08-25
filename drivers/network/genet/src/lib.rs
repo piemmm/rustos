@@ -74,7 +74,7 @@ use tairix_abi::driver::mmio::WindowError;
 use tairix_abi::driver::net::{
     DeviceFacts, LinkState, MacAddress, McastFilter, Net, NetOffloads, ETHERNET_HEADER_LEN,
 };
-use tairix_abi::driver::net_ring::{FrameRings, ServiceReport};
+use tairix_abi::driver::net_ring::{FrameOffload, FrameRings, RxDelivery, ServiceReport};
 use tairix_abi::driver::timing::Delay;
 use tairix_abi::{
     CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, Errno, HwMatchKey,
@@ -265,6 +265,9 @@ pub struct Genet<R: GenetRegs, D: Delay> {
     /// count in flight — and hence the free slots — is known without
     /// re-reading mid-drain.
     tx_consumer: u32,
+    /// Frames the receive pre-filter has shed since open. A cumulative
+    /// device statistic, so a consumer that misses a report loses nothing.
+    filtered_frames: u64,
 }
 
 impl<R: GenetRegs, D: Delay> Genet<R, D> {
@@ -300,6 +303,7 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
             rx_consumer: 0,
             tx_producer: 0,
             tx_consumer: 0,
+            filtered_frames: 0,
         };
         device.check_revision()?;
         // Mask every level-2 source before touching the device, so a
@@ -700,6 +704,7 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
             let status = self.regs.read(desc + regs::DESC_LENGTH_STATUS)?;
             match self.deliver_rx(rings, status, slot)? {
                 RxOutcome::Delivered => report.received += 1,
+                RxOutcome::Filtered => self.filtered_frames += 1,
                 RxOutcome::Dropped => {}
                 // Leave the frame in its descriptor and the slot unfreed:
                 // the device cannot overwrite it until the consumer index
@@ -748,10 +753,13 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
         }
         let (start, _) = Self::rx_buffer_range(slot);
         let from = start + regs::RX_FRAME_OFFSET as usize;
-        let rx = rings.rx_ring(0).map_err(|_| DriverError::BadMagic)?;
-        match rx.push(&self.frames.as_bytes()[from..from + length]) {
-            Ok(()) => Ok(RxOutcome::Delivered),
-            Err(Errno::NoSpace) => Ok(RxOutcome::RingFull),
+        // `deliver` applies the shared receive pre-filter, so a frame with
+        // no possible local consumer is neither copied nor woken for.
+        let frame = &self.frames.as_bytes()[from..from + length];
+        match rings.deliver(0, FrameOffload::None, frame) {
+            Ok(RxDelivery::Accepted) => Ok(RxOutcome::Delivered),
+            Ok(RxDelivery::Filtered) => Ok(RxOutcome::Filtered),
+            Ok(RxDelivery::RingFull) => Ok(RxOutcome::RingFull),
             Err(_) => Err(DriverError::BadMagic),
         }
     }
@@ -765,6 +773,9 @@ enum RxOutcome {
     /// The device flagged the frame, or it was malformed; the slot is freed
     /// and nothing is delivered.
     Dropped,
+    /// The receive pre-filter found no possible local consumer; the slot is
+    /// freed and the stack is never woken for it.
+    Filtered,
     /// The receive ring is full; the frame stays in its descriptor.
     RingFull,
 }
@@ -806,14 +817,19 @@ impl<R: GenetRegs, D: Delay> Net for Genet<R, D> {
         self.reclaim_tx(sensitive)?;
         self.drain_tx(rings, &mut report)?;
         self.harvest_rx(rings, &mut report, sensitive)?;
+        report.filtered = self.filtered_frames;
         Ok(report)
     }
 
     fn ack_interrupt(&mut self) {
-        // Clear exactly what is asserted, so the line is deasserted before
-        // it is re-enabled and cannot re-fire in a storm. A register fault
-        // here has nowhere to be reported, so it is dropped: the serve loop
-        // re-parks and the next doorbell surfaces the fault typed.
+        // Clear exactly what is asserted, and record a link event for the
+        // next service to re-resolve over MDIO. Clearing alone does not
+        // stop a re-fire — the DMA-done bits latch a level condition that
+        // is still true while frames are undrained, so it is
+        // `set_completion_interrupts` that holds the line off. A register
+        // fault here has nowhere to be reported, so it is dropped: the
+        // serve loop re-parks and the next doorbell surfaces the fault
+        // typed.
         let Ok(status) = self.regs.read(regs::INTRL2_CPU_STAT) else {
             return;
         };
@@ -824,6 +840,18 @@ impl<R: GenetRegs, D: Delay> Net for Genet<R, D> {
         if status & (regs::IRQ_LINK_UP | regs::IRQ_LINK_DOWN) != 0 {
             self.link_event = true;
         }
+    }
+
+    fn set_completion_interrupts(&mut self, enabled: bool) -> Result<(), DriverError> {
+        // `INTRL2` has separate set/clear mask registers, so neither
+        // direction is a read-modify-write and neither can disturb the link
+        // sources, which stay unmasked throughout.
+        let register = if enabled {
+            regs::INTRL2_CPU_MASK_CLEAR
+        } else {
+            regs::INTRL2_CPU_MASK_SET
+        };
+        self.regs.write(register, regs::IRQ_COMPLETION)
     }
 }
 

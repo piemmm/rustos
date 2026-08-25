@@ -8,31 +8,82 @@
 //! Frames never cross the IPC boundary — only the doorbell call and
 //! its [`ServiceReport`] do.
 //!
-//! # Ownership handoff, not shared mutation
+//! # A single-producer, single-consumer ring
 //!
-//! The rings are deliberately *not* concurrently shared: every ring
-//! mutation by the driver happens inside one blocking
-//! [`Net::service`](super::net::Net::service) call, and the stack
-//! touches the region only while no such call is in flight. The
-//! synchronisation is the call boundary itself, so the whole transport
-//! is safe Rust with no shared-memory atomics to get wrong. A driver
-//! woken by its interrupt does not write the ring; it notifies the
-//! stack, which issues the next service call.
+//! Each ring has exactly one producer and one consumer, in different
+//! address spaces, and they run **concurrently**: a driver woken by its
+//! device interrupt fills the receive ring and rings a doorbell without
+//! waiting for the stack, and the stack drains that ring without a call
+//! back into the driver. So the ring's counters are genuine shared
+//! mutable state and are [`AtomicU32`]s, not plain bytes:
+//!
+//! * the producer writes a slot's bytes, then **releases** its counter;
+//! * the consumer **acquires** that counter before reading the slot, and
+//!   releases its own only once it has finished with the bytes, so the
+//!   producer cannot overwrite a slot still being read.
+//!
+//! The two counters sit in separate cache lines. In one line every
+//! publish would invalidate the peer's read of the other counter and the
+//! two CPUs would ping-pong the line for every frame.
 //!
 //! # Fail closed
 //!
 //! Both sides treat the region as untrusted input: geometry is agreed
-//! out-of-band and validated at construction, indices and per-slot
-//! lengths read back from the region are re-validated on every
-//! operation, and any corrupt state is a typed error — never an
-//! out-of-bounds access, never a guess.
+//! out-of-band and validated at construction, and every counter and
+//! per-slot length is re-validated on the operation that reads it. Both
+//! counters live in memory the *peer* can write, so a corrupt or hostile
+//! value is a typed error — never an out-of-bounds access, never a guess.
+//! Each operation snapshots the counters once and works from that
+//! snapshot, so a peer that mutates its counter mid-operation cannot
+//! steer a second read past the bound the first one checked.
+
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::le::{put_u32, read_u32};
 use crate::Errno;
 
-/// Byte length of one ring's control header: the free-running
-/// producer and consumer counters (4 bytes each, little-endian).
-pub const RING_HEADER_LEN: usize = 8;
+/// Alignment a ring region must have: that of the header's counters.
+const INDEX_ALIGN: usize = align_of::<AtomicU32>();
+
+/// Bytes assumed for one cache line. Only an upper bound matters — it
+/// keeps the producer and consumer counters off each other's line — and
+/// 64 covers every Tier-1 target.
+const CACHE_LINE_BYTES: usize = 64;
+
+/// Byte length of one ring's control header: the free-running producer
+/// and consumer counters, each alone in a cache line.
+pub const RING_HEADER_LEN: usize = 2 * CACHE_LINE_BYTES;
+
+/// Byte offset of the producer counter within a ring header.
+const HEADER_PRODUCER: usize = 0;
+
+/// Byte offset of the consumer counter within a ring header.
+const HEADER_CONSUMER: usize = CACHE_LINE_BYTES;
+
+/// Index of the producer counter among the header's atomic cells.
+const PRODUCER_CELL: usize = HEADER_PRODUCER / INDEX_ALIGN;
+
+/// Index of the consumer counter among the header's atomic cells.
+const CONSUMER_CELL: usize = HEADER_CONSUMER / INDEX_ALIGN;
+
+/// Extra bytes an in-process buffer needs so an aligned region of the
+/// wanted length can be cut from it (see [`aligned_region`]).
+pub const REGION_ALIGN_PADDING: usize = INDEX_ALIGN - 1;
+
+/// Cut an aligned `len`-byte region out of `buffer`, or [`None`] when
+/// `buffer` is too short.
+///
+/// [`FrameRings::bind`] requires an aligned region because the ring
+/// headers' counters are atomics. A cross-process region comes from
+/// `shm` and is page-aligned already; an in-process buffer (a host test,
+/// the single-address-space local frame service) is only byte-aligned, so
+/// it is over-allocated by [`REGION_ALIGN_PADDING`] and trimmed here —
+/// one definition, rather than each caller doing pointer arithmetic.
+#[must_use]
+pub fn aligned_region(buffer: &mut [u8], len: usize) -> Option<&mut [u8]> {
+    let offset = buffer.as_ptr().align_offset(INDEX_ALIGN);
+    buffer.get_mut(offset..offset.checked_add(len)?)
+}
 
 /// Byte length of one slot's per-frame offload-metadata prefix (the
 /// transport-neutral analogue of a device's per-descriptor offload
@@ -43,7 +94,11 @@ pub const RING_HEADER_LEN: usize = 8;
 /// precedes the length prefix in every slot so a frame carries the
 /// offload the stack requested (transmit) or the device performed
 /// (receive) alongside its bytes, without a second channel.
-const SLOT_META_LEN: usize = 1 + 2 + 2 + 2 + 2;
+///
+/// Public, like [`RING_HEADER_LEN`], because it is part of the region
+/// layout both sides agree on: a consumer reasoning about a slot's bytes
+/// derives the offset from it rather than hard-coding one.
+pub const SLOT_META_LEN: usize = 1 + 2 + 2 + 2 + 2;
 
 /// Byte offset of `csum_start` within a slot's metadata prefix.
 const META_CSUM_START: usize = 1;
@@ -56,6 +111,42 @@ const META_HDR_LEN: usize = 7;
 
 /// Byte length of one slot's length prefix.
 const SLOT_LEN_PREFIX: usize = 4;
+
+/// Decides whether a received frame can possibly have a local consumer,
+/// consulted before it is copied into a receive ring.
+///
+/// The driver's harvest path evaluates this on the frame it is about to hand
+/// over, so a frame nothing here could want costs neither the copy nor —
+/// far more expensively — a wake of the network stack and a full protocol
+/// parse. On a busy segment most broadcast traffic is addressed to other
+/// hosts, and that is what this exists to shed.
+///
+/// # Its bias is to admit
+///
+/// It is a load-shedding optimisation and is **never** load-bearing for
+/// security: the stack still validates every frame it does receive, and a
+/// driver process already owns the device and could drop whatever it liked,
+/// so refusing here grants nothing. An implementation that cannot parse a
+/// frame confidently must therefore admit it — dropping is the optimisation,
+/// delivering is the safe default.
+pub trait RxAdmit: core::fmt::Debug {
+    /// Whether `frame` may have a local consumer.
+    fn admit(&self, frame: &[u8]) -> bool;
+}
+
+/// What became of a frame a device offered to a receive ring.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum RxDelivery {
+    /// Copied into the ring, awaiting the stack.
+    Accepted,
+    /// The pre-filter found no possible local consumer, so it was not
+    /// copied. The caller still frees the device's slot — the frame is
+    /// finished with, not deferred.
+    Filtered,
+    /// Every ring slot is occupied. The frame stays in the device and the
+    /// caller must not free its slot; the stack drains and asks again.
+    RingFull,
+}
 
 /// Per-frame offload descriptor carried in a ring slot's metadata.
 ///
@@ -360,8 +451,13 @@ impl RingGeometry {
 
     /// Bytes one slot of `slot_capacity` occupies: its offload-metadata
     /// prefix, its length prefix, and its payload capacity.
+    /// Bytes one slot occupies: its metadata prefix, length prefix, and
+    /// payload capacity, rounded up so every ring length — and hence
+    /// every ring's start offset inside a region — is a multiple of
+    /// [`INDEX_ALIGN`], which is what keeps each ring header's counters
+    /// aligned for their atomic access.
     const fn slot_stride(slot_capacity: u32) -> usize {
-        SLOT_META_LEN + SLOT_LEN_PREFIX + slot_capacity as usize
+        (SLOT_META_LEN + SLOT_LEN_PREFIX + slot_capacity as usize).next_multiple_of(INDEX_ALIGN)
     }
 
     /// Bytes a ring of `slots` slots of `slot_capacity` occupies:
@@ -430,16 +526,24 @@ impl RingGeometry {
     }
 }
 
-/// One direction's bounded frame queue inside the shared region.
+/// One direction's bounded single-producer, single-consumer frame queue
+/// inside the shared region.
 ///
-/// The producer and consumer counters are free-running (wrapping)
-/// `u32`s persisted little-endian in the ring header; occupancy is
-/// their wrapping difference and is re-validated against the slot
-/// count on every operation, so a corrupt header is refused rather
-/// than driving an out-of-bounds slot index.
+/// The producer and consumer counters are free-running (wrapping) `u32`s
+/// held in the ring header as atomics, because the two sides run
+/// concurrently in different address spaces. Occupancy is their wrapping
+/// difference and is re-validated against the slot count on every
+/// operation, so a counter the peer corrupted is refused rather than
+/// driving an out-of-bounds slot index.
 #[derive(Debug)]
 pub struct FrameRing<'a> {
-    region: &'a mut [u8],
+    /// The producer counter: slots published, mod 2³².
+    producer: &'a AtomicU32,
+    /// The consumer counter: slots released back, mod 2³².
+    consumer: &'a AtomicU32,
+    /// The slot area — the region past the header, so a slot offset needs
+    /// no header bias.
+    slots_region: &'a mut [u8],
     slots: u32,
     slot_capacity: u32,
 }
@@ -450,14 +554,40 @@ impl<'a> FrameRing<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`Errno::BufferTooSmall`] when `region` is not exactly
-    /// the ring length `slots` × stride + header.
+    /// * [`Errno::BufferTooSmall`] — `region` is not exactly the ring
+    ///   length `slots` × stride + header.
+    /// * [`Errno::BadAlignment`] — `region` is not aligned for the
+    ///   header's atomic counters. Use [`aligned_region`] to cut an
+    ///   aligned view from a plain in-process buffer.
     pub fn bind(region: &'a mut [u8], slots: u32, slot_capacity: u32) -> Result<Self, Errno> {
         if region.len() != RingGeometry::ring_len_for(slots, slot_capacity) {
             return Err(Errno::BufferTooSmall);
         }
+        let (header, slots_region) = region.split_at_mut(RING_HEADER_LEN);
+        // Give up the exclusive borrow of the header: from here it is only
+        // ever read and written through the two atomics, which the peer
+        // accesses concurrently.
+        let header: &'a [u8] = header;
+        // SAFETY: reinterpreting initialised `u8`s as `AtomicU32`s is the
+        // transmute `align_to` documents, and it is valid here: `AtomicU32`
+        // has `u32`'s layout and no invalid bit pattern, so every 4-byte
+        // group of the header is a legal value. `align_to` itself computes
+        // the split, so nothing is assumed about the region's alignment —
+        // a misaligned base simply yields a non-empty prefix, which is
+        // rejected below. Atomics rather than plain reads are precisely
+        // what a peer process concurrently accessing these bytes requires.
+        let (prefix, cells, _) = unsafe { header.align_to::<AtomicU32>() };
+        if !prefix.is_empty() {
+            return Err(Errno::BadAlignment);
+        }
+        let (Some(producer), Some(consumer)) = (cells.get(PRODUCER_CELL), cells.get(CONSUMER_CELL))
+        else {
+            return Err(Errno::BadAlignment);
+        };
         Ok(Self {
-            region,
+            producer,
+            consumer,
+            slots_region,
             slots,
             slot_capacity,
         })
@@ -475,34 +605,46 @@ impl<'a> FrameRing<'a> {
         self.slot_capacity
     }
 
-    fn producer(&self) -> u32 {
-        read_u32(self.region, 0)
+    /// Snapshot both counters and validate their occupancy once, so the
+    /// rest of an operation works from values a mutating peer can no
+    /// longer change under it.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] when the occupancy exceeds the slot count —
+    /// a counter the peer corrupted, refused rather than acted on.
+    fn snapshot(&self) -> Result<(u32, u32), Errno> {
+        // Acquire on the peer's counter: it orders this side's reads of
+        // the slot bytes the peer released with that counter.
+        let producer = self.producer.load(Ordering::Acquire);
+        let consumer = self.consumer.load(Ordering::Acquire);
+        if producer.wrapping_sub(consumer) > self.slots {
+            return Err(Errno::OutOfRange);
+        }
+        Ok((producer, consumer))
     }
 
-    fn consumer(&self) -> u32 {
-        read_u32(self.region, 4)
+    /// Publish `value` as the producer counter, releasing the slot bytes
+    /// written before it.
+    fn publish_producer(&self, value: u32) {
+        self.producer.store(value, Ordering::Release);
     }
 
-    fn set_producer(&mut self, value: u32) {
-        put_u32(self.region, 0, value);
-    }
-
-    fn set_consumer(&mut self, value: u32) {
-        put_u32(self.region, 4, value);
+    /// Publish `value` as the consumer counter, releasing the slot the
+    /// producer may now refill.
+    fn publish_consumer(&self, value: u32) {
+        self.consumer.store(value, Ordering::Release);
     }
 
     /// Frames currently queued.
     ///
     /// # Errors
     ///
-    /// Returns [`Errno::OutOfRange`] when the persisted counters are
-    /// corrupt (occupancy exceeds the slot count).
+    /// Returns [`Errno::OutOfRange`] when the counters are corrupt
+    /// (occupancy exceeds the slot count).
     pub fn len(&self) -> Result<u32, Errno> {
-        let occupancy = self.producer().wrapping_sub(self.consumer());
-        if occupancy > self.slots {
-            return Err(Errno::OutOfRange);
-        }
-        Ok(occupancy)
+        let (producer, consumer) = self.snapshot()?;
+        Ok(producer.wrapping_sub(consumer))
     }
 
     /// Whether no frame is queued.
@@ -523,9 +665,10 @@ impl<'a> FrameRing<'a> {
         Ok(self.len()? == self.slots)
     }
 
+    /// Byte offset of `counter`'s slot within [`Self::slots_region`].
     fn slot_offset(&self, counter: u32) -> usize {
         let index = (counter % self.slots) as usize;
-        RING_HEADER_LEN + index * RingGeometry::slot_stride(self.slot_capacity)
+        index * RingGeometry::slot_stride(self.slot_capacity)
     }
 
     /// Queue one frame with [`FrameOffload::None`] metadata.
@@ -552,27 +695,29 @@ impl<'a> FrameRing<'a> {
         if frame.is_empty() || frame.len() > self.slot_capacity as usize {
             return Err(Errno::LengthOutOfRange);
         }
-        if self.is_full()? {
+        let (head, consumer) = self.snapshot()?;
+        if head.wrapping_sub(consumer) == self.slots {
             return Err(Errno::NoSpace);
         }
-        let head = self.producer();
         let offset = self.slot_offset(head);
         let frame_len = u32::try_from(frame.len()).map_err(|_| Errno::LengthOutOfRange)?;
         let (csum_start, csum_offset) = offload.offsets();
         let (gso_size, hdr_len) = offload.gso();
-        self.region[offset] = offload.to_tag();
-        self.region[offset + META_CSUM_START..offset + META_CSUM_START + 2]
+        self.slots_region[offset] = offload.to_tag();
+        self.slots_region[offset + META_CSUM_START..offset + META_CSUM_START + 2]
             .copy_from_slice(&csum_start.to_le_bytes());
-        self.region[offset + META_CSUM_OFFSET..offset + META_CSUM_OFFSET + 2]
+        self.slots_region[offset + META_CSUM_OFFSET..offset + META_CSUM_OFFSET + 2]
             .copy_from_slice(&csum_offset.to_le_bytes());
-        self.region[offset + META_GSO_SIZE..offset + META_GSO_SIZE + 2]
+        self.slots_region[offset + META_GSO_SIZE..offset + META_GSO_SIZE + 2]
             .copy_from_slice(&gso_size.to_le_bytes());
-        self.region[offset + META_HDR_LEN..offset + META_HDR_LEN + 2]
+        self.slots_region[offset + META_HDR_LEN..offset + META_HDR_LEN + 2]
             .copy_from_slice(&hdr_len.to_le_bytes());
-        put_u32(self.region, offset + SLOT_META_LEN, frame_len);
+        put_u32(self.slots_region, offset + SLOT_META_LEN, frame_len);
         let payload = offset + SLOT_META_LEN + SLOT_LEN_PREFIX;
-        self.region[payload..payload + frame.len()].copy_from_slice(frame);
-        self.set_producer(head.wrapping_add(1));
+        self.slots_region[payload..payload + frame.len()].copy_from_slice(frame);
+        // Release last: the peer must not observe the counter before the
+        // bytes it points at.
+        self.publish_producer(head.wrapping_add(1));
         Ok(())
     }
 
@@ -604,42 +749,44 @@ impl<'a> FrameRing<'a> {
         offload: &mut FrameOffload,
         out: &mut [u8],
     ) -> Result<Option<usize>, Errno> {
-        if self.is_empty()? {
+        let (producer, tail) = self.snapshot()?;
+        if producer == tail {
             return Ok(None);
         }
-        let tail = self.consumer();
         let offset = self.slot_offset(tail);
-        let len = read_u32(self.region, offset + SLOT_META_LEN) as usize;
+        let len = read_u32(self.slots_region, offset + SLOT_META_LEN) as usize;
         if len == 0 || len > self.slot_capacity as usize {
             // Consume the corrupt slot before refusing, so the ring
             // recovers rather than replaying the same corruption.
-            self.set_consumer(tail.wrapping_add(1));
+            self.publish_consumer(tail.wrapping_add(1));
             return Err(Errno::LengthOutOfRange);
         }
         if out.len() < len {
             return Err(Errno::BufferTooSmall);
         }
-        let tag = self.region[offset];
+        let tag = self.slots_region[offset];
         let csum_start = u16::from_le_bytes([
-            self.region[offset + META_CSUM_START],
-            self.region[offset + META_CSUM_START + 1],
+            self.slots_region[offset + META_CSUM_START],
+            self.slots_region[offset + META_CSUM_START + 1],
         ]);
         let csum_offset = u16::from_le_bytes([
-            self.region[offset + META_CSUM_OFFSET],
-            self.region[offset + META_CSUM_OFFSET + 1],
+            self.slots_region[offset + META_CSUM_OFFSET],
+            self.slots_region[offset + META_CSUM_OFFSET + 1],
         ]);
         let gso_size = u16::from_le_bytes([
-            self.region[offset + META_GSO_SIZE],
-            self.region[offset + META_GSO_SIZE + 1],
+            self.slots_region[offset + META_GSO_SIZE],
+            self.slots_region[offset + META_GSO_SIZE + 1],
         ]);
         let hdr_len = u16::from_le_bytes([
-            self.region[offset + META_HDR_LEN],
-            self.region[offset + META_HDR_LEN + 1],
+            self.slots_region[offset + META_HDR_LEN],
+            self.slots_region[offset + META_HDR_LEN + 1],
         ]);
         *offload = FrameOffload::decode(tag, csum_start, csum_offset, gso_size, hdr_len);
         let payload = offset + SLOT_META_LEN + SLOT_LEN_PREFIX;
-        out[..len].copy_from_slice(&self.region[payload..payload + len]);
-        self.set_consumer(tail.wrapping_add(1));
+        out[..len].copy_from_slice(&self.slots_region[payload..payload + len]);
+        // Release only now: the slot is free for the producer to refill
+        // once its bytes have been copied out, not before.
+        self.publish_consumer(tail.wrapping_add(1));
         Ok(Some(len))
     }
 
@@ -652,14 +799,21 @@ impl<'a> FrameRing<'a> {
     ///
     /// # Errors
     ///
-    /// [`Errno::OutOfRange`] — the persisted counters are corrupt.
+    /// * [`Errno::OutOfRange`] — the counters are corrupt.
+    /// * [`Errno::LengthOutOfRange`] — the stored slot length is corrupt
+    ///   (zero or beyond the slot capacity). The slot is consumed either
+    ///   way, so one corrupt frame cannot wedge the ring, and no caller
+    ///   is ever handed a length the slot could not hold.
     pub fn skip(&mut self) -> Result<Option<usize>, Errno> {
-        if self.is_empty()? {
+        let (producer, tail) = self.snapshot()?;
+        if producer == tail {
             return Ok(None);
         }
-        let tail = self.consumer();
-        let len = read_u32(self.region, self.slot_offset(tail) + SLOT_META_LEN) as usize;
-        self.set_consumer(tail.wrapping_add(1));
+        let len = read_u32(self.slots_region, self.slot_offset(tail) + SLOT_META_LEN) as usize;
+        self.publish_consumer(tail.wrapping_add(1));
+        if len == 0 || len > self.slot_capacity as usize {
+            return Err(Errno::LengthOutOfRange);
+        }
         Ok(Some(len))
     }
 }
@@ -687,6 +841,10 @@ pub struct FrameRings<'a> {
     /// Frames the stack queued, awaiting the device (single transmit
     /// queue: the stack serialises its own egress).
     pub tx: FrameRing<'a>,
+    /// The receive pre-filter, when the driver host installed one. A frame
+    /// it refuses is never copied into a receive ring — the whole point is
+    /// to spend nothing on traffic with no local consumer.
+    admit: Option<&'a dyn RxAdmit>,
     /// Sensitivity class of the traffic: when
     /// [`Sensitive`](super::BufferClass::Sensitive), the driver zeroes
     /// every internal staging copy before its service call returns.
@@ -733,8 +891,50 @@ impl<'a> FrameRings<'a> {
             rx,
             rx_count,
             tx,
+            admit: None,
             class,
         })
+    }
+
+    /// Install the receive pre-filter this binding evaluates before copying
+    /// a frame into a receive ring.
+    ///
+    /// A binding without one admits every frame, which is the correct
+    /// default: the filter can only ever remove work, so its absence costs
+    /// performance, never correctness.
+    #[must_use]
+    pub fn with_admit(mut self, admit: &'a dyn RxAdmit) -> Self {
+        self.admit = Some(admit);
+        self
+    }
+
+    /// Offer a received frame to receive ring `queue`, consulting the
+    /// pre-filter first.
+    ///
+    /// The one place a device's received frame enters a ring, so the filter
+    /// runs on every driver's harvest path without any of them repeating it,
+    /// and a refused frame is never copied at all.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for a queue index the geometry does not have,
+    /// or the ring's own typed refusal (a corrupt counter, an over-long
+    /// frame). A full ring is [`RxDelivery::RingFull`], not an error: it is
+    /// back-pressure, and the frame stays in the device.
+    pub fn deliver(
+        &mut self,
+        queue: usize,
+        offload: FrameOffload,
+        frame: &[u8],
+    ) -> Result<RxDelivery, Errno> {
+        if !self.admit.is_none_or(|admit| admit.admit(frame)) {
+            return Ok(RxDelivery::Filtered);
+        }
+        match self.rx_ring(queue)?.push_with(offload, frame) {
+            Ok(()) => Ok(RxDelivery::Accepted),
+            Err(Errno::NoSpace) => Ok(RxDelivery::RingFull),
+            Err(other) => Err(other),
+        }
     }
 
     /// Number of live receive rings (one per device receive queue).
@@ -772,6 +972,16 @@ pub struct ServiceReport {
     pub transmitted: u32,
     /// Frames moved from the device into the RX ring.
     pub received: u32,
+    /// Frames this device's receive pre-filter has shed **since it was
+    /// opened** — no local consumer was possible, so the stack was never
+    /// woken for them.
+    ///
+    /// Cumulative, unlike the two counts above, and deliberately: a driver
+    /// drains its rings on its own interrupt and the stack does not
+    /// doorbell for every batch, so a per-call delta would simply be lost.
+    /// A consumer stores the latest value it saw; it is monotonic, so it
+    /// can neither double-count nor go backwards.
+    pub filtered: u64,
     /// The RX ring filled while the device still had frames pending.
     pub rx_ring_full: bool,
     /// The device's live link state at the moment of this service call.
@@ -799,9 +1009,25 @@ mod tests {
         RingGeometry::new(SLOTS, CAP, CAP, 1).expect("valid test geometry")
     }
 
-    /// Bind a single ring over `region` with the test dimensions.
-    fn ring(region: &mut [u8]) -> FrameRing<'_> {
+    /// A zeroed backing buffer for one aligned ring region.
+    ///
+    /// A stack array is only byte-aligned, so every test cuts its region
+    /// out of an over-allocated buffer exactly as an in-process caller
+    /// does — which also keeps `aligned_region` on the tested path.
+    const fn ring_buf<const RINGS: usize>() -> [u8; RINGS] {
+        [0u8; RINGS]
+    }
+
+    /// Bind a single ring over an aligned region cut from `buffer`.
+    fn ring(buffer: &mut [u8]) -> FrameRing<'_> {
+        let region = aligned_region(buffer, RING_LEN).expect("aligned region");
         FrameRing::bind(region, SLOTS, CAP).expect("bind")
+    }
+
+    /// Bind a whole ring set over an aligned region cut from `buffer`.
+    fn rings(buffer: &mut [u8], g: RingGeometry) -> FrameRings<'_> {
+        let region = aligned_region(buffer, g.region_len()).expect("aligned region");
+        FrameRings::bind(region, g, crate::driver::BufferClass::NonSensitive).expect("bind")
     }
 
     #[test]
@@ -850,10 +1076,9 @@ mod tests {
     fn multi_queue_rings_are_independent_and_index_checked() {
         let g = RingGeometry::new(SLOTS, CAP, CAP, 3).expect("triple");
         // Three receive rings + one transmit ring, each RING_LEN bytes.
-        let mut region = [0u8; 4 * RING_LEN];
-        assert_eq!(region.len(), g.region_len());
-        let mut rings = FrameRings::bind(&mut region, g, crate::driver::BufferClass::NonSensitive)
-            .expect("bind");
+        assert_eq!(4 * RING_LEN, g.region_len());
+        let mut buffer = ring_buf::<{ 4 * RING_LEN + REGION_ALIGN_PADDING }>();
+        let mut rings = rings(&mut buffer, g);
         assert_eq!(rings.rx_queues(), 3);
         // Each receive ring is a distinct queue: a frame pushed onto queue
         // 2 is not visible on queue 0 or 1.
@@ -886,9 +1111,8 @@ mod tests {
         assert_eq!(g.region_len(), g.rx_ring_len() + g.tx_ring_len());
         assert_eq!(g.region_len(), REGION_LEN);
         // The pair binds and each direction honours its own capacity.
-        let mut region = [0u8; REGION_LEN];
-        let mut rings = FrameRings::bind(&mut region, g, crate::driver::BufferClass::NonSensitive)
-            .expect("bind pair");
+        let mut buffer = ring_buf::<{ REGION_LEN + REGION_ALIGN_PADDING }>();
+        let mut rings = rings(&mut buffer, g);
         assert_eq!(rings.rx_ring(0).expect("rx0").slot_capacity(), RX_CAP);
         assert_eq!(rings.tx.slot_capacity(), TX_CAP);
         // The transmit ring accepts a frame the (smaller) receive ring
@@ -902,31 +1126,111 @@ mod tests {
 
     #[test]
     fn bind_requires_exact_region_length() {
-        let mut region = [0u8; RING_LEN + 1];
-        assert!(FrameRing::bind(&mut region, SLOTS, CAP).is_err());
-        let mut region = [0u8; RING_LEN];
-        assert!(FrameRing::bind(&mut region, SLOTS, CAP).is_ok());
+        let mut buffer = ring_buf::<{ RING_LEN + 1 + REGION_ALIGN_PADDING }>();
+        let long = aligned_region(&mut buffer, RING_LEN + 1).expect("aligned");
+        assert_eq!(
+            FrameRing::bind(long, SLOTS, CAP).map(|_| ()),
+            Err(Errno::BufferTooSmall)
+        );
+        let mut buffer = ring_buf::<{ RING_LEN + REGION_ALIGN_PADDING }>();
+        let exact = aligned_region(&mut buffer, RING_LEN).expect("aligned");
+        assert!(FrameRing::bind(exact, SLOTS, CAP).is_ok());
+    }
+
+    #[test]
+    fn bind_refuses_a_region_the_counters_are_not_aligned_for() {
+        // The header's counters are atomics, so a misaligned region is
+        // refused rather than accessed unsoundly. Start one byte past the
+        // aligned base with the exact length, so alignment is the only
+        // thing wrong.
+        let mut buffer = ring_buf::<{ RING_LEN + INDEX_ALIGN + REGION_ALIGN_PADDING }>();
+        let start = buffer.as_ptr().align_offset(INDEX_ALIGN) + 1;
+        let misaligned = &mut buffer[start..start + RING_LEN];
+        assert_eq!(
+            FrameRing::bind(misaligned, SLOTS, CAP).map(|_| ()),
+            Err(Errno::BadAlignment)
+        );
+    }
+
+    // In one cache line every publish would invalidate the peer's read of
+    // the other counter, and the two CPUs would ping-pong the line for
+    // every frame — so the layout is checked at compile time.
+    const _: () = assert!(HEADER_CONSUMER - HEADER_PRODUCER >= CACHE_LINE_BYTES);
+    const _: () = assert!(RING_HEADER_LEN >= HEADER_CONSUMER + INDEX_ALIGN);
+
+    #[test]
+    fn every_ring_length_keeps_the_next_ring_header_aligned() {
+        // A ring set lays its rings end to end, so a ring length that were
+        // not a multiple of the counters' alignment would misalign every
+        // ring after the first.
+        for capacity in [
+            RingGeometry::MIN_SLOT_CAPACITY,
+            RingGeometry::MIN_SLOT_CAPACITY + 1,
+            CAP,
+            1499,
+            1500,
+            RingGeometry::MAX_SLOT_CAPACITY,
+        ] {
+            for slots in [RingGeometry::MIN_SLOTS, 3, SLOTS, 17] {
+                let len = RingGeometry::ring_len_for(slots, capacity);
+                assert_eq!(
+                    len % INDEX_ALIGN,
+                    0,
+                    "ring_len_for({slots}, {capacity}) misaligns the next ring"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_peer_that_corrupts_its_counter_mid_operation_cannot_widen_a_read() {
+        let mut buffer = ring_buf::<{ RING_LEN + REGION_ALIGN_PADDING }>();
+        let mut ring = ring(&mut buffer);
+        ring.push(&[3u8; 20]).expect("push");
+        // A producer counter far beyond the ring's capacity is the shape a
+        // hostile peer would write to make the consumer walk past the slot
+        // area. Occupancy is validated first, so the read never happens.
+        ring.producer.store(u32::MAX, Ordering::Relaxed);
+        let mut out = [0u8; 128];
+        assert_eq!(ring.pop(&mut out), Err(Errno::OutOfRange));
+        assert_eq!(ring.skip(), Err(Errno::OutOfRange));
+        assert_eq!(ring.len(), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn skip_refuses_a_corrupt_length_rather_than_reporting_it() {
+        let mut buffer = ring_buf::<{ RING_LEN + REGION_ALIGN_PADDING }>();
+        let mut ring = ring(&mut buffer);
+        ring.push(&[4u8; 20]).expect("push");
+        put_u32(ring.slots_region, SLOT_META_LEN, 4096);
+        // The slot is consumed either way, so one corrupt frame cannot
+        // wedge the ring — but the caller is never handed a length the
+        // slot could not have held.
+        assert_eq!(ring.skip(), Err(Errno::LengthOutOfRange));
+        assert_eq!(ring.skip(), Ok(None));
+        ring.push(&[5u8; 20]).expect("push after corruption");
+        assert_eq!(ring.skip(), Ok(Some(20)));
     }
 
     #[test]
     fn rings_pair_binds_and_keeps_directions_apart() {
         let g = geometry();
-        let mut region = [0u8; 2 * RING_LEN];
-        let mut rings = FrameRings::bind(&mut region, g, crate::driver::BufferClass::NonSensitive)
-            .expect("bind pair");
+        let mut buffer = ring_buf::<{ 2 * RING_LEN + REGION_ALIGN_PADDING }>();
+        let mut rings = rings(&mut buffer, g);
         rings.tx.push(&[9u8; 40]).expect("tx push");
         assert_eq!(rings.rx_ring(0).expect("rx0").is_empty(), Ok(true));
         let mut out = [0u8; 128];
         assert_eq!(rings.tx.pop(&mut out), Ok(Some(40)));
         // A short pair region is refused whole.
-        let mut short = [0u8; 2 * RING_LEN - 1];
-        assert!(FrameRings::bind(&mut short, g, crate::driver::BufferClass::NonSensitive).is_err());
+        let mut buffer = ring_buf::<{ 2 * RING_LEN - 1 + REGION_ALIGN_PADDING }>();
+        let short = aligned_region(&mut buffer, 2 * RING_LEN - 1).expect("aligned");
+        assert!(FrameRings::bind(short, g, crate::driver::BufferClass::NonSensitive).is_err());
     }
 
     #[test]
     fn push_pop_round_trips_in_order() {
-        let mut region = [0u8; RING_LEN];
-        let mut ring = ring(&mut region);
+        let mut buffer = ring_buf::<{ RING_LEN + REGION_ALIGN_PADDING }>();
+        let mut ring = ring(&mut buffer);
         ring.push(&[1u8; 60]).expect("push a");
         ring.push(&[2u8; 100]).expect("push b");
         let mut out = [0u8; 128];
@@ -939,8 +1243,8 @@ mod tests {
 
     #[test]
     fn push_fails_closed_when_full_and_pop_recovers() {
-        let mut region = [0u8; RING_LEN];
-        let mut ring = ring(&mut region);
+        let mut buffer = ring_buf::<{ RING_LEN + REGION_ALIGN_PADDING }>();
+        let mut ring = ring(&mut buffer);
         for _ in 0..4 {
             ring.push(&[7u8; 20]).expect("push");
         }
@@ -952,11 +1256,11 @@ mod tests {
 
     #[test]
     fn wrapping_counters_survive_many_cycles() {
-        let mut region = [0u8; RING_LEN];
-        let mut ring = ring(&mut region);
+        let mut buffer = ring_buf::<{ RING_LEN + REGION_ALIGN_PADDING }>();
+        let mut ring = ring(&mut buffer);
         // Pre-wrap the counters near u32::MAX to prove wrapping math.
-        ring.set_producer(u32::MAX - 1);
-        ring.set_consumer(u32::MAX - 1);
+        ring.producer.store(u32::MAX - 1, Ordering::Relaxed);
+        ring.consumer.store(u32::MAX - 1, Ordering::Relaxed);
         let mut out = [0u8; 128];
         for round in 0..8u8 {
             ring.push(&[round; 30]).expect("push");
@@ -967,18 +1271,19 @@ mod tests {
 
     #[test]
     fn oversize_and_empty_frames_are_refused() {
-        let mut region = [0u8; RING_LEN];
-        let mut ring = ring(&mut region);
+        let mut buffer = ring_buf::<{ RING_LEN + REGION_ALIGN_PADDING }>();
+        let mut ring = ring(&mut buffer);
         assert_eq!(ring.push(&[]), Err(Errno::LengthOutOfRange));
         assert_eq!(ring.push(&[0u8; 129]), Err(Errno::LengthOutOfRange));
     }
 
     #[test]
     fn corrupt_counters_fail_closed() {
-        let mut region = [0u8; RING_LEN];
-        let mut ring = ring(&mut region);
-        ring.set_producer(10);
-        ring.set_consumer(0);
+        let mut buffer = ring_buf::<{ RING_LEN + REGION_ALIGN_PADDING }>();
+        let mut ring = ring(&mut buffer);
+        // What a hostile or buggy peer would write.
+        ring.producer.store(10, Ordering::Relaxed);
+        ring.consumer.store(0, Ordering::Relaxed);
         assert_eq!(ring.len(), Err(Errno::OutOfRange));
         assert_eq!(ring.push(&[1u8; 20]), Err(Errno::OutOfRange));
         let mut out = [0u8; 128];
@@ -987,12 +1292,12 @@ mod tests {
 
     #[test]
     fn corrupt_slot_length_is_consumed_and_refused() {
-        let mut region = [0u8; RING_LEN];
-        let mut ring = ring(&mut region);
+        let mut buffer = ring_buf::<{ RING_LEN + REGION_ALIGN_PADDING }>();
+        let mut ring = ring(&mut buffer);
         ring.push(&[1u8; 20]).expect("push");
         // Corrupt the queued slot's length prefix (past the offload-
         // metadata prefix) beyond capacity.
-        put_u32(ring.region, RING_HEADER_LEN + SLOT_META_LEN, 4096);
+        put_u32(ring.slots_region, SLOT_META_LEN, 4096);
         let mut out = [0u8; 128];
         assert_eq!(ring.pop(&mut out), Err(Errno::LengthOutOfRange));
         // The corrupt slot was consumed: the ring is usable again.
@@ -1003,8 +1308,8 @@ mod tests {
 
     #[test]
     fn skip_consumes_without_copying() {
-        let mut region = [0u8; RING_LEN];
-        let mut ring = ring(&mut region);
+        let mut buffer = ring_buf::<{ RING_LEN + REGION_ALIGN_PADDING }>();
+        let mut ring = ring(&mut buffer);
         assert_eq!(ring.skip(), Ok(None));
         ring.push(&[5u8; 90]).expect("push");
         ring.push(&[6u8; 30]).expect("push");
@@ -1016,8 +1321,8 @@ mod tests {
 
     #[test]
     fn pop_into_short_buffer_fails_without_consuming() {
-        let mut region = [0u8; RING_LEN];
-        let mut ring = ring(&mut region);
+        let mut buffer = ring_buf::<{ RING_LEN + REGION_ALIGN_PADDING }>();
+        let mut ring = ring(&mut buffer);
         ring.push(&[3u8; 100]).expect("push");
         let mut short = [0u8; 50];
         assert_eq!(ring.pop(&mut short), Err(Errno::BufferTooSmall));
@@ -1027,8 +1332,8 @@ mod tests {
 
     #[test]
     fn offload_metadata_round_trips_per_frame() {
-        let mut region = [0u8; RING_LEN];
-        let mut ring = ring(&mut region);
+        let mut buffer = ring_buf::<{ RING_LEN + REGION_ALIGN_PADDING }>();
+        let mut ring = ring(&mut buffer);
         ring.push_with(FrameOffload::Validated, &[1u8; 40])
             .expect("push validated");
         ring.push_with(
@@ -1059,8 +1364,8 @@ mod tests {
 
     #[test]
     fn tx_checksum_offload_round_trips_per_frame() {
-        let mut region = [0u8; RING_LEN];
-        let mut ring = ring(&mut region);
+        let mut buffer = ring_buf::<{ RING_LEN + REGION_ALIGN_PADDING }>();
+        let mut ring = ring(&mut buffer);
         ring.push_with(
             FrameOffload::TxChecksum {
                 csum_start: 34,
@@ -1083,8 +1388,8 @@ mod tests {
 
     #[test]
     fn tx_segment_offload_round_trips_per_frame() {
-        let mut region = [0u8; RING_LEN];
-        let mut ring = ring(&mut region);
+        let mut buffer = ring_buf::<{ RING_LEN + REGION_ALIGN_PADDING }>();
+        let mut ring = ring(&mut buffer);
         for ipv6 in [false, true] {
             let seg = FrameOffload::TxSegment {
                 csum_start: 34,
@@ -1103,12 +1408,12 @@ mod tests {
 
     #[test]
     fn unknown_offload_tag_decodes_to_none_fail_closed() {
-        let mut region = [0u8; RING_LEN];
-        let mut ring = ring(&mut region);
+        let mut buffer = ring_buf::<{ RING_LEN + REGION_ALIGN_PADDING }>();
+        let mut ring = ring(&mut buffer);
         ring.push_with(FrameOffload::Validated, &[9u8; 30])
             .expect("push");
         // Corrupt the offload tag byte (slot start) to an unknown value.
-        ring.region[RING_HEADER_LEN] = 0xFF;
+        ring.slots_region[0] = 0xFF;
         let mut out = [0u8; 128];
         let mut offload = FrameOffload::Validated;
         assert_eq!(ring.pop_with(&mut offload, &mut out), Ok(Some(30)));

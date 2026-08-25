@@ -38,6 +38,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_abi::driver::net::{DeviceFacts, LinkState, MacAddress, NetOffloads};
+use tairix_abi::driver::net_channel::RxFilterPolicy;
 use tairix_abi::time::Duration64;
 
 use crate::addr::{
@@ -3672,6 +3673,33 @@ impl Stack {
         acc
     }
 
+    /// The receive pre-filter policy for this interface's current
+    /// addresses.
+    ///
+    /// Assembled here, beside the addresses it describes, so the policy and
+    /// the [`crate::rxfilter::RxClassifier`] that evaluates it are never
+    /// derived twice. A *tentative* IPv6 address is included: duplicate-
+    /// address detection answers arrive addressed to it, and dropping those
+    /// would break the very check that decides whether the address is
+    /// usable.
+    #[must_use]
+    pub fn rx_filter_policy(&self) -> RxFilterPolicy {
+        let mut v4: Vec<([u8; 4], [u8; 4])> = Vec::new();
+        if let Some((addr, prefix_len)) = self.iface.ipv4() {
+            v4.push((
+                addr.octets(),
+                directed_broadcast_v4(addr, prefix_len).octets(),
+            ));
+        }
+        let v6: Vec<[u8; 16]> = self
+            .iface
+            .ipv6_addresses()
+            .iter()
+            .map(|info| info.addr.octets())
+            .collect();
+        RxFilterPolicy::new(&v4, &v6)
+    }
+
     /// Write the link-layer group addresses this interface needs its device
     /// to admit into `out`, replacing its contents, and report how many.
     ///
@@ -3882,6 +3910,20 @@ fn mask_v4(addr: Ipv4Addr, prefix_len: u8) -> Ipv4Addr {
     }
     let bits = u32::from_be_bytes(addr.octets());
     Ipv4Addr::from((bits & (u32::MAX << (32 - u32::from(prefix_len)))).to_be_bytes())
+}
+
+/// The directed-broadcast address of the subnet `addr`/`prefix_len` names:
+/// the network address with every host bit set. Every host on the subnet
+/// accepts it, so the receive pre-filter must admit it.
+fn directed_broadcast_v4(addr: Ipv4Addr, prefix_len: u8) -> Ipv4Addr {
+    if prefix_len == 0 || prefix_len >= 32 {
+        // A /32 has no host bits and so no directed broadcast; the address
+        // itself is the only thing that reaches it.
+        return addr;
+    }
+    let network = u32::from_be_bytes(mask_v4(addr, prefix_len).octets());
+    let hosts = u32::MAX >> u32::from(prefix_len);
+    Ipv4Addr::from((network | hosts).to_be_bytes())
 }
 
 /// The prefix length a DHCP subnet mask (option 1) encodes, or `None`

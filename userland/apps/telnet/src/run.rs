@@ -51,7 +51,6 @@ mod program {
     use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
     use tairix_abi::{Errno, InputMode, Origin, Signal, TerminalSize};
     use tairix_help::BundleHelp;
-    use tairix_net::dns::{RecordType, ResolveStatus};
     use tairix_net::IpAddr;
     use tairix_rt::io::{write_stderr_line, Read, Stderr, Stdin, Stdout, Write};
     use tairix_telnet::net::{CloseReason, Endpoint, IoEvent, TelnetIo};
@@ -309,30 +308,12 @@ mod program {
             port: u16,
             family: Option<NetAddrFamily>,
         ) -> Option<Endpoint> {
-            // A literal address needs no query at all, which is what makes
-            // `telnet <address>` work on a machine with no resolver configured.
-            if let Some(endpoint) = literal_endpoint(host, port, family) {
-                return Some(endpoint);
-            }
-            let wanted: &[RecordType] = match family {
-                Some(NetAddrFamily::V4) => &[RecordType::A],
-                Some(NetAddrFamily::V6) => &[RecordType::Aaaa],
-                // Without a forced family, prefer IPv6 as a modern resolver
-                // does, then fall back.
-                None => &[RecordType::Aaaa, RecordType::A],
-            };
-            for &record in wanted {
-                let Ok(resolution) = tairix_resolver::resolve(host, record) else {
-                    continue;
-                };
-                if resolution.status != ResolveStatus::Success {
-                    continue;
-                }
-                if let Some(&address) = resolution.addresses.as_slice().first() {
-                    return Some(endpoint_for(address, port));
-                }
-            }
-            None
+            // The literal-first, family-preference policy is shared, so
+            // `telnet` and `ping` cannot disagree about what a host operand
+            // means. A literal needs no query, which is what makes
+            // `telnet <address>` work with no resolver configured.
+            let address = tairix_resolver::host_address(host, family)?;
+            Some(endpoint_for(address, port))
         }
 
         fn connect(&mut self, endpoint: Endpoint) -> Result<(), Errno> {
@@ -459,37 +440,10 @@ mod program {
         let _ = tairix_rt::waitset_wait(set, nanos, &mut token);
     }
 
-    /// The endpoint a literal address spells, or [`None`] when `host` is a name.
-    fn literal_endpoint(host: &str, port: u16, family: Option<NetAddrFamily>) -> Option<Endpoint> {
-        let address: IpAddr = host.parse().ok()?;
-        // A literal of the wrong family is not a match: `-4 ::1` names nothing.
-        if matches!(
-            (family, address),
-            (Some(NetAddrFamily::V4), IpAddr::V6(_)) | (Some(NetAddrFamily::V6), IpAddr::V4(_))
-        ) {
-            return None;
-        }
-        Some(endpoint_for(address, port))
-    }
-
     /// The socket endpoint for a resolved address.
     fn endpoint_for(address: IpAddr, port: u16) -> Endpoint {
-        match address {
-            IpAddr::V4(v4) => {
-                let mut addr = [0u8; 16];
-                addr[..4].copy_from_slice(&v4.octets());
-                Endpoint {
-                    family: NetAddrFamily::V4,
-                    addr,
-                    port,
-                }
-            }
-            IpAddr::V6(v6) => Endpoint {
-                family: NetAddrFamily::V6,
-                addr: v6.octets(),
-                port,
-            },
-        }
+        let (family, addr) = tairix_resolver::address_parts(address);
+        Endpoint { family, addr, port }
     }
 
     /// Parse a `-b` local-bind address. The port is always ephemeral: binding a

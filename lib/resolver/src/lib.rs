@@ -17,6 +17,10 @@
 //!   then drive [`tairix_net::dns::resolve`] over a caller-supplied
 //!   [`tairix_net::dns::DnsTransport`] and CSPRNG. Both seams are injected,
 //!   so the whole path is exercised against in-memory fakes with no kernel.
+//! * [`resolve_host`] — the pure *host-operand* policy every connecting tool
+//!   shares: an address literal resolves with no query at all, otherwise the
+//!   wanted record types are tried in family-preference order. One definition,
+//!   so `ping` and `telnet` cannot disagree about what `-4 ::1` means.
 //! * `RtDnsTransport` and `resolve` (the `program` feature; documented on a
 //!   freestanding target) — the production glue: a [`DnsTransport`] over
 //!   the `netsock-v1` UDP datagram socket (`tairix_rt::net`), with RFC 5452
@@ -51,13 +55,13 @@ use alloc::vec::Vec;
 use tairix_abi::net_ipc::{NetAddrFamily, NetResolverServer, MAX_RESOLVER_SERVERS};
 use tairix_abi::Errno;
 use tairix_net::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
-use tairix_net::dns::{self, DnsError, DnsTransport, Name, RecordType, Resolution};
+use tairix_net::dns::{self, DnsError, DnsTransport, Name, RecordType, Resolution, ResolveStatus};
 use tairix_procinfo::{for_each_resolver_server, CallError, ListError, Transport, WalkStep};
 
 #[cfg(all(feature = "program", target_os = "none"))]
 mod rt;
 #[cfg(all(feature = "program", target_os = "none"))]
-pub use rt::{resolve, RtDnsTransport};
+pub use rt::{host_address, resolve, RtDnsTransport};
 
 /// Why a name resolution did not produce an answer.
 ///
@@ -156,6 +160,89 @@ pub fn resolve_name(
         return Err(ResolveError::NoServers);
     }
     dns::resolve(name, record_type, &servers, udp, rng).map_err(ResolveError::Transport)
+}
+
+/// The record types to query for `family`, in the order to try them.
+///
+/// Without a forced family a modern resolver prefers IPv6 and falls back to
+/// IPv4. A forced family asks for that family alone, so `-4 <v6-only name>`
+/// finds nothing rather than quietly connecting over the other family.
+#[must_use]
+pub const fn wanted_records(family: Option<NetAddrFamily>) -> &'static [RecordType] {
+    match family {
+        Some(NetAddrFamily::V4) => &[RecordType::A],
+        Some(NetAddrFamily::V6) => &[RecordType::Aaaa],
+        None => &[RecordType::Aaaa, RecordType::A],
+    }
+}
+
+/// The address family an [`IpAddr`] belongs to.
+#[must_use]
+pub const fn address_family(address: IpAddr) -> NetAddrFamily {
+    match address {
+        IpAddr::V4(_) => NetAddrFamily::V4,
+        IpAddr::V6(_) => NetAddrFamily::V6,
+    }
+}
+
+/// Split an [`IpAddr`] into the `(family, 16-byte address)` pair every
+/// `netsock-v1` address field carries (IPv4 occupies the first four bytes).
+#[must_use]
+pub fn address_parts(address: IpAddr) -> (NetAddrFamily, [u8; 16]) {
+    match address {
+        IpAddr::V4(v4) => {
+            let mut bytes = [0u8; 16];
+            bytes[..4].copy_from_slice(&v4.octets());
+            (NetAddrFamily::V4, bytes)
+        }
+        IpAddr::V6(v6) => (NetAddrFamily::V6, v6.octets()),
+    }
+}
+
+/// Parse `host` as an address literal of the wanted `family`.
+///
+/// A literal of the wrong family is not a match: `-4 ::1` names nothing.
+#[must_use]
+pub fn literal_address(host: &str, family: Option<NetAddrFamily>) -> Option<IpAddr> {
+    let address: IpAddr = host.parse().ok()?;
+    family
+        .is_none_or(|wanted| wanted == address_family(address))
+        .then_some(address)
+}
+
+/// Resolve a command-line host operand to one address, the way every
+/// connecting tool should.
+///
+/// An address literal resolves with no query at all, which is what lets
+/// `ping 10.0.2.2` work on a machine with no configured resolver. Otherwise
+/// each record type in [`wanted_records`] order is queried through `query`
+/// until one yields an address; a record type that errors or answers
+/// negatively moves on to the next.
+///
+/// `query` is injected so the policy is pure and host-tested here once,
+/// rather than re-derived by each tool. Returns [`None`] when nothing
+/// resolved — the caller reports it naming the host it was given, so no
+/// error type is needed.
+pub fn resolve_host(
+    host: &str,
+    family: Option<NetAddrFamily>,
+    query: &mut dyn FnMut(&str, RecordType) -> Option<Resolution>,
+) -> Option<IpAddr> {
+    if let Some(address) = literal_address(host, family) {
+        return Some(address);
+    }
+    for &record in wanted_records(family) {
+        let Some(resolution) = query(host, record) else {
+            continue;
+        };
+        if resolution.status != ResolveStatus::Success {
+            continue;
+        }
+        if let Some(&address) = resolution.addresses.as_slice().first() {
+            return Some(address);
+        }
+    }
+    None
 }
 
 /// Convert a [`NetResolverServer`] record to an [`IpAddr`].

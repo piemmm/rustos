@@ -1408,7 +1408,7 @@ fn net_iface_metric(
     // unrecognised leaf is an unknown selector, not an empty read.
     let unit = match leaf {
         "rx.bytes" | "tx.bytes" => Unit::Bytes,
-        "rx.packets" | "rx.dropped" | "tx.packets" | "tx.dropped" => Unit::Count,
+        "rx.packets" | "rx.dropped" | "rx.filtered" | "tx.packets" | "tx.dropped" => Unit::Count,
         _ => return Err(ResolveInfoError::UnknownSelector),
     };
     let counters = net_counters_for(transport, iface)?.counters;
@@ -1416,6 +1416,10 @@ fn net_iface_metric(
         "rx.packets" => counters.rx_frames,
         "rx.bytes" => counters.rx_bytes,
         "rx.dropped" => counters.rx_dropped,
+        // What the device's receive pre-filter shed before the stack was
+        // woken — distinct from `rx.dropped`, which the stack itself
+        // discarded after receiving.
+        "rx.filtered" => counters.rx_filtered,
         "tx.packets" => counters.tx_frames,
         "tx.bytes" => counters.tx_bytes,
         // The remaining validated leaf is `tx.dropped`: frames dropped
@@ -3428,6 +3432,7 @@ mod tests {
                 icmp_errors_suppressed: 5,
                 reassembly_expired: 2,
                 pending_dropped: 4,
+                rx_filtered: 0,
             },
         }
     }

@@ -2264,6 +2264,144 @@ vertical run against a *hostile* peer. Key facts for the next worker:
   not weaken this vertical: the run above is proven by its transcript, its
   pcap, and the peer's verdict, none of which a status could forge.
 
+### N17 — receive-path cost: the interrupt storm, the per-frame RPC, and the pre-filter `[x]`
+
+The reported symptom was a Raspberry Pi 4 spending ~15% of a core while
+idle on a LAN, receiving nothing but background traffic. Three distinct
+costs, addressed in the order they dominate.
+
+#### N17a — the interrupt storm (the dominant cost)
+
+A DMA engine's completion status is a **latch over a level condition**
+("completed descriptors are waiting"). Acknowledging clears the latch, but
+with frames still undrained the condition re-latches at once, and the
+kernel re-arms the interrupt line every time the driver process parks
+(`kernel/core/src/blockwait.rs`, `IrqWaiter::yield_now`). The old
+`on_interrupt` only acknowledged and notified, so the driver spun
+interrupt → acknowledge → notify → park at the speed of a context switch
+until the stack caught up. `Genet::ack_interrupt`'s rustdoc asserted the
+opposite ("cannot re-fire in a storm"), which is why the defect survived.
+
+- `Net::set_completion_interrupts(enabled)` masks and unmasks the device's
+  **data-path completion sources only**; link and configuration-change
+  sources stay live, or a cable pulled mid-flood would go unnoticed. GENET
+  drives `INTRL2_CPU_MASK_SET`/`MASK_CLEAR` over `IRQ_COMPLETION`;
+  `virtio_net` sets `VIRTQ_AVAIL_F_NO_INTERRUPT` per data-path queue
+  (a new `SplitQueue::suppress_used_interrupts`).
+- The `lib/netchan` serve loop masks on entry, acknowledges, drains, and
+  unmasks **only** when the device is empty *and* the shared receive ring
+  has room. `DrainStep` is that decision as a pure, host-tested value, so
+  the policy is exercised without hardware.
+- A burst therefore costs one interrupt rather than one per frame — the
+  coalescing a fixed frame threshold cannot give, which is why receive
+  `MBUF_DONE_THRESH` stays at 1 (as Linux's `bcmgenet` does).
+- Invariant: the sources are masked whenever the channel is detached, so a
+  device left running cannot storm a driver with nowhere to put frames;
+  `Attach` re-enables them.
+
+#### N17b — the receive path no longer pays an RPC
+
+The driver already holds the frame region mapped, so making the stack ask
+for frames with a blocking `Service` call cost two extra process switches
+per batch for nothing.
+
+- The interrupt path drives `net.service(rings)` itself, so frames are in
+  the shared ring **before** the notify is sent.
+- `NetChannelNotify` carries what the driver already knows — the live
+  `link` and a `back_pressure` flag — in its two previously-reserved bytes
+  (no wire growth). Without the link there, a change on an idle interface
+  would go unseen until some unrelated transmit provoked a doorbell, and a
+  bond failover keys on exactly that report.
+- `Netstack::service_interface` takes a `ServiceHint` and rings the
+  doorbell only when the device has work this side created (anything in
+  the transmit ring) or the driver masked its source for back-pressure.
+  `FrameService::receive_needs_doorbell` is how the in-process shape —
+  which has no interrupt, so the doorbell *is* what runs it — says it
+  cannot skip.
+- Steady state per received frame: ~2 process wakes and ~4 syscalls, from
+  ~4 and ~10.
+
+#### N17c — `FrameRing` is a real SPSC ring (the prerequisite)
+
+N15b makes the two sides genuinely concurrent, and the ring's counters
+were plain non-atomic bytes whose only synchronisation was the RPC
+boundary the change removes.
+
+- The producer/consumer counters are `AtomicU32` views over the region
+  with a release-publish / acquire-observe discipline, in **separate cache
+  lines** (in one line every publish would invalidate the peer's read of
+  the other and the two CPUs would ping-pong it per frame).
+- Both counters live in memory the *peer* can write, so every operation
+  snapshots them once and validates the occupancy before addressing a
+  slot; a corrupt counter or slot length is a typed error, never an
+  out-of-bounds read. `skip` now validates its length too, rather than
+  handing back one the slot could not have held.
+- The region must be aligned for the counters. A cross-process region is
+  `shm`-mapped and page-aligned already; `aligned_region` /
+  `REGION_ALIGN_PADDING` cut an aligned view from a plain in-process
+  buffer, and `bind` refuses a misaligned one (`Errno::BadAlignment`).
+  Slot strides round up so every ring length keeps the next ring's header
+  aligned.
+- `lib/abi/tests/net_ring_spsc.rs` is the proof: two threads over one
+  leaked region (aliased deliberately, modelling two process mappings)
+  move 20 000 sequence-stamped frames, asserting each crosses exactly once,
+  in order, untorn. The in-crate unit tests drive one side at a time and
+  cannot show this.
+
+#### N17d — the receive pre-filter
+
+Most broadcast traffic on a busy segment is addressed to other hosts.
+Every such frame otherwise costs a stack wake, a full parse, and a drop.
+
+- `lib/net::rxfilter::RxClassifier` decides, on the driver's harvest path,
+  whether a frame could have a local consumer: an ethertype allow-list
+  (IPv4/IPv6/ARP), an ARP target-address match (replies always admitted —
+  only the neighbour cache knows whether we asked), and an IPv4/IPv6
+  destination match against the interface's own addresses, its subnet's
+  directed broadcast, the limited broadcast, and any multicast.
+- It matches on **slow-changing L3 address state only**. No listening
+  ports and no group memberships: per-socket state could fall behind a
+  socket opening and drop a frame someone wanted, for a share of the noise
+  that does not justify the risk. Multicast is admitted wholesale — the
+  device's own group filter already sheds unjoined groups where it has
+  one.
+- **Its bias is to admit.** It is never load-bearing for security: the
+  stack still validates every admitted frame, and the driver already owns
+  the device and could drop whatever it liked, so refusing here grants
+  nothing. Anything it cannot parse confidently is admitted, and a policy
+  that could not name every local address (`is_exhaustive` false) widens
+  to admit all unicast.
+- Wire: `NetChannelRequest::SetRxFilter(RxFilterPolicy)`, published by the
+  stack whenever an interface's address set changes and compared against
+  the last published value (a small `Copy` compare is far cheaper than the
+  IPC it avoids, and there is no second piece of state to fall out of
+  step). `Stack::rx_filter_policy` assembles it beside the addresses it
+  describes.
+- Evaluated in one place — `FrameRings::deliver`, which every driver's
+  receive path calls — so no driver repeats it and a refused frame is
+  never even copied.
+- Observability: `ServiceReport::filtered` is a **cumulative** device
+  counter (the driver drains on its own interrupt and the stack does not
+  doorbell for every batch, so a per-call delta would simply be lost),
+  surfaced as `stats:net/<iface>/rx.filtered`. Distinct from `rx.dropped`,
+  which counts frames the stack received and then discarded.
+
+#### N17e — what N17 does *not* do
+
+- **No GENET hardware checksum offload.** The `RBUF_64B_EN` 64-byte
+  status-block mode the offload requires changes the layout of every
+  received frame, and its interaction with the `RBUF_ALIGN_2B` pad this
+  driver already uses is a hardware fact that is not established here and
+  that QEMU cannot be used to establish (it models no GENET). Getting it
+  wrong costs all receive on the Pi 4, so it is not guessed at. Raised as
+  an open question rather than shipped speculatively; the software
+  checksum path in `lib/net` remains canonical and allocation-free
+  (N7c-3), and the interrupt and IPC costs above — not checksum
+  arithmetic — were the measured bottleneck.
+- **No reverse (`PTR`) resolution**, so `ss -r` and reverse display of
+  reply addresses stay unavailable (`lib/net::dns::RecordType` has only
+  `A`/`Aaaa`).
+
 ## 5. Observability: `info:` / `state:` / `stats:` for every interface
 
 Every network interface `netstack` manages is a first-class resource,
@@ -2504,3 +2642,5 @@ changes (§17.4 — the seam is the contract).
   same seam later, as the Pi 4B's GENET MAC already does (N14).
 - No kernel-resident fast path: if profiling ever motivates one, that
   is a design conflict to raise (§15.7), not a quiet migration.
+- No GENET hardware checksum offload, and no reverse (`PTR`) name
+  resolution — both stated with their reasons in N17e.

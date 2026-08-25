@@ -444,15 +444,27 @@ Buffer sizes must be a positive integer multiple of
 
 `trait Net`. Methods:
 
-| Method                | Capability gate                  |
-|-----------------------|----------------------------------|
-| `device_facts()`      | Driver handle.                   |
-| `service(&mut rings)` | `CAP_NET_RAW` (plus handle).     |
+| Method                                  | Capability gate              |
+|-----------------------------------------|------------------------------|
+| `device_facts()`                        | Driver handle.               |
+| `service(&mut rings)`                   | `CAP_NET_RAW` (plus handle). |
+| `set_multicast_groups(&[MacAddress])`   | `CAP_NET_RAW` (plus handle). |
+| `set_completion_interrupts(bool)`       | `CAP_NET_RAW` (plus handle). |
+| `ack_interrupt()`                       | Driver handle.               |
 
 Frame I/O is the shared-memory frame-ring transport
 (`tairix_abi::driver::net_ring`): `service` drains the stack-owned TX
 ring into the device and harvests delivered frames into the RX ring
 (see [Network drivers](../drivers/network.md)).
+
+`set_completion_interrupts` masks and unmasks the device's **data-path
+completion** sources — receive-done and transmit-done — and is the half of a
+poll-to-budget cycle that stops an interrupt storm: a DMA engine's status
+latches a *level* condition, so `ack_interrupt` alone re-latches while frames
+are undrained. Link and configuration-change sources stay live throughout, or
+a cable pulled mid-flood would go unnoticed. The default is `Ok(())` for a
+device with no maskable source (an in-process mock, a self-clearing
+transport).
 
 ## Input
 

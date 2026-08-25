@@ -13,6 +13,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use tairix_abi::driver::net::{DeviceFacts, LinkState, MacAddress, McastFilter, NetOffloads};
+use tairix_abi::driver::net_channel::RxFilterPolicy;
 use tairix_abi::driver::net_ring::{FrameOffload, FrameRings};
 use tairix_abi::net_ipc::{
     validate_if_name, NetAddrFamily, NetAddrState, NetBondConfigMsg, NetBondMemberRecord,
@@ -88,6 +89,27 @@ pub type IfaceRename = Option<([u8; IF_NAME_LEN], [u8; IF_NAME_LEN])>;
 /// longer delivered. A refusal deliberately does **not** record the revision
 /// as pushed, so the next pump retries — a set that shrinks back within the
 /// device's slots recovers on its own.
+/// Publish `policy` to this channel's device, when it has changed.
+///
+/// Compared against the last published value rather than tracked by a
+/// revision counter: the policy is a small `Copy` value, the comparison is
+/// far cheaper than the IPC it avoids, and there is no second piece of
+/// state that could fall out of step with the addresses it describes.
+fn push_rx_filter<F: FrameService>(channel: &mut Interface, policy: RxFilterPolicy, fs: &mut F) {
+    // Recorded on the *channel's* interface, not the stack's: a bond's two
+    // members share one stack, so a record kept there would let the first
+    // member pumped mark the policy pushed and the second never receive it.
+    if channel.pushed_rx_filter == Some(policy) {
+        return;
+    }
+    // A refusal leaves the recorded policy alone, so the next pump retries.
+    // Until it lands the driver keeps its previous (wider) filter, which
+    // can only cost work, never a frame.
+    if fs.set_rx_filter(policy).is_ok() {
+        channel.pushed_rx_filter = Some(policy);
+    }
+}
+
 fn push_multicast<F: FrameService>(
     iface: &mut Interface,
     fs: &mut F,
@@ -132,6 +154,24 @@ pub struct ServiceOutcome {
     pub multicast_refused: Option<usize>,
 }
 
+/// What the caller already knows about a device before a pump runs.
+///
+/// A driver harvests received frames into the shared ring on its own device
+/// interrupt and states what it saw in the notify that wakes the stack, so a
+/// pump driven by one starts already knowing the link and whether the driver
+/// is holding its completion source masked. That is what lets a pure receive
+/// cost no doorbell at all. A timer- or admin-driven pump knows neither and
+/// passes [`Default`].
+#[derive(Copy, Clone, Debug, Default)]
+pub struct ServiceHint {
+    /// The link state the waking notify carried, if a notify woke this pump.
+    pub link: Option<LinkState>,
+    /// The driver masked its completion source because the shared receive
+    /// ring filled. This pump must doorbell after draining even with nothing
+    /// to transmit, or the device stays masked and receives nothing further.
+    pub back_pressure: bool,
+}
+
 /// One managed interface: its admin-chosen alias, link kind, and the
 /// per-interface dual-stack protocol engine.
 pub struct Interface {
@@ -158,6 +198,13 @@ pub struct Interface {
     /// device's group filter, or [`None`] while nothing has been programmed.
     /// The pump reprograms only when the engine's revision moves off this.
     pushed_multicast: Option<u64>,
+    /// The receive pre-filter policy last accepted by this interface's
+    /// device, so an unchanged address set costs no IPC.
+    pushed_rx_filter: Option<RxFilterPolicy>,
+    /// The driver's cumulative pre-filter count, as of the last report seen.
+    /// Stored rather than accumulated because the device counter is itself
+    /// cumulative — a report this stack never asked for is not lost.
+    rx_filtered: u64,
 }
 
 impl Interface {
@@ -318,6 +365,8 @@ impl Netstack {
             node_location,
             static_dns: Vec::new(),
             pushed_multicast: None,
+            pushed_rx_filter: None,
+            rx_filtered: 0,
         });
         Ok(())
     }
@@ -603,6 +652,9 @@ impl Netstack {
                         icmp_errors_suppressed: c.icmp_errors_suppressed,
                         reassembly_expired: c.reassembly_expired,
                         pending_dropped: c.pending_dropped,
+                        // A driver statistic, not a stack one: the pre-filter
+                        // shed these before the stack ever saw them.
+                        rx_filtered: i.rx_filtered,
                     },
                 }
             })
@@ -1051,22 +1103,33 @@ impl Netstack {
     }
 
     /// Pump one interface's frames through the frame service `fs` once:
-    /// queue the engine's due output into the TX ring, doorbell the device,
-    /// and feed every delivered frame back through the engine (whose replies
-    /// are queued and flushed in the same pass).
+    /// queue the engine's due output into the TX ring, drain every received
+    /// frame back through the engine (whose replies are queued and flushed
+    /// in the same pass), and doorbell the device when it has work only it
+    /// can do.
     ///
     /// The pump is written once against the [`FrameService`] seam, so it
     /// drives an in-process [`Net`](tairix_abi::driver::net::Net) device
     /// ([`LocalFrameService`](crate::LocalFrameService)) and a cross-process
     /// driver ([`NetChannelClient`](crate::NetChannelClient)) identically:
     /// the service owns the frame region and each doorbell is either a direct
-    /// `Net::service` or an `ipc_call` to the driver process. Ring bytes are
-    /// never touched across a doorbell, so the call boundary is the whole
-    /// synchronisation.
+    /// `Net::service` or an `ipc_call` to the driver process.
+    ///
+    /// # The doorbell is not unconditional
+    ///
+    /// A cross-process doorbell is two process switches, and a *received*
+    /// frame needs none of them: the driver harvested it into the shared ring
+    /// on its own device interrupt before waking this stack, and the ring's
+    /// atomic counters are what make reading it here safe. So the doorbell is
+    /// rung only when the device has work this side has created —
+    /// something in the transmit ring — or when `hint` says the driver
+    /// masked its completion source for back-pressure and needs releasing.
+    /// An idle interface receiving background traffic therefore costs one
+    /// wake and no calls.
     ///
     /// Returns the pump's [`ServiceOutcome`]: the typed [`StackEvent`]s the
-    /// engine reported, plus the interface's live link state if the driver's
-    /// service report showed it changed since the last pump.
+    /// engine reported, plus the interface's live link state if it changed
+    /// since the last pump.
     ///
     /// # Errors
     ///
@@ -1078,8 +1141,12 @@ impl Netstack {
         name: [u8; IF_NAME_LEN],
         fs: &mut F,
         now: Duration64,
+        hint: ServiceHint,
     ) -> Result<ServiceOutcome, Errno> {
         let channel_index = self.find(name).ok_or(Errno::NotFound)?;
+        // The link recorded before this pump: the value a no-doorbell pass
+        // reports, so an unchanged link stays unchanged.
+        let last_link = self.interfaces[channel_index].facts.link;
         // A member NIC has no stack of its own: its frames flow through the
         // bond's stack (the bond owns the addresses/routes). Its replies
         // are queued back onto this member's ring, which is correct for the
@@ -1120,13 +1187,36 @@ impl Netstack {
         // address's solicited-node group, whose DAD probe the same advance
         // just queued) is admitted before any answer to it could arrive.
         let multicast_refused = push_multicast(iface, fs, mcast_scratch);
+        // Keep the device's receive pre-filter in step with the addresses
+        // this advance may have assigned, before any answer to them could
+        // arrive. The addresses are the stack target's; the device is this
+        // channel's, and so is the record of what it was last sent.
+        let rx_policy = iface.stack.rx_filter_policy();
+        push_rx_filter(&mut interfaces[channel_index], rx_policy, fs);
+        let iface = &mut interfaces[index];
+        // A driver holding its completion source masked must be released
+        // whatever else this pump finds, and an in-process device is only
+        // ever run by the doorbell itself.
+        let mut doorbell = hint.back_pressure || fs.receive_needs_doorbell();
         {
             let mut rings = FrameRings::bind(fs.region_mut(), geometry, class)?;
             queue_frames(&mut rings, &out.frames);
+            // Anything in the transmit ring is work only the device can do.
+            // A ring whose counters will not read is reported as needing the
+            // doorbell, so the driver surfaces the fault as a typed reply
+            // instead of this pump swallowing it.
+            doorbell |= !rings.tx.is_empty().unwrap_or(false);
         }
         // The driver stamps its live link on every service report; keep the
-        // latest across both doorbells of this pump.
-        let mut reported_link = fs.service()?.link;
+        // latest across both doorbells of this pump. Without a doorbell the
+        // link is what the waking notify stated, or the last recorded value.
+        let mut reported_link = if doorbell {
+            let report = fs.service()?;
+            iface.rx_filtered = report.filtered;
+            report.link
+        } else {
+            hint.link.unwrap_or(last_link)
+        };
 
         // Feed delivered frames through the engine; its replies join
         // the TX ring. A multiqueue device (`plans/NETWORK.md` N7c-2)
@@ -1164,7 +1254,9 @@ impl Netstack {
             }
         }
         if replied {
-            reported_link = fs.service()?.link;
+            let report = fs.service()?;
+            iface.rx_filtered = report.filtered;
+            reported_link = report.link;
         }
         // Snapshot the post-pump counters for the throughput meter. Cheap
         // and self-throttling: the meter drops a sample taken within its
@@ -1363,6 +1455,8 @@ impl Netstack {
             // Populated when the bond's own interface config is applied.
             static_dns: Vec::new(),
             pushed_multicast: None,
+            pushed_rx_filter: None,
+            rx_filtered: 0,
         });
         Ok(())
     }

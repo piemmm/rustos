@@ -88,6 +88,10 @@ const AVAIL_TAIL_BYTES: usize = 2; // used_event
 const USED_HEADER_BYTES: usize = 4; // flags + idx
 const USED_TAIL_BYTES: usize = 2; // avail_event
 
+/// Avail-ring flag asking the device not to raise a used-ring interrupt
+/// (virtio 1.3 §2.7.7). Advisory: the device may interrupt regardless.
+const VIRTQ_AVAIL_F_NO_INTERRUPT: u16 = 1;
+
 impl SplitQueue {
     /// Required descriptor-table byte size for `queue_size`.
     #[must_use]
@@ -300,6 +304,28 @@ impl SplitQueue {
         // Update the avail.idx field (offset 2, little-endian u16).
         avail_bytes[2..4].copy_from_slice(&self.next_avail_idx.to_le_bytes());
         Ok(head)
+    }
+
+    /// Ask the device to suppress (`true`) or resume (`false`) used-ring
+    /// interrupts for this queue.
+    ///
+    /// Sets or clears `VIRTQ_AVAIL_F_NO_INTERRUPT` in the avail ring's flags
+    /// field (virtio 1.3 §2.7.7). It is an *advisory* hint — the spec lets a
+    /// device interrupt anyway — so a driver must stay correct when a
+    /// suppressed interrupt still arrives; suppression only removes the
+    /// needless ones while the driver is already draining the queue.
+    pub fn suppress_used_interrupts(&mut self, suppress: bool) {
+        let avail_bytes = self.avail.as_bytes_mut();
+        let flags = if suppress {
+            VIRTQ_AVAIL_F_NO_INTERRUPT
+        } else {
+            0
+        };
+        avail_bytes[..2].copy_from_slice(&flags.to_le_bytes());
+        // The device may read the flags at any time from its own context, so
+        // the store must be visible before whatever the caller does next
+        // (resume the drain, or park expecting to be woken again).
+        dma_wmb();
     }
 
     /// Notify the device that new chain(s) are available on this

@@ -45,3 +45,18 @@ and origin check.
 crates (`AGENTS.md` §17.4): `tairix-abi`, `tairix-net`, `tairix-procinfo`, and
 — under the `program` feature only — `tairix-rt`. `#![forbid(unsafe_code)]`,
 and no `unwrap`/`expect`/`panic!` on a production path.
+
+## The shared host-operand policy
+
+`resolve_host` is the one definition of what a command-line host operand
+means: an address literal resolves with no query at all (so a literal target
+works on a machine with no resolver configured), otherwise the wanted record
+types are tried in family-preference order — IPv6 then IPv4 unless `-4`/`-6`
+forced one. `ping`, `telnet`, and any future connecting tool call it, so they
+cannot disagree about `-4 ::1`. `address_parts` is the matching split into
+the `(family, 16-byte address)` pair every `netsock-v1` address field
+carries.
+
+The policy is pure and injected (`query` is a closure), so it is host-tested
+against scripted resolutions; `rt::host_address` supplies the production
+query and answers a literal without opening a socket.

@@ -76,6 +76,13 @@ same System Information API (`plans/ALIAS.md` §6, `plans/NETWORK.md` §5):
 
 - `stats:net/<iface>/rx.packets`, `.../rx.bytes`, `.../rx.dropped` and the
   `tx.*` counterparts — the monotonic per-interface counters.
+- `stats:net/<iface>/rx.filtered` — frames the device's receive pre-filter
+  shed before the stack was woken for them (`plans/NETWORK.md` N17d). It is
+  distinct from `rx.dropped`, which counts frames the stack *did* receive
+  and then discarded, and it is what makes a filter's effect visible: on a
+  busy segment it climbs steadily while `rx.packets` does not. A driver
+  reports it cumulatively, because it drains its rings on its own device
+  interrupt and the stack does not ask for every batch.
 - `stats:net/<iface>/rx.pps`, `.../rx.bps` (and `tx.*`) with a mandatory
   `?window=<duration>` decoration (`500ms`, `1s`, `2m`) — the average
   rate over the window that actually elapsed.
@@ -163,6 +170,53 @@ over an ordinary `CAP_NET` UDP socket (with CSPRNG source-port
 randomisation and a random query id). There is no `/etc/resolv.conf` and no
 local host file.
 
+## `ping` — reachability and round-trip time
+
+`ping` sends ICMP/`ICMPv6` echo requests through the capability-gated echo
+socket and prints each reply with its sequence number and time, then a
+closing statistics block, in the familiar iputils shape.
+
+```
+$ ping -c 3 gateway.example
+PING gateway.example (10.0.2.2) 56(84) bytes of data.
+64 bytes from 10.0.2.2: icmp_seq=1 time=0.412 ms
+64 bytes from 10.0.2.2: icmp_seq=2 time=0.388 ms
+64 bytes from 10.0.2.2: icmp_seq=3 time=0.401 ms
+
+--- gateway.example ping statistics ---
+3 packets transmitted, 3 received, 0% packet loss, time 2003ms
+rtt min/avg/max = 0.388/0.400/0.412 ms
+```
+
+The target is an address literal **or a host name**, resolved through the
+same `lib/resolver` stub resolver `host` and `telnet` use — the
+literal-first, family-preference policy is shared (`resolve_host`), so the
+three cannot disagree about what a host operand means, and a literal needs
+no query at all.
+
+### The payload is high-entropy by default
+
+Each request carries random bytes, drawn fresh for every request. This is a
+deliberate divergence in *default*, not in option surface: a link that
+compresses or de-duplicates traffic would otherwise report a throughput and
+latency that say nothing about its real capacity, which defeats the
+measurement. The echoed bytes are compared with what was sent, so a random
+payload doubles as a per-packet integrity check.
+
+`-p <hex>` opts into a fixed repeating pattern (iputils' spelling) where a
+deterministic payload is wanted; `-p random` names the default explicitly.
+The bytes come from `lib/rng`'s fast xoshiro256++ generator seeded once from
+the kernel CSPRNG — bulk uncompressible data is not a security surface, so
+drawing every payload from the CSPRNG would spend the reserve for nothing.
+
+### Deliberate divergences
+
+* No `ttl=` field on a reply line: the IP time-to-live is not exposed
+  through the echo-socket interface.
+* `-n` is accepted and inert. Reverse (`PTR`) resolution does not exist —
+  the stub resolver has no `PTR` record type — so reply addresses are
+  always numeric already and there is nothing to suppress.
+
 ## `telnet` — the Network Virtual Terminal client
 
 `telnet` opens a TCP connection to a host and relays the terminal to it, in the
@@ -177,7 +231,7 @@ login:
 ```
 
 The host may be a name or a literal IPv4/IPv6 address; a name is resolved
-through the same `lib/resolver` stub resolver `host` uses. The port is a
+through the same shared `lib/resolver` policy `host` and `ping` use. The port is a
 number — TAIRiX has no services database, so a service *name* is a usage error
 rather than a silent fall back to port 23. It is equally the way to poke a TCP
 service by hand: `telnet host 80` opens a connection you can type a request

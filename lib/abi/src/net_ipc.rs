@@ -1742,13 +1742,21 @@ pub struct NetCounters {
     pub reassembly_expired: u64,
     /// Packets dropped from the pending-resolution queue.
     pub pending_dropped: u64,
+    /// Frames the device's receive pre-filter shed before the stack was
+    /// woken: no local consumer was possible.
+    ///
+    /// Distinct from [`Self::rx_dropped`], which counts frames the stack
+    /// *did* receive and then discarded. A filtered frame never reached the
+    /// stack at all, so conflating the two would misreport both — and this
+    /// is the only way an operator can see what a filter is shedding.
+    pub rx_filtered: u64,
 }
 
 /// Number of `u64` counters in a [`NetCounters`].
-const COUNTERS_FIELDS: usize = 9;
+const COUNTERS_FIELDS: usize = 10;
 
 impl NetCounters {
-    /// Encoded payload size: nine little-endian `u64` counters.
+    /// Encoded payload size: one little-endian `u64` per counter.
     pub const WIRE_LEN: usize = COUNTERS_FIELDS * 8;
 
     /// Encode `self` little-endian.
@@ -1765,6 +1773,7 @@ impl NetCounters {
             self.icmp_errors_suppressed,
             self.reassembly_expired,
             self.pending_dropped,
+            self.rx_filtered,
         ]
         .into_iter()
         .enumerate()
@@ -1793,6 +1802,7 @@ impl NetCounters {
             icmp_errors_suppressed: read_u64(bytes, 48),
             reassembly_expired: read_u64(bytes, 56),
             pending_dropped: read_u64(bytes, 64),
+            rx_filtered: read_u64(bytes, 72),
         })
     }
 }
@@ -3735,6 +3745,7 @@ mod tests {
             icmp_errors_suppressed: 5,
             reassembly_expired: 6,
             pending_dropped: 7,
+            rx_filtered: 8,
         }
     }
 

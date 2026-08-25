@@ -35,7 +35,7 @@
 #![deny(missing_docs)]
 
 mod server;
-pub use server::NetChannelServer;
+pub use server::{DrainStep, NetChannelServer};
 
 #[cfg(target_os = "none")]
 mod serve;

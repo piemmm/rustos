@@ -137,12 +137,20 @@ pub const IRQ_RXDMA_DONE: u32 = 1 << 12;
 /// The transmit DMA engine finished a burst of buffers.
 pub const IRQ_TXDMA_DONE: u32 = 1 << 15;
 
+/// The data-path completion sources, masked while the driver drains the
+/// rings and unmasked once they are empty.
+///
+/// Both are *level* conditions latched into `INTRL2_CPU_STAT`: while
+/// completed descriptors are waiting, clearing the latch immediately
+/// re-latches, so only masking holds the line off until the drain is done.
+pub const IRQ_COMPLETION: u32 = IRQ_RXDMA_DONE | IRQ_TXDMA_DONE;
+
 /// The sources the driver enables: the two DMA-completion doorbells the
 /// serve loop needs plus both link events, so a cable change wakes the
 /// driver and the stack re-reads the link state. Every other source stays
 /// masked — an unhandled condition must not be able to re-assert the line
 /// faster than it can be serviced.
-pub const IRQ_ENABLED: u32 = IRQ_RXDMA_DONE | IRQ_TXDMA_DONE | IRQ_LINK_UP | IRQ_LINK_DOWN;
+pub const IRQ_ENABLED: u32 = IRQ_COMPLETION | IRQ_LINK_UP | IRQ_LINK_DOWN;
 
 // --- RBUF block ---------------------------------------------------------
 

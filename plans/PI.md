@@ -5107,3 +5107,25 @@ cargo run -q -p tairix-qemu --bin tairix-qemu-run -- \
 Stages that can only be proven on metal (P7–P10) additionally record a
 hardware bring-up checklist + a UART-log / photo acceptance artefact under
 the stage, since CI has no Pi attached.
+
+## On-metal acceptance: receive-path cost (`plans/NETWORK.md` N17)
+
+Two items need a live Pi 4 and cannot be settled in QEMU, which models no
+GENET.
+
+1. **The idle-CPU measurement.** The reported symptom was ~15% of a core
+   consumed while idle on a LAN. N17a removes the interrupt storm that
+   caused it (the driver never masked its DMA-done sources while the stack
+   was woken, and the kernel re-arms the line at every park, so the
+   condition re-latched immediately). Confirm on metal that an idle Pi 4 on
+   a busy segment now costs approximately nothing, and that
+   `stats:net/<iface>/rx.filtered` climbs while `rx.packets` does not — that
+   is the pre-filter shedding foreign broadcast.
+2. **The open question on hardware checksum offload.** Enabling GENET's
+   `RBUF_64B_EN` 64-byte status-block mode is what its RX/TX checksum
+   engines require, and it changes the layout of *every* received frame.
+   How it interacts with the `RBUF_ALIGN_2B` two-byte pad this driver
+   already programs is not established, and getting it wrong costs all
+   receive on the device. It is deliberately not guessed at (N17e); it
+   needs either the BCM2711 register documentation or a metal experiment
+   before any code is written.

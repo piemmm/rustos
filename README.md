@@ -80,6 +80,8 @@ for filesystems, the feature section below.
 | Networking | ◐ virtio | ◐ virtio + GENET | ◐ virtio | — |
 | DHCPv4 / DHCPv6 address configuration | ✓ | ✓ | ✓ | — |
 | Network offloads (RX/TX csum, TSO, mergeable RX, multiqueue RX) | ✓ virtio | ✓ virtio | ✓ virtio | — |
+| NIC completion-interrupt masking (no per-frame interrupt storm) | ✓ virtio | ✓ virtio + GENET | ✓ virtio | — |
+| Receive pre-filter (foreign traffic shed before the stack wakes) | ✓ | ✓ | ✓ | — |
 | Input devices | ✓ ps2 + USB | ✓ virtio + USB | ✓ virtio | ✓ host |
 | Production kernel binary | ✓ | ✓ | ▢ | ▢ |
 | Bootable image | ▢ iso | ✓ rpi.img | ▢ | ▢ |

@@ -3,22 +3,37 @@
 //! The option surface follows iputils/`ping(8)`: `-c count` bounds the number
 //! of requests (the default is unbounded), `-i interval` sets the seconds
 //! between requests, `-s size` sets the payload byte count, `-W timeout` bounds
-//! the wait for each reply, `-w deadline` bounds the whole run, `-4`/`-6` force
-//! the address family, `-n` prints numeric addresses (always in force on TAIRiX
-//! — there is no name resolver in this plan, so the target must be a literal
-//! address — and accepted for familiarity), and `-q` is quiet (summary only).
-//! Short help is the reserved `-?`/`--help` pair (plans/APPS.md §4).
+//! the wait for each reply, `-w deadline` bounds the whole run, `-p pattern`
+//! sets a fixed payload pattern, `-4`/`-6` force the address family, `-q` is
+//! quiet (summary only), and `-n` prints numeric addresses. Short help is the
+//! reserved `-?`/`--help` pair (plans/APPS.md §4).
+//!
+//! `-n` is accepted and has no effect: it suppresses *reverse* lookup of the
+//! addresses replies come from, and this tool never performs one (the stub
+//! resolver has no `PTR` record type), so the addresses printed are already
+//! numeric.
 //!
 //! A value-taking short flag accepts its value attached (`-c5`) or as the
 //! next argument (`-c 5`); long options accept `--count 5` or `--count=5`.
-//! Exactly one target operand — a literal IPv4 or IPv6 address — is
-//! required. There is no DNS resolution (not in `plans/NETWORK.md`), so a
-//! hostname is a usage error, reported honestly rather than silently.
+//! Exactly one target operand is required: an IPv4 or IPv6 address literal,
+//! or a host name. Parsing keeps the operand verbatim — resolving it needs
+//! I/O, so it happens in the engine against the injected seam, and a name
+//! that will not resolve is a run-time failure naming the host, not a usage
+//! error.
+//!
+//! # Payload
+//!
+//! The default payload is **high-entropy random bytes, fresh for every
+//! request**. A link that compresses or de-duplicates traffic would otherwise
+//! report a throughput and latency that say nothing about its real capacity,
+//! which defeats the purpose of the measurement. `-p` opts into a fixed
+//! repeating hex pattern for the cases where a deterministic payload is what
+//! is wanted (reproducing a pattern-sensitive fault, exercising a codec).
 
 use alloc::format;
 use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 use core::fmt;
-use core::net::{Ipv4Addr, Ipv6Addr};
 
 use tairix_abi::net_ipc::NetAddrFamily;
 
@@ -38,15 +53,40 @@ pub const DEFAULT_INTERVAL_NS: u64 = NANOS_PER_SEC;
 /// Default per-reply wait, as nanoseconds.
 pub const DEFAULT_TIMEOUT_NS: u64 = NANOS_PER_SEC;
 
-/// A resolved ping target: the literal as typed, its family, and its bytes.
+/// The target operand as typed, with any family the command line forced.
+///
+/// Unresolved: turning it into an address is I/O, so it is the engine's first
+/// act rather than the parser's.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostTarget {
+    /// The operand exactly as the user typed it — an address literal or a
+    /// host name. Kept verbatim so every diagnostic names what was asked for.
+    pub host: String,
+    /// The family `-4`/`-6` forced, or [`None`] to accept either.
+    pub family: Option<NetAddrFamily>,
+}
+
+/// A resolved ping target: the operand as typed, its family, and its bytes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Target {
-    /// The address literal exactly as the user typed it (for display).
+    /// The operand exactly as the user typed it (for display).
     pub display: String,
     /// The address family.
     pub family: NetAddrFamily,
     /// The address bytes (IPv4 uses the first four).
     pub addr: [u8; 16],
+}
+
+/// What the echo payload is filled with.
+#[derive(Clone, Debug, Eq, PartialEq, Default)]
+pub enum PayloadKind {
+    /// High-entropy random bytes, drawn fresh for every request — the
+    /// default, so a compressing or de-duplicating link cannot flatter
+    /// itself.
+    #[default]
+    Random,
+    /// A fixed byte pattern repeated to fill the payload (`-p`).
+    Pattern(Vec<u8>),
 }
 
 /// A parsed `ping` invocation.
@@ -61,8 +101,10 @@ pub enum Command {
 /// Everything a `ping` run needs, straight from the option grammar.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Config {
-    /// The target address to ping.
-    pub target: Target,
+    /// The target operand to resolve and ping.
+    pub target: HostTarget,
+    /// What each request's payload is filled with.
+    pub payload: PayloadKind,
     /// Number of requests to send, or [`None`] for unbounded.
     pub count: Option<u32>,
     /// Nanoseconds between requests.
@@ -95,9 +137,6 @@ pub enum ParseError {
     MissingTarget,
     /// More than one target operand was given.
     ExtraOperand(String),
-    /// The target was not a literal IP address of the required family
-    /// (there is no name resolution in this plan).
-    InvalidTarget(String),
 }
 
 impl fmt::Display for ParseError {
@@ -110,20 +149,8 @@ impl fmt::Display for ParseError {
             }
             Self::MissingTarget => f.write_str("no target address given"),
             Self::ExtraOperand(word) => write!(f, "unexpected extra operand '{word}'"),
-            Self::InvalidTarget(word) => write!(
-                f,
-                "'{word}' is not a literal IP address (name resolution is not supported)"
-            ),
         }
     }
-}
-
-/// The forced address family, if `-4`/`-6` was given.
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum Family {
-    Any,
-    V4,
-    V6,
 }
 
 /// Accumulated option state during parsing.
@@ -134,7 +161,8 @@ struct Builder {
     deadline_ns: Option<u64>,
     size: usize,
     quiet: bool,
-    family: Family,
+    family: Option<NetAddrFamily>,
+    payload: PayloadKind,
     target: Option<String>,
 }
 
@@ -147,7 +175,8 @@ impl Default for Builder {
             deadline_ns: None,
             size: DEFAULT_SIZE,
             quiet: false,
-            family: Family::Any,
+            family: None,
+            payload: PayloadKind::Random,
             target: None,
         }
     }
@@ -229,9 +258,10 @@ fn parse_long(
         "timeout" => builder.timeout_ns = parse_seconds(&take_value(key)?, "--timeout")?,
         "deadline" => builder.deadline_ns = Some(parse_seconds(&take_value(key)?, "--deadline")?),
         "size" => builder.size = parse_size(&take_value(key)?, "--size")?,
+        "pattern" => builder.payload = parse_pattern(&take_value(key)?, "--pattern")?,
         "quiet" => builder.quiet = true,
-        "ipv4" => builder.family = Family::V4,
-        "ipv6" => builder.family = Family::V6,
+        "ipv4" => builder.family = Some(NetAddrFamily::V4),
+        "ipv6" => builder.family = Some(NetAddrFamily::V6),
         _ => return Err(ParseError::UnknownOption(original.to_string())),
     }
     Ok(())
@@ -249,11 +279,13 @@ fn parse_short(
     for (pos, flag) in flags.char_indices() {
         match flag {
             '?' => return Ok(true),
-            '4' => builder.family = Family::V4,
-            '6' => builder.family = Family::V6,
+            '4' => builder.family = Some(NetAddrFamily::V4),
+            '6' => builder.family = Some(NetAddrFamily::V6),
+            // Numeric output: no reverse lookup is ever performed, so the
+            // addresses printed are already numeric.
             'n' => {}
             'q' => builder.quiet = true,
-            'c' | 'i' | 's' | 'W' | 'w' => {
+            'c' | 'i' | 's' | 'W' | 'w' | 'p' => {
                 // The value is the rest of this argument, or the next one.
                 let rest = &flags[pos + flag.len_utf8()..];
                 let value = if rest.is_empty() {
@@ -284,7 +316,11 @@ fn apply_value_flag(builder: &mut Builder, flag: char, value: &str) -> Result<()
         's' => builder.size = parse_size(value, "-s")?,
         'W' => builder.timeout_ns = parse_seconds(value, "-W")?,
         'w' => builder.deadline_ns = Some(parse_seconds(value, "-w")?),
-        _ => unreachable!("only value flags reach here"),
+        'p' => builder.payload = parse_pattern(value, "-p")?,
+        // The caller dispatches only the flags matched above; a value flag
+        // added there without a case here is a compile-time hole, so this
+        // arm refuses rather than guessing a meaning.
+        _ => return Err(invalid(&format!("-{flag}"), value)),
     }
     Ok(())
 }
@@ -298,13 +334,16 @@ fn set_target(builder: &mut Builder, word: &str) -> Result<(), ParseError> {
     Ok(())
 }
 
-/// Finalise the builder into a [`Command`], resolving and validating the
-/// target address against the forced family.
+/// Finalise the builder into a [`Command`], keeping the target operand
+/// verbatim for the engine to resolve.
 fn build(builder: Builder) -> Result<Command, ParseError> {
-    let literal = builder.target.ok_or(ParseError::MissingTarget)?;
-    let target = resolve_target(&literal, builder.family)?;
+    let host = builder.target.ok_or(ParseError::MissingTarget)?;
     Ok(Command::Run(Config {
-        target,
+        target: HostTarget {
+            host,
+            family: builder.family,
+        },
+        payload: builder.payload,
         count: builder.count,
         interval_ns: builder.interval_ns,
         timeout_ns: builder.timeout_ns,
@@ -314,41 +353,35 @@ fn build(builder: Builder) -> Result<Command, ParseError> {
     }))
 }
 
-/// Resolve a literal IP address string into a [`Target`] of the required
-/// family. There is no name resolution in this plan, so a non-literal is a
-/// usage error rather than a silent failure (fail loud).
-fn resolve_target(literal: &str, family: Family) -> Result<Target, ParseError> {
-    let v4 = literal.parse::<Ipv4Addr>().ok();
-    let v6 = literal.parse::<Ipv6Addr>().ok();
-    match family {
-        Family::V4 => v4
-            .map(|a| target_v4(literal, a))
-            .ok_or_else(|| ParseError::InvalidTarget(literal.to_string())),
-        Family::V6 => v6
-            .map(|a| target_v6(literal, a))
-            .ok_or_else(|| ParseError::InvalidTarget(literal.to_string())),
-        Family::Any => v4
-            .map(|a| target_v4(literal, a))
-            .or_else(|| v6.map(|a| target_v6(literal, a)))
-            .ok_or_else(|| ParseError::InvalidTarget(literal.to_string())),
+/// Parse a `-p` payload pattern: `random` for the default high-entropy fill,
+/// or an even-length string of hex digits giving the repeating byte pattern
+/// (iputils spells it that way).
+fn parse_pattern(value: &str, option: &str) -> Result<PayloadKind, ParseError> {
+    if value == "random" {
+        return Ok(PayloadKind::Random);
     }
+    // An odd digit count would leave a half-specified final byte, and a
+    // non-hex digit has no byte value: refuse rather than guess.
+    if value.is_empty() || !value.len().is_multiple_of(2) {
+        return Err(invalid(option, value));
+    }
+    let mut bytes = Vec::with_capacity(value.len() / 2);
+    for pair in value.as_bytes().chunks(2) {
+        let (Some(hi), Some(lo)) = (hex_digit(pair[0]), hex_digit(pair[1])) else {
+            return Err(invalid(option, value));
+        };
+        bytes.push(hi << 4 | lo);
+    }
+    Ok(PayloadKind::Pattern(bytes))
 }
 
-fn target_v4(literal: &str, addr: Ipv4Addr) -> Target {
-    let mut bytes = [0u8; 16];
-    bytes[..4].copy_from_slice(&addr.octets());
-    Target {
-        display: literal.to_string(),
-        family: NetAddrFamily::V4,
-        addr: bytes,
-    }
-}
-
-fn target_v6(literal: &str, addr: Ipv6Addr) -> Target {
-    Target {
-        display: literal.to_string(),
-        family: NetAddrFamily::V6,
-        addr: addr.octets(),
+/// The value of one ASCII hex digit, or [`None`] if `byte` is not one.
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -428,6 +461,7 @@ fn invalid(option: &str, value: &str) -> ParseError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     fn config(args: &[&str]) -> Config {
         match parse(args).expect("parses") {
@@ -437,24 +471,36 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_ipv4_target_defaults_the_rest() {
+    fn a_bare_target_defaults_the_rest() {
         let config = config(&["10.0.2.2"]);
-        assert_eq!(config.target.family, NetAddrFamily::V4);
-        assert_eq!(&config.target.addr[..4], &[10, 0, 2, 2]);
+        assert_eq!(config.target.host, "10.0.2.2");
+        assert_eq!(config.target.family, None);
         assert_eq!(config.count, None);
         assert_eq!(config.interval_ns, DEFAULT_INTERVAL_NS);
         assert_eq!(config.timeout_ns, DEFAULT_TIMEOUT_NS);
         assert_eq!(config.size, DEFAULT_SIZE);
         assert!(!config.quiet);
+        assert_eq!(
+            config.payload,
+            PayloadKind::Random,
+            "high-entropy data is the default, so a compressing link cannot flatter itself"
+        );
     }
 
     #[test]
-    fn an_ipv6_literal_parses() {
-        let config = config(&["fe80::1"]);
-        assert_eq!(config.target.family, NetAddrFamily::V6);
-        assert_eq!(config.target.addr[0], 0xfe);
-        assert_eq!(config.target.addr[1], 0x80);
-        assert_eq!(config.target.addr[15], 0x01);
+    fn a_host_name_is_kept_verbatim_for_the_engine_to_resolve() {
+        let config = config(&["example.com"]);
+        assert_eq!(config.target.host, "example.com");
+        assert_eq!(config.target.family, None);
+    }
+
+    #[test]
+    fn an_operand_of_the_excluded_family_still_parses() {
+        // Resolution is I/O, so a family mismatch is the engine's refusal to
+        // report against the host, not a usage error here.
+        let config = config(&["-4", "fe80::1"]);
+        assert_eq!(config.target.host, "fe80::1");
+        assert_eq!(config.target.family, Some(NetAddrFamily::V4));
     }
 
     #[test]
@@ -469,7 +515,7 @@ mod tests {
     fn boolean_short_flags_cluster() {
         let config = config(&["-nq4", "10.0.0.1"]);
         assert!(config.quiet);
-        assert_eq!(config.target.family, NetAddrFamily::V4);
+        assert_eq!(config.target.family, Some(NetAddrFamily::V4));
     }
 
     #[test]
@@ -495,26 +541,6 @@ mod tests {
     fn help_wins_from_either_form() {
         assert_eq!(parse(&["--help"]), Ok(Command::Help));
         assert_eq!(parse(&["-?", "10.0.0.1"]), Ok(Command::Help));
-    }
-
-    #[test]
-    fn a_forced_family_must_match_the_literal() {
-        assert!(matches!(
-            parse(&["-6", "10.0.2.2"]),
-            Err(ParseError::InvalidTarget(_))
-        ));
-        assert!(matches!(
-            parse(&["-4", "fe80::1"]),
-            Err(ParseError::InvalidTarget(_))
-        ));
-    }
-
-    #[test]
-    fn a_hostname_is_a_usage_error_not_a_silent_failure() {
-        assert!(matches!(
-            parse(&["example.com"]),
-            Err(ParseError::InvalidTarget(_))
-        ));
     }
 
     #[test]
@@ -553,6 +579,40 @@ mod tests {
             parse(&["-s", &big, "10.0.0.1"]),
             Err(ParseError::InvalidValue { .. })
         ));
+    }
+
+    #[test]
+    fn a_hex_pattern_parses_to_its_bytes() {
+        assert_eq!(
+            config(&["-p", "ff00a5", "10.0.0.1"]).payload,
+            PayloadKind::Pattern(vec![0xff, 0x00, 0xa5])
+        );
+        // Upper and lower case hex are the same pattern.
+        assert_eq!(
+            config(&["--pattern=DEAD", "10.0.0.1"]).payload,
+            PayloadKind::Pattern(vec![0xde, 0xad])
+        );
+    }
+
+    #[test]
+    fn the_random_pattern_names_the_default_explicitly() {
+        assert_eq!(
+            config(&["-p", "random", "10.0.0.1"]).payload,
+            PayloadKind::Random
+        );
+    }
+
+    #[test]
+    fn a_malformed_pattern_fails_closed() {
+        for bad in ["", "f", "abc", "zz", "ff0g", " 00"] {
+            assert!(
+                matches!(
+                    parse(&["-p", bad, "10.0.0.1"]),
+                    Err(ParseError::InvalidValue { .. })
+                ),
+                "pattern {bad:?} must be refused, never half-applied"
+            );
+        }
     }
 
     #[test]

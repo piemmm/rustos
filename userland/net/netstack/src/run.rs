@@ -52,7 +52,7 @@ mod program {
 
     use tairix_abi::driver::net::LinkState;
     use tairix_abi::driver::net_channel::{
-        notify_endpoint_for, NET_CHANNEL_ENDPOINT_COUNT, NET_CHANNEL_NOTIFY_LEN,
+        notify_endpoint_for, NetChannelNotify, NET_CHANNEL_ENDPOINT_COUNT, NET_CHANNEL_NOTIFY_LEN,
     };
     use tairix_abi::driver::net_ring::RingGeometry;
     use tairix_abi::driver::BufferClass;
@@ -70,7 +70,7 @@ mod program {
     use tairix_net::stack::StackEvent;
     use tairix_netstack::{
         events, queue_tx, serve, Caller, CryptoCookieSecret, Delivery, FrameBatch,
-        NetChannelClient, NetChannelTransport, Netstack, SocketService, StreamIo,
+        NetChannelClient, NetChannelTransport, Netstack, ServiceHint, SocketService, StreamIo,
     };
     use tairix_rt::LogSink;
 
@@ -367,15 +367,15 @@ mod program {
             return;
         };
         // Drain the coalescing doorbell so the wait-set member is not
-        // immediately ready again; the notify carries no data, only "there
-        // is receive work", which the pump discovers itself.
-        drain_notify(channel.notify);
+        // immediately ready again, folding what every queued notify stated
+        // into one hint for the pump.
+        let hint = drain_notify(channel.notify);
         // A driver rings the notify port on *any* device interrupt, a
         // config-change (link) interrupt included, so this wake is exactly
         // where a member's link-down/up is discovered live. Handle the
         // change after the pump releases its borrow of `channel`, so the
         // failover announcement can go out the *other* member's channel.
-        let link_change = pump_channel(stack, sockets, channel, secret, now());
+        let link_change = pump_channel(stack, sockets, channel, secret, now(), hint);
         if let Some((iface, link)) = link_change {
             handle_link_change(stack, sockets, channels, secret, iface, link, now());
         }
@@ -953,8 +953,16 @@ mod program {
             // A link change observed while draining a TX batch is left for
             // the next notify/timer pump to act on (the channels table is
             // borrowed here); `facts.link` is untouched until handled, so it
-            // is re-observed then, never lost.
-            let _ = pump_channel(stack, sockets, channel, secret, now());
+            // is re-observed then, never lost. The queued frames themselves
+            // are what make this pump doorbell, so it needs no hint.
+            let _ = pump_channel(
+                stack,
+                sockets,
+                channel,
+                secret,
+                now(),
+                ServiceHint::default(),
+            );
         }
     }
 
@@ -997,13 +1005,20 @@ mod program {
         channel: &mut Channel,
         secret: &CryptoCookieSecret,
         now: Duration64,
+        hint: ServiceHint,
     ) -> Option<([u8; IF_NAME_LEN], LinkState)> {
         let mut link_change = None;
+        // The hint describes the wake, so it applies to the first round
+        // only: a later round has already released any masked source and
+        // observed the link the first doorbell reported.
+        let mut hint = hint;
         for _ in 0..PUMP_ROUNDS {
-            let Ok(outcome) = stack.service_interface(channel.iface, &mut channel.client, now)
+            let Ok(outcome) =
+                stack.service_interface(channel.iface, &mut channel.client, now, hint)
             else {
                 return link_change;
             };
+            hint = ServiceHint::default();
             if let Some(link) = outcome.link_change {
                 link_change = Some((channel.iface, link));
             }
@@ -1124,7 +1139,11 @@ mod program {
         // channel). Bounded by the channel count.
         let mut link_changes: Vec<([u8; IF_NAME_LEN], LinkState)> = Vec::new();
         for channel in channels.iter_mut().flatten() {
-            if let Some(change) = pump_channel(stack, sockets, channel, secret, now) {
+            // A timer- or admin-driven pump was not woken by a notify, so
+            // it knows nothing the driver has not already reported.
+            if let Some(change) =
+                pump_channel(stack, sockets, channel, secret, now, ServiceHint::default())
+            {
                 link_changes.push(change);
             }
         }
@@ -1133,13 +1152,32 @@ mod program {
         }
     }
 
-    /// Drain a channel's notify mailbox: the wake carries no data (only
-    /// "there is receive work"), so every queued doorbell is consumed to
-    /// reset the wait-set member; the pump discovers the work itself.
-    fn drain_notify(notify: u64) {
+    /// Drain a channel's notify mailbox and fold what it said into one
+    /// [`ServiceHint`].
+    ///
+    /// Every queued doorbell is consumed so the wait-set member is not
+    /// immediately ready again. Each carries the driver's live link and
+    /// whether it masked its completion source, so the fold keeps the
+    /// *latest* link and any back-pressure claim: a single notify demanding
+    /// release must not be lost behind a later one that does not.
+    ///
+    /// A notify that will not decode is dropped but still counts as
+    /// back-pressure — the safe direction, since the alternative is leaving
+    /// a masked device receiving nothing.
+    fn drain_notify(notify: u64) -> ServiceHint {
         let mut frame = [0u8; NET_CHANNEL_NOTIFY_LEN];
         let mut sender = [0u8; ORIGIN_WIRE_LEN];
-        while tairix_rt::ipc_recv(notify, &mut frame, &mut sender).is_ok() {}
+        let mut hint = ServiceHint::default();
+        while let Ok(len) = tairix_rt::ipc_recv(notify, &mut frame, &mut sender) {
+            match NetChannelNotify::decode(&frame[..len]) {
+                Ok(notify) => {
+                    hint.link = Some(notify.link);
+                    hint.back_pressure |= notify.back_pressure;
+                }
+                Err(_) => hint.back_pressure = true,
+            }
+        }
+        hint
     }
 
     tairix_rt::entry!(main);

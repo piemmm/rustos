@@ -398,7 +398,7 @@ fn exercise_net_channel(bytes: &[u8]) {
         assert_eq!(request, redecoded);
     }
     if let Ok(notify) = NetChannelNotify::decode(bytes) {
-        let redecoded = NetChannelNotify::decode(&NetChannelNotify::encode())
+        let redecoded = NetChannelNotify::decode(&notify.encode())
             .expect("round-trip of the notify frame must succeed");
         assert_eq!(notify, redecoded);
     }

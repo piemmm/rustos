@@ -2,11 +2,13 @@
 //! receives replies.
 //!
 //! The engine ([`crate::client`]) is pure and host-testable: it never names
-//! a syscall. All contact with the outside world — the monotonic clock, the
-//! ICMP echo socket, and the wait/park between sends — goes through this
-//! object-safe [`PingIo`] trait. The production implementation
-//! (`src/run.rs`) drives it with the `tairix-rt` ICMP-echo socket wrappers
-//! and clock/wait-set syscalls; host tests drive it with an in-memory fake.
+//! a syscall. All contact with the outside world — name resolution, the
+//! monotonic clock, the ICMP echo socket, the payload entropy, and the
+//! wait/park between sends — goes through this object-safe [`PingIo`] trait.
+//! The production implementation (`src/run.rs`) drives it with the shared
+//! `lib/resolver` stub resolver, the `tairix-rt` ICMP-echo socket wrappers,
+//! `lib/rng`'s fast generator, and the clock/wait-set syscalls; host tests
+//! drive it with an in-memory fake.
 
 use alloc::vec::Vec;
 
@@ -27,8 +29,53 @@ pub struct EchoReply {
     pub payload: Vec<u8>,
 }
 
-/// The clock, echo socket, and wait/park the ping engine drives.
+/// Why a target operand did not resolve to a usable address.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResolveFailure {
+    /// The name does not exist, has no address record of the wanted family,
+    /// or no configured server answered.
+    Unknown,
+    /// The operand *is* an address literal, but of the family the command
+    /// line excluded (`ping -4 ::1`). Distinguished from [`Self::Unknown`]
+    /// because the fix is to drop the `-4`/`-6`, not to check the name.
+    FamilyMismatch,
+}
+
+/// Name resolution, the clock, the echo socket, the payload entropy, and the
+/// wait/park the ping engine drives.
 pub trait PingIo {
+    /// Resolve the target operand `host` to an address, restricted to
+    /// `family` when the command line forced one. An address literal
+    /// resolves without a query.
+    ///
+    /// # Errors
+    ///
+    /// A [`ResolveFailure`] the caller reports naming the host it was given.
+    fn resolve(
+        &mut self,
+        host: &str,
+        family: Option<NetAddrFamily>,
+    ) -> Result<(NetAddrFamily, [u8; 16]), ResolveFailure>;
+
+    /// Open the echo socket and connect it to the resolved peer, so the
+    /// stack filters replies to that peer and assigns the ICMP identifier.
+    ///
+    /// Called once, after [`Self::resolve`] and before the first
+    /// [`Self::send`].
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the open or connect raised — [`Errno::PermissionDenied`]
+    /// without `CAP_NET`/`CAP_NET_RAW`.
+    fn connect(&mut self, family: NetAddrFamily, addr: [u8; 16]) -> Result<(), Errno>;
+
+    /// Fill `out` with the bytes of the next request's payload.
+    ///
+    /// The default payload is high-entropy random data, drawn fresh for each
+    /// request so a link that compresses or de-duplicates traffic cannot
+    /// report a capacity it does not have.
+    fn fill_payload(&mut self, out: &mut [u8]);
+
     /// The current monotonic time in nanoseconds.
     fn now(&self) -> u64;
 

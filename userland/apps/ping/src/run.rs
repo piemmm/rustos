@@ -11,12 +11,20 @@
 //! `main` parses the argument vector, reads the `LANG` locale preference from
 //! the inherited environment (the shell exports it; the tool invents no
 //! second source), and runs the parsed command against the production seams:
-//! the `RtPingIo` echo-socket seam over `tairix_rt::net`, the shared
+//! the `RtPingIo` seam — name resolution through the shared `lib/resolver`
+//! stub resolver, the echo socket over `tairix_rt::net`, and payload entropy
+//! from `lib/rng`'s fast generator seeded by the kernel CSPRNG — the shared
 //! `tairix_help::BundleHelp` for the short-help switches, and `RtOutput`,
 //! which writes the per-reply lines and statistics to the inherited standard
 //! output and diagnostics to standard error. The tool binds only to its
 //! inherited descriptors, never a console device, and holds no ambient
 //! authority (the ICMP echo socket is capability-gated stack-side).
+//!
+//! The payload generator is deliberately the *fast* non-cryptographic
+//! xoshiro256++, seeded once from the kernel CSPRNG: bulk uncompressible
+//! bytes are not a security surface, so drawing every payload from the
+//! CSPRNG would spend the reserve for nothing, and rolling a private
+//! generator is forbidden — `lib/rng` owns both.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy, and
 //! fmt still cover the file.
@@ -34,10 +42,14 @@ mod program {
     use alloc::vec;
 
     use tairix_abi::net::{SocketAddr, SocketEcho, SocketId};
+    use tairix_abi::net_ipc::NetAddrFamily;
     use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
-    use tairix_abi::{Errno, Origin};
+    use tairix_abi::{Errno, Origin, RandomFlags};
     use tairix_help::BundleHelp;
-    use tairix_ping::{parse, run, Command, Config, EchoReply, Output, PingError, PingIo, USAGE};
+    use tairix_ping::{
+        parse, run, Command, EchoReply, Output, PingError, PingIo, ResolveFailure, USAGE,
+    };
+    use tairix_rng::{FastRng, RandU64};
     use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
 
     /// The client's async delivery-port endpoint id: an app-local,
@@ -86,7 +98,8 @@ mod program {
     /// The production [`PingIo`]: the monotonic clock, the ICMP echo socket,
     /// and the wait-set park, over the `tairix-rt` syscall wrappers.
     struct RtPingIo {
-        socket: SocketId,
+        /// The echo socket, opened by `connect` once the target resolved.
+        socket: Option<SocketId>,
         set: u64,
         /// The kernel-attested origin of the stack, captured from the first
         /// reply so every later reply can be required to match it — the
@@ -94,12 +107,16 @@ mod program {
         stack: Option<Origin>,
         /// The receive scratch buffer (reused across replies).
         buf: alloc::vec::Vec<u8>,
+        /// The payload generator, seeded once from the kernel CSPRNG.
+        rng: FastRng,
     }
 
     impl RtPingIo {
-        /// Bind the delivery port, open the echo socket, and connect it to
-        /// the target so the stack filters replies to that peer too.
-        fn open(config: &Config) -> Result<Self, PingError> {
+        /// Bind the delivery port, arm the wait-set, and seed the payload
+        /// generator. The socket itself is opened by
+        /// [`PingIo::connect`](tairix_ping::PingIo::connect), once the target
+        /// has resolved and its family is known.
+        fn open() -> Result<Self, PingError> {
             if tairix_rt::port_bind(DELIVER_PORT, SocketEcho::MAX_WIRE_LEN, DELIVER_CAPACITY) < 0 {
                 return Err(PingError::Socket(Errno::AddressInUse));
             }
@@ -117,23 +134,12 @@ mod program {
             {
                 return Err(PingError::Socket(Errno::NotImplemented));
             }
-            let socket = tairix_rt::net::icmp_echo_socket(config.target.family, DELIVER_PORT)
-                .map_err(map_open_error)?;
-            // An echo peer carries no port. Connecting records the default
-            // peer (so the stack filters replies to it) and assigns the
-            // socket's ICMP identifier; it performs no routing, so it never
-            // fails on a link that is still coming up.
-            let peer = SocketAddr {
-                family: config.target.family,
-                addr: config.target.addr,
-                port: 0,
-            };
-            tairix_rt::net::connect(socket, peer).map_err(PingError::Socket)?;
             Ok(Self {
-                socket,
+                socket: None,
                 set,
                 stack: None,
                 buf: vec![0u8; SocketEcho::MAX_WIRE_LEN],
+                rng: seed_generator()?,
             })
         }
 
@@ -143,15 +149,76 @@ mod program {
         }
     }
 
+    /// Seed the payload generator from the kernel CSPRNG.
+    ///
+    /// The blocking draw (no [`RandomFlags::NON_BLOCKING`]) waits only for the
+    /// kernel RNG to initialise and never blocks thereafter. A source that
+    /// cannot supply the seed is reported, never worked around with a
+    /// predictable stream — a compressible payload would silently invalidate
+    /// the measurement the tool exists to make.
+    fn seed_generator() -> Result<FastRng, PingError> {
+        let mut seed = [0u8; 32];
+        let drawn = tairix_rt::random_get(&mut seed, RandomFlags::empty())
+            .map_err(|raw| PingError::Socket(Errno::from_syscall(raw)))?;
+        if drawn != seed.len() {
+            return Err(PingError::Socket(Errno::EntropyNotReady));
+        }
+        Ok(FastRng::from_seed_bytes(&seed))
+    }
+
     impl PingIo for RtPingIo {
+        fn resolve(
+            &mut self,
+            host: &str,
+            family: Option<NetAddrFamily>,
+        ) -> Result<(NetAddrFamily, [u8; 16]), ResolveFailure> {
+            // The literal-first, family-preference policy is the shared one,
+            // so `ping` and `telnet` cannot disagree about a host operand. A
+            // literal needs no query, which is what makes `ping <address>`
+            // work with no resolver configured.
+            if let Some(address) = tairix_resolver::host_address(host, family) {
+                return Ok(tairix_resolver::address_parts(address));
+            }
+            // An operand that *is* a literal, merely of the excluded family,
+            // gets its own diagnosis: the fix is to drop the `-4`/`-6`.
+            if family.is_some() && tairix_resolver::literal_address(host, None).is_some() {
+                return Err(ResolveFailure::FamilyMismatch);
+            }
+            Err(ResolveFailure::Unknown)
+        }
+
+        fn connect(&mut self, family: NetAddrFamily, addr: [u8; 16]) -> Result<(), Errno> {
+            let socket = tairix_rt::net::icmp_echo_socket(family, DELIVER_PORT)?;
+            // An echo peer carries no port. Connecting records the default
+            // peer (so the stack filters replies to it) and assigns the
+            // socket's ICMP identifier; it performs no routing, so it never
+            // fails on a link that is still coming up.
+            let peer = SocketAddr {
+                family,
+                addr,
+                port: 0,
+            };
+            if let Err(errno) = tairix_rt::net::connect(socket, peer) {
+                let _ = tairix_rt::net::close(socket);
+                return Err(errno);
+            }
+            self.socket = Some(socket);
+            Ok(())
+        }
+
+        fn fill_payload(&mut self, out: &mut [u8]) {
+            self.rng.fill_bytes(out);
+        }
+
         fn now(&self) -> u64 {
             tairix_rt::clock_get()
         }
 
         fn send(&mut self, seq: u16, payload: &[u8]) -> Result<(), Errno> {
+            let socket = self.socket.ok_or(Errno::NotConnected)?;
             let mut last = Errno::NetworkUnreachable;
             for _ in 0..SEND_RETRIES {
-                match tairix_rt::net::send_echo(self.socket, None, seq, payload) {
+                match tairix_rt::net::send_echo(socket, None, seq, payload) {
                     Ok(()) => return Ok(()),
                     // The interface may not be bound yet at boot; park and
                     // retry rather than record a spurious loss.
@@ -209,20 +276,23 @@ mod program {
         }
     }
 
-    /// Map an echo-socket open refusal onto the tool's error type.
-    fn map_open_error(err: Errno) -> PingError {
-        match err {
-            Errno::PermissionDenied => PingError::Denied,
-            other => PingError::Socket(other),
-        }
-    }
-
     /// A stub [`PingIo`] for the help path, which touches no network. Its
     /// methods are never called (help returns before the ping loop), so they
     /// deny rather than act.
     struct NoNet;
 
     impl PingIo for NoNet {
+        fn resolve(
+            &mut self,
+            _host: &str,
+            _family: Option<NetAddrFamily>,
+        ) -> Result<(NetAddrFamily, [u8; 16]), ResolveFailure> {
+            Err(ResolveFailure::Unknown)
+        }
+        fn connect(&mut self, _family: NetAddrFamily, _addr: [u8; 16]) -> Result<(), Errno> {
+            Err(Errno::NotImplemented)
+        }
+        fn fill_payload(&mut self, _out: &mut [u8]) {}
         fn now(&self) -> u64 {
             0
         }
@@ -254,12 +324,13 @@ mod program {
         let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
         let help = BundleHelp::new("ping");
         let is_help = matches!(command, Command::Help);
-        let result = match &command {
-            Command::Run(config) => match RtPingIo::open(config) {
+        let result = if is_help {
+            run(command, locale, &mut NoNet, &help, &RtOutput, &RtErrors)
+        } else {
+            match RtPingIo::open() {
                 Ok(mut io) => run(command, locale, &mut io, &help, &RtOutput, &RtErrors),
                 Err(err) => Err(err),
-            },
-            Command::Help => run(command, locale, &mut NoNet, &help, &RtOutput, &RtErrors),
+            }
         };
         match result {
             Ok(summary) => i32::from(!is_help && !summary.any_received()),

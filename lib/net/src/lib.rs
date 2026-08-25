@@ -147,6 +147,7 @@ pub mod nd;
 pub mod neigh;
 pub mod rate;
 pub mod route;
+pub mod rxfilter;
 pub mod stack;
 pub mod tcp;
 #[cfg(test)]

@@ -129,7 +129,7 @@ use tairix_abi::driver::net::{
     DeviceFacts, LinkState, MacAddress, McastFilter, Net, NetOffloads, MAC_ADDRESS_LEN,
 };
 use tairix_abi::driver::net_ring::{
-    FrameOffload, FrameRing, FrameRings, RingGeometry, ServiceReport, MAX_RX_QUEUES,
+    FrameOffload, FrameRings, RingGeometry, RxDelivery, ServiceReport, MAX_RX_QUEUES,
 };
 use tairix_abi::DriverError;
 use tairix_abi::Errno;
@@ -454,6 +454,10 @@ struct RxQueue {
     /// ring (back-pressure): the next service retries it before harvesting
     /// further completions, so nothing the device handed over is dropped.
     pending: Option<PendingRx>,
+    /// Frames this queue's receive pre-filter has shed since open. A
+    /// cumulative statistic, so a consumer that misses a report loses
+    /// nothing.
+    filtered_frames: u64,
 }
 
 impl RxQueue {
@@ -484,6 +488,7 @@ impl RxQueue {
             buffers,
             reasm: Some(reasm),
             pending: None,
+            filtered_frames: 0,
         })
     }
 
@@ -548,7 +553,8 @@ impl RxQueue {
     #[allow(clippy::too_many_arguments)]
     fn harvest<T: Transport>(
         &mut self,
-        ring: &mut FrameRing<'_>,
+        rings: &mut FrameRings<'_>,
+        queue: usize,
         transport: &mut T,
         hdr_len: usize,
         max_frame_len: usize,
@@ -559,7 +565,7 @@ impl RxQueue {
     ) -> Result<(), DriverError> {
         loop {
             if self.pending.is_some() {
-                if !self.deliver_pending(ring, transport, hdr_len, sensitive, report)? {
+                if !self.deliver_pending(rings, queue, transport, hdr_len, sensitive, report)? {
                     // Ring still full: keep the frame held, stop.
                     return Ok(());
                 }
@@ -576,9 +582,11 @@ impl RxQueue {
 
     /// Deliver the held reassembled frame into `ring`, returning whether
     /// it was delivered (`false` = the ring is full, keep it).
+    #[allow(clippy::too_many_arguments)] // The device-wide receive facts, as for `harvest`.
     fn deliver_pending<T: Transport>(
         &mut self,
-        ring: &mut FrameRing<'_>,
+        rings: &mut FrameRings<'_>,
+        queue: usize,
         transport: &mut T,
         hdr_len: usize,
         sensitive: bool,
@@ -588,23 +596,32 @@ impl RxQueue {
             return Ok(true);
         };
         let len = pending.len;
-        let push = if let Some(index) = pending.single_index {
+        // `deliver` applies the shared receive pre-filter, so a frame with
+        // no possible local consumer is neither copied nor woken for.
+        let delivery = if let Some(index) = pending.single_index {
             let buffer = self
                 .buffers
                 .get(index)
                 .and_then(|b| b.as_ref())
                 .ok_or(DriverError::DeviceFault)?;
-            ring.push_with(
+            rings.deliver(
+                queue,
                 pending.offload,
                 &buffer.slab.as_bytes()[hdr_len..hdr_len + len],
             )
         } else {
             let reasm = self.reasm.as_ref().ok_or(DriverError::DeviceFault)?;
-            ring.push_with(pending.offload, &reasm.as_bytes()[..len])
+            rings.deliver(queue, pending.offload, &reasm.as_bytes()[..len])
         };
-        match push {
-            Ok(()) => {
-                report.received += 1;
+        match delivery {
+            // A filtered frame is finished with, not deferred: its buffers
+            // are recycled exactly as a delivered one's are.
+            Ok(accepted @ (RxDelivery::Accepted | RxDelivery::Filtered)) => {
+                if accepted == RxDelivery::Accepted {
+                    report.received += 1;
+                } else {
+                    self.filtered_frames += 1;
+                }
                 if sensitive && pending.single_index.is_none() {
                     self.scrub_reasm();
                 }
@@ -617,7 +634,7 @@ impl RxQueue {
                 self.queue.kick(transport);
                 Ok(true)
             }
-            Err(Errno::NoSpace) => {
+            Ok(RxDelivery::RingFull) => {
                 report.rx_ring_full = true;
                 self.pending = Some(pending);
                 Ok(false)
@@ -1451,10 +1468,10 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
             // Each queue drains into its own shared RX ring; a geometry
             // that provides fewer rings than the device has queues fails
             // closed rather than silently dropping a queue's traffic.
-            let ring = rings.rx_ring(pair).map_err(|_| DriverError::BadMagic)?;
             if let Some(queue) = self.rx[pair].as_mut() {
                 queue.harvest(
-                    ring,
+                    rings,
+                    pair,
                     &mut self.transport,
                     hdr_len,
                     max_frame_len,
@@ -1465,6 +1482,14 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
                 )?;
             }
         }
+        // The cumulative statistic is the sum across every receive queue,
+        // so a multiqueue device reports one device-wide figure.
+        report.filtered = self
+            .rx
+            .iter()
+            .flatten()
+            .map(|queue| queue.filtered_frames)
+            .sum();
         Ok(())
     }
 }
@@ -1614,6 +1639,19 @@ impl<T: Transport> Net for VirtioNet<'_, T> {
         // next `service` drains them. The virtio-MMIO transport writes
         // `InterruptACK` for exactly the bits it read as pending.
         self.transport.ack_interrupt();
+    }
+
+    fn set_completion_interrupts(&mut self, enabled: bool) -> Result<(), DriverError> {
+        // Every data-path queue: each receive queue plus the transmit
+        // queue. A virtio device has no separate link-event source to keep
+        // unmasked — configuration changes arrive through the transport's
+        // own config-change interrupt, which this never touches.
+        let suppress = !enabled;
+        for rx in self.rx.iter_mut().flatten() {
+            rx.queue.suppress_used_interrupts(suppress);
+        }
+        self.tx_queue.suppress_used_interrupts(suppress);
+        Ok(())
     }
 }
 

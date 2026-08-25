@@ -1,16 +1,30 @@
 //! The outcomes of running a `ping` command.
 
+use alloc::string::String;
 use core::fmt;
+
 use tairix_abi::Errno;
+
+use crate::net::ResolveFailure;
 
 /// Why a `ping` invocation did not complete.
 ///
-/// A refused socket open (want of `CAP_NET`/`CAP_NET_RAW`) or an unreachable
-/// network defeats the tool's whole purpose, so it is fatal and reported with
-/// an actionable reason (fail loud). The wire-level causes lean on the frozen
-/// [`Errno`] so no parallel error set is invented.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// A target that will not resolve, a refused socket open (want of
+/// `CAP_NET`/`CAP_NET_RAW`), or an unreachable network defeats the tool's
+/// whole purpose, so it is fatal and reported with an actionable reason
+/// (fail loud). The wire-level causes lean on the frozen [`Errno`] so no
+/// parallel error set is invented.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PingError {
+    /// The target operand did not resolve to an address of the wanted
+    /// family, so there is nothing to ping. Carries the host as typed, since
+    /// that is what the user needs to see corrected.
+    Resolve {
+        /// The target operand exactly as it was given.
+        host: String,
+        /// Why it did not resolve.
+        reason: ResolveFailure,
+    },
     /// Opening the ICMP echo socket was refused for want of the required
     /// capability (`CAP_NET`/`CAP_NET_RAW`).
     Denied,
@@ -27,6 +41,16 @@ pub enum PingError {
 impl fmt::Display for PingError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            // The iputils wording, so a user or script that knows `ping`
+            // recognises the diagnosis.
+            Self::Resolve {
+                host,
+                reason: ResolveFailure::Unknown,
+            } => write!(f, "{host}: Name or service not known"),
+            Self::Resolve {
+                host,
+                reason: ResolveFailure::FamilyMismatch,
+            } => write!(f, "{host}: Address family for hostname not supported"),
             Self::Denied => f.write_str(
                 "opening an ICMP echo socket requires CAP_NET and CAP_NET_RAW, \
                  which this session lacks",

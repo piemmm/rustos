@@ -93,6 +93,11 @@ impl MockRegs {
         self.writes.iter().position(|(o, _)| *o == offset)
     }
 
+    /// Pretend the device raised the interrupt sources in `bits`.
+    fn assert_source(&mut self, bits: u32) {
+        self.words.insert(regs::INTRL2_CPU_STAT, bits);
+    }
+
     /// Pretend the device completed `count` receive descriptors.
     fn set_rx_produced(&mut self, count: u32) {
         let ring = regs::ring_regs(regs::RDMA_DESC, regs::DEFAULT_RING);
@@ -291,6 +296,68 @@ fn bring_up_masks_interrupts_before_it_programs_the_device() {
     assert_eq!(
         mock.writes_to(regs::INTRL2_CPU_MASK_CLEAR),
         [regs::IRQ_ENABLED]
+    );
+}
+
+#[test]
+fn masking_the_completion_sources_leaves_the_link_sources_live() {
+    let mut device = open();
+    // Masking is the half of the poll-to-budget cycle that stops the storm:
+    // the DMA-done bits latch a level condition that is still asserted
+    // while frames are undrained, so acknowledging alone re-fires at once.
+    device
+        .set_completion_interrupts(false)
+        .expect("mask the completion sources");
+    let masked = device
+        .regs
+        .writes_to(regs::INTRL2_CPU_MASK_SET)
+        .last()
+        .copied()
+        .expect("a mask write");
+    assert_eq!(masked, regs::IRQ_COMPLETION);
+    assert_eq!(
+        masked & (regs::IRQ_LINK_UP | regs::IRQ_LINK_DOWN),
+        0,
+        "a cable pulled mid-flood must still wake the driver"
+    );
+
+    device
+        .set_completion_interrupts(true)
+        .expect("unmask the completion sources");
+    assert_eq!(
+        device
+            .regs
+            .writes_to(regs::INTRL2_CPU_MASK_CLEAR)
+            .last()
+            .copied(),
+        Some(regs::IRQ_COMPLETION),
+        "unmasking touches exactly the sources masking did"
+    );
+}
+
+#[test]
+fn acknowledging_an_interrupt_does_not_unmask_anything() {
+    let mut device = open();
+    device
+        .set_completion_interrupts(false)
+        .expect("mask the completion sources");
+    let clears_before = device.regs.writes_to(regs::INTRL2_CPU_MASK_CLEAR).len();
+    device.regs.assert_source(regs::IRQ_RXDMA_DONE);
+    device.ack_interrupt();
+    // Acknowledgement clears the latch only. Re-arming the source while the
+    // condition is still asserted is what spins the driver, so it is the
+    // drain's decision, never the acknowledgement's.
+    assert_eq!(
+        device.regs.writes_to(regs::INTRL2_CPU_MASK_CLEAR).len(),
+        clears_before
+    );
+    assert_eq!(
+        device
+            .regs
+            .writes_to(regs::INTRL2_CPU_CLEAR)
+            .last()
+            .copied(),
+        Some(regs::IRQ_RXDMA_DONE)
     );
 }
 

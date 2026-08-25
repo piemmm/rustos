@@ -5,15 +5,15 @@
 //! echo socket, wait/park) and the [`Output`] seam, never a syscall.
 
 use alloc::format;
-use alloc::string::String;
-use alloc::vec::Vec;
+use alloc::string::{String, ToString};
+use alloc::vec;
 use core::fmt::Write as _;
 use core::net::{Ipv4Addr, Ipv6Addr};
 
 use tairix_abi::net_ipc::NetAddrFamily;
 use tairix_help::{own_short_help, HelpSource};
 
-use crate::command::{Command, Config};
+use crate::command::{Command, Config, PayloadKind, Target};
 use crate::error::PingError;
 use crate::io::Output;
 use crate::net::PingIo;
@@ -21,7 +21,7 @@ use crate::net::PingIo;
 /// The one-line usage banner, printed on a usage error and as the fallback
 /// when the bundled help document is unavailable.
 pub const USAGE: &str = "usage: ping [-c count] [-i interval] [-s size] [-W timeout] \
-                         [-w deadline] [-46nq] <address>";
+                         [-w deadline] [-p pattern] [-46nq] <host>";
 
 /// The command word this bundle is named by, for the own-help lookup.
 const OWN_WORD: &str = "ping";
@@ -100,11 +100,15 @@ pub fn run(
 /// The ping loop proper: send each request, await its reply within the
 /// per-reply timeout, print the result, and print the closing statistics.
 fn ping(config: &Config, io: &mut dyn PingIo, out: &dyn Output) -> Result<RunSummary, PingError> {
-    let payload = build_payload(config.size);
+    let target = resolve(config, io)?;
+    io.connect(target.family, target.addr)
+        .map_err(map_connect_error)?;
+
+    let mut payload = vec![0u8; config.size];
     let start = io.now();
     let overall_deadline = config.deadline_ns.map(|d| start.saturating_add(d));
 
-    out.write_all(header(config).as_bytes())
+    out.write_all(header(config, &target).as_bytes())
         .map_err(PingError::Output)?;
 
     let mut summary = RunSummary::default();
@@ -117,6 +121,10 @@ fn ping(config: &Config, io: &mut dyn PingIo, out: &dyn Output) -> Result<RunSum
             }
         }
         seq = seq.wrapping_add(1);
+        // Fresh bytes for every request: an identical payload would let a
+        // de-duplicating link answer from a cache, and the echoed copy is
+        // then a per-packet integrity check as well.
+        fill_payload(config, io, &mut payload);
         let sent_at = io.now();
         summary.transmitted += 1;
         match io.send(seq, &payload) {
@@ -125,6 +133,7 @@ fn ping(config: &Config, io: &mut dyn PingIo, out: &dyn Output) -> Result<RunSum
                     config,
                     io,
                     out,
+                    &target,
                     &payload,
                     seq,
                     sent_at,
@@ -148,7 +157,7 @@ fn ping(config: &Config, io: &mut dyn PingIo, out: &dyn Output) -> Result<RunSum
         }
     }
 
-    out.write_all(statistics(config, summary, &rtt, io.now().saturating_sub(start)).as_bytes())
+    out.write_all(statistics(&target, summary, &rtt, io.now().saturating_sub(start)).as_bytes())
         .map_err(PingError::Output)?;
     Ok(summary)
 }
@@ -160,6 +169,7 @@ fn await_reply(
     config: &Config,
     io: &mut dyn PingIo,
     out: &dyn Output,
+    target: &Target,
     payload: &[u8],
     seq: u16,
     sent_at: u64,
@@ -169,7 +179,7 @@ fn await_reply(
     let deadline = sent_at.saturating_add(config.timeout_ns);
     loop {
         match io.recv(deadline).map_err(PingError::Receive)? {
-            Some(reply) if reply.seq == seq && reply_matches(config, payload, &reply) => {
+            Some(reply) if reply.seq == seq && reply_matches(target, payload, &reply) => {
                 let rtt_ns = io.now().saturating_sub(sent_at);
                 rtt.record(rtt_ns);
                 summary.received += 1;
@@ -192,37 +202,70 @@ fn await_reply(
     }
 }
 
-/// Whether a reply's source and payload match what we sent (defence in
-/// depth: the stack already filters by identifier and connected peer).
-fn reply_matches(config: &Config, payload: &[u8], reply: &crate::net::EchoReply) -> bool {
-    reply.family == config.target.family
-        && reply.addr == config.target.addr
-        && reply.payload == payload
+/// Resolve the target operand, or fail naming the host as typed.
+fn resolve(config: &Config, io: &mut dyn PingIo) -> Result<Target, PingError> {
+    let host = config.target.host.as_str();
+    let (family, addr) =
+        io.resolve(host, config.target.family)
+            .map_err(|reason| PingError::Resolve {
+                host: host.to_string(),
+                reason,
+            })?;
+    Ok(Target {
+        display: host.to_string(),
+        family,
+        addr,
+    })
 }
 
-/// Build the deterministic echo payload: a repeating byte pattern so a
-/// corrupt reply is detectable.
-fn build_payload(size: usize) -> Vec<u8> {
-    (0..size)
-        .map(|i| u8::try_from(i & 0xff).unwrap_or(0))
-        .collect()
+/// Map a connect refusal onto the tool's error type, keeping a capability
+/// denial distinguishable from every other cause.
+fn map_connect_error(errno: tairix_abi::Errno) -> PingError {
+    match errno {
+        tairix_abi::Errno::PermissionDenied => PingError::Denied,
+        other => PingError::Socket(other),
+    }
+}
+
+/// Whether a reply's source and payload match what we sent (defence in
+/// depth: the stack already filters by identifier and connected peer).
+///
+/// With the default random payload this is also a per-packet integrity
+/// check: a link that corrupted a byte cannot echo the bytes we drew.
+fn reply_matches(target: &Target, payload: &[u8], reply: &crate::net::EchoReply) -> bool {
+    reply.family == target.family && reply.addr == target.addr && reply.payload == payload
+}
+
+/// Fill `payload` for the next request.
+///
+/// The random default goes through the injected seam, so the engine stays
+/// pure; a `-p` pattern is repeated to fill the buffer and needs no entropy.
+fn fill_payload(config: &Config, io: &mut dyn PingIo, payload: &mut [u8]) {
+    match &config.payload {
+        PayloadKind::Random => io.fill_payload(payload),
+        PayloadKind::Pattern(pattern) => {
+            for (slot, byte) in payload.iter_mut().zip(pattern.iter().cycle()) {
+                *slot = *byte;
+            }
+        }
+    }
 }
 
 /// The opening `PING …` header line.
-fn header(config: &Config) -> String {
-    let addr = render_addr(config.target.family, &config.target.addr);
-    match config.target.family {
+fn header(config: &Config, target: &Target) -> String {
+    let addr = render_addr(target.family, &target.addr);
+    match target.family {
         NetAddrFamily::V4 => {
             // v4 total on the wire = payload + 8 (ICMP) + 20 (IPv4).
             let total = config.size + 28;
             format!(
                 "PING {} ({}) {}({}) bytes of data.\n",
-                config.target.display, addr, config.size, total
+                target.display, addr, config.size, total
             )
         }
         NetAddrFamily::V6 => format!(
             "PING {} ({}) {} data bytes\n",
-            config.target.display, addr, config.size
+            target.display, addr, config.size
         ),
     }
 }
@@ -246,9 +289,9 @@ fn reply_line(reply: &crate::net::EchoReply, rtt_ns: u64) -> String {
 }
 
 /// The closing statistics block.
-fn statistics(config: &Config, summary: RunSummary, rtt: &RttStats, elapsed_ns: u64) -> String {
+fn statistics(target: &Target, summary: RunSummary, rtt: &RttStats, elapsed_ns: u64) -> String {
     let mut text = String::new();
-    let _ = writeln!(text, "\n--- {} ping statistics ---", config.target.display);
+    let _ = writeln!(text, "\n--- {} ping statistics ---", target.display);
     let loss = if summary.transmitted == 0 {
         0
     } else {
@@ -303,11 +346,10 @@ fn render_addr(family: NetAddrFamily, addr: &[u8; 16]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::command::Target;
-    use crate::net::EchoReply;
+    use crate::command::HostTarget;
+    use crate::net::{EchoReply, ResolveFailure};
     use alloc::collections::VecDeque;
-    use alloc::string::ToString;
-    use alloc::vec;
+    use alloc::vec::Vec;
     use core::cell::RefCell;
     use tairix_abi::Errno;
 
@@ -323,6 +365,18 @@ mod tests {
         drop: Vec<u16>,
         send_err: Option<Errno>,
         replies: VecDeque<EchoReply>,
+        /// Scripted resolution outcome; `None` means "does not resolve".
+        resolves: Option<(NetAddrFamily, [u8; 16])>,
+        /// The failure a `None` resolution reports.
+        resolve_failure: ResolveFailure,
+        /// Hosts `resolve` was asked about, in order.
+        asked: Vec<String>,
+        /// A scripted connect refusal.
+        connect_err: Option<Errno>,
+        /// Counter driving the fake entropy, so successive payloads differ.
+        entropy: u8,
+        /// Every payload handed to `send`, in order.
+        sent: Vec<Vec<u8>>,
     }
 
     impl FakeIo {
@@ -337,16 +391,50 @@ mod tests {
                 drop: Vec::new(),
                 send_err: None,
                 replies: VecDeque::new(),
+                resolves: Some((NetAddrFamily::V4, addr)),
+                resolve_failure: ResolveFailure::Unknown,
+                asked: Vec::new(),
+                connect_err: None,
+                entropy: 0,
+                sent: Vec::new(),
             }
         }
     }
 
     impl PingIo for FakeIo {
+        fn resolve(
+            &mut self,
+            host: &str,
+            _family: Option<NetAddrFamily>,
+        ) -> Result<(NetAddrFamily, [u8; 16]), ResolveFailure> {
+            self.asked.push(host.to_string());
+            self.resolves.ok_or(self.resolve_failure)
+        }
+
+        fn connect(&mut self, _family: NetAddrFamily, _addr: [u8; 16]) -> Result<(), Errno> {
+            match self.connect_err {
+                Some(errno) => Err(errno),
+                None => Ok(()),
+            }
+        }
+
+        fn fill_payload(&mut self, out: &mut [u8]) {
+            // Not random, but distinct per call, which is the property the
+            // engine must preserve.
+            self.entropy = self.entropy.wrapping_add(1);
+            for (offset, byte) in out.iter_mut().enumerate() {
+                *byte = self
+                    .entropy
+                    .wrapping_add(u8::try_from(offset & 0xff).unwrap_or(0));
+            }
+        }
+
         fn now(&self) -> u64 {
             self.clock
         }
 
         fn send(&mut self, seq: u16, payload: &[u8]) -> Result<(), Errno> {
+            self.sent.push(payload.to_vec());
             if let Some(err) = self.send_err {
                 return Err(err);
             }
@@ -400,14 +488,12 @@ mod tests {
     }
 
     fn config(count: Option<u32>, quiet: bool) -> Config {
-        let mut addr = [0u8; 16];
-        addr[..4].copy_from_slice(&[10, 0, 2, 2]);
         Config {
-            target: Target {
-                display: "10.0.2.2".to_string(),
-                family: NetAddrFamily::V4,
-                addr,
+            target: HostTarget {
+                host: "10.0.2.2".to_string(),
+                family: None,
             },
+            payload: PayloadKind::Random,
             count,
             interval_ns: 0,
             timeout_ns: 1_000_000_000,
@@ -491,6 +577,119 @@ mod tests {
         // The foreign reply is discarded; the request times out.
         assert_eq!(summary.received, 0);
         assert!(out.text().contains("Request timeout for icmp_seq 1"));
+    }
+
+    #[test]
+    fn every_request_carries_fresh_payload_bytes() {
+        let mut io = FakeIo::v4();
+        let out = BufOut::new();
+        ping(&config(Some(4), true), &mut io, &out).expect("run");
+        assert_eq!(io.sent.len(), 4);
+        for (index, payload) in io.sent.iter().enumerate() {
+            assert_eq!(payload.len(), 4, "each payload is the requested size");
+            for other in &io.sent[index + 1..] {
+                assert_ne!(
+                    payload, other,
+                    "an identical payload would let a de-duplicating link answer from cache"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_pattern_payload_repeats_to_fill_the_size() {
+        let mut io = FakeIo::v4();
+        let mut config = config(Some(2), true);
+        config.payload = PayloadKind::Pattern(vec![0xab, 0xcd]);
+        config.size = 5;
+        let out = BufOut::new();
+        ping(&config, &mut io, &out).expect("run");
+        for payload in &io.sent {
+            assert_eq!(
+                payload.as_slice(),
+                &[0xab, 0xcd, 0xab, 0xcd, 0xab],
+                "the pattern cycles and every request is identical"
+            );
+        }
+    }
+
+    #[test]
+    fn a_zero_size_payload_is_empty_and_still_pings() {
+        let mut io = FakeIo::v4();
+        let mut config = config(Some(1), true);
+        config.size = 0;
+        let out = BufOut::new();
+        let summary = ping(&config, &mut io, &out).expect("run");
+        assert_eq!(summary.received, 1);
+        assert_eq!(io.sent, vec![Vec::new()]);
+    }
+
+    #[test]
+    fn a_name_is_resolved_and_the_header_shows_both() {
+        let mut io = FakeIo::v4();
+        let mut config = config(Some(1), false);
+        config.target.host = "gateway.example".to_string();
+        let out = BufOut::new();
+        ping(&config, &mut io, &out).expect("run");
+        assert_eq!(io.asked, vec!["gateway.example".to_string()]);
+        let text = out.text();
+        assert!(
+            text.starts_with("PING gateway.example (10.0.2.2) 4(32) bytes of data."),
+            "the header names the host as typed and the address it resolved to: {text}"
+        );
+        assert!(text.contains("--- gateway.example ping statistics ---"));
+    }
+
+    #[test]
+    fn an_unresolvable_target_fails_loud_naming_the_host() {
+        let mut io = FakeIo::v4();
+        io.resolves = None;
+        let mut config = config(Some(1), false);
+        config.target.host = "nope.invalid".to_string();
+        let out = BufOut::new();
+        let error = ping(&config, &mut io, &out).expect_err("must not silently succeed");
+        assert_eq!(
+            error,
+            PingError::Resolve {
+                host: "nope.invalid".to_string(),
+                reason: ResolveFailure::Unknown,
+            }
+        );
+        assert!(io.sent.is_empty(), "nothing is sent when nothing resolved");
+        assert!(
+            out.text().is_empty(),
+            "no header for a run that never began"
+        );
+    }
+
+    #[test]
+    fn a_literal_of_the_excluded_family_is_reported_as_such() {
+        let mut io = FakeIo::v4();
+        io.resolves = None;
+        io.resolve_failure = ResolveFailure::FamilyMismatch;
+        let mut config = config(Some(1), false);
+        config.target.host = "fe80::1".to_string();
+        config.target.family = Some(NetAddrFamily::V4);
+        let out = BufOut::new();
+        let error = ping(&config, &mut io, &out).expect_err("must not silently succeed");
+        assert_eq!(
+            error,
+            PingError::Resolve {
+                host: "fe80::1".to_string(),
+                reason: ResolveFailure::FamilyMismatch,
+            },
+            "a wrong-family literal is a distinct diagnosis from an unknown name"
+        );
+    }
+
+    #[test]
+    fn a_refused_socket_is_reported_as_a_capability_denial() {
+        let mut io = FakeIo::v4();
+        io.connect_err = Some(Errno::PermissionDenied);
+        let out = BufOut::new();
+        let error = ping(&config(Some(1), false), &mut io, &out).expect_err("denied");
+        assert_eq!(error, PingError::Denied);
+        assert!(io.sent.is_empty());
     }
 
     #[test]

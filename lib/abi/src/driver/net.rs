@@ -308,23 +308,55 @@ pub trait Net {
         Err(DriverError::Unsupported)
     }
 
-    /// Acknowledge the device's pending interrupt, deasserting the line.
+    /// Acknowledge the device's pending interrupt, clearing its latched
+    /// interrupt status.
     ///
-    /// A user-space NIC driver parks on the device interrupt and, when it
-    /// fires, must clear the device-level assertion **before** the line is
-    /// re-enabled — otherwise the interrupt re-fires immediately and storms
-    /// the driver off the run queue (the busy-wait the charter forbids). This
-    /// is distinct from [`service`](Self::service): acknowledgement only
-    /// clears the interrupt signal; the completed receive descriptors persist
-    /// until the next `service` drains them, so a driver may acknowledge on
-    /// the interrupt and defer the actual frame movement to the stack's next
-    /// service doorbell.
+    /// Acknowledgement alone does **not** stop the interrupt re-firing: on a
+    /// typical DMA engine the status bit is a latch over a *level* condition
+    /// ("completed descriptors are waiting"), so clearing it while frames are
+    /// still undrained simply re-latches. Holding the line off is
+    /// [`set_completion_interrupts`](Self::set_completion_interrupts)'s job;
+    /// this only clears the record of the interrupt already taken.
+    ///
+    /// Distinct from [`service`](Self::service): the completed descriptors
+    /// persist until a `service` drains them.
     ///
     /// The default is a no-op for devices and back-ends that need no explicit
     /// acknowledgement (an in-process mock, a transport that self-clears);
     /// a real hardware device overrides it to clear its interrupt-status
     /// register.
     fn ack_interrupt(&mut self) {}
+
+    /// Mask (`false`) or unmask (`true`) the device's **data-path completion**
+    /// interrupt sources — receive-done and transmit-done.
+    ///
+    /// This is the half of a poll-to-budget cycle that makes an interrupt-
+    /// driven NIC cheap under load, and it is what stops the storm described
+    /// on [`ack_interrupt`](Self::ack_interrupt): the driver masks on the
+    /// interrupt, drains to a budget, and unmasks only once the device ring
+    /// is empty. A burst then costs one interrupt instead of one per frame,
+    /// and the driver is never woken for work it has not been given room to
+    /// do.
+    ///
+    /// **Link and configuration-change sources stay unmasked.** They are rare
+    /// and must not be deferred behind a busy data path, or a cable pulled
+    /// mid-flood would go unnoticed.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::DeviceFault`] if the mask register could not be
+    /// written. A device with no maskable source keeps the default `Ok(())`;
+    /// its driver must then have some other way to avoid re-arming into an
+    /// asserted condition (a self-clearing transport, an in-process mock).
+    ///
+    /// # Capabilities
+    ///
+    /// Requires [`CapabilityId::NET_RAW`](crate::CapabilityId::NET_RAW), as
+    /// [`service`](Self::service) does: it changes when the device signals.
+    fn set_completion_interrupts(&mut self, enabled: bool) -> Result<(), DriverError> {
+        let _ = enabled;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

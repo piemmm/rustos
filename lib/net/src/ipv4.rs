@@ -274,6 +274,22 @@ pub fn fragment(
     Some(parts)
 }
 
+/// The destination address of an IPv4 header, without validating the rest
+/// of it.
+///
+/// The receive pre-filter asks only "could this be for us?" and runs ahead
+/// of the stack's full [`Ipv4Header::parse`]; folding the header checksum
+/// twice per frame is exactly the wasted work a filter exists to avoid. A
+/// frame too short to hold a header, or one whose version nibble is not 4,
+/// has no destination to read.
+#[must_use]
+pub fn peek_destination(bytes: &[u8]) -> Option<Ipv4Addr> {
+    if bytes.len() < IPV4_HEADER_LEN || bytes[0] >> 4 != 4 {
+        return None;
+    }
+    Some(address(&bytes[16..20]))
+}
+
 fn address(bytes: &[u8]) -> Ipv4Addr {
     let mut octets = [0u8; 4];
     octets.copy_from_slice(bytes);

@@ -12,6 +12,10 @@
 //! from any other sender is dropped (the delivery port is otherwise an
 //! unauthenticated inbox — fail closed).
 //!
+//! [`host_address`] is the entry point a connecting tool uses for its target
+//! operand: it answers an address literal without opening a socket, so a
+//! literal target works with no resolver configured.
+//!
 //! This module is compiled only for a freestanding userland program that
 //! opts into the `program` feature; the pure orchestration in the crate root
 //! and its host tests never pull the runtime.
@@ -168,6 +172,16 @@ impl RtDnsTransport {
         };
         resolve_name(name, record_type, &IpcTransport, self, &mut rng)
     }
+
+    /// Resolve a command-line host operand to one address over this
+    /// transport, reusing its bound delivery port and open sockets.
+    ///
+    /// The literal-first, family-preference policy itself is the shared
+    /// [`crate::resolve_host`]; this only supplies the query.
+    pub fn host_address(&mut self, host: &str, family: Option<NetAddrFamily>) -> Option<IpAddr> {
+        let mut query = |name: &str, record: RecordType| self.resolve(name, record).ok();
+        crate::resolve_host(host, family, &mut query)
+    }
 }
 
 impl Drop for RtDnsTransport {
@@ -246,24 +260,27 @@ pub fn resolve(name: &str, record_type: RecordType) -> Result<Resolution, Resolv
     udp.resolve(name, record_type)
 }
 
+/// Resolve a command-line host operand to one address over the production
+/// seams — the one call a connecting tool makes for its target operand.
+///
+/// An address literal is answered without opening a socket at all, so a
+/// literal target keeps working on a machine with no resolver configured.
+#[must_use]
+pub fn host_address(host: &str, family: Option<NetAddrFamily>) -> Option<IpAddr> {
+    if let Some(address) = crate::literal_address(host, family) {
+        return Some(address);
+    }
+    RtDnsTransport::open().ok()?.host_address(host, family)
+}
+
 /// Turn a resolver [`IpAddr`] into the `netsock-v1` destination
 /// [`SocketAddr`] on DNS [`PORT`] (53).
 fn server_socket_addr(server: IpAddr) -> SocketAddr {
-    match server {
-        IpAddr::V4(v4) => {
-            let mut addr = [0u8; 16];
-            addr[..4].copy_from_slice(&v4.octets());
-            SocketAddr {
-                family: NetAddrFamily::V4,
-                addr,
-                port: PORT,
-            }
-        }
-        IpAddr::V6(v6) => SocketAddr {
-            family: NetAddrFamily::V6,
-            addr: v6.octets(),
-            port: PORT,
-        },
+    let (family, addr) = crate::address_parts(server);
+    SocketAddr {
+        family,
+        addr,
+        port: PORT,
     }
 }
 

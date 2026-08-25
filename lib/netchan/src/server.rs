@@ -35,15 +35,54 @@
 //! typed [`Errno`] carried in the reply's status word — never a panic, never
 //! a partially-applied action.
 
-use tairix_abi::driver::net::Net;
+use tairix_abi::driver::net::{LinkState, Net};
 use tairix_abi::driver::net_channel::{
-    encode_facts_reply, encode_service_reply, AttachParams, McastGroups,
+    encode_facts_reply, encode_service_reply, AttachParams, McastGroups, RxFilterPolicy,
     NET_CHANNEL_FACTS_REPLY_LEN, NET_CHANNEL_SERVICE_REPLY_LEN,
 };
 use tairix_abi::driver::net_ring::{FrameRings, RingGeometry, ServiceReport};
 use tairix_abi::driver::BufferClass;
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::Errno;
+use tairix_net::rxfilter::RxClassifier;
+
+/// What a driver's drain loop should do next, given the service report it
+/// just saw.
+///
+/// The *policy* half of the interrupt path: whether the device's completion
+/// sources may be re-armed is decided here, so it is exercised on the host,
+/// while the serve loop supplies the mask-register write and the notify.
+/// Getting it wrong is not a subtle bug — unmasking into a still-asserted
+/// level condition spins the driver, and never unmasking wedges the device.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DrainStep {
+    /// The device handed over frames and may have more; service it again.
+    Continue,
+    /// The shared receive ring filled while the device still had frames.
+    /// The completion sources stay masked — that *is* the back-pressure —
+    /// and the stack's next `Service`, issued after it drains, releases
+    /// them.
+    BackPressure,
+    /// The device handed over everything it had, so its condition has
+    /// cleared: re-arm the completion sources and stop.
+    Quiet,
+}
+
+impl DrainStep {
+    /// Classify one service report.
+    #[must_use]
+    pub const fn of(report: &ServiceReport) -> Self {
+        if report.rx_ring_full {
+            // Checked first: a full ring means frames are still in the
+            // device however many were received, so the condition holds.
+            Self::BackPressure
+        } else if report.received == 0 {
+            Self::Quiet
+        } else {
+            Self::Continue
+        }
+    }
+}
 
 /// The state a channel carries once the stack has attached its frame region.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -67,6 +106,13 @@ struct Attached {
 pub struct NetChannelServer<N: Net> {
     net: N,
     attached: Option<Attached>,
+    /// Link state the last service reported, so the interrupt path can tell
+    /// a change from a steady state.
+    reported_link: LinkState,
+    /// The receive pre-filter the harvest path applies. Until the stack
+    /// publishes an address set this admits everything, so nothing is ever
+    /// dropped for want of a policy.
+    filter: RxClassifier,
 }
 
 impl<N: Net> NetChannelServer<N> {
@@ -75,6 +121,10 @@ impl<N: Net> NetChannelServer<N> {
         Self {
             net,
             attached: None,
+            // Until a service reports otherwise, assume the operational
+            // default: a device that cannot sense its link reports `Up`.
+            reported_link: LinkState::default(),
+            filter: RxClassifier::new(RxFilterPolicy::admit_all()),
         }
     }
 
@@ -86,12 +136,10 @@ impl<N: Net> NetChannelServer<N> {
 
     /// Borrow the underlying device engine mutably.
     ///
-    /// The driver process needs this to acknowledge the device interrupt
-    /// (`Transport::ack_interrupt`) the moment its IRQ fires — before it wakes
-    /// the stack with a notify and independently of whether a frame region is
-    /// attached — so a receive interrupt is deasserted promptly and never
-    /// re-fires in a storm while the stack has not yet issued its next
-    /// service doorbell.
+    /// The driver process needs this to mask and unmask the device's
+    /// completion sources and to acknowledge its interrupt around a drain —
+    /// the interrupt-side work that is I/O and so lives in the serve loop
+    /// rather than in this pure server.
     pub fn net_mut(&mut self) -> &mut N {
         &mut self.net
     }
@@ -183,12 +231,52 @@ impl<N: Net> NetChannelServer<N> {
         encode_service_reply(self.service(region))
     }
 
-    fn service(&mut self, region: &mut [u8]) -> Result<ServiceReport, Errno> {
+    /// Drive one device doorbell over `region` and return its report.
+    ///
+    /// The same work [`service_reply`](Self::service_reply) encodes, for the
+    /// driver's own interrupt path: a device interrupt harvests straight
+    /// into the shared region rather than waiting to be asked, so the report
+    /// is needed as a value rather than as reply bytes.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotConnected`] before attach, [`Errno::BufferTooSmall`] or
+    /// [`Errno::BadAlignment`] for a region that does not match the agreed
+    /// geometry, or the device's typed fault.
+    pub fn service(&mut self, region: &mut [u8]) -> Result<ServiceReport, Errno> {
         let attached = self.attached.as_ref().ok_or(Errno::NotConnected)?;
-        let mut rings = FrameRings::bind(region, attached.geometry, attached.class)?;
-        self.net
+        let mut rings =
+            FrameRings::bind(region, attached.geometry, attached.class)?.with_admit(&self.filter);
+        let report = self
+            .net
             .service(&mut rings)
-            .map_err(tairix_abi::DriverError::as_errno)
+            .map_err(tairix_abi::DriverError::as_errno)?;
+        self.reported_link = report.link;
+        Ok(report)
+    }
+
+    /// The link state the last [`service`](Self::service) reported.
+    ///
+    /// Lets the driver's interrupt path tell a link *change* from a steady
+    /// state, so a notify goes out for a cable pull on an interface with no
+    /// traffic — the only thing that would otherwise surface it is an
+    /// unrelated transmit.
+    #[must_use]
+    pub fn reported_link(&self) -> LinkState {
+        self.reported_link
+    }
+
+    /// Answer [`NetChannelRequest::SetRxFilter`](tairix_abi::driver::net_channel::NetChannelRequest::SetRxFilter):
+    /// replace the local addresses the receive pre-filter matches against.
+    ///
+    /// Always accepted: the filter can only ever shed work, so there is
+    /// nothing for a device to refuse and no state it could conflict with.
+    /// Accepted whether or not the channel is attached, so the stack may
+    /// publish an address set before frames flow.
+    #[must_use]
+    pub fn set_rx_filter_reply(&mut self, policy: RxFilterPolicy) -> [u8; STATUS_REPLY_LEN] {
+        self.filter = RxClassifier::new(policy);
+        encode_status_reply(Ok(()))
     }
 
     /// Answer [`NetChannelRequest::SetMulticast`](tairix_abi::driver::net_channel::NetChannelRequest::SetMulticast):

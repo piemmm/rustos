@@ -297,3 +297,12 @@ allocation), and fail-closed (a malformed input is rejected whole). The
 stateful engines are bounded and budgeted so a hostile peer can neither
 fill nor poison them. See `docs/src/lib/net.md` for the architecture and
 the seam contract the `netstack` service builds on.
+
+## `rxfilter` — the receive pre-filter
+
+The classifier a NIC driver applies on its harvest path so a frame with no
+possible local consumer never wakes the stack (`plans/NETWORK.md` N17d). It
+matches on slow-changing L3 address state only — no ports, no group
+memberships — and its bias is to **admit**: it is never load-bearing for
+security, so anything it cannot parse confidently, and any policy that could
+not name every local address, widens rather than drops.

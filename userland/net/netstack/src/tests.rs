@@ -5,8 +5,11 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
+use super::iface::ServiceHint;
 use tairix_abi::driver::net::{DeviceFacts, LinkState, MacAddress, McastFilter, Net, NetOffloads};
-use tairix_abi::driver::net_ring::{FrameRings, RingGeometry, ServiceReport};
+use tairix_abi::driver::net_ring::{
+    aligned_region, FrameRings, RingGeometry, ServiceReport, REGION_ALIGN_PADDING,
+};
 use tairix_abi::driver::BufferClass;
 use tairix_abi::net::{
     decode_bind_reply, decode_send_reply, decode_socket_reply, ShutdownHow, SocketAddr,
@@ -114,8 +117,16 @@ const GEOMETRY: RingGeometry = match RingGeometry::new(16, 1514, 1514, 1) {
     Err(_) => panic!("valid test geometry"),
 };
 
+/// Backing buffer for one frame region, over-allocated so an aligned
+/// region of the geometry's length can be cut from it: the ring headers'
+/// counters are atomics, and a plain `Vec<u8>` is only byte-aligned.
 fn rings_region() -> Vec<u8> {
-    vec![0u8; GEOMETRY.region_len()]
+    vec![0u8; GEOMETRY.region_len() + REGION_ALIGN_PADDING]
+}
+
+/// The aligned, exact-length frame region inside `buffer`.
+fn region_of(buffer: &mut [u8]) -> &mut [u8] {
+    aligned_region(buffer, GEOMETRY.region_len()).expect("aligned frame region")
 }
 
 /// Wrap a loopback [`PeerNet`] as the in-process [`LocalFrameService`] the
@@ -266,7 +277,7 @@ fn service_interface_surfaces_a_device_link_change() {
     // Initially up (matches the recorded facts): no change reported.
     assert_eq!(
         stack
-            .service_interface(name("eth0"), &mut fs, t(1))
+            .service_interface(name("eth0"), &mut fs, t(1), ServiceHint::default())
             .expect("pump")
             .link_change,
         None
@@ -275,7 +286,7 @@ fn service_interface_surfaces_a_device_link_change() {
     // The device drops its link: the next pump surfaces exactly one change.
     fs.net_mut().set_link(LinkState::Down);
     let outcome = stack
-        .service_interface(name("eth0"), &mut fs, t(2))
+        .service_interface(name("eth0"), &mut fs, t(2), ServiceHint::default())
         .expect("pump");
     assert_eq!(outcome.link_change, Some(LinkState::Down));
 
@@ -285,7 +296,7 @@ fn service_interface_surfaces_a_device_link_change() {
     assert!(batch.is_empty());
     assert_eq!(
         stack
-            .service_interface(name("eth0"), &mut fs, t(3))
+            .service_interface(name("eth0"), &mut fs, t(3), ServiceHint::default())
             .expect("pump")
             .link_change,
         None
@@ -295,7 +306,7 @@ fn service_interface_surfaces_a_device_link_change() {
     fs.net_mut().set_link(LinkState::Up);
     assert_eq!(
         stack
-            .service_interface(name("eth0"), &mut fs, t(4))
+            .service_interface(name("eth0"), &mut fs, t(4), ServiceHint::default())
             .expect("pump")
             .link_change,
         Some(LinkState::Up)
@@ -422,7 +433,7 @@ fn loopback_v4_ping_round_trips_through_the_pump() {
     for _ in 0..4 {
         events.extend(
             stack
-                .service_interface(name("wan"), &mut fs, t(2))
+                .service_interface(name("wan"), &mut fs, t(2), ServiceHint::default())
                 .expect("pump")
                 .events,
         );
@@ -459,7 +470,7 @@ fn loopback_v6_link_local_ping_round_trips_after_dad() {
         fs.net_mut().now = t(step);
         events.extend(
             stack
-                .service_interface(name("wan"), &mut fs, t(step))
+                .service_interface(name("wan"), &mut fs, t(step), ServiceHint::default())
                 .expect("pump")
                 .events,
         );
@@ -482,7 +493,7 @@ fn loopback_v6_link_local_ping_round_trips_after_dad() {
     for _ in 0..4 {
         events.extend(
             stack
-                .service_interface(name("wan"), &mut fs, t(3))
+                .service_interface(name("wan"), &mut fs, t(3), ServiceHint::default())
                 .expect("pump")
                 .events,
         );
@@ -2142,6 +2153,18 @@ struct ChannelRig {
 /// exactly as the driver process would on a doorbell.
 struct ChannelLoopback {
     rig: Rc<RefCell<ChannelRig>>,
+    /// Service requests this transport carried, so a test can assert the
+    /// pump did *not* ring the doorbell for a pure receive.
+    services: Rc<RefCell<u32>>,
+}
+
+impl ChannelLoopback {
+    fn new(rig: &Rc<RefCell<ChannelRig>>) -> Self {
+        Self {
+            rig: Rc::clone(rig),
+            services: Rc::new(RefCell::new(0)),
+        }
+    }
 }
 
 impl crate::channel::NetChannelTransport for ChannelLoopback {
@@ -2152,11 +2175,18 @@ impl crate::channel::NetChannelTransport for ChannelLoopback {
             NetChannelRequest::Facts => copy_reply(reply, &rig.server.facts_reply()),
             NetChannelRequest::Attach(params) => copy_reply(reply, &rig.server.attach(params)),
             NetChannelRequest::Service => {
+                *self.services.borrow_mut() += 1;
                 let ChannelRig { server, region } = &mut *rig;
-                copy_reply(reply, &server.service_reply(region))
+                // The driver's own mapping is the exact geometry, so the
+                // loopback hands the server the aligned cut of its backing
+                // buffer, not the padded buffer.
+                copy_reply(reply, &server.service_reply(region_of(region)))
             }
             NetChannelRequest::SetMulticast(groups) => {
                 copy_reply(reply, &rig.server.set_multicast_reply(&groups))
+            }
+            NetChannelRequest::SetRxFilter(policy) => {
+                copy_reply(reply, &rig.server.set_rx_filter_reply(policy))
             }
             NetChannelRequest::Detach => copy_reply(reply, &rig.server.detach()),
         }
@@ -2182,18 +2212,19 @@ fn net_channel_client_round_trips_a_frame_through_the_server() {
         server: NetChannelServer::new(EchoNet),
         region: rings_region(),
     }));
-    let mut transport = ChannelLoopback {
-        rig: Rc::clone(&rig),
-    };
+    let mut transport = ChannelLoopback::new(&rig);
 
     // Facts, then attach the region (the stack would `shm_grant` it; the
     // grant handle is opaque to the mock).
     let facts = NetChannelClient::query_facts(&mut transport).expect("facts");
     assert_eq!(facts.mtu, 1500);
+    // The cross-process client's region is an `shm` mapping of the exact
+    // geometry, so the test hands it the aligned cut rather than the
+    // padded backing buffer.
     let mut view = rings_region();
     let mut client = NetChannelClient::attach(
         transport,
-        &mut view,
+        region_of(&mut view),
         GEOMETRY,
         BufferClass::NonSensitive,
         0xC0FE,
@@ -2205,8 +2236,12 @@ fn net_channel_client_round_trips_a_frame_through_the_server() {
     // crosses to the device and echoes back.
     {
         let mut rig = rig.borrow_mut();
-        let mut rings =
-            FrameRings::bind(&mut rig.region, GEOMETRY, BufferClass::NonSensitive).expect("bind");
+        let mut rings = FrameRings::bind(
+            region_of(&mut rig.region),
+            GEOMETRY,
+            BufferClass::NonSensitive,
+        )
+        .expect("bind");
         rings.tx.push(&[0xEE; 128]).expect("queue tx");
     }
     let report = client.service().expect("doorbell");
@@ -2214,8 +2249,12 @@ fn net_channel_client_round_trips_a_frame_through_the_server() {
     assert_eq!(report.received, 1);
     {
         let mut rig = rig.borrow_mut();
-        let mut rings =
-            FrameRings::bind(&mut rig.region, GEOMETRY, BufferClass::NonSensitive).expect("bind");
+        let mut rings = FrameRings::bind(
+            region_of(&mut rig.region),
+            GEOMETRY,
+            BufferClass::NonSensitive,
+        )
+        .expect("bind");
         let mut out = vec![0u8; GEOMETRY.rx_slot_capacity() as usize];
         assert_eq!(rings.rx_ring(0).expect("rx0").pop(&mut out), Ok(Some(128)));
         assert_eq!(&out[..128], &[0xEE; 128]);
@@ -2226,14 +2265,71 @@ fn net_channel_client_round_trips_a_frame_through_the_server() {
 }
 
 #[test]
+fn a_receive_the_driver_already_harvested_costs_no_doorbell() {
+    // The cross-process shape: the driver process fills the receive ring
+    // from its own device interrupt before waking the stack, so a pump with
+    // nothing to transmit must read the frame without an `ipc_call`. Two
+    // process switches per received frame is exactly what this removes.
+    let rig = Rc::new(RefCell::new(ChannelRig {
+        server: NetChannelServer::new(EchoNet),
+        region: rings_region(),
+    }));
+    let mut transport = ChannelLoopback::new(&rig);
+    let services = Rc::clone(&transport.services);
+    let facts = NetChannelClient::query_facts(&mut transport).expect("facts");
+    assert_eq!(facts.mtu, 1500);
+    let mut view = rings_region();
+    let mut client = NetChannelClient::attach(
+        transport,
+        region_of(&mut view),
+        GEOMETRY,
+        BufferClass::NonSensitive,
+        0xC0FE,
+        NOTIFY_ENDPOINT,
+    )
+    .expect("attach");
+    assert_eq!(
+        *services.borrow(),
+        0,
+        "attach and facts are not service doorbells"
+    );
+
+    // Stand in for the driver's interrupt: it fills the shared receive ring
+    // — the region the client holds a mapping of — before waking the stack.
+    {
+        let mut rings = FrameRings::bind(client.region_mut(), GEOMETRY, BufferClass::NonSensitive)
+            .expect("bind");
+        rings
+            .rx_ring(0)
+            .expect("rx0")
+            .push(&[0xAB; 64])
+            .expect("driver-harvested frame");
+    }
+    assert!(
+        !client.receive_needs_doorbell(),
+        "a cross-process driver harvests on its own interrupt"
+    );
+    // Draining the ring is a local read of the shared region.
+    {
+        let mut rings = FrameRings::bind(client.region_mut(), GEOMETRY, BufferClass::NonSensitive)
+            .expect("bind");
+        let mut out = vec![0u8; GEOMETRY.rx_slot_capacity() as usize];
+        assert_eq!(rings.rx_ring(0).expect("rx0").pop(&mut out), Ok(Some(64)));
+    }
+    assert_eq!(
+        *services.borrow(),
+        0,
+        "reading a harvested frame must not cost a doorbell"
+    );
+}
+
+#[test]
 fn net_channel_client_attach_rejects_a_short_region() {
     let rig = Rc::new(RefCell::new(ChannelRig {
         server: NetChannelServer::new(EchoNet),
         region: rings_region(),
     }));
-    let transport = ChannelLoopback {
-        rig: Rc::clone(&rig),
-    };
+    let transport = ChannelLoopback::new(&rig);
     // A stack view a byte short of the agreed geometry is refused before
     // any request is sent.
     let mut short = vec![0u8; GEOMETRY.region_len() - 1];
@@ -2451,7 +2547,7 @@ fn pump_client(
     let mut deliveries = Vec::new();
     for _ in 0..64 {
         let events = ns
-            .service_interface(name("wan"), fs, now)
+            .service_interface(name("wan"), fs, now, ServiceHint::default())
             .expect("pump")
             .events;
         let io = svc.advance_streams(ns, now);
@@ -4122,7 +4218,7 @@ fn a_filtering_device_is_programmed_with_the_groups_the_stack_needs() {
     .expect("frame service");
 
     let outcome = stack
-        .service_interface(name("wan"), &mut fs, t(1))
+        .service_interface(name("wan"), &mut fs, t(1), ServiceHint::default())
         .expect("pump");
     assert!(outcome.multicast_refused.is_none());
     let set = programmed
@@ -4141,7 +4237,7 @@ fn a_filtering_device_is_programmed_with_the_groups_the_stack_needs() {
     // not moved, so the device is left alone.
     *programmed.borrow_mut() = None;
     stack
-        .service_interface(name("wan"), &mut fs, t(1))
+        .service_interface(name("wan"), &mut fs, t(1), ServiceHint::default())
         .expect("pump");
     assert!(
         programmed.borrow().is_none(),
@@ -4167,7 +4263,7 @@ fn an_unfiltered_device_is_never_programmed() {
     )
     .expect("frame service");
     stack
-        .service_interface(name("wan"), &mut fs, t(1))
+        .service_interface(name("wan"), &mut fs, t(1), ServiceHint::default())
         .expect("pump");
     assert!(programmed.borrow().is_none());
 }
@@ -4202,7 +4298,7 @@ fn a_device_that_refuses_the_group_set_is_reported_not_hidden() {
     )
     .expect("frame service");
     let outcome = stack
-        .service_interface(name("wan"), &mut fs, t(1))
+        .service_interface(name("wan"), &mut fs, t(1), ServiceHint::default())
         .expect("pump");
     // Loud, not silent: the groups that did not fit are genuinely not
     // delivered, and nothing was programmed.
@@ -4211,7 +4307,7 @@ fn a_device_that_refuses_the_group_set_is_reported_not_hidden() {
     // Retried on the next pump rather than recorded as pushed, so a set that
     // shrinks back within the device's slots recovers on its own.
     let again = stack
-        .service_interface(name("wan"), &mut fs, t(2))
+        .service_interface(name("wan"), &mut fs, t(2), ServiceHint::default())
         .expect("pump");
     assert!(again.multicast_refused.is_some());
 }

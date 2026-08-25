@@ -4,7 +4,7 @@ ping — envoyer des requêtes d'écho ICMP à un hôte réseau
 
 ## SYNOPSIS
 
-`ping [option...] adresse`
+`ping [option...] hôte`
 
 ## DESCRIPTION
 
@@ -15,10 +15,22 @@ final.
 Les requêtes passent par une socket d'écho ICMP ouverte auprès de la
 pile réseau en espace utilisateur, protégée par `CAP_NET` et `CAP_NET_RAW`
 et journalisée. La pile détient l'identifiant d'écho, si bien qu'une
-socket ne reçoit que les réponses à ses propres requêtes. Il n'y a pas de
-résolution de noms dans cette version : la cible doit donc être une
-adresse IPv4 ou IPv6 littérale ; un nom d'hôte est une erreur d'usage,
-pas un échec silencieux.
+socket ne reçoit que les réponses à ses propres requêtes.
+
+La cible est une adresse IPv4 ou IPv6 littérale ou un nom d'hôte. Un nom
+est résolu par le résolveur système, à partir des serveurs récursifs
+configurés sur la machine ; une adresse littérale ne nécessite aucune
+requête et fonctionne donc même sans résolveur configuré. Un nom qui ne
+résout vers aucune adresse de la famille demandée met fin à l'exécution
+en indiquant la raison.
+
+Chaque requête transporte par défaut des données aléatoires à forte
+entropie, tirées à nouveau pour chaque requête. C'est délibéré : un lien
+qui compresse ou déduplique le trafic rapporterait sinon un débit et une
+latence qui ne disent rien de sa capacité réelle. Les octets renvoyés sont
+comparés à ceux émis, si bien qu'une charge aléatoire sert aussi de
+contrôle d'intégrité par paquet. Utilisez `-p` pour un motif fixe lorsque
+c'est une charge déterministe qui est voulue.
 
 Par défaut `ping` envoie une requête par seconde jusqu'à interruption ;
 `-c` en borne le nombre. Chaque réponse indique la source, le numéro de
@@ -36,6 +48,9 @@ ne porte donc pas de champ `ttl=`.
 - `-c, --count` — s'arrêter après ce nombre de requêtes.
 - `-i, --interval` — secondes entre les requêtes (un décimal, p. ex. `0.5`).
 - `-s, --size` — taille de la charge utile en octets.
+- `-p, --pattern` — contenu de la charge utile : `random` (par défaut, à
+  forte entropie) ou une suite de chiffres hexadécimaux de longueur paire
+  donnant un motif d'octets répété, p. ex. `-p ff00`.
 - `-W, --timeout` — secondes d'attente de chaque réponse.
 - `-w, --deadline` — délai global de l'exécution, en secondes.
 - `-4, --ipv4` — exiger une cible IPv4.
@@ -65,6 +80,7 @@ ne porte donc pas de champ `ttl=`.
 
 ## SEE ALSO
 
+- `host`
 - `ss`
 - `sysinfo`
 - `man`

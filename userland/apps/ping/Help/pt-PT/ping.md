@@ -4,7 +4,7 @@ ping — enviar pedidos de eco ICMP a um host de rede
 
 ## SYNOPSIS
 
-`ping [option...] endereco`
+`ping [option...] host`
 
 ## DESCRIPTION
 
@@ -14,9 +14,22 @@ resposta com o seu tempo de ida e volta, seguido de um resumo final.
 Os pedidos passam por um socket de eco ICMP aberto na pilha de rede em
 espaço de utilizador, protegido por `CAP_NET` e `CAP_NET_RAW` e auditado.
 A pilha detém o identificador de eco, pelo que um socket só recebe
-respostas aos seus próprios pedidos. Nesta versão não há resolução de
-nomes, por isso o destino tem de ser um endereço IPv4 ou IPv6 literal; um
-nome de host é um erro de utilização, não uma falha silenciosa.
+respostas aos seus próprios pedidos.
+
+O destino é um endereço IPv4 ou IPv6 literal ou um nome de host. Um nome é
+resolvido pelo resolvedor de sistema, a partir dos servidores recursivos
+configurados na máquina; um endereço literal não exige consulta alguma e
+funciona por isso mesmo sem resolvedor configurado. Um nome que não
+resolva para nenhum endereço da família pedida termina a execução
+indicando a razão.
+
+Por predefinição cada pedido transporta dados aleatórios de alta entropia,
+sorteados de novo em cada pedido. É deliberado: uma ligação que comprime
+ou desduplica o tráfego relataria de outro modo um débito e uma latência
+que nada dizem da sua capacidade real. Os bytes devolvidos são comparados
+com os enviados, pelo que uma carga aleatória serve também de verificação
+de integridade por pacote. Use `-p` para um padrão fixo quando o que se
+pretende é uma carga determinista.
 
 Por predefinição, `ping` envia um pedido por segundo até ser
 interrompido; `-c` limita a quantidade. Cada resposta indica a origem, o
@@ -34,12 +47,15 @@ tem, por isso, um campo `ttl=`.
 - `-c, --count` — parar após enviar esta quantidade de pedidos.
 - `-i, --interval` — segundos entre pedidos (um decimal, p. ex. `0.5`).
 - `-s, --size` — tamanho da carga útil em bytes.
+- `-p, --pattern` — conteúdo da carga útil: `random` (predefinição, alta
+  entropia) ou uma sequência de dígitos hexadecimais de comprimento par
+  como padrão de bytes repetido, p. ex. `-p ff00`.
 - `-W, --timeout` — segundos de espera por cada resposta.
 - `-w, --deadline` — prazo global da execução, em segundos.
 - `-4, --ipv4` — exigir um destino IPv4.
 - `-6, --ipv6` — exigir um destino IPv6.
-- `-n, --numeric` — saída numérica. Sempre ativa no TAIRiX; aceite por
-  familiaridade.
+- `-n, --numeric` — saída numérica. Aceite e sem efeito: nunca é feita
+  resolução inversa, pelo que os endereços de resposta já são numéricos.
 - `-q, --quiet` — silencioso: apenas o cabeçalho e o resumo final.
 - `-?, --help` — mostrar a ajuda breve deste comando.
 
@@ -54,7 +70,8 @@ tem, por isso, um campo `ttl=`.
 
 - `0` — foi recebida pelo menos uma resposta (ou a ajuda breve foi escrita).
 - `1` — nenhum pedido obteve resposta.
-- `2` — linha de comandos não compreendida, ou socket impossível de abrir.
+- `2` — linha de comandos não compreendida, destino não resolvido, ou
+  socket impossível de abrir.
 
 ## ENVIRONMENT
 
@@ -63,6 +80,7 @@ tem, por isso, um campo `ttl=`.
 
 ## SEE ALSO
 
+- `host`
 - `ss`
 - `sysinfo`
 - `man`

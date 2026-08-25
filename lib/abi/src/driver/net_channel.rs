@@ -137,6 +137,7 @@ mod op {
     pub const SERVICE: u8 = 3;
     pub const DETACH: u8 = 4;
     pub const SET_MULTICAST: u8 = 5;
+    pub const SET_RX_FILTER: u8 = 6;
 }
 
 /// Fixed request header: magic (4) + version (2) + op (1) + reserved (1).
@@ -156,15 +157,40 @@ const ATTACH_BODY_LEN: usize = 4 + 4 + 4 + 8 + 1 + 2 + 1 + 8;
 /// rather than a partially-read set.
 const SET_MULTICAST_BODY_LEN: usize = 1 + 1 + MAX_MCAST_GROUPS * MAC_ADDRESS_LEN;
 
+/// Local IPv4 addresses a [`RxFilterPolicy`] carries.
+///
+/// A fixed containment bound, not a capacity: an interface with more
+/// addresses than this marks the policy non-exhaustive and the filter then
+/// admits all unicast, so the bound can never cost a frame.
+pub const MAX_FILTER_V4: usize = 8;
+
+/// Local IPv6 addresses a [`RxFilterPolicy`] carries. An interface normally
+/// has a link-local, a global, and a temporary address per prefix.
+pub const MAX_FILTER_V6: usize = 8;
+
+/// Wire length of the [`NetChannelRequest::SetRxFilter`] body: the two
+/// counts (1 each) + the exhaustive flag (1) + reserved (1) + each family's
+/// fixed-width address array, IPv4 twice (the address and its subnet's
+/// directed-broadcast address).
+const SET_RX_FILTER_BODY_LEN: usize = 1 + 1 + 1 + 1 + MAX_FILTER_V4 * 4 * 2 + MAX_FILTER_V6 * 16;
+
 /// Largest device-channel request frame: the header plus the largest body. A
 /// fixed validation bound sizing the buffer both sides pin for the control
 /// endpoint.
-pub const NET_CHANNEL_MAX_REQUEST: usize = HEADER_LEN
-    + if ATTACH_BODY_LEN > SET_MULTICAST_BODY_LEN {
-        ATTACH_BODY_LEN
-    } else {
-        SET_MULTICAST_BODY_LEN
-    };
+pub const NET_CHANNEL_MAX_REQUEST: usize = HEADER_LEN + largest_body();
+
+/// The largest request body, so [`NET_CHANNEL_MAX_REQUEST`] tracks whichever
+/// operation grows rather than needing a hand-updated comparison.
+const fn largest_body() -> usize {
+    let mut largest = ATTACH_BODY_LEN;
+    if SET_MULTICAST_BODY_LEN > largest {
+        largest = SET_MULTICAST_BODY_LEN;
+    }
+    if SET_RX_FILTER_BODY_LEN > largest {
+        largest = SET_RX_FILTER_BODY_LEN;
+    }
+    largest
+}
 
 /// Wire length of a [`NetChannelNotify`] frame: magic (4) + version (2) +
 /// reserved (2).
@@ -186,6 +212,105 @@ pub enum NetChannelRequest {
     Detach,
     /// Replace the set of group (multicast) addresses the device admits.
     SetMulticast(McastGroups),
+    /// Replace the local addresses the driver's receive pre-filter matches
+    /// against, so a frame with no possible local consumer is dropped
+    /// without waking the stack.
+    SetRxFilter(RxFilterPolicy),
+}
+
+/// The local addresses a driver's receive pre-filter matches a frame's
+/// destination against (`plans/NETWORK.md` N17).
+///
+/// The stack publishes this whenever an interface's address set changes — a
+/// control-plane event, not a per-frame one — and the driver evaluates it on
+/// its harvest path. It deliberately holds **only slow-changing L3 address
+/// state**: no listening ports and no group memberships, so there is nothing
+/// that could fall behind a socket opening or closing and drop a frame
+/// someone wanted.
+///
+/// # It can only cost work, never authority
+///
+/// The filter is a load-shedding optimisation and is never load-bearing for
+/// security: every admitted frame is still fully validated by the stack, and
+/// the driver process already owns the device and could drop any frame it
+/// liked. Its bias is therefore towards *admitting*: an address set too
+/// large to carry sets [`Self::is_exhaustive`] false and the filter then
+/// admits all unicast rather than dropping traffic to an address it was not
+/// told about.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct RxFilterPolicy {
+    v4_count: u8,
+    v6_count: u8,
+    exhaustive: bool,
+    v4: [[u8; 4]; MAX_FILTER_V4],
+    v4_broadcast: [[u8; 4]; MAX_FILTER_V4],
+    v6: [[u8; 16]; MAX_FILTER_V6],
+}
+
+impl RxFilterPolicy {
+    /// A policy that matches nothing and admits everything: the state before
+    /// the stack has published an address set, and the state a driver holds
+    /// when it has been told nothing.
+    #[must_use]
+    pub const fn admit_all() -> Self {
+        Self {
+            v4_count: 0,
+            v6_count: 0,
+            exhaustive: false,
+            v4: [[0u8; 4]; MAX_FILTER_V4],
+            v4_broadcast: [[0u8; 4]; MAX_FILTER_V4],
+            v6: [[0u8; 16]; MAX_FILTER_V6],
+        }
+    }
+
+    /// Build a policy from an interface's addresses.
+    ///
+    /// `v4` pairs each IPv4 address with its subnet's directed-broadcast
+    /// address. Either list longer than its bound is *truncated* and the
+    /// policy marked non-exhaustive, so the filter widens to admit all
+    /// unicast rather than silently dropping traffic to the addresses that
+    /// did not fit.
+    #[must_use]
+    pub fn new(v4: &[([u8; 4], [u8; 4])], v6: &[[u8; 16]]) -> Self {
+        let mut policy = Self::admit_all();
+        policy.exhaustive = v4.len() <= MAX_FILTER_V4 && v6.len() <= MAX_FILTER_V6;
+        for (slot, (address, broadcast)) in v4.iter().take(MAX_FILTER_V4).enumerate() {
+            policy.v4[slot] = *address;
+            policy.v4_broadcast[slot] = *broadcast;
+            policy.v4_count = policy.v4_count.saturating_add(1);
+        }
+        for (slot, address) in v6.iter().take(MAX_FILTER_V6).enumerate() {
+            policy.v6[slot] = *address;
+            policy.v6_count = policy.v6_count.saturating_add(1);
+        }
+        policy
+    }
+
+    /// Whether the policy names every local address of the interface. When
+    /// false a consumer must admit all unicast.
+    #[must_use]
+    pub const fn is_exhaustive(&self) -> bool {
+        self.exhaustive
+    }
+
+    /// The interface's IPv4 addresses.
+    #[must_use]
+    pub fn v4_addresses(&self) -> &[[u8; 4]] {
+        &self.v4[..self.v4_count as usize]
+    }
+
+    /// The directed-broadcast address of each IPv4 address's subnet, in the
+    /// same order as [`Self::v4_addresses`].
+    #[must_use]
+    pub fn v4_broadcasts(&self) -> &[[u8; 4]] {
+        &self.v4_broadcast[..self.v4_count as usize]
+    }
+
+    /// The interface's IPv6 addresses.
+    #[must_use]
+    pub fn v6_addresses(&self) -> &[[u8; 16]] {
+        &self.v6[..self.v6_count as usize]
+    }
 }
 
 /// The group-address set of a [`NetChannelRequest::SetMulticast`].
@@ -274,6 +399,7 @@ impl NetChannelRequest {
             Self::Service => op::SERVICE,
             Self::Detach => op::DETACH,
             Self::SetMulticast(_) => op::SET_MULTICAST,
+            Self::SetRxFilter(_) => op::SET_RX_FILTER,
         }
     }
 
@@ -287,6 +413,7 @@ impl NetChannelRequest {
             Self::Facts | Self::Service | Self::Detach => HEADER_LEN,
             Self::Attach(_) => HEADER_LEN + ATTACH_BODY_LEN,
             Self::SetMulticast(_) => HEADER_LEN + SET_MULTICAST_BODY_LEN,
+            Self::SetRxFilter(_) => HEADER_LEN + SET_RX_FILTER_BODY_LEN,
         };
         if out.len() < len {
             return Err(Errno::BufferTooSmall);
@@ -314,6 +441,23 @@ impl NetChannelRequest {
             for (slot, group) in groups.as_slice().iter().enumerate() {
                 let at = HEADER_LEN + 2 + slot * MAC_ADDRESS_LEN;
                 out[at..at + MAC_ADDRESS_LEN].copy_from_slice(group.as_octets());
+            }
+        }
+        if let Self::SetRxFilter(policy) = self {
+            out[HEADER_LEN] = policy.v4_count;
+            out[HEADER_LEN + 1] = policy.v6_count;
+            out[HEADER_LEN + 2] = u8::from(policy.exhaustive);
+            // out[HEADER_LEN + 3] reserved, left zero.
+            let mut at = HEADER_LEN + 4;
+            for (address, broadcast) in policy.v4_addresses().iter().zip(policy.v4_broadcasts()) {
+                out[at..at + 4].copy_from_slice(address);
+                out[at + 4..at + 8].copy_from_slice(broadcast);
+                at += 8;
+            }
+            let mut at = HEADER_LEN + 4 + MAX_FILTER_V4 * 8;
+            for address in policy.v6_addresses() {
+                out[at..at + 16].copy_from_slice(address);
+                at += 16;
             }
         }
         Ok(len)
@@ -347,8 +491,46 @@ impl NetChannelRequest {
             op::DETACH => Ok(Self::Detach),
             op::ATTACH => Self::decode_attach(bytes),
             op::SET_MULTICAST => Self::decode_set_multicast(bytes),
+            op::SET_RX_FILTER => Self::decode_set_rx_filter(bytes),
             _ => Err(Errno::OutOfRange),
         }
+    }
+
+    fn decode_set_rx_filter(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < HEADER_LEN + SET_RX_FILTER_BODY_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let v4_count = usize::from(bytes[HEADER_LEN]);
+        let v6_count = usize::from(bytes[HEADER_LEN + 1]);
+        // A count past its fixed bound is a corrupt frame, refused whole
+        // rather than clamped into a filter that would then drop traffic.
+        if v4_count > MAX_FILTER_V4 || v6_count > MAX_FILTER_V6 {
+            return Err(Errno::OutOfRange);
+        }
+        let exhaustive = match bytes[HEADER_LEN + 2] {
+            0 => false,
+            1 => true,
+            _ => return Err(Errno::OutOfRange),
+        };
+        if bytes[HEADER_LEN + 3] != 0 {
+            return Err(Errno::BadMagic);
+        }
+        let mut policy = RxFilterPolicy::admit_all();
+        policy.exhaustive = exhaustive;
+        for slot in 0..v4_count {
+            let at = HEADER_LEN + 4 + slot * 8;
+            policy.v4[slot].copy_from_slice(&bytes[at..at + 4]);
+            policy.v4_broadcast[slot].copy_from_slice(&bytes[at + 4..at + 8]);
+        }
+        for slot in 0..v6_count {
+            let at = HEADER_LEN + 4 + MAX_FILTER_V4 * 8 + slot * 16;
+            policy.v6[slot].copy_from_slice(&bytes[at..at + 16]);
+        }
+        // Widened only after every field validated, so a refused frame
+        // never leaves a half-applied policy.
+        policy.v4_count = u8::try_from(v4_count).map_err(|_| Errno::OutOfRange)?;
+        policy.v6_count = u8::try_from(v6_count).map_err(|_| Errno::OutOfRange)?;
+        Ok(Self::SetRxFilter(policy))
     }
 
     fn decode_attach(bytes: &[u8]) -> Result<Self, Errno> {
@@ -402,15 +584,37 @@ impl NetChannelRequest {
     }
 }
 
-/// The driver → stack receive-frames wake (`plans/NETWORK.md` N4c).
+/// The driver → stack wake (`plans/NETWORK.md` N4c, N17).
 ///
 /// The driver `ipc_send`s this fixed frame to the
-/// [`AttachParams::notify_endpoint`] when its device IRQ reports frames it
-/// could not immediately hand over; the stack, parked on that port, issues
-/// the next [`NetChannelRequest::Service`]. It carries no payload — *which*
-/// channel woke is the port it arrived on.
+/// [`AttachParams::notify_endpoint`] after its device interrupt has
+/// harvested frames into the shared region. *Which* channel woke is the
+/// port it arrived on.
+///
+/// It carries the two things the driver knows and the stack would otherwise
+/// have to ask for, so a receive that needs no transmit costs no call at
+/// all:
+///
+/// * `link` — the device's live link state. Without it a link change on an
+///   otherwise idle interface would go unseen until some unrelated transmit
+///   provoked a doorbell, and a bond failover keys on exactly that report.
+/// * `back_pressure` — the driver's receive ring filled while the device
+///   still had frames, so it has masked its completion source. The stack
+///   must issue a [`NetChannelRequest::Service`] after draining, even with
+///   nothing to transmit, or the device stays masked.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct NetChannelNotify;
+pub struct NetChannelNotify {
+    /// The device's link state as the driver last observed it.
+    pub link: LinkState,
+    /// The driver masked its completion source because the receive ring
+    /// filled; a `Service` is needed to release it.
+    pub back_pressure: bool,
+}
+
+/// Wire byte for a notify reporting back-pressure.
+const NOTIFY_BACK_PRESSURE: u8 = 1;
+/// Wire byte for a notify reporting none.
+const NOTIFY_FLOWING: u8 = 0;
 
 impl NetChannelNotify {
     /// Encoded length of the notify frame.
@@ -418,10 +622,19 @@ impl NetChannelNotify {
 
     /// Encode the notify frame.
     #[must_use]
-    pub fn encode() -> [u8; NET_CHANNEL_NOTIFY_LEN] {
+    pub fn encode(&self) -> [u8; NET_CHANNEL_NOTIFY_LEN] {
         let mut out = [0u8; NET_CHANNEL_NOTIFY_LEN];
         put_u32(&mut out, 0, NET_CHANNEL_NOTIFY_MAGIC);
         put_u16(&mut out, 4, NET_CHANNEL_VERSION_V1);
+        out[6] = match self.link {
+            LinkState::Up => LINK_UP,
+            LinkState::Down => LINK_DOWN,
+        };
+        out[7] = if self.back_pressure {
+            NOTIFY_BACK_PRESSURE
+        } else {
+            NOTIFY_FLOWING
+        };
         out
     }
 
@@ -430,8 +643,9 @@ impl NetChannelNotify {
     /// # Errors
     ///
     /// * [`Errno::BufferTooSmall`] — shorter than [`NET_CHANNEL_NOTIFY_LEN`].
-    /// * [`Errno::BadMagic`] — wrong magic or a dirty reserved field.
+    /// * [`Errno::BadMagic`] — wrong magic.
     /// * [`Errno::AbiVersionUnsupported`] — not [`NET_CHANNEL_VERSION_V1`].
+    /// * [`Errno::OutOfRange`] — an undefined link or flag byte.
     pub fn decode(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() < NET_CHANNEL_NOTIFY_LEN {
             return Err(Errno::BufferTooSmall);
@@ -442,10 +656,22 @@ impl NetChannelNotify {
         if read_u16(bytes, 4) != NET_CHANNEL_VERSION_V1 {
             return Err(Errno::AbiVersionUnsupported);
         }
-        if read_u16(bytes, 6) != 0 {
-            return Err(Errno::BadMagic);
-        }
-        Ok(Self)
+        let link = match bytes[6] {
+            LINK_UP => LinkState::Up,
+            LINK_DOWN => LinkState::Down,
+            _ => return Err(Errno::OutOfRange),
+        };
+        // An undefined flag byte is refused rather than read as "flowing":
+        // guessing here would leave a masked device wedged.
+        let back_pressure = match bytes[7] {
+            NOTIFY_BACK_PRESSURE => true,
+            NOTIFY_FLOWING => false,
+            _ => return Err(Errno::OutOfRange),
+        };
+        Ok(Self {
+            link,
+            back_pressure,
+        })
     }
 }
 
@@ -554,9 +780,21 @@ pub fn decode_facts_reply(bytes: &[u8]) -> Result<DeviceFacts, Errno> {
 
 // --- ServiceReport wire codec (the Service reply payload) ---------------
 
-/// Wire length of a [`ServiceReport`] payload: transmitted (4) + received
-/// (4) + `rx_ring_full` flag (1) + link (1).
-const SERVICE_PAYLOAD_LEN: usize = 4 + 4 + 1 + 1;
+/// Byte offsets of each [`ServiceReport`] field within the Service reply's
+/// payload, so the encoder, the decoder, and the tests that corrupt a
+/// specific byte all read one layout. `FILTERED` is a `u64` (it is a
+/// cumulative device counter); the two above it are per-call `u32`s.
+mod service {
+    pub const TRANSMITTED: usize = 0;
+    pub const RECEIVED: usize = 4;
+    pub const FILTERED: usize = 8;
+    pub const RX_RING_FULL: usize = 16;
+    pub const LINK: usize = 17;
+    pub const LEN: usize = 18;
+}
+
+/// Wire length of a [`ServiceReport`] payload.
+const SERVICE_PAYLOAD_LEN: usize = service::LEN;
 
 /// Wire length of the Service reply: a status word then the payload (zeroed
 /// on refusal).
@@ -586,10 +824,11 @@ pub fn encode_service_reply(
     match result {
         Ok(report) => {
             let body = &mut out[4..];
-            put_u32(body, 0, report.transmitted);
-            put_u32(body, 4, report.received);
-            body[8] = u8::from(report.rx_ring_full);
-            body[9] = match report.link {
+            put_u32(body, service::TRANSMITTED, report.transmitted);
+            put_u32(body, service::RECEIVED, report.received);
+            put_u64(body, service::FILTERED, report.filtered);
+            body[service::RX_RING_FULL] = u8::from(report.rx_ring_full);
+            body[service::LINK] = match report.link {
                 LinkState::Up => LINK_UP,
                 LinkState::Down => LINK_DOWN,
             };
@@ -622,14 +861,15 @@ pub fn decode_service_reply(bytes: &[u8]) -> Result<ServiceReport, Errno> {
         return Err(errno);
     }
     let body = &bytes[4..];
-    let transmitted = read_u32(body, 0);
-    let received = read_u32(body, 4);
-    let rx_ring_full = match body[8] {
+    let transmitted = read_u32(body, service::TRANSMITTED);
+    let received = read_u32(body, service::RECEIVED);
+    let filtered = read_u64(body, service::FILTERED);
+    let rx_ring_full = match body[service::RX_RING_FULL] {
         0 => false,
         1 => true,
         _ => return Err(Errno::OutOfRange),
     };
-    let link = match body[9] {
+    let link = match body[service::LINK] {
         LINK_UP => LinkState::Up,
         LINK_DOWN => LinkState::Down,
         _ => return Err(Errno::OutOfRange),
@@ -637,6 +877,7 @@ pub fn decode_service_reply(bytes: &[u8]) -> Result<ServiceReport, Errno> {
     Ok(ServiceReport {
         transmitted,
         received,
+        filtered,
         rx_ring_full,
         link,
     })
@@ -849,14 +1090,32 @@ mod tests {
 
     #[test]
     fn notify_round_trips_and_fails_closed() {
-        let frame = NetChannelNotify::encode();
-        assert_eq!(NetChannelNotify::decode(&frame), Ok(NetChannelNotify));
+        for link in [LinkState::Up, LinkState::Down] {
+            for back_pressure in [false, true] {
+                let notify = NetChannelNotify {
+                    link,
+                    back_pressure,
+                };
+                let frame = notify.encode();
+                assert_eq!(NetChannelNotify::decode(&frame), Ok(notify));
+            }
+        }
+        let frame = NetChannelNotify {
+            link: LinkState::Up,
+            back_pressure: false,
+        }
+        .encode();
         let mut bad = frame;
         bad[0] ^= 0xFF;
         assert_eq!(NetChannelNotify::decode(&bad), Err(Errno::BadMagic));
+        // An undefined link or flag byte is refused, never read as a
+        // default: guessing "flowing" would leave a masked device wedged.
         let mut bad = frame;
-        bad[6] = 1;
-        assert_eq!(NetChannelNotify::decode(&bad), Err(Errno::BadMagic));
+        bad[6] = 0xFF;
+        assert_eq!(NetChannelNotify::decode(&bad), Err(Errno::OutOfRange));
+        let mut bad = frame;
+        bad[7] = 0xFF;
+        assert_eq!(NetChannelNotify::decode(&bad), Err(Errno::OutOfRange));
         assert_eq!(
             NetChannelNotify::decode(&frame[..7]),
             Err(Errno::BufferTooSmall)
@@ -888,6 +1147,7 @@ mod tests {
         let report = ServiceReport {
             transmitted: 3,
             received: 7,
+            filtered: 11,
             rx_ring_full: true,
             link: LinkState::Down,
         };
@@ -903,11 +1163,11 @@ mod tests {
         assert_eq!(decode_service_reply(&err), Err(Errno::BadMagic));
         // A flag byte that is neither 0 nor 1 is refused.
         let mut bad = encode_service_reply(Ok(report));
-        bad[4 + 8] = 2;
+        bad[4 + service::RX_RING_FULL] = 2;
         assert_eq!(decode_service_reply(&bad), Err(Errno::OutOfRange));
         // A link byte that is neither LINK_UP nor LINK_DOWN is refused.
         let mut bad = encode_service_reply(Ok(report));
-        bad[4 + 9] = 0x55;
+        bad[4 + service::LINK] = 0x55;
         assert_eq!(decode_service_reply(&bad), Err(Errno::OutOfRange));
     }
 }

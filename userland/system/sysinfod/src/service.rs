@@ -2119,6 +2119,7 @@ mod tests {
                 icmp_errors_suppressed: 0,
                 reassembly_expired: 0,
                 pending_dropped: 0,
+                rx_filtered: 0,
             },
         }
     }

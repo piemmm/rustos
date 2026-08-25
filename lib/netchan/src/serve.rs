@@ -13,18 +13,42 @@
 //! * a **call** wake decodes one request and drives the pure
 //!   [`NetChannelServer`]; `Attach` maps the granted frame region, `Service`
 //!   drives one device doorbell over it, `Detach` unmaps it;
-//! * an **interrupt** wake acknowledges the device (deasserting the line so
-//!   it never storms) and, when a region is attached, wakes the stack with a
-//!   single notify so it issues the next `Service`.
+//! * an **interrupt** wake masks the device's completion sources, harvests
+//!   the rings into the shared region itself, and wakes the stack with a
+//!   single notify.
+//!
+//! # Why the interrupt path harvests, and why it masks first
+//!
+//! Both halves of this exist because the naive shape — acknowledge, notify,
+//! re-park — is pathological on real hardware.
+//!
+//! *Masking.* A DMA engine's completion status is a latch over a **level**
+//! condition ("completed descriptors are waiting"). Acknowledging clears the
+//! latch, but with frames still undrained the condition re-latches at once,
+//! and the kernel re-arms the line every time this process parks. The driver
+//! then spins interrupt → acknowledge → notify → park at the speed of a
+//! context switch until the stack catches up — measurable as a permanently
+//! busy core on an otherwise idle machine. So the completion sources are
+//! masked on entry and unmasked only once the device has nothing left and
+//! the shared ring has room; a burst costs one interrupt instead of one per
+//! frame, which is the coalescing a fixed frame threshold cannot give.
+//!
+//! *Harvesting.* The frame region is already mapped here, so making the
+//! stack ask for the frames with a blocking call costs two extra process
+//! switches per batch for nothing. The interrupt fills the ring and rings
+//! the doorbell once; the stack reads the ring in its own time and calls
+//! back only when it has transmit work or the driver reported
+//! back-pressure. The ring's atomic counters are what make that safe.
 //!
 //! Compiled only for the bare-metal targets a driver binary is built for.
 
-use tairix_abi::driver::net::Net;
+use tairix_abi::driver::net::{LinkState, Net};
 use tairix_abi::driver::net_channel::{
     is_net_channel_endpoint, AttachParams, NetChannelNotify, NetChannelRequest,
     NETCHAN_NODE_COMPATIBLE, NET_CHANNEL_ENDPOINT_BASE, NET_CHANNEL_MAX_REPLY,
     NET_CHANNEL_MAX_REQUEST,
 };
+use tairix_abi::driver::net_ring::ServiceReport;
 use tairix_abi::hwtree::HW_NODE_ROOT;
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
@@ -34,7 +58,7 @@ use tairix_log::{log, Event, EventId, Level};
 use tairix_rt::LogSink;
 
 use crate::exit;
-use crate::NetChannelServer;
+use crate::{DrainStep, NetChannelServer};
 
 /// Diagnostic event id: the one-shot "device channel published, serving"
 /// beacon a NIC driver emits once its device is live and its endpoint is
@@ -57,6 +81,15 @@ const ENDPOINT_CAPACITY: usize = 4;
 /// Wait forever on the serve wait-set (a doorbell or an interrupt arrives
 /// whenever there is work).
 const WAIT_FOREVER_NS: u64 = u64::MAX;
+
+/// Device doorbells one wake may drive before returning to the wait set.
+///
+/// A fixed containment bound, not a capacity: a saturating flood must not
+/// pin this process in the drain loop and starve its call endpoint. Nothing
+/// is lost by stopping — the completion sources stay masked while the device
+/// still has frames, so the remaining work is picked up without another
+/// interrupt being needed to find it.
+const SERVICE_ROUNDS: u32 = 16;
 
 /// One mapping of the shared frame region the stack granted in `Attach`.
 struct Region {
@@ -122,7 +155,13 @@ pub fn serve<N: Net>(net: N, irq_handle: u64) -> i32 {
         },
     );
 
-    serve_loop(NetChannelServer::new(net), set, endpoint)
+    let mut server = NetChannelServer::new(net);
+    // The channel starts detached, so there is nowhere to harvest into yet.
+    // Bring-up left the device's completion sources enabled; mask them until
+    // an `Attach` gives this driver a region, or a device already receiving
+    // traffic would storm a driver that can only drop it.
+    let _ = server.net_mut().set_completion_interrupts(false);
+    serve_loop(server, set, endpoint)
 }
 
 /// Claim the first free id in the reserved device-channel endpoint block
@@ -195,23 +234,137 @@ fn serve_loop<N: Net>(mut server: NetChannelServer<N>, set: u64, endpoint: u64) 
             continue;
         }
         match token {
-            IRQ_TOKEN => on_interrupt(&mut server),
+            IRQ_TOKEN => on_interrupt(&mut server, &mut region),
             CALL_TOKEN => serve_call(&mut server, endpoint, &mut request, &mut region),
             _ => {}
         }
     }
 }
 
-/// Acknowledge the device interrupt (deasserting the line so it never
-/// storms while the stack has not yet serviced) and, when a frame region
-/// is attached, wake the stack with a single receive-frames notify. The
-/// driver never services the rings here — it only rings the stack's
-/// doorbell; the stack owns the region and issues the next `Service`.
-fn on_interrupt<N: Net>(server: &mut NetChannelServer<N>) {
+/// Serve one device interrupt: mask the completion sources, acknowledge the
+/// device, harvest the rings into the shared region, and wake the stack once
+/// if anything moved.
+///
+/// The mask comes first because the acknowledgement below clears a latch
+/// over a still-asserted level condition; leaving the source unmasked across
+/// the drain is what makes the driver spin.
+fn on_interrupt<N: Net>(server: &mut NetChannelServer<N>, region: &mut Option<Region>) {
+    let _ = server.net_mut().set_completion_interrupts(false);
     server.net_mut().ack_interrupt();
-    if let Some(notify_endpoint) = server.notify_endpoint() {
-        let _ = tairix_rt::ipc_send(notify_endpoint, &NetChannelNotify::encode());
+
+    let Some(region) = region.as_mut() else {
+        // Detached: there is no region to harvest into and no stack to wake.
+        // The sources stay masked until an `Attach` re-enables them, so a
+        // device left running cannot storm a driver with nowhere to put
+        // frames.
+        return;
+    };
+    let outcome = drain(server, region.bytes);
+    // A link change must reach the stack even when no frame moved — an
+    // idle interface's cable pull is exactly that case, and a bond failover
+    // keys on the report. A fault must reach it too: the sources are masked
+    // and the stack's `Service` is the only thing that can surface why.
+    if outcome.moved || outcome.link_changed || outcome.faulted {
+        if let Some(notify_endpoint) = server.notify_endpoint() {
+            let notify = NetChannelNotify {
+                link: outcome.link,
+                // A fault demands the same doorbell back-pressure does: the
+                // sources are masked and only a `Service` can release or
+                // diagnose them.
+                back_pressure: outcome.back_pressure || outcome.faulted,
+            };
+            let _ = tairix_rt::ipc_send(notify_endpoint, &notify.encode());
+        }
     }
+}
+
+/// What a [`drain`] pass observed.
+struct Drained {
+    /// Any frame was received or transmitted.
+    moved: bool,
+    /// The device's link state at the end of the pass.
+    link: LinkState,
+    /// The link differs from what the previous pass saw.
+    link_changed: bool,
+    /// The completion sources are still masked because the shared receive
+    /// ring filled; the stack must `Service` after draining to release them.
+    back_pressure: bool,
+    /// A service faulted, so the sources are still masked and only the
+    /// stack's next `Service` can surface the reason.
+    faulted: bool,
+}
+
+impl Drained {
+    /// Fold one service report in, keeping the latest link and whether it
+    /// moved from `previous`.
+    fn observe(&mut self, report: &ServiceReport, previous: LinkState) {
+        self.moved |= report.received > 0 || report.transmitted > 0;
+        self.link = report.link;
+        self.link_changed = report.link != previous;
+    }
+}
+
+/// Drive device doorbells over `bytes` until the device is quiet or the
+/// round budget is spent, unmask the completion sources when it is safe to,
+/// and report what was seen.
+///
+/// Unmasking is safe only once the device has handed over everything it had
+/// **and** the shared receive ring still has room. While either fails, the
+/// device's level condition is asserted or about to be, so unmasking would
+/// re-fire immediately; the stack's drain and its following `Service` are
+/// what re-enable the source instead.
+fn drain<N: Net>(server: &mut NetChannelServer<N>, bytes: &mut [u8]) -> Drained {
+    let previous = server.reported_link();
+    let mut outcome = Drained {
+        moved: false,
+        link: previous,
+        link_changed: false,
+        back_pressure: false,
+        faulted: false,
+    };
+    for _ in 0..SERVICE_ROUNDS {
+        let Ok(report) = server.service(bytes) else {
+            // A typed fault (a device error, a corrupt ring) cannot be
+            // reported from here, and re-arming into a device that just
+            // faulted would storm. So the sources stay masked — but the
+            // stack is told, because a masked source with nobody coming to
+            // release it is a permanently and *silently* dead interface.
+            // Its `Service` carries the reason.
+            outcome.faulted = true;
+            return outcome;
+        };
+        outcome.observe(&report, previous);
+        match DrainStep::of(&report) {
+            DrainStep::Continue => {}
+            DrainStep::BackPressure => {
+                outcome.back_pressure = true;
+                return outcome;
+            }
+            DrainStep::Quiet => {
+                // Re-arm, then look **once more** before believing the
+                // device is idle. A completion that landed between the
+                // service above and this re-arm raised no interrupt of its
+                // own: a source that signals only on a *new* completion
+                // (virtio's used-ring event suppression) would then never
+                // wake this driver again and the frame would sit there for
+                // good. Linux's `virtqueue_enable_cb` reports a non-empty
+                // queue for exactly this reason.
+                let _ = server.net_mut().set_completion_interrupts(true);
+                let Ok(after) = server.service(bytes) else {
+                    outcome.faulted = true;
+                    return outcome;
+                };
+                outcome.observe(&after, previous);
+                if matches!(DrainStep::of(&after), DrainStep::Quiet) {
+                    return outcome;
+                }
+                // Something did land in the window. Go round again masked,
+                // exactly as the interrupt path entered.
+                let _ = server.net_mut().set_completion_interrupts(false);
+            }
+        }
+    }
+    outcome
 }
 
 /// Serve one device-channel doorbell on the claimed endpoint: receive the
@@ -240,7 +393,15 @@ fn serve_call<N: Net>(
         }
         Ok(NetChannelRequest::Service) => {
             let reply = match region.as_mut() {
-                Some(region) => server.service_reply(region.bytes),
+                Some(region) => {
+                    let reply = server.service_reply(region.bytes);
+                    // The stack calls here after draining its ring, so this
+                    // is where a source masked for back-pressure gets its
+                    // chance to come back: keep servicing until the device
+                    // is quiet, which re-enables it.
+                    drain(server, region.bytes);
+                    reply
+                }
                 // Detached (or region lost): the server answers
                 // `NotConnected` before it ever touches the slice.
                 None => server.service_reply(&mut []),
@@ -251,7 +412,14 @@ fn serve_call<N: Net>(
             let reply = server.set_multicast_reply(&groups);
             let _ = tairix_rt::call_reply(endpoint, ticket, &reply);
         }
+        Ok(NetChannelRequest::SetRxFilter(policy)) => {
+            let reply = server.set_rx_filter_reply(policy);
+            let _ = tairix_rt::call_reply(endpoint, ticket, &reply);
+        }
         Ok(NetChannelRequest::Detach) => {
+            // Mask before releasing the region: a device left running with
+            // nowhere to harvest into would otherwise storm this driver.
+            let _ = server.net_mut().set_completion_interrupts(false);
             let reply = server.detach();
             if let Some(region) = region.take() {
                 let _ = tairix_rt::shm_unmap(region.base, region.len);
@@ -319,6 +487,9 @@ fn attach<N: Net>(
             len: map_len,
             bytes,
         });
+        // There is somewhere to put frames again, so the completion sources
+        // — masked whenever the channel is detached — are re-enabled.
+        let _ = server.net_mut().set_completion_interrupts(true);
     } else {
         // The server refused (geometry too small for the device); drop the
         // mapping it will never use.

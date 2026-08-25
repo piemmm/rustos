@@ -9,6 +9,7 @@
 //! conversion, and the error mapping.
 
 use alloc::boxed::Box;
+use alloc::string::ToString;
 use alloc::vec::Vec;
 
 use tairix_abi::net_ipc::{NetAddrFamily, NetResolverServer};
@@ -16,9 +17,9 @@ use tairix_abi::sysinfo::{NetInterfaceListRequest, SysinfoQueryId, SysinfoReques
 use tairix_abi::time::Duration64;
 use tairix_abi::Errno;
 use tairix_net::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
-use tairix_net::dns::{DnsTransport, RecordType, ResolveStatus, Wait};
+use tairix_net::dns::{AddrList, DnsTransport, RecordType, Resolution, ResolveStatus, Wait};
 
-use super::{configured_servers, resolve_name, ResolveError};
+use super::{address_parts, configured_servers, resolve_host, resolve_name, ResolveError};
 
 // -- The System Information API fake -------------------------------------
 
@@ -288,4 +289,147 @@ fn a_server_source_failure_is_reported() {
         result,
         Err(ResolveError::ServerSource(Errno::PermissionDenied))
     );
+}
+
+// -- The shared host-operand policy --------------------------------------
+
+/// A `Resolution` answering `Success` with one address.
+fn answered(address: IpAddr) -> Resolution {
+    Resolution {
+        status: ResolveStatus::Success,
+        addresses: AddrList::from_addrs(&[address]),
+        ttl_secs: 60,
+    }
+}
+
+/// A `Resolution` that concluded negatively.
+fn negative(status: ResolveStatus) -> Resolution {
+    Resolution {
+        status,
+        addresses: AddrList::default(),
+        ttl_secs: 0,
+    }
+}
+
+#[test]
+fn an_address_literal_resolves_without_a_query() {
+    let mut asked = Vec::new();
+    let mut query = |name: &str, record: RecordType| {
+        asked.push((name.to_string(), record));
+        None
+    };
+    let resolved = resolve_host("10.0.2.2", None, &mut query);
+    assert_eq!(
+        resolved,
+        Some(IpAddr::V4(Ipv4Addr::new(10, 0, 2, 2))),
+        "a literal is the address, with no resolver involved"
+    );
+    assert!(asked.is_empty(), "a literal never reaches the wire");
+}
+
+#[test]
+fn a_literal_of_the_wrong_forced_family_names_nothing() {
+    let mut query = |_name: &str, _record: RecordType| None;
+    assert_eq!(
+        resolve_host("::1", Some(NetAddrFamily::V4), &mut query),
+        None,
+        "-4 ::1 names nothing rather than connecting over v6"
+    );
+    assert_eq!(
+        resolve_host("10.0.2.2", Some(NetAddrFamily::V6), &mut query),
+        None
+    );
+}
+
+#[test]
+fn a_name_prefers_ipv6_then_falls_back_to_ipv4() {
+    let v6 = IpAddr::V6(Ipv6Addr::from([
+        0x20, 0x01, 0xd, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+    ]));
+    let mut order = Vec::new();
+    let mut query = |_name: &str, record: RecordType| {
+        order.push(record);
+        Some(answered(v6))
+    };
+    assert_eq!(resolve_host("example.com", None, &mut query), Some(v6));
+    assert_eq!(
+        order,
+        alloc::vec![RecordType::Aaaa],
+        "AAAA is tried first and its answer ends the search"
+    );
+
+    // With no AAAA, the A record answers.
+    let v4 = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34));
+    let mut order = Vec::new();
+    let mut query = |_name: &str, record: RecordType| {
+        order.push(record);
+        match record {
+            RecordType::Aaaa => Some(negative(ResolveStatus::NoData)),
+            RecordType::A => Some(answered(v4)),
+        }
+    };
+    assert_eq!(resolve_host("example.com", None, &mut query), Some(v4));
+    assert_eq!(order, alloc::vec![RecordType::Aaaa, RecordType::A]);
+}
+
+#[test]
+fn a_forced_family_queries_only_that_record_type() {
+    let v4 = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34));
+    let mut order = Vec::new();
+    let mut query = |_name: &str, record: RecordType| {
+        order.push(record);
+        Some(answered(v4))
+    };
+    assert_eq!(
+        resolve_host("example.com", Some(NetAddrFamily::V4), &mut query),
+        Some(v4)
+    );
+    assert_eq!(order, alloc::vec![RecordType::A], "-4 never asks for AAAA");
+}
+
+#[test]
+fn a_name_that_does_not_exist_resolves_to_nothing() {
+    let mut query = |_name: &str, _record: RecordType| Some(negative(ResolveStatus::NonExistent));
+    assert_eq!(resolve_host("nope.invalid", None, &mut query), None);
+}
+
+#[test]
+fn a_query_failure_moves_on_to_the_next_record_type() {
+    let v4 = IpAddr::V4(Ipv4Addr::new(10, 1, 2, 3));
+    let mut query = |_name: &str, record: RecordType| match record {
+        // A failed AAAA query (no server, transport error) must not mask a
+        // usable A record.
+        RecordType::Aaaa => None,
+        RecordType::A => Some(answered(v4)),
+    };
+    assert_eq!(resolve_host("example.com", None, &mut query), Some(v4));
+}
+
+#[test]
+fn a_success_with_no_address_is_not_an_answer() {
+    let mut query = |_name: &str, _record: RecordType| {
+        Some(Resolution {
+            status: ResolveStatus::Success,
+            addresses: AddrList::default(),
+            ttl_secs: 60,
+        })
+    };
+    assert_eq!(
+        resolve_host("example.com", None, &mut query),
+        None,
+        "a Success carrying no address never yields a fabricated one"
+    );
+}
+
+#[test]
+fn address_parts_places_ipv4_in_the_first_four_octets() {
+    let (family, bytes) = address_parts(IpAddr::V4(Ipv4Addr::new(10, 0, 2, 2)));
+    assert_eq!(family, NetAddrFamily::V4);
+    assert_eq!(&bytes[..4], &[10, 0, 2, 2]);
+    assert_eq!(&bytes[4..], &[0u8; 12], "the tail stays zeroed");
+
+    let v6 = Ipv6Addr::from([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    let (family, bytes) = address_parts(IpAddr::V6(v6));
+    assert_eq!(family, NetAddrFamily::V6);
+    assert_eq!(bytes, v6.octets());
 }

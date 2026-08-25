@@ -1112,6 +1112,7 @@ mod tests {
                 "rx.bps?window=",
                 "rx.bytes",
                 "rx.dropped",
+                "rx.filtered",
                 "rx.packets",
                 "rx.pps?window="
             ]
@@ -1385,7 +1386,7 @@ mod tests {
 
         // An interface's counters still complete under a real name.
         let iface = complete("cat stats:net/wan/", 18, CommandEnv::default(), &lister);
-        assert_eq!(iface.candidates.len(), 10, "6 counters and 4 rates");
+        assert_eq!(iface.candidates.len(), 11, "7 counters and 4 rates");
 
         // A fully typed leaf is a dead end, not a placeholder match.
         for line in ["cat stats:irq/count/", "cat stats:cpu/load/"] {

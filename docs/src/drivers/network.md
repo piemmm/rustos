@@ -32,12 +32,40 @@ Frame I/O is the shared-memory frame-ring transport
 (`tairix_abi::driver::net_ring`): the stack owns a `FrameRings` pair —
 queued transmits in `tx`, delivered frames in `rx` — and hands it to
 `service`, the single doorbell that moves frames both ways. The rings
-are mutated only *inside* the `service` call, so the call boundary is
-the synchronisation and the whole transport is safe Rust; no frame
-bytes cross the IPC when the region is shared between processes. Ring
-state read back from the region is untrusted: corrupt counters or slot
-lengths are refused (`BadMagic`), and a corrupt slot is consumed so it
-cannot wedge the queue behind it.
+are a genuine **single-producer, single-consumer** pair: a driver process
+harvests into the receive ring from its own device interrupt while the
+stack drains it, so the doorbell is *not* the synchronisation. The
+producer/consumer counters are `AtomicU32`s with a release-publish /
+acquire-observe discipline and sit in separate cache lines — in one line
+every publish would invalidate the peer's read of the other and the two
+CPUs would ping-pong it per frame. No frame bytes cross the IPC when the
+region is shared between processes.
+
+The region must be aligned for those counters. A cross-process region is
+`shm`-mapped and page-aligned already; `aligned_region` and
+`REGION_ALIGN_PADDING` cut an aligned view from a plain in-process buffer,
+and `bind` refuses a misaligned one (`BadAlignment`).
+
+Ring state read back from the region is untrusted, and *both* counters live
+in memory the peer can write: every operation snapshots them once and
+validates the occupancy before it addresses a slot, so a corrupt counter or
+slot length is a typed error rather than an out-of-bounds read, and a
+corrupt slot is consumed so it cannot wedge the queue behind it.
+
+### The receive pre-filter
+
+A frame enters a receive ring through one call, `FrameRings::deliver`,
+which consults the installed `RxAdmit` pre-filter *before* copying it. That
+is where a frame with no possible local consumer is shed — most broadcast
+traffic on a busy segment is addressed to other hosts, and each such frame
+otherwise costs a stack wake, a full parse and a drop. One implementation
+serves every driver, so none repeats it (`plans/NETWORK.md` N17d).
+
+Its bias is to **admit**: the stack still validates every frame it does
+receive, and the driver already owns the device and could drop whatever it
+liked, so refusing here grants nothing. Anything the classifier cannot
+parse confidently is admitted. `ServiceReport::filtered` counts what was
+shed, cumulatively, and surfaces as `stats:net/<iface>/rx.filtered`.
 
 Each slot also carries a small per-frame **offload descriptor**
 (`FrameOffload`) — the transport-neutral analogue of a device's
@@ -90,12 +118,20 @@ inverted and frames flowing both ways:
    recyclable PID), and sends `Attach { geometry, region_grant, class,
    notify_port }`; the driver `shm_map`s exactly that region
    (owner-checked — no ambient authority).
-3. `Service` is the doorbell: the driver services the mapped rings once
-   and replies a `ServiceReport`. Between doorbells the driver parks on
-   its device IRQ and `ipc_send`s a `NetChannelNotify` to `notify_port`
-   when receive frames arrive; the stack, parked on that port, issues the
-   next `Service`. Neither side busy-polls.
-4. `SetMulticast` replaces the group addresses the device admits. Sent
+3. `SetRxFilter` publishes the local addresses the driver's receive
+   pre-filter matches against; the stack re-sends it whenever an
+   interface's address set changes, and never on the frame path.
+4. `Service` is the doorbell: the driver services the mapped rings once
+   and replies a `ServiceReport`. It is **not** on the receive path — a
+   driver woken by its device interrupt masks its completion sources,
+   harvests into the shared ring itself, and `ipc_send`s one
+   `NetChannelNotify` carrying the live link and a back-pressure flag. The
+   stack reads the ring locally and rings the doorbell only when the device
+   has work this side created (something in the transmit ring) or the
+   notify said a source is masked awaiting release. A pure receive
+   therefore costs no call at all (`plans/NETWORK.md` N17a–b). Neither side
+   busy-polls.
+5. `SetMulticast` replaces the group addresses the device admits. Sent
    only to a device whose `DeviceFacts::multicast_filter` is
    `McastFilter::Slots(n)` — an `Unfiltered` device already delivers every
    group frame, so it costs no IPC — and only when the stack's membership
@@ -105,7 +141,29 @@ inverted and frames flowing both ways:
    than the device's slots is refused whole, the previously admitted set
    stays in force, and the stack audits the refusal: the filter is never
    widened (least of all to promiscuous) to make an over-large set fit.
-5. `Detach` releases the channel.
+6. `Detach` releases the channel.
+
+### Interrupt masking, and why it exists
+
+A DMA engine's completion status latches a **level** condition ("completed
+descriptors are waiting"). Acknowledging clears the latch, but with frames
+still undrained the condition re-latches at once, and the kernel re-arms
+the interrupt line every time the driver process parks. A driver that only
+acknowledged and notified therefore spun interrupt → acknowledge → notify →
+park at the speed of a context switch until the stack caught up —
+measurable as a permanently busy core on an otherwise idle machine.
+
+`Net::set_completion_interrupts` is the fix: the serve loop masks the
+device's data-path completion sources on entry and unmasks them only once
+the device is empty *and* the shared receive ring has room. A burst then
+costs one interrupt instead of one per frame, which is the coalescing a
+fixed frame threshold cannot give — so GENET's receive `MBUF_DONE_THRESH`
+stays at 1, as Linux's `bcmgenet` does. **Link and configuration-change
+sources are never masked**, or a cable pulled mid-flood would go unnoticed.
+The masking policy itself is the pure, host-tested `DrainStep`.
+
+The sources are also masked whenever the channel is detached, so a device
+left running cannot storm a driver with nowhere to put frames.
 
 Every frame in the contract decodes total and fail-closed (magic,
 version, reserved-must-be-zero, geometry/class bounds,
@@ -128,7 +186,7 @@ region itself; that remains the stack's responsibility.
 | Driver                    | Crate                           | Supported buses     | Status                                             |
 |---------------------------|---------------------------------|---------------------|----------------------------------------------------|
 | [virtio-net](./virtio.md) | `tairix-drv-network-virtio-net` | virtio (PCI / MMIO) | ring transport + facts; receive-checksum offload (`VIRTIO_NET_F_GUEST_CSUM` → `RX_CSUM_VALIDATED`); TCP transmit-checksum offload (`VIRTIO_NET_F_CSUM` → `TX_CSUM_TCP`); TCP segmentation offload (`VIRTIO_NET_F_HOST_TSO4`+`TSO6` → `TX_SEGMENT_TCP`); mergeable receive buffers (`VIRTIO_NET_F_MRG_RXBUF`); multiqueue receive (`VIRTIO_NET_F_MQ` + `VIRTIO_NET_F_CTRL_VQ`) |
-| GENET v5                  | `tairix-drv-network-genet`       | platform MMIO (aarch64) | ring transport + facts; MDIO/PHY autonegotiation at 10/100/1000; unicast + broadcast + 15-slot group receive filter; no offloads advertised (see below) |
+| GENET v5                  | `tairix-drv-network-genet`       | platform MMIO (aarch64) | ring transport + facts; MDIO/PHY autonegotiation at 10/100/1000; unicast + broadcast + 15-slot group receive filter; completion-interrupt masking; no offloads advertised (see below) |
 
 Both driver *processes* share one control plane: `lib/netchan` carries the
 `netchan-v1` server (`NetChannelServer`) and the process loop that claims a
@@ -307,6 +365,25 @@ queue (multiqueue needs a `tap` netdev with `queues=N`), so a dgram-backed
 guest sees `max_virtqueue_pairs = 1` and correctly stays single-queue —
 the host test is the authoritative proof, exactly as for the other
 offloads (`plans/NETWORK.md` N7c-2).
+
+### GENET hardware checksum offload: an open question, not a gap
+
+The GENET has checksum engines, and reaching them means enabling
+`RBUF_64B_EN` — the 64-byte status-block descriptor mode. That mode changes
+the layout of **every received frame**, and how it interacts with the
+`RBUF_ALIGN_2B` two-byte pad this driver already programs is a hardware
+fact this tree does not establish. QEMU models no GENET, so no test here
+can establish it either, and getting it wrong costs *all* receive on the
+device.
+
+So it is not guessed at. The driver advertises `NetOffloads::empty()`, the
+`lib/net` software path (which is the byte-for-byte oracle for every
+offload anyway, and allocates nothing in steady state) carries the work,
+and the question is recorded as an on-metal acceptance item in
+`plans/PI.md`. This is a deliberate refusal to write speculative MMIO on a
+receive path, not an oversight: the measured cost on this device was
+interrupt and IPC overhead, which `plans/NETWORK.md` N17 removes, and not
+checksum arithmetic.
 
 ### Per-architecture offload state
 

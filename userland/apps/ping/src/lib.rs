@@ -5,10 +5,22 @@
 //! familiar iputils shape: one line per reply with its sequence number and
 //! time, then a closing statistics block. `-c` bounds the request count,
 //! `-i` sets the interval, `-s` the payload size, `-W` the per-reply
-//! timeout, `-w` an overall deadline, `-4`/`-6` force the family, `-q` is
-//! quiet, and `-n` is numeric (always in force — there is no name resolver
-//! in this plan, so the target must be a literal address). `-?`/`--help`
-//! render the tool's own short help through the shared `lib/help` engine.
+//! timeout, `-w` an overall deadline, `-p` a fixed payload pattern,
+//! `-4`/`-6` force the family, `-q` is quiet, and `-n` is numeric (accepted
+//! and inert — no reverse lookup is ever performed). `-?`/`--help` render
+//! the tool's own short help through the shared `lib/help` engine.
+//!
+//! The target operand is an address literal **or a host name**: a name is
+//! resolved through the shared userland stub resolver (`lib/resolver`),
+//! which reads the host's configured recursive servers from the System
+//! Information API and drives the pure `lib/net` DNS engine. A literal
+//! needs no query, so a literal target works with no resolver configured.
+//!
+//! Each request carries **high-entropy random data by default**, drawn
+//! fresh per request. A link that compresses or de-duplicates traffic would
+//! otherwise report a throughput and latency that say nothing about its real
+//! capacity, and the echoed random bytes double as a per-packet integrity
+//! check. `-p <hex>` opts into a deterministic repeating pattern.
 //!
 //! # How it reaches the network
 //!
@@ -27,7 +39,8 @@
 //! the outside world are the injected seams, so the whole engine is
 //! host-testable with no kernel:
 //!
-//! * [`net::PingIo`] — the clock, the echo socket, and the wait/park.
+//! * [`net::PingIo`] — name resolution, the clock, the echo socket, the
+//!   payload entropy, and the wait/park.
 //! * [`Output`] — the per-reply lines and statistics on standard output,
 //!   diagnostics on standard error.
 //! * [`tairix_help::HelpSource`] — the tool's own `Help/` tree, read by the
@@ -59,7 +72,7 @@ pub mod io;
 pub mod net;
 
 pub use client::{run, RunSummary, USAGE};
-pub use command::{parse, Command, Config, ParseError, Target};
+pub use command::{parse, Command, Config, HostTarget, ParseError, PayloadKind, Target};
 pub use error::PingError;
 pub use io::Output;
-pub use net::{EchoReply, PingIo};
+pub use net::{EchoReply, PingIo, ResolveFailure};

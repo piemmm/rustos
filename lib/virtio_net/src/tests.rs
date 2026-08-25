@@ -10,7 +10,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 use tairix_abi::driver::net::NetOffloads;
-use tairix_abi::driver::net_ring::{FrameOffload, RingGeometry};
+use tairix_abi::driver::net_ring::{
+    aligned_region, FrameOffload, RingGeometry, REGION_ALIGN_PADDING, RING_HEADER_LEN,
+    SLOT_META_LEN,
+};
 use tairix_abi::driver::BufferClass;
 use tairix_virtio::{ChainView, CompletionSignal, DmaHost, MockHost, MockTransport};
 
@@ -205,12 +208,20 @@ fn test_geometry() -> RingGeometry {
     RingGeometry::new(4, 2048, 2048, 1).expect("test geometry")
 }
 
+/// Backing buffer for one frame region, over-allocated so an aligned region
+/// of the geometry's length can be cut from it: the ring headers' counters
+/// are atomics, and a plain `Vec<u8>` is only byte-aligned.
 fn rings_region() -> Vec<u8> {
-    vec![0u8; test_geometry().region_len()]
+    vec![0u8; test_geometry().region_len() + REGION_ALIGN_PADDING]
 }
 
-fn bind_rings(region: &mut [u8], class: BufferClass) -> FrameRings<'_> {
-    FrameRings::bind(region, test_geometry(), class).expect("bind rings")
+/// The aligned, exact-length frame region inside `buffer`.
+fn region_of(buffer: &mut [u8]) -> &mut [u8] {
+    aligned_region(buffer, test_geometry().region_len()).expect("aligned frame region")
+}
+
+fn bind_rings(buffer: &mut [u8], class: BufferClass) -> FrameRings<'_> {
+    FrameRings::bind(region_of(buffer), test_geometry(), class).expect("bind rings")
 }
 
 /// Simulate the device completing the driver's posted receive chain and
@@ -690,13 +701,15 @@ fn corrupt_tx_slot_is_consumed_and_flow_continues() {
         rings.tx.push(&[0u8; 60]).expect("queue victim");
         rings.tx.push(&arp_frame()).expect("queue good");
     }
-    // The TX ring is the second half of the region; its first slot's
-    // length prefix sits after the 8-byte ring header and the 9-byte
-    // per-frame offload-metadata prefix (tag + two u16 checksum offsets
-    // + two u16 segmentation fields).
-    let tx_ring_base = test_geometry().rx_ring_len();
-    let len_prefix = tx_ring_base + 8 + 9;
-    region[len_prefix..len_prefix + 4].copy_from_slice(&8000u32.to_le_bytes());
+    // Corrupt the first transmit slot's length prefix, as a hostile or
+    // buggy peer would. Its offset is derived from the shared layout
+    // constants, never hard-coded: the transmit ring follows the receive
+    // rings, then the ring header, then the per-frame offload metadata.
+    let len_prefix = test_geometry().rx_ring_len() + RING_HEADER_LEN + SLOT_META_LEN;
+    {
+        let bytes = region_of(&mut region);
+        bytes[len_prefix..len_prefix + 4].copy_from_slice(&8000u32.to_le_bytes());
+    }
     let mut rings = bind_rings(&mut region, BufferClass::NonSensitive);
     let report = net.service(&mut rings).expect("service");
     assert_eq!(report.transmitted, 1);
