@@ -264,18 +264,32 @@ fn on_interrupt<N: Net>(server: &mut NetChannelServer<N>, region: &mut Option<Re
     // idle interface's cable pull is exactly that case, and a bond failover
     // keys on the report. A fault must reach it too: the sources are masked
     // and the stack's `Service` is the only thing that can surface why.
-    if outcome.moved || outcome.link_changed || outcome.faulted {
+    if outcome.moved || outcome.link_changed || outcome.masked != Masked::No {
         if let Some(notify_endpoint) = server.notify_endpoint() {
             let notify = NetChannelNotify {
                 link: outcome.link,
-                // A fault demands the same doorbell back-pressure does: the
-                // sources are masked and only a `Service` can release or
-                // diagnose them.
-                back_pressure: outcome.back_pressure || outcome.faulted,
+                // Either reason for a masked source demands the same
+                // doorbell: only a `Service` can release or diagnose it.
+                back_pressure: outcome.masked != Masked::No,
             };
             let _ = tairix_rt::ipc_send(notify_endpoint, &notify.encode());
         }
     }
+}
+
+/// Why a [`drain`] left the device's completion sources masked, if it did.
+///
+/// Two causes, one state: either way the device will raise no further
+/// interrupt and only the stack's next `Service` can release or diagnose it.
+/// Naming that state once keeps the two from drifting apart.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Masked {
+    /// Not masked: the device fell quiet and the sources were re-armed.
+    No,
+    /// The shared receive ring filled while the device still had frames.
+    BackPressure,
+    /// A service faulted, so re-arming would storm a broken device.
+    Fault,
 }
 
 /// What a [`drain`] pass observed.
@@ -286,12 +300,8 @@ struct Drained {
     link: LinkState,
     /// The link differs from what the previous pass saw.
     link_changed: bool,
-    /// The completion sources are still masked because the shared receive
-    /// ring filled; the stack must `Service` after draining to release them.
-    back_pressure: bool,
-    /// A service faulted, so the sources are still masked and only the
-    /// stack's next `Service` can surface the reason.
-    faulted: bool,
+    /// Whether the completion sources were left masked, and why.
+    masked: Masked,
 }
 
 impl Drained {
@@ -319,8 +329,7 @@ fn drain<N: Net>(server: &mut NetChannelServer<N>, bytes: &mut [u8]) -> Drained 
         moved: false,
         link: previous,
         link_changed: false,
-        back_pressure: false,
-        faulted: false,
+        masked: Masked::No,
     };
     for _ in 0..SERVICE_ROUNDS {
         let Ok(report) = server.service(bytes) else {
@@ -330,14 +339,14 @@ fn drain<N: Net>(server: &mut NetChannelServer<N>, bytes: &mut [u8]) -> Drained 
             // stack is told, because a masked source with nobody coming to
             // release it is a permanently and *silently* dead interface.
             // Its `Service` carries the reason.
-            outcome.faulted = true;
+            outcome.masked = Masked::Fault;
             return outcome;
         };
         outcome.observe(&report, previous);
         match DrainStep::of(&report) {
             DrainStep::Continue => {}
             DrainStep::BackPressure => {
-                outcome.back_pressure = true;
+                outcome.masked = Masked::BackPressure;
                 return outcome;
             }
             DrainStep::Quiet => {
@@ -351,7 +360,7 @@ fn drain<N: Net>(server: &mut NetChannelServer<N>, bytes: &mut [u8]) -> Drained 
                 // queue for exactly this reason.
                 let _ = server.net_mut().set_completion_interrupts(true);
                 let Ok(after) = server.service(bytes) else {
-                    outcome.faulted = true;
+                    outcome.masked = Masked::Fault;
                     return outcome;
                 };
                 outcome.observe(&after, previous);
