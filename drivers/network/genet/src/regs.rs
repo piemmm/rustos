@@ -231,7 +231,7 @@ pub const UMAC_MDF_CTRL: usize = UMAC + 0x650;
 pub const UMAC_MDF_ADDR: usize = UMAC + 0x654;
 
 /// Destination-address filter slots the UniMAC provides.
-pub const MDF_SLOTS: u32 = 17;
+pub const MDF_SLOTS: u16 = 17;
 
 /// Bytes one destination-address filter slot occupies.
 pub const MDF_SLOT_STRIDE: usize = 8;

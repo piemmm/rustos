@@ -87,6 +87,7 @@ use alloc::string::String;
 use core::fmt;
 
 use tairix_abi::driver_store::SystemConfigFile;
+use tairix_abi::net_ipc::NetworkSettings;
 use tairix_util::conf::strip_comment;
 
 /// The directory that holds the boot-time configuration store.
@@ -400,6 +401,30 @@ impl Key {
         Self::NetTcpEcn,
     ];
 
+    /// Whether this key belongs to the stack-wide `net.*` family, and so
+    /// changes the policy the network stack runs on.
+    ///
+    /// Matched exhaustively rather than by name prefix, so a new key must
+    /// state which family it joins instead of inheriting one from its
+    /// spelling.
+    #[must_use]
+    pub const fn is_network(self) -> bool {
+        match self {
+            Self::NetIpv4Enabled
+            | Self::NetIpv6Enabled
+            | Self::NetIpv6Privacy
+            | Self::NetTcpSynCookies
+            | Self::NetTcpKeepalive
+            | Self::NetTcpEcn => true,
+            Self::LoginType
+            | Self::CacheAll
+            | Self::CacheFilesystem
+            | Self::CacheBlock
+            | Self::CacheTransform
+            | Self::CacheSemantic => false,
+        }
+    }
+
     /// The canonical key spelling.
     #[must_use]
     pub const fn name(self) -> &'static str {
@@ -548,6 +573,24 @@ impl Default for SystemConfig {
 }
 
 impl SystemConfig {
+    /// The stack-wide network policy these `net.*` keys describe, in the
+    /// wire form the network stack's admin endpoint accepts.
+    ///
+    /// The one mapping from this document to that message, so every
+    /// deliverer — the device manager at boot, `configure` when it changes a
+    /// key — hands the stack the same policy for the same document.
+    #[must_use]
+    pub const fn network_settings(&self) -> NetworkSettings {
+        NetworkSettings {
+            ipv4_enabled: self.net_ipv4_enabled.is_enabled(),
+            ipv6_enabled: self.net_ipv6_enabled.is_enabled(),
+            syncookies_always: matches!(self.net_tcp_syncookies, SynCookies::Always),
+            ipv6_privacy: self.net_ipv6_privacy.is_enabled(),
+            tcp_keepalive: self.net_tcp_keepalive.is_enabled(),
+            tcp_ecn: self.net_tcp_ecn.is_enabled(),
+        }
+    }
+
     /// Parse and validate a store `text`.
     ///
     /// # Errors
@@ -1005,6 +1048,40 @@ mod tests {
         );
         // A refused set leaves the configuration unchanged.
         assert_eq!(config.login_type, LoginType::Graphical);
+    }
+
+    #[test]
+    fn exactly_the_net_keys_are_the_network_family() {
+        // The classifier decides whether a change is delivered to the running
+        // network stack, so a key joining the wrong family would either be
+        // silently dropped or hand the stack an unrelated edit.
+        for key in Key::ALL {
+            assert_eq!(
+                key.is_network(),
+                key.name().starts_with("net."),
+                "{}",
+                key.name()
+            );
+        }
+    }
+
+    #[test]
+    fn the_network_settings_mapping_reads_every_net_key() {
+        let mut config = SystemConfig::default();
+        let defaults = config.network_settings();
+        assert!(defaults.ipv4_enabled && defaults.ipv6_enabled);
+        assert!(!defaults.syncookies_always);
+        assert!(!defaults.ipv6_privacy && !defaults.tcp_keepalive && !defaults.tcp_ecn);
+
+        config.net_ipv4_enabled = NetToggle::Disabled;
+        config.net_tcp_syncookies = SynCookies::Always;
+        config.net_ipv6_privacy = NetToggle::Enabled;
+        config.net_tcp_keepalive = NetToggle::Enabled;
+        config.net_tcp_ecn = NetToggle::Enabled;
+        let set = config.network_settings();
+        assert!(!set.ipv4_enabled && set.ipv6_enabled);
+        assert!(set.syncookies_always && set.ipv6_privacy);
+        assert!(set.tcp_keepalive && set.tcp_ecn);
     }
 
     #[test]

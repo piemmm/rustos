@@ -20,9 +20,9 @@
 //! over it for each phase and never touches ring bytes across the doorbell,
 //! so the call boundary is the whole synchronisation (`net_ring`).
 
-use tairix_abi::driver::net::{DeviceFacts, Net};
+use tairix_abi::driver::net::{DeviceFacts, MacAddress, Net};
 use tairix_abi::driver::net_channel::{
-    decode_facts_reply, decode_service_reply, AttachParams, NetChannelRequest,
+    decode_facts_reply, decode_service_reply, AttachParams, McastGroups, NetChannelRequest,
     NET_CHANNEL_MAX_REPLY,
 };
 use tairix_abi::driver::net_ring::{FrameRings, RingGeometry, ServiceReport};
@@ -54,6 +54,15 @@ pub trait FrameService {
     ///
     /// A device fault or a corrupt ring state as a typed [`Errno`].
     fn service(&mut self) -> Result<ServiceReport, Errno>;
+
+    /// Replace the group addresses the device admits.
+    ///
+    /// # Errors
+    ///
+    /// The driver's typed refusal: [`Errno::NotImplemented`] from a device
+    /// that does not filter groups, or [`Errno::LengthOutOfRange`] when the
+    /// set exceeds its slots (the previously admitted set stays in force).
+    fn set_multicast_groups(&mut self, groups: &[MacAddress]) -> Result<(), Errno>;
 }
 
 /// An in-process [`Net`] device engine presented as a [`FrameService`] over
@@ -123,6 +132,12 @@ impl<N: Net> FrameService for LocalFrameService<'_, N> {
         let mut rings = FrameRings::bind(self.region, self.geometry, self.class)?;
         self.net
             .service(&mut rings)
+            .map_err(tairix_abi::DriverError::as_errno)
+    }
+
+    fn set_multicast_groups(&mut self, groups: &[MacAddress]) -> Result<(), Errno> {
+        self.net
+            .set_multicast_groups(groups)
             .map_err(tairix_abi::DriverError::as_errno)
     }
 }
@@ -232,6 +247,23 @@ impl<'r, T: NetChannelTransport> NetChannelClient<'r, T> {
         decode_status_reply(&reply[..reply_len])
     }
 
+    /// Replace the group addresses the driver's device admits.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] if `groups` exceeds
+    /// [`MAX_MCAST_GROUPS`](tairix_abi::driver::net::MAX_MCAST_GROUPS) or
+    /// holds a non-group address, a transport error, or the driver's typed
+    /// refusal.
+    pub fn set_multicast(&mut self, groups: &[MacAddress]) -> Result<(), Errno> {
+        let mut request = [0u8; NetChannelRequest::MAX_WIRE_LEN];
+        let len =
+            NetChannelRequest::SetMulticast(McastGroups::new(groups)?).encode(&mut request)?;
+        let mut reply = [0u8; NET_CHANNEL_MAX_REPLY];
+        let reply_len = self.transport.call(&request[..len], &mut reply)?;
+        decode_status_reply(&reply[..reply_len])
+    }
+
     fn doorbell(&mut self) -> Result<ServiceReport, Errno> {
         let mut request = [0u8; NetChannelRequest::MAX_WIRE_LEN];
         let len = NetChannelRequest::Service.encode(&mut request)?;
@@ -256,5 +288,9 @@ impl<T: NetChannelTransport> FrameService for NetChannelClient<'_, T> {
 
     fn service(&mut self) -> Result<ServiceReport, Errno> {
         self.doorbell()
+    }
+
+    fn set_multicast_groups(&mut self, groups: &[MacAddress]) -> Result<(), Errno> {
+        self.set_multicast(groups)
     }
 }

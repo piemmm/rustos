@@ -42,12 +42,12 @@ than driven against a register layout that may not describe it.
   addressable (ARP, a DHCP offer, a unicast reply). Promiscuous reception is
   never enabled: it would hand the network stack frames addressed to other
   hosts on the segment.
-- **Multicast is not yet received** (`plans/NETWORK.md` N14d). The MDF has 17
-  slots and admitting a group address is one more slot, but the driver has no
-  seam through which the stack can ask for one, so IPv6 — whose neighbour
-  discovery and router solicitation are multicast — cannot complete on this
-  NIC yet. IPv4 is unaffected. The alternative, promiscuous reception, is
-  refused above.
+- **Group addresses** take the remaining 15 of the MDF's 17 slots. The driver
+  reports them as `McastFilter::Slots(15)` and the stack programs the set it
+  needs through `Net::set_multicast_groups`, replacing it whole each time its
+  membership changes (`plans/NETWORK.md` N14d). A set larger than the table is
+  refused whole — the working set stays, and the filter is never widened to
+  make it fit.
 - **Receive**: descriptors are armed once with `DMA_OWN` and never rewritten;
   the consumer index alone hands a slot back, so the hot path writes one
   register per frame. `RBUF_ALIGN_2B` is enabled, so a frame starts two bytes

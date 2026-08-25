@@ -14,7 +14,7 @@
 //! the same seeded stream until `TAIRIX_FUZZ_BUDGET_SECS` elapses under
 //! `cargo xtask fuzz`.
 
-use tairix_abi::driver::net::{DeviceFacts, LinkState, MacAddress, NetOffloads};
+use tairix_abi::driver::net::{DeviceFacts, LinkState, MacAddress, McastFilter, NetOffloads};
 use tairix_abi::net_ipc::{NetAddrFamily, NetIfKind, IF_NAME_LEN};
 use tairix_abi::{
     CapabilityId, CapabilitySummary, Duration64, Origin, ProcId, TrustDomain, ORIGIN_CONSOLE_NONE,
@@ -51,6 +51,7 @@ fn facts() -> DeviceFacts {
         link: LinkState::Up,
         offloads: NetOffloads::empty(),
         rx_queues: 1,
+        multicast_filter: McastFilter::Unfiltered,
     }
 }
 

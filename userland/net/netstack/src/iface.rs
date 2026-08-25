@@ -12,7 +12,7 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use tairix_abi::driver::net::{DeviceFacts, LinkState, NetOffloads};
+use tairix_abi::driver::net::{DeviceFacts, LinkState, MacAddress, McastFilter, NetOffloads};
 use tairix_abi::driver::net_ring::{FrameOffload, FrameRings};
 use tairix_abi::net_ipc::{
     validate_if_name, NetAddrFamily, NetAddrState, NetBondConfigMsg, NetBondMemberRecord,
@@ -75,6 +75,41 @@ pub type FrameBatch = Vec<([u8; IF_NAME_LEN], Vec<TxFrame>)>;
 /// interface's bound driver channel (keyed by name).
 pub type IfaceRename = Option<([u8; IF_NAME_LEN], [u8; IF_NAME_LEN])>;
 
+/// Mirror `iface`'s engine group memberships into its device's group filter
+/// when they have changed since the last successful push.
+///
+/// A device that does no group filtering needs nothing (and is never called,
+/// so an unfiltered channel costs no IPC per pump). Otherwise the set is
+/// rebuilt and pushed only when the engine's multicast revision has moved,
+/// so a steady interface pays one integer comparison per pump.
+///
+/// Returns the number of addresses the device refused, when it refused: the
+/// caller audits that, because the groups that did not fit are genuinely no
+/// longer delivered. A refusal deliberately does **not** record the revision
+/// as pushed, so the next pump retries — a set that shrinks back within the
+/// device's slots recovers on its own.
+fn push_multicast<F: FrameService>(
+    iface: &mut Interface,
+    fs: &mut F,
+    scratch: &mut Vec<MacAddress>,
+) -> Option<usize> {
+    if matches!(iface.facts.multicast_filter, McastFilter::Unfiltered) {
+        return None;
+    }
+    let revision = iface.stack.multicast_revision();
+    if iface.pushed_multicast == Some(revision) {
+        return None;
+    }
+    iface.stack.multicast_macs(scratch);
+    match fs.set_multicast_groups(scratch) {
+        Ok(()) => {
+            iface.pushed_multicast = Some(revision);
+            None
+        }
+        Err(_) => Some(scratch.len()),
+    }
+}
+
 /// What one [`Netstack::service_interface`] pump produced.
 ///
 /// The engine events the pump routes to the socket layer, plus the
@@ -90,6 +125,11 @@ pub struct ServiceOutcome {
     /// The interface's new link state, `Some` only when it differs from
     /// the state recorded before this pump.
     pub link_change: Option<LinkState>,
+    /// How many group addresses the device refused to admit, `Some` only
+    /// when this pump tried to reprogram its filter and it would not fit.
+    /// The service audits it; reception of the groups that did not fit is
+    /// genuinely lost, so it is never silent.
+    pub multicast_refused: Option<usize>,
 }
 
 /// One managed interface: its admin-chosen alias, link kind, and the
@@ -114,6 +154,10 @@ pub struct Interface {
     /// device manager delivered, empty when none. They join this
     /// interface's DHCP-learned servers in [`Netstack::resolver_servers`].
     static_dns: Vec<NetResolverServer>,
+    /// The engine multicast revision last successfully programmed into the
+    /// device's group filter, or [`None`] while nothing has been programmed.
+    /// The pump reprograms only when the engine's revision moves off this.
+    pushed_multicast: Option<u64>,
 }
 
 impl Interface {
@@ -186,6 +230,10 @@ pub struct Netstack {
     /// [`DhcpRngFactory`]). A fresh source is drawn each time an interface
     /// is configured for DHCPv4 and handed to its [`Stack`].
     dhcp_rng_factory: DhcpRngFactory,
+    /// Reusable buffer for the group-address set pushed to a filtering
+    /// device — allocated once, rebuilt only when an engine's multicast
+    /// revision moves.
+    mcast_scratch: Vec<MacAddress>,
 }
 
 impl Netstack {
@@ -202,6 +250,7 @@ impl Netstack {
             out: StackOutput::default(),
             temp_factory,
             dhcp_rng_factory,
+            mcast_scratch: Vec::new(),
         }
     }
 
@@ -268,6 +317,7 @@ impl Netstack {
             role: BondRole::None,
             node_location,
             static_dns: Vec::new(),
+            pushed_multicast: None,
         });
         Ok(())
     }
@@ -1056,6 +1106,7 @@ impl Netstack {
             settings: _,
             temp_factory: _,
             dhcp_rng_factory: _,
+            mcast_scratch,
         } = self;
         let iface = &mut interfaces[index];
         let mut events = Vec::new();
@@ -1064,6 +1115,11 @@ impl Netstack {
         // queued into the TX ring bound over the service's own region.
         iface.stack.advance(now, out);
         events.append(&mut out.events);
+        // Mirror the engine's group memberships into a filtering device
+        // *before* the doorbell, so a group this advance joined (a fresh
+        // address's solicited-node group, whose DAD probe the same advance
+        // just queued) is admitted before any answer to it could arrive.
+        let multicast_refused = push_multicast(iface, fs, mcast_scratch);
         {
             let mut rings = FrameRings::bind(fs.region_mut(), geometry, class)?;
             queue_frames(&mut rings, &out.frames);
@@ -1123,6 +1179,7 @@ impl Netstack {
         Ok(ServiceOutcome {
             events,
             link_change,
+            multicast_refused,
         })
     }
 
@@ -1305,6 +1362,7 @@ impl Netstack {
             node_location: 0,
             // Populated when the bond's own interface config is applied.
             static_dns: Vec::new(),
+            pushed_multicast: None,
         });
         Ok(())
     }

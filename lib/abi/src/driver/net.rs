@@ -127,9 +127,35 @@ impl NetOffloads {
     }
 }
 
+/// How a device filters *group* (multicast) destination addresses.
+///
+/// A device that filters in hardware delivers only the group addresses it
+/// has been given, so the stack must hand it the set it wants to receive or
+/// see nothing — IPv6 neighbour discovery, router solicitation, and DAD are
+/// all multicast. Reporting this honestly is what lets the stack skip the
+/// programming entirely on a device that does no filtering.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum McastFilter {
+    /// Every group frame already reaches the stack; there is nothing to
+    /// program and [`Net::set_multicast_groups`] is never called.
+    Unfiltered,
+    /// The device admits only the group addresses it is given, at most this
+    /// many of them. Zero means the device filters but has no group
+    /// capacity at all.
+    Slots(u16),
+}
+
+/// Largest group-address set the stack asks a driver to admit.
+///
+/// A fixed validation bound on the control message, not a capacity: it sits
+/// above every device table in the tree (the largest is the GENET's 17
+/// slots), so the *device's* slot count is what actually binds and the wire
+/// never silently truncates a set that would have fitted the hardware.
+pub const MAX_MCAST_GROUPS: usize = 32;
+
 /// Typed report of a network device's facts (`plans/NETWORK.md` §2.3):
 /// its link-layer address, MTU, live link state, verified offload set,
-/// and receive-queue count.
+/// receive-queue count, and group-address filtering.
 ///
 /// The report describes the *device*, never the network: nothing in it
 /// is attacker-controlled, but the stack still validates it whole
@@ -153,6 +179,9 @@ pub struct DeviceFacts {
     /// At least 1: a device with no receive queue is not a network
     /// device.
     pub rx_queues: u16,
+    /// How the device filters group destinations, which decides whether the
+    /// stack must program its multicast set at all.
+    pub multicast_filter: McastFilter,
 }
 
 impl DeviceFacts {
@@ -244,6 +273,41 @@ pub trait Net {
     /// Requires [`CapabilityId::NET_RAW`](crate::CapabilityId::NET_RAW).
     fn service(&mut self, rings: &mut FrameRings<'_>) -> Result<ServiceReport, DriverError>;
 
+    /// Replace the set of group (multicast) destination addresses the
+    /// device admits with `groups`.
+    ///
+    /// Replacing the whole set rather than adding and removing keeps one
+    /// authoritative copy: the stack owns the membership and the device
+    /// mirrors it, so the two cannot drift apart through a lost increment.
+    /// The device's own unicast address and broadcast are not part of this
+    /// set — a driver admits those unconditionally.
+    ///
+    /// The stack calls this only on a device whose
+    /// [`DeviceFacts::multicast_filter`] is
+    /// [`McastFilter::Slots`]; the default refusal is therefore correct for
+    /// an [`McastFilter::Unfiltered`] device, and makes a driver that claims
+    /// slots without implementing this fail loudly rather than silently
+    /// dropping every group frame.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::Unsupported`] if the device does not filter groups.
+    /// * [`DriverError::LengthOutOfRange`] if `groups` exceeds the reported
+    ///   slot count — the previously admitted set is left in place rather
+    ///   than partially replaced, and the driver never widens the filter to
+    ///   make an over-large set fit.
+    /// * [`DriverError::DeviceFault`] if the hardware could not be
+    ///   programmed.
+    ///
+    /// # Capabilities
+    ///
+    /// Requires [`CapabilityId::NET_RAW`](crate::CapabilityId::NET_RAW), as
+    /// [`service`](Self::service) does: it changes what the device delivers.
+    fn set_multicast_groups(&mut self, groups: &[MacAddress]) -> Result<(), DriverError> {
+        let _ = groups;
+        Err(DriverError::Unsupported)
+    }
+
     /// Acknowledge the device's pending interrupt, deasserting the line.
     ///
     /// A user-space NIC driver parks on the device interrupt and, when it
@@ -317,6 +381,7 @@ mod tests {
             link: LinkState::Up,
             offloads: NetOffloads::empty(),
             rx_queues: 1,
+            multicast_filter: McastFilter::Unfiltered,
         }
     }
 

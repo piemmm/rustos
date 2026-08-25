@@ -1007,6 +1007,19 @@ mod tests {
     const PURE_TOOL_REQUEST: &[CapabilityId] =
         &[CapabilityId::CONSOLE_WRITE, CapabilityId::FS_ACCESS];
 
+    // `configure` is a store-only tool plus one thing: a changed `net.*`
+    // key must reach the *running* network stack over its admin endpoint
+    // (CAP_NET_ADMIN), because the store write alone would only take
+    // effect at the next boot and the stack holds no filesystem
+    // capability to read the store itself. A caller whose ceiling
+    // withholds it still saves the setting and is told the running stack
+    // did not take it.
+    const CONFIGURE_REQUEST: &[CapabilityId] = &[
+        CapabilityId::CONSOLE_WRITE,
+        CapabilityId::FS_ACCESS,
+        CapabilityId::NET_ADMIN,
+    ];
+
     // The `desktop` command app — the graphical desktop session
     // (plans/DISPLAY.md D7c, plans/APPWIN.md AW3/AW5), started by a
     // graphical login or by the shell's `desktop` command word: the
@@ -1301,7 +1314,7 @@ mod tests {
             ("chmod", ProgramKind::Command, PURE_TOOL_REQUEST),
             ("clear", ProgramKind::Command, CLEAR_MANIFEST),
             ("confd", ProgramKind::Service, CONFD_MANIFEST),
-            ("configure", ProgramKind::Command, PURE_TOOL_REQUEST),
+            ("configure", ProgramKind::Command, CONFIGURE_REQUEST),
             ("cp", ProgramKind::Command, FILE_TOOL_REQUEST),
             ("datetime", ProgramKind::Application, DATETIME_REQUEST),
             ("desktop", ProgramKind::Application, DESKTOP_SESSION_REQUEST),

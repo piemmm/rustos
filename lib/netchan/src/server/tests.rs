@@ -6,9 +6,11 @@ extern crate alloc;
 
 use super::NetChannelServer;
 use tairix_abi::driver::net::{
-    DeviceFacts, LinkState, MacAddress, Net, NetOffloads, ETHERNET_HEADER_LEN,
+    DeviceFacts, LinkState, MacAddress, McastFilter, Net, NetOffloads, ETHERNET_HEADER_LEN,
 };
-use tairix_abi::driver::net_channel::{decode_facts_reply, decode_service_reply, AttachParams};
+use tairix_abi::driver::net_channel::{
+    decode_facts_reply, decode_service_reply, AttachParams, McastGroups,
+};
 use tairix_abi::driver::net_ring::{FrameRings, RingGeometry, ServiceReport};
 use tairix_abi::driver::BufferClass;
 use tairix_abi::reply::decode_status_reply;
@@ -44,6 +46,7 @@ impl Net for LoopbackNet {
             link: LinkState::Up,
             offloads: NetOffloads::empty(),
             rx_queues: 1,
+            multicast_filter: McastFilter::Unfiltered,
         })
     }
 
@@ -180,4 +183,78 @@ fn detach_returns_to_the_detached_state() {
     assert!(!server.is_attached());
     assert_eq!(server.notify_endpoint(), None);
     assert_eq!(server.geometry(), None);
+}
+
+/// A device whose group filter is programmable, so the server's
+/// `SetMulticast` path can be driven end to end.
+struct FilterNet {
+    programmed: Option<alloc::vec::Vec<MacAddress>>,
+}
+
+impl Net for FilterNet {
+    fn device_facts(&self) -> Result<DeviceFacts, DriverError> {
+        Ok(DeviceFacts {
+            mac: MacAddress::new([0x02, 0x11, 0x22, 0x33, 0x44, 0x55]),
+            mtu: MTU,
+            link: LinkState::Up,
+            offloads: NetOffloads::empty(),
+            rx_queues: 1,
+            multicast_filter: McastFilter::Slots(2),
+        })
+    }
+
+    fn service(&mut self, _rings: &mut FrameRings<'_>) -> Result<ServiceReport, DriverError> {
+        Ok(ServiceReport::default())
+    }
+
+    fn set_multicast_groups(&mut self, groups: &[MacAddress]) -> Result<(), DriverError> {
+        if groups.len() > 2 {
+            return Err(DriverError::LengthOutOfRange);
+        }
+        self.programmed = Some(groups.to_vec());
+        Ok(())
+    }
+}
+
+#[test]
+fn the_group_filter_is_programmable_before_the_channel_is_attached() {
+    let mut server = NetChannelServer::new(FilterNet { programmed: None });
+    let group = MacAddress::new([0x33, 0x33, 0x00, 0x00, 0x00, 0x01]);
+    let set = McastGroups::new(&[group]).expect("group set");
+    // The filter is device state, not channel state: the stack may program
+    // it before frames flow, so a set arriving detached is honoured rather
+    // than refused with `NotConnected`.
+    assert_eq!(
+        decode_status_reply(&server.set_multicast_reply(&set)),
+        Ok(())
+    );
+}
+
+#[test]
+fn a_device_that_does_not_filter_groups_refuses_the_set() {
+    let mut server = NetChannelServer::new(LoopbackNet::new());
+    let group = MacAddress::new([0x33, 0x33, 0x00, 0x00, 0x00, 0x01]);
+    let set = McastGroups::new(&[group]).expect("group set");
+    // The default refusal makes a driver that claims slots without
+    // implementing the filter fail loudly instead of silently dropping every
+    // group frame.
+    assert_eq!(
+        decode_status_reply(&server.set_multicast_reply(&set)),
+        Err(Errno::NotImplemented)
+    );
+}
+
+#[test]
+fn an_over_large_group_set_is_refused_by_the_device() {
+    let mut server = NetChannelServer::new(FilterNet { programmed: None });
+    let groups = [
+        MacAddress::new([0x33, 0x33, 0x00, 0x00, 0x00, 0x01]),
+        MacAddress::new([0x33, 0x33, 0x00, 0x00, 0x00, 0x02]),
+        MacAddress::new([0x33, 0x33, 0x00, 0x00, 0x00, 0x03]),
+    ];
+    let set = McastGroups::new(&groups).expect("group set");
+    assert_eq!(
+        decode_status_reply(&server.set_multicast_reply(&set)),
+        Err(Errno::LengthOutOfRange)
+    );
 }

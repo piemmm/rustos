@@ -170,6 +170,7 @@ pub struct Membership<P: McastProtocol> {
     groups: BTreeMap<P::Addr, Group>,
     capacity: usize,
     rng: u64,
+    revision: u64,
 }
 
 impl<P: McastProtocol> Membership<P> {
@@ -186,7 +187,28 @@ impl<P: McastProtocol> Membership<P> {
             } else {
                 seed
             },
+            revision: 0,
         }
+    }
+
+    /// A counter that changes whenever the *member* set changes.
+    ///
+    /// Bumped inside every mutation that adds or removes a member, so a
+    /// consumer mirroring the set elsewhere (a NIC's hardware group filter)
+    /// compares one integer instead of rebuilding and diffing the set on
+    /// every pass — and cannot miss a change by forgetting to signal it at
+    /// a call site.
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// The groups the host is currently a member of, in address order.
+    pub fn groups(&self) -> impl Iterator<Item = P::Addr> + '_ {
+        self.groups
+            .iter()
+            .filter(|(_, group)| group.refs > 0)
+            .map(|(addr, _)| *addr)
     }
 
     /// Number of groups currently joined (reference count above zero).
@@ -235,6 +257,7 @@ impl<P: McastProtocol> Membership<P> {
             if entry.refs == 1 {
                 entry.change = state_change::<P>(ReportReason::JoinGroup, &group, now);
                 entry.report_at = NEVER;
+                self.revision = self.revision.wrapping_add(1);
             }
             return Ok(false);
         }
@@ -249,6 +272,7 @@ impl<P: McastProtocol> Membership<P> {
                 change: state_change::<P>(ReportReason::JoinGroup, &group, now),
             },
         );
+        self.revision = self.revision.wrapping_add(1);
         Ok(true)
     }
 
@@ -280,6 +304,7 @@ impl<P: McastProtocol> Membership<P> {
                 self.groups.remove(&group);
             }
         }
+        self.revision = self.revision.wrapping_add(1);
         true
     }
 

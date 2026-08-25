@@ -53,6 +53,7 @@ use alloc::format;
 use alloc::string::String;
 use core::fmt;
 
+use tairix_abi::net_ipc::NetworkSettings;
 use tairix_abi::Errno;
 use tairix_help::{own_short_help, HelpSource};
 use tairix_sysconfig::{Key, SystemConfig};
@@ -148,7 +149,27 @@ pub trait Store {
     fn write(&self, text: &str) -> Result<(), Errno>;
 }
 
-/// Writes bytes to the tool's standard output.
+/// Applies the stack-wide `net.*` policy to the running network stack.
+///
+/// Writing the store persists a change for the next boot; the running stack
+/// only learns of it when the policy is delivered over its capability-gated
+/// admin endpoint. The `Run` binary backs this with that call; tests wire a
+/// recorder. It is a seam rather than a direct call so the tool stays
+/// host-testable, and it grants nothing: the kernel gates the endpoint on the
+/// caller's `CAP_NET_ADMIN`.
+pub trait NetPolicy {
+    /// Deliver `settings` to the running network stack.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the endpoint raises — notably
+    /// [`Errno::PermissionDenied`] when the caller does not hold
+    /// `CAP_NET_ADMIN`, or [`Errno::NotFound`] when no network stack is
+    /// running. The store write has already succeeded either way.
+    fn apply(&self, settings: NetworkSettings) -> Result<(), Errno>;
+}
+
+/// Writes bytes to one of the tool's output streams.
 pub trait Output {
     /// Write every byte of `bytes` to the stream.
     ///
@@ -207,8 +228,10 @@ pub fn run(
     command: Command<'_>,
     locale: Option<&str>,
     store: &dyn Store,
+    policy: &dyn NetPolicy,
     help: &dyn HelpSource,
     output: &dyn Output,
+    diagnostics: &dyn Output,
 ) -> Result<(), ConfigureError> {
     match command {
         Command::Help => {
@@ -246,9 +269,37 @@ pub fn run(
             config
                 .set(key, value)
                 .map_err(|_| ConfigureError::InvalidValue(key))?;
-            store.write(&config.render()).map_err(ConfigureError::Write)
+            store
+                .write(&config.render())
+                .map_err(ConfigureError::Write)?;
+            if !key.is_network() {
+                return Ok(());
+            }
+            // A `net.*` key describes the running stack, so persisting it is
+            // only half the change. Applying it is a separate, refusable
+            // action: a refusal (no stack running, or no `CAP_NET_ADMIN`)
+            // leaves the saved setting standing for the next boot and is
+            // reported rather than fatal.
+            match policy.apply(config.network_settings()) {
+                Ok(()) => Ok(()),
+                // A diagnostic, so it never lands in the stdout a script
+                // parses.
+                Err(err) => diagnostics
+                    .write_all(deferred_notice(key, err).as_bytes())
+                    .map_err(ConfigureError::Output),
+            }
         }
     }
+}
+
+/// The notice a saved-but-not-applied `net.*` change reports: the setting is
+/// persisted, the running stack did not take it, and why.
+fn deferred_notice(key: Key, err: Errno) -> String {
+    format!(
+        "{}: saved; the running network stack did not accept it ({}); it applies at next boot\n",
+        key.name(),
+        err
+    )
 }
 
 /// Read and parse the current store, or the defaults when none exists.
@@ -273,11 +324,12 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::RefCell;
 
+    use tairix_abi::net_ipc::NetworkSettings;
     use tairix_abi::Errno;
     use tairix_help::HelpSource;
     use tairix_sysconfig::{Key, SystemConfig};
 
-    use super::{parse, run, Command, ConfigureError, Output, Store, USAGE};
+    use super::{parse, run, Command, ConfigureError, NetPolicy, Output, Store, USAGE};
 
     /// An in-memory store fixture: `None` models the fresh installation.
     struct MemStore {
@@ -332,6 +384,36 @@ mod tests {
         }
     }
 
+    /// A recording [`NetPolicy`]: captures each delivered policy and
+    /// answers with a scripted result.
+    struct MemPolicy {
+        applied: RefCell<Vec<NetworkSettings>>,
+        result: Result<(), Errno>,
+    }
+
+    impl MemPolicy {
+        fn accepting() -> Self {
+            Self {
+                applied: RefCell::new(Vec::new()),
+                result: Ok(()),
+            }
+        }
+
+        fn refusing(err: Errno) -> Self {
+            Self {
+                applied: RefCell::new(Vec::new()),
+                result: Err(err),
+            }
+        }
+    }
+
+    impl NetPolicy for MemPolicy {
+        fn apply(&self, settings: NetworkSettings) -> Result<(), Errno> {
+            self.applied.borrow_mut().push(settings);
+            self.result
+        }
+    }
+
     /// A help source with no documents, so the usage banner stands in.
     struct NoHelp;
 
@@ -374,7 +456,17 @@ mod tests {
     fn list_shows_defaults_for_a_fresh_installation() {
         let store = MemStore::new(None);
         let output = MemOutput::default();
-        run(Command::List, None, &store, &NoHelp, &output).expect("lists");
+        let errors = MemOutput::default();
+        run(
+            Command::List,
+            None,
+            &store,
+            &MemPolicy::accepting(),
+            &NoHelp,
+            &output,
+            &errors,
+        )
+        .expect("lists");
         assert_eq!(
             output.text(),
             "os.loginType graphical\n\
@@ -396,12 +488,15 @@ mod tests {
     fn show_reports_the_stored_value() {
         let store = MemStore::new(Some("os.loginType graphical\n"));
         let output = MemOutput::default();
+        let errors = MemOutput::default();
         run(
             Command::Show("os.loginType"),
             None,
             &store,
+            &MemPolicy::accepting(),
             &NoHelp,
             &output,
+            &errors,
         )
         .expect("shows");
         assert_eq!(output.text(), "graphical\n");
@@ -411,12 +506,15 @@ mod tests {
     fn set_writes_the_canonical_render_and_round_trips() {
         let store = MemStore::new(None);
         let output = MemOutput::default();
+        let errors = MemOutput::default();
         run(
             Command::Set("os.loginType", "graphical"),
             None,
             &store,
+            &MemPolicy::accepting(),
             &NoHelp,
             &output,
+            &errors,
         )
         .expect("sets");
         let text = store.text.borrow().clone().expect("store written");
@@ -428,16 +526,104 @@ mod tests {
     }
 
     #[test]
+    fn setting_a_net_key_applies_it_to_the_running_stack() {
+        let store = MemStore::new(None);
+        let output = MemOutput::default();
+        let errors = MemOutput::default();
+        let policy = MemPolicy::accepting();
+        run(
+            Command::Set("net.tcp.ecn", "true"),
+            None,
+            &store,
+            &policy,
+            &NoHelp,
+            &output,
+            &errors,
+        )
+        .expect("sets");
+        // Persisting alone would only take effect at the next boot, and the
+        // stack holds no filesystem capability to read the store itself.
+        let applied = policy.applied.borrow();
+        assert_eq!(applied.len(), 1);
+        assert!(applied[0].tcp_ecn);
+        // The whole policy travels, not just the changed key, so the stack's
+        // view can never drift from the document.
+        assert!(applied[0].ipv4_enabled && applied[0].ipv6_enabled);
+        assert_eq!(output.text(), "", "a delivered change says nothing");
+        assert_eq!(errors.text(), "", "and reports no diagnostic");
+    }
+
+    #[test]
+    fn setting_a_non_net_key_leaves_the_stack_alone() {
+        let store = MemStore::new(None);
+        let output = MemOutput::default();
+        let errors = MemOutput::default();
+        let policy = MemPolicy::accepting();
+        run(
+            Command::Set("os.loginType", "text"),
+            None,
+            &store,
+            &policy,
+            &NoHelp,
+            &output,
+            &errors,
+        )
+        .expect("sets");
+        assert!(
+            policy.applied.borrow().is_empty(),
+            "an os.* key is no business of the network stack"
+        );
+    }
+
+    #[test]
+    fn a_refused_live_apply_keeps_the_saved_setting_and_says_so() {
+        let store = MemStore::new(None);
+        let output = MemOutput::default();
+        let errors = MemOutput::default();
+        // No network stack running (or no CAP_NET_ADMIN): the refusal is an
+        // answer about one action, not a failure of the command.
+        let policy = MemPolicy::refusing(Errno::NotFound);
+        run(
+            Command::Set("net.ipv6.privacy", "true"),
+            None,
+            &store,
+            &policy,
+            &NoHelp,
+            &output,
+            &errors,
+        )
+        .expect("the setting is still saved");
+        assert_eq!(
+            store.text.borrow().as_deref(),
+            Some(
+                &*SystemConfig::parse("net.ipv6.privacy true\n")
+                    .expect("parses")
+                    .render()
+            )
+        );
+        // Loud, not silent: the operator is told the running stack did not
+        // take it and when it will — on the diagnostic stream, so a script
+        // parsing stdout is unaffected.
+        assert_eq!(output.text(), "", "stdout carries no diagnostic");
+        let text = errors.text();
+        assert!(text.contains("net.ipv6.privacy"), "{text}");
+        assert!(text.contains("next boot"), "{text}");
+    }
+
+    #[test]
     fn unknown_key_fails_closed_without_touching_the_store() {
         let store = MemStore::new(Some("os.loginType text\n"));
         let output = MemOutput::default();
+        let errors = MemOutput::default();
         assert_eq!(
             run(
                 Command::Set("os.frob", "on"),
                 None,
                 &store,
+                &MemPolicy::accepting(),
                 &NoHelp,
-                &output
+                &output,
+                &errors
             ),
             Err(ConfigureError::UnknownKey),
         );
@@ -452,12 +638,15 @@ mod tests {
     fn invalid_value_names_the_valid_choices() {
         let store = MemStore::new(None);
         let output = MemOutput::default();
+        let errors = MemOutput::default();
         let err = run(
             Command::Set("os.loginType", "desktop"),
             None,
             &store,
+            &MemPolicy::accepting(),
             &NoHelp,
             &output,
+            &errors,
         )
         .expect_err("refused");
         assert_eq!(err, ConfigureError::InvalidValue(Key::LoginType));
@@ -472,12 +661,15 @@ mod tests {
     fn a_malformed_store_refuses_a_set_rather_than_merging() {
         let store = MemStore::new(Some("os.unknownKey what\n"));
         let output = MemOutput::default();
+        let errors = MemOutput::default();
         let err = run(
             Command::Set("os.loginType", "text"),
             None,
             &store,
+            &MemPolicy::accepting(),
             &NoHelp,
             &output,
+            &errors,
         )
         .expect_err("refused");
         assert!(matches!(err, ConfigureError::Malformed(_)));
@@ -493,8 +685,17 @@ mod tests {
         let mut store = MemStore::new(None);
         store.read_err = Some(Errno::PermissionDenied);
         let output = MemOutput::default();
+        let errors = MemOutput::default();
         assert_eq!(
-            run(Command::List, None, &store, &NoHelp, &output),
+            run(
+                Command::List,
+                None,
+                &store,
+                &MemPolicy::accepting(),
+                &NoHelp,
+                &output,
+                &errors
+            ),
             Err(ConfigureError::Read(Errno::PermissionDenied)),
         );
 
@@ -505,8 +706,10 @@ mod tests {
                 Command::Set("os.loginType", "graphical"),
                 None,
                 &store,
+                &MemPolicy::accepting(),
                 &NoHelp,
                 &output,
+                &errors,
             ),
             Err(ConfigureError::Write(Errno::PermissionDenied)),
         );
@@ -516,7 +719,17 @@ mod tests {
     fn help_falls_back_to_the_usage_banner_without_documents() {
         let store = MemStore::new(None);
         let output = MemOutput::default();
-        run(Command::Help, None, &store, &NoHelp, &output).expect("help renders");
+        let errors = MemOutput::default();
+        run(
+            Command::Help,
+            None,
+            &store,
+            &MemPolicy::accepting(),
+            &NoHelp,
+            &output,
+            &errors,
+        )
+        .expect("help renders");
         assert_eq!(output.text(), format!("{USAGE}\n"));
     }
 

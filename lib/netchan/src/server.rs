@@ -37,8 +37,8 @@
 
 use tairix_abi::driver::net::Net;
 use tairix_abi::driver::net_channel::{
-    encode_facts_reply, encode_service_reply, AttachParams, NET_CHANNEL_FACTS_REPLY_LEN,
-    NET_CHANNEL_SERVICE_REPLY_LEN,
+    encode_facts_reply, encode_service_reply, AttachParams, McastGroups,
+    NET_CHANNEL_FACTS_REPLY_LEN, NET_CHANNEL_SERVICE_REPLY_LEN,
 };
 use tairix_abi::driver::net_ring::{FrameRings, RingGeometry, ServiceReport};
 use tairix_abi::driver::BufferClass;
@@ -189,6 +189,23 @@ impl<N: Net> NetChannelServer<N> {
         self.net
             .service(&mut rings)
             .map_err(tairix_abi::DriverError::as_errno)
+    }
+
+    /// Answer [`NetChannelRequest::SetMulticast`](tairix_abi::driver::net_channel::NetChannelRequest::SetMulticast):
+    /// replace the group addresses the device admits.
+    ///
+    /// Accepted whether or not the channel is attached: the filter is device
+    /// state, not channel state, so the stack may program it before frames
+    /// flow. A device that does not filter groups refuses with
+    /// [`Errno::NotImplemented`]; an over-large set is refused whole and the
+    /// previously admitted set stays in force.
+    #[must_use]
+    pub fn set_multicast_reply(&mut self, groups: &McastGroups) -> [u8; STATUS_REPLY_LEN] {
+        encode_status_reply(
+            self.net
+                .set_multicast_groups(groups.as_slice())
+                .map_err(tairix_abi::DriverError::as_errno),
+        )
     }
 
     /// Answer [`NetChannelRequest::Detach`](tairix_abi::driver::net_channel::NetChannelRequest::Detach):

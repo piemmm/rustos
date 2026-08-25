@@ -1286,12 +1286,19 @@ mod program {
         // One bounded read suffices: the engine refuses any document longer
         // than its own ceiling, so a store that does not fit this buffer
         // could never parse anyway.
-        let mut buf = [0u8; tairix_sysconfig::MAX_CONFIG_LEN];
+        // One byte past the engine's ceiling, so an over-long document is
+        // refused rather than parsed as a truncated prefix.
+        let mut buf = [0u8; tairix_sysconfig::MAX_CONFIG_LEN + 1];
         configured_session_kind(ConfigStore::from_read(read_config_document(&mut buf)))
     }
 
     /// Read the configuration document into `buf`, yielding the bytes it
     /// holds or the refusal that stopped the read.
+    ///
+    /// `buf` is one byte longer than the parse ceiling, so a read that fills
+    /// it proves the file is over-long and is refused
+    /// ([`Errno::LengthOutOfRange`]) — a truncated prefix could otherwise
+    /// parse as a valid but partial document.
     fn read_config_document(buf: &mut [u8]) -> Result<&[u8], Errno> {
         let ret = tairix_rt::fs_open(tairix_sysconfig::CONFIG_PATH.as_bytes(), OpenFlags::READ);
         if ret < 0 {
@@ -1303,6 +1310,9 @@ mod program {
         let outcome = tairix_rt::fs_read(fd, 0, buf);
         let _ = tairix_rt::fs_close(fd);
         let len = outcome.map_err(Errno::from_syscall)?;
+        if len >= buf.len() {
+            return Err(Errno::LengthOutOfRange);
+        }
         buf.get(..len).ok_or(Errno::OutOfRange)
     }
 

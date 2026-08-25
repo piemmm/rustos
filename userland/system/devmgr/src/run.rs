@@ -54,8 +54,9 @@ mod program {
         NETSTACK_ENDPOINT,
     };
     use tairix_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
+    use tairix_abi::OpenFlags;
     use tairix_abi::{Errno, HwNode, HwTreeHeader};
-    use tairix_devmgr::netcfg::{interface_configs_from_config, settings_from_config};
+    use tairix_devmgr::netcfg::interface_configs_from_config;
     use tairix_devmgr::{
         events, DriverStoreCall, HwTreeService, InterfaceConfigPlan, NetstackBind,
         NetworkConfigSource, NetworkInterfaceConfigSource,
@@ -309,32 +310,97 @@ mod program {
         Some(bytes.len())
     }
 
-    /// The production [`NetworkConfigSource`] backing: reads the stack-wide
-    /// `net.*` policy from `/System/Settings/Configuration/system.conf` over
-    /// the read-only `/System` store endpoint ([`read_store_config`]) and
-    /// maps it through the one shared `lib/sysconfig` engine
-    /// ([`settings_from_config`]).
+    /// Read a whitelisted configuration document through the **secured
+    /// VFS**, at the canonical `/System/Settings/` path an administrator
+    /// writes, under this service's own attested identity.
     ///
-    /// The read is over the store endpoint (not the VFS) so it works before
-    /// the root unlock, and is `CAP_DRV_LOAD`-gated by the kernel; this seam
-    /// adds no authority. It returns [`None`] on any failure — the store not
-    /// yet reachable, an absent (`NotFound`), unreadable, or oversized
-    /// document, or one the engine cannot parse — so delivery keeps the
-    /// network stack on its safe defaults and retries on the next generation
-    /// bump, never guessing at a policy (fail closed).
+    /// This is the writable *override* layer above the shipped default the
+    /// store endpoint serves ([`read_store_config`]): the path resolves to
+    /// the writable sub-mount backed by the encrypted root, so it fails
+    /// closed until that root is mounted and succeeds afterwards. Without it
+    /// an administrator's edit would be written to a file no reader ever
+    /// opened.
+    ///
+    /// `out` must be one byte longer than the document's parse ceiling: a
+    /// read that fills it proves the file is over-long, and is refused
+    /// rather than handed on as a truncated prefix that might parse as a
+    /// valid — but partial — document.
+    fn read_vfs_config(which: SystemConfigFile, out: &mut [u8]) -> Option<usize> {
+        let ret = tairix_rt::fs_open(which.path().as_bytes(), OpenFlags::READ);
+        if ret < 0 {
+            return None;
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        // `ret >= 0` checked above; descriptors are small kernel indices.
+        let fd = ret as u32;
+        let outcome = tairix_rt::fs_read(fd, 0, out);
+        let _ = tairix_rt::fs_close(fd);
+        let len = outcome.ok()?;
+        (len < out.len()).then_some(len)
+    }
+
+    /// Read one whitelisted configuration document, preferring the writable
+    /// override to the shipped default.
+    ///
+    /// The store is two layers: the image- or installer-authored default on
+    /// the always-readable read-only `/System` volume, and the document an
+    /// administrator writes at the canonical `/System/Settings/` path on the
+    /// writable root. The override wins once it is readable, so a change
+    /// takes effect on the next boot; before the root is mounted — and on
+    /// every system where nobody has overridden anything — the shipped
+    /// default stands. Neither layer is ever copied into the other.
+    fn read_layered_config(which: SystemConfigFile, out: &mut [u8]) -> Option<usize> {
+        read_vfs_config(which, out).or_else(|| read_store_config(which, out))
+    }
+
+    /// The production [`NetworkConfigSource`] backing: reads the stack-wide
+    /// `net.*` policy from `system.conf` through the layered store
+    /// ([`read_layered_config`]) and maps it through the one shared
+    /// `lib/sysconfig` engine.
+    ///
+    /// It returns [`None`] on any failure — neither layer reachable, an
+    /// absent, unreadable, or oversized document, or one the engine cannot
+    /// parse — so delivery keeps the network stack on its safe defaults and
+    /// retries on the next generation bump, never guessing at a policy (fail
+    /// closed).
     struct RtNetworkConfig;
 
     impl NetworkConfigSource for RtNetworkConfig {
         fn load(&mut self) -> Option<NetworkSettings> {
-            // One bounded read suffices: the engine refuses any document
-            // longer than its own ceiling, so a store that does not fit this
-            // buffer could never parse anyway.
-            let mut buf = [0u8; tairix_sysconfig::MAX_CONFIG_LEN];
-            let len = read_store_config(SystemConfigFile::System, &mut buf)?;
-            let text = core::str::from_utf8(&buf[..len]).ok()?;
-            let config = tairix_sysconfig::SystemConfig::parse(text).ok()?;
-            Some(settings_from_config(&config))
+            // One byte past the engine's ceiling, so a document that fills
+            // the buffer is proven over-long and refused rather than parsed
+            // as a truncated prefix.
+            #[allow(clippy::large_stack_arrays)]
+            let mut buf = [0u8; tairix_sysconfig::MAX_CONFIG_LEN + 1];
+            let len = read_layered_config(SystemConfigFile::System, &mut buf)?;
+            let Some(config) = core::str::from_utf8(&buf[..len])
+                .ok()
+                .and_then(|text| tairix_sysconfig::SystemConfig::parse(text).ok())
+            else {
+                // The document read but did not parse: refuse it whole and
+                // say so, or a hand edit would look like it had no effect.
+                malformed_document(SystemConfigFile::System);
+                return None;
+            };
+            Some(config.network_settings())
         }
+    }
+
+    /// Report a readable-but-unparseable configuration document. Nothing is
+    /// delivered from it; the caller keeps the safe defaults.
+    fn malformed_document(which: SystemConfigFile) {
+        log(
+            &LogSink,
+            &Event {
+                level: Level::Warn,
+                id: events::CONFIG_DOCUMENT_MALFORMED,
+                message: "configuration document could not be parsed; nothing delivered from it",
+                fields: &[Field {
+                    key: "path",
+                    value: tairix_log::FieldValue::Str(which.path()),
+                }],
+            },
+        );
     }
 
     /// The production [`NetworkInterfaceConfigSource`] backing: reads the
@@ -357,14 +423,18 @@ mod program {
 
     impl NetworkInterfaceConfigSource for RtNetworkInterfaceConfig {
         fn load(&mut self) -> Option<InterfaceConfigPlan> {
-            let mut buf = [0u8; tairix_netconfig::MAX_CONFIG_LEN];
-            let len = read_store_config(SystemConfigFile::Network, &mut buf)?;
+            #[allow(clippy::large_stack_arrays)]
+            let mut buf = [0u8; tairix_netconfig::MAX_CONFIG_LEN + 1];
+            let len = read_layered_config(SystemConfigFile::Network, &mut buf)?;
             let text = core::str::from_utf8(&buf[..len]).ok()?;
             // `parse` validates the whole document (including the bond and
             // static-addressing invariants), so a semantically inconsistent
             // store is refused whole here rather than delivered as a partial
             // guess (fail closed).
-            let config = tairix_netconfig::NetworkConfig::parse(text).ok()?;
+            let Ok(config) = tairix_netconfig::NetworkConfig::parse(text) else {
+                malformed_document(SystemConfigFile::Network);
+                return None;
+            };
             Some(interface_configs_from_config(&config))
         }
     }

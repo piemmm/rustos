@@ -1067,6 +1067,30 @@ impl Iface {
             .collect()
     }
 
+    /// A counter that changes whenever the set of IPv6 addresses this
+    /// interface holds changes.
+    ///
+    /// Folded over the addresses themselves rather than bumped at each of
+    /// the several places they are added and removed: a missed bump would
+    /// silently strand a NIC's hardware group filter one address behind,
+    /// while a fold cannot miss one. The list holds a handful of entries, so
+    /// this is cheap enough for the frame pump to consult every pass.
+    #[must_use]
+    pub fn multicast_revision(&self) -> u64 {
+        // FNV-1a over each address's octets, so two different address sets
+        // cannot fold to the same value as easily as an XOR would allow.
+        let mut acc: u64 = 0xCBF2_9CE4_8422_2325;
+        for entry in &self.v6 {
+            for byte in entry.addr.octets() {
+                acc = (acc ^ u64::from(byte)).wrapping_mul(0x0100_0000_01B3);
+            }
+        }
+        for flag in [self.v6_disabled, self.v6_admin_disabled] {
+            acc = (acc ^ u64::from(flag)).wrapping_mul(0x0100_0000_01B3);
+        }
+        acc
+    }
+
     /// Read-only views of every IPv6 address, tentative included.
     #[must_use]
     pub fn ipv6_addresses(&self) -> Vec<Ipv6AddrInfo> {

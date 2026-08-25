@@ -1007,6 +1007,13 @@ mod program {
             if let Some(link) = outcome.link_change {
                 link_change = Some((channel.iface, link));
             }
+            if outcome.multicast_refused.is_some() {
+                audit(
+                    events::MULTICAST_FILTER_REFUSED,
+                    Level::Warn,
+                    "netstack: NIC refused the multicast group set; those groups are not delivered",
+                );
+            }
             let mut staged = false;
             let mut saw_event = false;
             for event in &outcome.events {

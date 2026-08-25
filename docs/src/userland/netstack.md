@@ -187,10 +187,17 @@ with, so an image can never ship a document its own parser would reject.
 The Raspberry Pi image binds the board's on-board GENET NIC by its register
 aperture and selects DHCPv4 + SLAAC; an image that plants no NIC driver
 ships the canonical **empty** document ("no managed interfaces beyond
-loopback"). Rewriting the shipped default at runtime is not yet wired: the
-writable override layer `plans/NETWORK.md` §6.1 describes has no writer
-(`configure` grows no interface sub-grammar), so today the document is
-image- and installer-authored only.
+loopback").
+
+The store is read as two layers, neither copied into the other: the device
+manager reads the administrator's document at the canonical
+`/System/Settings/` path once the encrypted root is mounted, and the shipped
+default off the read-only `/System` volume before that (and on every system
+where nobody has overridden anything). `network.conf` itself has no runtime
+writer — `configure` grows no interface sub-grammar — so the per-interface
+document stays image- and installer-authored; the stack-wide `net.*` policy
+in `system.conf` does have one, and `configure` both persists it and delivers
+it to the running stack (`docs/src/lib/sysconfig.md`).
 
 ## Link aggregation (bonds)
 

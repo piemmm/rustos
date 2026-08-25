@@ -5,7 +5,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use tairix_abi::driver::net::{DeviceFacts, LinkState, MacAddress, Net, NetOffloads};
+use tairix_abi::driver::net::{DeviceFacts, LinkState, MacAddress, McastFilter, Net, NetOffloads};
 use tairix_abi::driver::net_ring::{FrameRings, RingGeometry, ServiceReport};
 use tairix_abi::driver::BufferClass;
 use tairix_abi::net::{
@@ -50,6 +50,7 @@ fn facts(mac: MacAddress) -> DeviceFacts {
         link: LinkState::Up,
         offloads: NetOffloads::empty(),
         rx_queues: 1,
+        multicast_filter: McastFilter::Unfiltered,
     }
 }
 
@@ -2154,6 +2155,9 @@ impl crate::channel::NetChannelTransport for ChannelLoopback {
                 let ChannelRig { server, region } = &mut *rig;
                 copy_reply(reply, &server.service_reply(region))
             }
+            NetChannelRequest::SetMulticast(groups) => {
+                copy_reply(reply, &rig.server.set_multicast_reply(&groups))
+            }
             NetChannelRequest::Detach => copy_reply(reply, &rig.server.detach()),
         }
     }
@@ -4056,4 +4060,158 @@ fn a_bond_alias_cannot_shadow_a_non_bond_interface() {
         ),
         Err(Errno::AlreadyExists)
     );
+}
+
+// --- The device group filter (`plans/NETWORK.md` N14d) ------------------
+
+/// A device that filters group destinations in hardware: it records the set
+/// the stack programs and refuses one larger than its slot count, exactly as
+/// a real MAC's filter table does.
+struct FilteringNet {
+    slots: u16,
+    programmed: Rc<RefCell<Option<Vec<MacAddress>>>>,
+}
+
+impl Net for FilteringNet {
+    fn device_facts(&self) -> Result<DeviceFacts, DriverError> {
+        let mut f = facts(MAC_B);
+        f.multicast_filter = McastFilter::Slots(self.slots);
+        Ok(f)
+    }
+
+    fn service(&mut self, _rings: &mut FrameRings<'_>) -> Result<ServiceReport, DriverError> {
+        Ok(ServiceReport::default())
+    }
+
+    fn set_multicast_groups(&mut self, groups: &[MacAddress]) -> Result<(), DriverError> {
+        if groups.len() > usize::from(self.slots) {
+            return Err(DriverError::LengthOutOfRange);
+        }
+        *self.programmed.borrow_mut() = Some(groups.to_vec());
+        Ok(())
+    }
+}
+
+#[test]
+fn a_filtering_device_is_programmed_with_the_groups_the_stack_needs() {
+    let programmed = Rc::new(RefCell::new(None));
+    let mut stack = Netstack::new(test_temp_factory(), test_dhcp_rng_factory());
+    let mut facts_filtering = facts(MAC_B);
+    facts_filtering.multicast_filter = McastFilter::Slots(15);
+    stack
+        .add_interface(
+            name("wan"),
+            NetIfKind::Ethernet,
+            facts_filtering,
+            IID_B,
+            9,
+            0,
+            t(0),
+        )
+        .expect("interface");
+    let mut region = rings_region();
+    let mut fs = LocalFrameService::new(
+        FilteringNet {
+            slots: 15,
+            programmed: Rc::clone(&programmed),
+        },
+        &mut region,
+        GEOMETRY,
+        BufferClass::NonSensitive,
+    )
+    .expect("frame service");
+
+    let outcome = stack
+        .service_interface(name("wan"), &mut fs, t(1))
+        .expect("pump");
+    assert!(outcome.multicast_refused.is_none());
+    let set = programmed
+        .borrow()
+        .clone()
+        .expect("the filter was programmed");
+    // All-nodes and the tentative link-local's solicited-node group, which
+    // is what DAD listens on — a device left unprogrammed would report a
+    // duplicate address as free.
+    assert!(!set.is_empty());
+    for mac in &set {
+        assert!(mac.as_octets()[0] & 0x01 != 0, "{mac:?} is a group address");
+    }
+
+    // A settled interface is not reprogrammed every pump: the revision has
+    // not moved, so the device is left alone.
+    *programmed.borrow_mut() = None;
+    stack
+        .service_interface(name("wan"), &mut fs, t(1))
+        .expect("pump");
+    assert!(
+        programmed.borrow().is_none(),
+        "an unchanged membership costs no device programming"
+    );
+}
+
+#[test]
+fn an_unfiltered_device_is_never_programmed() {
+    let programmed = Rc::new(RefCell::new(None));
+    let mut stack = managed_stack();
+    let mut region = rings_region();
+    // The interface `managed_stack` bound reports `Unfiltered`, so the pump
+    // must not spend an IPC per doorbell asking the driver to filter.
+    let mut fs = LocalFrameService::new(
+        FilteringNet {
+            slots: 15,
+            programmed: Rc::clone(&programmed),
+        },
+        &mut region,
+        GEOMETRY,
+        BufferClass::NonSensitive,
+    )
+    .expect("frame service");
+    stack
+        .service_interface(name("wan"), &mut fs, t(1))
+        .expect("pump");
+    assert!(programmed.borrow().is_none());
+}
+
+#[test]
+fn a_device_that_refuses_the_group_set_is_reported_not_hidden() {
+    let programmed = Rc::new(RefCell::new(None));
+    let mut stack = Netstack::new(test_temp_factory(), test_dhcp_rng_factory());
+    let mut facts_filtering = facts(MAC_B);
+    // No slots at all: every set the stack needs overflows.
+    facts_filtering.multicast_filter = McastFilter::Slots(0);
+    stack
+        .add_interface(
+            name("wan"),
+            NetIfKind::Ethernet,
+            facts_filtering,
+            IID_B,
+            9,
+            0,
+            t(0),
+        )
+        .expect("interface");
+    let mut region = rings_region();
+    let mut fs = LocalFrameService::new(
+        FilteringNet {
+            slots: 0,
+            programmed: Rc::clone(&programmed),
+        },
+        &mut region,
+        GEOMETRY,
+        BufferClass::NonSensitive,
+    )
+    .expect("frame service");
+    let outcome = stack
+        .service_interface(name("wan"), &mut fs, t(1))
+        .expect("pump");
+    // Loud, not silent: the groups that did not fit are genuinely not
+    // delivered, and nothing was programmed.
+    assert!(outcome.multicast_refused.is_some());
+    assert!(programmed.borrow().is_none());
+    // Retried on the next pump rather than recorded as pushed, so a set that
+    // shrinks back within the device's slots recovers on its own.
+    let again = stack
+        .service_interface(name("wan"), &mut fs, t(2))
+        .expect("pump");
+    assert!(again.multicast_refused.is_some());
 }

@@ -28,7 +28,7 @@ use core::alloc::{GlobalAlloc, Layout};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::alloc::System;
 
-use tairix_abi::driver::net::{DeviceFacts, LinkState, MacAddress, NetOffloads};
+use tairix_abi::driver::net::{DeviceFacts, LinkState, MacAddress, McastFilter, NetOffloads};
 use tairix_abi::time::Duration64;
 use tairix_net::addr::{IpAddr, Ipv4Addr};
 use tairix_net::iface::TempAddrSource;
@@ -100,6 +100,7 @@ fn facts(mac: MacAddress) -> DeviceFacts {
         link: LinkState::Up,
         offloads: NetOffloads::empty(),
         rx_queues: 1,
+        multicast_filter: McastFilter::Unfiltered,
     }
 }
 

@@ -3651,6 +3651,67 @@ impl Stack {
         self.membership_v4.is_member(dest)
     }
 
+    /// A counter that changes whenever [`Self::multicast_macs`] would yield
+    /// a different set.
+    ///
+    /// Folded from the three things the set is derived from, so the frame
+    /// pump can decide whether to reprogram a NIC's hardware group filter by
+    /// comparing one integer per pass instead of rebuilding and diffing the
+    /// set.
+    #[must_use]
+    pub fn multicast_revision(&self) -> u64 {
+        let mut acc: u64 = 0xCBF2_9CE4_8422_2325;
+        for value in [
+            self.membership_v4.revision(),
+            self.membership_v6.revision(),
+            self.iface.multicast_revision(),
+            u64::from(self.ipv4_enabled),
+        ] {
+            acc = (acc ^ value).wrapping_mul(0x0100_0000_01B3);
+        }
+        acc
+    }
+
+    /// Write the link-layer group addresses this interface needs its device
+    /// to admit into `out`, replacing its contents, and report how many.
+    ///
+    /// Exactly the groups the receive path accepts: every joined IPv4 group,
+    /// the IPv6 all-nodes group, the solicited-node group of every IPv6
+    /// address (tentative included — DAD listens there, so an address whose
+    /// solicited-node group were missing would pass DAD against a duplicate
+    /// that could not answer), and every joined IPv6 group. Two IPv6 groups
+    /// can share one link-layer address, so the result is deduplicated.
+    ///
+    /// A device that filters groups in hardware admits this set and nothing
+    /// else; a device reporting
+    /// [`McastFilter::Unfiltered`](tairix_abi::driver::net::McastFilter::Unfiltered)
+    /// needs none of it.
+    pub fn multicast_macs(&self, out: &mut Vec<MacAddress>) {
+        out.clear();
+        let push = |mac: MacAddress, out: &mut Vec<MacAddress>| {
+            if !out.contains(&mac) {
+                out.push(mac);
+            }
+        };
+        if self.ipv4_enabled {
+            for group in self.membership_v4.groups() {
+                push(ipv4_multicast_mac(&group), out);
+            }
+        }
+        if self.ipv6_enabled() {
+            push(ipv6_multicast_mac(&ALL_NODES), out);
+            for info in self.iface.ipv6_addresses() {
+                push(
+                    ipv6_multicast_mac(&solicited_node_multicast(&info.addr)),
+                    out,
+                );
+            }
+            for group in self.membership_v6.groups() {
+                push(ipv6_multicast_mac(&group), out);
+            }
+        }
+    }
+
     /// IGMP receive (RFC 2236): a query schedules our responses; another
     /// host's report suppresses ours; a leave is a router's concern.
     fn on_igmp(&mut self, payload: &[u8], now: Duration64) {

@@ -93,11 +93,22 @@ pub const NETWORK_IFCONFIG_DELIVERY_FAILED: EventId = EventId(13_015);
 /// at `Warn`.
 pub const NETWORK_IFCONFIG_REJECTED: EventId = EventId(13_016);
 
+/// A readable `/System/Settings/` configuration document could not be
+/// parsed, so nothing was delivered from it.
+///
+/// The administrator-writable override is hand-editable, and a document the
+/// engine cannot fully understand is refused whole rather than half-applied.
+/// Recorded at `Warn`: staying on the safe defaults is correct, but silently
+/// ignoring an operator's edit is not — without this the file would simply
+/// appear to have no effect. (`configure` renders canonically, so this
+/// surfaces a hand edit.)
+pub const CONFIG_DOCUMENT_MALFORMED: EventId = EventId(13_017);
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const ALL: [EventId; 16] = [
+    const ALL: [EventId; 17] = [
         NODE_BOUND,
         NODE_UNBOUND,
         NODE_TIE_REJECTED,
@@ -108,6 +119,7 @@ mod tests {
         NODE_UNLOADED,
         TREE_SEAM_FAILED,
         NETSTACK_BOUND,
+        CONFIG_DOCUMENT_MALFORMED,
         NETSTACK_BIND_FAILED,
         NETWORK_SETTINGS_DELIVERED,
         NETWORK_SETTINGS_DELIVERY_FAILED,

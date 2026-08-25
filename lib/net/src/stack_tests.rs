@@ -26,6 +26,7 @@ fn facts(mac: MacAddress) -> DeviceFacts {
         link: LinkState::Up,
         offloads: tairix_abi::driver::net::NetOffloads::empty(),
         rx_queues: 1,
+        multicast_filter: tairix_abi::driver::net::McastFilter::Unfiltered,
     }
 }
 
@@ -2460,4 +2461,80 @@ fn tcp_v4_ecn_is_stamped_on_emit_and_surfaced_on_receive() {
         })
         .expect("a TCP segment event");
     assert_eq!(ecn, Ecn::Ce, "the received CE mark is surfaced");
+}
+
+/// The device-facing group set must be exactly what the receive path
+/// accepts: a NIC programmed with less drops frames the stack would have
+/// answered, and one programmed with more admits traffic it will only throw
+/// away.
+#[test]
+fn the_device_group_set_matches_what_the_receive_path_accepts() {
+    use crate::eth::{ipv4_multicast_mac, ipv6_multicast_mac};
+
+    let mut s = stack(MacAddress::new([0x02, 0, 0, 0, 0, 1]), [1; 8]);
+    let mut out = StackOutput::default();
+    s.advance(t(0), &mut out);
+    let mut macs = Vec::new();
+
+    // A fresh interface already needs all-nodes and the solicited-node group
+    // of its tentative link-local: DAD listens on the latter, so a filter
+    // without it would pass DAD against a duplicate that could not answer.
+    s.multicast_macs(&mut macs);
+    assert!(macs.contains(&ipv6_multicast_mac(&ALL_NODES)));
+    for info in s.iface().ipv6_addresses() {
+        assert!(
+            macs.contains(&ipv6_multicast_mac(&solicited_node_multicast(&info.addr))),
+            "the solicited-node group of {:?} is admitted",
+            info.addr
+        );
+    }
+
+    // Joining a group of either family adds exactly its link-layer address.
+    let v4_group = Ipv4Addr::new(224, 0, 0, 251);
+    let v6_group = Ipv6Addr::new(0xFF02, 0, 0, 0, 0, 0, 0, 0xFB);
+    s.join_multicast(IpAddr::V4(v4_group), t(1)).expect("joins");
+    s.join_multicast(IpAddr::V6(v6_group), t(1)).expect("joins");
+    let before = s.multicast_revision();
+    s.multicast_macs(&mut macs);
+    assert!(macs.contains(&ipv4_multicast_mac(&v4_group)));
+    assert!(macs.contains(&ipv6_multicast_mac(&v6_group)));
+
+    // Leaving takes it back out, and the revision moves so a mirroring
+    // device is reprogrammed.
+    s.leave_multicast(IpAddr::V6(v6_group), t(2));
+    assert_ne!(s.multicast_revision(), before);
+    s.multicast_macs(&mut macs);
+    assert!(!macs.contains(&ipv6_multicast_mac(&v6_group)));
+
+    // Every entry is a group address — a unicast one would widen a device's
+    // filter to another host — and none repeats.
+    for (i, mac) in macs.iter().enumerate() {
+        assert!(crate::eth::is_group_mac(*mac), "{mac:?} is a group address");
+        assert!(!macs[..i].contains(mac), "{mac:?} appears once");
+    }
+}
+
+#[test]
+fn the_multicast_revision_is_stable_while_nothing_changes() {
+    let mut s = stack(MacAddress::new([0x02, 0, 0, 0, 0, 2]), [2; 8]);
+    let mut out = StackOutput::default();
+    // Bring-up itself moves the revision (the link-local completing DAD
+    // joins its solicited-node group), so settle first.
+    for secs in 0..60 {
+        s.advance(t(secs), &mut out);
+    }
+    let settled = s.multicast_revision();
+    // The frame pump consults this every pass; a value that drifted on its
+    // own would reprogram the device's filter forever.
+    for secs in 60..80 {
+        s.advance(t(secs), &mut out);
+    }
+    assert_eq!(s.multicast_revision(), settled);
+
+    // Disabling IPv6 drops its groups, so the revision must move.
+    s.set_ipv6_enabled(false, t(80));
+    assert_ne!(s.multicast_revision(), settled);
+    let mut macs = Vec::new();
+    s.multicast_macs(&mut macs);
+    assert!(macs.is_empty(), "no family is on, so nothing is admitted");
 }

@@ -69,6 +69,7 @@ one range test. The assigned identifiers:
 | `16_022` | `DHCP6_LEASE_ACQUIRED` | Info | An interface's DHCPv6 client committed a lease (RFC 8415): the leased IA_NA address was applied as a host `/128`. |
 | `16_023` | `DHCP6_LEASE_LOST` | Info | A DHCPv6 lease was lost (expiry, `NoBinding`, or a changed address on renewal): the address was withdrawn. |
 | `16_024` | `SYN_COOKIES_ENGAGED` | Warn | A listener's bounded half-open backlog overflowed and the stack fell back to stateless SYN cookies — the SYN-flood brake engaging. Emitted **once per listener**, on the transition, so a flood cannot amplify itself through the log. |
+| `16_025` | `MULTICAST_FILTER_REFUSED` | Warn | A NIC refused the group-address set the stack asked it to admit, so frames for the groups that did not fit are not delivered. The previously admitted set stays in force and the filter is never widened — the loss of reception is real, so it is recorded rather than hidden. |
 
 The stack-wide `net.*` policy (`net.ipv4.enabled`, `net.ipv6.enabled`,
 `net.ipv6.privacy`, `net.tcp.syncookies`, `net.tcp.keepalive`,

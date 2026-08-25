@@ -5023,9 +5023,10 @@ Reviewing the driver for what else stood between a bound interface and a
 lease found a second, independent blocker: bring-up programmed **no receive
 destination-address filter**, and the UniMAC drops every frame that matches
 no enabled filter slot, so the NIC would have received nothing at all. It now
-enables broadcast + its own unicast address before enabling the receiver
-(`plans/NETWORK.md` N14). Multicast still has no slot and no seam to ask for
-one, so IPv6 cannot complete on this NIC yet (N14d); IPv4 is unaffected.
+enables broadcast + its own unicast address before enabling the receiver, and
+the stack programs the group addresses it needs into the remaining 15 slots
+(`plans/NETWORK.md` N14, N14d), so IPv6 neighbour discovery reaches the NIC
+too.
 
 Every base, IRQ, DMA aperture, and even the MAC address is a discovered
 value: the register window and both INTIDs come from the node's `reg` and
@@ -5049,7 +5050,7 @@ log: `devmgr` autoloads the bundle against the GENET node, `devmgr` logs
 another host on the LAN, and the address matches the MAC printed on the board
 (so the firmware-published address was used, not an invented one). Then
 unplug and re-plug the cable and confirm the link event re-resolves without a
-driver restart. Expect no IPv6 global address until N14d lands.
+driver restart.
 
 **Done when:** the checklist above is recorded against a real Pi 4B.
 

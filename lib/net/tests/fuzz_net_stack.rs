@@ -14,7 +14,7 @@
 //! from the same seeded stream until `TAIRIX_FUZZ_BUDGET_SECS` elapses
 //! under `cargo xtask fuzz`.
 
-use tairix_abi::driver::net::{DeviceFacts, LinkState, MacAddress, NetOffloads};
+use tairix_abi::driver::net::{DeviceFacts, LinkState, MacAddress, McastFilter, NetOffloads};
 use tairix_abi::time::Duration64;
 use tairix_net::eth::{EthernetFrame, ETHERNET_HEADER_LEN};
 use tairix_net::iface::{TempAddrSource, MAX_IPV6_ADDRS};
@@ -73,6 +73,7 @@ fn fresh_stack() -> Stack {
         link: LinkState::Up,
         offloads: NetOffloads::empty(),
         rx_queues: 1,
+        multicast_filter: McastFilter::Unfiltered,
     };
     let mut config = StackConfig::new(facts, [0, 0, 0, 0, 0, 0, 0, 0xA1], 0x4242);
     // Exercise the RFC 8981 privacy-address path against the hostile RAs

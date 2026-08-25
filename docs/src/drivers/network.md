@@ -13,15 +13,18 @@ driver class.
 
 | Method          | Purpose                                              | Capability gate                |
 |-----------------|------------------------------------------------------|--------------------------------|
-| `device_facts`  | typed device report (MAC, MTU, link, offloads, queues) | `DriverHandle` ownership     |
+| `device_facts`  | typed device report (MAC, MTU, link, offloads, queues, group filter) | `DriverHandle` ownership |
 | `service`       | pump the shared-memory frame rings once (non-blocking) | `CAP_NET_RAW` at dispatch site |
+| `set_multicast_groups` | replace the group destinations the device admits | `CAP_NET_RAW` at dispatch site |
 | `ack_interrupt` | deassert the device's interrupt line after an IRQ    | `DriverHandle` ownership       |
 
 `device_facts` returns a `DeviceFacts` the consumer validates whole
 (`validate()`, fail closed): the MTU must sit inside the
 68..=65 535 bound and the receive-queue count must be at least 1, so a
 corrupt or hostile report can never size an attacker-controlled
-allocation.
+allocation. It also declares how the device filters group (multicast)
+destinations, which is what tells the stack whether it must program the
+device's filter at all.
 
 ## The frame-ring transport
 
@@ -92,7 +95,17 @@ inverted and frames flowing both ways:
    its device IRQ and `ipc_send`s a `NetChannelNotify` to `notify_port`
    when receive frames arrive; the stack, parked on that port, issues the
    next `Service`. Neither side busy-polls.
-4. `Detach` releases the channel.
+4. `SetMulticast` replaces the group addresses the device admits. Sent
+   only to a device whose `DeviceFacts::multicast_filter` is
+   `McastFilter::Slots(n)` — an `Unfiltered` device already delivers every
+   group frame, so it costs no IPC — and only when the stack's membership
+   has changed, which it tracks with a revision rather than by rebuilding
+   and diffing the set each doorbell. The set is replaced whole, so the
+   stack's membership stays the single authoritative copy. A set larger
+   than the device's slots is refused whole, the previously admitted set
+   stays in force, and the stack audits the refusal: the filter is never
+   widened (least of all to promiscuous) to make an over-large set fit.
+5. `Detach` releases the channel.
 
 Every frame in the contract decodes total and fail-closed (magic,
 version, reserved-must-be-zero, geometry/class bounds,
@@ -115,7 +128,7 @@ region itself; that remains the stack's responsibility.
 | Driver                    | Crate                           | Supported buses     | Status                                             |
 |---------------------------|---------------------------------|---------------------|----------------------------------------------------|
 | [virtio-net](./virtio.md) | `tairix-drv-network-virtio-net` | virtio (PCI / MMIO) | ring transport + facts; receive-checksum offload (`VIRTIO_NET_F_GUEST_CSUM` → `RX_CSUM_VALIDATED`); TCP transmit-checksum offload (`VIRTIO_NET_F_CSUM` → `TX_CSUM_TCP`); TCP segmentation offload (`VIRTIO_NET_F_HOST_TSO4`+`TSO6` → `TX_SEGMENT_TCP`); mergeable receive buffers (`VIRTIO_NET_F_MRG_RXBUF`); multiqueue receive (`VIRTIO_NET_F_MQ` + `VIRTIO_NET_F_CTRL_VQ`) |
-| GENET v5                  | `tairix-drv-network-genet`       | platform MMIO (aarch64) | ring transport + facts; MDIO/PHY autonegotiation at 10/100/1000; unicast + broadcast receive filter (no multicast yet); no offloads advertised (see below) |
+| GENET v5                  | `tairix-drv-network-genet`       | platform MMIO (aarch64) | ring transport + facts; MDIO/PHY autonegotiation at 10/100/1000; unicast + broadcast + 15-slot group receive filter; no offloads advertised (see below) |
 
 Both driver *processes* share one control plane: `lib/netchan` carries the
 `netchan-v1` server (`NetChannelServer`) and the process loop that claims a
@@ -167,11 +180,14 @@ Promiscuous reception is deliberately never enabled. It would admit every
 frame on the segment, including those addressed to other hosts — authority
 the network stack has no reason to hold.
 
-**Multicast reception is not wired yet** (`plans/NETWORK.md` N14d): admitting
-a group address costs one more of the 17 filter slots, but there is no seam
-through which the stack can ask the driver for one. IPv6 neighbour discovery
-and router solicitation are multicast, so IPv6 cannot complete on this NIC
-until that seam lands; IPv4 (including DHCPv4) is unaffected.
+Group addresses take the slots after those two. The driver reports the 15 it
+has left as `McastFilter::Slots(15)` in its `DeviceFacts`, and the stack
+programs them through `Net::set_multicast_groups` whenever its membership
+changes — all-nodes, the solicited-node group of each IPv6 address, and every
+joined group (`plans/NETWORK.md` N14d). A set larger than the table is refused
+whole, leaving the previously admitted set in force, and `netstack` audits the
+refusal: the groups that did not fit are genuinely not delivered, so it is
+never silent.
 
 It advertises **no offloads**. The GENET has checksum and segmentation
 engines, but a driver may advertise only what it has *verified* it can do

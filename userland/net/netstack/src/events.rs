@@ -130,6 +130,15 @@ pub const DHCP6_LEASE_LOST: EventId = EventId(16_023);
 /// its own amplifier.
 pub const SYN_COOKIES_ENGAGED: EventId = EventId(16_024);
 
+/// A NIC refused the group-address set the stack asked it to admit, so
+/// frames for the groups that did not fit will not be delivered.
+///
+/// Recorded at `Warn` and once per refusal: a device's filter table is
+/// finite, and exceeding it is a real loss of reception the operator must be
+/// able to see rather than a silent gap. The previously admitted set stays in
+/// force, and the filter is never widened to make an over-large set fit.
+pub const MULTICAST_FILTER_REFUSED: EventId = EventId(16_025);
+
 /// The message [`SYN_COOKIES_ENGAGED`] carries. Named here because the
 /// connection-exhaustion QEMU vertical (`plans/NETWORK.md` N16b) gates its
 /// run on this text appearing in the serial transcript, so the wording is
@@ -139,7 +148,6 @@ pub const SYN_COOKIES_ENGAGED_MESSAGE: &str =
 
 #[cfg(test)]
 mod tests {
-    use super::SYN_COOKIES_ENGAGED;
     use super::{
         ADMIN_APPLIED, ADMIN_REFUSED, DRIVER_BIND_DENIED, DRIVER_BIND_FAILED, DRIVER_BOUND,
         INBOUND_ECHO_SERVED, INTERFACE_CONFIG_APPLIED, NETSTACK_RANGE_END, NETSTACK_RANGE_START,
@@ -148,6 +156,7 @@ mod tests {
     };
     use super::{BOND_CONFIG_APPLIED, BOND_CONFIG_REFUSED, BOND_FAILOVER};
     use super::{DHCP6_LEASE_ACQUIRED, DHCP6_LEASE_LOST, DHCP_LEASE_ACQUIRED, DHCP_LEASE_LOST};
+    use super::{MULTICAST_FILTER_REFUSED, SYN_COOKIES_ENGAGED};
 
     #[test]
     fn ids_are_inside_reserved_range() {
@@ -176,6 +185,7 @@ mod tests {
             DHCP6_LEASE_ACQUIRED,
             DHCP6_LEASE_LOST,
             SYN_COOKIES_ENGAGED,
+            MULTICAST_FILTER_REFUSED,
         ] {
             assert!(id.0 >= NETSTACK_RANGE_START && id.0 < NETSTACK_RANGE_END);
         }
@@ -208,6 +218,7 @@ mod tests {
             DHCP6_LEASE_ACQUIRED.0,
             DHCP6_LEASE_LOST.0,
             SYN_COOKIES_ENGAGED.0,
+            MULTICAST_FILTER_REFUSED.0,
         ];
         ids.sort_unstable();
         for w in ids.windows(2) {

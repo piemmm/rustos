@@ -2062,24 +2062,61 @@ device-support crate (§2.22). Key facts for the next worker:
   slot at all, which on metal means the NIC receives nothing; the omission was
   invisible to the register-level suite until it asserted the filter.
 
-##### N14d — the driver-side multicast group filter `[ ]`
-The GENET admits a frame only if its destination matches an enabled filter
-slot, so a group address needs a slot. There is no seam through which the
-stack can ask a driver for one, so IPv6 — whose neighbour discovery, router
-solicitation, and DAD are multicast — cannot complete on the GENET. IPv4
-(including DHCPv4) is unaffected, and the virtio NICs are unaffected because
-their backends do no destination filtering.
+##### N14d — the driver-side multicast group filter `[x]`
+A MAC that filters destinations admits a frame only if it matches an enabled
+filter slot, so a group address needs a slot: without this the GENET received
+no multicast at all and IPv6 — whose neighbour discovery, router solicitation,
+and DAD are multicast — could not complete on it. IPv4 was unaffected, as were
+the virtio NICs, whose backends do no destination filtering. Key facts for the
+next worker:
 
-The increment is a `netchan-v1` group-membership operation the stack drives
-from the multicast set it already tracks (`lib/net::mcast`), and a `Net` trait
-method the driver implements by programming the group into a filter slot. It
-is the same shape for every NIC that filters in hardware, so it belongs on
-the shared device-channel contract rather than in one driver. Deliberately
-**not** solved by promiscuous reception: admitting every frame on the segment
-to work around a missing filter API is the security regression the charter
-forbids. Bound the slot budget fail-closed (17 slots, two already spent) and
-refuse a membership that does not fit rather than silently widening the
-filter.
+- **The device declares its own capability**, so the stack programs nothing on
+  a device that needs nothing: `DeviceFacts::multicast_filter` is
+  `McastFilter::Unfiltered` (every group frame already arrives) or
+  `McastFilter::Slots(n)` (only the given addresses arrive, at most `n`).
+  virtio-net reports `Unfiltered`; the GENET reports the slots left once its
+  two fixed ones (broadcast + own unicast) are spent.
+- **The set is replaced whole**, never added to and removed from:
+  `NetChannelRequest::SetMulticast` carries a fixed-capacity
+  `McastGroups` (bounded by `MAX_MCAST_GROUPS` = 32, above every device table
+  in the tree so the *device's* slot count is what binds), and `Net::
+  set_multicast_groups` mirrors it. One authoritative copy — the stack's
+  membership — so a lost increment cannot leave the two disagreeing. A
+  non-group address in the set is refused at construction *and* on decode, so
+  a hostile frame cannot widen a device's filter to another host.
+- **The pump pushes only on change.** `Stack::multicast_macs` builds exactly
+  what the receive path accepts (every joined IPv4 group; all-nodes, the
+  solicited-node group of every IPv6 address *including tentative ones* — DAD
+  listens there — and every joined IPv6 group), deduplicated because two IPv6
+  groups can share one link-layer address. `Stack::multicast_revision` folds
+  the three sources it derives from, so a settled interface costs one integer
+  comparison per doorbell rather than a rebuild-and-diff. The two membership
+  revisions are bumped *inside* `Membership`, and the address half is a fold
+  over the addresses rather than a bump at each of the several mutation sites:
+  a missed bump would silently strand a device one address behind.
+- **Pushed after `advance`, before the doorbell**, so a group that advance
+  just joined (a fresh address's solicited-node group, whose DAD probe the
+  same advance queued) is admitted before any answer to it could arrive.
+- **Overflow fails closed and loud, and never widens the filter.** A set past
+  the device's slots is refused whole, the previously admitted set stays in
+  force, and `netstack` audits `MULTICAST_FILTER_REFUSED` (16025) at `Warn`
+  because the groups that did not fit are genuinely no longer delivered. The
+  refusal is not recorded as pushed, so a set that shrinks back recovers on
+  the next pump. Promiscuous reception is deliberately **not** the fallback:
+  it would admit every frame on the segment, including unicast traffic
+  addressed to other hosts, which is a security regression rather than a
+  degradation.
+- **Coverage**: the wire codec (round-trip, smuggled unicast, over-long
+  count, dirty reserved byte, truncation, and the facts round-trip for every
+  filter kind), the `netchan` server (programmable while detached, refused by
+  an unfiltered device, refused when over-large), the engine (the set equals
+  what the receive path accepts, join/leave moves it, a settled interface's
+  revision is stable, a disabled family empties it), the pump (a filtering
+  device is programmed, an unfiltered one never is, a refusal is reported and
+  retried), and the GENET register model (groups land after the two fixed
+  slots, a replacement disables the slots it dropped, an over-large set is
+  refused whole). No QEMU vertical is possible for the GENET; the virtio
+  verticals continue to exercise the `Unfiltered` path.
 
 #### N15 — the socket half-close (`shutdown`) `[x]`
 
@@ -2314,17 +2351,17 @@ No hidden state, no per-driver config files, no imperative boot scripts.
   endpoint so interfaces are addressed as their drivers autoload, headless.
   It is image- and installer-authored; the build validates it through this
   engine, so an image cannot ship a document its own stack would reject.
-- **Runtime rewriting is not yet wired, and is the next increment here.**
-  The intended shape is a writable override on `/System/Settings` (the
-  `configure` precedent — writes through the secured VFS under the caller's
-  kernel-attested identity, the per-inode policy deciding who may write, no
-  new capability for the file itself) layered *above* the shipped default,
-  with the `CAP_NET_ADMIN` admin IPC applying it: `netstack` re-reads,
-  diffs, and applies atomically per interface, auditing each change
-  (§19.4). Today no writer exists (`configure` grows no interface
-  sub-grammar) and the device manager reads only the pre-unlock store, so
-  there is deliberately no second copy of the document anywhere — one
-  would look authoritative while being read by nothing.
+- **A writable override layer exists for the store as a whole** (see 6.2
+  for the `system.conf` half, which is wired end to end): the device manager
+  reads the authoritative document at the canonical `/System/Settings/` path
+  when the encrypted root has been mounted, and the shipped default beneath
+  it otherwise. Neither layer is copied into the other.
+- **`network.conf` has no runtime writer, by design.** `configure` grows no
+  interface sub-grammar, so the per-interface document stays image- and
+  installer-authored; the override layer is already in place for whenever one
+  lands, and the delivery path already re-pushes what changed. A second
+  *shipped* copy of the document is never created — that divergence is what
+  made the shipped addressing default unreadable in the first place.
 
 ### 6.2 `configure net.*` — stack-wide knobs
 
@@ -2357,20 +2394,37 @@ tree, exactly like `os.*`:
   changes are edits to `network.conf` plus the typed admin reload.
   Both stores surface as `state:net/…` reads (§5).
 
-**Open defect — `configure net.*` does not reach the stack.** `configure`
-writes `system.conf` through the VFS at `tairix_sysconfig::CONFIG_PATH`,
-which resolves to the writable `/System/Settings` sub-mount on the encrypted
-root; the device manager reads the `net.*` policy it delivers off the
-read-only `/System` volume through the pre-unlock store endpoint. The two
-are different files, so an edited `net.*` key is never delivered — the stack
-keeps its registry defaults. (The `os.*` keys are unaffected: the kernel and
-`login` read them through the same VFS path `configure` writes.) The fix is
-the writable-override layer 6.1 describes, applied to *both* stores: the
-device manager reads the shipped default pre-unlock, then re-reads the
-authoritative document once the root is mounted and re-delivers what
-changed. Until that lands, a `net.*` policy is an image/installer decision
-only. Landing it must not reintroduce a second *shipped* copy of either
-document — the divergence is precisely the defect.
+**`configure net.*` reaches the stack by two paths, and both use one
+mapping.** The store is two layers and neither is ever copied into the
+other: the image- or installer-authored default on the read-only `/System`
+volume, and the document an administrator writes at the canonical
+`/System/Settings/Configuration/system.conf` on the writable root.
+
+- **Live** — `configure` delivers the resulting policy over the existing
+  `CAP_NET_ADMIN` `ApplyNetworkSettings` admin op after it writes a `net.*`
+  key (`Key::is_network` classifies the key exhaustively rather than by
+  spelling). A refusal — no stack running, or a ceiling without
+  `CAP_NET_ADMIN` — leaves the saved setting standing and is *reported*, so
+  the operator learns it applies at next boot instead of believing it took
+  effect. The store write is already gated by the file's own per-inode
+  policy, so this grants nothing new.
+- **Across boot** — `devmgr` reads the layered store (`read_layered_config`:
+  the VFS override if readable, else the store endpoint's shipped default)
+  and re-delivers whenever the policy differs from what the stack last
+  accepted. `NetConfigState` therefore holds the last-delivered
+  `NetworkSettings` rather than a delivered-once flag. The override read
+  fails closed before the root is mounted, which is exactly when the shipped
+  default is the right answer.
+- **One mapping** — `SystemConfig::network_settings` in `lib/sysconfig`,
+  beside the key registry it reads, so both deliverers hand the stack the
+  same policy for the same document and a new `net.*` key updates the
+  registry and the mapping in one crate.
+
+Before this, `configure` wrote a file no reader ever opened: the two paths
+named different volumes, so an edited `net.*` key was silently never
+delivered and the stack kept its registry defaults. (The `os.*` keys were
+unaffected — the kernel and `login` read them through the same VFS path
+`configure` writes.)
 
 ### 6.3 Bonding and failover
 

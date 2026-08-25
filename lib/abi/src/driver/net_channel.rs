@@ -46,7 +46,9 @@
 //! operation byte, a dirty reserved field, an out-of-range geometry, or an
 //! over-length frame refuses with one typed [`Errno`] rather than guessing.
 
-use super::net::{DeviceFacts, LinkState, MacAddress, NetOffloads, MAC_ADDRESS_LEN};
+use super::net::{
+    DeviceFacts, LinkState, MacAddress, McastFilter, NetOffloads, MAC_ADDRESS_LEN, MAX_MCAST_GROUPS,
+};
 use super::net_ring::{RingGeometry, ServiceReport};
 use super::BufferClass;
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
@@ -134,6 +136,7 @@ mod op {
     pub const ATTACH: u8 = 2;
     pub const SERVICE: u8 = 3;
     pub const DETACH: u8 = 4;
+    pub const SET_MULTICAST: u8 = 5;
 }
 
 /// Fixed request header: magic (4) + version (2) + op (1) + reserved (1).
@@ -145,10 +148,23 @@ const HEADER_LEN: usize = 8;
 /// (2) + reserved (1) + notify endpoint id (8).
 const ATTACH_BODY_LEN: usize = 4 + 4 + 4 + 8 + 1 + 2 + 1 + 8;
 
-/// Largest device-channel request frame: the header plus the (largest)
-/// [`NetChannelRequest::Attach`] body. A fixed validation bound sizing the
-/// buffer both sides pin for the control endpoint.
-pub const NET_CHANNEL_MAX_REQUEST: usize = HEADER_LEN + ATTACH_BODY_LEN;
+/// Wire length of the [`NetChannelRequest::SetMulticast`] body: the group
+/// count (1) + reserved (1) + [`MAX_MCAST_GROUPS`] fixed-width addresses.
+///
+/// The body is fixed-width rather than count-sized so the frame length is a
+/// constant both sides validate against, and a short frame is a refusal
+/// rather than a partially-read set.
+const SET_MULTICAST_BODY_LEN: usize = 1 + 1 + MAX_MCAST_GROUPS * MAC_ADDRESS_LEN;
+
+/// Largest device-channel request frame: the header plus the largest body. A
+/// fixed validation bound sizing the buffer both sides pin for the control
+/// endpoint.
+pub const NET_CHANNEL_MAX_REQUEST: usize = HEADER_LEN
+    + if ATTACH_BODY_LEN > SET_MULTICAST_BODY_LEN {
+        ATTACH_BODY_LEN
+    } else {
+        SET_MULTICAST_BODY_LEN
+    };
 
 /// Wire length of a [`NetChannelNotify`] frame: magic (4) + version (2) +
 /// reserved (2).
@@ -168,6 +184,61 @@ pub enum NetChannelRequest {
     Service,
     /// Release the channel: unmap the region and forget the notify port.
     Detach,
+    /// Replace the set of group (multicast) addresses the device admits.
+    SetMulticast(McastGroups),
+}
+
+/// The group-address set of a [`NetChannelRequest::SetMulticast`].
+///
+/// Fixed-capacity and [`Copy`] so the whole request stays a plain value with
+/// no allocation and no borrow of the decoded frame; the set is small
+/// ([`MAX_MCAST_GROUPS`]) and only ever built when the stack's membership
+/// changes, never on the frame path.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct McastGroups {
+    count: u8,
+    groups: [MacAddress; MAX_MCAST_GROUPS],
+}
+
+impl McastGroups {
+    /// The empty set: the device admits no group address.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            count: 0,
+            groups: [MacAddress::BROADCAST; MAX_MCAST_GROUPS],
+        }
+    }
+
+    /// Collect `groups` into a set.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] when `groups` holds more than
+    /// [`MAX_MCAST_GROUPS`] addresses, or any of them is not a group address
+    /// (its IEEE 802 I/G bit is clear) — a unicast address here would widen
+    /// the device's filter to a host the stack never asked for.
+    pub fn new(groups: &[MacAddress]) -> Result<Self, Errno> {
+        if groups.len() > MAX_MCAST_GROUPS {
+            return Err(Errno::OutOfRange);
+        }
+        let mut set = Self::empty();
+        for (slot, group) in groups.iter().enumerate() {
+            if group.as_octets()[0] & 0x01 == 0 {
+                return Err(Errno::OutOfRange);
+            }
+            set.groups[slot] = *group;
+        }
+        // `groups.len()` is bounded by `MAX_MCAST_GROUPS` above.
+        set.count = u8::try_from(groups.len()).map_err(|_| Errno::OutOfRange)?;
+        Ok(set)
+    }
+
+    /// The group addresses, in the order the stack supplied them.
+    #[must_use]
+    pub fn as_slice(&self) -> &[MacAddress] {
+        &self.groups[..usize::from(self.count)]
+    }
 }
 
 /// The parameters of a [`NetChannelRequest::Attach`].
@@ -202,6 +273,7 @@ impl NetChannelRequest {
             Self::Attach(_) => op::ATTACH,
             Self::Service => op::SERVICE,
             Self::Detach => op::DETACH,
+            Self::SetMulticast(_) => op::SET_MULTICAST,
         }
     }
 
@@ -214,6 +286,7 @@ impl NetChannelRequest {
         let len = match self {
             Self::Facts | Self::Service | Self::Detach => HEADER_LEN,
             Self::Attach(_) => HEADER_LEN + ATTACH_BODY_LEN,
+            Self::SetMulticast(_) => HEADER_LEN + SET_MULTICAST_BODY_LEN,
         };
         if out.len() < len {
             return Err(Errno::BufferTooSmall);
@@ -234,6 +307,14 @@ impl NetChannelRequest {
             put_u16(out, HEADER_LEN + 21, params.geometry.rx_queues());
             // out[HEADER_LEN + 23] reserved, left zero.
             put_u64(out, HEADER_LEN + 24, params.notify_endpoint);
+        }
+        if let Self::SetMulticast(groups) = self {
+            out[HEADER_LEN] = groups.count;
+            // out[HEADER_LEN + 1] reserved, left zero.
+            for (slot, group) in groups.as_slice().iter().enumerate() {
+                let at = HEADER_LEN + 2 + slot * MAC_ADDRESS_LEN;
+                out[at..at + MAC_ADDRESS_LEN].copy_from_slice(group.as_octets());
+            }
         }
         Ok(len)
     }
@@ -265,6 +346,7 @@ impl NetChannelRequest {
             op::SERVICE => Ok(Self::Service),
             op::DETACH => Ok(Self::Detach),
             op::ATTACH => Self::decode_attach(bytes),
+            op::SET_MULTICAST => Self::decode_set_multicast(bytes),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -290,6 +372,33 @@ impl NetChannelRequest {
             class,
             notify_endpoint,
         }))
+    }
+
+    fn decode_set_multicast(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < HEADER_LEN + SET_MULTICAST_BODY_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        if bytes[HEADER_LEN + 1] != 0 {
+            return Err(Errno::BadMagic);
+        }
+        let count = usize::from(bytes[HEADER_LEN]);
+        if count > MAX_MCAST_GROUPS {
+            return Err(Errno::OutOfRange);
+        }
+        let mut groups = [MacAddress::BROADCAST; MAX_MCAST_GROUPS];
+        for (slot, group) in groups.iter_mut().take(count).enumerate() {
+            let at = HEADER_LEN + 2 + slot * MAC_ADDRESS_LEN;
+            let mut octets = [0u8; MAC_ADDRESS_LEN];
+            octets.copy_from_slice(&bytes[at..at + MAC_ADDRESS_LEN]);
+            *group = MacAddress::new(octets);
+        }
+        // Re-validate through the constructor so a hostile frame cannot
+        // smuggle a unicast address into the device's filter.
+        Self::new_set_multicast(&groups[..count])
+    }
+
+    fn new_set_multicast(groups: &[MacAddress]) -> Result<Self, Errno> {
+        Ok(Self::SetMulticast(McastGroups::new(groups)?))
     }
 }
 
@@ -343,8 +452,14 @@ impl NetChannelNotify {
 // --- DeviceFacts wire codec (the Facts reply payload) -------------------
 
 /// Wire length of a [`DeviceFacts`] payload: mac (6) + mtu (4) + offloads
-/// (4) + `rx_queues` (2) + link (1) + reserved (1).
-const FACTS_PAYLOAD_LEN: usize = MAC_ADDRESS_LEN + 4 + 4 + 2 + 1 + 1;
+/// (4) + `rx_queues` (2) + link (1) + multicast-filter kind (1) +
+/// multicast slots (2).
+const FACTS_PAYLOAD_LEN: usize = MAC_ADDRESS_LEN + 4 + 4 + 2 + 1 + 1 + 2;
+
+/// Wire byte for [`McastFilter::Unfiltered`].
+const MCAST_UNFILTERED: u8 = 0;
+/// Wire byte for [`McastFilter::Slots`].
+const MCAST_SLOTS: u8 = 1;
 
 /// Wire length of the Facts reply: a status word then the payload (zeroed
 /// on refusal).
@@ -372,6 +487,12 @@ pub fn encode_facts_reply(result: Result<DeviceFacts, Errno>) -> [u8; NET_CHANNE
                 LinkState::Up => LINK_UP,
                 LinkState::Down => LINK_DOWN,
             };
+            let (kind, slots) = match facts.multicast_filter {
+                McastFilter::Unfiltered => (MCAST_UNFILTERED, 0),
+                McastFilter::Slots(slots) => (MCAST_SLOTS, slots),
+            };
+            body[MAC_ADDRESS_LEN + 11] = kind;
+            put_u16(body, MAC_ADDRESS_LEN + 12, slots);
         }
         Err(err) => {
             let status = (-err.as_i32()).to_le_bytes();
@@ -411,15 +532,21 @@ pub fn decode_facts_reply(bytes: &[u8]) -> Result<DeviceFacts, Errno> {
         LINK_DOWN => LinkState::Down,
         _ => return Err(Errno::OutOfRange),
     };
-    if body[MAC_ADDRESS_LEN + 11] != 0 {
-        return Err(Errno::OutOfRange);
-    }
+    let slots = read_u16(body, MAC_ADDRESS_LEN + 12);
+    let multicast_filter = match body[MAC_ADDRESS_LEN + 11] {
+        // An unfiltered device has no slot count; a dirty one is a corrupt
+        // report, not a device that filters.
+        MCAST_UNFILTERED if slots == 0 => McastFilter::Unfiltered,
+        MCAST_SLOTS => McastFilter::Slots(slots),
+        _ => return Err(Errno::OutOfRange),
+    };
     let facts = DeviceFacts {
         mac: MacAddress::new(mac),
         mtu,
         link,
         offloads,
         rx_queues,
+        multicast_filter,
     };
     facts.validate()?;
     Ok(facts)
@@ -535,6 +662,85 @@ mod tests {
         })
     }
 
+    #[test]
+    fn set_multicast_round_trips_and_rejects_a_unicast_address() {
+        let groups = [
+            MacAddress::new([0x33, 0x33, 0x00, 0x00, 0x00, 0x01]),
+            MacAddress::new([0x01, 0x00, 0x5E, 0x7F, 0x00, 0x02]),
+        ];
+        let request =
+            NetChannelRequest::SetMulticast(McastGroups::new(&groups).expect("group set"));
+        let mut out = [0u8; NetChannelRequest::MAX_WIRE_LEN];
+        let len = request.encode(&mut out).expect("encodes");
+        assert_eq!(NetChannelRequest::decode(&out[..len]), Ok(request));
+
+        // A unicast address here would widen the device's filter to a host
+        // the stack never asked for: refused at construction and on decode.
+        assert_eq!(
+            McastGroups::new(&[MacAddress::new([0x02, 0x11, 0x22, 0x33, 0x44, 0x55])]).err(),
+            Some(Errno::OutOfRange)
+        );
+        let mut smuggled = out;
+        smuggled[HEADER_LEN + 2] = 0x02;
+        assert_eq!(
+            NetChannelRequest::decode(&smuggled[..len]),
+            Err(Errno::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn an_over_long_or_short_multicast_set_is_refused() {
+        let mut out = [0u8; NetChannelRequest::MAX_WIRE_LEN];
+        let len = NetChannelRequest::SetMulticast(McastGroups::empty())
+            .encode(&mut out)
+            .expect("encodes");
+        // A count past the fixed-width body cannot be honoured.
+        let mut over = out;
+        // `MAX_MCAST_GROUPS` fits a u8, so one past it does too.
+        over[HEADER_LEN] = u8::try_from(MAX_MCAST_GROUPS).expect("fits") + 1;
+        assert_eq!(
+            NetChannelRequest::decode(&over[..len]),
+            Err(Errno::OutOfRange)
+        );
+        // A dirty reserved byte is a malformed frame, never ignored.
+        let mut dirty = out;
+        dirty[HEADER_LEN + 1] = 1;
+        assert_eq!(
+            NetChannelRequest::decode(&dirty[..len]),
+            Err(Errno::BadMagic)
+        );
+        // A truncated body is refused rather than partially read.
+        assert_eq!(
+            NetChannelRequest::decode(&out[..len - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+        assert_eq!(McastGroups::empty().as_slice(), &[]);
+    }
+
+    #[test]
+    fn the_multicast_filter_survives_the_facts_round_trip() {
+        for filter in [
+            McastFilter::Unfiltered,
+            McastFilter::Slots(0),
+            McastFilter::Slots(15),
+        ] {
+            let mut expected = facts();
+            expected.multicast_filter = filter;
+            let reply = encode_facts_reply(Ok(expected));
+            assert_eq!(decode_facts_reply(&reply), Ok(expected), "{filter:?}");
+        }
+        // An unfiltered report carrying a slot count is corrupt, not a
+        // device that filters: fail closed rather than pick a reading.
+        let mut reply = encode_facts_reply(Ok(facts()));
+        reply[4 + MAC_ADDRESS_LEN + 11] = MCAST_UNFILTERED;
+        put_u16(&mut reply, 4 + MAC_ADDRESS_LEN + 12, 3);
+        assert_eq!(decode_facts_reply(&reply), Err(Errno::OutOfRange));
+        // An unknown filter kind is refused.
+        let mut unknown = encode_facts_reply(Ok(facts()));
+        unknown[4 + MAC_ADDRESS_LEN + 11] = 9;
+        assert_eq!(decode_facts_reply(&unknown), Err(Errno::OutOfRange));
+    }
+
     fn facts() -> DeviceFacts {
         DeviceFacts {
             mac: MacAddress::new([0x02, 0x11, 0x22, 0x33, 0x44, 0x55]),
@@ -542,6 +748,7 @@ mod tests {
             link: LinkState::Up,
             offloads: NetOffloads::from_bits(NetOffloads::TX_CSUM_UDP.bits())
                 .expect("defined bits"),
+            multicast_filter: McastFilter::Slots(15),
             rx_queues: 2,
         }
     }
@@ -673,10 +880,6 @@ mod tests {
         // A runt MTU fails DeviceFacts::validate.
         let mut ok = encode_facts_reply(Ok(facts()));
         put_u32(&mut ok, 4 + MAC_ADDRESS_LEN, 1);
-        assert_eq!(decode_facts_reply(&ok), Err(Errno::OutOfRange));
-        // A dirty reserved byte.
-        let mut ok = encode_facts_reply(Ok(facts()));
-        ok[4 + MAC_ADDRESS_LEN + 11] = 1;
         assert_eq!(decode_facts_reply(&ok), Err(Errno::OutOfRange));
     }
 

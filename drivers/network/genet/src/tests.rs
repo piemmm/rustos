@@ -369,6 +369,92 @@ fn bring_up_admits_the_station_address_and_broadcast_through_the_receive_filter(
 }
 
 #[test]
+fn group_addresses_are_admitted_after_the_two_fixed_slots() {
+    let mut device = open();
+    let groups = [
+        MacAddress::new([0x33, 0x33, 0x00, 0x00, 0x00, 0x01]),
+        MacAddress::new([0x01, 0x00, 0x5E, 0x00, 0x00, 0x01]),
+    ];
+    device
+        .set_multicast_groups(&groups)
+        .expect("two groups fit the table");
+    let mock = &device.regs;
+    // Broadcast and the station address keep the first two slots; the groups
+    // follow, so a group can never displace what makes the host addressable.
+    for (slot, address) in [
+        MacAddress::BROADCAST,
+        MacAddress::new(MAC),
+        groups[0],
+        groups[1],
+    ]
+    .iter()
+    .enumerate()
+    {
+        let octets = address.as_octets();
+        let base = regs::UMAC_MDF_ADDR + slot * regs::MDF_SLOT_STRIDE;
+        assert_eq!(
+            mock.peek(base),
+            u32::from(u16::from_be_bytes([octets[0], octets[1]])),
+            "slot {slot} high half"
+        );
+        assert_eq!(
+            mock.peek(base + 4),
+            u32::from_be_bytes([octets[2], octets[3], octets[4], octets[5]]),
+            "slot {slot} low word"
+        );
+    }
+    let top = 1u32 << (regs::MDF_SLOTS - 1);
+    assert_eq!(
+        mock.peek(regs::UMAC_MDF_CTRL),
+        top | (top >> 1) | (top >> 2) | (top >> 3),
+        "exactly four slots enabled"
+    );
+}
+
+#[test]
+fn replacing_the_group_set_disables_the_slots_it_dropped() {
+    let mut device = open();
+    let group = MacAddress::new([0x33, 0x33, 0x00, 0x00, 0x00, 0x01]);
+    device.set_multicast_groups(&[group]).expect("one group");
+    device
+        .set_multicast_groups(&[])
+        .expect("the empty set leaves the fixed pair");
+    // A stale enable bit would keep admitting a group the stack has left.
+    let top = 1u32 << (regs::MDF_SLOTS - 1);
+    assert_eq!(device.regs.peek(regs::UMAC_MDF_CTRL), top | (top >> 1));
+}
+
+#[test]
+fn a_group_set_larger_than_the_table_is_refused_whole() {
+    let mut device = open();
+    let group = MacAddress::new([0x33, 0x33, 0x00, 0x00, 0x00, 0x01]);
+    device.set_multicast_groups(&[group]).expect("one group");
+    let enabled_before = device.regs.peek(regs::UMAC_MDF_CTRL);
+    let too_many: Vec<MacAddress> = (0..=u32::from(MCAST_SLOTS))
+        .map(|n| {
+            let o = n.to_be_bytes();
+            MacAddress::new([0x33, 0x33, o[0], o[1], o[2], o[3]])
+        })
+        .collect();
+    assert_eq!(
+        device.set_multicast_groups(&too_many),
+        Err(DriverError::LengthOutOfRange),
+        "one past the table is refused"
+    );
+    // Refused whole: the working set stays, and the filter is never widened
+    // to make an over-large set fit.
+    assert_eq!(device.regs.peek(regs::UMAC_MDF_CTRL), enabled_before);
+}
+
+#[test]
+fn the_device_reports_the_group_slots_it_has_left() {
+    let device = open();
+    let facts = device.device_facts().expect("facts");
+    assert_eq!(facts.multicast_filter, McastFilter::Slots(MCAST_SLOTS));
+    assert_eq!(MCAST_SLOTS, regs::MDF_SLOTS - RX_FILTER_ADDRESSES);
+}
+
+#[test]
 fn the_receive_filter_is_programmed_before_the_receiver_is_enabled() {
     let device = open();
     let mock = &device.regs;

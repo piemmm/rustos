@@ -31,10 +31,12 @@ use crate::netbind::NetstackBind;
 /// The device manager's read of the stack-wide `net.*` policy from the
 /// system-configuration store.
 ///
-/// The production implementation reads
-/// `/System/Settings/Configuration/system.conf` and maps it through the one
-/// shared `lib/sysconfig` engine ([`settings_from_config`]); it is a seam so
-/// the delivery policy is host-testable against a scripted double.
+/// The production implementation reads `system.conf` — the administrator's
+/// document when the encrypted root is mounted, the shipped default beneath
+/// it otherwise — and maps it through the one shared
+/// [`SystemConfig::network_settings`](tairix_sysconfig::SystemConfig::network_settings);
+/// it is a seam so the delivery policy is host-testable against a scripted
+/// double.
 pub trait NetworkConfigSource {
     /// Load the current stack-wide network settings.
     ///
@@ -46,41 +48,19 @@ pub trait NetworkConfigSource {
     fn load(&mut self) -> Option<NetworkSettings>;
 }
 
-/// Map a parsed [`system.conf`](tairix_sysconfig::SystemConfig) onto the
-/// stack-wide [`NetworkSettings`] the network stack enforces.
+/// The device manager's memory of the stack-wide `net.*` policy it last
+/// delivered to the network stack.
 ///
-/// The mapping is exact and the single definition both the service binary and
-/// its tests use: `net.ipv4.enabled` / `net.ipv6.enabled` gate the families,
-/// `net.tcp.syncookies always` selects unconditional SYN cookies (`auto` leaves
-/// the bounded backlog), `net.ipv6.privacy` enables RFC 8981 temporary
-/// (privacy) IPv6 addresses, `net.tcp.keepalive` enables RFC 9293 §3.8.4 TCP
-/// keepalive probing on idle connections, and `net.tcp.ecn` enables RFC 3168
-/// Explicit Congestion Notification.
-#[cfg(feature = "program")]
-#[must_use]
-pub fn settings_from_config(config: &tairix_sysconfig::SystemConfig) -> NetworkSettings {
-    NetworkSettings {
-        ipv4_enabled: config.net_ipv4_enabled.is_enabled(),
-        ipv6_enabled: config.net_ipv6_enabled.is_enabled(),
-        syncookies_always: matches!(
-            config.net_tcp_syncookies,
-            tairix_sysconfig::SynCookies::Always
-        ),
-        ipv6_privacy: config.net_ipv6_privacy.is_enabled(),
-        tcp_keepalive: config.net_tcp_keepalive.is_enabled(),
-        tcp_ecn: config.net_tcp_ecn.is_enabled(),
-    }
-}
-
-/// The device manager's memory of whether it has delivered the stack-wide
-/// `net.*` policy to the network stack.
-///
-/// Delivery happens exactly once: the read-only `/System` configuration store
-/// is static (runtime reload is a later increment), so once the policy has
-/// been read and the stack accepted it, no further read or push is made.
+/// Not a "delivered once" flag: the shipped default on the read-only
+/// `/System` volume is only the *lower* layer of the store, and the
+/// authoritative document on the writable root becomes readable when the
+/// encrypted root is mounted. So the policy is re-read on each generation
+/// bump and re-delivered whenever it differs from what the stack was last
+/// given, which is what makes an administrator's edit take effect on the
+/// next boot rather than being silently ignored.
 #[derive(Default)]
 pub struct NetConfigState {
-    delivered: bool,
+    delivered: Option<NetworkSettings>,
 }
 
 impl NetConfigState {
@@ -90,30 +70,28 @@ impl NetConfigState {
         Self::default()
     }
 
-    /// Whether the policy has already been delivered and accepted.
+    /// Whether a policy has already been delivered and accepted.
     #[must_use]
     pub fn is_delivered(&self) -> bool {
-        self.delivered
+        self.delivered.is_some()
     }
 }
 
-/// Deliver the stack-wide `net.*` policy to the network stack, once.
+/// Deliver the stack-wide `net.*` policy to the network stack whenever it
+/// differs from the policy last accepted.
 ///
-/// A no-op after a successful delivery. Otherwise it reads the policy through
-/// `source`; if the store is not yet readable ([`None`]) it leaves the stack
-/// on its safe defaults and returns (retried on the next bump). If a policy
-/// is read, it is pushed through `netstack`: success is recorded (no further
-/// attempts), and a refusal is logged fail-soft and retried next bump — the
-/// stack may not have bound its admin endpoint yet.
+/// Reads the policy through `source`; if the store is not yet readable
+/// ([`None`]) it leaves the stack on its safe defaults and returns (retried
+/// on the next bump). A policy identical to the last delivered one is not
+/// re-pushed. Otherwise it is pushed through `netstack`: success is recorded,
+/// and a refusal is logged fail-soft and retried next bump — the stack may
+/// not have bound its admin endpoint yet.
 pub fn deliver_network_settings(
     source: &mut dyn NetworkConfigSource,
     state: &mut NetConfigState,
     netstack: &mut dyn NetstackBind,
     sink: &dyn Sink,
 ) {
-    if state.delivered {
-        return;
-    }
     let Some(settings) = source.load() else {
         // The store is not readable yet (the store service not reachable yet,
         // or an absent/failed read): the stack keeps its safe defaults and
@@ -121,9 +99,12 @@ pub fn deliver_network_settings(
         // store early in boot is the expected state, not an anomaly.
         return;
     };
+    if state.delivered == Some(settings) {
+        return;
+    }
     match netstack.apply_settings(settings) {
         Ok(()) => {
-            state.delivered = true;
+            state.delivered = Some(settings);
             log_event(
                 sink,
                 &Event {
@@ -779,7 +760,7 @@ mod tests {
     fn settings_map_from_the_config_registry() {
         let mut config = tairix_sysconfig::SystemConfig::default();
         assert_eq!(
-            settings_from_config(&config),
+            config.network_settings(),
             settings(true, true, false, false, false, false),
             "the registry defaults map to families-on, cookies-auto, privacy-off, keepalive-off, ecn-off"
         );
@@ -789,7 +770,7 @@ mod tests {
         config.net_tcp_keepalive = tairix_sysconfig::NetToggle::Enabled;
         config.net_tcp_ecn = tairix_sysconfig::NetToggle::Enabled;
         assert_eq!(
-            settings_from_config(&config),
+            config.network_settings(),
             settings(true, false, true, true, true, true)
         );
     }
@@ -810,7 +791,7 @@ mod tests {
     }
 
     #[test]
-    fn a_read_policy_is_delivered_once() {
+    fn an_unchanged_policy_is_not_re_delivered() {
         let policy = settings(true, false, true, true, true, true);
         let mut source = ScriptedSource::new(alloc::vec![Some(policy), Some(policy)]);
         let mut state = NetConfigState::new();
@@ -823,9 +804,34 @@ mod tests {
             sink.ids.borrow().as_slice(),
             &[events::NETWORK_SETTINGS_DELIVERED.0]
         );
-        // A second pass delivers nothing more (the store is static).
+        // Re-reading the same document costs the stack nothing.
         deliver_network_settings(&mut source, &mut state, &mut netstack, &sink);
-        assert_eq!(netstack.applied.borrow().len(), 1, "delivered exactly once");
+        assert_eq!(netstack.applied.borrow().len(), 1, "delivered once");
+    }
+
+    #[test]
+    fn a_changed_policy_is_re_delivered() {
+        // The shipped default on the read-only volume is only the lower
+        // layer: the administrator's document becomes readable when the
+        // encrypted root is mounted, so a policy that changes between reads
+        // must reach the stack rather than being ignored as "already
+        // delivered".
+        let shipped = settings(true, true, false, false, false, false);
+        let edited = settings(true, false, true, true, true, true);
+        let mut source = ScriptedSource::new(alloc::vec![Some(edited), Some(shipped)]);
+        let mut state = NetConfigState::new();
+        let mut netstack = RecordingNetstack::new(alloc::vec![Ok(()), Ok(())]);
+        let sink = RecordingSink::new();
+        deliver_network_settings(&mut source, &mut state, &mut netstack, &sink);
+        deliver_network_settings(&mut source, &mut state, &mut netstack, &sink);
+        assert_eq!(*netstack.applied.borrow(), alloc::vec![shipped, edited]);
+        assert_eq!(
+            sink.ids.borrow().as_slice(),
+            &[
+                events::NETWORK_SETTINGS_DELIVERED.0,
+                events::NETWORK_SETTINGS_DELIVERED.0
+            ]
+        );
     }
 
     #[test]

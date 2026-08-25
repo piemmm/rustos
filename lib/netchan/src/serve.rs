@@ -247,6 +247,10 @@ fn serve_call<N: Net>(
             };
             let _ = tairix_rt::call_reply(endpoint, ticket, &reply);
         }
+        Ok(NetChannelRequest::SetMulticast(groups)) => {
+            let reply = server.set_multicast_reply(&groups);
+            let _ = tairix_rt::call_reply(endpoint, ticket, &reply);
+        }
         Ok(NetChannelRequest::Detach) => {
             let reply = server.detach();
             if let Some(region) = region.take() {

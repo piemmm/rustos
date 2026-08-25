@@ -36,10 +36,12 @@ mod program {
     use alloc::vec::Vec;
 
     use tairix_abi::fs::OpenFlags;
+    use tairix_abi::net_ipc::{NetstackRequest, NetworkSettings, NETSTACK_ENDPOINT};
+    use tairix_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
     use tairix_abi::Errno;
-    use tairix_configure::{parse, run, ConfigureError, Store, USAGE};
+    use tairix_configure::{parse, run, ConfigureError, NetPolicy, Store, USAGE};
     use tairix_help::BundleHelp;
-    use tairix_rt::io::{write_stderr_line, Stdout, Write};
+    use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
     use tairix_sysconfig::{CONFIG_DIR, CONFIG_PATH, MAX_CONFIG_LEN};
 
     /// The production [`Store`] over the syscall-backed store file at
@@ -115,6 +117,23 @@ mod program {
         }
     }
 
+    /// The production [`NetPolicy`]: one `ipc_call` to the network stack's
+    /// reserved admin endpoint. The kernel gates it on this process's
+    /// `CAP_NET_ADMIN`, so the seam adds no authority — an ordinary user's
+    /// `configure` is refused there, exactly as its store write is refused by
+    /// the file's own per-inode policy.
+    struct StackPolicy;
+
+    impl NetPolicy for StackPolicy {
+        fn apply(&self, settings: NetworkSettings) -> Result<(), Errno> {
+            let request = NetstackRequest::ApplyNetworkSettings(settings).to_le_bytes();
+            let mut reply = [0u8; STATUS_REPLY_LEN];
+            let len = tairix_rt::ipc_call(NETSTACK_ENDPOINT, &request, &mut reply)
+                .map_err(Errno::from_syscall)?;
+            decode_status_reply(&reply[..len])
+        }
+    }
+
     /// Write every byte of `bytes` to `fd` from offset 0, looping over
     /// benign short writes; a backing that stops accepting bytes fails
     /// closed rather than spinning.
@@ -140,6 +159,16 @@ mod program {
             // The shared short-write loop; a stream that stops accepting
             // bytes fails closed rather than spinning.
             Stdout.write_all(bytes).map_err(|_| Errno::NotImplemented)
+        }
+    }
+
+    /// The diagnostic stream: a refused live apply is reported here, never on
+    /// the stdout a script parses.
+    struct RtDiagnostics;
+
+    impl tairix_configure::Output for RtDiagnostics {
+        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
+            Stderr.write_all(bytes).map_err(|_| Errno::NotImplemented)
         }
     }
 
@@ -169,8 +198,10 @@ mod program {
             command,
             locale,
             &FileStore,
+            &StackPolicy,
             &BundleHelp::new("configure"),
             &RtOutput,
+            &RtDiagnostics,
         ) {
             Ok(()) => 0,
             Err(err @ (ConfigureError::Usage | ConfigureError::UnknownKey)) => {

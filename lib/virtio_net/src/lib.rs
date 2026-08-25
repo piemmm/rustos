@@ -126,7 +126,7 @@
 
 use core::convert::TryFrom;
 use tairix_abi::driver::net::{
-    DeviceFacts, LinkState, MacAddress, Net, NetOffloads, MAC_ADDRESS_LEN,
+    DeviceFacts, LinkState, MacAddress, McastFilter, Net, NetOffloads, MAC_ADDRESS_LEN,
 };
 use tairix_abi::driver::net_ring::{
     FrameOffload, FrameRing, FrameRings, RingGeometry, ServiceReport, MAX_RX_QUEUES,
@@ -1581,6 +1581,10 @@ impl<T: Transport> Net for VirtioNet<'_, T> {
             link: self.read_link(),
             offloads,
             rx_queues: u16::try_from(self.rx_queue_count.max(1)).unwrap_or(1),
+            // This driver negotiates no receive-filter feature, so the
+            // device hands over every frame its backend delivers and the
+            // stack has nothing to program.
+            multicast_filter: McastFilter::Unfiltered,
         })
     }
 

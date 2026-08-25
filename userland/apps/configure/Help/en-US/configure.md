@@ -71,8 +71,11 @@ never changes a result.
   negotiated, treats a congestion mark as a signal to slow down instead
   of forcing a packet drop.
 
-The `net.*` settings are read by the network stack; a change takes
-effect when the stack next applies its configuration.
+Changing a `net.*` setting saves it and delivers it to the running network
+stack, so it takes effect at once. If the running stack does not accept it
+— none is running, or your account may not administer the network — the
+setting is still saved and `configure` says so; it then applies at the next
+boot.
 
 ## OPTIONS
 

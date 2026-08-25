@@ -25,7 +25,9 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use tairix_abi::driver::net::{DeviceFacts, LinkState, MacAddress, NetOffloads, MAC_ADDRESS_LEN};
+use tairix_abi::driver::net::{
+    DeviceFacts, LinkState, MacAddress, McastFilter, NetOffloads, MAC_ADDRESS_LEN,
+};
 use tairix_abi::Duration64;
 use tairix_net::addr::{Ecn, IpAddr, Ipv4Addr, Ipv6Addr, ALL_NODES};
 use tairix_net::checksum::Pseudo;
@@ -377,6 +379,7 @@ fn run_bond_peer(
         link: LinkState::Up,
         offloads: NetOffloads::empty(),
         rx_queues: 1,
+        multicast_filter: McastFilter::Unfiltered,
     };
     let start = Instant::now();
     let now = |t0: Instant| {
@@ -532,6 +535,7 @@ fn run_v6_campaign(
         link: LinkState::Up,
         offloads: NetOffloads::empty(),
         rx_queues: 1,
+        multicast_filter: McastFilter::Unfiltered,
     };
     let start = Instant::now();
     let now = |t0: Instant| {
@@ -644,6 +648,7 @@ fn run_dhcp_peer(
         link: LinkState::Up,
         offloads: NetOffloads::empty(),
         rx_queues: 1,
+        multicast_filter: McastFilter::Unfiltered,
     };
     let start = Instant::now();
     let now = |t0: Instant| {
@@ -1091,6 +1096,7 @@ fn run_dhcp6_peer(
         link: LinkState::Up,
         offloads: NetOffloads::empty(),
         rx_queues: 1,
+        multicast_filter: McastFilter::Unfiltered,
     };
     let start = Instant::now();
     let now = |t0: Instant| {
@@ -1714,6 +1720,7 @@ fn run_ping_responder(
         link: LinkState::Up,
         offloads: NetOffloads::empty(),
         rx_queues: 1,
+        multicast_filter: McastFilter::Unfiltered,
     };
     let start = Instant::now();
     let now = |t0: Instant| {
@@ -1860,6 +1867,7 @@ fn peer_stack(start: Instant) -> Result<(Stack, core::net::Ipv6Addr), String> {
         link: LinkState::Up,
         offloads: NetOffloads::empty(),
         rx_queues: 1,
+        multicast_filter: McastFilter::Unfiltered,
     };
     let now0 =
         Duration64::from_nanos(u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX));
