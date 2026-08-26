@@ -986,12 +986,13 @@ connects `cmd | cmd`. Binding design decisions:
   a failed spawn's unwind, and task exit (the registry `withdraw` dropping
   the table) all close ends through one path — nothing leaks and nothing is
   double-counted. Semantics: a read on an empty pipe **parks** the caller
-  on the new `PIPE_WAITQ` (never a busy loop) until bytes or writer
+  on the shared `STREAM_WAITQ` (never a busy loop) until bytes or writer
   exhaustion; all writers closed + empty ⇒ EOF (`0`). A write to a full
   pipe parks until space; all readers closed ⇒ the new
   `Errno::BrokenPipe` (**27**), so `yes | head`-style pipelines terminate.
-  Wakes ride `pipe_wake` (dispatcher-context `wake_all`, the
-  `procwait_wake` pattern).
+  Wakes ride `stream_wake`, keyed on the ring side that changed (each pipe
+  mints its own `RingWaits` pair), so a transfer wakes that pipe's blocked
+  reader or writer and no other stream's.
 - **The spawn attach block.** `spawn` keeps its six registers but slots 2/3
   become `attach`/`attach_len` (in-place `abi-v1` evolution; the old
   `console` and `target_uid` registers move *into* the block): a
@@ -1072,8 +1073,8 @@ Staged like SP3/SP5/SP6/SP7 (one fully-gated increment per landing):
   `tairix_sys_pipe_create` added; C header regenerated, drift guards green.
   `kernel/syscall`: `SyscallHandlers::spawn` re-shaped, `pipe_create`
   added, dispatch arms + decode tests. `kernel/core`: the `pipe` module
-  (ring + Drop-counted ends + `PIPE_WAITQ`/`pipe_wake` + park-loop
-  blocking I/O), `OpenBacking::Pipe` + the shared stream cursor on
+  (ring + Drop-counted ends + `RingWaits` keys on `STREAM_WAITQ`/`stream_wake`
+  + park-loop blocking I/O), `OpenBacking::Pipe` + the shared stream cursor on
   `OpenFile`, `pipe_create` handler, `fs_read`/`fs_write` pipe arms,
   `stream_read`/`stream_write` open-table-first routing with the console
   capability checked in the console arm, the spawn handler's attach-block

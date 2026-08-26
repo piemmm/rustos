@@ -136,7 +136,8 @@ definition, host-tested in `foreground.rs`.
   bounded by the shared `crate::pipe::PIPE_CAPACITY`), the `lib/tty`
   discipline state (`InputMode`, `EchoLine`, `TerminalSize`) plus the shared
   `ForegroundOwnership`, counted `PtyMasterEnd` / `PtySlaveEnd` handles
-  (`Clone`/`Drop` wake the peer via `pipe_wake`, exactly as `PipeEnd`), and
+  (the last `Drop` of a side wakes the peer's two conditions via
+  `stream_wake`, exactly as `PipeEnd`), and
   non-blocking steps for each end: `PtyMasterEnd::write` (the input
   discipline — cooked `^C`/`^Z` → `signals` for the foreground job, else
   buffered; returns the signals for the syscall layer to deliver so the

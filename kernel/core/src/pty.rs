@@ -7,8 +7,10 @@
 //! it never itself parks or switches context — the syscall handler drives the
 //! park loop (the [`crate::waitq`] discipline), calling the non-blocking
 //! [`PtyMasterEnd`] / [`PtySlaveEnd`] steps and parking on
-//! [`crate::waitq::PIPE_WAITQ`] (the shared stream wait-queue) when a step
-//! reports `Empty` / `Full`.
+//! [`crate::waitq::STREAM_WAITQ`] (the shared stream wait-queue) when a step
+//! reports `Empty` / `Full`, under the [`RingWaits`] key of the ring side it
+//! blocked on — so each of this pty's four blocking conditions wakes on its
+//! own and nothing else does.
 //!
 //! ```text
 //! terminal (master)                                   shell (slave)
@@ -61,7 +63,8 @@ use tairix_kernel_sec::ProcessId;
 use tairix_sync::SpinLock;
 
 use crate::foreground::ForegroundOwnership;
-use crate::pipe::PIPE_CAPACITY;
+use crate::pipe::{RingWaits, StreamWaits, PIPE_CAPACITY};
+use crate::waitq::WakeKey;
 
 /// Which end of the pty a handle grants.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -103,6 +106,12 @@ struct PtyState {
 /// One kernel pseudo-terminal: the object both end handles share.
 pub struct Pty {
     state: SpinLock<PtyState>,
+    /// Wake identities of the terminal → shell ring: `data` holds the slave's
+    /// readers, `space` the master's writers.
+    input_waits: RingWaits,
+    /// Wake identities of the shell → terminal ring: `data` holds the
+    /// master's readers, `space` the slave's writers.
+    output_waits: RingWaits,
     /// The controlling (foreground) ownership: the target the cooked-mode
     /// `^C`/`^Z` interception delivers to, and the task allowed to drain the
     /// slave and change its discipline. The shared type the console also uses.
@@ -172,6 +181,8 @@ impl Pty {
                 echo: tairix_tty::EchoLine::new(),
                 size,
             }),
+            input_waits: RingWaits::mint(),
+            output_waits: RingWaits::mint(),
             fg: ForegroundOwnership::new(),
         });
         (
@@ -210,24 +221,28 @@ impl Pty {
     /// The live-end counts, the geometry, and the controlling ownership are
     /// deliberately untouched: the pty outlives the session running on it, and
     /// releasing the ownership would let a task that never held the terminal
-    /// take its control. Freeing ring space can unblock a parked writer, so
-    /// the caller wakes the waiters exactly as a drain does.
+    /// take its control. Emptying both rings frees their space, so the writers
+    /// parked on either are woken exactly as a drain wakes them.
     pub fn purge_session(&self) {
-        let mut state = self.state.lock();
-        let PtyState {
-            input,
-            output,
-            mode,
-            echo,
-            ..
-        } = &mut *state;
-        for byte in input.iter_mut().chain(output.iter_mut()) {
-            *byte = 0;
+        {
+            let mut state = self.state.lock();
+            let PtyState {
+                input,
+                output,
+                mode,
+                echo,
+                ..
+            } = &mut *state;
+            for byte in input.iter_mut().chain(output.iter_mut()) {
+                *byte = 0;
+            }
+            input.clear();
+            output.clear();
+            *mode = InputMode::Cooked;
+            echo.reset();
         }
-        input.clear();
-        output.clear();
-        *mode = InputMode::Cooked;
-        echo.reset();
+        crate::waitq::stream_wake(self.input_waits.space);
+        crate::waitq::stream_wake(self.output_waits.space);
     }
 
     /// The pty's character-cell geometry (`terminal_size`). Always known — a
@@ -280,6 +295,29 @@ impl PtyMasterEnd {
     #[must_use]
     pub fn pty(&self) -> &Pty {
         &self.pty
+    }
+
+    /// The wake identities a blocking master **read** uses: it parks on the
+    /// output ring's bytes and its drain frees that ring's space.
+    #[must_use]
+    pub fn read_waits(&self) -> StreamWaits {
+        let RingWaits { data, space } = self.pty.output_waits;
+        StreamWaits::new(data, space)
+    }
+
+    /// The wake identities a blocking master **write** uses: it parks on the
+    /// input ring's space and its append supplies that ring's bytes.
+    #[must_use]
+    pub fn write_waits(&self) -> StreamWaits {
+        let RingWaits { data, space } = self.pty.input_waits;
+        StreamWaits::new(space, data)
+    }
+
+    /// The conditions the **last** master's release retires, in the slave's
+    /// `(read, write)` order: the slave's input can never be fed again, and its
+    /// output can never be consumed.
+    fn retired_conditions(&self) -> [WakeKey; 2] {
+        [self.pty.input_waits.data, self.pty.output_waits.space]
     }
 
     /// One non-blocking master write step: push terminal keystrokes through the
@@ -367,6 +405,36 @@ impl PtySlaveEnd {
     #[must_use]
     pub fn pty(&self) -> &Pty {
         &self.pty
+    }
+
+    /// The wake identities a blocking slave **read** uses: it parks on the
+    /// input ring's bytes, its drain frees that ring's space, and — because a
+    /// cooked read echoes what it consumed — it also supplies the output
+    /// ring's bytes.
+    ///
+    /// The echo condition is named for every read, not only an echoing one: a
+    /// raw-mode read then wakes a parked master that finds nothing, at
+    /// keystroke rate, which is the price of every wake a transfer owes being
+    /// visible in one place rather than hidden inside a step.
+    #[must_use]
+    pub fn read_waits(&self) -> StreamWaits {
+        let RingWaits { data, space } = self.pty.input_waits;
+        StreamWaits::crossing(data, space, self.pty.output_waits.data)
+    }
+
+    /// The wake identities a blocking slave **write** uses: it parks on the
+    /// output ring's space and its append supplies that ring's bytes.
+    #[must_use]
+    pub fn write_waits(&self) -> StreamWaits {
+        let RingWaits { data, space } = self.pty.output_waits;
+        StreamWaits::new(space, data)
+    }
+
+    /// The conditions the **last** slave's release retires, in the master's
+    /// `(read, write)` order: no program output can ever arrive, and no
+    /// keystroke can ever be read.
+    fn retired_conditions(&self) -> [WakeKey; 2] {
+        [self.pty.output_waits.data, self.pty.input_waits.space]
     }
 
     /// One non-blocking slave read step: drain **at most one line** of the
@@ -506,23 +574,34 @@ impl Clone for PtySlaveEnd {
 
 impl Drop for PtyMasterEnd {
     fn drop(&mut self) {
-        {
+        let last = {
             let mut state = self.pty.state.lock();
             state.masters = state.masters.saturating_sub(1);
+            state.masters == 0
+        };
+        // Only the last master retires the slave's conditions: its reader must
+        // observe EOF and its writer broken-pipe. A clone released while
+        // siblings live changes nothing, so it wakes nobody.
+        if last {
+            for key in self.retired_conditions() {
+                crate::waitq::stream_wake(key);
+            }
         }
-        // A slave reader must observe EOF and a slave writer broken-pipe once
-        // the last master is gone; wake the shared stream waiters.
-        crate::waitq::pipe_wake();
     }
 }
 
 impl Drop for PtySlaveEnd {
     fn drop(&mut self) {
-        {
+        let last = {
             let mut state = self.pty.state.lock();
             state.slaves = state.slaves.saturating_sub(1);
+            state.slaves == 0
+        };
+        if last {
+            for key in self.retired_conditions() {
+                crate::waitq::stream_wake(key);
+            }
         }
-        crate::waitq::pipe_wake();
     }
 }
 
@@ -880,5 +959,72 @@ mod tests {
         assert_eq!(s.role(), PtyRole::Slave);
         let (other_m, _other_s) = pty();
         assert_ne!(m, other_m);
+    }
+
+    /// A pty's four blocking conditions are four distinct identities that
+    /// pair up across its two rings, so a keystroke wakes the shell and
+    /// nothing else — and a second pty shares none of them.
+    #[test]
+    fn the_four_blocking_conditions_are_distinct_and_pair_across_the_rings() {
+        let (m, s) = pty();
+        let (mr, mw, sr, sw) = (
+            m.read_waits(),
+            m.write_waits(),
+            s.read_waits(),
+            s.write_waits(),
+        );
+        let parks = [mr.park(), mw.park(), sr.park(), sw.park()];
+        for (i, key) in parks.iter().enumerate() {
+            assert!(
+                !parks[..i].contains(key),
+                "two conditions share an identity"
+            );
+        }
+
+        assert_eq!(
+            mr,
+            StreamWaits::new(mr.park(), sw.park()),
+            "the master's drain frees the space the slave writes into"
+        );
+        assert_eq!(
+            sw,
+            StreamWaits::new(sw.park(), mr.park()),
+            "and the slave's output is what the master reads"
+        );
+        assert_eq!(
+            mw,
+            StreamWaits::new(mw.park(), sr.park()),
+            "a keystroke is what the slave reads"
+        );
+        assert_eq!(
+            sr,
+            StreamWaits::crossing(sr.park(), mw.park(), mr.park()),
+            "and an echoing read both frees input space and gives the master output"
+        );
+
+        let (other_m, _other_s) = pty();
+        assert!(
+            !parks.contains(&other_m.read_waits().park()),
+            "two ptys must not share a wake identity"
+        );
+        assert_eq!(m.clone().read_waits(), mr, "a clone is the same terminal");
+    }
+
+    /// A departing side must wake exactly the two conditions its departure
+    /// makes terminal, or the peer parks on an EOF or broken pipe it never
+    /// hears about.
+    #[test]
+    fn the_last_end_of_a_side_retires_exactly_its_peers_conditions() {
+        let (m, s) = pty();
+        assert_eq!(
+            m.retired_conditions(),
+            [s.read_waits().park(), s.write_waits().park()],
+            "the last master ends the slave's input and breaks its output"
+        );
+        assert_eq!(
+            s.retired_conditions(),
+            [m.read_waits().park(), m.write_waits().park()],
+            "the last slave ends the master's output and breaks its input"
+        );
     }
 }

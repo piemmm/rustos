@@ -43,11 +43,12 @@ exception.
   table, owner- and descriptor-checked at member add (every refusal the
   same oracle-free `NotFound`), ready — as a non-consuming, per-scan
   re-resolved peek — on buffered bytes or end-of-stream, woken by the
-  pipe layer's existing write/close wakes (`PIPE_WAITQ`, joined only by
-  sets holding a `Stream` member). Conformance-tested like the D7a
+  pipe layer's existing write/close wakes (`STREAM_WAITQ`, joined under the
+  readable-side key of each `Stream` member's own ring, so another stream's
+  traffic never reaches the waiter). Conformance-tested like the D7a
   members, plus `PipeEnd::readable` / registry-peek unit tests (the peek
-  borrows in place — a clone/drop of a pipe end would spuriously wake
-  every pipe waiter).
+  borrows in place, so scanning many members neither clones an end nor
+  touches a stream's live-end counts).
 - **The mailbox-room wait source (AW4).** `WaitSourceKind::PortRoom` (wire
   value 10, added in place in the stage that consumed it) is the **send**
   side of the same discipline: `id` names a port the caller may post to,

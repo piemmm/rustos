@@ -90,6 +90,32 @@ pub trait WaitQueueArch: Sync {
     }
 }
 
+/// Which condition on a queue a waiter is registered against.
+///
+/// A queue whose event releases *everyone* on it — a shared latch resolving, a
+/// device line firing that every waiter re-checks — leaves every waiter on
+/// [`WakeKey::NONE`] and wakes with [`WaitQueue::wake_all`]. A queue that holds
+/// waiters of many independent objects instead keys each one, so
+/// [`WaitQueue::wake_key`] releases only the waiters an event actually concerns
+/// and unrelated objects' waiters stay parked: that is what keeps one shared
+/// queue (one deadline index, one timed sweep) from becoming a machine-wide
+/// thundering herd.
+///
+/// Keys are minted inside this crate from a monotonic counter, never supplied
+/// by a caller, so two live objects can never collide on one.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub struct WakeKey(u64);
+
+impl WakeKey {
+    /// The unkeyed condition: the whole queue.
+    pub const NONE: Self = Self(0);
+
+    /// A keyed condition from a minted, never-reused identity.
+    pub(crate) const fn new(id: u64) -> Self {
+        Self(id)
+    }
+}
+
 /// One registered waiter's bookkeeping: its FIFO arrival sequence and the
 /// absolute monotonic-ns deadline at which the timed sweep releases it
 /// ([`NO_DEADLINE`] = never by timeout).
@@ -102,34 +128,40 @@ struct Waiter {
     deadline_ns: u64,
 }
 
+/// A registered waiter's identity: the condition it waits on and the task
+/// waiting. Key-major, so one key's waiters are a contiguous range.
+type WaiterId = (WakeKey, TaskId);
+
 /// The registered-waiter set behind a [`WaitQueue`]'s lock.
 ///
 /// A thin `Vec` scan was the P-2 slice; the complete primitive keeps three
 /// cross-indices so every load-bearing per-park operation is O(log n), never a
 /// linear scan under contended multi-user load:
 ///
-/// - [`by_task`](Self::by_task): the canonical set, keyed by [`TaskId`], for
-///   O(log n) `register` / `deregister` / `wake_task` membership.
-/// - [`order`](Self::order): arrival `seq` → task, so the FIFO head
+/// - [`by_waiter`](Self::by_waiter): the canonical set, keyed by
+///   [`WaiterId`], for O(log n) `register` / `deregister` /
+///   `wake_waiter` membership and, because the key sorts first, an O(log n +
+///   woken) [`WaitQueue::wake_key`] over one condition's waiters alone.
+/// - [`order`](Self::order): arrival `seq` → waiter, so the FIFO head
 ///   ([`WaitQueue::wake_one`], [`WaitQueue::oldest_task`]) is the first key
 ///   — O(log n), a *stated* first-come-first-served fairness discipline with
 ///   no starvation (an older waiter is never overtaken).
-/// - [`deadlines`](Self::deadlines): `(deadline_ns, seq)` → task, holding
+/// - [`deadlines`](Self::deadlines): `(deadline_ns, seq)` → waiter, holding
 ///   only finite-deadline waiters, so [`WaitQueue::earliest_deadline`] is
 ///   the first key (O(log n)) and [`WaitQueue::sweep`] visits only the
 ///   already-expired prefix (O(log n + woken)) instead of scanning every
 ///   waiter on every timer expiry.
 ///
-/// The three stay consistent: a waiter is in `by_task` and `order` always,
+/// The three stay consistent: a waiter is in `by_waiter` and `order` always,
 /// and in `deadlines` iff its deadline is finite.
 struct WaitSet {
     /// Next FIFO arrival sequence to hand out. Monotonic; a fresh `register`
-    /// takes and increments it, a re-`register` of a present task keeps its
+    /// takes and increments it, a re-`register` of a present waiter keeps its
     /// existing `seq` so its FIFO position is preserved.
     next_seq: u64,
-    by_task: BTreeMap<TaskId, Waiter>,
-    order: BTreeMap<u64, TaskId>,
-    deadlines: BTreeMap<(u64, u64), TaskId>,
+    by_waiter: BTreeMap<WaiterId, Waiter>,
+    order: BTreeMap<u64, WaiterId>,
+    deadlines: BTreeMap<(u64, u64), WaiterId>,
 }
 
 impl WaitSet {
@@ -138,7 +170,7 @@ impl WaitSet {
     const fn new() -> Self {
         Self {
             next_seq: 0,
-            by_task: BTreeMap::new(),
+            by_waiter: BTreeMap::new(),
             order: BTreeMap::new(),
             deadlines: BTreeMap::new(),
         }
@@ -213,40 +245,57 @@ impl WaitQueue {
         self.wake_pending.load(Ordering::Acquire)
     }
 
-    /// Register `task` as waiting, with an absolute monotonic-ns
-    /// `deadline_ns` ([`NO_DEADLINE`] for no timeout). Re-registering the
-    /// same task updates its deadline rather than duplicating it *and
-    /// preserves its FIFO position* (a handler that loops, re-arming after
-    /// each spurious wake, keeps its place in line and never grows the
-    /// queue). O(log n) — no linear scan on this per-park path.
+    /// Register `task` as waiting on the whole queue ([`WakeKey::NONE`]) with
+    /// an absolute monotonic-ns `deadline_ns` ([`NO_DEADLINE`] for no
+    /// timeout).
     pub fn register(&self, task: TaskId, deadline_ns: u64) {
+        self.register_keyed(WakeKey::NONE, task, deadline_ns);
+    }
+
+    /// Register `task` as waiting on the condition `key`, with an absolute
+    /// monotonic-ns `deadline_ns` ([`NO_DEADLINE`] for no timeout).
+    /// Re-registering the same `(key, task)` updates its deadline rather than
+    /// duplicating it *and preserves its FIFO position* (a handler that loops,
+    /// re-arming after each spurious wake, keeps its place in line and never
+    /// grows the queue). A task waiting on several conditions at once (a
+    /// wait-set naming more than one stream) registers under each key and is
+    /// released by whichever fires. O(log n) — no linear scan on this per-park
+    /// path.
+    pub fn register_keyed(&self, key: WakeKey, task: TaskId, deadline_ns: u64) {
         let mut set = self.waiters.lock();
-        if let Some(existing) = set.by_task.get(&task).copied() {
+        let id = (key, task);
+        if let Some(existing) = set.by_waiter.get(&id).copied() {
             // Present: keep the FIFO `seq`, only re-index the deadline.
             if existing.deadline_ns != NO_DEADLINE {
                 set.deadlines.remove(&(existing.deadline_ns, existing.seq));
             }
             let seq = existing.seq;
-            set.by_task.insert(task, Waiter { seq, deadline_ns });
+            set.by_waiter.insert(id, Waiter { seq, deadline_ns });
             if deadline_ns != NO_DEADLINE {
-                set.deadlines.insert((deadline_ns, seq), task);
+                set.deadlines.insert((deadline_ns, seq), id);
             }
         } else {
             let seq = set.next_seq;
             set.next_seq += 1;
-            set.by_task.insert(task, Waiter { seq, deadline_ns });
-            set.order.insert(seq, task);
+            set.by_waiter.insert(id, Waiter { seq, deadline_ns });
+            set.order.insert(seq, id);
             if deadline_ns != NO_DEADLINE {
-                set.deadlines.insert((deadline_ns, seq), task);
+                set.deadlines.insert((deadline_ns, seq), id);
             }
         }
     }
 
-    /// Remove `task` from the wait set (it finished waiting). Idempotent:
-    /// removing an absent task is a no-op. O(log n).
+    /// Remove `task`'s unkeyed registration ([`WakeKey::NONE`]) from the wait
+    /// set (it finished waiting).
     pub fn deregister(&self, task: TaskId) {
+        self.deregister_keyed(WakeKey::NONE, task);
+    }
+
+    /// Remove `task`'s registration on `key` from the wait set. Idempotent:
+    /// removing an absent waiter is a no-op. O(log n).
+    pub fn deregister_keyed(&self, key: WakeKey, task: TaskId) {
         let mut set = self.waiters.lock();
-        if let Some(w) = set.by_task.remove(&task) {
+        if let Some(w) = set.by_waiter.remove(&(key, task)) {
             set.order.remove(&w.seq);
             if w.deadline_ns != NO_DEADLINE {
                 set.deadlines.remove(&(w.deadline_ns, w.seq));
@@ -266,10 +315,43 @@ impl WaitQueue {
     /// never taken while holding the wait-queue lock (no lock held across a
     /// hand-off).
     pub fn wake_all(&self, arch: &dyn WaitQueueArch) {
-        let ids: Vec<TaskId> = self.waiters.lock().order.values().copied().collect();
+        let ids: Vec<TaskId> = self
+            .waiters
+            .lock()
+            .order
+            .values()
+            .map(|&(_, task)| task)
+            .collect();
         for id in ids {
             arch.unpark(id);
         }
+    }
+
+    /// Wake every waiter registered on the condition `key`, returning how many
+    /// there were. The one wake a queue that holds many independent objects'
+    /// waiters uses: a waiter on another key stays parked, so an event never
+    /// costs the machine a wake per unrelated object.
+    ///
+    /// Every waiter on one key is released, because a key names a condition
+    /// they are all blocked on and all must re-check — a stream's bytes
+    /// arriving, its space freeing, its peer closing terminally. That is a
+    /// wake-all over a *single object's* waiters (in practice one), not the
+    /// queue-wide broadcast [`Self::wake_all`] performs. The ids are collected
+    /// under the lock and the lock released before any `unpark`, so the
+    /// scheduler's locks are never taken while holding this one. An empty
+    /// range allocates nothing. O(log n + woken).
+    pub fn wake_key(&self, arch: &dyn WaitQueueArch, key: WakeKey) -> usize {
+        let ids: Vec<TaskId> = self
+            .waiters
+            .lock()
+            .by_waiter
+            .range((key, TaskId::MIN)..=(key, TaskId::MAX))
+            .map(|(&(_, task), _)| task)
+            .collect();
+        for &id in &ids {
+            arch.unpark(id);
+        }
+        ids.len()
     }
 
     /// Wake the oldest registered waiter, returning whether one existed.
@@ -302,7 +384,7 @@ impl WaitQueue {
             .order
             .values()
             .take(count)
-            .copied()
+            .map(|&(_, task)| task)
             .collect();
         for &id in &ids {
             arch.unpark(id);
@@ -318,14 +400,26 @@ impl WaitQueue {
     /// lost-wake discipline is preserved. O(log n).
     #[must_use]
     pub(crate) fn oldest_task(&self) -> Option<TaskId> {
-        self.waiters.lock().order.values().next().copied()
+        self.waiters
+            .lock()
+            .order
+            .values()
+            .next()
+            .map(|&(_, task)| task)
     }
 
-    /// Wake exactly `task` if it is currently registered, returning whether
-    /// it was (the wake-one discipline — an addressed event such as a
-    /// posted request or a ticket's reply wakes its one target, never the
-    /// whole queue; a wake-all there is a thundering herd that keeps
-    /// unrelated tasks runnable and distorts the load census). O(log n).
+    /// Wake exactly `task`'s unkeyed registration ([`WakeKey::NONE`]) if it is
+    /// currently waiting, returning whether it was.
+    pub fn wake_task(&self, arch: &dyn WaitQueueArch, task: TaskId) -> bool {
+        self.wake_waiter(arch, WakeKey::NONE, task)
+    }
+
+    /// Wake exactly the waiter `(key, task)` if it is currently registered,
+    /// returning whether it was (the wake-one discipline — an addressed event
+    /// such as a posted request or a ticket's reply wakes its one target,
+    /// never the whole queue; a wake-all there is a thundering herd that
+    /// keeps unrelated tasks runnable and distorts the load census).
+    /// O(log n).
     ///
     /// An unregistered target is a benign no-op returning `false`: by the
     /// register-before-poll discipline every waiter registers *before* its
@@ -333,8 +427,8 @@ impl WaitQueue {
     /// from the queue is running and will observe the event on its own next
     /// poll. The `unpark` runs after the lock is released, exactly as
     /// [`Self::wake_all`].
-    pub fn wake_task(&self, arch: &dyn WaitQueueArch, task: TaskId) -> bool {
-        let registered = self.waiters.lock().by_task.contains_key(&task);
+    pub fn wake_waiter(&self, arch: &dyn WaitQueueArch, key: WakeKey, task: TaskId) -> bool {
+        let registered = self.waiters.lock().by_waiter.contains_key(&(key, task));
         if registered {
             arch.unpark(task);
         }
@@ -353,7 +447,7 @@ impl WaitQueue {
     /// A fired deadline is **consumed** here: its entry is removed from the
     /// deadline index and the waiter's stored deadline is reset to
     /// [`NO_DEADLINE`], while the waiter keeps its FIFO slot in `order` /
-    /// `by_task` (so the register-before-retest lost-wake discipline holds and
+    /// `by_waiter` (so the register-before-retest lost-wake discipline holds and
     /// an edge [`Self::wake_all`] still finds it). Consuming it is what makes
     /// the timed wake single-shot per registration. Leaving the entry in place
     /// — relying on the woken waiter to deregister — pins the timer one-shot in
@@ -374,11 +468,11 @@ impl WaitQueue {
                 .collect();
             let mut ids = Vec::with_capacity(expired.len());
             for key in expired {
-                if let Some(task) = set.deadlines.remove(&key) {
-                    if let Some(waiter) = set.by_task.get_mut(&task) {
+                if let Some(id) = set.deadlines.remove(&key) {
+                    if let Some(waiter) = set.by_waiter.get_mut(&id) {
                         waiter.deadline_ns = NO_DEADLINE;
                     }
-                    ids.push(task);
+                    ids.push(id.1);
                 }
             }
             ids
@@ -405,7 +499,7 @@ impl WaitQueue {
     /// `true` if no task is currently waiting. Diagnostic / test observer.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.waiters.lock().by_task.is_empty()
+        self.waiters.lock().by_waiter.is_empty()
     }
 }
 
@@ -526,26 +620,35 @@ pub fn procwait_wake() {
     }
 }
 
-/// The wait-queue holding pipe readers and writers blocked on an empty or
-/// full pipe (`plans/SPAWN.md` SP10). A reader whose pipe is momentarily
-/// empty (with a live writer) and a writer whose pipe is momentarily full
-/// (with a live reader) park here off the run queue (**no** busy yield) and
-/// are woken by [`pipe_wake`] whenever bytes are produced, space frees, or
-/// an end closes terminally (EOF / broken pipe). Each woken task re-runs
-/// its non-blocking step ([`crate::pipe::PipeEnd::try_read`] /
-/// [`crate::pipe::PipeEnd::try_write`]) and either progresses or parks
-/// again, so a wake for a different pipe is a harmless spurious wake and
-/// the check-then-park race is closed by the scheduler's wake-pending
-/// token (the same interlock `wait`/`irq_wait` use).
-pub static PIPE_WAITQ: WaitQueue = WaitQueue::new();
+/// The wait-queue holding every byte-stream reader and writer blocked on an
+/// empty or full ring — pipes (`plans/SPAWN.md` SP10) and pseudo-terminals
+/// (`plans/PTY.md`) alike. A reader whose ring is momentarily empty (with a
+/// live peer) and a writer whose ring is momentarily full (with a live peer)
+/// park here off the run queue (**no** busy yield) and are woken by
+/// [`stream_wake`] when *their* ring produces bytes, frees space, or closes
+/// terminally (EOF / broken pipe). Each woken task re-runs its non-blocking
+/// step ([`crate::pipe::PipeEnd::try_read`] /
+/// [`crate::pipe::PipeEnd::try_write`] and the pty equivalents) and either
+/// progresses or parks again; the check-then-park race is closed by the
+/// scheduler's wake-pending token (the same interlock `wait`/`irq_wait` use).
+///
+/// Every waiter is registered under the [`WakeKey`] of the one ring side it
+/// blocked on ([`crate::pipe::RingWaits`]), so a chunk moved on one stream
+/// wakes only that stream's waiters. One queue for every stream is what keeps
+/// a timed `stream_read` on the single deadline index the timed sweep and
+/// [`nearest_timed_deadline`] already fold over, rather than the per-key
+/// queues [`crate::futex`] holds — whose table every sweep and every arming
+/// has to scan, a cost a futex key (a bare user address, with no kernel object
+/// to hang a queue on) has no way to avoid.
+pub static STREAM_WAITQ: WaitQueue = WaitQueue::new();
 
-/// Wake every task parked on a pipe because a pipe's condition changed
-/// (bytes arrived, space freed, or an end closed); each re-runs its step
-/// and either progresses or parks again. A fail-safe no-op before the arch
-/// hook is installed.
-pub fn pipe_wake() {
+/// Wake the tasks parked on the stream ring side `key` because *that* ring's
+/// condition changed (bytes arrived, space freed, or its peer side closed);
+/// each re-runs its step and either progresses or parks again. A fail-safe
+/// no-op before the arch hook is installed.
+pub fn stream_wake(key: WakeKey) {
     if let Some(arch) = wait_arch() {
-        PIPE_WAITQ.wake_all(arch);
+        let _ = STREAM_WAITQ.wake_key(arch, key);
     }
 }
 
@@ -826,7 +929,7 @@ fn run_timed_sweep(arch: &dyn WaitQueueArch) {
     IRQ_WAITQ.sweep(arch, now);
     CONSOLE_WAITQ.sweep(arch, now);
     USERS_DB_WAITQ.sweep(arch, now);
-    PIPE_WAITQ.sweep(arch, now);
+    STREAM_WAITQ.sweep(arch, now);
     // `CALL_WAITQ` holds callers awaiting a reply. Most register with
     // `NO_DEADLINE` (`ipc_call`/`call_recv` — released only by the reply or
     // teardown, so the sweep never touches them), but the async `call_post`
@@ -969,7 +1072,7 @@ pub fn console_deregister(task: TaskId, deadline_ns: u64) {
 
 /// The soonest finite deadline pending across **every** timed wait-queue
 /// (`HW_TREE_WAITQ`, `IRQ_WAITQ`, `CONSOLE_WAITQ`, `USERS_DB_WAITQ`,
-/// `PIPE_WAITQ`, `CALL_WAITQ`, and the per-key futex queues), or
+/// `STREAM_WAITQ`, `CALL_WAITQ`, and the per-key futex queues), or
 /// [`None`] if none has one. A park site arms the one-shot to this so
 /// registering a *later* deadline never delays an already-pending earlier
 /// wake.
@@ -980,7 +1083,7 @@ pub fn nearest_timed_deadline() -> Option<u64> {
         IRQ_WAITQ.earliest_deadline(),
         CONSOLE_WAITQ.earliest_deadline(),
         USERS_DB_WAITQ.earliest_deadline(),
-        PIPE_WAITQ.earliest_deadline(),
+        STREAM_WAITQ.earliest_deadline(),
         // A finite per-request deadline armed by `call_post` (the async
         // block transport). Infinite (`ipc_call`) registrations arm nothing.
         CALL_WAITQ.earliest_deadline(),
@@ -1098,6 +1201,80 @@ mod tests {
         // and will observe the event on its own next poll.
         assert!(!q.wake_task(&arch, 9));
         assert_eq!(*arch.unparked.borrow(), alloc::vec![2]);
+    }
+
+    /// The keyed wake is what keeps one shared queue from being a
+    /// machine-wide broadcast: an event on one object releases that object's
+    /// waiters and leaves every other object's parked.
+    #[test]
+    fn wake_key_releases_one_conditions_waiters_and_no_others() {
+        let arch = MockArch::new();
+        let q = WaitQueue::new();
+        let (mine, theirs) = (WakeKey::new(1), WakeKey::new(2));
+        q.register_keyed(mine, 1, NO_DEADLINE);
+        q.register_keyed(mine, 2, NO_DEADLINE);
+        q.register_keyed(theirs, 3, NO_DEADLINE);
+
+        assert_eq!(q.wake_key(&arch, mine), 2);
+        let mut got = arch.unparked.borrow().clone();
+        got.sort_unstable();
+        assert_eq!(got, alloc::vec![1, 2], "the other condition stayed parked");
+
+        // A key nobody waits on wakes nobody, and the queue-wide broadcast
+        // still reaches every key.
+        assert_eq!(q.wake_key(&arch, WakeKey::new(99)), 0);
+        arch.unparked.borrow_mut().clear();
+        q.wake_all(&arch);
+        let mut got = arch.unparked.borrow().clone();
+        got.sort_unstable();
+        assert_eq!(got, alloc::vec![1, 2, 3]);
+    }
+
+    /// A key scopes membership as well as the wake: the same task waiting on
+    /// two conditions holds two registrations, each addressable and removable
+    /// on its own, and the unkeyed forms are just the [`WakeKey::NONE`] one.
+    #[test]
+    fn a_registration_is_the_task_and_its_key_together() {
+        let arch = MockArch::new();
+        let q = WaitQueue::new();
+        let (a, b) = (WakeKey::new(11), WakeKey::new(12));
+        q.register_keyed(a, 5, NO_DEADLINE);
+        q.register_keyed(b, 5, NO_DEADLINE);
+        q.register(5, NO_DEADLINE);
+
+        assert!(q.wake_waiter(&arch, a, 5));
+        assert!(q.wake_waiter(&arch, b, 5));
+        assert!(q.wake_task(&arch, 5), "the unkeyed registration is its own");
+        assert!(!q.wake_waiter(&arch, WakeKey::new(13), 5));
+
+        q.deregister_keyed(a, 5);
+        assert!(!q.wake_waiter(&arch, a, 5), "only that key was released");
+        assert!(q.wake_waiter(&arch, b, 5));
+        assert!(q.wake_task(&arch, 5));
+        q.deregister_keyed(b, 5);
+        q.deregister(5);
+        assert!(q.is_empty());
+    }
+
+    /// A keyed waiter's finite deadline joins the one deadline index every
+    /// timed wait shares, so a timed `stream_read` needs no per-object queue
+    /// for the sweep to find it.
+    #[test]
+    fn a_keyed_waiter_is_swept_by_its_deadline_like_any_other() {
+        let arch = MockArch::new();
+        let q = WaitQueue::new();
+        let key = WakeKey::new(21);
+        q.register_keyed(key, 8, 400);
+        assert_eq!(q.earliest_deadline(), Some(400));
+        q.sweep(&arch, 399);
+        assert!(arch.unparked.borrow().is_empty(), "not yet due");
+        q.sweep(&arch, 400);
+        assert_eq!(*arch.unparked.borrow(), alloc::vec![8]);
+        // The fired deadline is consumed but the waiter keeps its place, so an
+        // edge wake on its key still finds it.
+        assert_eq!(q.earliest_deadline(), None);
+        assert_eq!(q.wake_key(&arch, key), 1);
+        q.deregister_keyed(key, 8);
     }
 
     #[test]

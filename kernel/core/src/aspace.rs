@@ -74,6 +74,7 @@ use crate::pipe::PipeEnd;
 use crate::pty::{PtyMasterEnd, PtySlaveEnd};
 use crate::resource::ResourceBacking;
 use crate::rlimit::LimitSet;
+use crate::waitq::WakeKey;
 
 /// One thread's reserved user-stack span, with the process that owns it.
 ///
@@ -2082,8 +2083,8 @@ impl AddressSpaceRegistry {
     /// bytes, or end-of-stream). Anything [`Self::stream_read_member`]
     /// refuses is simply not ready — a member whose descriptor was closed
     /// or replaced mid-wait stops reporting rather than erring. Borrows in
-    /// place, so the per-scan peek never clones a stream end (a clone/drop
-    /// pair would spuriously wake every stream waiter).
+    /// place, so a scan of many members neither clones an end nor touches a
+    /// stream's live-end counts.
     #[must_use]
     pub fn stream_readable(&self, task: ProcessId, fd: u32) -> bool {
         match self.borrow_read_stream_end(task, fd) {
@@ -2091,6 +2092,22 @@ impl AddressSpaceRegistry {
             Some(ReadStreamEnd::PtyMaster(end)) => end.readable(),
             Some(ReadStreamEnd::PtySlave(end)) => end.readable(),
             None => false,
+        }
+    }
+
+    /// The wake identity a wait-set `Stream` member on `task`'s descriptor
+    /// `fd` registers under: the *readable* side of the ring that descriptor
+    /// drains, so bytes arriving on it (or its last producer closing) release
+    /// this waiter and traffic on any other stream does not. `None` for
+    /// anything [`Self::stream_read_member`] refuses — such a member can never
+    /// become ready either, so registering nothing is the same fail-closed
+    /// answer.
+    #[must_use]
+    pub fn stream_read_wait_key(&self, task: ProcessId, fd: u32) -> Option<WakeKey> {
+        match self.borrow_read_stream_end(task, fd)? {
+            ReadStreamEnd::Pipe(end) => Some(end.waits().park()),
+            ReadStreamEnd::PtyMaster(end) => Some(end.read_waits().park()),
+            ReadStreamEnd::PtySlave(end) => Some(end.read_waits().park()),
         }
     }
 

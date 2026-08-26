@@ -51,32 +51,48 @@ The open items, in priority order:
   8.3-megapixel masters decode in 404 ms total at thumbnail scale, ~90 ms
   each full-screen.
 - **D52 — the stream write path registered for its wake *after* the poll that
-  found the ring full — DONE.** `parked_stream_write` called
-  `PIPE_WAITQ.register` inside the `Full` arm, so between the poll and the
-  registration a peer that drained the ring called `pipe_wake` →
-  `wake_all`, which reaches only tasks registered at that instant, and woke
-  nobody. The writer then parked with `NO_DEADLINE` on space that had already
-  freed, released only when unrelated pipe traffic happened to broadcast —
-  a multi-second stall by construction, and an outright hang whenever the
-  transfer was the machine's only pipe activity. The read path had the
-  correct discipline and its own comment explaining it. Fixed by registering
-  before the first poll and deregistering once the loop is left, matching the
-  read path; the regression test observes the registration from inside the
-  first step via `wake_task`'s registered/not answer.
-- **D53 — `PIPE_WAITQ` is one global queue woken with `wake_all` (OPEN).**
-  Every 64 KiB chunk moved on *any* pipe or pty unparks every stream waiter
-  on the machine, each of which re-polls its own unrelated backing and parks
-  again, and each `wake_all` heap-allocates a `Vec` of the waiter ids. On a
-  desktop with a sandbox worker per app plus shell ptys that is a
+  found the ring full — DONE.** `parked_stream_write` registered on the stream
+  wait-queue inside the `Full` arm, so between the poll and the registration a
+  peer that drained the ring woke only the tasks registered at that instant,
+  and woke nobody. The writer then parked with `NO_DEADLINE` on space that had
+  already freed, released only when unrelated pipe traffic happened to
+  broadcast — a multi-second stall by construction, and an outright hang
+  whenever the transfer was the machine's only pipe activity. The read path
+  had the correct discipline and its own comment explaining it. Fixed by
+  registering before the first poll and deregistering once the loop is left,
+  matching the read path; the regression test observes the registration from
+  inside the first step via `wake_waiter`'s registered/not answer.
+- **D53 — the stream wait-queue was one global queue woken with `wake_all` —
+  DONE.** Every 64 KiB chunk moved on *any* pipe or pty unparked every stream
+  waiter on the machine, each of which re-polled its own unrelated backing and
+  parked again, and each `wake_all` heap-allocated a `Vec` of the waiter ids.
+  On a desktop with a sandbox worker per app plus shell ptys that is a
   double-figure thundering herd per chunk, so one app streaming a gallery
-  taxes every other pipe user — a §2.16 / §27 defect, not a correctness one
-  (a spurious wake is harmless). The right fix is to stop broadcasting: give
-  each `Pipe` its own queue, or add a keyed index to `WaitSet` as
-  `kernel/core/src/futex.rs` already does for futex keys. Both have to keep
-  the global timed `sweep` / `earliest_deadline` machinery and the
-  `waitset_wait` pipe-member registration working, which is what makes this
-  larger than D51/D52 and why it is recorded here rather than folded into
-  them.
+  taxed every other pipe user — a §2.16 / §27 defect, not a correctness one (a
+  spurious wake is harmless). Closed by keying the waiters rather than
+  splitting the queue: a `WaitQueue` registration is now `(WakeKey, TaskId)`
+  key-major, so `wake_key` releases one condition's waiters as an O(log n +
+  woken) range and `wake_all` stays what a genuine queue-wide broadcast uses.
+  Each bounded ring mints its own `RingWaits` pair (bytes, space) — one pair
+  per pipe, two per pty — and every park, transfer wake, last-end close, and
+  `waitset_wait` `Stream` member names the one side it concerns. Keeping the
+  single queue is what keeps the timed `sweep` / `earliest_deadline` /
+  `nearest_timed_deadline` machinery unchanged: a timed `stream_read` needs no
+  per-object queue for the sweep to enumerate. A `Stream` member resolves its
+  ring once at wait entry, so the wait follows the object the descriptor held
+  then; a sibling thread swapping that descriptor number mid-wait cannot be
+  followed (the swap can always land between a re-resolution and the peer's
+  write) and the readiness scan, which re-resolves the number, stops reporting
+  the retired stream.
+  Two further defects fell out of it. `PipeEnd`/pty-end `Drop` woke on *every*
+  release, so a spawn's or a `stream_read` snapshot's clone/drop pair woke
+  waiters for a condition that had not changed; only the last end of a side
+  now wakes, and it wakes exactly the two conditions its departure retires.
+  And `terminal_purge` on a pty flagged `console_wake` for the ring space its
+  discard had just freed — the wrong queue entirely, so the parked writer was
+  released only by unrelated pipe traffic and, once the broadcast was gone,
+  never; `Pty::purge_session` now wakes both rings' space itself, where no
+  caller can pick the wrong queue.
 - **D50 — the flake hunt's concurrent replicas re-planted one guest's backing
   image underneath itself — DONE.** Up to four simultaneous runs of one
   enrolment shared a planted-image path, so a replica rewrote a live sibling's
@@ -1842,9 +1858,9 @@ spinlock site instead. `RwLock` now mirrors `SpinLock` through the same
 `lockwatch` seam, and its rustdoc states the recursive-read prohibition.
 
 **Also fixed, same path.** `parked_stream_read` polled before registering on
-`PIPE_WAITQ`, and `pipe_wake` latches nothing — a peer producing bytes between
-the poll and the registration woke nobody, so the reader parked on data that
-had already arrived. It now registers before the first poll and stays
+the stream wait-queue, and a stream wake latches nothing — a peer producing
+bytes between the poll and the registration woke nobody, so the reader parked
+on data that had already arrived. It now registers before the first poll and stays
 registered until the loop exits, matching `BlockingConsoleRead::read_until`.
 
 **Regression cover.** Six `lib/sync` tests pin the grant/refuse semantics and

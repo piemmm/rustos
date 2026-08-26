@@ -2619,9 +2619,9 @@ where
     /// Withdrawing the address-space registry entry drops the task's
     /// standard streams, resource limits, working directory, device
     /// grants, and — crucially — its **open-file table**: an open pipe
-    /// end's `Drop` decrements the ring's end count and wakes
-    /// `PIPE_WAITQ`, so a peer parked on the pipe observes end-of-stream
-    /// or broken-pipe instead of waiting forever on a dead partner
+    /// end's `Drop` decrements the ring's end count and, on the last one,
+    /// wakes that ring's waiters, so a peer parked on the pipe observes
+    /// end-of-stream or broken-pipe instead of waiting forever on a dead partner
     /// (`plans/SPAWN.md` SP10 — `seq | wc` must end when `seq` exits, and
     /// `yes` must fail `BrokenPipe` when `head` is done).
     pub(crate) fn reclaim_process_resources(&self, process: ProcessId) {
@@ -3021,14 +3021,16 @@ where
     /// `plans/PTY.md` — never a busy loop).
     ///
     /// `step` runs the backing's own non-blocking read into the staging
-    /// buffer and reports a normalised [`StreamReadStep`]; this loop owns
-    /// the stage/wake/deadline/park discipline so a pipe end and a pty end
-    /// never carry a second copy of it. End-of-stream (every peer end
-    /// closed, ring drained) is a zero-length read. `timeout_ns` bounds the
-    /// wait (`0` = indefinite, the `stream_read` convention); an elapsed
-    /// bound is `TimedOut`. A build with no resumable user kthread published
-    /// (a park that cannot happen) fails closed with `NotImplemented`
-    /// rather than spinning.
+    /// buffer and reports a normalised [`StreamReadStep`]; `waits` names the
+    /// backing's own ring sides ([`crate::pipe::StreamWaits`]) so the park and
+    /// the wake reach that stream and no other. This loop owns the
+    /// stage/wake/deadline/park discipline so a pipe end and a pty end never
+    /// carry a second copy of it. End-of-stream (every peer end closed, ring
+    /// drained) is a zero-length read. `timeout_ns` bounds the wait (`0` =
+    /// indefinite, the `stream_read` convention); an elapsed bound is
+    /// `TimedOut`. A build with no resumable user kthread published (a park
+    /// that cannot happen) fails closed with `NotImplemented` rather than
+    /// spinning.
     ///
     /// Every backing this loop serves buffers at most
     /// [`crate::pipe::PIPE_CAPACITY`], so staging more than that could never
@@ -3041,6 +3043,7 @@ where
         buf: u64,
         len: usize,
         timeout_ns: u64,
+        waits: crate::pipe::StreamWaits,
         mut step: impl FnMut(&mut [u8]) -> StreamReadStep,
     ) -> SyscallResult {
         // Cap the per-call transfer at what one step can actually supply
@@ -3063,14 +3066,15 @@ where
         };
         // Register on the wake queue *before* the first poll, and stay
         // registered across every re-poll until the read leaves this loop. A
-        // wake carries no state: `pipe_wake` unparks whoever is registered at
-        // that instant and is otherwise dropped. Registering only once the
-        // poll has already reported nothing leaves a window in which a peer
-        // can produce its bytes, wake nobody, and leave this task to park on
-        // data that has already arrived — a read that sleeps until the *next*
-        // write, or forever if none comes. Registering first makes the wake
-        // and the poll overlap, so one of the two always observes the bytes.
-        crate::waitq::PIPE_WAITQ.register(caller.task_id.0, deadline);
+        // wake carries no state: `stream_wake` unparks whoever is registered
+        // on that ring side at that instant and is otherwise dropped.
+        // Registering only once the poll has already reported nothing leaves a
+        // window in which a peer can produce its bytes, wake nobody, and leave
+        // this task to park on data that has already arrived — a read that
+        // sleeps until the *next* write, or forever if none comes. Registering
+        // first makes the wake and the poll overlap, so one of the two always
+        // observes the bytes.
+        crate::waitq::STREAM_WAITQ.register_keyed(waits.park(), caller.task_id.0, deadline);
         if deadline != crate::waitq::NO_DEADLINE {
             crate::waitq::rearm_timed_wakeup();
         }
@@ -3080,7 +3084,7 @@ where
                     // Space freed: a writer parked on the full ring can
                     // proceed. Wake before the copy-out so the producer
                     // overlaps with the consumer's copy.
-                    crate::waitq::pipe_wake();
+                    waits.wake_progress();
                     break match self.with_caller_aspace(caller, |space, physmap| {
                         copy_out(space, physmap, VirtAddr::new(buf), &data[..n])
                     }) {
@@ -3121,7 +3125,7 @@ where
                 }
             }
         };
-        crate::waitq::PIPE_WAITQ.deregister(caller.task_id.0);
+        crate::waitq::STREAM_WAITQ.deregister_keyed(waits.park(), caller.task_id.0);
         if deadline != crate::waitq::NO_DEADLINE {
             crate::waitq::rearm_timed_wakeup();
         }
@@ -3134,10 +3138,12 @@ where
     /// — never a busy loop).
     ///
     /// `step` runs the backing's own non-blocking write over the staged
-    /// bytes and reports a normalised [`StreamWriteStep`]; this loop owns
-    /// the stage/wake/park discipline. A short write (the free space) is
-    /// valid; the caller loops. A stream with no peer left fails closed with
-    /// `BrokenPipe`, so a producer whose consumer exited learns to stop.
+    /// bytes and reports a normalised [`StreamWriteStep`]; `waits` names the
+    /// backing's own ring sides so the park and the wake reach that stream and
+    /// no other. This loop owns the stage/wake/park discipline. A short write
+    /// (the free space) is valid; the caller loops. A stream with no peer left
+    /// fails closed with `BrokenPipe`, so a producer whose consumer exited
+    /// learns to stop.
     ///
     /// The stage is bounded exactly as [`Self::parked_stream_read`]'s is: one
     /// step can never accept more than [`crate::pipe::PIPE_CAPACITY`], so
@@ -3148,6 +3154,7 @@ where
         caller: &CallerContext<'_>,
         buf: u64,
         len: usize,
+        waits: crate::pipe::StreamWaits,
         mut step: impl FnMut(&[u8]) -> StreamWriteStep,
     ) -> SyscallResult {
         let len = stream_stage_len(len);
@@ -3159,18 +3166,22 @@ where
         let mut data = alloc::vec![0u8; len];
         self.copy_in_user(caller, buf, &mut data)?;
         // Register before the first poll and stay registered for the whole
-        // loop, exactly as the read path does: `wake_all` unparks only tasks
-        // that are registered at that instant, so a peer that drains the ring
-        // in the window between a `Full` poll and the registration would wake
+        // loop, exactly as the read path does: a wake unparks only tasks that
+        // are registered at that instant, so a peer that drains the ring in
+        // the window between a `Full` poll and the registration would wake
         // nobody and leave this task parked on space that has already freed —
         // an untimed sleep no further write to *this* stream can end.
-        crate::waitq::PIPE_WAITQ.register(caller.task_id.0, crate::waitq::NO_DEADLINE);
+        crate::waitq::STREAM_WAITQ.register_keyed(
+            waits.park(),
+            caller.task_id.0,
+            crate::waitq::NO_DEADLINE,
+        );
         let outcome = loop {
             match step(&data) {
                 StreamWriteStep::Wrote(n) => {
                     // Bytes arrived: a reader parked on the empty ring can
                     // proceed.
-                    crate::waitq::pipe_wake();
+                    waits.wake_progress();
                     break Ok(n as u64);
                 }
                 StreamWriteStep::Broken => break Err(Errno::BrokenPipe),
@@ -3190,7 +3201,7 @@ where
                 }
             }
         };
-        crate::waitq::PIPE_WAITQ.deregister(caller.task_id.0);
+        crate::waitq::STREAM_WAITQ.deregister_keyed(waits.park(), caller.task_id.0);
         outcome
     }
 
@@ -3206,12 +3217,12 @@ where
         timeout_ns: u64,
     ) -> SyscallResult {
         use crate::pipe::ReadStep;
-        self.parked_stream_read(caller, buf, len, timeout_ns, |data| {
-            match end.try_read(data) {
-                ReadStep::Read(n) => StreamReadStep::Read(n),
-                ReadStep::Eof => StreamReadStep::Eof,
-                ReadStep::Empty => StreamReadStep::Empty,
-            }
+        self.parked_stream_read(caller, buf, len, timeout_ns, end.waits(), |data| match end
+            .try_read(data)
+        {
+            ReadStep::Read(n) => StreamReadStep::Read(n),
+            ReadStep::Eof => StreamReadStep::Eof,
+            ReadStep::Empty => StreamReadStep::Empty,
         })
     }
 
@@ -3226,10 +3237,12 @@ where
         len: usize,
     ) -> SyscallResult {
         use crate::pipe::WriteStep;
-        self.parked_stream_write(caller, buf, len, |data| match end.try_write(data) {
-            WriteStep::Wrote(n) => StreamWriteStep::Wrote(n),
-            WriteStep::Broken => StreamWriteStep::Broken,
-            WriteStep::Full => StreamWriteStep::Full,
+        self.parked_stream_write(caller, buf, len, end.waits(), |data| {
+            match end.try_write(data) {
+                WriteStep::Wrote(n) => StreamWriteStep::Wrote(n),
+                WriteStep::Broken => StreamWriteStep::Broken,
+                WriteStep::Full => StreamWriteStep::Full,
+            }
         })
     }
 
@@ -3245,11 +3258,18 @@ where
         timeout_ns: u64,
     ) -> SyscallResult {
         use crate::pty::PtyReadStep;
-        self.parked_stream_read(caller, buf, len, timeout_ns, |data| match end.read(data) {
-            PtyReadStep::Read(n) => StreamReadStep::Read(n),
-            PtyReadStep::Eof => StreamReadStep::Eof,
-            PtyReadStep::Empty => StreamReadStep::Empty,
-        })
+        self.parked_stream_read(
+            caller,
+            buf,
+            len,
+            timeout_ns,
+            end.read_waits(),
+            |data| match end.read(data) {
+                PtyReadStep::Read(n) => StreamReadStep::Read(n),
+                PtyReadStep::Eof => StreamReadStep::Eof,
+                PtyReadStep::Empty => StreamReadStep::Empty,
+            },
+        )
     }
 
     /// Serve a write to a pty **master** descriptor: feed the terminal's
@@ -3272,19 +3292,22 @@ where
         // job-control byte into a signal when a producer that will actually
         // deliver it is installed (never consume a byte no one will act on).
         let intercept = crate::procsignal::foreground_signal_installed();
-        self.parked_stream_write(caller, buf, len, |data| match end.write(data, intercept) {
-            MasterWriteStep::Wrote { consumed, signals } => {
-                for (target, signal) in signals {
-                    crate::procsignal::queue_foreground_signal(target, signal);
+        let waits = end.write_waits();
+        self.parked_stream_write(caller, buf, len, waits, |data| {
+            match end.write(data, intercept) {
+                MasterWriteStep::Wrote { consumed, signals } => {
+                    for (target, signal) in signals {
+                        crate::procsignal::queue_foreground_signal(target, signal);
+                    }
+                    // Nudge the dispatch loop out of its idle park so a deferred
+                    // signal delivery drains promptly even with every task
+                    // parked (mirrors the console input filter).
+                    crate::waitq::console_wake();
+                    StreamWriteStep::Wrote(consumed)
                 }
-                // Nudge the dispatch loop out of its idle park so a deferred
-                // signal delivery drains promptly even with every task
-                // parked (mirrors the console input filter).
-                crate::waitq::console_wake();
-                StreamWriteStep::Wrote(consumed)
+                MasterWriteStep::Broken => StreamWriteStep::Broken,
+                MasterWriteStep::Full => StreamWriteStep::Full,
             }
-            MasterWriteStep::Broken => StreamWriteStep::Broken,
-            MasterWriteStep::Full => StreamWriteStep::Full,
         })
     }
 
@@ -3301,11 +3324,18 @@ where
         timeout_ns: u64,
     ) -> SyscallResult {
         use crate::pty::PtyReadStep;
-        self.parked_stream_read(caller, buf, len, timeout_ns, |data| match end.read(data) {
-            PtyReadStep::Read(n) => StreamReadStep::Read(n),
-            PtyReadStep::Eof => StreamReadStep::Eof,
-            PtyReadStep::Empty => StreamReadStep::Empty,
-        })
+        self.parked_stream_read(
+            caller,
+            buf,
+            len,
+            timeout_ns,
+            end.read_waits(),
+            |data| match end.read(data) {
+                PtyReadStep::Read(n) => StreamReadStep::Read(n),
+                PtyReadStep::Eof => StreamReadStep::Eof,
+                PtyReadStep::Empty => StreamReadStep::Empty,
+            },
+        )
     }
 
     /// Serve a write to a pty **slave** descriptor: cook program output
@@ -3320,10 +3350,12 @@ where
         len: usize,
     ) -> SyscallResult {
         use crate::pty::PtyWriteStep;
-        self.parked_stream_write(caller, buf, len, |data| match end.write(data) {
-            PtyWriteStep::Wrote(n) => StreamWriteStep::Wrote(n),
-            PtyWriteStep::Broken => StreamWriteStep::Broken,
-            PtyWriteStep::Full => StreamWriteStep::Full,
+        self.parked_stream_write(caller, buf, len, end.write_waits(), |data| {
+            match end.write(data) {
+                PtyWriteStep::Wrote(n) => StreamWriteStep::Wrote(n),
+                PtyWriteStep::Broken => StreamWriteStep::Broken,
+                PtyWriteStep::Full => StreamWriteStep::Full,
+            }
         })
     }
 
@@ -5634,10 +5666,9 @@ where
             let aspaces = self.aspaces.read();
             if let Some(pty) = aspaces.pty_slave(caller.process(), fd) {
                 self.check_terminal_foreground(caller, pty.foreground())?;
+                // The discard frees both rings' space, so the purge itself
+                // wakes the writers parked on them, exactly as a drain does.
                 pty.purge_session();
-                // The discard frees ring space, so a writer parked on a full
-                // ring is woken exactly as a drain wakes it.
-                crate::waitq::console_wake();
                 return Ok(0);
             }
         }
@@ -8919,11 +8950,31 @@ where
         // pointer-rate wakes a drag produces never touch an unrelated
         // waitset waiter.
         let observes_seat = members.iter().any(|m| m.kind == WaitSourceKind::SeatInput);
-        // `PIPE_WAITQ` is joined only by a set that actually holds a
-        // `Stream` member (the `SeatInput` discipline): pipe traffic
-        // between unrelated processes never wakes an unrelated waitset
-        // waiter.
-        let observes_stream = members.iter().any(|m| m.kind == WaitSourceKind::Stream);
+        // `STREAM_WAITQ` is joined once per `Stream` member, under that
+        // descriptor's own readable-side key, so traffic on any other stream
+        // — every other pipe and pty on the machine — never wakes this
+        // waiter. A member whose descriptor no longer resolves registers
+        // nothing: it can never report ready either.
+        //
+        // The stream a member names is resolved *once*, here, so the wait
+        // follows the object this descriptor held at entry. A sibling thread
+        // of the same process could close that number and open something else
+        // at it mid-wait; the readiness scan re-resolves the number and so
+        // stops reporting the retired stream, and the wait's own deadline
+        // bounds it. Following a replacement is not expressible anyway: the
+        // swap can always land between a re-resolution and the peer's write.
+        let stream_keys: Vec<crate::waitq::WakeKey> = {
+            let aspaces = self.aspaces.read();
+            members
+                .iter()
+                .filter(|m| m.kind == WaitSourceKind::Stream)
+                .filter_map(|m| {
+                    u32::try_from(m.id)
+                        .ok()
+                        .and_then(|fd| aspaces.stream_read_wait_key(caller.process(), fd))
+                })
+                .collect()
+        };
         // `SIGNAL_INTAKE_WAITQ` is likewise joined only by a set that
         // actually holds a `Signal` member, and its wake is targeted at the
         // opted-in task, so signal traffic never disturbs another waiter.
@@ -8955,8 +9006,8 @@ where
         if observes_seat {
             crate::waitq::SEAT_INPUT_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
         }
-        if observes_stream {
-            crate::waitq::PIPE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
+        for &key in &stream_keys {
+            crate::waitq::STREAM_WAITQ.register_keyed(key, sched_task, crate::waitq::NO_DEADLINE);
         }
         if observes_signal {
             crate::waitq::SIGNAL_INTAKE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
@@ -9093,8 +9144,8 @@ where
         if observes_seat {
             crate::waitq::SEAT_INPUT_WAITQ.deregister(sched_task);
         }
-        if observes_stream {
-            crate::waitq::PIPE_WAITQ.deregister(sched_task);
+        for &key in &stream_keys {
+            crate::waitq::STREAM_WAITQ.deregister_keyed(key, sched_task);
         }
         if observes_signal {
             crate::waitq::SIGNAL_INTAKE_WAITQ.deregister(sched_task);
@@ -18267,10 +18318,11 @@ mod tests {
         );
     }
 
-    /// A stream writer is on the pipe wait queue *before* its first poll, so
-    /// a peer that drains the ring between the poll and the park cannot wake
-    /// nobody and strand it. `wake_task` reports whether the target is
-    /// registered, which is exactly the question.
+    /// A stream writer is on the stream wait queue, *under its own ring's
+    /// key*, before its first poll, so a peer that drains the ring between the
+    /// poll and the park cannot wake nobody and strand it. `wake_waiter`
+    /// reports whether that exact `(key, task)` is registered, which is both
+    /// questions at once.
     #[test]
     fn a_stream_write_registers_for_the_wake_before_its_first_poll() {
         /// A `WaitQueueArch` that only has to exist: the assertion is
@@ -18311,13 +18363,15 @@ mod tests {
 
         let inert = Inert;
         let task = ctx.task_id.0;
+        let ring_keys = crate::pipe::RingWaits::mint();
+        let waits = crate::pipe::StreamWaits::new(ring_keys.space, ring_keys.data);
         let mut polls = 0usize;
         // `Broken` ends the loop on the first poll, so the registration this
         // observes is the one that was live *before* any step ran.
-        let outcome = h.parked_stream_write(&ctx, 0x1000, 4, |_| {
+        let outcome = h.parked_stream_write(&ctx, 0x1000, 4, waits, |_| {
             polls += 1;
             assert!(
-                crate::waitq::PIPE_WAITQ.wake_task(&inert, task),
+                crate::waitq::STREAM_WAITQ.wake_waiter(&inert, ring_keys.space, task),
                 "the writer must already be registered when its first poll runs"
             );
             StreamWriteStep::Broken
@@ -18325,9 +18379,77 @@ mod tests {
         assert_eq!(polls, 1, "the step ran once");
         assert_eq!(outcome, Err(Errno::BrokenPipe));
         assert!(
-            !crate::waitq::PIPE_WAITQ.wake_task(&inert, task),
+            !crate::waitq::STREAM_WAITQ.wake_waiter(&inert, ring_keys.space, task),
             "and is deregistered once the write leaves the loop"
         );
+    }
+
+    /// A blocked stream transfer joins the shared queue under *its own* ring
+    /// side and no other, so a chunk moved on an unrelated pipe or pty cannot
+    /// reach it: before this, every waiter sat on one unkeyed queue and every
+    /// 64 KiB moved anywhere unparked the lot (`plans/OPEN-DEFECTS.md` D53).
+    #[test]
+    fn a_blocked_stream_transfer_joins_only_its_own_ring_side() {
+        /// A `WaitQueueArch` that only has to exist: the assertion is
+        /// `wake_waiter`'s registered/not-registered answer, not the unpark.
+        struct Inert;
+        impl crate::waitq::WaitQueueArch for Inert {
+            fn unpark(&self, _id: tairix_kernel_sched_api::TaskId) {}
+            fn now_ns(&self) -> u64 {
+                0
+            }
+            fn set_wakeup(&self, _deadline_ns: Option<u64>) {}
+        }
+
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"ping");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        let inert = Inert;
+        let task = ctx.task_id.0;
+        let mine = crate::pipe::RingWaits::mint();
+        let theirs = crate::pipe::RingWaits::mint();
+        let outcome = h.parked_stream_write(
+            &ctx,
+            0x1000,
+            4,
+            crate::pipe::StreamWaits::new(mine.space, mine.data),
+            |_| {
+                assert!(
+                    crate::waitq::STREAM_WAITQ.wake_waiter(&inert, mine.space, task),
+                    "the writer waits on the space of the ring it is writing"
+                );
+                for foreign in [mine.data, theirs.data, theirs.space] {
+                    assert!(
+                        !crate::waitq::STREAM_WAITQ.wake_waiter(&inert, foreign, task),
+                        "and on nothing else — another stream's traffic must not reach it"
+                    );
+                }
+                StreamWriteStep::Broken
+            },
+        );
+        assert_eq!(outcome, Err(Errno::BrokenPipe));
     }
 
     /// A stream transfer stages one ring's worth, never the caller's whole

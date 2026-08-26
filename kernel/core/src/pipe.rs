@@ -6,8 +6,10 @@
 //! live-end counts. It never itself parks or switches context — the syscall
 //! handler drives the park loop (the [`crate::waitq`] discipline), calling
 //! the non-blocking [`PipeEnd::try_read`] / [`PipeEnd::try_write`] steps and
-//! parking on [`crate::waitq::PIPE_WAITQ`] when a step reports
-//! [`ReadStep::Empty`] / [`WriteStep::Full`].
+//! parking on [`crate::waitq::STREAM_WAITQ`] when a step reports
+//! [`ReadStep::Empty`] / [`WriteStep::Full`], under the [`RingWaits`] key of
+//! the ring side it blocked on so a transfer here never unparks another
+//! stream's waiters.
 //!
 //! # End lifetime
 //!
@@ -30,8 +32,86 @@
 
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use tairix_sync::SpinLock;
+
+use crate::waitq::WakeKey;
+
+/// The two wake identities one bounded byte ring carries: the tasks blocked on
+/// its bytes (or on end-of-stream) and the tasks blocked on its free space (or
+/// on the stream breaking). Minted per ring — a pipe has one, a pty has two —
+/// so a wake names one side of one ring and nothing else.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct RingWaits {
+    /// Released when bytes are appended, or the last producer closes.
+    pub data: WakeKey,
+    /// Released when bytes are drained, or the last consumer closes.
+    pub space: WakeKey,
+}
+
+/// Source of ring identities. Monotonic, so a live ring never shares a key
+/// with another.
+static NEXT_RING_KEY: AtomicU64 = AtomicU64::new(1);
+
+impl RingWaits {
+    /// Mint a fresh pair of identities for one ring.
+    #[must_use]
+    pub fn mint() -> Self {
+        Self {
+            data: WakeKey::new(NEXT_RING_KEY.fetch_add(1, Ordering::Relaxed)),
+            space: WakeKey::new(NEXT_RING_KEY.fetch_add(1, Ordering::Relaxed)),
+        }
+    }
+}
+
+/// The wake identities one blocking transfer uses: the ring side its caller
+/// parks on while it cannot progress, and the ring sides its progress
+/// releases.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct StreamWaits {
+    park: WakeKey,
+    /// [`WakeKey::NONE`] in the second slot means the transfer touches one
+    /// ring; [`Self::crossing`] fills it.
+    progress: [WakeKey; 2],
+}
+
+impl StreamWaits {
+    /// A transfer that parks on `park` and whose progress releases
+    /// `progress` — the ordinary one-ring read or write.
+    #[must_use]
+    pub const fn new(park: WakeKey, progress: WakeKey) -> Self {
+        Self {
+            park,
+            progress: [progress, WakeKey::NONE],
+        }
+    }
+
+    /// A transfer whose progress releases a second ring as well: an echoing
+    /// pty read both frees input space and fills the output ring.
+    #[must_use]
+    pub const fn crossing(park: WakeKey, progress: WakeKey, other: WakeKey) -> Self {
+        Self {
+            park,
+            progress: [progress, other],
+        }
+    }
+
+    /// The ring side a caller that cannot progress registers and parks on.
+    #[must_use]
+    pub const fn park(self) -> WakeKey {
+        self.park
+    }
+
+    /// Wake whatever a completed transfer released.
+    pub fn wake_progress(self) {
+        for key in self.progress {
+            if key != WakeKey::NONE {
+                crate::waitq::stream_wake(key);
+            }
+        }
+    }
+}
 
 /// Byte capacity of one pipe's ring (64 KiB, the POSIX-conventional size).
 ///
@@ -62,6 +142,9 @@ struct PipeState {
 /// One kernel pipe: the object both [`PipeEnd`] handles share.
 pub struct Pipe {
     state: SpinLock<PipeState>,
+    /// This pipe's own wake identities, so a transfer wakes only its own
+    /// blocked reader or writer.
+    waits: RingWaits,
 }
 
 /// Outcome of one non-blocking read step.
@@ -99,6 +182,7 @@ impl Pipe {
                 readers: 1,
                 writers: 1,
             }),
+            waits: RingWaits::mint(),
         });
         (
             PipeEnd {
@@ -135,6 +219,28 @@ impl PipeEnd {
     #[must_use]
     pub fn same_pipe(&self, other: &PipeEnd) -> bool {
         Arc::ptr_eq(&self.pipe, &other.pipe)
+    }
+
+    /// The wake identities a blocking transfer on this end uses: a reader
+    /// parks on the ring's bytes and its drain frees space; a writer parks on
+    /// the ring's space and its append supplies bytes.
+    #[must_use]
+    pub fn waits(&self) -> StreamWaits {
+        let RingWaits { data, space } = self.pipe.waits;
+        match self.role {
+            PipeRole::Read => StreamWaits::new(data, space),
+            PipeRole::Write => StreamWaits::new(space, data),
+        }
+    }
+
+    /// The condition this side's **last** release retires: the readers'
+    /// departure breaks the writers, the writers' ends the readers' stream.
+    fn retired_condition(&self) -> WakeKey {
+        let RingWaits { data, space } = self.pipe.waits;
+        match self.role {
+            PipeRole::Read => space,
+            PipeRole::Write => data,
+        }
     }
 
     /// One non-blocking read step: drain up to `out.len()` bytes.
@@ -248,18 +354,26 @@ impl Clone for PipeEnd {
 
 impl Drop for PipeEnd {
     fn drop(&mut self) {
-        {
+        let last = {
             let mut state = self.pipe.state.lock();
             match self.role {
-                PipeRole::Read => state.readers = state.readers.saturating_sub(1),
-                PipeRole::Write => state.writers = state.writers.saturating_sub(1),
+                PipeRole::Read => {
+                    state.readers = state.readers.saturating_sub(1);
+                    state.readers == 0
+                }
+                PipeRole::Write => {
+                    state.writers = state.writers.saturating_sub(1);
+                    state.writers == 0
+                }
             }
+        };
+        // Only the *last* end of a side changes the peer's condition (a reader
+        // must then observe EOF, a writer broken-pipe), so a clone released
+        // while siblings live wakes nobody. Woken after the lock is released;
+        // a fail-safe no-op before the wait arch is installed.
+        if last {
+            crate::waitq::stream_wake(self.retired_condition());
         }
-        // The peer side's condition may just have changed terminally (a
-        // reader must observe EOF, a writer broken-pipe), so wake the
-        // parked waiters after the lock is released. A fail-safe no-op
-        // before the wait arch is installed.
-        crate::waitq::pipe_wake();
     }
 }
 
@@ -424,6 +538,61 @@ mod tests {
         assert_eq!(write_b.try_write(b"x"), WriteStep::Wrote(1));
         assert!(!write_b.readable());
         assert!(read_b.readable());
+    }
+
+    /// Each pipe carries its own ring identities and its two ends mirror each
+    /// other across them, which is what confines a wake to the pipe that
+    /// produced it.
+    #[test]
+    fn each_pipe_waits_on_its_own_ring_and_the_ends_mirror_each_other() {
+        let (read, write) = Pipe::create();
+        let (r, w) = (read.waits(), write.waits());
+        assert_ne!(r.park(), w.park(), "the two directions block separately");
+        assert_eq!(
+            r,
+            StreamWaits::new(r.park(), w.park()),
+            "a drain frees the space its writer parks on"
+        );
+        assert_eq!(
+            w,
+            StreamWaits::new(w.park(), r.park()),
+            "an append supplies the bytes its reader parks on"
+        );
+
+        let (read2, write2) = Pipe::create();
+        let keys = [
+            r.park(),
+            w.park(),
+            read2.waits().park(),
+            write2.waits().park(),
+        ];
+        for (i, key) in keys.iter().enumerate() {
+            assert!(
+                !keys[..i].contains(key),
+                "two pipes must not share a wake identity"
+            );
+        }
+
+        // A clone shares its pipe's identities; it is the same ring.
+        assert_eq!(read.clone().waits(), r);
+    }
+
+    /// A departing side must wake exactly the condition its departure makes
+    /// terminal, or the peer parks on an EOF or broken pipe it never hears
+    /// about.
+    #[test]
+    fn the_last_end_of_a_side_retires_exactly_its_peers_condition() {
+        let (read, write) = Pipe::create();
+        assert_eq!(
+            read.retired_condition(),
+            write.waits().park(),
+            "the last reader breaks the writers waiting for its space"
+        );
+        assert_eq!(
+            write.retired_condition(),
+            read.waits().park(),
+            "the last writer ends the stream the readers wait on"
+        );
     }
 
     #[test]

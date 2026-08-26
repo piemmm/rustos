@@ -778,7 +778,22 @@ that keeps spuriously-woken tasks runnable and floors the idle load
 average at ~1). A **condition broadcast** — endpoint destruction, console
 input, a child exit, a hardware-tree bump — still wakes every registered
 waiter (`WaitQueue::wake_all`), each of which re-checks its own condition
-and re-parks on a miss. An interrupt-reachable wake never touches the
+and re-parks on a miss.
+
+One queue that holds waiters of *many independent objects* keys each
+registration instead (`WakeKey`, `WaitQueue::register_keyed`), and its
+events wake one key's waiters alone (`WaitQueue::wake_key`) — an O(log n +
+woken) range over the key-major waiter index. That is what `STREAM_WAITQ`
+does for every pipe and pseudo-terminal on the machine: each ring's two
+sides (bytes, space) are minted their own identity
+(`kernel/core::pipe::RingWaits`), so a chunk moved on one stream leaves
+every other stream's reader and writer parked, while all of them still
+share the single deadline index the timed sweep and
+`nearest_timed_deadline` fold over. Broadcasting to that queue instead
+made every 64 KiB moved anywhere on the machine unpark every stream
+waiter on it (`plans/OPEN-DEFECTS.md` D53).
+
+An interrupt-reachable wake never touches the
 wait-queue or scheduler locks: the device-IRQ dispatcher and the timer
 one-shot only flag a pending wake (`WaitQueue::request_wake` /
 `timed_wake_sweep`), and the actual `wake_all` / deadline sweep + `unpark`
