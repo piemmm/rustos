@@ -52,7 +52,7 @@ use tairix_log::Sink;
 use tairix_proglib::Catalog;
 use tairix_reclaim::PressureGauge;
 use tairix_taskbar::{
-    icon_cache, AppSlot, Edge, PickerEntry, TaskbarConfig, TaskbarRenderer, TaskbarResponse,
+    icon_cache, AppSlot, Edge, TaskbarConfig, TaskbarRenderer, TaskbarResponse,
     TransientNotification,
 };
 use tairix_theme::MotionInteraction;
@@ -63,7 +63,7 @@ use tairix_wm::{
     WindowSizeState,
 };
 
-use crate::apps::{prefetch_bar_icons, resolve_library_icons};
+use crate::apps::{picker_cells, prefetch_bar_icons, resolve_library_icons, thumbnail};
 use crate::desktop::Desktop;
 use crate::fade::BackdropFade;
 use crate::input::{SessionInputResponse, SessionInputRouter};
@@ -71,6 +71,7 @@ use crate::pinboard::PinboardMenu;
 use crate::presenter::{place, TaskbarPresenter};
 use crate::session::DesktopSession;
 use crate::tasks::TaskBridge;
+use crate::thumbs::WindowThumbnails;
 
 /// A source of live pointer/keyboard events for the desktop.
 ///
@@ -162,6 +163,9 @@ pub struct DesktopShell {
     /// The compositor window the pinboard's open context menu is shown in, if
     /// one is placed.
     pinboard_window: Option<WindowId>,
+    /// The hover window picker's thumbnails, scaled a window at a time while
+    /// the pointer rests out the picker's opening dwell.
+    thumbs: WindowThumbnails,
     /// The per-frame shell work counted so far, so a test can prove a
     /// drained batch settles once rather than once per sample. Test-only:
     /// the product carries no counter.
@@ -290,6 +294,7 @@ impl DesktopShell {
             wallpaper: None,
             backdrop_fade: BackdropFade::default(),
             pinboard_window: None,
+            thumbs: WindowThumbnails::new(),
             #[cfg(test)]
             settled: SettleWork::default(),
         }
@@ -1101,18 +1106,138 @@ impl DesktopShell {
     /// The answer to
     /// [`ShowWindowPicker`](TaskbarResponse::ShowWindowPicker): the session
     /// owns the windows' pixels, so it builds the cells and the bar places
-    /// and draws them. Refused, changing nothing, for fewer cells than
-    /// there is a choice between.
-    pub fn show_window_picker(
-        &mut self,
-        compositor: &mut Compositor,
-        app: usize,
-        entries: Vec<PickerEntry>,
-    ) {
+    /// and draws them. The thumbnails are whatever
+    /// [`advance_window_thumbnails`](Self::advance_window_thumbnails)
+    /// prepared while the pointer rested out the dwell — ordinarily all of
+    /// them; a cell whose window was not reached yet opens on its
+    /// application's glyph and is filled by a later slice. Refused, changing
+    /// nothing, for fewer cells than there is a choice between.
+    pub fn show_window_picker(&mut self, compositor: &mut Compositor, app: usize) {
         let scale = compositor.scale();
+        let entries = {
+            let (taskbar, thumbs) = (self.session.taskbar(), &mut self.thumbs);
+            picker_cells(taskbar, app, |window| thumbs.take(window))
+        };
         self.session
             .taskbar_mut()
             .show_window_picker(app, entries, scale);
+        self.present(compositor);
+    }
+
+    /// Scale one window frame the hover window picker wants, returning
+    /// whether the screen changed.
+    ///
+    /// The embedder calls this once per turn of its serve loop. It prepares
+    /// the application the pointer is resting its dwell out on — so the
+    /// picker opens already drawn — and goes on filling the cells of an open
+    /// picker whose slices had not all landed. One window per turn is what
+    /// keeps a screenful of windows from stopping the loop: the desktop
+    /// serves input, presents, and IPC between the slices.
+    ///
+    /// A pointer resting on nothing drops the preparation, so prepared pixels
+    /// are held only while there is a picker to show them in.
+    pub fn advance_window_thumbnails(&mut self, compositor: &mut Compositor) -> bool {
+        let open = self.session.taskbar().picker().app();
+        let Some(app) = self.router.dwelling_app().or(open) else {
+            self.thumbs.forget();
+            return false;
+        };
+        let Some(windows) = self
+            .session
+            .taskbar()
+            .apps()
+            .get(app)
+            .map(|slot| slot.windows().to_vec())
+        else {
+            self.thumbs.forget();
+            return false;
+        };
+        self.thumbs.aim(app, &windows);
+        let Some(window) = self.thumbs.next_owed() else {
+            return false;
+        };
+        let (width, height) = self
+            .session
+            .taskbar()
+            .picker_thumbnail_size(compositor.scale());
+        // A window that has not presented, or whose content the pressure
+        // ladder released, has no pixels to scale: its cell keeps the
+        // application's glyph and the remaining slices carry on.
+        let Some(scaled) = self
+            .tasks
+            .window_for(window)
+            .and_then(|wm| compositor.window(wm))
+            .and_then(tairix_wm::Window::content)
+            .and_then(|frame| thumbnail(frame, width, height))
+        else {
+            return false;
+        };
+        if open != Some(app) {
+            self.thumbs.store(window, scaled);
+            return false;
+        }
+        // The picker is already up over this application, so the cell that
+        // has been showing a glyph takes the thumbnail now.
+        let cell = self
+            .session
+            .taskbar()
+            .picker()
+            .entries()
+            .iter()
+            .position(|entry| entry.window() == window);
+        let Some(cell) = cell else {
+            return false;
+        };
+        if !self
+            .session
+            .taskbar_mut()
+            .set_picker_thumbnail(cell, scaled)
+        {
+            return false;
+        }
+        self.present(compositor);
+        true
+    }
+
+    /// Whether the hover window picker is owed a thumbnail, so the embedder's
+    /// next park is due immediately.
+    ///
+    /// True from the moment the pointer comes to rest on a multi-window slot
+    /// — the queue for it has not been built yet, which is itself work — until
+    /// the last of that application's windows has been scaled.
+    #[must_use]
+    pub fn window_thumbnails_owed(&self) -> bool {
+        let open = self.session.taskbar().picker().app();
+        match self.router.dwelling_app().or(open) {
+            Some(app) => self.thumbs.owed() || !self.thumbs.aimed_at(app),
+            None => false,
+        }
+    }
+
+    /// `park_ns` shortened to the next moment a time-driven bar gesture is
+    /// due — the hover picker's opening dwell or closing grace, a held
+    /// Switchboard capsule press — or left exactly as it is when none is
+    /// pending.
+    #[must_use]
+    pub fn taskbar_park_deadline_ns(&self, now_ns: u64, park_ns: u64) -> u64 {
+        self.router.park_deadline_ns(now_ns, park_ns)
+    }
+
+    /// Resolve whatever timed bar gesture has come due at `now_ns`,
+    /// re-presenting whatever it changed.
+    ///
+    /// The embedder calls this when the deadline
+    /// [`taskbar_park_deadline_ns`](Self::taskbar_park_deadline_ns) asked for
+    /// expires. A tick resolves the hover picker's own two edges — opening
+    /// once the pointer has rested out its dwell, closing once it has rested
+    /// elsewhere out the grace — and both are the shell's to carry out, so
+    /// there is nothing here for the embedder to route.
+    pub fn tick_taskbar(&mut self, compositor: &mut Compositor, now_ns: u64) {
+        let response = self.router.tick(self.session.taskbar_mut(), now_ns);
+        self.resolve_taskbar(&response, compositor);
+        // A picker that went down is a surface going away: the pointer's
+        // focus is re-resolved and the latched repaint drawn by the one
+        // settling present.
         self.present(compositor);
     }
 
@@ -1330,25 +1455,40 @@ impl DesktopShell {
                 ShellOutcome::WindowManager(response)
             }
             SessionInputResponse::Taskbar(response) => {
-                match response {
-                    // Choosing a window — in the hover picker, or through the
-                    // Switchboard capsule's cycle and previous-task gestures —
-                    // raises it. The bar has already restored and highlighted
-                    // it in its own model.
-                    TaskbarResponse::WindowChosen { id } => {
-                        self.tasks.raise(compositor, &mut self.router, id);
-                    }
-                    // A user dismiss clears the notification from the model
-                    // the session owns; the repaint latch it sets drives the
-                    // settling present, closing the popover when the last one
-                    // goes.
-                    TaskbarResponse::DismissNotification { producer, key } => {
-                        self.session.taskbar_mut().clear_notification(producer, key);
-                    }
-                    _ => {}
-                }
+                self.resolve_taskbar(&response, compositor);
                 ShellOutcome::Taskbar(response)
             }
+        }
+    }
+
+    /// Carry out the part of a taskbar `response` the shell's own state
+    /// suffices for, before the rest is handed to the embedder.
+    ///
+    /// The one site: an event and a timed
+    /// [`tick_taskbar`](Self::tick_taskbar) resolve the same response the
+    /// same way.
+    fn resolve_taskbar(&mut self, response: &TaskbarResponse, compositor: &mut Compositor) {
+        match *response {
+            // Choosing a window — in the hover picker, or through the
+            // Switchboard capsule's cycle and previous-task gestures —
+            // raises it. The bar has already restored and highlighted it in
+            // its own model.
+            TaskbarResponse::WindowChosen { id } => {
+                self.tasks.raise(compositor, &mut self.router, id);
+            }
+            // A user dismiss clears the notification from the model the
+            // session owns; the repaint latch it sets drives the settling
+            // present, closing the popover when the last one goes.
+            TaskbarResponse::DismissNotification { producer, key } => {
+                self.session.taskbar_mut().clear_notification(producer, key);
+            }
+            // The pointer finished its dwell on a multi-window slot: the
+            // shell holds the thumbnails it scaled while that dwell ran, so
+            // it opens the picker itself.
+            TaskbarResponse::ShowWindowPicker { app } => {
+                self.show_window_picker(compositor, app);
+            }
+            _ => {}
         }
     }
 

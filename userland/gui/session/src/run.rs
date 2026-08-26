@@ -113,8 +113,8 @@ mod program {
     use tairix_desktop_session::{
         admitted_pid, catalogued, deliver_pending_open, desktop_info, drop_is_noteworthy,
         ensure_switchboard, launch_argv, load_library, load_pinboard as read_pinboard_store,
-        maybe_send_seat_report, open_tray, parse, persist_pinboard, picker_cells, reap_launched,
-        relay_power, resolve_window_identities, serve_pinboard_apply, serve_switchboard_request,
+        maybe_send_seat_report, open_tray, parse, persist_pinboard, reap_launched, relay_power,
+        resolve_window_identities, serve_pinboard_apply, serve_switchboard_request,
         window_control_alternate_event, window_control_event, Answer, AppBarBridge, AppBarService,
         ArtworkDesk, ArtworkFileReader, ArtworkSandbox, CliError, Command, ConcludedPick,
         ConfirmPrompt, Delivery, Desktop, DesktopAction, DesktopActivation, DesktopOutcome,
@@ -1967,10 +1967,11 @@ mod program {
         loop {
             // The park stays indefinite: a cache-report change the runtime's
             // rate limiter is holding back, a frame report this session's own
-            // one is holding back, an animation frame the session owes, only
-            // ever *tighten* the wait to the moment the work is due, and fold
-            // back to indefinite once it is done. The desktop never polls for
-            // anything.
+            // one is holding back, an animation frame the session owes, a bar
+            // gesture the clock owes an answer to, and a window thumbnail a
+            // hover picker is waiting on, only ever *tighten* the wait to the
+            // moment the work is due, and fold back to indefinite once it is
+            // done. The desktop never polls for anything.
             //
             // A background session has no deadline at all, not even those:
             // it draws nothing, so a held-back report has nothing to report,
@@ -1978,6 +1979,13 @@ mod program {
             // for no work.
             let timeout_ns = {
                 let now_ns = tairix_rt::clock_get();
+                // A thumbnail slice is owed *now*: the wait still reports a
+                // ready member first, so slicing never starves input.
+                let owed = if shell.window_thumbnails_owed() {
+                    0
+                } else {
+                    u64::MAX
+                };
                 switch.park_deadline_ns(lock.park_deadline_ns(
                     now_ns,
                     clock.park_deadline_ns(
@@ -1986,9 +1994,12 @@ mod program {
                             now_ns,
                             shell.backdrop_park_deadline_ns(
                                 now_ns,
-                                frames.park_deadline_ns(
+                                shell.taskbar_park_deadline_ns(
                                     now_ns,
-                                    tairix_rt::cachereport::fold_wait_deadline_ns(u64::MAX),
+                                    frames.park_deadline_ns(
+                                        now_ns,
+                                        tairix_rt::cachereport::fold_wait_deadline_ns(owed),
+                                    ),
                                 ),
                             ),
                         ),
@@ -2006,13 +2017,20 @@ mod program {
                 // wake's source and dispatching on it would block in a
                 // `call_recv` with nothing to receive. Only what this loop
                 // armed the deadline for is owed: the next frame of whatever
-                // is animating, and the held-back report.
+                // is animating, the bar gesture the clock owes an answer to,
+                // the next window thumbnail a hover picker is waiting on, and
+                // the held-back report.
                 //
                 // One clock reading serves the whole frame: what the
                 // animation steps to and what the report's rate limit is
                 // timed against are the same instant, and the frame path
                 // takes one syscall for both rather than two.
                 let now_ns = tairix_rt::clock_get();
+                // The pointer resting still produces no events at all, so
+                // this is what opens a picker whose dwell has elapsed and
+                // takes down one whose grace has.
+                shell.tick_taskbar(&mut compositor, now_ns);
+                shell.advance_window_thumbnails(&mut compositor);
                 animate(
                     &mut fade,
                     &mut lock,
@@ -2743,6 +2761,10 @@ mod program {
             // this wake, the lock goes back on top before the frame is
             // shown. Idle when the screen is not locked.
             lock.keep_topmost(&mut compositor);
+            // One window thumbnail per wake, so a hover picker over a
+            // screenful of windows fills in across the turns the loop was
+            // making anyway instead of scaling every frame in one of them.
+            shell.advance_window_thumbnails(&mut compositor);
             // Whatever is animating steps to the instant this frame is
             // actually shown at, not to when the wake arrived, so the work
             // this wake did does not age the frame. One clock reading serves
@@ -4229,14 +4251,6 @@ mod program {
                     &WindowEvent::AppBarMenu { item },
                 );
             }
-            ShellOutcome::Taskbar(TaskbarResponse::ShowWindowPicker { app }) => {
-                // The session owns the windows' pixels, so it builds the
-                // cells: each window's last presented frame, scaled to the
-                // cell through the shared rasteriser. A window with no frame
-                // yet simply has no thumbnail and draws its application's
-                // glyph.
-                show_picker(app, shell, compositor);
-            }
             ShellOutcome::Taskbar(TaskbarResponse::OpenSwitchboard { section }) => {
                 // The bar already decided which section the gesture asks
                 // for (a quick press its overview, a hold its recovery
@@ -4348,7 +4362,8 @@ mod program {
             // An event no router acted on; outcomes the shell has already
             // fully applied with its own state (the click-to-activate/minimise
             // rule, clearing a dismissed notification from the model, the
-            // popup's own open/close); and the desktop shortcut, which
+            // popup's own open/close, opening the hover picker out of the
+            // thumbnails it prepared); and the desktop shortcut, which
             // `route_desktop` — the owner of that folder, its icons, and its
             // one creation path — has already made and shown. Nothing here
             // needs a capability this side of the routing holds, so the
@@ -4361,6 +4376,7 @@ mod program {
                 | TaskbarResponse::LibraryDismissed
                 | TaskbarResponse::WindowChosen { .. }
                 | TaskbarResponse::DismissNotification { .. }
+                | TaskbarResponse::ShowWindowPicker { .. }
                 | TaskbarResponse::CreateDesktopShortcut { .. },
             ) => {}
         }
@@ -4484,30 +4500,6 @@ mod program {
             .or_else(|| owned(tasks.previous()))
             .or_else(|| group.windows.last().copied())?;
         shell.tasks().window_for(task)
-    }
-
-    /// Open the bar's hover window picker over the application at strip
-    /// index `app`, one cell per window.
-    ///
-    /// Each cell carries that window's last presented frame — the session's
-    /// own copy of it, held by the compositor — scaled to the cell through
-    /// the shared rasteriser. A window whose pixels were released under
-    /// memory pressure, or that has not presented yet, has no thumbnail and
-    /// its cell draws the application's glyph instead of a hole.
-    fn show_picker(app: usize, shell: &mut DesktopShell, compositor: &mut Compositor) {
-        let scale = compositor.scale();
-        let cell = shell.session().taskbar().picker_thumbnail_size(scale);
-        let entries = {
-            let taskbar = shell.session().taskbar();
-            let tasks = shell.tasks();
-            picker_cells(taskbar, app, cell, |task| {
-                tasks
-                    .window_for(task)
-                    .and_then(|wm| compositor.window(wm))
-                    .and_then(|window| window.content().cloned())
-            })
-        };
-        shell.show_window_picker(compositor, app, entries);
     }
 
     /// The file-type associations of every catalogued application: each

@@ -555,27 +555,69 @@ window comes back by being chosen in the hover picker.
 ## The hover window picker
 
 `WindowPicker` is the surface that chooses between one application's windows.
-Hovering a slot whose application owns at least `PICKER_MIN_WINDOWS` (two)
-windows reports `ShowWindowPicker { app }`; the session — which owns the
-windows' pixels — answers with one `PickerEntry` per window through
-`Taskbar::show_window_picker`, and the bar lays out a row of captioned
-thumbnail cells opening outward from the slot, clamped onto the screen.
+Resting the pointer on a slot whose application owns at least
+`PICKER_MIN_WINDOWS` (two) windows reports `ShowWindowPicker { app }`; the
+session — which owns the windows' pixels — answers with one `PickerEntry` per
+window through `Taskbar::show_window_picker`, and the bar lays out a grid of
+captioned thumbnail cells opening outward from the slot, clamped onto the
+screen.
 
 **It opens only above one window.** With a single window there is nothing to
 choose, and the slot's own click already reaches it, so sweeping the pointer
-along a bar of ordinary single-window applications pops nothing up. That is
-what makes a hover-opened surface tolerable without a dwell timer: the picker
-appears exactly where there is a choice to make, and the bar needs no clock to
-decide it.
+along a bar of ordinary single-window applications pops nothing up.
 
-It is a pointer surface and nothing else. A press on a cell reports
+### Both edges are timed, and the clock resolves them
+
+- It opens once the pointer has **rested** on the slot for
+  `PICKER_OPEN_DELAY_NS` (one second). A pointer crossing the bar on its way
+  somewhere else has asked for nothing, so the dwell is what separates a hover
+  from a passing pointer.
+- It closes `PICKER_CLOSE_GRACE_NS` (a fifth of a second) after the pointer
+  comes to rest on **neither** the slot nor the panel. The panel hangs a gap
+  away from the bar, so a pointer travelling from the slot to a cell
+  necessarily leaves the bar's surfaces on the way; closing on that crossing
+  would make choosing a window impossible. Reaching the panel — or coming back
+  to the slot, which is what happens when a window merely passes over the bar
+  — cancels the grace outright.
+
+Neither edge is polled or slept on. `TaskbarInput::park_deadline_ns` folds the
+pending transition into the wait the desktop was going to make anyway, and
+`TaskbarInput::tick` resolves it when that wait expires; an idle bar arms no
+timer at all. A dwell whose slot moved under it (the strip was re-pushed while
+it ran) opens nothing rather than showing the windows of whichever application
+now holds that index.
+
+### The grid, and why no cell is unreachable
+
+Cells wrap into as many columns as the space beside the bar holds and as many
+rows as follow, and a grid with more rows than that space shows **scrolls**:
+`PickerLayout` carries the shared `tairix-controls` `ScrollBar`'s gutter, the
+wheel over the panel walks the grid, and pressing or dragging the bar moves it
+like any other scrollbar. A cell outside the visible rows is `Rect::EMPTY` and
+can never be hit — and scrolling brings it into view, so an application with
+far more windows than fit across the screen still has every one of them
+selectable. The first visible row is clamped to the grid at layout time, so a
+density change under a scrolled panel cannot leave it showing no cells at all.
+
+### Thumbnails are prepared, never scaled in one go
+
+Scaling a window's frame reads every one of its pixels, so building a whole
+picker at once would stop the desktop's serve loop for as long as that took.
+The session instead scales **one window per turn of its loop** while the dwell
+runs (`DesktopShell::advance_window_thumbnails`, reported as owed by
+`window_thumbnails_owed`), so the picker opens already drawn and the loop stays
+free to serve input, presents, and IPC between the slices. A cell whose
+thumbnail has not landed draws that *application's* glyph rather than a hole,
+and `Taskbar::set_picker_thumbnail` fills it in when a later slice arrives.
+Nothing is retained past the hover: the pointer leaving drops the prepared
+pixels.
+
+Otherwise it is a pointer surface and nothing else. A press on a cell reports
 `WindowChosen { id }` (the session raises and focuses that window, which also
 restores it if it was minimised); a press on the plate's own chrome is claimed
 and does nothing; it takes no keyboard, so the focused window keeps its keys;
-and it closes the moment the pointer leaves both it and the slot it hangs
-from, when the slot is clicked, or when the application stops having a choice
-to offer. A cell whose window has no thumbnail yet draws that
-*application's* glyph rather than a hole.
+and it closes when the slot is clicked, or when the application stops having a
+choice to offer.
 
 ## The context menu
 
@@ -638,17 +680,22 @@ act on.
 `TaskbarInput::set_pointer_focus` is the other half of the contract, and it
 takes a `tairix_input::PointerFocus`:
 
-- **`Left`** drops every hover the bar is drawing and closes the hover window
-  picker. It cannot be inferred from a position, because the pointer usually
-  has not moved — a window was raised over the bar, or a drag took the pointer
-  — and testing that unchanged position would answer "still on the clock",
-  leaving a highlighted slot and an open panel of window thumbnails stranded
-  over someone else's window.
+- **`Left`** drops every hover the bar is drawing and starts the hover window
+  picker's closing grace. It cannot be inferred from a position, because the
+  pointer usually has not moved — a window was raised over the bar, or a drag
+  took the pointer — and testing that unchanged position would answer "still on
+  the clock", leaving a highlighted slot lit over someone else's window. The
+  panel goes on the grace rather than at once because leaving the bar's
+  surfaces is also what a pointer travelling *to* a cell does; the clock ends
+  it, so nothing is left stranded.
 - **`Entered { at }`** adopts the position the pointer arrived at and refreshes
   the hover there. The pointer can arrive without moving (the window above the
-  bar closed), and no motion event exists for that. An arrival deliberately
-  opens **no** hover surface: a window closing is not a gesture, and the next
-  real motion opens the picker if the pointer is still on the slot.
+  bar closed), and no motion event exists for that. An arrival back onto the
+  surfaces an open picker lives on **cancels** its closing grace: a window
+  passing over the bar is not the pointer leaving, so the panel must not go
+  down behind it. An arrival deliberately opens **no** hover surface and arms
+  no dwell: a window closing is not a gesture, and the next real motion,
+  rested out, opens the picker if the pointer is still on the slot.
 
 A delivered `PointerMoved` says the same thing as an `Entered` and carries the
 same position, so a router handed one is already entered.
@@ -660,7 +707,8 @@ manager's `InputRouter`. It consumes the **same** shared `tairix-input`
 `InputEvent` stream the compositor routes (`AGENTS.md` §17.4, §2.2), tracking
 the pointer position from motion events (which also drives the leading
 buttons' and application slots' hover feedback through the repaint latch,
-and opens or closes the hover window picker). With the popup and menu closed
+and arms or drops the hover window picker's timed edges). With the popup and
+menu closed
 it acts only on a primary or secondary press, hit-tested against the current
 `BarLayout` and reported as a `TaskbarResponse`:
 
@@ -674,8 +722,10 @@ it acts only on a primary or secondary press, hit-tested against the current
 - a **secondary** press on an application slot opens the menu that
   application declared;
 - a primary press on an open **picker cell** chooses that window
-  (`WindowChosen { id }`); one on the picker's own plate is claimed and
-  closes it;
+  (`WindowChosen { id }`); one on its grid's scrollbar belongs to the
+  scrollbar (a thumb grab reports no offset of its own until the drag moves,
+  so the panel stays up under the hand that grabbed it); one on the picker's
+  own plate is claimed and closes it;
 - a primary press on a **notification icon** reports its `IconId`
   (`NotificationActivated`);
 - a primary press on the **clock** is claimed and inert — the clock is a

@@ -57,10 +57,18 @@ pub const WINDOW_REPLY_MAX: usize = if WINDOW_CREATE_REPLY_LEN > WINDOW_DESKTOP_
 };
 
 /// Most windows one attested client may hold open at once. A validation
-/// bound, not a capacity: a desktop app opens a handful of windows, and
-/// each one pins its shared frame region in the session, so an unbounded
-/// count would let one hostile app exhaust the session's address space.
-pub const WINDOWS_PER_CLIENT_MAX: usize = 16;
+/// bound, not a capacity: each window pins its shared frame region in the
+/// session, so an unbounded count would let one hostile app exhaust the
+/// session's address space.
+///
+/// Sized so ordinary use never meets it — a terminal opens every one of its
+/// windows in a single process, and a user with dozens of them is doing
+/// nothing unusual — while a runaway client is still stopped well before the
+/// session's own mappings are. The bound is on the *count* because that is
+/// what this engine can see; the bytes behind it are bounded by the session's
+/// address-space limit, which the kernel enforces and a refused mapping
+/// already fails this call closed on.
+pub const WINDOWS_PER_CLIENT_MAX: usize = 32;
 
 /// The caller-attestation seam — the kernel's `call_peer_origin` behind
 /// a trait, so the engine is host-testable and never trusts a claimed

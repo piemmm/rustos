@@ -8457,8 +8457,7 @@ fn datetime_elevate_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
     let aim_and_press = |marker: &str, button: MouseButton, from: Point, to: Point| {
         [
             step(marker, move_by(from, to)),
-            step(marker, PointerAction::Press(button)),
-            step(marker, PointerAction::Release(button)),
+            step(marker, PointerAction::Click(button)),
         ]
     };
     let ready = AUTOLOAD_DESKTOP_REVEALED_MARKER;
@@ -8680,8 +8679,7 @@ fn appbar_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     let click = |marker: &str, button: MouseButton, from: Point, to: Point| {
         [
             step(marker, move_by(from, to)),
-            step(marker, PointerAction::Press(button)),
-            step(marker, PointerAction::Release(button)),
+            step(marker, PointerAction::Click(button)),
         ]
     };
     let ready = AUTOLOAD_DESKTOP_REVEALED_MARKER;
@@ -8945,8 +8943,10 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
         dx: to.x - from.x,
         dy: to.y - from.y,
     };
-    let press = PointerAction::Press(MouseButton::Primary);
-    let release = PointerAction::Release(MouseButton::Primary);
+    // One step per click: a press and a release scripted separately would sit
+    // a poll tick apart, and a guest that acts on the press can exit inside
+    // that gap with the release still owed.
+    let click = PointerAction::Click(MouseButton::Primary);
     let step = |marker: &str, occurrences: u32, action: PointerAction| PointerStep {
         ready_marker: marker.to_owned(),
         ready_occurrences: occurrences,
@@ -8967,8 +8967,7 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
             1,
             move_by(Point::ORIGIN, files_slot),
         ),
-        step(AUTOLOAD_DESKTOP_REVEALED_MARKER, 1, press),
-        step(AUTOLOAD_DESKTOP_REVEALED_MARKER, 1, release),
+        step(AUTOLOAD_DESKTOP_REVEALED_MARKER, 1, click),
         // The spawned app's window frame has been mapped — its window is
         // created and sits at the first cascade slot — so click its body;
         // the session delivers `Focus` + `Pressed` to that window, which is
@@ -8985,20 +8984,14 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
         step(
             AUTOLOAD_WINDOW_MAP_MARKER,
             AUTOLOAD_FILES_WINDOW_MAP_OCCURRENCES,
-            press,
-        ),
-        step(
-            AUTOLOAD_WINDOW_MAP_MARKER,
-            AUTOLOAD_FILES_WINDOW_MAP_OCCURRENCES,
-            release,
+            click,
         ),
         // The handshake click on the still-focused window: keyed on the
         // first click's own deliveries reaching that window and
         // additionally held while the second dump is pending, so the dump
         // captures the staged dark frame and the terminal stage below
         // starts in a strictly later wake.
-        step(AUTOLOAD_FILES_ACTIVATED_MARKER, 1, press),
-        step(AUTOLOAD_FILES_ACTIVATED_MARKER, 1, release),
+        step(AUTOLOAD_FILES_ACTIVATED_MARKER, 1, click),
         // --- The AW4 terminal stage, keyed on the handshake click's own
         // delivery. Click the Library button — the program-library popup
         // opens (a session-owned surface: no app-ward delivery and no
@@ -9010,15 +9003,13 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
             1,
             move_by(window, library_button),
         ),
-        step(AUTOLOAD_FILES_HANDSHAKE_MARKER, 1, press),
-        step(AUTOLOAD_FILES_HANDSHAKE_MARKER, 1, release),
+        step(AUTOLOAD_FILES_HANDSHAKE_MARKER, 1, click),
         step(
             AUTOLOAD_FILES_HANDSHAKE_MARKER,
             1,
             move_by(library_button, terminal_entry),
         ),
-        step(AUTOLOAD_FILES_HANDSHAKE_MARKER, 1, press),
-        step(AUTOLOAD_FILES_HANDSHAKE_MARKER, 1, release),
+        step(AUTOLOAD_FILES_HANDSHAKE_MARKER, 1, click),
         // The terminal's window frame has been mapped — its window is
         // created and sits at the second cascade slot — so click its
         // body. This gate counts window-frame **maps** (one per window
@@ -9037,12 +9028,7 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
         step(
             AUTOLOAD_WINDOW_MAP_MARKER,
             AUTOLOAD_TERMINAL_WINDOW_MAP_OCCURRENCES,
-            press,
-        ),
-        step(
-            AUTOLOAD_WINDOW_MAP_MARKER,
-            AUTOLOAD_TERMINAL_WINDOW_MAP_OCCURRENCES,
-            release,
+            click,
         ),
     ])
 }
@@ -9683,15 +9669,53 @@ fn persist_serial(package: &str, path: &Path, serial: &str) -> Result<(), String
 #[cfg(test)]
 mod tests {
     use super::{
-        build_targets, login_type_plant, persist_serial, qemu_host_budget_for, qemu_job_weight,
-        sidecar_path, FsDisk, PrimePlan, QemuTest, MEMSOAK_PASS_PREFIX,
-        SUPERVISOR_ESC_AT_PROMPT_SCRIPT, SUPERVISOR_ESC_SCRIPT, SUPERVISOR_MOUNT_SCRIPT,
-        TCPECHO_PASS_PREFIX, TCPSERVE_PASS_PREFIX, TESTS, UNLOCK_PASSPHRASE_LINE,
-        UNPROVISIONED_MACHINE_ID_MARKER, VALUE_OPERAND_PHYSICAL_LINE,
+        appbar_pointer_script, autoload_desktop_pointer_script, build_targets, login_type_plant,
+        persist_serial, qemu_host_budget_for, qemu_job_weight, sidecar_path, FsDisk, PrimePlan,
+        QemuTest, MEMSOAK_PASS_PREFIX, SUPERVISOR_ESC_AT_PROMPT_SCRIPT, SUPERVISOR_ESC_SCRIPT,
+        SUPERVISOR_MOUNT_SCRIPT, TCPECHO_PASS_PREFIX, TCPSERVE_PASS_PREFIX, TESTS,
+        UNLOCK_PASSPHRASE_LINE, UNPROVISIONED_MACHINE_ID_MARKER, VALUE_OPERAND_PHYSICAL_LINE,
         VALUE_OPERAND_PHYSICAL_MARKER, VALUE_PIPE_PHYSICAL_LINE, VALUE_PIPE_PHYSICAL_MARKER,
         VALUE_PIPE_WRITE_REFUSED_MARKER,
     };
     use std::time::Duration;
+
+    /// Every desktop click a pointer script drives is **one** step.
+    ///
+    /// The runner sends at most one step per poll tick, and a desktop acts on
+    /// the press: a click scripted as a separate press and release therefore
+    /// leaves a tick in which a guest whose PASS witness is that press's own
+    /// effect can exit with the release still owed, which fails the run for an
+    /// incomplete script. The icon-bar vertical lost exactly that race when the
+    /// terminal stopped spawning a shell before asking for its window, so the
+    /// scripts state a click as the single gesture it is.
+    #[test]
+    fn every_desktop_pointer_click_is_one_step() {
+        use tairix_qemu::PointerAction;
+
+        for (label, script) in [
+            ("icon bar", appbar_pointer_script()),
+            ("autoload desktop", autoload_desktop_pointer_script()),
+        ] {
+            let steps = script.unwrap_or_else(|e| panic!("{label} script builds: {e}"));
+            for (index, step) in steps.iter().enumerate() {
+                assert!(
+                    !matches!(
+                        step.action,
+                        PointerAction::Press(_) | PointerAction::Release(_)
+                    ),
+                    "{label} step {index} halves a click across poll ticks: {:?}",
+                    step.action
+                );
+            }
+            assert!(
+                matches!(
+                    steps.last().map(|step| step.action),
+                    Some(PointerAction::Click(_))
+                ),
+                "{label} script ends on something other than the click its guest exits on"
+            );
+        }
+    }
 
     /// The enrolment with `disk`, for a test that asserts on what that disk
     /// plants. `label` names it in the failure a removed enrolment would
@@ -10183,8 +10207,9 @@ mod tests {
             let click = click_on(occurrences);
             assert_eq!(
                 click.len(),
-                3,
-                "the {window}-window click is one move + press + release, all on the map marker"
+                2,
+                "the {window}-window click is one move plus the click itself, both on the map \
+                 marker"
             );
             for step in click {
                 assert_ne!(

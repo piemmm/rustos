@@ -39,7 +39,7 @@ use tairix_icon::{
     ArtworkCache, ArtworkRasteriser, ArtworkReader, ArtworkResolver, IconKind, IconRequest,
 };
 use tairix_proglib::{Catalog, EntryId, IconAsset};
-use tairix_raster::{resample, Rgba8Image, Surface};
+use tairix_raster::{Region, Surface};
 use tairix_taskbar::{
     AppIdentity, AppSlot, LibraryIconRequest, PickerEntry, TaskId, Taskbar, PICKER_MIN_WINDOWS,
 };
@@ -362,33 +362,36 @@ fn entry_icon_path(catalog: &Catalog, id: &EntryId) -> Option<String> {
 /// A window's content surface is the session's own copy of the application's
 /// last presented frame — pixels it already holds, so no new authority is
 /// involved — and the scaling is `lib/raster`'s one resampler, never a
-/// second one here. `None` for a frame or a cell that cannot be resampled
-/// (either is empty, or the destination cannot be allocated), which leaves
-/// the cell drawing its application's glyph rather than a hole.
+/// second one here. It stays in the premultiplied space both surfaces are
+/// already stored in, so a thumbnail costs one allocation and one filter pass
+/// rather than a straight-alpha round trip and two copies of the whole frame.
+/// `None` for a frame or a cell that cannot be resampled (either is empty, or
+/// the destination cannot be allocated), which leaves the cell drawing its
+/// application's glyph rather than a hole.
 #[must_use]
 pub fn thumbnail(frame: &Surface, width: u32, height: u32) -> Option<Surface> {
-    let bytes = frame.to_rgba8();
-    let source = Rgba8Image::new(frame.width(), frame.height(), &bytes).ok()?;
-    let region = source.whole();
-    let scaled = resample(&source, region, width, height).ok()?;
-    Surface::from_rgba8(width, height, &scaled)
+    let region = Region {
+        x: 0,
+        y: 0,
+        width: frame.width(),
+        height: frame.height(),
+    };
+    frame.resampled(region, width, height).ok()
 }
 
 /// The cells a hover picker shows for the application at strip index `app`:
 /// one per window, captioned with its title and carrying the window's last
 /// presented frame scaled to the cell.
 ///
-/// `frame_of` hands back the session's own copy of a window's content — the
-/// compositor's surface for it — and `cell` is the thumbnail rectangle the
-/// bar will draw into. Refused, as an empty list, for an application with
-/// fewer than [`PICKER_MIN_WINDOWS`] windows: with one window there is
-/// nothing to choose, so the bar is asked to open nothing.
-pub fn picker_cells<F>(
-    taskbar: &Taskbar,
-    app: usize,
-    cell: (u32, u32),
-    mut frame_of: F,
-) -> Vec<PickerEntry>
+/// `thumbnail_of` hands back the window's frame already scaled to the cell —
+/// the embedder prepared it while the pointer rested out its dwell, one
+/// window per turn of the serve loop, so no picker is built by scaling a
+/// screenful of frames in one go — and `None` leaves that cell on its
+/// application's glyph until the embedder fills it in. Refused, as an empty
+/// list, for an application with fewer than [`PICKER_MIN_WINDOWS`] windows:
+/// with one window there is nothing to choose, so the bar is asked to open
+/// nothing.
+pub fn picker_cells<F>(taskbar: &Taskbar, app: usize, mut thumbnail_of: F) -> Vec<PickerEntry>
 where
     F: FnMut(TaskId) -> Option<Surface>,
 {
@@ -398,7 +401,6 @@ where
     if slot.windows().len() < PICKER_MIN_WINDOWS {
         return Vec::new();
     }
-    let (width, height) = cell;
     slot.windows()
         .iter()
         .map(|&window| {
@@ -409,10 +411,7 @@ where
                 .find(|entry| entry.id == window)
                 .map_or("", |entry| entry.title.as_str());
             let entry = PickerEntry::new(window, title);
-            match frame_of(window)
-                .as_ref()
-                .and_then(|frame| thumbnail(frame, width, height))
-            {
+            match thumbnail_of(window) {
                 Some(scaled) => entry.with_thumbnail(scaled),
                 None => entry,
             }

@@ -405,8 +405,10 @@ impl TaskbarRenderer {
     ///
     /// Each cell draws the thumbnail the embedder supplied for that window,
     /// falling back to the application's own glyph when it has none, so a
-    /// cell always states something. Returns `None` when the picker is
-    /// closed or its dimensions cannot be allocated (fail closed).
+    /// cell always states something; a grid with more rows than the panel
+    /// shows draws the scrollbar that reaches the rest. Returns `None` when
+    /// the picker is closed or its dimensions cannot be allocated (fail
+    /// closed).
     #[must_use]
     pub fn render_picker(&self, taskbar: &Taskbar, scale: Scale) -> Option<Surface> {
         let layout = taskbar.picker_layout(scale)?;
@@ -436,6 +438,11 @@ impl TaskbarRenderer {
                 theme,
                 entry.thumbnail(),
             );
+        }
+        if let Some(scrollbar) = layout.scrollbar {
+            picker
+                .scrollbar()
+                .render(&mut surface, local_rect(scrollbar, origin), scale, theme);
         }
         Some(surface)
     }

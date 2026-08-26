@@ -12,6 +12,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::{resample, resample_rows, Region, ResampleError, Rgba8Image};
+use crate::Surface;
 
 /// A `width`×`height` image whose every pixel is `pixel`.
 fn flat(width: u32, height: u32, pixel: [u8; 4]) -> Vec<u8> {
@@ -21,6 +22,19 @@ fn flat(width: u32, height: u32, pixel: [u8; 4]) -> Vec<u8> {
         .cycle()
         .take(width as usize * height as usize * 4)
         .collect()
+}
+
+/// A `width`×`height` opaque image whose channels vary with position, so a
+/// filter that mixes the wrong samples cannot pass by coincidence.
+fn gradient(width: u32, height: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(width as usize * height as usize * 4);
+    for y in 0..height {
+        for x in 0..width {
+            let channel = |scale: u32| u8::try_from((x * 7 + y * scale) % 256).unwrap_or(255);
+            out.extend_from_slice(&[channel(11), channel(29), channel(53), 255]);
+        }
+    }
+    out
 }
 
 /// A 2×2 opaque image of four distinct greys, laid out row-major.
@@ -368,4 +382,150 @@ fn a_mis_sized_output_buffer_is_refused_before_a_byte_is_written() {
         ResampleError::OutputSizeMismatch
     );
     assert!(out.iter().all(|&b| b == 0xAA), "nothing was written");
+}
+
+// ---- the premultiplied path -------------------------------------------
+
+/// `bytes` as a premultiplied surface, through the crate's one conversion.
+fn surface(width: u32, height: u32, bytes: &[u8]) -> Surface {
+    Surface::from_rgba8(width, height, bytes).expect("length matches")
+}
+
+/// The whole of a `width`×`height` image as a source region.
+fn whole(width: u32, height: u32) -> Region {
+    Region {
+        x: 0,
+        y: 0,
+        width,
+        height,
+    }
+}
+
+#[test]
+fn an_opaque_surface_resamples_exactly_as_the_straight_alpha_path_does() {
+    // Every pixel opaque, so straight and premultiplied storage agree
+    // channel-for-channel and the two filters must produce the same image.
+    let pixels = gradient(16, 12);
+    let src = Rgba8Image::new(16, 12, &pixels).expect("well-formed");
+    let surface = surface(16, 12, &pixels);
+    for (w, h) in [(5, 4), (16, 12), (33, 7), (1, 1)] {
+        let straight = resample(&src, src.whole(), w, h).expect("resamples");
+        let premultiplied = surface
+            .resampled(whole(16, 12), w, h)
+            .expect("resamples")
+            .pixels()
+            .iter()
+            .flat_map(|pixel| [pixel.r, pixel.g, pixel.b, pixel.a])
+            .collect::<Vec<u8>>();
+        assert_eq!(
+            premultiplied, straight,
+            "an opaque {w}×{h} resample must not depend on the alpha space"
+        );
+    }
+}
+
+#[test]
+fn a_premultiplied_one_to_one_resample_is_a_copy() {
+    let src = surface(4, 3, &gradient(4, 3));
+    let copied = src.resampled(whole(4, 3), 4, 3).expect("resamples");
+    assert_eq!(copied.pixels(), src.pixels());
+}
+
+#[test]
+fn a_premultiplied_region_copy_takes_exactly_that_region() {
+    let src = surface(4, 2, &gradient(4, 2));
+    let cropped = src
+        .resampled(
+            Region {
+                x: 1,
+                y: 0,
+                width: 2,
+                height: 2,
+            },
+            2,
+            2,
+        )
+        .expect("resamples");
+    for y in 0..2 {
+        for x in 0..2 {
+            assert_eq!(
+                cropped.get(x, y),
+                src.get(x + 1, y),
+                "cropped ({x},{y}) is the source's ({},{y})",
+                x + 1
+            );
+        }
+    }
+}
+
+#[test]
+fn a_premultiplied_reduction_is_the_area_mean_of_its_footprint() {
+    // Two opaque columns, black and white: halving the width must give the
+    // exact mean rather than one of the two samples.
+    let bytes = vec![
+        0, 0, 0, 255, 255, 255, 255, 255, //
+        0, 0, 0, 255, 255, 255, 255, 255,
+    ];
+    let src = surface(2, 2, &bytes);
+    let reduced = src.resampled(whole(2, 2), 1, 1).expect("resamples");
+    let pixel = reduced.get(0, 0).expect("one pixel");
+    assert_eq!((pixel.r, pixel.g, pixel.b, pixel.a), (128, 128, 128, 255));
+}
+
+#[test]
+fn a_transparent_neighbour_cannot_bleed_its_colour_premultiplied() {
+    // Opaque red beside fully transparent green: the reduction must carry
+    // red at half alpha, never a red/green mixture.
+    let bytes = vec![
+        255, 0, 0, 255, //
+        0, 255, 0, 0,
+    ];
+    let src = surface(2, 1, &bytes);
+    let reduced = src.resampled(whole(2, 1), 1, 1).expect("resamples");
+    let pixel = reduced.get(0, 0).expect("one pixel");
+    assert_eq!(pixel.a, 128, "half the footprint was transparent");
+    assert_eq!(pixel.g, 0, "the transparent green contributed no colour");
+    assert_eq!(
+        pixel.r, pixel.a,
+        "premultiplied opaque red at half coverage is red = alpha"
+    );
+}
+
+#[test]
+fn a_premultiplied_sample_never_exceeds_its_own_alpha() {
+    // An enlargement runs the cubic, whose negative lobes overshoot; a
+    // channel above its alpha would not be a representable pixel.
+    let src = surface(4, 4, &gradient(4, 4));
+    let grown = src.resampled(whole(4, 4), 21, 17).expect("resamples");
+    for pixel in grown.pixels() {
+        assert!(
+            pixel.r <= pixel.a && pixel.g <= pixel.a && pixel.b <= pixel.a,
+            "{pixel:?} is not a representable premultiplied pixel"
+        );
+    }
+}
+
+#[test]
+fn a_premultiplied_resample_refuses_degenerate_geometry() {
+    let src = surface(2, 2, &quad());
+    assert_eq!(
+        src.resampled(whole(2, 2), 0, 4).unwrap_err(),
+        ResampleError::EmptyDestination
+    );
+    assert_eq!(
+        src.resampled(whole(3, 2), 2, 2).unwrap_err(),
+        ResampleError::SourceRegionOutOfBounds,
+        "a region reaching past the source"
+    );
+    assert_eq!(
+        src.resampled(whole(0, 0), 2, 2).unwrap_err(),
+        ResampleError::SourceRegionOutOfBounds,
+        "an empty region"
+    );
+    let empty = Surface::new(0, 0).expect("allocates");
+    assert_eq!(
+        empty.resampled(whole(0, 0), 2, 2).unwrap_err(),
+        ResampleError::SourceSizeMismatch,
+        "a source with no pixels at all"
+    );
 }

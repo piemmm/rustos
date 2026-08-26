@@ -72,7 +72,7 @@ use crate::menu::{EntryRow, MenuSubject, INFO_ROW_LABEL};
 use crate::notifications::{
     IconId, NotifySeverity, StatusKind, StatusSignal, TransientNotification,
 };
-use crate::picker::{PickerEntry, PICKER_MIN_WINDOWS};
+use crate::picker::{PickerEntry, PICKER_CLOSE_GRACE_NS, PICKER_MIN_WINDOWS, PICKER_OPEN_DELAY_NS};
 use crate::render::{icon_cache, IconEpoch, TaskbarRenderer};
 use crate::repaint::TaskbarRepaint;
 use crate::taskbar::{Taskbar, TaskbarConfig};
@@ -2095,15 +2095,17 @@ fn cells(bar: &Taskbar, app: usize) -> Vec<PickerEntry> {
 
 /// The bar cannot see the window stack, so it cannot tell a clock the user is
 /// looking at from a clock a window is drawn over. The desktop's seat can, and
-/// says so: a [`PointerFocus::Left`] drops every hover the bar is drawing and
-/// closes the surfaces that hover opened.
+/// says so: a [`PointerFocus::Left`] drops every hover the bar is drawing.
 ///
-/// The picker is the sharpest case. It exists *only* because the pointer is
-/// resting on a slot, so leaving it open once the pointer is elsewhere floats a
-/// panel of window thumbnails over whatever the user is now working in — and
-/// the pointer has not moved, so no position could have told the bar.
+/// The picker is the sharpest case, and it cuts both ways. It hangs a gap away
+/// from the bar, so a pointer travelling from the slot to a cell leaves the
+/// bar's surfaces *on the way there* — taking the panel down on that crossing
+/// would make choosing a window impossible. But a pointer that has genuinely
+/// settled elsewhere must not leave a panel of window thumbnails floating over
+/// whatever the user is now working in. So leaving starts the grace, and the
+/// clock ends it.
 #[test]
-fn a_pointer_that_left_the_bar_drops_its_hover_and_closes_its_picker() {
+fn a_pointer_that_left_the_bar_drops_its_hover_and_lets_the_picker_go() {
     let mut bar = bottom_bar();
     for id in 1..=2 {
         bar.tasks_mut().add(TaskId(id), format!("Window {id}"));
@@ -2113,11 +2115,7 @@ fn a_pointer_that_left_the_bar_drops_its_hover_and_closes_its_picker() {
     ]);
     let mut input = TaskbarInput::new();
     let slot = centre_of(bar.layout(Scale::ONE).apps[0]);
-    assert_eq!(
-        moved_at(&mut input, &mut bar, slot, NOW_NS),
-        TaskbarResponse::ShowWindowPicker { app: 0 }
-    );
-    bar.show_window_picker(0, cells(&bar, 0), Scale::ONE);
+    dwell_on(&mut input, &mut bar, slot);
     assert!(bar.picker().is_open());
     assert_eq!(bar.apps().hover(), Some(0));
     let _ = bar.take_repaint();
@@ -2126,16 +2124,39 @@ fn a_pointer_that_left_the_bar_drops_its_hover_and_closes_its_picker() {
     input.set_pointer_focus(PointerFocus::Left, &mut bar, Scale::ONE);
 
     assert_eq!(bar.apps().hover(), None, "the slot stayed lit");
-    assert!(!bar.picker().is_open(), "the picker was left open");
+    assert!(
+        bar.picker().is_open(),
+        "the panel went down on the crossing towards it"
+    );
     assert_eq!(
         bar.take_repaint(),
-        TaskbarRepaint::BAR | TaskbarRepaint::PICKER,
-        "the slot that unlit and the picker that closed are what repaint"
+        TaskbarRepaint::BAR,
+        "only the slot that unlit repaints; the panel is unchanged"
     );
 
-    // Saying it again changes nothing and repaints nothing.
-    input.set_pointer_focus(PointerFocus::Left, &mut bar, Scale::ONE);
-    assert_eq!(bar.take_repaint(), TaskbarRepaint::NONE);
+    // The grace is the picker's whole remaining lease.
+    let left_ns = NOW_NS + PICKER_OPEN_DELAY_NS;
+    assert_eq!(
+        input.park_deadline_ns(left_ns, u64::MAX),
+        PICKER_CLOSE_GRACE_NS,
+        "the park is shortened to exactly the grace"
+    );
+    assert_eq!(
+        input.tick(&mut bar, left_ns + PICKER_CLOSE_GRACE_NS - 1),
+        TaskbarResponse::Ignored
+    );
+    assert!(bar.picker().is_open(), "it went a moment early");
+
+    assert_eq!(
+        input.tick(&mut bar, left_ns + PICKER_CLOSE_GRACE_NS),
+        TaskbarResponse::Ignored,
+        "taking a panel down asks nothing of the embedder"
+    );
+    assert!(!bar.picker().is_open(), "the picker was left open");
+    assert_eq!(bar.take_repaint(), TaskbarRepaint::PICKER);
+
+    // With nothing left pending the bar arms no timer at all.
+    assert_eq!(input.park_deadline_ns(left_ns, u64::MAX), u64::MAX);
 }
 
 /// The pointer can arrive without moving — the window above the bar closed —
@@ -2165,12 +2186,16 @@ fn a_pointer_that_entered_the_bar_hovers_without_opening_a_hover_surface() {
         "an arrival is not a gesture: it opened a hover surface"
     );
     assert_eq!(bar.take_repaint(), TaskbarRepaint::BAR);
-
-    // A real motion over the same slot is a gesture, and does ask.
     assert_eq!(
-        moved_at(&mut input, &mut bar, slot, NOW_NS),
-        TaskbarResponse::ShowWindowPicker { app: 0 }
+        input.park_deadline_ns(NOW_NS, u64::MAX),
+        u64::MAX,
+        "an arrival arms no dwell either"
     );
+
+    // A real motion over the same slot is a gesture, and does ask — once the
+    // pointer has rested there.
+    dwell_on(&mut input, &mut bar, slot);
+    assert_eq!(bar.picker().app(), Some(0));
 }
 
 /// The Switchboard capsule's readout opens *above* the bar, so a window that
@@ -2213,8 +2238,11 @@ fn hovering_one_window_asks_for_no_picker() {
     assert!(bar.picker_layout(Scale::ONE).is_none());
 }
 
+/// A pointer resting on a multi-window slot asks for the picker — but only
+/// after it has rested. A sweep across the bar on the way to something else
+/// has asked for nothing, which is the whole reason the dwell exists.
 #[test]
-fn hovering_two_windows_asks_for_the_picker() {
+fn resting_on_two_windows_asks_for_the_picker_once_the_dwell_elapses() {
     let mut bar = bottom_bar();
     for id in 1..=2 {
         bar.tasks_mut().add(TaskId(id), format!("Window {id}"));
@@ -2224,13 +2252,44 @@ fn hovering_two_windows_asks_for_the_picker() {
     ]);
     let mut input = TaskbarInput::new();
     let slot = centre_of(bar.layout(Scale::ONE).apps[0]);
+
     assert_eq!(
         moved_at(&mut input, &mut bar, slot, NOW_NS),
+        TaskbarResponse::Ignored,
+        "arriving on the slot asks for nothing yet"
+    );
+    assert_eq!(
+        input.dwelling_app(),
+        Some(0),
+        "but the embedder is told whose thumbnails to prepare"
+    );
+    assert_eq!(
+        input.park_deadline_ns(NOW_NS, u64::MAX),
+        PICKER_OPEN_DELAY_NS,
+        "and the park is shortened to the dwell"
+    );
+
+    // A hand that jitters mid-dwell does not restart it.
+    let mid_ns = NOW_NS + PICKER_OPEN_DELAY_NS / 2;
+    assert_eq!(
+        moved_at(&mut input, &mut bar, slot, mid_ns),
+        TaskbarResponse::Ignored
+    );
+    assert_eq!(
+        input.park_deadline_ns(mid_ns, u64::MAX),
+        PICKER_OPEN_DELAY_NS - PICKER_OPEN_DELAY_NS / 2,
+        "the deadline is the original rest's, not a fresh one"
+    );
+
+    // The clock resolves it: the pointer need not move again.
+    assert_eq!(
+        input.tick(&mut bar, NOW_NS + PICKER_OPEN_DELAY_NS),
         TaskbarResponse::ShowWindowPicker { app: 0 }
     );
     // The bar owns no window pixels, so it asks and waits: nothing is open
     // until the embedder answers with the cells.
     assert!(!bar.picker().is_open());
+    assert_eq!(input.dwelling_app(), None, "the dwell is spent");
 
     bar.show_window_picker(0, cells(&bar, 0), Scale::ONE);
     assert!(bar.picker().is_open());
@@ -2244,9 +2303,45 @@ fn hovering_two_windows_asks_for_the_picker() {
 
     // A further sample over the same slot asks again for nothing.
     assert_eq!(
-        moved_at(&mut input, &mut bar, slot, NOW_NS),
+        moved_at(&mut input, &mut bar, slot, NOW_NS + PICKER_OPEN_DELAY_NS),
         TaskbarResponse::Ignored
     );
+    assert_eq!(
+        input.park_deadline_ns(NOW_NS + PICKER_OPEN_DELAY_NS, u64::MAX),
+        u64::MAX,
+        "an open picker under the pointer arms no timer"
+    );
+}
+
+/// A pointer that crosses a multi-window slot without stopping opens nothing:
+/// the dwell is a rest, and moving on cancels it.
+#[test]
+fn sweeping_across_a_slot_opens_nothing() {
+    let mut bar = bottom_bar();
+    for id in 1..=2 {
+        bar.tasks_mut().add(TaskId(id), format!("Window {id}"));
+    }
+    bar.set_apps(alloc::vec![
+        app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])
+    ]);
+    let mut input = TaskbarInput::new();
+    let slot = centre_of(bar.layout(Scale::ONE).apps[0]);
+
+    let _ = moved_at(&mut input, &mut bar, slot, NOW_NS);
+    // Off the slot again well inside the dwell.
+    let _ = moved_at(&mut input, &mut bar, Point::new(500, 400), NOW_NS + 1);
+
+    assert_eq!(input.dwelling_app(), None);
+    assert_eq!(
+        input.park_deadline_ns(NOW_NS + 1, u64::MAX),
+        u64::MAX,
+        "nothing is pending, so nothing wakes the desktop"
+    );
+    assert_eq!(
+        input.tick(&mut bar, NOW_NS + PICKER_OPEN_DELAY_NS * 4),
+        TaskbarResponse::Ignored
+    );
+    assert!(!bar.picker().is_open());
 }
 
 #[test]
@@ -2327,10 +2422,104 @@ fn the_picker_lays_a_cell_out_per_window_and_stays_on_screen() {
     }
 }
 
+/// A window's cell is never laid out where it cannot be clicked. Cells wrap
+/// into a grid sized to the space beside the bar, and a grid with more rows
+/// than that space shows scrolls — so *every* window of an application with
+/// far more of them than fit across the screen can be reached.
 #[test]
-fn a_cell_that_does_not_fit_is_empty_and_can_never_be_hit() {
-    // A narrow screen leaves room for a cell or two; the rest clip away
-    // rather than being drawn past the plate.
+fn every_window_is_reachable_however_many_there_are() {
+    let mut bar = bottom_bar();
+    // The most windows one client may hold open, so the worst case the
+    // window channel admits is the case this pins.
+    let windows: Vec<TaskId> = (1..=32).map(TaskId).collect();
+    for &id in &windows {
+        bar.tasks_mut().add(id, "W");
+    }
+    bar.set_apps(alloc::vec![app("Terminal").with_windows(windows.clone())]);
+    bar.show_window_picker(0, cells(&bar, 0), Scale::ONE);
+    let mut input = TaskbarInput::new();
+
+    let layout = bar.picker_layout(Scale::ONE).expect("open");
+    let screen = Rect::new(0, 0, 1000, 800);
+    assert_eq!(
+        layout.panel.intersection(&screen),
+        layout.panel,
+        "the plate stays on the screen"
+    );
+    assert!(
+        layout.columns > 1 && layout.visible_rows > 1,
+        "the cells wrapped into a grid, not a strip: {layout:?}"
+    );
+    assert!(
+        layout.scrollbar.is_some(),
+        "a grid taller than the space beside the bar states its scroll"
+    );
+
+    // Every cell that is laid out lies inside the plate, and no two overlap.
+    for (index, cell) in layout.cells.iter().enumerate() {
+        if cell.is_empty() {
+            continue;
+        }
+        assert_eq!(
+            cell.intersection(&layout.panel),
+            *cell,
+            "cell {index} lies inside the plate"
+        );
+        for (other, second) in layout.cells.iter().enumerate().skip(index + 1) {
+            assert!(
+                second.is_empty() || second.intersection(cell).is_empty(),
+                "cells {index} and {other} overlap"
+            );
+        }
+    }
+
+    // Scrolling reaches every one of them: the pointer rests on the panel and
+    // the wheel walks the grid to its end.
+    let mut reached = alloc::vec![false; windows.len()];
+    let _ = moved_at(&mut input, &mut bar, centre_of(layout.panel), NOW_NS);
+    for _ in 0..windows.len() {
+        let layout = bar.picker_layout(Scale::ONE).expect("open");
+        for (index, cell) in layout.cells.iter().enumerate() {
+            if cell.is_empty() {
+                continue;
+            }
+            assert_eq!(
+                bar.picker().cell_at(&layout, centre_of(*cell)),
+                Some(index),
+                "cell {index} is hittable at its own centre"
+            );
+            if let Some(seen) = reached.get_mut(index) {
+                *seen = true;
+            }
+        }
+        assert_eq!(
+            input.handle(
+                InputEvent::PointerScrolled { dx: 0, dy: 1 },
+                &mut bar,
+                Scale::ONE,
+                NOW_NS,
+            ),
+            TaskbarResponse::Ignored,
+            "a wheel tick over the panel is the grid's, not the task list's"
+        );
+    }
+    assert!(
+        reached.iter().all(|&seen| seen),
+        "these windows could never be selected: {:?}",
+        reached
+            .iter()
+            .enumerate()
+            .filter(|(_, &seen)| !seen)
+            .map(|(index, _)| index)
+            .collect::<Vec<usize>>()
+    );
+}
+
+/// A screen with room for barely one cell still lays that one out, keeps it
+/// inside the plate, and scrolls to the rest rather than laying out cells
+/// nobody can click.
+#[test]
+fn a_grid_too_big_for_the_screen_scrolls_instead_of_clipping() {
     let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(300, 400), &Theme::dark());
     let windows: Vec<TaskId> = (1..=6).map(TaskId).collect();
     for &id in &windows {
@@ -2346,22 +2535,141 @@ fn a_cell_that_does_not_fit_is_empty_and_can_never_be_hit() {
         Scale::ONE,
     );
     let layout = bar.picker_layout(Scale::ONE).expect("open");
-    assert!(layout.cells.iter().any(Rect::is_empty), "some cells clip");
-    for cell in &layout.cells {
-        if cell.is_empty() {
-            continue;
-        }
+    assert_eq!(
+        layout.cells.len(),
+        6,
+        "one cell per window, laid out or not"
+    );
+    assert!(
+        layout.cells.iter().any(|cell| !cell.is_empty()),
+        "the screen holds at least one"
+    );
+    assert!(
+        layout.scrollbar.is_some(),
+        "and the rest are reached by scrolling"
+    );
+    assert_eq!(
+        layout.panel.intersection(&Rect::new(0, 0, 300, 400)),
+        layout.panel
+    );
+    for cell in layout.cells.iter().filter(|cell| !cell.is_empty()) {
         assert_eq!(cell.intersection(&layout.panel), *cell);
     }
-    // An empty cell is never the answer to a hit test at any point.
+    // A cell outside the visible rows is never the answer to a hit test.
     let empty_index = layout
         .cells
         .iter()
         .position(Rect::is_empty)
-        .expect("a clipped cell");
+        .expect("a scrolled-away cell");
     for point in [Point::ORIGIN, centre_of(layout.panel)] {
         assert_ne!(bar.picker().cell_at(&layout, point), Some(empty_index));
     }
+}
+
+/// A grid re-columned under a scrolled panel — the desktop's density changed
+/// — must not leave a first row past its own last one, which would lay out no
+/// cell at all and show a blank plate nothing could be chosen from.
+#[test]
+fn a_grid_re_columned_under_a_scrolled_panel_still_lays_cells_out() {
+    let mut bar = bottom_bar();
+    let windows: Vec<TaskId> = (1..=32).map(TaskId).collect();
+    for &id in &windows {
+        bar.tasks_mut().add(id, "W");
+    }
+    bar.set_apps(alloc::vec![app("Terminal").with_windows(windows.clone())]);
+    bar.show_window_picker(0, cells(&bar, 0), Scale::ONE);
+    let mut input = TaskbarInput::new();
+
+    // Scroll to the end of the grid at this density.
+    let panel = centre_of(bar.picker_layout(Scale::ONE).expect("open").panel);
+    let _ = moved_at(&mut input, &mut bar, panel, NOW_NS);
+    for _ in 0..windows.len() {
+        let _ = input.handle(
+            InputEvent::PointerScrolled { dx: 0, dy: 1 },
+            &mut bar,
+            Scale::ONE,
+            NOW_NS,
+        );
+    }
+
+    // Coarser densities shrink the cells, so the grid holds more of them per
+    // row and has fewer rows than the offset names.
+    for percent in [25, 35, 50, 75] {
+        let scale = Scale::from_percent(percent).expect("a scale");
+        let layout = bar.picker_layout(scale).expect("open");
+        assert!(
+            layout.cells.iter().any(|cell| !cell.is_empty()),
+            "at {percent}% the panel laid out no cell at all: {layout:?}"
+        );
+    }
+}
+
+/// A dwell counts for the *slot* the pointer rested on. If the strip is
+/// re-pushed while it runs — an application opened or closed a window — the
+/// index it named may now be somebody else's, and their windows are not what
+/// the user asked to see.
+#[test]
+fn a_dwell_whose_slot_moved_under_it_opens_nothing() {
+    let mut bar = bottom_bar();
+    for id in 1..=4 {
+        bar.tasks_mut().add(TaskId(id), format!("Window {id}"));
+    }
+    bar.set_apps(alloc::vec![
+        app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)]),
+        app("Editor").with_windows(alloc::vec![TaskId(3), TaskId(4)]),
+    ]);
+    let mut input = TaskbarInput::new();
+    let second = centre_of(bar.layout(Scale::ONE).apps[1]);
+    let _ = moved_at(&mut input, &mut bar, second, NOW_NS);
+    assert_eq!(input.dwelling_app(), Some(1));
+
+    // The leading application exits, so what was slot 1 is now slot 0 and the
+    // pointer rests over nothing.
+    bar.set_apps(alloc::vec![
+        app("Editor").with_windows(alloc::vec![TaskId(3), TaskId(4)])
+    ]);
+    assert_eq!(
+        input.tick(&mut bar, NOW_NS + PICKER_OPEN_DELAY_NS),
+        TaskbarResponse::Ignored,
+        "the dwell opened a picker for a slot that had moved"
+    );
+    assert!(!bar.picker().is_open());
+}
+
+/// A thumbnail the embedder scaled after the picker opened lands in that
+/// window's cell and repaints the panel alone.
+#[test]
+fn a_late_thumbnail_lands_in_its_own_cell() {
+    let mut bar = bottom_bar();
+    for id in 1..=2 {
+        bar.tasks_mut().add(TaskId(id), format!("Window {id}"));
+    }
+    bar.set_apps(alloc::vec![
+        app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])
+    ]);
+    bar.show_window_picker(0, cells(&bar, 0), Scale::ONE);
+    let _ = bar.take_repaint();
+    assert!(
+        bar.picker().entries()[1].thumbnail().is_none(),
+        "it opened on the glyph"
+    );
+
+    let (width, height) = bar.picker_thumbnail_size(Scale::ONE);
+    let scaled = Surface::filled(width, height, Color::rgba(0, 200, 40, 255).premultiply())
+        .expect("allocates");
+    assert!(bar.set_picker_thumbnail(1, scaled));
+
+    assert_eq!(
+        bar.picker().entries()[1]
+            .thumbnail()
+            .map(|art| (art.width(), art.height())),
+        Some((width, height))
+    );
+    assert_eq!(bar.take_repaint(), TaskbarRepaint::PICKER);
+    assert!(
+        !bar.set_picker_thumbnail(9, Surface::new(1, 1).expect("allocates")),
+        "a cell that does not exist takes nothing"
+    );
 }
 
 #[test]
@@ -2469,8 +2777,11 @@ fn the_picker_takes_no_keyboard() {
     assert!(bar.picker().is_open());
 }
 
+/// Leaving the slot gives the picker its grace, and the pointer reaching the
+/// panel inside that grace keeps it: that crossing is how a window is chosen,
+/// so it cannot be what dismisses the panel.
 #[test]
-fn leaving_the_slot_closes_the_picker() {
+fn leaving_the_slot_closes_the_picker_after_the_grace() {
     let mut bar = bottom_bar();
     for id in 1..=2 {
         bar.tasks_mut().add(TaskId(id), format!("Window {id}"));
@@ -2480,7 +2791,38 @@ fn leaving_the_slot_closes_the_picker() {
     ]);
     bar.show_window_picker(0, cells(&bar, 0), Scale::ONE);
     let mut input = TaskbarInput::new();
+
+    // Off the slot, in the gap between the bar and the panel.
     let _ = moved_at(&mut input, &mut bar, Point::new(500, 400), NOW_NS);
+    assert!(
+        bar.picker().is_open(),
+        "it went on the first sample outside"
+    );
+    assert_eq!(
+        input.park_deadline_ns(NOW_NS, u64::MAX),
+        PICKER_CLOSE_GRACE_NS
+    );
+
+    // Reaching a cell inside the grace cancels the close outright.
+    let cell = bar
+        .picker_layout(Scale::ONE)
+        .expect("a layout")
+        .cells
+        .first()
+        .copied()
+        .expect("a cell");
+    let _ = moved_at(&mut input, &mut bar, centre_of(cell), NOW_NS + 1);
+    assert_eq!(
+        input.park_deadline_ns(NOW_NS + 1, u64::MAX),
+        u64::MAX,
+        "the pointer is on the panel: nothing is pending"
+    );
+    assert_eq!(bar.picker().hover(), Some(0), "and the cell lit");
+
+    // Leaving for good does close it, once the grace runs out.
+    let left_ns = NOW_NS + 2;
+    let _ = moved_at(&mut input, &mut bar, Point::new(500, 400), left_ns);
+    let _ = input.tick(&mut bar, left_ns + PICKER_CLOSE_GRACE_NS);
     assert!(!bar.picker().is_open());
 }
 
@@ -5267,6 +5609,25 @@ fn moved_at(
     at_ns: u64,
 ) -> TaskbarResponse {
     input.handle(InputEvent::PointerMoved { to }, taskbar, Scale::ONE, at_ns)
+}
+
+/// Rest the pointer on `at` until the picker's dwell elapses, so the router
+/// asks for the picker, and answer with the cells the way the session does.
+///
+/// The dwell is the whole point of the opening delay, so every test that
+/// wants an *open* picker goes through it rather than reaching past it.
+fn dwell_on(input: &mut TaskbarInput, taskbar: &mut Taskbar, at: Point) {
+    assert_eq!(
+        moved_at(input, taskbar, at, NOW_NS),
+        TaskbarResponse::Ignored,
+        "arriving is not resting"
+    );
+    let TaskbarResponse::ShowWindowPicker { app } =
+        input.tick(taskbar, NOW_NS + PICKER_OPEN_DELAY_NS)
+    else {
+        panic!("the dwell elapsed without asking for a picker");
+    };
+    taskbar.show_window_picker(app, cells(taskbar, app), Scale::ONE);
 }
 
 /// Release the primary button where the pointer already is, at monotonic

@@ -57,11 +57,23 @@
 //! (one click does one thing), leaving whatever is beneath for the next
 //! click.
 //!
-//! Hovering a slot whose application owns more than one window opens the
-//! [`WindowPicker`](crate::WindowPicker), which is a pointer surface and
-//! nothing else: it takes no keyboard, a press on a cell chooses that
-//! window, a press on its own plate is claimed and does nothing, and it
-//! closes the moment the pointer leaves both it and the slot it hangs from.
+//! Resting the pointer on a slot whose application owns more than one window
+//! opens the [`WindowPicker`], which is a pointer surface and nothing else: it
+//! takes no keyboard, a press on a cell chooses that window, a scroll or a
+//! press on its grid's scrollbar moves the grid, and a press on its own plate
+//! is claimed and does nothing.
+//!
+//! Both of the picker's edges are timed, and the *clock* resolves them rather
+//! than the pointer: it opens once the pointer has rested on the slot for
+//! [`PICKER_OPEN_DELAY_NS`], and closes [`PICKER_CLOSE_GRACE_NS`] after the
+//! pointer comes to rest on neither the slot nor the panel. A pointer sweeping
+//! across the bar therefore opens nothing, and a pointer travelling from the
+//! slot to a cell — which must cross surface belonging to neither — does not
+//! lose the panel on the way. Neither edge is polled or slept on: the embedder
+//! folds
+//! [`park_deadline_ns`](TaskbarInput::park_deadline_ns) into the wait it was
+//! already going to make and calls [`tick`](TaskbarInput::tick) when it
+//! expires.
 //!
 //! The Switchboard capsule at the trailing end has its own quiet
 //! microinteractions: a primary press and quick release opens Switchboard's
@@ -90,7 +102,9 @@ use crate::clock_menu::ClockAction;
 use crate::layout::Hit;
 use crate::library::{LibraryRow, PopupOutcome};
 use crate::menu::{MenuChoice, MenuOutcome};
-use crate::picker::{PickerEntry, PICKER_MIN_WINDOWS};
+use crate::picker::{
+    PickerEntry, WindowPicker, PICKER_CLOSE_GRACE_NS, PICKER_MIN_WINDOWS, PICKER_OPEN_DELAY_NS,
+};
 use crate::repaint::TaskbarRepaint;
 use crate::system::{self, SystemAction};
 use crate::taskbar::Taskbar;
@@ -234,14 +248,59 @@ pub enum TaskbarResponse {
 
 /// Routes device input into [`Taskbar`] actions.
 ///
-/// The router's only state is the current pointer position, updated by
-/// [`InputEvent::PointerMoved`], and an in-progress Switchboard capsule
-/// press; presses act at that position, exactly as a real pointing device
-/// reports motion separately from clicks.
+/// The router's state is the current pointer position, updated by
+/// [`InputEvent::PointerMoved`] — presses act at that position, exactly as a
+/// real pointing device reports motion separately from clicks — plus the two
+/// gestures whose outcome depends on *time*: an in-progress Switchboard
+/// capsule press and the hover window picker's pending open or close.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TaskbarInput {
     pointer: Point,
+    /// The monotonic instant the bar was last given, in nanoseconds.
+    ///
+    /// The event stream carries the time, so the router keeps the latest
+    /// instant it was handed and times a transition the *stream* did not
+    /// carry a clock for against it — the pointer leaving the bar's surfaces,
+    /// which the seat reports as a focus crossing rather than as an event.
+    /// That crossing is itself driven by the motion sample immediately before
+    /// it, so the instant is the crossing's own; where a window stack change
+    /// causes one instead, the grace simply begins at the last sample.
+    now_ns: u64,
     capsule_press: Option<CapsulePress>,
+    picker_timer: Option<PickerTimer>,
+}
+
+/// A window-picker transition the clock owes.
+///
+/// Exactly one can be pending: the pointer is either working towards opening
+/// a picker or towards letting one go, never both. Whichever is armed is
+/// resolved by [`TaskbarInput::tick`] at its own deadline, or dropped when
+/// the pointer's next sample makes it moot.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum PickerTimer {
+    /// The pointer rests on the slot of the application at strip index
+    /// `app`, whose picker opens at `due_ns`.
+    Open {
+        /// Strip index of the application whose windows are on offer.
+        app: usize,
+        /// Monotonic time the picker opens at.
+        due_ns: u64,
+    },
+    /// The pointer rests on neither the open picker nor its slot; it closes
+    /// at `due_ns`.
+    Close {
+        /// Monotonic time the picker closes at.
+        due_ns: u64,
+    },
+}
+
+impl PickerTimer {
+    /// The deadline this transition is due at.
+    const fn due_ns(self) -> u64 {
+        match self {
+            Self::Open { due_ns, .. } | Self::Close { due_ns } => due_ns,
+        }
+    }
 }
 
 /// An in-progress primary press on the Switchboard capsule, tracked so a
@@ -283,12 +342,19 @@ impl TaskbarInput {
     ///   arrived at and refreshes the bar's hover feedback there. The pointer
     ///   can arrive without moving — a window above the bar closed, a drag
     ///   ended, a modal surface shut — and no motion event exists for those,
-    ///   which is why the position travels with the answer.
+    ///   which is why the position travels with the answer. An arrival back
+    ///   onto the surfaces an open picker lives on also *cancels* its closing
+    ///   grace: a window that passed over the bar is not the pointer leaving,
+    ///   so the panel it was drawn over must not go down behind it.
     /// * [`Left`](PointerFocus::Left) drops every hover the bar is drawing and
-    ///   closes the hover window picker. The picker in particular *must* go:
-    ///   it is a surface that exists only because the pointer is resting on a
-    ///   slot, so leaving it open once the pointer is elsewhere would float a
-    ///   panel of window thumbnails over whatever the user is now working in.
+    ///   starts the hover window picker's closing grace. The picker cannot
+    ///   simply go here: the panel hangs a gap away from the bar, so a pointer
+    ///   travelling from a slot to a cell *leaves the bar's surfaces* on the
+    ///   way and taking the panel down on that crossing would make choosing a
+    ///   window impossible. It does have to go once the pointer has genuinely
+    ///   settled elsewhere — a panel of window thumbnails must not float over
+    ///   whatever the user is now working in — which is what the grace, and
+    ///   the [`tick`](Self::tick) that ends it, decide.
     ///
     /// No gesture is resolved here and nothing is reported to the embedder:
     /// this is the pointer arriving or leaving, not the user asking for
@@ -302,10 +368,21 @@ impl TaskbarInput {
             PointerFocus::Entered { at } => {
                 self.pointer = at;
                 taskbar.track_hover(Some(at), scale, &mut damage);
+                if matches!(self.picker_timer, Some(PickerTimer::Close { .. }))
+                    && self.over_picker(taskbar, scale)
+                {
+                    self.picker_timer = None;
+                }
             }
             PointerFocus::Left => {
                 taskbar.track_hover(None, scale, &mut damage);
-                taskbar.close_picker();
+                if taskbar.picker().is_open() {
+                    self.picker_timer = Some(PickerTimer::Close {
+                        due_ns: self.now_ns.saturating_add(PICKER_CLOSE_GRACE_NS),
+                    });
+                } else {
+                    self.picker_timer = None;
+                }
             }
         }
     }
@@ -331,6 +408,7 @@ impl TaskbarInput {
         // One sink for the whole round: every control this event reaches
         // reports its own repainted bounds into the same region.
         let mut damage = damage::sink();
+        self.now_ns = now_ns;
         if let InputEvent::PointerMoved { to } = event {
             // A delivered motion is an enter: the seat resolves which surface
             // the pointer rests on before it delivers, so a motion arriving
@@ -345,7 +423,12 @@ impl TaskbarInput {
             // picker underneath it would show a surface the user cannot
             // reach.
             if !taskbar.menu().is_open() && !taskbar.library().is_open() {
-                if let Some(response) = self.track_picker(taskbar, scale) {
+                // A grid drag in progress belongs to the scrollbar, not to
+                // the cell the pointer happens to be over.
+                if taskbar.scroll_picker(&event, self.pointer, scale, &mut damage) {
+                    return TaskbarResponse::Ignored;
+                }
+                if let Some(response) = self.track_picker(taskbar, scale, now_ns) {
                     return response;
                 }
             }
@@ -360,6 +443,17 @@ impl TaskbarInput {
         // before the bar beneath does: choosing a window is what a press on
         // a cell means, and a press on the picker's own chrome is claimed so
         // it never falls through to the slot under it.
+        if matches!(
+            event,
+            InputEvent::PointerPressed {
+                button: PointerButton::Primary
+            } | InputEvent::PointerReleased {
+                button: PointerButton::Primary
+            } | InputEvent::PointerScrolled { .. }
+        ) && taskbar.scroll_picker(&event, self.pointer, scale, &mut damage)
+        {
+            return TaskbarResponse::Ignored;
+        }
         if matches!(
             event,
             InputEvent::PointerPressed {
@@ -653,49 +747,186 @@ impl TaskbarInput {
         TaskbarResponse::Ignored
     }
 
-    /// Follow the pointer with the hover window picker.
+    /// Follow the pointer with the hover window picker, arming or dropping
+    /// the transition its position now implies.
     ///
-    /// A pointer inside the open picker drives its highlight; one over an
-    /// application slot whose application owns more than one window asks the
-    /// embedder to show the picker there (the embedder owns the windows'
-    /// pixels, so it builds the cells); one that has left both closes it.
-    /// Returns a response only when the embedder must act.
-    fn track_picker(&mut self, taskbar: &mut Taskbar, scale: Scale) -> Option<TaskbarResponse> {
+    /// A pointer inside the open picker drives its highlight and holds the
+    /// panel; one that has come to rest on a slot whose application owns more
+    /// than one window arms the open dwell (and, once the dwell has elapsed,
+    /// asks the embedder to show the picker there — the embedder owns the
+    /// windows' pixels, so it builds the cells); one that rests on neither
+    /// arms the closing grace. Returns a response only when the embedder must
+    /// act.
+    fn track_picker(
+        &mut self,
+        taskbar: &mut Taskbar,
+        scale: Scale,
+        now_ns: u64,
+    ) -> Option<TaskbarResponse> {
         if let Some(layout) = taskbar.picker_layout(scale) {
             if layout.panel.contains(self.pointer) {
                 let cell = taskbar.picker().cell_at(&layout, self.pointer);
                 taskbar.track_picker_hover(cell);
+                self.picker_timer = None;
                 return None;
             }
         }
-        let hovered = taskbar.apps().hover();
-        match hovered {
-            Some(index)
-                if taskbar
-                    .apps()
-                    .get(index)
-                    .is_some_and(|app| app.windows().len() >= PICKER_MIN_WINDOWS) =>
-            {
-                if taskbar.picker().app() == Some(index) {
-                    return None;
+        match Self::picker_target(taskbar) {
+            Some(index) => self.arm_picker(taskbar, index, now_ns),
+            None if taskbar.picker().is_open() => {
+                // The pointer has left both surfaces, but a panel it may be
+                // travelling towards must not vanish under it: give the
+                // crossing its grace and let the clock decide.
+                if !matches!(self.picker_timer, Some(PickerTimer::Close { .. })) {
+                    self.picker_timer = Some(PickerTimer::Close {
+                        due_ns: now_ns.saturating_add(PICKER_CLOSE_GRACE_NS),
+                    });
                 }
-                Some(TaskbarResponse::ShowWindowPicker { app: index })
+                None
             }
-            _ => {
-                taskbar.close_picker();
+            None => {
+                self.picker_timer = None;
                 None
             }
         }
     }
 
+    /// Whether the pointer rests on the open picker's own surfaces: its panel,
+    /// or the slot it hangs from.
+    fn over_picker(&self, taskbar: &Taskbar, scale: Scale) -> bool {
+        let Some(app) = taskbar.picker().app() else {
+            return false;
+        };
+        taskbar
+            .picker_layout(scale)
+            .is_some_and(|layout| layout.panel.contains(self.pointer))
+            || taskbar.apps().hover() == Some(app)
+    }
+
+    /// The strip index of the application whose picker the pointer's current
+    /// position asks for: a hovered slot owning more than one window.
+    fn picker_target(taskbar: &Taskbar) -> Option<usize> {
+        let index = taskbar.apps().hover()?;
+        taskbar
+            .apps()
+            .get(index)
+            .is_some_and(|app| app.windows().len() >= PICKER_MIN_WINDOWS)
+            .then_some(index)
+    }
+
+    /// Arm — or resolve — the open dwell for the application at strip index
+    /// `app`.
+    ///
+    /// A picker already open over `app` holds; a dwell already armed for it
+    /// is left running until its deadline, which is what makes the delay a
+    /// *rest* rather than a countdown restarted by every sample of a
+    /// stationary hand.
+    fn arm_picker(
+        &mut self,
+        taskbar: &Taskbar,
+        app: usize,
+        now_ns: u64,
+    ) -> Option<TaskbarResponse> {
+        if taskbar.picker().app() == Some(app) {
+            self.picker_timer = None;
+            return None;
+        }
+        match self.picker_timer {
+            Some(PickerTimer::Open { app: armed, due_ns }) if armed == app => {
+                if now_ns < due_ns {
+                    return None;
+                }
+                self.picker_timer = None;
+                Some(TaskbarResponse::ShowWindowPicker { app })
+            }
+            _ => {
+                self.picker_timer = Some(PickerTimer::Open {
+                    app,
+                    due_ns: now_ns.saturating_add(PICKER_OPEN_DELAY_NS),
+                });
+                None
+            }
+        }
+    }
+
+    /// The strip index of the application whose windows the bar is about to
+    /// offer — the one the pointer is resting out its dwell on — or `None`
+    /// when no picker is pending.
+    ///
+    /// The embedder reads this to scale that application's window frames
+    /// while the dwell runs, one per turn of its serve loop, so the picker
+    /// appears already drawn instead of stalling the desktop for the length
+    /// of a screenful of thumbnails.
+    #[must_use]
+    pub const fn dwelling_app(&self) -> Option<usize> {
+        match self.picker_timer {
+            Some(PickerTimer::Open { app, .. }) => Some(app),
+            _ => None,
+        }
+    }
+
+    /// `park_ns` shortened to the moment the pending window-picker
+    /// transition is due, or left exactly as it is when none is pending.
+    ///
+    /// An idle bar arms no timer of its own: nothing here wakes a core to
+    /// find out that a pointer has not moved.
+    #[must_use]
+    pub fn park_deadline_ns(&self, now_ns: u64, park_ns: u64) -> u64 {
+        match self.picker_timer {
+            Some(timer) => park_ns.min(timer.due_ns().saturating_sub(now_ns)),
+            None => park_ns,
+        }
+    }
+
+    /// Resolve whichever of the hover picker's two timed edges has come due
+    /// at `now_ns`.
+    ///
+    /// The embedder calls this when the deadline
+    /// [`park_deadline_ns`](Self::park_deadline_ns) asked for expires. It is
+    /// the only path that opens a picker or closes one the pointer has left,
+    /// so both depend on elapsed time alone rather than on a hand that
+    /// happens to jitter. A held capsule press is *not* resolved here: it
+    /// already has an event of its own to resolve against, its own release.
+    pub fn tick(&mut self, taskbar: &mut Taskbar, now_ns: u64) -> TaskbarResponse {
+        self.now_ns = now_ns;
+        match self.picker_timer {
+            Some(PickerTimer::Open { app, due_ns }) if now_ns >= due_ns => {
+                self.picker_timer = None;
+                // The strip may have been re-pushed while the pointer rested,
+                // moving the slot the dwell was counting for; opening the
+                // picker of whatever now holds that index would show the
+                // windows of an application the user never rested on.
+                if Self::picker_target(taskbar) != Some(app) {
+                    return TaskbarResponse::Ignored;
+                }
+                TaskbarResponse::ShowWindowPicker { app }
+            }
+            Some(PickerTimer::Close { due_ns }) if now_ns >= due_ns => {
+                self.picker_timer = None;
+                // Taking the panel down is a pixel-only change: the model's
+                // repaint latch carries it, so the embedder needs no response.
+                taskbar.close_picker();
+                TaskbarResponse::Ignored
+            }
+            _ => TaskbarResponse::Ignored,
+        }
+    }
+
     /// Resolve a primary press that landed on the open picker: a press on a
-    /// cell chooses that window, one on the picker's own chrome is claimed
-    /// and does nothing. `None` when the picker is closed or the press
-    /// landed elsewhere.
+    /// cell chooses that window, one on its grid's scrollbar belongs to the
+    /// scrollbar, and one on the picker's own chrome is claimed and does
+    /// nothing. `None` when the picker is closed or the press landed
+    /// elsewhere.
     fn press_picker(&mut self, taskbar: &mut Taskbar, scale: Scale) -> Option<TaskbarResponse> {
         let layout = taskbar.picker_layout(scale)?;
         if !layout.panel.contains(self.pointer) {
             return None;
+        }
+        if WindowPicker::over_scrollbar(&layout, self.pointer) {
+            // The grid's scrollbar owns this press — a thumb grab reports no
+            // offset of its own until the drag moves — so the panel stays up
+            // rather than being dismissed under the hand that grabbed it.
+            return Some(TaskbarResponse::Ignored);
         }
         let chosen = taskbar
             .picker()

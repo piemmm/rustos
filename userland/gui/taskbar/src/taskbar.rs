@@ -793,6 +793,43 @@ impl Taskbar {
         false
     }
 
+    /// Show `thumbnail` in the open picker's cell at `index`, latching the
+    /// picker's own repaint when it landed.
+    ///
+    /// The embedder scales a window's frame one per turn of its serve loop,
+    /// so a picker that opened before every thumbnail was ready fills in as
+    /// they arrive rather than blocking on all of them.
+    pub fn set_picker_thumbnail(&mut self, index: usize, thumbnail: Surface) -> bool {
+        if self.picker.set_thumbnail(index, thumbnail) {
+            self.repaint |= TaskbarRepaint::PICKER;
+            return true;
+        }
+        false
+    }
+
+    /// Feed one pointer event to the open picker's grid scrollbar, latching
+    /// the picker's repaint when it moved. `false` while the picker is
+    /// closed or its grid needs no scrolling.
+    pub(crate) fn scroll_picker(
+        &mut self,
+        event: &InputEvent,
+        pointer: Point,
+        scale: Scale,
+        damage: &mut Region,
+    ) -> bool {
+        let Some(layout) = self.picker_layout(scale) else {
+            return false;
+        };
+        if self
+            .picker
+            .on_pointer(event, &layout, pointer, (scale, &self.theme), damage)
+        {
+            self.repaint |= TaskbarRepaint::PICKER;
+            return true;
+        }
+        false
+    }
+
     /// Track the hovered picker cell, latching the picker's own repaint when
     /// the highlight moves.
     pub(crate) fn track_picker_hover(&mut self, cell: Option<usize>) {

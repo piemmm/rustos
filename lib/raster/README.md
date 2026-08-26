@@ -223,13 +223,17 @@ This crate owns:
   requested one clamped to half the shorter side. A caller reasoning about
   *where* a shape's corners are — which rows carry an arc at all, as the
   compositor asks per window row — reads the clamp rather than restating it.
-- `resample` / `resample_rows` — the single image resampler the whole desktop
-  scales through: the icon pipeline fitting a bundle's artwork into a slot and
-  the wallpaper pipeline placing a photograph onto a screen are the same
-  arithmetic, so there is one implementation rather than one per consumer
-  (`AGENTS.md` §2.2). Separable, integer, and filtered in **premultiplied**
-  space so a transparent neighbour can never bleed its colour into an opaque
-  pixel. See "The resampler" below.
+- `resample` / `resample_rows` / `Surface::resampled` — the single image
+  resampler the whole desktop scales through: the icon pipeline fitting a
+  bundle's artwork into a slot, the wallpaper pipeline placing a photograph
+  onto a screen, and the taskbar's picker scaling a window's frame into a
+  thumbnail are the same arithmetic, so there is one implementation rather
+  than one per consumer (`AGENTS.md` §2.2). Separable, integer, and filtered
+  in **premultiplied** space so a transparent neighbour can never bleed its
+  colour into an opaque pixel. The first two take and return straight-alpha
+  bytes (the interchange form a decoder produces); the third takes and returns
+  `Surface`s in the premultiplied space they already store, so scaling a
+  surface costs no conversion round trip. See "The resampler" below.
 - `Surface`'s `tairix_reclaim::CachedBytes` impl — the one measurement of a
   surface's retained heap size (its pixel buffer) and the one wipe that
   clears it to fully transparent black before release. The window manager's
@@ -348,6 +352,15 @@ chosen per axis by the direction that axis is going:
   its decoded source must not show. The cubic is interpolating, so at 1:1 its
   weights collapse to a single unit tap and the resample is an exact copy:
   no needless blur on the ratio callers hit most.
+
+Both alpha spaces a desktop holds pixels in go through that one filter, each
+read and written in its own space. Straight-alpha RGBA8 (`resample`,
+`resample_rows`) is premultiplied on the way in and divided back out on the
+way out; premultiplied `Surface`s (`Surface::resampled`) multiply and divide
+nothing, filtering the stored channels as they are — half the multiplies in
+the inner loop, and no copy of the source. The two agree exactly on an opaque
+image, which is a unit test, because both carry their samples at the same
+scale under the fixed-point descale.
 
 A plan whose two axes are both that identity is recognised as the copy it
 is and answered by copying the region's rows. That is not a second filter:

@@ -150,10 +150,23 @@ window-scoped send does.
 A `ShowWindowPicker { app }` response is answered with one cell per window,
 built by `picker_cells`: each carries that window's **last presented frame** —
 the compositor's own copy of pixels the session already holds, so no new
-authority is involved — scaled to the cell through `lib/raster::resample`,
-the one resampler on the desktop (`AGENTS.md` §2.2). A window whose pixels
-were released under memory pressure, or that has not presented yet, simply has
-no thumbnail and its cell draws the application's glyph.
+authority is involved — scaled to the cell through `Surface::resampled`, the
+one resampler on the desktop (`AGENTS.md` §2.2). Both surfaces are
+premultiplied, so the scale is one allocation and one filter pass: no
+straight-alpha round trip, and no copy of the whole frame.
+
+**Scaling is sliced, because a frame's every pixel is read.** Building a
+screenful of thumbnails in one turn of the serve loop would stop the desktop
+for as long as it took, so `DesktopShell::advance_window_thumbnails` scales
+**one** window per turn while the pointer rests out the picker's opening dwell,
+and `window_thumbnails_owed` shortens the loop's park to nothing while a slice
+remains (the wait still reports a ready member first, so slicing never starves
+input). The picker therefore opens already drawn, and a slice that lands after
+it opened fills its cell in place. A window whose pixels were released under
+memory pressure, or that has not presented yet, simply has no thumbnail and its
+cell draws the application's glyph. Nothing is retained past the hover: the
+pointer leaving drops the prepared pixels, so thumbnails cost memory only while
+there is a picker to show them in.
 
 ### Icon artwork
 
@@ -1197,8 +1210,9 @@ Two consequences worth stating on their own:
   not moved at all, and re-testing its unchanged position would answer "still
   hovered" and strand the highlight — and any popover it opened — over the
   window now in front of it. The taskbar's `set_pointer_focus` drops every
-  hover and closes the window picker; the window manager's puts out the title
-  bar command the pointer was on.
+  hover and starts the window picker's closing grace (a window passing over the
+  bar and moving on cancels it again, so the panel does not go down behind it);
+  the window manager's puts out the title bar command the pointer was on.
 - **Keys follow the keyboard, not the pointer.** They go to the window manager,
   which delivers them to the focused window; the taskbar takes them only while
   one of its modal surfaces is open. A pointer resting on the bar never diverts

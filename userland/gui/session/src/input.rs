@@ -230,6 +230,33 @@ impl SessionInputRouter {
         &self.wm
     }
 
+    /// The strip index of the application whose hover window picker is
+    /// pending — the slot the pointer is resting its dwell out on — or `None`
+    /// when none is.
+    ///
+    /// The embedder scales that application's window frames while the dwell
+    /// runs, so the picker appears already drawn. It is the bar's router that
+    /// owns the dwell, so the answer is read from there rather than the seat
+    /// keeping a second copy.
+    #[must_use]
+    pub const fn dwelling_app(&self) -> Option<usize> {
+        self.taskbar.dwelling_app()
+    }
+
+    /// `park_ns` shortened to the moment the hover picker's pending open
+    /// dwell or closing grace is due, or left exactly as it is when neither
+    /// is pending.
+    #[must_use]
+    pub fn park_deadline_ns(&self, now_ns: u64, park_ns: u64) -> u64 {
+        self.taskbar.park_deadline_ns(now_ns, park_ns)
+    }
+
+    /// Resolve whichever of the hover picker's timed edges has come due at
+    /// `now_ns`.
+    pub fn tick(&mut self, taskbar: &mut Taskbar, now_ns: u64) -> TaskbarResponse {
+        self.taskbar.tick(taskbar, now_ns)
+    }
+
     /// `true` while an interactive window move-grab is in progress.
     #[must_use]
     pub fn is_moving(&self) -> bool {

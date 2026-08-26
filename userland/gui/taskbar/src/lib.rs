@@ -107,7 +107,10 @@ pub use menu::{BarMenu, EntryRow, MenuLayout, MenuSubject, INFO_ROW_LABEL};
 pub use notifications::{
     IconId, NotificationArea, NotifySeverity, StatusKind, StatusSignal, TransientNotification,
 };
-pub use picker::{PickerEntry, PickerLayout, WindowPicker, PICKER_MIN_WINDOWS};
+pub use picker::{
+    PickerEntry, PickerLayout, WindowPicker, PICKER_CLOSE_GRACE_NS, PICKER_MIN_WINDOWS,
+    PICKER_OPEN_DELAY_NS,
+};
 pub use render::{icon_cache, IconEpoch, TaskbarRenderer};
 pub use repaint::TaskbarRepaint;
 pub use system::{SystemAction, SystemPermits, SystemRow};

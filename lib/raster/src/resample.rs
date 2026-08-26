@@ -46,13 +46,27 @@
 //! would show as banding — and it means two calls that should agree cannot
 //! drift apart the way floating point would.
 //!
-//! Colour is filtered **premultiplied** and divided back out at the end.
-//! That is the only correct way to filter an image with an alpha channel: a
-//! fully transparent source pixel contributes its transparency but not its
-//! (meaningless) colour, so scaling artwork with transparent padding cannot
-//! drag that padding's colour into the visible edge. A destination pixel
-//! whose whole footprint is transparent has no colour to report and yields
-//! transparent black.
+//! Colour is filtered **premultiplied**, because that is the only correct way
+//! to filter an image with an alpha channel: a fully transparent source pixel
+//! contributes its transparency but not its (meaningless) colour, so scaling
+//! artwork with transparent padding cannot drag that padding's colour into the
+//! visible edge. A destination pixel whose whole footprint is transparent has
+//! no colour to report and yields transparent black.
+//!
+//! # Alpha spaces
+//!
+//! Both spaces a desktop actually holds pixels in are resampled by the one
+//! filter above, and each is read and written in its own space:
+//!
+//! - **Straight-alpha RGBA8** ([`resample`], [`resample_rows`]) is the
+//!   interchange form a decoder produces. Its samples are premultiplied on
+//!   the way in and divided back out on the way out.
+//! - **Premultiplied [`Pixel`]s** ([`crate::Surface::resampled`]) are what
+//!   every [`crate::Surface`] already carries, so that path multiplies and
+//!   divides nothing: it filters the stored channels as they are. Scaling a
+//!   window's frame to a picker thumbnail therefore costs one allocation and
+//!   one filter pass, where routing it through the straight-alpha entry point
+//!   would copy and convert the whole frame twice over.
 //!
 //! # Bands
 //!
@@ -75,6 +89,8 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
+
+use crate::color::Pixel;
 
 /// Bytes per straight-alpha RGBA8 pixel.
 const CHANNELS: usize = 4;
@@ -189,16 +205,6 @@ impl<'a> Rgba8Image<'a> {
             height: self.height,
         }
     }
-
-    /// Row `y` as whole pixels, or `None` when the row does not lie in the
-    /// image — unreachable for a row a validated plan asks for, but checked
-    /// rather than assumed.
-    fn row(&self, y: u32) -> Option<&'a [[u8; CHANNELS]]> {
-        let start = pixel_offset(0, y, self.width)?;
-        let len = pixel_bytes(self.width, 1)?;
-        let bytes = self.pixels.get(start..start.checked_add(len)?)?;
-        Some(bytes.as_chunks::<CHANNELS>().0)
-    }
 }
 
 /// A rectangular region of a source image, in source pixels.
@@ -215,6 +221,197 @@ pub struct Region {
     pub width: u32,
     /// Height in source pixels; never zero for an accepted region.
     pub height: u32,
+}
+
+/// The alpha space a resample reads and writes, and the two kernels that
+/// differ with it: how a source sample enters the filter, and how a filtered
+/// sample is encoded back.
+///
+/// Everything else — the plan, the row cache, the band loop, the geometry
+/// validation — is shared, so the two spaces cannot drift apart in anything
+/// but the arithmetic that genuinely differs between them.
+trait Space {
+    /// One pixel as this space stores it.
+    type Sample: Copy;
+
+    /// Add `sample`, weighted by the fixed-point `weight`, into `sums`.
+    ///
+    /// The four sums are in whatever internal scale [`encode`](Self::encode)
+    /// expects; they are never read outside this trait's own pair.
+    fn weigh(sample: Self::Sample, weight: i64, sums: &mut [i64; CHANNELS]);
+
+    /// The sample the accumulated `channels` encode, carrying one
+    /// [`WEIGHT_SHIFT`] of scale each.
+    fn encode(channels: [i64; CHANNELS]) -> Self::Sample;
+}
+
+/// A borrowed source image of one space, addressed by row.
+trait Rows {
+    /// The space this image's samples are in.
+    type Space: Space;
+
+    /// The image width in samples.
+    fn width(&self) -> u32;
+
+    /// The image height in rows.
+    fn height(&self) -> u32;
+
+    /// Row `y` as whole samples, or `None` when the row does not lie in the
+    /// image.
+    fn row(&self, y: u32) -> Option<&[<Self::Space as Space>::Sample]>;
+}
+
+/// Straight-alpha RGBA8, where a sample's colour still has to be weighted by
+/// its own alpha before it can be filtered.
+struct Straight;
+
+/// Premultiplied [`Pixel`]s, where the stored channels are already
+/// alpha-weighted and are filtered exactly as they are.
+struct Premultiplied;
+
+impl Space for Straight {
+    type Sample = [u8; CHANNELS];
+
+    /// Colour is carried as `channel * alpha` and alpha as `alpha * 255`,
+    /// both in the same scale, so dividing the first by the second at
+    /// encode time recovers the alpha-weighted mean colour exactly.
+    fn weigh(sample: [u8; CHANNELS], weight: i64, sums: &mut [i64; CHANNELS]) {
+        let weighted_alpha = weight * i64::from(sample[3]);
+        sums[0] += weighted_alpha * i64::from(sample[0]);
+        sums[1] += weighted_alpha * i64::from(sample[1]);
+        sums[2] += weighted_alpha * i64::from(sample[2]);
+        sums[3] += weighted_alpha * 255;
+    }
+
+    /// The colour channels and the alpha were filtered in the same scale, so
+    /// the straight-alpha colour is the ratio between them. A footprint that
+    /// accumulated no alpha has no colour to report.
+    ///
+    /// The cubic's negative lobes can carry a filtered sample past the range
+    /// its neighbours occupy — the overshoot that makes an interpolating
+    /// filter look sharp — and each channel is therefore held to what a byte
+    /// can say *after* the division, never before it. Dividing by an alpha
+    /// that had already been clipped would scale the colour by the clipping:
+    /// an opaque pixel beside a transparent one would come back a different
+    /// colour than it went in, which is exactly the bleed premultiplied
+    /// filtering exists to prevent.
+    ///
+    /// Both divisions round to nearest rather than truncating. Truncation
+    /// would bias every channel of every pixel down by half a level, which is
+    /// a systematic darkening of the whole image rather than noise.
+    fn encode(channels: [i64; CHANNELS]) -> [u8; CHANNELS] {
+        // A descaled sample is a weighted mean of `channel * alpha` over
+        // weights summing to one, so it cannot exceed `255 * 255`, and the
+        // arithmetic below stays inside a 32-bit word. Saying so lets the
+        // divisions be 32-bit, which is worth stating because there are
+        // three of them for every pixel of every resampled image.
+        let alpha_scaled = narrow(descale(channels[3]));
+        if alpha_scaled <= 0 {
+            return [0, 0, 0, 0];
+        }
+        let mut out = [0u8; CHANNELS];
+        for (channel, sample) in out.iter_mut().zip(channels).take(CHANNELS - 1) {
+            let premultiplied = narrow(descale(sample)).max(0);
+            let scaled = premultiplied.saturating_mul(255) + alpha_scaled / 2;
+            *channel = clamp_u8(scaled / alpha_scaled);
+        }
+        out[3] = clamp_u8((alpha_scaled + 127) / 255);
+        out
+    }
+}
+
+impl Space for Premultiplied {
+    type Sample = Pixel;
+
+    /// Already alpha-weighted, so the filter weights the stored channels
+    /// directly rather than reconstructing a straight colour it would only
+    /// premultiply again.
+    ///
+    /// Every channel is carried in the same `× 255` scale the straight-alpha
+    /// space uses, so both spaces keep the same headroom under the
+    /// fixed-point descale and an opaque image resamples identically either
+    /// way — a sample carried at its plain byte scale would lose up to one
+    /// level per axis to the intermediate rounding.
+    fn weigh(sample: Pixel, weight: i64, sums: &mut [i64; CHANNELS]) {
+        let scaled = weight * 255;
+        sums[0] += scaled * i64::from(sample.r);
+        sums[1] += scaled * i64::from(sample.g);
+        sums[2] += scaled * i64::from(sample.b);
+        sums[3] += scaled * i64::from(sample.a);
+    }
+
+    /// Each channel is its own weighted mean, so encoding drops the carried
+    /// scale and nothing else — no division by alpha, and no colour to
+    /// recover.
+    ///
+    /// A colour channel is held to the alpha rather than to 255: a
+    /// premultiplied channel above its own alpha is not a representable
+    /// pixel, and the cubic's negative lobes can overshoot into that range
+    /// on an enlargement.
+    fn encode(channels: [i64; CHANNELS]) -> Pixel {
+        let level = |sample: i64| (narrow(descale(sample)).max(0) + 127) / 255;
+        let alpha = clamp_u8(level(channels[3]));
+        let ceiling = i32::from(alpha);
+        let channel = |sample: i64| {
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "`level` floors at zero and `ceiling` is a `u8`, leaving exactly what a `u8` holds"
+            )]
+            let clamped = level(sample).min(ceiling) as u8;
+            clamped
+        };
+        Pixel {
+            r: channel(channels[0]),
+            g: channel(channels[1]),
+            b: channel(channels[2]),
+            a: alpha,
+        }
+    }
+}
+
+impl Rows for Rgba8Image<'_> {
+    type Space = Straight;
+
+    fn width(&self) -> u32 {
+        self.width
+    }
+
+    fn height(&self) -> u32 {
+        self.height
+    }
+
+    fn row(&self, y: u32) -> Option<&[[u8; CHANNELS]]> {
+        let start = pixel_offset(0, y, self.width)?;
+        let len = pixel_bytes(self.width, 1)?;
+        let bytes = self.pixels.get(start..start.checked_add(len)?)?;
+        Some(bytes.as_chunks::<CHANNELS>().0)
+    }
+}
+
+/// A borrowed premultiplied image: one [`crate::Surface`]'s own pixels.
+struct PixelImage<'a> {
+    width: u32,
+    height: u32,
+    pixels: &'a [Pixel],
+}
+
+impl Rows for PixelImage<'_> {
+    type Space = Premultiplied;
+
+    fn width(&self) -> u32 {
+        self.width
+    }
+
+    fn height(&self) -> u32 {
+        self.height
+    }
+
+    fn row(&self, y: u32) -> Option<&[Pixel]> {
+        let start = sample_offset(y, self.width)?;
+        let len = sample_count(self.width, 1)?;
+        self.pixels.get(start..start.checked_add(len)?)
+    }
 }
 
 /// Resample `region` of `src` into a whole `dest_width`×`dest_height`
@@ -270,30 +467,125 @@ pub fn resample_rows(
     rows: u32,
     out: &mut [u8],
 ) -> Result<(), ResampleError> {
-    validate_region(src, region)?;
-    if dest_width == 0 || dest_height == 0 {
-        return Err(ResampleError::EmptyDestination);
-    }
-    let last = first_row
-        .checked_add(rows)
-        .ok_or(ResampleError::BandOutOfBounds)?;
-    if rows == 0 || last > dest_height {
-        return Err(ResampleError::BandOutOfBounds);
-    }
-    let expected = pixel_bytes(dest_width, rows).ok_or(ResampleError::OutputSizeMismatch)?;
+    let band = Band {
+        first_row,
+        rows,
+        dest_width,
+        dest_height,
+    };
+    let samples = validate(src, region, band)?;
+    let expected = samples
+        .checked_mul(CHANNELS)
+        .ok_or(ResampleError::OutputSizeMismatch)?;
     if out.len() != expected {
         return Err(ResampleError::OutputSizeMismatch);
     }
+    // A validated byte length is a whole number of samples, so the ragged
+    // tail this splits off is always empty.
+    let (quads, _tail) = out.as_chunks_mut::<CHANNELS>();
+    filter_band(src, region, band, quads);
+    Ok(())
+}
 
-    let columns = Axis::plan(region.x, region.width, dest_width);
-    let rows_plan = Axis::plan(region.y, region.height, dest_height);
-    if columns.is_identity() && rows_plan.is_identity() {
-        return copy_rows(src, region, first_row, rows, out);
+/// Resample `region` of the `width`×`height` premultiplied image `src` into
+/// the whole `dest_width`×`dest_height` premultiplied image `out`.
+///
+/// The pixel-space counterpart of [`resample_rows`], reached through
+/// [`Surface::resampled`](crate::Surface::resampled) — the only caller that
+/// can hold both buffers.
+///
+/// # Errors
+///
+/// As [`resample_rows`], with [`ResampleError::SourceSizeMismatch`] for a
+/// `src` whose length does not match its declared geometry and
+/// [`ResampleError::OutputSizeMismatch`] for a mis-sized `out`.
+pub(crate) fn resample_pixels(
+    src: (u32, u32, &[Pixel]),
+    region: Region,
+    dest: (u32, u32),
+    out: &mut [Pixel],
+) -> Result<(), ResampleError> {
+    let (width, height, pixels) = src;
+    if width == 0 || height == 0 {
+        return Err(ResampleError::SourceSizeMismatch);
     }
-    let mut cache = RowCache::new(dest_width, rows_plan.stride);
-    let mut accumulator = vec![0i64; samples_per_row(dest_width)];
-    let row_bytes = expected / rows_as_usize(rows);
-    for (dest_y, chunk) in (first_row..last).zip(out.chunks_exact_mut(row_bytes)) {
+    if pixels.len() != sample_count(width, height).ok_or(ResampleError::SourceSizeMismatch)? {
+        return Err(ResampleError::SourceSizeMismatch);
+    }
+    let image = PixelImage {
+        width,
+        height,
+        pixels,
+    };
+    let (dest_width, dest_height) = dest;
+    let band = Band {
+        first_row: 0,
+        rows: dest_height,
+        dest_width,
+        dest_height,
+    };
+    let samples = validate(&image, region, band)?;
+    if out.len() != samples {
+        return Err(ResampleError::OutputSizeMismatch);
+    }
+    filter_band(&image, region, band, out);
+    Ok(())
+}
+
+/// One contiguous run of destination rows, of a destination of a stated size.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct Band {
+    first_row: u32,
+    rows: u32,
+    dest_width: u32,
+    dest_height: u32,
+}
+
+impl Band {
+    /// The destination row after the last this band writes, or `None` when
+    /// the sum does not fit.
+    fn last_row(self) -> Option<u32> {
+        self.first_row.checked_add(self.rows)
+    }
+}
+
+/// Check `region` against `src` and `band` against its destination,
+/// answering how many samples the band writes.
+///
+/// The one validation both entry points share, so neither can accept
+/// geometry the other refuses; each then checks its own buffer's length in
+/// its own units.
+fn validate<R: Rows>(src: &R, region: Region, band: Band) -> Result<usize, ResampleError> {
+    validate_region(src, region)?;
+    if band.dest_width == 0 || band.dest_height == 0 {
+        return Err(ResampleError::EmptyDestination);
+    }
+    let last = band.last_row().ok_or(ResampleError::BandOutOfBounds)?;
+    if band.rows == 0 || last > band.dest_height {
+        return Err(ResampleError::BandOutOfBounds);
+    }
+    sample_count(band.dest_width, band.rows).ok_or(ResampleError::OutputSizeMismatch)
+}
+
+/// Filter `band` of `region` into `out`, which [`validate`] has already
+/// matched against the band's own geometry.
+fn filter_band<R: Rows>(
+    src: &R,
+    region: Region,
+    band: Band,
+    out: &mut [<R::Space as Space>::Sample],
+) {
+    let columns = Axis::plan(region.x, region.width, band.dest_width);
+    let rows_plan = Axis::plan(region.y, region.height, band.dest_height);
+    if columns.is_identity() && rows_plan.is_identity() {
+        copy_rows(src, region, band, out);
+        return;
+    }
+    let mut cache = RowCache::new(band.dest_width, rows_plan.stride);
+    let mut accumulator = vec![0i64; samples_per_row(band.dest_width)];
+    let width = band.dest_width as usize;
+    let last = band.last_row().unwrap_or(band.dest_height);
+    for (dest_y, chunk) in (band.first_row..last).zip(out.chunks_exact_mut(width.max(1))) {
         // The first contributing tap *writes* the accumulator and the rest
         // add to it, so a destination row never pays to clear a buffer it
         // is about to overwrite — which for a resample near 1:1, where a
@@ -319,16 +611,14 @@ pub fn resample_rows(
         if !started {
             accumulator.fill(0);
         }
-        write_row(&accumulator, chunk);
+        write_row::<R::Space>(&accumulator, chunk);
     }
-    Ok(())
 }
 
-/// Copy `region` of `src` straight into destination rows `first_row`
-/// through `first_row + rows`.
+/// Copy `region` of `src` straight into `band`'s destination rows.
 ///
 /// A resample whose two axis plans are both the identity *is* a copy:
-/// every destination pixel draws one source pixel at full weight, so the
+/// every destination sample draws one source sample at full weight, so the
 /// filter would premultiply each channel by its alpha and then divide it
 /// back out to reproduce the byte it started from. That case is not
 /// exotic on a desktop — an image decoded at exactly the size it will be
@@ -338,31 +628,30 @@ pub fn resample_rows(
 ///
 /// A source row the region names but the image does not hold is
 /// unreachable for a validated region; it leaves the destination row
-/// transparent rather than reporting bytes it did not read.
-fn copy_rows(
-    src: &Rgba8Image<'_>,
+/// transparent rather than reporting samples it did not read.
+fn copy_rows<R: Rows>(
+    src: &R,
     region: Region,
-    first_row: u32,
-    rows: u32,
-    out: &mut [u8],
-) -> Result<(), ResampleError> {
-    let row_bytes = pixel_bytes(region.width, 1).ok_or(ResampleError::OutputSizeMismatch)?;
+    band: Band,
+    out: &mut [<R::Space as Space>::Sample],
+) {
     let left = region.x as usize;
     let right = left.saturating_add(region.width as usize);
+    let last = band.last_row().unwrap_or(band.dest_height);
+    let blank = <R::Space as Space>::encode([0; CHANNELS]);
     for (dest_y, chunk) in
-        (first_row..first_row.saturating_add(rows)).zip(out.chunks_exact_mut(row_bytes.max(1)))
+        (band.first_row..last).zip(out.chunks_exact_mut((region.width as usize).max(1)))
     {
         let source_y = region.y.saturating_add(dest_y);
         match src.row(source_y).and_then(|row| row.get(left..right)) {
-            Some(span) => chunk.copy_from_slice(span.as_flattened()),
-            None => chunk.fill(0),
+            Some(span) => chunk.copy_from_slice(span),
+            None => chunk.fill(blank),
         }
     }
-    Ok(())
 }
 
 /// Check that `region` is non-empty and lies wholly inside `src`.
-fn validate_region(src: &Rgba8Image<'_>, region: Region) -> Result<(), ResampleError> {
+fn validate_region<R: Rows>(src: &R, region: Region) -> Result<(), ResampleError> {
     let right = region
         .x
         .checked_add(region.width)
@@ -371,7 +660,7 @@ fn validate_region(src: &Rgba8Image<'_>, region: Region) -> Result<(), ResampleE
         .y
         .checked_add(region.height)
         .ok_or(ResampleError::SourceRegionOutOfBounds)?;
-    if region.width == 0 || region.height == 0 || right > src.width || bottom > src.height {
+    if region.width == 0 || region.height == 0 || right > src.width() || bottom > src.height() {
         return Err(ResampleError::SourceRegionOutOfBounds);
     }
     Ok(())
@@ -656,7 +945,7 @@ impl RowCache {
     }
 
     /// Source row `source_row` of `src`, filtered along `columns`.
-    fn filtered_row(&mut self, src: &Rgba8Image<'_>, columns: &Axis, source_row: u32) -> &[i32] {
+    fn filtered_row<R: Rows>(&mut self, src: &R, columns: &Axis, source_row: u32) -> &[i32] {
         let slot = (source_row as usize) % self.held.len().max(1);
         let start = slot * self.stride;
         let end = start + self.stride;
@@ -673,15 +962,12 @@ impl RowCache {
     }
 }
 
-/// Filter source row `source_row` along `columns` into `out`, as
-/// premultiplied `[red, green, blue, alpha]` samples per destination
-/// column.
+/// Filter source row `source_row` along `columns` into `out`, as one
+/// space-internal four-channel sample per destination column.
 ///
-/// Colour is carried as `channel * alpha` and alpha as `alpha * 255`, both
-/// in the same scale, so dividing the first by the second at write-out
-/// recovers the alpha-weighted mean colour exactly. A row outside the image
-/// — unreachable for a row a validated plan names — contributes nothing.
-fn filter_row(src: &Rgba8Image<'_>, columns: &Axis, source_row: u32, out: &mut [i32]) {
+/// A row outside the image — unreachable for a row a validated plan names —
+/// contributes nothing.
+fn filter_row<R: Rows>(src: &R, columns: &Axis, source_row: u32, out: &mut [i32]) {
     let Some(pixels) = src.row(source_row) else {
         out.fill(0);
         return;
@@ -692,15 +978,10 @@ fn filter_row(src: &Rgba8Image<'_>, columns: &Axis, source_row: u32, out: &mut [
     for (slot, taps) in samples.iter_mut().zip(columns.rows()) {
         let mut sums = [0i64; CHANNELS];
         for tap in taps {
-            let Some(pixel) = pixels.get(tap.source as usize) else {
+            let Some(&pixel) = pixels.get(tap.source as usize) else {
                 continue;
             };
-            let alpha = i64::from(pixel[3]);
-            let weighted_alpha = i64::from(tap.weight) * alpha;
-            sums[0] += weighted_alpha * i64::from(pixel[0]);
-            sums[1] += weighted_alpha * i64::from(pixel[1]);
-            sums[2] += weighted_alpha * i64::from(pixel[2]);
-            sums[3] += weighted_alpha * 255;
+            <R::Space as Space>::weigh(pixel, i64::from(tap.weight), &mut sums);
         }
         for (channel, sum) in slot.iter_mut().zip(sums) {
             *channel = i32::try_from(descale(sum)).unwrap_or(i32::MAX);
@@ -708,46 +989,12 @@ fn filter_row(src: &Rgba8Image<'_>, columns: &Axis, source_row: u32, out: &mut [
     }
 }
 
-/// Write one destination row from its accumulated premultiplied samples.
-///
-/// The colour channels and the alpha were filtered in the same scale, so
-/// the straight-alpha colour is the ratio between them. A footprint that
-/// accumulated no alpha has no colour to report.
-///
-/// The cubic's negative lobes can carry a filtered sample past the range
-/// its neighbours occupy — the overshoot that makes an interpolating filter
-/// look sharp — and each channel is therefore held to what a byte can say
-/// *after* the division, never before it. Dividing by an alpha that had
-/// already been clipped would scale the colour by the clipping: an opaque
-/// pixel beside a transparent one would come back a different colour than
-/// it went in, which is exactly the bleed premultiplied filtering exists to
-/// prevent.
-///
-/// Both divisions round to nearest rather than truncating. Truncation would
-/// bias every channel of every pixel down by half a level, which is a
-/// systematic darkening of the whole image rather than noise.
-fn write_row(accumulator: &[i64], out: &mut [u8]) {
-    // A row is a whole number of pixels by construction, so the ragged
-    // tail this splits off is always empty.
-    let (pixels, _tail) = out.as_chunks_mut::<CHANNELS>();
+/// Write one destination row from its accumulated samples, through the
+/// space's own [`Space::encode`].
+fn write_row<S: Space>(accumulator: &[i64], out: &mut [S::Sample]) {
     let (accumulated, _rest) = accumulator.as_chunks::<CHANNELS>();
-    for (samples, pixel) in accumulated.iter().zip(pixels) {
-        // A descaled sample is a weighted mean of `channel * alpha` over
-        // weights summing to one, so it cannot exceed `255 * 255`, and the
-        // arithmetic below stays inside a 32-bit word. Saying so lets the
-        // divisions be 32-bit, which is worth stating because there are
-        // three of them for every pixel of every resampled image.
-        let alpha_scaled = narrow(descale(samples[3]));
-        if alpha_scaled <= 0 {
-            *pixel = [0, 0, 0, 0];
-            continue;
-        }
-        for (channel, sample) in pixel.iter_mut().zip(samples).take(CHANNELS - 1) {
-            let premultiplied = narrow(descale(*sample)).max(0);
-            let scaled = premultiplied.saturating_mul(255) + alpha_scaled / 2;
-            *channel = clamp_u8(scaled / alpha_scaled);
-        }
-        pixel[3] = clamp_u8((alpha_scaled + 127) / 255);
+    for (samples, sample) in accumulated.iter().zip(out) {
+        *sample = S::encode(*samples);
     }
 }
 
@@ -781,6 +1028,19 @@ fn samples_per_row(width: u32) -> usize {
     (width as usize).saturating_mul(CHANNELS)
 }
 
+/// The sample count of a `width`×`height` image, or `None` when it does not
+/// fit in a `usize` on this target.
+fn sample_count(width: u32, height: u32) -> Option<usize> {
+    usize::try_from(u64::from(width).checked_mul(u64::from(height))?).ok()
+}
+
+/// Sample offset of row `y` in a row-major buffer `width` samples wide, or
+/// `None` when it would not fit a `usize` — unreachable for a buffer that
+/// exists, but checked rather than assumed.
+fn sample_offset(y: u32, width: u32) -> Option<usize> {
+    usize::try_from(u64::from(y).checked_mul(u64::from(width))?).ok()
+}
+
 /// The byte length of a `width`×`height` RGBA8 buffer, or `None` when it
 /// does not fit in a `usize` on this target.
 fn pixel_bytes(width: u32, height: u32) -> Option<usize> {
@@ -798,13 +1058,6 @@ fn pixel_offset(x: u32, y: u32, width: u32) -> Option<usize> {
         .checked_mul(u64::from(width))?
         .checked_add(u64::from(x))?;
     usize::try_from(index.checked_mul(CHANNELS_U64)?).ok()
-}
-
-/// A validated band height as a `usize` divisor. The caller has already
-/// matched `out` against `rows * dest_width * 4`, so a band of zero rows
-/// cannot reach here; the floor of one keeps the division total.
-fn rows_as_usize(rows: u32) -> usize {
-    usize::try_from(rows).unwrap_or(usize::MAX).max(1)
 }
 
 #[cfg(test)]

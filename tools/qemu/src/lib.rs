@@ -385,6 +385,22 @@ pub enum PointerAction {
     Press(MouseButton),
     /// Release the button (its bit leaves the tracked mask).
     Release(MouseButton),
+    /// Press *and* release the button, as one step.
+    ///
+    /// A click is one gesture, and this is how a script says so. Scripting it
+    /// as a [`Press`](Self::Press) step followed by a
+    /// [`Release`](Self::Release) step splits it across two poll ticks, which
+    /// opens a window a guest can exit inside: a desktop acts on the press, so
+    /// a guest whose PASS witness is that press's own effect races the release
+    /// it has not been sent yet — and a witness that lands first fails the run
+    /// for an incomplete script. Sending both mask changes in one tick closes
+    /// that window without coalescing anything: the device still sees two
+    /// distinct `mouse_button` events, in order.
+    ///
+    /// [`Press`](Self::Press) and [`Release`](Self::Release) remain for a
+    /// gesture whose *duration* is the point — a tap-or-hold, a drag — where
+    /// the steps between them are exactly what the script is expressing.
+    Click(MouseButton),
 }
 
 /// A pointer button a [`PointerAction`] presses or releases, named by
@@ -2368,8 +2384,9 @@ impl InjectionState {
         // marker was seen and no earlier-requested dump is pending: a dump
         // whose marker has appeared must hold the pixels it was keyed on
         // before any further injection can change the screen. At most one
-        // step per poll tick, so consecutive actions arrive as distinct
-        // device events.
+        // *step* per poll tick, so a motion is processed before whatever
+        // follows it lands at the new position; a `Click` step sends both of
+        // its mask changes in that one tick, because a click is one gesture.
         let dump_pending = spec.screendumps.get(self.dump_step).is_some_and(|_| {
             self.dump_state == DumpState::Sent
                 || markers
@@ -2383,22 +2400,39 @@ impl InjectionState {
                 .get(self.pointer_step)
                 .is_some_and(|seen| seen.load(Ordering::Acquire));
             if step_seen && !dump_pending {
-                let command = match step.action {
-                    PointerAction::Move { dx, dy } => format!("mouse_move {dx} {dy}"),
+                match step.action {
+                    PointerAction::Move { dx, dy } => {
+                        self.send(monitor, "pointer", &format!("mouse_move {dx} {dy}"))?;
+                    }
                     PointerAction::Press(button) => {
                         self.pointer_button_mask |= button.mask_bit();
-                        format!("mouse_button {}", self.pointer_button_mask)
+                        self.send_button_mask(monitor)?;
                     }
                     PointerAction::Release(button) => {
                         self.pointer_button_mask &= !button.mask_bit();
-                        format!("mouse_button {}", self.pointer_button_mask)
+                        self.send_button_mask(monitor)?;
                     }
-                };
-                self.send(monitor, "pointer", &command)?;
+                    PointerAction::Click(button) => {
+                        self.pointer_button_mask |= button.mask_bit();
+                        self.send_button_mask(monitor)?;
+                        self.pointer_button_mask &= !button.mask_bit();
+                        self.send_button_mask(monitor)?;
+                    }
+                }
                 self.pointer_step += 1;
             }
         }
         Ok(())
+    }
+
+    /// Send the tracked button-state mask as a `mouse_button` command.
+    ///
+    /// # Errors
+    ///
+    /// The failing injection's message, as [`send`](Self::send) reports it.
+    fn send_button_mask(&mut self, monitor: Option<&ReservedSocket>) -> Result<(), String> {
+        let command = format!("mouse_button {}", self.pointer_button_mask);
+        self.send(monitor, "pointer", &command)
     }
 
     /// Write one newline-terminated command over the shared monitor

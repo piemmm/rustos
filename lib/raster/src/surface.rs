@@ -27,6 +27,7 @@ use tairix_reclaim::CachedBytes;
 use crate::color::{blend_span, blend_span_mapped, div255, mix, Color, Pixel};
 use crate::dither::DitherRow;
 use crate::paint::Paint;
+use crate::resample::{resample_pixels, Region, ResampleError};
 use crate::round::round_rect_coverage;
 use crate::scan::{FillRule, SampleSpace, ScanFill};
 
@@ -279,24 +280,35 @@ impl Surface {
         })
     }
 
-    /// The surface as straight-alpha RGBA8 bytes in row-major order — the
-    /// exact inverse of [`from_rgba8`](Self::from_rgba8).
+    /// `region` of this surface resampled to `dest_width`×`dest_height`
+    /// through the shared filter ([`resample`](crate::resample())), staying
+    /// premultiplied throughout.
     ///
-    /// Straight alpha, because that is the interchange form: it is what an
-    /// image decoder produces and what [`resample`](crate::resample()) filters,
-    /// so a surface that has to be scaled (a window's frame down to a picker
-    /// thumbnail) comes back through this one conversion rather than a
-    /// caller's own colour algebra. The un-premultiply is the crate's single
-    /// [`Pixel::unpremultiply`] path, which returns an opaque pixel
-    /// channel-for-channel, so an opaque surface converts as a plain copy.
-    #[must_use]
-    pub fn to_rgba8(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(self.pixels.len() * 4);
-        for pixel in &self.pixels {
-            let color = pixel.unpremultiply();
-            out.extend_from_slice(&[color.r, color.g, color.b, color.a]);
-        }
-        out
+    /// This is how a window's frame becomes a picker thumbnail. The pixels
+    /// are filtered in the space they are already stored in, so scaling costs
+    /// one allocation and one filter pass — no straight-alpha round trip, and
+    /// no copy of the source.
+    ///
+    /// # Errors
+    ///
+    /// [`ResampleError::DestinationTooLarge`] when the destination could not
+    /// be allocated, and every geometry refusal
+    /// [`resample_rows`](crate::resample_rows) states.
+    pub fn resampled(
+        &self,
+        region: Region,
+        dest_width: u32,
+        dest_height: u32,
+    ) -> Result<Self, ResampleError> {
+        let mut out =
+            Self::new(dest_width, dest_height).ok_or(ResampleError::DestinationTooLarge)?;
+        resample_pixels(
+            (self.width, self.height, &self.pixels),
+            region,
+            (dest_width, dest_height),
+            &mut out.pixels,
+        )?;
+        Ok(out)
     }
 
     /// Surface width in pixels.

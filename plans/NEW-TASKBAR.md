@@ -808,15 +808,35 @@ What now stands:
   the bar never interprets one. An application that declared no menu opens
   **nothing**.
 - **The hover window picker** (`WindowPicker`) opens at
-  `PICKER_MIN_WINDOWS` (two) windows and no fewer, which is why no dwell
-  timer is needed: the picker appears exactly where there is a choice to
-  make. The session answers `ShowWindowPicker { app }` with one
-  `PickerEntry` per window, each carrying that window's **last presented
-  frame** — pixels the compositor already holds — scaled to the cell through
-  `lib/raster::resample` (whose `Surface::to_rgba8` inverse now completes the
-  crate's `from_rgba8`). A press on a cell reports `WindowChosen { id }`; the
-  picker takes no keyboard and closes when the pointer leaves, when the slot
-  is clicked, or when the application stops having a choice to offer.
+  `PICKER_MIN_WINDOWS` (two) windows and no fewer, and both its edges are
+  timed by the clock rather than by the pointer: it opens once the pointer has
+  **rested** on the slot for `PICKER_OPEN_DELAY_NS` (one second), and closes
+  `PICKER_CLOSE_GRACE_NS` (200 ms) after the pointer comes to rest on neither
+  the slot nor the panel. The grace is load-bearing, not a courtesy: the panel
+  hangs a gap away from the bar, so the pointer *must* leave the bar's surfaces
+  to reach a cell. Reaching the panel or returning to the slot cancels it.
+  Neither edge polls or sleeps — `TaskbarInput::park_deadline_ns` folds the
+  pending transition into the desktop's own wait and `TaskbarInput::tick`
+  resolves it — and a dwell whose slot moved under it (the strip was
+  re-pushed) opens nothing.
+- **Cells wrap into a grid, and a grid that overflows scrolls**, so no window
+  is ever laid out where it cannot be clicked: `PickerLayout` carries the
+  columns, the visible rows, and the shared `ScrollBar`'s gutter; the wheel
+  and the bar itself walk the grid; the first visible row is clamped at layout
+  time so a density change under a scrolled panel cannot blank it.
+- **Thumbnails are prepared a window at a time.** The session answers
+  `ShowWindowPicker { app }` with one `PickerEntry` per window, each carrying
+  that window's **last presented frame** — pixels the compositor already
+  holds — scaled to the cell through `Surface::resampled`, the premultiplied
+  entry point to the one resampler (no straight-alpha round trip, no copy of
+  the frame). `DesktopShell::advance_window_thumbnails` scales **one** window
+  per turn of the serve loop while the dwell runs and
+  `window_thumbnails_owed` shortens the park while a slice remains, so a
+  picker over a screenful of windows opens already drawn without the desktop
+  ever stopping to build it; a slice that lands later fills its cell in place,
+  and the pointer leaving drops the prepared pixels. A press on a cell reports
+  `WindowChosen { id }`; the picker takes no keyboard and closes when the slot
+  is clicked or when the application stops having a choice to offer.
 - **`terminal.app` is now one process with many windows.** Each window
   carries its own pty, shell child, screen model, retained picture, look, and
   overlay, over one wait-set with one event mailbox for the process plus a
@@ -824,8 +844,13 @@ What now stands:
   and its own *New window* row through the shared convention
   (`tairix_terminal::appbar` over `appbar::declaration`), so the menu reads
   `About`, *New window*, a rule, *Quit* — its slot opens a fresh window on a
-  click and its menu can close them all. `MAX_WINDOWS` bounds the process's
-  own resources; the last window closing ends it.
+  click and its menu can close them all. `MAX_WINDOWS` (32) bounds the
+  process's own resources and matches `WINDOWS_PER_CLIENT_MAX`, the windows
+  the session will pin for one client, so a user who asks for one too many
+  meets the terminal's own stated refusal rather than the session's. Its
+  bring-up asks the desktop for the window **before** creating the pty and
+  spawning the shell, so a refused window costs one round trip instead of a
+  whole process load and teardown. The last window closing ends it.
 
 Tested in the `lib/abi` window-IPC suites (the builder's and the decoder's
 shared shape rule, every refusal, the reserved tail, fuzz), the `lib/window`
@@ -1767,8 +1792,10 @@ What that guarantees now:
   moving. An arrival refreshes hover and opens no hover surface — a window
   closing is not a gesture.
 - **Both routers implement it**: `TaskbarInput::set_pointer_focus` drops every
-  bar hover and closes the window picker; `InputRouter::set_pointer_focus` puts
-  out the title-bar command the pointer was on. `lib/controls` grew the
+  bar hover and starts the window picker's closing grace — an arrival back onto
+  the picker's own surfaces cancels it, so a window merely passing over the bar
+  does not take the panel down; `InputRouter::set_pointer_focus` puts out the
+  title-bar command the pointer was on. `lib/controls` grew the
   position-independent `pointer_left` each needs
   (`WindowControl`, `TitleBar`, `TraySignal`).
 - **`DesktopShell::present` re-resolves the focus** before it paints, because
@@ -1796,7 +1823,8 @@ sections: the icon-bar menu's transport is inline bounded rows, which is also
 than derived, so an application keeps its slot for the life of its process
 (T6); the information panel is manifest-attested rather than app-supplied, so
 no application can spoof an identity in system chrome (T7); the picker opens
-only at two windows, which is why it needs no dwell timer (T7);
+only at two windows, and only on a deliberate rest, because a hover-opened
+panel that a passing pointer can raise is one nobody asked for (T7);
 `CAP_PROC_CONTROL` was minted with its live enforcement point — no earlier
 capability fit — and the monitor service is session-spawned, with the capsule
 degrading calmly when it is absent (T10).

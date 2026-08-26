@@ -36,7 +36,7 @@ use tairix_proglib::{
 use tairix_reclaim::{CacheLedger, PressureBand, ReclaimCache, ReportedPressure};
 use tairix_taskbar::{
     icon_cache, Edge, EntryRow, IconEpoch, LibraryRow, TaskId, TaskbarConfig, TaskbarRenderer,
-    TaskbarRepaint, TaskbarResponse,
+    TaskbarRepaint, TaskbarResponse, PICKER_CLOSE_GRACE_NS, PICKER_OPEN_DELAY_NS,
 };
 use tairix_theme::{
     Appearance, CursorKind, Metrics, MotionInteraction, Theme, ThemeError, ThemeId, Timeline,
@@ -3919,8 +3919,9 @@ fn picker_cells_caption_each_window_and_refuse_below_a_choice() {
         a: 255,
     };
 
-    let cells = picker_cells(&bar, 0, (32, 20), |task| {
-        (task == TaskId(1)).then(|| Surface::filled(64, 40, magenta.premultiply()).expect("frame"))
+    let cells = picker_cells(&bar, 0, |task| {
+        (task == TaskId(1))
+            .then(|| Surface::filled(32, 20, magenta.premultiply()).expect("thumbnail"))
     });
     assert_eq!(cells.len(), 2);
     assert_eq!(cells[0].window(), TaskId(1));
@@ -3932,12 +3933,12 @@ fn picker_cells_caption_each_window_and_refuse_below_a_choice() {
     assert_eq!(cells[1].title(), "Logs");
     assert!(
         cells[1].thumbnail().is_none(),
-        "a window with no frame yet has no thumbnail, and its cell draws the glyph"
+        "a window whose thumbnail is not prepared yet draws the glyph"
     );
 
     // One window is no choice, and an unknown application is no application.
-    assert!(picker_cells(&bar, 1, (32, 20), |_| None).is_empty());
-    assert!(picker_cells(&bar, 9, (32, 20), |_| None).is_empty());
+    assert!(picker_cells(&bar, 1, |_| None).is_empty());
+    assert!(picker_cells(&bar, 9, |_| None).is_empty());
 }
 
 #[test]
@@ -4043,14 +4044,14 @@ fn hovering_a_two_window_app_shows_the_picker_as_its_own_window() {
     let at = app_slot_point(&shell, 0);
     assert_eq!(
         shell.handle(moved(at.x, at.y), &mut comp, 0),
-        ShellOutcome::Taskbar(TaskbarResponse::ShowWindowPicker { app: 0 }),
-        "the session owns the windows' pixels, so it is asked for the cells"
+        ShellOutcome::Ignored,
+        "arriving on the slot opens nothing: the picker waits out its dwell"
     );
+    assert!(shell.presenter().picker_window().is_none());
 
-    // The embedder answers with the cells and the picker becomes a window.
-    let cell = shell.session().taskbar().picker_thumbnail_size(Scale::ONE);
-    let entries = picker_cells(shell.session().taskbar(), 0, cell, |_| None);
-    shell.show_window_picker(&mut comp, 0, entries);
+    // The clock opens it, and the shell builds the cells out of the
+    // thumbnails it prepared while the dwell ran.
+    shell.tick_taskbar(&mut comp, PICKER_OPEN_DELAY_NS);
     assert!(shell.session().taskbar().picker().is_open());
     assert!(shell.presenter().picker_window().is_some());
 
@@ -4074,6 +4075,135 @@ fn hovering_a_two_window_app_shows_the_picker_as_its_own_window() {
         Some(TaskId(2)),
         "the chosen window is the focused one"
     );
+}
+
+/// The reported freeze: a picker over a screenful of windows must not be built
+/// by scaling every one of their frames in a single turn of the serve loop.
+///
+/// The dwell is the budget. One window is scaled per turn while the pointer
+/// rests, the loop is free to serve everything else between those turns, and
+/// the picker opens already drawn. What proves it here is the *shape* of the
+/// work: one call, one thumbnail, and a park deadline that says more is owed.
+#[test]
+fn a_pickers_thumbnails_are_scaled_one_turn_at_a_time() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    // Three real windows with real pixels, all owned by one application.
+    let frame = || Surface::filled(400, 300, Color::rgb(0, 120, 255).premultiply());
+    let windows: Vec<TaskId> = (1..=3)
+        .map(|n| {
+            let surface = frame().expect("surface");
+            let window = shell
+                .open_window(&mut comp, Point::new(10 * n, 10 * n), surface, "Terminal")
+                .expect("opens");
+            shell
+                .session()
+                .taskbar()
+                .tasks()
+                .entries()
+                .iter()
+                .map(|entry| entry.id)
+                .find(|task| shell.tasks().window_for(*task) == Some(window))
+                .expect("a task")
+        })
+        .collect();
+    shell.set_apps(
+        &mut comp,
+        vec![
+            tairix_taskbar::AppSlot::new("Terminal", IconKind::AppBundle)
+                .with_windows(windows.clone()),
+        ],
+    );
+    assert!(
+        !shell.window_thumbnails_owed(),
+        "nothing is hovered, so nothing is owed"
+    );
+
+    // Rest the pointer on the slot: the dwell arms and the work begins.
+    let at = app_slot_point(&shell, 0);
+    assert_eq!(
+        shell.handle(moved(at.x, at.y), &mut comp, 0),
+        ShellOutcome::Ignored
+    );
+    for owed in (0..windows.len()).rev() {
+        assert!(
+            shell.window_thumbnails_owed(),
+            "{owed} windows still to scale, so the park is due now"
+        );
+        assert!(
+            !shell.advance_window_thumbnails(&mut comp),
+            "no picker is open yet, so nothing is drawn"
+        );
+    }
+    assert!(
+        !shell.window_thumbnails_owed(),
+        "every window was scaled, one turn each"
+    );
+
+    // The dwell elapses and the picker opens already populated.
+    shell.tick_taskbar(&mut comp, PICKER_OPEN_DELAY_NS);
+    let picker = shell.session().taskbar().picker();
+    assert!(picker.is_open());
+    assert_eq!(picker.entries().len(), 3);
+    let (width, height) = shell
+        .session()
+        .taskbar()
+        .picker_thumbnail_size(comp.scale());
+    for (index, entry) in picker.entries().iter().enumerate() {
+        assert_eq!(
+            entry.thumbnail().map(|art| (art.width(), art.height())),
+            Some((width, height)),
+            "cell {index} opened without its thumbnail"
+        );
+    }
+}
+
+/// A pointer that leaves drops the prepared pixels: thumbnails are held only
+/// while there is a picker to show them in.
+#[test]
+fn leaving_a_slot_drops_the_thumbnails_it_was_preparing() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let surface =
+        Surface::filled(400, 300, Color::rgb(0, 120, 255).premultiply()).expect("surface");
+    let window = shell
+        .open_window(&mut comp, Point::new(10, 10), surface, "Terminal")
+        .expect("opens");
+    let task = shell
+        .session()
+        .taskbar()
+        .tasks()
+        .entries()
+        .iter()
+        .map(|entry| entry.id)
+        .find(|task| shell.tasks().window_for(*task) == Some(window))
+        .expect("a task");
+    shell
+        .session_mut()
+        .taskbar_mut()
+        .tasks_mut()
+        .add(TaskId(90), "Second");
+    shell.set_apps(
+        &mut comp,
+        vec![
+            tairix_taskbar::AppSlot::new("Terminal", IconKind::AppBundle)
+                .with_windows(vec![task, TaskId(90)]),
+        ],
+    );
+
+    let at = app_slot_point(&shell, 0);
+    let _ = shell.handle(moved(at.x, at.y), &mut comp, 0);
+    assert!(shell.window_thumbnails_owed());
+
+    // Away, well inside the dwell.
+    let _ = shell.handle(moved(at.x, at.y - 400), &mut comp, 1);
+    assert!(!shell.advance_window_thumbnails(&mut comp));
+    assert!(
+        !shell.window_thumbnails_owed(),
+        "the preparation went with the pointer"
+    );
+    shell.tick_taskbar(&mut comp, PICKER_OPEN_DELAY_NS);
+    assert!(!shell.session().taskbar().picker().is_open());
 }
 
 // ---- the pointer's focus: what is drawn there is what gets the pointer ----
@@ -4104,11 +4234,9 @@ fn hover_a_two_window_slot(shell: &mut DesktopShell, comp: &mut Compositor) -> P
     let at = app_slot_point(shell, 0);
     assert_eq!(
         shell.handle(moved(at.x, at.y), comp, 0),
-        ShellOutcome::Taskbar(TaskbarResponse::ShowWindowPicker { app: 0 })
+        ShellOutcome::Ignored
     );
-    let cell = shell.session().taskbar().picker_thumbnail_size(Scale::ONE);
-    let entries = picker_cells(shell.session().taskbar(), 0, cell, |_| None);
-    shell.show_window_picker(comp, 0, entries);
+    shell.tick_taskbar(comp, PICKER_OPEN_DELAY_NS);
     assert!(shell.session().taskbar().picker().is_open());
     assert_eq!(shell.session().taskbar().apps().hover(), Some(0));
     at
@@ -4140,6 +4268,11 @@ fn a_window_raised_over_a_hovered_slot_takes_the_hover_with_it() {
         None,
         "the slot stayed lit under a window that took the pointer"
     );
+
+    // The panel is on its closing grace, not gone on the instant: the same
+    // grace is what lets a pointer travelling *towards* a cell cross the gap.
+    // The clock ends it, so nothing is left floating over the window.
+    shell.tick_taskbar(&mut comp, PICKER_OPEN_DELAY_NS + PICKER_CLOSE_GRACE_NS);
     assert!(
         !shell.session().taskbar().picker().is_open(),
         "the hover picker was left open over the window in front of the bar"
@@ -4167,6 +4300,7 @@ fn moving_the_pointer_onto_a_window_takes_the_bars_hover_with_it() {
         })
     );
     assert_eq!(shell.session().taskbar().apps().hover(), None);
+    shell.tick_taskbar(&mut comp, PICKER_OPEN_DELAY_NS + PICKER_CLOSE_GRACE_NS);
     assert!(!shell.session().taskbar().picker().is_open());
 }
 
@@ -4174,9 +4308,9 @@ fn moving_the_pointer_onto_a_window_takes_the_bars_hover_with_it() {
 /// closes, and the slot under the pointer is hovered again — no jiggling the
 /// mouse to provoke it.
 ///
-/// The hover picker deliberately does **not** come back. A window closing is
-/// not a gesture, and a popover that opens because something else vanished is
-/// one the user never asked for; the next real motion opens it.
+/// The panel that was open over that slot survives the whole crossing. The
+/// pointer never left it, so the window passing over the bar must not be what
+/// takes it down: the arrival cancels the closing grace the departure armed.
 #[test]
 fn closing_a_covering_window_hands_the_hover_back_without_a_motion() {
     let mut shell = shell();
@@ -4194,6 +4328,50 @@ fn closing_a_covering_window_hands_the_hover_back_without_a_motion() {
         Some(0),
         "the pointer is on the slot again, so the slot is hovered again"
     );
+    assert!(
+        shell.session().taskbar().picker().is_open(),
+        "the panel went down behind a window that merely passed over the bar"
+    );
+    shell.tick_taskbar(&mut comp, PICKER_OPEN_DELAY_NS + PICKER_CLOSE_GRACE_NS);
+    assert!(
+        shell.session().taskbar().picker().is_open(),
+        "and the grace it was on was cancelled, not merely postponed"
+    );
+}
+
+/// An arrival is not a gesture: the pointer being revealed on a multi-window
+/// slot hovers it but opens no hover surface, and arms no dwell either. Only a
+/// real motion, rested out, asks for a picker.
+#[test]
+fn an_arrival_on_a_slot_opens_no_hover_surface() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    shell
+        .session_mut()
+        .taskbar_mut()
+        .tasks_mut()
+        .add(TaskId(1), "Shell");
+    shell
+        .session_mut()
+        .taskbar_mut()
+        .tasks_mut()
+        .add(TaskId(2), "Logs");
+    shell.set_apps(
+        &mut comp,
+        vec![
+            tairix_taskbar::AppSlot::new("Terminal", IconKind::AppBundle)
+                .with_windows(vec![TaskId(1), TaskId(2)]),
+        ],
+    );
+    let at = app_slot_point(&shell, 0);
+    // A window over the slot, then gone: the pointer arrives without moving.
+    let covering = opaque_window(&mut comp, Point::new(at.x - 40, at.y - 40), 200, 200);
+    let _ = shell.handle(moved(at.x, at.y), &mut comp, 0);
+    comp.remove(covering);
+    shell.present(&mut comp);
+
+    assert_eq!(shell.session().taskbar().apps().hover(), Some(0));
+    shell.tick_taskbar(&mut comp, PICKER_OPEN_DELAY_NS * 4);
     assert!(
         !shell.session().taskbar().picker().is_open(),
         "a window closing is not a gesture: it must not open a hover surface"

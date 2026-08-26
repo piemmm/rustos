@@ -828,9 +828,13 @@ mod program {
         env: &'a [Vec<u8>],
     }
 
-    /// Open one terminal window: its pseudo-terminal and hosted shell, its
-    /// screen model and retained picture, its shared frame region, the
-    /// desktop window itself, and its two wait-set members.
+    /// Open one terminal window: its screen model and retained picture, its
+    /// shared frame region, the desktop window itself, and then its
+    /// pseudo-terminal, hosted shell, and two wait-set members.
+    ///
+    /// The desktop is asked for the window before anything is spawned, so a
+    /// session that refuses one costs a single round trip rather than a pty
+    /// and a whole shell process brought up and torn straight back down.
     ///
     /// Returns the window and the session identity the create reply named, or
     /// `None` with the reason already on `stderr`. Every refusal unwinds what
@@ -848,34 +852,7 @@ mod program {
         let (w, h) = window_size(look.font, output, ctx.theme, ctx.desktop.scale());
         let (cols, rows) = grid_dims(w, h, look.font);
 
-        // The pty is created at the grid the window will actually show, so
-        // `terminal_size` reports it. The shell's fd 0/1/2 are the slave, a
-        // console-class tty, so it runs its full interactive editor exactly
-        // as on the hardware console (`plans/PTY.md`).
-        let Ok((pty_master, pty_slave)) = tairix_rt::pty_create(rows, cols) else {
-            report("pty refused; no window opened");
-            return None;
-        };
-        let attach = shell_wires(pty_slave);
-        let env: Vec<&[u8]> = ctx.env.iter().map(Vec::as_slice).collect();
-        let shell_pid =
-            tairix_rt::spawn_attached(DEFAULT_SHELL.as_bytes(), &attach, &[b"elsh"], &env);
-        // Close this process's own slave end either way: the spawn cloned it
-        // into the shell, and keeping it here would mask the shell's exit.
-        let _ = tairix_rt::fs_close(pty_slave);
-        if shell_pid < 0 {
-            let _ = tairix_rt::fs_close(pty_master);
-            report("shell spawn refused; no window opened");
-            return None;
-        }
-
-        let Some(terminal) = Terminal::new(cols, rows, PtyShell { master: pty_master }) else {
-            let _ = tairix_rt::fs_close(pty_master);
-            report("screen grid refused; no window opened");
-            return None;
-        };
         let Some(screen) = Screen::new(w, h) else {
-            let _ = tairix_rt::fs_close(pty_master);
             report("screen surface refused; no window opened");
             return None;
         };
@@ -885,25 +862,29 @@ mod program {
             .checked_mul(mode.height_px as usize)
             .and_then(|frame| frame.checked_mul(FRAME_COUNT as usize))
         else {
-            let _ = tairix_rt::fs_close(pty_master);
             report("frame region larger than the address width; no window opened");
             return None;
         };
         let mut region_id: u64 = 0;
         let base = tairix_rt::shm_create(total, &mut region_id);
         let Ok(base) = usize::try_from(base) else {
-            let _ = tairix_rt::fs_close(pty_master);
             report("shared frame region refused; no window opened");
             return None;
         };
         let grant = tairix_rt::shm_grant(region_id, WINDOW_ENDPOINT);
         if grant < 1 {
             let _ = tairix_rt::shm_unmap(base as u64, total);
-            let _ = tairix_rt::fs_close(pty_master);
             report("frame region grant refused; no window opened");
             return None;
         }
 
+        // The desktop is asked *before* a pty is created or a shell spawned,
+        // because the session can refuse (it bounds the windows one client
+        // may hold) and a refusal must cost nothing: spawning a shell that is
+        // immediately thrown away is a whole process load and teardown per
+        // click, which is felt right across the desktop when a user keeps
+        // asking for windows they cannot have.
+        //
         // A character grid can show nothing at all below one whole cell, and
         // that is where the terminal's own snap to whole cells bottoms out,
         // so one cell of the face it opens in is its declared floor.
@@ -919,8 +900,41 @@ mod program {
         );
         let Ok((window, server)) = created else {
             let _ = tairix_rt::shm_unmap(base as u64, total);
-            let _ = tairix_rt::fs_close(pty_master);
             report("desktop session refused the window");
+            return None;
+        };
+        let close_window = |client: &mut WindowClient<RtWindowTransport>| {
+            let _ = client.close(window);
+            let _ = tairix_rt::shm_unmap(base as u64, total);
+        };
+
+        // The pty is created at the grid the window will actually show, so
+        // `terminal_size` reports it. The shell's fd 0/1/2 are the slave, a
+        // console-class tty, so it runs its full interactive editor exactly
+        // as on the hardware console (`plans/PTY.md`).
+        let Ok((pty_master, pty_slave)) = tairix_rt::pty_create(rows, cols) else {
+            close_window(ctx.client);
+            report("pty refused; no window opened");
+            return None;
+        };
+        let attach = shell_wires(pty_slave);
+        let env: Vec<&[u8]> = ctx.env.iter().map(Vec::as_slice).collect();
+        let shell_pid =
+            tairix_rt::spawn_attached(DEFAULT_SHELL.as_bytes(), &attach, &[b"elsh"], &env);
+        // Close this process's own slave end either way: the spawn cloned it
+        // into the shell, and keeping it here would mask the shell's exit.
+        let _ = tairix_rt::fs_close(pty_slave);
+        if shell_pid < 0 {
+            let _ = tairix_rt::fs_close(pty_master);
+            close_window(ctx.client);
+            report("shell spawn refused; no window opened");
+            return None;
+        }
+
+        let Some(terminal) = Terminal::new(cols, rows, PtyShell { master: pty_master }) else {
+            let _ = tairix_rt::fs_close(pty_master);
+            close_window(ctx.client);
+            report("screen grid refused; no window opened");
             return None;
         };
 

@@ -201,6 +201,7 @@ pub mod shell;
 pub mod switchboard;
 pub mod switchuser;
 pub mod tasks;
+pub mod thumbs;
 pub mod vigil;
 pub mod wallpaper;
 pub mod windows;
@@ -275,6 +276,7 @@ pub use switchuser::{
     NO_DEADLINE_NS,
 };
 pub use tasks::TaskBridge;
+pub use thumbs::WindowThumbnails;
 pub use vigil::{HangTracker, UNRESPONSIVE_AFTER_NS};
 pub use wallpaper::{Prepared, WallpaperDesk, WallpaperSource};
 pub use windows::{
