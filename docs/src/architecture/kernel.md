@@ -193,6 +193,7 @@ audit trail, and is compiled in only under the `watchdog-diagnostics` feature:
 | 4002 | Info  | `KERNEL_PHASE_READY`    | log    |
 | 4003 | Error | `KERNEL_PHASE_FAILED`   | audit  |
 | 4004 | Info  | `KERNEL_BOOT_COMPLETED` | audit  |
+| 4005 | Info/Warn | `KERNEL_RAM_SELF_TEST`  | log    |
 | 4010 | Error | `KERNEL_PANIC`          | audit  |
 | 4020 | Error | `SYSCALL_FEATURE_UNAVAILABLE` | audit  |
 | 4021 | Error | `SYSCALL_NO_CALLER_CONTEXT`   | audit  |

@@ -96,7 +96,7 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
     argv.push("-serial".into());
     argv.push("stdio".into());
     argv.push("-m".into());
-    argv.push(format!("{DEFAULT_RAM_MIB}M").into());
+    argv.push(format!("{}M", spec.ram_mib()).into());
     argv.push("-smp".into());
     argv.push(spec.cpus.to_string().into());
     argv.push("-device".into());
@@ -222,6 +222,7 @@ mod tests {
             cpus,
             timeout: Duration::from_secs(60),
             declared_runtime_ceiling: None,
+            declared_ram_mib: None,
             block_devices: Vec::new(),
             net_devices: Vec::new(),
             display_ramfb: false,
@@ -322,6 +323,30 @@ mod tests {
                 .expect("argv contains -smp");
             assert_eq!(argv[pos + 1], n.to_string());
         }
+    }
+
+    #[test]
+    fn argv_defaults_to_the_per_arch_ram_size() {
+        let spec = fixture_spec(1);
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+        let pos = argv
+            .iter()
+            .position(|a| a == "-m")
+            .expect("argv contains -m");
+        assert_eq!(argv[pos + 1], format!("{DEFAULT_RAM_MIB}M"));
+    }
+
+    #[test]
+    fn argv_encodes_a_declared_ram_size() {
+        // The direct-map vertical needs more RAM than the boot trampoline's
+        // own identity window, so the declared size must reach the argv.
+        let spec = fixture_spec(1).with_ram_mib(5120);
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+        let pos = argv
+            .iter()
+            .position(|a| a == "-m")
+            .expect("argv contains -m");
+        assert_eq!(argv[pos + 1], "5120M");
     }
 
     #[test]

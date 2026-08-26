@@ -132,6 +132,17 @@ no-op and the model is identical, which is what makes the engine fully
 host-testable (healthy RAM, an injected stuck-low/stuck-high bit, and a
 shorted address line are all exercised on the host).
 
+**What it could not reach.** A span the direct map does not cover is left
+untested rather than trusted, so a run reports two totals: the bytes
+`verified` and the bytes left `unreachable`. The console counter cannot show
+the difference — it settles on the machine's advertised size either way — so
+the totals go to the log as `KERNEL_RAM_SELF_TEST`, at `Warn` when anything
+was unreachable, because a kernel that cannot address some of its own RAM by
+pointer will fail closed on every consumer that draws such a frame. Frame
+zero is skipped, exactly as the frame allocator never enrols it: an identity
+map translates it to the null pointer, so a window that began there would
+fail to map and take the whole first chunk of low RAM with it.
+
 **On the console.** The `TAIRiX <version> <RAM>MiB` identity line is drawn
 here — the figure starts at zero and climbs to the installed total in
 **yellow** while the test is still running (RAM being verified but not yet

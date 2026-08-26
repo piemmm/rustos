@@ -1930,7 +1930,13 @@ fn run_phases<A: KernelArch>(
     // usable/reserved regions later (`plans/NEW-SUPERVISOR.md`) — one owner,
     // no second copy.
     let memory_map: &'static tairix_kernel_mem::BootMemoryMap = Box::leak(Box::new(memory_map));
-    crate::memtest::run(arch.as_ref(), memory_map, installed_memory_bytes, consoles);
+    crate::memtest::run(
+        arch.as_ref(),
+        memory_map,
+        installed_memory_bytes,
+        consoles,
+        log_sink,
+    );
     let frame_allocator: &'static FrameAllocator = Box::leak(Box::new(
         FrameAllocator::new(memory_map).map_err(InitError::Mem)?,
     ));

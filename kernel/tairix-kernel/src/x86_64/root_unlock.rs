@@ -50,7 +50,7 @@ use tairix_kernel_core::{
     ConsoleRead, ConsoleWrite, CooperativeYield, InitSpawnCtx, IrqParkWaiter, YieldHandle,
 };
 use tairix_kernel_irq::{IrqController, IrqTable};
-use tairix_kernel_mem::{AddressSpace, DirectPhysMap, DmaPool, FrameAllocator, MmioMap, VirtAddr};
+use tairix_kernel_mem::{AddressSpace, DmaPool, FrameAllocator, MmioMap, VirtAddr};
 use tairix_kernel_sec::captable::TaskCapabilities;
 use tairix_kernel_sec::identity::UserId;
 use tairix_kernel_virtio::{provision_virtio_pci, KernelMmioMapper, KernelVirtioHost};
@@ -80,14 +80,6 @@ const POOL_PAGES: usize = 64;
 /// Capacity, in pages, of the MMIO register-window map (the four virtio
 /// configuration windows plus the MSI-X BAR).
 const MMIO_CAP_PAGES: usize = 64;
-
-/// Upper bound (exclusive) of the boot trampoline's identity map: the CPU
-/// reaches device register windows and DMA frames through
-/// [`DirectPhysMap::identity`] over `[0, 4 GiB)`, the same window `boot.s`
-/// identity-maps, so every physical address the bring-up touches keeps its
-/// address. The kernel frame allocator draws the DMA frames from usable RAM
-/// below this bound on the QEMU PC target.
-const IDENTITY_LIMIT: u64 = 4 << 30;
 
 /// Bookkeeping virtual base of the MMIO register-window map. The map's
 /// page-table writes land in a throwaway address space (never made live);
@@ -376,10 +368,11 @@ fn virtio_blk_unlock<'a>(
     // shared for the life of the system by two independent preemptive tasks
     // (the driver-store serve task and the encrypted-root unlock task), so
     // its backing must outlive both frames. The CPU reaches the device
-    // register windows and DMA frames through the boot trampoline's identity
-    // map; every physical address the bring-up touches lies below
-    // [`IDENTITY_LIMIT`].
-    let phys: &'static DirectPhysMap = Box::leak(Box::new(DirectPhysMap::identity(IDENTITY_LIMIT)));
+    // register windows and DMA frames through the port's one identity direct
+    // map, whose window the boot path sized from the discovered RAM — so a
+    // DMA frame the allocator draws from the top of a multi-gigabyte pool is
+    // reachable, not just one below the trampoline's own window.
+    let phys = &crate::x86_64::spawn_producer::SPAWN_TABLE_PHYSMAP;
 
     // Throwaway MMIO register-window map: its page-table writes land in a
     // bookkeeping arch space (never made live) and device access is through

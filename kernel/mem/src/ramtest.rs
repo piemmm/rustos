@@ -390,6 +390,22 @@ fn align_down(addr: u64, align: u64) -> u64 {
     addr & !(align - 1)
 }
 
+/// What one [`run`] of the RAM self-test proved, in bytes.
+///
+/// The two totals are reported separately because a short `verified` has two
+/// very different causes, and only one of them is a defect: RAM the direct
+/// map does not reach is a kernel that cannot address its own memory
+/// (`unreachable`), whereas the frames the walk deliberately never touches
+/// are not RAM the test was ever going to prove.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct RamTestTotals {
+    /// Bytes written and read back through the direct map.
+    pub verified: u64,
+    /// Bytes of walkable usable RAM the direct map does not cover, so they
+    /// were left untested rather than trusted.
+    pub unreachable: u64,
+}
+
 /// Test every usable region of `map`, one progress step at a time.
 ///
 /// Each [`RegionKind::Usable`] region is rounded *inward* to whole frames
@@ -398,17 +414,26 @@ fn align_down(addr: u64, align: u64) -> u64 {
 /// `on_progress` is called with the cumulative number of bytes verified so
 /// far, so the caller can advance an on-screen counter.
 ///
-/// Returns the total number of usable bytes verified on success, or the
-/// first [`RamFault`] found. A region the direct map cannot reach is left
-/// untested (and uncounted) rather than trusted — the boot continues on the
-/// RAM that *was* proven; it never fabricates a pass for memory it could not
-/// read.
-pub fn run<M, F>(map: &BootMemoryMap, physmap: &M, mut on_progress: F) -> Result<u64, RamFault>
+/// Frame zero is skipped, exactly as the frame allocator never enrols it: an
+/// identity direct map translates it to the null pointer, so a window that
+/// began there would fail to map and take the whole first chunk of low RAM
+/// down with it.
+///
+/// Returns the [`RamTestTotals`] on success, or the first [`RamFault`]
+/// found. A span the direct map cannot reach is left untested and counted in
+/// [`RamTestTotals::unreachable`] rather than trusted — the boot continues on
+/// the RAM that *was* proven; it never fabricates a pass for memory it could
+/// not read.
+pub fn run<M, F>(
+    map: &BootMemoryMap,
+    physmap: &M,
+    mut on_progress: F,
+) -> Result<RamTestTotals, RamFault>
 where
     M: PhysMap + ?Sized,
     F: FnMut(u64),
 {
-    let mut tested: u64 = 0;
+    let mut totals = RamTestTotals::default();
     for region in map.regions() {
         if region.kind != RegionKind::Usable {
             continue;
@@ -416,7 +441,7 @@ where
         let Some(region_end) = region.end() else {
             continue;
         };
-        let start = align_up(region.start.as_u64(), PAGE_SIZE as u64);
+        let start = align_up(region.start.as_u64(), PAGE_SIZE as u64).max(PAGE_SIZE as u64);
         let end = align_down(region_end.as_u64(), PAGE_SIZE as u64);
         let mut addr = start;
         while addr < end {
@@ -427,13 +452,15 @@ where
             };
             if let Some(window) = PhysWindow::new(physmap, PhysAddr::new(addr), chunk_len) {
                 test_window(&window, PhysAddr::new(addr))?;
-                tested += chunk;
-                on_progress(tested);
+                totals.verified += chunk;
+                on_progress(totals.verified);
+            } else {
+                totals.unreachable += chunk;
             }
             addr += chunk;
         }
     }
-    Ok(tested)
+    Ok(totals)
 }
 
 /// Test one caller-**owned**, frame-aligned physical window
@@ -1177,7 +1204,8 @@ mod tests {
             last = cumulative;
         })
         .expect("healthy simulated RAM passes");
-        assert_eq!(tested, len as u64);
+        assert_eq!(tested.verified, len as u64);
+        assert_eq!(tested.unreachable, 0);
         assert_eq!(last, len as u64);
         assert_eq!(steps, 1, "a sub-step region reports progress once");
 
@@ -1247,14 +1275,15 @@ mod tests {
             kind: RegionKind::Usable,
         });
         let tested = run(&map, &sim, |_| {}).expect("healthy");
-        assert_eq!(tested, PAGE_SIZE as u64);
+        assert_eq!(tested.verified, PAGE_SIZE as u64);
+        assert_eq!(tested.unreachable, 0);
     }
 
     #[test]
     fn run_leaves_an_unmappable_region_untested_rather_than_trusting_it() {
         // The simulator covers one region; a second usable region lies far
         // outside it. The reachable region is tested; the unreachable one is
-        // skipped (uncounted), never faked as a pass.
+        // reported as unreachable, never faked as a pass.
         let base = 0x30_0000u64;
         let sim = SimPhysMap::new(PhysAddr::new(base), PAGE_SIZE);
         let mut map = BootMemoryMap::new();
@@ -1269,7 +1298,29 @@ mod tests {
             kind: RegionKind::Usable,
         });
         let tested = run(&map, &sim, |_| {}).expect("reachable region passes");
-        assert_eq!(tested, PAGE_SIZE as u64);
+        assert_eq!(tested.verified, PAGE_SIZE as u64);
+        assert_eq!(
+            tested.unreachable, PAGE_SIZE as u64,
+            "RAM the direct map cannot reach is reported, not silently dropped"
+        );
+    }
+
+    #[test]
+    fn run_skips_frame_zero_so_the_first_chunk_of_low_ram_is_still_tested() {
+        // An identity map translates physical zero to the null pointer, so a
+        // window that started there would fail to map and take the whole
+        // first chunk of low RAM with it — the low region would go untested.
+        let len = 4 * PAGE_SIZE;
+        let sim = SimPhysMap::new(PhysAddr::new(0), len);
+        let mut map = BootMemoryMap::new();
+        map.push(MemoryRegion {
+            start: PhysAddr::new(0),
+            length: len as u64,
+            kind: RegionKind::Usable,
+        });
+        let tested = run(&map, &sim, |_| {}).expect("healthy");
+        assert_eq!(tested.verified, (len - PAGE_SIZE) as u64);
+        assert_eq!(tested.unreachable, 0);
     }
 
     /// Collect every fault a sweep of `ram` with `pattern` reports.

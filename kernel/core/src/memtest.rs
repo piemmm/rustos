@@ -160,6 +160,45 @@ fn emit(consoles: &[ConsoleDevice], bytes: &[u8]) {
     }
 }
 
+/// Record what the self-test actually proved.
+///
+/// The engine leaves a span the direct map does not cover untested rather
+/// than trusting it, which the on-screen counter cannot show: it settles on
+/// the machine's advertised size either way. Unreachable RAM means the
+/// kernel cannot address some of its own memory by pointer — every consumer
+/// that draws such a frame will fail closed — so it is recorded at `Warn`
+/// with both totals rather than passing silently.
+fn log_selftest(sink: &(dyn tairix_log::Sink + Sync), totals: tairix_kernel_mem::RamTestTotals) {
+    use tairix_log::{Event, Field, FieldValue, Level};
+
+    let (level, message) = if totals.unreachable == 0 {
+        (Level::Info, "ram self-test verified every usable byte")
+    } else {
+        (
+            Level::Warn,
+            "ram self-test left usable RAM untested: outside the direct map",
+        )
+    };
+    tairix_log::log(
+        sink,
+        &Event {
+            level,
+            id: crate::AuditEvent::RamSelfTest.id(),
+            message,
+            fields: &[
+                Field {
+                    key: "verified_bytes",
+                    value: FieldValue::UnsignedInt(totals.verified),
+                },
+                Field {
+                    key: "unreachable_bytes",
+                    value: FieldValue::UnsignedInt(totals.unreachable),
+                },
+            ],
+        },
+    );
+}
+
 /// Run the early-boot RAM self-test and display its progress on every boot
 /// console in `consoles`.
 ///
@@ -179,6 +218,7 @@ pub fn run<A: KernelArch>(
     map: &tairix_kernel_mem::BootMemoryMap,
     installed_bytes: u64,
     consoles: &[ConsoleDevice],
+    log_sink: &(dyn tairix_log::Sink + Sync),
 ) {
     let Some(physmap) = arch.direct_phys_map() else {
         return;
@@ -207,7 +247,8 @@ pub fn run<A: KernelArch>(
     });
 
     match outcome {
-        Ok(verified) => {
+        Ok(totals) => {
+            log_selftest(log_sink, totals);
             // Settle the line on the installed total (rounded to the nearest
             // MiB, matching the machine's advertised size) and close it. When
             // the port reported no installed figure, show the verified total
@@ -215,7 +256,7 @@ pub fn run<A: KernelArch>(
             let mib = if installed_bytes > 0 {
                 installed_bytes.saturating_add(MIB / 2) / MIB
             } else {
-                verified / MIB
+                totals.verified / MIB
             };
             emit(consoles, counter_line(mib, true).as_bytes());
         }

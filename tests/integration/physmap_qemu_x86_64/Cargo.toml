@@ -1,0 +1,31 @@
+[package]
+name = "tairix-test-physmap-qemu-x86_64"
+description = "x86_64 direct-physical-map QEMU integration test: on a guest with more RAM than the boot trampoline's own identity window, prove the boot path widens the window and the kernel reaches every usable byte through it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# The freestanding "boot with several gigabytes of RAM and prove the direct
+# map reaches all of it" integration test. It reuses the production boot
+# pipeline through `tairix-kernel`'s library half and only replaces the audit
+# sink, exactly as `tests/integration/kernel_arch_boot` does; the QEMU-exit
+# shortcut lives in this dedicated bin so feature unification under
+# `cargo build --workspace` can never leak it into a real image.
+
+[[bin]]
+name = "tairix-test-physmap-qemu-x86_64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
+tairix-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

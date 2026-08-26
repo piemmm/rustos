@@ -103,8 +103,8 @@ pub use pressure::{
 pub use ramtest::{
     run as ram_selftest, snapshot_free_regions as ram_snapshot_free_regions,
     sweep_pattern as ram_sweep_pattern, takeover_test_bytes as ram_takeover_test_bytes,
-    test_owned_window as ram_test_owned_window, RamFault, RamTestPattern, SweepObserver,
-    Word as RamTestWord, MAX_SWEEP_EXCLUDES, PROGRESS_STEP_BYTES,
+    test_owned_window as ram_test_owned_window, RamFault, RamTestPattern, RamTestTotals,
+    SweepObserver, Word as RamTestWord, MAX_SWEEP_EXCLUDES, PROGRESS_STEP_BYTES,
 };
 pub use ramzip::{
     eligibility, escalate_refusal, CompressRefusal, FaultError, Ineligible, PageCandidate,

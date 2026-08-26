@@ -24,13 +24,14 @@
 //! The runtime `spawn` syscall is issued by PID 1 `init`, so the producer runs
 //! under PID 1's own root, which [`init_spawn`](crate::x86_64::init_spawn)
 //! built with [`ArchAddressSpace::new_identity_first_gib`]: it identity-maps the
-//! low [`IDENTITY_GIB`] GiB **and** mirrors the higher-half kernel window. The
+//! discovered-RAM window ([`paging::configured_identity_gigapages`]) **and**
+//! mirrors the higher-half kernel window. The
 //! x86_64 page-table walk recovers each existing intermediate table from its
 //! **low physical address** (`paging::ensure_child`) and writes each new table
 //! through its higher-half static pointer, and the image content is written
-//! through a higher-half [`DirectPhysMap`] — all three are mapped under PID 1's
-//! active root (the child pool is a `.bss` static and the live allocator's
-//! frames are in the low identity window). So the producer builds the child's
+//! through the same identity [`ConfiguredIdentityPhysMap`] — all three are
+//! mapped under PID 1's active root, since every table and image frame comes
+//! from the live allocator inside that window. So the producer builds the child's
 //! tables *through the caller's active CR3*, never switching it, exactly as the
 //! aarch64 producer builds through its identity window. The child's own CR3 is
 //! reloaded by its `pre_resume` hook before the scheduler first resumes it
@@ -40,15 +41,15 @@
 //! its registered program declares intersected with its user's grants; this seam only authorises the *act* of spawning
 //! under `CAP_PROC_SPAWN`.
 
+use core::ptr::NonNull;
+
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 
 use tairix_abi::rxe::LoadImage;
 use tairix_abi::Errno;
 use tairix_arch_api::mmu::AddressSpace as MmuAddressSpace;
-use tairix_arch_x86_64::paging::{
-    activate_user_root, AddressSpace as ArchAddressSpace, KERNEL_VMA_BASE,
-};
+use tairix_arch_x86_64::paging::{self, activate_user_root, AddressSpace as ArchAddressSpace};
 use tairix_arch_x86_64::syscall_entry;
 use tairix_arch_x86_64::userentry::{set_user_thread_pointer, USER_MODE};
 use tairix_kernel_core::{
@@ -57,7 +58,7 @@ use tairix_kernel_core::{
     UserThreadEntry,
 };
 use tairix_kernel_mem::{
-    AddressSpace, DirectPhysMap, FrameAllocator, FrameTableSource, LiveSpace, PhysMap,
+    AddressSpace, DirectPhysMap, FrameAllocator, FrameTableSource, LiveSpace, PhysAddr, PhysMap,
     UserAddressSpace, UserStack, VirtAddr,
 };
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
@@ -71,56 +72,60 @@ use crate::stack_arena::{FrameArenaGrow, KTHREAD_STACK_ARENA};
 /// repoints (mirrors `init_spawn_x86_64::BOOT_CPU`).
 const BOOT_CPU: usize = 0;
 
-/// Span of the direct physical map the spawn build writes frame contents
-/// through: the `[0, 1 GiB)` physical window the boot trampoline mirrors at
-/// [`KERNEL_VMA_BASE`] (`boot.s` SAFETY-INVARIANT 9), the same window PID 1
-/// uses (`init_spawn_x86_64`).
-const PHYSMAP_SPAN: u64 = 1 << 30;
-
-/// Gigabytes of identity map each spawned child address space provides.
-///
-/// 4 GiB mirrors the boot trampoline's identity map and PID 1's space: it
-/// covers all of the platform's RAM (so the page-table walk's low-physical
-/// table dereferences and the live allocator's image frames resolve) and the
-/// architectural LAPIC MMIO page at ~3.98 GiB (so the scheduler's LAPIC
-/// accesses stay valid under the child's CR3 once it is resumed).
-/// [`CHILD_USER_BIAS`] (64 GiB) sits far above it, so the program's pages land
-/// on freshly walked tables rather than colliding with an identity huge page
-/// — the same window PID 1 uses.
-const IDENTITY_GIB: usize = 4;
-
 /// A spawned child's four fixed guarded-window bases (`plans/PI.md`
 /// 5d-0-ii (b′)/(c)), derived from the one shared offset set the retained
 /// [`LiveSpace`]'s window allocators are configured with.
 const WINDOWS: spawn_layout::WindowBases = spawn_layout::window_bases(CHILD_USER_BIAS);
 
-/// Identity direct map the page-table frame source translates a freshly
-/// allocated frame's physical address through to a CPU-dereferenceable
-/// pointer (`plans/WIRING.md` W5b-3).
+/// The kernel's direct physical map: the low identity window
+/// (`virtual == physical`) the boot path sized from the discovered memory
+/// map, mirroring the aarch64 and riscv64 ports.
 ///
-/// It is the **identity** map (`offset == 0`) covering the same
-/// `[0, IDENTITY_GIB GiB)` low window each child space identity-maps —
-/// distinct from [`PHYSMAP_SPAN`]'s higher-half map used to write the
-/// child's *image* contents — because the x86_64 page-table walk recovers
-/// an existing child table by dereferencing its low physical address
-/// directly (`paging::ensure_child`: `phys as *mut`, identity under the
-/// active CR3's low-4 GiB identity map), so the frame view the source
-/// hands the port must satisfy `virtual == physical`. A frame the
-/// allocator draws from outside this window fails the translate and the
-/// spawn fails closed — the same window the child's
-/// image data frames resolve under.
-static SPAWN_TABLE_PHYSMAP: DirectPhysMap = DirectPhysMap::identity((IDENTITY_GIB as u64) << 30);
+/// It has to be the **identity** map because the x86_64 page-table walk
+/// recovers an existing child table by dereferencing its physical address
+/// directly (`paging::ensure_child`), so the frame view the page-table
+/// source hands the port must satisfy `virtual == physical`. It is also the
+/// view every other kernel path that reaches a frame by pointer uses — the
+/// child image write, the shared-region zero-on-free scrub, the remap
+/// window's record store, the slab page supply — so there is one map, not a
+/// separate higher-half one that could cover different RAM.
+///
+/// The limit is re-derived from the live window on every call
+/// ([`paging::configured_identity_bytes`]) rather than frozen at a
+/// build-time gigabyte count a real machine outgrows: the fixed 1 GiB
+/// higher-half map this replaced left every frame above it unreachable
+/// while the allocator kept handing them out. A frame outside the window
+/// still fails the translate and its consumer fails closed rather than
+/// fabricating a pointer.
+pub struct ConfiguredIdentityPhysMap;
 
-/// The higher-half kernel direct map (`KERNEL_VMA_BASE + phys`, the same
-/// `[KERNEL_VMA_BASE, KERNEL_VMA_BASE + PHYSMAP_SPAN)` window the spawn path
-/// writes a child's image through) the kernel core hands the shared-memory
-/// facility to scrub region frames through (`plans/USB.md`).
+impl PhysMap for ConfiguredIdentityPhysMap {
+    fn translate(&self, phys: PhysAddr, len: usize) -> Option<NonNull<u8>> {
+        DirectPhysMap::identity(paging::configured_identity_bytes()).translate(phys, len)
+    }
+
+    fn reverse(&self, virt: usize) -> Option<PhysAddr> {
+        DirectPhysMap::identity(paging::configured_identity_bytes()).reverse(virt)
+    }
+
+    fn clean_invalidate(&self, _phys: PhysAddr, _len: usize) {
+        // Deliberate no-op: x86_64 DMA is I/O-coherent, so a device sees the
+        // kernel's cacheable writes without maintenance.
+    }
+
+    fn sync_instruction_cache(&self, _phys: PhysAddr, _len: usize) {
+        // Deliberate no-op: the x86_64 instruction cache is coherent with
+        // kernel data writes, so freshly loaded code needs no maintenance.
+    }
+}
+
+/// The single, `'static` [`ConfiguredIdentityPhysMap`] the page-table frame
+/// source borrows.
 ///
-/// Unlike [`SPAWN_TABLE_PHYSMAP`] (the low identity window used only for the
-/// page-table walk), this is the map through which the kernel reaches *any*
-/// RAM frame the allocator hands out, so it is the correct view for the
-/// region zero-on-free scrub.
-pub static SHM_PHYSMAP: DirectPhysMap = DirectPhysMap::new(KERNEL_VMA_BASE, PHYSMAP_SPAN);
+/// Also handed to the kernel core as the arch direct physical map
+/// (`plans/USB.md`): it covers the same RAM the allocator draws from, so
+/// any frame the kernel must reach by pointer is reachable.
+pub static SPAWN_TABLE_PHYSMAP: ConfiguredIdentityPhysMap = ConfiguredIdentityPhysMap;
 
 /// The single, `'static` allocator-backed page-table frame source every
 /// spawned child's PML4 hierarchy is built from.
@@ -180,7 +185,7 @@ impl ArchImageBuilder for X86_64ProcessSpawn {
             return (Box::new(BoxStack::new()), None);
         };
         crate::stack_arena::publish_reclaim_frames(pt_frames);
-        let grow = FrameArenaGrow::new(frames, (IDENTITY_GIB as u64) << 30);
+        let grow = FrameArenaGrow::new(frames, paging::configured_identity_bytes());
         match KTHREAD_STACK_ARENA.alloc(&grow, &crate::stack_arena::IdentityBlockStore) {
             Some(stack) => {
                 let guard = stack.guard_page();
@@ -208,19 +213,22 @@ impl ArchImageBuilder for X86_64ProcessSpawn {
             .ok_or_else(|| refuse_build(ctx, "page_table_allocator_unwired"))?;
         let table_frames = page_table_source(pt_frames)?;
 
-        // Build a PML4 identity-mapping the low `IDENTITY_GIB` GiB (RAM + the
+        // Build a PML4 identity-mapping the discovered-RAM window (RAM + the
         // LAPIC MMIO page) and the higher-half kernel window, and capture its
         // root *without* switching CR3: the spawning caller (PID 1) stays
         // active under its own root, so the running parent is never moved out
         // from under itself. The child's tables and image are written through
         // the caller's active root — which identity-maps the live allocator's
-        // page-table and image frames in the low window and mirrors the
-        // higher-half kernel window the page-table walk and `DirectPhysMap`
-        // use — so the build does not require the child space to be active.
+        // page-table and image frames and mirrors the higher-half kernel
+        // window — so the build does not require the child space to be
+        // active.
         // The child's own CR3 is reloaded by its `pre_resume` hook before the
         // scheduler first resumes it (`plans/SPAWN.md` SP2, `plans/PI.md` X1).
-        let mut arch = ArchAddressSpace::new_identity_first_gib(table_frames, IDENTITY_GIB)
-            .ok_or_else(|| refuse_build(ctx, "page_table_frames_exhausted"))?;
+        let mut arch = ArchAddressSpace::new_identity_first_gib(
+            table_frames,
+            paging::configured_identity_gigapages(),
+        )
+        .ok_or_else(|| refuse_build(ctx, "page_table_frames_exhausted"))?;
         let child_root_phys = arch.pml4_phys();
 
         // Re-express the loading kthread's kernel-stack guard page in the
@@ -242,7 +250,7 @@ impl ArchImageBuilder for X86_64ProcessSpawn {
         }
 
         let mut space = AddressSpace::new(arch);
-        let physmap = DirectPhysMap::new(KERNEL_VMA_BASE, PHYSMAP_SPAN);
+        let physmap = ConfiguredIdentityPhysMap;
 
         // Parse the build-time `rxe` blob against the kernel's own compiled-in
         // syscall CFI tag. A mismatch fails closed; the registry
@@ -279,9 +287,9 @@ impl ArchImageBuilder for X86_64ProcessSpawn {
         // SAFETY: building the image is itself safe; the returned `UserEntry`
         // is only entered later, once the child is dispatched and its
         // `pre_resume` hook has made `space` active (the `spawn_image`
-        // contract). The frame source draws first-GiB RAM frames from the
-        // kernel's live allocator, written through the higher-half `physmap`
-        // mapped under the caller's active root. The retained live space
+        // contract). The frame source draws RAM frames from the kernel's live
+        // allocator, written through the identity `physmap` mapped under the
+        // caller's active root. The retained live space
         // below owns the whole footprint and returns it (frames zeroed,
         // tables freed) when the task exits. A returning `Err` maps to a
         // stable errno; the cause is already audited by `spawn_image`.
@@ -348,9 +356,8 @@ impl ArchImageBuilder for X86_64ProcessSpawn {
 
         // The child's process address space (`plans/PI.md` 5d-0-ii (b′)): the
         // *same* arch space the snapshot above was frozen from, zeroing
-        // anonymous frames through a fresh higher-half [`DirectPhysMap`]
-        // identical to the one the image build used (both the low identity and
-        // the higher-half kernel window are mapped under the child's CR3). No
+        // anonymous frames through the same identity direct map the image
+        // build used (the child's CR3 carries it). No
         // `'static` allocator, or a window the allocator rejects, retains none
         // and the child's `mem_map` / `mmio_map` fail closed.
         let live: Option<Arc<ProcessSpace>> = match ctx.page_table_allocator() {
@@ -362,7 +369,7 @@ impl ArchImageBuilder for X86_64ProcessSpawn {
                 );
                 LiveSpace::new(
                     space,
-                    DirectPhysMap::new(KERNEL_VMA_BASE, PHYSMAP_SPAN),
+                    ConfiguredIdentityPhysMap,
                     static_frames,
                     VirtAddr::new(WINDOWS.mmio),
                     spawn_layout::MMIO_WINDOW_PAGES,

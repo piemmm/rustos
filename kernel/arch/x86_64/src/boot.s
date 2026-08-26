@@ -46,9 +46,12 @@
 //     guarantees that the LAPIC MMIO frame at 0xFEE00000 and the IO-APIC
 //     frame at 0xFEC00000 — both architecturally fixed by Intel — are
 //     reachable, and likewise that any ACPI table OVMF/GRUB placed in
-//     high memory below 4 GiB is reachable. Going beyond 4 GiB is not
-//     needed for the Stage-2 QEMU tests (the runner allocates 256 MiB of
-//     guest RAM and no MMIO TAIRiX uses today sits above 4 GiB).
+//     high memory below 4 GiB is reachable. This is the *floor*, not the
+//     final window: the kernel reaches every RAM frame by pointer through
+//     this map, so once the firmware memory map has been parsed the boot
+//     path widens it to the discovered RAM
+//     (`paging::widen_boot_identity`). Four gigabytes is what the
+//     trampoline can lay down before it knows how much RAM is installed.
 //  5. The long-mode GDT below has a single 64-bit code segment at
 //     selector 0x08 with L=1 (long mode) and a 64-bit data segment at
 //     selector 0x10. Both are flat (base 0, limit ignored in 64-bit).

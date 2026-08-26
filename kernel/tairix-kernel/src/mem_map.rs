@@ -22,9 +22,10 @@
 //! `riscv64::boot` consume it) and on any host `cargo test` build (where the
 //! tests below consume it), and on no other configuration, so it is never
 //! dead code. The single-window [`build_memory_map`]
-//! (aarch64) and the map-carve [`carve_guard_arena_from_map`] (x86_64 +
-//! riscv64) are each gated to the port(s) that use them; the arena-sizing
-//! policy is shared.
+//! (aarch64), the map-carve [`carve_guard_arena_from_map`] (x86_64 +
+//! riscv64), and the identity-window sizing and page-directory carve
+//! [`identity_window_gib`] / [`carve_frames_from_map`] (x86_64) are each
+//! gated to the port(s) that use them; the arena-sizing policy is shared.
 
 use tairix_kernel_mem::{BootMemoryMap, PhysAddr, RegionKind};
 // `MemoryRegion` and `PAGE_SIZE` are named only by the aarch64 single-window
@@ -423,6 +424,98 @@ pub(crate) fn region_byte_totals(map: &BootMemoryMap) -> (u64, u64) {
     (usable, reserved)
 }
 
+/// One gigabyte, the granularity the x86_64 identity window is sized in.
+#[cfg(any(all(freestanding, kernel_isa = "x86_64"), test))]
+const GIB: u64 = 1 << 30;
+
+/// Size the identity/direct-map window, in whole gigabytes, from the RAM
+/// `map` actually reports.
+///
+/// The window has to cover every frame the allocator can hand out, because
+/// the kernel reaches a frame's bytes through it — a process image write, a
+/// shared-region scrub, a page table, a slab page. It is therefore the top
+/// of the highest **usable** region rounded up to a gigabyte, never the
+/// map's highest address: a PC firmware map spans the reserved MMIO hole
+/// well past the installed RAM, and sizing from that would map gigabytes of
+/// holes.
+///
+/// `floor_gib` keeps the architectural MMIO frames the boot trampoline
+/// already covers inside the window on a machine with less RAM than that.
+/// `cap_gib` is the first gigabyte the window may not reach — the user
+/// virtual base, since the identity map shares each process root's low half
+/// with the child image. RAM above the cap is unreachable by pointer and
+/// every consumer of it fails closed.
+#[cfg(any(all(freestanding, kernel_isa = "x86_64"), test))]
+pub(crate) fn identity_window_gib(map: &BootMemoryMap, floor_gib: usize, cap_gib: usize) -> usize {
+    let top = map
+        .regions()
+        .iter()
+        .filter(|region| region.kind == RegionKind::Usable)
+        .filter_map(tairix_kernel_mem::MemoryRegion::end)
+        .fold(0u64, |acc, end| acc.max(end.as_u64()));
+    let gib = usize::try_from(top.div_ceil(GIB)).unwrap_or(cap_gib);
+    gib.clamp(floor_gib, cap_gib)
+}
+
+/// Reserve `pages` physically contiguous, page-aligned frames below
+/// `max_addr` out of `map`, returning their physical base.
+///
+/// The x86_64 identity widening needs page directories before the frame
+/// allocator exists, and they must stay out of its hands afterwards, so
+/// they are carved from the firmware map exactly as the guard arena is
+/// ([`carve_guard_arena_from_map`]) — the same reserve-then-hand-back
+/// shape, so neither can drift from the other. `max_addr` is the window
+/// the caller can still write through while it installs the wider one.
+///
+/// The run is taken from the **highest** usable placement that fits, not
+/// the lowest: a PC's first usable region is the legacy sub-640-KiB window
+/// that holds the firmware's own structures and the physical address the
+/// AP start-up trampoline is copied to, and a small run would otherwise
+/// always land there. Nothing the boot path is still reading lives at the
+/// top of usable RAM (firmware tables are `Reserved` in the map, so they
+/// are never candidates).
+///
+/// Returns `None`, having changed nothing, when no usable region can host
+/// the whole run below `max_addr` (the caller then fails the boot rather
+/// than running on a window it did not install).
+#[cfg(any(all(freestanding, kernel_isa = "x86_64"), test))]
+pub(crate) fn carve_frames_from_map(
+    map: &mut BootMemoryMap,
+    pages: usize,
+    max_addr: u64,
+) -> Option<u64> {
+    let page = tairix_kernel_mem::PAGE_SIZE as u64;
+    let bytes = (pages as u64).checked_mul(page)?;
+    if bytes == 0 {
+        return None;
+    }
+    let mut chosen: Option<u64> = None;
+    for region in map.regions() {
+        if region.kind != RegionKind::Usable {
+            continue;
+        }
+        let region_start = region.start.as_u64();
+        let Some(region_end) = region_start.checked_add(region.length) else {
+            continue;
+        };
+        let Some(start) = align_up(region_start, page) else {
+            continue;
+        };
+        // Highest page-aligned base inside this region whose whole run stays
+        // below both the region end and the writable window.
+        let ceiling = region_end.min(max_addr);
+        let Some(base) = ceiling.checked_sub(bytes).map(|top| top & !(page - 1)) else {
+            continue;
+        };
+        if base >= start && base.saturating_add(bytes) <= ceiling {
+            chosen = Some(chosen.map_or(base, |best: u64| best.max(base)));
+        }
+    }
+    let base = chosen?;
+    map.reserve_range(PhysAddr::new(base), PhysAddr::new(base + bytes));
+    Some(base)
+}
+
 /// Carve a 2 MiB-aligned kthread-stack guard arena out of an
 /// already-built firmware [`BootMemoryMap`] and reserve it.
 ///
@@ -553,8 +646,9 @@ pub(crate) fn log_guard_arena(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_memory_map, region_byte_totals, stack_arena_bytes, MemoryMapError, GUARD_ARENA_ALIGN,
-        STACK_ARENA_MAX_BYTES, STACK_ARENA_MIN_BYTES,
+        build_memory_map, carve_frames_from_map, identity_window_gib, region_byte_totals,
+        stack_arena_bytes, MemoryMapError, GUARD_ARENA_ALIGN, STACK_ARENA_MAX_BYTES,
+        STACK_ARENA_MIN_BYTES,
     };
     use tairix_kernel_mem::{RegionKind, PAGE_SIZE};
 
@@ -1110,5 +1204,87 @@ mod tests {
         assert!(carve_guard_arena_from_map(&mut map, ram, 4 << 30).is_none());
         assert_eq!(map.regions().len(), before, "map untouched on no-arena");
         assert_eq!(usable_bytes(&map), ram);
+    }
+
+    /// The shape a PC firmware map has once the guest has more RAM than the
+    /// boot trampoline's own window: the legacy low window, the main block
+    /// below the PCI hole, the reserved hole itself, and the remainder
+    /// re-based above 4 GiB.
+    fn pc_map_with_high_ram() -> BootMemoryMap {
+        let mut map = BootMemoryMap::new();
+        map.push(usable(0, 0x9_FC00));
+        map.push(usable(0x10_0000, 0xBFF0_0000 - 0x10_0000));
+        map.push(MemoryRegion {
+            start: PhysAddr::new(0xBFF0_0000),
+            length: 0x1_0000_0000 - 0xBFF0_0000,
+            kind: RegionKind::Reserved,
+        });
+        map.push(usable(0x1_0000_0000, 0x4010_0000));
+        map
+    }
+
+    #[test]
+    fn identity_window_covers_the_top_of_usable_ram() {
+        // RAM ends at 5 GiB + 1 MiB, so the window must reach the whole 6th
+        // gigabyte or the frames at the top of the pool are unreachable.
+        assert_eq!(identity_window_gib(&pc_map_with_high_ram(), 4, 64), 6);
+    }
+
+    #[test]
+    fn identity_window_ignores_reserved_regions_above_ram() {
+        // A firmware map spans its reserved MMIO hole past the installed
+        // RAM; sizing from the highest *address* would map gigabytes of it.
+        let mut map = BootMemoryMap::new();
+        map.push(usable(0, 0x2000_0000));
+        map.push(MemoryRegion {
+            start: PhysAddr::new(0xF000_0000),
+            length: 0x1000_0000,
+            kind: RegionKind::Reserved,
+        });
+        assert_eq!(identity_window_gib(&map, 4, 64), 4, "floor, not the hole");
+    }
+
+    #[test]
+    fn identity_window_clamps_to_the_user_virtual_base() {
+        // RAM above the cap shares the window's virtual range with the child
+        // image, so the window stops short of it and those frames fail closed.
+        let mut map = BootMemoryMap::new();
+        map.push(usable(0, 128u64 << 30));
+        assert_eq!(identity_window_gib(&map, 4, 64), 64);
+    }
+
+    #[test]
+    fn frame_carve_takes_the_top_of_usable_ram_below_the_bound() {
+        // Bottom-up would land in the legacy sub-640-KiB window, over the
+        // firmware structures and the AP start-up trampoline at 0x8000.
+        let mut map = pc_map_with_high_ram();
+        let before = usable_bytes(&map);
+        let base = carve_frames_from_map(&mut map, 6, 4 << 30).expect("6 frames fit");
+        assert_eq!(base, 0xBFF0_0000 - 6 * PAGE_SIZE as u64);
+        assert_eq!(base % PAGE_SIZE as u64, 0);
+        assert_eq!(usable_bytes(&map), before - 6 * PAGE_SIZE as u64);
+    }
+
+    #[test]
+    fn frame_carve_stays_below_the_writable_window() {
+        // Only RAM above the caller's window is free: the carve refuses
+        // rather than handing back frames it could not write through.
+        let mut map = BootMemoryMap::new();
+        map.push(usable(0x1_0000_0000, 0x4000_0000));
+        let before = map.regions().len();
+        assert!(carve_frames_from_map(&mut map, 4, 4 << 30).is_none());
+        assert_eq!(map.regions().len(), before, "map untouched on no carve");
+    }
+
+    #[test]
+    fn frame_carve_reserves_against_a_second_carve() {
+        // The reservation is what keeps the frame allocator — and any later
+        // carve — off the live page directories.
+        let mut map = BootMemoryMap::new();
+        map.push(usable(0, 0x10_0000));
+        let first = carve_frames_from_map(&mut map, 2, 4 << 30).expect("2 frames fit");
+        let second = carve_frames_from_map(&mut map, 2, 4 << 30).expect("2 more frames fit");
+        assert_eq!(first, 0x10_0000 - 2 * PAGE_SIZE as u64);
+        assert_eq!(second, first - 2 * PAGE_SIZE as u64);
     }
 }

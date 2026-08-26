@@ -57,6 +57,7 @@ use tairix_arch_x86_64::bootmemory;
 use tairix_arch_x86_64::gdt::PerCpuGdt;
 use tairix_arch_x86_64::irq as arch_irq;
 use tairix_arch_x86_64::kernel_arch::{halt as arch_halt, X86_64Arch, X86_64ArchStorage};
+use tairix_arch_x86_64::paging;
 use tairix_arch_x86_64::{fault, percpu, preempt, smp, syscall_entry};
 use tairix_kernel_core::boot_audit_ring::{
     boot_audit_clock, BootAuditRing, BOOT_AUDIT_RING_CAPACITY,
@@ -252,6 +253,14 @@ pub enum BootError {
     /// path fails closed. A single-CPU
     /// boot is unaffected: one TSC is self-monotonic.
     TscNotInvariant,
+    /// The identity/direct-map window could not be widened to cover the
+    /// discovered RAM — no usable run below the boot trampoline's own
+    /// window could host the page directories, or the arch widening
+    /// refused the request. Every kernel path that reaches a frame by
+    /// pointer would then fail closed above the trampoline's window while
+    /// the allocator kept handing out frames above it, so the boot refuses
+    /// rather than running on RAM it cannot reach.
+    IdentityWindowWiden,
 }
 
 impl BootError {
@@ -282,6 +291,7 @@ impl BootError {
             Self::IrqProgramPin => "irq_program_pin_failed",
             Self::UserFaultResolverInstall => "user_fault_resolver_install_failed",
             Self::TscNotInvariant => "tsc_not_invariant",
+            Self::IdentityWindowWiden => "identity_window_widen_failed",
         }
     }
 }
@@ -316,13 +326,28 @@ const KERNEL_BOOT_TSC_INVARIANCE: EventId = EventId(4098);
 /// may not be renumbered.
 const KERNEL_BOOT_GUARD_ARENA: EventId = EventId(4097);
 
-/// Upper bound (exclusive) for the kthread-stack guard arena: the low
-/// identity window the x86_64 spawn seams (`init_spawn_x86_64`,
-/// `spawn_producer_x86_64`) build each task's root with (their
-/// `IDENTITY_GIB` = 4 GiB). A stack outside it could not be reached — nor
-/// its guard page faulted — under the task's own `CR3`, so
-/// the arena carve refuses to place the arena there.
-const KTHREAD_ARENA_IDENTITY_LIMIT: u64 = 4 << 30;
+/// Security-relevant boot decision: how wide the identity/direct-map
+/// window the kernel reaches every RAM frame through ended up, and whether
+/// the part's 1 GiB pages backed it. Logged on every boot so a machine
+/// whose RAM outruns the window is visible in the record rather than
+/// discovered as a fail-closed allocation later. Sits in the
+/// `kernel/core`-owned `4000..5000` range, just below
+/// [`KERNEL_BOOT_GUARD_ARENA`]; the id is part of the audit contract and
+/// may not be renumbered.
+pub const KERNEL_BOOT_IDENTITY_WINDOW: EventId = EventId(4096);
+
+/// First gigabyte the identity/direct-map window may not reach: the user
+/// virtual base every child image is mapped at. The window shares each
+/// process root's low half with that image, so it stops short of it.
+const IDENTITY_WINDOW_CAP_GIB: usize = (crate::spawn_layout::CHILD_USER_BIAS >> 30) as usize;
+
+/// A cap that reached the image bias would map RAM over the child's own
+/// pages. Pin it at build time rather than discovering the overlap as a
+/// corrupted image.
+const _: () = assert!(
+    (IDENTITY_WINDOW_CAP_GIB as u64) << 30 <= crate::spawn_layout::CHILD_USER_BIAS,
+    "the identity window must stop at or below the user image bias"
+);
 
 // --- Retained boot audit log ----------------------------------------
 
@@ -607,6 +632,25 @@ pub fn bring_up_bsp(
 
     let (mut memory_map, installed_memory_bytes) = build_memory_map(&boot_data)?;
 
+    // Widen the identity/direct-map window to the RAM the firmware map
+    // reports, before anything reaches a frame through it. The trampoline
+    // maps a fixed window sized for the architectural MMIO frames and the
+    // firmware tables, not for the installed RAM; the allocator draws from
+    // the top of its pool downward, so on a machine with more RAM than that
+    // the very first frame handed out would be unreachable by pointer and
+    // every consumer of it — the process-image write, the shared-region
+    // scrub, a page table, a slab page — would fail closed while gigabytes
+    // sat free. The page directories the widening needs are carved out of
+    // the map first (and only where the part has no 1 GiB pages, which need
+    // none), so the allocator never hands them out.
+    let identity_gib = crate::mem_map::identity_window_gib(
+        &memory_map,
+        paging::BOOT_IDENTITY_GIB,
+        IDENTITY_WINDOW_CAP_GIB,
+    );
+    widen_identity_window(&mut memory_map, identity_gib)?;
+    log_identity_window(log_sink, paging::configured_identity_gigapages());
+
     // Carve a 2 MiB-aligned kthread-stack guard arena out of the firmware
     // map and install it so the PID 1 spawn seam (`init_spawn_x86_64`) can
     // draw `init`'s kernel stack from it and unmap that stack's guard page
@@ -630,8 +674,11 @@ pub fn bring_up_bsp(
         .iter()
         .filter(|region| region.kind == RegionKind::Usable)
         .fold(0u64, |acc, region| acc.saturating_add(region.length));
-    let guard_arena =
-        carve_guard_arena_from_map(&mut memory_map, ram_bytes, KTHREAD_ARENA_IDENTITY_LIMIT);
+    let guard_arena = carve_guard_arena_from_map(
+        &mut memory_map,
+        ram_bytes,
+        paging::configured_identity_bytes(),
+    );
     if let Some(arena) = guard_arena {
         KTHREAD_STACK_ARENA.install(arena.base, arena.len, &IdentityBlockStore);
     }
@@ -1073,8 +1120,8 @@ unsafe fn seed_virtio_pci(
 
 /// Build a memory-mapped ECAM configuration-space bus from the firmware
 /// `MCFG`, or `None` when the firmware advertises no MMCONFIG region or its
-/// window does not lie wholly within the boot trampoline's identity map
-/// (fail closed — the caller then falls back to mechanism #1).
+/// window does not lie wholly within the live identity map (fail closed —
+/// the caller then falls back to mechanism #1).
 ///
 /// # Safety
 ///
@@ -1089,11 +1136,6 @@ unsafe fn ecam_bus(
 > {
     use tairix_abi::RegisterWindow;
 
-    /// Upper bound of the boot trampoline's identity map: an ECAM window
-    /// must lie wholly below this to be reachable through an identity
-    /// [`RegisterWindow`] (`boot.s` SAFETY-INVARIANT 4).
-    const IDENTITY_LIMIT: u64 = 4u64 << 30;
-
     // SAFETY: forwarded — `rsdp` is identity-mapped per the caller.
     let mcfg_bytes = unsafe { acpi::locate_mcfg(rsdp) }?;
     let ecam = acpi::mcfg_first_ecam(mcfg_bytes)?;
@@ -1101,7 +1143,7 @@ unsafe fn ecam_bus(
     // `RegisterWindow` over it would touch unmapped memory (fail closed).
     let window_len = ecam.window_len();
     let end = ecam.base.checked_add(window_len)?;
-    if ecam.base == 0 || end > IDENTITY_LIMIT {
+    if ecam.base == 0 || end > paging::configured_identity_bytes() {
         return None;
     }
     let len = usize::try_from(window_len).ok()?;
@@ -1109,7 +1151,7 @@ unsafe fn ecam_bus(
     let ptr = core::ptr::NonNull::new(addr as *mut u8)?;
     // SAFETY: `ecam.base .. ecam.base + len` is the firmware-described ECAM
     // configuration window (`mcfg_first_ecam`), proven above to lie wholly
-    // within the 0..4 GiB identity map, so `ptr` is a valid, uniquely-owned
+    // within the live identity map, so `ptr` is a valid, uniquely-owned
     // pointer to `len` bytes for the kernel's lifetime. Config space is only
     // ever accessed through the bounded `RegisterWindow` accessors this
     // window backs; nothing else aliases it during single-CPU bring-up.
@@ -1123,12 +1165,6 @@ unsafe fn ecam_bus(
 /// bound [`tairix_abi::IrqHandle`] covers the whole device — the same entry
 /// the in-kernel root-block bring-up uses.
 const MSIX_PROBE_ENTRY: u16 = 0;
-
-/// Upper bound (exclusive) of the boot trampoline's identity map. The MSI-X
-/// table BAR the enumerator programs is reached through
-/// [`DirectPhysMap::identity`] over `[0, 4 GiB)` — the same window `boot.s`
-/// identity-maps — so `SeaBIOS`'s low BAR assignment stays addressable.
-const MSI_PROBE_IDENTITY_LIMIT: u64 = 4u64 << 30;
 
 /// Bookkeeping virtual base of the throwaway MSI-X-routing register-window
 /// map. Its page-table writes land in an arch space that is never made live;
@@ -1202,7 +1238,7 @@ where
     // the identity physical map; if that context cannot be built the
     // interrupt-driven functions are left undiscovered rather than granted a
     // line that never delivers (fail closed).
-    let phys = DirectPhysMap::identity(MSI_PROBE_IDENTITY_LIMIT);
+    let phys = DirectPhysMap::identity(paging::configured_identity_bytes());
     let Some(mmio_space) = ArchAddressSpace::new_identity_first_32mib(&MSI_PROBE_PT_POOL) else {
         return;
     };
@@ -1299,6 +1335,68 @@ fn make_bsp_lapic() -> Lapic<VolatileLapicMmio> {
     // write happens here.
     let mmio = unsafe { VolatileLapicMmio::new(preempt::LAPIC_BASE_PHYS as *mut u32) };
     Lapic::new(mmio)
+}
+
+/// Widen the identity/direct-map window to `gib` gigabytes, reserving the
+/// page directories it needs out of `map` first.
+///
+/// A window that already covers `gib` (the common case on a machine whose
+/// RAM fits the boot trampoline's own window) is left alone. Otherwise the
+/// directories are carved below the *pre-widening* window, because that is
+/// what the widening can still write through, and reserved so the frame
+/// allocator never hands them out from under the live page tables.
+fn widen_identity_window(map: &mut BootMemoryMap, gib: usize) -> Result<(), BootError> {
+    if gib <= paging::BOOT_IDENTITY_GIB {
+        return Ok(());
+    }
+    let directories = match paging::identity_directory_frames(gib) {
+        0 => 0,
+        pages => crate::mem_map::carve_frames_from_map(
+            map,
+            pages,
+            (paging::BOOT_IDENTITY_GIB as u64) << 30,
+        )
+        .ok_or(BootError::IdentityWindowWiden)?,
+    };
+    // SAFETY: this runs on the BSP before any secondary is brought up and
+    // before the frame allocator exists, so no other CPU walks the low
+    // PDPT and nothing else owns `directories` — the carve above reserved
+    // those page-aligned frames out of the map for this use alone.
+    if unsafe { paging::widen_boot_identity(gib, directories) } {
+        Ok(())
+    } else {
+        Err(BootError::IdentityWindowWiden)
+    }
+}
+
+/// Record how wide the identity/direct-map window ended up, so a machine
+/// whose RAM outruns it is visible in the boot record rather than found
+/// later as a fail-closed allocation.
+fn log_identity_window(sink: &(dyn tairix_log::Sink + Sync), gib: usize) {
+    use tairix_log::{Event, Field, FieldValue, Level};
+
+    tairix_log::log(
+        sink,
+        &Event {
+            level: Level::Info,
+            id: KERNEL_BOOT_IDENTITY_WINDOW,
+            message: "identity/direct-map window sized from the discovered map",
+            fields: &[
+                Field {
+                    key: "gigabytes",
+                    value: FieldValue::UnsignedInt(gib as u64),
+                },
+                Field {
+                    key: "gigapages",
+                    value: FieldValue::Str(if paging::gigapages_supported() {
+                        "true"
+                    } else {
+                        "false"
+                    }),
+                },
+            ],
+        },
+    );
 }
 
 /// Build the canonical memory map from the firmware description, returning
