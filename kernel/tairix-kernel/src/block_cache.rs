@@ -34,7 +34,8 @@
 //! pressure and drained to zero from moderate on, before anonymous
 //! pages are handed to `ramzip` (`plans/SWAPSWAPSWAP.md` section 6).
 //! Growth is admitted only at normal pressure and never into the
-//! reserve ([`MemoryPressure::growth_permitted`]). Inserts over the
+//! reserve ([`tairix_reclaim::PressureGauge::growth_permitted`]). Inserts
+//! over the
 //! hard limit first evict least-recently-used blocks down to the low
 //! watermark (hysteresis).
 //!
@@ -78,8 +79,8 @@ use tairix_kernel_core::{CacheClass, CacheControl, CACHE_CONTROL};
 use tairix_log::Sink;
 use tairix_reclaim::{
     log_cache_poisoned, log_cache_refused, shrink_target, CacheAccounting, CacheBudget,
-    CacheCandidate, CacheLedger, CachePolicy, InvalidationSource, MemoryPressure, RebuildCost,
-    ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity,
+    CacheCandidate, CacheLedger, CachePolicy, GrowthAllowance, InvalidationSource, MemoryPressure,
+    RebuildCost, ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity,
 };
 use zeroize::Zeroize;
 
@@ -416,9 +417,16 @@ impl<B: Block> BlockCache<B> {
     /// (`plans/SMARTRAM.md` section 7): shrunk to the low watermark at
     /// mild pressure, drained to zero from moderate on. Every evicted
     /// buffer is wiped on the way out.
-    fn enforce_pressure(&mut self) {
+    ///
+    /// Returns the allowance the same reading yields, which the
+    /// operation then admits its whole run of blocks against. One
+    /// reading per *request* is the point: the gauge measures the
+    /// physical frame allocator, so re-reading it per device block took
+    /// the global frame-allocator lock a hundred-odd times to answer a
+    /// question that cannot change inside one request.
+    fn enforce_pressure(&mut self) -> GrowthAllowance {
         if self.poisoned {
-            return;
+            return GrowthAllowance::refused();
         }
         // The operator disabled the block cache (`cache.block` or the
         // master `cache.all` off): drop (wiping) everything and admit
@@ -428,15 +436,16 @@ impl<B: Block> BlockCache<B> {
             if self.accounting.total_bytes() > 0 {
                 self.drop_all();
             }
-            return;
+            return GrowthAllowance::refused();
         }
-        let band = self.pressure.sample();
-        let target = shrink_target(band, ReclaimClass::CleanFileData, self.budget);
+        let allowance = self.pressure.growth_allowance();
+        let target = shrink_target(allowance.band(), ReclaimClass::CleanFileData, self.budget);
         if self.accounting.total_bytes() > target {
             self.accounting
                 .record_pressure_shrink(ReclaimClass::CleanFileData);
             self.evict_until(target);
         }
+        allowance
     }
 
     /// Serve `blocks` device blocks starting at `lba` into `buf` from
@@ -469,14 +478,15 @@ impl<B: Block> BlockCache<B> {
     }
 
     /// Retain the just-read `buf` per block, replacing stale copies and
-    /// admitting new blocks under the budget and pressure gates. Stops
-    /// at the first refused admission: one refusal means the next
-    /// insert faces the same gate.
-    fn populate(&mut self, lba: u64, blocks: u64, buf: &[u8]) {
-        if !self.control.admits(CacheClass::Block) {
-            self.accounting.record_refusal(ReclaimClass::CleanFileData);
-            return;
-        }
+    /// admitting new blocks under the budget and the request's
+    /// `allowance`. Stops at the first refused admission: one refusal
+    /// means the next insert faces the same gate.
+    ///
+    /// `allowance` is the one pressure reading the request took
+    /// ([`Self::enforce_pressure`]); each admitted block draws its cost
+    /// down from it, so the reserve floor bounds the whole run rather
+    /// than each block against a reading that never moves.
+    fn populate(&mut self, lba: u64, blocks: u64, buf: &[u8], allowance: &mut GrowthAllowance) {
         let bs = self.block_size();
         let (payload, metadata) = self.cost_of();
         let cost = payload.saturating_add(metadata);
@@ -494,7 +504,7 @@ impl<B: Block> BlockCache<B> {
                 entry.data.copy_from_slice(bytes);
                 continue;
             }
-            if cost > self.budget.hard() || !self.pressure.growth_permitted(cost) {
+            if cost > self.budget.hard() || !allowance.take(cost) {
                 self.accounting.record_refusal(ReclaimClass::CleanFileData);
                 return;
             }
@@ -574,8 +584,15 @@ impl<B: Block> BlockCache<B> {
     /// A wrong guess (random access, or a stream that ends early)
     /// over-reads at most one bounded, budget-gated window and never
     /// changes a result.
-    fn plan_readahead(&mut self, lba: u64, blocks: u64, sequential: bool) -> u64 {
-        if blocks > READAHEAD_TRIGGER_BLOCKS || !sequential {
+    ///
+    /// `admissible` is whether the prefetched blocks could actually be
+    /// retained. The whole value of speculating is that the *next* read
+    /// is served from RAM, so when nothing can be admitted — an
+    /// operator-disabled or poisoned cache, or any pressure band above
+    /// normal — the over-read is discarded as fast as it arrives and
+    /// there is nothing to win.
+    fn plan_readahead(&mut self, lba: u64, blocks: u64, sequential: bool, admissible: bool) -> u64 {
+        if blocks > READAHEAD_TRIGGER_BLOCKS || !sequential || !admissible {
             self.readahead_window = 0;
             return blocks;
         }
@@ -603,7 +620,7 @@ impl<B: Block> BlockCache<B> {
         buf: &mut [u8],
         forward: impl Fn(&mut B, u64, &mut [u8]) -> Result<(), DriverError>,
     ) -> Result<(), DriverError> {
-        self.enforce_pressure();
+        let mut allowance = self.enforce_pressure();
         let Some(blocks) = self.cacheable_span(lba, buf.len()) else {
             // A bypassed (uncacheable or bulk) read breaks the tracked
             // sequential run; the next small read starts cold.
@@ -624,7 +641,9 @@ impl<B: Block> BlockCache<B> {
             return forward(&mut self.device, lba, buf);
         }
         self.accounting.record_miss(ReclaimClass::CleanFileData);
-        let prefetch = self.plan_readahead(lba, blocks, sequential);
+        let (payload, metadata) = self.cost_of();
+        let admissible = allowance.permits(payload.saturating_add(metadata));
+        let prefetch = self.plan_readahead(lba, blocks, sequential, admissible);
         let want_bytes = usize::try_from(prefetch)
             .unwrap_or(0)
             .saturating_mul(self.block_size());
@@ -641,7 +660,7 @@ impl<B: Block> BlockCache<B> {
                 scratch.resize(want_bytes, 0);
                 if forward(&mut self.device, lba, &mut scratch).is_ok() {
                     buf.copy_from_slice(&scratch[..buf.len()]);
-                    self.populate(lba, prefetch, &scratch);
+                    self.populate(lba, prefetch, &scratch, &mut allowance);
                     Self::wipe(&mut scratch);
                     return Ok(());
                 }
@@ -656,7 +675,7 @@ impl<B: Block> BlockCache<B> {
             // speculative buffer).
         }
         forward(&mut self.device, lba, buf)?;
-        self.populate(lba, blocks, buf);
+        self.populate(lba, blocks, buf, &mut allowance);
         Ok(())
     }
 
@@ -671,6 +690,9 @@ impl<B: Block> BlockCache<B> {
         buf: &[u8],
         forward: impl FnOnce(&mut B, u64, &[u8]) -> Result<(), DriverError>,
     ) -> Result<(), DriverError> {
+        // A write admits nothing new (it refreshes retained copies in
+        // place), so the reading is taken for its forced-shrink side
+        // effect alone and the allowance it yields is not drawn on.
         self.enforce_pressure();
         let result = forward(&mut self.device, lba, buf);
         if let Some(blocks) = self.cacheable_span(lba, buf.len()) {

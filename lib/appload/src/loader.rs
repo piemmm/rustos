@@ -133,6 +133,7 @@ impl<'a> AppLoader<'a> {
         let contents = self
             .timed(&mut load_ns, || self.cfg.store.contents(bundle))
             .map_err(|e| self.store_error(bundle, e))?;
+        let read_bytes = contents.read_bytes;
         if ct_ne(&contents.content_hash, &header.content_hash) {
             self.audit(
                 events::APP_CONTENT_MISMATCH,
@@ -157,7 +158,7 @@ impl<'a> AppLoader<'a> {
         // content-hash, and entry-point verification) is the verify cost.
         let total_ns = self.cfg.clock.now_ns().saturating_sub(start_ns);
         let verify_ns = total_ns.saturating_sub(load_ns);
-        self.audit_loaded(bundle, header.bundle_name(), load_ns, verify_ns);
+        self.audit_loaded(bundle, header.bundle_name(), load_ns, verify_ns, read_bytes);
         Ok(LoadedApp::new(
             BundleIdentity {
                 id: header.bundle_id().into(),
@@ -415,7 +416,18 @@ impl<'a> AppLoader<'a> {
     /// carrying how long the load-from-store and verification phases took so
     /// a slow first launch (a large bundle read off disk, or an expensive
     /// signature/content-hash check) is diagnosable from the audit log.
-    fn audit_loaded(&self, bundle: &str, name: &str, load_ns: u64, verify_ns: u64) {
+    ///
+    /// `read_bytes` is what the load span moved, so the record states a
+    /// throughput rather than a bare duration — a slow store and a large
+    /// bundle look identical without it.
+    fn audit_loaded(
+        &self,
+        bundle: &str,
+        name: &str,
+        load_ns: u64,
+        verify_ns: u64,
+        read_bytes: usize,
+    ) {
         log(
             self.cfg.sink,
             &Event {
@@ -438,6 +450,10 @@ impl<'a> AppLoader<'a> {
                     Field {
                         key: "verify",
                         value: tairix_log::FieldValue::Duration(Duration64::from_nanos(verify_ns)),
+                    },
+                    Field {
+                        key: "read_bytes",
+                        value: tairix_log::FieldValue::UnsignedInt(read_bytes as u64),
                     },
                 ],
             },
@@ -681,6 +697,7 @@ mod tests {
             self.contents_calls.set(self.contents_calls.get() + 1);
             Ok(BundleContents {
                 content_hash: self.content,
+                read_bytes: self.run.len(),
                 run_image: self.run.clone(),
             })
         }
@@ -704,12 +721,16 @@ mod tests {
         /// The `(load, verify)` durations carried by the last `APP_LOADED`
         /// record, so a test can assert both phases were timed and emitted.
         loaded_phases: RefCell<Option<(tairix_abi::Duration64, tairix_abi::Duration64)>>,
+        /// The `read_bytes` the last `APP_LOADED` record carried — the load
+        /// span's denominator.
+        loaded_bytes: RefCell<Option<u64>>,
     }
     impl RecordingSink {
         fn new() -> Self {
             Self {
                 events: RefCell::new(Vec::new()),
                 loaded_phases: RefCell::new(None),
+                loaded_bytes: RefCell::new(None),
             }
         }
         fn count(&self, id: EventId) -> usize {
@@ -729,6 +750,11 @@ mod tests {
                 if let (Some(load), Some(verify)) = (phase("load"), phase("verify")) {
                     *self.loaded_phases.borrow_mut() = Some((load, verify));
                 }
+                *self.loaded_bytes.borrow_mut() =
+                    event.fields.iter().find_map(|f| match (f.key, f.value) {
+                        ("read_bytes", tairix_log::FieldValue::UnsignedInt(n)) => Some(n),
+                        _ => None,
+                    });
             }
         }
     }
@@ -1223,6 +1249,13 @@ mod tests {
         assert!(
             verify > tairix_abi::Duration64::ZERO,
             "verification time must be recorded"
+        );
+        // The span's denominator travels with it: a bare duration cannot
+        // tell a slow store from a large bundle.
+        assert_eq!(
+            *sink.loaded_bytes.borrow(),
+            Some(store.run.len() as u64),
+            "APP_LOADED carries the bytes the load span moved"
         );
     }
 

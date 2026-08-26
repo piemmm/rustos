@@ -69,6 +69,6 @@ pub use model::{
     Sensitivity,
 };
 pub use pressure::{
-    shrink_target, BandObserver, FreeMemorySource, MemoryPressure, PressureBand, PressureGauge,
-    PressureThresholds, ReportedPressure, RESERVE_DIVISOR,
+    shrink_target, BandObserver, FreeMemorySource, GrowthAllowance, MemoryPressure, PressureBand,
+    PressureGauge, PressureThresholds, ReportedPressure, RESERVE_DIVISOR,
 };

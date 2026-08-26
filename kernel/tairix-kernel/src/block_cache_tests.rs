@@ -19,13 +19,26 @@ use tairix_reclaim::{FreeMemorySource, PressureBand};
 /// on readable byte counts.
 const TEST_TOTAL: usize = 1 << 30;
 
-/// A controllable memory reading backing a test pressure gauge.
+/// A controllable memory reading backing a test pressure gauge, counting
+/// how often it was read: in production this reading is the physical
+/// frame allocator's free-frame count, so every read takes the global
+/// frame-allocator lock and the *count per request* is the cost the
+/// cache is held to.
 struct TestSource {
     free: AtomicUsize,
+    readings: AtomicUsize,
+}
+
+impl TestSource {
+    /// How often the gauge has read this source.
+    fn readings(&self) -> usize {
+        self.readings.load(Ordering::Relaxed)
+    }
 }
 
 impl FreeMemorySource for TestSource {
     fn free_bytes(&self) -> usize {
+        self.readings.fetch_add(1, Ordering::Relaxed);
         self.free.load(Ordering::Relaxed)
     }
 
@@ -38,6 +51,7 @@ impl FreeMemorySource for TestSource {
 fn pressured(free: usize) -> (&'static TestSource, &'static MemoryPressure) {
     let source: &'static TestSource = Box::leak(Box::new(TestSource {
         free: AtomicUsize::new(free),
+        readings: AtomicUsize::new(0),
     }));
     (source, Box::leak(Box::new(MemoryPressure::over(source))))
 }
@@ -82,6 +96,9 @@ const COST: usize = BS as usize + ENTRY_OVERHEAD;
 struct Store {
     data: Vec<u8>,
     reads: u64,
+    /// Bytes the device was asked for, so a test can tell a wider
+    /// speculative read from the same *number* of narrower ones.
+    bytes_read: usize,
     writes: u64,
     flushes: u64,
     discards: Vec<(u64, u64)>,
@@ -102,6 +119,7 @@ impl MemDisk {
                 .map(|i| u8::try_from(i % 251).expect("bounded by the modulus"))
                 .collect(),
             reads: 0,
+            bytes_read: 0,
             writes: 0,
             flushes: 0,
             discards: Vec::new(),
@@ -144,6 +162,7 @@ impl Block for MemDisk {
         let start = self.span(lba, buf.len())?;
         let mut store = self.store.borrow_mut();
         store.reads += 1;
+        store.bytes_read += buf.len();
         buf.copy_from_slice(&store.data[start..start + buf.len()]);
         Ok(())
     }
@@ -435,6 +454,82 @@ fn a_wide_read_the_budget_holds_is_retained_and_repeats_from_the_cache() {
         "the repeated run never reached the device"
     );
     assert_eq!(again, run, "and answered exactly the same bytes");
+}
+
+#[test]
+fn one_request_takes_one_pressure_reading_however_many_blocks_it_retains() {
+    // The regression: `populate` asked the gauge per *device block*, and
+    // the gauge's reading is the physical frame allocator's free-frame
+    // count — so a 128-block coalesced read took the global
+    // frame-allocator lock 257 times (one per `enforce_pressure`, two per
+    // block for the band and the reserve test) to answer a question that
+    // cannot change inside one request. One reading per request, drawn
+    // down per block, is both cheaper and the stricter bound.
+    let (source, pressure) = pressured(TEST_TOTAL / 2);
+    let (store, disk) = MemDisk::with_geometry(BS, 256);
+    let mut cache =
+        BlockCache::new(disk, roomy_budget(), pressure, sink()).expect("geometry queried");
+
+    let blocks = 128;
+    let before = source.readings();
+    let mut run = vec![0u8; blocks * BS as usize];
+    cache.read_blocks(0, &mut run).unwrap();
+    assert_eq!(store.borrow().reads, 1, "one device request for the run");
+    assert_eq!(
+        cache.accounting().total_bytes(),
+        blocks * COST,
+        "every block of the run is retained"
+    );
+    assert_eq!(
+        source.readings() - before,
+        1,
+        "the whole run is admitted from one gauge reading"
+    );
+
+    // A hit costs the same one reading, and a write — which admits
+    // nothing — costs one too.
+    let hit = source.readings();
+    cache.read_blocks(0, &mut run).unwrap();
+    assert_eq!(source.readings() - hit, 1, "a served hit reads once");
+    let write = source.readings();
+    cache.write_blocks(0, &run).unwrap();
+    assert_eq!(source.readings() - write, 1, "a write reads once");
+}
+
+#[test]
+fn a_cache_that_can_retain_nothing_does_not_speculate() {
+    // Readahead exists so the *next* read comes from RAM. With nothing
+    // admissible — here the operator has switched the block class off — the
+    // prefetched blocks are discarded as fast as they arrive, so the wider
+    // device read is pure waste and must not be issued.
+    let control: &'static CacheControl = Box::leak(Box::new(CacheControl::new()));
+    let (store, disk) = MemDisk::with_geometry(BS, 256);
+    let mut cache = BlockCache::new(disk, roomy_budget(), unpressured(), sink())
+        .expect("geometry queried")
+        .with_cache_control(control);
+
+    // Enabled: a sequential pair of single-block reads opens a window, so
+    // the second read fetches more than the one block it was asked for.
+    let mut one = block_of(0);
+    cache.read_blocks(0, &mut one).unwrap();
+    cache.read_blocks(1, &mut one).unwrap();
+    let admitted = cache.accounting().total_bytes();
+    assert!(
+        admitted > 2 * COST,
+        "the sequential second read prefetched a window"
+    );
+
+    // Off: the same sequential pattern must read exactly what was asked.
+    control.set(CacheClass::Block, tairix_kernel_core::CacheMode::Off);
+    let before = store.borrow().bytes_read;
+    cache.read_blocks(10, &mut one).unwrap();
+    cache.read_blocks(11, &mut one).unwrap();
+    assert_eq!(
+        store.borrow().bytes_read - before,
+        2 * BS as usize,
+        "a cache that retains nothing reads exactly the requested blocks"
+    );
+    assert_eq!(cache.accounting().total_bytes(), 0);
 }
 
 #[test]
@@ -857,6 +952,7 @@ fn readahead_falls_back_to_the_exact_span_when_the_coalesced_read_faults() {
     let store = Rc::new(RefCell::new(Store {
         data: (0..len).map(|i| u8::try_from(i % 251).unwrap()).collect(),
         reads: 0,
+        bytes_read: 0,
         writes: 0,
         flushes: 0,
         discards: Vec::new(),

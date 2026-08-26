@@ -36,7 +36,8 @@
 //! is not a reclaimable cache: nothing may shrink it behind its owner's
 //! back. It is instead bounded by the same documented heap fraction the
 //! bounded caches use ([`CacheBudget`]) and gated per growth by the
-//! system pressure gauge ([`MemoryPressure::growth_permitted`]). When the
+//! system pressure gauge
+//! ([`tairix_reclaim::PressureGauge::growth_permitted`]). When the
 //! budget or the gauge refuses growth the journal degrades honestly: it
 //! wipes and drops what it held and reports itself
 //! [lost](RetainedWrites::is_lost) — the surprise-removal path then says
@@ -60,7 +61,7 @@ use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, DiscardCapability};
 use tairix_abi::driver::BufferClass;
 use tairix_abi::DriverError;
-use tairix_reclaim::{CacheBudget, MemoryPressure};
+use tairix_reclaim::{CacheBudget, GrowthAllowance, MemoryPressure};
 use tairix_sync::SpinLock;
 use zeroize::Zeroize;
 
@@ -286,10 +287,20 @@ impl RetainedWrites {
     /// pressure gauge refuses, abandons retention ([`Self::mark_lost`])
     /// rather than evicting: the journal is the only copy, so partial
     /// retention would be a lie.
+    ///
+    /// The gauge is read **at most once** for the whole write and each
+    /// retained block draws its cost down from that one allowance: the
+    /// reading is the physical frame allocator, so re-asking per block took
+    /// the global frame-allocator lock once per 4 KiB of every write, and
+    /// answered from a free figure that does not move as blocks are
+    /// retained — so the reserve bounded each block instead of the run. A
+    /// write that refreshes only blocks already held admits nothing and so
+    /// takes no reading at all.
     fn record(&mut self, lba: u64, data: &[u8], pressure: &MemoryPressure) {
         if self.lost || self.block_size == 0 {
             return;
         }
+        let mut allowance: Option<GrowthAllowance> = None;
         let cost = self.block_size + ENTRY_OVERHEAD;
         let mut at = 0usize;
         let mut block = lba;
@@ -301,7 +312,9 @@ impl RetainedWrites {
                 entry.copy_from_slice(bytes);
             } else {
                 if self.bytes.saturating_add(cost) > self.budget.hard()
-                    || !pressure.growth_permitted(cost)
+                    || !allowance
+                        .get_or_insert_with(|| pressure.growth_allowance())
+                        .take(cost)
                 {
                     self.mark_lost();
                     return;
@@ -574,6 +587,27 @@ mod tests {
     }
     static AMPLE: AmpleSource = AmpleSource;
 
+    /// An ample source that counts how often it was read. In production
+    /// that reading is the physical frame allocator, so each one takes
+    /// the global frame-allocator lock and the count per write is the
+    /// cost the journal is held to.
+    struct CountingSource {
+        readings: core::sync::atomic::AtomicUsize,
+    }
+    impl FreeMemorySource for CountingSource {
+        fn free_bytes(&self) -> usize {
+            self.readings
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            1 << 30
+        }
+        fn total_bytes(&self) -> usize {
+            1 << 30
+        }
+    }
+    static COUNTING: CountingSource = CountingSource {
+        readings: core::sync::atomic::AtomicUsize::new(0),
+    };
+
     /// A memory source under critical pressure: no free bytes to speak of.
     struct StarvedSource;
     impl FreeMemorySource for StarvedSource {
@@ -787,6 +821,68 @@ mod tests {
         device.device.fail_flush = true;
         device.write_blocks(0, &[1u8; BLOCK_SIZE as usize]).unwrap();
         assert!(journal.lock().is_lost());
+    }
+
+    #[test]
+    fn one_write_takes_one_pressure_reading_however_many_blocks_it_retains() {
+        // The regression: `record` asked the gauge per *device block* of
+        // every write, and that reading is the physical frame allocator's
+        // free-frame count — so a 16-block write took the global
+        // frame-allocator lock 32 times to answer a question that cannot
+        // change inside one write. One reading per write, drawn down per
+        // block, is both cheaper and the stricter bound.
+        let journal = Arc::new(SpinLock::new(RetainedWrites::new(
+            BLOCK_SIZE,
+            small_budget(),
+        )));
+        let pressure: &'static MemoryPressure =
+            Box::leak(Box::new(MemoryPressure::over(&COUNTING)));
+        let mut device =
+            JournaledBlock::new(RamFlushBlock::new(64), Arc::clone(&journal), pressure);
+        // The device refuses the opportunistic watermark flush, so the
+        // whole write stays retained and its per-block admissions are
+        // what the reading count is measured over.
+        device.device.fail_flush = true;
+        let blocks = 16usize;
+        let before = COUNTING
+            .readings
+            .load(core::sync::atomic::Ordering::Relaxed);
+        device
+            .write_blocks(0, &vec![5u8; blocks * BLOCK_SIZE as usize])
+            .unwrap();
+        let after = COUNTING
+            .readings
+            .load(core::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            after - before,
+            1,
+            "the whole write is retained from one gauge reading"
+        );
+        {
+            let held = journal.lock();
+            assert!(!held.is_lost());
+            assert_eq!(
+                held.retained_bytes(),
+                u64::from(BLOCK_SIZE) * blocks as u64,
+                "every block of the write is retained"
+            );
+        }
+
+        // Rewriting the same blocks admits nothing, so it takes no reading at
+        // all — the allowance is drawn lazily, on the first admission.
+        let repeat = COUNTING
+            .readings
+            .load(core::sync::atomic::Ordering::Relaxed);
+        device
+            .write_blocks(0, &vec![6u8; blocks * BLOCK_SIZE as usize])
+            .unwrap();
+        assert_eq!(
+            COUNTING
+                .readings
+                .load(core::sync::atomic::Ordering::Relaxed),
+            repeat,
+            "a refresh-only write reads the gauge not at all"
+        );
     }
 
     #[test]

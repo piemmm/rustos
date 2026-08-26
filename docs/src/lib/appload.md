@@ -99,10 +99,13 @@ Every decision is recorded through `lib/log` (§19.4) in the reserved
 `LIBRARY_RESOLVED`, `LIBRARY_REFUSED`, and `APP_RUN_IMAGE_INVALID`.
 
 The `APP_LOADED` record additionally carries a `load` duration (time spent
-reading the bundle off the store — the "getting it from disk" cost) and a
+reading the bundle off the store — the "getting it from disk" cost), a
 `verify` duration (the remaining layout / manifest / interface-hash /
-signature / publisher / content-hash / run-image checking), so a slow first
-launch is diagnosable from the audit log.
+signature / publisher / content-hash / run-image checking), and a
+`read_bytes` count of what that load span actually moved, so a slow first
+launch is diagnosable from the audit log — `load` and `read_bytes` together
+state a store throughput, which a bare duration cannot distinguish from a
+large bundle.
 
 The crate is `no_std` (with `alloc`) and depends only on `tairix-abi`,
 `tairix-caps`, `tairix-crypto`, and `tairix-log` (§17.4); it has no `unsafe`

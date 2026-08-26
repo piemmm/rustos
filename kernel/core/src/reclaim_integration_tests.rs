@@ -22,7 +22,9 @@ use alloc::boxed::Box;
 
 use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeId, NodeKind};
 use tairix_kernel_mem::{escalation, ramzip_handoff, EscalationStep, RamzipHandoff};
-use tairix_reclaim::{CacheBudget, MemoryPressure, PressureBand, ReclaimClass, ReclaimOwner};
+use tairix_reclaim::{
+    CacheBudget, MemoryPressure, PressureBand, PressureGauge, ReclaimClass, ReclaimOwner,
+};
 
 extern crate std;
 

@@ -32,7 +32,8 @@
 //! drained to zero from moderate pressure on — before anonymous pages
 //! are handed to `ramzip` (`plans/SWAPSWAPSWAP.md` section 6). Growth is
 //! admitted only at normal pressure and never into the reserve
-//! ([`MemoryPressure::growth_permitted`]). Inserts over the hard limit
+//! ([`tairix_reclaim::PressureGauge::growth_permitted`]). Inserts over the
+//! hard limit
 //! first evict least-recently-used entries down to the low watermark
 //! (hysteresis). Reclaim can never make an app unlaunchable: a miss
 //! simply re-runs the load gate against the intact on-disk bundle.
@@ -65,8 +66,8 @@ use tairix_appload::LoadedApp;
 use tairix_log::Sink;
 use tairix_reclaim::{
     log_cache_poisoned, log_cache_refused, shrink_target, CacheAccounting, CacheBudget,
-    CacheCandidate, CacheLedger, CachePolicy, InvalidationSource, MemoryPressure, RebuildCost,
-    ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity,
+    CacheCandidate, CacheLedger, CachePolicy, InvalidationSource, MemoryPressure, PressureGauge,
+    RebuildCost, ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity,
 };
 
 use crate::cache_control::{CacheClass, CacheControl, CACHE_CONTROL};

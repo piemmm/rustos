@@ -46,11 +46,13 @@
 //!
 //! The thresholds carry a reserve floor derived from the backing size.
 //! A reading at or below the reserve is critical pressure regardless
-//! of band history, and [`MemoryPressure::growth_permitted`] refuses
-//! any cache growth that would dip into the reserve — cache expansion
-//! can never be the cause of reserve exhaustion. A backing whose size
-//! is unknown (zero) reports critical pressure and admits nothing:
-//! fail closed, never a guess.
+//! of band history, and the [`GrowthAllowance`] one reading yields
+//! refuses any cache growth that would dip into the reserve — cache
+//! expansion can never be the cause of reserve exhaustion, and a
+//! caller admitting a whole run of entries draws each one down from
+//! that single allowance rather than re-asking per entry. A backing
+//! whose size is unknown (zero) reports critical pressure and admits
+//! nothing: fail closed, never a guess.
 
 use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
@@ -405,7 +407,14 @@ impl MemoryPressure {
     /// band counts one entry into the new band; a sample that holds the
     /// band counts nothing.
     pub fn sample(&self) -> PressureBand {
-        let free = self.source.free_bytes();
+        self.publish(self.source.free_bytes())
+    }
+
+    /// Fold `free` into the published band, counting and notifying a
+    /// change. The one definition [`sample`](Self::sample) and
+    /// [`growth_allowance`](Self::growth_allowance) share, so a single
+    /// reading is folded exactly once however it was taken.
+    fn publish(&self, free: usize) -> PressureBand {
         let next = self.thresholds.fold(self.band(), free);
         let previous = self.band.swap(next.depth(), Ordering::Relaxed);
         if previous != next.depth() {
@@ -436,15 +445,116 @@ impl MemoryPressure {
         self.source.total_bytes()
     }
 
-    /// Whether a cache may grow by `cost_bytes` right now: growth is
-    /// permitted only at normal pressure, and never when it would take
-    /// the free reading to (or below) the reserve floor — cache
-    /// expansion can never be the cause of reserve exhaustion.
-    pub fn growth_permitted(&self, cost_bytes: usize) -> bool {
-        if !matches!(self.sample(), PressureBand::Normal) {
+    /// One reading, folded once, carrying the headroom above the reserve
+    /// floor it leaves: growth is permitted only at normal pressure, and
+    /// never past the floor — cache expansion can never be the cause of
+    /// reserve exhaustion.
+    ///
+    /// Taking the reading here rather than per admission is what lets a
+    /// caller admitting a *run* of entries decide all of them from one
+    /// reading, instead of re-reading the free-memory source (in the
+    /// kernel: taking the global frame-allocator lock) once per entry.
+    pub fn growth_allowance(&self) -> GrowthAllowance {
+        let free = self.source.free_bytes();
+        GrowthAllowance::new(
+            self.publish(free),
+            free.saturating_sub(self.thresholds.reserve),
+        )
+    }
+}
+
+/// One gauge reading, from which a caller admitting a **run** of entries
+/// decides every one of them without touching the gauge's source again.
+///
+/// A cache that retains many entries per operation — a block cache
+/// holding each device block of one coalesced read, a write journal
+/// recording each block of one write — asked the gauge per *entry*
+/// before this existed. In the kernel that reading is the physical
+/// frame allocator, so a 64-block admission took the global
+/// frame-allocator lock 128 times to answer a question whose answer
+/// cannot change between two entries of the same operation.
+///
+/// The allowance is also the *stricter* answer. Admitted bytes come
+/// from the kernel heap's existing slack, so the free reading does not
+/// fall as entries are admitted: re-asking per entry returns the same
+/// verdict every time and lets a run admit many multiples of the
+/// headroom the first answer covered. Drawing each entry's cost down
+/// from one headroom is what makes the reserve floor bound the *run*.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct GrowthAllowance {
+    band: PressureBand,
+    remaining: usize,
+}
+
+impl GrowthAllowance {
+    /// An allowance over `band` with `remaining` bytes admissible before
+    /// the reading would reach the reserve floor.
+    #[must_use]
+    pub const fn new(band: PressureBand, remaining: usize) -> Self {
+        Self { band, remaining }
+    }
+
+    /// An allowance that admits nothing: the caller already knows growth
+    /// is refused (a poisoned or operator-disabled cache) and needs no
+    /// reading to say so.
+    #[must_use]
+    pub const fn refused() -> Self {
+        Self::new(PressureBand::Critical, 0)
+    }
+
+    /// An allowance over `band` with no reserve floor in view, so only
+    /// the caller's own budget bounds the run.
+    ///
+    /// This is the honest answer for a gauge that cannot measure
+    /// physical memory: the floor is kernel state a process must not
+    /// read, and it is already folded into the band such a gauge was
+    /// told.
+    #[must_use]
+    pub const fn unbounded(band: PressureBand) -> Self {
+        Self::new(band, usize::MAX)
+    }
+
+    /// The band the reading folded to.
+    #[must_use]
+    pub const fn band(self) -> PressureBand {
+        self.band
+    }
+
+    /// Bytes still admissible before the reading would reach the reserve
+    /// floor. [`usize::MAX`] where the gauge has no floor in view.
+    #[must_use]
+    pub const fn remaining_bytes(self) -> usize {
+        self.remaining
+    }
+
+    /// Whether a draw of `cost_bytes` would be admitted, without taking
+    /// it — the question a caller asks before doing *speculative* work
+    /// whose only value is that the result can be retained.
+    #[must_use]
+    pub const fn permits(self, cost_bytes: usize) -> bool {
+        if !matches!(self.band, PressureBand::Normal) {
             return false;
         }
-        self.source.free_bytes().saturating_sub(cost_bytes) > self.thresholds.reserve
+        // Strictly above the floor: a draw that lands exactly on the
+        // reserve is refused, so cache growth can never be what exhausts
+        // it.
+        match self.remaining.checked_sub(cost_bytes) {
+            Some(left) => left > 0,
+            None => false,
+        }
+    }
+
+    /// Draw `cost_bytes` from the allowance, reporting whether it was
+    /// admitted. A refusal leaves the allowance untouched, so a caller
+    /// may keep offering smaller entries.
+    pub fn take(&mut self, cost_bytes: usize) -> bool {
+        if !self.permits(cost_bytes) {
+            return false;
+        }
+        // `permits` proved the headroom strictly exceeds the cost, so the
+        // saturating form is exact and there is no underflow to guard.
+        self.remaining = self.remaining.saturating_sub(cost_bytes);
+        true
     }
 }
 
@@ -462,8 +572,14 @@ pub trait PressureGauge: Sync {
     /// has one to take.
     fn sample(&self) -> PressureBand;
 
-    /// Whether a cache may grow by `cost_bytes` right now.
-    fn growth_permitted(&self, cost_bytes: usize) -> bool;
+    /// One reading, from which a run of admissions is decided.
+    fn growth_allowance(&self) -> GrowthAllowance;
+
+    /// Whether a cache may grow by `cost_bytes` right now — a run of
+    /// one, so it is the allowance and never a second policy.
+    fn growth_permitted(&self, cost_bytes: usize) -> bool {
+        self.growth_allowance().take(cost_bytes)
+    }
 }
 
 impl PressureGauge for MemoryPressure {
@@ -471,8 +587,8 @@ impl PressureGauge for MemoryPressure {
         Self::sample(self)
     }
 
-    fn growth_permitted(&self, cost_bytes: usize) -> bool {
-        Self::growth_permitted(self, cost_bytes)
+    fn growth_allowance(&self) -> GrowthAllowance {
+        Self::growth_allowance(self)
     }
 }
 
@@ -523,17 +639,14 @@ impl PressureGauge for ReportedPressure {
         self.band()
     }
 
-    /// Growth is permitted only at normal pressure.
-    ///
-    /// `cost_bytes` is unused here on purpose: the reserve floor is
+    /// The band alone bounds growth here: the reserve floor is
     /// physical-memory state only the kernel can see, and it is already
     /// folded into the band this gauge was told (a reading inside the
     /// reserve is reported critical). What bounds an individual
     /// admission on this side is the cache's own budget, not a reserve
     /// the process cannot read.
-    fn growth_permitted(&self, cost_bytes: usize) -> bool {
-        let _ = cost_bytes;
-        matches!(self.band(), PressureBand::Normal)
+    fn growth_allowance(&self) -> GrowthAllowance {
+        GrowthAllowance::unbounded(self.band())
     }
 }
 
@@ -653,6 +766,119 @@ mod tests {
         assert_eq!(pressure.sample(), PressureBand::Normal);
         assert!(!pressure.growth_permitted(free - t.reserve));
         assert!(pressure.growth_permitted(4096));
+    }
+
+    #[test]
+    fn one_allowance_bounds_a_whole_run_of_admissions() {
+        // The block cache admits every device block of one coalesced
+        // read from one reading. Asking the gauge per block returned the
+        // same verdict every time (admitted bytes come from heap slack,
+        // so the free reading does not move), which let a run admit many
+        // multiples of the headroom the first answer covered. Drawing
+        // each block down from one allowance is what makes the reserve
+        // floor bound the run.
+        let t = PressureThresholds::from_total(TOTAL);
+        let free = t.enter[0] + 4096;
+        let (_, pressure) = gauge(free);
+        let headroom = free - t.reserve;
+        let cost = headroom / 4;
+
+        let mut allowance = pressure.growth_allowance();
+        assert_eq!(allowance.band(), PressureBand::Normal);
+        assert_eq!(allowance.remaining_bytes(), headroom);
+        // Three quarters of the headroom is admissible; the fourth would
+        // land exactly on the floor and is refused, and a refusal leaves
+        // the allowance intact for a smaller entry.
+        assert!(allowance.take(cost));
+        assert!(allowance.take(cost));
+        assert!(allowance.take(cost));
+        assert!(!allowance.take(cost));
+        assert_eq!(allowance.remaining_bytes(), headroom - 3 * cost);
+        assert!(allowance.take(cost - 1));
+
+        // Re-asking per entry would have admitted the fourth: proof the
+        // per-entry question was the weaker one.
+        assert!(pressure.growth_permitted(cost));
+    }
+
+    #[test]
+    fn permits_answers_the_draw_without_taking_it() {
+        // Speculative work whose only value is that the result can be
+        // retained asks before doing it, so the query must agree with the
+        // draw and must not consume headroom.
+        let t = PressureThresholds::from_total(TOTAL);
+        let free = t.enter[0] + 4096;
+        let (_, pressure) = gauge(free);
+        let mut allowance = pressure.growth_allowance();
+        let before = allowance.remaining_bytes();
+        assert!(allowance.permits(4096));
+        assert_eq!(allowance.remaining_bytes(), before, "a query draws nothing");
+        assert!(
+            !allowance.permits(before),
+            "landing on the floor is refused"
+        );
+        assert!(allowance.take(4096));
+        assert_eq!(allowance.remaining_bytes(), before - 4096);
+
+        // Outside normal pressure nothing is permitted, whatever the cost.
+        let mild = GrowthAllowance::new(PressureBand::Mild, usize::MAX);
+        assert!(!mild.permits(0));
+    }
+
+    #[test]
+    fn a_refused_allowance_admits_nothing_without_a_reading() {
+        // The caller already knows growth is refused (a poisoned or
+        // operator-disabled cache), so it needs no reading to say so.
+        let mut refused = GrowthAllowance::refused();
+        assert_eq!(refused.band(), PressureBand::Critical);
+        assert_eq!(refused.remaining_bytes(), 0);
+        assert!(!refused.take(0));
+        assert!(!refused.take(1));
+    }
+
+    #[test]
+    fn an_allowance_matches_the_single_admission_verdict_in_every_band() {
+        // One definition, two spellings: `growth_permitted` is the
+        // allowance drawn once, so the two can never diverge.
+        let t = PressureThresholds::from_total(TOTAL);
+        for free in [
+            TOTAL / 2,
+            t.enter[0] + 4096,
+            t.enter[0] - 4096,
+            t.enter[1] - 4096,
+            t.enter[2] - 4096,
+            t.enter[3] - 4096,
+            t.reserve,
+            0,
+        ] {
+            for cost in [0usize, 4096, TOTAL] {
+                let (_, pressure) = gauge(free);
+                let mut allowance = pressure.growth_allowance();
+                let via_allowance = allowance.take(cost);
+                let (_, fresh) = gauge(free);
+                assert_eq!(
+                    via_allowance,
+                    fresh.growth_permitted(cost),
+                    "free={free} cost={cost}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_reported_gauge_bounds_a_run_by_its_band_alone() {
+        // A process cannot see the reserve floor, so its allowance is
+        // bounded only by the band it was told and by its own budget.
+        let reported = ReportedPressure::unknown();
+        assert!(!reported.growth_allowance().take(0));
+        assert!(reported.report(PressureBand::Normal));
+        let mut allowance = reported.growth_allowance();
+        assert_eq!(allowance.remaining_bytes(), usize::MAX);
+        for _ in 0..8 {
+            assert!(allowance.take(1 << 20));
+        }
+        assert!(reported.report(PressureBand::Mild));
+        assert!(!reported.growth_allowance().take(1));
     }
 
     #[test]

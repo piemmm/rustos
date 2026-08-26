@@ -446,6 +446,7 @@ impl BundleStore for FsBundleStore<'_> {
         Ok(BundleContents {
             content_hash,
             run_image,
+            read_bytes: total,
         })
     }
 }

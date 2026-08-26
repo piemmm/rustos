@@ -97,8 +97,8 @@ use tairix_kernel_mem::PAGE_SIZE;
 use tairix_log::Sink;
 use tairix_reclaim::{
     log_cache_poisoned, log_cache_refused, shrink_target, CacheAccounting, CacheBudget,
-    CacheCandidate, CacheLedger, CachePolicy, InvalidationSource, MemoryPressure, RebuildCost,
-    ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity,
+    CacheCandidate, CacheLedger, CachePolicy, InvalidationSource, MemoryPressure, PressureGauge,
+    RebuildCost, ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity,
 };
 use zeroize::Zeroize;
 

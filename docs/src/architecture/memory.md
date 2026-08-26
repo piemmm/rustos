@@ -1237,6 +1237,20 @@ normal, mild, moderate, severe, critical — is shared with
   growth only at normal pressure and never lets it take the free
   reading into the reserve — cache expansion can never be the cause of
   reserve exhaustion.
+- **One reading per request, not per entry.** `growth_allowance` takes
+  the reading once and returns a `GrowthAllowance` carrying the folded
+  band and the headroom above the reserve; a consumer admitting a whole
+  *run* of entries (the block cache retaining each device block of one
+  coalesced read, the write journal recording each block of one write)
+  draws each entry's cost down from that one allowance.
+  `growth_permitted` is a run of one over the same definition, so the
+  two cannot diverge. This is the stricter bound as well as the cheaper
+  one: admitted bytes come from heap slack, so the free reading does not
+  move as entries are admitted, and re-asking per entry returned the
+  same verdict every time — letting one run admit many multiples of the
+  headroom its first answer covered. It is also the difference between
+  one and 2N acquisitions of the global frame-allocator lock per
+  request, since in the kernel the reading *is* that allocator.
 - **Reclaim ordering.** `shrink_target(band, class, budget)` is the
   pure per-band ceiling each `ReclaimClass` must shrink to: at mild
   pressure the disposable/speculative classes drop and semantic,

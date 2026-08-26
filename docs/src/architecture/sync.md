@@ -44,6 +44,30 @@ it for the per-mount filesystem lock and any other mutual-exclusion region that
 must be held across a park; keep using the `lib/sync` spin locks for short,
 non-sleeping critical sections.
 
+Its uncontended acquire and release are one compare-exchange each, and the
+wait queue is not touched. That matters because the lock also serialises
+*every* block-device operation on a shared disk, so a filesystem read walking
+a file pays one acquire/release per device operation — and an operation served
+from the block cache above the disk is a memcpy, not a park. What makes it
+possible is that contention lives **in the lock word**: a contender sets a
+`CONTENDED` bit there before it parks, so the releaser's single
+`LOCKED -> 0` compare-exchange fails precisely when a wake is owed. Flag and
+lock bit share one location, so their modification order is total and no
+store/load fence is needed — a contender that publishes before the release
+makes that release take the wake path, and one that publishes after it
+observes the lock already free and never parks. Holding "is anyone waiting?"
+anywhere else would have cost the wait-queue lock on every release just to
+learn that nobody was. The bit may linger over a handoff or over a contender
+that found the lock free; that costs one release which looks at the queue,
+finds it empty, and clears the word.
+
+Release keeps its FIFO discipline: ownership is published directly to the
+oldest waiter with `LOCKED` still set, so a fresh contender cannot barge ahead
+of it. A waiter that has vanished between observation and wake is passed over
+for the next-oldest rather than unlocking with the queue still occupied —
+doing that would clear the word with it, so no later release would owe the
+remaining contenders a wake and they would park for good.
+
 ## Decision tree
 
 ```text

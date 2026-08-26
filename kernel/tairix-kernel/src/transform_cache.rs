@@ -32,7 +32,8 @@
 //! and drained to zero from moderate pressure on, before anonymous
 //! pages are handed to `ramzip` (`plans/SWAPSWAPSWAP.md` section 6).
 //! Growth is admitted only at normal pressure and never into the
-//! reserve ([`MemoryPressure::growth_permitted`]). Inserts over the
+//! reserve ([`tairix_reclaim::PressureGauge::growth_permitted`]). Inserts
+//! over the
 //! hard limit first evict least-recently-used entries down to the low
 //! watermark (hysteresis).
 //!
@@ -56,8 +57,8 @@ use tairix_kernel_core::{CacheClass, CacheControl, CACHE_CONTROL};
 use tairix_log::Sink;
 use tairix_reclaim::{
     log_cache_poisoned, log_cache_refused, shrink_target, CacheAccounting, CacheBudget,
-    CacheCandidate, CacheLedger, CachePolicy, InvalidationSource, MemoryPressure, RebuildCost,
-    ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity,
+    CacheCandidate, CacheLedger, CachePolicy, InvalidationSource, MemoryPressure, PressureGauge,
+    RebuildCost, ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity,
 };
 use zeroize::Zeroize;
 

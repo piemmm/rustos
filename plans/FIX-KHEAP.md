@@ -62,9 +62,6 @@ measured 370 MB/s flat, and it taxed every unrelated subsystem equally.
 
 ## Remaining
 
-Two items were separated out of the allocator fix rather than folded into it,
-both surfaced by measuring the same read path:
-
 - **Slab allocation (SLUB).** Page-sized objects are the heap's dominant
   traffic (the filesystem cache's chunk is `PAGE_SIZE`), and a byte-granular
   heap serves them with a header, so they never pack into a frame. Per-size-class
@@ -74,13 +71,118 @@ both surfaced by measuring the same read path:
   slab page addressable with no window slot, which matters: `kvslots` allocates
   first-fit, so one window slot per single-page slab would reintroduce a walk
   one layer down.
-- **The per-request read cost above the driver.** Delivered throughput is
-  ~0.9 MB/s where the filesystem driver measures 370 MB/s over RAM — a gap the
-  allocator fix does not touch, present from boot (a 2.8 s bundle load). The
-  measured suspects are the `SharedBlock` sleep-lock round-trip per device
-  operation and `BlockCache::populate` sampling the pressure gauge (and so
-  taking the global frame-allocator lock) once per *device block* rather than
-  once per request.
+
+  **Not built.** Designed to the point below and stopped there, because the
+  design turns on one decision that is not this plan's to take (see "The
+  granule" — it needs a `granule` seam on `FreeListAllocator` that every arch
+  bin calls, or a hoist of `PAGE_SIZE` into a shared crate). What follows is
+  the settled part, so the next pass implements rather than re-derives.
+
+  - **One allocator, two tiers.** The slab lives inside
+    `tairix_kalloc::FreeListAllocator` behind the same `GlobalAlloc` façade
+    and under the same interrupt-safe lock — never a second kernel
+    allocator. `GlobalAlloc::alloc`'s and `dealloc`'s bodies factor into
+    private `alloc_in`/`dealloc_in` over `&mut Inner` so the slab can draw a
+    page through the byte-granular tier without re-entering the lock.
+  - **Routing is a pure function of `layout`, and must be constant for the
+    process lifetime.** `dealloc` receives the allocating layout by the
+    `GlobalAlloc` contract, so `class_for(layout)` decides the tier at both
+    ends with no side table and no per-object header. The trap: if routing
+    consulted whether a source were installed, an object allocated before
+    the install would be freed down the wrong tier and corrupt the heap.
+  - **The granule.** Routing therefore depends only on the class table, whose
+    top class must *be* the page size for the plan's headline benefit to
+    exist. It cannot come from the frame-backed source (that arrives long
+    after the first allocation) and duplicating `4096` inside `lib/kalloc`
+    is the constant duplication the charter forbids — it is already defined
+    in each `kernel/arch/<target>/paging.rs` and in `kernel/mem::frame`.
+    The two ways out: each arch bin publishes its own
+    `paging::PAGE_SIZE` as the granule at the same point it calls
+    `register_global_heap` (before any allocation, so routing is fixed from
+    the first one, and a later call is refused), or `PAGE_SIZE` is hoisted
+    to one shared definition the arch crates, `kernel/mem`, and `lib/kalloc`
+    all import. The first keeps the platform constant in the port where it
+    belongs; the second closes the existing four-way duplication but is a
+    separate refactor across three ports' paging code. **This is the open
+    decision.**
+  - **Classes** are powers of two from a minimum that fits the in-page slab
+    descriptor up to the granule, one per octave, the count derived from the
+    word width exactly as `FL_COUNT` is — never a picked ceiling. A class
+    below the granule keeps its descriptor (free-object list head, live and
+    total counts, and the doubly-linked partial-list pointers so a page that
+    fills or drains is unlinked in O(1)) in the page's own first object
+    slot, so an object pointer finds its page by masking to the granule and
+    there is no side table to search. The granule class has no room for a
+    descriptor and needs none: one object per page, and free pages form a
+    LIFO threaded through each free page's first word.
+  - **Page supply, and provenance.** After
+    `install_frame_slab_source` the tier draws one frame per page through
+    `FrameAllocator::alloc_order(0)` — the kernel commit, so it may use the
+    reserve like heap growth does — and addresses it through
+    `PhysMap::translate`, releasing it with `PhysMap::reverse` +
+    `FrameAllocator::free`. No `kvslots` slot, which is the point. Before
+    the source exists the tier must still serve its classes (routing is
+    already committed), so it draws a granule-aligned, granule-sized block
+    from the byte-granular tier instead. Which supply a page came from is
+    recovered in O(1) by an address-range test against the bootstrap arena's
+    own `(base, len)`; pages are never drawn from the byte-granular tier
+    once the source is installed, so the test is total.
+  - **Reclaim.** A drained page is returned to its supply rather than
+    cached indefinitely, so an idle system does not hold memory it has
+    freed; the retention of *one* page per class is the hysteresis that
+    stops an alloc/free cycle at a class boundary thrashing the frame
+    allocator (the same shape D53 in `plans/OPEN-DEFECTS.md` wants for
+    region growth).
+  - **What must be proven before it ships.** A host test that a
+    page-sized allocation consumes exactly one granule with no header; that
+    alloc/free of every class round-trips and that a freed object is
+    reusable; that a drained page returns to its supply and a retained one
+    does not; that routing is stable across the source install (allocate in
+    every class before installing, free after); that the counting-allocator
+    no-allocation proof still holds on `grow`/`shrink`; and a QEMU vertical,
+    since every existing vertical fails to boot if the global allocator is
+    wrong.
+
+## The per-request read cost above the driver — measured, and it was not the block layer
+
+Both per-operation costs this plan named as suspects were real and are fixed
+(below), but measurement puts neither anywhere near the reported gap. What
+the gap actually is: **contention from a desktop-side loop**, tracked as its
+own defect in `plans/OPEN-DEFECTS.md`.
+
+The instrument is the load record every bundle emits, which now carries the
+bytes its load span moved (`read_bytes`) as well as the span, so `load=` is a
+throughput and not a bare duration. Over the `autoload-input-qemu-aarch64`
+desktop vertical the delivered rate is not a function of size at all — the
+largest bundle is the *fastest* (`desktop.app`, 2.15 MB at 6.2 MB/s) and the
+smallest is among the slowest (`seatmgr.app`, 35 KB at 0.15 MB/s). Sorting by
+*when* each load ran explains all of it: the desktop's second thread issues a
+burst of some 2500 audited `fs_open` + `fs_write` pairs between 7.47 s and
+12.65 s, and exactly the two loads that fall inside that window are the slow
+ones (`switchboard.app` 1.36 s, `files.app` 2.54 s, both ~0.5 MB/s), while
+every load outside it completes in 0.08–0.60 s. The reported ~0.9 MB/s is a
+*contended* rate, so the per-byte read path was never the term to attack.
+
+Two per-operation costs were fixed regardless, because both were genuine
+work-per-block where the answer cannot change within a request:
+
+- `BlockCache::populate` and `RetainedWrites::record` asked the memory-pressure
+  gauge once per **device block**. That reading is the physical frame
+  allocator's free-frame count, so a 128-block coalesced read took the global
+  frame-allocator lock 257 times per request. `tairix_reclaim::GrowthAllowance`
+  is now one reading per request that each block draws its cost down from —
+  and it is the *stricter* bound, because admitted bytes come from heap slack,
+  so the free reading does not move and re-asking per block let one run admit
+  many multiples of the headroom its first answer covered.
+- `SleepLock::release` consulted its wait queue — a spin lock and a `BTreeMap`
+  probe — on every release just to learn nobody was waiting, and this lock
+  serialises every block-device operation on a shared disk. Contention now
+  lives in the lock word (a `CONTENDED` bit a contender publishes before it
+  parks), so the uncontended release is one compare-exchange and the queue is
+  untouched. Flag and lock bit share one location, so no store/load fence is
+  needed. A vanished waiter is now passed over for the next-oldest rather than
+  unlocking with the queue still occupied, which would have stranded every
+  remaining contender.
 
 **Kernel code runs with the current task's translation root active**, so a
 kernel address must resolve identically under every root. Each port

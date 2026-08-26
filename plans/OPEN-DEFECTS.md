@@ -93,6 +93,10 @@ The open items, in priority order:
   released only by unrelated pipe traffic and, once the broadcast was gone,
   never; `Pty::purge_session` now wakes both rings' space itself, where no
   caller can pick the wrong queue.
+- **D54 — a desktop worker thread issues ~2500 file opens at session start,
+  starving every concurrent reader — OPEN.** It is the measured whole of the
+  read-throughput gap `plans/FIX-KHEAP.md` reported: bundle load rate tracks
+  overlap with this burst, not bundle size. Desktop-side, not block-layer.
 - **D50 — the flake hunt's concurrent replicas re-planted one guest's backing
   image underneath itself — DONE.** Up to four simultaneous runs of one
   enrolment shared a planted-image path, so a replica rewrote a live sibling's
@@ -3179,3 +3183,40 @@ releasing its address space needs a non-mutating `SlotWindow` query
 **Confirming it.** Instrument the source's grow/shrink counts over a desktop
 session and check whether the heap is serving small allocations from grown
 regions at all. Fix only if it is.
+
+## D54 — a desktop worker thread issues ~2500 file opens at session start, starving every concurrent reader (OPEN)
+
+**Mechanism.** Between 7.47 s and 12.65 s of the `autoload-input-qemu-aarch64`
+desktop boot, one thread of the `desktop` process (task `0x10`, not its main
+task) issues some 2500 audited `fs_open` + `fs_write` pairs — a rate near
+1500 pairs per second sustained for five seconds. Every `fs_open` is a full
+VFS path resolution against the writable root, so the burst monopolises the
+one boot disk's serialised device windows for its whole duration.
+
+**Impact, measured.** It is the whole of the "delivered throughput is
+~0.9 MB/s where the driver measures 370 MB/s" gap `plans/FIX-KHEAP.md`
+reported. Bundle load throughput (now self-describing: the `APP_LOADED`
+record carries `read_bytes` beside `load`) is not a function of bundle size —
+the largest bundle is the fastest (`desktop.app`, 2.15 MB at 6.2 MB/s) and
+the smallest is among the slowest (`seatmgr.app`, 35 KB at 0.15 MB/s). It is
+a function of *overlap with this burst*: the only two loads inside the window
+are the only slow ones (`switchboard.app` 1.36 s and `files.app` 2.54 s, both
+about 0.5 MB/s), while every load outside it takes 0.08–0.60 s. The burst
+also emits ~5000 audit records on the serial console, which is itself a
+per-syscall cost on the same path.
+
+**What is not yet known.** Which loop it is. The burst begins ~150 ms after
+the `desktop` process spawns and *before* its wallpaper sandbox worker is
+spawned (7.861 s), so it is not the wallpaper transfer. `fs_read` is not
+audited, so the reads between each open/write pair are invisible in the
+serial transcript and the pattern "open a file, write a byte" fits both an
+asset-per-item worker nudging the serve loop through `WorkerWake` and a
+catalog walk. Its iteration count is also not deterministic — two runs of the
+same vertical produced 4713 and 2484 pairs — so it is timing-dependent, which
+is itself a signal about what drives it.
+
+**Confirming it.** Add the opened path to the `fs_open` audit record, or run
+the vertical with the session's own tracing, and identify the loop. Then fix
+the loop — this is a desktop-side defect, not a block-layer one: no
+per-operation saving in the block stack can compensate for 2500 path
+resolutions that should not be issued.

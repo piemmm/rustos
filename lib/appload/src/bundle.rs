@@ -73,6 +73,11 @@ pub struct BundleContents {
     /// as read during the content-hash walk. Authenticated by
     /// `content_hash` once that hash matches the signed manifest.
     pub run_image: Vec<u8>,
+    /// Bytes the walk actually read off the store, across every covered
+    /// file. Reported on the load record, so the measured load span has a
+    /// denominator and a slow store is a throughput figure a maintainer can
+    /// act on rather than a bare duration.
+    pub read_bytes: usize,
 }
 
 /// A monotonic clock the loader reads only to *measure* how long its two
