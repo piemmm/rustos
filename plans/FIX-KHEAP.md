@@ -41,11 +41,46 @@ description is `docs/src/architecture/memory.md` §7u.
 7. **`MAX_ORDER` has one meaning** — the largest physically contiguous draw,
    a hardware-shaped bound. `BUNDLE_FILE_MAX` is an untrusted-input bound
    independent of it, and the compile-time assertion tying them is gone.
+8. **O(1) allocate, free, and region reclaim.** Intra-region behaviour is
+   *not* separable from growth, and the earlier claim that it was out of
+   scope was wrong: the more the heap grew, the more the allocator's own
+   per-operation cost rose. `lib/kalloc` is a segregated-fit allocator over
+   in-band boundary tags — per-size-class free lists entered by bitmap scan,
+   a recorded physical predecessor so coalescing reaches each neighbour
+   directly, and a doubly-linked region list so a drained region is unlinked
+   without a search. No list is walked on any path.
 
-Heap-level (intra-region) fragmentation is out of scope: the
-`FreeListAllocator`'s own coalescing free list is its proper job.
+The superseded design walked one address-sorted hole list on both `alloc`
+and `dealloc`, plus the whole region list on *every* `dealloc`. Because a
+grown region's header separator forbids coalescing across it, the hole count
+could never fall below the region count, and regions accumulate with the
+heap — so past the bootstrap arena every allocation in the kernel paid a
+cost linear in total growth. It surfaced as the desktop wallpaper gallery
+degrading from 0.46 s to 20 s per image while the filesystem driver beneath
+measured 370 MB/s flat, and it taxed every unrelated subsystem equally.
+`per_operation_node_reach_does_not_grow_with_the_heap` pins the bound.
 
-## The shape, and why
+## Remaining
+
+Two items were separated out of the allocator fix rather than folded into it,
+both surfaced by measuring the same read path:
+
+- **Slab allocation (SLUB).** Page-sized objects are the heap's dominant
+  traffic (the filesystem cache's chunk is `PAGE_SIZE`), and a byte-granular
+  heap serves them with a header, so they never pack into a frame. Per-size-class
+  slabs drawn a page at a time from the frame allocator, with the free list
+  threaded through the free objects themselves, give a page-sized allocation
+  exactly one frame and no header. The kernel's direct physical map makes the
+  slab page addressable with no window slot, which matters: `kvslots` allocates
+  first-fit, so one window slot per single-page slab would reintroduce a walk
+  one layer down.
+- **The per-request read cost above the driver.** Delivered throughput is
+  ~0.9 MB/s where the filesystem driver measures 370 MB/s over RAM — a gap the
+  allocator fix does not touch, present from boot (a 2.8 s bundle load). The
+  measured suspects are the `SharedBlock` sleep-lock round-trip per device
+  operation and `BlockCache::populate` sampling the pressure gauge (and so
+  taking the global frame-allocator lock) once per *device block* rather than
+  once per request.
 
 **Kernel code runs with the current task's translation root active**, so a
 kernel address must resolve identically under every root. Each port

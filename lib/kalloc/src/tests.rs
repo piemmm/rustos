@@ -347,47 +347,54 @@ fn allocate_all_memory_then_free_it_all_reclaims_fully_every_round() {
 }
 
 #[test]
-fn over_aligned_request_uses_a_hole_that_is_not_already_over_aligned() {
-    // Regression: a free hole is only ever `ALIGN` (8)-aligned, so an
-    // over-aligned (16-byte) request can find the aligned start sitting a
-    // sub-`MIN_BLOCK` distance above the hole base. The allocator must still
-    // serve the request from such a hole instead of skipping it — otherwise a
-    // single large but 8-aligned hole stranded the whole heap, panicking a
-    // 656-byte/16-align allocation with ~63 MiB free.
-    let mut backing = Backing([0u8; 4096]);
-    let alloc = fixture(&mut backing);
-    // Carve 24 bytes (an odd multiple of `ALIGN`) from the page-aligned base
-    // so the remaining hole begins 8 bytes past a 16-byte boundary: an
-    // 8-aligned-but-not-16-aligned hole.
-    let odd = Layout::from_size_align(24, 8).unwrap();
-    // SAFETY: non-zero layout, fresh allocator.
-    let head = unsafe { alloc.alloc(odd) };
-    assert!(!head.is_null());
-    assert_eq!(alloc.remaining() % 16, 8, "remaining hole must be 8 mod 16");
-    // A 16-aligned request whose aligned start leaves an 8-byte front
-    // remnant. Before the fix this returned null with the rest of the heap
-    // free; it must now succeed and stay 16-aligned.
-    let over = Layout::from_size_align(656, 16).unwrap();
-    // SAFETY: non-zero layout.
-    let p = unsafe { alloc.alloc(over) };
-    assert!(
-        !p.is_null(),
-        "over-aligned request must be served from an 8-aligned hole"
-    );
-    assert_eq!(p as usize % 16, 0);
-    // Disjoint from the first block.
-    assert!(p as usize >= head as usize + 24 || p as usize + 656 <= head as usize);
-    // Freeing both strands nothing: the heap returns fully to empty.
-    // SAFETY: each pointer came from this allocator with its layout.
-    unsafe {
-        alloc.dealloc(p, over);
-        alloc.dealloc(head, odd);
+fn over_aligned_request_is_served_whatever_the_free_block_offset() {
+    // Regression: a block start is only `ALIGN`-aligned, so a request aligned
+    // *above* `ALIGN` can find its aligned payload sitting a sub-`MIN_BLOCK`
+    // distance above the block base — a front remnant too small to become its
+    // own free block. The allocator must advance a whole alignment stride and
+    // still serve the request rather than skip the block: skipping stranded
+    // the entire heap behind one large-but-misaligned hole, failing a
+    // 656-byte over-aligned allocation with ~63 MiB free.
+    //
+    // Which relative offset triggers the stride bump depends on the header and
+    // alignment arithmetic, so the whole range of leading offsets is swept
+    // instead of one hand-computed case.
+    for lead in 0..8usize {
+        let mut backing = Backing([0u8; 8192]);
+        let alloc = fixture(&mut backing);
+        // Push the surviving free block to a range of offsets past the
+        // page-aligned base, one of which lands the aligned payload a
+        // sub-`MIN_BLOCK` step above the block start.
+        let filler = Layout::from_size_align(MIN_BLOCK * lead + 8, 8).unwrap();
+        // SAFETY: non-zero layout, fresh allocator.
+        let head = unsafe { alloc.alloc(filler) };
+        assert!(!head.is_null(), "lead {lead}: filler must be served");
+
+        let over = Layout::from_size_align(656, 64).unwrap();
+        // SAFETY: non-zero layout.
+        let p = unsafe { alloc.alloc(over) };
+        assert!(
+            !p.is_null(),
+            "lead {lead}: over-aligned request must be served, not skipped"
+        );
+        assert_eq!(p as usize % 64, 0, "lead {lead}: alignment honoured");
+        // Disjoint from the live filler block.
+        assert!(
+            p as usize >= head as usize + filler.size() || p as usize + 656 <= head as usize,
+            "lead {lead}: blocks must not overlap"
+        );
+        // Freeing both strands nothing: the heap returns fully to empty.
+        // SAFETY: each pointer came from this allocator with its layout.
+        unsafe {
+            alloc.dealloc(p, over);
+            alloc.dealloc(head, filler);
+        }
+        assert_eq!(
+            alloc.used(),
+            0,
+            "lead {lead}: no bytes stranded by the front remnant"
+        );
     }
-    assert_eq!(
-        alloc.used(),
-        0,
-        "no bytes stranded by advancing past the sub-MIN_BLOCK front remnant"
-    );
 }
 
 // --- Growable-heap tests (the injected `HeapSource`) --------------------
@@ -618,3 +625,75 @@ fn grown_region_does_not_coalesce_into_the_bootstrap() {
 }
 
 extern crate alloc;
+
+/// The regression gate for the scaling cliff this allocator was rewritten to
+/// remove: allocate and free at a *constant* cost however far the heap has
+/// grown.
+///
+/// The predecessor walked an address-sorted hole list on both `alloc` and
+/// `dealloc` and the whole region list on every `dealloc`, and a region
+/// separator kept the hole count at or above the region count — so per-operation
+/// cost rose linearly with how much the heap had ever grown, taxing every
+/// allocation in the kernel. Wall-clock is load-dependent and never a gate, so
+/// the assertion is on the *number of other nodes reached*, which is what a
+/// reintroduced walk would inflate.
+#[test]
+fn per_operation_node_reach_does_not_grow_with_the_heap() {
+    // A handful of neighbour touches, whatever the heap size: a segregated
+    // list is entered by bit-scan and coalescing reaches one block each way.
+    const BOUND: usize = 8;
+    let mut backing = Backing([0u8; 4096]);
+    let alloc = fixture(&mut backing);
+    let source = std::boxed::Box::leak(std::boxed::Box::new(MockSource::new(usize::MAX)));
+    alloc.install_source(source);
+
+    let layout = Layout::from_size_align(4096, 8).unwrap();
+    let mut live = std::vec::Vec::new();
+    let mut worst_when_small = 0usize;
+    let mut worst_when_large = 0usize;
+
+    // Grow the heap well past its bootstrap arena, sampling the per-operation
+    // reach early (few regions) and late (many regions).
+    for round in 0..600 {
+        let _ = alloc.take_steps();
+        // SAFETY: non-zero layout.
+        let p = unsafe { alloc.alloc(layout) };
+        if p.is_null() {
+            break;
+        }
+        let alloc_steps = alloc.take_steps();
+        live.push(p);
+
+        // Free an older block so both paths are exercised against a heap that
+        // holds many regions at once.
+        let free_steps = if live.len() > 4 {
+            let old = live.remove(0);
+            // SAFETY: `old` came from this allocator with `layout`.
+            unsafe { alloc.dealloc(old, layout) };
+            alloc.take_steps()
+        } else {
+            0
+        };
+        let worst = alloc_steps.max(free_steps);
+        if round < 8 {
+            worst_when_small = worst_when_small.max(worst);
+        } else if round >= 400 {
+            worst_when_large = worst_when_large.max(worst);
+        }
+    }
+    for p in live {
+        // SAFETY: each pointer came from this allocator with `layout`.
+        unsafe { alloc.dealloc(p, layout) };
+    }
+
+    assert!(
+        worst_when_large <= BOUND,
+        "per-operation node reach must stay constant as the heap grows: \
+         {worst_when_large} nodes reached with a large heap (bound {BOUND})"
+    );
+    assert!(
+        worst_when_large <= worst_when_small.max(BOUND),
+        "per-operation node reach grew with the heap: {worst_when_small} \
+         nodes when small, {worst_when_large} when large"
+    );
+}
