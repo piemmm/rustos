@@ -101,12 +101,20 @@ The open items, in priority order:
   image underneath itself — DONE.** Up to four simultaneous runs of one
   enrolment shared a planted-image path, so a replica rewrote a live sibling's
   disk mid-run. Sidecar paths are now per-run, not per-binary.
-- **D55 — the x86_64 direct physical map covers only the first gigabyte**,
-  so every kernel path that reaches a frame by pointer — the spawn image
-  write, the shared-memory scrub, the remap window's own record store, and
-  now the kernel heap's slab page supply — fails closed for a frame drawn
-  above 1 GiB. Noticed while landing the slab tier; pre-existing and not
-  introduced by it.
+- **D56 — the x86_64 page-table walk recovers a table by its raw physical
+  address**, so every page table, and the direct map that shares the window
+  with them, must live below the user virtual base. A machine with more than
+  64 GiB of RAM fails closed on every frame above it. Surfaced by D55, which
+  removed the smaller of the two bounds; not introduced by it.
+- **D55 — the x86_64 direct physical map covered only the first gigabyte —
+  DONE.** Every kernel path that reaches a frame by pointer — the spawn image
+  write, the shared-memory scrub, the remap window's own record store, the
+  kernel heap's slab page supply — failed closed for a frame above it, and
+  the allocator hands out its highest frames first, so on a machine with more
+  RAM the first frame drawn was already unreachable. The port now sizes one
+  identity map from the boot memory map, as its siblings do. Two defects fell
+  out of it (a huge leaf dereferenced as a page table, and a RAM self-test
+  that silently skipped what the map did not cover).
 - **D49 — a QEMU vertical's success status is also what a machine reset
   produces**, on aarch64 and riscv64 (both report success as plain `0`). The
   harness's verdict is therefore fail-open: a guest that took the machine down
@@ -3229,32 +3237,92 @@ resolutions that should not be issued.
 
 ---
 
-## D55 — the x86_64 direct physical map covers only the first gigabyte (OPEN)
+## D55 — the x86_64 direct physical map covered only the first gigabyte (DONE)
 
-**Mechanism.** The x86_64 port's boot trampoline mirrors `[0, 1 GiB)` of
-physical memory at `KERNEL_VMA_BASE`, and `direct_phys_map()` hands the
-kernel a `DirectPhysMap` of exactly that span. Every kernel path that has to
-*reach* a frame by pointer resolves through it: the spawn path's image and
-page-table writes, the shared-memory zero-on-free scrub, the remap window's
-own record store (`kvslots`), and — since the kernel heap gained its slab
-tier (`plans/FIX-KHEAP.md`) — the slab's page supply (`kernel/mem::FramePages`).
-A frame the allocator draws above 1 GiB translates to nothing, so each of
-those fails closed. The aarch64 and riscv64 ports do not share the limit:
-both size their identity map from discovered RAM.
+**The defect.** The x86_64 port had two physical maps and neither was sized
+from the machine. `direct_phys_map()` handed out a fixed `[0, 1 GiB)` window
+at `KERNEL_VMA_BASE`, and the page-table/frame view was a fixed `[0, 4 GiB)`
+identity window; both were build-time constants, where the aarch64 and
+riscv64 ports size theirs from discovery. Every kernel path that reaches a
+frame by pointer — the spawn image write, the shared-memory zero-on-free
+scrub, the remap window's `kvslots` store, the kernel heap's slab page supply
+(`plans/FIX-KHEAP.md`) — therefore failed closed for a frame above the
+window. It was not latent: the buddy allocator hands out its highest frames
+first, so on any machine with RAM above the window the *first* frame drawn was
+already unreachable.
 
-**Consequence.** No corruption — every consumer refuses the frame and returns
-it — but on an x86_64 machine with more than a gigabyte of RAM the kernel
-degrades once low memory is spent: the slab falls back to carving its pages
-out of the bootstrap heap region, and when that is exhausted small kernel
-allocations fail while gigabytes are free. The byte-granular tier is
-unaffected, because a grown region is mapped through the remap window's page
-tables rather than the direct map.
+**Fix.** One map, sized from the boot memory map. The boot trampoline's
+`[0, BOOT_IDENTITY_GIB GiB)` is now a floor rather than the window: once
+`build_memory_map` has run, `mem_map::identity_window_gib` takes the top of
+usable RAM (floored at the trampoline's window, capped at the user virtual
+base, since the identity map shares each process root's low half with the
+child image) and `paging::widen_boot_identity` installs it — as 1 GiB PDPT
+leaves where the part has them, else one page directory per gigabyte carved
+out of the map (`mem_map::carve_frames_from_map`, from the top of low usable
+RAM so it cannot land on the legacy structures or the AP trampoline at
+`0x8000`). Every root constructor and the direct map re-read the published
+window, so none can carry a different one. It fails closed
+(`BootError::IdentityWindowWiden`) rather than booting on RAM it cannot
+address.
 
-**The fix.** Size the x86_64 direct map from the discovered memory map as the
-other two ports do, mapping the RAM gigapages the boot memory map reports
-rather than a fixed one, and publish the resulting span through
-`direct_phys_map()`. That is a change to the port's boot trampoline and its
-`PHYSMAP_SPAN`, not to any consumer.
+The two maps collapsed into `ConfiguredIdentityPhysMap`, which
+`direct_phys_map()`, the page-table frame source, both spawn seams, and the
+root-unlock DMA/MMIO bring-up all share, so the `PHYSMAP_SPAN` / `IDENTITY_GIB`
+constants each of them carried are gone. PID 1's page tables moved to the
+allocator-backed source the runtime spawn already used: on a part without
+1 GiB pages the window costs a directory per gigabyte, which a fixed `.bss`
+reserve would have capped.
 
-**Done when:** an x86_64 image with several gigabytes of RAM reaches a frame
-at the top of its pool through `direct_phys_map()`, and a vertical pins it.
+**Two defects fell out of it.** `ensure_child` dereferenced a present *huge*
+leaf as a page table, which 1 GiB identity leaves made reachable; it now
+refuses. And the RAM self-test silently skipped what the direct map did not
+cover while the console settled on the installed total: it now reports
+`verified` and `unreachable` separately (`AuditEvent::RamSelfTest`, `Warn`
+when non-zero) and starts each region past frame zero, whose identity
+translation is the null pointer and so used to take the whole first chunk of
+low RAM untested with it.
+
+**Regression cover.** `tests/integration/physmap_qemu_x86_64` boots the
+production pipeline on a 3584 MiB guest — the smallest `-m` for which QEMU's
+`pc` machine places any RAM above 4 GiB — and requires both that the window
+widened past the trampoline's own and that the self-test left no usable byte
+unreachable, i.e. every byte above 4 GiB was written and read back through
+`direct_phys_map()`. Host tests cover the window sizing, the top-down carve
+and its reservation, and the engine's zero-page skip and unreachable
+accounting.
+
+**What is still bounded.** RAM above the user virtual base (64 GiB) stays
+unreachable and fails closed, because the page-table walk still recovers
+tables by raw physical address and so needs `virtual == physical`. Lifting
+that means walking through a higher-half direct map instead — see D56.
+
+## D56 — the x86_64 page-table walk recovers a table by its raw physical address (OPEN)
+
+**Mechanism.** `paging::ensure_child` — and the read-only walks beside it —
+dereference a page-table entry's physical address directly (`phys as *mut`),
+so the port's direct map has to satisfy `virtual == physical`. An identity map
+lives in the low half of every process root, which it shares with the child
+image at `spawn_layout::CHILD_USER_BIAS` (64 GiB), so the window stops there.
+D55 sized that window from the discovered RAM; this is the bound left under
+it. The aarch64 and riscv64 ports have the same shape and the same bound
+(riscv64's Sv39 root is smaller still), so the user bias cannot simply move —
+it is one workspace-wide relocation bias every `rxe` is baked for.
+
+**Consequence.** No corruption — a frame above the window fails its translate
+and its consumer fails closed — but a machine with more than 64 GiB of RAM
+degrades exactly as it did below 1 GiB before D55: the allocator hands out its
+highest frames first, so the first frame drawn is unreachable and the kernel
+runs on what is left. Not reachable on any target the matrix runs today.
+
+**The fix.** Walk through a higher-half direct map instead of an identity one,
+as Linux does: give the port a dedicated PML4 region, dereference a table at
+`PHYSMAP_BASE + phys`, and drop the per-root low identity map to the MMIO and
+firmware window it is genuinely needed for. That also removes the per-root
+page-directory cost of identity-mapping RAM. The blast radius is the reason it
+is staged separately: ~15 sites in `kernel/arch/x86_64/src/paging.rs` plus
+every QEMU vertical that builds an `AddressSpace` from a static pool would
+have to bring the map up first.
+
+**Done when:** an x86_64 guest with RAM above the user virtual base reaches a
+frame at the top of its pool through `direct_phys_map()`, and a vertical pins
+it.

@@ -611,6 +611,10 @@ pub struct Spec {
     /// read it through [`Spec::runtime_ceiling`], which is the only bound the
     /// runner enforces.
     declared_runtime_ceiling: Option<Duration>,
+    /// Guest RAM in mebibytes. `None` takes the per-arch default; set it
+    /// through [`Spec::with_ram_mib`] and read it through
+    /// [`Spec::ram_mib`], which is what the argv builders emit.
+    declared_ram_mib: Option<u32>,
     /// Backing block devices attached as `virtio-blk-pci` functions, in
     /// declaration order. Empty for tests that need no storage.
     pub block_devices: Vec<BlockDevice>,
@@ -734,6 +738,7 @@ impl Spec {
             cpus: 1,
             timeout: Duration::from_secs(60),
             declared_runtime_ceiling: None,
+            declared_ram_mib: None,
             block_devices: Vec::new(),
             net_devices: Vec::new(),
             display_ramfb: false,
@@ -757,6 +762,31 @@ impl Spec {
     pub fn with_cpus(mut self, cpus: u32) -> Self {
         self.cpus = cpus.max(1);
         self
+    }
+
+    /// Override the guest RAM size, in mebibytes.
+    ///
+    /// The per-arch default is comfortable headroom for a test kernel, not a
+    /// figure any vertical is meant to depend on. A vertical overrides it
+    /// when the *amount* of RAM is the thing under test — the x86_64
+    /// direct-map vertical needs more RAM than the boot trampoline's own
+    /// identity window to prove the boot path widens it. Clamped at `>= 1`
+    /// because `-m 0` is rejected by every QEMU we target.
+    #[must_use]
+    pub fn with_ram_mib(mut self, ram_mib: u32) -> Self {
+        self.declared_ram_mib = Some(ram_mib.max(1));
+        self
+    }
+
+    /// Guest RAM in mebibytes: this run's declared size, or the per-arch
+    /// default. The one value every argv builder emits.
+    #[must_use]
+    pub fn ram_mib(&self) -> u32 {
+        self.declared_ram_mib.unwrap_or(match self.arch {
+            Arch::X86_64 => x86_64::DEFAULT_RAM_MIB,
+            Arch::Aarch64 => aarch64::DEFAULT_RAM_MIB,
+            Arch::Riscv64 => riscv64::DEFAULT_RAM_MIB,
+        })
     }
 
     /// Override the inactivity (no-progress) budget.
@@ -843,6 +873,7 @@ impl Spec {
             cpus: 1,
             timeout: Duration::from_secs(60),
             declared_runtime_ceiling: None,
+            declared_ram_mib: None,
             block_devices: Vec::new(),
             net_devices: Vec::new(),
             display_ramfb: false,
@@ -871,6 +902,7 @@ impl Spec {
             cpus: 1,
             timeout: Duration::from_secs(60),
             declared_runtime_ceiling: None,
+            declared_ram_mib: None,
             block_devices: Vec::new(),
             net_devices: Vec::new(),
             display_ramfb: false,
@@ -3342,6 +3374,7 @@ mod tests {
             cpus: 1,
             timeout: Duration::from_secs(60),
             declared_runtime_ceiling: None,
+            declared_ram_mib: None,
             block_devices: vec![BlockDevice {
                 image: PathBuf::from("/definitely/not/a/real/disk.img"),
             }],

@@ -3895,6 +3895,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-physmap-qemu-x86_64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-x86_64",
+ "tairix-itest-harness",
+ "tairix-kernel",
+ "tairix-log",
+]
+
+[[package]]
 name = "tairix-test-pipeline-qemu-aarch64"
 version = "0.0.0"
 dependencies = [

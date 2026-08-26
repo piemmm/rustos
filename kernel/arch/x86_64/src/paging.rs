@@ -52,6 +52,74 @@ pub const ENTRIES_PER_TABLE: usize = 512;
 /// single guard page inside it can be unmapped (`plans/PI.md` G2).
 pub const BLOCK_2MIB: u64 = 2 * 1024 * 1024;
 
+/// Gigabytes of physical memory the boot trampoline identity-maps before
+/// any discovery has run (`boot.s` SAFETY-INVARIANT 4, whose static
+/// `boot_pds` array holds exactly this many page directories). It is the
+/// floor [`widen_boot_identity`] widens from, and the window every root
+/// built before the widening carries.
+pub const BOOT_IDENTITY_GIB: usize = 4;
+
+/// Largest identity window the low PDPT can express: its 512 slots at
+/// 1 GiB each. A wider window would need a second PML4 slot, which the
+/// port's virtual layout gives to user space.
+pub const MAX_IDENTITY_GIB: usize = ENTRIES_PER_TABLE;
+
+/// Gigabytes of physical memory currently identity-mapped in every
+/// translation root, published by [`widen_boot_identity`] once the boot
+/// memory map is known. Read on every direct-map translate and by every
+/// root constructor, so the whole system shares one window.
+static IDENTITY_GIGAPAGES: AtomicUsize = AtomicUsize::new(BOOT_IDENTITY_GIB);
+
+/// Gigabytes of physical memory the live identity window covers.
+#[must_use]
+pub fn configured_identity_gigapages() -> usize {
+    IDENTITY_GIGAPAGES.load(Ordering::Acquire)
+}
+
+/// Exclusive top of the live identity window, in bytes — the direct
+/// physical map's limit and the ceiling a kernel stack or arena block must
+/// sit below to stay reachable under every root.
+#[must_use]
+pub fn configured_identity_bytes() -> u64 {
+    (configured_identity_gigapages() as u64) << 30
+}
+
+/// `true` when the part maps 1 GiB pages at PDPT level (CPUID
+/// `0x8000_0001` `EDX[26]`, AMD64 APM Vol. 3 / Intel SDM Vol. 2A).
+///
+/// With gigapages a whole identity window costs no page directories at
+/// all, so a root's identity map is one table however much RAM the
+/// machine has. The host build reports `false` (no CPU to ask), which
+/// only selects the 2 MiB path the host never walks.
+#[must_use]
+pub fn gigapages_supported() -> bool {
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+    {
+        // Leaf `0x8000_0000` reports the highest extended leaf, so the
+        // feature leaf is read only once the part admits to having it.
+        if core::arch::x86_64::__cpuid(0x8000_0000).eax < 0x8000_0001 {
+            return false;
+        }
+        core::arch::x86_64::__cpuid(0x8000_0001).edx & (1 << 26) != 0
+    }
+    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+    {
+        false
+    }
+}
+
+/// Page directories [`widen_boot_identity`] and the root constructors need
+/// to identity-map `gib` gigabytes: none when the part has 1 GiB pages
+/// (the PDPT holds the leaves itself), otherwise one per gigabyte.
+#[must_use]
+pub fn identity_directory_frames(gib: usize) -> usize {
+    if gigapages_supported() {
+        0
+    } else {
+        gib
+    }
+}
+
 /// Base virtual address of the -2 GiB higher-half kernel window.
 ///
 /// A kernel symbol linked at `KERNEL_VMA_BASE + p` is loaded at physical
@@ -267,8 +335,12 @@ impl AddressSpace {
         Self::new_identity(frames, 16)
     }
 
-    /// Build a new address space identity-mapping `[0, gib GiB)` with 2 MiB
-    /// huge pages, plus the higher-half kernel window.
+    /// Build a new address space identity-mapping `[0, gib GiB)`, plus the
+    /// higher-half kernel window.
+    ///
+    /// Callers pass [`configured_identity_gigapages`] so every root carries
+    /// the one window the boot path sized from discovered RAM. The leaves
+    /// are 1 GiB pages where the part has them and 2 MiB pages otherwise.
     ///
     /// Unlike [`Self::new_identity_first_32mib`], this maps whole gigabytes so
     /// the low identity map covers all of the physical RAM the page-table walk
@@ -297,9 +369,16 @@ impl AddressSpace {
     /// Shared constructor backing [`Self::new_identity_first_32mib`] and
     /// [`Self::new_identity_first_gib`] (one definition).
     ///
-    /// Identity-maps the first `pages_2mib` 2 MiB pages (allocating one PD per
-    /// 512 pages) and mirrors the boot trampoline's higher-half kernel window.
+    /// Identity-maps the first `pages_2mib` 2 MiB pages and mirrors the boot
+    /// trampoline's higher-half kernel window. A whole-gigabyte span on a
+    /// part with 1 GiB pages is laid down as PDPT leaves; otherwise one page
+    /// directory is drawn per gigabyte.
     fn new_identity(frames: &'static dyn PageTableFrames, pages_2mib: usize) -> Option<Self> {
+        // One PDPT addresses 512 GiB; a wider span has nowhere to put its
+        // remaining directories, so refuse rather than index past the table.
+        if pages_2mib > ENTRIES_PER_TABLE * ENTRIES_PER_TABLE {
+            return None;
+        }
         let TableFrame {
             phys: pml4_phys,
             entries: pml4,
@@ -310,24 +389,38 @@ impl AddressSpace {
         } = frames.alloc_table()?;
         pml4[0] = pdpt_phys | flags::PRESENT | flags::WRITABLE;
 
-        // Identity-map `pages_2mib` 2 MiB pages, one PD (512 entries = 1 GiB)
-        // at a time, linking each into the low PDPT.
-        let mut mapped = 0usize;
-        let mut pdpt_idx = 0usize;
-        while mapped < pages_2mib {
-            let TableFrame {
-                phys: pd_phys,
-                entries: pd,
-            } = frames.alloc_table()?;
-            pdpt[pdpt_idx] = pd_phys | flags::PRESENT | flags::WRITABLE;
-            for slot in pd.iter_mut() {
-                if mapped >= pages_2mib {
-                    break;
-                }
-                *slot = ((mapped as u64) << 21) | flags::PRESENT | flags::WRITABLE | flags::HUGE;
-                mapped += 1;
+        // A whole-gigabyte window on a part with 1 GiB pages needs no page
+        // directories: the PDPT carries the leaves, so a root's identity map
+        // costs one table however much RAM the machine has.
+        if gigapages_supported() && pages_2mib.is_multiple_of(ENTRIES_PER_TABLE) {
+            for (gib, slot) in pdpt
+                .iter_mut()
+                .take(pages_2mib / ENTRIES_PER_TABLE)
+                .enumerate()
+            {
+                *slot = ((gib as u64) << 30) | flags::PRESENT | flags::WRITABLE | flags::HUGE;
             }
-            pdpt_idx += 1;
+        } else {
+            // Identity-map `pages_2mib` 2 MiB pages, one PD (512 entries =
+            // 1 GiB) at a time, linking each into the low PDPT.
+            let mut mapped = 0usize;
+            let mut pdpt_idx = 0usize;
+            while mapped < pages_2mib {
+                let TableFrame {
+                    phys: pd_phys,
+                    entries: pd,
+                } = frames.alloc_table()?;
+                pdpt[pdpt_idx] = pd_phys | flags::PRESENT | flags::WRITABLE;
+                for slot in pd.iter_mut() {
+                    if mapped >= pages_2mib {
+                        break;
+                    }
+                    *slot =
+                        ((mapped as u64) << 21) | flags::PRESENT | flags::WRITABLE | flags::HUGE;
+                    mapped += 1;
+                }
+                pdpt_idx += 1;
+            }
         }
 
         // Mirror the boot trampoline's higher-half kernel window so the
@@ -813,6 +906,119 @@ const _: () = assert!(
     KernelWindow::new(kernel_window_base(), KERNEL_WINDOW_PAGES).is_some(),
     "the kernel remap window must be a representable extent"
 );
+
+/// Widen the live translation root's low identity map to `[0, gib GiB)`
+/// and publish `gib` as the window every later root and every direct-map
+/// translate reads ([`configured_identity_gigapages`]).
+///
+/// The boot trampoline maps a fixed [`BOOT_IDENTITY_GIB`] gigabytes before
+/// the firmware memory map has been parsed, which is enough to reach the
+/// architectural LAPIC/IO-APIC frames and the firmware tables but not the
+/// RAM of a machine with more than that installed. Once the map is known
+/// the boot path calls this with the discovered window, so a frame the
+/// allocator draws from the top of a multi-gigabyte pool is reachable by
+/// pointer like any other.
+///
+/// `directories` is the physical base of [`identity_directory_frames`]
+/// contiguous page-aligned frames used as page directories; it is ignored
+/// (and may be zero) when the part has 1 GiB pages, which need none. The
+/// frames must lie inside the *pre-widening* window, since they are written
+/// through it.
+///
+/// Returns `false`, having changed nothing, for a `gib` that is not a
+/// widening ([`BOOT_IDENTITY_GIB`] or less), exceeds
+/// [`MAX_IDENTITY_GIB`], comes with a `directories` run the widening would
+/// have to write outside the window it is widening from, or arrives after
+/// the window has already been widened — the caller then fails the boot
+/// rather than running on a window it did not install.
+///
+/// # Safety
+///
+/// * Paging is enabled, the caller runs on the boot CPU before any
+///   secondary is brought up, and no other CPU is walking the low PDPT.
+/// * `directories` names [`identity_directory_frames`] page-aligned frames
+///   that no other owner holds (the boot path reserves them out of the
+///   memory map before the frame allocator is built).
+///
+/// The widening only ever re-expresses `[0, BOOT_IDENTITY_GIB GiB)` with
+/// the identical output addresses and adds mappings above it, so no live
+/// translation changes meaning; `CR3` is reloaded at the end so the CPU
+/// drops the stale entries for the re-expressed range.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub unsafe fn widen_boot_identity(gib: usize, directories: u64) -> bool {
+    if gib <= BOOT_IDENTITY_GIB || gib > MAX_IDENTITY_GIB {
+        return false;
+    }
+    // One widening per boot: a second would rewrite the live PDPT under
+    // roots already built from the published window.
+    if configured_identity_gigapages() != BOOT_IDENTITY_GIB {
+        return false;
+    }
+    let dir_frames = identity_directory_frames(gib);
+    if dir_frames != 0 {
+        let bytes = (dir_frames as u64) * PAGE_SIZE as u64;
+        let fits_in_current_window = directories & (PAGE_SIZE as u64 - 1) == 0
+            && directories
+                .checked_add(bytes)
+                .is_some_and(|end| end <= (BOOT_IDENTITY_GIB as u64) << 30);
+        if !fits_in_current_window {
+            return false;
+        }
+    }
+
+    let root = active_root_phys();
+    if root == 0 {
+        return false;
+    }
+    // SAFETY: `CR3` names the live PML4, which sits in low physical memory
+    // the trampoline identity-maps, so its physical address dereferences
+    // directly (the round-trip every walk in this module relies on).
+    let pml4 = unsafe { &mut *(root as *mut [u64; ENTRIES_PER_TABLE]) };
+    let low = pml4[0];
+    if low & flags::PRESENT == 0 || low & flags::HUGE != 0 {
+        return false;
+    }
+    // SAFETY: as above — a present non-huge PML4 entry holds the low
+    // identity-mapped PDPT the trampoline built.
+    let pdpt = unsafe { &mut *((low & ADDR_MASK) as *mut [u64; ENTRIES_PER_TABLE]) };
+
+    if dir_frames == 0 {
+        for (slot_gib, slot) in pdpt.iter_mut().take(gib).enumerate() {
+            *slot = ((slot_gib as u64) << 30) | flags::PRESENT | flags::WRITABLE | flags::HUGE;
+        }
+    } else {
+        for (slot_gib, slot) in pdpt.iter_mut().enumerate().take(gib) {
+            let pd_phys = directories + (slot_gib as u64) * PAGE_SIZE as u64;
+            // SAFETY: the caller pins `directories` as unowned page-aligned
+            // frames inside the pre-widening window, so each directory
+            // dereferences here and aliases nothing live.
+            let pd = unsafe { &mut *(pd_phys as *mut [u64; ENTRIES_PER_TABLE]) };
+            let base = (slot_gib as u64) << 30;
+            for (block, entry) in pd.iter_mut().enumerate() {
+                *entry = (base + ((block as u64) << 21))
+                    | flags::PRESENT
+                    | flags::WRITABLE
+                    | flags::HUGE;
+            }
+            *slot = pd_phys | flags::PRESENT | flags::WRITABLE;
+        }
+    }
+
+    IDENTITY_GIGAPAGES.store(gib, Ordering::Release);
+
+    // SAFETY: reloading `CR3` with the value it already holds is a pure
+    // TLB flush of the non-global entries; the root is unchanged and still
+    // maps the executing code, stack, and per-CPU data.
+    unsafe {
+        core::arch::asm!(
+            "mov {t}, cr3",
+            "mov cr3, {t}",
+            t = out(reg) _,
+            options(nostack, preserves_flags),
+        );
+    }
+    true
+}
 
 /// Reserve the kernel remap window: draw the shared PDPT, publish the PML4
 /// entry every root installs, and patch it into the live root so the
@@ -1454,6 +1660,13 @@ fn ensure_child(
 ) -> Option<&'static mut [u64; ENTRIES_PER_TABLE]> {
     let entry = parent[idx];
     if entry & flags::PRESENT != 0 {
+        // A present *huge* leaf is a data page, not a table: dereferencing
+        // its address as one would let a mapping walk scribble page-table
+        // entries over mapped memory. Refuse, so the caller fails closed
+        // and the coarse leaf is split explicitly instead.
+        if entry & flags::HUGE != 0 {
+            return None;
+        }
         // Existing child — recover the `&mut` from the physical address.
         // Identity mapping makes phys = virt here.
         let phys = entry & ADDR_MASK;

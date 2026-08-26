@@ -77,6 +77,15 @@ pub enum AuditEvent {
     PhaseFailed,
     /// Every init phase finished; control passes to the scheduler.
     BootCompleted,
+    /// The early-boot RAM self-test finished, with the bytes it actually
+    /// verified and the usable bytes the firmware map described.
+    ///
+    /// The test can only reach RAM the port's direct physical map covers, so
+    /// a `verified` short of `usable` means the kernel cannot address some of
+    /// its own RAM by pointer — it is recorded rather than left as a counter
+    /// that silently understates what was proven, and it emits at `Warn`.
+    /// The fields are byte totals; neither is a secret.
+    RamSelfTest,
     /// The kernel panicked; the handler logged context and is halting.
     Panic,
     /// A syscall handler's backing subsystem is intentionally not yet
@@ -580,6 +589,7 @@ impl AuditEvent {
             Self::PhaseReady => 4002,
             Self::PhaseFailed => 4003,
             Self::BootCompleted => 4004,
+            Self::RamSelfTest => 4005,
             Self::Panic => 4010,
             Self::SyscallFeatureUnavailable => 4020,
             Self::SyscallNoCallerContext => 4021,
@@ -645,6 +655,7 @@ impl AuditEvent {
             Self::PhaseReady => "kernel init phase ready",
             Self::PhaseFailed => "kernel init phase failed",
             Self::BootCompleted => "kernel boot completed",
+            Self::RamSelfTest => "ram self-test completed",
             Self::Panic => "kernel panic",
             Self::SyscallFeatureUnavailable => "syscall feature unavailable",
             Self::SyscallNoCallerContext => "syscall has no caller context",
@@ -725,6 +736,7 @@ mod tests {
             AuditEvent::PhaseReady,
             AuditEvent::PhaseFailed,
             AuditEvent::BootCompleted,
+            AuditEvent::RamSelfTest,
             AuditEvent::Panic,
             AuditEvent::SyscallFeatureUnavailable,
             AuditEvent::SyscallNoCallerContext,
@@ -793,6 +805,7 @@ mod tests {
             AuditEvent::PhaseReady.id().0,
             AuditEvent::PhaseFailed.id().0,
             AuditEvent::BootCompleted.id().0,
+            AuditEvent::RamSelfTest.id().0,
             AuditEvent::Panic.id().0,
             AuditEvent::SyscallFeatureUnavailable.id().0,
             AuditEvent::SyscallNoCallerContext.id().0,

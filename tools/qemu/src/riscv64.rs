@@ -173,7 +173,7 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
     argv.push("-serial".into());
     argv.push("stdio".into());
     argv.push("-m".into());
-    argv.push(format!("{DEFAULT_RAM_MIB}M").into());
+    argv.push(format!("{}M", spec.ram_mib()).into());
     argv.push("-smp".into());
     argv.push(spec.cpus.to_string().into());
     argv.push("-bios".into());
@@ -265,6 +265,7 @@ mod tests {
             cpus,
             timeout: Duration::from_secs(60),
             declared_runtime_ceiling: None,
+            declared_ram_mib: None,
             block_devices: Vec::new(),
             net_devices: Vec::new(),
             display_ramfb: false,
