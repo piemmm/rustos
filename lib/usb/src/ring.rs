@@ -206,10 +206,12 @@ impl ProducerRing {
 /// have no Link TRBs — the segment table defines the bounds, and this
 /// cursor models one segment.
 ///
-/// The cursor holds no borrow of the segment: the controller (or a
-/// test) keeps writing new events into the memory while the cursor is
-/// live, so [`pop`](Self::pop) takes the segment afresh on every call
-/// and validates that its length still matches the registered one.
+/// The cursor holds no borrow of the segment: the controller keeps writing
+/// new events into the memory while the cursor is live, so it is handed the
+/// TRB at [`dequeue_index`](Self::dequeue_index) afresh on every call. Only
+/// that one entry is ever examined, so the owner reads 16 bytes per poll
+/// rather than the whole segment — the difference dominates the per-interrupt
+/// cost on non-cacheable DMA memory.
 pub struct EventRingCursor {
     len: usize,
     dequeue: usize,
@@ -234,54 +236,43 @@ impl EventRingCursor {
         })
     }
 
-    /// Consume the next event from `trbs`, if the controller has
-    /// produced one.
+    /// Consume `trb` — the entry the owner read from the dequeue slot — if the
+    /// controller has produced it.
     ///
-    /// Returns `Ok(None)` while the TRB at the dequeue point still
-    /// carries the previous pass's cycle state (controller-owned).
-    /// Consuming the last slot of the segment wraps the dequeue point
-    /// and inverts the expected cycle state.
-    ///
-    /// # Errors
-    ///
-    /// * [`DriverError::LengthOutOfRange`] if `trbs` is not the
-    ///   segment this cursor was created for (its length differs).
-    pub fn pop(&mut self, trbs: &[Trb]) -> Result<Option<Trb>, DriverError> {
-        if trbs.len() != self.len {
-            return Err(DriverError::LengthOutOfRange);
-        }
-        let trb = trbs[self.dequeue];
+    /// Returns `None` while the entry still carries the previous pass's cycle
+    /// state (controller-owned). Consuming the last slot of the segment wraps
+    /// the dequeue point and inverts the expected cycle state.
+    pub fn pop(&mut self, trb: Trb) -> Option<Trb> {
         if trb.cycle() != self.cycle {
-            return Ok(None);
+            return None;
         }
         self.dequeue += 1;
         if self.dequeue == self.len {
             self.dequeue = 0;
             self.cycle = !self.cycle;
         }
-        Ok(Some(trb))
+        Some(trb)
     }
 
-    /// Whether the controller has produced the event at the dequeue point —
-    /// the slot's cycle bit matches the consumer cycle state — **without**
-    /// advancing the cursor.
+    /// Whether `trb` — read from the dequeue slot — has been produced by the
+    /// controller, **without** advancing the cursor.
     ///
-    /// The owner reads this from a first snapshot of the segment to decide
-    /// whether an event is present, issues a DMA read barrier, then re-reads
-    /// the segment and [`pop`](Self::pop)s, so the entry body is observed
-    /// after the cycle bit that announced it (the controller writes the body
-    /// before the cycle bit; on non-coherent DMA memory an unordered read of
-    /// the whole entry can pair a fresh cycle bit with a stale body).
-    ///
-    /// # Errors
-    ///
-    /// * [`DriverError::LengthOutOfRange`] if `trbs` is not the segment this
-    ///   cursor was created for (its length differs).
-    pub fn owned(&self, trbs: &[Trb]) -> Result<bool, DriverError> {
-        if trbs.len() != self.len {
-            return Err(DriverError::LengthOutOfRange);
-        }
-        Ok(trbs[self.dequeue].cycle() == self.cycle)
+    /// The owner tests a first read of the slot to decide whether an event is
+    /// present, issues a DMA read barrier, then re-reads the slot and
+    /// [`pop`](Self::pop)s, so the entry body is observed after the cycle bit
+    /// that announced it (the controller writes the body before the cycle bit;
+    /// on non-coherent DMA memory an unordered read of the whole entry can pair
+    /// a fresh cycle bit with a stale body).
+    #[must_use]
+    pub fn owned(&self, trb: Trb) -> bool {
+        trb.cycle() == self.cycle
+    }
+
+    /// Byte offset of the dequeue slot within the event segment, for the owner
+    /// to read exactly that one entry.
+    #[must_use]
+    pub fn dequeue_offset(&self) -> usize {
+        self.dequeue * crate::trb::TRB_LEN
     }
 
     /// Index of the slot the next event will be consumed from, for the

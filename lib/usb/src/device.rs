@@ -34,7 +34,7 @@ use tairix_abi::{Delay, DriverError, HwDeviceClass, HwMatchKey, HwNode};
 
 use crate::ring::{EventRingCursor, ProducerRing, PushOutcome};
 use crate::trb::{self, CompletionCode, Trb, TrbType};
-use crate::{DmaProgram, PortStatus, Xhci, XhciHost};
+use crate::{ControllerStatus, DmaProgram, PortStatus, Xhci, XhciHost};
 
 /// Growable device-shared memory the engine and the controller both see:
 /// a bank of independently allocated DMA chunks addressed through one
@@ -2401,6 +2401,17 @@ pub struct UsbDevice<'w, H: XhciHost, M: DmaBank> {
     /// [`Layout::output_ctx`] or a device region's `output_ctx`.
     output_ctx_off: usize,
     event_cursor: EventRingCursor,
+    /// Whether some root port's change bits may be latched, so
+    /// [`Self::next_root_change`] must scan `PORTSC`.
+    ///
+    /// Armed by the two independent latched sources the controller offers — a
+    /// drained Port Status Change Event ([`Self::poll_event`]) and the
+    /// `USBSTS.PCD` summary ([`Self::acknowledge_interrupt`]) — and starts set
+    /// so bring-up, and a re-enumeration after a controller reset, scan the
+    /// ports the firmware may already have left connected. Without it the scan
+    /// costs one `PORTSC` read per port on *every* interrupt, which on a PCIe
+    /// controller is the most expensive thing on the report path.
+    root_change_pending: bool,
     /// Bound on the *register-handshake* polls (`Xhci` open/start/reset
     /// readiness waits) only — the brief, bounded MMIO waits the silicon
     /// dictates. Event waits are parked on [`Self::wait`] and bounded by
@@ -2581,6 +2592,7 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
             ep0_ring_off,
             output_ctx_off,
             event_cursor,
+            root_change_pending: true,
             budget,
             wait,
             slot: 0,
@@ -2894,7 +2906,10 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
     /// Called at the **start** of servicing a delivered interrupt — before
     /// the reports are drained through [`Self::next_report`] — so a
     /// completion the controller posts during the drain re-asserts `IMAN.IP`
-    /// and is not lost. Delegates to [`Xhci::acknowledge_interrupt`].
+    /// and is not lost. Delegates to [`Xhci::acknowledge_interrupt`], whose
+    /// single `USBSTS` read also carries the port-change summary — folded into
+    /// [`Self::next_root_change`]'s arming here — and the fault latch, returned
+    /// so the caller recovers without a second read of the same register.
     ///
     /// This clears only `IMAN.IP`, never `ERDP`. Event Handler Busy
     /// (`ERDP.EHB`) is released solely by the per-event dequeue advance the
@@ -2909,9 +2924,13 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
     ///
     /// # Errors
     ///
-    /// [`DriverError::DeviceFault`] if the register window rejects the write.
-    pub fn acknowledge_interrupt(&mut self) -> Result<(), DriverError> {
-        self.xhci.acknowledge_interrupt()
+    /// [`DriverError::DeviceFault`] if the register window rejects the access.
+    pub fn acknowledge_interrupt(&mut self) -> Result<ControllerStatus, DriverError> {
+        let status = self.xhci.acknowledge_interrupt()?;
+        if status.port_change {
+            self.root_change_pending = true;
+        }
+        Ok(status)
     }
 
     /// Device-visible address of the bank's virtual offset `offset`.
@@ -2929,8 +2948,8 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
     fn poll_event(&mut self) -> Result<Option<Trb>, DriverError> {
         // First snapshot: decide *whether* the controller has produced the
         // event at the dequeue point, by its cycle bit alone.
-        let trbs = self.read_event_segment()?;
-        if !self.event_cursor.owned(&trbs)? {
+        let trb = self.read_event_slot()?;
+        if !self.event_cursor.owned(trb) {
             return Ok(None);
         }
         // An event is owned. The controller writes the entry body before it
@@ -2941,7 +2960,7 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
         // the metal `REJECT_ADDRESS_MISMATCH` this fixes). Order the body read
         // after the cycle observation, then re-read and consume (see `tairix_dma_barrier`).
         tairix_dma_barrier::dma_rmb();
-        let trbs = self.read_event_segment()?;
+        let trb = self.read_event_slot()?;
         // Re-confirm ownership on the post-barrier snapshot, then verify the
         // entry has actually landed before consuming it. The read barrier
         // orders *this PE's* reads (body after cycle), but it cannot order the
@@ -2956,32 +2975,41 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
         // permanently desynchronise the consumer cycle, wedging the interrupter
         // with Event Handler Busy stuck set so no further completion interrupts
         // — the metal "first key then silent" fault.
-        if !self.event_cursor.owned(&trbs)? {
+        if !self.event_cursor.owned(trb) {
             return Ok(None);
         }
-        if trbs[self.event_cursor.dequeue_index()].trb_type_raw() == 0 {
+        if trb.trb_type_raw() == 0 {
             return Ok(None);
         }
-        let event = self.event_cursor.pop(&trbs)?;
-        if event.is_some() {
-            let erdp = self.phys_of(self.layout.event_segment)?
-                + (self.event_cursor.dequeue_index() * trb::TRB_LEN) as u64;
-            self.xhci.ack_event(erdp)?;
+        let Some(event) = self.event_cursor.pop(trb) else {
+            return Ok(None);
+        };
+        // A Port Status Change Event is the controller's notification that some
+        // root port's change bits latched. Recording it here — at the one point
+        // every ring consumer funnels through — is what lets the root-port scan
+        // be event-driven rather than run on every interrupt: no consumer can
+        // drain such an event without arming the scan.
+        if event.trb_type() == Ok(TrbType::PortStatusChange) {
+            self.root_change_pending = true;
         }
-        Ok(event)
+        let erdp = self.phys_of(self.layout.event_segment)?
+            + (self.event_cursor.dequeue_index() * trb::TRB_LEN) as u64;
+        self.xhci.ack_event(erdp)?;
+        Ok(Some(event))
     }
 
-    /// Read the whole single-segment event ring out of DMA into TRBs.
-    fn read_event_segment(&mut self) -> Result<[Trb; RING_TRBS], DriverError> {
-        let mut bytes = [0u8; RING_TRBS * trb::TRB_LEN];
-        self.dma.read(self.layout.event_segment, &mut bytes)?;
-        let mut trbs = [Trb::ZERO; RING_TRBS];
-        for (index, slot) in trbs.iter_mut().enumerate() {
-            let mut image = [0u8; trb::TRB_LEN];
-            image.copy_from_slice(&bytes[index * trb::TRB_LEN..(index + 1) * trb::TRB_LEN]);
-            *slot = Trb::from_bytes(image);
-        }
-        Ok(trbs)
+    /// Read the one event-ring entry at the cursor's dequeue point out of DMA.
+    ///
+    /// Only that entry decides whether an event is pending, so reading it alone
+    /// keeps a poll at 16 bytes of non-cacheable traffic instead of the whole
+    /// segment.
+    fn read_event_slot(&mut self) -> Result<Trb, DriverError> {
+        let mut image = [0u8; trb::TRB_LEN];
+        self.dma.read(
+            self.layout.event_segment + self.event_cursor.dequeue_offset(),
+            &mut image,
+        )?;
+        Ok(Trb::from_bytes(image))
     }
 
     /// Reset the per-transfer event diagnostics before a fresh command
@@ -4567,6 +4595,15 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
     /// event-driven — with no latch set it returns [`HubEvent::None`],
     /// and it never polls or spins.
     ///
+    /// The `PORTSC` walk itself runs only when a root-port change has armed
+    /// it, which is what keeps a steady stream of report interrupts
+    /// (a mouse in motion) off the port registers entirely: on a PCIe
+    /// controller each `PORTSC` read is a non-posted round trip and dwarfs
+    /// the rest of the report path. Two independent latched sources arm it —
+    /// a Port Status Change Event drained by *any* ring consumer, and the
+    /// `USBSTS.PCD` summary — and neither can lose an edge, so a plug is
+    /// still seen even when its event was consumed by an engine wait.
+    ///
     /// The scan is per-port fail-soft, mirroring [`Self::next_hub_change`]:
     /// one port's broken device has its latch consumed and the remaining
     /// changed ports are still serviced; the first failure is surfaced
@@ -4581,6 +4618,9 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
     /// [`DriverError`] from the first failed attach or detach when no
     /// actionable event was produced (fail closed).
     pub fn next_root_change(&mut self, delay: &dyn Delay) -> Result<HubEvent, DriverError> {
+        if !self.root_change_pending {
+            return Ok(HubEvent::None);
+        }
         self.attach_fault = None;
         let max_ports = self.xhci.max_ports();
         let mut first_failure = None;
@@ -4628,10 +4668,14 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
                 (Some(_), true) | (None, false) => {}
             }
         }
-        match first_failure {
-            Some(err) => Err(err),
-            None => Ok(HubEvent::None),
+        if let Some(err) = first_failure {
+            return Err(err);
         }
+        // Only a scan that walked every port and found nothing actionable
+        // disarms: an actionable event returns from inside the loop above with
+        // later ports unvisited, and the caller re-scans until it sees `None`.
+        self.root_change_pending = false;
+        Ok(HubEvent::None)
     }
 
     /// Reset the hub at `hub_index`'s downstream `port`, await the reset
@@ -5973,6 +6017,23 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
             .any(|entry| entry.as_ref().is_some_and(|hub| hub.int_ring.is_some()))
     }
 
+    /// Hubs whose status-change endpoint is watched — the most distinct reports
+    /// one ring drain can have parked, since each hub keeps exactly one status
+    /// transfer outstanding.
+    ///
+    /// This bounds the caller's service loop: draining every parked report in
+    /// one pass is what stops a second reporting hub being stranded with no
+    /// outstanding transfer to raise the next interrupt, while the bound stops
+    /// a *flapping* hub — whose re-armed endpoint completes again during each
+    /// service — from holding the loop and starving the other devices' URBs.
+    #[must_use]
+    pub fn watched_hub_count(&self) -> usize {
+        self.hubs
+            .iter()
+            .filter(|entry| entry.as_ref().is_some_and(|hub| hub.int_ring.is_some()))
+            .count()
+    }
+
     /// Confirm and detach the served device at `index` after its interrupt
     /// or bulk endpoint faulted.
     ///
@@ -6052,8 +6113,9 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
     /// hub tier reported it — returning what changed.
     ///
     /// Called by the HCD when the controller interrupt fires while a hub is
-    /// watched ([`Self::hub_watch_active`]): it drains the status-change
-    /// completion (one parked by a synchronous wait, else freshly polled),
+    /// watched ([`Self::hub_watch_active`]): it takes the status-change
+    /// completion the shared ring drain parked for that hub — the same drain
+    /// [`Self::pump_reports`] and every synchronous wait run —
     /// reads the changed downstream port on the reporting hub, and either
     /// enumerates a freshly connected device ([`HubEvent::Attached`], a
     /// brand-new enumeration — or a fresh hub tier,
@@ -6079,14 +6141,14 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
         // A fresh service gets a fresh fault snapshot: whatever this call
         // surfaces is what [`Self::last_attach_fault`] then describes.
         self.attach_fault = None;
-        // A status-change completion parked by a synchronous wait is serviced
-        // first; otherwise poll the event ring for one (routing any device
-        // report completion to its own pending slot, never faulting it).
-        let hub_index = match self.take_parked_hub_completion() {
-            Some(hub_index) => Some(hub_index),
-            None => self.poll_hub_completion()?,
-        };
-        let Some(hub_index) = hub_index else {
+        // Drain through the one shared classifier, which parks each watched
+        // hub's status-change completion (and captures reports, parks bulk,
+        // arms the root-port scan) — then take what it parked. A second
+        // hub-specific ring walk beside it would be a duplicate of that
+        // dispatch decision, and the walk it replaced read the whole event
+        // segment per poll.
+        self.drain_events()?;
+        let Some(hub_index) = self.take_parked_hub_completion() else {
             return Ok(HubEvent::None);
         };
         if let Some(ring) = self
@@ -6124,59 +6186,6 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
                 .as_mut()
                 .is_some_and(|hub| hub.pending.take().is_some())
         })
-    }
-
-    /// Poll the event ring for any watched hub's status-change endpoint
-    /// completion, routing a device report completion seen first to its
-    /// pending slot. `Ok(Some(hub_index))` names the reporting hub;
-    /// `Ok(None)` when no hub completion is pending.
-    fn poll_hub_completion(&mut self) -> Result<Option<usize>, DriverError> {
-        for _ in 0..RING_TRBS {
-            let Some(event) = self.poll_event()? else {
-                return Ok(None);
-            };
-            // The event this poll is looking for: a watched hub's
-            // status-change interrupt-IN completion.
-            if event.trb_type() == Ok(TrbType::TransferEvent) {
-                if let Some(hub_index) = self.hub_async_index(event) {
-                    return Ok(Some(hub_index));
-                }
-            }
-            // The served devices' report and bulk completions share this one
-            // event ring. Capture a report into its device's FIFO
-            // ([`UsbDevice::capture_report_event`]) and park a bulk completion
-            // for [`UsbDevice::poll_bulk`], exactly as the synchronous waits'
-            // stash does — so a report seen while polling the hub watch is
-            // buffered and its endpoint re-armed, never dropped, and never
-            // faults the watch.
-            if event.trb_type() == Ok(TrbType::TransferEvent) {
-                if let Some(report_index) = self.report_async_index(event) {
-                    let _ = self.capture_report_event(report_index, event);
-                } else if let Some(bulk_index) = self.bulk_async_index(event) {
-                    if let Some(device) = self.devices[bulk_index].as_mut() {
-                        let _ = device.pending_bulk.push(event);
-                    }
-                }
-            } else {
-                // Everything else is DRAINED (the `poll_event` dequeue already
-                // advanced the ring) and the scan continues — never faulted.
-                // This poll is opportunistic: faulting here would make
-                // `next_hub_change` return (its `?`) before the status-change
-                // endpoint is re-armed, leaving it with no outstanding transfer
-                // so the hub can never post another report — downstream hotplug
-                // is then silenced permanently on a single stray event (the
-                // metal symptom: the controller goes quiet after the first
-                // report). The shared event ring is not a security boundary, so
-                // an event this poll does not model fails *open to draining*
-                // (advancing the ring), not closed: an informational controller
-                // event (port-status-change, device notification,
-                // host-controller event, MFINDEX wrap, …) and a trailing
-                // completion for a just-freed slot are both drained. A genuine
-                // fault still surfaces synchronously through the control/command
-                // waits that follow.
-            }
-        }
-        Ok(None)
     }
 
     /// Read the reporting hub's port-change bitmap and act on the first
@@ -6331,6 +6340,10 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
         self.command_ring = command_ring;
         self.ep0_ring = ep0_ring;
         self.event_cursor = event_cursor;
+        // The reset cleared every `PORTSC` latch and the fresh ring has posted
+        // no Port Status Change Event yet, so nothing would arm the scan for
+        // ports the controller comes back with already connected.
+        self.root_change_pending = true;
         self.reset_device_tracking();
         self.stage = EnumStage::Scan;
         self.reset_event_diagnostics();
@@ -6545,6 +6558,12 @@ impl<H: XhciHost, M: DmaBank> UsbDevice<'_, H, M> {
     /// tests can drive and assert the mock controller's state.
     pub(crate) fn host_mut(&mut self) -> &mut H {
         &mut self.xhci.host
+    }
+
+    /// Test-only access to the DMA bank, so the cost-budget regression can read
+    /// the mock bank's access counters.
+    pub(crate) fn dma_mut(&mut self) -> &mut M {
+        &mut self.dma
     }
 
     /// Test-only read of a served device's raw slot, so a hot-removal test

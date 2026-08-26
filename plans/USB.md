@@ -465,7 +465,7 @@ the live controller behaviour is host- and CI-proven first.
     `UsbDevice::freed_slot` so a **trailing** transfer completion the controller
     still posts for the gone slot (a dropped in-flight transfer, or a Disable
     Slot side-effect) is drained by the event-ring consumers
-    (`stash_async_event`/`poll_hub_completion`) rather than faulted — without
+    (`stash_async_event`/`drain_events`) rather than faulted — without
     this such an event matched no live endpoint and faulted the hub watch,
     silencing it so a later re-plug went unseen. The tolerance is cleared once a
     fresh device enumerates.
@@ -662,8 +662,8 @@ the live controller behaviour is host- and CI-proven first.
   - **Root-port hot-plug is a per-port CSC scan, uniform for every port.**
     A connect or disconnect on any root port latches `PORTSC.CSC` (and
     posts the Port Status Change Event that raises the interrupt);
-    `UsbDevice::next_root_change` — called by the HCD on every interrupt
-    wake, before the hub-watch service — reads each port's latch, consumes
+    `UsbDevice::next_root_change` — called by the HCD on each interrupt
+    wake, after the ring drain — reads each port's latch, consumes
     it (`Xhci::clear_port_connect_change`, RW1C-masked), re-reads the live
     connect state, and reconciles: a new connect on an unserved port is
     attached in place (`UsbDevice::attach_root_port` — a hub tier
@@ -679,6 +679,51 @@ the live controller behaviour is host- and CI-proven first.
     `last_attach_fault` (with the root port number; `port_status` is `0` —
     a root port has no hub-format `wPortStatus`), and the first failure is
     surfaced for the HCD's breadcrumb log.
+  - **The `PORTSC` walk is armed by a latched event, never run
+    unconditionally.** `next_root_change` returns immediately unless
+    `root_change_pending` is set, because on a PCIe controller each `PORTSC`
+    read is a non-posted round trip — the most expensive operation on the
+    report path — and a mouse in motion makes that path run ~1000 times a
+    second. Two independent xHCI-mandated latches arm it: a **Port Status
+    Change Event** recorded in `poll_event`, the one point every ring consumer
+    funnels through (so a plug whose event was swallowed by a synchronous
+    engine wait is still scanned for), and the **`USBSTS.PCD`** summary, read
+    and cleared by the interrupt acknowledgement that had to write that
+    register anyway. It starts armed and is re-armed by
+    `reset_and_reenumerate`, so bring-up and post-reset re-enumeration scan
+    ports the firmware may already have left connected. Only a scan that walks
+    every port and finds nothing actionable disarms — an actionable event
+    returns mid-walk with later ports unvisited, and the HCD re-scans until it
+    sees a quiet pass. Regressions:
+    `a_drained_port_status_change_event_arms_the_root_scan`,
+    `the_usbsts_port_change_summary_arms_the_root_scan`,
+    `an_unarmed_root_scan_touches_no_port_register`,
+    `an_actionable_root_change_leaves_the_scan_armed_for_the_remaining_ports`,
+    `a_controller_reset_rearms_the_root_scan`.
+  - **The event ring is drained once per interrupt, by one classifier, reading
+    one TRB per probe.** The HCD's interrupt service is *acknowledge → drain →
+    dispatch*: `pump_reports` makes the single pass that sorts every posted
+    event into its consumer's buffer (reports into per-device FIFOs with the
+    endpoint re-armed, each watched hub's status report into its parked slot,
+    bulk into its FIFO, a Port Status Change Event into the scan arming), and
+    hot-plug and the URB replies then read those buffers. The hub watch takes
+    what that drain parked rather than walking the ring with a second copy of
+    the same dispatch decision, and `poll_event` reads the single 16-byte entry
+    at the dequeue point rather than the whole segment out of non-cacheable
+    memory. Servicing loops until every parked hub report is drained, not just
+    the first: a hub's status endpoint is re-armed only once its report is
+    serviced, so a second reporting hub left for "the next interrupt" may never
+    get one. Measured per 4-byte report: **1 register read** (was 6) and **100
+    bytes of DMA over 7 reads** (was 1796 over 8), allocating nothing.
+    Regressions: `a_report_interrupt_costs_one_register_read_and_one_trb_per_ring_probe`,
+    `a_report_interrupt_allocates_nothing`,
+    `a_hub_status_change_is_serviced_from_the_slot_the_shared_drain_parked_it_in`,
+    `two_hubs_reporting_at_once_are_both_serviced_without_a_further_interrupt`.
+  - **Metal acceptance item (open).** The scan arming and the reordered
+    interrupt service are mock-verified only — QEMU models no Pi USB. On a
+    Pi 4, confirm plug and unplug of a mouse, a keyboard and a hub assembly on
+    both a root port and a downstream hub port, and confirm the CPU drop while
+    moving a mouse.
   - **Every reachable device is served concurrently — on every root
     port.** `UsbDevice::bring_up` powers all root ports, parks through the
     connect-debounce window, then attaches **every** connected root port
@@ -789,7 +834,7 @@ the live controller behaviour is host- and CI-proven first.
     command-ring slot either way so the ring stays consistent for the next
     enumeration. A late
     Disable Slot Command Completion for the freed slot is drained as a freed-slot
-    event by the event-ring consumers (`await_event_for`/`poll_hub_completion`)
+    event by the event-ring consumers (`await_event_for`/`drain_events`)
     rather than faulting the hub watch. The acted-on fault code is cleared on
     teardown and on a fresh enumeration so a re-plugged device is never
     immediately re-detached; the HCD then re-arms the hub watch, and the hub's
@@ -904,15 +949,15 @@ the live controller behaviour is host- and CI-proven first.
     (CommandCompletion), `compl_hex=0x1` (Success): since `control()`/`command()`
     are the only callers of `reset_event_diagnostics`, those fields were
     **stale** from the last successful command — proving the fault issued no
-    control/command transfer and so came from `poll_hub_completion`, not the
-    `GET_PORT_STATUS` transfer earlier hypotheses blamed. `poll_hub_completion`
+    control/command transfer and so came from the hub watch's own ring poll, not
+    the `GET_PORT_STATUS` transfer earlier hypotheses blamed. That poll
     failed closed (`_ => Err(DeviceFault)`) on an event it did not model, and
     `next_hub_change` propagated that error at its `?` **before** the
     status-change endpoint was re-armed — leaving it with no outstanding
     transfer, so the hub could never post another report and every later
     keystroke/unplug/replug produced no interrupt (the controller "went
-    silent"). The fix makes that opportunistic poll **drain** any event it does
-    not model — an informational controller event (device notification,
+    silent"). The fix makes the shared drain (`drain_events`, now the watch's
+    only ring access) **drain** any event it does not model — an informational controller event (device notification,
     host-controller event, MFINDEX wrap), a trailing freed-slot completion, or a
     keyboard report arriving before the previous one is drained — and keep
     scanning, never faulting (the shared event ring is not a security boundary;

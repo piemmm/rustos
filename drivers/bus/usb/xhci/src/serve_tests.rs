@@ -396,3 +396,47 @@ fn attach_transport_grants_adds_the_endpoint_and_shared_resources() {
     assert!(kinds.contains(&Some(HwResourceKind::Endpoint)));
     assert!(kinds.contains(&Some(HwResourceKind::Shared)));
 }
+
+#[test]
+fn a_held_submit_runs_no_synchronous_transfer_the_shared_ring_could_lose() {
+    // The contract the event loop's skip rests on. A submit that runs a
+    // *synchronous* engine wait parks on the shared controller interrupt line
+    // and consumes whatever else that edge carried, so the loop must re-drive
+    // every other transport afterwards to release those stashed completions. A
+    // held interrupt-IN runs no such wait — its report simply was not buffered
+    // yet — so there is nothing stashed and the re-drive is pure waste on the
+    // hot path. `Held` versus `Reply` is exactly that distinction.
+    let mut engine = MockEngine::new();
+    let mut shm = vec![0u8; 8];
+    let mut service = UrbService::new();
+
+    // Nothing buffered: held, and only the non-blocking interrupt-IN probe ran.
+    let outcome = service.on_submit(true, 0x21, &interrupt_urb(1, 8), &mut shm, &mut engine);
+    assert_eq!(outcome, UrbOutcome::Held);
+    assert_eq!(
+        engine.control_calls, 0,
+        "a held URB issues no synchronous transfer"
+    );
+
+    // A control transfer, by contrast, completes inside the submit: it ran a
+    // synchronous wait, so the loop does re-drive the other transports.
+    let mut engine = MockEngine::new();
+    engine.control_response = vec![0xAA; 4];
+    let mut service = UrbService::new();
+    let urb = UrbRequest {
+        endpoint: 0,
+        transfer_type: UsbTransferType::Control,
+        direction: UsbDirection::In,
+        buffer: BUFFER_HANDLE,
+        length: 4,
+        setup: [0x80, 0x06, 0x00, 0x01, 0x00, 0x00, 0x04, 0x00],
+    };
+    let mut buf = [0u8; URB_REQUEST_LEN];
+    let n = urb.encode(&mut buf).expect("encodes");
+    let outcome = service.on_submit(true, 0x22, &buf[..n], &mut shm, &mut engine);
+    assert!(matches!(outcome, UrbOutcome::Reply(_)));
+    assert_eq!(
+        engine.control_calls, 1,
+        "a replied control URB did run a synchronous transfer"
+    );
+}

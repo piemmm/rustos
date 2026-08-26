@@ -100,9 +100,15 @@ build on the *same* engine without depending on each other — exactly the split
   released, never allowed to cost the other devices their service. A device
   absent at bring-up is a first-class state, not a failure: the controller
   comes up watched (each hub's status-change endpoint, and the root ports'
-  latched connect changes serviced by `next_root_change` on every interrupt
-  wake, with no controller reset), so a cold boot with nothing plugged in
-  works and each device autoloads when plugged in.
+  latched connect changes serviced by `next_root_change`, with no controller
+  reset), so a cold boot with nothing plugged in works and each device
+  autoloads when plugged in. The `PORTSC` walk runs only when a latched
+  source has armed it — a Port Status Change Event drained by any ring
+  consumer, or the `USBSTS.PCD` summary the interrupt acknowledgement reads —
+  so a device streaming reports never touches a port register, while neither
+  trigger can lose a plug. Both are xHCI-mandated latches, and the arming is
+  recorded at the one point every ring consumer funnels through, so a plug
+  whose event was swallowed by a synchronous engine wait is still scanned for.
 - `regs` / `trb` / `ring` — the register, TRB, and ring-state vocabularies; the
   ring state machines (`ProducerRing`, `EventRingCursor`) hold no memory of
   their own, so the owner publishes every write through the `device::DmaBank`

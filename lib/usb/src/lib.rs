@@ -44,6 +44,11 @@
 // error, never a panic).
 extern crate alloc;
 
+// The allocation-budget regression owns a counting `#[global_allocator]` that
+// forwards to the host allocator.
+#[cfg(test)]
+extern crate std;
+
 use tairix_abi::driver::mmio::WindowError;
 use tairix_abi::{DriverError, RegisterWindow};
 
@@ -230,6 +235,19 @@ impl DmaProgram {
         }
         ok
     }
+}
+
+/// The latched `USBSTS` summary bits one interrupt's service needs, read once
+/// by [`Xhci::acknowledge_interrupt`].
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ControllerStatus {
+    /// A latched Host System Error or a halted controller (`HSE`/`HCHalted`) —
+    /// the controller raises no further interrupt until it is reset, so the
+    /// caller must recover rather than wait.
+    pub faulted: bool,
+    /// Some root port's change bits latched (`PCD`), so the root-port scan has
+    /// work. Cleared by the acknowledgement that read it.
+    pub port_change: bool,
 }
 
 /// An `xHCI` controller brought to the halted, freshly reset state.
@@ -738,7 +756,8 @@ impl<H: XhciHost> Xhci<H> {
     }
 
     /// Acknowledge interrupter 0's pending interrupt by clearing the xHCI
-    /// global event status and `IMAN.IP`, keeping Interrupt Enable set.
+    /// global event status and `IMAN.IP`, keeping Interrupt Enable set, and
+    /// report the [`ControllerStatus`] the same `USBSTS` read revealed.
     ///
     /// Called at the **start** of servicing a delivered interrupt, before
     /// the event ring is drained: clearing the global event latch before
@@ -749,12 +768,31 @@ impl<H: XhciHost> Xhci<H> {
     /// [`Self::ack_event`]). Writing IP as 1 clears it; the companion IE bit
     /// is re-written set so the interrupter stays armed.
     ///
+    /// One read serves the whole interrupt: the fault and port-change latches
+    /// live in the register the acknowledgement must write anyway, so a caller
+    /// that took its decisions from here needs no further `USBSTS` read — on a
+    /// PCIe controller each such read is a non-posted round trip. `PCD` is
+    /// cleared in the same write-1-to-clear write when it was set, *before* the
+    /// caller scans the ports, so a change arriving during that scan re-latches
+    /// and is scanned again rather than being lost.
+    ///
     /// # Errors
     ///
-    /// [`DriverError::DeviceFault`] if the register window rejects the write.
-    pub fn acknowledge_interrupt(&mut self) -> Result<(), DriverError> {
-        self.write_op(regs::USBSTS, regs::USBSTS_EINT)?;
-        self.write_ir0(regs::IR_IMAN, regs::IMAN_IE | regs::IMAN_IP)
+    /// [`DriverError::DeviceFault`] if the register window rejects the access.
+    pub fn acknowledge_interrupt(&mut self) -> Result<ControllerStatus, DriverError> {
+        let usbsts = self.read_op(regs::USBSTS)?;
+        let status = ControllerStatus {
+            faulted: usbsts & (regs::USBSTS_HSE | regs::USBSTS_HCH) != 0,
+            port_change: usbsts & regs::USBSTS_PCD != 0,
+        };
+        let clear = if status.port_change {
+            regs::USBSTS_EINT | regs::USBSTS_PCD
+        } else {
+            regs::USBSTS_EINT
+        };
+        self.write_op(regs::USBSTS, clear)?;
+        self.write_ir0(regs::IR_IMAN, regs::IMAN_IE | regs::IMAN_IP)?;
+        Ok(status)
     }
 
     /// Reset a root-hub port and wait for it to come back enabled

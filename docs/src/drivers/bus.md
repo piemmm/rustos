@@ -420,8 +420,11 @@ cycle/wrap/full logic is host-proven. The ring refuses caller-set
 cycle bits and caller Link TRBs and fails closed (`Busy`) when full;
 `EventRingCursor` consumes only TRBs whose cycle bit matches its
 expectation, inverting it on each wrap, and holds no borrow of the
-segment (the controller keeps writing it), validating the segment
-length on every `pop`.
+segment (the controller keeps writing it) — it is handed the single
+entry at `dequeue_offset` afresh on each call. Only that entry is ever
+examined, so a poll reads 16 bytes rather than the whole segment out of
+non-cacheable DMA memory; on a device streaming reports that difference
+dominates the driver's steady-state CPU cost.
 
 ### Device enumeration and the HID report path
 

@@ -26,17 +26,40 @@
 //!   `call_recv`s the URB and drives it. An interrupt-IN report not yet
 //!   arrived is left **outstanding** (the class driver's `ipc_call` parks in
 //!   the kernel); a control transfer or a ready report is replied at once.
-//! * **The controller's completion interrupt**: it first **pumps every served
-//!   interrupt-IN endpoint** (`UsbDevice::pump_reports`) — capturing each
-//!   posted report into the engine's per-device buffer and re-arming the
-//!   endpoint, *independent* of whether a class driver has a URB outstanding —
-//!   then **replies to any now-satisfiable outstanding URB** from that buffer,
-//!   bounce-copying the report into the shared buffer the class driver reads.
+//! * **The controller's completion interrupt**: *acknowledge, drain once, then
+//!   dispatch*. The acknowledgement's single `USBSTS` read carries the fault and
+//!   port-change latches, so the whole service needs no second read of it. Then
+//!   one pass over the event ring (`UsbDevice::pump_reports`) sorts every posted
+//!   event into its consumer's buffer — each served interrupt-IN endpoint's
+//!   reports into its per-device FIFO with the endpoint re-armed, each watched
+//!   hub's status-change report into its parked slot, bulk completions into
+//!   their FIFOs, a Port Status Change Event into the root-scan arming.
+//!   Everything after that reads those buffers rather than walking the ring
+//!   again: hot-plug is serviced, then any now-satisfiable outstanding URB is
+//!   **replied** from the buffered report, bounce-copied into the shared buffer
+//!   the class driver reads.
+//!
 //!   Capturing on the interrupt rather than only when a class driver submits
 //!   decouples device polling from a CPU-starved class driver, so reports are
 //!   never dropped under load (`plans/USB.md`). It also watches the root-hub
 //!   port and retracts the interface node on a disconnect (`hw_remove_node`),
 //!   so `devmgr` unloads the class driver while the controller stays up.
+//!
+//! # Per-interrupt cost
+//!
+//! A device streaming reports — a mouse in motion, at the 1 ms
+//! interrupt-moderation ceiling — makes this path run ~1000 times a second, so
+//! what it touches per pass is the driver's whole steady-state CPU cost. Three
+//! properties keep it small, each with a budget regression in `lib/usb`:
+//!
+//! * **One register read.** The port scan is armed by a latched event rather
+//!   than run unconditionally, and the fault check rides the acknowledgement's
+//!   own read. On a PCIe controller a register read is a non-posted round trip
+//!   and is the most expensive operation here.
+//! * **One TRB per ring probe.** The engine reads the single 16-byte entry at
+//!   the dequeue point, never the whole segment out of non-cacheable memory.
+//! * **No allocation.** The path holds only fixed-capacity state; the heap is
+//!   touched on attach and detach alone.
 //!
 //! # Data path (`plans/USB.md` U3a2, Option B)
 //!
@@ -414,18 +437,24 @@ mod program {
     /// interrupt can carry several ports' changes; a failed service is
     /// logged with its whole attach-fault breadcrumb and the loop stops
     /// (the latch was consumed, so it cannot re-fire spuriously).
+    ///
+    /// Returns whether anything was attached or detached, so the caller only
+    /// pays for the post-teardown controller-fault check when a teardown
+    /// actually happened.
     fn service_root_changes(
         device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
         transports: &mut Vec<Option<Transport>>,
         set: u64,
         urb_base: u64,
         delay: ClockDelay,
-    ) {
+    ) -> bool {
+        let mut changed = false;
         loop {
             match device.next_root_change(&delay) {
-                Ok(HubEvent::None) => return,
+                Ok(HubEvent::None) => return changed,
                 Ok(HubEvent::Attached(_) | HubEvent::HubAttached(_)) => {
                     reconcile_interfaces(device, transports, set, urb_base);
+                    changed = true;
                     log(
                         &LogSink,
                         &Event {
@@ -438,6 +467,7 @@ mod program {
                 }
                 Ok(HubEvent::Detached(_) | HubEvent::HubDetached(_)) => {
                     reconcile_interfaces(device, transports, set, urb_base);
+                    changed = true;
                     log(
                         &LogSink,
                         &Event {
@@ -454,7 +484,7 @@ mod program {
                         "usb-hcd: root-port hot-plug service failed",
                         err,
                     );
-                    return;
+                    return changed;
                 }
             }
         }
@@ -853,13 +883,18 @@ mod program {
     /// stash must be drained here rather than waiting for another
     /// interrupt. A transport whose device just detached has already had
     /// its URB aborted, so it is simply not busy.
+    ///
+    /// Returns whether a transfer fault detached a device, so the caller only
+    /// pays for the post-teardown controller-fault check when a teardown
+    /// actually happened.
     fn service_busy_urbs(
         device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
         transports: &mut Vec<Option<Transport>>,
         set: u64,
         urb_base: u64,
         delay: ClockDelay,
-    ) {
+    ) -> bool {
+        let mut any_detached = false;
         for index in 0..transports.len() {
             let busy = transports[index]
                 .as_ref()
@@ -886,6 +921,7 @@ mod program {
                         && retract_after_fault_if_gone(
                             device, index, transports, set, urb_base, reply, delay,
                         );
+                    any_detached |= detached;
                     if !detached {
                         if let Some(transport) = transports[index].as_ref() {
                             reply_to_urb(transport.endpoint_id, reply);
@@ -908,6 +944,7 @@ mod program {
                 UrbOutcome::Idle => {}
             }
         }
+        any_detached
     }
 
     /// Run the engine's consumer-independent report pump on a controller
@@ -1619,6 +1656,12 @@ mod program {
         };
         let mut request = [0u8; URB_REQUEST_LEN];
         let mut ticket = 0u64;
+        // Whether servicing the submit could have consumed another transport's
+        // completion. Only a submit that ran a synchronous engine wait can: it
+        // parks on the shared interrupt line and stashes whatever else that
+        // edge carried. A held interrupt-IN URB ran no wait — the report simply
+        // was not buffered yet — so there is nothing stashed to drive.
+        let mut wait_may_have_stashed = false;
         match tairix_rt::call_recv_nonblock(transport.endpoint_id, &mut request, &mut ticket) {
             Ok(n) => {
                 match transport.service.on_submit(
@@ -1629,6 +1672,7 @@ mod program {
                     &mut device.engine_for(index),
                 ) {
                     UrbOutcome::Reply(reply) => {
+                        wait_may_have_stashed = true;
                         reply_to_urb(transport.endpoint_id, reply);
                     }
                     UrbOutcome::Held => {}
@@ -1655,17 +1699,20 @@ mod program {
                 );
             }
         }
-        // A synchronous wait inside the submit may have consumed the interrupt
-        // edge that carried another transport's asynchronous completion (now
-        // stashed); drain it rather than leaving it parked until the next
-        // interrupt.
-        service_busy_urbs(device, transports, set, urb_base, delay);
+        if wait_may_have_stashed {
+            service_busy_urbs(device, transports, set, urb_base, delay);
+        }
     }
 
-    /// Service the controller interrupt: acknowledge it, drive hot-plug, pump
-    /// every served interrupt-IN device's reports, hand the buffered reports to
-    /// any outstanding URB, and recover the controller either side of the
-    /// teardown paths that latch a fault.
+    /// Service the controller interrupt: acknowledge it, drain the event ring
+    /// **once** into the per-consumer buffers, then dispatch from those buffers
+    /// — hot-plug, then the buffered reports handed to any outstanding URB —
+    /// recovering the controller around each teardown path that can latch a
+    /// fault.
+    ///
+    /// Draining before dispatching is what keeps the ring walked once per
+    /// interrupt with one shared classifier, rather than each consumer walking
+    /// it again with its own copy of that decision.
     fn service_controller_interrupt(
         device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
         transports: &mut Vec<Option<Transport>>,
@@ -1682,25 +1729,55 @@ mod program {
         // controller still has an un-dequeued event re-asserts immediately and
         // spins the loop, while a per-event advance only ever clears EHB once
         // the ring is genuinely caught up.
-        let _ = device.acknowledge_interrupt();
-        // Hot-plug. Root-port connects/disconnects are serviced first, from
-        // the `PORTSC.CSC` latches (a `SuperSpeed` device trains directly on a
-        // root port; pulling a hub assembly clears the root port it sat on —
-        // either way the change stays latched even when its Port Status Change
-        // Event was drained by an engine wait). Then a watched hub's
-        // status-change report drives downstream connect/disconnect: a fresh
-        // device is enumerated and a new interface node published on its
-        // index's transport (so `devmgr` autoloads the class driver onto the
-        // same endpoint across a re-plug), and a disconnect retracts only that
-        // device's node. All leave the controller up.
-        service_root_changes(device, transports, set, urb_base, delay);
-        if device.hub_watch_active() {
+        // The acknowledgement's single USBSTS read also carries the fault and
+        // port-change latches, so the whole service needs no further read of
+        // it. A controller already faulted when we woke raises no further
+        // interrupt, so recover before touching anything else.
+        let faulted = device
+            .acknowledge_interrupt()
+            .is_ok_and(|status| status.faulted);
+        if faulted && recover_controller(device, transports, set, urb_base, delay, health) {
+            return;
+        }
+        // Drain the event ring once, here, into the per-consumer buffers: every
+        // served interrupt-IN device's reports into its FIFO (with its endpoint
+        // re-armed), each watched hub's status-change completion into its parked
+        // slot, bulk completions into their FIFOs, and a Port Status Change
+        // Event into the root-scan arming. Capturing reports off the interrupt
+        // rather than only when a class driver submits is what makes the report
+        // path immune to a CPU-starved class driver — no report is lost merely
+        // because the software above it was not scheduled — and it covers every
+        // interrupt-IN device the controller serves, not just the one whose URB
+        // happens to be in flight. Everything below dispatches from those
+        // buffers rather than walking the ring again.
+        pump_reports(device, reported_drops);
+        // Hot-plug. Root-port connects/disconnects come from the `PORTSC.CSC`
+        // latches (a `SuperSpeed` device trains directly on a root port;
+        // pulling a hub assembly clears the root port it sat on — either way
+        // the change stays latched even when its Port Status Change Event was
+        // drained by an engine wait). Then a watched hub's status-change report
+        // drives downstream connect/disconnect: a fresh device is enumerated
+        // and a new interface node published on its index's transport (so
+        // `devmgr` autoloads the class driver onto the same endpoint across a
+        // re-plug), and a disconnect retracts only that device's node. All
+        // leave the controller up.
+        let mut topology_changed = service_root_changes(device, transports, set, urb_base, delay);
+        // Every hub with a report parked is serviced, not just the first: a
+        // hub's status-change endpoint is re-armed only once its report is
+        // serviced, so a second reporting hub left until "the next interrupt"
+        // may never get one. Bounded by the watched-hub count — each keeps one
+        // status transfer outstanding, so that is every report the drain can
+        // have parked — which stops a flapping hub whose endpoint re-completes
+        // during each service from holding this loop and starving the other
+        // devices' URBs.
+        for _ in 0..device.watched_hub_count() {
             match device.next_hub_change(&delay) {
                 Ok(HubEvent::Attached(_) | HubEvent::HubAttached(_)) => {
                     // A fresh leaf device — or a fresh hub tier whose
                     // downstream devices were enumerated with it — is
                     // published by diffing every live index.
                     reconcile_interfaces(device, transports, set, urb_base);
+                    topology_changed = true;
                     log(
                         &LogSink,
                         &Event {
@@ -1715,6 +1792,7 @@ mod program {
                     // A vanished leaf device — or a vanished hub tier with
                     // everything behind it — is retracted by the same diff.
                     reconcile_interfaces(device, transports, set, urb_base);
+                    topology_changed = true;
                     log(
                         &LogSink,
                         &Event {
@@ -1725,42 +1803,37 @@ mod program {
                         },
                     );
                 }
-                Ok(HubEvent::None) => {}
-                Err(err) => log_topology_service_failure(
-                    device,
-                    "usb-hcd: hub status-change service failed",
-                    err,
-                ),
+                Ok(HubEvent::None) => break,
+                Err(err) => {
+                    log_topology_service_failure(
+                        device,
+                        "usb-hcd: hub status-change service failed",
+                        err,
+                    );
+                    break;
+                }
             }
         }
         // A disconnect-handling teardown above (a hub status-change detach or
         // a hub-assembly detach) can leave the controller halted with a
         // latched Host System Error on the Pi 4 VL805; recover before
-        // servicing so the re-plug is still seen.
-        if recover_controller(device, transports, set, urb_base, delay, health) {
+        // servicing so the re-plug is still seen. Only a teardown can latch it,
+        // so a routine report interrupt pays nothing to check.
+        if topology_changed && recover_controller(device, transports, set, urb_base, delay, health)
+        {
             return;
         }
-        // Capture every served interrupt-IN device's reports off this
-        // controller interrupt into the engine's per-device buffers, and keep
-        // every such endpoint armed — regardless of whether a class driver has
-        // a URB outstanding. This is the decoupling that makes report capture
-        // immune to a CPU-starved class driver: reports are captured the
-        // moment they arrive rather than only when the (possibly starved)
-        // class driver next submits, so none is lost under load. It covers
-        // every interrupt-IN device the controller serves (keyboard, mouse,
-        // and any other), not just the one whose URB happens to be in flight.
-        // `service_busy_urbs` below then merely hands the already-buffered
-        // reports to any outstanding URB.
-        pump_reports(device, reported_drops);
-        // Drive every transport with a URB outstanding: the drained event(s)
-        // may complete any of them, and a completion the hot-plug handling
+        // Hand the already-buffered reports to any outstanding URB. A drained
+        // completion may satisfy any transport, and one the hot-plug handling
         // above parked must not wait for another interrupt.
-        service_busy_urbs(device, transports, set, urb_base, delay);
+        let detached = service_busy_urbs(device, transports, set, urb_base, delay);
         // The transfer-fault disconnect teardown (the Disable Slot in
         // `retract_after_fault_if_gone`) latches the same controller fault on
         // the Pi 4 VL805 after it completes; recover here too so the re-plug
         // is seen rather than the controller staying halted and silent.
-        let _ = recover_controller(device, transports, set, urb_base, delay, health);
+        if detached {
+            let _ = recover_controller(device, transports, set, urb_base, delay, health);
+        }
     }
 
     tairix_rt::entry!(main);

@@ -78,6 +78,12 @@ struct MockDma {
     chunks: Vec<(usize, usize)>,
     /// The next chunk's base offset; monotonic, 4096-aligned.
     next_base: usize,
+    /// Bytes read out of the region, so a cost-budget regression can hold the
+    /// per-interrupt DMA traffic down. On metal this memory is
+    /// Normal-Non-Cacheable, so every byte is a real access.
+    read_bytes: usize,
+    /// Read calls made, for the same budget.
+    read_calls: usize,
 }
 
 impl MockDma {
@@ -87,6 +93,8 @@ impl MockDma {
             phys,
             chunks: Vec::new(),
             next_base: 0,
+            read_bytes: 0,
+            read_calls: 0,
         }
     }
 
@@ -142,6 +150,8 @@ impl DmaBank for MockDma {
 
     fn read(&mut self, offset: usize, buf: &mut [u8]) -> Result<(), DriverError> {
         self.chunk_covering(offset, buf.len())?;
+        self.read_bytes += buf.len();
+        self.read_calls += 1;
         let mem = self.mem.borrow();
         buf.copy_from_slice(&mem[offset..offset + buf.len()]);
         Ok(())
@@ -612,6 +622,11 @@ const MOCK_COMPOSITE_CONFIG_DESCRIPTOR: [u8; 75] = [
 /// allowed here for the same reason as the `emmc2` `MockSdhci`.
 #[allow(clippy::struct_excessive_bools)]
 struct MockXhci {
+    /// Register reads served, so a cost-budget regression can hold the
+    /// per-interrupt register traffic down. On a PCIe controller each read is a
+    /// non-posted round trip and is the most expensive thing on the report
+    /// path; writes are posted and cheap.
+    reg_reads: usize,
     cap_dword0: u32,
     hcsparams1: u32,
     hccparams1: u32,
@@ -1148,6 +1163,7 @@ impl MockXhci {
     #[allow(clippy::too_many_lines)]
     fn new() -> Self {
         Self {
+            reg_reads: 0,
             cap_dword0: 0x0110_0000 | MOCK_CAPLENGTH, // xHCI 1.1
             hcsparams1: 0x0400_0020,                  // 4 ports, 32 slots
             hccparams1: 0x0000_0005,                  // AC64 + CSZ
@@ -1660,6 +1676,19 @@ impl MockXhci {
             parameter: trb_addr,
             status: u32::from(CompletionCode::Success.as_u8()) << 24,
             control: (u32::from(type_raw) << 10) | trb::control_slot(self.active_slot),
+        });
+    }
+
+    /// Post the Port Status Change Event the controller raises when a root
+    /// port's change bits latch (§4.19.2), naming `port` (1-based).
+    ///
+    /// This is the trigger the root-port scan keys on that cannot be lost: the
+    /// event reaches the scan's arming through whichever consumer drains it.
+    fn post_port_status_change_event(&mut self, port: u8) {
+        self.post_event(Trb {
+            parameter: u64::from(port) << 24,
+            status: u32::from(CompletionCode::Success.as_u8()) << 24,
+            control: u32::from(TrbType::PortStatusChange.as_u8()) << 10,
         });
     }
 
@@ -2788,6 +2817,16 @@ impl MockXhci {
         }
     }
 
+    /// Unplug the device behind the nested hub on root-hub port `root_port`:
+    /// its downstream port reports disconnected with the connect change
+    /// latched, as the hub would after a physical pull.
+    fn clear_nested_downstream(&mut self, root_port: u8) {
+        if let Some(i) = self.nested_by_root_port(root_port) {
+            self.nested_hubs[i].downstream_status = 0;
+            self.nested_hubs[i].downstream_change = PORT_CHANGE_CONNECTION;
+        }
+    }
+
     /// Deliver one status-change report from the **nested** hub carried on
     /// root-hub port `root_port`, as [`Self::post_hub_status_change`] does
     /// for the root hub: write `bitmap` into that hub's armed status-change
@@ -2980,6 +3019,7 @@ impl MockXhci {
 
 impl XhciHost for MockXhci {
     fn read32(&mut self, offset: usize) -> Result<u32, DriverError> {
+        self.reg_reads += 1;
         if offset >= MOCK_WINDOW_LEN {
             return Err(DriverError::DeviceFault);
         }
@@ -3174,6 +3214,19 @@ impl XhciHost for MockXhci {
 }
 
 impl MockXhci {
+    /// Set root port `index`'s (0-based) `PORTSC` to `value`, latching
+    /// `USBSTS.PCD` when the new value carries a change bit — what the silicon
+    /// does on a `0`→`1` change transition, and the summary the root-port scan
+    /// keys on. `PCD` stays latched until written back (write-1-to-clear), so a
+    /// consumed Port Status Change Event can leave the port latch set with `PCD`
+    /// already clear; that case is covered by the drained-event arming instead.
+    fn latch_portsc(&mut self, index: usize, value: u32) {
+        self.portsc[index] = value;
+        if value & regs::PORTSC_RW1C_MASK != 0 {
+            self.pcd_latched = true;
+        }
+    }
+
     /// Service a doorbell write at slot `index` with target `value` (the DCI,
     /// or `0` for the command ring), driving the matching ring's device model.
     fn ring_doorbell_model(&mut self, index: usize, value: u32) {
@@ -3532,18 +3585,19 @@ fn event_cursor_rejects_empty_segment() {
 fn event_cursor_consumes_matching_cycle_only() {
     let mut segment = [Trb::ZERO; 3];
     let mut cursor = EventRingCursor::new(3).expect("segment fits");
+    let at = |seg: &[Trb; 3], cursor: &EventRingCursor| seg[cursor.dequeue_index()];
     // Nothing produced yet: every slot carries cycle 0, cursor wants 1.
-    assert_eq!(cursor.pop(&segment), Ok(None));
+    assert_eq!(cursor.pop(at(&segment, &cursor)), None);
     segment[0] = Trb::new(
         TrbType::CommandCompletion,
         0x1000,
         u32::from(CompletionCode::Success.as_u8()) << 24,
         CONTROL_CYCLE,
     );
-    let event = cursor.pop(&segment).expect("read ok").expect("one event");
+    let event = cursor.pop(at(&segment, &cursor)).expect("one event");
     assert_eq!(event.trb_type(), Ok(TrbType::CommandCompletion));
     assert_eq!(cursor.dequeue_index(), 1);
-    assert_eq!(cursor.pop(&segment), Ok(None));
+    assert_eq!(cursor.pop(at(&segment, &cursor)), None);
 }
 
 #[test]
@@ -3554,30 +3608,30 @@ fn event_cursor_owned_peeks_without_advancing() {
     // non-coherent DMA).
     let mut segment = [Trb::ZERO; 3];
     let mut cursor = EventRingCursor::new(3).expect("segment fits");
-    assert_eq!(cursor.owned(&segment), Ok(false), "nothing produced yet");
+    let at = |seg: &[Trb; 3], cursor: &EventRingCursor| seg[cursor.dequeue_index()];
+    assert!(!cursor.owned(at(&segment, &cursor)), "nothing produced yet");
     segment[0] = Trb::new(
         TrbType::CommandCompletion,
         0x1000,
         u32::from(CompletionCode::Success.as_u8()) << 24,
         CONTROL_CYCLE,
     );
-    assert_eq!(cursor.owned(&segment), Ok(true), "producer owns slot 0 now");
-    // Peeking twice still does not advance: a following `pop` consumes it.
-    assert_eq!(cursor.owned(&segment), Ok(true));
-    assert_eq!(cursor.dequeue_index(), 0, "peek left the cursor put");
-    assert!(cursor.pop(&segment).unwrap().is_some());
-    assert_eq!(cursor.dequeue_index(), 1);
-    // A wrong-length segment is rejected like `pop`.
-    assert_eq!(
-        cursor.owned(&[Trb::ZERO; 4]),
-        Err(DriverError::LengthOutOfRange)
+    assert!(
+        cursor.owned(at(&segment, &cursor)),
+        "producer owns slot 0 now"
     );
+    // Peeking twice still does not advance: a following `pop` consumes it.
+    assert!(cursor.owned(at(&segment, &cursor)));
+    assert_eq!(cursor.dequeue_index(), 0, "peek left the cursor put");
+    assert!(cursor.pop(at(&segment, &cursor)).is_some());
+    assert_eq!(cursor.dequeue_index(), 1);
 }
 
 #[test]
 fn event_cursor_wraps_and_toggles_expectation() {
     let mut segment = [Trb::ZERO; 2];
     let mut cursor = EventRingCursor::new(2).expect("segment fits");
+    let at = |seg: &[Trb; 2], cursor: &EventRingCursor| seg[cursor.dequeue_index()];
     let event = |cycle: bool| Trb {
         parameter: 0,
         status: u32::from(CompletionCode::Success.as_u8()) << 24,
@@ -3586,21 +3640,36 @@ fn event_cursor_wraps_and_toggles_expectation() {
     };
     segment[0] = event(true);
     segment[1] = event(true);
-    assert!(cursor.pop(&segment).unwrap().is_some());
-    assert!(cursor.pop(&segment).unwrap().is_some());
+    assert!(cursor.pop(at(&segment, &cursor)).is_some());
+    assert!(cursor.pop(at(&segment, &cursor)).is_some());
     assert_eq!(cursor.dequeue_index(), 0);
     // Second pass: the controller now produces with cycle 0; stale
     // first-pass TRBs (cycle 1) must not be re-consumed.
-    assert_eq!(cursor.pop(&segment), Ok(None));
+    assert_eq!(cursor.pop(at(&segment, &cursor)), None);
     segment[0] = event(false);
-    assert!(cursor.pop(&segment).unwrap().is_some());
+    assert!(cursor.pop(at(&segment, &cursor)).is_some());
 }
 
 #[test]
-fn event_cursor_rejects_wrong_segment() {
-    let segment = [Trb::ZERO; 3];
-    let mut cursor = EventRingCursor::new(4).expect("cursor fits");
-    assert_eq!(cursor.pop(&segment), Err(DriverError::LengthOutOfRange));
+fn event_cursor_dequeue_offset_tracks_the_slot_the_owner_reads() {
+    // The owner reads exactly the dequeue entry — 16 bytes, not the whole
+    // segment — so the byte offset must follow the cursor and wrap with it.
+    let mut cursor = EventRingCursor::new(3).expect("segment fits");
+    let produced = Trb::new(
+        TrbType::CommandCompletion,
+        0x2000,
+        u32::from(CompletionCode::Success.as_u8()) << 24,
+        CONTROL_CYCLE,
+    );
+    for slot in 0..3 {
+        assert_eq!(cursor.dequeue_offset(), slot * TRB_LEN);
+        assert!(cursor.pop(produced).is_some());
+    }
+    assert_eq!(
+        cursor.dequeue_offset(),
+        0,
+        "the offset wraps with the cursor"
+    );
 }
 
 #[test]
@@ -3737,6 +3806,16 @@ fn started_device_with_wait(
     let xhci = Xhci::open(mock).expect("bring-up succeeds");
     let dma = MockDma::new(Rc::clone(mem), MOCK_DMA_BASE);
     UsbDevice::start(xhci, dma, wait, 4096).expect("engine starts")
+}
+
+/// Model a root-port change arriving as the controller does: latch `PORTSC`
+/// (which latches the `USBSTS.PCD` summary) and acknowledge the interrupt it
+/// raises, exactly as the HCD does on every wake before it scans the ports.
+fn root_port_change(device: &mut UsbDevice<'_, MockXhci, MockDma>, port_index: usize, portsc: u32) {
+    device.host_mut().latch_portsc(port_index, portsc);
+    device
+        .acknowledge_interrupt()
+        .expect("the acknowledgement reads USBSTS");
 }
 
 fn arm_report_request(device: &mut UsbDevice<'_, MockXhci, MockDma>) {
@@ -7063,12 +7142,12 @@ fn a_stray_controller_event_during_a_hub_poll_never_silences_the_watch() {
     // The decisive "controller goes quiet after the first report" metal
     // symptom: while a keyboard sits behind the (integrated) hub, a stray
     // controller event the engine does not model lands on the shared event
-    // ring ahead of the hub's status-change completion. `poll_hub_completion`
+    // ring ahead of the hub's status-change completion. The watch's ring poll
     // used to fault on it, so `next_hub_change` returned its `?` error before
     // re-arming the status-change endpoint — leaving it with no outstanding
     // transfer, so the hub could never post another report and every later
-    // disconnect/reconnect went unseen. The opportunistic poll must instead
-    // DRAIN such an event and keep scanning, so the watch is never silenced.
+    // disconnect/reconnect went unseen. The shared drain must instead DRAIN
+    // such an event and keep going, so the watch is never silenced.
     let mem = shared_mem();
     let mut mock = MockXhci::with_hub(&mem, 4, 4);
     mock.hub_downstream_status = 1 << 0;
@@ -7703,7 +7782,7 @@ fn hub_assembly_unplug_at_root_port_tears_down_and_replug_reenumerates() {
 
     // The whole hub assembly is now unplugged: its root port clears the
     // connect bit and latches the connect change.
-    device.host_mut().portsc[0] = regs::PORTSC_PP | regs::PORTSC_CSC;
+    root_port_change(&mut device, 0, regs::PORTSC_PP | regs::PORTSC_CSC);
     match device.next_root_change(&delay) {
         Ok(HubEvent::HubDetached(_)) => {}
         other => panic!("the hub assembly detach is detected, got {other:?}"),
@@ -7724,11 +7803,15 @@ fn hub_assembly_unplug_at_root_port_tears_down_and_replug_reenumerates() {
     // latched change). The scan attaches it afresh — the hub installed,
     // descended, and watched, the keyboard behind it enumerated — without
     // any controller reset.
-    device.host_mut().portsc[0] = regs::PORTSC_CCS
-        | regs::PORTSC_PED
-        | regs::PORTSC_PP
-        | (3 << regs::PORTSC_SPEED_SHIFT)
-        | regs::PORTSC_CSC;
+    root_port_change(
+        &mut device,
+        0,
+        regs::PORTSC_CCS
+            | regs::PORTSC_PED
+            | regs::PORTSC_PP
+            | (3 << regs::PORTSC_SPEED_SHIFT)
+            | regs::PORTSC_CSC,
+    );
     match device.next_root_change(&delay) {
         Ok(HubEvent::HubAttached(_)) => {}
         other => panic!("the hub assembly re-attach is served, got {other:?}"),
@@ -7774,11 +7857,15 @@ fn a_device_plugged_into_a_second_root_port_is_served_while_the_hub_stays_watche
 
     // A device is plugged into root port 2: connected, already enabled
     // (the `SuperSpeed` shape — no reset needed), connect change latched.
-    device.host_mut().portsc[1] = regs::PORTSC_CCS
-        | regs::PORTSC_PED
-        | regs::PORTSC_PP
-        | (3 << regs::PORTSC_SPEED_SHIFT)
-        | regs::PORTSC_CSC;
+    root_port_change(
+        &mut device,
+        1,
+        regs::PORTSC_CCS
+            | regs::PORTSC_PED
+            | regs::PORTSC_PP
+            | (3 << regs::PORTSC_SPEED_SHIFT)
+            | regs::PORTSC_CSC,
+    );
     let index = match device.next_root_change(&delay) {
         Ok(HubEvent::Attached(index)) => index,
         other => panic!("the second root port's device is attached, got {other:?}"),
@@ -7796,7 +7883,7 @@ fn a_device_plugged_into_a_second_root_port_is_served_while_the_hub_stays_watche
     assert_eq!(device.next_root_change(&delay), Ok(HubEvent::None));
 
     // Unplug it again: the disconnect detaches only that device.
-    device.host_mut().portsc[1] = regs::PORTSC_PP | regs::PORTSC_CSC;
+    root_port_change(&mut device, 1, regs::PORTSC_PP | regs::PORTSC_CSC);
     assert_eq!(
         device.next_root_change(&delay),
         Ok(HubEvent::Detached(index))
@@ -7896,11 +7983,15 @@ fn bring_up_keyboard_comes_up_awaiting_a_connect_when_no_device_is_attached() {
 
     // A keyboard is now plugged into a root port: the connect latches
     // `PORTSC.CSC` and the scan attaches it — no controller reset.
-    device.host_mut().portsc[0] = regs::PORTSC_CCS
-        | regs::PORTSC_PED
-        | regs::PORTSC_PP
-        | (3 << regs::PORTSC_SPEED_SHIFT)
-        | regs::PORTSC_CSC;
+    root_port_change(
+        &mut device,
+        0,
+        regs::PORTSC_CCS
+            | regs::PORTSC_PED
+            | regs::PORTSC_PP
+            | (3 << regs::PORTSC_SPEED_SHIFT)
+            | regs::PORTSC_CSC,
+    );
     match device.next_root_change(&delay) {
         Ok(HubEvent::Attached(0)) => {}
         other => panic!("the first connect is attached, got {other:?}"),
@@ -8707,5 +8798,414 @@ fn detaching_a_downstream_device_releases_its_dma_chunk() {
         device.dma_ref().live_chunks(),
         with_device - 1,
         "the detached device's region chunk was returned to the bank"
+    );
+}
+
+/// Allocation counter behind the test harness's global allocator, so the report
+/// path can be *proved* allocation-free rather than argued to be.
+///
+/// The counters are **per thread**: this crate's unit tests share one binary and
+/// the harness runs them in parallel, so a process-global counter would fold
+/// unrelated tests' allocations into the measured window and the budget would
+/// pass or fail by scheduling luck. Every allocating method is counted,
+/// `realloc`/`alloc_zeroed` included, so a growing `Vec` reintroduced on the
+/// path cannot slip past an `alloc`-only counter.
+mod alloc_counter {
+    use core::alloc::{GlobalAlloc, Layout};
+    use core::cell::Cell;
+    use std::alloc::System;
+    use std::thread::LocalKey;
+    use std::thread_local;
+
+    // `Cell<usize>` has no destructor, so these are const-initialised with no
+    // TLS teardown hook — the access itself never allocates and so cannot
+    // recurse into the allocator. `try_with` keeps a late allocation during
+    // thread teardown from panicking.
+    thread_local! {
+        static ALLOCS: Cell<usize> = const { Cell::new(0) };
+        static FREES: Cell<usize> = const { Cell::new(0) };
+    }
+
+    fn bump(counter: &'static LocalKey<Cell<usize>>) {
+        let _ = counter.try_with(|count| count.set(count.get().saturating_add(1)));
+    }
+
+    /// Allocations charged to the calling thread so far.
+    pub(super) fn allocs() -> usize {
+        ALLOCS.with(Cell::get)
+    }
+
+    /// Frees charged to the calling thread so far.
+    pub(super) fn frees() -> usize {
+        FREES.with(Cell::get)
+    }
+
+    pub(super) struct Counting;
+
+    // SAFETY: every method forwards to the system allocator unchanged; the only
+    // added behaviour is a thread-local counter bump over a destructor-free
+    // `Cell`, which allocates nothing and cannot affect memory safety.
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            bump(&ALLOCS);
+            unsafe { System.alloc(layout) }
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            bump(&FREES);
+            unsafe { System.dealloc(ptr, layout) }
+        }
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            bump(&ALLOCS);
+            unsafe { System.alloc_zeroed(layout) }
+        }
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            bump(&ALLOCS);
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+    }
+}
+
+#[global_allocator]
+static COUNTING_ALLOC: alloc_counter::Counting = alloc_counter::Counting;
+
+/// Bring up the Pi-4-shaped topology (onboard hub, keyboard and mouse behind
+/// it), settle the report endpoints, and post one mouse-move report — the state
+/// the per-interrupt cost tests measure from.
+fn hub_with_a_mouse_report_posted(mem: &SharedMem) -> UsbDevice<'static, MockXhci, MockDma> {
+    let mut mock = MockXhci::with_hub(mem, 4, 4);
+    mock.mouse_downstream_port = 2;
+    let mut device = started_device(mock, mem);
+    let delay = TestDelay::default();
+    device.bring_up(&delay).expect("hub, keyboard and mouse");
+    device.pump_reports().expect("both endpoints arm");
+    let mut buf = [0u8; REPORT_LEN];
+    let _ = device.next_report(1, &mut buf);
+    // Bring-up attaches the ports directly, so the scan is still armed from
+    // start-up; settle it, since the steady state a mouse in motion pays for is
+    // what this measures.
+    assert_eq!(device.next_root_change(&delay), Ok(HubEvent::None));
+    device
+        .host_mut()
+        .pending_reports2
+        .push_back(alloc::vec![0x00, 0x05, 0x00, 0x00]);
+    device.host_mut().process_int2_ring();
+    device
+}
+
+/// Run the engine calls the HCD's controller-interrupt service makes for one
+/// posted report, plus the class driver's next submit, returning
+/// `(register reads, DMA bytes read, DMA read calls)`.
+fn one_report_interrupt_cost(
+    device: &mut UsbDevice<'_, MockXhci, MockDma>,
+) -> (usize, usize, usize) {
+    let delay = TestDelay::default();
+    let mut buf = [0u8; REPORT_LEN];
+    let regs = device.host_mut().reg_reads;
+    let bytes = device.dma_mut().read_bytes;
+    let calls = device.dma_mut().read_calls;
+
+    device
+        .acknowledge_interrupt()
+        .expect("the acknowledgement reads USBSTS once");
+    device.pump_reports().expect("the one ring drain");
+    assert_eq!(device.next_root_change(&delay), Ok(HubEvent::None));
+    assert_eq!(device.next_hub_change(&delay), Ok(HubEvent::None));
+    device
+        .next_report(1, &mut buf)
+        .expect("the report drains")
+        .expect("the posted mouse report is delivered");
+    // The class driver's next submit finds nothing buffered and parks.
+    assert_eq!(device.next_report(1, &mut buf), Ok(None));
+
+    (
+        device.host_mut().reg_reads - regs,
+        device.dma_mut().read_bytes - bytes,
+        device.dma_mut().read_calls - calls,
+    )
+}
+
+#[test]
+fn a_report_interrupt_costs_one_register_read_and_one_trb_per_ring_probe() {
+    // The mouse-in-motion budget. Before this was enforced one 4-byte report
+    // cost 6 register reads and 1796 bytes of DMA: the ring was read whole (256
+    // bytes) to inspect the single 16-byte entry at the dequeue point, seven
+    // times over; the root ports were scanned on every interrupt; and USBSTS
+    // was read three times. At the 1 ms interrupt-moderation ceiling that is
+    // ~1000 of these a second, which is where the 1-2% of a core went.
+    let mem = shared_mem();
+    let mut device = hub_with_a_mouse_report_posted(&mem);
+    let (regs, bytes, calls) = one_report_interrupt_cost(&mut device);
+
+    assert_eq!(
+        regs, 1,
+        "only the acknowledgement's own USBSTS read: the port scan is \
+         event-gated and the fault latch rides that same read"
+    );
+    // Six single-TRB ring reads and the 4-byte report body. The reads are: two
+    // for the drain that consumes the report (the cycle-bit peek and the
+    // post-barrier re-read that guards a torn entry), one closing that drain on
+    // an empty ring, and one each for the hub take, the delivery, and the
+    // class driver's next submit finding nothing left.
+    assert_eq!(calls, 7, "one read per probe plus the report body");
+    assert_eq!(
+        bytes,
+        6 * TRB_LEN + 4,
+        "every probe reads the one dequeue entry, never the whole segment"
+    );
+}
+
+#[test]
+fn a_report_interrupt_allocates_nothing() {
+    // The report path holds only fixed-capacity state — the per-device report
+    // FIFO, the bulk FIFO, stack TRB images — so a device streaming reports
+    // never touches the heap. Growth happens on attach/detach alone.
+    let mem = shared_mem();
+    let mut device = hub_with_a_mouse_report_posted(&mem);
+    let allocs = alloc_counter::allocs();
+    let frees = alloc_counter::frees();
+
+    let _ = one_report_interrupt_cost(&mut device);
+
+    assert_eq!(
+        (
+            alloc_counter::allocs() - allocs,
+            alloc_counter::frees() - frees,
+        ),
+        (0, 0),
+        "no allocation or free on the report path"
+    );
+}
+
+#[test]
+fn a_drained_port_status_change_event_arms_the_root_scan() {
+    // The primary trigger, and the one that cannot be lost: the controller
+    // posts a Port Status Change Event for a root-port change, and *any* ring
+    // consumer that drains it arms the scan — including a synchronous engine
+    // wait that swallows the event on its way to an unrelated completion. This
+    // is what makes gating the scan safe: the arming is recorded where every
+    // consumer funnels through, not where one caller remembers to look.
+    let mem = shared_mem();
+    let mut device = hub_with_a_mouse_report_posted(&mem);
+    let delay = TestDelay::default();
+
+    // A keyboard is plugged into a bare root port. The port latch is set, but
+    // `PCD` is deliberately left clear — as it is once an earlier
+    // acknowledgement consumed it — so only the event can arm the scan.
+    device.host_mut().portsc[1] = regs::PORTSC_CCS
+        | regs::PORTSC_PED
+        | regs::PORTSC_PP
+        | (3 << regs::PORTSC_SPEED_SHIFT)
+        | regs::PORTSC_CSC;
+    assert_eq!(
+        device.next_root_change(&delay),
+        Ok(HubEvent::None),
+        "with neither trigger armed the latch alone is not scanned for"
+    );
+
+    device.host_mut().post_port_status_change_event(2);
+    device.pump_reports().expect("the drain sees the event");
+    match device.next_root_change(&delay) {
+        Ok(HubEvent::Attached(_) | HubEvent::HubAttached(_)) => {}
+        other => panic!("the drained event arms the scan, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_usbsts_port_change_summary_arms_the_root_scan() {
+    // The second, independent trigger: the `USBSTS.PCD` summary latch, read by
+    // the same acknowledgement the interrupt service already performs. It costs
+    // no extra register read and covers a controller that coalesced or dropped
+    // the per-port event.
+    let mem = shared_mem();
+    let mut device = hub_with_a_mouse_report_posted(&mem);
+    let delay = TestDelay::default();
+
+    // `latch_portsc` sets the summary bit as the silicon does; no Port Status
+    // Change Event is posted, so `PCD` alone must arm the scan.
+    root_port_change(
+        &mut device,
+        1,
+        regs::PORTSC_CCS
+            | regs::PORTSC_PED
+            | regs::PORTSC_PP
+            | (3 << regs::PORTSC_SPEED_SHIFT)
+            | regs::PORTSC_CSC,
+    );
+    match device.next_root_change(&delay) {
+        Ok(HubEvent::Attached(_) | HubEvent::HubAttached(_)) => {}
+        other => panic!("the PCD summary arms the scan, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_unarmed_root_scan_touches_no_port_register() {
+    // The whole point of the gate: a steady stream of report interrupts — a
+    // mouse in motion — must not read a single `PORTSC`. Each is a non-posted
+    // round trip on a PCIe controller.
+    let mem = shared_mem();
+    let mut device = hub_with_a_mouse_report_posted(&mem);
+    let delay = TestDelay::default();
+
+    let before = device.host_mut().reg_reads;
+    for _ in 0..8 {
+        assert_eq!(device.next_root_change(&delay), Ok(HubEvent::None));
+    }
+    assert_eq!(
+        device.host_mut().reg_reads - before,
+        0,
+        "an unarmed scan reads no register at all"
+    );
+}
+
+#[test]
+fn an_actionable_root_change_leaves_the_scan_armed_for_the_remaining_ports() {
+    // One interrupt can carry several ports' changes, and the scan returns from
+    // inside its walk on the first actionable one — leaving later ports
+    // unvisited. So an actionable event must *not* disarm: the HCD re-scans
+    // until it sees a quiet pass, and only that pass clears the arming.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.mouse_downstream_port = 2;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+    device.bring_up(&delay).expect("hub, keyboard and mouse");
+    assert_eq!(device.next_root_change(&delay), Ok(HubEvent::None));
+
+    // Two bare root ports gain a device at once, under a single arming.
+    let connected = regs::PORTSC_CCS
+        | regs::PORTSC_PED
+        | regs::PORTSC_PP
+        | (3 << regs::PORTSC_SPEED_SHIFT)
+        | regs::PORTSC_CSC;
+    device.host_mut().latch_portsc(1, connected);
+    device.host_mut().latch_portsc(2, connected);
+    device
+        .acknowledge_interrupt()
+        .expect("the acknowledgement reads USBSTS");
+
+    let mut attached = 0;
+    loop {
+        match device.next_root_change(&delay) {
+            Ok(HubEvent::None) => break,
+            Ok(HubEvent::Attached(_) | HubEvent::HubAttached(_)) => attached += 1,
+            other => panic!("only attaches were staged, got {other:?}"),
+        }
+    }
+    assert_eq!(
+        attached, 2,
+        "both changed ports are serviced under one arming"
+    );
+}
+
+#[test]
+fn a_controller_reset_rearms_the_root_scan() {
+    // A Host Controller Reset clears every `PORTSC` latch and starts a fresh
+    // event ring, so nothing would arm the scan for ports the controller comes
+    // back with already connected. The re-enumeration must therefore scan
+    // unconditionally, exactly as a cold boot does.
+    let mem = shared_mem();
+    let mut device = hub_with_a_mouse_report_posted(&mem);
+    let delay = TestDelay::default();
+    assert_eq!(device.next_root_change(&delay), Ok(HubEvent::None));
+
+    device
+        .reset_and_reenumerate(&delay)
+        .expect("the controller resets and re-enumerates");
+    let before = device.host_mut().reg_reads;
+    let _ = device.next_root_change(&delay);
+    assert!(
+        device.host_mut().reg_reads > before,
+        "the post-reset scan reads the ports rather than trusting a stale arming"
+    );
+}
+
+#[test]
+fn a_hub_status_change_is_serviced_from_the_slot_the_shared_drain_parked_it_in() {
+    // The hub watch reads what the one shared ring drain classified for it,
+    // rather than walking the ring a second time with its own copy of that
+    // dispatch decision. So a report the drain has already parked must be
+    // serviced without the watch reading any further ring entry.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.hub_downstream_status = 1 << 0;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+    device
+        .bring_up(&delay)
+        .expect("the hub and its device come up");
+    assert!(
+        device.device_live(1),
+        "the keyboard behind the hub is served"
+    );
+
+    // The keyboard is pulled from the hub's downstream port 4; the hub reports
+    // the change, and the shared drain parks that completion.
+    device.host_mut().hub_downstream_status = 0;
+    device.host_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
+    device.host_mut().post_hub_status_change(&[1 << 4]);
+    device
+        .pump_reports()
+        .expect("the drain parks the hub report");
+
+    match device.next_hub_change(&delay) {
+        Ok(HubEvent::Detached(_) | HubEvent::HubDetached(_)) => {}
+        other => panic!("the parked hub report is serviced, got {other:?}"),
+    }
+    assert!(!device.device_live(1), "its device slot was freed");
+    assert!(
+        device.hub_watch_active(),
+        "the watch is re-armed, so a re-plug is still seen"
+    );
+}
+
+#[test]
+fn two_hubs_reporting_at_once_are_both_serviced_without_a_further_interrupt() {
+    // A hub's status-change endpoint is re-armed only once its report has been
+    // serviced, so a second reporting hub left "until the next interrupt" may
+    // never get one — nothing is outstanding on it to complete. Servicing must
+    // therefore drain every parked hub report, not just the first.
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_hub_fanout(&mem, 12, 2), &mem);
+    let delay = TestDelay::default();
+    device.bring_up(&delay).expect("both hub tiers come up");
+    assert_eq!(device.next_root_change(&delay), Ok(HubEvent::None));
+    let served = (0..device.device_table_len())
+        .filter(|&i| device.device_live(i))
+        .count();
+    assert_eq!(served, 2, "one leaf behind each tier");
+
+    // Both tiers lose their leaf and report in the same interrupt window.
+    let roots: alloc::vec::Vec<u8> = device
+        .host_mut()
+        .nested_hubs
+        .iter()
+        .map(|hub| hub.root_port)
+        .collect();
+    for root in &roots {
+        device.host_mut().clear_nested_downstream(*root);
+        // Each tier carries its leaf on its own downstream port 2.
+        device
+            .host_mut()
+            .post_nested_hub_status_change(*root, &[1 << 2]);
+    }
+    device.pump_reports().expect("the drain parks both reports");
+
+    // The HCD bounds this loop by `watched_hub_count` — every report one drain
+    // can have parked, since each hub keeps one status transfer outstanding.
+    let mut serviced = 0;
+    for _ in 0..device.watched_hub_count() {
+        match device.next_hub_change(&delay) {
+            Ok(HubEvent::None) => break,
+            Ok(_) => serviced += 1,
+            Err(err) => panic!("both parked reports service cleanly, got {err:?}"),
+        }
+    }
+    assert_eq!(serviced, 2, "both hubs' reports are serviced in one pass");
+    assert_eq!(
+        (0..device.device_table_len())
+            .filter(|&i| device.device_live(i))
+            .count(),
+        0,
+        "both leaves are freed"
     );
 }
