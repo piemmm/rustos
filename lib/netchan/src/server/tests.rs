@@ -65,7 +65,7 @@ impl Net for LoopbackNet {
                     report.transmitted += 1;
                     let rx0 = rings.rx_ring(0).map_err(|_| DriverError::BadMagic)?;
                     match rx0.push(&frame[..len]) {
-                        Ok(()) => report.received += 1,
+                        Ok(()) => report.record_delivered(),
                         Err(Errno::NoSpace) => {
                             report.rx_ring_full = true;
                             break;
@@ -269,14 +269,25 @@ fn an_over_large_group_set_is_refused_by_the_device() {
 
 // --- The drain policy the interrupt path applies ------------------------
 
-/// A report with the given receive count and back-pressure flag.
+/// A report with the given receive count and back-pressure flag, where
+/// every harvested frame reached the ring.
 fn report(received: u32, rx_ring_full: bool) -> ServiceReport {
     ServiceReport {
         transmitted: 0,
         received,
+        harvested: received,
         filtered: 0,
         rx_ring_full,
         link: LinkState::Up,
+    }
+}
+
+/// A report for a pass that harvested `harvested` frames and shed every one.
+fn all_shed(harvested: u32) -> ServiceReport {
+    ServiceReport {
+        harvested,
+        filtered: u64::from(harvested),
+        ..report(0, false)
     }
 }
 
@@ -284,6 +295,16 @@ fn report(received: u32, rx_ring_full: bool) -> ServiceReport {
 fn a_device_still_handing_over_frames_keeps_draining() {
     assert_eq!(DrainStep::of(&report(1, false)), DrainStep::Continue);
     assert_eq!(DrainStep::of(&report(64, false)), DrainStep::Continue);
+}
+
+#[test]
+fn a_pass_that_shed_every_frame_still_counts_as_progress() {
+    // The device handed those frames over and may have more, so the drain
+    // must stay masked and keep going. Reading `received` here would call
+    // this "quiet" and re-arm, and a burst of shed frames — the normal case
+    // once the pre-filter is doing its job — would cost one interrupt each.
+    assert_eq!(DrainStep::of(&all_shed(1)), DrainStep::Continue);
+    assert_eq!(DrainStep::of(&all_shed(64)), DrainStep::Continue);
 }
 
 #[test]
@@ -491,7 +512,7 @@ impl Net for OneFrameNet {
         if self.remaining > 0 {
             self.remaining -= 1;
             match rings.deliver(0, FrameOffload::None, &self.frame) {
-                Ok(RxDelivery::Accepted) => report.received += 1,
+                Ok(RxDelivery::Accepted) => report.record_delivered(),
                 Ok(RxDelivery::Filtered) => self.filtered += 1,
                 Ok(RxDelivery::RingFull) => report.rx_ring_full = true,
                 Err(_) => return Err(DriverError::BadMagic),
@@ -766,7 +787,7 @@ impl Net for LateFrameNet {
                 rings.deliver(0, FrameOffload::None, &frame),
                 Ok(RxDelivery::Accepted)
             ) {
-                report.received += 1;
+                report.record_delivered();
             }
         }
         Ok(report)

@@ -56,7 +56,8 @@ use tairix_net::rxfilter::RxClassifier;
 /// level condition spins the driver, and never unmasking wedges the device.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum DrainStep {
-    /// The device handed over frames and may have more; service it again.
+    /// The device handed over frames — delivered *or* shed — and may have
+    /// more; service it again.
     Continue,
     /// The shared receive ring filled while the device still had frames.
     /// The completion sources stay masked — that *is* the back-pressure —
@@ -76,9 +77,13 @@ impl DrainStep {
             // Checked first: a full ring means frames are still in the
             // device however many were received, so the condition holds.
             Self::BackPressure
-        } else if report.received == 0 {
+        } else if report.harvested == 0 {
             Self::Quiet
         } else {
+            // Frames the pre-filter shed count as progress: the device
+            // handed them over and may have more. Reading `received` here
+            // would call a pass that shed everything "quiet" and re-arm, so
+            // a burst of shed frames would cost one interrupt each.
             Self::Continue
         }
     }

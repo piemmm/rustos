@@ -618,9 +618,10 @@ impl RxQueue {
             // are recycled exactly as a delivered one's are.
             Ok(accepted @ (RxDelivery::Accepted | RxDelivery::Filtered)) => {
                 if accepted == RxDelivery::Accepted {
-                    report.received += 1;
+                    report.record_delivered();
                 } else {
                     self.filtered_frames += 1;
+                    report.record_undelivered();
                 }
                 if sensitive && pending.single_index.is_none() {
                     self.scrub_reasm();

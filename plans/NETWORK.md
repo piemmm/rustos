@@ -2295,7 +2295,15 @@ opposite ("cannot re-fire in a storm"), which is why the defect survived.
   host-tested, so the policy is exercised without hardware and the loop
   supplies only the mask writes and the notify.
 - A burst therefore costs one interrupt rather than one per frame — the
-  coalescing a fixed frame threshold cannot give, which is why the device's
+  coalescing a fixed frame threshold cannot give. What makes a burst *look*
+  like one to the drain is `ServiceReport::harvested`, the per-pass count of
+  frames the device handed over whether or not they reached the ring:
+  `DrainStep` keys on it, not on `received`, because once N17d's pre-filter
+  is doing its job almost every pass delivers nothing and reading `received`
+  would call each one quiet, re-arm, and take a fresh interrupt for the next
+  frame. `record_delivered`/`record_undelivered` are the only way a driver
+  moves either counter, so the two cannot fall out of step. This is why the
+  device's
   own completion threshold is programmed at its most responsive (GENET
   writes `MBUF_DONE_THRESH = 1` on both rings, ring timer disarmed, as
   Linux's `bcmgenet` does). Programmed, never inherited: it is the

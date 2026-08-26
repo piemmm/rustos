@@ -474,7 +474,7 @@ mod tests {
                 let (frame, len) = &self.pending[i];
                 match rx0.push(&frame[..*len]) {
                     Ok(()) => {
-                        report.received += 1;
+                        report.record_delivered();
                         delivered += 1;
                     }
                     Err(Errno::NoSpace) => {

@@ -262,7 +262,7 @@ impl Net for PeerNet {
         self.stack.advance(self.now, &mut out);
         for frame in &out.frames {
             if rings.rx_ring(0).expect("rx0").push(&frame.bytes).is_ok() {
-                report.received += 1;
+                report.record_delivered();
             }
         }
         // Answer every queued transmit as the peer host.
@@ -274,7 +274,7 @@ impl Net for PeerNet {
                         .on_frame(&self.scratch[..len], self.now, &mut out);
                     for frame in &out.frames {
                         if rings.rx_ring(0).expect("rx0").push(&frame.bytes).is_ok() {
-                            report.received += 1;
+                            report.record_delivered();
                         }
                     }
                 }
@@ -2194,7 +2194,7 @@ impl Net for EchoNet {
                     report.transmitted += 1;
                     let rx0 = rings.rx_ring(0).map_err(|_| DriverError::BadMagic)?;
                     match rx0.push(&frame[..len]) {
-                        Ok(()) => report.received += 1,
+                        Ok(()) => report.record_delivered(),
                         Err(Errno::NoSpace) => {
                             report.rx_ring_full = true;
                             break;
@@ -2491,7 +2491,7 @@ impl PeerTcpNet {
             {
                 for frame in &out.frames {
                     if rings.rx_ring(0).expect("rx0").push(&frame.bytes).is_ok() {
-                        report.received += 1;
+                        report.record_delivered();
                     }
                 }
             }
@@ -2511,7 +2511,7 @@ impl Net for PeerTcpNet {
         self.stack.advance(self.now, &mut out);
         for frame in &out.frames {
             if rings.rx_ring(0).expect("rx0").push(&frame.bytes).is_ok() {
-                report.received += 1;
+                report.record_delivered();
             }
         }
         self.drive_egress(rings, &mut report);
@@ -2523,7 +2523,7 @@ impl Net for PeerTcpNet {
                         .on_frame(&self.scratch[..len], self.now, &mut out);
                     for frame in &out.frames {
                         if rings.rx_ring(0).expect("rx0").push(&frame.bytes).is_ok() {
-                            report.received += 1;
+                            report.record_delivered();
                         }
                     }
                     for event in &out.events {

@@ -70,7 +70,12 @@ so broadcast UDP to the DHCP client port is admitted.
 
 It pays twice over. The shed frame is never copied, and a harvest that
 admits nothing leaves `moved` false, so the driver sends no notify and the
-stack is not woken at all. On an idle Raspberry Pi 4 the stack was being
+stack is not woken at all. A shed frame does still count as *progress* for
+the drain — `ServiceReport::harvested` counts what the device handed over
+whether or not it reached the ring, and `DrainStep` keys on that rather than
+on `received`. Otherwise a filter doing its job would make every pass look
+quiet, re-arm the completion sources, and give back the burst coalescing
+above one interrupt at a time. On an idle Raspberry Pi 4 the stack was being
 woken for 7994 frames a minute and discarding 7917 of them.
 
 Its bias is to **admit**: the stack still validates every frame it does

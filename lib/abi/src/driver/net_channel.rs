@@ -899,7 +899,8 @@ mod service {
     pub const FILTERED: usize = 8;
     pub const RX_RING_FULL: usize = 16;
     pub const LINK: usize = 17;
-    pub const LEN: usize = 18;
+    pub const HARVESTED: usize = 18;
+    pub const LEN: usize = 22;
 }
 
 /// Wire length of a [`ServiceReport`] payload.
@@ -909,19 +910,44 @@ const SERVICE_PAYLOAD_LEN: usize = service::LEN;
 /// on refusal).
 pub const NET_CHANNEL_SERVICE_REPLY_LEN: usize = 4 + SERVICE_PAYLOAD_LEN;
 
-/// Largest reply any device-channel request produces: the [`Facts`] reply is
-/// the widest ([`NET_CHANNEL_FACTS_REPLY_LEN`]), ahead of the [`Service`]
-/// reply and the [`STATUS_REPLY_LEN`](crate::reply::STATUS_REPLY_LEN)-byte
-/// status the [`Attach`]/[`Detach`] operations answer. A fixed bound the
-/// driver's call endpoint and the stack's client both size their reply buffer
-/// to, so the endpoint's `max_reply` is one definition, never a per-site
-/// guess.
+/// Largest reply any device-channel request produces: the widest of the
+/// [`Facts`] reply, the [`Service`] reply, and the
+/// [`STATUS_REPLY_LEN`](crate::reply::STATUS_REPLY_LEN)-byte status the
+/// [`Attach`]/[`Detach`] operations answer. A fixed bound the driver's call
+/// endpoint and the stack's client both size their reply buffer to, so the
+/// endpoint's `max_reply` is one definition, never a per-site guess.
+///
+/// Computed rather than naming whichever reply is biggest today, exactly as
+/// the request side computes its largest body: widening a reply payload must
+/// not silently leave every buffer in the contract a few bytes short.
 ///
 /// [`Facts`]: NetChannelRequest::Facts
 /// [`Service`]: NetChannelRequest::Service
 /// [`Attach`]: NetChannelRequest::Attach
 /// [`Detach`]: NetChannelRequest::Detach
-pub const NET_CHANNEL_MAX_REPLY: usize = NET_CHANNEL_FACTS_REPLY_LEN;
+pub const NET_CHANNEL_MAX_REPLY: usize = largest_reply();
+
+/// Both sides size their reply buffer to [`NET_CHANNEL_MAX_REPLY`], so a
+/// payload that outgrew it would leave every buffer in the contract short —
+/// surfacing as a `BufferTooSmall` doorbell at run time. Naming whichever
+/// reply happened to be widest is what let that happen once; this makes it a
+/// build failure instead.
+const _: () = assert!(NET_CHANNEL_MAX_REPLY >= NET_CHANNEL_FACTS_REPLY_LEN);
+const _: () = assert!(NET_CHANNEL_MAX_REPLY >= NET_CHANNEL_SERVICE_REPLY_LEN);
+const _: () = assert!(NET_CHANNEL_MAX_REPLY >= crate::reply::STATUS_REPLY_LEN);
+
+/// The widest reply of the three shapes a device-channel request answers
+/// with.
+const fn largest_reply() -> usize {
+    let mut largest = NET_CHANNEL_FACTS_REPLY_LEN;
+    if NET_CHANNEL_SERVICE_REPLY_LEN > largest {
+        largest = NET_CHANNEL_SERVICE_REPLY_LEN;
+    }
+    if crate::reply::STATUS_REPLY_LEN > largest {
+        largest = crate::reply::STATUS_REPLY_LEN;
+    }
+    largest
+}
 
 /// Encode the driver's reply to [`NetChannelRequest::Service`]: `0` status
 /// and the report, or a `-errno` status and a zeroed payload.
@@ -941,6 +967,7 @@ pub fn encode_service_reply(
                 LinkState::Up => LINK_UP,
                 LinkState::Down => LINK_DOWN,
             };
+            put_u32(body, service::HARVESTED, report.harvested);
         }
         Err(err) => {
             let status = (-err.as_i32()).to_le_bytes();
@@ -986,6 +1013,7 @@ pub fn decode_service_reply(bytes: &[u8]) -> Result<ServiceReport, Errno> {
     Ok(ServiceReport {
         transmitted,
         received,
+        harvested: read_u32(body, service::HARVESTED),
         filtered,
         rx_ring_full,
         link,
@@ -1329,6 +1357,7 @@ mod tests {
         let report = ServiceReport {
             transmitted: 3,
             received: 7,
+            harvested: 9,
             filtered: 11,
             rx_ring_full: true,
             link: LinkState::Down,

@@ -1035,9 +1035,12 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
             let desc = regs::desc(regs::RDMA_DESC, slot);
             let status = self.regs.read(desc + regs::DESC_LENGTH_STATUS)?;
             match self.deliver_rx(rings, status, slot)? {
-                RxOutcome::Delivered => report.received += 1,
-                RxOutcome::Filtered => self.filtered_frames += 1,
-                RxOutcome::Dropped => {}
+                RxOutcome::Delivered => report.record_delivered(),
+                RxOutcome::Filtered => {
+                    self.filtered_frames += 1;
+                    report.record_undelivered();
+                }
+                RxOutcome::Dropped => report.record_undelivered(),
                 // Leave the frame in its descriptor and the slot unfreed:
                 // the device cannot overwrite it until the consumer index
                 // advances, so the stack drains the ring and calls again.

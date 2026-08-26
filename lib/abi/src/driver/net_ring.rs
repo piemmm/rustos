@@ -972,6 +972,15 @@ pub struct ServiceReport {
     pub transmitted: u32,
     /// Frames moved from the device into the RX ring.
     pub received: u32,
+    /// Frames the device handed over in **this pass**, whether or not they
+    /// reached the ring — [`Self::received`] plus those the pre-filter shed.
+    ///
+    /// This, not `received`, is what tells a drain the device is still
+    /// producing. A pass that harvested frames and shed every one of them
+    /// has made progress and may find more; reading `received` alone there
+    /// says "quiet", so the drain would re-arm and take a fresh interrupt
+    /// for each frame of a burst instead of absorbing the burst masked.
+    pub harvested: u32,
     /// Frames this device's receive pre-filter has shed **since it was
     /// opened** — no local consumer was possible, so the stack was never
     /// woken for them.
@@ -993,6 +1002,26 @@ pub struct ServiceReport {
     /// The stack turns a change into a bond-member link report
     /// (`set_member_link`), the sole live source of a bond failover.
     pub link: super::net::LinkState,
+}
+
+impl ServiceReport {
+    /// Record one frame the device handed over that reached the ring.
+    pub fn record_delivered(&mut self) {
+        self.received += 1;
+        self.harvested += 1;
+    }
+
+    /// Record one frame the device handed over that did **not** reach the
+    /// ring — the pre-filter shed it, or the device itself flagged it.
+    ///
+    /// Still progress: the device produced a frame, which is what a drain
+    /// needs to know to keep going. The two recorders exist so
+    /// [`Self::harvested`] cannot fall out of step with
+    /// [`Self::received`] — a driver that bumped one and forgot the other
+    /// would silently cost an interrupt per frame.
+    pub fn record_undelivered(&mut self) {
+        self.harvested += 1;
+    }
 }
 
 #[cfg(test)]
