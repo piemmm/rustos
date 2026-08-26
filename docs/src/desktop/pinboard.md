@@ -128,6 +128,14 @@ A wallpaper that will not decode is not fatal: the desktop falls back to
 the backdrop colour, reports why on `stderr`, and remembers the refusal, so
 a bad file costs one attempt rather than one per frame.
 
+The chooser reports each placement's cost with its two halves apart — the
+file read and the sandboxed render — on the `RENDER_TIMED` log record, with
+the source byte count and the destination extent. A gallery that crawls on
+real storage is diagnosed from that record rather than guessed at: the two
+halves have unrelated causes, and the decode is already a known quantity
+(the 26 shipped masters decode in 404 ms *total* at thumbnail scale, ~90 ms
+each full-screen), so a placement costing seconds is never the decoder.
+
 The prepared picture is never cut to. Because it arrives whenever the worker
 finishes — a second or so into the session at login, or mid-session when the
 choice changes — it dissolves into whatever ground is on screen over the

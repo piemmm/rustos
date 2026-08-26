@@ -84,6 +84,7 @@ use tairix_wallpaper::{
 };
 
 mod chooser;
+pub mod events;
 mod layout;
 mod paint;
 

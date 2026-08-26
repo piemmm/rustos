@@ -34,6 +34,49 @@ The open items, in priority order:
   `lib/collections`) were audited against §27. All are complete; `waitq`
   (D2) was the sole thin slice. One latent watch-item (the slab
   free-slot scan) is recorded and staged (not a live defect).
+- **D51 — a byte-stream transfer staged the caller's whole declared length,
+  not one ring — DONE.** `parked_stream_read` / `parked_stream_write` capped
+  the staging buffer at `FS_IO_MAX` (1 MiB) while every backing they serve
+  buffers exactly one `PIPE_CAPACITY` (64 KiB) ring, so a caller handing a
+  whole payload to one call made the kernel allocate and zero a megabyte of
+  heap, copy a megabyte across the user boundary, then discard all but 64 KiB
+  of it. The parser-sandbox seam does exactly that (`send_frame` writes the
+  entire payload in one `Channel::write`), so placing one 2.5 MB wallpaper
+  master cost ~64 MiB of kernel-heap alloc/memset/copy in 1 MiB units, both
+  directions — and `copy_in_user` restarts its copy from the buffer base
+  after each demand-fault miss, so a large stage over first-touch user memory
+  re-copied quadratically. Fixed by one shared `stream_stage_len` bound: both
+  loops stage at most one ring and answer short, which the caller already
+  loops on. Measured context: the decoder was never the cost — the 26 shipped
+  8.3-megapixel masters decode in 404 ms total at thumbnail scale, ~90 ms
+  each full-screen.
+- **D52 — the stream write path registered for its wake *after* the poll that
+  found the ring full — DONE.** `parked_stream_write` called
+  `PIPE_WAITQ.register` inside the `Full` arm, so between the poll and the
+  registration a peer that drained the ring called `pipe_wake` →
+  `wake_all`, which reaches only tasks registered at that instant, and woke
+  nobody. The writer then parked with `NO_DEADLINE` on space that had already
+  freed, released only when unrelated pipe traffic happened to broadcast —
+  a multi-second stall by construction, and an outright hang whenever the
+  transfer was the machine's only pipe activity. The read path had the
+  correct discipline and its own comment explaining it. Fixed by registering
+  before the first poll and deregistering once the loop is left, matching the
+  read path; the regression test observes the registration from inside the
+  first step via `wake_task`'s registered/not answer.
+- **D53 — `PIPE_WAITQ` is one global queue woken with `wake_all` (OPEN).**
+  Every 64 KiB chunk moved on *any* pipe or pty unparks every stream waiter
+  on the machine, each of which re-polls its own unrelated backing and parks
+  again, and each `wake_all` heap-allocates a `Vec` of the waiter ids. On a
+  desktop with a sandbox worker per app plus shell ptys that is a
+  double-figure thundering herd per chunk, so one app streaming a gallery
+  taxes every other pipe user — a §2.16 / §27 defect, not a correctness one
+  (a spurious wake is harmless). The right fix is to stop broadcasting: give
+  each `Pipe` its own queue, or add a keyed index to `WaitSet` as
+  `kernel/core/src/futex.rs` already does for futex keys. Both have to keep
+  the global timed `sweep` / `earliest_deadline` machinery and the
+  `waitset_wait` pipe-member registration working, which is what makes this
+  larger than D51/D52 and why it is recorded here rather than folded into
+  them.
 - **D50 — the flake hunt's concurrent replicas re-planted one guest's backing
   image underneath itself — DONE.** Up to four simultaneous runs of one
   enrolment shared a planted-image path, so a replica rewrote a live sibling's

@@ -12,6 +12,10 @@ publish.workspace = true
 # The frozen `Errno`, the `NamedKeyCode`/`KeyValue` keyboard vocabulary, and
 # the pinboard-apply IPC types the chooser encodes its request with.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# Structured logging: the reserved event ids and the record the render-timing
+# measurement is reported on, so a slow gallery on real storage names which
+# half of the path is slow.
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 # The single shared theme definition: the chooser takes its colours from
 # the active theme so it stays consistent with the desktop.
 tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }

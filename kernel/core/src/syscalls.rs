@@ -524,6 +524,22 @@ enum StreamWriteStep {
     Full,
 }
 
+/// Bytes the two parking stream loops stage for one call.
+///
+/// Every backing they serve buffers exactly one [`crate::pipe::PIPE_CAPACITY`]
+/// ring, so no step can ever move more than that in one go and a caller's
+/// larger request is answered short. Staging the caller's whole length instead
+/// bought nothing and cost a great deal: the surplus was allocated and zeroed
+/// on the kernel heap, copied across the user boundary, and then discarded —
+/// and because [`KernelSyscallHandlers::copy_in_user`] restarts its copy from
+/// the buffer's base after each demand-fault miss, a large stage over
+/// first-touch user memory re-copied quadratically.
+fn stream_stage_len(len: usize) -> usize {
+    // The per-transfer cap still bounds a hostile length; the ring is simply
+    // the tighter of the two.
+    len.min(crate::pipe::PIPE_CAPACITY).min(FS_IO_MAX)
+}
+
 /// Where one descriptor transfer takes its byte position from — the single
 /// difference between the positional and sequential entry points onto
 /// [`KernelSyscallHandlers::descriptor_read`] /
@@ -3013,6 +3029,12 @@ where
     /// bound is `TimedOut`. A build with no resumable user kthread published
     /// (a park that cannot happen) fails closed with `NotImplemented`
     /// rather than spinning.
+    ///
+    /// Every backing this loop serves buffers at most
+    /// [`crate::pipe::PIPE_CAPACITY`], so staging more than that could never
+    /// be filled: a caller asking for a megabyte is answered from one ring's
+    /// worth and loops. A backing with a deeper ring would have to raise the
+    /// stage with it.
     fn parked_stream_read(
         &self,
         caller: &CallerContext<'_>,
@@ -3021,9 +3043,10 @@ where
         timeout_ns: u64,
         mut step: impl FnMut(&mut [u8]) -> StreamReadStep,
     ) -> SyscallResult {
-        // Cap the per-call transfer at the staging bound (short reads are
-        // valid; the caller loops). A zero-length read is inert.
-        let len = len.min(FS_IO_MAX);
+        // Cap the per-call transfer at what one step can actually supply
+        // (short reads are valid; the caller loops). A zero-length read is
+        // inert.
+        let len = stream_stage_len(len);
         if len == 0 {
             return Ok(0);
         }
@@ -3115,6 +3138,11 @@ where
     /// the stage/wake/park discipline. A short write (the free space) is
     /// valid; the caller loops. A stream with no peer left fails closed with
     /// `BrokenPipe`, so a producer whose consumer exited learns to stop.
+    ///
+    /// The stage is bounded exactly as [`Self::parked_stream_read`]'s is: one
+    /// step can never accept more than [`crate::pipe::PIPE_CAPACITY`], so
+    /// staging a caller's whole megabyte would copy it across the user
+    /// boundary only to discard all but one ring's worth.
     fn parked_stream_write(
         &self,
         caller: &CallerContext<'_>,
@@ -3122,7 +3150,7 @@ where
         len: usize,
         mut step: impl FnMut(&[u8]) -> StreamWriteStep,
     ) -> SyscallResult {
-        let len = len.min(FS_IO_MAX);
+        let len = stream_stage_len(len);
         if len == 0 {
             return Ok(0);
         }
@@ -3130,33 +3158,40 @@ where
         // touched (a faulting buffer writes nothing).
         let mut data = alloc::vec![0u8; len];
         self.copy_in_user(caller, buf, &mut data)?;
-        loop {
+        // Register before the first poll and stay registered for the whole
+        // loop, exactly as the read path does: `wake_all` unparks only tasks
+        // that are registered at that instant, so a peer that drains the ring
+        // in the window between a `Full` poll and the registration would wake
+        // nobody and leave this task parked on space that has already freed —
+        // an untimed sleep no further write to *this* stream can end.
+        crate::waitq::PIPE_WAITQ.register(caller.task_id.0, crate::waitq::NO_DEADLINE);
+        let outcome = loop {
             match step(&data) {
                 StreamWriteStep::Wrote(n) => {
                     // Bytes arrived: a reader parked on the empty ring can
                     // proceed.
                     crate::waitq::pipe_wake();
-                    return Ok(n as u64);
+                    break Ok(n as u64);
                 }
-                StreamWriteStep::Broken => return Err(Errno::BrokenPipe),
+                StreamWriteStep::Broken => break Err(Errno::BrokenPipe),
                 StreamWriteStep::Full => {
                     let cpu = SchedulerArch::current_cpu(self.arch);
-                    crate::waitq::PIPE_WAITQ.register(caller.task_id.0, crate::waitq::NO_DEADLINE);
                     let parked = crate::kthread::reschedule_current(cpu, RescheduleAction::Park);
-                    crate::waitq::PIPE_WAITQ.deregister(caller.task_id.0);
                     if !parked {
-                        return Err(Errno::NotImplemented);
+                        break Err(Errno::NotImplemented);
                     }
                     // A doomed waiter never re-parks: a termination deferred
                     // against this task unwinds the wait so the kill lands at
                     // the syscall boundary (the errno never reaches user
                     // space).
                     if crate::procsignal::kill_pending(caller.task_id.0) {
-                        return Err(Errno::Interrupted);
+                        break Err(Errno::Interrupted);
                     }
                 }
             }
-        }
+        };
+        crate::waitq::PIPE_WAITQ.deregister(caller.task_id.0);
+        outcome
     }
 
     /// Serve a read from a pipe-backed descriptor — the pipe backing driven
@@ -18230,6 +18265,94 @@ mod tests {
             h.spawn(&ctx, 0x1000, SPAWN_PATH_MAX + 1, 0, 0, 0, 0),
             Err(Errno::NotFound)
         );
+    }
+
+    /// A stream writer is on the pipe wait queue *before* its first poll, so
+    /// a peer that drains the ring between the poll and the park cannot wake
+    /// nobody and strand it. `wake_task` reports whether the target is
+    /// registered, which is exactly the question.
+    #[test]
+    fn a_stream_write_registers_for_the_wake_before_its_first_poll() {
+        /// A `WaitQueueArch` that only has to exist: the assertion is
+        /// `wake_task`'s registered/not-registered answer, not the unpark.
+        struct Inert;
+        impl crate::waitq::WaitQueueArch for Inert {
+            fn unpark(&self, _id: tairix_kernel_sched_api::TaskId) {}
+            fn now_ns(&self) -> u64 {
+                0
+            }
+            fn set_wakeup(&self, _deadline_ns: Option<u64>) {}
+        }
+
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"ping");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        let inert = Inert;
+        let task = ctx.task_id.0;
+        let mut polls = 0usize;
+        // `Broken` ends the loop on the first poll, so the registration this
+        // observes is the one that was live *before* any step ran.
+        let outcome = h.parked_stream_write(&ctx, 0x1000, 4, |_| {
+            polls += 1;
+            assert!(
+                crate::waitq::PIPE_WAITQ.wake_task(&inert, task),
+                "the writer must already be registered when its first poll runs"
+            );
+            StreamWriteStep::Broken
+        });
+        assert_eq!(polls, 1, "the step ran once");
+        assert_eq!(outcome, Err(Errno::BrokenPipe));
+        assert!(
+            !crate::waitq::PIPE_WAITQ.wake_task(&inert, task),
+            "and is deregistered once the write leaves the loop"
+        );
+    }
+
+    /// A stream transfer stages one ring's worth, never the caller's whole
+    /// declared length: a sandbox seam handing a multi-megabyte payload to one
+    /// `fs_write` used to make the kernel allocate, zero and copy a megabyte
+    /// per call to move 64 KiB of it.
+    #[test]
+    fn a_stream_transfer_stages_one_ring_and_never_the_callers_whole_length() {
+        assert_eq!(
+            stream_stage_len(FS_IO_MAX),
+            crate::pipe::PIPE_CAPACITY,
+            "an oversize request stages one ring"
+        );
+        assert_eq!(
+            stream_stage_len(8 << 20),
+            crate::pipe::PIPE_CAPACITY,
+            "and so does a whole sandbox frame"
+        );
+        // A request the ring can hold is staged exactly, never rounded up.
+        assert_eq!(stream_stage_len(4), 4);
+        assert_eq!(
+            stream_stage_len(crate::pipe::PIPE_CAPACITY),
+            crate::pipe::PIPE_CAPACITY
+        );
+        assert_eq!(stream_stage_len(0), 0, "a zero-length transfer is inert");
     }
 
     /// `pipe_create` mints a read/write descriptor pair in the caller's own

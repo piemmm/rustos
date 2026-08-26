@@ -53,12 +53,15 @@ mod program {
     use tairix_abi::pinboard_ipc::{PinboardDocument, PinboardRequest, PINBOARD_ENDPOINT};
     use tairix_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
     use tairix_abi::window_ipc::{WindowEvent, WINDOW_ENDPOINT};
-    use tairix_abi::{Errno, Origin, ProcId, WaitSetOp, WaitSourceKind, ORIGIN_WIRE_LEN};
+    use tairix_abi::{
+        Duration64, Errno, Origin, ProcId, WaitSetOp, WaitSourceKind, ORIGIN_WIRE_LEN,
+    };
     use tairix_appdata::RtHost;
     use tairix_display::{winframe, SERIAL};
     use tairix_font::BitmapFont;
     use tairix_geometry::Point;
     use tairix_input::InputEvent;
+    use tairix_log::{Event, Field, Level};
     use tairix_raster::Surface;
     use tairix_rt::io::{Stderr, Write};
     use tairix_sandbox::imagerender::{render_wallpaper_for_screen, ImageRenderService};
@@ -70,8 +73,8 @@ mod program {
         WallpaperPath, MAX_WALLPAPER_BYTES, PINBOARD_PUBLISHER, WALLPAPER_STORE,
     };
     use tairix_wallpaper_chooser::{
-        candidates_from_catalog, ApplyOutcome, Chooser, ChooserAction, Style, MIN_WIN_HEIGHT,
-        MIN_WIN_WIDTH, WIN_HEIGHT, WIN_WIDTH,
+        candidates_from_catalog, events::RENDER_TIMED, ApplyOutcome, Chooser, ChooserAction, Style,
+        MIN_WIN_HEIGHT, MIN_WIN_WIDTH, WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_window::{
         key_input_event, pointer_input_events, Desktop, EventSource, WindowClient, WindowEvents,
@@ -370,6 +373,7 @@ mod program {
         height: u32,
     ) -> Option<Surface> {
         let spelled = path.as_str();
+        let opened = tairix_rt::clock_get();
         let fd = match open_read(spelled) {
             Ok(fd) => fd,
             Err(err) => {
@@ -383,13 +387,78 @@ mod program {
             ));
             return None;
         };
-        match render_wallpaper_for_screen(sandbox, screen, width, height, fit, &bytes) {
+        let read_done = tairix_rt::clock_get();
+        let placed = render_wallpaper_for_screen(sandbox, screen, width, height, fit, &bytes);
+        report_render_timing(
+            spelled,
+            bytes.len(),
+            (width, height),
+            elapsed(opened, read_done),
+            elapsed(read_done, tairix_rt::clock_get()),
+        );
+        match placed {
             Ok(rgba) => Surface::from_rgba8(width, height, &rgba),
             Err(failure) => {
                 report(&alloc::format!("{spelled}: {failure}; not shown"));
                 None
             }
         }
+    }
+
+    /// The span between two `clock_get` readings, saturating: a
+    /// non-monotonic pair is a zero span rather than a huge one.
+    fn elapsed(from: u64, to: u64) -> Duration64 {
+        Duration64::from_nanos(to.saturating_sub(from))
+    }
+
+    /// Report one placement's read and render halves.
+    ///
+    /// `Info`, because a record no one can read diagnoses nothing: the level
+    /// is a per-process default with no runtime knob, so anything below it
+    /// would be dropped. One record per placement — never per frame — and a
+    /// placement is a user-driven operation costing tens of milliseconds at
+    /// best, so the record is far cheaper than the work it measures.
+    fn report_render_timing(
+        path: &str,
+        source_bytes: usize,
+        dest: (u32, u32),
+        read: Duration64,
+        render: Duration64,
+    ) {
+        tairix_log::log(
+            &tairix_rt::LogSink,
+            &Event {
+                level: Level::Info,
+                id: RENDER_TIMED,
+                message: "wallpaper: placed",
+                fields: &[
+                    Field {
+                        key: "path",
+                        value: tairix_abi::FieldValue::Str(path),
+                    },
+                    Field {
+                        key: "read",
+                        value: tairix_abi::FieldValue::Duration(read),
+                    },
+                    Field {
+                        key: "render",
+                        value: tairix_abi::FieldValue::Duration(render),
+                    },
+                    Field {
+                        key: "source_bytes",
+                        value: tairix_abi::FieldValue::UnsignedInt(source_bytes as u64),
+                    },
+                    Field {
+                        key: "dest_w",
+                        value: tairix_abi::FieldValue::UnsignedInt(u64::from(dest.0)),
+                    },
+                    Field {
+                        key: "dest_h",
+                        value: tairix_abi::FieldValue::UnsignedInt(u64::from(dest.1)),
+                    },
+                ],
+            },
+        );
     }
 
     /// Ask the desktop session to adopt `document` and report what it

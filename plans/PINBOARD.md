@@ -173,6 +173,15 @@ One document, one engine, one writer.
     costing hundreds of milliseconds per master. A whole-file read of a
     hot wallpaper now costs one memory copy per 64 KiB and no device I/O
     at all.
+  - **Which half is slow is measured, never inferred.** Each placement
+    reports its read span and its render span apart, on the chooser's
+    `RENDER_TIMED` record (`userland/apps/wallpaper/src/events.rs`), with the
+    source byte count and the destination. The two halves have unrelated
+    causes when a gallery crawls — a cold cache or a store behind an SD card
+    on one side, the sandbox pipe transfer and the decode on the other — and
+    the decode is the one thing already known: the 26 shipped masters decode
+    in 404 ms *total* at thumbnail scale and ~90 ms each full-screen, so a
+    placement costing seconds is never the decoder.
 - **Prepared once, per (path, fit, screen).** The sandbox returns the image
   already placed at exactly the screen size; the session holds that one
   prepared surface and composites it as the desktop layer's base, over the
