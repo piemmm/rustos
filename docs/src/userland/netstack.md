@@ -257,7 +257,14 @@ space for **datagram** (UDP) and **stream** (TCP) sockets alike, as a POSIX
 fd table holds every kind — gating every call on `CAP_NET` before any state
 is touched. A datagram socket demultiplexes each inbound
 `StackEvent::UdpDatagram` to its bound socket and delivers a
-`SocketDatagram`. A stream socket owns one pure `tairix_net::tcp::conn::Tcb`
+`SocketDatagram`; a socket bound to the wildcard address (or to a broadcast
+address) receives IPv4 broadcast on its port, and after every socket
+operation the service republishes the set of bound IPv4 datagram ports to
+every interface engine, which is what admits broadcast to those ports
+through the interface's acceptance rule and the device's receive pre-filter
+(`docs/src/drivers/network.md`). Broadcast to a port nothing holds is
+dropped at the IP layer, so a segment's `NetBIOS`/SSDP background noise
+costs neither a parse nor a wake. A stream socket owns one pure `tairix_net::tcp::conn::Tcb`
 per connection: `Connect` actively opens it (CSPRNG ISN, egress interface
 chosen once), inbound `StackEvent::TcpSegment`s drive it, and the service
 turns the results into segment egress (through `Stack::send_tcp`) and

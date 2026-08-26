@@ -52,6 +52,7 @@ impl Net for LoopbackNet {
             link: LinkState::Up,
             offloads: NetOffloads::empty(),
             rx_queues: 1,
+            max_tx_frame: MTU + ETHERNET_HEADER_LEN,
             multicast_filter: McastFilter::Unfiltered,
         })
     }
@@ -86,7 +87,7 @@ impl Net for LoopbackNet {
 /// derives it from the facts reply.
 fn geometry() -> RingGeometry {
     let cap = MTU + ETHERNET_HEADER_LEN;
-    RingGeometry::new(8, cap, cap, 1).expect("valid geometry")
+    RingGeometry::new(8, 8, cap, cap, 1).expect("valid geometry")
 }
 
 fn attach_params(geometry: RingGeometry) -> AttachParams {
@@ -160,9 +161,25 @@ fn attach_stores_state_and_service_round_trips_a_frame() {
 fn attach_rejects_a_geometry_too_small_for_the_device() {
     let mut server = NetChannelServer::new(LoopbackNet::new());
     // A ring whose slots cannot carry the device's full frame (MTU+header).
-    let small = RingGeometry::new(8, MTU, MTU, 1).expect("valid but too small");
+    let small = RingGeometry::new(8, 8, MTU, MTU, 1).expect("valid but too small");
     assert_eq!(
         decode_status_reply(&server.attach(attach_params(small))),
+        Err(Errno::OutOfRange)
+    );
+    assert!(!server.is_attached());
+}
+
+#[test]
+fn attach_rejects_a_transmit_slot_larger_than_the_driver_can_stage() {
+    // The stack sizes a segmentation super-frame slot from the machine it
+    // was attested; this driver reports staging for one link frame only.
+    // Accepting the wider slot would drop every super-frame at the pop,
+    // silently, so the attach is refused instead.
+    let mut server = NetChannelServer::new(LoopbackNet::new());
+    let cap = MTU + ETHERNET_HEADER_LEN;
+    let wide = RingGeometry::new(8, 2, cap, cap * 8, 1).expect("valid geometry");
+    assert_eq!(
+        decode_status_reply(&server.attach(attach_params(wide))),
         Err(Errno::OutOfRange)
     );
     assert!(!server.is_attached());
@@ -207,6 +224,7 @@ impl Net for FilterNet {
             link: LinkState::Up,
             offloads: NetOffloads::empty(),
             rx_queues: 1,
+            max_tx_frame: MTU + ETHERNET_HEADER_LEN,
             multicast_filter: McastFilter::Slots(2),
         })
     }
@@ -503,6 +521,7 @@ impl Net for OneFrameNet {
             link: LinkState::Up,
             offloads: NetOffloads::empty(),
             rx_queues: 1,
+            max_tx_frame: MTU + ETHERNET_HEADER_LEN,
             multicast_filter: McastFilter::Unfiltered,
         })
     }
@@ -582,7 +601,7 @@ fn a_frame_the_filter_sheds_never_reaches_the_ring() {
     let (mut server, mut buffer) = attached(net);
     // A published address set turns the filter on; until then it admits
     // everything.
-    let policy = RxFilterPolicy::new(&[([10, 0, 2, 15], [10, 0, 2, 255])], &[], &[], &[]);
+    let policy = RxFilterPolicy::new(&[([10, 0, 2, 15], [10, 0, 2, 255])], &[], &[], &[], &[]);
     assert_eq!(
         decode_status_reply(&server.set_rx_filter_reply(policy)),
         Ok(())
@@ -609,7 +628,7 @@ fn a_frame_addressed_to_us_still_reaches_the_ring() {
         filtered: 0,
     };
     let (mut server, mut buffer) = attached(net);
-    let policy = RxFilterPolicy::new(&[([10, 0, 2, 15], [10, 0, 2, 255])], &[], &[], &[]);
+    let policy = RxFilterPolicy::new(&[([10, 0, 2, 15], [10, 0, 2, 255])], &[], &[], &[], &[]);
     assert_eq!(
         decode_status_reply(&server.set_rx_filter_reply(policy)),
         Ok(())
@@ -654,6 +673,7 @@ impl Net for LinkNet {
             link: self.link,
             offloads: NetOffloads::empty(),
             rx_queues: 1,
+            max_tx_frame: MTU + ETHERNET_HEADER_LEN,
             multicast_filter: McastFilter::Unfiltered,
         })
     }
@@ -774,6 +794,7 @@ impl Net for LateFrameNet {
             link: LinkState::Up,
             offloads: NetOffloads::empty(),
             rx_queues: 1,
+            max_tx_frame: MTU + ETHERNET_HEADER_LEN,
             multicast_filter: McastFilter::Unfiltered,
         })
     }

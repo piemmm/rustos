@@ -1159,6 +1159,33 @@ pub trait DriverHost {
     fn seat_gate(&self) -> Option<&dyn display::SeatGate> {
         None
     }
+
+    /// The kernel-attested machine summary a driver sizes its pinned
+    /// buffering from ([`crate::BootFacts`]).
+    ///
+    /// A driver that carves DMA staging — a NIC's descriptor rings and
+    /// frame buffers, a controller's transfer pool — must scale it to the
+    /// machine, or the depth that suits a small board starves a server and
+    /// the depth that suits a server exhausts the board. The host reports
+    /// the discovered figures (installed RAM, cores brought up) so the
+    /// driver derives its depths through the shared sizing policy rather
+    /// than from a hand-picked constant.
+    ///
+    /// The default implementation returns `None`, the correct shape for a
+    /// host that cannot attest a machine (a unit-test seam). A driver then
+    /// sizes to the structural minimum rather than inventing a figure —
+    /// fail closed, never a guess.
+    ///
+    /// # Errors
+    ///
+    /// Never fails; an unattested machine is reported as `None`.
+    ///
+    /// # Capabilities
+    ///
+    /// None: the summary is public machine shape, not live state.
+    fn machine(&self) -> Option<crate::BootFacts> {
+        None
+    }
 }
 
 #[cfg(test)]

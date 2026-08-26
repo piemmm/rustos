@@ -147,7 +147,7 @@ const HEADER_LEN: usize = 8;
 /// header: geometry `slots` (4) + `rx_slot_capacity` (4) +
 /// `tx_slot_capacity` (4) + grant handle (8) + class (1) + `rx_queues`
 /// (2) + reserved (1) + notify endpoint id (8).
-const ATTACH_BODY_LEN: usize = 4 + 4 + 4 + 8 + 1 + 2 + 1 + 8;
+const ATTACH_BODY_LEN: usize = 4 + 4 + 4 + 4 + 8 + 1 + 2 + 1 + 8;
 
 /// Wire length of the [`NetChannelRequest::SetMulticast`] body: the group
 /// count (1) + reserved (1) + [`MAX_MCAST_GROUPS`] fixed-width addresses.
@@ -181,17 +181,48 @@ pub const MAX_FILTER_GROUPS_V4: usize = 8;
 /// addresses the policy already names.
 pub const MAX_FILTER_GROUPS_V6: usize = 8;
 
+/// Bytes of the [`RxFilterPolicy`] broadcast-consumer port summary: 512
+/// bits, one per folded port slot.
+///
+/// A summary rather than a list, because a busy server holds far more
+/// datagram sockets than any fixed list could name and a list that
+/// overflowed would have to widen to admitting *all* broadcast — exactly
+/// the LAN noise the pre-filter exists to shed. Its error is one-sided:
+/// two ports can fold to one slot, so the filter may admit a frame the
+/// stack then finds no consumer for, but it can never shed one a consumer
+/// wanted.
+pub const BROADCAST_PORT_BITMAP_LEN: usize = BROADCAST_PORT_SLOTS as usize / 8;
+
+/// Bit slots the broadcast-consumer summary carries. Every port below this
+/// keeps a slot of its own, which covers the well-known ports a broadcast
+/// protocol actually uses.
+const BROADCAST_PORT_SLOTS: u16 = 512;
+
+/// The `(byte, mask)` of `port`'s slot in the broadcast-consumer summary.
+///
+/// Folds the port's high bits into the low nine, so every well-known port
+/// below the slot count keeps a slot of its own and the ephemeral range
+/// spreads evenly. The one definition of the fold: the stack sets a bit and
+/// the driver tests it through this, so the two cannot disagree.
+#[must_use]
+pub const fn broadcast_port_slot(port: u16) -> (usize, u8) {
+    let slot = (port ^ (port >> 9)) % BROADCAST_PORT_SLOTS;
+    ((slot / 8) as usize, 1u8 << (slot % 8))
+}
+
 /// Wire length of the [`NetChannelRequest::SetRxFilter`] body: the four
 /// counts (1 each) + the exhaustive flag (1) + reserved (3) + each family's
 /// fixed-width address array, IPv4 twice (the address and its subnet's
-/// directed-broadcast address), then each family's joined-group array.
+/// directed-broadcast address), each family's joined-group array, then the
+/// broadcast-consumer port summary.
 const SET_RX_FILTER_BODY_LEN: usize = 4
     + 1
     + 3
     + MAX_FILTER_V4 * 4 * 2
     + MAX_FILTER_V6 * 16
     + MAX_FILTER_GROUPS_V4 * 4
-    + MAX_FILTER_GROUPS_V6 * 16;
+    + MAX_FILTER_GROUPS_V6 * 16
+    + BROADCAST_PORT_BITMAP_LEN;
 
 /// Byte offset of the IPv6 address array within the `SetRxFilter` body.
 const RX_FILTER_V6_AT: usize = 8 + MAX_FILTER_V4 * 8;
@@ -199,6 +230,8 @@ const RX_FILTER_V6_AT: usize = 8 + MAX_FILTER_V4 * 8;
 const RX_FILTER_GROUPS_V4_AT: usize = RX_FILTER_V6_AT + MAX_FILTER_V6 * 16;
 /// Byte offset of the IPv6 joined-group array within the body.
 const RX_FILTER_GROUPS_V6_AT: usize = RX_FILTER_GROUPS_V4_AT + MAX_FILTER_GROUPS_V4 * 4;
+/// Byte offset of the broadcast-consumer port summary within the body.
+const RX_FILTER_BROADCAST_PORTS_AT: usize = RX_FILTER_GROUPS_V6_AT + MAX_FILTER_GROUPS_V6 * 16;
 
 /// Largest device-channel request frame: the header plus the largest body. A
 /// fixed validation bound sizing the buffer both sides pin for the control
@@ -226,6 +259,12 @@ pub const NET_CHANNEL_NOTIFY_LEN: usize = 16;
 /// endpoint (`plans/NETWORK.md` N4c). Decoded fail-closed from an untrusted
 /// frame; the driver acts only on a fully-validated value.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+// The control-plane request is deliberately a plain `Copy` value with no
+// allocation — `lib/abi` is `no_std` with no allocator, and every body is
+// fixed-width so the frame length is a constant both sides validate against.
+// Boxing the widest body (the filter policy) is therefore not available, and
+// the value is built once per control message, never on the frame path.
+#[allow(clippy::large_enum_variant)]
 pub enum NetChannelRequest {
     /// Report the device's [`DeviceFacts`] so the stack can size the ring
     /// geometry before attaching.
@@ -252,11 +291,12 @@ pub enum NetChannelRequest {
 /// evaluates it on its harvest path.
 ///
 /// It holds exactly the inputs to the stack's own destination-acceptance
-/// rule, and **only slow-changing L3 state**: our addresses, the subnet
-/// broadcast, and the joined groups. No listening ports, so nothing here can
-/// fall behind a socket opening and drop a frame someone wanted — the stack
-/// gates delivery of a group or broadcast destination on membership, never on
-/// a port, so membership is the whole of what the filter needs to mirror it.
+/// rule: our addresses, the subnet broadcast, the joined groups, and a
+/// summary of the local ports a *broadcast* datagram could be delivered to.
+/// A group destination is gated on membership alone, so nothing about it can
+/// fall behind a socket opening; broadcast is the one destination whose
+/// acceptance genuinely depends on there being a datagram consumer, and the
+/// stack gates it on the same summary, so the two rules stay one rule.
 ///
 /// # It can only cost work, never authority
 ///
@@ -279,6 +319,7 @@ pub struct RxFilterPolicy {
     v6: [[u8; 16]; MAX_FILTER_V6],
     groups_v4: [[u8; 4]; MAX_FILTER_GROUPS_V4],
     groups_v6: [[u8; 16]; MAX_FILTER_GROUPS_V6],
+    broadcast_ports: [u8; BROADCAST_PORT_BITMAP_LEN],
 }
 
 impl RxFilterPolicy {
@@ -298,23 +339,32 @@ impl RxFilterPolicy {
             v6: [[0u8; 16]; MAX_FILTER_V6],
             groups_v4: [[0u8; 4]; MAX_FILTER_GROUPS_V4],
             groups_v6: [[0u8; 16]; MAX_FILTER_GROUPS_V6],
+            broadcast_ports: [0u8; BROADCAST_PORT_BITMAP_LEN],
         }
     }
 
     /// Build a policy from an interface's addresses and joined groups.
     ///
     /// `v4` pairs each IPv4 address with its subnet's directed-broadcast
-    /// address. **Any** list longer than its bound is *truncated* and the
-    /// policy marked non-exhaustive, so the filter widens to admit rather
-    /// than silently dropping traffic to something it was not told about.
+    /// address, and `broadcast_ports` names the local ports a broadcast
+    /// datagram could be delivered to. **Any** address or group list longer
+    /// than its bound is *truncated* and the policy marked non-exhaustive,
+    /// so the filter widens to admit rather than silently dropping traffic
+    /// to something it was not told about. The port summary has no such
+    /// bound — it is a bitmap, so any number of ports fits.
     #[must_use]
     pub fn new(
         v4: &[([u8; 4], [u8; 4])],
         v6: &[[u8; 16]],
         groups_v4: &[[u8; 4]],
         groups_v6: &[[u8; 16]],
+        broadcast_ports: &[u16],
     ) -> Self {
         let mut policy = Self::admit_all();
+        for port in broadcast_ports {
+            let (byte, mask) = broadcast_port_slot(*port);
+            policy.broadcast_ports[byte] |= mask;
+        }
         policy.exhaustive = v4.len() <= MAX_FILTER_V4
             && v6.len() <= MAX_FILTER_V6
             && groups_v4.len() <= MAX_FILTER_GROUPS_V4
@@ -375,6 +425,29 @@ impl RxFilterPolicy {
     #[must_use]
     pub fn v6_groups(&self) -> &[[u8; 16]] {
         &self.groups_v6[..self.groups_v6_count as usize]
+    }
+
+    /// Name `port` as one a broadcast datagram could be delivered to.
+    ///
+    /// The incremental form of the `broadcast_ports` argument to
+    /// [`Self::new`], for a consumer the caller holds separately from its
+    /// port list (an interface's own DHCP client) — so building the policy
+    /// needs no second list to concatenate into.
+    pub fn admit_broadcast_port(&mut self, port: u16) {
+        let (byte, mask) = broadcast_port_slot(port);
+        self.broadcast_ports[byte] |= mask;
+    }
+
+    /// Whether a broadcast datagram to `port` could have a local consumer.
+    ///
+    /// A port the stack never named always answers `false`, and a port it
+    /// named always answers `true`; a folded collision can only turn a
+    /// `false` into a `true`, which costs one wasted parse and never a
+    /// dropped frame.
+    #[must_use]
+    pub const fn admits_broadcast_port(&self, port: u16) -> bool {
+        let (byte, mask) = broadcast_port_slot(port);
+        self.broadcast_ports[byte] & mask != 0
     }
 }
 
@@ -491,14 +564,15 @@ impl NetChannelRequest {
         out[6] = self.op_byte();
         // out[7] reserved, left zero.
         if let Self::Attach(params) = self {
-            put_u32(out, HEADER_LEN, params.geometry.slots());
-            put_u32(out, HEADER_LEN + 4, params.geometry.rx_slot_capacity());
-            put_u32(out, HEADER_LEN + 8, params.geometry.tx_slot_capacity());
-            put_u64(out, HEADER_LEN + 12, params.region_grant);
-            out[HEADER_LEN + 20] = params.class.as_u8();
-            put_u16(out, HEADER_LEN + 21, params.geometry.rx_queues());
-            // out[HEADER_LEN + 23] reserved, left zero.
-            put_u64(out, HEADER_LEN + 24, params.notify_endpoint);
+            put_u32(out, HEADER_LEN, params.geometry.rx_slots());
+            put_u32(out, HEADER_LEN + 4, params.geometry.tx_slots());
+            put_u32(out, HEADER_LEN + 8, params.geometry.rx_slot_capacity());
+            put_u32(out, HEADER_LEN + 12, params.geometry.tx_slot_capacity());
+            put_u64(out, HEADER_LEN + 16, params.region_grant);
+            out[HEADER_LEN + 24] = params.class.as_u8();
+            put_u16(out, HEADER_LEN + 25, params.geometry.rx_queues());
+            // out[HEADER_LEN + 27] reserved, left zero.
+            put_u64(out, HEADER_LEN + 28, params.notify_endpoint);
         }
         if let Self::SetMulticast(groups) = self {
             out[HEADER_LEN] = groups.count;
@@ -531,6 +605,9 @@ impl NetChannelRequest {
                 out[at..at + 4].copy_from_slice(group);
                 at += 4;
             }
+            out[HEADER_LEN + RX_FILTER_BROADCAST_PORTS_AT
+                ..HEADER_LEN + RX_FILTER_BROADCAST_PORTS_AT + BROADCAST_PORT_BITMAP_LEN]
+                .copy_from_slice(&policy.broadcast_ports);
             let mut at = HEADER_LEN + RX_FILTER_GROUPS_V6_AT;
             for group in policy.v6_groups() {
                 out[at..at + 16].copy_from_slice(group);
@@ -620,6 +697,10 @@ impl NetChannelRequest {
             let at = HEADER_LEN + RX_FILTER_GROUPS_V6_AT + slot * 16;
             policy.groups_v6[slot].copy_from_slice(&bytes[at..at + 16]);
         }
+        policy.broadcast_ports.copy_from_slice(
+            &bytes[HEADER_LEN + RX_FILTER_BROADCAST_PORTS_AT
+                ..HEADER_LEN + RX_FILTER_BROADCAST_PORTS_AT + BROADCAST_PORT_BITMAP_LEN],
+        );
         // Widened only after every field validated, so a refused frame
         // never leaves a half-applied policy.
         policy.v4_count = u8::try_from(v4_count).map_err(|_| Errno::OutOfRange)?;
@@ -633,17 +714,24 @@ impl NetChannelRequest {
         if bytes.len() < HEADER_LEN + ATTACH_BODY_LEN {
             return Err(Errno::BufferTooSmall);
         }
-        let slots = read_u32(bytes, HEADER_LEN);
-        let rx_slot_capacity = read_u32(bytes, HEADER_LEN + 4);
-        let tx_slot_capacity = read_u32(bytes, HEADER_LEN + 8);
-        let region_grant = read_u64(bytes, HEADER_LEN + 12);
-        let class = BufferClass::from_u8(bytes[HEADER_LEN + 20]).map_err(|_| Errno::OutOfRange)?;
-        let rx_queues = read_u16(bytes, HEADER_LEN + 21);
-        let geometry = RingGeometry::new(slots, rx_slot_capacity, tx_slot_capacity, rx_queues)?;
-        if bytes[HEADER_LEN + 23] != 0 {
+        let rx_slots = read_u32(bytes, HEADER_LEN);
+        let tx_slots = read_u32(bytes, HEADER_LEN + 4);
+        let rx_slot_capacity = read_u32(bytes, HEADER_LEN + 8);
+        let tx_slot_capacity = read_u32(bytes, HEADER_LEN + 12);
+        let region_grant = read_u64(bytes, HEADER_LEN + 16);
+        let class = BufferClass::from_u8(bytes[HEADER_LEN + 24]).map_err(|_| Errno::OutOfRange)?;
+        let rx_queues = read_u16(bytes, HEADER_LEN + 25);
+        let geometry = RingGeometry::new(
+            rx_slots,
+            tx_slots,
+            rx_slot_capacity,
+            tx_slot_capacity,
+            rx_queues,
+        )?;
+        if bytes[HEADER_LEN + 27] != 0 {
             return Err(Errno::BadMagic);
         }
-        let notify_endpoint = read_u64(bytes, HEADER_LEN + 24);
+        let notify_endpoint = read_u64(bytes, HEADER_LEN + 28);
         Ok(Self::Attach(AttachParams {
             geometry,
             region_grant,
@@ -789,7 +877,7 @@ impl NetChannelNotify {
 /// Wire length of a [`DeviceFacts`] payload: mac (6) + mtu (4) + offloads
 /// (4) + `rx_queues` (2) + link (1) + multicast-filter kind (1) +
 /// multicast slots (2).
-const FACTS_PAYLOAD_LEN: usize = MAC_ADDRESS_LEN + 4 + 4 + 2 + 1 + 1 + 2;
+const FACTS_PAYLOAD_LEN: usize = MAC_ADDRESS_LEN + 4 + 4 + 4 + 2 + 1 + 1 + 2;
 
 /// Wire byte for [`McastFilter::Unfiltered`].
 const MCAST_UNFILTERED: u8 = 0;
@@ -816,9 +904,10 @@ pub fn encode_facts_reply(result: Result<DeviceFacts, Errno>) -> [u8; NET_CHANNE
             let body = &mut out[4..];
             body[..MAC_ADDRESS_LEN].copy_from_slice(facts.mac.as_octets());
             put_u32(body, MAC_ADDRESS_LEN, facts.mtu);
-            put_u32(body, MAC_ADDRESS_LEN + 4, facts.offloads.bits());
-            put_u16(body, MAC_ADDRESS_LEN + 8, facts.rx_queues);
-            body[MAC_ADDRESS_LEN + 10] = match facts.link {
+            put_u32(body, MAC_ADDRESS_LEN + 4, facts.max_tx_frame);
+            put_u32(body, MAC_ADDRESS_LEN + 8, facts.offloads.bits());
+            put_u16(body, MAC_ADDRESS_LEN + 12, facts.rx_queues);
+            body[MAC_ADDRESS_LEN + 14] = match facts.link {
                 LinkState::Up => LINK_UP,
                 LinkState::Down => LINK_DOWN,
             };
@@ -826,8 +915,8 @@ pub fn encode_facts_reply(result: Result<DeviceFacts, Errno>) -> [u8; NET_CHANNE
                 McastFilter::Unfiltered => (MCAST_UNFILTERED, 0),
                 McastFilter::Slots(slots) => (MCAST_SLOTS, slots),
             };
-            body[MAC_ADDRESS_LEN + 11] = kind;
-            put_u16(body, MAC_ADDRESS_LEN + 12, slots);
+            body[MAC_ADDRESS_LEN + 15] = kind;
+            put_u16(body, MAC_ADDRESS_LEN + 16, slots);
         }
         Err(err) => {
             let status = (-err.as_i32()).to_le_bytes();
@@ -860,15 +949,16 @@ pub fn decode_facts_reply(bytes: &[u8]) -> Result<DeviceFacts, Errno> {
     let mut mac = [0u8; MAC_ADDRESS_LEN];
     mac.copy_from_slice(&body[..MAC_ADDRESS_LEN]);
     let mtu = read_u32(body, MAC_ADDRESS_LEN);
-    let offloads = NetOffloads::from_bits(read_u32(body, MAC_ADDRESS_LEN + 4))?;
-    let rx_queues = read_u16(body, MAC_ADDRESS_LEN + 8);
-    let link = match body[MAC_ADDRESS_LEN + 10] {
+    let max_tx_frame = read_u32(body, MAC_ADDRESS_LEN + 4);
+    let offloads = NetOffloads::from_bits(read_u32(body, MAC_ADDRESS_LEN + 8))?;
+    let rx_queues = read_u16(body, MAC_ADDRESS_LEN + 12);
+    let link = match body[MAC_ADDRESS_LEN + 14] {
         LINK_UP => LinkState::Up,
         LINK_DOWN => LinkState::Down,
         _ => return Err(Errno::OutOfRange),
     };
-    let slots = read_u16(body, MAC_ADDRESS_LEN + 12);
-    let multicast_filter = match body[MAC_ADDRESS_LEN + 11] {
+    let slots = read_u16(body, MAC_ADDRESS_LEN + 16);
+    let multicast_filter = match body[MAC_ADDRESS_LEN + 15] {
         // An unfiltered device has no slot count; a dirty one is a corrupt
         // report, not a device that filters.
         MCAST_UNFILTERED if slots == 0 => McastFilter::Unfiltered,
@@ -881,6 +971,7 @@ pub fn decode_facts_reply(bytes: &[u8]) -> Result<DeviceFacts, Errno> {
         link,
         offloads,
         rx_queues,
+        max_tx_frame,
         multicast_filter,
     };
     facts.validate()?;
@@ -1028,7 +1119,7 @@ mod tests {
         // A GSO-class transmit capacity distinct from the receive MTU,
         // and a multi-queue receive count, so the round-trip proves both
         // capacities and `rx_queues` survive the wire.
-        RingGeometry::new(256, 1514, 65_549, 4).expect("valid geometry")
+        RingGeometry::new(256, 32, 1514, 65_549, 4).expect("valid geometry")
     }
 
     fn attach() -> NetChannelRequest {
@@ -1110,13 +1201,18 @@ mod tests {
         // An unfiltered report carrying a slot count is corrupt, not a
         // device that filters: fail closed rather than pick a reading.
         let mut reply = encode_facts_reply(Ok(facts()));
-        reply[4 + MAC_ADDRESS_LEN + 11] = MCAST_UNFILTERED;
-        put_u16(&mut reply, 4 + MAC_ADDRESS_LEN + 12, 3);
+        reply[4 + MAC_ADDRESS_LEN + 15] = MCAST_UNFILTERED;
+        put_u16(&mut reply, 4 + MAC_ADDRESS_LEN + 16, 3);
         assert_eq!(decode_facts_reply(&reply), Err(Errno::OutOfRange));
         // An unknown filter kind is refused.
         let mut unknown = encode_facts_reply(Ok(facts()));
-        unknown[4 + MAC_ADDRESS_LEN + 11] = 9;
+        unknown[4 + MAC_ADDRESS_LEN + 15] = 9;
         assert_eq!(decode_facts_reply(&unknown), Err(Errno::OutOfRange));
+        // A staging bound below one link frame is a report the transmit
+        // ring could not be sized from: fail closed.
+        let mut short = encode_facts_reply(Ok(facts()));
+        put_u32(&mut short, 4 + MAC_ADDRESS_LEN + 4, 1513);
+        assert_eq!(decode_facts_reply(&short), Err(Errno::OutOfRange));
     }
 
     fn facts() -> DeviceFacts {
@@ -1128,6 +1224,7 @@ mod tests {
                 .expect("defined bits"),
             multicast_filter: McastFilter::Slots(15),
             rx_queues: 2,
+            max_tx_frame: 1514,
         }
     }
 
@@ -1156,6 +1253,7 @@ mod tests {
             &[[0x20; 16], [0xFE; 16]],
             &[[224, 0, 0, 1], [239, 1, 2, 3]],
             &[[0xFF; 16]],
+            &[68, 5353],
         )
     }
 
@@ -1176,6 +1274,33 @@ mod tests {
         assert_eq!(back.v6_addresses(), [[0x20; 16], [0xFE; 16]]);
         assert_eq!(back.v4_groups(), [[224, 0, 0, 1], [239, 1, 2, 3]]);
         assert_eq!(back.v6_groups(), [[0xFF; 16]]);
+        assert!(back.admits_broadcast_port(68));
+        assert!(back.admits_broadcast_port(5353));
+        assert!(!back.admits_broadcast_port(1900));
+    }
+
+    #[test]
+    fn the_broadcast_port_summary_never_sheds_a_named_port() {
+        // Its error is one-sided by construction: every named port answers
+        // true, and a policy that named none answers false for all.
+        let ports: [u16; 6] = [0, 68, 123, 5353, 49_152, u16::MAX];
+        let policy = RxFilterPolicy::new(&[], &[], &[], &[], &ports);
+        for port in ports {
+            assert!(policy.admits_broadcast_port(port), "port {port}");
+        }
+        let empty = RxFilterPolicy::new(&[], &[], &[], &[], &[]);
+        for port in ports {
+            assert!(!empty.admits_broadcast_port(port), "port {port}");
+        }
+        // Every well-known port keeps a slot of its own, so the ports a
+        // broadcast protocol actually uses never collide with each other.
+        let mut seen = [false; 512];
+        for port in 0..512u16 {
+            let (byte, mask) = broadcast_port_slot(port);
+            let slot = byte * 8 + mask.trailing_zeros() as usize;
+            assert!(!seen[slot], "port {port} collided below the slot count");
+            seen[slot] = true;
+        }
     }
 
     #[test]
@@ -1184,10 +1309,11 @@ mod tests {
         // joined group admits everything rather than shedding a group it was
         // not told about.
         let groups = [[224, 0, 0, 1]; MAX_FILTER_GROUPS_V4 + 1];
-        let policy = RxFilterPolicy::new(&[([10, 0, 2, 15], [10, 0, 2, 255])], &[], &groups, &[]);
+        let policy =
+            RxFilterPolicy::new(&[([10, 0, 2, 15], [10, 0, 2, 255])], &[], &groups, &[], &[]);
         assert!(!policy.is_exhaustive());
         let v6 = [[0x20; 16]; MAX_FILTER_GROUPS_V6 + 1];
-        let policy = RxFilterPolicy::new(&[], &[], &[], &v6);
+        let policy = RxFilterPolicy::new(&[], &[], &[], &v6, &[]);
         assert!(!policy.is_exhaustive());
     }
 
@@ -1262,30 +1388,37 @@ mod tests {
     fn decode_attach_rejects_bad_geometry_class_reserved() {
         let mut buf = [0u8; NetChannelRequest::MAX_WIRE_LEN];
         let len = attach().encode(&mut buf).expect("encode");
-        // Zero slots -> out of range geometry.
+        // Zero receive slots -> out of range geometry.
         let mut bad = buf;
         put_u32(&mut bad, HEADER_LEN, 0);
         assert_eq!(
             NetChannelRequest::decode(&bad[..len]),
             Err(Errno::OutOfRange)
         );
+        // A transmit slot count that is not a power of two, likewise.
+        let mut bad = buf;
+        put_u32(&mut bad, HEADER_LEN + 4, 6);
+        assert_eq!(
+            NetChannelRequest::decode(&bad[..len]),
+            Err(Errno::OutOfRange)
+        );
         // Unknown buffer class byte.
         let mut bad = buf;
-        bad[HEADER_LEN + 20] = 0x7F;
+        bad[HEADER_LEN + 24] = 0x7F;
         assert_eq!(
             NetChannelRequest::decode(&bad[..len]),
             Err(Errno::OutOfRange)
         );
         // Out-of-range receive-queue count (0) -> out of range geometry.
         let mut bad = buf;
-        put_u16(&mut bad, HEADER_LEN + 21, 0);
+        put_u16(&mut bad, HEADER_LEN + 25, 0);
         assert_eq!(
             NetChannelRequest::decode(&bad[..len]),
             Err(Errno::OutOfRange)
         );
         // Dirty reserved byte in the attach body (past `rx_queues`).
         let mut bad = buf;
-        bad[HEADER_LEN + 23] = 1;
+        bad[HEADER_LEN + 27] = 1;
         assert_eq!(NetChannelRequest::decode(&bad[..len]), Err(Errno::BadMagic));
         // Truncated attach body.
         assert_eq!(

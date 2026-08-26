@@ -1116,9 +1116,10 @@ drove the next service. The CFQ park/unpark handshake and the
 (a)/(c) ruled out).
 
 **Fix — multi-in-flight transmit pipelining (`lib/virtio_net`).** The single
-`tx_header`/`tx_data`/`tx_inflight` fields are replaced by a fixed,
-allocation-free `TxStaging` pool of header+frame staging pairs, sized to the
-transmit virtqueue (`TX_INFLIGHT_MAX = TX_QUEUE_SIZE / 2`). Each `service`
+`tx_header`/`tx_data`/`tx_inflight` fields are replaced by an
+allocation-free `TxStaging` pool of header+frame staging pairs whose depth is
+derived from the discovered machine and the device's own advertised queue
+maximum (`QueueDepths`, two descriptors per in-flight frame). Each `service`
 reaps **every** completed transmission (returning its staging pair to the
 pool, keyed by the descriptor head the used ring reports) and then stages
 **every** queued frame until the frame ring is empty or the pool is

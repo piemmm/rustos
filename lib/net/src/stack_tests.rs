@@ -28,6 +28,7 @@ fn facts(mac: MacAddress) -> DeviceFacts {
         link: LinkState::Up,
         offloads: tairix_abi::driver::net::NetOffloads::empty(),
         rx_queues: 1,
+        max_tx_frame: 1500 + tairix_abi::driver::net::ETHERNET_HEADER_LEN,
         multicast_filter: tairix_abi::driver::net::McastFilter::Unfiltered,
     }
 }
@@ -980,6 +981,131 @@ fn unknown_ipv4_protocol_gets_rate_limited_protocol_unreachable() {
     );
 }
 
+/// A UDP datagram to `destination`:`port` from `V4_B`, framed for `a`.
+fn udp_frame_to(destination: Ipv4Addr, port: u16) -> Vec<u8> {
+    let mut udp = [0u8; crate::udp::UDP_HEADER_LEN];
+    udp[2..4].copy_from_slice(&port.to_be_bytes());
+    let len = u16::try_from(crate::udp::UDP_HEADER_LEN).expect("small");
+    udp[4..6].copy_from_slice(&len.to_be_bytes());
+    let header = Ipv4Header::new(V4_B, destination, PROTOCOL_UDP);
+    let mut packet = vec![0u8; IPV4_HEADER_LEN + udp.len()];
+    header.write(&mut packet, udp.len()).expect("fits");
+    packet[IPV4_HEADER_LEN..].copy_from_slice(&udp);
+    let mut frame = vec![0u8; ETHERNET_HEADER_LEN + packet.len()];
+    write_header(&mut frame, BROADCAST, MAC_B, ETHERTYPE_IPV4).expect("fits");
+    frame[ETHERNET_HEADER_LEN..].copy_from_slice(&packet);
+    frame
+}
+
+/// Whether `out` carried a delivered UDP datagram.
+fn delivered_udp(out: &StackOutput) -> bool {
+    out.events
+        .iter()
+        .any(|event| matches!(event, StackEvent::UdpDatagram { .. }))
+}
+
+#[test]
+fn a_udp_socket_receives_ipv4_broadcast_on_a_port_it_holds() {
+    // A broadcast datagram reaches every host on the segment, so it is
+    // delivered where a datagram consumer holds the port and dropped where
+    // none does — rather than dropped unconditionally, which left a bound
+    // socket unable to receive broadcast at all.
+    let mut a = stack(MAC_A, IID_A);
+    a.set_ipv4_config(V4_A, 24, None).expect("configure A");
+    let limited = Ipv4Addr::BROADCAST;
+    let directed = Ipv4Addr::new(10, 0, 2, 255);
+
+    for destination in [limited, directed] {
+        assert!(
+            !delivered_udp(&a.on_frame_collect(&udp_frame_to(destination, 9999), t(1))),
+            "{destination:?} must not be delivered while nothing holds the port"
+        );
+    }
+    a.set_datagram_ports(&[9999]);
+    for destination in [limited, directed] {
+        assert!(
+            delivered_udp(&a.on_frame_collect(&udp_frame_to(destination, 9999), t(2))),
+            "{destination:?} must reach the socket bound to its port"
+        );
+    }
+    // Another port stays shed, and unbinding closes the door again.
+    assert!(!delivered_udp(
+        &a.on_frame_collect(&udp_frame_to(limited, 137), t(3))
+    ));
+    a.set_datagram_ports(&[]);
+    assert!(!delivered_udp(
+        &a.on_frame_collect(&udp_frame_to(limited, 9999), t(4))
+    ));
+}
+
+#[test]
+fn broadcast_is_never_accepted_for_tcp_icmp_or_an_unknown_protocol() {
+    // RFC 1122 makes a broadcast TCP segment something a host MUST discard,
+    // an echo request to a broadcast address is the smurf amplifier, and an
+    // unknown protocol must draw no ICMP error to an ambiguous destination.
+    let mut a = stack(MAC_A, IID_A);
+    a.set_ipv4_config(V4_A, 24, None).expect("configure A");
+    a.set_datagram_ports(&[9999]);
+    // Prime the neighbour cache so a permitted reply would leave at once
+    // rather than parking, otherwise an absent frame proves nothing.
+    let request = ArpPacket {
+        operation: OP_REQUEST,
+        sender_hardware: MAC_B,
+        sender_protocol: V4_B,
+        target_hardware: MacAddress([0; 6]),
+        target_protocol: V4_A,
+    };
+    let mut arp = [0u8; crate::arp::ARP_PACKET_LEN];
+    request.write(&mut arp).expect("fits");
+    let mut arp_frame = vec![0u8; ETHERNET_HEADER_LEN + arp.len()];
+    write_header(&mut arp_frame, BROADCAST, MAC_B, ETHERTYPE_ARP).expect("fits");
+    arp_frame[ETHERNET_HEADER_LEN..].copy_from_slice(&arp);
+    assert_eq!(a.on_frame_collect(&arp_frame, t(1)).frames.len(), 1);
+
+    for destination in [Ipv4Addr::BROADCAST, Ipv4Addr::new(10, 0, 2, 255)] {
+        for protocol in [PROTOCOL_TCP, crate::stack::PROTOCOL_ICMP, 253] {
+            let payload = [0u8; 8];
+            let header = Ipv4Header::new(V4_B, destination, protocol);
+            let mut packet = vec![0u8; IPV4_HEADER_LEN + payload.len()];
+            header.write(&mut packet, payload.len()).expect("fits");
+            packet[IPV4_HEADER_LEN..].copy_from_slice(&payload);
+            let mut frame = vec![0u8; ETHERNET_HEADER_LEN + packet.len()];
+            write_header(&mut frame, BROADCAST, MAC_B, ETHERTYPE_IPV4).expect("fits");
+            frame[ETHERNET_HEADER_LEN..].copy_from_slice(&packet);
+            let out = a.on_frame_collect(&frame, t(2));
+            assert!(
+                out.events.is_empty(),
+                "protocol {protocol} to {destination:?} must surface nothing"
+            );
+            assert!(
+                out.frames.is_empty(),
+                "protocol {protocol} to {destination:?} must draw no answer"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_thirty_one_bit_prefix_has_no_broadcast_address() {
+    // RFC 3021: a /31 point-to-point link has no broadcast address — its
+    // other address is the peer's unicast, so treating it as broadcast
+    // would accept traffic addressed to the peer.
+    let mut a = stack(MAC_A, IID_A);
+    a.set_ipv4_config(Ipv4Addr::new(10, 0, 0, 0), 31, None)
+        .expect("configure A");
+    a.set_datagram_ports(&[9999]);
+    let peer = Ipv4Addr::new(10, 0, 0, 1);
+    assert!(
+        !delivered_udp(&a.on_frame_collect(&udp_frame_to(peer, 9999), t(1))),
+        "the peer's own address is not this host's broadcast"
+    );
+    // The limited broadcast still works on such a link.
+    assert!(delivered_udp(&a.on_frame_collect(
+        &udp_frame_to(Ipv4Addr::BROADCAST, 9999),
+        t(2)
+    )));
+}
+
 #[test]
 fn everything_the_stack_accepts_the_receive_pre_filter_admits() {
     // The safety property the pre-filter rests on. It may admit *more* than
@@ -990,6 +1116,9 @@ fn everything_the_stack_accepts_the_receive_pre_filter_admits() {
     // rather than on someone's network.
     let mut a = stack(MAC_A, IID_A);
     a.set_ipv4_config(V4_A, 24, None).expect("configure A");
+    // A datagram consumer on the probe port, so the broadcast destinations
+    // below are ones the stack genuinely accepts and the filter must admit.
+    a.set_datagram_ports(&[9999]);
     let filter = crate::rxfilter::RxClassifier::new(a.rx_filter_policy());
 
     let mut checked = 0;
@@ -1037,7 +1166,7 @@ fn everything_the_stack_accepts_the_receive_pre_filter_admits() {
     // all-systems group are both accepted, so a run that asserted nothing
     // would mean the oracle stopped working.
     assert!(
-        checked >= 2,
+        checked >= 4,
         "the acceptance oracle matched {checked} destinations, so this proved nothing"
     );
 }

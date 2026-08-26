@@ -209,6 +209,36 @@ drivers/network/<nic>                 — link-layer only: frames in/out,
   matching `VIRTIO_NET_F_*` features and maps them onto the closed
   vocabulary; a feature the device offers but the vocabulary does not
   name is left un-negotiated (no speculative surface, §2.4).
+- **Every ring depth is derived from discovered hardware, never
+  hand-picked (§24.1).** `RingBudget::for_machine` states the per-ring
+  pinned-memory budget once — one 4096th of the RAM the boot path
+  discovered, from the kernel-attested `BootFacts` — and `RingGeometry::
+  for_device` composes it with the device's report: receive queues are
+  the device's own count capped by the machine's cores and
+  `MAX_RX_QUEUES`; each direction takes the deepest power-of-two ring its
+  budget affords *at its own slot cost*, floored at `MIN_SLOTS` and
+  clamped at `MAX_SLOTS`; and a segmentation transmit slot is widened to
+  the largest super-frame the budget affords, capped by the driver's own
+  `DeviceFacts::max_tx_frame` staging bound. The two directions carry
+  **independent** slot counts because one shared count would either waste
+  a 64 KiB super-frame's space on every receive slot or shrink receive
+  depth to what the super-frames cost. Slot counts are powers of two, so
+  slot addressing masks the free-running counter instead of dividing by
+  it. A machine the caller could not attest yields the floor — the
+  minimum viable ring, never an invented figure.
+- The drivers size their **own** device rings through the same policy,
+  from the machine the driver host attests (`DriverHost::machine`, an
+  unprivileged `boot_facts_get` in the user-space host): GENET's
+  `DmaLayout` derives its programmed descriptor count (bounded by the
+  controller's descriptor RAM) and its segmentation staging area;
+  `lib/virtio_net`'s `QueueDepths` derives its receive-buffer pool depth
+  and transmit staging depth (bounded by the device's advertised queue
+  maximum and by the crate's pinned-DMA bounds). One policy, so the two
+  sides land at coherent depths, and `max_tx_frame` closes the loop
+  explicitly rather than either side re-deriving what the other could
+  afford. `virtio_net`'s receive pool is one contiguous DMA carve indexed
+  by offset, not a slab per buffer, so a deep pool costs one allocation
+  and no per-buffer page rounding.
 
 ### 2.4 The socket ABI — `lib/abi/src/net.rs`
 
@@ -2324,11 +2354,11 @@ opposite ("cannot re-fire in a storm"), which is why the defect survived.
   (`rx_ring_full` asks for nothing), so the doorbell path re-arms unless the
   device faulted — `Masked::may_rearm`, distinct from `needs_release`. A
   source still asserted then re-interrupts into the path that does carry a
-  release. With `NET_RING_SLOTS = 16` against a 64-descriptor device ring,
-  back-pressure is routine at any real frame rate, so this edge is
-  load-bearing: without it one filled ring ends interrupt-driven receive for
-  the life of the interface and the frame path degrades to whatever else
-  happens to doorbell.
+  release. Back-pressure is reachable at any real frame rate whenever the
+  shared ring is shallower than a burst, so this edge is load-bearing:
+  without it one filled ring ends interrupt-driven receive for the life of
+  the interface and the frame path degrades to whatever else happens to
+  doorbell.
 
 #### N17b — the receive path no longer pays an RPC
 
@@ -2392,20 +2422,32 @@ Raspberry Pi 4: of 7994 frames the stack was woken for, it discarded 7917.
   only the neighbour cache knows whether we asked), and a destination
   check that **mirrors the stack's own acceptance rule**.
 - That rule is the whole design. The stack accepts an IPv4 destination that
-  is one of its addresses or a *joined group*, and an IPv6 destination that
-  is one of its addresses, all-nodes, a solicited-node group, or a joined
-  group. It gates a group or broadcast destination on **membership, never
-  on a listening port** — so the filter needs no per-socket state, and
-  nothing in it can fall behind a socket opening. The all-nodes and
+  is one of its addresses, a *joined group*, or a broadcast address whose
+  UDP destination port a local datagram consumer holds; and an IPv6
+  destination that is one of its addresses, all-nodes, a solicited-node
+  group, or a joined group. A group destination is gated on **membership,
+  never on a listening port**, so nothing about it can fall behind a socket
+  opening. Broadcast is the one destination whose acceptance genuinely
+  depends on a transport consumer — it reaches every host on the segment —
+  so the policy carries a 512-bit summary of the local ports it could reach
+  and the stack gates its own acceptance on the same summary. The all-nodes and
   solicited-node groups are derived from addresses the policy already
   names rather than carried, so there is no second set to keep in step.
-- One carve-out, and it is the engine's own: a DHCPv4 reply arrives
-  broadcast before any address exists, so broadcast UDP to
-  `dhcp::CLIENT_PORT` is admitted. Matching the port keeps this stateless
-  — a "client is running" flag would be true for the whole lease and so
-  admit every broadcast datagram on a DHCP-configured interface, which is
-  the traffic this sheds. IPv6 needs no equivalent: its DHCP reply is
-  delivered to the interface's link-local unicast address.
+- The broadcast summary is a bitmap, not a list, so a busy server holding
+  hundreds of datagram sockets never overflows it into "admit all
+  broadcast" — the LAN noise this sheds. Its error is one-sided: two ports
+  can fold to one slot, so it may admit a frame the stack then finds no
+  consumer for, never shed one a consumer wanted. Every well-known port
+  below the slot count keeps a slot of its own, so the ports a broadcast
+  protocol actually uses never collide with each other. A DHCPv4 client's
+  port is in the summary while a client runs, which is what lets its
+  broadcast reply through before the interface has any address; IPv6 needs
+  no equivalent, since its DHCP reply goes to the link-local unicast
+  address. A broadcast *fragment* is admitted without inspection (the port
+  lives in the first fragment, and reassembly is the stack's job), and
+  anything but UDP to a broadcast destination is refused outright: a
+  broadcast TCP segment is one RFC 1122 requires a host to discard, and an
+  echo request to a broadcast address is the smurf amplifier.
 - Carrying the joined groups is not merely a tidy-up of GENET's 23-bit
   multicast-MAC aliasing: `lib/virtio_net` reports
   `McastFilter::Unfiltered`, so on that device this is the *only* group
@@ -2423,11 +2465,15 @@ Raspberry Pi 4: of 7994 frames the stack was woken for, it discarded 7917.
   that could not name every local address (`is_exhaustive` false) widens
   to admit all unicast.
 - Wire: `NetChannelRequest::SetRxFilter(RxFilterPolicy)`, published by the
-  stack whenever an interface's address set changes and compared against
-  the last published value (a small `Copy` compare is far cheaper than the
-  IPC it avoids, and there is no second piece of state to fall out of
-  step). `Stack::rx_filter_policy` assembles it beside the addresses it
-  describes.
+  stack whenever an interface's address set, its memberships, or the
+  service's datagram sockets change, and compared against the last
+  published value (a small `Copy` compare is far cheaper than the IPC it
+  avoids, and there is no second piece of state to fall out of step).
+  `Stack::rx_filter_policy` assembles it beside the addresses it describes;
+  the socket table is the authority for the port set and
+  `Netstack::publish_datagram_ports` pushes it to every engine after every
+  socket operation, comparing the set rather than tracking which operations
+  can change it — so a future operation cannot forget to bump anything.
 - Evaluated in one place — `FrameRings::deliver`, which every driver's
   receive path calls — so no driver repeats it and a refused frame is
   never even copied.

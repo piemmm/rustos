@@ -63,7 +63,14 @@ fn single_buffer_rx(
 }
 
 fn build_device() -> (MockTransport, TxLog, RxQueue) {
-    let mut t = MockTransport::new(2, 8, 0, 6);
+    build_device_with_queue_max(8)
+}
+
+/// `build_device` against a device advertising `queue_max` descriptors per
+/// virtqueue, so a test can vary the ceiling the driver's derived depth is
+/// clamped to.
+fn build_device_with_queue_max(queue_max: u16) -> (MockTransport, TxLog, RxQueue) {
+    let mut t = MockTransport::new(2, queue_max, 0, 6);
     t.set_config(0, &DEVICE_MAC);
     let tx_log: Rc<RefCell<Vec<Frame>>> = Rc::new(RefCell::new(Vec::new()));
     let rx_queue: Rc<RefCell<VecDeque<Frame>>> = Rc::new(RefCell::new(VecDeque::new()));
@@ -169,11 +176,22 @@ impl VirtioHost for NoWaitHost {
     }
 }
 
+/// The machine the tests derive their queue depths from: a 1 GiB, 4-core
+/// box, so a depth an assertion names is the one the policy produces.
+fn test_machine() -> tairix_abi::BootFacts {
+    tairix_abi::BootFacts {
+        arch: tairix_abi::Arch::Aarch64,
+        cpu_name: tairix_abi::CpuName::UNKNOWN,
+        cpu_count: 4,
+        memory_bytes: 1024 * 1024 * 1024,
+    }
+}
+
 fn open_net_no_wait(t: MockTransport) -> Box<VirtioNet<'static, MockTransport>> {
     let host = Box::leak(Box::new(NoWaitHost {
         inner: MockHost::new(),
     }));
-    Box::new(VirtioNet::open(t, host).expect("open"))
+    Box::new(VirtioNet::open(t, host, Some(&test_machine())).expect("open"))
 }
 
 fn open_net_with_host(
@@ -183,7 +201,7 @@ fn open_net_with_host(
     &'static AutoDrainHost,
 ) {
     let host = auto_host();
-    let mut net = Box::new(VirtioNet::open(t, host).expect("open"));
+    let mut net = Box::new(VirtioNet::open(t, host, Some(&test_machine())).expect("open"));
     host.install_transport(core::ptr::from_mut::<MockTransport>(net.transport_mut()));
     (net, host)
 }
@@ -205,7 +223,7 @@ fn arp_frame() -> Vec<u8> {
 /// a deliberately over-MTU frame *into* the ring so the driver-side
 /// drop policy is what the test exercises.
 fn test_geometry() -> RingGeometry {
-    RingGeometry::new(4, 2048, 2048, 1).expect("test geometry")
+    RingGeometry::new(4, 4, 2048, 2048, 1).expect("test geometry")
 }
 
 /// Backing buffer for one frame region, over-allocated so an aligned region
@@ -439,7 +457,7 @@ fn multiqueue_enables_queues_and_steers_receive_per_queue() {
     assert_eq!(net.device_facts().expect("facts").rx_queues, 2);
 
     // Two receive rings, sized for the device, one transmit ring.
-    let geom = RingGeometry::new(4, 2048, 2048, 2).expect("geometry");
+    let geom = RingGeometry::new(4, 4, 2048, 2048, 2).expect("geometry");
     let mut region = vec![0u8; geom.region_len()];
     let mut rings = FrameRings::bind(&mut region, geom, BufferClass::NonSensitive).expect("bind");
     assert_eq!(rings.rx_queues(), 2);
@@ -518,9 +536,11 @@ fn transmit_back_pressure_only_when_the_ring_is_full() {
     let mut region = rings_region();
     let mut rings = bind_rings(&mut region, BufferClass::NonSensitive);
 
-    // First batch: exactly the pool depth. One service puts them all in
-    // flight and empties the frame ring.
-    let first: Vec<Frame> = (0..TX_INFLIGHT_MAX)
+    // First batch: exactly the pool depth, whatever the derived depth and
+    // the device's ring came out at. One service puts them all in flight
+    // and empties the frame ring.
+    let depth = net.tx.free.iter().flatten().count();
+    let first: Vec<Frame> = (0..depth)
         .map(|i| tagged_frame(u8::try_from(i).unwrap()))
         .collect();
     for f in &first {
@@ -528,13 +548,13 @@ fn transmit_back_pressure_only_when_the_ring_is_full() {
     }
     assert_eq!(
         net.service(&mut rings).expect("service").transmitted,
-        u32::try_from(TX_INFLIGHT_MAX).unwrap()
+        u32::try_from(depth).unwrap()
     );
 
     // Second batch (frame ring now empty again): with every staging pair
     // still in flight, this doorbell sends nothing (ring-full back-pressure)
     // and drops nothing.
-    let second: Vec<Frame> = (0..TX_INFLIGHT_MAX)
+    let second: Vec<Frame> = (0..depth)
         .map(|i| tagged_frame(u8::try_from(0x80 + i).unwrap()))
         .collect();
     for f in &second {
@@ -547,7 +567,7 @@ fn transmit_back_pressure_only_when_the_ring_is_full() {
     deliver_tx(&mut net);
     assert_eq!(
         net.service(&mut rings).expect("service").transmitted,
-        u32::try_from(TX_INFLIGHT_MAX).unwrap()
+        u32::try_from(depth).unwrap()
     );
     deliver_tx(&mut net);
 
@@ -1223,16 +1243,78 @@ fn mergeable_over_link_frame_merge_is_dropped_fail_closed() {
 }
 
 #[test]
+fn queue_depths_scale_with_the_machine_and_the_device() {
+    // No depth here is hand-picked: a bigger machine posts more receive
+    // buffers and stages more transmits, the pinned-DMA bounds cap the top,
+    // and an unattested machine gets the structural floor.
+    let rx_buf = 1526;
+    let tx_pair = 12 + 1514;
+    let small = QueueDepths::new(
+        Some(&tairix_abi::BootFacts {
+            memory_bytes: 128 * 1024 * 1024,
+            cpu_count: 1,
+            ..test_machine()
+        }),
+        rx_buf,
+        tx_pair,
+    );
+    let desktop = QueueDepths::new(Some(&test_machine()), rx_buf, tx_pair);
+    let server = QueueDepths::new(
+        Some(&tairix_abi::BootFacts {
+            memory_bytes: 64 * 1024 * 1024 * 1024,
+            cpu_count: 64,
+            ..test_machine()
+        }),
+        rx_buf,
+        tx_pair,
+    );
+    assert!(small.rx_pool() < desktop.rx_pool());
+    assert!(desktop.rx_pool() < server.rx_pool());
+    assert_eq!(usize::from(server.rx_pool()), RX_POOL_MAX);
+    assert_eq!(usize::from(server.tx_inflight()), TX_INFLIGHT_MAX);
+    let floor = QueueDepths::new(None, rx_buf, tx_pair);
+    assert!(floor.rx_pool() < small.rx_pool());
+    for d in [floor, small, desktop, server] {
+        assert!(
+            d.rx_pool().is_power_of_two(),
+            "virtio queues are powers of two"
+        );
+        assert!(d.tx_queue_size().is_power_of_two());
+        assert!(d.rx_pool() >= 2);
+    }
+    // A segmentation super-frame costs staging depth, not receive depth.
+    let tso = QueueDepths::new(Some(&test_machine()), rx_buf, 12 + 65_549);
+    assert_eq!(tso.rx_pool(), desktop.rx_pool());
+    assert!(tso.tx_inflight() < desktop.tx_inflight());
+}
+
+#[test]
+fn a_deeper_device_ring_gets_a_deeper_pool() {
+    // The device's own advertised queue maximum is the other ceiling: the
+    // transport clamps the request, so the pool tracks whichever binds.
+    let shallow = open_net(build_device().0);
+    let deep = open_net(build_device_with_queue_max(256).0);
+    let shallow_depth = shallow.rx[0].as_ref().expect("queue 0").depth;
+    let deep_depth = deep.rx[0].as_ref().expect("queue 0").depth;
+    assert!(
+        deep_depth > shallow_depth,
+        "a 256-descriptor device must post more than an 8-descriptor one \
+         ({deep_depth} vs {shallow_depth})"
+    );
+}
+
+#[test]
 fn receive_pool_captures_a_burst_in_one_service() {
     // The driver posts a pool of receive buffers, so a burst of frames
     // the device delivers back to back is captured before the stack next
     // services the ring — the single-outstanding-buffer predecessor could
     // hold only one. A wider ring lets the whole burst land in one call.
-    let slots = u32::try_from(RX_POOL).expect("pool fits u32");
-    let geometry = RingGeometry::new(slots, 2048, 2048, 1).expect("geometry");
     let (t, _tx, rx_queue) = build_device();
     let mut net = open_net(t);
-    let frames: Vec<Frame> = (0..RX_POOL)
+    let pool = net.rx[0].as_ref().expect("queue 0").depth;
+    let slots = u32::try_from(pool).expect("pool fits u32");
+    let geometry = RingGeometry::new(slots, 4, 2048, 2048, 1).expect("geometry");
+    let frames: Vec<Frame> = (0..pool)
         .map(|i| tagged_frame(u8::try_from(i).unwrap()))
         .collect();
     for f in &frames {

@@ -14,20 +14,23 @@
 //!
 //! # What it matches on
 //!
-//! It **mirrors the stack's own destination-acceptance rule**, over the
-//! slow-changing L3 state that rule is made of: the interface's addresses,
-//! its subnet broadcast, and the groups it has joined. That is the whole
-//! input — the stack gates a group or broadcast destination on *membership*,
-//! never on a listening port, so no per-socket state is needed and nothing
-//! here can fall behind a socket opening.
+//! It **mirrors the stack's own destination-acceptance rule**, over the state
+//! that rule is made of: the interface's addresses, its subnet broadcast, the
+//! groups it has joined, and the ports a broadcast datagram could be
+//! delivered to. A group destination is gated on *membership* alone, so
+//! nothing about it can fall behind a socket opening; the port summary is
+//! republished as the service's datagram sockets come and go, and until a
+//! republish lands the driver keeps its previous, wider policy — which can
+//! only cost work, never a frame.
 //!
-//! One IPv4 carve-out, and it is the engine's own: a DHCPv4 reply arrives
-//! broadcast before any address exists, so broadcast UDP to
-//! [`dhcp::CLIENT_PORT`](crate::dhcp::CLIENT_PORT) is admitted. Matching the
-//! port rather than tracking "a client is running" keeps this stateless — a
-//! running-client flag would be true for the whole lease and so admit every
-//! broadcast datagram on a DHCP-configured interface, which is the traffic
-//! this sheds.
+//! Broadcast is the one destination whose acceptance depends on a transport
+//! consumer rather than on an address or a membership, so the policy carries
+//! a summary of the local UDP ports a broadcast datagram could reach and the
+//! filter tests the datagram's port against it. That is the stack's own rule,
+//! not a second one: a host with nothing bound to the port drops the datagram
+//! too, one hop later. A DHCPv4 client's port is in the summary while a
+//! client runs, which is what lets its broadcast reply through before the
+//! interface has any address at all.
 //!
 //! # Its bias is to admit
 //!
@@ -90,9 +93,8 @@ impl RxClassifier {
 
     /// Whether an IPv4 packet is one this interface answers for.
     ///
-    /// Mirrors the stack's rule — our own address, or a joined group — with
-    /// the engine's own DHCP carve-out: its client claims a broadcast reply
-    /// ahead of the address filter, before any address exists to match.
+    /// Mirrors the stack's rule: our own address, a joined group, or a
+    /// broadcast destination whose UDP port a local datagram consumer holds.
     fn admits_v4(&self, header: &Ipv4Header, payload: &[u8]) -> bool {
         if !self.decides_v4() {
             return true;
@@ -107,7 +109,7 @@ impl RxClassifier {
         if header.destination == Ipv4Addr::BROADCAST
             || self.policy.v4_broadcasts().contains(&octets)
         {
-            return is_dhcp_client_datagram(header, payload);
+            return admits_broadcast(&self.policy, header, payload);
         }
         false
     }
@@ -160,13 +162,14 @@ impl RxClassifier {
     }
 }
 
-/// Whether an IPv4 broadcast datagram is one the stack's DHCPv4 client
-/// claims: a plain (unfragmented) UDP datagram to the client port.
+/// Whether a broadcast datagram could reach a local consumer: a plain
+/// (unfragmented) UDP datagram whose destination port the policy names.
 ///
 /// A fragment is admitted without inspection — the port lives in the first
 /// one, and reassembly is the stack's job, so guessing here could shed a
-/// reply.
-fn is_dhcp_client_datagram(header: &Ipv4Header, payload: &[u8]) -> bool {
+/// datagram someone wanted. Anything but UDP is refused, because the stack
+/// consumes a broadcast destination as UDP or not at all.
+fn admits_broadcast(policy: &RxFilterPolicy, header: &Ipv4Header, payload: &[u8]) -> bool {
     if header.is_fragment() {
         return true;
     }
@@ -176,7 +179,7 @@ fn is_dhcp_client_datagram(header: &Ipv4Header, payload: &[u8]) -> bool {
     let Some(udp) = payload.get(..UDP_HEADER_LEN) else {
         return true;
     };
-    u16::from_be_bytes([udp[2], udp[3]]) == crate::dhcp::CLIENT_PORT
+    policy.admits_broadcast_port(u16::from_be_bytes([udp[2], udp[3]]))
 }
 
 impl RxAdmit for RxClassifier {

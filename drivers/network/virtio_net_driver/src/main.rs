@@ -124,13 +124,16 @@ mod program {
         // `device`), while a single-aperture MMIO device grants one register
         // window. The kernel resolved and role-tagged every window — the
         // driver never reads PCI configuration space.
+        // Ring and staging depths scale to the machine the host attested,
+        // through the shared ring-sizing policy.
+        let machine = tairix_abi::DriverHost::machine(&host);
         match virtio_pci_windows(host.resources()) {
             Ok(windows) => {
                 let Some(transport) = build_pci_transport(&host, &windows) else {
                     return exit::BRINGUP_FAILED;
                 };
                 let vhost: &dyn VirtioHost = &host;
-                let Ok(net) = VirtioNet::open(transport, vhost) else {
+                let Ok(net) = VirtioNet::open(transport, vhost, machine.as_ref()) else {
                     return exit::BRINGUP_FAILED;
                 };
                 tairix_netchan::serve(net, irq_handle)
@@ -147,7 +150,7 @@ mod program {
                     return exit::BRINGUP_FAILED;
                 };
                 let vhost: &dyn VirtioHost = &host;
-                let Ok(net) = VirtioNet::open(transport, vhost) else {
+                let Ok(net) = VirtioNet::open(transport, vhost, machine.as_ref()) else {
                     return exit::BRINGUP_FAILED;
                 };
                 tairix_netchan::serve(net, irq_handle)

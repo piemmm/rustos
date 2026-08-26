@@ -331,6 +331,10 @@ pub struct SocketService {
     /// Rolling handle allocator; the next candidate id, advanced past any
     /// live collision so a delivered message can never alias a reused id.
     next_id: SocketId,
+    /// Local ports assigned since the table was created — a witness that
+    /// the set of bound ports may have changed, so the broadcast-consumer
+    /// ports are republished without any operation having to say so.
+    port_assignments: u64,
     /// Connection-defence totals of listeners that have since closed,
     /// folded in as each one is dropped. Without this the stack-wide
     /// counters would fall when a listener closes, so a flood that ended
@@ -449,6 +453,35 @@ impl SocketService {
             return Err(Errno::PermissionDenied);
         }
         let owner = caller.origin().proc_id();
+        // Two structural witnesses of a change to the broadcast-consumer
+        // ports, so no operation has to remember to announce one: every port
+        // is assigned through `assign_port`, and every socket removal
+        // shortens the table. A fresh socket lengthens it with no port yet,
+        // which the set comparison below then finds unchanged.
+        let assignments = self.port_assignments;
+        let population = self.sockets.len();
+        let result = self.dispatch(
+            interfaces, caller, audit, entropy, decoded, owner, response, now,
+        );
+        if self.port_assignments != assignments || self.sockets.len() != population {
+            interfaces.publish_datagram_ports(broadcast_consumer_ports(&self.sockets));
+        }
+        result
+    }
+
+    /// The one dispatch arm per socket operation.
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch(
+        &mut self,
+        interfaces: &mut Netstack,
+        caller: &Caller,
+        audit: &dyn Sink,
+        entropy: &mut dyn FnMut() -> u32,
+        decoded: SocketRequest<'_>,
+        owner: ProcId,
+        response: &mut [u8],
+        now: Duration64,
+    ) -> Result<SocketReply, Errno> {
         match decoded {
             SocketRequest::Socket {
                 family,
@@ -1781,7 +1814,12 @@ impl SocketService {
     /// ephemeral one when `requested` is `0`. Ports are globally unique
     /// across all sockets (no silent reuse); fail closed with
     /// [`Errno::AddressInUse`].
-    fn assign_port(&self, entropy: &mut dyn FnMut() -> u32, requested: u16) -> Result<u16, Errno> {
+    fn assign_port(
+        &mut self,
+        entropy: &mut dyn FnMut() -> u32,
+        requested: u16,
+    ) -> Result<u16, Errno> {
+        self.port_assignments = self.port_assignments.wrapping_add(1);
         if requested != 0 {
             if self.port_in_use(requested) {
                 return Err(Errno::AddressInUse);
@@ -1860,6 +1898,22 @@ fn route_segments_to(
     } else {
         alloc::vec![(iface, frames)]
     }
+}
+
+/// The local ports a broadcast IPv4 datagram could be delivered to: every
+/// bound IPv4 datagram socket's port.
+///
+/// Deliberately not narrowed by the socket's bound local address. A socket
+/// bound to a specific unicast address cannot in fact match a broadcast
+/// destination, so including its port costs at most one wasted parse; but a
+/// socket bound to the broadcast address itself *can*, and excluding that
+/// would lose datagrams. The safe direction is to admit.
+fn broadcast_consumer_ports(sockets: &[SocketEntry]) -> impl Iterator<Item = u16> + '_ {
+    sockets.iter().filter_map(|entry| {
+        let bound = entry.local_port != 0;
+        let datagram = matches!(entry.proto, Proto::Datagram(_));
+        (bound && datagram && entry.family == NetAddrFamily::V4).then_some(entry.local_port)
+    })
 }
 
 /// Encode a stream event and push it as a delivery to `deliver_port`. A

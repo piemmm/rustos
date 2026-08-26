@@ -36,6 +36,19 @@ fn split_queue_rejects_non_power_of_two() {
 }
 
 #[test]
+fn a_non_conformant_device_maximum_is_rounded_not_refused() {
+    // virtio §2.6 admits only power-of-two queue sizes, so a device
+    // advertising a maximum that is not one is non-conformant. Where that
+    // cap binds a conformant request, take the largest conformant size
+    // below it: refusing would leave the device with no queue at all.
+    let mut t = MockTransport::new(1, 6, 0, 0);
+    let host = static_host();
+    let q = SplitQueue::new(&mut t, host, 0, 8).expect("setup");
+    assert_eq!(q.size(), 4);
+    assert_eq!(q.free_count(), 4);
+}
+
+#[test]
 fn add_chain_consumes_descriptors_and_publishes_avail() {
     let mut t = MockTransport::new(1, 8, 0, 0);
     let host = static_host();

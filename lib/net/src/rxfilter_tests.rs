@@ -40,14 +40,16 @@ const THEIRS_V4: [u8; 4] = [10, 0, 2, 99];
 const OURS_V6: [u8; 16] = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x15];
 const THEIRS_V6: [u8; 16] = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x99];
 
-/// A classifier for an interface holding both of this host's addresses and
-/// the all-systems group every host joins.
+/// A classifier for an interface holding both of this host's addresses, the
+/// all-systems group every host joins, and one broadcast-consuming port (a
+/// running DHCPv4 client's).
 fn ours() -> RxClassifier {
     RxClassifier::new(RxFilterPolicy::new(
         &[(OURS_V4, OUR_BROADCAST_V4)],
         &[OURS_V6],
         &[ALL_SYSTEMS_V4],
         &[],
+        &[crate::dhcp::CLIENT_PORT],
     ))
 }
 
@@ -173,19 +175,44 @@ fn the_groups_derived_from_our_addresses_are_admitted() {
 }
 
 #[test]
-fn broadcast_is_shed_except_the_dhcp_reply_the_engine_claims() {
-    // A DHCPv4 reply arrives broadcast before any address exists, and the
-    // engine claims it ahead of its own address filter, so it must survive.
+fn broadcast_is_shed_unless_a_local_consumer_holds_its_port() {
+    // A broadcast datagram to a port something is bound to must survive
+    // (a DHCPv4 reply arrives this way before any address exists); the
+    // segment's `NetBIOS`/SSDP background noise, to ports nothing holds, is
+    // shed without waking the stack.
     assert!(ours().admit(&udp_to(
         Ipv4Addr::BROADCAST.octets(),
         crate::dhcp::CLIENT_PORT
     )));
     assert!(ours().admit(&udp_to(OUR_BROADCAST_V4, crate::dhcp::CLIENT_PORT)));
-    // Everything else broadcast is noise the stack drops anyway: it never
-    // delivers a broadcast destination to a socket.
     assert!(!ours().admit(&udp_to(Ipv4Addr::BROADCAST.octets(), 137)));
     assert!(!ours().admit(&udp_to(OUR_BROADCAST_V4, 138)));
+    // Non-UDP broadcast is refused outright: the stack consumes a broadcast
+    // destination as UDP or not at all.
     assert!(!ours().admit(&ipv4_to(Ipv4Addr::BROADCAST.octets())));
+}
+
+#[test]
+fn a_socket_binding_widens_the_broadcast_ports_the_filter_admits() {
+    // The service republishes the port summary as its datagram sockets come
+    // and go, so a bound port that used to be shed is admitted.
+    let before = RxClassifier::new(RxFilterPolicy::new(
+        &[(OURS_V4, OUR_BROADCAST_V4)],
+        &[OURS_V6],
+        &[],
+        &[],
+        &[],
+    ));
+    assert!(!before.admit(&udp_to(Ipv4Addr::BROADCAST.octets(), 9999)));
+    let after = RxClassifier::new(RxFilterPolicy::new(
+        &[(OURS_V4, OUR_BROADCAST_V4)],
+        &[OURS_V6],
+        &[],
+        &[],
+        &[9999],
+    ));
+    assert!(after.admit(&udp_to(Ipv4Addr::BROADCAST.octets(), 9999)));
+    assert!(after.admit(&udp_to(OUR_BROADCAST_V4, 9999)));
 }
 
 #[test]
@@ -238,7 +265,7 @@ fn a_policy_that_could_not_hold_every_address_admits_all_unicast() {
             ([10, 0, 2, last], OUR_BROADCAST_V4)
         })
         .collect();
-    let policy = RxFilterPolicy::new(&v4, &[OURS_V6], &[ALL_SYSTEMS_V4], &[]);
+    let policy = RxFilterPolicy::new(&v4, &[OURS_V6], &[ALL_SYSTEMS_V4], &[], &[]);
     assert!(!policy.is_exhaustive());
     let wide = RxClassifier::new(policy);
     assert!(wide.admit(&ipv4_to(THEIRS_V4)));
@@ -251,7 +278,13 @@ fn a_policy_that_could_not_hold_every_address_admits_all_unicast() {
             address
         })
         .collect();
-    let policy = RxFilterPolicy::new(&[(OURS_V4, OUR_BROADCAST_V4)], &v6, &[ALL_SYSTEMS_V4], &[]);
+    let policy = RxFilterPolicy::new(
+        &[(OURS_V4, OUR_BROADCAST_V4)],
+        &v6,
+        &[ALL_SYSTEMS_V4],
+        &[],
+        &[],
+    );
     assert!(!policy.is_exhaustive());
     assert!(RxClassifier::new(policy).admit(&ipv6_to(THEIRS_V6)));
 }
@@ -263,7 +296,13 @@ fn a_policy_that_could_not_hold_every_group_admits_all_multicast() {
     let groups: Vec<[u8; 4]> = (0..=MAX_FILTER_GROUPS_V4)
         .map(|n| [224, 0, 0, u8::try_from(n).expect("small")])
         .collect();
-    let policy = RxFilterPolicy::new(&[(OURS_V4, OUR_BROADCAST_V4)], &[OURS_V6], &groups, &[]);
+    let policy = RxFilterPolicy::new(
+        &[(OURS_V4, OUR_BROADCAST_V4)],
+        &[OURS_V6],
+        &groups,
+        &[],
+        &[],
+    );
     assert!(!policy.is_exhaustive());
     assert!(RxClassifier::new(policy).admit(&ipv4_to(UNJOINED_V4)));
 
@@ -274,7 +313,13 @@ fn a_policy_that_could_not_hold_every_group_admits_all_multicast() {
             group
         })
         .collect();
-    let policy = RxFilterPolicy::new(&[(OURS_V4, OUR_BROADCAST_V4)], &[OURS_V6], &[], &groups);
+    let policy = RxFilterPolicy::new(
+        &[(OURS_V4, OUR_BROADCAST_V4)],
+        &[OURS_V6],
+        &[],
+        &groups,
+        &[],
+    );
     assert!(!policy.is_exhaustive());
     assert!(RxClassifier::new(policy).admit(&ipv6_to(UNJOINED_V6)));
 }
@@ -304,7 +349,7 @@ fn an_interface_with_no_ipv4_address_admits_ipv4_unicast() {
     // list dropped every IPv4 unicast, including the OFFER/ACK addressed to
     // the very address being offered. No address, so no route, so every send
     // was refused. "Names them all" is not "can decide".
-    let boot = RxClassifier::new(RxFilterPolicy::new(&[], &[OURS_V6], &[], &[]));
+    let boot = RxClassifier::new(RxFilterPolicy::new(&[], &[OURS_V6], &[], &[], &[]));
     assert!(boot.policy().is_exhaustive());
     assert!(
         boot.admit(&ipv4_to(THEIRS_V4)),
@@ -323,6 +368,7 @@ fn an_interface_with_no_ipv6_address_admits_ipv6_unicast() {
         &[],
         &[ALL_SYSTEMS_V4],
         &[],
+        &[],
     ));
     assert!(boot.policy().is_exhaustive());
     assert!(boot.admit(&ipv6_to(THEIRS_V6)));
@@ -333,7 +379,7 @@ fn an_interface_with_no_ipv6_address_admits_ipv6_unicast() {
 
 #[test]
 fn a_policy_with_no_address_at_all_filters_nothing_addressable() {
-    let bare = RxClassifier::new(RxFilterPolicy::new(&[], &[], &[], &[]));
+    let bare = RxClassifier::new(RxFilterPolicy::new(&[], &[], &[], &[], &[]));
     assert!(bare.admit(&ipv4_to(THEIRS_V4)));
     assert!(bare.admit(&ipv6_to(THEIRS_V6)));
     assert!(bare.admit(&arp_frame(arp::OP_REQUEST, THEIRS_V4)));

@@ -105,13 +105,6 @@ mod program {
     /// fail-closed memory bound.
     const NOTIFY_CAPACITY: usize = 4;
 
-    /// Slots per frame ring. A fixed layout parameter of the shared
-    /// device-channel region (agreed with the driver through the geometry),
-    /// not a per-machine scaling capacity: it bounds the pinned frame region
-    /// and the per-doorbell work, and the engine's own retransmission
-    /// recovers a frame dropped on a momentarily-full ring.
-    const NET_RING_SLOTS: u32 = 16;
-
     /// Sensitivity class of the frame rings. Link-layer frames are not
     /// treated as secrets (confidentiality is an upper-layer concern, e.g.
     /// TLS), matching every other frame-ring consumer; the shared region is
@@ -796,11 +789,14 @@ mod program {
         };
         let facts = NetChannelClient::query_facts(&mut transport)?;
         facts.validate()?;
-        // The receive ring holds a link frame; the transmit ring is sized
-        // for a segmentation-offload super-frame when the device
-        // negotiated it (`for_device` is the one definition both sides
-        // derive, so the driver's attach validation agrees).
-        let geometry = RingGeometry::for_device(&facts, NET_RING_SLOTS)?;
+        let machine = tairix_rt::boot_facts().ok();
+        let machine = machine.as_ref();
+        // Ring depths, receive-queue breadth, and the segmentation slot
+        // capacity all come from the device's facts and the machine the
+        // kernel attested — never a hand-picked slot count. `for_device` is
+        // the one definition both sides derive from, so the driver's attach
+        // validation agrees.
+        let geometry = RingGeometry::for_device(&facts, machine)?;
         let region_len = geometry.region_len();
 
         // Create and map the shared frame region (owner mapping), then mint

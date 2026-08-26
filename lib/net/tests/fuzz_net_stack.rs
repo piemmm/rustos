@@ -73,6 +73,7 @@ fn fresh_stack() -> Stack {
         link: LinkState::Up,
         offloads: NetOffloads::empty(),
         rx_queues: 1,
+        max_tx_frame: 1500 + tairix_abi::driver::net::ETHERNET_HEADER_LEN,
         multicast_filter: McastFilter::Unfiltered,
     };
     let mut config = StackConfig::new(facts, [0, 0, 0, 0, 0, 0, 0, 0xA1], 0x4242);

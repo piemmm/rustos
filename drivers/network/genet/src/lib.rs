@@ -30,8 +30,8 @@
 //!
 //! Descriptors live in the controller's own on-chip RAM inside the register
 //! aperture, so the only DMA is the frame buffers: one
-//! [`DMA_REGION_BYTES`] carve holds [`RING_SLOTS`] receive and
-//! [`RING_SLOTS`] transmit buffers of [`BUF_LEN`] bytes, allocated **once**
+//! [`DmaLayout`]-sized carve holds one receive and one transmit buffer of
+//! [`BUF_LEN`] bytes per programmed descriptor, allocated **once**
 //! at [`Genet::open`] and reused for every frame — no per-packet carve, no
 //! allocator on the hot path.
 //!
@@ -89,15 +89,16 @@
 use tairix_abi::driver::dma::DmaSlab;
 use tairix_abi::driver::mmio::WindowError;
 use tairix_abi::driver::net::{
-    DeviceFacts, LinkState, MacAddress, McastFilter, Net, NetOffloads, ETHERNET_HEADER_LEN,
+    frame_capacity, DeviceFacts, LinkState, MacAddress, McastFilter, Net, NetOffloads,
+    ETHERNET_HEADER_LEN,
 };
 use tairix_abi::driver::net_ring::{
-    FrameOffload, FrameRings, RingGeometry, RxDelivery, ServiceReport,
+    FrameOffload, FrameRings, RingBudget, RingGeometry, RxDelivery, ServiceReport,
 };
 use tairix_abi::driver::timing::Delay;
 use tairix_abi::{
-    CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, Errno, HwMatchKey,
-    RegisterWindow,
+    BootFacts, CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, Errno,
+    HwMatchKey, RegisterWindow,
 };
 
 pub mod mdio;
@@ -153,37 +154,75 @@ pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
     },
 )];
 
-/// Descriptors per direction the driver programs its ring to use.
-///
-/// The controller's descriptor RAM holds 256 per direction; a ring may be
-/// programmed shorter, and 64 is the working set this driver sizes its DMA
-/// carve for: at gigabit line rate 64 × 1500-byte frames is ~96 KB in
-/// flight each way, comfortably more than the stack's service latency, for a
-/// [`DMA_REGION_BYTES`] carve.
-pub const RING_SLOTS: u32 = 64;
-
 /// Bytes per frame buffer. The controller's receive buffer size must cover
 /// the largest frame plus the two-byte alignment pad it inserts; 2 KiB is
 /// the natural power-of-two above that and keeps each buffer on its own
 /// cache-line-aligned stride.
 pub const BUF_LEN: u32 = 2048;
 
-/// Bytes the per-descriptor frame buffers occupy: one [`BUF_LEN`] buffer per
-/// receive and per transmit descriptor.
-const BUFFER_BYTES: usize = 2 * (RING_SLOTS as usize) * (BUF_LEN as usize);
-
-/// Bytes of transmit staging the segmentation path uses, at the end of the
-/// carve so it and the frame buffers can be borrowed apart.
+/// How the driver's one DMA carve is laid out: the descriptors it programs
+/// each ring to use, and the segmentation staging area behind them.
 ///
-/// One whole transmit ring slot: that is what the transport sizes a slot to
-/// once segmentation is negotiated, so it is the largest super-frame the
-/// stack can hand over. Ordinary memory as far as the CPU is concerned — the
-/// device never masters it, and no descriptor names it.
-const TX_STAGING_LEN: usize = RingGeometry::MAX_SLOT_CAPACITY as usize;
+/// Both figures are derived from the discovered machine through the shared
+/// ring-sizing policy, never hand-picked: the same policy the network stack
+/// sizes the shared frame rings with, so a small board and a server each get
+/// a coherent set of depths and the two sides cannot disagree about what the
+/// other can afford. The descriptor count is additionally bounded by the
+/// controller's own descriptor RAM ([`regs::TOTAL_DESC`] per direction).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DmaLayout {
+    ring_slots: u32,
+    tx_staging: u32,
+}
 
-/// Bytes of device-visible DMA the driver carves once at [`Genet::open`]:
-/// the frame buffers and the transmit staging area.
-pub const DMA_REGION_BYTES: usize = BUFFER_BYTES + TX_STAGING_LEN;
+impl DmaLayout {
+    /// Derive the layout for `machine`.
+    #[must_use]
+    pub fn for_machine(machine: Option<&BootFacts>) -> Self {
+        let budget = RingBudget::for_machine(machine);
+        // The link MTU is fixed for this controller, so the floor cannot
+        // overflow; a floor of one whole frame is the honest fallback.
+        let floor = frame_capacity(MTU).unwrap_or(ETHERNET_HEADER_LEN);
+        Self {
+            ring_slots: budget.slots(BUF_LEN as usize, regs::TOTAL_DESC),
+            tx_staging: budget.slot_capacity(floor, RingGeometry::MAX_SLOT_CAPACITY),
+        }
+    }
+
+    /// Descriptors the driver programs each direction's ring to use.
+    #[must_use]
+    pub const fn ring_slots(self) -> u32 {
+        self.ring_slots
+    }
+
+    /// The descriptor `counter` addresses. The depth is a power of two, so
+    /// the wrap is a mask rather than a division on the frame path.
+    #[must_use]
+    pub const fn ring_index(self, counter: u32) -> u32 {
+        counter & (self.ring_slots - 1)
+    }
+
+    /// Largest single transmit frame the staging area holds — the driver's
+    /// [`DeviceFacts::max_tx_frame`] report, so the stack never offers a
+    /// super-frame slot this carve could not stage.
+    #[must_use]
+    pub const fn tx_staging(self) -> u32 {
+        self.tx_staging
+    }
+
+    /// Bytes the frame buffers occupy: one [`BUF_LEN`] buffer per receive
+    /// and per transmit descriptor.
+    const fn buffer_bytes(self) -> usize {
+        2 * (self.ring_slots as usize) * (BUF_LEN as usize)
+    }
+
+    /// Bytes of device-visible DMA the driver carves once at
+    /// [`Genet::open`]: the frame buffers then the staging area.
+    #[must_use]
+    pub const fn bytes(self) -> usize {
+        self.buffer_bytes() + self.tx_staging as usize
+    }
+}
 
 /// Destination addresses bring-up admits through the receive filter before
 /// any group address: this station's own unicast address and the broadcast
@@ -304,6 +343,9 @@ pub struct Genet<R: GenetRegs, D: Delay> {
     delay: D,
     /// The one frame-buffer carve: receive buffers first, then transmit.
     frames: DmaSlab,
+    /// How that carve is laid out — the descriptor count each ring is
+    /// programmed to and the staging area behind the buffers.
+    layout: DmaLayout,
     /// The address programmed into the UniMAC, reported in
     /// [`DeviceFacts::mac`].
     mac: MacAddress,
@@ -349,9 +391,9 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
     /// the MAC, program `mac`, build both DMA rings over `frames`, start the
     /// PHY, and enable transmit and receive.
     ///
-    /// `frames` must be at least [`DMA_REGION_BYTES`] long; a shorter carve
-    /// is refused rather than driving the device against buffers that are
-    /// not there.
+    /// `layout` is the derived carve layout `frames` was allocated for;
+    /// a carve shorter than [`DmaLayout::bytes`] is refused rather than
+    /// driving the device against buffers that are not there.
     ///
     /// # Errors
     ///
@@ -363,14 +405,21 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
     /// * [`DriverError::OutOfRange`] if a register access falls outside the
     ///   mapped aperture (a short window).
     /// * [`DriverError::DeviceFault`] if the PHY never answers on MDIO.
-    pub fn open(regs: R, delay: D, frames: DmaSlab, mac: MacAddress) -> Result<Self, DriverError> {
-        if frames.len() < DMA_REGION_BYTES {
+    pub fn open(
+        regs: R,
+        delay: D,
+        frames: DmaSlab,
+        mac: MacAddress,
+        layout: DmaLayout,
+    ) -> Result<Self, DriverError> {
+        if frames.len() < layout.bytes() {
             return Err(DriverError::BufferTooSmall);
         }
         let mut device = Self {
             regs,
             delay,
             frames,
+            layout,
             mac,
             link: None,
             link_event: false,
@@ -550,13 +599,13 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
         let ring = regs::ring_regs(desc_base, regs::DEFAULT_RING);
         self.regs
             .write(block + regs::DMA_SCB_BURST_SIZE, regs::DMA_MAX_BURST_LENGTH)?;
-        // The ring occupies the first `RING_SLOTS` descriptors of the
+        // The ring occupies the first programmed descriptors of the
         // block's RAM; the addresses are descriptor-*word* indices.
         self.regs.write(ring + regs::RING_START_ADDR, 0)?;
         self.regs.write(ring + regs::RING_START_ADDR_HI, 0)?;
         self.regs.write(
             ring + regs::RING_END_ADDR,
-            RING_SLOTS * regs::DESC_WORDS - 1,
+            self.layout.ring_slots() * regs::DESC_WORDS - 1,
         )?;
         self.regs.write(ring + regs::RING_END_ADDR_HI, 0)?;
         self.regs.write(ring + regs::RING_RW_POINTER, 0)?;
@@ -565,7 +614,7 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
         self.regs.write(ring + regs::RING_DRIVER_INDEX, 0)?;
         self.regs.write(
             ring + regs::RING_BUF_SIZE,
-            (RING_SLOTS << regs::RING_SIZE_SHIFT) | BUF_LEN,
+            (self.layout.ring_slots() << regs::RING_SIZE_SHIFT) | BUF_LEN,
         )?;
         self.regs
             .write(block + regs::DMA_RING_CFG, 1 << regs::DEFAULT_RING)
@@ -616,7 +665,7 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
             .write(ring + regs::RING_FLOW_PERIOD, regs::DMA_FC_THRESH)?;
         self.arm_completion_interrupt(regs::RDMA_DESC)?;
         let length_status = (BUF_LEN << regs::DMA_BUFLENGTH_SHIFT) | regs::DMA_OWN;
-        for slot in 0..RING_SLOTS {
+        for slot in 0..self.layout.ring_slots() {
             let (low, high) = address_words(self.rx_buffer_device_addr(slot));
             let desc = regs::desc(regs::RDMA_DESC, slot);
             self.regs.write(desc + regs::DESC_ADDRESS_LO, low)?;
@@ -638,7 +687,7 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
         let ring = regs::ring_regs(regs::TDMA_DESC, regs::DEFAULT_RING);
         self.arm_completion_interrupt(regs::TDMA_DESC)?;
         self.regs.write(ring + regs::RING_FLOW_PERIOD, 0)?;
-        for slot in 0..RING_SLOTS {
+        for slot in 0..self.layout.ring_slots() {
             let (low, high) = address_words(self.tx_buffer_device_addr(slot));
             let desc = regs::desc(regs::TDMA_DESC, slot);
             self.regs.write(desc + regs::DESC_ADDRESS_LO, low)?;
@@ -691,7 +740,7 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
     /// Device-visible address of transmit buffer `slot`, which follows the
     /// whole receive-buffer block.
     fn tx_buffer_device_addr(&self, slot: u32) -> u64 {
-        self.frames.phys() + u64::from(RING_SLOTS + slot) * u64::from(BUF_LEN)
+        self.frames.phys() + u64::from(self.layout.ring_slots() + slot) * u64::from(BUF_LEN)
     }
 
     /// Byte range of receive buffer `slot` within the carve.
@@ -701,22 +750,23 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
     }
 
     /// Byte range of transmit buffer `slot` within the carve: the transmit
-    /// status block, then the frame.
-    fn tx_buffer_range(slot: u32) -> (usize, usize) {
-        let start = ((RING_SLOTS + slot) * BUF_LEN) as usize;
+    /// status block, then the frame. Transmit buffers follow the whole
+    /// receive-buffer block, so the range depends on the ring depth.
+    fn tx_buffer_range(layout: DmaLayout, slot: u32) -> (usize, usize) {
+        let start = ((layout.ring_slots() + slot) * BUF_LEN) as usize;
         (start, start + BUF_LEN as usize)
     }
 
     /// Byte range of the frame area inside transmit buffer `slot`, past the
     /// status block the controller reads first.
-    fn tx_frame_range(slot: u32) -> (usize, usize) {
-        let (start, end) = Self::tx_buffer_range(slot);
+    fn tx_frame_range(layout: DmaLayout, slot: u32) -> (usize, usize) {
+        let (start, end) = Self::tx_buffer_range(layout, slot);
         (start + regs::TSB_LEN as usize, end)
     }
 
     /// Transmit descriptors free for a frame right now.
-    fn tx_free_slots(producer: u32, consumer: u32) -> u32 {
-        RING_SLOTS - Self::in_flight(producer, consumer).min(RING_SLOTS)
+    fn tx_free_slots(slots: u32, producer: u32, consumer: u32) -> u32 {
+        slots - Self::in_flight(producer, consumer).min(slots)
     }
 
     /// Descriptors the device still owns, from a producer/consumer pair.
@@ -748,7 +798,8 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
         }
         for _ in 0..completed {
             if sensitive {
-                let (start, end) = Self::tx_buffer_range(self.tx_consumer % RING_SLOTS);
+                let (start, end) =
+                    Self::tx_buffer_range(self.layout, self.layout.ring_index(self.tx_consumer));
                 self.frames.as_bytes_mut()[start..end].fill(0);
             }
             self.tx_consumer = self.tx_consumer.wrapping_add(1) & regs::RING_INDEX_MASK;
@@ -781,11 +832,11 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
             return Ok(());
         }
         loop {
-            if self.tx_in_flight() >= RING_SLOTS {
+            if self.tx_in_flight() >= self.layout.ring_slots() {
                 return Ok(());
             }
-            let slot = self.tx_producer % RING_SLOTS;
-            let (start, end) = Self::tx_frame_range(slot);
+            let slot = self.layout.ring_index(self.tx_producer);
+            let (start, end) = Self::tx_frame_range(self.layout, slot);
             let mut offload = FrameOffload::None;
             let popped = rings
                 .tx
@@ -827,10 +878,12 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
             if !(ETHERNET_HEADER_LEN..=MAX_FRAME_LEN).contains(&length) {
                 continue;
             }
+            let layout = self.layout;
             if Self::queue_slot(
                 self.frames.as_bytes_mut(),
                 &mut self.regs,
                 &mut self.tx_producer,
+                layout,
                 slot,
                 length,
                 offload,
@@ -849,7 +902,7 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
     /// leaving it would wedge everything queued behind it.
     fn stage_super_frame(&mut self, rings: &mut FrameRings<'_>) -> Result<(), DriverError> {
         let mut offload = FrameOffload::None;
-        let staging = BUFFER_BYTES;
+        let staging = self.layout.buffer_bytes();
         let popped = rings
             .tx
             .pop_with(&mut offload, &mut self.frames.as_bytes_mut()[staging..]);
@@ -867,10 +920,11 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
     /// Move a super-frame that already fits one transmit slot into the
     /// staging area, so both super-frame paths split from one place.
     fn stage_from_slot(&mut self, slot: u32, length: usize, offload: FrameOffload) {
-        let (start, _) = Self::tx_frame_range(slot);
+        let (start, _) = Self::tx_frame_range(self.layout, slot);
+        let staging = self.layout.buffer_bytes();
         self.frames
             .as_bytes_mut()
-            .copy_within(start..start + length, BUFFER_BYTES);
+            .copy_within(start..start + length, staging);
         self.stage(length, offload);
     }
 
@@ -879,7 +933,7 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
     /// would not fit a transmit buffer, is dropped rather than transmitted
     /// half-fixed-up or split against a buffer that is not there.
     fn stage(&mut self, length: usize, offload: FrameOffload) {
-        let staging = BUFFER_BYTES;
+        let staging = self.layout.buffer_bytes();
         let frame = &self.frames.as_bytes()[staging..staging + length];
         let segment_fits = |segmenter: &TcpSegmenter<'_>| {
             u32::try_from(segmenter.max_segment_len()).is_ok_and(|max| max <= MAX_FRAME_LEN)
@@ -921,13 +975,15 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
         let Self {
             regs,
             frames,
+            layout,
             tx_producer,
             tx_consumer,
             ..
         } = self;
+        let layout = *layout;
         // The staging area sits past every frame buffer, so the source frame
         // and the destination slot are disjoint borrows of the one carve.
-        let (buffers, staging) = frames.as_bytes_mut().split_at_mut(BUFFER_BYTES);
+        let (buffers, staging) = frames.as_bytes_mut().split_at_mut(layout.buffer_bytes());
         let frame = &staging[..staged.length];
         let Ok(mut segmenter) = TcpSegmenter::resume(frame, staged.offload, staged.emitted) else {
             // Unreachable: `stage` validated the same frame. Dropping it is
@@ -936,13 +992,13 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
         };
         let offload = segmenter.checksum_offload();
         loop {
-            if Self::tx_free_slots(*tx_producer, *tx_consumer) == 0 {
+            if Self::tx_free_slots(layout.ring_slots(), *tx_producer, *tx_consumer) == 0 {
                 staged.emitted = segmenter.emitted();
                 self.staged = Some(staged);
                 return Ok(false);
             }
-            let slot = *tx_producer % RING_SLOTS;
-            let (start, end) = Self::tx_frame_range(slot);
+            let slot = layout.ring_index(*tx_producer);
+            let (start, end) = Self::tx_frame_range(layout, slot);
             // `stage` refused any super-frame whose segments could not fit a
             // buffer, so a short-buffer refusal here cannot arise; treating it
             // as the end of the split drops the remainder rather than wedging
@@ -955,7 +1011,7 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
                 Self::scrub_staging(staging, staged.length, sensitive);
                 return Ok(true);
             };
-            if Self::queue_slot(buffers, regs, tx_producer, slot, length, offload)? {
+            if Self::queue_slot(buffers, regs, tx_producer, layout, slot, length, offload)? {
                 report.transmitted += 1;
             }
         }
@@ -971,11 +1027,12 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
         buffers: &mut [u8],
         regs: &mut R,
         tx_producer: &mut u32,
+        layout: DmaLayout,
         slot: u32,
         frame_len: u32,
         offload: FrameOffload,
     ) -> Result<bool, DriverError> {
-        let (start, _) = Self::tx_buffer_range(slot);
+        let (start, _) = Self::tx_buffer_range(layout, slot);
         let frame_start = start + regs::TSB_LEN as usize;
         let frame_end = frame_start + frame_len as usize;
         let Some(directive) = csum_directive(&buffers[frame_start..frame_end], offload) else {
@@ -1027,11 +1084,11 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
         // so the report is corrupt and acting on it would deliver whatever
         // the descriptor RAM happens to hold.
         let pending = producer.wrapping_sub(self.rx_consumer) & regs::RING_INDEX_MASK;
-        if pending > RING_SLOTS {
+        if pending > self.layout.ring_slots() {
             return Err(DriverError::DeviceFault);
         }
         for _ in 0..pending {
-            let slot = self.rx_consumer % RING_SLOTS;
+            let slot = self.layout.ring_index(self.rx_consumer);
             let desc = regs::desc(regs::RDMA_DESC, slot);
             let status = self.regs.read(desc + regs::DESC_LENGTH_STATUS)?;
             match self.deliver_rx(rings, status, slot)? {
@@ -1137,6 +1194,7 @@ impl<R: GenetRegs, D: Delay> Net for Genet<R, D> {
             link: self.link_state(),
             offloads: OFFLOADS,
             rx_queues: 1,
+            max_tx_frame: self.layout.tx_staging(),
             multicast_filter: McastFilter::Slots(MCAST_SLOTS),
         })
     }

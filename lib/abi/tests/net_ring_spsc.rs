@@ -102,7 +102,7 @@ impl SharedRegion {
 fn a_concurrent_producer_and_consumer_move_every_frame_exactly_once() {
     // One ring's length, via the public geometry (both directions share
     // the slot count and capacity here).
-    let ring_len = RingGeometry::new(SLOTS, CAP, CAP, 1)
+    let ring_len = RingGeometry::new(SLOTS, SLOTS, CAP, CAP, 1)
         .expect("valid geometry")
         .rx_ring_len();
     let shared = Arc::new(SharedRegion::leak(ring_len));

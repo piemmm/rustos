@@ -624,6 +624,10 @@ impl<S: GrantSyscalls> DriverHost for RtDriverHost<S> {
         DriverKind::UserSpace
     }
 
+    fn machine(&self) -> Option<tairix_abi::BootFacts> {
+        self.syscalls.boot_facts()
+    }
+
     fn virtio_host(&self) -> Option<&dyn VirtioHost> {
         Some(self)
     }

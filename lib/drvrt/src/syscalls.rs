@@ -29,6 +29,12 @@ pub trait GrantSyscalls {
     /// Mirrors [`tairix_rt::mmio_map`].
     fn mmio_map(&self, handle: u64, offset: u64, len: usize) -> i64;
 
+    /// The kernel-attested machine summary, or `None` when the call
+    /// refused. Drivers size their pinned DMA staging from it.
+    ///
+    /// Mirrors [`tairix_rt::boot_facts`].
+    fn boot_facts(&self) -> Option<tairix_abi::BootFacts>;
+
     /// Carve a coherent DMA buffer of `len` bytes bounded by the constraint
     /// named by the kernel-issued grant `handle`, write the buffer's
     /// device-visible base to `device_out`, and return its base user virtual
@@ -144,6 +150,11 @@ impl GrantSyscalls for RtGrantSyscalls {
     #[inline]
     fn mmio_map(&self, handle: u64, offset: u64, len: usize) -> i64 {
         tairix_rt::mmio_map(handle, offset, len)
+    }
+
+    #[inline]
+    fn boot_facts(&self) -> Option<tairix_abi::BootFacts> {
+        tairix_rt::boot_facts().ok()
     }
 
     #[inline]

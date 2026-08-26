@@ -153,8 +153,22 @@ impl PackedQueue {
         if max == 0 {
             return Err(VirtioError::QueueSizeTooLarge);
         }
+        // A request that is not a power of two is the caller's bug, and
+        // virtio §2.6 admits no such queue: refuse it.
+        if requested_size == 0 || !requested_size.is_power_of_two() {
+            return Err(VirtioError::QueueSizeTooLarge);
+        }
+        // The device's own maximum, however, is its claim, and a
+        // non-conformant device may advertise one that is not a power of
+        // two. Where that cap binds, take the largest conformant size at or
+        // below it rather than refusing to bring the queue up at all.
         let size = core::cmp::min(requested_size, max);
-        if size == 0 || !size.is_power_of_two() {
+        let size = if size.is_power_of_two() {
+            size
+        } else {
+            1 << (u16::BITS - 1 - size.leading_zeros())
+        };
+        if size == 0 {
             return Err(VirtioError::QueueSizeTooLarge);
         }
         let desc = host

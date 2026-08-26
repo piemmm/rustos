@@ -293,6 +293,12 @@ pub struct Netstack {
     /// device — allocated once, rebuilt only when an engine's multicast
     /// revision moves.
     mcast_scratch: Vec<MacAddress>,
+    /// The local datagram ports last published to every managed engine, and
+    /// the scratch the next candidate set is built into. Two buffers rather
+    /// than one so the compare needs no allocation: on a change the pair is
+    /// swapped.
+    datagram_ports: Vec<u16>,
+    datagram_ports_scratch: Vec<u16>,
 }
 
 impl Netstack {
@@ -310,6 +316,8 @@ impl Netstack {
             temp_factory,
             dhcp_rng_factory,
             mcast_scratch: Vec::new(),
+            datagram_ports: Vec::new(),
+            datagram_ports_scratch: Vec::new(),
         }
     }
 
@@ -366,7 +374,10 @@ impl Netstack {
         config.iface.ipv6_enabled = self.settings.ipv6_enabled;
         config.iface.privacy = self.settings.ipv6_privacy;
         let temp_source = (self.temp_factory)();
-        let stack = Stack::new(&config, temp_source, now).map_err(|_| Errno::OutOfRange)?;
+        let mut stack = Stack::new(&config, temp_source, now).map_err(|_| Errno::OutOfRange)?;
+        // A new interface joins with the set already published, so a socket
+        // bound before it appeared still receives broadcast on it.
+        stack.set_datagram_ports(self.published_datagram_ports());
         self.interfaces.push(Interface {
             name,
             kind,
@@ -1002,6 +1013,35 @@ impl Netstack {
         Ok(batches)
     }
 
+    /// Publish the local datagram ports a broadcast datagram may be
+    /// delivered to, to every managed engine.
+    ///
+    /// The socket table is the authority; each engine holds the set because
+    /// the decision belongs on its receive path, and the driver's receive
+    /// pre-filter learns it through the policy the pump pushes. The set is
+    /// compared against the last published one rather than tracked by a
+    /// revision counter, so no socket operation has to remember to bump
+    /// anything — a set that did not change costs one slice comparison.
+    pub fn publish_datagram_ports<I: Iterator<Item = u16>>(&mut self, ports: I) {
+        self.datagram_ports_scratch.clear();
+        self.datagram_ports_scratch.extend(ports);
+        self.datagram_ports_scratch.sort_unstable();
+        self.datagram_ports_scratch.dedup();
+        if self.datagram_ports_scratch == self.datagram_ports {
+            return;
+        }
+        core::mem::swap(&mut self.datagram_ports, &mut self.datagram_ports_scratch);
+        for iface in &mut self.interfaces {
+            iface.stack.set_datagram_ports(&self.datagram_ports);
+        }
+    }
+
+    /// The datagram ports last published, so a freshly added interface
+    /// starts from the same set as its siblings.
+    fn published_datagram_ports(&self) -> &[u16] {
+        &self.datagram_ports
+    }
+
     /// Leave multicast `group` on every managed interface, returning the
     /// frames each interface emitted (an IGMP Leave when the last
     /// reference dropped) tagged by alias.
@@ -1206,6 +1246,8 @@ impl Netstack {
             temp_factory: _,
             dhcp_rng_factory: _,
             mcast_scratch,
+            datagram_ports: _,
+            datagram_ports_scratch: _,
         } = self;
         let iface = &mut interfaces[index];
         let mut events = Vec::new();

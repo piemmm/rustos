@@ -346,24 +346,108 @@ impl FrameOffload {
 /// would add pinned memory and complexity without a consumer.
 pub const MAX_RX_QUEUES: u16 = 8;
 
+/// The pinned-memory budget one frame ring's slots are sized within,
+/// derived from the discovered machine rather than hand-picked.
+///
+/// Every ring on the system — a device's own receive and transmit DMA
+/// staging and the shared stack/driver receive and transmit rings, per
+/// receive queue, per interface — is pinned memory that no reclaim can
+/// take back, so a depth that suits a 128 MiB board starves a server and
+/// one that suits a server exhausts the board. The budget is therefore a
+/// share of the installed RAM the boot path discovered, and each ring's
+/// depth is the largest power of two whose slots fit it.
+///
+/// The share is one 4096th: a general-purpose machine carries a handful of
+/// interfaces of a few receive queues each, which puts the realistic total
+/// at one to two percent of RAM, while [`RingGeometry::MAX_SLOTS`] and the
+/// core-count-derived receive-queue breadth bound the pathological case of
+/// a small machine hosting many multiqueue NICs.
+///
+/// A machine the caller could not attest (`None`) yields a zero budget,
+/// which sizes every ring to its structural minimum. That is deliberate:
+/// an unattested machine gets the floor, never an invented figure.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct RingBudget(usize);
+
+impl RingBudget {
+    /// Share of installed RAM one ring's slots may pin.
+    const RAM_DIVISOR: u64 = 4096;
+
+    /// The budget for one ring on `machine`.
+    #[must_use]
+    pub fn for_machine(machine: Option<&crate::BootFacts>) -> Self {
+        let bytes = machine.map_or(0, |facts| facts.memory_bytes / Self::RAM_DIVISOR);
+        Self(usize::try_from(bytes).unwrap_or(usize::MAX))
+    }
+
+    /// The budget in bytes.
+    #[must_use]
+    pub const fn bytes(self) -> usize {
+        self.0
+    }
+
+    /// Slots for a ring whose slots cost `slot_bytes` each: the largest
+    /// power of two within the budget, clamped to
+    /// [`RingGeometry::MIN_SLOTS`]`..=max_slots`.
+    ///
+    /// The floor wins over the budget: a ring shallower than
+    /// [`RingGeometry::MIN_SLOTS`] cannot carry frames at all, so the
+    /// smallest machine still gets a working ring.
+    #[must_use]
+    pub fn slots(self, slot_bytes: usize, max_slots: u32) -> u32 {
+        if slot_bytes == 0 {
+            return RingGeometry::MIN_SLOTS;
+        }
+        let fits = u32::try_from(self.0 / slot_bytes).unwrap_or(u32::MAX);
+        let allowed = fits.min(max_slots).min(RingGeometry::MAX_SLOTS);
+        if allowed < RingGeometry::MIN_SLOTS {
+            RingGeometry::MIN_SLOTS
+        } else {
+            // Round down to a power of two: ring indexing masks the
+            // counter rather than dividing by the slot count.
+            1 << (u32::BITS - 1 - allowed.leading_zeros())
+        }
+    }
+
+    /// The slot capacity a ring may afford, clamped to `floor..=ceiling`:
+    /// the largest capacity at which [`RingGeometry::MIN_SLOTS`] slots
+    /// still fit the budget.
+    ///
+    /// This is what keeps a TCP-segmentation-offload transmit slot honest.
+    /// A 64 KiB super-frame slot is the right size on a server and four
+    /// times the whole ring budget on a small board, so the board gets a
+    /// smaller super-frame — still a segmentation win — rather than a
+    /// transmit ring it cannot pay for.
+    #[must_use]
+    pub fn slot_capacity(self, floor: u32, ceiling: u32) -> u32 {
+        let affordable = self.0 / RingGeometry::MIN_SLOTS as usize;
+        u32::try_from(affordable)
+            .unwrap_or(u32::MAX)
+            .min(ceiling)
+            .max(floor)
+    }
+}
+
 /// Validated geometry of a receive + transmit frame ring set: how many
-/// receive queues the region carries, how many slots each ring holds,
-/// and the largest frame one slot carries in each direction.
+/// receive queues the region carries, how many slots each direction's
+/// ring holds, and the largest frame one slot carries in each direction.
 ///
 /// A region holds [`Self::rx_queues`] independent **receive** rings
 /// followed by one **transmit** ring. The two directions carry
-/// **independent** slot capacities so the transmit ring can hold an
-/// over-size TCP-segmentation-offload super-frame (up to
-/// [`Self::MAX_SLOT_CAPACITY`]) without wasting that space on every
-/// receive slot, which only ever holds a link-MTU frame. Every ring
-/// shares the slot *count*. Geometry is agreed out-of-band (both sides
-/// derive it from the same [`DeviceFacts`](super::net::DeviceFacts) and
-/// negotiated [`NetOffloads`](super::net::NetOffloads)) and validated
-/// fail-closed here, so a corrupt or hostile geometry can never size an
-/// out-of-bounds view over the shared region.
+/// **independent** slot counts and capacities: a receive slot only ever
+/// holds a link-MTU frame, while a transmit slot may hold an over-size
+/// TCP-segmentation-offload super-frame, so one shared count would either
+/// waste the super-frame's space on every receive slot or shrink receive
+/// depth to what the super-frames cost. Geometry is agreed out-of-band
+/// (both sides derive it from the same
+/// [`DeviceFacts`](super::net::DeviceFacts), negotiated
+/// [`NetOffloads`](super::net::NetOffloads), and discovered machine) and
+/// validated fail-closed here, so a corrupt or hostile geometry can never
+/// size an out-of-bounds view over the shared region.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct RingGeometry {
-    slots: u32,
+    rx_slots: u32,
+    tx_slots: u32,
     rx_slot_capacity: u32,
     tx_slot_capacity: u32,
     rx_queues: u16,
@@ -388,22 +472,29 @@ impl RingGeometry {
     /// super-frame's Ethernet-framed length.
     pub const MAX_SLOT_CAPACITY: u32 = 65_535 + super::net::ETHERNET_HEADER_LEN;
 
-    /// Validate and build a geometry with `rx_queues` receive rings and
-    /// one transmit ring.
+    /// Validate and build a geometry with `rx_queues` receive rings of
+    /// `rx_slots` slots and one transmit ring of `tx_slots`.
+    ///
+    /// A slot count must be a power of two: ring indexing then masks the
+    /// free-running counter instead of dividing by the count, which keeps
+    /// a division off the per-frame path, and every device ring the
+    /// transport mirrors requires a power of two anyway.
     ///
     /// # Errors
     ///
-    /// Returns [`Errno::OutOfRange`] when `slots` lies outside
-    /// [`Self::MIN_SLOTS`]`..=`[`Self::MAX_SLOTS`], either capacity lies
-    /// outside [`Self::MIN_SLOT_CAPACITY`]`..=`[`Self::MAX_SLOT_CAPACITY`],
-    /// or `rx_queues` lies outside `1..=`[`MAX_RX_QUEUES`].
+    /// Returns [`Errno::OutOfRange`] when either slot count lies outside
+    /// [`Self::MIN_SLOTS`]`..=`[`Self::MAX_SLOTS`] or is not a power of
+    /// two, either capacity lies outside
+    /// [`Self::MIN_SLOT_CAPACITY`]`..=`[`Self::MAX_SLOT_CAPACITY`], or
+    /// `rx_queues` lies outside `1..=`[`MAX_RX_QUEUES`].
     pub const fn new(
-        slots: u32,
+        rx_slots: u32,
+        tx_slots: u32,
         rx_slot_capacity: u32,
         tx_slot_capacity: u32,
         rx_queues: u16,
     ) -> Result<Self, Errno> {
-        if slots < Self::MIN_SLOTS || slots > Self::MAX_SLOTS {
+        if !Self::slots_in_range(rx_slots) || !Self::slots_in_range(tx_slots) {
             return Err(Errno::OutOfRange);
         }
         if !Self::capacity_in_range(rx_slot_capacity) || !Self::capacity_in_range(tx_slot_capacity)
@@ -414,21 +505,32 @@ impl RingGeometry {
             return Err(Errno::OutOfRange);
         }
         Ok(Self {
-            slots,
+            rx_slots,
+            tx_slots,
             rx_slot_capacity,
             tx_slot_capacity,
             rx_queues,
         })
     }
 
+    const fn slots_in_range(slots: u32) -> bool {
+        slots >= Self::MIN_SLOTS && slots <= Self::MAX_SLOTS && slots.is_power_of_two()
+    }
+
     const fn capacity_in_range(capacity: u32) -> bool {
         capacity >= Self::MIN_SLOT_CAPACITY && capacity <= Self::MAX_SLOT_CAPACITY
     }
 
-    /// Number of slots in each ring.
+    /// Number of slots in each receive ring.
     #[must_use]
-    pub const fn slots(&self) -> u32 {
-        self.slots
+    pub const fn rx_slots(&self) -> u32 {
+        self.rx_slots
+    }
+
+    /// Number of slots in the transmit ring.
+    #[must_use]
+    pub const fn tx_slots(&self) -> u32 {
+        self.tx_slots
     }
 
     /// Largest frame one receive slot carries, in bytes.
@@ -466,16 +568,16 @@ impl RingGeometry {
         RING_HEADER_LEN + slots as usize * Self::slot_stride(slot_capacity)
     }
 
-    /// Bytes the receive ring occupies.
+    /// Bytes one receive ring occupies.
     #[must_use]
     pub const fn rx_ring_len(&self) -> usize {
-        Self::ring_len_for(self.slots, self.rx_slot_capacity)
+        Self::ring_len_for(self.rx_slots, self.rx_slot_capacity)
     }
 
     /// Bytes the transmit ring occupies.
     #[must_use]
     pub const fn tx_ring_len(&self) -> usize {
-        Self::ring_len_for(self.slots, self.tx_slot_capacity)
+        Self::ring_len_for(self.tx_slots, self.tx_slot_capacity)
     }
 
     /// Bytes a whole [`FrameRings`] region occupies: the `rx_queues`
@@ -486,44 +588,74 @@ impl RingGeometry {
     }
 
     /// The geometry both the stack and the driver derive from the same
-    /// [`DeviceFacts`](super::net::DeviceFacts) and a shared slot count —
+    /// [`DeviceFacts`](super::net::DeviceFacts) and discovered `machine` —
     /// the one definition of "how big are the rings for this device", so
-    /// the two sides cannot disagree.
+    /// the two sides cannot disagree and no depth is hand-picked.
     ///
-    /// A receive slot holds one link frame (the MTU plus the Ethernet
-    /// header). A transmit slot holds the same *unless* the device
-    /// negotiated TCP segmentation offload
-    /// ([`NetOffloads::TX_SEGMENT_TCP`](super::net::NetOffloads::TX_SEGMENT_TCP)),
-    /// in which case it is sized to [`Self::MAX_SLOT_CAPACITY`] so the
-    /// stack can hand the device one over-MTU super-segment to split —
-    /// the receive ring is never enlarged for it.
+    /// Every term comes from something discovered:
     ///
-    /// The receive-queue count is the device's own
-    /// [`DeviceFacts::rx_queues`](super::net::DeviceFacts::rx_queues)
-    /// clamped to [`MAX_RX_QUEUES`], so a device advertising more receive
-    /// queues than the transport bounds is served on the first
-    /// [`MAX_RX_QUEUES`] and never sizes an over-large region.
+    /// * **Receive queues** — the device's own
+    ///   [`rx_queues`](super::net::DeviceFacts::rx_queues), capped by the
+    ///   machine's core count and by [`MAX_RX_QUEUES`]. Receive steering
+    ///   exists to spread receive work across cores, so queues beyond the
+    ///   cores that could drain them only pin memory and lengthen every
+    ///   drain pass.
+    /// * **Slot capacities** — a receive slot holds one link frame (the
+    ///   MTU plus the Ethernet header). A transmit slot holds the same
+    ///   unless the device negotiated TCP segmentation offload
+    ///   ([`NetOffloads::TX_SEGMENT_TCP`](super::net::NetOffloads::TX_SEGMENT_TCP)),
+    ///   when it is widened to the largest super-frame the ring budget can
+    ///   afford, capped by the driver's own
+    ///   [`max_tx_frame`](super::net::DeviceFacts::max_tx_frame) staging
+    ///   bound, so the stack hands the device one over-MTU segment to
+    ///   split and never one the driver would have to drop. The receive
+    ///   slot is never enlarged for it.
+    /// * **Slot counts** — each direction takes the deepest power-of-two
+    ///   ring its [`RingBudget`] affords at its own slot cost. Receive
+    ///   therefore runs deep (a shallow receive ring back-pressures the
+    ///   driver at any real frame rate) while transmit stays proportionate
+    ///   to its far larger slots.
     ///
     /// # Errors
     ///
-    /// Returns [`Errno::OutOfRange`] when `slots` is out of range or the
-    /// MTU (plus the Ethernet header) is not a valid slot capacity.
-    pub fn for_device(facts: &super::net::DeviceFacts, slots: u32) -> Result<Self, Errno> {
-        let rx = facts
-            .mtu
-            .checked_add(super::net::ETHERNET_HEADER_LEN)
-            .ok_or(Errno::OutOfRange)?;
-        let tx = if facts
+    /// Returns [`Errno::OutOfRange`] when the MTU plus the Ethernet header
+    /// is not a valid slot capacity.
+    pub fn for_device(
+        facts: &super::net::DeviceFacts,
+        machine: Option<&crate::BootFacts>,
+    ) -> Result<Self, Errno> {
+        let rx_capacity = facts.frame_capacity()?;
+        if !Self::capacity_in_range(rx_capacity) {
+            return Err(Errno::OutOfRange);
+        }
+        let budget = RingBudget::for_machine(machine);
+        // A super-frame slot needs both a device that can split it and a
+        // driver that carved staging for it, so the ceiling is the
+        // driver's own reported bound rather than a figure derived twice.
+        let tx_capacity = if facts
             .offloads
             .contains(super::net::NetOffloads::TX_SEGMENT_TCP)
         {
-            Self::MAX_SLOT_CAPACITY
+            budget.slot_capacity(rx_capacity, facts.max_tx_frame.max(rx_capacity))
         } else {
-            rx
+            rx_capacity
         };
-        let rx_queues = facts.rx_queues.clamp(1, MAX_RX_QUEUES);
-        Self::new(slots, rx, tx, rx_queues)
+        let rx_queues = facts
+            .rx_queues
+            .min(cores_for_queues(machine))
+            .clamp(1, MAX_RX_QUEUES);
+        let rx_slots = budget.slots(Self::slot_stride(rx_capacity), Self::MAX_SLOTS);
+        let tx_slots = budget.slots(Self::slot_stride(tx_capacity), Self::MAX_SLOTS);
+        Self::new(rx_slots, tx_slots, rx_capacity, tx_capacity, rx_queues)
     }
+}
+
+/// Receive queues the machine's cores could drain, or one when the machine
+/// was not attested.
+fn cores_for_queues(machine: Option<&crate::BootFacts>) -> u16 {
+    machine.map_or(1, |facts| {
+        u16::try_from(facts.cpu_count).unwrap_or(MAX_RX_QUEUES)
+    })
 }
 
 /// One direction's bounded single-producer, single-consumer frame queue
@@ -559,7 +691,12 @@ impl<'a> FrameRing<'a> {
     /// * [`Errno::BadAlignment`] — `region` is not aligned for the
     ///   header's atomic counters. Use [`aligned_region`] to cut an
     ///   aligned view from a plain in-process buffer.
+    /// * [`Errno::OutOfRange`] — `slots` is not a power of two, so slot
+    ///   addressing could not mask the counter.
     pub fn bind(region: &'a mut [u8], slots: u32, slot_capacity: u32) -> Result<Self, Errno> {
+        if !slots.is_power_of_two() {
+            return Err(Errno::OutOfRange);
+        }
         if region.len() != RingGeometry::ring_len_for(slots, slot_capacity) {
             return Err(Errno::BufferTooSmall);
         }
@@ -666,8 +803,11 @@ impl<'a> FrameRing<'a> {
     }
 
     /// Byte offset of `counter`'s slot within [`Self::slots_region`].
+    ///
+    /// The slot count is a power of two, so the wrap is a mask rather than
+    /// a division on the per-frame path.
     fn slot_offset(&self, counter: u32) -> usize {
-        let index = (counter % self.slots) as usize;
+        let index = (counter & (self.slots - 1)) as usize;
         index * RingGeometry::slot_stride(self.slot_capacity)
     }
 
@@ -881,12 +1021,12 @@ impl<'a> FrameRings<'a> {
             let (head, tail) = current.split_at_mut(rx_ring_len);
             *slot = Some(FrameRing::bind(
                 head,
-                geometry.slots(),
+                geometry.rx_slots(),
                 geometry.rx_slot_capacity(),
             )?);
             rest = tail;
         }
-        let tx = FrameRing::bind(rest, geometry.slots(), geometry.tx_slot_capacity())?;
+        let tx = FrameRing::bind(rest, geometry.tx_slots(), geometry.tx_slot_capacity())?;
         Ok(Self {
             rx,
             rx_count,
@@ -1027,15 +1167,18 @@ impl ServiceReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::driver::net::{DeviceFacts, LinkState, MacAddress, McastFilter, NetOffloads};
 
     /// Test ring dimensions: 4 slots of 128 bytes.
     const SLOTS: u32 = 4;
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * MIB;
     const CAP: u32 = 128;
     const RING_LEN: usize = RingGeometry::ring_len_for(SLOTS, CAP);
 
     /// Test geometry with equal RX/TX capacities and one receive queue.
     fn geometry() -> RingGeometry {
-        RingGeometry::new(SLOTS, CAP, CAP, 1).expect("valid test geometry")
+        RingGeometry::new(SLOTS, SLOTS, CAP, CAP, 1).expect("valid test geometry")
     }
 
     /// A zeroed backing buffer for one aligned ring region.
@@ -1062,33 +1205,161 @@ mod tests {
     #[test]
     fn geometry_bounds_fail_closed() {
         let min = RingGeometry::MIN_SLOT_CAPACITY;
-        assert!(RingGeometry::new(2, min, min, 1).is_ok());
-        assert_eq!(RingGeometry::new(1, 128, 128, 1), Err(Errno::OutOfRange));
+        assert!(RingGeometry::new(2, 2, min, min, 1).is_ok());
+        assert_eq!(RingGeometry::new(1, 4, 128, 128, 1), Err(Errno::OutOfRange));
+        assert_eq!(RingGeometry::new(4, 1, 128, 128, 1), Err(Errno::OutOfRange));
         assert_eq!(
-            RingGeometry::new(RingGeometry::MAX_SLOTS + 1, 128, 128, 1),
+            RingGeometry::new(RingGeometry::MAX_SLOTS * 2, 4, 128, 128, 1),
+            Err(Errno::OutOfRange)
+        );
+        // Slot addressing masks the counter, so a count that is not a power
+        // of two is refused in either direction.
+        assert_eq!(RingGeometry::new(6, 4, 128, 128, 1), Err(Errno::OutOfRange));
+        assert_eq!(RingGeometry::new(4, 6, 128, 128, 1), Err(Errno::OutOfRange));
+        assert_eq!(
+            RingGeometry::new(4, 4, min - 1, 128, 1),
             Err(Errno::OutOfRange)
         );
         assert_eq!(
-            RingGeometry::new(4, min - 1, 128, 1),
-            Err(Errno::OutOfRange)
-        );
-        assert_eq!(
-            RingGeometry::new(4, 128, RingGeometry::MAX_SLOT_CAPACITY + 1, 1),
+            RingGeometry::new(4, 4, 128, RingGeometry::MAX_SLOT_CAPACITY + 1, 1),
             Err(Errno::OutOfRange)
         );
         // Receive-queue count is bounded 1..=MAX_RX_QUEUES, fail closed.
-        assert_eq!(RingGeometry::new(4, 128, 128, 0), Err(Errno::OutOfRange));
+        assert_eq!(RingGeometry::new(4, 4, 128, 128, 0), Err(Errno::OutOfRange));
         assert_eq!(
-            RingGeometry::new(4, 128, 128, MAX_RX_QUEUES + 1),
+            RingGeometry::new(4, 4, 128, 128, MAX_RX_QUEUES + 1),
             Err(Errno::OutOfRange)
         );
-        assert!(RingGeometry::new(4, 128, 128, MAX_RX_QUEUES).is_ok());
+        assert!(RingGeometry::new(4, 4, 128, 128, MAX_RX_QUEUES).is_ok());
+    }
+
+    /// A machine of `memory_bytes` RAM and `cpu_count` cores.
+    fn machine(memory_bytes: u64, cpu_count: u32) -> crate::BootFacts {
+        crate::BootFacts {
+            arch: crate::Arch::Aarch64,
+            cpu_name: crate::CpuName::UNKNOWN,
+            cpu_count,
+            memory_bytes,
+        }
+    }
+
+    /// Facts for a `mtu`-byte link with `rx_queues` receive queues.
+    fn device(mtu: u32, rx_queues: u16, offloads: NetOffloads) -> DeviceFacts {
+        DeviceFacts {
+            mac: MacAddress::new([0x02, 0, 0, 0, 0, 1]),
+            mtu,
+            link: LinkState::Up,
+            offloads,
+            rx_queues,
+            max_tx_frame: RingGeometry::MAX_SLOT_CAPACITY,
+            multicast_filter: McastFilter::Unfiltered,
+        }
+    }
+
+    #[test]
+    fn ring_depth_scales_with_the_discovered_machine() {
+        let facts = device(1500, 1, NetOffloads::empty());
+        let small = RingGeometry::for_device(&facts, Some(&machine(128 * MIB, 1))).expect("small");
+        let desktop = RingGeometry::for_device(&facts, Some(&machine(GIB, 4))).expect("desktop");
+        let server =
+            RingGeometry::for_device(&facts, Some(&machine(64 * GIB, 64))).expect("server");
+        // A bigger machine gets a strictly deeper ring, and every depth is
+        // a power of two the mask-based slot addressing needs.
+        assert!(small.rx_slots() < desktop.rx_slots());
+        assert!(desktop.rx_slots() < server.rx_slots());
+        for g in [small, desktop, server] {
+            assert!(g.rx_slots().is_power_of_two());
+            assert!(g.tx_slots().is_power_of_two());
+            assert!(g.rx_slots() >= RingGeometry::MIN_SLOTS);
+            assert!(g.rx_slots() <= RingGeometry::MAX_SLOTS);
+        }
+        // The ceiling binds on a large machine rather than the budget
+        // growing a ring without end.
+        assert_eq!(server.rx_slots(), RingGeometry::MAX_SLOTS);
+        // Even the smallest machine gets a working ring, not a refusal.
+        assert!(small.rx_slots() >= RingGeometry::MIN_SLOTS);
+    }
+
+    #[test]
+    fn a_machine_that_could_not_be_attested_gets_the_floor() {
+        // No invented figure: an unattested machine is sized to the
+        // structural minimum, which still carries frames.
+        let facts = device(1500, 4, NetOffloads::empty());
+        let g = RingGeometry::for_device(&facts, None).expect("floor geometry");
+        assert_eq!(g.rx_slots(), RingGeometry::MIN_SLOTS);
+        assert_eq!(g.tx_slots(), RingGeometry::MIN_SLOTS);
+        assert_eq!(g.rx_queues(), 1);
+    }
+
+    #[test]
+    fn receive_queues_never_outrun_the_cores_that_drain_them() {
+        let facts = device(1500, MAX_RX_QUEUES, NetOffloads::empty());
+        // Receive steering spreads work across cores, so a single-core
+        // machine takes one queue however many the device offers.
+        let single = RingGeometry::for_device(&facts, Some(&machine(GIB, 1))).expect("single core");
+        assert_eq!(single.rx_queues(), 1);
+        let dual = RingGeometry::for_device(&facts, Some(&machine(GIB, 2))).expect("dual core");
+        assert_eq!(dual.rx_queues(), 2);
+        // And a machine with more cores than the transport carries queues
+        // is bounded by the transport.
+        let many = RingGeometry::for_device(&facts, Some(&machine(GIB, 256))).expect("many cores");
+        assert_eq!(many.rx_queues(), MAX_RX_QUEUES);
+        // A single-queue device stays single-queue on any machine.
+        let one_queue = device(1500, 1, NetOffloads::empty());
+        let g = RingGeometry::for_device(&one_queue, Some(&machine(GIB, 64))).expect("one queue");
+        assert_eq!(g.rx_queues(), 1);
+    }
+
+    #[test]
+    fn a_segmentation_slot_costs_transmit_depth_not_receive_depth() {
+        let plain = device(1500, 1, NetOffloads::empty());
+        let tso = device(1500, 1, NetOffloads::TX_SEGMENT_TCP);
+        let m = machine(GIB, 4);
+        let plain = RingGeometry::for_device(&plain, Some(&m)).expect("plain");
+        let tso = RingGeometry::for_device(&tso, Some(&m)).expect("tso");
+        // The over-size transmit slot is paid for out of transmit depth
+        // alone; receive is unchanged, which is the whole reason the two
+        // directions carry independent counts.
+        assert_eq!(tso.rx_slots(), plain.rx_slots());
+        assert!(tso.tx_slot_capacity() > plain.tx_slot_capacity());
+        assert!(tso.tx_slots() < plain.tx_slots());
+        // Neither ring exceeds its budget by more than the floor allows.
+        assert!(tso.tx_ring_len() >= tso.tx_slot_capacity() as usize);
+    }
+
+    #[test]
+    fn a_small_machine_gets_a_smaller_super_frame_not_an_unaffordable_ring() {
+        let tso = device(1500, 1, NetOffloads::TX_SEGMENT_TCP);
+        let small = RingGeometry::for_device(&tso, Some(&machine(128 * MIB, 1))).expect("small");
+        let server = RingGeometry::for_device(&tso, Some(&machine(64 * GIB, 8))).expect("server");
+        // A board that cannot afford two 64 KiB slots segments against a
+        // smaller super-frame rather than being given a ring it cannot pay
+        // for; a server takes the full ceiling.
+        assert!(small.tx_slot_capacity() < server.tx_slot_capacity());
+        assert_eq!(server.tx_slot_capacity(), RingGeometry::MAX_SLOT_CAPACITY);
+        // Still a segmentation win: the slot holds more than one link frame.
+        assert!(small.tx_slot_capacity() > small.rx_slot_capacity());
+    }
+
+    #[test]
+    fn the_whole_pinned_region_stays_a_small_share_of_a_small_machine() {
+        // The binding floor: a 1 GiB machine hosting several multiqueue
+        // segmentation-capable NICs must not pin a meaningful fraction of
+        // its RAM in frame rings.
+        const RAM: u64 = GIB;
+        let facts = device(1500, MAX_RX_QUEUES, NetOffloads::TX_SEGMENT_TCP);
+        let g = RingGeometry::for_device(&facts, Some(&machine(RAM, 8))).expect("geometry");
+        let four_nics = 4 * g.region_len() as u64;
+        assert!(
+            four_nics < RAM / 32,
+            "four NICs pin {four_nics} bytes of {RAM}"
+        );
     }
 
     #[test]
     fn multi_queue_region_sizes_one_rx_ring_per_queue() {
-        let single = RingGeometry::new(SLOTS, CAP, CAP, 1).expect("single");
-        let quad = RingGeometry::new(SLOTS, CAP, CAP, 4).expect("quad");
+        let single = RingGeometry::new(SLOTS, SLOTS, CAP, CAP, 1).expect("single");
+        let quad = RingGeometry::new(SLOTS, SLOTS, CAP, CAP, 4).expect("quad");
         assert_eq!(quad.rx_queues(), 4);
         // Four receive rings + one transmit ring vs one + one.
         assert_eq!(
@@ -1103,7 +1374,7 @@ mod tests {
 
     #[test]
     fn multi_queue_rings_are_independent_and_index_checked() {
-        let g = RingGeometry::new(SLOTS, CAP, CAP, 3).expect("triple");
+        let g = RingGeometry::new(SLOTS, SLOTS, CAP, CAP, 3).expect("triple");
         // Three receive rings + one transmit ring, each RING_LEN bytes.
         assert_eq!(4 * RING_LEN, g.region_len());
         let mut buffer = ring_buf::<{ 4 * RING_LEN + REGION_ALIGN_PADDING }>();
@@ -1133,7 +1404,7 @@ mod tests {
         const TX_CAP: u32 = 2048;
         const REGION_LEN: usize =
             RingGeometry::ring_len_for(4, RX_CAP) + RingGeometry::ring_len_for(4, TX_CAP);
-        let g = RingGeometry::new(4, RX_CAP, TX_CAP, 1).expect("valid");
+        let g = RingGeometry::new(4, 4, RX_CAP, TX_CAP, 1).expect("valid");
         assert_eq!(g.rx_slot_capacity(), RX_CAP);
         assert_eq!(g.tx_slot_capacity(), TX_CAP);
         assert!(g.tx_ring_len() > g.rx_ring_len());

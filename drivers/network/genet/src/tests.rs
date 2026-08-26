@@ -192,14 +192,43 @@ impl tairix_abi::driver::timing::Delay for MockDelay {
     }
 }
 
-/// A leaked frame-buffer carve standing in for the kernel's DMA region.
-fn frames() -> DmaSlab {
-    let storage = alloc::vec![0u8; DMA_REGION_BYTES].leak();
+/// The machine every test derives its carve layout from: a 1 GiB, 4-core
+/// board, so the depths the tests assert are the ones the policy produces
+/// rather than a figure written down twice.
+fn test_machine() -> BootFacts {
+    BootFacts {
+        arch: tairix_abi::Arch::Aarch64,
+        cpu_name: tairix_abi::CpuName::UNKNOWN,
+        cpu_count: 4,
+        memory_bytes: 1024 * 1024 * 1024,
+    }
+}
+
+/// The carve layout of [`test_machine`].
+fn layout() -> DmaLayout {
+    DmaLayout::for_machine(Some(&test_machine()))
+}
+
+/// Bytes the frame buffers of [`layout`] occupy — where the staging area
+/// begins.
+fn buffer_bytes() -> usize {
+    layout().bytes() - layout().tx_staging() as usize
+}
+
+/// A leaked frame-buffer carve of `len` bytes standing in for the kernel's
+/// DMA region.
+fn frames_of(len: usize) -> DmaSlab {
+    let storage = alloc::vec![0u8; len].leak();
     let ptr = NonNull::new(storage.as_mut_ptr()).expect("leaked storage is non-null");
-    // SAFETY: `storage` is a `'static` leaked allocation of exactly
-    // `DMA_REGION_BYTES` bytes that nothing else references, and `FRAMES_PHYS`
-    // stands in for its device-visible base in this host model.
-    unsafe { DmaSlab::from_leaked(FRAMES_PHYS, ptr, DMA_REGION_BYTES, PoolId::MOCK, 0) }
+    // SAFETY: `storage` is a `'static` leaked allocation of exactly `len`
+    // bytes that nothing else references, and `FRAMES_PHYS` stands in for its
+    // device-visible base in this host model.
+    unsafe { DmaSlab::from_leaked(FRAMES_PHYS, ptr, len, PoolId::MOCK, 0) }
+}
+
+/// A leaked frame-buffer carve sized for [`layout`].
+fn frames() -> DmaSlab {
+    frames_of(layout().bytes())
 }
 
 /// Bring a device up over a fresh mock, returning both so a test can inspect
@@ -210,6 +239,7 @@ fn open() -> Genet<MockRegs, MockDelay> {
         MockDelay::new(),
         frames(),
         MacAddress::new(MAC),
+        layout(),
     )
     .expect("bring-up succeeds against a GENET v5 model")
 }
@@ -218,7 +248,7 @@ fn open() -> Genet<MockRegs, MockDelay> {
 /// facts.
 fn geometry() -> RingGeometry {
     let capacity = MTU + ETHERNET_HEADER_LEN;
-    RingGeometry::new(8, capacity, capacity, 1).expect("valid geometry")
+    RingGeometry::new(8, 8, capacity, capacity, 1).expect("valid geometry")
 }
 
 // --- bring-up -----------------------------------------------------------
@@ -233,7 +263,14 @@ fn a_foreign_core_revision_is_refused() {
         mock.words
             .insert(regs::SYS_REV_CTRL, major << regs::REV_MAJOR_SHIFT);
         assert_eq!(
-            Genet::open(mock, MockDelay::new(), frames(), MacAddress::new(MAC)).err(),
+            Genet::open(
+                mock,
+                MockDelay::new(),
+                frames(),
+                MacAddress::new(MAC),
+                layout()
+            )
+            .err(),
             Some(DriverError::Unsupported),
             "major {major} must be refused"
         );
@@ -241,18 +278,46 @@ fn a_foreign_core_revision_is_refused() {
 }
 
 #[test]
+fn the_dma_carve_scales_with_the_discovered_machine() {
+    // The descriptor depth and the segmentation staging area are derived,
+    // not hand-picked: a bigger board gets a deeper ring, the controller's
+    // own descriptor RAM is the ceiling, and an unattested machine gets the
+    // structural floor rather than an invented figure.
+    let small = DmaLayout::for_machine(Some(&BootFacts {
+        cpu_count: 1,
+        memory_bytes: 128 * 1024 * 1024,
+        ..test_machine()
+    }));
+    let big = DmaLayout::for_machine(Some(&BootFacts {
+        cpu_count: 4,
+        memory_bytes: 8 * 1024 * 1024 * 1024,
+        ..test_machine()
+    }));
+    assert!(small.ring_slots() < layout().ring_slots());
+    assert!(layout().ring_slots() < big.ring_slots());
+    assert!(big.ring_slots() <= regs::TOTAL_DESC);
+    assert!(small.tx_staging() < big.tx_staging());
+    let floor = DmaLayout::for_machine(None);
+    assert!(floor.ring_slots() < small.ring_slots());
+    assert!(floor.bytes() > 0);
+    // Every depth is a power of two, as the descriptor-ring size field and
+    // the transport's slot masking both need.
+    for l in [floor, small, layout(), big] {
+        assert!(l.ring_slots().is_power_of_two());
+        assert!(l.tx_staging() >= MTU + ETHERNET_HEADER_LEN);
+    }
+}
+
+#[test]
 fn a_short_dma_carve_is_refused() {
-    let storage = alloc::vec![0u8; DMA_REGION_BYTES - 1].leak();
-    let ptr = NonNull::new(storage.as_mut_ptr()).expect("non-null");
-    // SAFETY: as in `frames`, with a deliberately undersized region.
-    let short =
-        unsafe { DmaSlab::from_leaked(FRAMES_PHYS, ptr, DMA_REGION_BYTES - 1, PoolId::MOCK, 0) };
+    let short = frames_of(layout().bytes() - 1);
     assert_eq!(
         Genet::open(
             MockRegs::new(),
             MockDelay::new(),
             short,
-            MacAddress::new(MAC)
+            MacAddress::new(MAC),
+            layout()
         )
         .err(),
         Some(DriverError::BufferTooSmall)
@@ -266,7 +331,14 @@ fn a_short_register_window_fails_closed() {
     let mut mock = MockRegs::new();
     mock.len = 0x1000;
     assert_eq!(
-        Genet::open(mock, MockDelay::new(), frames(), MacAddress::new(MAC)).err(),
+        Genet::open(
+            mock,
+            MockDelay::new(),
+            frames(),
+            MacAddress::new(MAC),
+            layout()
+        )
+        .err(),
         Some(DriverError::OutOfRange)
     );
 }
@@ -632,18 +704,18 @@ fn bring_up_arms_both_rings_over_the_dma_carve() {
         (regs::RDMA_DESC, phys),
         (
             regs::TDMA_DESC,
-            phys + u64::from(RING_SLOTS) * u64::from(BUF_LEN),
+            phys + u64::from(layout().ring_slots()) * u64::from(BUF_LEN),
         ),
     ] {
         let ring = regs::ring_regs(desc_base, regs::DEFAULT_RING);
         assert_eq!(
             mock.peek(ring + regs::RING_BUF_SIZE),
-            (RING_SLOTS << regs::RING_SIZE_SHIFT) | BUF_LEN
+            (layout().ring_slots() << regs::RING_SIZE_SHIFT) | BUF_LEN
         );
         assert_eq!(mock.peek(ring + regs::RING_START_ADDR), 0);
         assert_eq!(
             mock.peek(ring + regs::RING_END_ADDR),
-            RING_SLOTS * regs::DESC_WORDS - 1
+            layout().ring_slots() * regs::DESC_WORDS - 1
         );
         assert_eq!(
             mock.peek(regs::dma_regs(desc_base) + regs::DMA_RING_CFG),
@@ -654,7 +726,7 @@ fn bring_up_arms_both_rings_over_the_dma_carve() {
         assert!(ctrl & regs::DMA_EN != 0);
         assert!(ctrl & (1 << (regs::DEFAULT_RING + regs::DMA_RING_BUF_EN_SHIFT)) != 0);
         // Every descriptor points at its own buffer in the carve.
-        for slot in 0..RING_SLOTS {
+        for slot in 0..layout().ring_slots() {
             let desc = regs::desc(desc_base, slot);
             let expected = first_buffer + u64::from(slot) * u64::from(BUF_LEN);
             assert_eq!(
@@ -736,8 +808,14 @@ fn each_negotiated_rate_selects_its_own_mac_speed() {
         let mut mock = MockRegs::new();
         mock.phy.insert(0x0A, gbsr);
         mock.phy.insert(0x05, anlpar);
-        let device =
-            Genet::open(mock, MockDelay::new(), frames(), MacAddress::new(MAC)).expect("bring-up");
+        let device = Genet::open(
+            mock,
+            MockDelay::new(),
+            frames(),
+            MacAddress::new(MAC),
+            layout(),
+        )
+        .expect("bring-up");
         assert_eq!(
             device.link.map(|l| l.full_duplex),
             Some(full_duplex),
@@ -758,8 +836,14 @@ fn no_link_partner_comes_up_down_with_the_mac_disabled() {
     // it later.
     let mut mock = MockRegs::new();
     mock.phy_link_down();
-    let device =
-        Genet::open(mock, MockDelay::new(), frames(), MacAddress::new(MAC)).expect("bring-up");
+    let device = Genet::open(
+        mock,
+        MockDelay::new(),
+        frames(),
+        MacAddress::new(MAC),
+        layout(),
+    )
+    .expect("bring-up");
     assert_eq!(device.link, None);
     assert_eq!(device.device_facts().expect("facts").link, LinkState::Down);
     let cmd = device.regs.peek(regs::UMAC_CMD);
@@ -771,7 +855,14 @@ fn a_wedged_mdio_bus_fails_closed_rather_than_spinning() {
     let mut mock = MockRegs::new();
     mock.mdio_hangs = true;
     assert_eq!(
-        Genet::open(mock, MockDelay::new(), frames(), MacAddress::new(MAC)).err(),
+        Genet::open(
+            mock,
+            MockDelay::new(),
+            frames(),
+            MacAddress::new(MAC),
+            layout()
+        )
+        .err(),
         Some(DriverError::DeviceFault)
     );
 }
@@ -781,7 +872,14 @@ fn an_absent_phy_fails_closed() {
     let mut mock = MockRegs::new();
     mock.mdio_read_fails = true;
     assert_eq!(
-        Genet::open(mock, MockDelay::new(), frames(), MacAddress::new(MAC)).err(),
+        Genet::open(
+            mock,
+            MockDelay::new(),
+            frames(),
+            MacAddress::new(MAC),
+            layout()
+        )
+        .err(),
         Some(DriverError::DeviceFault)
     );
 }
@@ -928,7 +1026,7 @@ fn a_queued_frame_is_written_into_a_transmit_slot_and_rung_through() {
     // The frame reached slot 0's buffer past the transmit status block, its
     // descriptor names both lengths and asks the MAC to append the frame
     // check sequence, and the producer index advanced by exactly one.
-    let (start, _) = Genet::<MockRegs, MockDelay>::tx_frame_range(0);
+    let (start, _) = Genet::<MockRegs, MockDelay>::tx_frame_range(layout(), 0);
     assert_eq!(&device.frames.as_bytes()[start..start + 64], &[0xAB; 64]);
     let status = device
         .regs
@@ -957,10 +1055,13 @@ fn a_queued_frame_is_written_into_a_transmit_slot_and_rung_through() {
 #[test]
 fn a_full_transmit_ring_stops_draining_without_loss() {
     let mut device = open();
-    // A region with more queued frames than the device has slots.
-    let slots = RING_SLOTS + 4;
+    // A transmit ring deeper than the device's, so more frames are queued
+    // than the device has descriptors for.
+    let device_slots = layout().ring_slots();
+    let queued = device_slots + 4;
     let geometry = RingGeometry::new(
-        slots,
+        8,
+        device_slots * 2,
         MTU + ETHERNET_HEADER_LEN,
         MTU + ETHERNET_HEADER_LEN,
         1,
@@ -970,14 +1071,14 @@ fn a_full_transmit_ring_stops_draining_without_loss() {
     {
         let mut rings =
             FrameRings::bind(&mut region, geometry, BufferClass::NonSensitive).expect("bind");
-        for _ in 0..slots {
+        for _ in 0..queued {
             rings.tx.push(&[0x5A; 100]).expect("queue");
         }
     }
     let mut rings =
         FrameRings::bind(&mut region, geometry, BufferClass::NonSensitive).expect("bind");
     let report = device.service(&mut rings).expect("service");
-    assert_eq!(report.transmitted, RING_SLOTS, "exactly one ring's worth");
+    assert_eq!(report.transmitted, device_slots, "exactly one ring's worth");
     assert_eq!(rings.tx.len(), Ok(4), "the rest stay queued");
 
     // Once the device drains four descriptors, the remaining frames flow.
@@ -1000,7 +1101,7 @@ fn runt_and_oversize_frames_are_dropped_without_wedging_the_queue() {
     let report = service(&mut device, &mut region, BufferClass::NonSensitive);
     // The runt was consumed and dropped; the good frame behind it flowed.
     assert_eq!(report.transmitted, 1);
-    let (start, _) = Genet::<MockRegs, MockDelay>::tx_frame_range(0);
+    let (start, _) = Genet::<MockRegs, MockDelay>::tx_frame_range(layout(), 0);
     assert_eq!(device.frames.as_bytes()[start], 0x02);
 }
 
@@ -1023,7 +1124,7 @@ fn a_device_claiming_impossible_ring_progress_fails_closed() {
     // the ring holds: the ring cannot have produced them, so the driver
     // refuses rather than walking descriptor RAM it never armed.
     let mut device = open();
-    device.regs.set_rx_produced(RING_SLOTS + 1);
+    device.regs.set_rx_produced(layout().ring_slots() + 1);
     assert_eq!(
         device.service(&mut rings).err(),
         Some(DriverError::DeviceFault)
@@ -1031,7 +1132,7 @@ fn a_device_claiming_impossible_ring_progress_fails_closed() {
 
     // Exactly a full ring is legitimate, not a fault.
     let mut device = open();
-    device.regs.set_rx_produced(RING_SLOTS);
+    device.regs.set_rx_produced(layout().ring_slots());
     assert!(device.service(&mut rings).is_ok());
 }
 
@@ -1043,7 +1144,7 @@ fn a_frame_too_large_for_a_device_buffer_is_dropped_not_wedged() {
     // the slot occupied, so the driver must release it explicitly or the
     // queue behind it never moves.
     let oversize = BUF_LEN + 512;
-    let geometry = RingGeometry::new(4, oversize, oversize, 1).expect("geometry");
+    let geometry = RingGeometry::new(4, 4, oversize, oversize, 1).expect("geometry");
     let mut region = alloc::vec![0u8; geometry.region_len()];
     {
         let mut rings =
@@ -1061,7 +1162,7 @@ fn a_frame_too_large_for_a_device_buffer_is_dropped_not_wedged() {
     // dropped, and the one behind it flowed.
     assert_eq!(report.transmitted, 1);
     assert_eq!(rings.tx.len(), Ok(0), "the queue drained, nothing stuck");
-    let (start, _) = Genet::<MockRegs, MockDelay>::tx_frame_range(0);
+    let (start, _) = Genet::<MockRegs, MockDelay>::tx_frame_range(layout(), 0);
     assert_eq!(device.frames.as_bytes()[start], 0x3D);
 }
 
@@ -1159,8 +1260,14 @@ fn flagged_fragmented_and_malformed_receives_are_dropped() {
 fn a_full_receive_ring_back_pressures_without_loss() {
     let mut device = open();
     // Five completed frames through a four-slot receive ring.
-    let geometry = RingGeometry::new(4, MTU + ETHERNET_HEADER_LEN, MTU + ETHERNET_HEADER_LEN, 1)
-        .expect("geometry");
+    let geometry = RingGeometry::new(
+        4,
+        4,
+        MTU + ETHERNET_HEADER_LEN,
+        MTU + ETHERNET_HEADER_LEN,
+        1,
+    )
+    .expect("geometry");
     let reported = 60 + regs::RX_FRAME_OFFSET;
     for slot in 0..5u32 {
         let (start, _) = Genet::<MockRegs, MockDelay>::rx_buffer_range(slot);
@@ -1201,7 +1308,7 @@ fn both_rings_wrap_at_their_last_slot() {
     let mut region = alloc::vec![0u8; geometry().region_len()];
     // Walk the transmit ring right round: each pass fills one slot, and the
     // device is told it consumed it, so the ring never fills.
-    for pass in 0..RING_SLOTS + 3 {
+    for pass in 0..layout().ring_slots() + 3 {
         {
             let mut rings =
                 FrameRings::bind(&mut region, geometry(), BufferClass::NonSensitive).expect("bind");
@@ -1213,8 +1320,8 @@ fn both_rings_wrap_at_their_last_slot() {
     }
     // The producer index wrapped past the ring and the slot index came back
     // round with it.
-    assert_eq!(device.tx_producer, RING_SLOTS + 3);
-    assert_eq!(device.tx_producer % RING_SLOTS, 3);
+    assert_eq!(device.tx_producer, layout().ring_slots() + 3);
+    assert_eq!(device.tx_producer % layout().ring_slots(), 3);
 }
 
 #[test]
@@ -1227,7 +1334,7 @@ fn a_sensitive_ring_scrubs_both_directions_staging() {
         rings.tx.push(&[0xEE; 128]).expect("queue");
     }
     service(&mut device, &mut region, BufferClass::Sensitive);
-    let (tx_start, tx_end) = Genet::<MockRegs, MockDelay>::tx_buffer_range(0);
+    let (tx_start, tx_end) = Genet::<MockRegs, MockDelay>::tx_buffer_range(layout(), 0);
     // The frame is still staged while the device owns it.
     assert!(device.frames.as_bytes()[tx_start..tx_end].contains(&0xEE));
     // Once the device has consumed it, the reclaim scrubs the buffer.
@@ -1266,7 +1373,7 @@ fn a_non_sensitive_ring_leaves_its_staging_alone() {
     service(&mut device, &mut region, BufferClass::NonSensitive);
     device.regs.set_tx_consumed(1);
     service(&mut device, &mut region, BufferClass::NonSensitive);
-    let (start, end) = Genet::<MockRegs, MockDelay>::tx_buffer_range(0);
+    let (start, end) = Genet::<MockRegs, MockDelay>::tx_buffer_range(layout(), 0);
     assert!(device.frames.as_bytes()[start..end].contains(&0xEE));
 }
 
@@ -1317,14 +1424,15 @@ fn tso_geometry() -> RingGeometry {
         link: LinkState::Up,
         offloads: OFFLOADS,
         rx_queues: 1,
+        max_tx_frame: layout().tx_staging(),
         multicast_filter: McastFilter::Slots(MCAST_SLOTS),
     };
-    RingGeometry::for_device(&facts, 8).expect("valid geometry")
+    RingGeometry::for_device(&facts, Some(&test_machine())).expect("valid geometry")
 }
 
 /// The transmit status block's directive word for slot `slot`.
 fn tsb_directive(device: &Genet<MockRegs, MockDelay>, slot: u32) -> u32 {
-    let (start, _) = Genet::<MockRegs, MockDelay>::tx_buffer_range(slot);
+    let (start, _) = Genet::<MockRegs, MockDelay>::tx_buffer_range(layout(), slot);
     let block = &device.frames.as_bytes()[start..start + regs::TSB_LEN as usize];
     u32::from_le_bytes([
         block[regs::TSB_CSUM_INFO],
@@ -1537,7 +1645,7 @@ fn a_checksum_offset_past_the_frame_drops_it_rather_than_sending_a_partial() {
         report.transmitted, 1,
         "the unhonourable frame is dropped, never sent half-checksummed"
     );
-    let (start, _) = Genet::<MockRegs, MockDelay>::tx_frame_range(0);
+    let (start, _) = Genet::<MockRegs, MockDelay>::tx_frame_range(layout(), 0);
     assert_eq!(device.frames.as_bytes()[start], 0x5E);
 }
 
@@ -1599,8 +1707,10 @@ fn a_super_frame_is_split_into_wire_frames_the_engine_checksums() {
     // The payload ran in order across the three slots.
     let mut seen = 0usize;
     for (slot, payload) in sizes.iter().enumerate() {
-        let (start, _) =
-            Genet::<MockRegs, MockDelay>::tx_frame_range(u32::try_from(slot).expect("bounded"));
+        let (start, _) = Genet::<MockRegs, MockDelay>::tx_frame_range(
+            layout(),
+            u32::try_from(slot).expect("bounded"),
+        );
         let bytes = &device.frames.as_bytes()[start + 54..start + 54 + *payload as usize];
         assert_eq!(bytes, &frame[54 + seen..54 + seen + *payload as usize]);
         seen += *payload as usize;
@@ -1614,7 +1724,7 @@ fn a_full_transmit_ring_defers_the_rest_of_a_split_rather_than_dropping_it() {
     let geometry = tso_geometry();
     // More segments than the device has descriptors, so the split cannot
     // finish in one doorbell.
-    let payload = (RING_SLOTS as usize + 3) * 100;
+    let payload = (layout().ring_slots() as usize + 3) * 100;
     let frame = tcp_frame(6, payload);
     let mut region = alloc::vec![0u8; geometry.region_len()];
     {
@@ -1637,14 +1747,14 @@ fn a_full_transmit_ring_defers_the_rest_of_a_split_rather_than_dropping_it() {
     let mut rings =
         FrameRings::bind(&mut region, geometry, BufferClass::NonSensitive).expect("bind");
     let first = device.service(&mut rings).expect("service");
-    assert_eq!(first.transmitted, RING_SLOTS, "the ring filled");
+    assert_eq!(first.transmitted, layout().ring_slots(), "the ring filled");
     assert!(
         device.staged.is_some(),
         "the remainder is kept, not dropped"
     );
 
     // The device drains its ring; the next doorbell finishes the split.
-    device.regs.set_tx_consumed(RING_SLOTS);
+    device.regs.set_tx_consumed(layout().ring_slots());
     let second = device.service(&mut rings).expect("service");
     assert_eq!(second.transmitted, 3);
     assert!(device.staged.is_none(), "the super-frame is complete");
@@ -1681,7 +1791,7 @@ fn a_segmentation_descriptor_the_frame_does_not_bear_out_is_dropped() {
     let report = device.service(&mut rings).expect("service");
     assert_eq!(report.transmitted, 1, "only the well-formed frame flowed");
     assert!(device.staged.is_none());
-    let (start, _) = Genet::<MockRegs, MockDelay>::tx_frame_range(0);
+    let (start, _) = Genet::<MockRegs, MockDelay>::tx_frame_range(layout(), 0);
     assert_eq!(device.frames.as_bytes()[start], 0x77);
 }
 
@@ -1710,7 +1820,7 @@ fn a_sensitive_ring_scrubs_the_staged_super_frame_after_the_split() {
     }
     let mut rings = FrameRings::bind(&mut region, geometry, BufferClass::Sensitive).expect("bind");
     device.service(&mut rings).expect("service");
-    let staged = &device.frames.as_bytes()[BUFFER_BYTES..BUFFER_BYTES + frame.len()];
+    let staged = &device.frames.as_bytes()[buffer_bytes()..buffer_bytes() + frame.len()];
     assert!(
         staged.iter().all(|&b| b == 0),
         "the staged plaintext must not outlive its transmission"
@@ -1747,6 +1857,6 @@ fn a_segment_size_past_a_transmit_buffer_is_refused_rather_than_wedging() {
     let report = device.service(&mut rings).expect("service");
     assert_eq!(report.transmitted, 1);
     assert!(device.staged.is_none());
-    let (start, _) = Genet::<MockRegs, MockDelay>::tx_frame_range(0);
+    let (start, _) = Genet::<MockRegs, MockDelay>::tx_frame_range(layout(), 0);
     assert_eq!(device.frames.as_bytes()[start], 0x2A);
 }

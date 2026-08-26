@@ -100,6 +100,7 @@ fn facts(mac: MacAddress) -> DeviceFacts {
         link: LinkState::Up,
         offloads: NetOffloads::empty(),
         rx_queues: 1,
+        max_tx_frame: 1500 + tairix_abi::driver::net::ETHERNET_HEADER_LEN,
         multicast_filter: McastFilter::Unfiltered,
     }
 }

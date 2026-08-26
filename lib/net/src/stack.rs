@@ -701,6 +701,17 @@ pub struct Stack {
     /// over-size super-segment for the device to split.
     tx_segment_tcp: bool,
     counters: StackCounters,
+    /// Local UDP ports a broadcast datagram could be delivered to, sorted.
+    ///
+    /// An IPv4 broadcast destination is the one destination whose acceptance
+    /// depends on a *transport* consumer rather than on an address or a
+    /// group membership: a host with nothing bound to the port has no use
+    /// for the datagram, and admitting it would mean parsing every SSDP,
+    /// `NetBIOS` and LLMNR broadcast on the segment only to discard it. The
+    /// service publishes the set as its datagram sockets come and go; a port
+    /// absent from it is refused at the IP layer, exactly as the driver's
+    /// pre-filter refuses it a hop earlier.
+    datagram_ports: Vec<u16>,
     /// The interface's DHCPv4 client, present only while the interface is
     /// configured for DHCPv4 (`<iface>.ipv4.method = dhcp`). Driven from
     /// [`Stack::advance`], fed replies intercepted in [`Stack::on_ipv4`],
@@ -773,6 +784,7 @@ impl Stack {
             next_ipv6_ident: u32::from(config.ipv4_ident_seed),
             membership_v4: Membership::new(config.multicast_capacity, mac_seed(config.facts.mac)),
             membership_v6: Membership::new(config.multicast_capacity, mac_seed(config.facts.mac)),
+            datagram_ports: Vec::new(),
             rx_csum_offload: config
                 .facts
                 .offloads
@@ -1202,7 +1214,18 @@ impl Stack {
             self.counters.rx_dropped += 1;
             return;
         };
-        if header.destination != our_v4 && !self.accepts_v4_multicast(header.destination) {
+        let broadcast = self.accepts_v4_broadcast(header.destination);
+        if header.destination != our_v4
+            && !self.accepts_v4_multicast(header.destination)
+            && !broadcast
+        {
+            self.counters.rx_dropped += 1;
+            return;
+        }
+        // A broadcast datagram is only ever consumed as UDP, so a non-UDP
+        // one cannot complete into anything a socket could read and never
+        // enters the reassembly budget.
+        if broadcast && header.protocol != PROTOCOL_UDP {
             self.counters.rx_dropped += 1;
             return;
         }
@@ -1228,19 +1251,32 @@ impl Stack {
                     // per-frame checksum assurance cannot cover a transport
                     // checksum that spans fragments, so a reassembled
                     // datagram is always software-verified.
-                    self.on_ipv4_payload(out, &header, &datagram, None, ChecksumCheck::Verify, now);
+                    self.on_ipv4_payload(
+                        out,
+                        &header,
+                        &datagram,
+                        None,
+                        ChecksumCheck::Verify,
+                        broadcast,
+                        now,
+                    );
                 }
                 PushOutcome::Pending => {}
                 PushOutcome::Rejected(_) => self.counters.rx_dropped += 1,
             }
             return;
         }
-        self.on_ipv4_payload(out, &header, payload, Some(packet), check, now);
+        self.on_ipv4_payload(out, &header, payload, Some(packet), check, broadcast, now);
     }
 
     /// Dispatch a whole IPv4 payload. `original` carries the intact
     /// packet bytes when available (unfragmented), for ICMP error
-    /// excerpts.
+    /// excerpts, and `broadcast` is what the destination filter already
+    /// decided about the destination.
+    // The dispatch needs the whole receive context (output, header, payload,
+    // original bytes, checksum assurance, destination class, clock); it is
+    // the one call the destination filter hands off to.
+    #[allow(clippy::too_many_arguments)]
     fn on_ipv4_payload(
         &mut self,
         out: &mut StackOutput,
@@ -1248,6 +1284,7 @@ impl Stack {
         payload: &[u8],
         original: Option<&[u8]>,
         check: ChecksumCheck,
+        broadcast: bool,
         now: Duration64,
     ) {
         if header.protocol == PROTOCOL_ICMP {
@@ -1267,6 +1304,13 @@ impl Stack {
                 self.counters.rx_dropped += 1;
                 return;
             };
+            // Broadcast reaches every host on the segment, so it is
+            // delivered only where a datagram consumer holds the port; the
+            // checksum is verified first either way.
+            if broadcast && !self.consumes_broadcast_port(datagram.destination_port) {
+                self.counters.rx_dropped += 1;
+                return;
+            }
             out.events.push(StackEvent::UdpDatagram {
                 source: IpAddr::V4(header.source),
                 destination: IpAddr::V4(header.destination),
@@ -3654,6 +3698,48 @@ impl Stack {
         self.membership_v4.is_member(dest)
     }
 
+    /// Whether `dest` is an IPv4 broadcast address this interface answers
+    /// for: the limited broadcast, or its own subnet's directed broadcast.
+    ///
+    /// The interface's own address is never one, so a /31 or /32 — neither
+    /// of which has a directed broadcast — cannot make unicast traffic read
+    /// as broadcast.
+    fn accepts_v4_broadcast(&self, dest: Ipv4Addr) -> bool {
+        if dest.is_broadcast() {
+            return true;
+        }
+        let Some((addr, prefix_len)) = self.iface.ipv4() else {
+            return false;
+        };
+        dest != addr && directed_broadcast_v4(addr, prefix_len) == dest
+    }
+
+    /// Whether a broadcast datagram to `port` has a local consumer: a
+    /// registered datagram port, or this interface's DHCP client while one
+    /// is running (its reply is broadcast before any address exists).
+    fn consumes_broadcast_port(&self, port: u16) -> bool {
+        if self.dhcp.is_some() && port == crate::dhcp::CLIENT_PORT {
+            return true;
+        }
+        self.datagram_ports.binary_search(&port).is_ok()
+    }
+
+    /// Replace the set of local UDP ports a broadcast datagram may be
+    /// delivered to.
+    ///
+    /// The service owns the authoritative set (its datagram socket table)
+    /// and republishes it whenever a socket binds or closes; the engine
+    /// holds it because the decision belongs on the receive path. A
+    /// whole-set replacement rather than add/remove, so a missed removal
+    /// cannot leave a stale port admitting broadcast for the rest of the
+    /// interface's life.
+    pub fn set_datagram_ports(&mut self, ports: &[u16]) {
+        self.datagram_ports.clear();
+        self.datagram_ports.extend_from_slice(ports);
+        self.datagram_ports.sort_unstable();
+        self.datagram_ports.dedup();
+    }
+
     /// A counter that changes whenever [`Self::multicast_macs`] would yield
     /// a different set.
     ///
@@ -3713,7 +3799,16 @@ impl Stack {
             .groups()
             .map(|group| group.octets())
             .collect();
-        RxFilterPolicy::new(&v4, &v6, &groups_v4, &groups_v6)
+        // The ports a broadcast datagram may reach, so the driver's filter
+        // sheds exactly what the engine would drop and nothing more. The
+        // DHCP client's port is set in place rather than concatenated, so
+        // assembling the policy needs no second list.
+        let mut policy =
+            RxFilterPolicy::new(&v4, &v6, &groups_v4, &groups_v6, &self.datagram_ports);
+        if self.dhcp.is_some() {
+            policy.admit_broadcast_port(crate::dhcp::CLIENT_PORT);
+        }
+        policy
     }
 
     /// Write the link-layer group addresses this interface needs its device
@@ -3932,9 +4027,11 @@ fn mask_v4(addr: Ipv4Addr, prefix_len: u8) -> Ipv4Addr {
 /// the network address with every host bit set. Every host on the subnet
 /// accepts it, so the receive pre-filter must admit it.
 fn directed_broadcast_v4(addr: Ipv4Addr, prefix_len: u8) -> Ipv4Addr {
-    if prefix_len == 0 || prefix_len >= 32 {
-        // A /32 has no host bits and so no directed broadcast; the address
-        // itself is the only thing that reaches it.
+    if prefix_len == 0 || prefix_len >= 31 {
+        // A /32 has no host bits, and RFC 3021 gives a /31 point-to-point
+        // link no broadcast address either — its other address is the
+        // peer's unicast. Reporting the interface's own address keeps both
+        // out of the broadcast set.
         return addr;
     }
     let network = u32::from_be_bytes(mask_v4(addr, prefix_len).octets());

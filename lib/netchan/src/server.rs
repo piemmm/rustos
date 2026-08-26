@@ -371,10 +371,12 @@ impl<N: Net> NetChannelServer<N> {
     /// move to attached. Returns the status frame; on refusal the server is
     /// left unchanged (fail closed — a rejected attach never half-binds).
     ///
-    /// The geometry's slot must be able to carry the device's largest frame
-    /// (its MTU plus the Ethernet header); a stack that offered a smaller
-    /// ring than it promised via the [`facts_reply`](Self::facts_reply) is
-    /// refused rather than silently dropping every oversize frame later.
+    /// Both directions' slots must be able to carry the device's largest
+    /// frame (its MTU plus the Ethernet header), and a transmit slot must
+    /// not exceed the staging bound the driver reported through
+    /// [`facts_reply`](Self::facts_reply): a ring smaller than the device
+    /// needs, or a super-frame slot larger than the driver can stage, is
+    /// refused rather than silently dropping oversize frames later.
     #[must_use]
     pub fn attach(&mut self, params: AttachParams) -> [u8; STATUS_REPLY_LEN] {
         let result = self.try_attach(params);
@@ -386,15 +388,15 @@ impl<N: Net> NetChannelServer<N> {
             .net
             .device_facts()
             .map_err(tairix_abi::DriverError::as_errno)?;
-        // Both directions must carry at least one device frame; when the
-        // device segments (`TX_SEGMENT_TCP`) the transmit ring must
-        // additionally carry a super-frame. `for_device` is the one
-        // definition of those minima (the stack sized its offer from the
-        // same facts), so a ring smaller than the device needs is refused
-        // rather than silently dropping oversize frames later.
-        let need = RingGeometry::for_device(&facts, params.geometry.slots())?;
-        if params.geometry.rx_slot_capacity() < need.rx_slot_capacity()
-            || params.geometry.tx_slot_capacity() < need.tx_slot_capacity()
+        // Checked against the driver's own facts, never against a
+        // re-derivation of the stack's sizing: the floor is one device
+        // frame each way and the transmit ceiling is this driver's staging
+        // bound, so a geometry the driver could not serve is refused here
+        // instead of dropping frames on the hot path.
+        let frame = facts.frame_capacity()?;
+        if params.geometry.rx_slot_capacity() < frame
+            || params.geometry.tx_slot_capacity() < frame
+            || params.geometry.tx_slot_capacity() > facts.max_tx_frame
         {
             return Err(Errno::OutOfRange);
         }

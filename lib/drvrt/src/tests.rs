@@ -189,6 +189,15 @@ impl MockSyscalls {
 }
 
 impl GrantSyscalls for MockSyscalls {
+    fn boot_facts(&self) -> Option<tairix_abi::BootFacts> {
+        Some(tairix_abi::BootFacts {
+            arch: tairix_abi::Arch::Aarch64,
+            cpu_name: tairix_abi::CpuName::UNKNOWN,
+            cpu_count: 4,
+            memory_bytes: 1024 * 1024 * 1024,
+        })
+    }
+
     fn mmio_map(&self, handle: u64, offset: u64, len: usize) -> i64 {
         self.mmio_calls.set(self.mmio_calls.get() + 1);
         self.last_mmio.set((offset, len));

@@ -20,11 +20,13 @@ driver class.
 
 `device_facts` returns a `DeviceFacts` the consumer validates whole
 (`validate()`, fail closed): the MTU must sit inside the
-68..=65 535 bound and the receive-queue count must be at least 1, so a
-corrupt or hostile report can never size an attacker-controlled
-allocation. It also declares how the device filters group (multicast)
-destinations, which is what tells the stack whether it must program the
-device's filter at all.
+68..=65 535 bound, the receive-queue count must be at least 1, and
+`max_tx_frame` — the largest single transmit frame the driver will stage —
+must hold at least one link frame and no more than the transport's slot
+ceiling, so a corrupt or hostile report can never size an
+attacker-controlled allocation. It also declares how the device filters
+group (multicast) destinations, which is what tells the stack whether it
+must program the device's filter at all.
 
 ## The frame-ring transport
 
@@ -60,13 +62,29 @@ is where a frame with no possible local consumer is shed. One implementation
 serves every driver, so none repeats it (`plans/NETWORK.md` N17d).
 
 The classifier **mirrors the stack's own destination-acceptance rule**: an
-address of the interface, or a group it has joined (plus all-nodes and the
+address of the interface, a group it has joined (plus all-nodes and the
 solicited-node groups, derived from those addresses rather than carried
-separately). The stack gates a group or broadcast destination on membership
-and never on a listening port, so the filter needs no per-socket state and
-nothing in it can fall behind a socket opening. The one carve-out is the
-engine's own — a DHCPv4 reply arrives broadcast before any address exists,
-so broadcast UDP to the DHCP client port is admitted.
+separately), or an IPv4 broadcast address whose UDP destination port a local
+datagram consumer holds. A group destination is gated on membership alone,
+so nothing about it can fall behind a socket opening.
+
+Broadcast is the one destination whose acceptance depends on a *transport*
+consumer rather than on an address or a membership: it reaches every host on
+the segment, and a host with nothing bound to the port drops the datagram
+anyway. The policy therefore carries a 512-bit summary of the local ports a
+broadcast datagram could reach, republished as the service's datagram
+sockets come and go, and the stack gates its own acceptance on the same
+summary — so the two rules stay one rule. The summary's error is one-sided:
+two ports can fold to one slot, so the filter may admit a frame the stack
+then finds no consumer for, but it can never shed one a consumer wanted. A
+running DHCPv4 client's port is in the summary, which is what lets its
+broadcast reply through before the interface has any address at all. A
+broadcast *fragment* is admitted without inspection (the port lives in the
+first fragment, and reassembly is the stack's job); anything but UDP to a
+broadcast destination is refused outright, because the stack consumes a
+broadcast destination as UDP or not at all — a broadcast TCP segment is one
+RFC 1122 requires a host to discard, and an echo request to a broadcast
+address is the smurf amplifier.
 
 It pays twice over. The shed frame is never copied, and a harvest that
 admits nothing leaves `moved` false, so the driver sends no notify and the
@@ -126,20 +144,27 @@ region. This is the display service's `shm_grant` handoff with the roles
 inverted and frames flowing both ways:
 
 1. The stack asks `Facts` for the device's `DeviceFacts` and sizes a
-   `RingGeometry` from them with the shared `RingGeometry::for_device`:
-   the receive ring holds one link frame (MTU + Ethernet header), and the
-   transmit ring holds a segmentation-offload super-frame (up to
-   `MAX_SLOT_CAPACITY`) when the device negotiated `TX_SEGMENT_TCP`, else
-   the same as receive. `Attach` carries both capacities and the driver
-   re-derives the minima to validate the offer.
+   `RingGeometry` from them and the discovered machine with the shared
+   `RingGeometry::for_device`. Every term is derived, never hand-picked
+   (see [Ring sizing](#ring-sizing) below): the receive ring holds one link
+   frame (MTU + Ethernet header); the transmit ring holds a
+   segmentation-offload super-frame when the device negotiated
+   `TX_SEGMENT_TCP`, capped by the driver's own `max_tx_frame` staging
+   bound; and the two directions carry independent, power-of-two slot
+   counts. `Attach` carries both counts and both capacities, and the driver
+   validates the offer against its *own* facts — one link frame each way as
+   the floor, its staging bound as the transmit ceiling — so a geometry it
+   could not serve is refused at attach rather than dropping frames later.
 2. It `shm_create`s the region, `shm_grant`s it to the driver's endpoint
    (the recipient is resolved kernel-side from the endpoint, never a
    recyclable PID), and sends `Attach { geometry, region_grant, class,
    notify_port }`; the driver `shm_map`s exactly that region
    (owner-checked — no ambient authority).
-3. `SetRxFilter` publishes the local addresses the driver's receive
-   pre-filter matches against; the stack re-sends it whenever an
-   interface's address set changes, and never on the frame path.
+3. `SetRxFilter` publishes the local addresses, joined groups, and
+   broadcast-consumer ports the driver's receive pre-filter matches
+   against; the stack re-sends it whenever an interface's address set, its
+   memberships, or the service's datagram sockets change, and never on the
+   frame path.
 4. `Service` is the doorbell: the driver services the mapped rings once
    and replies a `ServiceReport`. It is **not** on the receive path — a
    driver woken by its device interrupt masks its completion sources,
@@ -164,6 +189,51 @@ inverted and frames flowing both ways:
    stays in force, and the stack audits the refusal: the filter is never
    widened (least of all to promiscuous) to make an over-large set fit.
 6. `Detach` releases the channel.
+
+### Ring sizing
+
+No ring depth on the system is a hand-picked constant. A frame ring is
+pinned memory that no reclaim can take back, and a depth that suits a
+128 MiB board starves a server while one that suits a server exhausts the
+board — so every depth is a function of what the boot path discovered.
+
+`RingBudget::for_machine` states the budget once: one 4096th of the
+installed RAM per ring, from the kernel-attested `BootFacts`. `slots` then
+returns the deepest power-of-two ring that fits it (a power of two so slot
+addressing masks the free-running counter instead of dividing by it, and
+because every device ring the transport mirrors requires one anyway),
+floored at `MIN_SLOTS` so the smallest machine still gets a working ring
+and clamped at `MAX_SLOTS` so the largest gets a bounded one. A machine the
+caller could not attest yields a zero budget and hence the floor —
+deliberately, so an unattested host gets the minimum rather than an
+invented figure.
+
+`RingGeometry::for_device` composes that with the device's own report:
+
+- **Receive queues** — the device's `rx_queues`, capped by the machine's
+  core count and by `MAX_RX_QUEUES`. Receive steering exists to spread work
+  across cores, so queues beyond the cores that could drain them only pin
+  memory and lengthen every drain pass.
+- **Slot capacities** — a receive slot holds one link frame. A transmit
+  slot is widened to the largest super-frame the budget affords, capped by
+  `max_tx_frame`, only when the device negotiated `TX_SEGMENT_TCP`. A board
+  that cannot afford two 64 KiB slots gets a smaller super-frame — still a
+  segmentation win — rather than a ring it cannot pay for.
+- **Slot counts** — each direction takes the deepest ring its budget
+  affords *at its own slot cost*. This is why the two counts are
+  independent: one shared count would either waste a 64 KiB super-frame's
+  space on every receive slot or shrink receive depth to what the
+  super-frames cost, and a shallow receive ring back-pressures the driver
+  at any real frame rate.
+
+The drivers size their own device rings through the same policy, from the
+machine the driver host attests (`DriverHost::machine`). GENET derives its
+programmed descriptor count and segmentation staging area (`DmaLayout`,
+bounded above by the controller's own descriptor RAM); `virtio_net` derives
+its receive-buffer pool depth and transmit staging depth (`QueueDepths`,
+bounded above by whatever the device advertises as its queue maximum and by
+the crate's pinned-DMA bounds). Both sides therefore land at coherent
+depths without either having to guess what the other could afford.
 
 ### Interrupt masking, and why it exists
 

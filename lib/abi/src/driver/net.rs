@@ -179,9 +179,35 @@ pub struct DeviceFacts {
     /// At least 1: a device with no receive queue is not a network
     /// device.
     pub rx_queues: u16,
+    /// Largest single transmit frame the driver will stage, in bytes
+    /// (Ethernet header included).
+    ///
+    /// At least [`Self::frame_capacity`]; larger only when the driver
+    /// carved staging for an over-MTU segmentation super-frame. The stack
+    /// sizes the transmit ring's slots within this, so a driver never
+    /// receives a frame it would have to drop and neither side has to
+    /// guess what the other could afford.
+    pub max_tx_frame: u32,
     /// How the device filters group destinations, which decides whether the
     /// stack must program its multicast set at all.
     pub multicast_filter: McastFilter,
+}
+
+/// The largest frame a link of `mtu` bytes carries, Ethernet header
+/// included — a ring slot's minimum capacity.
+///
+/// The one definition of that sum: a driver sizing its own staging before it
+/// has a [`DeviceFacts`] to report reaches it here rather than repeating the
+/// arithmetic.
+///
+/// # Errors
+///
+/// [`Errno::OutOfRange`] when the sum overflows.
+pub const fn frame_capacity(mtu: u32) -> Result<u32, Errno> {
+    match mtu.checked_add(ETHERNET_HEADER_LEN) {
+        Some(capacity) => Ok(capacity),
+        None => Err(Errno::OutOfRange),
+    }
 }
 
 impl DeviceFacts {
@@ -196,14 +222,36 @@ impl DeviceFacts {
     /// report can never induce an attacker-sized allocation.
     pub const MAX_MTU: u32 = 65_535;
 
+    /// The largest frame the device moves: the MTU plus the Ethernet
+    /// header. The one definition of a ring slot's minimum capacity, so
+    /// the stack's sizing and the driver's attach check cannot disagree.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] when the sum overflows.
+    pub const fn frame_capacity(&self) -> Result<u32, Errno> {
+        frame_capacity(self.mtu)
+    }
+
     /// Validate the whole report, fail-closed.
     ///
     /// # Errors
     ///
     /// Returns [`Errno::OutOfRange`] when `mtu` lies outside
-    /// [`Self::MIN_MTU`]..=[`Self::MAX_MTU`] or `rx_queues` is zero.
+    /// [`Self::MIN_MTU`]..=[`Self::MAX_MTU`], `rx_queues` is zero, or
+    /// `max_tx_frame` cannot even hold one link frame or exceeds the
+    /// transport's slot ceiling.
     pub const fn validate(&self) -> Result<(), Errno> {
         if self.mtu < Self::MIN_MTU || self.mtu > Self::MAX_MTU || self.rx_queues == 0 {
+            return Err(Errno::OutOfRange);
+        }
+        let capacity = match self.frame_capacity() {
+            Ok(capacity) => capacity,
+            Err(err) => return Err(err),
+        };
+        if self.max_tx_frame < capacity
+            || self.max_tx_frame > super::net_ring::RingGeometry::MAX_SLOT_CAPACITY
+        {
             return Err(Errno::OutOfRange);
         }
         Ok(())
@@ -400,7 +448,7 @@ mod tests {
 
     /// Test geometry: 4 slots of 128 bytes per ring (equal RX/TX), one
     /// receive queue.
-    const GEOMETRY: RingGeometry = match RingGeometry::new(4, 128, 128, 1) {
+    const GEOMETRY: RingGeometry = match RingGeometry::new(4, 4, 128, 128, 1) {
         Ok(g) => g,
         Err(_) => panic!("valid test geometry"),
     };
@@ -413,6 +461,7 @@ mod tests {
             link: LinkState::Up,
             offloads: NetOffloads::empty(),
             rx_queues: 1,
+            max_tx_frame: 1500 + ETHERNET_HEADER_LEN,
             multicast_filter: McastFilter::Unfiltered,
         }
     }

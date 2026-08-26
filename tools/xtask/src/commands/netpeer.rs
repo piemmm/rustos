@@ -379,6 +379,7 @@ fn run_bond_peer(
         link: LinkState::Up,
         offloads: NetOffloads::empty(),
         rx_queues: 1,
+        max_tx_frame: 1500 + tairix_abi::driver::net::ETHERNET_HEADER_LEN,
         multicast_filter: McastFilter::Unfiltered,
     };
     let start = Instant::now();
@@ -535,6 +536,7 @@ fn run_v6_campaign(
         link: LinkState::Up,
         offloads: NetOffloads::empty(),
         rx_queues: 1,
+        max_tx_frame: 1500 + tairix_abi::driver::net::ETHERNET_HEADER_LEN,
         multicast_filter: McastFilter::Unfiltered,
     };
     let start = Instant::now();
@@ -648,6 +650,7 @@ fn run_dhcp_peer(
         link: LinkState::Up,
         offloads: NetOffloads::empty(),
         rx_queues: 1,
+        max_tx_frame: 1500 + tairix_abi::driver::net::ETHERNET_HEADER_LEN,
         multicast_filter: McastFilter::Unfiltered,
     };
     let start = Instant::now();
@@ -1096,6 +1099,7 @@ fn run_dhcp6_peer(
         link: LinkState::Up,
         offloads: NetOffloads::empty(),
         rx_queues: 1,
+        max_tx_frame: 1500 + tairix_abi::driver::net::ETHERNET_HEADER_LEN,
         multicast_filter: McastFilter::Unfiltered,
     };
     let start = Instant::now();
@@ -1720,6 +1724,7 @@ fn run_ping_responder(
         link: LinkState::Up,
         offloads: NetOffloads::empty(),
         rx_queues: 1,
+        max_tx_frame: 1500 + tairix_abi::driver::net::ETHERNET_HEADER_LEN,
         multicast_filter: McastFilter::Unfiltered,
     };
     let start = Instant::now();
@@ -1867,6 +1872,7 @@ fn peer_stack(start: Instant) -> Result<(Stack, core::net::Ipv6Addr), String> {
         link: LinkState::Up,
         offloads: NetOffloads::empty(),
         rx_queues: 1,
+        max_tx_frame: 1500 + tairix_abi::driver::net::ETHERNET_HEADER_LEN,
         multicast_filter: McastFilter::Unfiltered,
     };
     let now0 =

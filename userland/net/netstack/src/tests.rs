@@ -54,6 +54,7 @@ fn facts(mac: MacAddress) -> DeviceFacts {
         link: LinkState::Up,
         offloads: NetOffloads::empty(),
         rx_queues: 1,
+        max_tx_frame: 1500 + tairix_abi::driver::net::ETHERNET_HEADER_LEN,
         multicast_filter: McastFilter::Unfiltered,
     }
 }
@@ -113,7 +114,7 @@ fn test_dhcp_rng_factory() -> crate::iface::DhcpRngFactory {
 }
 
 /// Ring geometry ample for the control-plane exchanges the tests run.
-const GEOMETRY: RingGeometry = match RingGeometry::new(16, 1514, 1514, 1) {
+const GEOMETRY: RingGeometry = match RingGeometry::new(16, 16, 1514, 1514, 1) {
     Ok(g) => g,
     Err(_) => panic!("valid test geometry"),
 };
@@ -163,6 +164,9 @@ impl Net for QuietNet {
 struct HarvestedService<'r, N: Net> {
     inner: LocalFrameService<'r, N>,
     doorbells: usize,
+    /// The last receive-pre-filter policy the pump pushed, so a test can
+    /// assert what the driver would actually shed.
+    rx_filter: Option<RxFilterPolicy>,
 }
 
 impl<'r, N: Net> HarvestedService<'r, N> {
@@ -170,6 +174,7 @@ impl<'r, N: Net> HarvestedService<'r, N> {
         Self {
             inner: local_service_generic(net, region),
             doorbells: 0,
+            rx_filter: None,
         }
     }
 }
@@ -201,6 +206,7 @@ impl<N: Net> FrameService for HarvestedService<'_, N> {
     }
 
     fn set_rx_filter(&mut self, policy: RxFilterPolicy) -> Result<(), Errno> {
+        self.rx_filter = Some(policy);
         self.inner.set_rx_filter(policy)
     }
 }
@@ -3895,6 +3901,74 @@ fn settle<F: FrameService>(stack: &mut Netstack, iface: &[u8; IF_NAME_LEN], fs: 
             .service_interface(*iface, fs, t(step), ServiceHint::default())
             .expect("settle pump");
     }
+}
+
+#[test]
+fn binding_a_datagram_socket_widens_the_broadcast_ports_the_driver_admits() {
+    // The publish chain a bound socket depends on: the socket table names
+    // the port, the interface engine takes it, and the pump pushes it to
+    // the device's pre-filter — so a broadcast datagram to that port is no
+    // longer shed a hop before the stack could deliver it.
+    let mut stack = managed_stack();
+    let mut svc = SocketService::new();
+    let mut ent = || 0x2222_u32;
+    let mut reply = vec![0u8; 256];
+    let mut region = rings_region();
+    let mut fs = HarvestedService::new(QuietNet, &mut region);
+    settle(&mut stack, &name("wan"), &mut fs);
+    let before = fs.rx_filter.expect("a policy is pushed at settle");
+    assert!(!before.admits_broadcast_port(9999));
+
+    let out = svc_serve(
+        &mut svc,
+        &mut stack,
+        &net_caller(1),
+        &mut ent,
+        SocketRequest::Socket {
+            family: NetAddrFamily::V4,
+            sock_type: SocketType::Datagram,
+            deliver_port: 0x5000,
+        },
+        &mut reply,
+        t(1),
+    )
+    .expect("open");
+    let id = decode_socket_reply(&reply[..out.len]).expect("id");
+    svc_serve(
+        &mut svc,
+        &mut stack,
+        &net_caller(1),
+        &mut ent,
+        SocketRequest::Bind {
+            socket: id,
+            local: v4_addr(0, 0, 0, 0, 9999),
+        },
+        &mut reply,
+        t(1),
+    )
+    .expect("bind");
+
+    settle(&mut stack, &name("wan"), &mut fs);
+    let after = fs.rx_filter.expect("policy");
+    assert!(
+        after.admits_broadcast_port(9999),
+        "the bound port must reach the device filter"
+    );
+
+    // Closing it narrows the filter again, so a port nothing holds stops
+    // costing a wake.
+    svc_serve(
+        &mut svc,
+        &mut stack,
+        &net_caller(1),
+        &mut ent,
+        SocketRequest::Close { socket: id },
+        &mut reply,
+        t(2),
+    )
+    .expect("close");
+    settle(&mut stack, &name("wan"), &mut fs);
+    assert!(!fs.rx_filter.expect("policy").admits_broadcast_port(9999));
 }
 
 #[test]

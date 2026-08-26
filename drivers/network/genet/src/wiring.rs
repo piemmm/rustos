@@ -23,7 +23,7 @@ use tairix_abi::driver::net::{MacAddress, MAC_ADDRESS_LEN};
 use tairix_abi::driver::timing::Delay;
 use tairix_abi::{CapabilityId, DriverError, DriverHost, HwResource, RegisterWindow};
 
-use crate::{Genet, DMA_REGION_BYTES};
+use crate::{DmaLayout, Genet};
 
 /// Map the discovered GENET register window, carve its frame buffers, and
 /// bring the controller online.
@@ -69,9 +69,12 @@ where
         .ok_or(DriverError::Unsupported)?
         .map_window(base, len)
         .map_err(MmioMapError::as_driver_error)?;
+    // The carve is sized from the machine the host attested, through the
+    // shared ring-sizing policy the network stack uses for its own rings.
+    let layout = DmaLayout::for_machine(host.machine().as_ref());
     let frames = host
         .dma_host()
         .ok_or(DriverError::Unsupported)?
-        .alloc_dma_zeroed(DMA_REGION_BYTES)?;
-    Genet::open(window, delay, frames, mac)
+        .alloc_dma_zeroed(layout.bytes())?;
+    Genet::open(window, delay, frames, mac, layout)
 }
