@@ -386,13 +386,17 @@ pub const CAT_MANIFEST: &[CapabilityId] = &[
 /// authorises every path per-inode under the caller's attested identity —
 /// and `CAP_PROC_SPAWN` to re-spawn its own binary as the parser-sandbox
 /// render worker (`docs/src/security/sandbox.md`): the foreign document is
-/// parsed there, never in `man`'s own process.
+/// parsed there, never in `man`'s own process. `CAP_LOG_EMIT` carries that
+/// seam's containment record — a worker crashed and was replaced — so the
+/// crash is reported rather than refused into an audited denial that hides
+/// it.
 #[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
 pub const MAN_MANIFEST: &[CapabilityId] = &[
     CapabilityId::CONSOLE_WRITE,
     CapabilityId::CONSOLE_READ,
     CapabilityId::FS_ACCESS,
     CapabilityId::PROC_SPAWN,
+    CapabilityId::LOG_EMIT,
 ];
 
 /// The `clear` tool's manifest: `CAP_CONSOLE_WRITE` for the clear sequence
@@ -799,6 +803,7 @@ mod tests {
                 CapabilityId::CONSOLE_READ,
                 CapabilityId::FS_ACCESS,
                 CapabilityId::PROC_SPAWN,
+                CapabilityId::LOG_EMIT,
             ])
         );
     }
@@ -990,12 +995,16 @@ mod tests {
     // A file tool that additionally re-spawns its own binary as its
     // parser-sandbox worker (fstree's disassembly viewer decodes
     // every container and instruction window there, never in-process):
-    // the file-tool request plus `CAP_PROC_SPAWN`.
+    // the file-tool request plus `CAP_PROC_SPAWN`, and `CAP_LOG_EMIT` so
+    // the seam's containment record — a worker crashed and was replaced —
+    // reaches the log instead of being refused into an audited denial that
+    // hides the crash.
     const SANDBOXED_FILE_TOOL_REQUEST: &[CapabilityId] = &[
         CapabilityId::CONSOLE_WRITE,
         CapabilityId::CONSOLE_READ,
         CapabilityId::FS_ACCESS,
         CapabilityId::PROC_SPAWN,
+        CapabilityId::LOG_EMIT,
     ];
 
     // The store-only pure text tools' expected request: console write
@@ -1094,6 +1103,7 @@ mod tests {
         CapabilityId::FS_ACCESS,
         CapabilityId::SHM,
         CapabilityId::PROC_SPAWN,
+        CapabilityId::LOG_EMIT,
     ];
 
     // The windowed terminal `terminal` (plans/APPWIN.md AW4,
@@ -1154,6 +1164,7 @@ mod tests {
         CapabilityId::FS_ACCESS,
         CapabilityId::SHM,
         CapabilityId::PROC_SPAWN,
+        CapabilityId::LOG_EMIT,
     ];
 
     // The volume-detach tool `unmount` (plans/DEVICES.md D4b): the
@@ -1261,6 +1272,7 @@ mod tests {
         CapabilityId::SHM,
         CapabilityId::PROC_CONTROL,
         CapabilityId::SYSTEM_POWER,
+        CapabilityId::LOG_EMIT,
     ];
 
     // The `greeter` login screen (plans/NEW-DESKTOP-LOGIN.md G3):

@@ -1979,6 +1979,16 @@ impl TlbShootdown for AddressSpace {
             invalidate_all_inner_shareable();
         }
     }
+
+    fn publish_mappings(&mut self, _start_vaddr: u64, page_count: usize) {
+        // A leaf that was invalid cannot be cached, so installing one owes
+        // the walker ordering, not invalidation — and the range flush above
+        // is a whole-domain broadcast, which would turn every mapping
+        // installation into a system-wide TLB wipe.
+        if page_count != 0 {
+            publish_table_update();
+        }
+    }
 }
 
 /// Invalidate, on every PE in the inner-shareable domain, the stage-1

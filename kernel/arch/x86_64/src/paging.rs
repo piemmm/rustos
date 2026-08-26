@@ -1357,6 +1357,15 @@ impl TlbShootdown for AddressSpace {
             let _ = vaddr;
         }
     }
+
+    fn publish_mappings(&mut self, start_vaddr: u64, page_count: usize) {
+        // Nothing is owed. A not-present paging-structure entry is never
+        // cached (Intel SDM Vol 3A, "Caching Translation Information"), so
+        // installing a leaf leaves no stale translation to discard, and the
+        // store is already ordered ahead of the walk that reads it. The
+        // default's per-page `invlpg` sweep would be pure waste.
+        let _ = (start_vaddr, page_count);
+    }
 }
 
 /// Decode an x86_64 leaf PTE's permission bits back into the neutral

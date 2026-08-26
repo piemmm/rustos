@@ -35,6 +35,8 @@ id = "os.tairix.switchboard"
 name = "switchboard"
 version = "0.1.0"
 kind = "service"
-capabilities = ["CAP_CONSOLE_WRITE", "CAP_SYSINFO_GLOBAL", "CAP_SYSINFO_KERNEL", "CAP_SYSINFO_HW", "CAP_SHM", "CAP_PROC_CONTROL", "CAP_SYSTEM_POWER"]
+# CAP_LOG_EMIT so the records it emits reach the log rather than being
+# refused into an audited denial that hides what they were reporting.
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_SYSINFO_GLOBAL", "CAP_SYSINFO_KERNEL", "CAP_SYSINFO_HW", "CAP_SHM", "CAP_PROC_CONTROL", "CAP_SYSTEM_POWER", "CAP_LOG_EMIT"]
 # This bundle's own 256x256 icon master in its Resources/ (plans/ICONS.md).
 library-icon = "switchboard.png"

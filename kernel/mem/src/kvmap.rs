@@ -192,11 +192,13 @@ impl<P: PageTable + Send> KernelVirtMap for KernelRemap<P> {
                 return Err(RemapError::Map(err));
             }
         }
-        // An invalid-to-valid leaf cannot be stale in any CPU's TLB, so no
-        // cross-CPU work is owed here: the local flush is what orders the
-        // table stores against the walker, and a CPU that faults on one of
-        // the new leaves walks the tables and finds it.
-        space.flush_range(vaddr, pages);
+        // An invalid-to-valid leaf cannot be stale in any CPU's TLB, so what
+        // is owed is ordering, not invalidation — and no cross-CPU work at
+        // all: a CPU that faults on one of the new leaves walks the tables
+        // and finds it. Invalidating here instead cost a whole-domain TLB
+        // broadcast per chunk on aarch64, which is what made a fragmented
+        // pool's many-chunk growth ruinous.
+        space.publish_mappings(vaddr, pages);
         Ok(())
     }
 
@@ -220,12 +222,15 @@ impl<P: PageTable + Send> KernelVirtMap for KernelRemap<P> {
                 }
             }
             // Every CPU must have forgotten these translations before a
-            // recovered frame can be handed back for reuse. This runs with
-            // interrupts masked (the heap lock's doing), which the
-            // `CrossCpuTlbShootdown` contract permits only for a *sole*
-            // initiator — satisfied here because that same heap lock
+            // recovered frame can be handed back for reuse — and only then;
+            // a batch that tore down no leaf left nothing stale to discard.
+            // This runs with interrupts masked (the heap lock's doing),
+            // which the `CrossCpuTlbShootdown` contract permits only for a
+            // *sole* initiator — satisfied here because that same heap lock
             // serialises every teardown.
-            self.xtlb.shootdown_range(batch_base, batch);
+            if found != 0 {
+                self.xtlb.shootdown_range(batch_base, batch);
+            }
             for frame in &frames[..found] {
                 recovered(*frame);
             }
@@ -398,6 +403,34 @@ mod tests {
             xtlb.pages.load(Ordering::Relaxed) - before,
             WINDOW_PAGES,
             "every torn-down page was invalidated system-wide"
+        );
+    }
+
+    #[test]
+    fn mapping_publishes_without_invalidating_anything() {
+        // A not-present-to-present leaf is never stale, so installing one
+        // must cost no cross-CPU invalidation: doing it anyway made a
+        // many-chunk growth issue one whole-domain TLB broadcast per chunk.
+        let (map, xtlb) = remap(WINDOW_PAGES);
+        map.map_chunk(WINDOW_BASE, Frame(0x40), 8).expect("maps");
+        map.map_chunk(WINDOW_BASE + 8 * PAGE, Frame(0x300), 8)
+            .expect("maps");
+        assert_eq!(
+            xtlb.calls.load(Ordering::Relaxed),
+            0,
+            "installing leaves issued a system-wide invalidation"
+        );
+    }
+
+    #[test]
+    fn tearing_down_an_unmapped_run_invalidates_nothing() {
+        let (map, xtlb) = remap(WINDOW_PAGES);
+        let calls_before = xtlb.calls.load(Ordering::Relaxed);
+        assert_eq!(map.unmap_run(WINDOW_BASE, 8, &mut |_| {}), 0);
+        assert_eq!(
+            xtlb.calls.load(Ordering::Relaxed),
+            calls_before,
+            "a batch that tore down no leaf owes no invalidation"
         );
     }
 

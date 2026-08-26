@@ -11,6 +11,9 @@ id = "os.tairix.man"
 name = "man"
 version = "0.1.0"
 kind = "command"
-capabilities = ["CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_FS_ACCESS", "CAP_PROC_SPAWN"]
+# CAP_LOG_EMIT is the sandbox seam's voice: a help-document worker that
+# crashes is contained and replaced, and that record must reach the log
+# rather than be refused into an audited denial that hides the crash.
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_FS_ACCESS", "CAP_PROC_SPAWN", "CAP_LOG_EMIT"]
 # This bundle's own 256x256 icon master in its Resources/ (plans/ICONS.md).
 library-icon = "man.png"

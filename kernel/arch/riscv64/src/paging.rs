@@ -874,6 +874,17 @@ impl TlbShootdown for AddressSpace {
             invalidate_all_local();
         }
     }
+
+    fn publish_mappings(&mut self, _start_vaddr: u64, page_count: usize) {
+        // Sv39 permits an implementation to cache invalid entries, so
+        // making a leaf valid genuinely needs the fence — this port cannot
+        // publish an installation with a bare barrier the way aarch64 can.
+        // One whole-hart fence covers the range; the scheduler never runs
+        // one space on two harts at once, so no remote fence is owed.
+        if page_count != 0 {
+            invalidate_all_local();
+        }
+    }
 }
 
 /// Invalidate the *calling* hart's cached Sv39 translation for the 4 KiB

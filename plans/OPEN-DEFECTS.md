@@ -3143,3 +3143,39 @@ x86_64-only protocol defect.
 shootdown from a CPU with interrupts masked while a second CPU initiates
 concurrently, and the precondition wording added to the HAL contract for this
 entry is deleted (§2.14) because the protocol no longer needs it.
+
+## D53 — kernel-heap grow/shrink thrash now costs per-page work (OPEN, reachability unconfirmed)
+
+**Mechanism.** `kalloc` hands a grown region back to its source the instant
+the region drains, with no hysteresis. That was free when the source was one
+`alloc_order` / `free_order` pair. Since the fragmentation-immune growth
+landed (`plans/FIX-KHEAP.md`) a region costs work proportional to its page
+count: at the 16-page growth granule an alloc/free cycle that spills out of
+the bootstrap region pays 16 page-table installs, 16 teardowns, 16
+system-wide invalidations and 16 frame frees — where it previously paid two
+frame operations. `lib/kalloc`'s own
+`grow_shrink_cycles_are_stable_and_reuse_space` test exercises exactly that
+pattern and shows one grow *and* one shrink per allocation over 1000 rounds.
+
+**Why it is recorded rather than fixed.** The regression bites only while the
+heap is serving allocations out of *grown* regions — i.e. once the 64 MiB
+bootstrap region is exhausted. Nothing observed so far establishes that the
+system reaches that state: if it did, every small kernel allocation would
+thrash and the whole machine would crawl, not one application. Building a
+retention cache for a path that is not known to be hot is the speculative
+optimisation the charter forbids, so the cost is stated here with its
+arithmetic instead of guessed at.
+
+**The fix, when it is confirmed.** Hysteresis where the cost lives: the
+growth source keeps one granule-sized chunk mapped instead of tearing it
+down, and hands it back on the next grow that fits. Retention is then bounded
+by one growth granule rather than by the largest region ever grown, which is
+what makes it acceptable against "an idle system does not hold memory it has
+freed"; a larger region amortises its own mapping against the allocation that
+needed it and is still returned promptly. Validating a retained run without
+releasing its address space needs a non-mutating `SlotWindow` query
+(`AnonWindowMap::validate`'s counterpart).
+
+**Confirming it.** Instrument the source's grow/shrink counts over a desktop
+session and check whether the heap is serving small allocations from grown
+regions at all. Fix only if it is.

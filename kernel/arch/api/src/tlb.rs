@@ -78,6 +78,28 @@ pub trait TlbShootdown {
             vaddr = vaddr.wrapping_add(PAGE_BYTES);
         }
     }
+
+    /// Make `page_count` freshly *installed* leaves from `start_vaddr`
+    /// visible to the table walker, **without invalidating anything**.
+    ///
+    /// This is the not-present-to-present half of a page-table edit, and it
+    /// is not a flush: a leaf that was absent cannot be stale in any TLB, so
+    /// what the walker needs is the table store *ordered* ahead of the next
+    /// access, not a discard of cached translations. Keeping it distinct
+    /// matters because the invalidation a port issues for a real flush can
+    /// be far more expensive than the barrier — on aarch64 the range flush
+    /// is a whole-domain `tlbi vmalle1is` broadcast, which turns a mapping
+    /// installation into a system-wide TLB wipe.
+    ///
+    /// The default is the range flush: always correct, merely heavier. Each
+    /// port overrides it with the cheapest sequence its ISA permits —
+    /// aarch64 with a store barrier alone, x86_64 with nothing at all (a
+    /// not-present entry is never cached and its store is already ordered
+    /// for the walker), riscv64 keeping the fence its ISA requires because
+    /// it permits caching invalid entries.
+    fn publish_mappings(&mut self, start_vaddr: u64, page_count: usize) {
+        self.flush_range(start_vaddr, page_count);
+    }
 }
 
 /// The TLB-shootdown conformance vertical.
@@ -98,8 +120,8 @@ pub mod conformance {
     ///
     /// Flushes `vaddr`, a misaligned address in the same page, the zero
     /// page, the top page, an empty range, and a representative multi-page
-    /// range — proving the port accepts every contract shape and never
-    /// panics.
+    /// range, then publishes an empty and a multi-page installation —
+    /// proving the port accepts every contract shape and never panics.
     pub fn run_all<T: TlbShootdown + ?Sized>(tlb: &mut T, vaddr: u64) {
         tlb.flush_page(vaddr);
         tlb.flush_page(vaddr | 0xFFF);
@@ -107,6 +129,8 @@ pub mod conformance {
         tlb.flush_page(0xFFFF_FFFF_FFFF_F000);
         tlb.flush_range(vaddr, 0);
         tlb.flush_range(vaddr, 3);
+        tlb.publish_mappings(vaddr, 0);
+        tlb.publish_mappings(vaddr | 0xFFF, 3);
     }
 
     #[cfg(test)]
@@ -133,14 +157,30 @@ pub mod conformance {
         fn suite_drives_every_flush_over_a_faithful_tlb() {
             let mut tlb = CountingTlb::default();
             run_all(&mut tlb, 0x10_0000_0000);
-            assert_eq!(tlb.flushes, 7, "the default range issues per-page flushes");
+            assert_eq!(
+                tlb.flushes, 10,
+                "four single pages, the default range's three, and the \
+                 default publish's three"
+            );
 
             // And over the object-safe erasure the per-process façade and
             // the kernel registry both rely on.
             let mut dynamic = CountingTlb::default();
             let erased: &mut dyn TlbShootdown = &mut dynamic;
             run_all(erased, 0x10_0000_0000);
-            assert_eq!(dynamic.flushes, 7);
+            assert_eq!(dynamic.flushes, 10);
+        }
+
+        #[test]
+        fn publishing_an_installation_defaults_to_the_range_flush() {
+            // A port that overrides nothing must still be correct: the
+            // default publishes by invalidating, which can only
+            // over-invalidate.
+            let mut tlb = CountingTlb::default();
+            tlb.publish_mappings(0x4000_0FFF, 4);
+            assert_eq!(tlb.flushes, 4);
+            tlb.publish_mappings(0x4000_0000, 0);
+            assert_eq!(tlb.flushes, 4, "an empty installation publishes nothing");
         }
     }
 }

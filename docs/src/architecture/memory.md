@@ -2253,7 +2253,14 @@ into one run of a kernel **remap window**.
   (`CrossCpuTlbShootdown::shootdown_range`), and only then hands the
   recovered frames back — so no stale translation can alias reallocated
   memory, and a large region does not pay one inter-processor round-trip per
-  4 KiB leaf.
+  4 KiB leaf. A batch that tore down no leaf skips it.
+- **Installing a leaf synchronises nothing.** A not-present entry is never
+  cached, so a fresh mapping owes the walker *ordering*, not invalidation:
+  `TlbShootdown::publish_mappings` is a store barrier on aarch64, a no-op on
+  x86_64, and the fence Sv39 requires on riscv64. Using the range *flush*
+  here instead issued a whole-domain `tlbi vmalle1is` broadcast per chunk,
+  so growth got more expensive the more fragmented the pool became — the
+  opposite of the point.
 - **Placement bookkeeping is heap-free** (`kernel/mem::kvslots`). Growth runs
   *inside* the global heap's own non-reentrant lock, so it must allocate
   nothing from that heap: `AnonWindowMap` (§7f) keeps its state in

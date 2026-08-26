@@ -16,6 +16,12 @@
 #     adopt a change over the pinboard IPC channel.
 #   - CAP_SHM to create and grant the zero-copy window frame region the
 #     desktop session maps.
+#   - CAP_LOG_EMIT for the one placement-timing record it emits per render
+#     and for the sandbox seam's containment record. Without it the kernel
+#     refuses the emit, so the diagnostic that would name a worker crash is
+#     replaced by an audited denial — the failure is hidden rather than
+#     reported. It is part of the interactive session baseline, so the
+#     effective set still narrows to the launching user's grants.
 #   - CAP_PROC_SPAWN to host its own thumbnail-rendering sandbox worker: a
 #     restricted spawn of this same binary in its worker role, which the
 #     kernel brands capability-empty, so the untrusted wallpaper decode never
@@ -32,7 +38,7 @@ kind = "application"
 # about itself (plans/NEW-TASKBAR.md).
 purpose = "Choose the desktop backdrop"
 author = "The TAIRiX Project"
-capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_SHM", "CAP_PROC_SPAWN"]
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_SHM", "CAP_PROC_SPAWN", "CAP_LOG_EMIT"]
 # A windowed, user-facing application: list it in the desktop's program
 # library beside the other desktop-settings tools.
 library = "SystemTools"

@@ -76,13 +76,25 @@ release, retracting the cursor when a freed run reaches it, with its entry
 records drawn a frame at a time from the frame allocator. Record storage is
 bounded by live-plus-freed runs, never by the window's page count.
 
-**Teardown synchronises before it frees.** `unmap_run` unmaps a batch,
-issues one system-wide invalidation for the batch's range, and only then
-hands the recovered frames back — freeing first would leave a stale
-translation aliasing reallocated memory. `CrossCpuTlbShootdown` gained a
-range form for this (per-page on the default, one broadcast barrier on
-aarch64, one SBI RFENCE on riscv64, one IPI round-trip on x86_64), so a
+**Teardown synchronises before it frees; installation does not synchronise
+at all.** `unmap_run` unmaps a batch, issues one system-wide invalidation for
+the batch's range, and only then hands the recovered frames back — freeing
+first would leave a stale translation aliasing reallocated memory. A batch
+that tore down no leaf owes nothing and skips it. `CrossCpuTlbShootdown`
+gained a range form for this (per-page on the default, one broadcast barrier
+on aarch64, one SBI RFENCE on riscv64, one IPI round-trip on x86_64), so a
 large region does not pay one cross-CPU round-trip per 4 KiB leaf.
+
+Installing a leaf is the opposite case and must not be confused with it: a
+not-present entry is never cached, so what the walker needs is the table
+store *ordered*, not an invalidation. `TlbShootdown::publish_mappings` is
+that distinct operation — a store barrier on aarch64, nothing at all on
+x86_64, the fence riscv64's ISA requires because it permits caching invalid
+entries. Reaching for the range *flush* here instead cost a whole-domain
+`tlbi vmalle1is` broadcast per chunk on aarch64, so a fragmented pool's
+many-chunk growth wiped every TLB on every core once per chunk — the growth
+path's cost then rose with fragmentation, which is exactly what the design
+exists to stop.
 
 **Ordering.** `slots` is always locked before the remap map, on both paths;
 `shrink` releases the address space *first* (which accepts only an exact
