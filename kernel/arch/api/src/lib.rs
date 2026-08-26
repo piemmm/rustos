@@ -190,7 +190,9 @@ pub use context::{
     conformance as context_conformance, ContextSwitch, PrepareError, TaskContext, TaskEntry,
 };
 
-pub use mmu::{conformance as mmu_conformance, AddressSpace, BlockSplit, MapError, PageFlags};
+pub use mmu::{
+    conformance as mmu_conformance, AddressSpace, BlockSplit, KernelWindow, MapError, PageFlags,
+};
 
 pub use frames::{
     conformance as frames_conformance, reclaim_hierarchy, PageTableFrames, TableFrame,

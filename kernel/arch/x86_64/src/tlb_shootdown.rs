@@ -16,24 +16,36 @@
 //! never races itself across CPUs. The initiator:
 //!
 //! 1. spin-acquires the descriptor lock,
-//! 2. publishes the target virtual address and the number of CPUs it is
+//! 2. publishes the target virtual range and the number of CPUs it is
 //!    about to interrupt (the outstanding-acknowledge count),
 //! 3. raises a [`TLB_SHOOTDOWN_VECTOR`] IPI at each of those CPUs,
-//! 4. invalidates the page on *itself* with `invlpg`,
+//! 4. invalidates the range on *itself* with `invlpg`,
 //! 5. spins until every interrupted CPU has acknowledged (the count
 //!    reaches zero), then releases the lock.
 //!
 //! Each interrupted CPU runs `tairix_arch_x86_64_tlb_shootdown_dispatch`
-//! from the ISR: it reads the published address, runs `invlpg`, writes
-//! the LAPIC end-of-interrupt, and decrements the acknowledge count.
+//! from the ISR: it reads the published range, runs `invlpg` over it,
+//! writes the LAPIC end-of-interrupt, and decrements the acknowledge
+//! count. A *range* is published rather than a single page because a
+//! large page-table teardown otherwise pays one IPI round-trip per
+//! 4 KiB leaf; one round-trip covers the whole run instead.
 //!
-//! The spin in step 5 is a genuine, bounded synchronisation — every
-//! targeted CPU has interrupts enabled in the kernel idle/work loop and
-//! will service the IPI — not a "retry until it works" bring-up hack: under-invalidating (returning before a CPU has
-//! flushed) is the only failure mode, so the initiator *must* wait for
-//! the acknowledge. Deadlock is impossible because only the lock holder
-//! sends IPIs, and a CPU spinning to *acquire* the lock still services
-//! incoming shootdown IPIs (its interrupts are not masked).
+//! The spin in step 5 is a genuine, bounded synchronisation — a targeted
+//! CPU with interrupts enabled services the IPI — not a "retry until it
+//! works" bring-up hack: under-invalidating (returning before a CPU has
+//! flushed) is the only failure mode, so the initiator *must* wait for the
+//! acknowledge.
+//!
+//! # The masked-initiator precondition
+//!
+//! A CPU whose own interrupts are masked cannot acknowledge, so it must not
+//! be one of two concurrent initiators: the other would hold the mailbox
+//! waiting for an acknowledge that cannot come, while this one waits to
+//! acquire the mailbox. The kernel-heap teardown — the only production
+//! caller, and a masked one — satisfies this because the global heap lock
+//! that masks it also serialises it. Adding a second production initiator
+//! requires letting a target acknowledge from a spin as well as from its
+//! ISR (`plans/OPEN-DEFECTS.md` D52).
 //!
 //! # Host build
 //!
@@ -70,8 +82,10 @@ pub const TLB_SHOOTDOWN_VECTOR: u8 = 0x21;
 struct ShootdownMailbox {
     /// Spin flag: `true` while an initiator owns the descriptor.
     lock: AtomicBool,
-    /// The virtual address whose page every target must `invlpg`.
+    /// First page of the range every target must `invlpg`.
     vaddr: AtomicU64,
+    /// How many consecutive 4 KiB pages from `vaddr` to invalidate.
+    pages: AtomicUsize,
     /// Outstanding acknowledges; the initiator waits for this to reach 0.
     pending: AtomicUsize,
 }
@@ -80,25 +94,29 @@ struct ShootdownMailbox {
 static SHOOTDOWN: ShootdownMailbox = ShootdownMailbox {
     lock: AtomicBool::new(false),
     vaddr: AtomicU64::new(0),
+    pages: AtomicUsize::new(0),
     pending: AtomicUsize::new(0),
 };
 
-/// Invalidate the 4 KiB page containing `vaddr` on the calling CPU and on
-/// every CPU whose LAPIC ID `targets` yields, returning once all of them
-/// have acknowledged.
+/// Invalidate `pages` consecutive 4 KiB pages from the page containing
+/// `vaddr` on the calling CPU and on every CPU whose LAPIC ID `targets`
+/// yields, returning once all of them have acknowledged.
 ///
 /// `targets` must yield the *other* online CPUs' LAPIC ids (never the
-/// caller). An empty iterator degrades to a purely local `invlpg`. The
-/// iterator is taken `Clone` rather than as a `&[u8]` so the caller can
+/// caller). An empty iterator degrades to a purely local `invlpg` sweep.
+/// The iterator is taken `Clone` rather than as a `&[u8]` so the caller can
 /// stream the ids straight out of its caller-sized per-CPU map without a
 /// fixed `MAX_CPUS` scratch buffer; `shootdown` walks
 /// it twice — once to publish the acknowledge count, once to raise the
-/// IPIs — so it must be cheap to re-walk.
+/// IPIs — so it must be cheap to re-walk. A zero page count is a no-op.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-pub fn shootdown<I>(vaddr: u64, targets: I)
+pub fn shootdown<I>(vaddr: u64, pages: usize, targets: I)
 where
     I: Iterator<Item = u8> + Clone,
 {
+    if pages == 0 {
+        return;
+    }
     // Acquire the global descriptor. `Acquire` pairs with the `Release`
     // store in the unlock below so a previous shootdown's writes are
     // visible before this one reuses the mailbox.
@@ -110,12 +128,13 @@ where
         core::hint::spin_loop();
     }
 
-    // Publish the page and the acknowledge count *before* any IPI is
-    // raised. `vaddr` is stored with `Release` so the ISR's `Acquire`
-    // load synchronises-with it; the IPI send below is additionally an
-    // MMIO write (a strong ordering point), so a target never observes a
-    // stale address.
-    SHOOTDOWN.vaddr.store(vaddr, Ordering::Release);
+    // Publish the range and the acknowledge count *before* any IPI is
+    // raised. `vaddr`/`pages` are stored before `pending` with `Release`
+    // so the ISR's `Acquire` load of `pending` synchronises-with them; the
+    // IPI send below is additionally an MMIO write (a strong ordering
+    // point), so a target never observes a stale range.
+    SHOOTDOWN.vaddr.store(vaddr, Ordering::Relaxed);
+    SHOOTDOWN.pages.store(pages, Ordering::Release);
     SHOOTDOWN
         .pending
         .store(targets.clone().count(), Ordering::Release);
@@ -137,7 +156,7 @@ where
     }
 
     // Invalidate locally while the targets are flushing in parallel.
-    invlpg(vaddr);
+    invlpg_range(vaddr, pages);
 
     // Wait for every interrupted CPU to acknowledge. `Acquire` pairs with
     // the dispatcher's `Release` decrement so the remote `invlpg`s are
@@ -147,6 +166,18 @@ where
     }
 
     SHOOTDOWN.lock.store(false, Ordering::Release);
+}
+
+/// Invalidate the calling CPU's TLB entries for `pages` consecutive 4 KiB
+/// pages from the page containing `vaddr`.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+fn invlpg_range(vaddr: u64, pages: usize) {
+    const PAGE_BYTES: u64 = 4096;
+    let mut page = vaddr & !(PAGE_BYTES - 1);
+    for _ in 0..pages {
+        invlpg(page);
+        page = page.wrapping_add(PAGE_BYTES);
+    }
 }
 
 /// Invalidate the calling CPU's TLB entry for the page containing
@@ -170,7 +201,7 @@ fn invlpg(vaddr: u64) {
 
 /// Rust trampoline called by the shootdown ISR stub.
 ///
-/// Reads the published page, invalidates it on this CPU, writes the LAPIC
+/// Reads the published range, invalidates it on this CPU, writes the LAPIC
 /// end-of-interrupt, and decrements the outstanding-acknowledge count so
 /// the initiator can observe completion.
 ///
@@ -182,11 +213,12 @@ fn invlpg(vaddr: u64) {
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[no_mangle]
 unsafe extern "C" fn tairix_arch_x86_64_tlb_shootdown_dispatch(_regs: *mut SavedRegs) {
-    // `Acquire` pairs with the initiator's `Release` store of `pending`,
-    // which is published after `vaddr`, so the address read here is the
+    // `Acquire` pairs with the initiator's `Release` store of `pages`,
+    // which is published after `vaddr`, so the range read here is the
     // current one.
-    let vaddr = SHOOTDOWN.vaddr.load(Ordering::Acquire);
-    invlpg(vaddr);
+    let pages = SHOOTDOWN.pages.load(Ordering::Acquire);
+    let vaddr = SHOOTDOWN.vaddr.load(Ordering::Relaxed);
+    invlpg_range(vaddr, pages);
 
     // SAFETY: `LAPIC_EOI_OFFSET` is the architecturally-fixed EOI
     // register; writing `0` is the documented end-of-interrupt sequence

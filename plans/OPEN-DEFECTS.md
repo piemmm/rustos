@@ -619,8 +619,11 @@ its own per-CPU identity (fixed), D47 was a dropped argv[0] in the desktop's
 launch path that started a core component in the wrong role, behind a harness
 that measured the wrong slot (fixed), and D48 was a window request an app could
 build but the protocol had to refuse, dying in silence because a graphical
-elevation's `stderr` reaches no one (fixed). Do not collapse the
-open items into one change; land each on its own whole-project-green gate (§7).
+elevation's `stderr` reaches no one (fixed), and D52 is an x86_64 cross-CPU
+shootdown protocol defect that only became reachable once a production caller
+existed — the tree is safe by the current caller set, not by the protocol
+(open). Do not collapse the open items into one change; land each on its own
+whole-project-green gate (§7).
 
 ## Coupling to be aware of
 
@@ -3095,3 +3098,48 @@ is now a per-run output too.
   already exposes (§2.3/§2.4).
 - Do NOT mark any item done on a green compile alone — the tests and the
   §23 gate are the bar.
+
+## D52 — an x86_64 shootdown initiator that cannot take the IPI can deadlock (OPEN)
+
+**Mechanism.** `tairix_arch_x86_64::tlb_shootdown` reaches the other CPUs by
+raising an IPI at each and spinning until every one has acknowledged from its
+ISR. That protocol assumes each target *can* take the interrupt. A CPU that
+initiates a shootdown while its own interrupts are masked cannot acknowledge
+one, so two concurrent initiators can cycle: B holds the global mailbox and
+waits for A's acknowledge, while A — masked — waits to acquire the mailbox.
+Neither is a bug in isolation; the cycle needs both.
+
+**Why it surfaced now.** Until the fragmentation-immune kernel-heap growth
+landed (`plans/FIX-KHEAP.md`), nothing in production drove
+`CrossCpuTlbShootdown` at all — only the `cross_cpu_tlb_shootdown_qemu_*`
+verticals did. Kernel-heap teardown is the first production initiator, and it
+runs under the global heap lock, which masks interrupts for the whole hold.
+
+**Why the tree is safe today, and why that is not good enough.** That same
+heap lock serialises every instance of the only production initiator, so two
+initiators cannot coexist and the cycle cannot form. The safety therefore
+rests on the current *caller set*, not on the protocol — the moment a second
+production initiator lands (process address-space teardown is the obvious
+one, and the HAL exists for it) the cycle becomes reachable. The precondition
+is stated in `tairix_arch_api::CrossCpuTlbShootdown`'s contract and in the
+x86_64 module docs so a second caller reads it before adding one, but a
+stated precondition is a weaker guarantee than a protocol that cannot
+deadlock.
+
+**The fix.** Let a target acknowledge from a spin as well as from its ISR,
+exactly once: publish a generation counter last (after the range and the
+outstanding count), record per CPU the last generation it served, and have a
+CPU that is itself spinning to acquire the mailbox serve the in-flight
+request when its generation is new. The ISR does the same check, so a request
+served from the spin is not double-acknowledged when the pending IPI is later
+taken. x86_64 already carries `PerCpuStorage`, so the marker needs no new
+ceiling. aarch64 needs nothing (`tlbi vaae1is` is a hardware broadcast with
+no software acknowledge) and riscv64 needs nothing (the SBI RFENCE is served
+by the firmware in M-mode, which S-mode masking does not gate) — this is an
+x86_64-only protocol defect.
+
+**Definition of done.** The generation-marker protocol lands, the
+`cross_cpu_tlb_shootdown_qemu_x86_64` vertical is extended to drive a
+shootdown from a CPU with interrupts masked while a second CPU initiates
+concurrently, and the precondition wording added to the HAL contract for this
+entry is deleted (§2.14) because the protocol no longer needs it.

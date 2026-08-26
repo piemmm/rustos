@@ -129,7 +129,9 @@ static SPAWN_FRAME_SOURCE: Once<FrameTableSource> = Once::new();
 /// was poisoned by a panicking earlier attempt — [`FrameTableSource::new`]
 /// cannot panic, so this is unreachable in practice, but it is never
 /// papered over.
-fn page_table_source(frames: &'static FrameAllocator) -> Result<&'static FrameTableSource, Errno> {
+pub(crate) fn page_table_source(
+    frames: &'static FrameAllocator,
+) -> Result<&'static FrameTableSource, Errno> {
     SPAWN_FRAME_SOURCE
         .call_once_infallible(|| FrameTableSource::new(frames, &SPAWN_TABLE_PHYSMAP))
         .map_err(|_| Errno::NotImplemented)

@@ -594,6 +594,38 @@ impl KernelArch for BinArch {
         self.calibration.tsc_ticks_to_ns(ticks)
     }
 
+    fn install_kernel_remap(
+        arch: &'static Self,
+        frames: &'static tairix_kernel_mem::FrameAllocator,
+        physmap: &'static (dyn tairix_kernel_mem::PhysMap + Sync),
+    ) -> Option<&'static dyn tairix_kernel_mem::KernelVirtMap> {
+        // Reserve the highest free canonical PML4 slot as the growable
+        // kernel heap's remap window and hand back the neutral map over it.
+        // The window's shared PDPT — and every intermediate table a heap
+        // region needs — comes from the same allocator-backed page-table
+        // source the spawn path uses, so no fixed `.bss` pool caps how much
+        // the heap can grow. The port's own handle carries the IPI-based
+        // cross-CPU invalidation.
+        #[cfg(all(freestanding, kernel_isa = "x86_64"))]
+        {
+            // The frame source carries the direct physical map itself;
+            // `physmap` backs the *caller's* own bookkeeping.
+            let _ = physmap;
+            let tables = crate::x86_64::spawn_producer::page_table_source(frames).ok()?;
+            let window = tairix_arch_x86_64::paging::reserve_kernel_window(tables)?;
+            let space = tairix_arch_x86_64::paging::AddressSpace::new_kernel_window(tables)?;
+            let remap = alloc::boxed::Box::leak(alloc::boxed::Box::new(
+                tairix_kernel_mem::KernelRemap::new(window, space, arch.arch()),
+            ));
+            Some(remap)
+        }
+        #[cfg(not(all(freestanding, kernel_isa = "x86_64")))]
+        {
+            let _ = (arch, frames, physmap);
+            None
+        }
+    }
+
     fn direct_phys_map(&self) -> Option<&'static (dyn tairix_kernel_mem::PhysMap + Sync)> {
         // The higher-half kernel direct map through which the kernel reaches
         // any RAM frame the allocator hands out — the view the shared-memory

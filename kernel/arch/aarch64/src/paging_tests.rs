@@ -1150,3 +1150,84 @@ fn set_accessed_flag_in_root_only_touches_a_valid_cleared_leaf() {
     let leaf = host_leaf_descriptor(root, va).expect("mapped");
     assert_ne!(leaf & attrs::AF, 0, "AF must be set after the fault fix-up");
 }
+
+#[test]
+fn the_kernel_remap_window_sits_at_the_top_of_the_addressable_range() {
+    // `TCR_VALUE` sets `T0SZ = 25`, so `TTBR0_EL1` covers a 39-bit range
+    // with bits 63:39 clear — the window's base is spelled directly, with
+    // no sign extension, and must lie wholly inside it.
+    const VA_TOP: u64 = 1 << 39;
+    let base = kernel_window_base();
+    let window =
+        KernelWindow::new(base, KERNEL_WINDOW_PAGES).expect("the window extent is representable");
+
+    assert!(
+        base < VA_TOP,
+        "the window base is addressable through TTBR0"
+    );
+    assert_eq!(
+        base + window.len_bytes(),
+        VA_TOP,
+        "the window runs to the top of the translation regime"
+    );
+    assert_eq!(table_index(base, 1), KERNEL_WINDOW_FIRST_SLOT);
+    assert_eq!(
+        KERNEL_WINDOW_FIRST_SLOT + KERNEL_WINDOW_SLOTS,
+        ENTRIES_PER_TABLE,
+        "the window's slots are the top of the L1 table"
+    );
+    assert_eq!(base % (1 << 30), 0, "the base is gigapage-aligned");
+}
+
+#[test]
+fn ensure_identity_gigapage_refuses_a_kernel_window_slot() {
+    static POOL: PageTablePool = PageTablePool::new();
+    let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+
+    // Widening RAM into the window would shadow the remapped kernel heap
+    // with an identity block, so both ends of the window are refused.
+    let base = kernel_window_base();
+    let last = base + ((KERNEL_WINDOW_SLOTS as u64 - 1) << 30);
+    assert!(!space.ensure_identity_gigapage(base));
+    assert!(!space.ensure_identity_gigapage(last));
+    // A gigapage below the window is still widened normally.
+    assert!(space.ensure_identity_gigapage(64 << 30));
+}
+
+#[test]
+fn tearing_a_space_down_never_frees_the_shared_kernel_window_tables() {
+    // The window's L1 descriptors point at tables *every* root shares, so a
+    // teardown walk that treats them as this hierarchy's own would free the
+    // live kernel heap's page tables. Plant a descriptor in the window slots
+    // by hand — the reservation itself needs a live root — and prove the
+    // walk never reaches it.
+    static POOL: PageTablePool = PageTablePool::new();
+    let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+    let shared = POOL.alloc().expect("a stand-in shared window table");
+    let shared_phys = shared.as_ptr() as u64;
+
+    // SAFETY: `root_phys` names this space's live L1 table from the
+    // process-static pool; writing its own window slot is what every root
+    // constructor does once a window is reserved.
+    unsafe {
+        let root = &mut *(space.root_phys() as *mut [u64; ENTRIES_PER_TABLE]);
+        root[KERNEL_WINDOW_FIRST_SLOT] = table_descriptor(shared_phys);
+    }
+
+    // SAFETY: the space is not the active translation regime (the host has
+    // none), which is `reclaim_table_frames`' contract.
+    unsafe {
+        MmuAddressSpace::reclaim_table_frames(&mut space);
+    }
+    // The static pool never reuses a retired frame, so the shared table's
+    // survival is proven by the walk never having named it: the window slot
+    // is cleared before the descent.
+    // SAFETY: as above — reading the root's own window slot.
+    let slot = unsafe {
+        (*(space.root_phys() as *const [u64; ENTRIES_PER_TABLE]))[KERNEL_WINDOW_FIRST_SLOT]
+    };
+    assert_eq!(
+        slot, 0,
+        "the shared window descriptor was dropped, not walked"
+    );
+}

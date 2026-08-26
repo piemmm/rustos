@@ -143,6 +143,13 @@ impl PageFlags {
         }
     }
 
+    /// The union of two sets — the `const` counterpart of
+    /// [`core::ops::BitOr`], usable when building a flag constant.
+    #[must_use]
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
     /// `true` if the leaf is both writable and executable — the W^X
     /// violation a port may reject.
     #[must_use]
@@ -313,6 +320,87 @@ impl AccessTracking {
             Self::Supported => None,
             Self::Unsupported(reason) | Self::Pending(reason) => Some(reason),
         }
+    }
+}
+
+/// A run of kernel virtual address space a port guarantees is free of any
+/// other mapping **and** reachable from every address space it builds.
+///
+/// This is what makes a kernel `vmap` possible: growth that needs a
+/// virtually-contiguous range assembled from scattered physical chunks
+/// needs somewhere to assemble it, and — because kernel code runs with the
+/// *current task's* translation root active — that somewhere must resolve
+/// identically under every root. A port reserves the window by pointing
+/// the covering top-level table entry of every root it builds at one
+/// shared sub-hierarchy, so a leaf installed once is visible everywhere.
+///
+/// The window costs no RAM until something is mapped into it; only the
+/// shared sub-hierarchy's table frames are drawn up front.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct KernelWindow {
+    base: u64,
+    pages: usize,
+}
+
+impl KernelWindow {
+    /// Describe the window `[base, base + pages * 4 KiB)`.
+    ///
+    /// Returns `None` — never a truncated or wrapped window — unless
+    /// `base` is 4 KiB-aligned, `pages` is non-zero, and the byte span and
+    /// its exclusive top both fit the address width. A window ending
+    /// exactly at the top of the address space is therefore refused too,
+    /// so no consumer has to reason about wrapping arithmetic.
+    #[must_use]
+    pub const fn new(base: u64, pages: usize) -> Option<Self> {
+        const PAGE_BYTES: u64 = 4096;
+        if base & (PAGE_BYTES - 1) != 0 || pages == 0 {
+            return None;
+        }
+        // `usize as u64` is lossless on every target (`usize` is at most
+        // 64 bits), so the page count widens without a checked conversion.
+        let Some(span) = (pages as u64).checked_mul(PAGE_BYTES) else {
+            return None;
+        };
+        if base.checked_add(span).is_none() {
+            return None;
+        }
+        Some(Self { base, pages })
+    }
+
+    /// Lowest address in the window.
+    #[must_use]
+    pub const fn base(self) -> u64 {
+        self.base
+    }
+
+    /// Number of 4 KiB pages the window spans.
+    #[must_use]
+    pub const fn pages(self) -> usize {
+        self.pages
+    }
+
+    /// Byte length of the window. Never zero (a zero-page window is
+    /// refused at construction), so there is no emptiness to test.
+    #[must_use]
+    pub const fn len_bytes(self) -> u64 {
+        // Validated at construction, so the product cannot overflow.
+        (self.pages as u64) * 4096
+    }
+
+    /// `true` if `vaddr` lies inside the window.
+    #[must_use]
+    pub const fn contains(self, vaddr: u64) -> bool {
+        vaddr >= self.base && vaddr - self.base < self.len_bytes()
+    }
+
+    /// The 0-based page index of `vaddr` within the window, or `None` when
+    /// `vaddr` lies outside it.
+    #[must_use]
+    pub const fn page_index(self, vaddr: u64) -> Option<usize> {
+        if !self.contains(vaddr) {
+            return None;
+        }
+        Some(((vaddr - self.base) / 4096) as usize)
     }
 }
 
@@ -1097,5 +1185,34 @@ mod tests {
         // A Pending gap is honest but not release-ready.
         assert!(!pending.is_release_ready());
         assert_eq!(pending.detail(), Some("software AF fault in b1a"));
+    }
+
+    #[test]
+    fn kernel_window_refuses_a_misaligned_empty_or_overflowing_extent() {
+        assert_eq!(KernelWindow::new(0x4000_0001, 4), None);
+        assert_eq!(KernelWindow::new(0x4000_0000, 0), None);
+        // The exclusive top must be representable, so the very last page
+        // of the address space is refused rather than wrapped.
+        assert_eq!(KernelWindow::new(u64::MAX - 0xFFF, 1), None);
+        assert!(KernelWindow::new(u64::MAX - 0x1FFF, 1).is_some());
+    }
+
+    #[test]
+    fn kernel_window_locates_addresses_inside_it_only() {
+        let window = KernelWindow::new(0x80_0000_0000, 3).expect("valid window");
+        assert_eq!(window.base(), 0x80_0000_0000);
+        assert_eq!(window.pages(), 3);
+        assert_eq!(window.len_bytes(), 3 * 4096);
+
+        assert!(window.contains(0x80_0000_0000));
+        assert!(window.contains(0x80_0000_2FFF));
+        assert!(!window.contains(0x80_0000_3000), "the exclusive top");
+        assert!(!window.contains(0x7F_FFFF_FFFF), "one byte below");
+
+        assert_eq!(window.page_index(0x80_0000_0000), Some(0));
+        assert_eq!(window.page_index(0x80_0000_1FFF), Some(1));
+        assert_eq!(window.page_index(0x80_0000_2000), Some(2));
+        assert_eq!(window.page_index(0x80_0000_3000), None);
+        assert_eq!(window.page_index(0), None);
     }
 }

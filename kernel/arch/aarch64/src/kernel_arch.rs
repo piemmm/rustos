@@ -605,6 +605,12 @@ impl CrossCpuTlbShootdown for Aarch64Arch {
         // ordering the cross-CPU contract requires.
         crate::paging::invalidate_page_inner_shareable(vaddr);
     }
+
+    fn shootdown_range(&self, start_vaddr: u64, page_count: usize) {
+        // The broadcast is per page either way, so the range form's win is
+        // one barrier pair for the whole run instead of one per page.
+        crate::paging::invalidate_range_inner_shareable(start_vaddr, page_count);
+    }
 }
 
 impl SecondaryBringup for Aarch64Arch {

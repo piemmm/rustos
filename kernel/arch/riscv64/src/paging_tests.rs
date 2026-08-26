@@ -702,3 +702,81 @@ fn set_accessed_flag_in_root_respects_permission_and_clears() {
         "A must be set after the fault fix-up"
     );
 }
+
+#[test]
+fn the_kernel_remap_window_is_canonical_and_clear_of_the_identity_map() {
+    let base = kernel_window_base();
+    // Sv39 sign-extends from bit 38, so an upper-half window's base carries
+    // ones in bits 63:39; the bare `slot << 30` spelling would fault.
+    assert_eq!(base >> 39, u64::MAX >> 39, "the base is canonical");
+    assert_eq!(vpn_index(base, 2), KERNEL_WINDOW_FIRST_SLOT);
+    assert_eq!(base % (1 << 30), 0, "the base is gigapage-aligned");
+
+    let window =
+        KernelWindow::new(base, KERNEL_WINDOW_PAGES).expect("the window extent is representable");
+    // The identity map stops exactly where the window begins, so the two
+    // can never claim the same root slot.
+    assert_eq!(IDENTITY_GIGAPAGES, KERNEL_WINDOW_FIRST_SLOT);
+    // And the window stops one gigapage below the top of the address space,
+    // so its exclusive top is representable.
+    assert_eq!(
+        vpn_index(base + window.len_bytes() - 1, 2),
+        ENTRIES_PER_TABLE - 2
+    );
+}
+
+#[test]
+fn an_identity_space_leaves_the_kernel_window_slots_alone() {
+    static POOL: PageTablePool = PageTablePool::new();
+    let space =
+        AddressSpace::new_identity_gigapages(&POOL, IDENTITY_GIGAPAGES).expect("identity map");
+    let root = space.root_phys() as *const u64;
+    // SAFETY: `root_phys` is the address of a live table page from the
+    // process-static pool; reading its top entries is sound.
+    let (first_window, top) = unsafe {
+        (
+            *root.add(KERNEL_WINDOW_FIRST_SLOT),
+            *root.add(ENTRIES_PER_TABLE - 1),
+        )
+    };
+    // No window is reserved in a host test, so both stay invalid — the
+    // identity fill never reaches them.
+    assert_eq!(first_window & flags::VALID, 0);
+    assert_eq!(
+        top & flags::VALID,
+        0,
+        "the topmost gigapage is never claimed"
+    );
+}
+
+#[test]
+fn tearing_a_space_down_never_frees_the_shared_kernel_window_tables() {
+    // The window's root entries point at tables *every* root shares, so a
+    // teardown walk that treats them as this hierarchy's own would free the
+    // live kernel heap's page tables. Plant an entry in the window slot by
+    // hand — the reservation itself needs a live root — and prove the walk
+    // never reaches it.
+    static POOL: PageTablePool = PageTablePool::new();
+    let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+    let shared = POOL.alloc().expect("a stand-in shared window table");
+    let shared_phys = shared.as_ptr() as u64;
+
+    // SAFETY: `root_phys` names this space's live root table from the
+    // process-static pool; writing its own window slot is what every root
+    // constructor does once a window is reserved.
+    unsafe {
+        let root = &mut *(space.root_phys() as *mut [u64; ENTRIES_PER_TABLE]);
+        root[KERNEL_WINDOW_FIRST_SLOT] = pte_from_phys(shared_phys, flags::VALID);
+    }
+
+    // SAFETY: the space is not the active translation regime (the host has
+    // none), which is `reclaim_table_frames`' contract.
+    unsafe {
+        MmuAddressSpace::reclaim_table_frames(&mut space);
+    }
+    // SAFETY: as above — reading the root's own window slot.
+    let slot = unsafe {
+        (*(space.root_phys() as *const [u64; ENTRIES_PER_TABLE]))[KERNEL_WINDOW_FIRST_SLOT]
+    };
+    assert_eq!(slot, 0, "the shared window entry was dropped, not walked");
+}

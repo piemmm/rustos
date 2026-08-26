@@ -52,7 +52,6 @@ use tairix_abi::{
 };
 use tairix_appload::{AppError, BundleContents, BundleStore, Clock, LoadedApp, Verifier};
 use tairix_crypto::{Ed25519PublicKey, Ed25519Signature, Sha256Stream};
-use tairix_kernel_mem::{MAX_ORDER, PAGE_SIZE};
 use tairix_log::Sink;
 use tairix_reclaim::{CacheBudget, MemoryPressure};
 use tairix_sync::RwLock;
@@ -244,24 +243,14 @@ impl AppStore {
 /// bound on untrusted volume contents, not a scalable capacity: a `Run`
 /// rxe or `Resources/` asset beyond it is a hostile or corrupt bundle and
 /// the whole load fails closed.
+///
+/// The figure is the store's own, and answers only to what a legitimate
+/// bundle file can be — it is deliberately independent of how the kernel
+/// heap obtains the contiguous buffer the file is read into
+/// (`plans/FIX-KHEAP.md`). Heap growth assembles a region out of as many
+/// physical chunks as the pool can offer, so the serviceable size is
+/// bounded by installed RAM, not by any allocator order.
 const BUNDLE_FILE_MAX: usize = 16 << 20;
-
-/// A bundle file is read whole into one contiguous heap buffer
-/// ([`FsBundleStore::read_file`]), so the kernel heap must be able to grow
-/// a region large enough to hold the largest one. The heap's frame-backed
-/// growth draws a single power-of-two frame block capped at
-/// [`MAX_ORDER`]; a `BUNDLE_FILE_MAX` request rounds up to the next power
-/// of two (allocator header + alignment push a full 16 MiB just over
-/// 4096 pages), so the largest growable block must be at least twice
-/// `BUNDLE_FILE_MAX`. This ties the two constants together at compile time
-/// so raising `BUNDLE_FILE_MAX` without a matching `MAX_ORDER` — which
-/// would silently reintroduce the load-fails-once-fragmented defect — does
-/// not build.
-const _: () = assert!(
-    (1usize << MAX_ORDER) * PAGE_SIZE >= 2 * BUNDLE_FILE_MAX,
-    "MAX_ORDER too small: the kernel heap cannot grow a region large enough \
-     to read a BUNDLE_FILE_MAX bundle file",
-);
 
 /// Largest total byte count of one bundle's hashed contents (32 MiB, the
 /// size of the whole `/System` store volume today). Bounds the kernel

@@ -109,11 +109,46 @@
 ///   (the x86 acknowledge spin, the aarch64 `dsb ish`/`isb`, the SBI
 ///   `remote_sfence_vma` completion).
 /// * Implementations must not panic for any `vaddr`.
+///
+/// # Precondition on a caller that cannot take an interrupt
+///
+/// A port whose shootdown needs the targets to *acknowledge* in software
+/// (x86_64 raises an IPI and waits) cannot be acknowledged by a CPU whose
+/// own interrupts are masked. Two such initiators can therefore cycle: one
+/// holds the shootdown mailbox waiting for the other's acknowledge, while
+/// the other — masked — waits to acquire the mailbox. So a caller that
+/// shoots down with interrupts masked must be the **only** initiator that
+/// can be in flight. The kernel-heap teardown
+/// (`tairix_kernel_mem::KernelVirtMap`) satisfies this because the global
+/// heap lock, which is what masks its interrupts, also serialises it.
+/// **Adding a second production initiator requires closing this first**
+/// (`plans/OPEN-DEFECTS.md` D52 carries the protocol fix).
 pub trait CrossCpuTlbShootdown {
     /// Invalidate every online CPU's cached translation for the 4 KiB
     /// page containing `vaddr`, returning once the invalidation is
     /// globally visible.
     fn shootdown_page(&self, vaddr: u64);
+
+    /// Invalidate every online CPU's cached translations for `page_count`
+    /// consecutive 4 KiB pages starting at the page containing
+    /// `start_vaddr`, returning once the invalidation is globally visible.
+    ///
+    /// A zero page count is a no-op. The default is the universally-correct
+    /// per-page sequence, mirroring [`crate::tlb::TlbShootdown::flush_range`];
+    /// a port whose invalidation carries a per-call cost the range can
+    /// amortise overrides it, so tearing a large kernel remapping down pays
+    /// one synchronisation boundary rather than one per leaf (a per-page IPI
+    /// round-trip over thousands of pages is a real cost, not a theoretical
+    /// one).
+    fn shootdown_range(&self, start_vaddr: u64, page_count: usize) {
+        const PAGE_BYTES: u64 = 4096;
+
+        let mut vaddr = start_vaddr & !(PAGE_BYTES - 1);
+        for _ in 0..page_count {
+            self.shootdown_page(vaddr);
+            vaddr = vaddr.wrapping_add(PAGE_BYTES);
+        }
+    }
 }
 
 /// The cross-CPU TLB-shootdown conformance vertical.
@@ -135,12 +170,15 @@ pub mod conformance {
     ///
     /// Shoots down `vaddr`, a misaligned address in the same page, the
     /// zero page, and the top page — proving the port accepts any address
-    /// and never panics.
+    /// and never panics — then the range form over an empty and a
+    /// multi-page span.
     pub fn run_all<T: CrossCpuTlbShootdown + ?Sized>(xtlb: &T, vaddr: u64) {
         xtlb.shootdown_page(vaddr);
         xtlb.shootdown_page(vaddr | 0xFFF);
         xtlb.shootdown_page(0);
         xtlb.shootdown_page(0xFFFF_FFFF_FFFF_F000);
+        xtlb.shootdown_range(vaddr, 0);
+        xtlb.shootdown_range(vaddr | 0xFFF, 3);
     }
 
     #[cfg(test)]
@@ -171,15 +209,43 @@ pub mod conformance {
             run_all(&xtlb, 0x10_0000_0000);
             assert_eq!(
                 xtlb.shootdowns.load(Ordering::Relaxed),
-                4,
-                "the suite issues four shootdowns"
+                7,
+                "four single pages plus the default range's three"
             );
 
             // And over the object-safe erasure the kernel holds it behind.
             let dynamic = CountingXtlb::default();
             let erased: &dyn CrossCpuTlbShootdown = &dynamic;
             run_all(erased, 0x10_0000_0000);
-            assert_eq!(dynamic.shootdowns.load(Ordering::Relaxed), 4);
+            assert_eq!(dynamic.shootdowns.load(Ordering::Relaxed), 7);
+        }
+
+        #[test]
+        fn the_default_range_rounds_down_and_walks_consecutive_pages() {
+            /// Records the exact addresses the default range issues, so a
+            /// port that overrides it can be checked against the same
+            /// contract.
+            #[derive(Default)]
+            struct RecordingXtlb {
+                seen: core::cell::RefCell<[u64; 4]>,
+                count: core::cell::Cell<usize>,
+            }
+
+            impl CrossCpuTlbShootdown for RecordingXtlb {
+                fn shootdown_page(&self, vaddr: u64) {
+                    let n = self.count.get();
+                    self.seen.borrow_mut()[n] = vaddr;
+                    self.count.set(n + 1);
+                }
+            }
+
+            let xtlb = RecordingXtlb::default();
+            xtlb.shootdown_range(0x4000_0FFF, 3);
+            assert_eq!(xtlb.count.get(), 3);
+            assert_eq!(
+                xtlb.seen.borrow()[..3],
+                [0x4000_0000, 0x4000_1000, 0x4000_2000]
+            );
         }
     }
 }

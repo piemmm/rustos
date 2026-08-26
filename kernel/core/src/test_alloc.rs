@@ -19,23 +19,41 @@
 //! test binaries never link this allocator.
 
 use core::alloc::{GlobalAlloc, Layout};
-use core::sync::atomic::{AtomicIsize, Ordering};
+use core::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
 
 use std::alloc::System;
 use std::cell::Cell;
 
-/// One measurement's net allocated-but-not-freed byte balance.
+/// One measurement's allocator activity: the net allocated-but-not-freed
+/// byte balance, and how many allocations were made.
 ///
 /// A test leaks one of these (`Box::leak`, the established fixture pattern)
-/// and opts its own threads into it; no other test can touch it.
+/// and opts its own threads into it; no other test can touch it. Two
+/// distinct questions are asked of the host allocator: a leak soak wants the
+/// net balance, while the kernel-heap growth path must prove it makes *no*
+/// allocation at all (its production caller holds the very heap's
+/// non-reentrant lock), which a net balance of zero would not establish.
 #[derive(Debug, Default)]
-pub struct LiveBytes(AtomicIsize);
+pub struct LiveBytes {
+    net: AtomicIsize,
+    allocations: AtomicUsize,
+}
 
 impl LiveBytes {
     /// A zeroed balance.
     #[must_use]
     pub const fn new() -> Self {
-        Self(AtomicIsize::new(0))
+        Self {
+            net: AtomicIsize::new(0),
+            allocations: AtomicUsize::new(0),
+        }
+    }
+
+    /// How many allocations (including reallocations) the opted-in threads
+    /// have made since this balance was created.
+    #[must_use]
+    pub fn allocations(&self) -> usize {
+        self.allocations.load(Ordering::SeqCst)
     }
 
     /// Net bytes currently allocated-but-not-freed by the threads opted
@@ -46,7 +64,7 @@ impl LiveBytes {
     /// small, stated slack.
     #[must_use]
     pub fn net(&self) -> isize {
-        self.0.load(Ordering::SeqCst)
+        self.net.load(Ordering::SeqCst)
     }
 }
 
@@ -82,7 +100,16 @@ pub fn opt_out_current_thread() {
 /// the TLS slot is gone, is simply not counted instead of aborting.
 fn record(delta: isize) {
     if let Some(counter) = PARTICIPATING.try_with(Cell::get).ok().flatten() {
-        counter.0.fetch_add(delta, Ordering::SeqCst);
+        counter.net.fetch_add(delta, Ordering::SeqCst);
+    }
+}
+
+/// Charge one allocation to the current thread's balance, if it opted into
+/// one. Counted separately from the byte delta because a reallocation that
+/// shrinks still *is* an allocation.
+fn record_alloc() {
+    if let Some(counter) = PARTICIPATING.try_with(Cell::get).ok().flatten() {
+        counter.allocations.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -107,6 +134,7 @@ unsafe impl GlobalAlloc for CountingAlloc {
         let ptr = unsafe { System.alloc(layout) };
         if !ptr.is_null() {
             record(size_delta(layout.size()));
+            record_alloc();
         }
         ptr
     }
@@ -116,6 +144,7 @@ unsafe impl GlobalAlloc for CountingAlloc {
         let ptr = unsafe { System.alloc_zeroed(layout) };
         if !ptr.is_null() {
             record(size_delta(layout.size()));
+            record_alloc();
         }
         ptr
     }
@@ -131,6 +160,7 @@ unsafe impl GlobalAlloc for CountingAlloc {
         let new_ptr = unsafe { System.realloc(ptr, layout, new_size) };
         if !new_ptr.is_null() {
             record(size_delta(new_size) - size_delta(layout.size()));
+            record_alloc();
         }
         new_ptr
     }

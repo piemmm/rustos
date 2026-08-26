@@ -484,6 +484,10 @@ impl SchedulerArch for X86_64Arch {
 
 impl CrossCpuTlbShootdown for X86_64Arch {
     fn shootdown_page(&self, vaddr: u64) {
+        self.shootdown_range(vaddr, 1);
+    }
+
+    fn shootdown_range(&self, start_vaddr: u64, page_count: usize) {
         #[cfg(all(target_arch = "x86_64", target_os = "none"))]
         {
             // Stream the LAPIC ids of every *other* online CPU straight
@@ -501,13 +505,16 @@ impl CrossCpuTlbShootdown for X86_64Arch {
                 }
                 self.lapic_id_of(cpu)
             });
-            crate::tlb_shootdown::shootdown(vaddr, targets);
+            // One IPI round-trip covers the whole range: `invlpg` is
+            // per-page but the acknowledge protocol is what costs, so a
+            // large teardown must not pay it once per leaf.
+            crate::tlb_shootdown::shootdown(start_vaddr, page_count, targets);
         }
         #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
         {
             // Host: no second CPU and no TLB; the conformance vertical
             // only checks the call is total and panic-free.
-            let _ = vaddr;
+            let _ = (start_vaddr, page_count);
         }
     }
 }

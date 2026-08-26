@@ -2215,6 +2215,76 @@ alongside: it was unbounded, scanned linearly, never shrank under
 pressure, was invisible to the reclaim ledger, and never wiped rendered
 user data.
 
+## 7u. Kernel remap window and heap growth (`kvmap`, `kvslots`)
+
+The kernel heap adds whole regions as it grows, and one allocation must fit
+inside one region, so growth needs a *virtually contiguous* run. Drawing
+that run as a single physically contiguous buddy block has three
+consequences, and all three were defects (`plans/FIX-KHEAP.md`):
+
+- growth fails on a fragmented pool even when tens of gigabytes are free,
+  because no large *contiguous* block exists;
+- rounding the request up to a power of two wastes up to twice the bytes
+  asked for;
+- the largest serviceable single allocation is welded to `MAX_ORDER` rather
+  than to installed RAM.
+
+`kernel/mem::kvmap` removes all three by requiring *virtual* contiguity
+only: a region is drawn as the **exact page count** rounded to a page and
+assembled from as many `<= MAX_ORDER` chunks as the pool can offer, mapped
+into one run of a kernel **remap window**.
+
+- **The window is shared by every root.** Kernel code runs with the current
+  task's translation root active, so a kernel address must resolve
+  identically under all of them. Each port therefore points the covering
+  top-level entry of every root it builds at one shared sub-hierarchy
+  (`reserve_kernel_window`, installed by every root constructor and patched
+  into the live boot root), and installs leaves through a root that maps
+  *only* the window. A leaf added once is visible everywhere; the handle
+  can reach nothing outside the window. Placement comes from each port's VA
+  layout — the top eighth of the `TTBR0_EL1` / Sv39 range, the highest free
+  canonical PML4 slot on x86_64 — and costs no RAM until something is
+  backed into it.
+- **Leaves are `RW`, never executable** (`AGENTS.md` §19.2), kernel-only,
+  and their intermediate tables come from the allocator-backed page-table
+  frame source, so no fixed `.bss` pool bounds how far the heap can grow.
+- **Teardown synchronises before it frees.** `unmap_run` unmaps a batch,
+  issues **one** system-wide invalidation for the batch's range
+  (`CrossCpuTlbShootdown::shootdown_range`), and only then hands the
+  recovered frames back — so no stale translation can alias reallocated
+  memory, and a large region does not pay one inter-processor round-trip per
+  4 KiB leaf.
+- **Placement bookkeeping is heap-free** (`kernel/mem::kvslots`). Growth runs
+  *inside* the global heap's own non-reentrant lock, so it must allocate
+  nothing from that heap: `AnonWindowMap` (§7f) keeps its state in
+  `BTreeMap`s and would deadlock here. `SlotWindow` is its counterpart — one
+  address-sorted boundary-tag list covering everything below a bump cursor,
+  first-fit with splitting, coalescing on release, retracting the cursor when
+  a freed run reaches it — with its entry records drawn a frame at a time
+  from the physical frame allocator. Record storage is bounded by the number
+  of live plus freed runs, never by the window's page count (§24.1), and a
+  heap that grows and fully drains leaves the window pristine.
+- **Fail closed, leak nothing.** A refused reservation, a refused leaf, or
+  genuine frame exhaustion returns every chunk already drawn and releases the
+  address space; `shrink` accepts only an exact live run, so a mismatched
+  `(base, len)` frees nothing. Growth draws through the *kernel* commit path
+  (`alloc_order`), so it may use the kernel reserve and keeps making progress
+  under user memory pressure.
+- **Tested.** `kvslots` host-unit tests (cursor growth, first-fit reuse and
+  split, two-sided coalescing, cursor retraction, exact-match release,
+  record recycling, arena growth past one frame, fail-closed record
+  exhaustion); `kvmap` host-unit tests (chunk mapping, W^X and kernel-only
+  leaves, out-of-window refusal, whole-chunk rollback, multi-chunk frame
+  recovery, batched invalidation before every free); and `kernel/core::kheap`
+  host-unit tests over a non-allocating page-table double — growth across a
+  deliberately fragmented pool with no four-frame contiguous block *and* a
+  region larger than one `MAX_ORDER` block, a region spanning several such
+  blocks, sub-page waste, fail-closed exhaustion and window exhaustion,
+  refused mismatched shrink, address-space reuse, and a counting-allocator
+  proof that neither `grow` nor `shrink` performs a single global-heap
+  allocation. The end-to-end dereference is proven on the metal by every
+  QEMU vertical: the kernel cannot complete boot unless the window works.
+
 ## 8. Testing strategy
 
 - **Unit tests** — alongside each module under `#[cfg(all(test, not(loom)))]`:

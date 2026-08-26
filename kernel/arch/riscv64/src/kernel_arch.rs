@@ -378,26 +378,38 @@ impl SchedulerArch for RiscvArch {
 
 impl CrossCpuTlbShootdown for RiscvArch {
     fn shootdown_page(&self, vaddr: u64) {
-        // Invalidate the calling hart locally first: the SBI remote
-        // fence below covers only the *other* harts, never the caller.
-        // Both the local flush and this share the one sequence.
-        crate::paging::invalidate_page_local(vaddr);
+        self.shootdown_range(vaddr, 1);
+    }
+
+    fn shootdown_range(&self, start_vaddr: u64, page_count: usize) {
+        if page_count == 0 {
+            return;
+        }
+        // Invalidate the calling hart locally first: the SBI remote fence
+        // below covers only the *other* harts, never the caller. Both the
+        // local flush and this share the one sequence.
+        crate::paging::invalidate_range_local(start_vaddr, page_count);
 
         #[cfg(all(target_arch = "riscv64", target_os = "none"))]
         {
             // Reach every *other* online hart through the SBI RFENCE
-            // firmware call. `remote_sfence_vma` returns only once those
-            // harts have fenced, so the firmware performs the remote
-            // acknowledge — there is no software ack loop (cf. the
-            // x86_64 IPI path). A malformed mask returns an SBI error
-            // the caller cannot act on, so it is dropped (over-/under-
-            // fencing the *remote* set cannot corrupt the local map).
+            // firmware call. `remote_sfence_vma` takes a byte *range* and
+            // returns only once those harts have fenced, so one call
+            // covers the whole run and the firmware performs the remote
+            // acknowledge — there is no software ack loop (cf. the x86_64
+            // IPI path). A malformed mask returns an SBI error the caller
+            // cannot act on, so it is dropped (over-/under-fencing the
+            // *remote* set cannot corrupt the local map).
             let me = SchedulerArch::current_cpu(self);
             // `usize::try_from` rather than `as`: an address never exceeds
             // `usize` on riscv64, so the `Err` arm is unreachable, but the
             // checked conversion keeps the cast lint-clean without an
             // `#[allow]`.
-            let Ok(page) = usize::try_from(vaddr & !(crate::paging::PAGE_SIZE as u64 - 1)) else {
+            let Ok(page) = usize::try_from(start_vaddr & !(crate::paging::PAGE_SIZE as u64 - 1))
+            else {
+                return;
+            };
+            let Some(size) = page_count.checked_mul(crate::paging::PAGE_SIZE) else {
                 return;
             };
             // Iterate the caller-sized per-CPU map, not a fixed ceiling.
@@ -408,8 +420,7 @@ impl CrossCpuTlbShootdown for RiscvArch {
                 }
                 if let Some(hartid) = self.hartid_of(cpu) {
                     let (mask, base) = crate::sbi::hart_mask_for(hartid);
-                    let _ =
-                        crate::sbi::remote_sfence_vma(mask, base, page, crate::paging::PAGE_SIZE);
+                    let _ = crate::sbi::remote_sfence_vma(mask, base, page, size);
                 }
             }
         }
@@ -418,7 +429,7 @@ impl CrossCpuTlbShootdown for RiscvArch {
             // Host: the local helper above was a vacuous no-op and there
             // is no firmware to call; the conformance vertical asserts
             // only that the call is total and panic-free.
-            let _ = vaddr;
+            let _ = start_vaddr;
         }
     }
 }

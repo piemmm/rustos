@@ -33,7 +33,7 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use tairix_arch_api::frames::{reclaim_hierarchy, PageTableFrames, TableFrame};
 use tairix_arch_api::mmu::{
-    AccessTracking, AddressSpace as MmuAddressSpace, BlockSplit, MapError, PageFlags,
+    AccessTracking, AddressSpace as MmuAddressSpace, BlockSplit, KernelWindow, MapError, PageFlags,
 };
 use tairix_arch_api::tlb::TlbShootdown;
 
@@ -578,6 +578,124 @@ pub const fn identity_gigapage_leaf(device: bool, ram: bool) -> Option<u64> {
     }
 }
 
+/// L1 slots the kernel remap window claims, at the very top of the
+/// `TTBR0_EL1` range.
+///
+/// Sized from the port's VA layout rather than from a byte figure: the
+/// translation regime spans [`ENTRIES_PER_TABLE`] gigapages, and the window
+/// takes the top eighth of them (64 GiB). Address space is free until
+/// something is backed into it, so the only cost of a generous window is
+/// one shared L2 table per slot; what the size bounds is the kernel heap,
+/// and on any machine this port runs on installed RAM binds long before
+/// 64 GiB of kernel heap does.
+const KERNEL_WINDOW_SLOTS: usize = ENTRIES_PER_TABLE / 8;
+
+/// First L1 slot of the kernel remap window.
+const KERNEL_WINDOW_FIRST_SLOT: usize = ENTRIES_PER_TABLE - KERNEL_WINDOW_SLOTS;
+
+/// Pages the kernel remap window spans.
+const KERNEL_WINDOW_PAGES: usize = KERNEL_WINDOW_SLOTS * ENTRIES_PER_TABLE * ENTRIES_PER_TABLE;
+
+/// The window's shared L1 table descriptors, one per claimed slot, or `0`
+/// before [`reserve_kernel_window`] runs.
+///
+/// Every root this port builds installs these, so a leaf added under one of
+/// the shared L2 tables they point at resolves identically whichever root
+/// is active — the property that lets kernel code reach a remapped kernel
+/// address while a user task's root is loaded.
+static KERNEL_WINDOW_L1: [AtomicU64; KERNEL_WINDOW_SLOTS] =
+    [const { AtomicU64::new(0) }; KERNEL_WINDOW_SLOTS];
+
+/// Base virtual address of the kernel remap window.
+#[must_use]
+pub const fn kernel_window_base() -> u64 {
+    (KERNEL_WINDOW_FIRST_SLOT as u64) << 30
+}
+
+/// A window whose extent is not representable is refused at run time, which
+/// would silently leave the kernel heap on its bootstrap region. Fail the
+/// build instead.
+const _: () = assert!(
+    KernelWindow::new(kernel_window_base(), KERNEL_WINDOW_PAGES).is_some(),
+    "the kernel remap window must be a representable extent"
+);
+
+/// Reserve the kernel remap window: draw one shared L2 table per claimed
+/// L1 slot, publish the descriptors every root installs, and patch them
+/// into the live root so the running CPUs see the window immediately.
+///
+/// Called once, from the boot path, after the frame allocator exists (the
+/// tables come from it, not from the fixed boot pool). A second call
+/// returns the same window without drawing anything.
+///
+/// Returns `None`, having changed nothing, when a claimed slot is already
+/// spoken for by the discovered Device or RAM mask — a machine whose
+/// hardware reaches into the top of the translation regime gets no remap
+/// window rather than a window that would shadow its RAM or MMIO (fail
+/// closed) — or when the frame source cannot supply the shared tables.
+pub fn reserve_kernel_window(frames: &'static dyn PageTableFrames) -> Option<KernelWindow> {
+    let window = KernelWindow::new(kernel_window_base(), KERNEL_WINDOW_PAGES)?;
+    if KERNEL_WINDOW_L1[0].load(Ordering::Acquire) != 0 {
+        return Some(window);
+    }
+    for offset in 0..KERNEL_WINDOW_SLOTS {
+        let slot = KERNEL_WINDOW_FIRST_SLOT + offset;
+        if configured_gigapage_is_device(slot) || configured_gigapage_is_ram(slot) {
+            return None;
+        }
+    }
+
+    for (offset, slot) in KERNEL_WINDOW_L1.iter().enumerate() {
+        let Some(TableFrame { phys, entries: _ }) = frames.alloc_table() else {
+            // Undo the partial reservation so a retry starts clean.
+            for undone in KERNEL_WINDOW_L1.iter().take(offset) {
+                frames.free_table(phys_from_descriptor(undone.swap(0, Ordering::AcqRel)));
+            }
+            return None;
+        };
+        slot.store(table_descriptor(phys), Ordering::Release);
+    }
+    install_kernel_window(active_root_phys());
+    Some(window)
+}
+
+/// Install the published window descriptors into the root table at
+/// `root_phys`, or do nothing when no window is reserved (or `root_phys` is
+/// zero, which is what the host build and a pre-MMU caller report).
+fn install_kernel_window(root_phys: u64) {
+    if root_phys == 0 {
+        return;
+    }
+    // SAFETY: a non-zero root physical address names this port's own live
+    // L1 table, which the identity map makes directly dereferenceable; the
+    // only entries written are the window's own slots, which no other
+    // writer touches.
+    let root = unsafe { &mut *(root_phys as *mut [u64; ENTRIES_PER_TABLE]) };
+    install_kernel_window_slots(root);
+    publish_table_update();
+}
+
+/// Copy the published window descriptors into `root`'s top slots.
+///
+/// Every root constructor calls this, so a space built before *or* after
+/// the reservation ends up with the window (the boot root is patched in
+/// place by [`reserve_kernel_window`]). An invalid-to-valid table
+/// descriptor needs no TLB maintenance, only the store barrier the callers
+/// issue.
+fn install_kernel_window_slots(root: &mut [u64; ENTRIES_PER_TABLE]) {
+    for offset in 0..KERNEL_WINDOW_SLOTS {
+        let descriptor = KERNEL_WINDOW_L1[offset].load(Ordering::Acquire);
+        if descriptor != 0 {
+            root[KERNEL_WINDOW_FIRST_SLOT + offset] = descriptor;
+        }
+    }
+}
+
+/// `true` if L1 slot `index` belongs to the kernel remap window.
+const fn is_kernel_window_slot(index: usize) -> bool {
+    index >= KERNEL_WINDOW_FIRST_SLOT
+}
+
 /// Publish a translation-table store to the MMU's table walker before
 /// the next access depends on it: `dsb ishst` orders the store for the
 /// walker, `isb` discards any fetch-ahead made under the old tables.
@@ -1020,6 +1138,37 @@ impl AddressSpace {
             };
             *slot = descriptor(paddr, leaf);
         }
+        // Every root reaches the kernel remap window, so a kernel address
+        // in it resolves whichever root is active. Done here rather than at
+        // each call site so no future space can be built without it.
+        install_kernel_window_slots(root);
+        Some(Self {
+            root_phys,
+            root,
+            frames,
+        })
+    }
+
+    /// Build a root that maps **only** the kernel remap window — the handle
+    /// the kernel-heap remap layer edits the window's shared sub-hierarchy
+    /// through.
+    ///
+    /// The root is never activated: because the window's L1 descriptors
+    /// point at tables every other root shares, a leaf installed through
+    /// this space is immediately visible under all of them. Keeping it
+    /// separate means the remap layer draws its intermediate tables from the
+    /// frame allocator rather than from the fixed boot pool, and cannot
+    /// reach any address outside the window.
+    ///
+    /// # Errors
+    ///
+    /// Returns `None` if the frame source cannot supply the root table.
+    pub fn new_kernel_window(frames: &'static dyn PageTableFrames) -> Option<Self> {
+        let TableFrame {
+            phys: root_phys,
+            entries: root,
+        } = frames.alloc_table()?;
+        install_kernel_window_slots(root);
         Some(Self {
             root_phys,
             root,
@@ -1042,7 +1191,9 @@ impl AddressSpace {
     /// untouched and reported `true`.
     pub fn ensure_identity_gigapage(&mut self, paddr: u64) -> bool {
         let index = (paddr >> 30) as usize;
-        if index >= ENTRIES_PER_TABLE {
+        if index >= ENTRIES_PER_TABLE || is_kernel_window_slot(index) {
+            // A window slot is not identity address space; widening into it
+            // would shadow the remapped kernel heap. Fail closed.
             return false;
         }
         if (self.root[index] & attrs::VALID) != 0 {
@@ -1784,6 +1935,14 @@ impl MmuAddressSpace for AddressSpace {
         if active_root_phys() == self.root_phys && !park_kernel_root() {
             return;
         }
+        // The kernel remap window's L1 descriptors point at tables *every*
+        // root shares, not at tables this hierarchy owns, and the walk below
+        // cannot tell the two apart — it would free the live kernel heap's
+        // page tables. Drop them from this root first; the window itself is
+        // permanent and is reached through every other root unchanged.
+        for slot in self.root.iter_mut().skip(KERNEL_WINDOW_FIRST_SLOT) {
+            *slot = 0;
+        }
         let frames = self.frames;
         // A stage-1 hierarchy rooted at L1: an L1/L2 entry that is valid
         // and not a block is a table pointer; L3 (depth 2) entries are
@@ -1833,30 +1992,49 @@ impl TlbShootdown for AddressSpace {
 /// shootdowns are literally the same operation on aarch64 — there is one
 /// implementation, not two.
 pub(crate) fn invalidate_page_inner_shareable(vaddr: u64) {
+    invalidate_range_inner_shareable(vaddr, 1);
+}
+
+/// Invalidate, on every PE in the inner-shareable domain, the stage-1
+/// EL1&0 TLB entries for `pages` consecutive 4 KiB pages from `start_vaddr`
+/// (all ASIDs), paying one barrier pair for the whole range.
+///
+/// The single-page flush is this with `pages == 1`, so there is one
+/// invalidation sequence on this port rather than two. A bounded range —
+/// the kernel-heap teardown batch — costs one `tlbi` per page and one
+/// synchronisation, which beats both a per-page barrier pair and the
+/// whole-domain [`invalidate_all_inner_shareable`] sledgehammer.
+pub(crate) fn invalidate_range_inner_shareable(start_vaddr: u64, pages: usize) {
+    if pages == 0 {
+        return;
+    }
     #[cfg(all(target_arch = "aarch64", target_os = "none"))]
     {
         // SAFETY: `tlbi vaae1is` invalidates the inner-shareable TLB
         // entries for the page named by its operand (VA[55:12], all
-        // ASIDs); the `dsb`/`isb` barriers order the invalidation and
-        // make it visible before the next translation. It touches no
-        // memory and only discards a cached translation. No Rust
-        // spelling exists.
-        let va_page = vaddr >> 12;
+        // ASIDs); the leading `dsb ishst` orders the table stores before
+        // the invalidations and the trailing `dsb ish` + `isb` make them
+        // visible before the next translation. The sequence touches no
+        // memory and only discards cached translations. No Rust spelling
+        // exists.
         unsafe {
-            core::arch::asm!(
-                "dsb ishst",
-                "tlbi vaae1is, {page}",
-                "dsb ish",
-                "isb",
-                page = in(reg) va_page,
-                options(nostack, preserves_flags),
-            );
+            core::arch::asm!("dsb ishst", options(nostack, preserves_flags));
+            let mut va_page = start_vaddr >> 12;
+            for _ in 0..pages {
+                core::arch::asm!(
+                    "tlbi vaae1is, {page}",
+                    page = in(reg) va_page,
+                    options(nostack, preserves_flags),
+                );
+                va_page = va_page.wrapping_add(1);
+            }
+            core::arch::asm!("dsb ish", "isb", options(nostack, preserves_flags));
         }
     }
     #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
     {
         // The host has no TLB to invalidate; a flush is vacuous.
-        let _ = vaddr;
+        let _ = start_vaddr;
     }
 }
 

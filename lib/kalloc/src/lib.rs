@@ -26,10 +26,12 @@
 //! source and **shrinks** by handing whole drained regions back. This is
 //! the growable-capacity discipline the charter requires of every resource
 //! ceiling: a busy kernel is not wedged by a fixed 64 MiB slab, and an idle
-//! one does not hold memory it has freed. The production source draws
-//! physically contiguous frames from the frame allocator (reachable through
-//! the kernel direct map); because that allocator is heap-independent by
-//! construction, growth never re-enters this heap's own lock.
+//! one does not hold memory it has freed. The production source assembles
+//! each region out of several physical chunks mapped into one virtually
+//! contiguous kernel window, so growth is bounded by total free RAM rather
+//! than by the largest physically contiguous block available; because the
+//! frame allocator and that window's bookkeeping are both heap-independent
+//! by construction, growth never re-enters this heap's own lock.
 //!
 //! # Design
 //!
@@ -165,9 +167,9 @@ fn block_size(layout: Layout) -> Option<usize> {
 /// `HeapSource` ([`FreeListAllocator::install_source`]) so the kernel heap
 /// grows and shrinks on demand instead of being capped at a hand-picked
 /// constant — the growable-capacity rule the charter requires of every
-/// resource ceiling. The production implementation draws physically
-/// contiguous frames from the frame allocator and hands back their
-/// direct-map addresses; a host test uses a simple arena-backed fake.
+/// resource ceiling. The production implementation assembles each chunk out
+/// of several physical frame blocks mapped into one virtually contiguous
+/// kernel window; a host test uses a simple arena-backed fake.
 ///
 /// # Contract
 ///
@@ -181,8 +183,10 @@ fn block_size(layout: Layout) -> Option<usize> {
 ///
 /// The source is consulted only while the allocator holds its own lock, so
 /// an implementation must **not** call back into this same heap (that would
-/// re-enter the non-reentrant lock and deadlock). The production frame
-/// allocator satisfies this: it is heap-independent by construction.
+/// re-enter the non-reentrant lock and deadlock). The production source
+/// satisfies this: the frame allocator, the page-table frame source, and
+/// the window's own address-space bookkeeping are all heap-independent by
+/// construction.
 pub trait HeapSource: Sync {
     /// Provide a fresh chunk of at least `min_len` writable, `ALIGN`-aligned
     /// bytes, or `None` when no more memory can be given (fail closed).

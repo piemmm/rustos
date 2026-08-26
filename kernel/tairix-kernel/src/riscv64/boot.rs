@@ -116,23 +116,24 @@ const KTHREAD_ARENA_IDENTITY_LIMIT: u64 = 4 << 30;
 
 /// Number of 1 GiB identity gigapages the boot address space maps.
 ///
-/// 512 covers the whole Sv39 low VA range (`[0, 512 GiB)`) in a single
-/// root table, so the kernel image, stack, the firmware DTB, the PLIC,
-/// and the `virt`-board MMIO window all keep their physical addresses
-/// once the MMU is on — whatever their addresses, with no `cfg(board)`
-/// fork. Identity mapping makes physical == virtual,
-/// so the device-bring-up verticals that read MMIO/DMA at physical
-/// addresses keep working under the paged regime.
+/// This covers the Sv39 low VA range below the growable kernel heap's remap
+/// window, so the kernel image, stack, the firmware DTB, the PLIC, and the
+/// `virt`-board MMIO window all keep their physical addresses once the MMU
+/// is on — whatever their addresses, with no `cfg(board)` fork. Identity
+/// mapping makes physical == virtual, so the device-bring-up verticals that
+/// read MMIO/DMA at physical addresses keep working under the paged regime.
+/// The figure comes from the port, which owns both the window's placement
+/// and the identity extent below it, so the two cannot drift into overlap.
 ///
 /// `pub(crate)` so the root-unlock bring-up ([`crate::riscv64::root_unlock`])
 /// sizes its device physical map ([`tairix_kernel_mem::DirectPhysMap`]) to the
 /// same identity extent the live boot MMU maps, rather than repeating the
 /// figure (one definition).
-pub(crate) const IDENTITY_GIGABYTES: usize = 512;
+pub(crate) const IDENTITY_GIGABYTES: usize = tairix_arch_riscv64::paging::IDENTITY_GIGAPAGES;
 
 /// Boot-time page-table frame source for the Sv39 identity map.
 ///
-/// A single root table holds all 512 gigapage leaves, so the pool only
+/// A single root table holds every gigapage leaf, so the pool only
 /// ever hands out one frame here. It lives in `.bss` for the lifetime of
 /// the kernel image, so `satp` keeps pointing at a valid table after
 /// [`enable_mmu_and_vectors`] returns even though the transient
@@ -429,6 +430,38 @@ impl KernelArch for RiscvBinArch {
         // Off the freestanding target this module does not compile; boot.rs
         // is freestanding-only, so the handle is always available here.
         Some(tairix_arch_riscv64::takeover::machine_takeover_handle())
+    }
+
+    fn install_kernel_remap(
+        arch: &'static Self,
+        frames: &'static tairix_kernel_mem::FrameAllocator,
+        physmap: &'static (dyn tairix_kernel_mem::PhysMap + Sync),
+    ) -> Option<&'static dyn tairix_kernel_mem::KernelVirtMap> {
+        // Reserve the top of the Sv39 range as the growable kernel heap's
+        // remap window and hand back the neutral map over it. The window's
+        // shared intermediate tables — and every table a heap region needs —
+        // come from the same allocator-backed page-table source the spawn
+        // path uses, so no fixed `.bss` pool caps how much the heap can
+        // grow. The port's own handle carries the SBI RFENCE cross-CPU
+        // invalidation.
+        #[cfg(all(freestanding, kernel_isa = "riscv64"))]
+        {
+            // The frame source carries the identity physical map itself;
+            // `physmap` backs the *caller's* own bookkeeping.
+            let _ = physmap;
+            let tables = crate::riscv64::spawn_producer::page_table_source(frames).ok()?;
+            let window = tairix_arch_riscv64::paging::reserve_kernel_window(tables)?;
+            let space = tairix_arch_riscv64::paging::AddressSpace::new_kernel_window(tables)?;
+            let remap = alloc::boxed::Box::leak(alloc::boxed::Box::new(
+                tairix_kernel_mem::KernelRemap::new(window, space, &arch.arch),
+            ));
+            Some(remap)
+        }
+        #[cfg(not(all(freestanding, kernel_isa = "riscv64")))]
+        {
+            let _ = (arch, frames, physmap);
+            None
+        }
     }
 
     fn direct_phys_map(&self) -> Option<&'static (dyn tairix_kernel_mem::PhysMap + Sync)> {
@@ -783,7 +816,9 @@ fn enable_mmu_and_vectors() -> bool {
     else {
         return false;
     };
-    // SAFETY: `new_identity_gigapages` identity-maps `[0, 512 GiB)`, so
+    // SAFETY: `new_identity_gigapages` identity-maps
+    // `[0, IDENTITY_GIGABYTES GiB)` — everything below the kernel remap
+    // window — so
     // the executing `pc`, the boot stack, the firmware DTB, the PLIC,
     // and the `virt` MMIO window all keep their physical addresses —
     // enabling the MMU does not move the ground under the running code,

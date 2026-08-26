@@ -465,6 +465,43 @@ pub trait KernelArch: SchedulerArch {
         None
     }
 
+    /// Build this port's **kernel remap window** and hand back the map the
+    /// growable kernel heap assembles its regions in.
+    ///
+    /// The heap needs a virtually-contiguous run for every region it grows,
+    /// and drawing one as a physically contiguous block welds the largest
+    /// serviceable allocation to the frame allocator's contiguity order and
+    /// fails on a fragmented pool while RAM is still free
+    /// (`plans/FIX-KHEAP.md`). Assembling the run out of several chunks
+    /// instead needs a range of kernel virtual addresses that resolves under
+    /// *every* translation root — which only the port can arrange, because
+    /// only it builds those roots. So the port reserves the window (drawing
+    /// the shared sub-hierarchy from `frames` through `physmap`) and returns
+    /// the neutral [`tairix_kernel_mem::KernelVirtMap`] over it; the rest is
+    /// architecture-neutral and lives in `kernel/mem`.
+    ///
+    /// Called once, from [`crate::Phase::Mem`], immediately after the frame
+    /// allocator exists and before the heap growth source is installed. The
+    /// returned reference must be `'static`.
+    ///
+    /// # Default
+    ///
+    /// The default returns [`None`]: a port with no MMU (`wasm32`) or one
+    /// that has not reserved a window leaves the kernel heap on its
+    /// bootstrap region rather than growing (fail closed, never a panic).
+    #[must_use]
+    fn install_kernel_remap(
+        arch: &'static Self,
+        frames: &'static tairix_kernel_mem::FrameAllocator,
+        physmap: &'static (dyn tairix_kernel_mem::PhysMap + Sync),
+    ) -> Option<&'static dyn tairix_kernel_mem::KernelVirtMap>
+    where
+        Self: Sized,
+    {
+        let _ = (arch, frames, physmap);
+        None
+    }
+
     /// Hand the kernel core the architecture's **platform entropy source** —
     /// the per-port hardware random-number handle (x86 `RDSEED`/`RDRAND`,
     /// ARMv8.5 `RNDR`, the RISC-V `Zkr` `seed` CSR) — so the boot path can

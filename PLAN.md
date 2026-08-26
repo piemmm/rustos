@@ -8082,3 +8082,41 @@ future contributor needs from this file:
   store. On aarch64 only PID 1 is embedded; on the ports whose storage floor
   has not landed the consequence is wider, and the fix is those floors
   (`plans/ARCHSUPPORT.md`), not a fabricated identity.
+
+## FIX-KHEAP — fragmentation-immune kernel-heap growth (`plans/FIX-KHEAP.md`)  **[K1–K5 DONE]**
+
+`plans/FIX-KHEAP.md` is the binding design and carries the goal invariants,
+the re-entrancy trap, and the non-goals; it is not repeated here. What a
+future contributor needs from this file:
+
+- **Why it exists.** Heap growth drew one physically contiguous buddy block,
+  so it refused a large region on a fragmented pool while gigabytes were
+  free, wasted up to 2× per grow rounding to a power of two, and welded the
+  largest serviceable single allocation to `MAX_ORDER`. That coupling had
+  previously been "fixed" by raising the constant and pinning it with a
+  compile-time assertion in `appspawn.rs` — mitigation, not the structural
+  control.
+- **The fix requires virtual contiguity, not physical.** A region is drawn as
+  the exact page count and assembled from as many `<= MAX_ORDER` chunks as
+  the pool offers, mapped into a kernel remap window
+  (`kernel/mem::kvmap` + `kvslots`, documented in
+  `docs/src/architecture/memory.md` §7u).
+- **Kernel code runs on the current task's root**, so the window must resolve
+  under every one of them. Each port reserves it by pointing the covering
+  top-level entry of every root it builds at one shared sub-hierarchy
+  (`reserve_kernel_window` / `new_kernel_window`, wired through
+  `KernelArch::install_kernel_remap`). Placement is derived from each port's
+  VA layout; on riscv64 the identity extent is derived from the same figure
+  so the two cannot overlap.
+- **The bookkeeping cannot touch the heap it is growing.** Growth runs under
+  the global heap's non-reentrant lock, so `SlotWindow` keeps its records in
+  frames drawn from the frame allocator and the page tables are the only
+  record of what was mapped. A counting-allocator host test pins the
+  invariant.
+- **Teardown synchronises before it frees.** `CrossCpuTlbShootdown` gained a
+  range form so one invalidation covers a batch of pages; freeing a frame
+  before its translation is globally gone would alias reallocated memory.
+- **`MAX_ORDER` keeps one meaning** — the largest physically contiguous draw,
+  a hardware-shaped bound, not a capacity anything derives a limit from. The
+  `BUNDLE_FILE_MAX` ↔ `MAX_ORDER` assertion is deleted and
+  `BUNDLE_FILE_MAX` is a standalone untrusted-input bound.

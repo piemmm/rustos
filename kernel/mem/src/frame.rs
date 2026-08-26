@@ -68,17 +68,14 @@ pub const PAGE_SHIFT: u32 = 12;
 ///
 /// Order `n` blocks span `2^n` frames, i.e. `4 KiB * 2^n` bytes.
 /// `MAX_ORDER = 13` ⇒ the largest atomically-allocatable block is
-/// `4 KiB << 13 = 32 MiB`. This is the ceiling on a single contiguous
-/// physical allocation, and — crucially — on the region the kernel heap's
-/// frame-backed growth source can draw in one go (`crate` `kheap`), so it
-/// must comfortably exceed the largest single contiguous allocation the
-/// kernel ever makes. The binding case is a bundle `Run` image, read whole
-/// into one heap buffer up to `BUNDLE_FILE_MAX` (16 MiB): the allocator's
-/// per-block header and power-of-two growth granule round a full 16 MiB
-/// request up to the next power of two (32 MiB), so 32 MiB is the smallest
-/// order that guarantees such a load is served from — or grown to — the
-/// heap rather than failing once the bootstrap arena fragments. A
-/// compile-time assertion in `kernel/core` keeps this coupling honest.
+/// `4 KiB << 13 = 32 MiB`. It bounds one thing only: how much
+/// *physically contiguous* memory a single draw can yield — a genuine
+/// hardware-shaped limit (a device's DMA window, a coarse page-table
+/// block), not a capacity anything scales against. A caller needing more
+/// memory than this asks for several blocks and maps them into one virtual
+/// window, exactly as the growable kernel heap does
+/// (`plans/FIX-KHEAP.md`), so no consumer's size limit is derived from this
+/// order.
 pub const MAX_ORDER: u32 = 13;
 
 // [`RESERVE_DIVISOR`](tairix_reclaim::RESERVE_DIVISOR) is the one

@@ -345,6 +345,38 @@ impl KernelArch for Aarch64BinArch {
         }
     }
 
+    fn install_kernel_remap(
+        arch: &'static Self,
+        frames: &'static tairix_kernel_mem::FrameAllocator,
+        physmap: &'static (dyn tairix_kernel_mem::PhysMap + Sync),
+    ) -> Option<&'static dyn tairix_kernel_mem::KernelVirtMap> {
+        // Reserve the top of the `TTBR0_EL1` range as the growable kernel
+        // heap's remap window and hand back the neutral map over it. The
+        // window's shared L2 tables — and every intermediate table a heap
+        // region needs — come from the same allocator-backed page-table
+        // source the spawn path uses, so no fixed `.bss` pool caps how much
+        // the heap can grow. `tlbi vaae1is` broadcasts, so the port's own
+        // handle is the cross-CPU invalidation.
+        #[cfg(all(freestanding, kernel_isa = "aarch64"))]
+        {
+            // The frame source carries the identity physical map itself;
+            // `physmap` backs the *caller's* own bookkeeping.
+            let _ = physmap;
+            let tables = crate::aarch64::spawn_producer::page_table_source(frames).ok()?;
+            let window = tairix_arch_aarch64::paging::reserve_kernel_window(tables)?;
+            let space = tairix_arch_aarch64::paging::AddressSpace::new_kernel_window(tables)?;
+            let remap = alloc::boxed::Box::leak(alloc::boxed::Box::new(
+                tairix_kernel_mem::KernelRemap::new(window, space, arch.arch()),
+            ));
+            Some(remap)
+        }
+        #[cfg(not(all(freestanding, kernel_isa = "aarch64")))]
+        {
+            let _ = (arch, frames, physmap);
+            None
+        }
+    }
+
     fn console_framebuffer(&self) -> Option<(tairix_kernel_mem::PhysAddr, u64)> {
         // The active framebuffer console's scan-out surface, so the pre-boot
         // Supervisor's `memtest` takeover can keep it out of the destructive

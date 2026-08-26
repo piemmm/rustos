@@ -23,6 +23,10 @@
 //! 4. [`frame`] — physical [`FrameAllocator`], a buddy/bitmap hybrid that
 //!    respects bootloader-supplied reserve regions described by a
 //!    [`BootMemoryMap`].
+//! 5. [`kvmap`] + [`kvslots`] — the kernel remap window: assembling one
+//!    virtually-contiguous kernel range out of scattered physical chunks,
+//!    with heap-free placement bookkeeping, so the kernel heap can grow
+//!    without needing a large physically-contiguous block.
 //!
 //! # Allocation contract
 //!
@@ -57,6 +61,8 @@ pub mod dma;
 pub mod error;
 pub mod filemap;
 pub mod frame;
+pub mod kvmap;
+pub mod kvslots;
 pub mod live;
 pub mod loader;
 pub mod mmio;
@@ -82,6 +88,8 @@ pub use dma::{DmaBuffer, DmaError, DmaPool, DmaWindowMap};
 pub use error::AllocError;
 pub use filemap::{map_file_page, unmap_file_region, FILE_FLAGS};
 pub use frame::{Frame, FrameAllocator, FrameCount, PhysAddr, MAX_ORDER, PAGE_SHIFT, PAGE_SIZE};
+pub use kvmap::{KernelRemap, KernelVirtMap, RemapError};
+pub use kvslots::{SlotError, SlotWindow};
 pub use live::{DmaMapping, LiveSpace, LiveSpaceError, LiveUserSpace};
 pub use loader::{map_flags_for, map_image, LoadError};
 pub use mmio::{MmioError, MmioMap, MmioRegion, MmioWindowMap};

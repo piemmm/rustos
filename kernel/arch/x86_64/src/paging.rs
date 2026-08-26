@@ -34,7 +34,9 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use tairix_arch_api::frames::{PageTableFrames, TableFrame};
-use tairix_arch_api::mmu::{AddressSpace as MmuAddressSpace, BlockSplit, MapError, PageFlags};
+use tairix_arch_api::mmu::{
+    AddressSpace as MmuAddressSpace, BlockSplit, KernelWindow, MapError, PageFlags,
+};
 use tairix_arch_api::tlb::TlbShootdown;
 
 /// Size of a single x86_64 page-table page.
@@ -350,6 +352,38 @@ impl AddressSpace {
             *slot = ((i as u64) << 21) | flags::PRESENT | flags::WRITABLE | flags::HUGE;
         }
 
+        // Every root reaches the kernel remap window, so a kernel address
+        // in it resolves whichever root is active. Done here rather than at
+        // each call site so no future space can be built without it.
+        install_kernel_window_slot(pml4);
+
+        Some(Self {
+            pml4_phys,
+            pml4,
+            frames,
+        })
+    }
+
+    /// Build a root that maps **only** the kernel remap window — the handle
+    /// the kernel-heap remap layer edits the window's shared sub-hierarchy
+    /// through.
+    ///
+    /// The root is never loaded into `CR3`: because the window's PML4 entry
+    /// points at a PDPT every other root shares, a leaf installed through
+    /// this space is immediately visible under all of them. Keeping it
+    /// separate means the remap layer draws its intermediate tables from the
+    /// frame allocator rather than from the fixed boot pool, and cannot
+    /// reach any address outside the window.
+    ///
+    /// # Errors
+    ///
+    /// Returns `None` if the frame source cannot supply the root table.
+    pub fn new_kernel_window(frames: &'static dyn PageTableFrames) -> Option<Self> {
+        let TableFrame {
+            phys: pml4_phys,
+            entries: pml4,
+        } = frames.alloc_table()?;
+        install_kernel_window_slot(pml4);
         Some(Self {
             pml4_phys,
             pml4,
@@ -739,6 +773,101 @@ impl AddressSpace {
     #[must_use]
     pub fn pml4_phys(&self) -> u64 {
         self.pml4_phys
+    }
+}
+
+/// PML4 slot the kernel remap window claims.
+///
+/// Chosen from the port's VA layout: the boot trampoline uses slot 0 for
+/// the low identity window and slot 511 for the higher-half kernel window
+/// (`boot.s` SAFETY-INVARIANT 4 and 9), so slot 510 is the highest free
+/// canonical slot. One PML4 slot is 512 GiB of address space, which costs
+/// nothing until something is backed into it and needs one shared PDPT.
+const KERNEL_WINDOW_PML4_SLOT: usize = 510;
+
+/// Pages the kernel remap window spans: one PML4 slot is 512 entries at
+/// each of the three levels below it.
+const KERNEL_WINDOW_PAGES: usize = ENTRIES_PER_TABLE * ENTRIES_PER_TABLE * ENTRIES_PER_TABLE;
+
+/// The window's shared PML4 entry, or `0` before
+/// [`reserve_kernel_window`] runs.
+///
+/// Every root this port builds installs it, so a leaf added under the
+/// shared PDPT it points at resolves identically whichever root is active —
+/// the property that lets kernel code reach a remapped kernel address while
+/// a user task's root is loaded.
+static KERNEL_WINDOW_PML4: AtomicU64 = AtomicU64::new(0);
+
+/// Base virtual address of the kernel remap window (canonical: PML4 slot
+/// 510 sign-extends to the higher half).
+#[must_use]
+pub const fn kernel_window_base() -> u64 {
+    // Bit 47 of the slot's base is set, so bits 63:48 sign-extend to ones.
+    0xFFFF_0000_0000_0000 | ((KERNEL_WINDOW_PML4_SLOT as u64) << 39)
+}
+
+/// A window whose extent is not representable is refused at run time, which
+/// would silently leave the kernel heap on its bootstrap region. Fail the
+/// build instead.
+const _: () = assert!(
+    KernelWindow::new(kernel_window_base(), KERNEL_WINDOW_PAGES).is_some(),
+    "the kernel remap window must be a representable extent"
+);
+
+/// Reserve the kernel remap window: draw the shared PDPT, publish the PML4
+/// entry every root installs, and patch it into the live root so the
+/// running CPUs see the window immediately.
+///
+/// Called once, from the boot path, after the frame allocator exists (the
+/// table comes from it, not from the fixed boot pool). A second call
+/// returns the same window without drawing anything. Returns `None`,
+/// having changed nothing, when the frame source cannot supply the shared
+/// table (fail closed — the kernel heap then stays on its bootstrap
+/// region).
+pub fn reserve_kernel_window(frames: &'static dyn PageTableFrames) -> Option<KernelWindow> {
+    let window = KernelWindow::new(kernel_window_base(), KERNEL_WINDOW_PAGES)?;
+    if KERNEL_WINDOW_PML4.load(Ordering::Acquire) != 0 {
+        return Some(window);
+    }
+    let TableFrame { phys, entries: _ } = frames.alloc_table()?;
+    KERNEL_WINDOW_PML4.store(phys | flags::PRESENT | flags::WRITABLE, Ordering::Release);
+    install_kernel_window(active_root_phys());
+    Some(window)
+}
+
+/// Install the published window entry into the PML4 at `root_phys`, or do
+/// nothing when no window is reserved (or `root_phys` is zero, which is
+/// what the host build reports).
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+fn install_kernel_window(root_phys: u64) {
+    if root_phys == 0 {
+        return;
+    }
+    // SAFETY: a non-zero `CR3` base names the live PML4, which lives in low
+    // physical memory the boot trampoline identity-maps, so the physical
+    // address dereferences directly (the same round-trip `ensure_child`
+    // relies on). The only entry written is the window's own slot, which no
+    // other writer touches.
+    let root = unsafe { &mut *(root_phys as *mut [u64; ENTRIES_PER_TABLE]) };
+    install_kernel_window_slot(root);
+}
+
+/// Host substitute: there is no live `CR3` to patch.
+#[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+fn install_kernel_window(root_phys: u64) {
+    let _ = root_phys;
+}
+
+/// Copy the published window entry into `pml4`'s slot.
+///
+/// Every root constructor calls this, so a space built before *or* after
+/// the reservation ends up with the window (the boot root is patched in
+/// place by [`reserve_kernel_window`]). A not-present-to-present entry
+/// needs no TLB maintenance: the CPU never caches an absent translation.
+fn install_kernel_window_slot(pml4: &mut [u64; ENTRIES_PER_TABLE]) {
+    let entry = KERNEL_WINDOW_PML4.load(Ordering::Acquire);
+    if entry != 0 {
+        pml4[KERNEL_WINDOW_PML4_SLOT] = entry;
     }
 }
 
@@ -1149,6 +1278,13 @@ impl MmuAddressSpace for AddressSpace {
             if active_root_phys() == self.pml4_phys && !park_kernel_root() {
                 return;
             }
+            // The kernel remap window's PML4 entry points at a PDPT
+            // *every* root shares, not at a table this hierarchy owns, and
+            // the walk below cannot tell the two apart — it would free the
+            // live kernel heap's page tables. Drop it from this root first;
+            // the window itself is permanent and is reached through every
+            // other root unchanged.
+            self.pml4[KERNEL_WINDOW_PML4_SLOT] = 0;
             let frames = self.frames;
             // A four-level hierarchy rooted at the PML4: a present PML4
             // entry always points at a PDPT; a present PDPT/PD entry

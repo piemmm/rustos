@@ -33,7 +33,7 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use tairix_arch_api::frames::{reclaim_hierarchy, PageTableFrames, TableFrame};
 use tairix_arch_api::mmu::{
-    AccessTracking, AddressSpace as MmuAddressSpace, BlockSplit, MapError, PageFlags,
+    AccessTracking, AddressSpace as MmuAddressSpace, BlockSplit, KernelWindow, MapError, PageFlags,
 };
 use tairix_arch_api::tlb::TlbShootdown;
 
@@ -264,6 +264,37 @@ impl AddressSpace {
             let paddr = (i as u64) << 30;
             *slot = pte_from_phys(paddr, leaf);
         }
+        // Every root reaches the kernel remap window, so a kernel address
+        // in it resolves whichever root is active. Done here rather than at
+        // each call site so no future space can be built without it.
+        install_kernel_window_slots(root);
+        Some(Self {
+            root_phys,
+            root,
+            frames,
+        })
+    }
+
+    /// Build a root that maps **only** the kernel remap window — the handle
+    /// the kernel-heap remap layer edits the window's shared sub-hierarchy
+    /// through.
+    ///
+    /// The root is never activated: because the window's root entries point
+    /// at tables every other root shares, a leaf installed through this
+    /// space is immediately visible under all of them. Keeping it separate
+    /// means the remap layer draws its intermediate tables from the frame
+    /// allocator rather than from the fixed boot pool, and cannot reach any
+    /// address outside the window.
+    ///
+    /// # Errors
+    ///
+    /// Returns `None` if the frame source cannot supply the root table.
+    pub fn new_kernel_window(frames: &'static dyn PageTableFrames) -> Option<Self> {
+        let TableFrame {
+            phys: root_phys,
+            entries: root,
+        } = frames.alloc_table()?;
+        install_kernel_window_slots(root);
         Some(Self {
             root_phys,
             root,
@@ -491,7 +522,9 @@ impl AddressSpace {
             return None;
         }
         let i2 = vpn_index(vaddr, 2);
-        if (self.root[i2] & flags::VALID) != 0 {
+        // A window slot is not identity address space; aliasing into it
+        // would clobber the shared remap hierarchy every root points at.
+        if (self.root[i2] & flags::VALID) != 0 || i2 >= KERNEL_WINDOW_FIRST_SLOT {
             return None;
         }
         self.root[i2] = pte_from_phys(paddr, flags | flags::VALID | flags::ACCESSED | flags::DIRTY);
@@ -797,6 +830,14 @@ impl MmuAddressSpace for AddressSpace {
         if active_root_phys() == self.root_phys && !park_kernel_root() {
             return;
         }
+        // The kernel remap window's root entries point at tables *every*
+        // root shares, not at tables this hierarchy owns, and the walk below
+        // cannot tell the two apart — it would free the live kernel heap's
+        // page tables. Drop them from this root first; the window itself is
+        // permanent and is reached through every other root unchanged.
+        for slot in self.root.iter_mut().skip(KERNEL_WINDOW_FIRST_SLOT) {
+            *slot = 0;
+        }
         let frames = self.frames;
         // An Sv39 hierarchy rooted at level 2: a valid PTE with R=W=X=0 is
         // a pointer to the next level; level-0 (depth 2) entries are page
@@ -846,24 +887,185 @@ impl TlbShootdown for AddressSpace {
 /// cross-CPU path reaches *other* harts through the SBI RFENCE firmware
 /// call (`crate::sbi::remote_sfence_vma`).
 pub(crate) fn invalidate_page_local(vaddr: u64) {
+    invalidate_range_local(vaddr, 1);
+}
+
+/// Root-table slots the kernel remap window claims, at the very top of the
+/// Sv39 range.
+///
+/// Sized from the port's VA layout rather than from a byte figure: Sv39's
+/// root table holds [`ENTRIES_PER_TABLE`] gigapages, and the window takes
+/// the top eighth of them (64 GiB). Address space is free until something
+/// is backed into it, so the only cost of a generous window is one shared
+/// intermediate table per slot; what the size bounds is the kernel heap,
+/// and on any machine this port runs on installed RAM binds long before
+/// 64 GiB of kernel heap does.
+///
+/// The identity map is sized to stop below the window
+/// (`crate::paging::IDENTITY_GIGAPAGES`), so the two never overlap.
+pub const KERNEL_WINDOW_SLOTS: usize = ENTRIES_PER_TABLE / 8;
+
+/// First root-table slot of the kernel remap window.
+///
+/// The window stops one gigapage short of the top of the address space: an
+/// extent whose exclusive top is not representable is refused outright
+/// (which keeps every consumer free of wrap arithmetic), and the last
+/// gigapage of Sv39 is worth less than that simplicity.
+const KERNEL_WINDOW_FIRST_SLOT: usize = ENTRIES_PER_TABLE - 1 - KERNEL_WINDOW_SLOTS;
+
+/// Pages the kernel remap window spans.
+const KERNEL_WINDOW_PAGES: usize = KERNEL_WINDOW_SLOTS * ENTRIES_PER_TABLE * ENTRIES_PER_TABLE;
+
+/// Identity gigapages the boot space maps: everything below the kernel
+/// remap window. Derived here so the window and the identity extent cannot
+/// drift apart, and so the direct physical map is sized from the same
+/// figure the live MMU uses.
+pub const IDENTITY_GIGAPAGES: usize = KERNEL_WINDOW_FIRST_SLOT;
+
+/// The window's shared root-table entries, one per claimed slot, or `0`
+/// before [`reserve_kernel_window`] runs.
+///
+/// Every root this port builds installs these, so a leaf added under one of
+/// the shared intermediate tables they point at resolves identically
+/// whichever root is active — the property that lets kernel code reach a
+/// remapped kernel address while a user task's root is loaded.
+static KERNEL_WINDOW_ROOT: [AtomicU64; KERNEL_WINDOW_SLOTS] =
+    [const { AtomicU64::new(0) }; KERNEL_WINDOW_SLOTS];
+
+/// The window is placed in the upper half of the Sv39 range, so its base
+/// must carry the sign extension below. Pinned so a change to
+/// [`KERNEL_WINDOW_SLOTS`] cannot silently move the window into the lower
+/// half and leave the spelling wrong.
+const _: () = assert!(
+    KERNEL_WINDOW_FIRST_SLOT >= ENTRIES_PER_TABLE / 2,
+    "the kernel remap window must stay in the upper half of the Sv39 range"
+);
+
+/// Base virtual address of the kernel remap window.
+///
+/// Sv39 addresses are sign-extended from bit 38, so a root slot in the
+/// upper half of the table names an *upper-half* virtual address: bits
+/// 63:39 must all be set. Spelling the base as the bare `slot << 30` would
+/// be non-canonical and fault on every access.
+#[must_use]
+pub const fn kernel_window_base() -> u64 {
+    const UPPER_HALF: u64 = u64::MAX << 39;
+    UPPER_HALF | ((KERNEL_WINDOW_FIRST_SLOT as u64) << 30)
+}
+
+/// A window whose extent is not representable is refused at run time, which
+/// would silently leave the kernel heap on its bootstrap region. Fail the
+/// build instead.
+const _: () = assert!(
+    KernelWindow::new(kernel_window_base(), KERNEL_WINDOW_PAGES).is_some(),
+    "the kernel remap window must be a representable extent"
+);
+
+/// Reserve the kernel remap window: draw one shared intermediate table per
+/// claimed root slot, publish the entries every root installs, and patch
+/// them into the live root so the running harts see the window immediately.
+///
+/// Called once, from the boot path, after the frame allocator exists (the
+/// tables come from it, not from the fixed boot pool). A second call
+/// returns the same window without drawing anything. Returns `None`,
+/// having changed nothing, when the frame source cannot supply the shared
+/// tables (fail closed — the kernel heap then stays on its bootstrap
+/// region).
+pub fn reserve_kernel_window(frames: &'static dyn PageTableFrames) -> Option<KernelWindow> {
+    let window = KernelWindow::new(kernel_window_base(), KERNEL_WINDOW_PAGES)?;
+    if KERNEL_WINDOW_ROOT[0].load(Ordering::Acquire) != 0 {
+        return Some(window);
+    }
+    for (offset, slot) in KERNEL_WINDOW_ROOT.iter().enumerate() {
+        let Some(TableFrame { phys, entries: _ }) = frames.alloc_table() else {
+            // Undo the partial reservation so a retry starts clean.
+            for undone in KERNEL_WINDOW_ROOT.iter().take(offset) {
+                frames.free_table(phys_from_pte(undone.swap(0, Ordering::AcqRel)));
+            }
+            return None;
+        };
+        // Non-leaf (table pointer): valid set, R/W/X clear.
+        slot.store(pte_from_phys(phys, flags::VALID), Ordering::Release);
+    }
+    install_kernel_window(active_root_phys());
+    Some(window)
+}
+
+/// Install the published window entries into the root table at
+/// `root_phys`, or do nothing when no window is reserved (or `root_phys` is
+/// zero, which is what the host build and an unpaged caller report).
+fn install_kernel_window(root_phys: u64) {
+    if root_phys == 0 {
+        return;
+    }
+    // SAFETY: a non-zero root physical address names this port's own live
+    // root table, which the identity map makes directly dereferenceable;
+    // the only entries written are the window's own slots, which no other
+    // writer touches.
+    let root = unsafe { &mut *(root_phys as *mut [u64; ENTRIES_PER_TABLE]) };
+    install_kernel_window_slots(root);
+    publish_table_update();
+}
+
+/// Copy the published window entries into `root`'s top slots.
+///
+/// Every root constructor calls this, so a space built before *or* after
+/// the reservation ends up with the window (the boot root is patched in
+/// place by [`reserve_kernel_window`]). An invalid-to-valid non-leaf entry
+/// needs no TLB maintenance, only the fence the callers issue.
+fn install_kernel_window_slots(root: &mut [u64; ENTRIES_PER_TABLE]) {
+    for offset in 0..KERNEL_WINDOW_SLOTS {
+        let entry = KERNEL_WINDOW_ROOT[offset].load(Ordering::Acquire);
+        if entry != 0 {
+            root[KERNEL_WINDOW_FIRST_SLOT + offset] = entry;
+        }
+    }
+}
+
+/// Publish a page-table store to the MMU's walker before the next access
+/// depends on it. An invalid-to-valid entry needs no invalidation, only
+/// ordering; `sfence.vma` provides it. Host builds walk no hardware
+/// tables, so this is a no-op there.
+fn publish_table_update() {
     #[cfg(all(target_arch = "riscv64", target_os = "none"))]
     {
-        // SAFETY: `sfence.vma {addr}, zero` is the documented Sv39
-        // single-page TLB invalidation; it touches no memory and only
-        // discards the cached translation for `vaddr`. No Rust
-        // spelling exists.
+        // SAFETY: `sfence.vma` orders prior page-table stores against
+        // subsequent implicit walks; it touches no memory and only
+        // discards cached translation state.
         unsafe {
-            core::arch::asm!(
-                "sfence.vma {addr}, zero",
-                addr = in(reg) vaddr,
-                options(nostack, preserves_flags),
-            );
+            core::arch::asm!("sfence.vma", options(nostack, preserves_flags));
+        }
+    }
+}
+
+/// Invalidate the calling hart's cached translations for `pages`
+/// consecutive 4 KiB pages from `start_vaddr`.
+///
+/// The single-page flush is this with `pages == 1`, so there is one local
+/// invalidation sequence on this port rather than two.
+pub(crate) fn invalidate_range_local(start_vaddr: u64, pages: usize) {
+    #[cfg(all(target_arch = "riscv64", target_os = "none"))]
+    {
+        let mut vaddr = start_vaddr;
+        for _ in 0..pages {
+            // SAFETY: `sfence.vma {addr}, zero` is the documented Sv39
+            // single-page TLB invalidation; it touches no memory and only
+            // discards the cached translation for `vaddr`. No Rust
+            // spelling exists.
+            unsafe {
+                core::arch::asm!(
+                    "sfence.vma {addr}, zero",
+                    addr = in(reg) vaddr,
+                    options(nostack, preserves_flags),
+                );
+            }
+            vaddr = vaddr.wrapping_add(PAGE_SIZE as u64);
         }
     }
     #[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
     {
         // The host has no TLB to invalidate; a flush is vacuous.
-        let _ = vaddr;
+        let _ = (start_vaddr, pages);
     }
 }
 

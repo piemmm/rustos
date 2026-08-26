@@ -1934,12 +1934,24 @@ fn run_phases<A: KernelArch>(
     let frame_allocator: &'static FrameAllocator = Box::leak(Box::new(
         FrameAllocator::new(memory_map).map_err(InitError::Mem)?,
     ));
-    // Activate growable kernel-heap backing at the first point both required
-    // components exist. Scheduler/runtime initialization allocates from the
-    // heap, so deferring this until after those allocations can exhaust the
-    // fixed bootstrap region on a valid discovered-sized topology.
+    // Activate growable kernel-heap backing at the first point every
+    // required component exists. Scheduler/runtime initialization allocates
+    // from the heap, so deferring this until after those allocations can
+    // exhaust the fixed bootstrap region on a valid discovered-sized
+    // topology.
+    //
+    // Growth assembles each region out of several physical chunks mapped
+    // into the port's kernel remap window, so it needs both the direct map
+    // (to reach a page-table frame) and that window. A port that supplies
+    // neither leaves the heap on its bootstrap region — fail closed, never a
+    // panic. The arch handle is lifted to `'static` because the window's map
+    // keeps the port's cross-CPU invalidation for the life of the image.
     if let Some(physmap) = arch.direct_phys_map() {
-        crate::kheap::install_frame_heap_source(frame_allocator, physmap);
+        let arch_arc: &'static Arc<A> = Box::leak(Box::new(Arc::clone(&arch)));
+        let arch_static: &'static A = arch_arc;
+        if let Some(kvmap) = A::install_kernel_remap(arch_static, frame_allocator, physmap) {
+            crate::kheap::install_frame_heap_source(frame_allocator, physmap, kvmap);
+        }
     }
     phase_ready(log_sink, Phase::Mem);
 
