@@ -383,13 +383,19 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
         device.check_revision()?;
         // Mask every level-2 source before touching the device, so a
         // condition left asserted by whatever ran before cannot storm the
-        // line while bring-up programs the rings.
+        // line while bring-up programs the rings. Both instances: this
+        // driver never binds `INTRL2_1`'s line and never services it, so
+        // leaving its sources live would leave part of the device's
+        // interrupt state to whatever the firmware left behind.
         device
             .regs
             .write(regs::INTRL2_CPU_MASK_SET, regs::INTRL2_ALL)?;
         device
             .regs
             .write(regs::INTRL2_CPU_CLEAR, regs::INTRL2_ALL)?;
+        device
+            .regs
+            .write(regs::INTRL2_1_CPU_MASK_SET, regs::INTRL2_ALL)?;
         device.reset_umac()?;
         device.write_hwaddr()?;
         device.write_rx_filter(&[])?;
@@ -565,6 +571,38 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
             .write(block + regs::DMA_RING_CFG, 1 << regs::DEFAULT_RING)
     }
 
+    /// The link as last resolved from the PHY, in the vocabulary both the
+    /// device facts and every service report state it in.
+    fn link_state(&self) -> LinkState {
+        if self.link.is_some() {
+            LinkState::Up
+        } else {
+            LinkState::Down
+        }
+    }
+
+    /// Program when the default ring raises its completion interrupt: on the
+    /// first completed descriptor, with the ring's timer disarmed.
+    ///
+    /// Both halves are programmed rather than inherited. The condition that
+    /// raises `IRQ_*DMA_DONE` is a comparison against this threshold, so a
+    /// ring left holding whatever value reset (or the firmware) put there is
+    /// a ring whose interrupt behaviour is unknown — and a threshold of zero
+    /// is satisfied permanently, which is a level condition draining cannot
+    /// clear and so an interrupt storm no masking can end.
+    ///
+    /// A threshold of one with no timer is the deliberate choice, not a
+    /// missing feature: this driver's coalescing comes from masking the
+    /// completion sources for the duration of a drain, which adapts to the
+    /// actual burst, where a timer would only add latency to a lone frame.
+    fn arm_completion_interrupt(&mut self, desc_base: usize) -> Result<(), DriverError> {
+        let ring = regs::ring_regs(desc_base, regs::DEFAULT_RING);
+        self.regs.write(ring + regs::RING_MBUF_DONE_THRESH, 1)?;
+        let timeout = regs::ring_timeout(desc_base, regs::DEFAULT_RING);
+        let current = self.regs.read(timeout)?;
+        self.regs.write(timeout, current & !regs::DMA_TIMEOUT_MASK)
+    }
+
     /// Build the receive ring: geometry, flow-control thresholds, and one
     /// device-owned descriptor per buffer.
     ///
@@ -576,6 +614,7 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
         let ring = regs::ring_regs(regs::RDMA_DESC, regs::DEFAULT_RING);
         self.regs
             .write(ring + regs::RING_FLOW_PERIOD, regs::DMA_FC_THRESH)?;
+        self.arm_completion_interrupt(regs::RDMA_DESC)?;
         let length_status = (BUF_LEN << regs::DMA_BUFLENGTH_SHIFT) | regs::DMA_OWN;
         for slot in 0..RING_SLOTS {
             let (low, high) = address_words(self.rx_buffer_device_addr(slot));
@@ -597,7 +636,7 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
     fn init_tx(&mut self) -> Result<(), DriverError> {
         self.init_ring_common(regs::TDMA_DESC)?;
         let ring = regs::ring_regs(regs::TDMA_DESC, regs::DEFAULT_RING);
-        self.regs.write(ring + regs::RING_MBUF_DONE_THRESH, 1)?;
+        self.arm_completion_interrupt(regs::TDMA_DESC)?;
         self.regs.write(ring + regs::RING_FLOW_PERIOD, 0)?;
         for slot in 0..RING_SLOTS {
             let (low, high) = address_words(self.tx_buffer_device_addr(slot));
@@ -1092,11 +1131,7 @@ impl<R: GenetRegs, D: Delay> Net for Genet<R, D> {
             // report does not: the PHY's link-change interrupt wakes the
             // driver, which re-resolves on its next service doorbell, so the
             // reported state tracks the wire.
-            link: if self.link.is_some() {
-                LinkState::Up
-            } else {
-                LinkState::Down
-            },
+            link: self.link_state(),
             offloads: OFFLOADS,
             rx_queues: 1,
             multicast_filter: McastFilter::Slots(MCAST_SLOTS),
@@ -1120,6 +1155,12 @@ impl<R: GenetRegs, D: Delay> Net for Genet<R, D> {
         self.drain_tx(rings, &mut report, sensitive)?;
         self.harvest_rx(rings, &mut report, sensitive)?;
         report.filtered = self.filtered_frames;
+        // The link as of this doorbell — re-resolved above when the PHY
+        // signalled a change. Without it here a cable pull would reach the
+        // stack only through a `DeviceFacts` query nothing on the frame path
+        // makes, so the interface would read up for ever and a bond would
+        // never fail over.
+        report.link = self.link_state();
         Ok(report)
     }
 

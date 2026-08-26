@@ -42,13 +42,12 @@
 //!
 //! Compiled only for the bare-metal targets a driver binary is built for.
 
-use tairix_abi::driver::net::{LinkState, Net};
+use tairix_abi::driver::net::Net;
 use tairix_abi::driver::net_channel::{
     is_net_channel_endpoint, AttachParams, NetChannelNotify, NetChannelRequest,
     NETCHAN_NODE_COMPATIBLE, NET_CHANNEL_ENDPOINT_BASE, NET_CHANNEL_MAX_REPLY,
     NET_CHANNEL_MAX_REQUEST,
 };
-use tairix_abi::driver::net_ring::ServiceReport;
 use tairix_abi::hwtree::HW_NODE_ROOT;
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
@@ -58,7 +57,7 @@ use tairix_log::{log, Event, EventId, Level};
 use tairix_rt::LogSink;
 
 use crate::exit;
-use crate::{DrainStep, NetChannelServer};
+use crate::{Drain, DrainAction, Drained, NetChannelServer};
 
 /// Diagnostic event id: the one-shot "device channel published, serving"
 /// beacon a NIC driver emits once its device is live and its endpoint is
@@ -262,118 +261,66 @@ fn on_interrupt<N: Net>(server: &mut NetChannelServer<N>, region: &mut Option<Re
     let outcome = drain(server, region.bytes);
     // A link change must reach the stack even when no frame moved — an
     // idle interface's cable pull is exactly that case, and a bond failover
-    // keys on the report. A fault must reach it too: the sources are masked
-    // and the stack's `Service` is the only thing that can surface why.
-    if outcome.moved || outcome.link_changed || outcome.masked != Masked::No {
+    // keys on the report. A masked source must too: the sources are masked
+    // and the stack's `Service` is the only thing that can release or
+    // diagnose it.
+    if outcome.moved || outcome.link_changed || outcome.masked.needs_release() {
         if let Some(notify_endpoint) = server.notify_endpoint() {
             let notify = NetChannelNotify {
                 link: outcome.link,
-                // Either reason for a masked source demands the same
-                // doorbell: only a `Service` can release or diagnose it.
-                back_pressure: outcome.masked != Masked::No,
+                back_pressure: outcome.masked.needs_release(),
+                // The stack reads the pre-filter's count from here: a pure
+                // receive rings no doorbell, so this notify is the only
+                // report of it the stack will ever see.
+                filtered: outcome.filtered,
             };
             let _ = tairix_rt::ipc_send(notify_endpoint, &notify.encode());
         }
     }
 }
 
-/// Why a [`drain`] left the device's completion sources masked, if it did.
+/// Drive device doorbells over `bytes` under the [`Drain`] policy until it
+/// says to stop, performing the mask-register writes it asks for.
 ///
-/// Two causes, one state: either way the device will raise no further
-/// interrupt and only the stack's next `Service` can release or diagnose it.
-/// Naming that state once keeps the two from drifting apart.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum Masked {
-    /// Not masked: the device fell quiet and the sources were re-armed.
-    No,
-    /// The shared receive ring filled while the device still had frames.
-    BackPressure,
-    /// A service faulted, so re-arming would storm a broken device.
-    Fault,
-}
-
-/// What a [`drain`] pass observed.
-struct Drained {
-    /// Any frame was received or transmitted.
-    moved: bool,
-    /// The device's link state at the end of the pass.
-    link: LinkState,
-    /// The link differs from what the previous pass saw.
-    link_changed: bool,
-    /// Whether the completion sources were left masked, and why.
-    masked: Masked,
-}
-
-impl Drained {
-    /// Fold one service report in, keeping the latest link and whether it
-    /// moved from `previous`.
-    fn observe(&mut self, report: &ServiceReport, previous: LinkState) {
-        self.moved |= report.received > 0 || report.transmitted > 0;
-        self.link = report.link;
-        self.link_changed = report.link != previous;
-    }
-}
-
-/// Drive device doorbells over `bytes` until the device is quiet or the
-/// round budget is spent, unmask the completion sources when it is safe to,
-/// and report what was seen.
+/// The I/O shell only: which pass unmasks, which re-masks, and what the
+/// stack must be told are all decided by the host-tested state machine.
 ///
-/// Unmasking is safe only once the device has handed over everything it had
-/// **and** the shared receive ring still has room. While either fails, the
-/// device's level condition is asserted or about to be, so unmasking would
-/// re-fire immediately; the stack's drain and its following `Service` are
-/// what re-enable the source instead.
+/// The caller enters with the completion sources **masked**; the returned
+/// [`Drained::masked`] then states whether they were left that way, which is
+/// what the notify's back-pressure flag means.
 fn drain<N: Net>(server: &mut NetChannelServer<N>, bytes: &mut [u8]) -> Drained {
-    let previous = server.reported_link();
-    let mut outcome = Drained {
-        moved: false,
-        link: previous,
-        link_changed: false,
-        masked: Masked::No,
-    };
-    for _ in 0..SERVICE_ROUNDS {
+    let mut policy = Drain::new(server.reported_link(), SERVICE_ROUNDS);
+    loop {
         let Ok(report) = server.service(bytes) else {
             // A typed fault (a device error, a corrupt ring) cannot be
             // reported from here, and re-arming into a device that just
-            // faulted would storm. So the sources stay masked — but the
+            // faulted would storm. So the sources are held masked — but the
             // stack is told, because a masked source with nobody coming to
             // release it is a permanently and *silently* dead interface.
             // Its `Service` carries the reason.
-            outcome.masked = Masked::Fault;
-            return outcome;
+            let _ = server.net_mut().set_completion_interrupts(false);
+            policy.fault();
+            return policy.outcome();
         };
-        outcome.observe(&report, previous);
-        match DrainStep::of(&report) {
-            DrainStep::Continue => {}
-            DrainStep::BackPressure => {
-                outcome.masked = Masked::BackPressure;
-                return outcome;
-            }
-            DrainStep::Quiet => {
-                // Re-arm, then look **once more** before believing the
-                // device is idle. A completion that landed between the
-                // service above and this re-arm raised no interrupt of its
-                // own: a source that signals only on a *new* completion
-                // (virtio's used-ring event suppression) would then never
-                // wake this driver again and the frame would sit there for
-                // good. Linux's `virtqueue_enable_cb` reports a non-empty
-                // queue for exactly this reason.
+        match policy.observe(&report) {
+            DrainAction::Service => {}
+            // Re-arm, then look **once more** before believing the device
+            // idle. A completion that landed between the service above and
+            // this re-arm raised no interrupt of its own: a source that
+            // signals only on a *new* completion (virtio's used-ring event
+            // suppression) would then never wake this driver again and the
+            // frame would sit there for good. Linux's
+            // `virtqueue_enable_cb` reports a non-empty queue for exactly
+            // this reason.
+            DrainAction::UnmaskAndService => {
                 let _ = server.net_mut().set_completion_interrupts(true);
-                let Ok(after) = server.service(bytes) else {
-                    outcome.masked = Masked::Fault;
-                    return outcome;
-                };
-                outcome.observe(&after, previous);
-                if matches!(DrainStep::of(&after), DrainStep::Quiet) {
-                    return outcome;
-                }
-                // Something did land in the window. Go round again masked,
-                // exactly as the interrupt path entered.
+            }
+            DrainAction::MaskAndService => {
                 let _ = server.net_mut().set_completion_interrupts(false);
             }
+            DrainAction::Stop => return policy.outcome(),
         }
     }
-    outcome
 }
 
 /// Serve one device-channel doorbell on the claimed endpoint: receive the
@@ -407,7 +354,11 @@ fn serve_call<N: Net>(
                     // The stack calls here after draining its ring, so this
                     // is where a source masked for back-pressure gets its
                     // chance to come back: keep servicing until the device
-                    // is quiet, which re-enables it.
+                    // is quiet, which re-enables it. Masked first because a
+                    // doorbell rung for a *transmit* arrives with the
+                    // sources still up, and `drain` reports whether it left
+                    // them down — a report the device then contradicts.
+                    let _ = server.net_mut().set_completion_interrupts(false);
                     drain(server, region.bytes);
                     reply
                 }

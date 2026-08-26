@@ -39,6 +39,21 @@ on the host against a mock device.
   drives exactly one `Net::service` doorbell.
 - `Detach` returns to detached; the device stays live for a later re-attach.
 
+`Drain` is its interrupt-path counterpart, and pure for the same reason: it
+folds in one `ServiceReport` at a time and answers what the loop must do next
+(service again, unmask and look once more, re-mask and resume, stop) plus,
+at the end, what the stack must be told. Getting that wrong is not a subtle
+bug — unmasking into a still-asserted level condition spins the driver, and
+stopping while masked without saying so wedges the interface — so the whole
+policy is decided where a host test can drive it, and the loop supplies only
+the mask-register writes and the notify.
+
+`Masked` is the one name for "the completion sources are still down": the
+receive ring filled (`BackPressure`), the round budget ran out
+(`BudgetSpent`), or a service faulted (`Fault`). All three mean the same
+thing to the stack — only its next `Service` can release or diagnose them —
+so all three set the notify's back-pressure flag.
+
 `serve(net, irq_handle)` is the freestanding process loop, compiled only for
 the bare-metal targets a driver binary is built for. It:
 
@@ -53,9 +68,17 @@ the bare-metal targets a driver binary is built for. It:
    recovers the NIC's stable bus location from the published channel;
 3. parks on a wait set over `{call endpoint, device interrupt}` for the life
    of the driver — never busy-polls (`AGENTS.md` §2.23). A call wake serves
-   one request; an interrupt wake acknowledges the device (deasserting the
-   line so it cannot storm) and, when a region is attached, wakes the stack
-   with a single notify so it issues the next `Service`.
+   one request. An interrupt wake **masks** the device's completion sources
+   first (acknowledging alone would not stop a re-fire: the latch sits over a
+   level condition that is still true while frames are undrained), then
+   acknowledges, then harvests the rings into the shared region itself under
+   `Drain`, and wakes the stack with a single notify. The notify carries what
+   the driver already knows — the live link, whether a source is still masked,
+   and the device's cumulative pre-filter count — so a pure receive costs the
+   stack no `Service` call at all. That last field is not a convenience: a
+   receive-only interface rings no doorbell, so without it the operator's
+   `stats:net/<iface>/rx.filtered` would sit frozen at whatever the last
+   transmit happened to observe.
 
 ## Fail closed
 
@@ -76,7 +99,10 @@ same failure report the same number.
 in-process loopback `Net`: the facts reply and its device-fault path, the
 detached/attached transitions, a frame round-tripping through one service
 doorbell, a geometry too small for the device, a wrong-length region, and
-detach. The process loop is exercised live by the two-process QEMU verticals
+detach. `Drain` is driven directly over synthetic reports: the re-arm
+look-once-more, a frame landing in that window, a full ring, a fault, a
+link change with no frame moved, the pre-filter count reaching the notify,
+and an exhausted round budget stopping masked *and* asking for release. The process loop is exercised live by the two-process QEMU verticals
 (`netstack_autoload_qemu_*`, `netstack_dhcp_qemu_*`,
 `netstack_dhcp6_qemu_*`), which drive the real stack against the real server
 across a process boundary.

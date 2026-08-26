@@ -13,7 +13,9 @@
 //! * [`NetChannelServer`] — the pure, host-testable per-request handler:
 //!   attach state, geometry validation, and the ring/service logic. No I/O,
 //!   so the whole control plane is exercised on the host against a mock
-//!   device.
+//!   device. [`Drain`] is its interrupt-path counterpart: the whole
+//!   mask/unmask/stop policy as a state machine over
+//!   [`ServiceReport`](tairix_abi::driver::net_ring::ServiceReport)s.
 //! * `serve` — the freestanding process loop the driver binary hands its
 //!   opened device to: claim a reserved device-channel endpoint, publish the
 //!   [`NETCHAN_NODE_COMPATIBLE`](tairix_abi::driver::net_channel::NETCHAN_NODE_COMPATIBLE)
@@ -35,7 +37,7 @@
 #![deny(missing_docs)]
 
 mod server;
-pub use server::{DrainStep, NetChannelServer};
+pub use server::{Drain, DrainAction, DrainStep, Drained, Masked, NetChannelServer};
 
 #[cfg(target_os = "none")]
 mod serve;

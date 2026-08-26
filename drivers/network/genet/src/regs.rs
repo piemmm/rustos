@@ -129,6 +129,17 @@ pub const INTRL2_CPU_MASK_CLEAR: usize = INTRL2_0 + 0x14;
 /// Every source bit, for the wholesale mask-all at bring-up.
 pub const INTRL2_ALL: u32 = 0xFFFF_FFFF;
 
+/// Base of the `INTRL2_1` block — the second interrupt instance, carrying
+/// the priority rings 0..15. This driver drives only [`DEFAULT_RING`], never
+/// binds this instance's line, and so never services it; bring-up masks it
+/// wholesale so no part of the device's interrupt state is left to whatever
+/// ran before.
+pub const INTRL2_1: usize = 0x0240;
+
+/// `INTRL2_1`'s write-1-to-mask register, at the same offset within its
+/// block as [`INTRL2_CPU_MASK_SET`].
+pub const INTRL2_1_CPU_MASK_SET: usize = INTRL2_1 + 0x10;
+
 /// The PHY reported the link came up.
 pub const IRQ_LINK_UP: u32 = 1 << 4;
 /// The PHY reported the link went down.
@@ -408,6 +419,17 @@ pub const DMA_CTRL: usize = 0x04;
 /// Control register: system-bus burst size.
 pub const DMA_SCB_BURST_SIZE: usize = 0x0C;
 
+/// Control register: ring 0's completion-interrupt timeout; each later
+/// ring's follows one word on ([`ring_timeout`]).
+const DMA_RING0_TIMEOUT: usize = 0x2C;
+
+/// Mask of the timeout field within a ring's timeout register, in units of
+/// [`DMA_TIMEOUT_UNIT_NS`]. The rest of the word is left as found.
+pub const DMA_TIMEOUT_MASK: u32 = 0xFFFF;
+
+/// Nanoseconds one unit of a ring timeout counts.
+pub const DMA_TIMEOUT_UNIT_NS: u32 = 8192;
+
 /// Enable the DMA engine.
 pub const DMA_EN: u32 = 1 << 0;
 /// Shift of the per-ring buffer-enable bitmap in [`DMA_CTRL`].
@@ -441,6 +463,14 @@ pub const fn desc(desc_base: usize, index: u32) -> usize {
 #[must_use]
 pub const fn ring_regs(desc_base: usize, ring: u32) -> usize {
     desc_base + TOTAL_DESC as usize * DESC_LEN + ring as usize * RING_STRIDE
+}
+
+/// Byte offset of ring `ring`'s completion-interrupt timeout register for
+/// the DMA engine whose descriptor RAM starts at `desc_base`. The timeouts
+/// live among the block-wide control registers, one word per ring.
+#[must_use]
+pub const fn ring_timeout(desc_base: usize, ring: u32) -> usize {
+    dma_regs(desc_base) + DMA_RING0_TIMEOUT + ring as usize * 4
 }
 
 /// Byte offset of the block-wide DMA control registers for the engine whose

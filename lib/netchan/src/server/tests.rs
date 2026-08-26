@@ -6,7 +6,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use super::{DrainStep, NetChannelServer};
+use super::{Drain, DrainAction, DrainStep, Masked, NetChannelServer};
 use tairix_abi::driver::net::{
     DeviceFacts, LinkState, MacAddress, McastFilter, Net, NetOffloads, ETHERNET_HEADER_LEN,
 };
@@ -300,6 +300,144 @@ fn a_full_receive_ring_holds_the_sources_masked() {
     // whether or not this pass moved anything.
     assert_eq!(DrainStep::of(&report(0, true)), DrainStep::BackPressure);
     assert_eq!(DrainStep::of(&report(8, true)), DrainStep::BackPressure);
+}
+
+// --- The whole drain, as the state machine the serve loop shells ---------
+
+/// Rounds a drain test allows, small enough to exhaust deliberately.
+const ROUNDS: u32 = 3;
+
+/// A report carrying a receive count, a back-pressure flag, and a link.
+fn linked(received: u32, rx_ring_full: bool, link: LinkState) -> ServiceReport {
+    ServiceReport {
+        link,
+        ..report(received, rx_ring_full)
+    }
+}
+
+#[test]
+fn a_quiet_device_is_re_armed_after_one_look_more() {
+    let mut drain = Drain::new(LinkState::Up, ROUNDS);
+    assert_eq!(
+        drain.observe(&report(0, false)),
+        DrainAction::UnmaskAndService
+    );
+    assert_eq!(drain.observe(&report(0, false)), DrainAction::Stop);
+    let outcome = drain.outcome();
+    assert_eq!(outcome.masked, Masked::No);
+    assert!(!outcome.moved);
+    assert!(!outcome.masked.needs_release());
+}
+
+#[test]
+fn a_frame_landing_in_the_re_arm_window_resumes_the_drain_masked() {
+    let mut drain = Drain::new(LinkState::Up, ROUNDS);
+    assert_eq!(
+        drain.observe(&report(0, false)),
+        DrainAction::UnmaskAndService
+    );
+    // The look-once-more found work, so the sources go back down and the
+    // drain resumes exactly as the interrupt entered it.
+    assert_eq!(
+        drain.observe(&report(1, false)),
+        DrainAction::MaskAndService
+    );
+    assert_eq!(
+        drain.observe(&report(0, false)),
+        DrainAction::UnmaskAndService
+    );
+    assert_eq!(drain.observe(&report(0, false)), DrainAction::Stop);
+    assert_eq!(drain.outcome().masked, Masked::No);
+    assert!(drain.outcome().moved);
+}
+
+#[test]
+fn a_full_ring_stops_masked_and_asks_for_release() {
+    let mut drain = Drain::new(LinkState::Up, ROUNDS);
+    assert_eq!(drain.observe(&report(4, true)), DrainAction::Stop);
+    let outcome = drain.outcome();
+    assert_eq!(outcome.masked, Masked::BackPressure);
+    assert!(outcome.masked.needs_release());
+}
+
+#[test]
+fn a_spent_round_budget_stops_masked_and_asks_for_release() {
+    // The defect this closes: the budget bounds the drain, but a device
+    // still handing over frames when it runs out leaves the sources masked.
+    // Reporting "flowing" there means the stack never doorbells, nothing
+    // releases the mask, and the interface goes quietly dead.
+    let mut drain = Drain::new(LinkState::Up, ROUNDS);
+    for _ in 0..ROUNDS {
+        assert_eq!(drain.observe(&report(1, false)), DrainAction::Service);
+    }
+    assert_eq!(drain.observe(&report(1, false)), DrainAction::Stop);
+    let outcome = drain.outcome();
+    assert_eq!(outcome.masked, Masked::BudgetSpent);
+    assert!(
+        outcome.masked.needs_release(),
+        "the stack must be told to doorbell, or the device stays masked for good"
+    );
+}
+
+#[test]
+fn a_budget_spent_during_the_re_check_leaves_the_sources_up() {
+    // The sources are already unmasked here, so nothing is stranded: the
+    // work the look-once-more found raises its own interrupt. Claiming
+    // "masked" would make the stack chase a release that is not needed.
+    let mut drain = Drain::new(LinkState::Up, ROUNDS);
+    for _ in 0..ROUNDS {
+        assert_eq!(drain.observe(&report(1, false)), DrainAction::Service);
+    }
+    assert_eq!(
+        drain.observe(&report(0, false)),
+        DrainAction::UnmaskAndService
+    );
+    assert_eq!(drain.observe(&report(1, false)), DrainAction::Stop);
+    assert_eq!(drain.outcome().masked, Masked::No);
+}
+
+#[test]
+fn a_fault_stops_masked_so_a_broken_device_cannot_storm() {
+    let mut drain = Drain::new(LinkState::Up, ROUNDS);
+    assert_eq!(drain.observe(&report(1, false)), DrainAction::Service);
+    drain.fault();
+    let outcome = drain.outcome();
+    assert_eq!(outcome.masked, Masked::Fault);
+    assert!(outcome.masked.needs_release());
+}
+
+#[test]
+fn a_link_change_is_reported_even_when_no_frame_moved() {
+    // An idle interface's cable pull is exactly this case, and a bond
+    // failover keys on the report.
+    let mut drain = Drain::new(LinkState::Up, ROUNDS);
+    assert_eq!(
+        drain.observe(&linked(0, false, LinkState::Down)),
+        DrainAction::UnmaskAndService
+    );
+    assert_eq!(
+        drain.observe(&linked(0, false, LinkState::Down)),
+        DrainAction::Stop
+    );
+    let outcome = drain.outcome();
+    assert!(!outcome.moved);
+    assert!(outcome.link_changed);
+    assert_eq!(outcome.link, LinkState::Down);
+}
+
+#[test]
+fn the_pre_filter_count_reaches_the_notify() {
+    // The stack reads it from the notify alone on a pure receive, so a
+    // drain that loses it freezes the operator's `rx.filtered`.
+    let mut drain = Drain::new(LinkState::Up, ROUNDS);
+    let mut first = report(1, false);
+    first.filtered = 7;
+    assert_eq!(drain.observe(&first), DrainAction::Service);
+    let mut second = report(0, false);
+    second.filtered = 11;
+    assert_eq!(drain.observe(&second), DrainAction::UnmaskAndService);
+    assert_eq!(drain.observe(&second), DrainAction::Stop);
+    assert_eq!(drain.outcome().filtered, 11);
 }
 
 // --- The receive pre-filter on the harvest path -------------------------

@@ -166,10 +166,16 @@ pub struct ServiceOutcome {
 pub struct ServiceHint {
     /// The link state the waking notify carried, if a notify woke this pump.
     pub link: Option<LinkState>,
-    /// The driver masked its completion source because the shared receive
-    /// ring filled. This pump must doorbell after draining even with nothing
-    /// to transmit, or the device stays masked and receives nothing further.
+    /// The driver masked its completion source. This pump must doorbell
+    /// after draining even with nothing to transmit, or the device stays
+    /// masked and receives nothing further.
     pub back_pressure: bool,
+    /// The device's cumulative receive-pre-filter count the notify carried.
+    /// A pure receive rings no doorbell, so this is the only report of it
+    /// the stack ever sees on the interrupt path — without it
+    /// `stats:net/<iface>/rx.filtered` would sit frozen at whatever the
+    /// last transmit happened to observe.
+    pub filtered: Option<u64>,
 }
 
 /// One managed interface: its admin-chosen alias, link kind, and the
@@ -201,9 +207,15 @@ pub struct Interface {
     /// The receive pre-filter policy last accepted by this interface's
     /// device, so an unchanged address set costs no IPC.
     pushed_rx_filter: Option<RxFilterPolicy>,
-    /// The driver's cumulative pre-filter count, as of the last report seen.
-    /// Stored rather than accumulated because the device counter is itself
-    /// cumulative — a report this stack never asked for is not lost.
+    /// This entry's *own device's* cumulative pre-filter count, as of the
+    /// last report or notify seen. Stored rather than accumulated because
+    /// the device counter is itself cumulative — a report this stack never
+    /// asked for is not lost.
+    ///
+    /// Recorded on the channel, like [`Self::pushed_rx_filter`] and for the
+    /// same reason: a bond's members share one stack, so a count kept on
+    /// the stack target would be overwritten by whichever member was pumped
+    /// last. A bond reports the sum of its members'.
     rx_filtered: u64,
 }
 
@@ -654,11 +666,31 @@ impl Netstack {
                         pending_dropped: c.pending_dropped,
                         // A driver statistic, not a stack one: the pre-filter
                         // shed these before the stack ever saw them.
-                        rx_filtered: i.rx_filtered,
+                        rx_filtered: self.filtered_frames_of(i),
                     },
                 }
             })
             .collect()
+    }
+
+    /// The pre-filter count to report for `iface`: its own device's, or for
+    /// a bond the sum over its members' devices.
+    ///
+    /// A bond has no device of its own, and every other counter on its
+    /// record already aggregates its members (they feed one stack), so a
+    /// bond reporting one member's figure would be inconsistent with its own
+    /// `rx_frames`. A member whose name no longer resolves contributes
+    /// nothing rather than poisoning the total.
+    fn filtered_frames_of(&self, iface: &Interface) -> u64 {
+        let BondRole::Bond { members, .. } = &iface.role else {
+            return iface.rx_filtered;
+        };
+        members
+            .iter()
+            .filter_map(|name| self.find(*name))
+            .fold(0u64, |total, index| {
+                total.saturating_add(self.interfaces[index].rx_filtered)
+            })
     }
 
     /// The whole table's live throughput rates over `window`, one record
@@ -1194,6 +1226,10 @@ impl Netstack {
         let rx_policy = iface.stack.rx_filter_policy();
         push_rx_filter(&mut interfaces[channel_index], rx_policy, fs);
         let iface = &mut interfaces[index];
+        // The device's cumulative pre-filter count: whatever the waking
+        // notify carried, superseded by any doorbell report this pump gets.
+        // Monotonic, so the latest observation is always the right one.
+        let mut filtered = hint.filtered;
         // A driver holding its completion source masked must be released
         // whatever else this pump finds, and an in-process device is only
         // ever run by the doorbell itself.
@@ -1212,7 +1248,7 @@ impl Netstack {
         // link is what the waking notify stated, or the last recorded value.
         let mut reported_link = if doorbell {
             let report = fs.service()?;
-            iface.rx_filtered = report.filtered;
+            filtered = Some(report.filtered);
             report.link
         } else {
             hint.link.unwrap_or(last_link)
@@ -1255,19 +1291,23 @@ impl Netstack {
         }
         if replied {
             let report = fs.service()?;
-            iface.rx_filtered = report.filtered;
+            filtered = Some(report.filtered);
             reported_link = report.link;
         }
         // Snapshot the post-pump counters for the throughput meter. Cheap
         // and self-throttling: the meter drops a sample taken within its
         // sampling gap of the last.
         iface.rates.record(now, rate_counters_of(&iface.stack));
-        // A link change on the serviced NIC (channel) — not the stack-
-        // target — is what a bond failover keys on; compare against the
-        // last recorded state. `iface`'s borrow has ended (its last use is
-        // above), so re-indexing the serviced channel entry is sound.
-        let link_change =
-            (reported_link != interfaces[channel_index].facts.link).then_some(reported_link);
+        // `iface`'s borrow has ended (its last use is above), so re-indexing
+        // the serviced channel entry is sound. Both of the facts below are
+        // the *channel's*, not the stack target's: the pre-filter count
+        // belongs to the device that shed the frames, and a link change on
+        // the serviced NIC is what a bond failover keys on.
+        let channel = &mut interfaces[channel_index];
+        if let Some(filtered) = filtered {
+            channel.rx_filtered = filtered;
+        }
+        let link_change = (reported_link != channel.facts.link).then_some(reported_link);
         Ok(ServiceOutcome {
             events,
             link_change,

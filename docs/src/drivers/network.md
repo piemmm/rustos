@@ -125,12 +125,15 @@ inverted and frames flowing both ways:
    and replies a `ServiceReport`. It is **not** on the receive path — a
    driver woken by its device interrupt masks its completion sources,
    harvests into the shared ring itself, and `ipc_send`s one
-   `NetChannelNotify` carrying the live link and a back-pressure flag. The
-   stack reads the ring locally and rings the doorbell only when the device
-   has work this side created (something in the transmit ring) or the
-   notify said a source is masked awaiting release. A pure receive
-   therefore costs no call at all (`plans/NETWORK.md` N17a–b). Neither side
-   busy-polls.
+   `NetChannelNotify` carrying the live link, a back-pressure flag, and the
+   device's cumulative receive-pre-filter count. The stack reads the ring
+   locally and rings the doorbell only when the device has work this side
+   created (something in the transmit ring) or the notify said a source is
+   masked awaiting release. A pure receive therefore costs no call at all
+   (`plans/NETWORK.md` N17a–b). The count rides the notify for exactly that
+   reason: a receive-only interface rings no doorbell, so a figure carried
+   only on the `Service` reply would leave `stats:net/<iface>/rx.filtered`
+   frozen at whatever the last transmit observed. Neither side busy-polls.
 5. `SetMulticast` replaces the group addresses the device admits. Sent
    only to a device whose `DeviceFacts::multicast_filter` is
    `McastFilter::Slots(n)` — an `Unfiltered` device already delivers every
@@ -157,10 +160,28 @@ measurable as a permanently busy core on an otherwise idle machine.
 device's data-path completion sources on entry and unmasks them only once
 the device is empty *and* the shared receive ring has room. A burst then
 costs one interrupt instead of one per frame, which is the coalescing a
-fixed frame threshold cannot give — so GENET's receive `MBUF_DONE_THRESH`
-stays at 1, as Linux's `bcmgenet` does. **Link and configuration-change
+fixed frame threshold cannot give — so a device's own completion threshold
+is programmed at its most responsive (GENET writes `MBUF_DONE_THRESH = 1` on
+both rings with the ring timer disarmed, as Linux's `bcmgenet` does), and the
+coalescing comes from the masking, which adapts to the actual burst where a
+timer would only add latency to a lone frame. **Link and configuration-change
 sources are never masked**, or a cable pulled mid-flood would go unnoticed.
-The masking policy itself is the pure, host-tested `DrainStep`.
+
+That threshold is programmed, never inherited. It is the comparison that
+raises the completion source, so a ring left holding whatever value reset or
+the firmware put there has unknown interrupt behaviour — and a threshold of
+zero is satisfied permanently, which is a level condition draining cannot
+clear and therefore a storm no masking can end.
+
+The policy itself is pure and host-tested: `DrainStep` classifies one report,
+and `Drain` is the whole interrupt-path state machine over a sequence of
+them. `Masked` names the state it can stop in — `BackPressure` (the shared
+ring filled), `BudgetSpent` (the round bound ran out while the device still
+had work), or `Fault` — and all three set the notify's back-pressure flag,
+because in all three only the stack's next `Service` can release or diagnose
+the sources. A drain that stopped masked without saying so would leave the
+interface receiving nothing until some unrelated transmit happened to
+release it.
 
 The sources are also masked whenever the channel is detached, so a device
 left running cannot storm a driver with nowhere to put frames.
@@ -217,10 +238,15 @@ consumer index alone hands a slot back — so the hot path writes one register
 per frame.
 
 Bring-up refuses any core that does not report the GENET v5 revision, masks
-the level-2 interrupt controller wholesale *before* programming anything, and
-afterwards unmasks exactly `{RXDMA done, TXDMA done, link up, link down}`. A
-link event re-resolves and re-programs the negotiated link on the next service
-doorbell, so a cable change needs no driver restart.
+**both** level-2 interrupt instances wholesale *before* programming anything
+— the driver drives only the default ring, so it never binds `INTRL2_1`'s
+line and never services it, and leaving those sources live would leave part
+of the device's interrupt state to whatever the firmware left behind — and
+afterwards unmasks exactly `{RXDMA done, TXDMA done, link up, link down}` on
+`INTRL2_0`. A link event re-resolves and re-programs the negotiated link on
+the next service doorbell, and that doorbell's report states the resolved
+link, so a cable change reaches the stack (and a bond's failover) without a
+driver restart.
 
 #### The receive destination-address filter
 

@@ -193,8 +193,8 @@ const fn largest_body() -> usize {
 }
 
 /// Wire length of a [`NetChannelNotify`] frame: magic (4) + version (2) +
-/// reserved (2).
-pub const NET_CHANNEL_NOTIFY_LEN: usize = 8;
+/// link (1) + back-pressure (1) + cumulative filtered count (8).
+pub const NET_CHANNEL_NOTIFY_LEN: usize = 16;
 
 /// A device-channel control request the stack issues to the driver's
 /// endpoint (`plans/NETWORK.md` N4c). Decoded fail-closed from an untrusted
@@ -598,17 +598,28 @@ impl NetChannelRequest {
 /// * `link` — the device's live link state. Without it a link change on an
 ///   otherwise idle interface would go unseen until some unrelated transmit
 ///   provoked a doorbell, and a bond failover keys on exactly that report.
-/// * `back_pressure` — the driver's receive ring filled while the device
-///   still had frames, so it has masked its completion source. The stack
-///   must issue a [`NetChannelRequest::Service`] after draining, even with
-///   nothing to transmit, or the device stays masked.
+/// * `back_pressure` — the driver has masked its completion source and only
+///   a [`NetChannelRequest::Service`] can release it. The stack must issue
+///   one after draining, even with nothing to transmit, or the device stays
+///   masked.
+/// * `filtered` — the device's cumulative receive-pre-filter count. A pure
+///   receive rings no doorbell, so without it here the only reader of
+///   [`ServiceReport::filtered`](super::net_ring::ServiceReport::filtered)
+///   would be a doorbell the receive path deliberately never rings, and the
+///   operator's `stats:net/<iface>/rx.filtered` would sit frozen at whatever
+///   the last transmit happened to observe.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct NetChannelNotify {
     /// The device's link state as the driver last observed it.
     pub link: LinkState,
-    /// The driver masked its completion source because the receive ring
-    /// filled; a `Service` is needed to release it.
+    /// The driver masked its completion source; a `Service` is needed to
+    /// release it.
     pub back_pressure: bool,
+    /// Frames the device's receive pre-filter has shed since it was opened
+    /// — the same cumulative counter
+    /// [`ServiceReport::filtered`](super::net_ring::ServiceReport::filtered)
+    /// carries, so a consumer keeps the latest value it saw from either.
+    pub filtered: u64,
 }
 
 /// Wire byte for a notify reporting back-pressure.
@@ -635,6 +646,7 @@ impl NetChannelNotify {
         } else {
             NOTIFY_FLOWING
         };
+        put_u64(&mut out, 8, self.filtered);
         out
     }
 
@@ -671,6 +683,7 @@ impl NetChannelNotify {
         Ok(Self {
             link,
             back_pressure,
+            filtered: read_u64(bytes, 8),
         })
     }
 }
@@ -1092,17 +1105,21 @@ mod tests {
     fn notify_round_trips_and_fails_closed() {
         for link in [LinkState::Up, LinkState::Down] {
             for back_pressure in [false, true] {
-                let notify = NetChannelNotify {
-                    link,
-                    back_pressure,
-                };
-                let frame = notify.encode();
-                assert_eq!(NetChannelNotify::decode(&frame), Ok(notify));
+                for filtered in [0, 1, u64::MAX] {
+                    let notify = NetChannelNotify {
+                        link,
+                        back_pressure,
+                        filtered,
+                    };
+                    let frame = notify.encode();
+                    assert_eq!(NetChannelNotify::decode(&frame), Ok(notify));
+                }
             }
         }
         let frame = NetChannelNotify {
             link: LinkState::Up,
             back_pressure: false,
+            filtered: 0,
         }
         .encode();
         let mut bad = frame;
@@ -1117,7 +1134,7 @@ mod tests {
         bad[7] = 0xFF;
         assert_eq!(NetChannelNotify::decode(&bad), Err(Errno::OutOfRange));
         assert_eq!(
-            NetChannelNotify::decode(&frame[..7]),
+            NetChannelNotify::decode(&frame[..NET_CHANNEL_NOTIFY_LEN - 1]),
             Err(Errno::BufferTooSmall)
         );
     }

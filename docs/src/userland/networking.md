@@ -95,7 +95,12 @@ same System Information API (`plans/ALIAS.md` §6, `plans/NETWORK.md` §5):
   and then discarded, and it is what makes a filter's effect visible: on a
   busy segment it climbs steadily while `rx.packets` does not. A driver
   reports it cumulatively, because it drains its rings on its own device
-  interrupt and the stack does not ask for every batch.
+  interrupt and the stack does not ask for every batch — and it rides the
+  notify that wakes the stack, not only the `Service` reply, so a
+  receive-only interface (which rings no doorbell at all) reports a live
+  figure rather than whatever its last transmit happened to observe. A bond
+  reports the sum over its members' devices, as its other counters already
+  aggregate them.
 - `stats:net/<iface>/rx.pps`, `.../rx.bps` (and `tx.*`) with a mandatory
   `?window=<duration>` decoration (`500ms`, `1s`, `2m`) — the average
   rate over the window that actually elapsed.

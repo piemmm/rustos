@@ -1156,10 +1156,11 @@ mod program {
     /// [`ServiceHint`].
     ///
     /// Every queued doorbell is consumed so the wait-set member is not
-    /// immediately ready again. Each carries the driver's live link and
-    /// whether it masked its completion source, so the fold keeps the
-    /// *latest* link and any back-pressure claim: a single notify demanding
-    /// release must not be lost behind a later one that does not.
+    /// immediately ready again. Each carries the driver's live link, its
+    /// cumulative pre-filter count, and whether it masked its completion
+    /// source, so the fold keeps the *latest* link and count and any
+    /// back-pressure claim: a single notify demanding release must not be
+    /// lost behind a later one that does not.
     ///
     /// A notify that will not decode is dropped but still counts as
     /// back-pressure — the safe direction, since the alternative is leaving
@@ -1173,6 +1174,7 @@ mod program {
                 Ok(notify) => {
                     hint.link = Some(notify.link);
                     hint.back_pressure |= notify.back_pressure;
+                    hint.filtered = Some(notify.filtered);
                 }
                 Err(_) => hint.back_pressure = true,
             }

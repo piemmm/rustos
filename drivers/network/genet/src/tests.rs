@@ -514,6 +514,91 @@ fn a_group_set_larger_than_the_table_is_refused_whole() {
 }
 
 #[test]
+fn every_service_report_states_the_live_link() {
+    // The stack reads the link from the report on every doorbell and turns
+    // a change into a bond failover; a report that always said `Up` would
+    // pin the interface up for ever however the wire actually looked.
+    let mut device = open();
+    let mut region = alloc::vec![0u8; geometry().region_len()];
+    assert_eq!(
+        service(&mut device, &mut region, BufferClass::NonSensitive).link,
+        LinkState::Up
+    );
+
+    device.regs.phy_link_down();
+    device.regs.assert_irq(regs::IRQ_LINK_DOWN);
+    device.ack_interrupt();
+    assert_eq!(
+        service(&mut device, &mut region, BufferClass::NonSensitive).link,
+        LinkState::Down
+    );
+}
+
+#[test]
+fn both_rings_have_their_completion_interrupt_armed_before_the_mac_runs() {
+    // The condition that raises `IRQ_*DMA_DONE` is a comparison against the
+    // ring's done threshold, so a ring left holding whatever value reset put
+    // there has unknown interrupt behaviour — and a threshold of zero is
+    // satisfied permanently, which is a level condition draining cannot
+    // clear and so a storm no masking can end.
+    let device = open();
+    let mock = &device.regs;
+    for desc_base in [regs::RDMA_DESC, regs::TDMA_DESC] {
+        let ring = regs::ring_regs(desc_base, regs::DEFAULT_RING);
+        assert_eq!(
+            mock.peek(ring + regs::RING_MBUF_DONE_THRESH),
+            1,
+            "one completed descriptor raises the source; the drain's masking is the coalescer"
+        );
+        let timeout = regs::ring_timeout(desc_base, regs::DEFAULT_RING);
+        assert!(
+            mock.first_write_index(timeout).is_some(),
+            "the ring timer is programmed, not inherited"
+        );
+        assert_eq!(
+            mock.peek(timeout) & regs::DMA_TIMEOUT_MASK,
+            0,
+            "disarmed: a timer would only add latency to a lone frame"
+        );
+        // Both must be in force before the DMA engine can complete anything.
+        let armed = mock
+            .first_write_index(ring + regs::RING_MBUF_DONE_THRESH)
+            .expect("threshold programmed");
+        let dma_enabled = mock
+            .writes
+            .iter()
+            .position(|(offset, value)| {
+                *offset == regs::dma_regs(desc_base) + regs::DMA_CTRL && value & regs::DMA_EN != 0
+            })
+            .expect("bring-up enables the engine");
+        assert!(armed < dma_enabled);
+    }
+}
+
+#[test]
+fn bring_up_masks_the_interrupt_instance_it_never_services() {
+    // This driver drives only the default ring, so it never binds
+    // `INTRL2_1`'s line and never services it. Leaving its sources live
+    // would leave part of the device's interrupt state to whatever the
+    // firmware left behind.
+    let device = open();
+    let mock = &device.regs;
+    assert_eq!(
+        mock.writes_to(regs::INTRL2_1_CPU_MASK_SET),
+        alloc::vec![regs::INTRL2_ALL]
+    );
+    let masked = mock
+        .first_write_index(regs::INTRL2_1_CPU_MASK_SET)
+        .expect("masked during bring-up");
+    let rx_enabled = mock
+        .writes
+        .iter()
+        .position(|(offset, value)| *offset == regs::UMAC_CMD && value & regs::CMD_RX_EN != 0)
+        .expect("bring-up enables the receiver");
+    assert!(masked < rx_enabled);
+}
+
+#[test]
 fn the_device_reports_the_group_slots_it_has_left() {
     let device = open();
     let facts = device.device_facts().expect("facts");
@@ -790,9 +875,14 @@ fn a_link_event_re_resolves_the_link_on_the_next_service() {
     let mut region = alloc::vec![0u8; geometry().region_len()];
     let mut rings =
         FrameRings::bind(&mut region, geometry(), BufferClass::NonSensitive).expect("bind");
-    device.service(&mut rings).expect("service");
+    let report = device.service(&mut rings).expect("service");
     assert_eq!(device.link, None);
     assert!(!device.link_event, "the event is consumed");
+    assert_eq!(
+        report.link,
+        LinkState::Down,
+        "the doorbell is how the stack learns the cable was pulled"
+    );
     assert_eq!(
         device.regs.peek(regs::UMAC_CMD) & (regs::CMD_TX_EN | regs::CMD_RX_EN),
         0,

@@ -2290,14 +2290,27 @@ opposite ("cannot re-fire in a storm"), which is why the defect survived.
   (a new `SplitQueue::suppress_used_interrupts`).
 - The `lib/netchan` serve loop masks on entry, acknowledges, drains, and
   unmasks **only** when the device is empty *and* the shared receive ring
-  has room. `DrainStep` is that decision as a pure, host-tested value, so
-  the policy is exercised without hardware.
+  has room. `DrainStep` classifies one report and `Drain` is the whole
+  interrupt-path state machine over a sequence of them — both pure and
+  host-tested, so the policy is exercised without hardware and the loop
+  supplies only the mask writes and the notify.
 - A burst therefore costs one interrupt rather than one per frame — the
-  coalescing a fixed frame threshold cannot give, which is why receive
-  `MBUF_DONE_THRESH` stays at 1 (as Linux's `bcmgenet` does).
+  coalescing a fixed frame threshold cannot give, which is why the device's
+  own completion threshold is programmed at its most responsive (GENET
+  writes `MBUF_DONE_THRESH = 1` on both rings, ring timer disarmed, as
+  Linux's `bcmgenet` does). Programmed, never inherited: it is the
+  comparison that raises the source, and a reset default of zero is
+  satisfied permanently — a level condition draining cannot clear, and so
+  a storm no masking can end.
 - Invariant: the sources are masked whenever the channel is detached, so a
   device left running cannot storm a driver with nowhere to put frames;
   `Attach` re-enables them.
+- `Masked` names every state the drain can stop in with the sources still
+  down — `BackPressure`, `BudgetSpent` (the round bound ran out with work
+  left), `Fault` — and all three set the notify's back-pressure flag,
+  because only the stack's next `Service` can release or diagnose any of
+  them. Stopping masked without saying so leaves the interface receiving
+  nothing until an unrelated transmit happens to release it.
 
 #### N17b — the receive path no longer pays an RPC
 
@@ -2308,10 +2321,11 @@ per batch for nothing.
 - The interrupt path drives `net.service(rings)` itself, so frames are in
   the shared ring **before** the notify is sent.
 - `NetChannelNotify` carries what the driver already knows — the live
-  `link` and a `back_pressure` flag — in its two previously-reserved bytes
-  (no wire growth). Without the link there, a change on an idle interface
-  would go unseen until some unrelated transmit provoked a doorbell, and a
-  bond failover keys on exactly that report.
+  `link`, a `back_pressure` flag, and the device's cumulative `filtered`
+  count. Without the link there, a change on an idle interface would go
+  unseen until some unrelated transmit provoked a doorbell, and a bond
+  failover keys on exactly that report. Without the count there, its only
+  reader would be a doorbell this very optimisation removes.
 - `Netstack::service_interface` takes a `ServiceHint` and rings the
   doorbell only when the device has work this side created (anything in
   the transmit ring) or the driver masked its source for back-pressure.
@@ -2384,7 +2398,14 @@ Every such frame otherwise costs a stack wake, a full parse, and a drop.
   counter (the driver drains on its own interrupt and the stack does not
   doorbell for every batch, so a per-call delta would simply be lost),
   surfaced as `stats:net/<iface>/rx.filtered`. Distinct from `rx.dropped`,
-  which counts frames the stack received and then discarded.
+  which counts frames the stack received and then discarded. It rides the
+  notify as well as the `Service` reply, or the receive-only case N17b
+  optimised — no doorbell at all — would freeze the counter at its last
+  transmit's value, and the one figure an operator judges the filter by
+  would be meaningless. The stack records it against the *channel*, like
+  the policy it published and for the same reason, so a bond's members do
+  not overwrite one another; a bond reports their sum, as its other
+  counters already aggregate them.
 
 ### N18 — GENET offloads and reverse resolution `[x]`
 

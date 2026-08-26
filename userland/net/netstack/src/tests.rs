@@ -7,6 +7,7 @@ use core::cell::RefCell;
 
 use super::iface::ServiceHint;
 use tairix_abi::driver::net::{DeviceFacts, LinkState, MacAddress, McastFilter, Net, NetOffloads};
+use tairix_abi::driver::net_channel::RxFilterPolicy;
 use tairix_abi::driver::net_ring::{
     aligned_region, FrameRings, RingGeometry, ServiceReport, REGION_ALIGN_PADDING,
 };
@@ -132,12 +133,81 @@ fn region_of(buffer: &mut [u8]) -> &mut [u8] {
 /// Wrap a loopback [`PeerNet`] as the in-process [`LocalFrameService`] the
 /// pump drives.
 fn local_service(net: PeerNet, region: &mut [u8]) -> LocalFrameService<'_, PeerNet> {
-    LocalFrameService::new(net, region, GEOMETRY, BufferClass::NonSensitive).expect("frame service")
+    local_service_generic(net, region)
 }
 
 /// Wrap a link-toggling [`LinkNet`] as the in-process [`LocalFrameService`]
 /// the pump drives (the live link-status path).
 fn local_service_link(net: LinkNet, region: &mut [u8]) -> LocalFrameService<'_, LinkNet> {
+    local_service_generic(net, region)
+}
+
+/// A device that neither receives nor transmits: the pump's own behaviour
+/// is what a test using it is measuring.
+struct QuietNet;
+
+impl Net for QuietNet {
+    fn device_facts(&self) -> Result<DeviceFacts, DriverError> {
+        Ok(facts(MAC_B))
+    }
+
+    fn service(&mut self, _rings: &mut FrameRings<'_>) -> Result<ServiceReport, DriverError> {
+        Ok(ServiceReport::default())
+    }
+}
+
+/// A [`LocalFrameService`] that reports the *cross-process* shape: its
+/// driver harvests on its own device interrupt, so a pump with nothing to
+/// transmit must not ring the doorbell. Counts the doorbells it does get,
+/// so a test can prove the pump took the notify path.
+struct HarvestedService<'r, N: Net> {
+    inner: LocalFrameService<'r, N>,
+    doorbells: usize,
+}
+
+impl<'r, N: Net> HarvestedService<'r, N> {
+    fn new(net: N, region: &'r mut [u8]) -> Self {
+        Self {
+            inner: local_service_generic(net, region),
+            doorbells: 0,
+        }
+    }
+}
+
+impl<N: Net> FrameService for HarvestedService<'_, N> {
+    fn geometry(&self) -> RingGeometry {
+        self.inner.geometry()
+    }
+
+    fn class(&self) -> BufferClass {
+        self.inner.class()
+    }
+
+    fn region_mut(&mut self) -> &mut [u8] {
+        self.inner.region_mut()
+    }
+
+    fn service(&mut self) -> Result<ServiceReport, Errno> {
+        self.doorbells += 1;
+        self.inner.service()
+    }
+
+    fn receive_needs_doorbell(&self) -> bool {
+        false
+    }
+
+    fn set_multicast_groups(&mut self, groups: &[MacAddress]) -> Result<(), Errno> {
+        self.inner.set_multicast_groups(groups)
+    }
+
+    fn set_rx_filter(&mut self, policy: RxFilterPolicy) -> Result<(), Errno> {
+        self.inner.set_rx_filter(policy)
+    }
+}
+
+/// Wrap any [`Net`] fake as the in-process [`LocalFrameService`] the pump
+/// drives.
+fn local_service_generic<N: Net>(net: N, region: &mut [u8]) -> LocalFrameService<'_, N> {
     LocalFrameService::new(net, region, GEOMETRY, BufferClass::NonSensitive).expect("frame service")
 }
 
@@ -3815,6 +3885,109 @@ fn two_member_bond() -> Netstack {
     // Admit both members past the anti-flap up-delay.
     stack.advance_bonds(t(2));
     stack
+}
+
+/// Pump `iface` until the engine stops producing frames, so a following
+/// pump is genuinely receive-only and rings no doorbell.
+fn settle<F: FrameService>(stack: &mut Netstack, iface: &[u8; IF_NAME_LEN], fs: &mut F) {
+    for step in 0..8 {
+        stack
+            .service_interface(*iface, fs, t(step), ServiceHint::default())
+            .expect("settle pump");
+    }
+}
+
+#[test]
+fn a_notify_refreshes_the_pre_filter_count_with_no_doorbell() {
+    // The defect this closes: a pure receive deliberately rings no
+    // doorbell, so a count carried only on the `Service` reply left
+    // `stats:net/<iface>/rx.filtered` frozen at whatever the last transmit
+    // happened to observe — which is the only figure an operator has for
+    // what the filter is shedding.
+    let mut stack = managed_stack();
+    // A statically-addressed, IPv6-free interface has nothing of its own to
+    // send, so the pump below is genuinely receive-only.
+    stack
+        .apply_interface_config(
+            &NetInterfaceConfigMsg {
+                alias: name("wan"),
+                match_mac: None,
+                match_node: None,
+                ipv4: NetIpv4Config::Static {
+                    addr: [10, 0, 2, 15],
+                    prefix: 24,
+                    gateway: None,
+                },
+                ipv6: NetIpv6Config::Disabled,
+                mtu: 0,
+                dns: NetDnsServers::EMPTY,
+            },
+            t(0),
+        )
+        .expect("static address");
+    let mut region = rings_region();
+    let mut fs = HarvestedService::new(QuietNet, &mut region);
+    settle(&mut stack, &name("wan"), &mut fs);
+    let before = fs.doorbells;
+
+    stack
+        .service_interface(
+            name("wan"),
+            &mut fs,
+            t(9),
+            ServiceHint {
+                filtered: Some(4242),
+                ..ServiceHint::default()
+            },
+        )
+        .expect("notify-driven pump");
+
+    assert_eq!(
+        fs.doorbells, before,
+        "a receive-only pump rings no doorbell"
+    );
+    assert_eq!(
+        stack.counters_records(0, 8)[0].counters.rx_filtered,
+        4242,
+        "so the notify is the only thing that can refresh the count"
+    );
+}
+
+#[test]
+fn a_bond_reports_the_sum_of_its_members_pre_filter_counts() {
+    // A bond has no device of its own and every other counter on its record
+    // aggregates its members, so recording one member's cumulative figure
+    // on the bond made it oscillate between them and left the member rows
+    // reading zero.
+    let mut stack = two_member_bond();
+    for (member, filtered) in [("eth0", 5u64), ("eth1", 7u64)] {
+        let mut region = rings_region();
+        let mut fs = HarvestedService::new(QuietNet, &mut region);
+        stack
+            .service_interface(
+                name(member),
+                &mut fs,
+                t(3),
+                ServiceHint {
+                    filtered: Some(filtered),
+                    ..ServiceHint::default()
+                },
+            )
+            .expect("member pump");
+    }
+
+    let by_name = |want: &str| {
+        stack
+            .counters_records(0, 8)
+            .into_iter()
+            .find(|r| r.name == name(want))
+            .expect("record")
+            .counters
+            .rx_filtered
+    };
+    assert_eq!(by_name("eth0"), 5);
+    assert_eq!(by_name("eth1"), 7);
+    assert_eq!(by_name("bond0"), 12, "the bond sums its members' devices");
 }
 
 #[test]

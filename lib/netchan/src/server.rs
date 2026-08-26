@@ -84,6 +84,178 @@ impl DrainStep {
     }
 }
 
+/// Why a [`Drain`] left the device's completion sources masked, if it did.
+///
+/// Three causes, one state: whichever it was, the device raises no further
+/// interrupt and only the stack's next `Service` can release or diagnose it.
+/// Naming that state once keeps the three from drifting apart.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum Masked {
+    /// Not masked: the device fell quiet and the sources were re-armed.
+    #[default]
+    No,
+    /// The shared receive ring filled while the device still had frames.
+    BackPressure,
+    /// The round budget was spent while the device still had work.
+    BudgetSpent,
+    /// A service faulted, so re-arming would storm a broken device.
+    Fault,
+}
+
+impl Masked {
+    /// Whether the stack must issue a `Service` to release or diagnose the
+    /// sources — the notify's back-pressure flag.
+    #[must_use]
+    pub const fn needs_release(self) -> bool {
+        !matches!(self, Self::No)
+    }
+}
+
+/// What a [`Drain`] observed across a whole interrupt.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Drained {
+    /// Any frame was received or transmitted.
+    pub moved: bool,
+    /// The device's link state at the end of the pass.
+    pub link: LinkState,
+    /// The link differs from what the previous pass saw.
+    pub link_changed: bool,
+    /// The device's cumulative receive-pre-filter count as last reported.
+    pub filtered: u64,
+    /// Whether the completion sources were left masked, and why.
+    pub masked: Masked,
+}
+
+/// What the driver's interrupt path must do after one service report.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DrainAction {
+    /// Service the device again; the completion sources stay masked.
+    Service,
+    /// Unmask the completion sources and service once more before believing
+    /// the device idle.
+    UnmaskAndService,
+    /// Re-mask the completion sources and service again: the look-once-more
+    /// found work, so the drain resumes exactly as the interrupt entered.
+    MaskAndService,
+    /// Stop; [`Drain::outcome`] is final.
+    Stop,
+}
+
+/// Which service call a [`Drain`] is interpreting.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Phase {
+    /// An ordinary drain pass, sources masked.
+    Masked,
+    /// The look-once-more after unmasking.
+    ReChecking,
+}
+
+/// The whole interrupt-path drain policy as a pure state machine: fold in
+/// each [`ServiceReport`] and it answers what to do next and, at the end,
+/// what the stack must be told.
+///
+/// The serve loop supplies only the I/O — the mask-register writes, the
+/// `service` calls, the notify — so the policy is exercised on the host.
+/// Getting it wrong is not a subtle bug: unmasking into a still-asserted
+/// level condition spins the driver, and stopping while masked without
+/// saying so wedges the interface.
+pub struct Drain {
+    outcome: Drained,
+    previous_link: LinkState,
+    rounds_left: u32,
+    phase: Phase,
+}
+
+impl Drain {
+    /// Begin a drain against the link the previous pass reported, allowing
+    /// `rounds` masked service passes.
+    ///
+    /// `rounds` is a fixed containment bound, not a capacity: a saturating
+    /// flood must not pin the driver process in the drain loop and starve
+    /// its call endpoint.
+    #[must_use]
+    pub const fn new(previous_link: LinkState, rounds: u32) -> Self {
+        Self {
+            outcome: Drained {
+                moved: false,
+                link: previous_link,
+                link_changed: false,
+                filtered: 0,
+                masked: Masked::No,
+            },
+            previous_link,
+            rounds_left: rounds,
+            phase: Phase::Masked,
+        }
+    }
+
+    /// Fold one service report in and decide the next step.
+    pub fn observe(&mut self, report: &ServiceReport) -> DrainAction {
+        self.outcome.moved |= report.received > 0 || report.transmitted > 0;
+        self.outcome.link = report.link;
+        self.outcome.link_changed = report.link != self.previous_link;
+        self.outcome.filtered = report.filtered;
+        match self.phase {
+            Phase::Masked => match DrainStep::of(report) {
+                DrainStep::BackPressure => {
+                    self.outcome.masked = Masked::BackPressure;
+                    DrainAction::Stop
+                }
+                DrainStep::Quiet => {
+                    self.phase = Phase::ReChecking;
+                    DrainAction::UnmaskAndService
+                }
+                DrainStep::Continue => self.spend(DrainAction::Service, Masked::BudgetSpent),
+            },
+            // Anything but quiet means the look-once-more found work, so the
+            // drain resumes masked and the *next* pass classifies it; that
+            // keeps one place deciding back-pressure.
+            Phase::ReChecking => {
+                if matches!(DrainStep::of(report), DrainStep::Quiet) {
+                    DrainAction::Stop
+                } else {
+                    self.phase = Phase::Masked;
+                    // The sources are up at this point, so a budget spent
+                    // here strands nothing: the work the look-once-more
+                    // found raises its own interrupt.
+                    self.spend(DrainAction::MaskAndService, Masked::No)
+                }
+            }
+        }
+    }
+
+    /// Fold a device fault in. The outcome is final and the caller masks the
+    /// completion sources: re-arming into a device that just faulted would
+    /// storm, and the stack is told because a masked source with nobody
+    /// coming to release it is a permanently and silently dead interface.
+    pub fn fault(&mut self) {
+        self.outcome.masked = Masked::Fault;
+    }
+
+    /// What this drain observed. Final once [`observe`](Self::observe)
+    /// returned [`DrainAction::Stop`] or [`fault`](Self::fault) was called.
+    #[must_use]
+    pub const fn outcome(&self) -> Drained {
+        self.outcome
+    }
+
+    /// Charge one pass against the round budget, or stop reporting
+    /// `exhausted` — the mask state the caller is actually left in.
+    ///
+    /// The bound must not silently wedge the interface: spent while the
+    /// sources are down, the device will raise no further interrupt and only
+    /// the stack's `Service` can release them, so it must be told. Stopping
+    /// silently there is how an interface goes dead.
+    fn spend(&mut self, action: DrainAction, exhausted: Masked) -> DrainAction {
+        let Some(left) = self.rounds_left.checked_sub(1) else {
+            self.outcome.masked = exhausted;
+            return DrainAction::Stop;
+        };
+        self.rounds_left = left;
+        action
+    }
+}
+
 /// The state a channel carries once the stack has attached its frame region.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 struct Attached {
