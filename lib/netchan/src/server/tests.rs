@@ -407,6 +407,28 @@ fn a_fault_stops_masked_so_a_broken_device_cannot_storm() {
 }
 
 #[test]
+fn only_a_fault_forbids_re_arming_the_completion_sources() {
+    // The doorbell path has no notify to carry a release request — a
+    // `ServiceReport`'s `rx_ring_full` asks the stack for nothing — so a
+    // caller there must re-arm on everything but a fault. Answering "no" for
+    // back-pressure leaves the sources down with nothing scheduled to lift
+    // them, and the interface silently stops being interrupt-driven.
+    assert!(Masked::No.may_rearm());
+    assert!(Masked::BackPressure.may_rearm());
+    assert!(Masked::BudgetSpent.may_rearm());
+    assert!(
+        !Masked::Fault.may_rearm(),
+        "re-arming into a device that just faulted would storm"
+    );
+    // Distinct from asking the stack to come and release them, which every
+    // masked state does need.
+    assert!(!Masked::No.needs_release());
+    assert!(Masked::BackPressure.needs_release());
+    assert!(Masked::BudgetSpent.needs_release());
+    assert!(Masked::Fault.needs_release());
+}
+
+#[test]
 fn a_link_change_is_reported_even_when_no_frame_moved() {
     // An idle interface's cable pull is exactly this case, and a bond
     // failover keys on the report.
@@ -481,6 +503,29 @@ impl Net for OneFrameNet {
 }
 
 /// An Ethernet frame carrying `ethertype` over `payload`.
+/// An ICMP-carrying IPv4 packet addressed to `destination`.
+///
+/// A real header, checksum and all: the classifier parses it and admits
+/// anything it cannot read, so a hand-rolled one would make every shedding
+/// assertion pass for the wrong reason.
+fn ipv4_packet(destination: [u8; 4]) -> Vec<u8> {
+    use tairix_net::addr::Ipv4Addr;
+    use tairix_net::ipv4::{Ipv4Header, IPV4_HEADER_LEN, PROTOCOL_ICMP};
+
+    let payload = [0u8; 8];
+    let header = Ipv4Header::new(
+        Ipv4Addr::new(10, 0, 2, 99),
+        Ipv4Addr::from(destination),
+        PROTOCOL_ICMP,
+    );
+    let mut packet = alloc::vec![0u8; IPV4_HEADER_LEN + payload.len()];
+    header
+        .write(&mut packet, payload.len())
+        .expect("the buffer is exactly one packet");
+    packet[IPV4_HEADER_LEN..].copy_from_slice(&payload);
+    packet
+}
+
 fn eth_frame(ethertype: u16, payload: &[u8]) -> Vec<u8> {
     let mut out = alloc::vec![0u8; 14 + payload.len()];
     out[..6].copy_from_slice(&[0xff; 6]);
@@ -508,18 +553,15 @@ fn attached(net: OneFrameNet) -> (NetChannelServer<OneFrameNet>, alloc::vec::Vec
 fn a_frame_the_filter_sheds_never_reaches_the_ring() {
     // An IPv4 unicast addressed to another host on the segment: the rule
     // that carries the real noise reduction on a busy LAN.
-    let mut header = alloc::vec![0u8; 20];
-    header[0] = 0x45;
-    header[16..20].copy_from_slice(&[10, 0, 2, 99]);
     let net = OneFrameNet {
-        frame: eth_frame(0x0800, &header),
+        frame: eth_frame(0x0800, &ipv4_packet([10, 0, 2, 99])),
         remaining: 1,
         filtered: 0,
     };
     let (mut server, mut buffer) = attached(net);
     // A published address set turns the filter on; until then it admits
     // everything.
-    let policy = RxFilterPolicy::new(&[([10, 0, 2, 15], [10, 0, 2, 255])], &[]);
+    let policy = RxFilterPolicy::new(&[([10, 0, 2, 15], [10, 0, 2, 255])], &[], &[], &[]);
     assert_eq!(
         decode_status_reply(&server.set_rx_filter_reply(policy)),
         Ok(())
@@ -540,16 +582,13 @@ fn a_frame_the_filter_sheds_never_reaches_the_ring() {
 
 #[test]
 fn a_frame_addressed_to_us_still_reaches_the_ring() {
-    let mut header = alloc::vec![0u8; 20];
-    header[0] = 0x45;
-    header[16..20].copy_from_slice(&[10, 0, 2, 15]);
     let net = OneFrameNet {
-        frame: eth_frame(0x0800, &header),
+        frame: eth_frame(0x0800, &ipv4_packet([10, 0, 2, 15])),
         remaining: 1,
         filtered: 0,
     };
     let (mut server, mut buffer) = attached(net);
-    let policy = RxFilterPolicy::new(&[([10, 0, 2, 15], [10, 0, 2, 255])], &[]);
+    let policy = RxFilterPolicy::new(&[([10, 0, 2, 15], [10, 0, 2, 255])], &[], &[], &[]);
     assert_eq!(
         decode_status_reply(&server.set_rx_filter_reply(policy)),
         Ok(())
@@ -565,8 +604,11 @@ fn a_frame_addressed_to_us_still_reaches_the_ring() {
 fn without_a_published_policy_nothing_is_shed() {
     // The state before the stack has published an address set: an interface
     // still doing DHCP must not have its offer filtered away.
+    // Addressed to another host, so a *published* policy would shed it: that
+    // is what makes this a test of the unpublished state rather than of a
+    // frame nothing could classify either way.
     let net = OneFrameNet {
-        frame: eth_frame(0x0800, &[0x45u8; 20]),
+        frame: eth_frame(0x0800, &ipv4_packet([10, 0, 2, 99])),
         remaining: 1,
         filtered: 0,
     };
@@ -719,7 +761,7 @@ impl Net for LateFrameNet {
         self.services += 1;
         let mut report = ServiceReport::default();
         if self.services == self.deliver_on {
-            let frame = eth_frame(0x0800, &[0x45u8; 20]);
+            let frame = eth_frame(0x0800, &ipv4_packet([10, 0, 2, 15]));
             if matches!(
                 rings.deliver(0, FrameOffload::None, &frame),
                 Ok(RxDelivery::Accepted)

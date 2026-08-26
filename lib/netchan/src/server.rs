@@ -109,6 +109,19 @@ impl Masked {
     pub const fn needs_release(self) -> bool {
         !matches!(self, Self::No)
     }
+
+    /// Whether re-arming the completion sources is safe.
+    ///
+    /// Only a fault forbids it: re-arming into a device that just faulted
+    /// would storm. Back-pressure does not — an unmasked source that is
+    /// still asserted simply re-interrupts, and the interrupt path is the
+    /// one that carries a release request to the stack. A caller with no
+    /// other way to ask for a release must re-arm on this, or the sources
+    /// stay down with nothing scheduled to lift them.
+    #[must_use]
+    pub const fn may_rearm(self) -> bool {
+        !matches!(self, Self::Fault)
+    }
 }
 
 /// What a [`Drain`] observed across a whole interrupt.

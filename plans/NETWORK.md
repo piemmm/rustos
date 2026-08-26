@@ -2311,6 +2311,16 @@ opposite ("cannot re-fire in a storm"), which is why the defect survived.
   because only the stack's next `Service` can release or diagnose any of
   them. Stopping masked without saying so leaves the interface receiving
   nothing until an unrelated transmit happens to release it.
+- **Never leave a source masked with nothing scheduled to lift it.** The
+  notify is that schedule on the interrupt path; a doorbell's reply is not
+  (`rx_ring_full` asks for nothing), so the doorbell path re-arms unless the
+  device faulted — `Masked::may_rearm`, distinct from `needs_release`. A
+  source still asserted then re-interrupts into the path that does carry a
+  release. With `NET_RING_SLOTS = 16` against a 64-descriptor device ring,
+  back-pressure is routine at any real frame rate, so this edge is
+  load-bearing: without it one filled ring ends interrupt-driven receive for
+  the life of the interface and the frame path degrades to whatever else
+  happens to doorbell.
 
 #### N17b — the receive path no longer pays an RPC
 
@@ -2364,21 +2374,40 @@ boundary the change removes.
 
 #### N17d — the receive pre-filter
 
-Most broadcast traffic on a busy segment is addressed to other hosts.
-Every such frame otherwise costs a stack wake, a full parse, and a drop.
+Nearly all broadcast and multicast traffic on a busy segment is addressed
+to other hosts or to groups this host never joined. Measured on an idle
+Raspberry Pi 4: of 7994 frames the stack was woken for, it discarded 7917.
 
 - `lib/net::rxfilter::RxClassifier` decides, on the driver's harvest path,
   whether a frame could have a local consumer: an ethertype allow-list
   (IPv4/IPv6/ARP), an ARP target-address match (replies always admitted —
-  only the neighbour cache knows whether we asked), and an IPv4/IPv6
-  destination match against the interface's own addresses, its subnet's
-  directed broadcast, the limited broadcast, and any multicast.
-- It matches on **slow-changing L3 address state only**. No listening
-  ports and no group memberships: per-socket state could fall behind a
-  socket opening and drop a frame someone wanted, for a share of the noise
-  that does not justify the risk. Multicast is admitted wholesale — the
-  device's own group filter already sheds unjoined groups where it has
-  one.
+  only the neighbour cache knows whether we asked), and a destination
+  check that **mirrors the stack's own acceptance rule**.
+- That rule is the whole design. The stack accepts an IPv4 destination that
+  is one of its addresses or a *joined group*, and an IPv6 destination that
+  is one of its addresses, all-nodes, a solicited-node group, or a joined
+  group. It gates a group or broadcast destination on **membership, never
+  on a listening port** — so the filter needs no per-socket state, and
+  nothing in it can fall behind a socket opening. The all-nodes and
+  solicited-node groups are derived from addresses the policy already
+  names rather than carried, so there is no second set to keep in step.
+- One carve-out, and it is the engine's own: a DHCPv4 reply arrives
+  broadcast before any address exists, so broadcast UDP to
+  `dhcp::CLIENT_PORT` is admitted. Matching the port keeps this stateless
+  — a "client is running" flag would be true for the whole lease and so
+  admit every broadcast datagram on a DHCP-configured interface, which is
+  the traffic this sheds. IPv6 needs no equivalent: its DHCP reply is
+  delivered to the interface's link-local unicast address.
+- Carrying the joined groups is not merely a tidy-up of GENET's 23-bit
+  multicast-MAC aliasing: `lib/virtio_net` reports
+  `McastFilter::Unfiltered`, so on that device this is the *only* group
+  filter.
+- The mirror is held honest by a test, not by discipline:
+  `everything_the_stack_accepts_the_receive_pre_filter_admits` drives both
+  sides from one published policy over a table of destinations and asserts
+  the filter admits everything the stack accepts. It may admit more — that
+  is the bias — but never less, so a future widening of the acceptance rule
+  that forgets the filter fails there rather than on a real network.
 - **Its bias is to admit.** It is never load-bearing for security: the
   stack still validates every admitted frame, and the driver already owns
   the device and could drop whatever it liked, so refusing here grants

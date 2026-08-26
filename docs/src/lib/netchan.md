@@ -52,7 +52,20 @@ the mask-register writes and the notify.
 receive ring filled (`BackPressure`), the round budget ran out
 (`BudgetSpent`), or a service faulted (`Fault`). All three mean the same
 thing to the stack — only its next `Service` can release or diagnose them —
-so all three set the notify's back-pressure flag.
+so all three set the notify's back-pressure flag (`needs_release`).
+
+Whether they may be *re-armed* is a different question (`may_rearm`), and
+only a fault forbids it. This matters because the two paths into a drain
+have different channels back: the interrupt path leaves the sources down and
+the notify asks the stack to release them, but a doorbell's reply asks for
+nothing — a `ServiceReport`'s `rx_ring_full` is not a request — so a source
+left masked *there* has nothing scheduled to lift it and the interface
+silently stops being interrupt-driven. The doorbell path therefore always
+re-arms unless the device faulted, which is self-healing: the stack has just
+drained its ring, and a source still asserted merely re-interrupts, which is
+the path that does carry a release. With a 16-slot shared ring against a
+64-descriptor device ring, back-pressure is a routine outcome rather than an
+emergency, so that release edge is load-bearing, not a corner case.
 
 `serve(net, irq_handle)` is the freestanding process loop, compiled only for
 the bare-metal targets a driver binary is built for. It:

@@ -100,7 +100,10 @@ same System Information API (`plans/ALIAS.md` §6, `plans/NETWORK.md` §5):
   receive-only interface (which rings no doorbell at all) reports a live
   figure rather than whatever its last transmit happened to observe. A bond
   reports the sum over its members' devices, as its other counters already
-  aggregate them.
+  aggregate them. It advances in *steps* rather than smoothly: a harvest
+  that admits nothing sends no notify — that suppression is the whole point
+  — so the count catches up whenever anything else wakes the stack. It is
+  cumulative, so none of it is lost.
 - `stats:net/<iface>/rx.pps`, `.../rx.bps` (and `tx.*`) with a mandatory
   `?window=<duration>` decoration (`500ms`, `1s`, `2m`) — the average
   rate over the window that actually elapsed.

@@ -56,16 +56,30 @@ corrupt slot is consumed so it cannot wedge the queue behind it.
 
 A frame enters a receive ring through one call, `FrameRings::deliver`,
 which consults the installed `RxAdmit` pre-filter *before* copying it. That
-is where a frame with no possible local consumer is shed — most broadcast
-traffic on a busy segment is addressed to other hosts, and each such frame
-otherwise costs a stack wake, a full parse and a drop. One implementation
+is where a frame with no possible local consumer is shed. One implementation
 serves every driver, so none repeats it (`plans/NETWORK.md` N17d).
+
+The classifier **mirrors the stack's own destination-acceptance rule**: an
+address of the interface, or a group it has joined (plus all-nodes and the
+solicited-node groups, derived from those addresses rather than carried
+separately). The stack gates a group or broadcast destination on membership
+and never on a listening port, so the filter needs no per-socket state and
+nothing in it can fall behind a socket opening. The one carve-out is the
+engine's own — a DHCPv4 reply arrives broadcast before any address exists,
+so broadcast UDP to the DHCP client port is admitted.
+
+It pays twice over. The shed frame is never copied, and a harvest that
+admits nothing leaves `moved` false, so the driver sends no notify and the
+stack is not woken at all. On an idle Raspberry Pi 4 the stack was being
+woken for 7994 frames a minute and discarding 7917 of them.
 
 Its bias is to **admit**: the stack still validates every frame it does
 receive, and the driver already owns the device and could drop whatever it
 liked, so refusing here grants nothing. Anything the classifier cannot
-parse confidently is admitted. `ServiceReport::filtered` counts what was
-shed, cumulatively, and surfaces as `stats:net/<iface>/rx.filtered`.
+parse confidently is admitted, and a policy that could not name every
+address or group widens rather than shedding something it was not told
+about. `ServiceReport::filtered` counts what was shed, cumulatively, and
+surfaces as `stats:net/<iface>/rx.filtered`.
 
 Each slot also carries a small per-frame **offload descriptor**
 (`FrameOffload`) — the transport-neutral analogue of a device's
@@ -182,6 +196,13 @@ because in all three only the stack's next `Service` can release or diagnose
 the sources. A drain that stopped masked without saying so would leave the
 interface receiving nothing until some unrelated transmit happened to
 release it.
+
+The invariant that makes this safe is that the sources are never left masked
+with nothing scheduled to lift them. On the interrupt path the notify's
+back-pressure flag is that schedule. A `Service` doorbell has no such
+channel — its reply's `rx_ring_full` asks the stack for nothing — so that
+path re-arms unless the device faulted, and a source still asserted simply
+re-interrupts into the path that does carry a release.
 
 The sources are also masked whenever the channel is detached, so a device
 left running cannot storm a driver with nowhere to put frames.

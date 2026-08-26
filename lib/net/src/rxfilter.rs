@@ -2,24 +2,32 @@
 //! consumer, before the network stack is woken for it
 //! (`plans/NETWORK.md` N17).
 //!
-//! On a busy segment most broadcast traffic is addressed to other hosts —
-//! ARP asking after a neighbour, `NetBIOS` and SSDP announcements, and the
-//! rest of the background noise of a LAN. Every such frame otherwise costs a
-//! wake of the stack process, a full protocol parse, and a drop. The driver
-//! evaluates this classifier on its harvest path instead and hands over only
-//! what could matter, so an idle machine on a noisy network costs
-//! approximately nothing.
+//! On a busy segment nearly all broadcast and multicast traffic is addressed
+//! to other hosts, or to groups this host never joined — ARP asking after a
+//! neighbour, mDNS, LLMNR, SSDP, `NetBIOS` and the rest of a LAN's
+//! background noise. Measured on an idle Raspberry Pi 4: of 7994 frames the
+//! stack was woken for, it discarded 7917. Each of those cost a frame copy
+//! into the shared ring, a wake of the stack process, and a full protocol
+//! parse, to be dropped. The driver evaluates this classifier on its harvest
+//! path instead, before the copy, and a harvest that admits nothing sends no
+//! notify at all — so the stack is never woken for them.
 //!
-//! # What it matches on, and what it deliberately does not
+//! # What it matches on
 //!
-//! Only **slow-changing L3 address state**, published by the stack when an
-//! interface's addresses change. It knows nothing about listening ports or
-//! group memberships, and that is the point: per-socket state could fall
-//! behind a socket opening and drop a frame someone wanted, for a share of
-//! the noise that does not justify the risk. Multicast is admitted
-//! wholesale for the same reason — the device's own group filter already
-//! sheds unjoined groups where it has one, and mirroring IGMP/MLD
-//! membership here would be more state to keep in step for less benefit.
+//! It **mirrors the stack's own destination-acceptance rule**, over the
+//! slow-changing L3 state that rule is made of: the interface's addresses,
+//! its subnet broadcast, and the groups it has joined. That is the whole
+//! input — the stack gates a group or broadcast destination on *membership*,
+//! never on a listening port, so no per-socket state is needed and nothing
+//! here can fall behind a socket opening.
+//!
+//! One IPv4 carve-out, and it is the engine's own: a DHCPv4 reply arrives
+//! broadcast before any address exists, so broadcast UDP to
+//! [`dhcp::CLIENT_PORT`](crate::dhcp::CLIENT_PORT) is admitted. Matching the
+//! port rather than tracking "a client is running" keeps this stateless — a
+//! running-client flag would be true for the whole lease and so admit every
+//! broadcast datagram on a DHCP-configured interface, which is the traffic
+//! this sheds.
 //!
 //! # Its bias is to admit
 //!
@@ -33,13 +41,12 @@
 use tairix_abi::driver::net_channel::RxFilterPolicy;
 use tairix_abi::driver::net_ring::RxAdmit;
 
-use crate::addr::{Ipv4Addr, Ipv6Addr};
+use crate::addr::{solicited_node_multicast, Ipv4Addr, Ipv6Addr, ALL_NODES};
 use crate::arp::{self, ArpPacket};
 use crate::eth::{EthernetFrame, ETHERTYPE_ARP, ETHERTYPE_IPV4, ETHERTYPE_IPV6};
-use crate::{ipv4, ipv6};
-
-/// The IPv4 limited-broadcast address, which every host accepts.
-const IPV4_BROADCAST: Ipv4Addr = Ipv4Addr::BROADCAST;
+use crate::ipv4::Ipv4Header;
+use crate::ipv6;
+use crate::udp::{PROTOCOL_UDP, UDP_HEADER_LEN};
 
 /// Classifies a received frame against one interface's local addresses.
 ///
@@ -81,28 +88,52 @@ impl RxClassifier {
         self.policy.is_exhaustive() && !self.policy.v6_addresses().is_empty()
     }
 
-    /// Whether an IPv4 destination is one this interface answers for.
-    fn admits_v4(&self, destination: Ipv4Addr) -> bool {
-        if destination == IPV4_BROADCAST || destination.is_multicast() {
-            return true;
-        }
+    /// Whether an IPv4 packet is one this interface answers for.
+    ///
+    /// Mirrors the stack's rule — our own address, or a joined group — with
+    /// the engine's own DHCP carve-out: its client claims a broadcast reply
+    /// ahead of the address filter, before any address exists to match.
+    fn admits_v4(&self, header: &Ipv4Header, payload: &[u8]) -> bool {
         if !self.decides_v4() {
             return true;
         }
-        let octets = destination.octets();
-        self.policy.v4_addresses().contains(&octets)
+        let octets = header.destination.octets();
+        if self.policy.v4_addresses().contains(&octets) {
+            return true;
+        }
+        if header.destination.is_multicast() {
+            return self.policy.v4_groups().contains(&octets);
+        }
+        if header.destination == Ipv4Addr::BROADCAST
             || self.policy.v4_broadcasts().contains(&octets)
+        {
+            return is_dhcp_client_datagram(header, payload);
+        }
+        false
     }
 
     /// Whether an IPv6 destination is one this interface answers for.
+    ///
+    /// The all-nodes and solicited-node groups are derived rather than
+    /// carried: both follow from addresses the policy already names, so
+    /// there is no second set to keep in step.
     fn admits_v6(&self, destination: Ipv6Addr) -> bool {
-        if destination.is_multicast() {
-            return true;
-        }
         if !self.decides_v6() {
             return true;
         }
-        self.policy.v6_addresses().contains(&destination.octets())
+        if self.policy.v6_addresses().contains(&destination.octets()) {
+            return true;
+        }
+        if !destination.is_multicast() {
+            return false;
+        }
+        destination == ALL_NODES
+            || self.policy.v6_groups().contains(&destination.octets())
+            || self
+                .policy
+                .v6_addresses()
+                .iter()
+                .any(|octets| solicited_node_multicast(&Ipv6Addr::from(*octets)) == destination)
     }
 
     /// Whether an ARP payload concerns this interface.
@@ -129,6 +160,25 @@ impl RxClassifier {
     }
 }
 
+/// Whether an IPv4 broadcast datagram is one the stack's DHCPv4 client
+/// claims: a plain (unfragmented) UDP datagram to the client port.
+///
+/// A fragment is admitted without inspection — the port lives in the first
+/// one, and reassembly is the stack's job, so guessing here could shed a
+/// reply.
+fn is_dhcp_client_datagram(header: &Ipv4Header, payload: &[u8]) -> bool {
+    if header.is_fragment() {
+        return true;
+    }
+    if header.protocol != PROTOCOL_UDP {
+        return false;
+    }
+    let Some(udp) = payload.get(..UDP_HEADER_LEN) else {
+        return true;
+    };
+    u16::from_be_bytes([udp[2], udp[3]]) == crate::dhcp::CLIENT_PORT
+}
+
 impl RxAdmit for RxClassifier {
     fn admit(&self, frame: &[u8]) -> bool {
         let Some(parsed) = EthernetFrame::parse(frame) else {
@@ -139,8 +189,11 @@ impl RxAdmit for RxClassifier {
         };
         match parsed.ethertype {
             ETHERTYPE_ARP => self.admits_arp(parsed.payload),
-            ETHERTYPE_IPV4 => ipv4::peek_destination(parsed.payload)
-                .is_none_or(|destination| self.admits_v4(destination)),
+            // One parse yields the destination, the protocol and the
+            // payload, so the DHCP check below needs no second decoder; a
+            // header this refuses is admitted for the stack to diagnose.
+            ETHERTYPE_IPV4 => Ipv4Header::parse(parsed.payload)
+                .is_none_or(|(header, _options, payload)| self.admits_v4(&header, payload)),
             ETHERTYPE_IPV6 => ipv6::peek_destination(parsed.payload)
                 .is_none_or(|destination| self.admits_v6(destination)),
             // The stack speaks no other ethertype, so nothing local can

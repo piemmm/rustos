@@ -1307,8 +1307,10 @@ impl Stack {
         self.counters.rx_dropped += 1;
         let context = ErrorContext {
             invoking_is_icmp_error: false,
-            dest_is_multicast: false,
+            dest_is_multicast: v4_dest_ambiguous(header.destination),
             source_is_ambiguous: v4_source_ambiguous(header.source),
+            // IPv4 has no counterpart to IPv6's Packet-Too-Big carve-out, so
+            // suppression about a broadcast or group destination is absolute.
             multicast_exception: false,
         };
         self.emit_icmp_error_v4(
@@ -3676,7 +3678,7 @@ impl Stack {
     /// The receive pre-filter policy for this interface's current
     /// addresses.
     ///
-    /// Assembled here, beside the addresses it describes, so the policy and
+    /// Assembled here, beside the state it describes, so the policy and
     /// the [`crate::rxfilter::RxClassifier`] that evaluates it are never
     /// derived twice. A *tentative* IPv6 address is included: duplicate-
     /// address detection answers arrive addressed to it, and dropping those
@@ -3697,7 +3699,21 @@ impl Stack {
             .iter()
             .map(|info| info.addr.octets())
             .collect();
-        RxFilterPolicy::new(&v4, &v6)
+        // The joined groups are the other half of the destination-acceptance
+        // rule the filter mirrors. The all-nodes and solicited-node groups
+        // are omitted deliberately: the classifier derives both from the
+        // addresses above, so neither is a second set to keep in step.
+        let groups_v4: Vec<[u8; 4]> = self
+            .membership_v4
+            .groups()
+            .map(|group| group.octets())
+            .collect();
+        let groups_v6: Vec<[u8; 16]> = self
+            .membership_v6
+            .groups()
+            .map(|group| group.octets())
+            .collect();
+        RxFilterPolicy::new(&v4, &v6, &groups_v4, &groups_v6)
     }
 
     /// Write the link-layer group addresses this interface needs its device
@@ -3971,6 +3987,17 @@ fn ipv6_packet(header: &Ipv6Header, payload: &[u8]) -> Option<Vec<u8>> {
 /// §3.2.2: unspecified, multicast, or limited broadcast).
 fn v4_source_ambiguous(source: Ipv4Addr) -> bool {
     source.is_unspecified() || source.is_multicast() || source.is_broadcast()
+}
+
+/// True when a v4 *destination* does not name a single node, so RFC 1122
+/// §3.2.2 forbids generating an ICMP error about the datagram.
+///
+/// The reachable case is a joined group — every host joins the all-systems
+/// group — and without this an unrecognised-protocol datagram addressed there
+/// makes every host on the segment answer whatever source it names, which the
+/// error rate limiter bounds but does not stop being a reflection.
+fn v4_dest_ambiguous(destination: Ipv4Addr) -> bool {
+    destination.is_multicast() || destination.is_broadcast()
 }
 
 /// Derive a stable DHCPv6 IA identifier (IAID) from the interface MAC.

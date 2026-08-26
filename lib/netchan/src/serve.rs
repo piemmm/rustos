@@ -323,6 +323,22 @@ fn drain<N: Net>(server: &mut NetChannelServer<N>, bytes: &mut [u8]) -> Drained 
     }
 }
 
+/// Drain on the doorbell path, then release the completion sources unless
+/// the device faulted.
+///
+/// The reply is the only channel back on this path — `rx_ring_full` in a
+/// `ServiceReport` asks for nothing, unlike the notify's back-pressure flag
+/// — so a source left masked here has nothing scheduled to lift it and the
+/// interface silently stops being interrupt-driven. Releasing is safe and
+/// self-healing instead: the stack has just drained its ring, and a source
+/// still asserted merely re-interrupts, which *is* the path that carries a
+/// release request.
+fn drain_and_release<N: Net>(server: &mut NetChannelServer<N>, bytes: &mut [u8]) {
+    if drain(server, bytes).masked.may_rearm() {
+        let _ = server.net_mut().set_completion_interrupts(true);
+    }
+}
+
 /// Serve one device-channel doorbell on the claimed endpoint: receive the
 /// request, drive the pure [`NetChannelServer`], and reply. A transient
 /// recv error simply drops the doorbell (the stack retries); a decode
@@ -353,13 +369,11 @@ fn serve_call<N: Net>(
                     let reply = server.service_reply(region.bytes);
                     // The stack calls here after draining its ring, so this
                     // is where a source masked for back-pressure gets its
-                    // chance to come back: keep servicing until the device
-                    // is quiet, which re-enables it. Masked first because a
-                    // doorbell rung for a *transmit* arrives with the
-                    // sources still up, and `drain` reports whether it left
-                    // them down — a report the device then contradicts.
+                    // chance to come back. Masked first because a doorbell
+                    // rung for a *transmit* arrives with the sources still
+                    // up, and `drain` reports whether it left them down.
                     let _ = server.net_mut().set_completion_interrupts(false);
-                    drain(server, region.bytes);
+                    drain_and_release(server, region.bytes);
                     reply
                 }
                 // Detached (or region lost): the server answers

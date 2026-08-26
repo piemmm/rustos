@@ -5,7 +5,9 @@
 use super::*;
 use crate::ipv6::HBH_ROUTER_ALERT_LEN;
 use crate::test_support::temp_source;
+// `admit` is the `RxAdmit` seam every driver's harvest path calls.
 use alloc::collections::VecDeque;
+use tairix_abi::driver::net_ring::RxAdmit;
 
 const MAC_A: MacAddress = MacAddress([0x02, 0xAA, 0, 0, 0, 0x01]);
 const MAC_B: MacAddress = MacAddress([0x02, 0xBB, 0, 0, 0, 0x02]);
@@ -976,6 +978,118 @@ fn unknown_ipv4_protocol_gets_rate_limited_protocol_unreachable() {
         u64::try_from(sent).expect("fits"),
         counters.icmp_errors_sent
     );
+}
+
+#[test]
+fn everything_the_stack_accepts_the_receive_pre_filter_admits() {
+    // The safety property the pre-filter rests on. It may admit *more* than
+    // the stack accepts — that is its bias — but never less, or it silently
+    // drops traffic the stack wanted. Both sides are driven from one
+    // published policy over the same destinations, so a future widening of
+    // this acceptance rule that forgets to widen the filter fails here
+    // rather than on someone's network.
+    let mut a = stack(MAC_A, IID_A);
+    a.set_ipv4_config(V4_A, 24, None).expect("configure A");
+    let filter = crate::rxfilter::RxClassifier::new(a.rx_filter_policy());
+
+    let mut checked = 0;
+    for destination in [
+        V4_A,
+        V4_B,
+        Ipv4Addr::new(224, 0, 0, 1),
+        Ipv4Addr::new(224, 0, 0, 251),
+        Ipv4Addr::BROADCAST,
+        Ipv4Addr::new(10, 0, 2, 255),
+    ] {
+        // A UDP datagram is the acceptance oracle: one the destination filter
+        // admits always surfaces a `UdpDatagram` event, whether or not
+        // anything above consumes it, and one it refuses surfaces nothing.
+        // (An ICMP probe would not do — the stack can accept a destination
+        // and *then* decline to answer, which reads the same as a refusal.)
+        let mut udp = [0u8; crate::udp::UDP_HEADER_LEN];
+        udp[2..4].copy_from_slice(&9999u16.to_be_bytes());
+        // Length covers the header alone; a zero checksum is "unchecksummed",
+        // which IPv4 permits.
+        let len = u16::try_from(crate::udp::UDP_HEADER_LEN).expect("small");
+        udp[4..6].copy_from_slice(&len.to_be_bytes());
+        let header = Ipv4Header::new(V4_B, destination, PROTOCOL_UDP);
+        let mut packet = vec![0u8; IPV4_HEADER_LEN + udp.len()];
+        header.write(&mut packet, udp.len()).expect("fits");
+        packet[IPV4_HEADER_LEN..].copy_from_slice(&udp);
+        let mut frame = vec![0u8; ETHERNET_HEADER_LEN + packet.len()];
+        write_header(&mut frame, MAC_A, MAC_B, ETHERTYPE_IPV4).expect("fits");
+        frame[ETHERNET_HEADER_LEN..].copy_from_slice(&packet);
+
+        let out = a.on_frame_collect(&frame, t(2));
+        if out
+            .events
+            .iter()
+            .any(|event| matches!(event, StackEvent::UdpDatagram { .. }))
+        {
+            checked += 1;
+            assert!(
+                filter.admit(&frame),
+                "the stack accepted {destination:?} but the pre-filter sheds it"
+            );
+        }
+    }
+    // The table must actually exercise the property: our own address and the
+    // all-systems group are both accepted, so a run that asserted nothing
+    // would mean the oracle stopped working.
+    assert!(
+        checked >= 2,
+        "the acceptance oracle matched {checked} destinations, so this proved nothing"
+    );
+}
+
+#[test]
+fn an_unknown_protocol_to_a_group_address_draws_no_icmp_error() {
+    // RFC 1122 forbids an ICMP error about a datagram addressed to a group,
+    // and the reason is reflection: every host joins the all-systems group,
+    // so one frame naming a spoofed source would make the whole segment
+    // answer it. The rate limiter bounds each host's share; it does not stop
+    // the amplification.
+    let mut a = stack(MAC_A, IID_A);
+    a.set_ipv4_config(V4_A, 24, None).expect("configure A");
+    // Prime the neighbour cache so a permitted error would transmit at once
+    // rather than parking — otherwise an absent frame proves nothing.
+    let request = ArpPacket {
+        operation: OP_REQUEST,
+        sender_hardware: MAC_B,
+        sender_protocol: V4_B,
+        target_hardware: MacAddress([0; 6]),
+        target_protocol: V4_A,
+    };
+    let mut arp = [0u8; crate::arp::ARP_PACKET_LEN];
+    request.write(&mut arp).expect("fits");
+    let mut arp_frame = vec![0u8; ETHERNET_HEADER_LEN + arp.len()];
+    write_header(&mut arp_frame, BROADCAST, MAC_B, ETHERTYPE_ARP).expect("fits");
+    arp_frame[ETHERNET_HEADER_LEN..].copy_from_slice(&arp);
+    assert_eq!(a.on_frame_collect(&arp_frame, t(1)).frames.len(), 1);
+
+    let unknown_protocol = 253;
+    let frame_to = |destination: Ipv4Addr| {
+        let header = Ipv4Header::new(V4_B, destination, unknown_protocol);
+        let mut packet = vec![0u8; IPV4_HEADER_LEN + 4];
+        header.write(&mut packet, 4).expect("fits");
+        let mut frame = vec![0u8; ETHERNET_HEADER_LEN + packet.len()];
+        write_header(&mut frame, MAC_A, MAC_B, ETHERTYPE_IPV4).expect("fits");
+        frame[ETHERNET_HEADER_LEN..].copy_from_slice(&packet);
+        frame
+    };
+
+    let out = a.on_frame_collect(&frame_to(Ipv4Addr::new(224, 0, 0, 1)), t(2));
+    assert!(
+        out.frames.is_empty(),
+        "a group destination must draw no error"
+    );
+    assert_eq!(a.counters().icmp_errors_sent, 0);
+
+    // The unicast case still reports, so the suppression above is the
+    // destination check and not the whole path going quiet.
+    let out = a.on_frame_collect(&frame_to(V4_A), t(2));
+    assert_eq!(out.frames.len(), 1, "a unicast destination still reports");
+    assert_eq!(a.counters().icmp_errors_sent, 1);
 }
 
 #[test]

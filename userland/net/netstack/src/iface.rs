@@ -95,18 +95,18 @@ pub type IfaceRename = Option<([u8; IF_NAME_LEN], [u8; IF_NAME_LEN])>;
 /// revision counter: the policy is a small `Copy` value, the comparison is
 /// far cheaper than the IPC it avoids, and there is no second piece of
 /// state that could fall out of step with the addresses it describes.
-fn push_rx_filter<F: FrameService>(channel: &mut Interface, policy: RxFilterPolicy, fs: &mut F) {
+fn push_rx_filter<F: FrameService>(channel: &mut Interface, policy: &RxFilterPolicy, fs: &mut F) {
     // Recorded on the *channel's* interface, not the stack's: a bond's two
     // members share one stack, so a record kept there would let the first
     // member pumped mark the policy pushed and the second never receive it.
-    if channel.pushed_rx_filter == Some(policy) {
+    if channel.pushed_rx_filter.as_ref() == Some(policy) {
         return;
     }
     // A refusal leaves the recorded policy alone, so the next pump retries.
     // Until it lands the driver keeps its previous (wider) filter, which
     // can only cost work, never a frame.
-    if fs.set_rx_filter(policy).is_ok() {
-        channel.pushed_rx_filter = Some(policy);
+    if fs.set_rx_filter(*policy).is_ok() {
+        channel.pushed_rx_filter = Some(*policy);
     }
 }
 
@@ -1224,7 +1224,7 @@ impl Netstack {
         // arrive. The addresses are the stack target's; the device is this
         // channel's, and so is the record of what it was last sent.
         let rx_policy = iface.stack.rx_filter_policy();
-        push_rx_filter(&mut interfaces[channel_index], rx_policy, fs);
+        push_rx_filter(&mut interfaces[channel_index], &rx_policy, fs);
         let iface = &mut interfaces[index];
         // The device's cumulative pre-filter count: whatever the waking
         // notify carried, superseded by any doorbell report this pump gets.

@@ -168,11 +168,37 @@ pub const MAX_FILTER_V4: usize = 8;
 /// has a link-local, a global, and a temporary address per prefix.
 pub const MAX_FILTER_V6: usize = 8;
 
-/// Wire length of the [`NetChannelRequest::SetRxFilter`] body: the two
-/// counts (1 each) + the exhaustive flag (1) + reserved (1) + each family's
+/// Joined IPv4 group addresses a [`RxFilterPolicy`] carries.
+///
+/// A fixed containment bound like [`MAX_FILTER_V4`], and deliberately its own
+/// constant: that one bounds the addresses the interface *answers for*, this
+/// one the groups it has *joined*. The two coincide today but are not the
+/// same quantity, so aliasing them would couple two independent choices.
+pub const MAX_FILTER_GROUPS_V4: usize = 8;
+
+/// Joined IPv6 group addresses a [`RxFilterPolicy`] carries. The all-nodes
+/// and solicited-node groups are not among them: both are derived from
+/// addresses the policy already names.
+pub const MAX_FILTER_GROUPS_V6: usize = 8;
+
+/// Wire length of the [`NetChannelRequest::SetRxFilter`] body: the four
+/// counts (1 each) + the exhaustive flag (1) + reserved (3) + each family's
 /// fixed-width address array, IPv4 twice (the address and its subnet's
-/// directed-broadcast address).
-const SET_RX_FILTER_BODY_LEN: usize = 1 + 1 + 1 + 1 + MAX_FILTER_V4 * 4 * 2 + MAX_FILTER_V6 * 16;
+/// directed-broadcast address), then each family's joined-group array.
+const SET_RX_FILTER_BODY_LEN: usize = 4
+    + 1
+    + 3
+    + MAX_FILTER_V4 * 4 * 2
+    + MAX_FILTER_V6 * 16
+    + MAX_FILTER_GROUPS_V4 * 4
+    + MAX_FILTER_GROUPS_V6 * 16;
+
+/// Byte offset of the IPv6 address array within the `SetRxFilter` body.
+const RX_FILTER_V6_AT: usize = 8 + MAX_FILTER_V4 * 8;
+/// Byte offset of the IPv4 joined-group array within the body.
+const RX_FILTER_GROUPS_V4_AT: usize = RX_FILTER_V6_AT + MAX_FILTER_V6 * 16;
+/// Byte offset of the IPv6 joined-group array within the body.
+const RX_FILTER_GROUPS_V6_AT: usize = RX_FILTER_GROUPS_V4_AT + MAX_FILTER_GROUPS_V4 * 4;
 
 /// Largest device-channel request frame: the header plus the largest body. A
 /// fixed validation bound sizing the buffer both sides pin for the control
@@ -221,12 +247,16 @@ pub enum NetChannelRequest {
 /// The local addresses a driver's receive pre-filter matches a frame's
 /// destination against (`plans/NETWORK.md` N17).
 ///
-/// The stack publishes this whenever an interface's address set changes — a
-/// control-plane event, not a per-frame one — and the driver evaluates it on
-/// its harvest path. It deliberately holds **only slow-changing L3 address
-/// state**: no listening ports and no group memberships, so there is nothing
-/// that could fall behind a socket opening or closing and drop a frame
-/// someone wanted.
+/// The stack publishes this whenever an interface's address or group set
+/// changes — a control-plane event, not a per-frame one — and the driver
+/// evaluates it on its harvest path.
+///
+/// It holds exactly the inputs to the stack's own destination-acceptance
+/// rule, and **only slow-changing L3 state**: our addresses, the subnet
+/// broadcast, and the joined groups. No listening ports, so nothing here can
+/// fall behind a socket opening and drop a frame someone wanted — the stack
+/// gates delivery of a group or broadcast destination on membership, never on
+/// a port, so membership is the whole of what the filter needs to mirror it.
 ///
 /// # It can only cost work, never authority
 ///
@@ -241,10 +271,14 @@ pub enum NetChannelRequest {
 pub struct RxFilterPolicy {
     v4_count: u8,
     v6_count: u8,
+    groups_v4_count: u8,
+    groups_v6_count: u8,
     exhaustive: bool,
     v4: [[u8; 4]; MAX_FILTER_V4],
     v4_broadcast: [[u8; 4]; MAX_FILTER_V4],
     v6: [[u8; 16]; MAX_FILTER_V6],
+    groups_v4: [[u8; 4]; MAX_FILTER_GROUPS_V4],
+    groups_v6: [[u8; 16]; MAX_FILTER_GROUPS_V6],
 }
 
 impl RxFilterPolicy {
@@ -256,24 +290,35 @@ impl RxFilterPolicy {
         Self {
             v4_count: 0,
             v6_count: 0,
+            groups_v4_count: 0,
+            groups_v6_count: 0,
             exhaustive: false,
             v4: [[0u8; 4]; MAX_FILTER_V4],
             v4_broadcast: [[0u8; 4]; MAX_FILTER_V4],
             v6: [[0u8; 16]; MAX_FILTER_V6],
+            groups_v4: [[0u8; 4]; MAX_FILTER_GROUPS_V4],
+            groups_v6: [[0u8; 16]; MAX_FILTER_GROUPS_V6],
         }
     }
 
-    /// Build a policy from an interface's addresses.
+    /// Build a policy from an interface's addresses and joined groups.
     ///
     /// `v4` pairs each IPv4 address with its subnet's directed-broadcast
-    /// address. Either list longer than its bound is *truncated* and the
-    /// policy marked non-exhaustive, so the filter widens to admit all
-    /// unicast rather than silently dropping traffic to the addresses that
-    /// did not fit.
+    /// address. **Any** list longer than its bound is *truncated* and the
+    /// policy marked non-exhaustive, so the filter widens to admit rather
+    /// than silently dropping traffic to something it was not told about.
     #[must_use]
-    pub fn new(v4: &[([u8; 4], [u8; 4])], v6: &[[u8; 16]]) -> Self {
+    pub fn new(
+        v4: &[([u8; 4], [u8; 4])],
+        v6: &[[u8; 16]],
+        groups_v4: &[[u8; 4]],
+        groups_v6: &[[u8; 16]],
+    ) -> Self {
         let mut policy = Self::admit_all();
-        policy.exhaustive = v4.len() <= MAX_FILTER_V4 && v6.len() <= MAX_FILTER_V6;
+        policy.exhaustive = v4.len() <= MAX_FILTER_V4
+            && v6.len() <= MAX_FILTER_V6
+            && groups_v4.len() <= MAX_FILTER_GROUPS_V4
+            && groups_v6.len() <= MAX_FILTER_GROUPS_V6;
         for (slot, (address, broadcast)) in v4.iter().take(MAX_FILTER_V4).enumerate() {
             policy.v4[slot] = *address;
             policy.v4_broadcast[slot] = *broadcast;
@@ -282,6 +327,14 @@ impl RxFilterPolicy {
         for (slot, address) in v6.iter().take(MAX_FILTER_V6).enumerate() {
             policy.v6[slot] = *address;
             policy.v6_count = policy.v6_count.saturating_add(1);
+        }
+        for (slot, group) in groups_v4.iter().take(MAX_FILTER_GROUPS_V4).enumerate() {
+            policy.groups_v4[slot] = *group;
+            policy.groups_v4_count = policy.groups_v4_count.saturating_add(1);
+        }
+        for (slot, group) in groups_v6.iter().take(MAX_FILTER_GROUPS_V6).enumerate() {
+            policy.groups_v6[slot] = *group;
+            policy.groups_v6_count = policy.groups_v6_count.saturating_add(1);
         }
         policy
     }
@@ -310,6 +363,18 @@ impl RxFilterPolicy {
     #[must_use]
     pub fn v6_addresses(&self) -> &[[u8; 16]] {
         &self.v6[..self.v6_count as usize]
+    }
+
+    /// The IPv4 group addresses the interface has joined.
+    #[must_use]
+    pub fn v4_groups(&self) -> &[[u8; 4]] {
+        &self.groups_v4[..self.groups_v4_count as usize]
+    }
+
+    /// The IPv6 group addresses the interface has joined.
+    #[must_use]
+    pub fn v6_groups(&self) -> &[[u8; 16]] {
+        &self.groups_v6[..self.groups_v6_count as usize]
     }
 }
 
@@ -446,17 +511,29 @@ impl NetChannelRequest {
         if let Self::SetRxFilter(policy) = self {
             out[HEADER_LEN] = policy.v4_count;
             out[HEADER_LEN + 1] = policy.v6_count;
-            out[HEADER_LEN + 2] = u8::from(policy.exhaustive);
-            // out[HEADER_LEN + 3] reserved, left zero.
-            let mut at = HEADER_LEN + 4;
+            out[HEADER_LEN + 2] = policy.groups_v4_count;
+            out[HEADER_LEN + 3] = policy.groups_v6_count;
+            out[HEADER_LEN + 4] = u8::from(policy.exhaustive);
+            // out[HEADER_LEN + 5..8] reserved, left zero.
+            let mut at = HEADER_LEN + 8;
             for (address, broadcast) in policy.v4_addresses().iter().zip(policy.v4_broadcasts()) {
                 out[at..at + 4].copy_from_slice(address);
                 out[at + 4..at + 8].copy_from_slice(broadcast);
                 at += 8;
             }
-            let mut at = HEADER_LEN + 4 + MAX_FILTER_V4 * 8;
+            let mut at = HEADER_LEN + RX_FILTER_V6_AT;
             for address in policy.v6_addresses() {
                 out[at..at + 16].copy_from_slice(address);
+                at += 16;
+            }
+            let mut at = HEADER_LEN + RX_FILTER_GROUPS_V4_AT;
+            for group in policy.v4_groups() {
+                out[at..at + 4].copy_from_slice(group);
+                at += 4;
+            }
+            let mut at = HEADER_LEN + RX_FILTER_GROUPS_V6_AT;
+            for group in policy.v6_groups() {
+                out[at..at + 16].copy_from_slice(group);
                 at += 16;
             }
         }
@@ -502,34 +579,53 @@ impl NetChannelRequest {
         }
         let v4_count = usize::from(bytes[HEADER_LEN]);
         let v6_count = usize::from(bytes[HEADER_LEN + 1]);
+        let groups_v4_count = usize::from(bytes[HEADER_LEN + 2]);
+        let groups_v6_count = usize::from(bytes[HEADER_LEN + 3]);
         // A count past its fixed bound is a corrupt frame, refused whole
         // rather than clamped into a filter that would then drop traffic.
-        if v4_count > MAX_FILTER_V4 || v6_count > MAX_FILTER_V6 {
+        if v4_count > MAX_FILTER_V4
+            || v6_count > MAX_FILTER_V6
+            || groups_v4_count > MAX_FILTER_GROUPS_V4
+            || groups_v6_count > MAX_FILTER_GROUPS_V6
+        {
             return Err(Errno::OutOfRange);
         }
-        let exhaustive = match bytes[HEADER_LEN + 2] {
+        let exhaustive = match bytes[HEADER_LEN + 4] {
             0 => false,
             1 => true,
             _ => return Err(Errno::OutOfRange),
         };
-        if bytes[HEADER_LEN + 3] != 0 {
+        if bytes[HEADER_LEN + 5..HEADER_LEN + 8]
+            .iter()
+            .any(|b| *b != 0)
+        {
             return Err(Errno::BadMagic);
         }
         let mut policy = RxFilterPolicy::admit_all();
         policy.exhaustive = exhaustive;
         for slot in 0..v4_count {
-            let at = HEADER_LEN + 4 + slot * 8;
+            let at = HEADER_LEN + 8 + slot * 8;
             policy.v4[slot].copy_from_slice(&bytes[at..at + 4]);
             policy.v4_broadcast[slot].copy_from_slice(&bytes[at + 4..at + 8]);
         }
         for slot in 0..v6_count {
-            let at = HEADER_LEN + 4 + MAX_FILTER_V4 * 8 + slot * 16;
+            let at = HEADER_LEN + RX_FILTER_V6_AT + slot * 16;
             policy.v6[slot].copy_from_slice(&bytes[at..at + 16]);
+        }
+        for slot in 0..groups_v4_count {
+            let at = HEADER_LEN + RX_FILTER_GROUPS_V4_AT + slot * 4;
+            policy.groups_v4[slot].copy_from_slice(&bytes[at..at + 4]);
+        }
+        for slot in 0..groups_v6_count {
+            let at = HEADER_LEN + RX_FILTER_GROUPS_V6_AT + slot * 16;
+            policy.groups_v6[slot].copy_from_slice(&bytes[at..at + 16]);
         }
         // Widened only after every field validated, so a refused frame
         // never leaves a half-applied policy.
         policy.v4_count = u8::try_from(v4_count).map_err(|_| Errno::OutOfRange)?;
         policy.v6_count = u8::try_from(v6_count).map_err(|_| Errno::OutOfRange)?;
+        policy.groups_v4_count = u8::try_from(groups_v4_count).map_err(|_| Errno::OutOfRange)?;
+        policy.groups_v6_count = u8::try_from(groups_v6_count).map_err(|_| Errno::OutOfRange)?;
         Ok(Self::SetRxFilter(policy))
     }
 
@@ -1014,10 +1110,79 @@ mod tests {
             NetChannelRequest::Service,
             NetChannelRequest::Detach,
             attach(),
+            NetChannelRequest::SetRxFilter(RxFilterPolicy::admit_all()),
+            NetChannelRequest::SetRxFilter(rx_filter()),
         ] {
             let mut buf = [0u8; NetChannelRequest::MAX_WIRE_LEN];
             let len = req.encode(&mut buf).expect("encode");
             assert_eq!(NetChannelRequest::decode(&buf[..len]), Ok(req));
+        }
+    }
+
+    /// A policy exercising every array in the body, so a field the codec
+    /// forgets shows up as a round-trip mismatch rather than as traffic the
+    /// driver silently sheds.
+    fn rx_filter() -> RxFilterPolicy {
+        RxFilterPolicy::new(
+            &[([10, 0, 2, 15], [10, 0, 2, 255])],
+            &[[0x20; 16], [0xFE; 16]],
+            &[[224, 0, 0, 1], [239, 1, 2, 3]],
+            &[[0xFF; 16]],
+        )
+    }
+
+    #[test]
+    fn an_rx_filter_carries_every_address_and_group_over_the_wire() {
+        let policy = rx_filter();
+        let mut buf = [0u8; NetChannelRequest::MAX_WIRE_LEN];
+        let len = NetChannelRequest::SetRxFilter(policy)
+            .encode(&mut buf)
+            .expect("encode");
+        let Ok(NetChannelRequest::SetRxFilter(back)) = NetChannelRequest::decode(&buf[..len])
+        else {
+            panic!("a SetRxFilter frame must decode as one");
+        };
+        assert!(back.is_exhaustive());
+        assert_eq!(back.v4_addresses(), [[10, 0, 2, 15]]);
+        assert_eq!(back.v4_broadcasts(), [[10, 0, 2, 255]]);
+        assert_eq!(back.v6_addresses(), [[0x20; 16], [0xFE; 16]]);
+        assert_eq!(back.v4_groups(), [[224, 0, 0, 1], [239, 1, 2, 3]]);
+        assert_eq!(back.v6_groups(), [[0xFF; 16]]);
+    }
+
+    #[test]
+    fn an_over_capacity_group_set_widens_the_filter_instead_of_dropping() {
+        // Truncation must never be silent: a policy that could not name every
+        // joined group admits everything rather than shedding a group it was
+        // not told about.
+        let groups = [[224, 0, 0, 1]; MAX_FILTER_GROUPS_V4 + 1];
+        let policy = RxFilterPolicy::new(&[([10, 0, 2, 15], [10, 0, 2, 255])], &[], &groups, &[]);
+        assert!(!policy.is_exhaustive());
+        let v6 = [[0x20; 16]; MAX_FILTER_GROUPS_V6 + 1];
+        let policy = RxFilterPolicy::new(&[], &[], &[], &v6);
+        assert!(!policy.is_exhaustive());
+    }
+
+    #[test]
+    fn an_rx_filter_count_past_its_bound_is_refused() {
+        let mut buf = [0u8; NetChannelRequest::MAX_WIRE_LEN];
+        let len = NetChannelRequest::SetRxFilter(rx_filter())
+            .encode(&mut buf)
+            .expect("encode");
+        for offset in 0..4 {
+            let mut bad = buf;
+            bad[HEADER_LEN + offset] = 0xFF;
+            assert_eq!(
+                NetChannelRequest::decode(&bad[..len]),
+                Err(Errno::OutOfRange),
+                "a corrupt count is refused whole, never clamped"
+            );
+        }
+        // Every reserved byte is checked, not just the first.
+        for offset in 5..8 {
+            let mut bad = buf;
+            bad[HEADER_LEN + offset] = 1;
+            assert_eq!(NetChannelRequest::decode(&bad[..len]), Err(Errno::BadMagic));
         }
     }
 

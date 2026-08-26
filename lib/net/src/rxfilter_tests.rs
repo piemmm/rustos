@@ -5,15 +5,29 @@
 //! ever dropped — including on every path where the classifier cannot be
 //! sure.
 
-use super::{RxClassifier, IPV4_BROADCAST};
-use crate::addr::{Ipv4Addr, Ipv6Addr};
+use super::RxClassifier;
+use crate::addr::{solicited_node_multicast, Ipv4Addr, Ipv6Addr, ALL_NODES};
 use crate::arp::{self, ArpPacket};
 use crate::eth::{ETHERNET_HEADER_LEN, ETHERTYPE_ARP, ETHERTYPE_IPV4, ETHERTYPE_IPV6};
+use crate::ipv4::Ipv4Header;
+use crate::udp::PROTOCOL_UDP;
 use alloc::vec;
 use alloc::vec::Vec;
 use tairix_abi::driver::net::MacAddress;
-use tairix_abi::driver::net_channel::{RxFilterPolicy, MAX_FILTER_V4, MAX_FILTER_V6};
+use tairix_abi::driver::net_channel::{
+    RxFilterPolicy, MAX_FILTER_GROUPS_V4, MAX_FILTER_GROUPS_V6, MAX_FILTER_V4, MAX_FILTER_V6,
+};
 use tairix_abi::driver::net_ring::RxAdmit;
+
+/// The one IPv4 group every multicast-capable host joins (RFC 1112), so the
+/// tests below name it as *the* joined group.
+const ALL_SYSTEMS_V4: [u8; 4] = [224, 0, 0, 1];
+
+/// A group this host has not joined — mDNS, the noise this sheds.
+const UNJOINED_V4: [u8; 4] = [224, 0, 0, 251];
+
+/// The IPv6 counterpart: mDNS over v6, never joined here.
+const UNJOINED_V6: [u8; 16] = [0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xfb];
 
 /// This host's IPv4 address and its subnet's directed broadcast.
 const OURS_V4: [u8; 4] = [10, 0, 2, 15];
@@ -26,11 +40,14 @@ const THEIRS_V4: [u8; 4] = [10, 0, 2, 99];
 const OURS_V6: [u8; 16] = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x15];
 const THEIRS_V6: [u8; 16] = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x99];
 
-/// A classifier for an interface holding both of this host's addresses.
+/// A classifier for an interface holding both of this host's addresses and
+/// the all-systems group every host joins.
 fn ours() -> RxClassifier {
     RxClassifier::new(RxFilterPolicy::new(
         &[(OURS_V4, OUR_BROADCAST_V4)],
         &[OURS_V6],
+        &[ALL_SYSTEMS_V4],
+        &[],
     ))
 }
 
@@ -44,13 +61,35 @@ fn frame(ethertype: u16, payload: &[u8]) -> Vec<u8> {
     out
 }
 
-/// An IPv4 frame addressed to `destination`. Only the fields the filter
-/// reads are filled; the stack's own parse is what validates the rest.
+/// An IPv4 frame of `protocol` addressed to `destination` over `payload`.
+///
+/// A real header, checksum and all: the classifier parses it now, and a
+/// header it cannot parse is admitted, so a hand-rolled one would make every
+/// shedding assertion below pass for the wrong reason.
+fn ipv4_proto_to(destination: [u8; 4], protocol: u8, payload: &[u8]) -> Vec<u8> {
+    let header = Ipv4Header::new(
+        Ipv4Addr::from(THEIRS_V4),
+        Ipv4Addr::from(destination),
+        protocol,
+    );
+    let mut packet = vec![0u8; crate::ipv4::IPV4_HEADER_LEN + payload.len()];
+    header.write(&mut packet, payload.len()).expect("fits");
+    packet[crate::ipv4::IPV4_HEADER_LEN..].copy_from_slice(payload);
+    frame(ETHERTYPE_IPV4, &packet)
+}
+
+/// An IPv4 frame addressed to `destination`, carrying a protocol with no
+/// port to match on (ICMP), so the destination alone decides.
 fn ipv4_to(destination: [u8; 4]) -> Vec<u8> {
-    let mut header = vec![0u8; 20];
-    header[0] = 0x45;
-    header[16..20].copy_from_slice(&destination);
-    frame(ETHERTYPE_IPV4, &header)
+    ipv4_proto_to(destination, crate::ipv4::PROTOCOL_ICMP, &[0u8; 8])
+}
+
+/// A UDP datagram to `destination` port `port`.
+fn udp_to(destination: [u8; 4], port: u16) -> Vec<u8> {
+    let mut udp = [0u8; 8];
+    udp[2..4].copy_from_slice(&port.to_be_bytes());
+    udp[4..6].copy_from_slice(&8u16.to_be_bytes());
+    ipv4_proto_to(destination, PROTOCOL_UDP, &udp)
 }
 
 /// An IPv6 frame addressed to `destination`.
@@ -114,17 +153,54 @@ fn traffic_addressed_to_us_is_admitted() {
 }
 
 #[test]
-fn broadcast_and_multicast_are_admitted() {
-    assert!(ours().admit(&ipv4_to(IPV4_BROADCAST.octets())));
-    assert!(
-        ours().admit(&ipv4_to(OUR_BROADCAST_V4)),
-        "a subnet's directed broadcast reaches every host on it"
-    );
-    // DHCP offers arrive at the limited broadcast before an address exists,
-    // and neighbour discovery lives entirely on multicast.
-    assert!(ours().admit(&ipv4_to([224, 0, 0, 1])));
-    let all_nodes = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1);
-    assert!(ours().admit(&ipv6_to(all_nodes.octets())));
+fn a_joined_group_is_admitted_and_an_unjoined_one_is_shed() {
+    // The stack delivers a group destination only to a member, so this is
+    // the mirror of its own rule. mDNS and its kin are the bulk of the noise
+    // and are shed here without a stack wake.
+    assert!(ours().admit(&ipv4_to(ALL_SYSTEMS_V4)));
+    assert!(!ours().admit(&ipv4_to(UNJOINED_V4)));
+    assert!(!ours().admit(&ipv6_to(UNJOINED_V6)));
+}
+
+#[test]
+fn the_groups_derived_from_our_addresses_are_admitted() {
+    // All-nodes and solicited-node are not carried in the policy: both follow
+    // from the addresses it already names, so there is no second set to keep
+    // in step — but they must still be admitted.
+    assert!(ours().admit(&ipv6_to(ALL_NODES.octets())));
+    let solicited = solicited_node_multicast(&Ipv6Addr::from(OURS_V6));
+    assert!(ours().admit(&ipv6_to(solicited.octets())));
+}
+
+#[test]
+fn broadcast_is_shed_except_the_dhcp_reply_the_engine_claims() {
+    // A DHCPv4 reply arrives broadcast before any address exists, and the
+    // engine claims it ahead of its own address filter, so it must survive.
+    assert!(ours().admit(&udp_to(
+        Ipv4Addr::BROADCAST.octets(),
+        crate::dhcp::CLIENT_PORT
+    )));
+    assert!(ours().admit(&udp_to(OUR_BROADCAST_V4, crate::dhcp::CLIENT_PORT)));
+    // Everything else broadcast is noise the stack drops anyway: it never
+    // delivers a broadcast destination to a socket.
+    assert!(!ours().admit(&udp_to(Ipv4Addr::BROADCAST.octets(), 137)));
+    assert!(!ours().admit(&udp_to(OUR_BROADCAST_V4, 138)));
+    assert!(!ours().admit(&ipv4_to(Ipv4Addr::BROADCAST.octets())));
+}
+
+#[test]
+fn a_broadcast_fragment_is_admitted_without_inspection() {
+    // The port lives in the first fragment and reassembly is the stack's
+    // job, so guessing here could shed a reply.
+    let mut udp = [0u8; 8];
+    udp[2..4].copy_from_slice(&137u16.to_be_bytes());
+    let mut header = Ipv4Header::new(Ipv4Addr::from(THEIRS_V4), Ipv4Addr::BROADCAST, PROTOCOL_UDP);
+    header.fragment_offset = 8;
+    header.more_fragments = true;
+    let mut packet = vec![0u8; crate::ipv4::IPV4_HEADER_LEN + udp.len()];
+    header.write(&mut packet, udp.len()).expect("fits");
+    packet[crate::ipv4::IPV4_HEADER_LEN..].copy_from_slice(&udp);
+    assert!(ours().admit(&frame(ETHERTYPE_IPV4, &packet)));
 }
 
 #[test]
@@ -162,7 +238,7 @@ fn a_policy_that_could_not_hold_every_address_admits_all_unicast() {
             ([10, 0, 2, last], OUR_BROADCAST_V4)
         })
         .collect();
-    let policy = RxFilterPolicy::new(&v4, &[OURS_V6]);
+    let policy = RxFilterPolicy::new(&v4, &[OURS_V6], &[ALL_SYSTEMS_V4], &[]);
     assert!(!policy.is_exhaustive());
     let wide = RxClassifier::new(policy);
     assert!(wide.admit(&ipv4_to(THEIRS_V4)));
@@ -175,9 +251,32 @@ fn a_policy_that_could_not_hold_every_address_admits_all_unicast() {
             address
         })
         .collect();
-    let policy = RxFilterPolicy::new(&[(OURS_V4, OUR_BROADCAST_V4)], &v6);
+    let policy = RxFilterPolicy::new(&[(OURS_V4, OUR_BROADCAST_V4)], &v6, &[ALL_SYSTEMS_V4], &[]);
     assert!(!policy.is_exhaustive());
     assert!(RxClassifier::new(policy).admit(&ipv6_to(THEIRS_V6)));
+}
+
+#[test]
+fn a_policy_that_could_not_hold_every_group_admits_all_multicast() {
+    // Truncation must never be silent: a policy that could not name every
+    // joined group widens rather than shedding a group it was not told about.
+    let groups: Vec<[u8; 4]> = (0..=MAX_FILTER_GROUPS_V4)
+        .map(|n| [224, 0, 0, u8::try_from(n).expect("small")])
+        .collect();
+    let policy = RxFilterPolicy::new(&[(OURS_V4, OUR_BROADCAST_V4)], &[OURS_V6], &groups, &[]);
+    assert!(!policy.is_exhaustive());
+    assert!(RxClassifier::new(policy).admit(&ipv4_to(UNJOINED_V4)));
+
+    let groups: Vec<[u8; 16]> = (0..=MAX_FILTER_GROUPS_V6)
+        .map(|n| {
+            let mut group = UNJOINED_V6;
+            group[15] = u8::try_from(n).expect("small");
+            group
+        })
+        .collect();
+    let policy = RxFilterPolicy::new(&[(OURS_V4, OUR_BROADCAST_V4)], &[OURS_V6], &[], &groups);
+    assert!(!policy.is_exhaustive());
+    assert!(RxClassifier::new(policy).admit(&ipv6_to(UNJOINED_V6)));
 }
 
 #[test]
@@ -205,21 +304,26 @@ fn an_interface_with_no_ipv4_address_admits_ipv4_unicast() {
     // list dropped every IPv4 unicast, including the OFFER/ACK addressed to
     // the very address being offered. No address, so no route, so every send
     // was refused. "Names them all" is not "can decide".
-    let boot = RxClassifier::new(RxFilterPolicy::new(&[], &[OURS_V6]));
+    let boot = RxClassifier::new(RxFilterPolicy::new(&[], &[OURS_V6], &[], &[]));
     assert!(boot.policy().is_exhaustive());
     assert!(
         boot.admit(&ipv4_to(THEIRS_V4)),
         "an IPv4 unicast must be admitted while the interface has no v4 address"
     );
     // The broadcast path a DHCP offer may instead take stays admitted too.
-    assert!(boot.admit(&ipv4_to(IPV4_BROADCAST.octets())));
+    assert!(boot.admit(&ipv4_to(Ipv4Addr::BROADCAST.octets())));
     // And an ARP request cannot be judged either, so it is admitted.
     assert!(boot.admit(&arp_frame(arp::OP_REQUEST, THEIRS_V4)));
 }
 
 #[test]
 fn an_interface_with_no_ipv6_address_admits_ipv6_unicast() {
-    let boot = RxClassifier::new(RxFilterPolicy::new(&[(OURS_V4, OUR_BROADCAST_V4)], &[]));
+    let boot = RxClassifier::new(RxFilterPolicy::new(
+        &[(OURS_V4, OUR_BROADCAST_V4)],
+        &[],
+        &[ALL_SYSTEMS_V4],
+        &[],
+    ));
     assert!(boot.policy().is_exhaustive());
     assert!(boot.admit(&ipv6_to(THEIRS_V6)));
     // The family that *does* have an address still filters.
@@ -229,7 +333,7 @@ fn an_interface_with_no_ipv6_address_admits_ipv6_unicast() {
 
 #[test]
 fn a_policy_with_no_address_at_all_filters_nothing_addressable() {
-    let bare = RxClassifier::new(RxFilterPolicy::new(&[], &[]));
+    let bare = RxClassifier::new(RxFilterPolicy::new(&[], &[], &[], &[]));
     assert!(bare.admit(&ipv4_to(THEIRS_V4)));
     assert!(bare.admit(&ipv6_to(THEIRS_V6)));
     assert!(bare.admit(&arp_frame(arp::OP_REQUEST, THEIRS_V4)));
