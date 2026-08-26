@@ -101,6 +101,12 @@ The open items, in priority order:
   image underneath itself — DONE.** Up to four simultaneous runs of one
   enrolment shared a planted-image path, so a replica rewrote a live sibling's
   disk mid-run. Sidecar paths are now per-run, not per-binary.
+- **D55 — the x86_64 direct physical map covers only the first gigabyte**,
+  so every kernel path that reaches a frame by pointer — the spawn image
+  write, the shared-memory scrub, the remap window's own record store, and
+  now the kernel heap's slab page supply — fails closed for a frame drawn
+  above 1 GiB. Noticed while landing the slab tier; pre-existing and not
+  introduced by it.
 - **D49 — a QEMU vertical's success status is also what a machine reset
   produces**, on aarch64 and riscv64 (both report success as plain `0`). The
   harness's verdict is therefore fail-open: a guest that took the machine down
@@ -779,7 +785,7 @@ fixed in passing (D4.3).
 | `lib/caps::CapToken` | unforgeable token vocabulary (`token.rs`) | §27-complete |
 | `kernel/ipc::PortRegistry` | `BTreeMap` endpoint + name indexes — O(log n) `lookup`/`resolve`/`register`/`unregister`; bulk `teardown_owned_by` O(n) only on process exit (not a hot path) | §27-complete |
 | `kernel/ipc` `call`/`port`/`notify` | reply/mailbox/notification queues over the shared `waitq` wake/drain discipline (D2) | §27-complete |
-| `lib/kalloc::FreeListAllocator` | coalescing address-sorted first-fit free list; growable/shrinkable via `HeapSource`; deterministic OOM (null, never panic) | §27-complete (first-fit is O(free-blocks); coalescing bounds the count — the standard general-purpose design, not a thin slice) |
+| `lib/kalloc::FreeListAllocator` | two tiers behind one `GlobalAlloc`: a header-free per-size-class slab up to the page granule, coalescing segregated fit over boundary tags above it; growable/shrinkable via `HeapSource`; deterministic OOM (null, never panic) | §27-complete (O(1) allocate, free, coalesce and region/page reclaim — no list walked on any path; pinned by the two per-operation node-reach tests) |
 | `lib/rt` heap | first-fit over a coalesced, address-sorted free-**span** list; growable `SpanStore` (§24.1/§25); realloc grow/shrink in place | §27-complete (same standard first-fit design; §25-bound) |
 | `kernel/mem::Slab` | guard-page + tag-rotation + zero-on-free + double-free/dirty-slot hardened fixed-size slab | §27-complete for its use — **watch-item** below |
 
@@ -3220,3 +3226,35 @@ the vertical with the session's own tracing, and identify the loop. Then fix
 the loop — this is a desktop-side defect, not a block-layer one: no
 per-operation saving in the block stack can compensate for 2500 path
 resolutions that should not be issued.
+
+---
+
+## D55 — the x86_64 direct physical map covers only the first gigabyte (OPEN)
+
+**Mechanism.** The x86_64 port's boot trampoline mirrors `[0, 1 GiB)` of
+physical memory at `KERNEL_VMA_BASE`, and `direct_phys_map()` hands the
+kernel a `DirectPhysMap` of exactly that span. Every kernel path that has to
+*reach* a frame by pointer resolves through it: the spawn path's image and
+page-table writes, the shared-memory zero-on-free scrub, the remap window's
+own record store (`kvslots`), and — since the kernel heap gained its slab
+tier (`plans/FIX-KHEAP.md`) — the slab's page supply (`kernel/mem::FramePages`).
+A frame the allocator draws above 1 GiB translates to nothing, so each of
+those fails closed. The aarch64 and riscv64 ports do not share the limit:
+both size their identity map from discovered RAM.
+
+**Consequence.** No corruption — every consumer refuses the frame and returns
+it — but on an x86_64 machine with more than a gigabyte of RAM the kernel
+degrades once low memory is spent: the slab falls back to carving its pages
+out of the bootstrap heap region, and when that is exhausted small kernel
+allocations fail while gigabytes are free. The byte-granular tier is
+unaffected, because a grown region is mapped through the remap window's page
+tables rather than the direct map.
+
+**The fix.** Size the x86_64 direct map from the discovered memory map as the
+other two ports do, mapping the RAM gigapages the boot memory map reports
+rather than a fixed one, and publish the resulting span through
+`direct_phys_map()`. That is a change to the port's boot trampoline and its
+`PHYSMAP_SPAN`, not to any consumer.
+
+**Done when:** an x86_64 image with several gigabytes of RAM reaches a frame
+at the top of its pool through `direct_phys_map()`, and a vertical pins it.

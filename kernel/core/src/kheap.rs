@@ -3,11 +3,15 @@
 //! The kernel `#[global_allocator]` is a [`tairix_kalloc::FreeListAllocator`]
 //! living in the bin crate over a small `.bss` bootstrap region. That
 //! bootstrap covers early boot, before a physical frame allocator exists;
-//! once one does, the boot path installs a growth source here so the heap
-//! grows past its bootstrap region on demand and shrinks drained regions
-//! back — the growable-capacity discipline the charter requires of every
-//! resource ceiling, replacing the former fixed slab that a busy kernel
-//! could exhaust into an allocation-failure panic.
+//! once one does, the boot path installs a source here so the heap draws
+//! fresh memory on demand and hands it back — the growable-capacity
+//! discipline the charter requires of every resource ceiling, replacing the
+//! former fixed slab that a busy kernel could exhaust into an
+//! allocation-failure panic.
+//!
+//! One source feeds both of the allocator's tiers: whole regions for the
+//! byte-granular tier (below), and single direct-mapped frames for the slab
+//! tier that serves everything up to a page.
 //!
 //! Three seams connect the bin's allocator to the kernel core:
 //!
@@ -19,8 +23,8 @@
 //!   interrupt mask/restore so the allocator's lock is interrupt-safe.
 //! * [`install_frame_heap_source`] — the boot path calls this once the
 //!   frame allocator, the arch direct physical map, and the port's kernel
-//!   remap window all exist and are `'static`, wiring a frame-backed
-//!   growth source into the registered heap.
+//!   remap window all exist and are `'static`, wiring the frame-backed
+//!   source into the registered heap.
 //!
 //! # How a region is grown
 //!
@@ -42,6 +46,14 @@
 //! may use the kernel reserve and keeps making progress under user memory
 //! pressure. Window pages are mapped read/write and never executable.
 //!
+//! # How a slab page is supplied
+//!
+//! The slab tier wants one whole page addressed by an ordinary pointer, which
+//! is a frame plus the direct map ([`tairix_kernel_mem::FramePages`]) — no
+//! window slot, no page-table work, and no invalidation on either side. That
+//! is what lets a page-sized allocation cost exactly one frame: a window slot
+//! per single-page slab would put a first-fit walk back one layer down.
+//!
 //! # No re-entry into the heap being grown
 //!
 //! Every path here runs under the global heap's own non-reentrant lock, so
@@ -57,11 +69,13 @@
 //! never a panic).
 
 use alloc::boxed::Box;
+use core::ptr::NonNull;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
 use tairix_kalloc::{FreeListAllocator, HeapSource};
 use tairix_kernel_mem::{
-    AllocError, Frame, FrameAllocator, KernelVirtMap, PhysMap, SlotWindow, MAX_ORDER, PAGE_SIZE,
+    AllocError, Frame, FrameAllocator, FramePages, KernelVirtMap, PhysMap, SlotWindow, MAX_ORDER,
+    PAGE_SIZE,
 };
 use tairix_sync::SpinLock;
 
@@ -122,12 +136,18 @@ fn global_heap() -> Option<&'static FreeListAllocator> {
     unsafe { GLOBAL_HEAP.load(Ordering::Acquire).as_ref() }
 }
 
-/// The production kernel-heap growth source: physical chunks from the frame
-/// allocator, assembled into one virtually-contiguous region in the port's
-/// kernel remap window.
+/// The production kernel-heap source: physical chunks from the frame
+/// allocator assembled into one virtually-contiguous region in the port's
+/// kernel remap window for the byte-granular tier, and plain direct-mapped
+/// frames for the slab tier.
 struct FrameHeapSource {
     frames: &'static FrameAllocator,
     kvmap: &'static dyn KernelVirtMap,
+    /// The slab tier's page supply. A slab page is one frame addressed
+    /// through the direct map: no window slot, no page-table work, and no
+    /// invalidation, which is what makes a page-sized allocation cost exactly
+    /// one frame.
+    pages: FramePages,
     /// Which runs of the window are handed out. Locked rather than borrowed
     /// because the heap drives the source through a shared reference; the
     /// only caller already holds the global heap lock, whose hold masks this
@@ -216,6 +236,14 @@ impl HeapSource for FrameHeapSource {
         Some((addr as *mut u8, len))
     }
 
+    fn alloc_page(&self) -> Option<NonNull<u8>> {
+        self.pages.alloc()
+    }
+
+    fn free_page(&self, page: NonNull<u8>) {
+        self.pages.free(page);
+    }
+
     fn shrink(&self, base: *mut u8, len: usize) {
         let base_addr = base as u64;
         let pages = len / PAGE_SIZE;
@@ -236,8 +264,9 @@ impl HeapSource for FrameHeapSource {
     }
 }
 
-/// Wire a frame-backed growth source into the registered kernel heap, so it
-/// can grow past its bootstrap region.
+/// Wire the frame-backed source into the registered kernel heap, so its
+/// byte-granular tier can grow past the bootstrap region and its slab tier
+/// can draw pages.
 ///
 /// Called once from the boot path after the frame allocator, the arch direct
 /// physical map, and the port's kernel remap window all exist and are
@@ -259,6 +288,7 @@ pub fn install_frame_heap_source(
     let source: &'static FrameHeapSource = Box::leak(Box::new(FrameHeapSource {
         frames,
         kvmap,
+        pages: FramePages::new(frames, physmap),
         slots: SpinLock::new(slots),
     }));
     heap.install_source(source);
@@ -410,6 +440,7 @@ mod tests {
         let source: &'static FrameHeapSource = Box::leak(Box::new(FrameHeapSource {
             frames,
             kvmap,
+            pages: FramePages::new(frames, sim),
             slots: SpinLock::new(slots),
         }));
         let harness = Harness {
@@ -634,9 +665,74 @@ mod tests {
         h.source.shrink(second, len2);
     }
 
+    #[test]
+    fn a_slab_page_costs_one_frame_and_no_window_space() {
+        let h = harness(0x10_0000, 512, 4096);
+        let free_before = h.frames.free_frames();
+
+        let page = h.source.alloc_page().expect("a page");
+        assert_eq!(
+            h.frames.free_frames(),
+            free_before - 1,
+            "a slab page costs exactly one frame"
+        );
+        assert_eq!(
+            page.as_ptr() as usize % PAGE_SIZE,
+            0,
+            "a slab page is granule-aligned"
+        );
+        assert!(
+            h.window.page_index(page.as_ptr() as u64).is_none(),
+            "a slab page is direct-mapped, never carved out of the remap window"
+        );
+        // The direct map is real storage in this harness, so the page is
+        // genuinely writable.
+        // SAFETY: the source owns the frame until the page is returned.
+        unsafe { core::ptr::write_bytes(page.as_ptr(), 0x5A, PAGE_SIZE) };
+
+        // The window is untouched, so a region still starts at its first slot.
+        let (base, len) = h.source.grow(PAGE_SIZE).expect("grows");
+        assert_eq!(
+            h.window.page_index(base as u64),
+            Some(0),
+            "the page draw consumed no window slot"
+        );
+        h.source.shrink(base, len);
+
+        h.source.free_page(page);
+        assert_eq!(
+            h.frames.free_frames(),
+            free_before,
+            "the page's frame came back"
+        );
+    }
+
+    #[test]
+    fn page_exhaustion_fails_closed_without_leaking() {
+        let h = harness(0x10_0000, 8, 4096);
+        let mut pages = Vec::new();
+        while let Some(page) = h.source.alloc_page() {
+            pages.push(page);
+        }
+        assert!(!pages.is_empty(), "the pool serves at least one page");
+        assert_eq!(h.frames.free_frames(), 0, "the pool is drained");
+        // Exhausted: `None`, never a panic.
+        assert!(h.source.alloc_page().is_none());
+        let drawn = pages.len();
+        for page in pages {
+            h.source.free_page(page);
+        }
+        assert_eq!(
+            h.frames.free_frames(),
+            drawn,
+            "every page came back to the allocator"
+        );
+    }
+
     /// The invariant the whole design turns on: in production the heap being
     /// grown is the global heap, and its lock is not reentrant, so a single
-    /// allocation from either path deadlocks.
+    /// allocation from either path deadlocks. It binds the slab tier's page
+    /// supply exactly as it binds region growth: both run under that lock.
     #[test]
     fn neither_grow_nor_shrink_allocates_from_the_global_heap() {
         let block_pages = 1usize << MAX_ORDER;
@@ -662,5 +758,29 @@ mod tests {
         assert!(region.is_some(), "the measured grow succeeded");
         assert_eq!(after_grow, 0, "grow allocated from the global heap");
         assert_eq!(after_shrink, 0, "shrink allocated from the global heap");
+    }
+
+    /// The same proof for the slab tier's page supply, which the heap drives
+    /// from inside that very lock every time a size class needs a page.
+    #[test]
+    fn neither_page_draw_nor_page_release_allocates_from_the_global_heap() {
+        let h = harness(0x10_0000, 512, 4096);
+
+        let counter: &'static LiveBytes = Box::leak(Box::new(LiveBytes::new()));
+        opt_in_current_thread(counter);
+        let page = h.source.alloc_page();
+        let after_draw = counter.allocations();
+        if let Some(page) = page {
+            h.source.free_page(page);
+        }
+        let after_release = counter.allocations();
+        opt_out_current_thread();
+
+        assert!(page.is_some(), "the measured draw succeeded");
+        assert_eq!(after_draw, 0, "a page draw allocated from the global heap");
+        assert_eq!(
+            after_release, 0,
+            "a page release allocated from the global heap"
+        );
     }
 }

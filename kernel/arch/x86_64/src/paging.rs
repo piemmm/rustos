@@ -39,8 +39,8 @@ use tairix_arch_api::mmu::{
 };
 use tairix_arch_api::tlb::TlbShootdown;
 
-/// Size of a single x86_64 page-table page.
-pub const PAGE_SIZE: usize = 4096;
+/// Size of a single page (and of a page-table page): the one system granule.
+pub use tairix_abi::PAGE_SIZE;
 
 /// Number of 64-bit entries in a page-table page (PML4 / PDPT / PD / PT).
 pub const ENTRIES_PER_TABLE: usize = 512;

@@ -142,7 +142,7 @@ pub use log_ingress::{
 pub use manifest::{
     decode_capability_ids, ManifestHeader, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES,
 };
-pub use memory::MapFlags;
+pub use memory::{MapFlags, PAGE_SHIFT, PAGE_SIZE};
 pub use net::{
     decode_bind_reply, decode_socket_reply, encode_bind_reply, encode_socket_reply, ShutdownHow,
     SocketAddr, SocketDatagram, SocketId, SocketRequest, SocketType, NETSTACK_SOCKET_ENDPOINT,

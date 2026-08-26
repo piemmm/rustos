@@ -278,6 +278,7 @@ members = [
     "tests/integration/memory_isolation_qemu_aarch64",
     "tests/integration/stack_guard_qemu_aarch64",
     "tests/integration/stack_arena_qemu_aarch64",
+    "tests/integration/kslab_qemu_aarch64",
     "tests/integration/stack_overrun_qemu_aarch64",
     "tests/integration/memory_isolation_qemu_riscv64",
     "tests/integration/stack_guard_qemu_riscv64",

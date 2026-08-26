@@ -2262,8 +2262,8 @@ order (one fully-gated increment each):
                  `lib/collections::BitSet256`, `lib/caps` (`CapabilitySet`
                  delegation + `CapToken`), `kernel/ipc` (`PortRegistry` +
                  `call`/`port`/`notify` over the P-6 wake/drain), and the
-                 allocators (`lib/kalloc` coalescing free list, `lib/rt` heap
-                 free-span, `kernel/mem::Slab`). All are §27-complete abstractions
+                 allocators (`lib/kalloc`'s slab + segregated-fit tiers, `lib/rt`
+                 heap free-span, `kernel/mem::Slab`). All are §27-complete abstractions
                  with the right structure/complexity for §26 load; `waitq` (P-6)
                  was the sole thin slice. **One latent structural watch-item,
                  staged not fixed (§2.18 / D4.3):** `kernel/mem::Slab::alloc`
@@ -4836,8 +4836,12 @@ and fail-closed (§24.4) — this work must not loosen them.
   64 MiB `.bss` slab that, once exhausted, returned null from `GlobalAlloc` →
   `handle_alloc_error` → panic. It is now growable/shrinkable: the `.bss` region
   is a *bootstrap* only, and a late-installed `HeapSource` lets it draw fresh
-  physically-contiguous frames from the live `FrameAllocator` on a miss and hand
-  whole drained regions back. Production wiring is `kernel/core::kheap`
+  memory from the live `FrameAllocator` on a miss and hand it back: whole
+  regions for the byte-granular tier — assembled from as many chunks as the
+  pool can offer into one virtually-contiguous run of the kernel remap window
+  (`plans/FIX-KHEAP.md`), so growth needs no large contiguous block — and
+  single direct-mapped frames for the slab tier, so a page-sized allocation
+  costs exactly one frame. Production wiring is `kernel/core::kheap`
   (`register_global_heap` — an `AtomicPtr` slot each arch bin sets in
   `kernel_main` before `boot` — plus the frame-backed `FrameHeapSource` and
   `install_frame_heap_source`, called in `kernel_bringup` once the frame

@@ -17,6 +17,10 @@ developer can pull in exactly what they need, plus the umbrella
 | `include/tairix/tairix_capability.h` | `TAIRIX_CAP_*` and `TAIRIX_CAPABILITY_ID_MAX` — the capability identifiers |
 | `include/tairix/tairix_time.h` | `tairix_time64_t` / `tairix_duration64_t` and the `TAIRIX_NANOS_PER_SEC` / `*_WIRE_LEN` constants |
 | `include/tairix/tairix_random.h` | `TAIRIX_RANDOM_FLAG_*` request flags and the `TAIRIX_RANDOM_*_BYTES` request limits |
+| `include/tairix/tairix_log.h` | the structured-log wire limits (`TAIRIX_LOG_*`) and the `TAIRIX_FIELD_TAG_*` field-value discriminants |
+| `include/tairix/tairix_rlimit.h` | `tairix_resource_limit_t`, `TAIRIX_RLIMIT_INFINITY`, and the `TAIRIX_LIMIT_KIND_*` discriminants |
+| `include/tairix/tairix_memory.h` | `TAIRIX_PAGE_SIZE` — the granule a `mem_map` length rounds up to — and the `TAIRIX_MAP_FLAG_*` mapping flag bits |
+| `include/tairix/tairix_hwtree.h` | the hardware-tree wire records and their `TAIRIX_HW_*` / `TAIRIX_HWTREE_VERSION` class, match-kind, resource-kind and length constants |
 | `include/tairix/tairix_ipc.h` | `tairix_ipc_message_header_t` / `tairix_port_name_t` and the `TAIRIX_IPC_*` / `TAIRIX_PORT_NAME_*` constants |
 | `include/tairix/tairix_stdinfo.h` | `TAIRIX_STDINFO_FD`, the `TAIRIX_STDINFO_VERSION_*` framing tags, and the `TAIRIX_STDINFO_KIND_*` / `TAIRIX_STDINFO_SEVERITY_*` discriminants |
 | `include/tairix/tairix_manifest.h` | `tairix_manifest_header_t` and the `TAIRIX_MANIFEST_*` / `TAIRIX_SYSCALL_TABLE_HASH_LEN` constants |

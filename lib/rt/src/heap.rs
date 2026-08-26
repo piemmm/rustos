@@ -63,11 +63,11 @@
 
 use core::alloc::{GlobalAlloc, Layout};
 
-use crate::sync::Mutex;
+// The one system page granule: the arena grows in whole pages, and `mem_map`
+// rounds its length up to this.
+use tairix_abi::PAGE_SIZE;
 
-/// Page size of every Tier-1 target's smallest translation granule. The arena
-/// grows in whole pages, and `mem_map` rounds its length up to this.
-const PAGE_SIZE: usize = 4096;
+use crate::sync::Mutex;
 
 /// Fixed virtual base of the heap arena.
 ///

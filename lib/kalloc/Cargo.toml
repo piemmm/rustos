@@ -8,6 +8,15 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[dependencies]
+# The one system page granule (`PAGE_SIZE`/`PAGE_SHIFT`): the slab tier's
+# largest size class *is* the page, so a page-sized allocation occupies exactly
+# one frame. The granule is user-visible through `mem_map`, so it is defined
+# once in the ABI and imported here rather than re-stated. `tairix-abi` has no
+# dependencies of its own and allocates nothing, so the allocator crate stays a
+# leaf over `core`.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+
 [lints]
 workspace = true
 

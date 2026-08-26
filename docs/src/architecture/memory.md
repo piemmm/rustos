@@ -2306,6 +2306,85 @@ into one run of a kernel **remap window**.
   allocation. The end-to-end dereference is proven on the metal by every
   QEMU vertical: the kernel cannot complete boot unless the window works.
 
+## 7v. The kernel heap's two tiers (`lib/kalloc`, `framepages`)
+
+The kernel `#[global_allocator]` is one allocator with **two tiers behind one
+`GlobalAlloc`**, under one interrupt-safe lock (`lib/kalloc`).
+
+- **Up to the page granule: a slab.** Per-size-class pages, the free list
+  threaded through the free objects themselves, and each page's own
+  bookkeeping (free head, live count, virgin-slot cursor, partial-list links)
+  in its first object slot — so an object finds its page by masking its
+  address to the granule and no side table is ever searched. There is no
+  per-object header and no rounding to a block boundary, so a page-sized
+  allocation — the kernel's dominant traffic, the filesystem cache's chunk
+  being exactly `PAGE_SIZE` — occupies **exactly one frame** where a
+  byte-granular heap spilled a header into a second one.
+- **Above it: the byte-granular tier** described in §7u — coalescing
+  segregated fit over in-band boundary tags, O(1) throughout.
+
+**Routing is a pure function of the `Layout`, and nothing else.** `dealloc`
+receives the allocating layout, so both ends decide the same way with no side
+table and no header to consult. This is a correctness requirement, not a
+simplification: were routing to depend on whether a page supply were
+installed, an object allocated before the install would be freed down the
+other tier and corrupt the heap.
+
+**Classes are powers of two**, so an object placed at a multiple of its own
+size inside a page-aligned page is aligned to that size and alignment needs
+no padding and no header. They run from the smallest width that holds a page
+descriptor up to a **derived ceiling**, plus the granule class. The ceiling
+is derived, not picked: a sub-granule page spends one slot on its descriptor,
+so a class of width `c` costs `PAGE_SIZE / (PAGE_SIZE / c - 1)` bytes per
+object, and past a point that exceeds what a byte-tier block of the same
+width would cost — at half the granule a page would hold one object and
+charge double. Those widths go to the byte tier, which has no per-page
+overhead to amortise. The granule class is exempt and always present: with no
+descriptor at all it both undercuts the byte tier and is the one shape that
+fits a single frame. Four classes result on a 64-bit target with 4 KiB pages,
+so the one page each keeps back is a bounded retention (§24.1), not a cache.
+
+**Page supply, and provenance.** After the boot path installs the heap source
+the slab draws one frame per page through `kernel/mem::FramePages` — the
+kernel commit path, so it may use the reserve exactly as region growth does —
+and addresses it through the direct physical map. No remap-window slot is
+consumed, which is the point: `kvslots` allocates first-fit, so a slot per
+single-page slab would reintroduce a walk one layer down. `FramePages` proves
+the direct map inverts its own translation *before* handing a page out, so a
+map that could not return the page refuses it rather than stranding it.
+Before the source exists the slab carves its pages out of the bootstrap
+region through the byte-granular tier, so the kernel has a working heap from
+its first allocation; which supply a page came from is recovered in O(1) by a
+range test against the bootstrap region, and a byte-tier carve that falls
+*outside* that range (a grown region) is handed straight back rather than
+kept, so the test is total.
+
+**Reclaim.** A drained page goes back to its supply rather than being cached,
+so an idle system does not hold memory it has freed; one page per class is
+kept as the hysteresis that stops an allocate/free cycle at a class boundary
+thrashing the frame allocator. Those retained pages are also the heap's one
+reclaim step before it refuses an allocation: a bootstrap-region spare
+rejoins the byte tier's free lists and a frame spare lets the next region
+grow draw it, so the heap reclaims before it fails closed.
+
+**Tested.** `lib/kalloc` host-unit tests (routing purity across every size
+and alignment; every class round-tripping with its object reusable; objects
+disjoint and never overlapping the descriptor; a page-sized allocation
+costing exactly one page with no header; a drained page returning with
+exactly one kept; routing and provenance surviving the source install; a
+page the source cannot supply never carved from a grown region; the source
+set-once; retained pages reclaimed before a refusal; and the per-operation
+node reach staying constant as pages accumulate); `kernel/mem::framepages`
+host-unit tests over a dereferenceable simulated map (one frame per page,
+disjointness, fail-closed exhaustion, a non-invertible map refused rather
+than leaked); `kernel/core::kheap` host-unit tests (a slab page costing one
+frame and no window space, page exhaustion failing closed, and the
+counting-allocator proof that neither a page draw nor a page release
+allocates from the global heap it is serving); and the
+`kslab_qemu_aarch64` vertical, which enables the MMU, installs the
+production supply, and proves the same page accounting — including writing
+and reading back a whole page through the live direct map — on the metal.
+
 ## 8. Testing strategy
 
 - **Unit tests** — alongside each module under `#[cfg(all(test, not(loom)))]`:

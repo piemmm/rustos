@@ -37,8 +37,8 @@ use tairix_arch_api::mmu::{
 };
 use tairix_arch_api::tlb::TlbShootdown;
 
-/// Size of a single page (and of a page-table page).
-pub const PAGE_SIZE: usize = 4096;
+/// Size of a single page (and of a page-table page): the one system granule.
+pub use tairix_abi::PAGE_SIZE;
 
 /// Size of an L2 block descriptor's translation (2 MiB).
 ///

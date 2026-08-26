@@ -1703,6 +1703,9 @@ dependencies = [
 [[package]]
 name = "tairix-kalloc"
 version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+]
 
 [[package]]
 name = "tairix-kernel"
@@ -3390,6 +3393,20 @@ dependencies = [
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel-sched-mlfq",
+]
+
+[[package]]
+name = "tairix-test-kslab-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-arch-aarch64",
+ "tairix-arch-api",
+ "tairix-itest-finisher",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel-mem",
+ "tairix-log",
 ]
 
 [[package]]

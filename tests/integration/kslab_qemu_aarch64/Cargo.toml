@@ -1,0 +1,43 @@
+[package]
+name = "tairix-test-kslab-qemu-aarch64"
+description = "plans/FIX-KHEAP.md slab-tier QEMU integration test: prove the kernel heap's slab serves a page-sized allocation out of exactly one frame, addressed through the live direct map, and returns its pages to the frame allocator."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Freestanding "enable the MMU, build a frame allocator over a `.bss` pool,
+# install the production page supply into the global allocator, and prove the
+# slab tier's page accounting on real hardware" integration test. It links the
+# `tairix-arch-aarch64` port, `kernel/mem`'s production `FramePages` supply,
+# and the `tairix-kalloc` allocator itself; the QEMU-exit shortcut lives in
+# this dedicated bin (never a Cargo feature on a production crate) so feature
+# unification cannot leak it into a real image.
+
+[[bin]]
+name = "tairix-test-kslab-qemu-aarch64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-itest-finisher = { path = "../finisher", version = "=0.0.0" }
+# The Arch HAL MMU surface: the identity space is activated through
+# `tairix_arch_api::mmu::AddressSpace`, so the page the slab writes is reached
+# under a live MMU exactly as it is in production.
+tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+# The frame allocator, the direct physical map, and the production page supply
+# the kernel heap's slab tier draws through — never a second copy of it.
+tairix-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
+# The allocator under test: this bin registers it as its `#[global_allocator]`
+# exactly as every freestanding image does.
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

@@ -9,14 +9,40 @@ harness) registers a `FreeListAllocator` over a per-binary `Heap` static
 as its `#[global_allocator]`. Defining the allocator once here satisfies
 `AGENTS.md` §2.2 (no duplication) and §6 (shared code lives in `lib/`).
 
-The allocator is a coalescing **segregated-fit** allocator over in-band
-boundary tags: free blocks are threaded onto per-size-class lists selected
-by a pair of bitmap scans, and every block records its physical predecessor
-so coalescing reaches each neighbour directly. `alloc`, `dealloc`, and
-returning a drained region are therefore **O(1)** — no list is ever walked.
+The allocator has **two tiers behind one `GlobalAlloc`**, both under the
+same lock.
+
+A request up to the page granule is served by the **slab** tier:
+per-size-class pages, the free list threaded through the free objects
+themselves, and each page's own bookkeeping in its first object slot. There
+is no per-object header and no rounding to a block boundary, so a page-sized
+allocation — the kernel's dominant traffic, the filesystem cache's chunk
+being exactly `PAGE_SIZE` — occupies exactly one frame. Classes are powers
+of two, so an object placed at a multiple of its class inside a page-aligned
+page is aligned to that class and alignment costs nothing. Which tier serves
+a request is a pure function of its `Layout`, so `alloc` and `dealloc`
+always agree with no side table; a routing decision that consulted installed
+state would free a pre-install object down the wrong tier.
+
+The sub-granule classes stop at a *derived* ceiling rather than running to
+the granule: the descriptor costs a page one slot, so past a point a slab
+page charges more per object than a byte-tier block of the same width would
+(at half the granule it would charge double), and those widths go to the
+byte tier instead. The granule class is exempt — it carries no descriptor at
+all, so it both undercuts the byte tier and fits one frame exactly.
+
+Anything larger, or in that middle band, is served by the **byte-granular**
+tier: a coalescing
+segregated-fit allocator over in-band boundary tags, where free blocks are
+threaded onto per-size-class lists selected by a pair of bitmap scans and
+every block records its physical predecessor so coalescing reaches each
+neighbour directly. `alloc`, `dealloc`, and returning a drained region are
+therefore **O(1)** — no list is ever walked.
+
 Steady allocate/free traffic runs in bounded memory and exhaustion is a
-`null` return, never a panic (`AGENTS.md` §4). See the crate-level rustdoc
-for the design and bounds-checking invariants.
+`null` return, never a panic (`AGENTS.md` §4). Before it refuses, the heap
+reclaims the one page each slab class keeps back as hysteresis. See the
+crate-level rustdoc for the design and bounds-checking invariants.
 
 The shape is load-bearing, not incidental. The predecessor walked one
 address-sorted hole list on both `alloc` and `dealloc`, plus the whole
@@ -41,5 +67,7 @@ single-CPU with interrupts already masked, so no ISR can reenter).
 ## Stability tier
 
 `stable` — the public surface (`FreeListAllocator`, `Heap`, `HEAP_BYTES`,
-`install_irq_control`) is the kernel-heap contract consumed across the
-kernel and test trees. It is `no_std` and depends only on `core`.
+`HeapSource`, `install_irq_control`) is the kernel-heap contract consumed
+across the kernel and test trees. It is `no_std`, allocates nothing outside
+the arena it is given, and depends only on `core` and the ABI crate's page
+granule (`tairix_abi::PAGE_SIZE`), which itself has no dependencies.

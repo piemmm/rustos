@@ -47,6 +47,21 @@
 
 use crate::Errno;
 
+/// The system page granule, in bytes: the unit `mem_map` rounds a length up
+/// to, every Tier-1 target's smallest translation granule, and the quantum
+/// the physical frame allocator and both heaps work in.
+///
+/// It lives here because it is user-visible — a program sizes a mapping
+/// against it — so it is one value across the whole system rather than a
+/// per-port constant each layer re-states. A port that needed a different
+/// granule would be changing the mapping ABI, not a private detail.
+pub const PAGE_SIZE: usize = 4096;
+
+/// Bit-shift such that `1 << PAGE_SHIFT == PAGE_SIZE`.
+pub const PAGE_SHIFT: u32 = PAGE_SIZE.trailing_zeros();
+
+const _: () = assert!(PAGE_SIZE.is_power_of_two());
+
 /// Flags accepted by [`mem_map`](crate::SyscallNumber::MEM_MAP).
 ///
 /// A `#[repr(transparent)]` newtype over the `u32` flags register so the wire

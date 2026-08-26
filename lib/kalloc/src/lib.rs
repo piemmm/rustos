@@ -23,6 +23,33 @@
 //! both heap-independent by construction, growth never re-enters this heap's
 //! own lock.
 //!
+//! # Two tiers, one allocator
+//!
+//! Requests up to the page granule are served by a **slab** tier: per-size-class
+//! pages, each drawn whole from the page supply, with the free list threaded
+//! through the free objects themselves. There is no per-object header and no
+//! rounding to a block boundary, so a page-sized allocation — the kernel's
+//! dominant traffic, the filesystem cache's chunk being exactly `PAGE_SIZE` —
+//! occupies exactly one frame instead of spilling a header into a second one.
+//! Anything larger goes to the byte-granular tier below.
+//!
+//! Which tier serves a request is a pure function of its [`Layout`]
+//! (`slab_class`) and nothing else. `dealloc` is handed the allocating layout
+//! by the [`GlobalAlloc`] contract, so both ends route identically with no side
+//! table and no header to consult — and, crucially, routing cannot shift under
+//! an object's feet: were it to depend on installed state, an object allocated
+//! before an install would be freed down the other tier and corrupt the heap.
+//!
+//! Classes are powers of two. A power-of-two class placed at a multiple of its
+//! own size inside a page-aligned page is aligned to that size, so alignment
+//! costs no padding and no header, and retention stays bounded (one spare page
+//! per class, a handful of classes). They run from the smallest width that
+//! holds a page's own descriptor up to a *derived* ceiling
+//! (`SUB_GRANULE_MAX`) — a sub-granule page spends one slot on that
+//! descriptor, so past a point the tax exceeds what the byte tier would charge
+//! and the byte tier takes the request instead — plus the granule class, which
+//! needs no descriptor and is the one shape that fits a frame exactly.
+//!
 //! # Design: segregated fit over boundary tags, O(1) throughout
 //!
 //! Every block carries an in-band header — its size, its flags, and the
@@ -71,6 +98,8 @@ use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+use tairix_abi::PAGE_SIZE;
 
 /// Bytes of the bootstrap heap arena a freestanding bin reserves in `.bss`.
 ///
@@ -157,11 +186,16 @@ const fn align_up(value: usize, align: usize) -> Option<usize> {
     }
 }
 
-/// The block byte length an allocation of `layout` occupies: its header plus
-/// the requested payload, floored at [`MIN_BLOCK`] and rounded to [`ALIGN`]
-/// so the next block start stays aligned.
-fn block_size(layout: Layout) -> Option<usize> {
-    let want = align_up(layout.size().checked_add(HEADER)?, ALIGN)?;
+/// The block byte length a payload of `size` occupies: its header plus the
+/// requested payload, floored at [`MIN_BLOCK`] and rounded to [`ALIGN`] so the
+/// next block start stays aligned.
+const fn block_size(size: usize) -> Option<usize> {
+    let Some(sum) = size.checked_add(HEADER) else {
+        return None;
+    };
+    let Some(want) = align_up(sum, ALIGN) else {
+        return None;
+    };
     Some(if want > MIN_BLOCK { want } else { MIN_BLOCK })
 }
 
@@ -280,6 +314,175 @@ const REGION_HDR: usize = {
     }
 };
 
+// --- The slab tier ------------------------------------------------------
+
+/// Per-page bookkeeping for a sub-granule size class.
+///
+/// It lives in the page's own first object slot, so an object finds its page —
+/// and so its descriptor — by masking its address down to the granule, and no
+/// side table has to be searched. The granule class needs none: its page holds
+/// one object and nothing else.
+#[repr(C)]
+struct SlabPage {
+    /// Head of the free-object list, threaded through the free objects.
+    free: Option<NonNull<u8>>,
+    /// Partial-list links, meaningful only while the page is on that list —
+    /// which its `live` count decides (neither drained nor full).
+    next: Option<NonNull<SlabPage>>,
+    prev: Option<NonNull<SlabPage>>,
+    /// Objects currently handed out.
+    live: u16,
+    /// Objects taken from the never-yet-used tail of the page, so a fresh page
+    /// costs no threading walk over its slots.
+    bump: u16,
+}
+
+/// Smallest slab class: the smallest power of two that holds a [`SlabPage`],
+/// and never below the block alignment the byte tier guarantees.
+const MIN_CLASS: usize = {
+    let want = size_of::<SlabPage>().next_power_of_two();
+    if want > ALIGN {
+        want
+    } else {
+        ALIGN
+    }
+};
+
+/// `log2(MIN_CLASS)`.
+const MIN_CLASS_SHIFT: u32 = MIN_CLASS.trailing_zeros();
+
+/// The widest *sub-granule* class the slab serves.
+///
+/// A sub-granule page spends one slot on its own descriptor, so a class of
+/// width `c` costs `PAGE_SIZE / (PAGE_SIZE / c - 1)` bytes per object. That
+/// tax is negligible for a small class and ruinous for a large one — at half
+/// the granule a page would hold a single object, doubling what the same
+/// request costs the byte-granular tier. The ceiling is therefore *derived*,
+/// not picked: a class exists only while its page costs no more per object
+/// than a byte-tier block of the same width. Wider requests go to the byte
+/// tier, which has no per-page overhead to amortise.
+///
+/// The granule class is exempt and always present: it carries no descriptor
+/// at all (one object fills the page), so it costs less than the byte tier's
+/// block *and* is the one shape that fits a single frame.
+const SUB_GRANULE_MAX: usize = {
+    let mut width = MIN_CLASS;
+    let mut widest = MIN_CLASS;
+    while width < PAGE_SIZE {
+        // A page one of whose slots is the descriptor holds `per_page`
+        // objects; `None` means it holds none at all.
+        if let Some(per_object) = PAGE_SIZE.checked_div(PAGE_SIZE / width - 1) {
+            if let Some(block) = block_size(width) {
+                if per_object <= block {
+                    widest = width;
+                }
+            }
+        }
+        width *= 2;
+    }
+    widest
+};
+
+/// Slab size classes: one per octave from [`MIN_CLASS`] to
+/// [`SUB_GRANULE_MAX`], plus the granule class last. Derived from the
+/// granule and the word width, never picked.
+const SLAB_CLASSES: usize = (SUB_GRANULE_MAX.trailing_zeros() - MIN_CLASS_SHIFT + 2) as usize;
+
+/// Index of the granule class, the last one.
+const GRANULE_CLASS: usize = SLAB_CLASSES - 1;
+
+const _: () = assert!(PAGE_SIZE.is_power_of_two() && PAGE_SIZE > MIN_CLASS);
+const _: () = assert!(MIN_CLASS >= size_of::<SlabPage>() && MIN_CLASS >= align_of::<SlabPage>());
+const _: () = assert!(SUB_GRANULE_MAX >= MIN_CLASS && SUB_GRANULE_MAX < PAGE_SIZE);
+// `live` and `bump` count slots, so the tightest packing must fit a `u16`.
+const _: () = assert!(PAGE_SIZE / MIN_CLASS <= u16::MAX as usize);
+
+/// Byte width of slab class `class`.
+const fn class_size(class: usize) -> usize {
+    if class == GRANULE_CLASS {
+        PAGE_SIZE
+    } else {
+        MIN_CLASS << class
+    }
+}
+
+/// Objects a sub-granule page of `size`-byte objects holds: every slot but the
+/// first, which is the page's own descriptor.
+const fn objects_per_page(size: usize) -> usize {
+    PAGE_SIZE / size - 1
+}
+
+/// The slab class serving `layout`, or [`None`] when the byte-granular tier
+/// does.
+///
+/// A pure function of the layout, so `alloc` and `dealloc` always agree. The
+/// width is the larger of the size and the alignment, rounded up to a power of
+/// two: an object placed at a multiple of a power-of-two class inside a
+/// page-aligned page is aligned to that class, so alignment needs no padding.
+/// Widths between [`SUB_GRANULE_MAX`] and the granule are the byte tier's.
+fn slab_class(layout: Layout) -> Option<usize> {
+    if layout.size() > PAGE_SIZE || layout.align() > PAGE_SIZE {
+        return None;
+    }
+    let want = if layout.size() > layout.align() {
+        layout.size()
+    } else {
+        layout.align()
+    };
+    // Both inputs are at most the granule, which is itself a power of two, so
+    // the rounded width cannot exceed it.
+    let want = if want > MIN_CLASS {
+        want.next_power_of_two()
+    } else {
+        MIN_CLASS
+    };
+    if want == PAGE_SIZE {
+        return Some(GRANULE_CLASS);
+    }
+    if want > SUB_GRANULE_MAX {
+        return None;
+    }
+    Some((want.trailing_zeros() - MIN_CLASS_SHIFT) as usize)
+}
+
+/// The page holding `obj`: its address masked down to the granule.
+fn page_of(obj: NonNull<u8>) -> NonNull<SlabPage> {
+    let base = (obj.as_ptr() as usize) & !(PAGE_SIZE - 1);
+    // SAFETY: `obj` is non-null and lies inside a granule-aligned page, so the
+    // masked address is that page's non-null base.
+    unsafe { NonNull::new_unchecked(base as *mut SlabPage) }
+}
+
+/// Where a *free* object parks its free-list link: its own first word, which
+/// every class has room for and is aligned enough for, since the smallest
+/// class holds a whole descriptor. Reading or writing through it is the
+/// caller's `unsafe`, and is sound only while the object is genuinely free.
+fn free_link(obj: NonNull<u8>) -> *mut Option<NonNull<u8>> {
+    obj.cast::<Option<NonNull<u8>>>().as_ptr()
+}
+
+/// One size class's pages.
+#[derive(Clone, Copy)]
+struct SlabClass {
+    /// Pages holding at least one free *and* at least one live object,
+    /// doubly linked through their descriptors so a page that fills or drains
+    /// is unlinked without a search. Always empty for the granule class, whose
+    /// pages hold a single object and so are never partly used.
+    partial: Option<NonNull<SlabPage>>,
+    /// One drained page kept back rather than returned, so an allocate/free
+    /// cycle at a class boundary does not thrash the page supply. Bounded at
+    /// one page per class, so an idle system holds a handful of pages, not
+    /// whatever it once peaked at.
+    spare: Option<NonNull<u8>>,
+}
+
+impl SlabClass {
+    const EMPTY: Self = Self {
+        partial: None,
+        spare: None,
+    };
+}
+
 /// A source of fresh memory the heap grows into, and returns to on shrink.
 ///
 /// The fixed bootstrap region a [`FreeListAllocator`] is constructed over
@@ -300,6 +503,19 @@ const REGION_HDR: usize = {
 /// * [`shrink`](Self::shrink) is only ever called with the exact
 ///   `(base, len)` pair a prior `grow` returned, once the heap has drained
 ///   every byte of that chunk.
+/// * [`alloc_page`](Self::alloc_page) returns one granule-sized,
+///   granule-aligned writable page for the slab tier, and
+///   [`free_page`](Self::free_page) takes one back. These are deliberately
+///   *not* served out of [`grow`](Self::grow)'s regions: the slab wants a
+///   plain frame the kernel's direct map already addresses, where a region
+///   costs a slot in the remap window's own bookkeeping.
+///
+/// One source supplies both tiers, and it is installed once
+/// ([`FreeListAllocator::install_source`]) for the life of the binary. That
+/// is what lets the slab tell its two page supplies apart in constant time:
+/// before an install it carves pages out of the bootstrap region through the
+/// byte-granular tier, after one it draws them here, and a simple range test
+/// against the bootstrap region decides which way a page goes back.
 ///
 /// The source is consulted only while the allocator holds its own lock, so
 /// an implementation must **not** call back into this same heap (that would
@@ -316,6 +532,18 @@ pub trait HeapSource: Sync {
     /// Return a chunk previously produced by [`grow`](Self::grow), given its
     /// exact base and length.
     fn shrink(&self, base: *mut u8, len: usize);
+
+    /// Provide one writable page: exactly [`tairix_abi::PAGE_SIZE`] bytes,
+    /// aligned to that granule, or `None` on genuine exhaustion (fail
+    /// closed).
+    ///
+    /// A page must be returnable: an implementation that cannot recover what
+    /// it handed out returns `None` here rather than leaking it in
+    /// [`free_page`](Self::free_page).
+    fn alloc_page(&self) -> Option<NonNull<u8>>;
+
+    /// Return a page previously produced by [`alloc_page`](Self::alloc_page).
+    fn free_page(&self, page: NonNull<u8>);
 }
 
 /// The mutable allocator state guarded by [`FreeListAllocator::lock`].
@@ -340,6 +568,8 @@ struct Inner {
     sl_bitmap: [u32; FL_COUNT],
     /// Head of each segregated free list.
     heads: [[Option<NonNull<Block>>; SL_COUNT]; FL_COUNT],
+    /// The slab tier's pages, one entry per size class.
+    slabs: [SlabClass; SLAB_CLASSES],
     /// Test-only probe: how many *other* free-list or region-list nodes the
     /// operations since the last reset had to reach. It pins the O(1)
     /// property — a reintroduced list walk makes this grow with the heap.
@@ -358,6 +588,7 @@ impl Inner {
             fl_bitmap: 0,
             sl_bitmap: [0; FL_COUNT],
             heads: [[None; SL_COUNT]; FL_COUNT],
+            slabs: [SlabClass::EMPTY; SLAB_CLASSES],
             #[cfg(test)]
             steps: 0,
         }
@@ -511,16 +742,20 @@ impl FreeListAllocator {
         }
     }
 
-    /// Install the growth source the heap draws fresh memory from once one
-    /// exists (the boot path calls this after building the frame
-    /// allocator).
+    /// Install the source the heap draws fresh memory from once one exists
+    /// (the boot path calls this after building the frame allocator).
     ///
-    /// Idempotent-by-policy: the boot path installs exactly one source for
-    /// the life of the binary. Before a source is installed the heap is
-    /// confined to its bootstrap region and returns null once that is
-    /// exhausted.
+    /// **Set-once.** A later call is refused, because the regions and pages
+    /// already outstanding belong to the installed source: handing them to a
+    /// replacement would return memory to something that never issued it.
+    /// Before a source is installed the heap is confined to its bootstrap
+    /// region and returns null once that is exhausted.
     pub fn install_source(&self, source: &'static dyn HeapSource) {
-        self.with_inner(|inner| inner.source = Some(source));
+        self.with_inner(|inner| {
+            if inner.source.is_none() {
+                inner.source = Some(source);
+            }
+        });
     }
 
     /// Install the per-CPU interrupt mask/restore hooks that make the
@@ -849,81 +1084,137 @@ impl FreeListAllocator {
 
 unsafe impl GlobalAlloc for FreeListAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let Some(size) = block_size(layout) else {
+        self.with_inner(|inner| {
+            // SAFETY: under the lock, per `ensure_init`'s contract.
+            unsafe { self.ensure_init(inner) };
+            match slab_class(layout) {
+                // SAFETY: under the lock, and `class` is in range by
+                // construction.
+                Some(class) => unsafe { self.slab_alloc(inner, class) },
+                // SAFETY: under the lock.
+                None => unsafe { self.alloc_bytes(inner, layout.size(), layout.align()) },
+            }
+        })
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        let Some(ptr) = NonNull::new(ptr) else {
+            return;
+        };
+        // The allocating layout routes the free, so the two ends always agree.
+        self.with_inner(|inner| match slab_class(layout) {
+            // SAFETY: `ptr` came from `slab_alloc` with this same layout, so
+            // it is a live object of `class`, and the lock makes it ours.
+            Some(class) => unsafe { self.slab_dealloc(inner, class, ptr) },
+            // SAFETY: `ptr` came from `alloc_bytes`, so its header sits
+            // `HEADER` bytes below it.
+            None => unsafe { self.dealloc_bytes(inner, ptr) },
+        });
+    }
+}
+
+// --- The byte-granular tier ---------------------------------------------
+
+impl FreeListAllocator {
+    /// Hand out `size` bytes at `align` from the byte-granular tier, or null
+    /// when neither the free lists nor a fresh region can satisfy it.
+    ///
+    /// # Safety
+    ///
+    /// Called under the lock, after [`Self::ensure_init`].
+    unsafe fn alloc_bytes(&self, inner: &mut Inner, size: usize, align: usize) -> *mut u8 {
+        let Some(size) = block_size(size) else {
             return core::ptr::null_mut();
         };
         // A payload lands `HEADER` into an `ALIGN`-aligned block, so anything
         // up to `ALIGN` is already satisfied. A wider alignment may need the
         // block start pushed forward, and the skipped front must itself be a
         // representable free block — so ask for the worst case.
-        let over = layout.align() > ALIGN;
+        let over = align > ALIGN;
         let Some(need) = (if over {
-            size.checked_add(layout.align())
+            size.checked_add(align)
                 .and_then(|s| s.checked_add(MIN_BLOCK))
         } else {
             Some(size)
         }) else {
             return core::ptr::null_mut();
         };
-        self.with_inner(|inner| {
-            // SAFETY: under the lock, per `ensure_init`'s contract.
-            unsafe { self.ensure_init(inner) };
-            let mut found = inner.find_free(need);
-            if found.is_none() {
-                // SAFETY: under the lock.
-                unsafe { Self::grow(inner, need) };
-                found = inner.find_free(need);
-            }
-            let Some(block) = found else {
-                return core::ptr::null_mut();
-            };
-            // SAFETY: `block` is on the free list for a class that fits.
-            unsafe { inner.pop_free(block) };
-            if !over {
-                // SAFETY: off-list free block of at least `size` bytes.
-                return unsafe { Self::occupy(inner, block, size) };
-            }
-            // Push the payload up to the requested alignment, keeping the
-            // skipped front as its own free block. `need` reserved the worst
-            // case, so a stride bump always leaves a whole block.
-            let start = block.as_ptr() as usize;
-            let Some(mut payload) = align_up(start + HEADER, layout.align()) else {
-                // SAFETY: still a valid free block; put it back.
-                unsafe { inner.push_free(block) };
-                return core::ptr::null_mut();
-            };
-            while payload - HEADER - start != 0 && payload - HEADER - start < MIN_BLOCK {
-                payload += layout.align();
-            }
-            let front = payload - HEADER - start;
-            if front == 0 {
-                // SAFETY: off-list free block of at least `size` bytes.
-                return unsafe { Self::occupy(inner, block, size) };
-            }
-            // SAFETY: `block` owns `front + size` or more; split the front off
-            // as its own free block and occupy the remainder.
-            let split = unsafe { Self::split_front(inner, block, front) };
-            // SAFETY: `split` is the off-list tail, at least `size` bytes.
-            unsafe { Self::occupy(inner, split, size) }
-        })
+        // SAFETY: under the lock.
+        let mut found = unsafe { Self::find_or_grow(inner, need) };
+        // SAFETY: under the lock.
+        if found.is_none() && unsafe { self.drop_spares(inner) } {
+            // The slab's retained pages are the one pool the heap can reclaim
+            // before refusing: a bootstrap-region page rejoins these very free
+            // lists, and a frame page lets the next grow draw it.
+            // SAFETY: under the lock.
+            found = unsafe { Self::find_or_grow(inner, need) };
+        }
+        let Some(block) = found else {
+            return core::ptr::null_mut();
+        };
+        // SAFETY: `block` is on the free list for a class that fits.
+        unsafe { inner.pop_free(block) };
+        if !over {
+            // SAFETY: off-list free block of at least `size` bytes.
+            return unsafe { Self::occupy(inner, block, size) };
+        }
+        // Push the payload up to the requested alignment, keeping the skipped
+        // front as its own free block. `need` reserved the worst case, so a
+        // stride bump always leaves a whole block.
+        let start = block.as_ptr() as usize;
+        let Some(mut payload) = align_up(start + HEADER, align) else {
+            // SAFETY: still a valid free block; put it back.
+            unsafe { inner.push_free(block) };
+            return core::ptr::null_mut();
+        };
+        while payload - HEADER - start != 0 && payload - HEADER - start < MIN_BLOCK {
+            payload += align;
+        }
+        let front = payload - HEADER - start;
+        if front == 0 {
+            // SAFETY: off-list free block of at least `size` bytes.
+            return unsafe { Self::occupy(inner, block, size) };
+        }
+        // SAFETY: `block` owns `front + size` or more; split the front off as
+        // its own free block and occupy the remainder.
+        let split = unsafe { Self::split_front(inner, block, front) };
+        // SAFETY: `split` is the off-list tail, at least `size` bytes.
+        unsafe { Self::occupy(inner, split, size) }
     }
 
-    unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
-        if ptr.is_null() {
-            return;
+    /// The smallest free block that fits `need`, drawing a fresh region from
+    /// the source when none does.
+    ///
+    /// # Safety
+    ///
+    /// Called under the lock.
+    unsafe fn find_or_grow(inner: &mut Inner, need: usize) -> Option<NonNull<Block>> {
+        if let Some(block) = inner.find_free(need) {
+            return Some(block);
         }
-        // SAFETY: `ptr` came from `alloc`, so it is non-null and its header
-        // sits `HEADER` bytes below it, `ALIGN`-aligned.
-        let block = unsafe { NonNull::new_unchecked(ptr).byte_sub(HEADER).cast::<Block>() };
-        self.with_inner(|inner| {
-            // SAFETY: `block` is the live header of a handed-out block, and
-            // the lock makes it exclusively ours.
-            unsafe {
-                inner.used = inner.used.saturating_sub(block.as_ref().size());
-                let merged = Self::free_and_coalesce(inner, block);
-                Self::try_shrink(inner, self.heap_base, merged);
-            }
-        });
+        // SAFETY: under the lock.
+        unsafe { Self::grow(inner, need) };
+        inner.find_free(need)
+    }
+
+    /// Return a block to the byte-granular tier, coalescing it with its free
+    /// neighbours and handing back a region it drains.
+    ///
+    /// # Safety
+    ///
+    /// Called under the lock. `ptr` is a live payload a prior
+    /// [`Self::alloc_bytes`] returned.
+    unsafe fn dealloc_bytes(&self, inner: &mut Inner, ptr: NonNull<u8>) {
+        // SAFETY: a live payload's header sits `HEADER` bytes below it,
+        // `ALIGN`-aligned.
+        let block = unsafe { ptr.byte_sub(HEADER).cast::<Block>() };
+        // SAFETY: `block` is the live header of a handed-out block, and the
+        // lock makes it exclusively ours.
+        unsafe {
+            inner.used = inner.used.saturating_sub(block.as_ref().size());
+            let merged = Self::free_and_coalesce(inner, block);
+            Self::try_shrink(inner, self.heap_base, merged);
+        }
     }
 }
 
@@ -1049,6 +1340,321 @@ impl FreeListAllocator {
         // and marked free.
         unsafe { inner.push_free(block) };
         block
+    }
+}
+
+// --- The slab tier: allocation, reclaim, and the page supply -------------
+
+/// Take one object out of `page`, either from its free list or from the
+/// never-yet-used tail (so a fresh page costs no threading walk over its
+/// slots).
+///
+/// # Safety
+///
+/// Called under the lock. `page` is a live sub-granule descriptor with a free
+/// slot, and `size` is its class width.
+unsafe fn take_object(page: NonNull<SlabPage>, size: usize) -> NonNull<u8> {
+    let p = page.as_ptr();
+    // SAFETY: `page` is a live descriptor the lock makes exclusively ours.
+    let obj = if let Some(obj) = unsafe { (*p).free } {
+        // SAFETY: a free object parks its link in its own first word.
+        unsafe { (*p).free = free_link(obj).read() };
+        obj
+    } else {
+        // SAFETY: slot 0 is the descriptor, so the next virgin object sits at
+        // `(bump + 1) * size`, inside the page.
+        unsafe {
+            let slot = usize::from((*p).bump) + 1;
+            (*p).bump += 1;
+            page.cast::<u8>().byte_add(slot * size)
+        }
+    };
+    // SAFETY: `page` is live.
+    unsafe { (*p).live += 1 };
+    obj
+}
+
+impl Inner {
+    /// Thread `page` onto its class's partial list.
+    ///
+    /// # Safety
+    ///
+    /// Called under the lock. `page` is a live descriptor on no list.
+    unsafe fn link_partial(&mut self, class: usize, page: NonNull<SlabPage>) {
+        let head = self.slabs[class].partial;
+        // SAFETY: `page` is live.
+        unsafe {
+            (*page.as_ptr()).next = head;
+            (*page.as_ptr()).prev = None;
+        }
+        if let Some(old) = head {
+            #[cfg(test)]
+            {
+                self.steps += 1;
+            }
+            // SAFETY: `old` is a live descriptor already on this list.
+            unsafe { (*old.as_ptr()).prev = Some(page) };
+        }
+        self.slabs[class].partial = Some(page);
+    }
+
+    /// Unthread `page` from its class's partial list.
+    ///
+    /// # Safety
+    ///
+    /// Called under the lock. `page` is a live descriptor currently on that
+    /// list.
+    unsafe fn unlink_partial(&mut self, class: usize, page: NonNull<SlabPage>) {
+        // SAFETY: `page` is live.
+        let (next, prev) = unsafe { ((*page.as_ptr()).next, (*page.as_ptr()).prev) };
+        match prev {
+            Some(p) => {
+                #[cfg(test)]
+                {
+                    self.steps += 1;
+                }
+                // SAFETY: `p` is a live descriptor on the same list.
+                unsafe { (*p.as_ptr()).next = next };
+            }
+            None => self.slabs[class].partial = next,
+        }
+        if let Some(n) = next {
+            #[cfg(test)]
+            {
+                self.steps += 1;
+            }
+            // SAFETY: `n` is a live descriptor on the same list.
+            unsafe { (*n.as_ptr()).prev = prev };
+        }
+    }
+}
+
+/// Plant a fresh descriptor in the first object slot of the page at `base`.
+///
+/// # Safety
+///
+/// Called under the lock. `base` is granule-aligned and owns a whole page no
+/// live object overlaps.
+unsafe fn init_page(base: NonNull<u8>) -> NonNull<SlabPage> {
+    let page = base.cast::<SlabPage>();
+    // SAFETY: the page owns `PAGE_SIZE` bytes and `MIN_CLASS` — the smallest
+    // slot — is at least the descriptor's size and alignment.
+    unsafe {
+        page.as_ptr().write(SlabPage {
+            free: None,
+            next: None,
+            prev: None,
+            live: 0,
+            bump: 0,
+        });
+    }
+    page
+}
+
+impl FreeListAllocator {
+    /// Hand out one object of slab class `class`, or null on genuine
+    /// exhaustion (deterministic OOM, never a panic).
+    ///
+    /// # Safety
+    ///
+    /// Called under the lock, after [`Self::ensure_init`], with `class` a
+    /// class [`slab_class`] produced.
+    unsafe fn slab_alloc(&self, inner: &mut Inner, class: usize) -> *mut u8 {
+        // SAFETY: under the lock, per this function's own contract.
+        match unsafe { self.slab_alloc_object(inner, class) } {
+            Some(obj) => obj.as_ptr(),
+            None => core::ptr::null_mut(),
+        }
+    }
+
+    /// [`Self::slab_alloc`]'s body, in the fallible form the page supply
+    /// reports in.
+    ///
+    /// # Safety
+    ///
+    /// As [`Self::slab_alloc`].
+    unsafe fn slab_alloc_object(&self, inner: &mut Inner, class: usize) -> Option<NonNull<u8>> {
+        let size = class_size(class);
+        if size == PAGE_SIZE {
+            // The page *is* the object: no descriptor to plant, no list to
+            // keep, and exactly one frame consumed.
+            return match inner.slabs[class].spare.take() {
+                Some(page) => Some(page),
+                // SAFETY: under the lock.
+                None => unsafe { self.draw_page(inner) },
+            };
+        }
+        let total = objects_per_page(size);
+        if let Some(page) = inner.slabs[class].partial {
+            // SAFETY: a page on the partial list is live and has a free slot.
+            let obj = unsafe { take_object(page, size) };
+            // SAFETY: `page` is live.
+            if usize::from(unsafe { (*page.as_ptr()).live }) == total {
+                // SAFETY: `page` is on its class's partial list, and a full
+                // page belongs on no list.
+                unsafe { inner.unlink_partial(class, page) };
+            }
+            return Some(obj);
+        }
+        let page = match inner.slabs[class].spare.take() {
+            // A retained page kept its descriptor, so it is reusable as it is.
+            Some(base) => base.cast::<SlabPage>(),
+            // SAFETY: under the lock; a freshly drawn page is ours alone.
+            None => unsafe { init_page(self.draw_page(inner)?) },
+        };
+        // SAFETY: the page is empty, so it has a free slot.
+        let obj = unsafe { take_object(page, size) };
+        // SAFETY: `page` is live and on no list.
+        if usize::from(unsafe { (*page.as_ptr()).live }) < total {
+            unsafe { inner.link_partial(class, page) };
+        }
+        Some(obj)
+    }
+
+    /// Return one object of slab class `class`.
+    ///
+    /// # Safety
+    ///
+    /// Called under the lock. `ptr` is a live object of `class` that this
+    /// allocator handed out.
+    unsafe fn slab_dealloc(&self, inner: &mut Inner, class: usize, ptr: NonNull<u8>) {
+        let size = class_size(class);
+        if size == PAGE_SIZE {
+            // SAFETY: the object is the whole page, now drained.
+            unsafe { self.retain_or_release(inner, class, ptr) };
+            return;
+        }
+        let page = page_of(ptr);
+        let p = page.as_ptr();
+        let total = objects_per_page(size);
+        // SAFETY: `page` is the live descriptor of `ptr`'s page.
+        let was_full = usize::from(unsafe { (*p).live }) == total;
+        // SAFETY: a free object parks its link in its own first word, and the
+        // descriptor is live.
+        let live = unsafe {
+            free_link(ptr).write((*p).free);
+            (*p).free = Some(ptr);
+            // Saturating rather than wrapping: only a double free could reach
+            // zero here, and an arithmetic panic is no way to report one.
+            (*p).live = (*p).live.saturating_sub(1);
+            (*p).live
+        };
+        if live == 0 {
+            if !was_full {
+                // SAFETY: a partly-used page is on its class's partial list.
+                unsafe { inner.unlink_partial(class, page) };
+            }
+            // SAFETY: the page is drained, so no object of it is live.
+            unsafe { self.retain_or_release(inner, class, page.cast::<u8>()) };
+        } else if was_full {
+            // SAFETY: a full page is on no list.
+            unsafe { inner.link_partial(class, page) };
+        }
+    }
+
+    /// Draw one page for the slab tier, or `None` on genuine exhaustion.
+    ///
+    /// The installed source supplies a plain frame, which the kernel's direct
+    /// map already addresses — no remap-window slot, which is the point.
+    /// Before an install the page is carved out of the bootstrap region
+    /// through the byte-granular tier instead, so the slab serves its classes
+    /// from the first allocation and routing never has to consult what is
+    /// installed.
+    ///
+    /// # Safety
+    ///
+    /// Called under the lock, after [`Self::ensure_init`].
+    unsafe fn draw_page(&self, inner: &mut Inner) -> Option<NonNull<u8>> {
+        if let Some(source) = inner.source {
+            if let Some(page) = source.alloc_page() {
+                // A frame was never part of the byte tier's space, so it joins
+                // both sides of the ledger and leaves `remaining` unmoved.
+                inner.capacity = inner.capacity.saturating_add(PAGE_SIZE);
+                inner.used = inner.used.saturating_add(PAGE_SIZE);
+                return Some(page);
+            }
+            // No frame left; the bootstrap region may still hold a page.
+        }
+        // SAFETY: under the lock, after `ensure_init`.
+        let page = NonNull::new(unsafe { self.alloc_bytes(inner, PAGE_SIZE, PAGE_SIZE) })?;
+        if self.in_bootstrap(page) {
+            return Some(page);
+        }
+        // A page carved from a *grown* region could not be told from a frame
+        // when it came back, so it is refused rather than mis-returned.
+        // SAFETY: `page` is the payload this call just obtained.
+        unsafe { self.dealloc_bytes(inner, page) };
+        None
+    }
+
+    /// Keep `page` as its class's one spare, or give it back when the class
+    /// already holds one.
+    ///
+    /// # Safety
+    ///
+    /// Called under the lock. `page` is a drained slab page of `class`.
+    unsafe fn retain_or_release(&self, inner: &mut Inner, class: usize, page: NonNull<u8>) {
+        if inner.slabs[class].spare.is_none() {
+            inner.slabs[class].spare = Some(page);
+            return;
+        }
+        // SAFETY: the page is drained and now unreferenced.
+        unsafe { self.release_page(inner, page) };
+    }
+
+    /// Give `page` back to whichever supply produced it.
+    ///
+    /// # Safety
+    ///
+    /// Called under the lock. `page` is a drained page this allocator drew and
+    /// no longer references.
+    unsafe fn release_page(&self, inner: &mut Inner, page: NonNull<u8>) {
+        if self.in_bootstrap(page) {
+            // SAFETY: a bootstrap-region page is a byte-tier payload.
+            unsafe { self.dealloc_bytes(inner, page) };
+            return;
+        }
+        // Outside the bootstrap region the source produced it, and the source
+        // is set-once, so this is the very source that issued the page.
+        if let Some(source) = inner.source {
+            source.free_page(page);
+            inner.capacity = inner.capacity.saturating_sub(PAGE_SIZE);
+            inner.used = inner.used.saturating_sub(PAGE_SIZE);
+        }
+    }
+
+    /// Return every retained spare page to its supply, reporting whether
+    /// anything came back.
+    ///
+    /// This is the heap's one reclaim step before it refuses an allocation: a
+    /// bootstrap-region spare rejoins the byte tier's free lists directly, and
+    /// a frame spare lets the next region grow draw it.
+    ///
+    /// # Safety
+    ///
+    /// Called under the lock.
+    unsafe fn drop_spares(&self, inner: &mut Inner) -> bool {
+        let mut released = false;
+        for class in 0..SLAB_CLASSES {
+            if let Some(page) = inner.slabs[class].spare.take() {
+                // SAFETY: a spare is a drained page this allocator drew.
+                unsafe { self.release_page(inner, page) };
+                released = true;
+            }
+        }
+        released
+    }
+
+    /// Whether `ptr` lies inside the fixed bootstrap region.
+    ///
+    /// This is how the slab tells its two page supplies apart, in constant
+    /// time, and it is total: [`Self::draw_page`] keeps no byte-tier page that
+    /// falls outside this range, and a frame can never alias the kernel image
+    /// the bootstrap region lives in.
+    fn in_bootstrap(&self, ptr: NonNull<u8>) -> bool {
+        let base = self.heap_base as usize;
+        let addr = ptr.as_ptr() as usize;
+        addr >= base && addr - base < self.heap_len
     }
 }
 

@@ -72,15 +72,16 @@ use tairix_abi::{
     LOG_FIELD_KEY_MAX, LOG_FIELD_VALUE_MAX, LOG_LEVEL_MAX, LOG_MESSAGE_MAX, LOG_RECORD_HEADER_LEN,
     LOG_RECORD_MAX, MACHINE_ID_LEN, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES, MIME_ENTRY_LEN,
     MIME_TYPE_MAX, MOD_ALT, MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX,
-    MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, MOUNT_VOLUME_ID_LEN, NANOS_PER_SEC, POINTER_INPUT_MAGIC,
-    PORT_NAME_MAX_LEN, PROCESS_CPU_NONE, PROCESS_NAME_MAX, PROCESS_START_MAGIC,
-    PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN, PROCESS_START_MAX_TOTAL_LEN,
-    RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES, RESOURCE_LIMITS_REPORT_LEN,
-    RLIMIT_INFINITY, RXE_PAGE_SIZE, SEG_FLAG_EXEC, SEG_FLAG_READ, SEG_FLAG_WRITE,
-    SPAWN_UID_INHERIT, STDINFO_FD, STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1, SYSCALLS,
-    SYSCALL_MAX_ARGS, SYSCALL_TABLE_HASH_LEN, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERY_NAME_MAX,
-    SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1,
-    SYSTEM_LIBRARIES_DIR, THREAD_STACK_DEFAULT, USER_DIRECTORY_NAME_MAX,
+    MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, MOUNT_VOLUME_ID_LEN, NANOS_PER_SEC, PAGE_SIZE,
+    POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN, PROCESS_CPU_NONE, PROCESS_NAME_MAX,
+    PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN,
+    PROCESS_START_MAX_TOTAL_LEN, RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES,
+    RESOURCE_LIMITS_REPORT_LEN, RLIMIT_INFINITY, RXE_PAGE_SIZE, SEG_FLAG_EXEC, SEG_FLAG_READ,
+    SEG_FLAG_WRITE, SPAWN_UID_INHERIT, STDINFO_FD, STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1,
+    SYSCALLS, SYSCALL_MAX_ARGS, SYSCALL_TABLE_HASH_LEN, SYSINFO_MAX_PAYLOAD_LEN,
+    SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC,
+    SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, SYSTEM_LIBRARIES_DIR, THREAD_STACK_DEFAULT,
+    USER_DIRECTORY_NAME_MAX,
 };
 
 /// Default on-disk location of the generated C ABI header set, relative to
@@ -497,17 +498,22 @@ fn generate_rlimit() -> String {
     out
 }
 
-/// `tairix_memory.h` — the anonymous-memory `mem_map` flag bits
-/// (`plans/SPAWN.md` SP5).
+/// `tairix_memory.h` — the page granule and the anonymous-memory `mem_map`
+/// flag bits (`plans/SPAWN.md` SP5).
 ///
-/// Declares the single defined `mem_map` flag bit (`TAIRIX_MAP_FLAG_*`, read
-/// from [`MapFlags`]). The flag register is a `uint32_t`, matching the `U32`
+/// Declares the granule a mapping length rounds up to (`TAIRIX_PAGE_SIZE`) and
+/// the single defined `mem_map` flag bit (`TAIRIX_MAP_FLAG_*`, read from
+/// [`MapFlags`]). The flag register is a `uint32_t`, matching the `U32`
 /// argument the `tairix_sys_mem_map` prototype carries.
 fn generate_memory() -> String {
     use std::fmt::Write as _;
-    let mut out = banner("Anonymous-memory mem_map flag bits (plans/SPAWN.md SP5).");
+    let mut out = banner("Page granule and mem_map flag bits (plans/SPAWN.md SP5).");
     out.push_str("#ifndef TAIRIX_MEMORY_H\n#define TAIRIX_MEMORY_H\n\n");
     out.push_str("#include <stdint.h>\n\n");
+
+    out.push_str("/* Page granule: mem_map rounds a mapping length up to this. */\n");
+    let _ = writeln!(out, "#define TAIRIX_PAGE_SIZE ((uintptr_t){PAGE_SIZE}u)");
+    out.push('\n');
 
     out.push_str(
         "/* mem_map flags (uint32_t). Every undefined bit is reserved and must be zero. */\n",
@@ -3380,6 +3386,13 @@ mod tests {
         let h = body("tairix_memory.h");
         assert!(h.contains("#ifndef TAIRIX_MEMORY_H"), "guard present");
         assert!(h.contains("#include <stdint.h>"), "stdint included");
+        // The granule is read from lib/abi, never re-typed.
+        assert!(
+            h.contains(&format!(
+                "#define TAIRIX_PAGE_SIZE ((uintptr_t){PAGE_SIZE}u)"
+            )),
+            "page granule: {h}"
+        );
         // The flag bit value is read from lib/abi, never re-typed.
         assert!(
             h.contains(&format!(

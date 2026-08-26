@@ -57,12 +57,9 @@ use tairix_sync::SpinLock;
 use crate::bootinfo::{BootMemoryMap, RegionKind};
 use crate::error::AllocError;
 
-/// Page-frame size in bytes (4 KiB, the smallest unit every Tier-1 arch
-/// supports natively).
-pub const PAGE_SIZE: usize = 4096;
-
-/// Bit-shift such that `1 << PAGE_SHIFT == PAGE_SIZE`.
-pub const PAGE_SHIFT: u32 = 12;
+/// Page-frame size in bytes and its bit-shift: the one system granule, shared
+/// with the mapping ABI and both heaps.
+pub use tairix_abi::{PAGE_SHIFT, PAGE_SIZE};
 
 /// Maximum buddy order supported by this allocator.
 ///

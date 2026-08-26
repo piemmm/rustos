@@ -1,6 +1,6 @@
 # FIX-KHEAP — Fragmentation-immune kernel-heap growth
 
-Status: **done** (K1–K5 landed).
+Status: **done** (K1–K6 landed).
 
 Binding under `AGENTS.md`. The kernel heap grows by adding whole regions,
 and one allocation must fit inside one region, so growth needs a
@@ -17,8 +17,9 @@ control.
 
 Read first: `kernel/mem/src/kvmap.rs`, `kernel/mem/src/kvslots.rs`,
 `kernel/core/src/kheap.rs`, each port's `paging.rs`
-`reserve_kernel_window` / `new_kernel_window`. The architecture-level
-description is `docs/src/architecture/memory.md` §7u.
+`reserve_kernel_window` / `new_kernel_window`, and `lib/kalloc/src/lib.rs`.
+The architecture-level description is `docs/src/architecture/memory.md`
+§7u (growth) and §7v (the two tiers).
 
 ## What it now guarantees
 
@@ -44,11 +45,19 @@ description is `docs/src/architecture/memory.md` §7u.
 8. **O(1) allocate, free, and region reclaim.** Intra-region behaviour is
    *not* separable from growth, and the earlier claim that it was out of
    scope was wrong: the more the heap grew, the more the allocator's own
-   per-operation cost rose. `lib/kalloc` is a segregated-fit allocator over
-   in-band boundary tags — per-size-class free lists entered by bitmap scan,
-   a recorded physical predecessor so coalescing reaches each neighbour
-   directly, and a doubly-linked region list so a drained region is unlinked
-   without a search. No list is walked on any path.
+   per-operation cost rose. `lib/kalloc`'s byte-granular tier is a
+   segregated-fit allocator over in-band boundary tags — per-size-class free
+   lists entered by bitmap scan, a recorded physical predecessor so
+   coalescing reaches each neighbour directly, and a doubly-linked region
+   list so a drained region is unlinked without a search. No list is walked
+   on any path.
+9. **A slab tier under the same façade, so a page-sized allocation is one
+   frame.** Requests up to the page granule are served by per-size-class
+   slab pages with the free list threaded through the free objects
+   themselves — no per-object header, no rounding to a block boundary — so
+   the filesystem cache's `PAGE_SIZE` chunk occupies exactly one frame
+   instead of spilling a header into a second. Larger requests fall through
+   to the byte-granular tier above.
 
 The superseded design walked one address-sorted hole list on both `alloc`
 and `dealloc`, plus the whole region list on *every* `dealloc`. Because a
@@ -58,90 +67,71 @@ heap — so past the bootstrap arena every allocation in the kernel paid a
 cost linear in total growth. It surfaced as the desktop wallpaper gallery
 degrading from 0.46 s to 20 s per image while the filesystem driver beneath
 measured 370 MB/s flat, and it taxed every unrelated subsystem equally.
-`per_operation_node_reach_does_not_grow_with_the_heap` pins the bound.
+`per_operation_node_reach_does_not_grow_with_the_heap` pins the bound, and
+`slab_per_operation_node_reach_stays_constant_as_pages_accumulate` pins the
+slab's.
 
-## Remaining
+## The slab tier as built (K6)
 
-- **Slab allocation (SLUB).** Page-sized objects are the heap's dominant
-  traffic (the filesystem cache's chunk is `PAGE_SIZE`), and a byte-granular
-  heap serves them with a header, so they never pack into a frame. Per-size-class
-  slabs drawn a page at a time from the frame allocator, with the free list
-  threaded through the free objects themselves, give a page-sized allocation
-  exactly one frame and no header. The kernel's direct physical map makes the
-  slab page addressable with no window slot, which matters: `kvslots` allocates
-  first-fit, so one window slot per single-page slab would reintroduce a walk
-  one layer down.
+The architecture-level description is `docs/src/architecture/memory.md` §7v;
+what a future change must not undo:
 
-  **Not built.** Designed to the point below and stopped there, because the
-  design turns on one decision that is not this plan's to take (see "The
-  granule" — it needs a `granule` seam on `FreeListAllocator` that every arch
-  bin calls, or a hoist of `PAGE_SIZE` into a shared crate). What follows is
-  the settled part, so the next pass implements rather than re-derives.
-
-  - **One allocator, two tiers.** The slab lives inside
-    `tairix_kalloc::FreeListAllocator` behind the same `GlobalAlloc` façade
-    and under the same interrupt-safe lock — never a second kernel
-    allocator. `GlobalAlloc::alloc`'s and `dealloc`'s bodies factor into
-    private `alloc_in`/`dealloc_in` over `&mut Inner` so the slab can draw a
-    page through the byte-granular tier without re-entering the lock.
-  - **Routing is a pure function of `layout`, and must be constant for the
-    process lifetime.** `dealloc` receives the allocating layout by the
-    `GlobalAlloc` contract, so `class_for(layout)` decides the tier at both
-    ends with no side table and no per-object header. The trap: if routing
-    consulted whether a source were installed, an object allocated before
-    the install would be freed down the wrong tier and corrupt the heap.
-  - **The granule.** Routing therefore depends only on the class table, whose
-    top class must *be* the page size for the plan's headline benefit to
-    exist. It cannot come from the frame-backed source (that arrives long
-    after the first allocation) and duplicating `4096` inside `lib/kalloc`
-    is the constant duplication the charter forbids — it is already defined
-    in each `kernel/arch/<target>/paging.rs` and in `kernel/mem::frame`.
-    The two ways out: each arch bin publishes its own
-    `paging::PAGE_SIZE` as the granule at the same point it calls
-    `register_global_heap` (before any allocation, so routing is fixed from
-    the first one, and a later call is refused), or `PAGE_SIZE` is hoisted
-    to one shared definition the arch crates, `kernel/mem`, and `lib/kalloc`
-    all import. The first keeps the platform constant in the port where it
-    belongs; the second closes the existing four-way duplication but is a
-    separate refactor across three ports' paging code. **This is the open
-    decision.**
-  - **Classes** are powers of two from a minimum that fits the in-page slab
-    descriptor up to the granule, one per octave, the count derived from the
-    word width exactly as `FL_COUNT` is — never a picked ceiling. A class
-    below the granule keeps its descriptor (free-object list head, live and
-    total counts, and the doubly-linked partial-list pointers so a page that
-    fills or drains is unlinked in O(1)) in the page's own first object
-    slot, so an object pointer finds its page by masking to the granule and
-    there is no side table to search. The granule class has no room for a
-    descriptor and needs none: one object per page, and free pages form a
-    LIFO threaded through each free page's first word.
-  - **Page supply, and provenance.** After
-    `install_frame_slab_source` the tier draws one frame per page through
-    `FrameAllocator::alloc_order(0)` — the kernel commit, so it may use the
-    reserve like heap growth does — and addresses it through
-    `PhysMap::translate`, releasing it with `PhysMap::reverse` +
-    `FrameAllocator::free`. No `kvslots` slot, which is the point. Before
-    the source exists the tier must still serve its classes (routing is
-    already committed), so it draws a granule-aligned, granule-sized block
-    from the byte-granular tier instead. Which supply a page came from is
-    recovered in O(1) by an address-range test against the bootstrap arena's
-    own `(base, len)`; pages are never drawn from the byte-granular tier
-    once the source is installed, so the test is total.
-  - **Reclaim.** A drained page is returned to its supply rather than
-    cached indefinitely, so an idle system does not hold memory it has
-    freed; the retention of *one* page per class is the hysteresis that
-    stops an alloc/free cycle at a class boundary thrashing the frame
-    allocator (the same shape D53 in `plans/OPEN-DEFECTS.md` wants for
-    region growth).
-  - **What must be proven before it ships.** A host test that a
-    page-sized allocation consumes exactly one granule with no header; that
-    alloc/free of every class round-trips and that a freed object is
-    reusable; that a drained page returns to its supply and a retained one
-    does not; that routing is stable across the source install (allocate in
-    every class before installing, free after); that the counting-allocator
-    no-allocation proof still holds on `grow`/`shrink`; and a QEMU vertical,
-    since every existing vertical fails to boot if the global allocator is
-    wrong.
+- **One allocator, two tiers, one lock.** The slab lives inside
+  `tairix_kalloc::FreeListAllocator` behind the same `GlobalAlloc` façade,
+  never a second kernel allocator. `GlobalAlloc`'s bodies route to private
+  `alloc_bytes`/`dealloc_bytes` (the byte-granular tier) or to
+  `slab_alloc`/`slab_dealloc`, so the slab draws a page *through* the byte
+  tier without re-entering the lock.
+- **Routing is a pure function of `layout`.** `slab_class` reads nothing but
+  the size and alignment, so both ends of an allocation agree with no side
+  table and no header. Routing that consulted whether a supply were
+  installed would free a pre-install object down the wrong tier.
+- **The granule is one shared compile-time constant.** The open question the
+  design stopped at is settled the second way it named: `PAGE_SIZE` /
+  `PAGE_SHIFT` now live once in `tairix_abi::memory` — the granule is
+  user-visible through `mem_map`, so the ABI is its home — and the three
+  ports' `paging.rs`, `kernel/mem::frame`, `lib/rt`'s heap, and `lib/kalloc`
+  all import that one definition. Routing therefore needs no runtime state
+  and cannot be wrong on an allocation made before some install.
+- **Classes** are powers of two, so a class placed at a multiple of its own
+  size inside a page-aligned page is aligned to that size and alignment needs
+  no padding, no header, and no second mechanism. They run from the smallest
+  width that holds a page's descriptor up to a **derived** ceiling
+  (`SUB_GRANULE_MAX`), plus the granule class. This is the one place the
+  built tier refines the design settled above, which said "up to the
+  granule": a sub-granule page spends one slot on its descriptor, so a class
+  of width `c` costs `PAGE_SIZE / (PAGE_SIZE / c - 1)` per object — at half
+  the granule that is a whole page for a 2 KiB object, double what the byte
+  tier charges. The ceiling is therefore the widest class that costs no more
+  per object than a byte-tier block of the same width (128 bytes on a 64-bit
+  target with 4 KiB pages), which is derived arithmetic and not the picked
+  ceiling the design forbade. The granule class is exempt and always present:
+  with no descriptor it both undercuts the byte tier and is the one shape
+  that fits a frame exactly. Four classes result, so one retained page each
+  is a bounded retention.
+  `the_slab_never_costs_more_per_object_than_the_byte_tier` pins the rule.
+- **A sub-granule page's descriptor** (free-object head, live count, a
+  virgin-slot cursor so a fresh page costs no threading walk, and the
+  doubly-linked partial-list links) lives in the page's own first object
+  slot, so an object finds its page by masking to the granule. The granule
+  class has no descriptor and needs none: one object per page.
+- **Page supply, and provenance.** `HeapSource` supplies both tiers —
+  `grow`/`shrink` for regions, `alloc_page`/`free_page` for pages — and is
+  **set-once**, because the regions and pages outstanding belong to the
+  source that issued them. After the install a page is one frame drawn
+  through `kernel/mem::FramePages` (the kernel commit path) and addressed by
+  the direct map, with no `kvslots` slot, which is the point. Before it, the
+  slab carves a granule-aligned block out of the bootstrap region through
+  the byte tier; a carve that lands outside that region is handed straight
+  back, so the O(1) range test that decides how a page goes home is total.
+  `FramePages` proves the direct map inverts its own translation before
+  handing a page out, so a map that could not return the page refuses it
+  rather than stranding it.
+- **Reclaim.** A drained page goes back to its supply; one page per class is
+  kept as the hysteresis that stops an allocate/free cycle at a class
+  boundary thrashing the frame allocator. Those retained pages are also the
+  heap's one reclaim step before it refuses: `alloc_bytes` releases every
+  spare and retries once before returning null.
 
 ## The per-request read cost above the driver — measured, and it was not the block layer
 

@@ -6411,6 +6411,36 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
+    // `plans/FIX-KHEAP.md` slab tier: `tairix-test-kslab-qemu-aarch64` proves
+    // the kernel heap's page accounting on real hardware. It enables the MMU
+    // over an identity space, builds a `FrameAllocator` over a `.bss` pool,
+    // installs the production `kernel/mem::FramePages` supply into the
+    // `tairix-kalloc` global allocator, and then asserts through the plain
+    // `GlobalAlloc` surface that a page-sized allocation costs exactly one
+    // frame and starts on a page boundary (so it carries no header), that the
+    // page is writable end to end through the live direct map, that a drained
+    // page is kept back once and reused without a draw while the next is
+    // returned, that every size class round-trips aligned to its own width,
+    // and that a request above the granule still comes from the byte-granular
+    // tier. A regression in the routing, the descriptor placement, or the page
+    // provenance reports FAILURE explicitly. Single CPU and a 60-second budget
+    // match the other boot-then-do-fixed-work aarch64 tests.
+    QemuTest {
+        package: "tairix-test-kslab-qemu-aarch64",
+        binary: "tairix-test-kslab-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[],
+    },
     // `plans/PI.md` guard-page fault-form (stage G3c): the *production*
     // fault-form. `tairix-test-stack-overrun-qemu-aarch64` proves that an
     // overrunning kthread takes a synchronous data abort, not a

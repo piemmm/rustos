@@ -3,7 +3,7 @@
 *
 * GENERATED FILE - DO NOT EDIT BY HAND.
 *
-* Anonymous-memory mem_map flag bits (plans/SPAWN.md SP5).
+* Page granule and mem_map flag bits (plans/SPAWN.md SP5).
 *
 * This is part of the C-language view of the TAIRiX kernel/user ABI.
 * It is generated from the single source of truth in `lib/abi` by
@@ -16,6 +16,9 @@
 #define TAIRIX_MEMORY_H
 
 #include <stdint.h>
+
+/* Page granule: mem_map rounds a mapping length up to this. */
+#define TAIRIX_PAGE_SIZE ((uintptr_t)4096u)
 
 /* mem_map flags (uint32_t). Every undefined bit is reserved and must be zero. */
 #define TAIRIX_MAP_FLAG_FIXED 0x1u
