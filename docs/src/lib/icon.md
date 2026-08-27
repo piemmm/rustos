@@ -132,21 +132,26 @@ re-reading it every frame.
 ## What pressure may take, and what it may not
 
 The cache is built through `tairix_reclaim::working_set_ui_cache`, so its whole
-budget is declared the owner's live **working set**: mild and moderate memory
-pressure leave it alone, and severe and critical still take it. Re-deriving an
-entry here is not local work the session can repeat at will — it is a
-capability-gated read plus a parser-sandbox round trip — and the budget is a
-small fraction of one frame of the output the icons are drawn on, so there is
-nothing in it to trim that the desktop is not currently drawing. Giving it back
-at the first tightening frees a negligible figure and immediately costs both
-again, per icon, on the next repaint (`plans/SMARTRAM.md` section 6.4).
+budget is declared the owner's live **working set** and its first
+`UI_CACHE_RESERVE_BYTES` are declared **irreducible**: mild and moderate memory
+pressure leave the working set alone, and severe and critical take only the
+speculation above the reserve. Re-deriving an entry here is not local work the
+session can repeat at will — it is a capability-gated read plus a
+parser-sandbox round trip — and the budget is a small fraction of one frame of
+the output the icons are drawn on, so there is nothing in it to trim that the
+desktop is not currently drawing. Giving it back at the first tightening frees
+a negligible figure and immediately costs both again, per icon, on the next
+repaint (`plans/SMARTRAM.md` section 6.4). On any output whose frame is under
+16 mebibytes the whole budget sits inside the reserve, so on every display
+TAIRiX currently drives, no band takes a decoded icon at all.
 
-Where retention genuinely is refused — severe pressure, or an entry larger than
-the whole budget — the decode cannot be kept and the draw site falls back to
-its built-in glyph, which is the tier that exists for it. What must not follow
-is asking again on every frame, so the cache reports the refusal to the
-resolver that produced it (`ArtworkResolver::declined`) and a deferring
-resolver holds that key back until the band moves.
+Where retention genuinely is refused — an entry larger than what the budget can
+hold, or an output whose budget is smaller than one decode — the decode cannot
+be kept and the draw site falls back to its built-in glyph, which is the tier
+that exists for it. What must not follow is asking again on every frame, so the
+cache reports the refusal to the resolver that produced it
+(`ArtworkResolver::declined`) and a deferring resolver holds that key back until
+the band moves.
 
 ## Which thread does the decode
 

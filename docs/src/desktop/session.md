@@ -993,8 +993,8 @@ silently discarded until now.
 ### Each served window's own visible witness
 
 `DESKTOP_REVEALED` says the desktop is visible; `WINDOW_SHOWN` ("served
-window first frame on screen") says one *application's* window is, once
-each, naming it in a `window` field. It is emitted from the same place and
+window first frame on screen") says one *application's* window is, naming it
+in a `window` field. It is emitted from the same place and
 for the same reason: after a present that reached the display, because until
 that frame lands nobody has seen the window.
 
@@ -1013,11 +1013,33 @@ pixels, so a frame carrying it shows a blank window: `SessionWindows` tracks
 each window as awaited, then painted, then shown, and only the painted → shown
 step announces. A refused present leaves it awaited.
 
+Once, and once again after a release. Releasing a hidden window's content makes
+the record's claim false — the window composites transparent, so nothing of the
+application's is on screen — so `SessionWindows::content_released` puts it back
+to awaited and the frame that brings its re-attached pixels back announces it
+afresh. Without that, a window released and never re-presented (an application
+that ignores its redraw) would still read as shown.
+
 Two readers depend on it. A user diagnosing an application that launched but
 showed nothing can tell "never drawn" from "never launched". And the icon-bar
 QEMU vertical gates both its screendumps and its bar gestures on it: a create
 reply would say only that the window exists, which is too early to photograph
 and too early to click.
+
+### And its own release witness
+
+`CONTENT_RELEASED` ("window content released under memory pressure") is the
+other end of the same story: the session emits it, naming the `window` and the
+`bytes` given back, when it unmaps a hidden window's frame region and tells the
+owning application it may let go of its own copies
+([memory](../architecture/memory.md#window-content-is-a-policy-not-a-cache)).
+
+Every other reclaim decision on the machine is already recorded — a cache's
+evictions and refusals through `lib/reclaim`'s audit sink, the band itself by
+the kernel — and window content is by far the largest block the desktop gives
+back, so a silent release would leave the one that matters most the only one
+nobody can see. It is also the only reclaim a *user* can perceive, because the
+application is asked to re-establish its pixels afterwards.
 
 ## The screen lock
 

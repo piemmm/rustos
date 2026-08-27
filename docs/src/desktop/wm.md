@@ -1027,12 +1027,27 @@ memory model, two mechanisms suited to two different kinds of memory.
   so an app that does nothing still gets its pixels back; an app that
   ignores the event simply leaves its window blank while the desktop
   keeps running.
-- **The pressure ladder** (`Compositor::release_content_under_pressure`,
-  run by the session on a band change):
+- **Two triggers, one decision.** The ladder reads the band *and* each
+  window's visibility, so it runs when either moves: on the band's wake
+  (`Compositor::release_content_under_pressure`) and on the hide
+  (`Compositor::set_visible`, which applies the same per-window decision to
+  the window it just hid). The band's wake alone is not enough, because it is
+  edge-triggered: a user minimising a window on a machine whose pressure has
+  already settled produces no edge, so the largest block the desktop could
+  give back would be released only if the band happened to move again. A
+  minimise-then-restore inside one wake withdraws its own undrained notice
+  instead, since neither side has let go yet and telling the client would cost
+  an unmap and a re-attach that change nothing.
+- **The session records the release.** Handing a window's frames back emits
+  `CONTENT_RELEASED` naming the window and the bytes
+  ([session](session.md#and-its-own-release-witness)); every other reclaim
+  decision on the machine is logged, and this is the largest of them.
+- **The pressure ladder** (the per-window decision both triggers share):
   - **Normal** — nothing is released. There is no reason to make an app
     repaint while memory is plentiful.
   - **Mild and deeper** — every **hidden or minimised** window's content
-    goes. Nobody is looking at it, so the release is invisible and the
+    goes, whether it was already hidden when the band moved or is hidden
+    afterwards. Nobody is looking at it, so the release is invisible and the
     win is the whole surface.
   - **Critical** — additionally every **visible but unfocused** window,
     each with an immediate redraw request. A background window blank for

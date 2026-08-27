@@ -18387,7 +18387,7 @@ mod tests {
     /// A blocked stream transfer joins the shared queue under *its own* ring
     /// side and no other, so a chunk moved on an unrelated pipe or pty cannot
     /// reach it: before this, every waiter sat on one unkeyed queue and every
-    /// 64 KiB moved anywhere unparked the lot (`plans/OPEN-DEFECTS.md` D53).
+    /// 64 KiB moved anywhere unparked the lot (`plans/OPEN-DEFECTS.md` D62).
     #[test]
     fn a_blocked_stream_transfer_joins_only_its_own_ring_side() {
         /// A `WaitQueueArch` that only has to exist: the assertion is

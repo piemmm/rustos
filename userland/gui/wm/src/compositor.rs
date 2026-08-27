@@ -762,56 +762,80 @@ impl Compositor {
     /// next shown, and meanwhile it is queued in
     /// [`take_released_notices`](Self::take_released_notices) so the embedder
     /// can tell its client to let go of its own copies.
+    ///
+    /// # Two triggers, one decision
+    ///
+    /// The ladder reads two things — the band and each window's visibility —
+    /// so it runs when *either* moves: here on the band's wake, and in
+    /// [`set_visible`](Self::set_visible) on the hide. Running only on the
+    /// band's wake would miss the ordinary case, since that wake is
+    /// edge-triggered and a user minimising a window on an already-tight
+    /// machine produces no edge.
     pub fn release_content_under_pressure(&mut self, focused: Option<WindowId>) -> usize {
         let band = self.pressure.sample();
         if band == PressureBand::Normal {
             return 0;
         }
         let mut released = 0usize;
-        let mut freed = Vec::new();
-        for window in &mut self.windows {
-            let id = window.id();
-            if !window.is_app_presented() {
-                continue;
-            }
-            let takeable = if window.is_visible() {
-                band >= PressureBand::Critical && Some(id) != focused
-            } else {
-                true
-            };
-            if !takeable {
-                continue;
-            }
-            let bytes = window.release_content();
-            if bytes > 0 {
-                released = released.saturating_add(bytes);
-                // A hidden window draws nothing either way, so only a
-                // visible one's pixels actually changed on screen.
-                let exposed = window.is_visible().then(|| window.bounds());
-                freed.push((id, exposed));
-            }
-        }
-        for (id, exposed) in freed {
-            match exposed {
-                // Visible: it must not be left blank, so its pixels are asked
-                // for now and the rectangle it vacated is repainted.
-                Some(bounds) => {
-                    self.request_redraw(id);
-                    self.mark_layer(id, bounds);
-                }
-                // Hidden: asking now would spend the very memory the release
-                // recovered, and nobody would see the result.
-                // `set_visible` asks when the window is next shown, so what
-                // this owes its client is only the news that it may let go of
-                // its own copies too.
-                None => {
-                    if !self.released_notices.contains(&id) {
-                        self.released_notices.push(id);
-                    }
-                }
-            }
+        for index in 0..self.windows.len() {
+            released =
+                released.saturating_add(self.take_content_under_pressure(index, band, focused));
         }
         released
+    }
+
+    /// Apply the ladder to the single window at `index` and record what the
+    /// release owes: the bytes given back, or zero if the band, the window's
+    /// visibility, or its lack of a client spares it.
+    ///
+    /// The one place the ladder's decision and its consequences live, so the
+    /// band's own wake and the visibility edge ([`set_visible`](Self::set_visible))
+    /// cannot come to differ about what a release means.
+    fn take_content_under_pressure(
+        &mut self,
+        index: usize,
+        band: PressureBand,
+        focused: Option<WindowId>,
+    ) -> usize {
+        if band == PressureBand::Normal {
+            return 0;
+        }
+        let Some(window) = self.windows.get_mut(index) else {
+            return 0;
+        };
+        let id = window.id();
+        if !window.is_app_presented() {
+            return 0;
+        }
+        let visible = window.is_visible();
+        if visible && !(band >= PressureBand::Critical && Some(id) != focused) {
+            return 0;
+        }
+        let bytes = window.release_content();
+        if bytes == 0 {
+            return 0;
+        }
+        // A hidden window draws nothing either way, so only a visible one's
+        // pixels actually changed on screen.
+        let exposed = visible.then(|| window.bounds());
+        match exposed {
+            // Visible: it must not be left blank, so its pixels are asked
+            // for now and the rectangle it vacated is repainted.
+            Some(bounds) => {
+                self.request_redraw(id);
+                self.mark_layer(id, bounds);
+            }
+            // Hidden: asking now would spend the very memory the release
+            // recovered, and nobody would see the result. `set_visible` asks
+            // when the window is next shown, so what this owes its client is
+            // only the news that it may let go of its own copies too.
+            None => {
+                if !self.released_notices.contains(&id) {
+                    self.released_notices.push(id);
+                }
+            }
+        }
+        bytes
     }
 
     /// Take every window whose content was released while hidden, leaving the
@@ -1223,18 +1247,42 @@ impl Compositor {
     /// Show or hide a window; its bounds are marked dirty. Setting the
     /// visibility it already has marks no damage and still returns `true`
     /// (only an unknown `id` returns `false`).
+    ///
+    /// Hiding is the other input to the content-release ladder
+    /// ([`release_content_under_pressure`](Self::release_content_under_pressure)),
+    /// so the decision is remade here for this window. The band's own wake is
+    /// edge-triggered — it fires when the band *moves* — and a user minimising
+    /// a window on a machine whose pressure has already settled produces no
+    /// such edge, so without this the largest easily-recovered block the
+    /// desktop holds would be released only if the band happened to move again.
+    ///
+    /// Showing is the reverse: a window shown again after its content was
+    /// released has nothing to draw until its app presents, so the redraw is
+    /// asked for now rather than leaving it blank until something else
+    /// happens to it.
     pub fn set_visible(&mut self, id: WindowId, visible: bool) -> bool {
         let known = self.mutate(id, |w| w.set_visible(visible));
-        // A window shown again after its content was released has nothing
-        // to draw until its app presents, so ask now rather than leaving
-        // it blank until something else happens to it.
-        let contentless = self
-            .window(id)
-            .is_some_and(|w| w.is_app_presented() && !w.has_content());
-        if known && visible && contentless {
-            self.request_redraw(id);
+        if !known {
+            return false;
         }
-        known
+        if visible {
+            // A notice not yet drained is one the embedder has not acted on,
+            // so both sides still hold the region: withdrawing it spares a
+            // quick minimise-then-restore an unmap and a re-attach that would
+            // change nothing.
+            self.released_notices.retain(|&queued| queued != id);
+            if self
+                .window(id)
+                .is_some_and(|w| w.is_app_presented() && !w.has_content())
+            {
+                self.request_redraw(id);
+            }
+        } else if let Some(index) = self.windows.iter().position(|w| w.id() == id) {
+            // A window that has just been hidden is takeable whatever holds
+            // focus, so the ladder's focus exception cannot apply to it.
+            let _ = self.take_content_under_pressure(index, self.pressure.sample(), None);
+        }
+        true
     }
 
     /// Declare that a client presents the window named by `id` and can be

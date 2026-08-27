@@ -436,14 +436,20 @@ pub enum AccountingError {
 /// the hysteresis `plans/SMARTRAM.md` section 7 requires: growth up to
 /// `hard`, shrink down to `low`, never both on one threshold.
 ///
-/// `floor` is the working-set share of `hard` that pressure short of
-/// severe does not take (see [`with_working_set_floor`](Self::with_working_set_floor));
-/// it is zero for a cache that is speculation all the way down.
+/// Two floors sit under those bounds, and both are zero for a cache that
+/// is speculation all the way down: `working_set` is the share of `hard`
+/// that pressure short of severe does not take
+/// ([`with_working_set_floor`](Self::with_working_set_floor)), and
+/// `reserved` is the irreducible part no band takes at all
+/// ([`with_reserved_floor`](Self::with_reserved_floor)). `reserved` is
+/// never above `working_set`: what the deepest band keeps, a shallower one
+/// keeps too.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct CacheBudget {
     hard: usize,
     low: usize,
-    floor: usize,
+    working_set: usize,
+    reserved: usize,
 }
 
 /// The backing-resource fraction one bounded cache may occupy.
@@ -464,6 +470,27 @@ const BACKING_DIVISOR: usize = 16;
 const LOW_NUMERATOR: usize = 3;
 const LOW_DIVISOR: usize = 4;
 
+/// The irreducible bytes every rasterised-UI cache keeps at every band
+/// ([`CacheBudget::with_reserved_floor`]): the desktop's cursors, glyphs,
+/// decoded icons, window furniture and frosted backdrops.
+///
+/// One mebibyte, clamped by each cache's own display- or RAM-derived
+/// ceiling. It is deliberately *not* scaled with the machine, because it
+/// does not describe a capacity: it is the point below which a cache stops
+/// paying for itself. What that costs is bounded above by the ceiling, so a
+/// small board reserves the whole of a cache that is already smaller than
+/// this and a large one reserves this much of a far larger cache.
+///
+/// The figure is what one screenful of drawing actually needs. At the
+/// reference density a window's four furniture strips across a 1920-pixel
+/// output are some 300 KiB; the visible glyph repertoire at one size is a
+/// few hundred 8-bit coverage bitmaps, well under 100 KiB; a desktop's and
+/// icon bar's visible icons at 32 physical pixels are some 160 KiB. A
+/// mebibyte holds any one of those with room for the second size or theme a
+/// live session actually mixes, and is a fraction of a percent of the RAM
+/// on the smallest machine TAIRiX targets.
+pub const UI_CACHE_RESERVE_BYTES: usize = 1024 * 1024;
+
 impl CacheBudget {
     /// Derive the budget for one cache from the byte size of the
     /// resource backing it (the kernel heap arena), per the documented
@@ -475,7 +502,8 @@ impl CacheBudget {
         Self {
             hard,
             low: hard / LOW_DIVISOR * LOW_NUMERATOR,
-            floor: 0,
+            working_set: 0,
+            reserved: 0,
         }
     }
 
@@ -499,7 +527,8 @@ impl CacheBudget {
         Self {
             hard: hard_bytes,
             low: hard_bytes / LOW_DIVISOR * LOW_NUMERATOR,
-            floor: 0,
+            working_set: 0,
+            reserved: 0,
         }
     }
 
@@ -520,10 +549,10 @@ impl CacheBudget {
     ///
     /// So a cache may declare the part of its budget that is not
     /// speculation. The floor is honoured up to moderate pressure and
-    /// yields entirely at severe and critical, where every class shrinks
-    /// to zero and a coarser fallback is the honest answer. It binds
-    /// growth and forced shrink alike, because both read the one
-    /// [`shrink_target`](crate::shrink_target) policy.
+    /// yields at severe and critical down to whatever
+    /// [`with_reserved_floor`](Self::with_reserved_floor) declared
+    /// irreducible. It binds growth and forced shrink alike, because both
+    /// read the one [`shrink_target`](crate::shrink_target) policy.
     ///
     /// `floor_bytes` is clamped to `hard`: a floor above the ceiling
     /// would describe bytes the cache could never hold. It must itself be
@@ -531,21 +560,70 @@ impl CacheBudget {
     /// on, the machine's RAM — never a hand-picked constant.
     #[must_use]
     pub const fn with_working_set_floor(mut self, floor_bytes: usize) -> Self {
-        self.floor = if floor_bytes > self.hard {
+        self.working_set = if floor_bytes > self.hard {
             self.hard
         } else {
             floor_bytes
         };
+        if self.working_set < self.reserved {
+            self.working_set = self.reserved;
+        }
+        self
+    }
+
+    /// This budget, declaring `reserved_bytes` of it **irreducible**:
+    /// bytes no band takes, severe and critical included.
+    ///
+    /// A working-set floor answers "this is not speculation"; this answers
+    /// "below this the owner stops working". A desktop that has given up
+    /// every rasterised cursor, glyph, icon and window strip does not draw
+    /// a cheaper frame — it draws the same frame, re-deriving every pixel
+    /// through a filesystem read, a parser-sandbox round trip, or an IPC
+    /// call, on every repaint. Past a point, reclaiming a UI cache costs
+    /// the machine more of the resources it is short of than it returns,
+    /// and the user sees a desktop that has stopped responding rather than
+    /// one that is saving memory. The reserve is where that point is.
+    ///
+    /// It is a *reserve*, not a capacity, so it is a fixed figure clamped
+    /// by the cache's own derived ceiling
+    /// ([`UI_CACHE_RESERVE_BYTES`] is the
+    /// desktop's): the ceiling is what scales with the machine, and this
+    /// only says how little is too little. A cache whose ceiling is
+    /// already below it reserves all of itself, which is the right answer
+    /// for a cache that small.
+    ///
+    /// `reserved_bytes` is clamped to `hard`, and raises the working-set
+    /// floor to meet it: what the deepest band keeps cannot exceed what a
+    /// shallower one keeps.
+    #[must_use]
+    pub const fn with_reserved_floor(mut self, reserved_bytes: usize) -> Self {
+        self.reserved = if reserved_bytes > self.hard {
+            self.hard
+        } else {
+            reserved_bytes
+        };
+        if self.working_set < self.reserved {
+            self.working_set = self.reserved;
+        }
         self
     }
 
     /// The working-set bytes a forced shrink short of severe pressure
     /// leaves in place. Zero unless
-    /// [`with_working_set_floor`](Self::with_working_set_floor) declared
+    /// [`with_working_set_floor`](Self::with_working_set_floor) or
+    /// [`with_reserved_floor`](Self::with_reserved_floor) declared
     /// otherwise.
     #[must_use]
-    pub const fn floor(self) -> usize {
-        self.floor
+    pub const fn working_set(self) -> usize {
+        self.working_set
+    }
+
+    /// The irreducible bytes no band takes. Zero unless
+    /// [`with_reserved_floor`](Self::with_reserved_floor) declared
+    /// otherwise.
+    #[must_use]
+    pub const fn reserved(self) -> usize {
+        self.reserved
     }
 
     /// The ceiling an insert may never push usage past.

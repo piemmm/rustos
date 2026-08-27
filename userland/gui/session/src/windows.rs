@@ -51,6 +51,23 @@ pub const WINDOW_SHOWN: EventId = EventId(20_003);
 /// matches on this constant rather than on a copy of its text.
 pub const WINDOW_SHOWN_MESSAGE: &str = "served window first frame on screen";
 
+/// Event id of the record the session emits when it hands a window's frame
+/// region back under memory pressure, in the desktop session's reserved
+/// range.
+///
+/// Every other reclaim decision on the machine is recorded — a cache's
+/// evictions and refusals through `lib/reclaim`'s audit sink, the band itself
+/// by the kernel — and window content is the largest block the desktop gives
+/// back, so leaving it silent would make the one release that matters most the
+/// only one nobody can see. It is also the only reclaim the *user* can
+/// perceive, since the owning application is asked to re-establish its pixels
+/// afterwards.
+pub const CONTENT_RELEASED: EventId = EventId(20_005);
+
+/// The exact message [`CONTENT_RELEASED`] is emitted with. A log consumer
+/// matches on this constant rather than on a copy of its text.
+pub const CONTENT_RELEASED_MESSAGE: &str = "window content released under memory pressure";
+
 /// The freshly opened window's fill until the app's first present lands:
 /// an opaque near-black, so an app that is slow to render shows a blank
 /// window body rather than stale or transparent pixels.
@@ -70,8 +87,9 @@ const CASCADE_STEP: i32 = 32;
 const CASCADE_WRAP: i32 = 8;
 
 /// How far a served window has got towards being visible, so the
-/// [`WINDOW_SHOWN`] announcement is made once and only for a window whose
-/// pixels genuinely reached the screen.
+/// [`WINDOW_SHOWN`] announcement is made only for a window whose pixels
+/// genuinely reached the screen — once, and once again after a release took
+/// them away.
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum FirstFrame {
     /// Opened, but no present has been served into it yet: the window body
@@ -146,15 +164,16 @@ impl SessionWindows {
         core::mem::take(&mut self.presented)
     }
 
-    /// Report every served window whose first painted frame has just reached
-    /// the display, once each.
+    /// Report every served window whose awaited frame has just reached the
+    /// display.
     ///
     /// Called immediately after a frame was handed to the display, which is
     /// what makes the claim true: a window the application has presented into
     /// is carried by that frame, so it is on screen now. A window still
     /// awaiting its first present says nothing — its body is the session's own
     /// opening fill, not the application's pixels — and one already announced
-    /// is not announced again.
+    /// is not announced again until [`content_released`](Self::content_released)
+    /// makes it awaited afresh.
     ///
     /// Takes a reporter rather than returning a collection so an idle wake —
     /// which is nearly every wake — allocates nothing.
@@ -164,6 +183,22 @@ impl SessionWindows {
                 record.first_frame = FirstFrame::Shown;
                 report(ipc);
             }
+        }
+    }
+
+    /// Note that window `ipc`'s content was released, so it is awaiting its
+    /// pixels again.
+    ///
+    /// A released window composites transparent — the desktop shows through —
+    /// so "a frame carrying this window's own pixels reached the display" has
+    /// stopped being true, and the record must stop claiming it. The window is
+    /// announced again ([`report_newly_shown`](Self::report_newly_shown)) when
+    /// the application answers the redraw its next showing sends and that
+    /// frame lands, which is the only honest moment to say its pixels are
+    /// back.
+    pub fn content_released(&mut self, ipc: u64) {
+        if let Some(record) = self.records.get_mut(&ipc) {
+            record.first_frame = FirstFrame::Awaited;
         }
     }
 
@@ -972,6 +1007,29 @@ mod tests {
             host.window_presented(1, &m, &[0u8; 4 * 4 * 4], whole(&m))
                 .expect("presents again");
         }
+        assert_eq!(shown(&mut windows), Vec::<u64>::new());
+
+        // A release is the one thing that makes it news again: the window
+        // composites transparent until its app answers the redraw, so the
+        // record must stop claiming its pixels are on screen and start again
+        // from the frame that brings them back.
+        windows.content_released(1);
+        assert_eq!(shown(&mut windows), Vec::<u64>::new(), "not yet re-painted");
+        {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+                apps: &mut RecordingBar::default(),
+            };
+            host.window_presented(1, &m, &[0u8; 4 * 4 * 4], whole(&m))
+                .expect("re-attached and presents");
+        }
+        assert_eq!(shown(&mut windows), alloc::vec![1]);
+        assert_eq!(shown(&mut windows), Vec::<u64>::new(), "one-shot again");
+        // A window the session never knew is not invented by a release.
+        windows.content_released(9999);
         assert_eq!(shown(&mut windows), Vec::<u64>::new());
     }
 
@@ -2208,5 +2266,92 @@ mod tests {
             "a window that was asked to present is not told to let go"
         );
         PRESSURE.report(PressureBand::Normal);
+    }
+
+    #[test]
+    fn minimising_on_an_already_tight_machine_releases_the_window_there_and_then() {
+        // The band's wake is edge-triggered, so a desktop that acted only on
+        // it never released a window the user minimised after pressure had
+        // settled — the ordinary sequence, and the largest block the desktop
+        // could have given back. The gesture is the other edge.
+        static PRESSURE: ReportedPressure = ReportedPressure::unknown();
+        PRESSURE.report(PressureBand::Normal);
+        let (mut shell, mut compositor) = crate::tests::desktop_over(
+            TaskbarConfig::bottom_bar(640, 480),
+            mode(640, 480, DisplayFormat::Rgba8888),
+            &PRESSURE,
+        );
+        shell.present(&mut compositor);
+
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let window = {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+                apps: &mut RecordingBar::default(),
+            };
+            open_one_sized(&mut host, 1, WindowSizing::default())
+        };
+        let held = |c: &Compositor, id| c.window(id).expect("window").has_content();
+        assert!(held(&compositor, window));
+
+        // The band moves to mild, and the desktop's answer to that wake keeps
+        // the visible window's pixels — correctly, since it is on screen.
+        PRESSURE.report(PressureBand::Mild);
+        let _ = shell.trim_caches(&mut compositor);
+        assert!(held(&compositor, window));
+        let _ = compositor.pending_redraws();
+        let _ = compositor.take_released_notices();
+
+        // Now the user minimises it. No band change follows, and none is
+        // needed: the pixels go, and the client is owed the news.
+        assert!(shell.minimize_window(&mut compositor, window));
+        assert!(!held(&compositor, window));
+        assert_eq!(compositor.take_released_notices(), alloc::vec![window]);
+        assert!(
+            compositor.pending_redraws().is_empty(),
+            "nothing is asked of an app whose window nobody can see"
+        );
+
+        // Raising it is what asks — the window picker's own path.
+        assert!(shell.raise_window(&mut compositor, window));
+        assert_eq!(compositor.pending_redraws(), alloc::vec![window]);
+        PRESSURE.report(PressureBand::Normal);
+    }
+
+    #[test]
+    fn minimising_a_comfortable_machines_window_keeps_its_pixels() {
+        // Every release costs the owning app a repaint, so a machine with
+        // memory to spare spends none: a minimise at normal pressure is a
+        // visibility change and nothing else.
+        static PRESSURE: ReportedPressure = ReportedPressure::unknown();
+        PRESSURE.report(PressureBand::Normal);
+        let (mut shell, mut compositor) = crate::tests::desktop_over(
+            TaskbarConfig::bottom_bar(640, 480),
+            mode(640, 480, DisplayFormat::Rgba8888),
+            &PRESSURE,
+        );
+        shell.present(&mut compositor);
+
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let window = {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+                apps: &mut RecordingBar::default(),
+            };
+            open_one_sized(&mut host, 1, WindowSizing::default())
+        };
+
+        assert!(shell.minimize_window(&mut compositor, window));
+        assert!(compositor.window(window).expect("window").has_content());
+        assert!(compositor.take_released_notices().is_empty());
+        assert!(compositor.pending_redraws().is_empty());
     }
 }

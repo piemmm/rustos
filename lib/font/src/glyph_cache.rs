@@ -48,7 +48,7 @@ use alloc::boxed::Box;
 
 use tairix_reclaim::{
     CacheBudget, CacheCandidate, CachedBytes, InvalidationSource, RebuildCost, ReclaimClass,
-    ReclaimOwner, ReclaimRule, Sensitivity,
+    ReclaimOwner, ReclaimRule, Sensitivity, UI_CACHE_RESERVE_BYTES,
 };
 
 /// One rasterised glyph bitmap as either side of the font-service boundary
@@ -139,17 +139,32 @@ const GLYPH_CACHE_RAM_DIVISOR: u64 = 4096;
 /// physical RAM (`tairix_procinfo::memory_total_bytes`), never a
 /// hand-picked constant.
 ///
+/// The shared irreducible reserve is declared on it, clamped by that
+/// ceiling: every glyph on screen is redrawn from this cache on every
+/// repaint, so a side that empties it re-rasterises — or re-fetches over
+/// the endpoint — the whole visible text per frame while the machine is
+/// short.
+///
 /// `total_ram_bytes` of `0` (the query unanswered, refused, or the service
 /// unreachable) yields a zero budget, which admits nothing: fail closed to
 /// uncached, not to an unbounded or hand-picked ceiling.
 #[must_use]
 pub fn glyph_cache_budget(total_ram_bytes: u64) -> CacheBudget {
+    CacheBudget::from_ceiling(glyph_cache_ceiling(total_ram_bytes))
+        .with_reserved_floor(UI_CACHE_RESERVE_BYTES)
+}
+
+/// The ceiling both font caches derive from the machine's total usable
+/// physical RAM: see the [module docs](self) for the fraction.
+///
+/// Crate-internal: the two budgets built on it are what a consumer names.
+#[must_use]
+pub(crate) fn glyph_cache_ceiling(total_ram_bytes: u64) -> usize {
     let hard = total_ram_bytes / GLYPH_CACHE_RAM_DIVISOR;
     // `usize` is narrower than `u64` only on `wasm32`, where a budget this
     // small never approaches `u32::MAX`; saturating keeps the conversion
     // total rather than refusing to build a budget at all.
-    let hard = usize::try_from(hard).unwrap_or(usize::MAX);
-    CacheBudget::from_ceiling(hard)
+    usize::try_from(hard).unwrap_or(usize::MAX)
 }
 
 /// The **client** side's budget: [`glyph_cache_budget`] with the whole of it
@@ -163,8 +178,9 @@ pub fn glyph_cache_budget(total_ram_bytes: u64) -> CacheBudget {
 /// re-fetches every character on screen, over IPC, while the machine is short
 /// — which frees a fraction of a screenful and costs a round trip per glyph
 /// per repaint. Mild and moderate pressure therefore leave the client's
-/// glyphs alone; severe still takes them, and the text is re-fetched then
-/// because at that point the memory genuinely matters more.
+/// glyphs alone; severe takes the speculation down to the reserve
+/// [`glyph_cache_budget`] already declares, because at that point the memory
+/// genuinely matters more than the round trips.
 #[must_use]
 pub fn client_glyph_cache_budget(total_ram_bytes: u64) -> CacheBudget {
     let budget = glyph_cache_budget(total_ram_bytes);
@@ -192,6 +208,9 @@ mod tests {
         let budget = glyph_cache_budget(0);
         assert_eq!(budget.hard(), 0);
         assert_eq!(budget.low(), 0);
+        // Nothing to reserve either: the reserve is clamped by the ceiling,
+        // so a machine whose RAM went unanswered caches nothing at all.
+        assert_eq!(budget.reserved(), 0);
     }
 
     #[test]
@@ -207,18 +226,27 @@ mod tests {
 
     #[test]
     fn the_client_budget_keeps_its_glyphs_until_severe_pressure() {
-        use tairix_reclaim::{shrink_target, PressureBand};
+        use tairix_reclaim::{shrink_target, PressureBand, UI_CACHE_RESERVE_BYTES};
 
         // The client rebuilds a dropped glyph by asking the font service for
         // it again, so giving them up at the first tightening re-fetches every
         // character on screen over IPC while the machine is short. The service,
-        // which re-rasterises an outline it already holds, keeps the plain
-        // budget and drops at mild as the reclaim order says.
-        let client = client_glyph_cache_budget(1 << 30);
-        let service = glyph_cache_budget(1 << 30);
+        // which re-rasterises an outline it already holds, keeps only the
+        // shared reserve and gives the speculation up at mild as the reclaim
+        // order says. A big enough machine for the ceiling to exceed the
+        // reserve, so the two sides are genuinely distinguishable.
+        let ram = 64u64 << 30;
+        let client = client_glyph_cache_budget(ram);
+        let service = glyph_cache_budget(ram);
         assert_eq!(client.hard(), service.hard(), "same ceiling");
-        assert_eq!(client.floor(), client.hard(), "all of it is working set");
-        assert_eq!(service.floor(), 0);
+        assert!(client.hard() > UI_CACHE_RESERVE_BYTES);
+        assert_eq!(
+            client.working_set(),
+            client.hard(),
+            "all of it is working set"
+        );
+        assert_eq!(service.working_set(), UI_CACHE_RESERVE_BYTES);
+        assert_eq!(service.reserved(), UI_CACHE_RESERVE_BYTES);
         for band in [PressureBand::Mild, PressureBand::Moderate] {
             assert_eq!(
                 shrink_target(band, ReclaimClass::DisposableUi, client),
@@ -227,16 +255,42 @@ mod tests {
             );
             assert_eq!(
                 shrink_target(band, ReclaimClass::DisposableUi, service),
-                0,
-                "{band:?} drops the service's own atlas"
+                UI_CACHE_RESERVE_BYTES,
+                "{band:?} takes the service's atlas down to its reserve"
             );
         }
         for band in [PressureBand::Severe, PressureBand::Critical] {
-            assert_eq!(shrink_target(band, ReclaimClass::DisposableUi, client), 0);
+            assert_eq!(
+                shrink_target(band, ReclaimClass::DisposableUi, client),
+                UI_CACHE_RESERVE_BYTES,
+                "{band:?} still leaves a screenful of text drawable"
+            );
         }
         // A machine whose RAM total went unanswered gets no floor to keep,
         // because it gets no budget: fail closed to uncached.
-        assert_eq!(client_glyph_cache_budget(0).floor(), 0);
+        assert_eq!(client_glyph_cache_budget(0).working_set(), 0);
+        assert_eq!(client_glyph_cache_budget(0).reserved(), 0);
+    }
+
+    #[test]
+    fn a_small_machines_whole_glyph_ceiling_is_reserved() {
+        use tairix_reclaim::{shrink_target, PressureBand, UI_CACHE_RESERVE_BYTES};
+
+        // The reserve is clamped by the derived ceiling, never added to it: a
+        // 1 GiB machine's glyph ceiling is well under a mebibyte, so all of it
+        // is irreducible and no band empties it. That is the right answer —
+        // there is nothing in a cache that small worth reclaiming, and
+        // re-fetching a screenful of text costs a round trip per glyph.
+        let budget = glyph_cache_budget(1 << 30);
+        assert!(budget.hard() > 0 && budget.hard() < UI_CACHE_RESERVE_BYTES);
+        assert_eq!(budget.reserved(), budget.hard());
+        for band in PressureBand::ALL {
+            assert_eq!(
+                shrink_target(band, ReclaimClass::DisposableUi, budget),
+                budget.hard(),
+                "{band:?} keeps a ceiling that is already below the reserve"
+            );
+        }
     }
 
     #[test]

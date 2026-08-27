@@ -438,6 +438,14 @@ just freed, so the release frees nothing and costs one repaint per hidden
 window at exactly the wrong moment. A *visible* window released at critical
 pressure is still asked at once, because it must not be left blank.
 
+**The ladder has two triggers, because it reads two things.** The band and each
+window's visibility, so it runs on either edge: the band's wake, and
+`Compositor::set_visible` on the hide. The band's wake alone is not enough —
+it is edge-triggered, so a user minimising a window on a machine whose pressure
+has already settled crosses no edge and the largest block the desktop could
+give back stays pinned. Handing a window's frames back is recorded
+(`CONTENT_RELEASED`), like every other reclaim decision on the machine.
+
 **Two kinds, one class.** Everything above is one `ReclaimClass`, and under
 pressure it is still the first memory reclaimed among equals. But the entries
 divide by what rebuilding one *needs*, and that division decides how deep a
@@ -451,7 +459,32 @@ band may take them:
   *plus* a parser-sandbox round trip) and a glyph on the *client* side of the
   font endpoint (an IPC round trip). These declare a working-set floor
   (`CacheBudget::with_working_set_floor`) that mild and moderate leave alone;
-  severe and critical still take everything.
+  severe and critical take only the speculation above the reserve below.
+
+**And under both, an irreducible reserve no band takes.** Every rasterised-UI
+cache — cursors, notification glyphs, window furniture, frosted backdrops,
+decoded icons, glyphs on either side of the font endpoint — declares
+`UI_CACHE_RESERVE_BYTES` (`CacheBudget::with_reserved_floor`) that severe and
+critical leave alone too. A desktop holding none of its pixels does not draw a
+cheaper frame: it draws the same frame and re-derives every element on every
+repaint, which is how a machine short of memory becomes a machine that has
+stopped responding. Past a point, reclaiming a UI cache costs more of what the
+machine is short of than it returns, and the reserve is where that point is.
+Growth reads it too, so the reserve is fillable rather than merely keepable —
+a cache that may hold a mebibyte but never re-admit after a theme change
+decays to uselessness.
+
+It is one mebibyte, clamped by each cache's own display- or RAM-derived
+ceiling. That is deliberately not scaled with the machine, because it is not a
+capacity: the ceiling is what scales, and this only says how little is too
+little. A cache whose ceiling is already below it reserves all of itself, which
+is the right answer for a cache that small — on the 1024×768 boot console that
+is the whole cursor, notification and artwork budget, and a mebibyte of the
+three-mebibyte chrome and frost ceilings. The figure is what one screenful of
+drawing needs: a window's four furniture strips across a 1920-pixel output are
+some 300 KiB, the visible glyph repertoire at one size well under 100 KiB, a
+desktop's visible icons at 32 physical pixels some 160 KiB. No kernel cache
+declares a reserve; those are speculation all the way down.
 
 The floor exists because dropping those entries does not free memory the
 system can use — the desktop's whole icon set is a fraction of one screen —
@@ -464,8 +497,8 @@ font endpoint on every repaint. The floor is also why growth and forced shrink
 read one policy (section 7): a cache that may keep its working set but not
 admit into it decays to the same place more slowly.
 
-A refusal the cache *cannot* avoid — severe pressure, or an entry larger than
-the whole budget — must not be retried per frame either. The desktop's icon
+A refusal the cache *cannot* avoid — an entry larger than what the budget can
+hold — must not be retried per frame either. The desktop's icon
 resolver is told a decode was declined and holds that key back until the band
 moves, so the fallback is a built-in glyph rather than a storm of reads.
 
@@ -479,7 +512,7 @@ Rules:
 - cached window contents are user/session data and must not cross users,
   seats, or sessions;
 - UI cache is normally among the first memory released under pressure, save
-  for the off-process working-set floor above;
+  for the off-process working-set floor and the irreducible reserve above;
 - pressure hints to userland services are added only with current in-tree
   callers, complete capability checks where needed, docs, tests, and validation.
 
@@ -1018,7 +1051,8 @@ weaker policy:
   by a `(scale, theme/source-set)` generation token, `Drop` on reclaim.
   The budget is derived from the discovered framebuffer byte size, so a
   4K output gets a proportionately larger cache than a 640×480 one and
-  no hand-picked ceiling appears anywhere. There is exactly one
+  no hand-picked ceiling appears anywhere; each declares the shared
+  irreducible reserve on top of it (section 6.4). There is exactly one
   constructor and it demands the real backing size, gauge, and sink: a
   cache is injected into each consumer, never defaulted, because a cache
   built without a live gauge would retain nothing while looking like it
@@ -1075,6 +1109,13 @@ weaker policy:
   which the `lib/window` client answers by re-presenting its last frame
   with full-window damage. One memory model, two mechanisms suited to two
   different kinds of memory.
+
+  The ladder reads the band *and* each window's visibility, so it runs on
+  either edge — the band's wake and `Compositor::set_visible` on the hide —
+  because the band's wake is edge-triggered and a minimise on an
+  already-tight machine crosses no edge. Each release is recorded
+  (`CONTENT_RELEASED`) and puts the window's `WINDOW_SHOWN` record back to
+  awaited, since a released window shows nothing of its application's.
 - **`lib/raster`'s unbounded `RasterCache` is deleted**, not deprecated:
   it grew without limit, scanned linearly, never shrank under pressure,
   was invisible to the reclaim ledger, and never wiped rendered user
@@ -1101,8 +1142,13 @@ Tests:
   owner is the seat, and teardown wipes).
 - Headless build does not instantiate desktop cache policy.
 - UI cache is released under pressure before `ramzip` escalation —
-  `DisposableUi` shrinks to zero at mild, where `ramzip` handoff is
-  still closed.
+  `DisposableUi` shrinks to its declared floors at mild, where `ramzip`
+  handoff is still closed.
+- The irreducible reserve: every desktop cache keeps it at severe and
+  critical, still admits into it there, and reserves all of itself where its
+  own ceiling is already below it; the speculation above it is still given
+  back at mild; no kernel cache declares one; and the two floors cannot
+  cross whichever order a caller declares them in.
 - The compositor does not add a second raster or blend implementation.
 - The band wait source: baseline at add, no wake without a change, wake
   on a change, edge consumed on report, `id != 0` refused, no capability
@@ -1114,11 +1160,17 @@ Tests:
   byte-identical with the cache warm, emptied, and unable to retain
   anything, so caching is never required for correctness.
 - Retained frosts stay under the same ceiling however many frosted windows
-  are open, and are given back at mild pressure and wiped on teardown. One
+  are open, and the speculation above the reserve is given back at mild
+  pressure; teardown wipes them all. One
   scene composed twice — reusing frosts and blurring afresh — is
   byte-identical in both the scan-out frame and the back buffer through every
   change that can invalidate a frost, so the cache is an accelerator and never
   a correctness requirement.
+- The content ladder at every band *and* on the visibility edge: a window
+  hidden while the band is already above normal released by the gesture with no
+  further wake, a window hidden at normal pressure keeping its pixels, a
+  session-painted window never released either way, and a
+  minimise-then-restore inside one wake withdrawing its own undrained notice.
 - The content ladder at every band, including the focused window never
   released and a session-painted window never released; the pixel bytes
   actually overwritten before the buffer is dropped; a released window

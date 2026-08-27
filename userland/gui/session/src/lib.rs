@@ -281,5 +281,6 @@ pub use vigil::{HangTracker, UNRESPONSIVE_AFTER_NS};
 pub use wallpaper::{Prepared, WallpaperDesk, WallpaperSource};
 pub use windows::{
     desktop_info, resolve_window_identities, window_control_alternate_event, window_control_event,
-    SessionWindows, ShellWindowHost, WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE,
+    SessionWindows, ShellWindowHost, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, WINDOW_SHOWN,
+    WINDOW_SHOWN_MESSAGE,
 };

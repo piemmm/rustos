@@ -691,6 +691,9 @@ fn default_cache() -> GlyphCache {
 /// it was walked from, so the memo's real working set sits well inside it. A
 /// RAM read that fails is a zero total, hence a zero budget, hence a memo that
 /// retains nothing and walks every measurement — slower, never wrong.
+///
+/// It declares no floor: unlike a glyph bitmap, a measurement is rebuilt by
+/// walking advances the client already holds, so pressure may take all of it.
 #[cfg(feature = "rt")]
 fn default_measure_cache() -> MeasureCache {
     use tairix_reclaim::ReclaimOwner;
@@ -701,7 +704,7 @@ fn default_measure_cache() -> MeasureCache {
     let cache = ReclaimCache::new(
         MEASURE_CACHE_LABEL,
         measure::measure_cache_candidate(ReclaimOwner::UserlandProcess(CLIENT_CACHE_OWNER)),
-        crate::glyph_cache::glyph_cache_budget(total),
+        measure::measure_cache_budget(total),
         tairix_rt::pressure::gauge(),
         &LOG_SINK,
     );
@@ -1394,34 +1397,44 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn mild_pressure_empties_the_cache_and_refuses_further_growth() {
+    fn no_band_empties_the_glyph_cache_below_its_reserve() {
+        // The glyph budget declares an irreducible reserve, so however deep
+        // pressure goes the client keeps enough glyphs to draw the screen it
+        // is drawing. Emptying it would not free memory the machine can use —
+        // this board's whole ceiling is a fraction of a mebibyte — while
+        // costing an IPC round trip per character per repaint.
         let (mut client, gauge) = cached_client();
         assert!(coverage(&mut client, 'A', FamilyKey::MONO, 28).is_some());
         assert_eq!(client.caches.glyphs.as_ref().expect("installed").len(), 1);
 
-        gauge.report(PressureBand::Mild);
-        let cache = client.caches.glyphs.as_mut().expect("installed");
-        assert!(cache.enforce_pressure() > 0, "mild pressure must release");
-        assert_eq!(cache.len(), 0);
-        assert_eq!(cache.charged_bytes(), 0);
+        for band in [
+            PressureBand::Mild,
+            PressureBand::Moderate,
+            PressureBand::Severe,
+            PressureBand::Critical,
+        ] {
+            gauge.report(band);
+            let cache = client.caches.glyphs.as_mut().expect("installed");
+            assert_eq!(cache.enforce_pressure(), 0, "{band:?} released a glyph");
+            assert_eq!(cache.len(), 1, "{band:?}");
+            assert!(cache.charged_bytes() > 0, "{band:?}");
+        }
 
-        assert!(
-            coverage(&mut client, 'B', FamilyKey::MONO, 28).is_some(),
-            "a shrunk cache still renders"
-        );
-        assert_eq!(
-            client.caches.glyphs.as_ref().expect("installed").len(),
-            0,
-            "no growth while the band forbids it"
-        );
+        // And the reserve is fillable, not merely keepable: a glyph not seen
+        // before is still admitted at the deepest band, because a cache that
+        // may keep a mebibyte but never re-admit decays to uselessness.
+        assert!(coverage(&mut client, 'B', FamilyKey::MONO, 28).is_some());
+        assert_eq!(client.caches.glyphs.as_ref().expect("installed").len(), 2);
     }
 
-    /// The bug this counting exists to catch: a client whose gauge was never
-    /// told a band admits nothing, so every character drawn is a fresh
-    /// service call. On a desktop redrawing text that is one IPC round trip
-    /// per glyph per repaint, and the font service carries all of it.
+    /// The bug this counting exists to catch: a desktop that pays one IPC
+    /// round trip per glyph per repaint because its cache retains nothing.
+    /// The fail-closed unknown band reads as critical, and the reserve is
+    /// what keeps even that from costing a fetch per character — so a client
+    /// that has not yet armed the pressure wake is slower to *warm*, never
+    /// permanently uncached.
     #[test]
-    fn an_unreported_band_makes_every_draw_a_service_call() {
+    fn an_unreported_band_still_retains_within_the_reserve() {
         static SINK: DiscardSink = DiscardSink;
         let gauge: &'static ReportedPressure = Box::leak(Box::new(ReportedPressure::unknown()));
         let (mut client, tally) = counting_client();
@@ -1438,18 +1451,18 @@ pub(crate) mod tests {
         }
         assert_eq!(
             tally.get(),
-            8,
-            "an unreported gauge retains nothing, so every draw re-fetches"
+            1,
+            "the reserve is admitted even from a gauge nobody has reported to"
         );
-        assert_eq!(client.caches.glyphs.as_ref().expect("installed").len(), 0);
+        assert_eq!(client.caches.glyphs.as_ref().expect("installed").len(), 1);
 
-        // Learning the band is the whole fix: the very next draw is retained
-        // and every repeat after it is free.
+        // Learning the band changes nothing here beyond widening the ceiling
+        // above the reserve: the repeats were already free.
         gauge.report(PressureBand::Normal);
         for _ in 0..8 {
             assert!(coverage(&mut client, 'A', FamilyKey::MONO, 28).is_some());
         }
-        assert_eq!(tally.get(), 9, "one fetch to populate the cache, then none");
+        assert_eq!(tally.get(), 1, "one fetch to populate the cache, then none");
     }
 
     #[test]
@@ -1478,7 +1491,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn trimming_releases_the_cache_and_needs_no_cache_to_be_installed() {
+    fn trimming_keeps_the_reserve_and_needs_no_cache_to_be_installed() {
         let (mut client, gauge) = cached_client();
         assert_eq!(
             client.caches.trim(),
@@ -1496,12 +1509,16 @@ pub(crate) mod tests {
                 > 0
         );
 
+        // The memo declares no floor, so a tightening band takes all of it;
+        // the glyph cache's reserve is what the same trim leaves alone.
+        assert!(client.caches.measure.is_none(), "no memo installed here");
         gauge.report(PressureBand::Mild);
-        assert!(
-            client.caches.trim() > 0,
-            "the band's ceiling is applied at once"
+        assert_eq!(
+            client.caches.trim(),
+            0,
+            "the trim took glyphs the reserve keeps"
         );
-        assert_eq!(client.caches.glyphs.as_ref().expect("installed").len(), 0);
+        assert_eq!(client.caches.glyphs.as_ref().expect("installed").len(), 1);
 
         let mut bare = client_with(SolidTestTransport);
         assert_eq!(bare.caches.trim(), 0, "no cache installed is not an error");

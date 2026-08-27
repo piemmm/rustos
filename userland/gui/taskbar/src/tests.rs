@@ -4458,27 +4458,38 @@ fn the_glyph_cache_never_exceeds_its_derived_budget() {
 }
 
 #[test]
-fn mild_pressure_drops_the_glyph_cache_and_refuses_growth() {
+fn no_band_drops_the_glyph_cache_below_its_reserve() {
+    // One bar's worth of rasterised glyphs is far inside the shared UI
+    // reserve, so no band takes it: the bar is redrawn on every clock tick
+    // and every hover, and re-rasterising each glyph per frame is what
+    // pressure must not add.
     static GAUGE: ReportedPressure = ReportedPressure::unknown();
     let bar = bar_with_status_signals();
     let mut renderer = pressured_renderer(&GAUGE);
     let _ = renderer
         .render(&bar, Scale::ONE, &mut NoArtwork)
         .expect("bar renders");
-    assert!(renderer.cache_len() > 0);
+    let held = renderer.cache_bytes();
+    let entries = renderer.cache_len();
+    assert!(entries > 0 && held > 0);
 
-    GAUGE.report(PressureBand::Mild);
-    assert!(renderer.trim() > 0, "mild pressure must release UI pixels");
-    assert_eq!(renderer.cache_len(), 0);
-    assert_eq!(renderer.cache_bytes(), 0);
+    for band in [
+        PressureBand::Mild,
+        PressureBand::Moderate,
+        PressureBand::Severe,
+        PressureBand::Critical,
+    ] {
+        GAUGE.report(band);
+        assert_eq!(renderer.trim(), 0, "{band:?} took the reserve");
+        assert_eq!(renderer.cache_len(), entries, "{band:?}");
+        assert_eq!(renderer.cache_bytes(), held, "{band:?}");
+    }
 
-    // The bar still paints correctly; the glyphs are simply rasterised
-    // on demand instead of retained.
+    // And the bar still paints correctly at the deepest band.
     let surface = renderer
         .render(&bar, Scale::ONE, &mut NoArtwork)
         .expect("bar renders");
     assert_eq!(surface.width(), bar.layout(Scale::ONE).bar.width);
-    assert_eq!(renderer.cache_len(), 0, "no growth while pressure holds");
 }
 
 #[test]

@@ -68,7 +68,7 @@ pub use ledger::CacheLedger;
 pub use model::{
     AccountingError, AdmissionRefusal, CacheAccounting, CacheBudget, CacheCandidate, CachePolicy,
     InvalidationSource, RebuildCost, ReclaimClass, ReclaimClassStats, ReclaimOwner, ReclaimRule,
-    Sensitivity,
+    Sensitivity, UI_CACHE_RESERVE_BYTES,
 };
 pub use pressure::{
     shrink_target, BandObserver, FreeMemorySource, GrowthAllowance, MemoryPressure, PressureBand,

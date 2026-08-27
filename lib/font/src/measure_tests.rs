@@ -17,7 +17,7 @@ use crate::client::tests::{
 use crate::client::FontClient;
 
 use crate::font::{BitmapFont, ELLIPSIS};
-use crate::glyph_cache::glyph_cache_budget;
+use crate::measure::measure_cache_budget;
 use crate::measure::{self, measure_cache_candidate};
 
 /// A second proportional family, to show a face is part of the key.
@@ -36,7 +36,7 @@ fn measuring_client(
 ) -> (LocalClient, &'static ReportedPressure) {
     static SINK: DiscardSink = DiscardSink;
 
-    let (mut client, gauge) = caching_client(band, glyph_cache_budget(1 << 30));
+    let (mut client, gauge) = caching_client(band, measure_cache_budget(1 << 30));
     client.caches.measure = Some(ReclaimCache::new(
         "test.font.measure",
         measure_cache_candidate(ReclaimOwner::UserlandProcess("test.font")),
@@ -49,7 +49,7 @@ fn measuring_client(
 
 /// A comfortable machine: room for both caches, band reported normal.
 fn roomy_client() -> (LocalClient, &'static ReportedPressure) {
-    measuring_client(PressureBand::Normal, glyph_cache_budget(1 << 30))
+    measuring_client(PressureBand::Normal, measure_cache_budget(1 << 30))
 }
 
 /// Lookups the memo itself has answered or missed.
@@ -322,8 +322,8 @@ fn a_pressured_or_unbudgeted_memo_retains_nothing_and_still_measures() {
     // A band that forbids growth, and a machine whose RAM reading gave a zero
     // budget: both refuse every entry, and both must still answer correctly.
     for (band, budget) in [
-        (PressureBand::Mild, glyph_cache_budget(1 << 30)),
-        (PressureBand::Normal, glyph_cache_budget(0)),
+        (PressureBand::Mild, measure_cache_budget(1 << 30)),
+        (PressureBand::Normal, measure_cache_budget(0)),
     ] {
         let (mut client, _gauge) = measuring_client(band, budget);
         let measured = font.width_on(&mut client, text);
@@ -371,12 +371,12 @@ fn a_service_that_answers_metrics_but_no_glyph_measures_zero_and_retains_nothing
 
     static SINK: DiscardSink = DiscardSink;
 
-    let (_, gauge) = cache_at(PressureBand::Normal, glyph_cache_budget(1 << 30));
+    let (_, gauge) = cache_at(PressureBand::Normal, measure_cache_budget(1 << 30));
     let mut client = client_with(MetricsOnly);
     client.caches.measure = Some(ReclaimCache::new(
         "test.font.measure",
         measure_cache_candidate(ReclaimOwner::UserlandProcess("test.font")),
-        glyph_cache_budget(1 << 30),
+        measure_cache_budget(1 << 30),
         gauge,
         &SINK,
     ));

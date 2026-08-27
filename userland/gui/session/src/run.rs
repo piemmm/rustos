@@ -124,7 +124,8 @@ mod program {
         PinboardMenuOutcome, Prepared, PresentedOwners, PromptOutcome, ScreenFade, ScreenLock,
         SeatEventReader, SeatInputChannel, SessionClock, SessionFileReader, SessionPicker,
         SessionWindows, ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe,
-        WallpaperDesk, WallpaperSource, BUNDLE_RUN_SUFFIX, DATETIME_RUN_PATH, ELEVATE_PROMPT_SHOWN,
+        WallpaperDesk, WallpaperSource, BUNDLE_RUN_SUFFIX, CONTENT_RELEASED,
+        CONTENT_RELEASED_MESSAGE, DATETIME_RUN_PATH, ELEVATE_PROMPT_SHOWN,
         ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_CALL_REFUSED,
         SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, USAGE, WALLPAPER_LABEL, WALLPAPER_RUN_PATH,
         WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE,
@@ -2727,6 +2728,19 @@ mod program {
                 if typed {
                     shell.settle(&mut compositor);
                 }
+                // A window minimised while the machine was already short of
+                // memory had its content released by the gesture itself, so
+                // its client is told here rather than waiting for a band
+                // change that may never come.
+                deliver_released_notices(
+                    &mut server,
+                    &mut sink,
+                    &mut shell,
+                    &mut compositor,
+                    &mut windows,
+                    &mut picker,
+                    &mut apps.service,
+                );
                 // A window restored from the taskbar (or otherwise shown
                 // again) whose content was released while it was hidden
                 // has nothing to draw until its app presents, so ask now
@@ -5132,7 +5146,29 @@ mod program {
             let Some(window_id) = windows.ipc_id(wm) else {
                 continue;
             };
-            let _ = server.release_frames(window_id);
+            let bytes = server.release_frames(window_id);
+            // Its pixels are gone, so the window is awaiting them again and
+            // the shown announcement must be re-earned by the frame that
+            // brings them back.
+            windows.content_released(window_id);
+            log(
+                &LOG_SINK,
+                &LogEvent {
+                    level: LogLevel::Info,
+                    id: CONTENT_RELEASED,
+                    message: CONTENT_RELEASED_MESSAGE,
+                    fields: &[
+                        LogField {
+                            key: "window",
+                            value: LogFieldValue::UnsignedInt(window_id),
+                        },
+                        LogField {
+                            key: "bytes",
+                            value: LogFieldValue::UnsignedInt(bytes),
+                        },
+                    ],
+                },
+            );
             deliver(
                 server,
                 sink,

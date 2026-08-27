@@ -1279,13 +1279,23 @@ normal, mild, moderate, severe, critical — is shared with
   while being refused every new entry decays to uselessness under sustained
   mild pressure, and reports a healthy ledger while doing it.
 
-  **A working-set floor is the one exception to a class's target.** A cache
+  **Two declared floors are the exceptions to a class's target.** A cache
   whose entries cannot be rebuilt without the filesystem or another process
   declares part of its budget as live working set
   (`CacheBudget::with_working_set_floor`); mild and moderate leave that many
-  bytes alone, severe and critical still take everything. Two caches declare
-  it — the desktop's decoded icon artwork and the client side of the glyph
-  cache — for the reason §7g gives.
+  bytes alone. Two caches declare it — the desktop's decoded icon artwork and
+  the client side of the glyph cache — for the reason §7g gives.
+
+  Beneath it, a rasterised-UI cache declares an **irreducible reserve**
+  (`CacheBudget::with_reserved_floor`, `tairix_reclaim::UI_CACHE_RESERVE_BYTES`)
+  that *no* band takes, severe and critical included. Growth reads it too, so
+  the reserve is fillable rather than merely keepable: a cache that may hold a
+  mebibyte but never re-admit after a theme change would decay to uselessness.
+  It is one mebibyte, clamped by each cache's own display- or RAM-derived
+  ceiling, so it does not scale with the machine and cannot describe bytes a
+  cache could not hold — the ceiling is what scales; the reserve only says how
+  little is too little. Every desktop UI cache declares it; no kernel cache
+  does, because those are speculation all the way down.
 - **`ramzip` handoff and escalation.** `ramzip_handoff` fixes the
   `plans/SWAPSWAPSWAP.md` ordering: no compression at normal/mild; at
   moderate, compression of cold anonymous pages may start only once
@@ -2225,7 +2235,19 @@ reclaim policy anyway (`plans/SMARTRAM.md` SMART5, section 6.4).
   ceiling (`tairix_reclaim::desktop::screenful_ui_cache`): one screenful of
   pixels rather than the small fraction a cursor or a glyph is allowed,
   because no more of either than fills the screen can be visible at once.
-- **What the desktop cannot rebuild by itself keeps a working-set floor.**
+- **Every one of them keeps an irreducible reserve.** A desktop holding none
+  of its rasterised pixels does not draw a cheaper frame — it draws the same
+  frame, re-deriving every element through a rasterisation, a blur, a
+  filesystem read, a sandbox round trip, or an IPC call, on every repaint.
+  Past a point, reclaiming a UI cache costs the machine more of what it is
+  short of than it returns, and the user sees a desktop that has stopped
+  responding rather than one that is saving memory. So each of these caches
+  declares `UI_CACHE_RESERVE_BYTES` (one mebibyte, clamped by its own
+  ceiling) irreducible, and no band — severe and critical included — takes it.
+  On the 1024×768 boot console that is the whole of the cursor, notification,
+  and artwork budgets and a mebibyte of the three-mebibyte chrome and frost
+  ceilings.
+- **What the desktop cannot rebuild by itself keeps a working-set floor too.**
   Every cache above is rebuilt from data the process already holds: a
   rasterise, a blur. Two are not. A decoded icon costs a capability-gated
   read *plus* a parser-sandbox round trip, and a glyph on the client side of
@@ -2233,7 +2255,7 @@ reclaim policy anyway (`plans/SMARTRAM.md` SMART5, section 6.4).
   `tairix_reclaim::desktop::working_set_ui_cache` and
   `tairix_font::client_glyph_cache_budget`, which declare their whole budget
   the session's live working set. Mild and moderate pressure leave them
-  alone; severe and critical still take them.
+  alone; severe and critical take the speculation above the reserve.
 
   Not a special case, a measured one. Their budgets are a small fraction of
   one frame of the output the pixels are drawn on, and no more of them than
@@ -2246,9 +2268,10 @@ reclaim policy anyway (`plans/SMARTRAM.md` SMART5, section 6.4).
   of a fifth of one — the bar and the desktop drawing built-in glyphs in
   place of every icon, and every glyph re-fetched over the font endpoint on
   every repaint.
-- **A refusal is reported, not retried per frame.** At severe pressure, or
-  for an entry larger than the whole budget, the cache genuinely cannot
-  retain the decode. `ArtworkResolver::declined` is how it says so, and the
+- **A refusal is reported, not retried per frame.** For an entry larger than
+  what the budget can hold — a whole screenful of artwork already retained, or
+  an output whose budget is smaller than one decode — the cache genuinely
+  cannot keep it. `ArtworkResolver::declined` is how it says so, and the
   session's icon desk holds that key back until the pressure band moves
   (`ArtworkDesk::decline` / `retry_declined`). The draw falls to its built-in
   glyph — the tier that exists for exactly this — rather than to a storm of
@@ -2279,7 +2302,10 @@ reclaim policy anyway (`plans/SMARTRAM.md` SMART5, section 6.4).
   recency-driven: evicting a visible window's pixels is a visual defect
   rather than a slowdown, so the ladder follows what the user can see —
   hidden and minimised windows at mild, visible-but-unfocused ones at
-  critical, never the focused window. The buffer is wiped before it is
+  critical, never the focused window. The ladder's two inputs are the band and
+  each window's visibility, so it runs on either edge — the band's wake, and
+  the minimise itself, since a machine whose pressure has already settled
+  produces no further wake. The buffer is wiped before it is
   dropped and the owning app is asked to present again through the window
   protocol's redraw handshake, which its client library answers for it.
   One memory model, two mechanisms for two different kinds of memory

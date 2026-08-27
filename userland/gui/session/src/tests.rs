@@ -7338,23 +7338,21 @@ fn pin_artwork_survives_tightening_pressure_and_is_wiped_on_teardown() {
     // decoded icon is not local work the session can repeat at will: it is
     // a capability-gated read plus a parser-sandbox round trip, so dropping
     // it frees a fraction of one screenful and then costs both again, per
-    // icon, on the next repaint — with the machine already short. Mild and
-    // moderate therefore leave the working set alone.
-    for band in [PressureBand::Mild, PressureBand::Moderate] {
+    // icon, on the next repaint — with the machine already short. On this
+    // output the whole budget is inside the shared UI reserve, so no band
+    // takes it: the desktop keeps drawing its real artwork however deep
+    // pressure goes, and only the session's own teardown clears it.
+    for band in [
+        PressureBand::Mild,
+        PressureBand::Moderate,
+        PressureBand::Severe,
+        PressureBand::Critical,
+    ] {
         PRESSURED.report(band);
         assert_eq!(cache.trim(), 0, "{band:?} keeps the icon working set");
         assert_eq!(cache.charged_bytes(), held);
         assert!(drawn(&mut cache), "{band:?} still draws real artwork");
     }
-
-    // Severe is where it genuinely matters more than the pictures do: the
-    // whole cache goes, the draw site falls back to its built-in glyph, and
-    // a lookup retains nothing rather than re-acquiring what was released.
-    PRESSURED.report(PressureBand::Severe);
-    assert!(cache.trim() > 0, "severe pressure releases the working set");
-    assert_eq!(cache.charged_bytes(), 0);
-    assert!(!drawn(&mut cache), "the glyph tier takes over");
-    assert_eq!(cache.charged_bytes(), 0, "no growth under severe pressure");
 
     PRESSURED.report(PressureBand::Normal);
     assert!(drawn(&mut cache));

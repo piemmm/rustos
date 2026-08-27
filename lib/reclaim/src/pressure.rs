@@ -43,7 +43,11 @@
 //! every class obeys a forced shrink to zero. A cache whose entries
 //! cannot be rebuilt without the filesystem or another process declares
 //! a working-set floor ([`CacheBudget::with_working_set_floor`]) that
-//! mild and moderate leave alone; severe still takes it.
+//! mild and moderate leave alone, and a rasterised-UI cache additionally
+//! declares the irreducible reserve
+//! ([`CacheBudget::with_reserved_floor`]) that no band takes, because a
+//! desktop with none of its pixels left re-derives every one of them per
+//! repaint instead of drawing a cheaper frame.
 //!
 //! Growth reads that same [`shrink_target`], so a class the band
 //! preserves keeps admitting and one the band empties admits nothing.
@@ -719,12 +723,18 @@ impl PressureGauge for ReportedPressure {
 /// - **severe / critical** — every class obeys a forced shrink to
 ///   zero.
 ///
-/// A budget that declares a working-set floor
+/// Two declared floors bound that. A working-set floor
 /// ([`CacheBudget::with_working_set_floor`]) keeps that many bytes
-/// through mild and moderate pressure whatever its class's target is;
-/// severe and critical still take everything.
+/// through mild and moderate pressure whatever its class's target is; a
+/// reserved floor ([`CacheBudget::with_reserved_floor`]) keeps that many
+/// through severe and critical too, so a cache whose owner cannot draw
+/// without it is never emptied outright.
 #[must_use]
 pub const fn shrink_target(band: PressureBand, class: ReclaimClass, budget: CacheBudget) -> usize {
+    let floor = match band {
+        PressureBand::Severe | PressureBand::Critical => budget.reserved(),
+        _ => budget.working_set(),
+    };
     let target = match band {
         PressureBand::Normal => budget.hard(),
         PressureBand::Mild => match class {
@@ -742,10 +752,10 @@ pub const fn shrink_target(band: PressureBand, class: ReclaimClass, budget: Cach
             ReclaimClass::FsMetadata | ReclaimClass::ReliabilityAssist => budget.low(),
             _ => 0,
         },
-        PressureBand::Severe | PressureBand::Critical => return 0,
+        PressureBand::Severe | PressureBand::Critical => 0,
     };
-    if target < budget.floor() {
-        budget.floor()
+    if target < floor {
+        floor
     } else {
         target
     }
@@ -927,20 +937,27 @@ mod tests {
         // The invariant behind the fix: whatever a band lets a class hold
         // is what it lets that class grow to. Anything a shrink would keep
         // is admissible, and anything above it is not.
-        let b = budget().with_working_set_floor(budget().hard() / 8);
-        for band in PressureBand::ALL {
-            for class in ReclaimClass::ALL {
-                let target = shrink_target(band, class, b);
-                let allowance = GrowthAllowance::new(band, usize::MAX);
-                assert_eq!(
-                    allowance.permits(class, b, target),
-                    target > 0,
-                    "{band:?} {class:?} at the target"
-                );
-                assert!(
-                    !allowance.permits(class, b, target + 1),
-                    "{band:?} {class:?} past the target"
-                );
+        // Both floor tiers, because a cache that must *keep* a reserve has to
+        // be able to fill it again after an invalidation — at every band,
+        // critical included.
+        for b in [
+            budget().with_working_set_floor(budget().hard() / 8),
+            budget().with_reserved_floor(budget().hard() / 16),
+        ] {
+            for band in PressureBand::ALL {
+                for class in ReclaimClass::ALL {
+                    let target = shrink_target(band, class, b);
+                    let allowance = GrowthAllowance::new(band, usize::MAX);
+                    assert_eq!(
+                        allowance.permits(class, b, target),
+                        target > 0,
+                        "{band:?} {class:?} at the target"
+                    );
+                    assert!(
+                        !allowance.permits(class, b, target + 1),
+                        "{band:?} {class:?} past the target"
+                    );
+                }
             }
         }
     }
@@ -964,11 +981,60 @@ mod tests {
         // A floor never widens a budget: one above the ceiling is clamped
         // to it, so it can never describe bytes the cache cannot hold.
         let clamped = budget().with_working_set_floor(usize::MAX);
-        assert_eq!(clamped.floor(), clamped.hard());
+        assert_eq!(clamped.working_set(), clamped.hard());
         assert_eq!(
             shrink_target(PressureBand::Moderate, class, clamped),
             clamped.hard()
         );
+    }
+
+    #[test]
+    fn a_reserved_floor_survives_every_band_including_critical() {
+        // Declared by a rasterised-UI cache: a desktop holding none of its
+        // pixels does not draw a cheaper frame, it draws the same frame and
+        // re-derives every element through the I/O and IPC a machine short
+        // of memory has least of.
+        let reserved = budget().hard() / 16;
+        let b = budget().with_reserved_floor(reserved);
+        let class = ReclaimClass::DisposableUi;
+        assert_eq!(shrink_target(PressureBand::Normal, class, b), b.hard());
+        for band in [PressureBand::Mild, PressureBand::Moderate] {
+            assert_eq!(shrink_target(band, class, b), reserved, "{band:?}");
+        }
+        for band in [PressureBand::Severe, PressureBand::Critical] {
+            assert_eq!(shrink_target(band, class, b), reserved, "{band:?}");
+        }
+        // Every class, not just the disposable one: the reserve is the
+        // cache's declaration about itself, not a property of its class.
+        for class in ReclaimClass::ALL {
+            assert!(shrink_target(PressureBand::Critical, class, b) >= reserved);
+        }
+    }
+
+    #[test]
+    fn a_reserve_raises_the_working_set_to_meet_it_whichever_order_they_are_declared() {
+        // What the deepest band keeps, a shallower band keeps too, so the
+        // two floors can never cross however a caller composes them.
+        let reserved = budget().hard() / 2;
+        let smaller_working_set = budget().hard() / 8;
+        let after = budget()
+            .with_reserved_floor(reserved)
+            .with_working_set_floor(smaller_working_set);
+        let before = budget()
+            .with_working_set_floor(smaller_working_set)
+            .with_reserved_floor(reserved);
+        for b in [after, before] {
+            assert_eq!(b.reserved(), reserved);
+            assert_eq!(b.working_set(), reserved);
+            assert_eq!(
+                shrink_target(PressureBand::Mild, ReclaimClass::DisposableUi, b),
+                reserved
+            );
+        }
+        // A reserve above the ceiling is clamped to it, like any floor.
+        let clamped = budget().with_reserved_floor(usize::MAX);
+        assert_eq!(clamped.reserved(), clamped.hard());
+        assert_eq!(clamped.working_set(), clamped.hard());
     }
 
     #[test]

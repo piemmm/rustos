@@ -50,7 +50,7 @@ The open items, in priority order:
   loops on. Measured context: the decoder was never the cost — the 26 shipped
   8.3-megapixel masters decode in 404 ms total at thumbnail scale, ~90 ms
   each full-screen.
-- **D52 — the stream write path registered for its wake *after* the poll that
+- **D61 — the stream write path registered for its wake *after* the poll that
   found the ring full — DONE.** `parked_stream_write` registered on the stream
   wait-queue inside the `Full` arm, so between the poll and the registration a
   peer that drained the ring woke only the tasks registered at that instant,
@@ -62,7 +62,7 @@ The open items, in priority order:
   registering before the first poll and deregistering once the loop is left,
   matching the read path; the regression test observes the registration from
   inside the first step via `wake_waiter`'s registered/not answer.
-- **D53 — the stream wait-queue was one global queue woken with `wake_all` —
+- **D62 — the stream wait-queue was one global queue woken with `wake_all` —
   DONE.** Every 64 KiB chunk moved on *any* pipe or pty unparked every stream
   waiter on the machine, each of which re-polled its own unrelated backing and
   parked again, and each `wake_all` heap-allocated a `Vec` of the waiter ids.
@@ -165,6 +165,27 @@ The open items, in priority order:
     (`WindowEvent::ContentReleased`, `Errno::NotAttached` on a present against
     a released window), which lets go of its own two and re-attaches on the
     paint that follows the next redraw request.
+  A third half was found later, by reading the ladder's trigger rather than its
+  body: it ran **only** on the pressure band's wake, and that wake is
+  edge-triggered. A user minimising a window on a machine whose pressure had
+  already settled produced no edge, so the release never ran for the ordinary
+  sequence — get tight, then put a window away — and the largest block the
+  desktop can give back was freed only if the band happened to move again. The
+  ladder's inputs are the band *and* each window's visibility, so it now runs
+  on either edge: `Compositor::set_visible` applies the same per-window
+  decision to the window it has just hidden, and the session drains the
+  released notices on the input wake as well as the band's. A
+  minimise-then-restore inside one wake withdraws its own undrained notice,
+  since neither side has let go and telling the client would cost an unmap and
+  a re-attach that change nothing.
+  Two smaller defects fell out of that reading. The session recorded nothing
+  when it handed a window's frames back, though every other reclaim decision on
+  the machine is logged and this is the largest of them
+  (`CONTENT_RELEASED`, naming the window and the bytes). And `WINDOW_SHOWN` —
+  "a frame carrying this window's own pixels reached the display" — stayed
+  latched across a release, so a window released and never re-presented still
+  read as shown; `SessionWindows::content_released` puts the record back to
+  awaited and the frame that brings the pixels back announces it afresh.
   Adjacent, deliberate, and **not** changed: the session keeps converting each
   present into its own copy rather than compositing from the client's buffer.
   That would halve a *visible* window's cost, but it moves the
@@ -173,6 +194,76 @@ The open items, in priority order:
   is a speed and integrity trade rather than a win; the zero-copy path for
   visible windows is the hardware layer scanout `plans/FIX-DISPLAY-ACCELERATION.md`
   stages.
+- **D60 — the window-content release has no end-to-end vertical: the one
+  claim only a live desktop can settle is untested — OPEN.** Stated when D59
+  landed. Every seam of the release path is host-tested — the engine's
+  release/re-attach and the byte budget dropping a released window to zero
+  (`lib/window/src/tests.rs`), the compositor's deferral and released-notice
+  queue (`userland/gui/wm/src/tests.rs`), the session's trim producing the
+  notice (`userland/gui/session/src/windows.rs`), the `ContentReleased` wire
+  round trip (`lib/abi/src/window_ipc.rs`) — but no QEMU run has ever taken a
+  window through *release → client lets go → shown again → re-attach → its
+  pixels back*.
+  - **Why the existing vertical does not reach it.**
+    `tests/integration/desktop_pressure_qemu_aarch64` gets the machine into a
+    non-normal band with a screenful of terminal windows, but
+    `release_content_under_pressure` only takes a window that is **not
+    visible**, and visibility there is an explicit flag rather than occlusion:
+    cascaded windows are all visible, however deeply stacked, so at mild and
+    moderate pressure the ladder correctly releases nothing. Only critical
+    pressure touches visible windows, and it spares the focused one.
+  - **The groundwork is in, and it found the defect the coverage was missing.**
+    Reading the release ladder's *trigger* while designing this vertical
+    surfaced the third half of D59: the ladder ran only on the band's
+    edge-triggered wake, so "minimise a window on an already-tight machine"
+    released nothing. That is fixed and host-tested
+    (`userland/gui/wm/src/tests.rs`, `userland/gui/session/src/windows.rs`), and
+    with it the two markers a vertical needs now exist: the session's
+    `CONTENT_RELEASED` record and a `WINDOW_SHOWN` that is re-earned after a
+    release.
+  - **Two things in the design above do not work; use these instead.**
+    - `shm_unmap` is `audit: false` in the syscall table (an unprivileged
+      release of the caller's own mapping, the same posture as `mem_unmap`), so
+      the client's half of a release is *not* in the audit trail and cannot be
+      the guest's witness. Turning auditing on for it to make a test observable
+      would shape production for the test. Witness the **re-attach** instead —
+      `sc=shm_create` + `sc=shm_grant` attributed by `comm` to the app under
+      test, which `ProcName::from_path` sets to the bundle's stem — and take the
+      release from the session's own `CONTENT_RELEASED` record on serial.
+    - The window cannot be a *terminal* window restored from its icon-bar slot.
+      The terminal declares a default action, so a primary click on its slot is
+      relayed to the app and opens **another** window; only an application that
+      declares none (`tairix_window::info_and_quit`) gets
+      `TaskbarResponse::AppRaise`, which is what shows a minimised window
+      again. Use such an app — `widgets` is the smallest: no filesystem, no
+      arguments, a fixed 820×620 window, and it is listed in the program
+      library.
+  - **The shape that works.** Reach pressure the proven way (the existing
+    screenful of terminal windows), launch `widgets`, then drive two full
+    cycles: raise it, maximise it so its body covers screen the cascade cannot
+    reach, minimise it, and restore it from its slot. Gate causally throughout —
+    the reveal witness, then per-window `WINDOW_SHOWN` occurrences, then
+    `CONTENT_RELEASED` — and photograph the frame after the *first* restore,
+    holding the second cycle until the dump has been read back so the guest
+    (whose PASS is the *third* frame region the app creates) outlives it. The
+    assertion is that a strip of the work area only a maximised window can
+    cover is not the wallpaper: a window that came back transparent would leave
+    it wallpaper, and no cascaded terminal reaches it.
+  - **Two prerequisites the script cannot reconstruct without.** The gallery's
+    declared window extent (`WIN_WIDTH` / `WIN_HEIGHT` / its `WindowSizing`)
+    is private to its `Run` binary, so a host reconstruction cannot read the
+    one definition and would have to restate it; hoist those into the crate's
+    `lib` as `lib/browse` already does for the file manager. And the clamp that
+    turns a declared extent into a client size lives on
+    `tairix_window::Desktop`, which is built from a `DesktopInfo` — the host
+    needs one composed from the board geometry rather than a second copy of
+    `Desktop::window_size`'s arithmetic.
+  - **What remains genuinely unwitnessed even then.** That the *pages* were
+    freed, rather than merely unmapped on both sides. The sysinfo memory
+    reading could show free memory rising across the release, but it is noisy
+    on a live desktop; the honest witness is the release record plus the
+    re-attach, and the page accounting belongs to a kernel-side test of
+    `shm_unmap` refcounting rather than to a desktop vertical.
 - **D56 — the x86_64 page-table walk recovers a table by its raw physical
   address**, so every page table, and the direct map that shares the window
   with them, must live below the user virtual base. A machine with more than
@@ -712,11 +803,18 @@ build but the protocol had to refuse, dying in silence because a graphical
 elevation's `stderr` reaches no one (fixed), and D52 is an x86_64 cross-CPU
 shootdown protocol defect that only became reachable once a production caller
 existed — the tree is safe by the current caller set, not by the protocol
-(open), and D57/D58/D59 were a *policy* group rather than coding slips — a
+(open), D57/D58/D59 were a *policy* group rather than coding slips — a
 pressure model whose two halves disagreed, three counts standing in for the
 resource they were meant to bound, and a release that undid itself one line
-later (all fixed). Do not collapse the open
-items into one change; land each on its own whole-project-green gate (§7).
+later and then only ran on an edge nobody crosses (all fixed) — and D60 is the
+coverage those three left behind: a path tested at every seam and never once
+end to end, which is exactly the shape that let D59's three halves hide behind
+green unit tests (open; its design is corrected and its groundwork landed with
+D59's third half). D61/D62 are the two stream-wake defects that had been filed
+under numbers D52 and D53 already held by the shootdown and kernel-heap
+entries; the citations in the tree now resolve to one defect each. Do not
+collapse the open items into one change; land each on its own
+whole-project-green gate (§7).
 
 ## Coupling to be aware of
 

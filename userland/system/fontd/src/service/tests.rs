@@ -498,7 +498,11 @@ fn a_size_outside_the_permitted_range_is_refused() {
 }
 
 #[test]
-fn mild_pressure_empties_the_cache_and_refuses_further_growth() {
+fn no_band_empties_the_atlas_below_its_reserve() {
+    // Every glyph the desktop draws is served from here, so a service that
+    // gave its atlas up would re-rasterise the whole visible text of every
+    // client, per repaint, exactly when the machine can least afford it. The
+    // atlas therefore declares an irreducible reserve no band takes.
     let mono = asset("mono/Inconsolata-EX.ttf");
     let mut store = mono_only_store(&mono);
     let (cache, gauge) = cache_for(ROOMY_MACHINE_BYTES, PressureBand::Normal);
@@ -508,15 +512,42 @@ fn mild_pressure_empties_the_cache_and_refuses_further_growth() {
     assert!(request_glyph(&mut svc, key, 'A', 28, FontWeight::Regular).is_ok());
     assert_eq!(svc.cache.len(), 1);
 
-    gauge.report(PressureBand::Mild);
-    assert!(svc.trim_cache() > 0, "mild pressure must release");
-    assert_eq!(svc.cache.len(), 0);
+    for band in [
+        PressureBand::Mild,
+        PressureBand::Moderate,
+        PressureBand::Severe,
+        PressureBand::Critical,
+    ] {
+        gauge.report(band);
+        assert_eq!(svc.trim_cache(), 0, "{band:?} took the reserve");
+        assert_eq!(svc.cache.len(), 1, "{band:?}");
+    }
 
+    // And the reserve is fillable, not merely keepable: a glyph not seen
+    // before is still rasterised *and* retained at the deepest band.
     assert!(
         request_glyph(&mut svc, key, 'B', 28, FontWeight::Regular).is_ok(),
-        "a shrunk service still rasterises"
+        "the service still rasterises"
     );
-    assert_eq!(svc.cache.len(), 0, "no growth while the band forbids it");
+    assert_eq!(svc.cache.len(), 2, "the reserve still admits");
+}
+
+#[test]
+fn a_machine_that_answered_no_ram_reading_rasterises_every_glyph_uncached() {
+    // Fail closed to uncached rather than to a hand-picked ceiling: the
+    // budget is zero, so the reserve is zero too, and the service is correct
+    // and merely slower.
+    let mono = asset("mono/Inconsolata-EX.ttf");
+    let mut store = mono_only_store(&mono);
+    let (cache, _gauge) = cache_for(0, PressureBand::Normal);
+    let mut svc = discover(&mut store, cache, &DiscardSink).expect("discovers");
+    let key = FamilyKey::new("mono").expect("key");
+
+    assert!(request_glyph(&mut svc, key, 'A', 28, FontWeight::Regular).is_ok());
+    assert_eq!(svc.cache.len(), 0);
+    assert!(request_glyph(&mut svc, key, 'A', 28, FontWeight::Regular).is_ok());
+    assert_eq!(svc.cache.len(), 0);
+    assert_eq!(svc.trim_cache(), 0);
 }
 
 #[test]

@@ -34,13 +34,13 @@ use alloc::vec::Vec;
 use tairix_abi::font_ipc::{FamilyKey, FontWeight, FONT_FAMILY_KEY_LEN};
 #[cfg(any(feature = "rt", test))]
 use tairix_reclaim::{
-    CacheCandidate, InvalidationSource, RebuildCost, ReclaimClass, ReclaimOwner, ReclaimRule,
-    Sensitivity,
+    CacheBudget, CacheCandidate, InvalidationSource, RebuildCost, ReclaimClass, ReclaimOwner,
+    ReclaimRule, Sensitivity,
 };
 use tairix_reclaim::{CachedBytes, ReclaimCache};
 
 #[cfg(any(feature = "rt", test))]
-use crate::glyph_cache::GLYPH_CACHE_ENTRY_METADATA_BYTES;
+use crate::glyph_cache::{glyph_cache_ceiling, GLYPH_CACHE_ENTRY_METADATA_BYTES};
 
 /// What one measurement is retained under: the face's wire bytes, its pixel
 /// height, its wire weight, and the measured text's byte length and CRC-32C.
@@ -94,6 +94,20 @@ pub(crate) fn measure_cache_candidate(owner: ReclaimOwner) -> CacheCandidate {
         rule: Some(ReclaimRule::Drop),
         entry_metadata_bytes: GLYPH_CACHE_ENTRY_METADATA_BYTES,
     }
+}
+
+/// The memo's byte budget, on the same RAM-derived ceiling as the glyph
+/// cache ([`glyph_cache_ceiling`]) and with no floor of any kind.
+///
+/// The memo holds no pixels and rebuilds an entry by walking advances it
+/// already has, so — unlike a glyph bitmap, which costs a rasterisation or
+/// an IPC round trip — there is nothing here worth keeping through pressure:
+/// it is speculation all the way down, and the first tightening may take all
+/// of it.
+#[cfg(any(feature = "rt", test))]
+#[must_use]
+pub(crate) fn measure_cache_budget(total_ram_bytes: u64) -> CacheBudget {
+    CacheBudget::from_ceiling(glyph_cache_ceiling(total_ram_bytes))
 }
 
 /// One string measured in one face: the bytes measured, and the pen position

@@ -4575,7 +4575,7 @@ fn a_scale_change_invalidates_every_cached_cursor() {
 }
 
 #[test]
-fn mild_pressure_drops_the_cursor_cache_and_refuses_growth() {
+fn no_band_drops_the_cursor_cache_below_its_reserve() {
     // A gauge private to this test: it moves the band, and the shared one
     // must stay at normal for the tests running beside it.
     static PRESSURE: ReportedPressure = ReportedPressure::unknown();
@@ -4597,20 +4597,30 @@ fn mild_pressure_drops_the_cursor_cache_and_refuses_growth() {
     assert_eq!(ctrl.cache_len(), 1);
     assert!(ctrl.cache_bytes() > 0);
 
-    // Mild pressure forces a disposable-UI cache to zero, ahead of any
-    // clean-file or anonymous-page reclaim.
-    PRESSURE.report(PressureBand::Mild);
-    assert!(ctrl.trim() > 0, "mild pressure must release bytes");
-    assert_eq!(ctrl.cache_len(), 0);
-    assert_eq!(ctrl.cache_bytes(), 0);
+    // The whole cursor budget is below the shared UI reserve on this output,
+    // so no band empties it: a pointer that had to be re-rasterised on every
+    // sample would cost the desktop a rasterisation pass per motion event
+    // exactly when it can least afford one.
+    let held = ctrl.cache_bytes();
+    for band in [
+        PressureBand::Mild,
+        PressureBand::Moderate,
+        PressureBand::Severe,
+        PressureBand::Critical,
+    ] {
+        PRESSURE.report(band);
+        assert_eq!(ctrl.trim(), 0, "{band:?} took the cursor reserve");
+        assert_eq!(ctrl.cache_len(), 1, "{band:?}");
+        assert_eq!(ctrl.cache_bytes(), held, "{band:?}");
+    }
 
-    // A different shape is still drawn correctly; it is simply
-    // rasterised on demand instead of retained.
+    // A different shape is still drawn correctly, and still retained: the
+    // reserve is fillable, not merely keepable.
     router.handle(moved(20, 20), &mut c);
     assert!(ctrl.refresh(router.pointer(), &router, &mut c));
     assert_eq!(ctrl.kind(), CursorKind::Text);
     assert!(c.cursor_bounds().is_some());
-    assert_eq!(ctrl.cache_len(), 0, "no growth while pressure holds");
+    assert!(ctrl.cache_len() >= 1, "the reserve still admits");
 }
 
 #[test]
@@ -5005,7 +5015,7 @@ fn a_resize_invalidates_only_that_window_s_furniture() {
 }
 
 #[test]
-fn mild_pressure_drops_the_chrome_cache_and_refuses_growth() {
+fn no_band_drops_the_chrome_cache_below_its_reserve() {
     // A gauge private to this test: it moves the band, and the shared one
     // must stay at normal for the tests running beside it.
     static PRESSURE: ReportedPressure = ReportedPressure::unknown();
@@ -5025,20 +5035,30 @@ fn mild_pressure_drops_the_chrome_cache_and_refuses_growth() {
     assert!(c.chrome_cache_bytes() > 0);
     let warm = c.frame().to_vec();
 
-    // Mild pressure forces a disposable-UI cache to zero, ahead of any
-    // clean-file or anonymous-page reclaim.
-    PRESSURE.report(PressureBand::Mild);
-    assert!(c.trim_chrome() > 0, "mild pressure must release bytes");
-    assert_eq!(c.chrome_cache_len(), 0);
-    assert_eq!(c.chrome_cache_bytes(), 0);
+    // One window's furniture is far inside the shared UI reserve, so no band
+    // takes it: a desktop re-rendering every strip per frame is what pressure
+    // must not produce.
+    let held = c.chrome_cache_bytes();
+    for band in [
+        PressureBand::Mild,
+        PressureBand::Moderate,
+        PressureBand::Severe,
+        PressureBand::Critical,
+    ] {
+        PRESSURE.report(band);
+        assert_eq!(c.trim_chrome(), 0, "{band:?} took the chrome reserve");
+        assert_eq!(c.chrome_cache_len(), 1, "{band:?}");
+        assert_eq!(c.chrome_cache_bytes(), held, "{band:?}");
+    }
 
-    // The frame is still drawn correctly; the furniture is simply
-    // rendered on demand instead of retained.
+    // And the frame is the same either way, which is the guarantee that makes
+    // the retention an optimisation rather than a behaviour.
     repaint_everything(&mut c);
     assert_eq!(c.frame(), &warm[..], "pressure must not change a pixel");
-    assert_eq!(c.chrome_cache_len(), 0, "no growth while pressure holds");
-    assert!(c.chrome_cache_stats().refusals() >= 1);
-    assert!(!c.chrome_resident(id));
+    assert!(
+        c.chrome_resident(id),
+        "the reserve still holds the furniture"
+    );
 }
 
 /// Force a full repaint without disturbing the scene: two background
@@ -5947,7 +5967,7 @@ fn retained_frosts_never_exceed_the_one_screenful_ceiling() {
 }
 
 #[test]
-fn pressure_gives_the_frost_back_and_the_frame_is_unchanged() {
+fn no_band_gives_the_frost_back_and_the_frame_is_unchanged() {
     // A gauge private to this test: it moves the band, and the shared one must
     // stay at normal for the tests running beside it.
     static PRESSURE: ReportedPressure = ReportedPressure::unknown();
@@ -5968,14 +5988,23 @@ fn pressure_gives_the_frost_back_and_the_frame_is_unchanged() {
     let warm = c.frame().to_vec();
     assert!(c.frost_cache_bytes() > 0);
 
-    PRESSURE.report(PressureBand::Mild);
-    assert!(c.trim_frost() > 0, "mild pressure must release bytes");
-    assert_eq!(c.frost_cache_bytes(), 0);
+    // This scene's frost is far inside the shared UI reserve, so no band takes
+    // it: re-blurring a backdrop per frame is the cost pressure must not add.
+    let held = c.frost_cache_bytes();
+    for band in [
+        PressureBand::Mild,
+        PressureBand::Moderate,
+        PressureBand::Severe,
+        PressureBand::Critical,
+    ] {
+        PRESSURE.report(band);
+        assert_eq!(c.trim_frost(), 0, "{band:?} took the frost reserve");
+        assert_eq!(c.frost_cache_bytes(), held, "{band:?}");
+    }
 
-    // Nothing was lost: the same scene composes the same frame, blurred again.
+    // And the same scene composes the same frame either way.
     repaint_everything(&mut c);
     assert_eq!(c.frame(), warm.as_slice());
-    assert!(c.frame_stats().blur_px > 0);
 }
 
 #[test]
@@ -6019,6 +6048,11 @@ fn releasable_compositor(
         pressure,
     )
     .expect("compositor")
+}
+
+/// Whether the compositor still holds `id`'s content pixels.
+fn content(c: &Compositor, id: WindowId) -> bool {
+    c.window(id).expect("window").has_content()
 }
 
 /// A decorated window whose pixels an app presents — the only kind the
@@ -6225,8 +6259,6 @@ fn the_release_ladder_follows_the_pressure_band() {
     c.composite();
     let _ = c.pending_redraws();
 
-    let content = |c: &Compositor, id: WindowId| c.window(id).expect("window").has_content();
-
     // Normal: memory is plentiful and every release costs a repaint.
     PRESSURE.report(PressureBand::Normal);
     assert_eq!(c.release_content_under_pressure(Some(focused)), 0);
@@ -6290,6 +6322,109 @@ fn each_release_queues_exactly_one_redraw_request() {
     // Showing a window whose pixels are gone asks again, once.
     assert!(c.set_visible(hidden, true));
     assert_eq!(c.pending_redraws(), alloc::vec![hidden]);
+}
+
+#[test]
+fn hiding_a_window_releases_its_content_without_waiting_for_the_band_to_move() {
+    // The defect: the ladder reads the band *and* each window's visibility,
+    // but ran only on the band's wake — which is edge-triggered. A user
+    // minimising a window on a machine whose pressure had already settled
+    // therefore freed nothing until the band happened to move again, which on
+    // a plateaued machine is never. Minimising a full-screen window is the
+    // largest easily-recovered block the desktop holds, so this was the
+    // ordinary case, not a corner.
+    static PRESSURE: ReportedPressure = ReportedPressure::unknown();
+    let mut c = releasable_compositor(&PRESSURE, mode(320, 240), BLUE);
+    let win = app_window(&mut c, 10, 10, 40, "editor");
+    present_full(&mut c, win, RED);
+    c.composite();
+    assert!(content(&c, win));
+
+    // At normal nothing is released: every release costs the owning app a
+    // repaint, and there is no reason to spend one.
+    assert!(c.set_visible(win, false));
+    assert!(
+        content(&c, win),
+        "normal pressure keeps a hidden window's pixels"
+    );
+    assert!(c.take_released_notices().is_empty());
+
+    // The band moves once — that is the only wake this test allows — and the
+    // window is shown again, so the state under test is "hidden while the band
+    // is already above normal", reached with no further band change.
+    assert!(c.set_visible(win, true));
+    PRESSURE.report(PressureBand::Mild);
+    assert_eq!(
+        c.release_content_under_pressure(None),
+        0,
+        "a visible window is spared at mild, so the ladder's wake frees nothing"
+    );
+    assert!(content(&c, win));
+    let _ = c.pending_redraws();
+    let _ = c.take_released_notices();
+
+    assert!(c.set_visible(win, false));
+    assert!(!content(&c, win), "the gesture itself released the pixels");
+    assert_eq!(
+        c.take_released_notices(),
+        alloc::vec![win],
+        "and owes its client the news, so both sides let go"
+    );
+    // Nothing is asked of the app while nobody can see it.
+    assert!(c.pending_redraws().is_empty());
+
+    // Shown again, it is asked to present, exactly as after a band-driven
+    // release.
+    assert!(c.set_visible(win, true));
+    assert_eq!(c.pending_redraws(), alloc::vec![win]);
+    PRESSURE.report(PressureBand::Normal);
+}
+
+#[test]
+fn showing_a_window_again_withdraws_a_notice_the_embedder_has_not_acted_on() {
+    // A minimise and a restore inside one wake: the embedder never got to
+    // unmap its side, so both halves still hold the region and telling the
+    // client to let go would cost an unmap and a re-attach that change
+    // nothing. The redraw is still owed, because the content did go.
+    static PRESSURE: ReportedPressure = ReportedPressure::unknown();
+    let mut c = releasable_compositor(&PRESSURE, mode(320, 240), BLUE);
+    let win = app_window(&mut c, 10, 10, 40, "editor");
+    present_full(&mut c, win, RED);
+    c.composite();
+
+    PRESSURE.report(PressureBand::Mild);
+    assert!(c.set_visible(win, false));
+    assert!(!content(&c, win));
+    assert!(c.set_visible(win, true));
+    assert!(
+        c.take_released_notices().is_empty(),
+        "a notice nobody acted on is withdrawn"
+    );
+    assert_eq!(c.pending_redraws(), alloc::vec![win]);
+    PRESSURE.report(PressureBand::Normal);
+}
+
+#[test]
+fn hiding_a_window_the_embedder_paints_itself_releases_nothing() {
+    // The taskbar, a session dialog, the lock screen: no client to ask, so a
+    // release would blank them with no way back. Fail closed, at every band.
+    static PRESSURE: ReportedPressure = ReportedPressure::unknown();
+    let mut c = releasable_compositor(&PRESSURE, mode(320, 240), BLUE);
+    let own = titled_window(&mut c, 10, 10, 40, "session");
+    c.composite();
+    assert!(content(&c, own));
+
+    for band in [PressureBand::Mild, PressureBand::Critical] {
+        PRESSURE.report(band);
+        assert!(c.set_visible(own, false));
+        assert!(
+            content(&c, own),
+            "{band:?} blanked a session-painted window"
+        );
+        assert!(c.take_released_notices().is_empty(), "{band:?}");
+        assert!(c.set_visible(own, true));
+    }
+    PRESSURE.report(PressureBand::Normal);
 }
 
 #[test]

@@ -29,6 +29,17 @@
 //! module only composes them into the one declaration both consumers
 //! would otherwise each spell out.
 //!
+//! # Every one of them keeps a reserve
+//!
+//! All three constructors declare
+//! [`UI_CACHE_RESERVE_BYTES`] irreducible,
+//! clamped by each cache's own display-derived ceiling. The three differ in
+//! how much *speculation* they hold above that — a cursor fraction, a
+//! screenful, a whole working set — and in which bands take it; none of
+//! them is ever emptied outright, because a session with no rasterised
+//! pixels left redraws the same screen through a filesystem read, a
+//! sandbox round trip, or an IPC call per element, every repaint.
+//!
 //! # One constructor, injected
 //!
 //! There is exactly one way to build such a cache, and it demands the
@@ -46,7 +57,7 @@ use tairix_log::Sink;
 use crate::cache::{CachedBytes, ReclaimCache};
 use crate::model::{
     CacheBudget, CacheCandidate, InvalidationSource, RebuildCost, ReclaimClass, ReclaimOwner,
-    ReclaimRule, Sensitivity,
+    ReclaimRule, Sensitivity, UI_CACHE_RESERVE_BYTES,
 };
 use crate::pressure::PressureGauge;
 
@@ -97,7 +108,7 @@ where
     ReclaimCache::new(
         label,
         disposable_ui_candidate(seat, entry_metadata_bytes),
-        CacheBudget::from_backing(fb_bytes),
+        CacheBudget::from_backing(fb_bytes).with_reserved_floor(UI_CACHE_RESERVE_BYTES),
         pressure,
         sink,
     )
@@ -134,7 +145,7 @@ where
     ReclaimCache::new(
         label,
         disposable_ui_candidate(seat, entry_metadata_bytes),
-        CacheBudget::from_ceiling(fb_bytes),
+        CacheBudget::from_ceiling(fb_bytes).with_reserved_floor(UI_CACHE_RESERVE_BYTES),
         pressure,
         sink,
     )
@@ -150,7 +161,8 @@ where
 /// memory the model reclaims among equals. It differs in one respect —
 /// the whole of that budget is declared the session's live working set
 /// ([`CacheBudget::with_working_set_floor`]), so mild and moderate
-/// pressure leave it alone and severe still takes it.
+/// pressure leave it alone and severe takes it down to the shared
+/// irreducible reserve.
 ///
 /// The budget *is* the working set here rather than a speculative
 /// allowance around one: it is a small fraction of one frame of the very
@@ -178,7 +190,9 @@ where
     ReclaimCache::new(
         label,
         disposable_ui_candidate(seat, entry_metadata_bytes),
-        budget.with_working_set_floor(budget.hard()),
+        budget
+            .with_working_set_floor(budget.hard())
+            .with_reserved_floor(UI_CACHE_RESERVE_BYTES),
         pressure,
         sink,
     )
@@ -269,6 +283,87 @@ mod tests {
             "the cursor/icon fraction is far too small for window furniture"
         );
         assert!(glyphs.charged_bytes() <= CacheBudget::from_backing(fb_bytes).hard());
+    }
+
+    #[test]
+    fn every_desktop_cache_keeps_its_reserve_at_the_deepest_band() {
+        use crate::model::UI_CACHE_RESERVE_BYTES;
+        use crate::pressure::shrink_target;
+
+        // One 1080p output, and a glyph small enough that a screenful of them
+        // fits inside the smallest of the three budgets.
+        let gauge: &'static ReportedPressure = Box::leak(Box::new(ReportedPressure::unknown()));
+        gauge.report(PressureBand::Normal);
+        let sink: &'static DiscardSink = Box::leak(Box::new(DiscardSink));
+        let fb_bytes = 1920 * 1080 * 4;
+
+        let mut caches: Vec<(&str, ReclaimCache<u32, Glyph, u64>)> = vec![
+            (
+                "cursor",
+                disposable_ui_cache("test.cursor", 1, fb_bytes, 32, gauge, sink),
+            ),
+            (
+                "chrome",
+                screenful_ui_cache("test.chrome", 1, fb_bytes, 32, gauge, sink),
+            ),
+            (
+                "icons",
+                working_set_ui_cache("test.icons", 1, fb_bytes, 32, gauge, sink),
+            ),
+        ];
+        for (what, cache) in &mut caches {
+            let _ = cache.get_or_build(&1, 0, || {
+                Some(Glyph {
+                    bytes: vec![0x55; 4096],
+                })
+            });
+            assert!(cache.charged_bytes() > 0, "{what}");
+        }
+
+        for band in [PressureBand::Severe, PressureBand::Critical] {
+            gauge.report(band);
+            for (what, cache) in &mut caches {
+                assert_eq!(
+                    cache.enforce_pressure(),
+                    0,
+                    "{band:?} took {what}'s reserve"
+                );
+                assert_eq!(cache.len(), 1, "{band:?} {what}");
+            }
+        }
+
+        // Above the reserve the ordinary order still applies: a screenful
+        // cache holding more than the reserve gives the excess back at mild
+        // pressure and keeps the reserve. Furniture strips at this width, so
+        // the figures are a real desktop's.
+        gauge.report(PressureBand::Normal);
+        let strips = 1920 * 32 * 4;
+        let mut chrome: ReclaimCache<u32, Glyph, u64> =
+            screenful_ui_cache("test.chrome.deep", 1, fb_bytes, 32, gauge, sink);
+        for key in 0..8u32 {
+            let _ = chrome.get_or_build(&1, key, || {
+                Some(Glyph {
+                    bytes: vec![0x22; strips],
+                })
+            });
+        }
+        assert!(chrome.charged_bytes() > UI_CACHE_RESERVE_BYTES);
+        gauge.report(PressureBand::Mild);
+        assert!(chrome.enforce_pressure() > 0, "the speculation must go");
+        assert!(chrome.charged_bytes() <= UI_CACHE_RESERVE_BYTES);
+        assert!(!chrome.is_empty(), "but not the reserve");
+
+        // The reserve is the smaller of the shared figure and the cache's own
+        // display-derived ceiling, so a small budget reserves all of itself
+        // and a screen-sized one reserves the shared figure.
+        let small = CacheBudget::from_backing(fb_bytes).with_reserved_floor(UI_CACHE_RESERVE_BYTES);
+        let large = CacheBudget::from_ceiling(fb_bytes).with_reserved_floor(UI_CACHE_RESERVE_BYTES);
+        assert_eq!(small.reserved(), small.hard());
+        assert_eq!(large.reserved(), UI_CACHE_RESERVE_BYTES);
+        assert_eq!(
+            shrink_target(PressureBand::Critical, ReclaimClass::DisposableUi, large),
+            UI_CACHE_RESERVE_BYTES
+        );
     }
 
     #[test]

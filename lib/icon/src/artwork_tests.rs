@@ -797,18 +797,14 @@ fn owned_artwork_tells_a_storing_caller_pending_from_refused() {
 
 #[test]
 fn owned_artwork_hands_back_a_picture_the_cache_could_not_retain() {
-    // A gauge of this test's own, so moving the band cannot perturb another's.
-    let gauge: &'static ReportedPressure = Box::leak(Box::new(ReportedPressure::unknown()));
-    gauge.report(PressureBand::Normal);
-    let sink: &'static DiscardSink = Box::leak(Box::new(DiscardSink));
-    let mut c = artwork_cache("test.icon-artwork", 1, 1920 * 1080 * 4, gauge, sink);
+    // An output too small for its budget to hold one decode: the state in
+    // which the cache genuinely retains nothing, since no band empties it
+    // below the reserve it declares.
+    let (_gauge, mut c) = cache_at_on(PressureBand::Normal, FB_TOO_SMALL_FOR_ONE_ICON);
     let mut reader = CountingReader::new().with("/a.png", vec![0u8; 10]);
     let mut ras = SquareRasteriser;
     let request = IconRequest::asset(IconKind::AppBundle, "/a.png");
 
-    // Severe: the band at which even the icon working set yields, so the
-    // cache genuinely retains nothing.
-    gauge.report(PressureBand::Severe);
     let inline = &mut InlineArtwork::new(&mut reader, &mut ras);
     assert!(
         c.artwork(inline, request, 8).is_none(),
@@ -917,14 +913,27 @@ impl ArtworkResolver for DecliningResolver<'_> {
 
 /// A cache at `band`, wired like a real seat's.
 fn cache_at(band: PressureBand) -> (&'static ReportedPressure, ArtworkCache) {
+    cache_at_on(band, 1920 * 1080 * 4)
+}
+
+/// The same, on an output of `fb_bytes` — how a caller reaches a budget too
+/// small to hold one decode, which is the only state in which the cache
+/// genuinely cannot keep a picture (no band empties it below its reserve).
+fn cache_at_on(band: PressureBand, fb_bytes: usize) -> (&'static ReportedPressure, ArtworkCache) {
     let gauge: &'static ReportedPressure = Box::leak(Box::new(ReportedPressure::unknown()));
     gauge.report(band);
     let sink: &'static DiscardSink = Box::leak(Box::new(DiscardSink));
     (
         gauge,
-        artwork_cache("test.icon-artwork", 1, 1920 * 1080 * 4, gauge, sink),
+        artwork_cache("test.icon-artwork", 1, fb_bytes, gauge, sink),
     )
 }
+
+/// An output whose whole artwork budget is smaller than any decode's pixels,
+/// so every admission is refused. A sixteenth of this is the ceiling, and the
+/// reserve is clamped to it, which is what makes "retains nothing" reachable
+/// without a band that empties the cache.
+const FB_TOO_SMALL_FOR_ONE_ICON: usize = 1024;
 
 #[test]
 fn tightening_pressure_never_takes_the_drawn_icon_away() {
@@ -959,12 +968,11 @@ fn tightening_pressure_never_takes_the_drawn_icon_away() {
 
 #[test]
 fn a_decode_the_cache_cannot_keep_is_reported_once_not_repeated() {
-    // At severe pressure the pixels genuinely must go. What must not happen is
-    // the desktop asking for them again on every frame: the resolver is told
-    // the answer was declined, so it can hold the key back until the band
-    // moves.
+    // A budget with no room for the decode at all. What must not happen is the
+    // desktop asking for it again on every frame: the resolver is told the
+    // answer was declined, so it can hold the key back until something moves.
     let path = icon_artwork_path(IconKind::Folder);
-    let (gauge, mut cache) = cache_at(PressureBand::Severe);
+    let (_gauge, mut cache) = cache_at_on(PressureBand::Normal, FB_TOO_SMALL_FOR_ONE_ICON);
     let mut reader = CountingReader::new().with(&path, vec![0u8; 64]);
     let mut ras = SquareRasteriser;
     let mut resolver = DecliningResolver::new(&mut reader, &mut ras);
@@ -972,7 +980,7 @@ fn a_decode_the_cache_cannot_keep_is_reported_once_not_repeated() {
 
     assert!(
         cache.artwork(&mut resolver, request, 32).is_none(),
-        "severe pressure falls back to the glyph tier"
+        "a budget that cannot hold the decode falls back to the glyph tier"
     );
     assert_eq!(
         resolver.declined,
@@ -981,8 +989,37 @@ fn a_decode_the_cache_cannot_keep_is_reported_once_not_repeated() {
     );
     assert_eq!(cache.charged_bytes(), 0);
 
-    // Relaxing the band retains it, and the picture is back.
-    gauge.report(PressureBand::Normal);
-    assert!(cache.artwork(&mut resolver, request, 32).is_some());
-    assert!(cache.charged_bytes() > 0);
+    // On an output whose budget does hold it, the picture is retained.
+    let (_gauge, mut roomy) = cache_at(PressureBand::Normal);
+    assert!(roomy.artwork(&mut resolver, request, 32).is_some());
+    assert!(roomy.charged_bytes() > 0);
+}
+
+#[test]
+fn no_band_takes_the_decoded_icons_away() {
+    // The whole icon working set is a fraction of one frame, and rebuilding an
+    // entry costs a capability-gated read plus a parser-sandbox round trip —
+    // the resources a machine short of memory has least of. So the reserve
+    // holds at every band, critical included, and a desktop under pressure
+    // keeps drawing its real artwork rather than re-deriving it per repaint.
+    let request = IconRequest::kind(IconKind::Folder);
+    for band in PressureBand::ALL {
+        let (gauge, mut cache) = cache_at(PressureBand::Normal);
+        let path = icon_artwork_path(IconKind::Folder);
+        let mut reader = CountingReader::new().with(&path, vec![0u8; 64]);
+        let mut ras = SquareRasteriser;
+        let mut resolver = DecliningResolver::new(&mut reader, &mut ras);
+        assert!(cache.artwork(&mut resolver, request, 32).is_some());
+        let charged = cache.charged_bytes();
+        assert!(charged > 0);
+
+        gauge.report(band);
+        assert_eq!(cache.trim(), 0, "{band:?} released a decoded icon");
+        assert_eq!(cache.charged_bytes(), charged, "{band:?}");
+        assert!(
+            cache.artwork(&mut resolver, request, 32).is_some(),
+            "{band:?} draws the retained artwork"
+        );
+        assert_eq!(resolver.decodes, 1, "{band:?} decoded once");
+    }
 }
