@@ -135,6 +135,35 @@ pub struct VolumeHealthSource {
     pub counters: Arc<BlkHealthCountersAtomic>,
 }
 
+impl VolumeHealthSource {
+    /// The live health state the block client last reflected onto this
+    /// device's overlay, or [`None`] when the byte names no live state.
+    #[must_use]
+    pub fn live_availability(&self) -> Option<MountAvailability> {
+        live_availability(&self.availability)
+    }
+}
+
+/// The live health state an availability `overlay` byte names, or [`None`] when
+/// it names none.
+///
+/// Only the overlay's own three live states are live readings; the
+/// authoritative vanish states belong to the surprise-removal path and never
+/// travel through here. This is the one decode of that byte, read by the mount
+/// snapshot and by the block client's own
+/// [`Block::backing_availability`] answer, so the two cannot report one
+/// device's health differently.
+fn live_availability(overlay: &AtomicU8) -> Option<MountAvailability> {
+    match MountAvailability::from_u8(overlay.load(Ordering::Relaxed)) {
+        Ok(
+            live @ (MountAvailability::Available
+            | MountAvailability::Degraded
+            | MountAvailability::Recovering),
+        ) => Some(live),
+        _ => None,
+    }
+}
+
 /// A [`Block`] device served by a user-space block driver over a call
 /// endpoint and a shared data window.
 pub struct BlkClient {
@@ -567,6 +596,19 @@ impl Block for BlkClient {
     /// build does not recognise is served the bounded unclassified envelope.
     /// What the device *said* it is stays on
     /// [`declared_class`](BlkClient::declared_class).
+    /// What the served device last said it could promise, reflected from each
+    /// completion's health status. A composed backing — an array short of
+    /// redundancy, a device inside its recovery grace window — reaches a
+    /// filesystem on this client through here, so its background passes stand
+    /// down instead of spending the bandwidth the layer below needs.
+    ///
+    /// An overlay byte that names no live state leaves the answer available:
+    /// the client seeds it available and only ever stores a live reading, so
+    /// there is nothing to fabricate an unavailable backing from.
+    fn backing_availability(&self) -> MountAvailability {
+        live_availability(&self.health).unwrap_or(MountAvailability::Available)
+    }
+
     fn device_class(&self) -> BlkDeviceClass {
         BlkDeviceClass::served_as(self.declared_class)
     }
@@ -1366,6 +1408,39 @@ mod tests {
                 ]
             );
         });
+    }
+
+    #[test]
+    fn the_served_backings_health_is_what_this_client_promises_a_layer_above() {
+        use tairix_abi::blkio::BlkStatus;
+        let (client, _id, server) = connect_scripted_audited(vec![], 1, &REC);
+        server.join().unwrap();
+        // Nothing unwell has been reported, so a filesystem on this client is
+        // free to spend discretionary I/O on it.
+        assert_eq!(client.backing_availability(), MountAvailability::Available);
+
+        // A composed backing short of redundancy, and a device riding out its
+        // recovery window, each reach the layer above so its background passes
+        // stand down.
+        client.note_health(BlkStatus::Degraded);
+        assert_eq!(client.backing_availability(), MountAvailability::Degraded);
+        client.note_health(BlkStatus::Reset);
+        assert_eq!(client.backing_availability(), MountAvailability::Recovering);
+
+        // A per-request bad-sector verdict says nothing about the volume, so
+        // the promise stands; a valid answer clears the overlay.
+        client.note_health(BlkStatus::MediumError);
+        assert_eq!(client.backing_availability(), MountAvailability::Recovering);
+        client.note_health(BlkStatus::Ok);
+        assert_eq!(client.backing_availability(), MountAvailability::Available);
+
+        // The mount snapshot reads the same overlay through the same decode,
+        // so the two can never disagree about one device.
+        client.note_health(BlkStatus::Degraded);
+        assert_eq!(
+            client.health_source().live_availability(),
+            Some(MountAvailability::Degraded)
+        );
     }
 
     #[test]

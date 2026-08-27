@@ -52,6 +52,13 @@ use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth};
 use tairix_abi::driver::{BufferClass, DriverError};
 use tairix_abi::raid::{ArrayHealth, MemberState, RaidLevel};
+use tairix_abi::sysinfo::MountAvailability;
+
+/// Syndrome members per stripe: RAID6 reserves two members' chunks per
+/// stripe — the P (XOR) and Q (Reed-Solomon) syndromes — so a stripe
+/// carries `n - PARITY_MEMBERS` data chunks and survives that many members
+/// being lost.
+pub(crate) const PARITY_MEMBERS: usize = 2;
 
 #[cfg(test)]
 mod tests;
@@ -436,27 +443,10 @@ impl<B: Block> DualParityArray<'_, B> {
     /// redundancy left to reconstruct a stripe).
     #[must_use]
     pub fn health(&self) -> ArrayHealth {
-        let mut in_sync = 0usize;
-        let mut resyncing = 0usize;
-        let mut lost = 0usize;
-        for member in &*self.members {
-            match member.state {
-                MemberState::InSync => in_sync += 1,
-                MemberState::Resyncing => resyncing += 1,
-                MemberState::Faulted | MemberState::Absent => lost += 1,
-            }
-        }
-        // A stripe needs member_count - 2 present chunks to reconstruct the two
-        // it may be missing; three lost members leaves a stripe unrecoverable.
-        if lost >= 3 || (lost > 0 && in_sync + resyncing < self.members.len() - 2) {
-            ArrayHealth::Failed
-        } else if resyncing > 0 {
-            ArrayHealth::Recovering
-        } else if lost > 0 {
-            ArrayHealth::Degraded
-        } else {
-            ArrayHealth::Optimal
-        }
+        crate::health::parity_health(
+            self.members.iter().map(DualParityMember::state),
+            PARITY_MEMBERS,
+        )
     }
 
     /// Whether a member is still rebuilding.
@@ -562,7 +552,7 @@ impl Layout {
         let chunk = self.chunk;
         let dchunk = lba / chunk;
         let offset = lba % chunk;
-        let data_per_stripe = n - 2;
+        let data_per_stripe = n - PARITY_MEMBERS as u64;
         let stripe = dchunk / data_per_stripe;
         let dpos = dchunk % data_per_stripe;
         let (p, q) = self.syndrome_members(stripe);
@@ -1617,6 +1607,13 @@ impl<B: Block> DualParityArray<'_, B> {
 impl<B: Block> Block for DualParityArray<'_, B> {
     fn device_class(&self) -> BlkDeviceClass {
         crate::health::aggregate_device_class(self.live_devices().map(Block::device_class))
+    }
+
+    fn backing_availability(&self) -> MountAvailability {
+        crate::health::aggregate_backing_availability(
+            self.health(),
+            self.live_devices().map(Block::backing_availability),
+        )
     }
 
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {

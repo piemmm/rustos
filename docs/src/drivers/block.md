@@ -14,6 +14,7 @@ loaded as user-space drivers unless their manifest declares
 |--------------------------------|-----------------------------------------------|--------------------------------|
 | `geometry`                     | report `BlockGeometry { block_size, block_count }` | `DriverHandle` ownership |
 | `device_class`                 | report the `BlkDeviceClass` the I/O budget derives from | `DriverHandle` ownership |
+| `backing_availability`         | report what the device can promise a background consumer | `DriverHandle` ownership |
 | `read_blocks` / `write_blocks` | bulk transfer (multiple of `block_size`)      | `DriverHandle` ownership       |
 | `read_blocks_with_class` / `write_blocks_with_class` | classed transfer (see below) | `DriverHandle` ownership |
 
@@ -130,6 +131,57 @@ knows what the hardware is — the driver that binds it — declares it:
   (`BlkDeviceClass::most_patient`): the array can only answer as fast as the
   member it is waiting on, so a mirror of an SSD and a spinning disk is served
   the spinning disk's spin-up budget.
+
+## What a device can promise a background consumer
+
+A layer that verifies, discards, or rebuilds its own storage in the background
+faces a question no per-request status answers: *is the thing underneath me in
+a state where discretionary I/O is appropriate at all?* A degraded or
+rebuilding array's bandwidth belongs to its own rebuild, a device inside its
+recovery grace window must not be handed reads it did not have to serve, and a
+discard — destructive and irreversible — must never be issued to a fault domain
+whose state is in doubt. **Restoring redundancy below outranks verifying
+above**, and asking is the only way a layer can know.
+
+`Block::backing_availability` is that question, answered in the shared
+`MountAvailability` vocabulary rather than a second one:
+
+- The **default is `Available`** — the honest answer for a plain device with
+  nothing composed beneath it.
+- A device that **wraps** another forwards the inner answer: a partition window
+  (`tairix_partition::PartitionBlock`), the kernel block cache, the retention
+  journal, a `&mut B` adapter. A window that inherited the default instead would
+  tell a filesystem on a partition that its backing is whole while the composed
+  device beneath is rebuilding.
+- A device that **composes** others folds its own state with theirs through
+  `MountAvailability::worse_of`, so the worst answer anywhere in the stack is
+  what the top layer acts on. A RAID array folds its `ArrayHealth` with its live
+  members' answers (`tairix_raid::health`): a member that is still in sync while
+  *itself* degraded or riding out a recovery window leaves the array optimal, and
+  that is exactly the case the query exists to surface.
+- A **block-service client** (`BlkClient` kernel-side, `RemoteBlock` in
+  userland) reflects the health status each completion carried, through the one
+  shared `MountAvailability::from_block_status` mapping. There is no second state
+  machine: the serving driver owns the sticky one and its grace window, and the
+  client mirrors its per-request verdict.
+
+The query governs *discretionary background I/O only*. A user's read or write is
+unaffected, reporting the state touches no hardware and cannot fail, and it needs
+no capability beyond the handle that already reaches the device — it reports a
+state the caller's own device already has.
+
+### Crossing the block-service seam
+
+A composed array serves a read perfectly well while short of redundancy, so a
+consumer told only "the transfer succeeded" would mount it and report a clean
+bill on sand. The shared serve engine therefore asks the served device what it
+can promise and reports that as the success status
+(`BlkStatus::for_backing`): `Available` answers `BlkStatus::Ok` exactly as
+before, and anything less answers `BlkStatus::Degraded` — the only honest word
+for a serving-but-unwell device, since the data *is* valid and every other
+non-`Ok` status either says the payload cannot be consumed or invites the
+consumer to reissue a good answer. The consumer's mount overlay then reads the
+volume as at-risk and audits the edge, with no extra plumbing.
 
 ## Health state machine and the recovery grace window
 

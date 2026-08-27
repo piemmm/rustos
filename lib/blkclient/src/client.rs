@@ -13,6 +13,7 @@ use tairix_abi::blkio::{
     BLK_COMPLETION_LEN, BLK_DATA_LEN, BLK_FLAG_READ_ONLY, BLK_REQUEST_LEN,
 };
 use tairix_abi::driver::block::{Block, BlockGeometry};
+use tairix_abi::sysinfo::MountAvailability;
 use tairix_abi::{DriverError, Errno};
 
 /// Smallest logical block size a sane device reports.
@@ -96,6 +97,12 @@ pub struct RemoteBlock<'w, C: BlkCall> {
     /// this build does not recognise, held distinct from every named class so
     /// nothing above reports a medium the device never declared.
     declared_class: Option<BlkDeviceClass>,
+    /// What the served device last said it could promise, reflected from each
+    /// completion's health status through the one shared mapping. The serving
+    /// driver owns the state machine and its grace window; this client only
+    /// mirrors its per-request verdict, so a composition layered over this one
+    /// sees a degraded or rebuilding backing rather than a clean bill.
+    availability: MountAvailability,
 }
 
 impl<'w, C: BlkCall> RemoteBlock<'w, C> {
@@ -148,6 +155,9 @@ impl<'w, C: BlkCall> RemoteBlock<'w, C> {
             // envelope; the device's own class is adopted below.
             declared_class: None,
             budget: BlkDeviceClass::served_as(None).budget(),
+            // Nothing has been served yet, so there is nothing to stand
+            // background work down for until a completion says otherwise.
+            availability: MountAvailability::Available,
         };
         let completion = client.transfer(BlkRequest {
             op: BlkOp::Geometry,
@@ -221,7 +231,11 @@ impl<'w, C: BlkCall> RemoteBlock<'w, C> {
             self.window,
             self.budget.deadline_ns,
         )?;
-        Ok(decode_outcome(reply.get(..got).ok_or(Errno::BadMagic)?))
+        let outcome = decode_outcome(reply.get(..got).ok_or(Errno::BadMagic)?);
+        if let Some(next) = MountAvailability::from_block_status(outcome.status) {
+            self.availability = next;
+        }
+        Ok(outcome)
     }
 
     /// Largest whole-block chunk a single transfer can move through the
@@ -266,6 +280,10 @@ impl<C: BlkCall> Block for RemoteBlock<'_, C> {
 
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {
         Ok(self.geometry)
+    }
+
+    fn backing_availability(&self) -> MountAvailability {
+        self.availability
     }
 
     fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {

@@ -1164,10 +1164,14 @@ definition, so a member is never re-probed before its own driver would have
 given up on it — doubling to a 32× ceiling, and a demonstrated return
 (`note_member_returned`, the IO3/IO4 recovery signal) collapses an escalated
 wait back to that base delay and no further, so neither a flapping member nor a
-repeating signal becomes a re-probe storm. The scrub cadence and the busy window
-are properties of the accepted risk and of the workload rather than of the
-hardware, so they are one documented default per array, settable through the
-policy's public fields; `ArrayMaintenance::new` takes the elapsed time since the
+repeating signal becomes a re-probe storm. The background cadences are **not**
+RAID's own: the duty arithmetic is the shared `blkio::DutyPacer` over the shared
+class-keyed `blkio::MaintenanceBudget` the policy holds whole
+(`policy.background`), so a filesystem verifying the same spindles paces to the
+same notion of "busy" rather than each layer taking its own share of one device
+(§2.2). The scrub cadence and the busy window are properties of the accepted
+risk and of the workload rather than of the hardware, so they are one documented
+default per array, settable through the budget's public fields; `ArrayMaintenance::new` takes the elapsed time since the
 last completed pass from the caller's persisted record, and `u64::MAX` (no
 record) makes the first pass due at once — an array whose verification history
 is unknown is verified, not assumed clean (§5.4, §26.5). Deliberately out of
@@ -1794,7 +1798,8 @@ the critical path and land first.
   `MaintenanceAction::Checkpoint { progress, pass_completed }`, ranked above
   both chunk kinds (metadata is not array bandwidth, so it never waits behind a
   rebuild running flat out), due only when the members' records no longer say
-  what the array knows, and paced by `MaintenancePolicy::checkpoint_period_ns`
+  what the array knows, and paced by the shared budget's
+  `checkpoint_period_ns`
   (30 s — one small write per current member per interval bounds both the
   discarded re-work and the write wear). The action *carries* the position, so
   the scheduler and the disks cannot disagree about what was written;

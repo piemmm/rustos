@@ -1,6 +1,6 @@
 # ARXFS-MAINTENANCE.md — autonomous filesystem health: the maintenance runner
 
-Status: **planned** (stages M0–M7, none landed).
+Status: **in progress** (M0 done; M1–M7 planned).
 Binding under `AGENTS.md` and listed in its §15.18 jump-sheet.
 This plan owns ARXFS spec **stage 18** (`docs/src/filesystem/arxfs-spec.md`
 §15/§18), whose spec section is **§24**.
@@ -220,21 +220,28 @@ and the accepted exposure window — so a second copy in ARXFS would be the
 duplication the charter forbids, and worse: two layers pacing to two different
 notions of "busy" cannot compose (§6).
 
-The work is therefore to **hoist, then consume**:
+That hoist is **done** (M0):
 
-- The class-keyed background budget (`busy_duty_percent`, `foreground_idle_ns`,
-  `checkpoint_period_ns`, and the exposure window) joins `IoBudget` in
-  `lib/abi/src/blkio.rs`, which is already the one home for per-`BlkDeviceClass`
-  storage policy and its small pure state machines (`IoBudget::should_reissue`,
-  `BlkHealth::poll`, `recovery_wait_timeout`). Both consumers already depend on
-  `lib/abi`, so this adds no crate and no dependency edge.
+- The class-keyed background budget is `MaintenanceBudget` beside `IoBudget` in
+  `lib/abi/src/blkio.rs` — already the one home for per-`BlkDeviceClass` storage
+  policy and its small pure state machines (`IoBudget::should_reissue`,
+  `BlkHealth::poll`, `recovery_wait_timeout`) — derived by
+  `BlkDeviceClass::maintenance_budget()`. It carries `scrub_period_ns` (the
+  exposure window), `busy_duty_percent`, `foreground_idle_ns`, and
+  `checkpoint_period_ns`; only the duty share is class-dependent. Both consumers
+  already depend on `lib/abi`, so this added no crate and no dependency edge.
 - The duty arithmetic — *after a chunk taking `d`, hold the next off for
-  `d × (100 − duty) / duty`; an idle consumer runs at full speed* — becomes one
-  pure `DutyPacer` value type beside it, consumed by both schedulers.
-- `lib/raid`'s `MaintenancePolicy` keeps its RAID-specific fields (the member
-  re-add cadence) and derives the shared ones from the hoisted budget instead
-  of holding its own copies. Its behaviour must not change: the existing RAID
-  maintenance tests are the regression proof for the hoist.
+  `d × (100 − duty) / duty`; an idle consumer runs at full speed* — is the pure
+  `DutyPacer` value type beside it, consumed by both schedulers.
+- `lib/raid`'s `MaintenancePolicy` holds that budget whole (`policy.background`)
+  plus its own member re-add cadence (`policy.readd`), and `ArrayMaintenance`
+  holds a `DutyPacer`. The existing RAID maintenance tests' assertions are
+  unchanged, and one asserts the policy derives the budget rather than
+  duplicating it.
+
+Still to hoist, with its second consumer: `RetryCadence`/`RetryState` — the
+escalating cadence a failed attempt is held off by — are in `lib/raid` and move
+into `blkio` with the M3 scheduler that needs them.
 
 What is **not** shared is the action vocabulary and the priority order: an
 array re-admits members and rebuilds parity, a filesystem discards and
@@ -264,7 +271,8 @@ The rule, stated once: **restoring redundancy below outranks verifying above.**
   destructive and irreversible, and issuing one to a fault domain whose state
   is in doubt is exactly the "no data-loss shortcut" the charter forbids.
 
-To ask the question, the block seam gains one default-provided query:
+To ask the question, the block seam carries one default-provided query (M0,
+done):
 
 ```text
 Block::backing_availability(&self) -> MountAvailability     default: Available
@@ -272,13 +280,20 @@ Block::backing_availability(&self) -> MountAvailability     default: Available
 
 `MountAvailability` is reused rather than invented: it is already the shared
 vocabulary for *available / degraded / recovering / unavailable*, and
-`lib/abi/src/raid.rs` already maps array health into it. The default is the
-honest answer for a plain device that has nothing composed beneath it. Two live
-producers land with the query — the RAID composer's `Block` impl (from its
-array health) and the kernel block client (from the per-device `BlkHealth`
-state machine and the volume service's unavailable states) — and one live
-consumer, this scheduler, so nothing speculative is added. No new capability:
-it reports a state the caller's own device already has.
+`lib/abi/src/raid.rs` already maps array health into it. It gained the explicit
+`severity`/`worse_of` ordering the fold needs, kept independent of the wire byte.
+The default is the honest answer for a plain device that has nothing composed
+beneath it. No new capability: it reports a state the caller's own device
+already has.
+
+Every wrapping device forwards it, every composition folds its own
+`ArrayHealth` with its live members' answers through `worse_of`, and both
+block-service clients produce it from the health status each completion carried.
+The answer crosses the block-service seam because the shared serve engine
+reports what the served device can promise as the success status
+(`BlkStatus::for_backing`) — so a kernel-hosted ARXFS over a user-space array
+composer learns the truth without a second channel, and the mount table stops
+reporting a degraded array as available.
 
 `arxfs`'s reported volume health takes the worse of its own findings and the
 backing's availability, so `arxfs status` on a filesystem over a degraded array
@@ -686,13 +701,53 @@ when M7 has landed **and** this section is empty.
 One stage per session, each ending with the whole-project gate green and this
 file's status plus spec §24 updated before it is reported.
 
-### M0 — the shared pacer and the cross-layer query. **planned**
-Hoist the class-keyed background budget and the duty pacer into
-`lib/abi/src/blkio.rs`; make `lib/raid`'s policy derive from them with its tests
-unchanged. Add `Block::backing_availability` with its two producers.
-*Acceptance:* one definition of the pace and the budget in the tree; the RAID
-maintenance suite passes unchanged; a composed array reports its degraded state
-through the query and a plain device reports `Available`.
+### M0 — the shared pacer and the cross-layer query. **done**
+The class-keyed background budget is `blkio::MaintenanceBudget`, derived by
+`BlkDeviceClass::maintenance_budget()`: the exposure window, the duty share, the
+busy window, and the checkpoint interval, of which only the duty share is
+class-dependent. The duty arithmetic is `blkio::DutyPacer` — pace after a chunk,
+hold off after a failure, report readiness and the next deadline, note
+foreground. `lib/raid`'s `MaintenancePolicy` holds that budget whole
+(`policy.background`) plus its own `readd` cadence, and `ArrayMaintenance` holds
+a `DutyPacer`; the RAID maintenance suite's assertions are unchanged and a test
+asserts the policy *derives* the budget rather than duplicating it.
+
+`Block::backing_availability() -> MountAvailability` is the cross-layer query,
+default `Available`. Every wrapping device forwards it (`&mut B`,
+`PartitionBlock`, the kernel block cache, the retention journal, the shared
+block handle); every composition folds its own `ArrayHealth` with its live
+members' answers through `MountAvailability::worse_of`
+(`tairix_raid::health::aggregate_backing_availability`), so a member that is
+in sync while itself recovering still stands the layer above down; and both
+block-service clients (`BlkClient`, `RemoteBlock`) produce it from the health
+status each completion carried, through the one shared
+`from_block_status` mapping. `MountAvailability` gained the explicit
+`severity`/`worse_of` ordering that fold needs, kept independent of the wire
+byte.
+
+The answer crosses the block-service seam because the shared serve engine now
+reports what the served device can promise as the success status
+(`BlkStatus::for_backing`): `Available` answers `Ok` exactly as before, anything
+less answers `Degraded` — valid data, not reissuable. That closes a live
+reporting defect: a mount over a degraded composed array previously read as
+`Available` in the mount table, because a degraded array serves its reads and
+the completion said only that the transfer succeeded.
+
+**Fixed with it, with a regression test that fails before and passes after.**
+`Raid10Array::health` reported a column left with only a rebuild target as
+`Recovering` — an array that could not serve those stripes read as serving and
+being repaired, and the composer's array-lost escalation stayed silent. The
+per-family redundancy rules are now stated once
+(`tairix_raid::health::{mirror_health, parity_health, stripe_of_mirrors_health}`),
+so a RAID10 column follows the same mirror rule a whole RAID1 array does and the
+three near-identical parity bodies are one function over the syndrome count.
+`OwnedRaidArray::health` and `ArrayRuntime::array_health` are `&self` reads as a
+consequence.
+
+*Not done here, and not deferred:* `RetryCadence`/`RetryState` (`lib/raid`) are
+the fourth shared quantity §5 names, but no non-RAID consumer exists yet, so
+they are hoisted into `blkio` by **M3** with the ARXFS scheduler that needs
+them — not moved now with no second consumer.
 
 ### M1 — the read-only rule (D-M1). **planned**
 One shared read-only repair rule for both copy-repair sites; `scrub` and
@@ -719,7 +774,9 @@ than left beside the new path.
 
 ### M3 — the scheduler. **planned**
 `maintain.rs`: `VolumeMaintenance`, the action set, the priority order, the
-deadline, the pace, the escalation cadence. Host-pure, no runner yet.
+deadline, the pace (the M0 `DutyPacer`), the escalation cadence — which is where
+`RetryCadence`/`RetryState` gain their second consumer and are hoisted out of
+`lib/raid` beside the rest of the shared budget. Host-pure, no runner yet.
 *Acceptance:* tests 1, 3, 16.
 
 ### M4 — the driver ABI facet. **planned**

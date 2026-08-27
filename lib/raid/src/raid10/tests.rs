@@ -9,6 +9,7 @@ use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, HealthSnapshot};
 use tairix_abi::driver::{BufferClass, DriverError};
 use tairix_abi::raid::{ArrayHealth, MemberState};
+use tairix_abi::sysinfo::MountAvailability;
 
 // Small blocks keep the test doubles' backing arrays well under clippy's
 // large-stack-array threshold even for a four-member array.
@@ -392,6 +393,56 @@ fn a_fully_absent_pair_assembles_failed_and_fails_that_region_closed() {
     array.read_blocks(0, &mut buf).expect("pair 0 reads");
     assert!(buf.iter().all(|&b| b == pat(0)));
     assert!(array.read_blocks(2, &mut buf).is_err());
+}
+
+#[test]
+fn a_column_left_with_only_a_rebuild_target_reports_the_array_failed() {
+    // A column whose last current copy faults *while* its sibling is still
+    // rebuilding has no source to serve a read from and none to finish the
+    // rebuild from, so the array can no longer serve the stripes that live
+    // there. Reporting it as merely `Recovering` would say the array is
+    // serving and being repaired when neither is true — and would leave the
+    // composer's array-lost escalation silent.
+    let mut members = four(0);
+    let mut array = Raid10Array::assemble(&mut members, CHUNK).expect("assembles");
+    write_all(&mut array);
+
+    // Fault copy 0 of column 0, hot-swap it, and leave the spare mid-rebuild.
+    dev(&array, 0)
+        .read_fault
+        .set(Some(DriverError::DeviceOffline));
+    let mut buf = block(0);
+    array.read_blocks(0, &mut buf).expect("survivor serves");
+    array
+        .replace_member(0, FaultBlock::new(0xAA))
+        .expect("replace faulted member");
+    assert_eq!(array.member_state(0), Some(MemberState::Resyncing));
+    assert_eq!(array.health(), ArrayHealth::Recovering);
+
+    // Now lose the copy the rebuild was reading from.
+    dev(&array, 1)
+        .read_fault
+        .set(Some(DriverError::DeviceOffline));
+    assert!(array.read_blocks(0, &mut buf).is_err(), "no copy can serve");
+    assert_eq!(array.member_state(1), Some(MemberState::Faulted));
+    assert_eq!(
+        array.health(),
+        ArrayHealth::Failed,
+        "a column with no current copy cannot serve, whatever is rebuilding in it"
+    );
+    assert!(!array.health().is_serving());
+    assert_eq!(
+        array.health().to_mount_availability(),
+        MountAvailability::UnavailableLost,
+        "the consumer is told the array is lost, not that a repair is in flight"
+    );
+
+    // The unaffected column keeps serving its own stripes (logical chunk 1,
+    // so LBA 2 with a two-block stripe unit); only the array's whole-device
+    // promise is gone.
+    array
+        .read_blocks(2, &mut buf)
+        .expect("the intact column still serves");
 }
 
 #[test]

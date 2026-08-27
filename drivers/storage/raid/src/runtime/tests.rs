@@ -19,9 +19,11 @@ use crate::testkit::{
     NOW, UUID_A,
 };
 
-use tairix_abi::blkio::{decode_completion, BlkHealthState, BlkOp, BLK_COMPLETION_LEN};
-use tairix_abi::raid::{MemberState, RaidLevel};
-use tairix_abi::sysinfo::BlkHealthTransition;
+use tairix_abi::blkio::{
+    decode_completion, decode_outcome, BlkHealthState, BlkOp, BlkStatus, BLK_COMPLETION_LEN,
+};
+use tairix_abi::raid::{ArrayHealth, MemberState, RaidLevel};
+use tairix_abi::sysinfo::{BlkHealthTransition, MountAvailability};
 use tairix_abi::DriverError;
 use tairix_raid::{ArraySuperblock, MaintenanceAction, RaidError};
 use tairix_raidmeta::{ArrayProgress, MaintenanceRecord, RESERVED_METADATA_BLOCKS};
@@ -153,6 +155,61 @@ fn a_live_array_answers_block_requests_through_the_shared_serve_engine() {
         window.iter().all(|&byte| byte == 0x5A),
         "the bytes written to the array read back from it"
     );
+}
+
+#[test]
+fn a_degraded_array_serves_its_reads_while_telling_its_consumer_so() {
+    // An array short of redundancy answers every read perfectly well, so a
+    // consumer told only "the transfer succeeded" would mount it and report a
+    // clean bill on sand — and a filesystem on it would spend discretionary
+    // scrub bandwidth the array needs to rebuild. The completion carries what
+    // the array can promise instead.
+    let present = superblock(RaidLevel::Mirror, UUID_A, 2, 0, 5);
+    let mut supply = [Some(stamped(&present))];
+    let assembled = assemble_array(
+        identity_of(UUID_A, &[present]),
+        &candidates(&[present]),
+        NOW,
+        |tag| supply[tag].take(),
+    )
+    .expect("one copy of a two-copy mirror still serves");
+    let mut array = live(assembled);
+    let mut window = vec![0u8; BLOCK_SIZE as usize];
+    let mut reply = [0u8; BLK_COMPLETION_LEN];
+
+    let len = array.serve(&request(BlkOp::Read, 1, 1), &mut window, &mut reply, 0);
+    let outcome = decode_outcome(&reply[..len]);
+    assert_eq!(outcome.status, BlkStatus::Degraded);
+    assert!(
+        outcome.status.data_valid(),
+        "the read did succeed: the survivor served it"
+    );
+    assert!(
+        !outcome.status.is_retryable(),
+        "reissuing a good answer would waste the bandwidth the rebuild needs"
+    );
+    assert_eq!(
+        MountAvailability::from_block_status(outcome.status),
+        Some(MountAvailability::Degraded),
+        "so the consumer's mount reads as at-risk rather than healthy"
+    );
+    assert_eq!(
+        array.health().state(),
+        BlkHealthState::Degraded,
+        "and the array's own health machine records it, not a fault"
+    );
+
+    // A copy coming back makes the array whole, and the next completion says so
+    // without any consumer having to ask.
+    let returning = stamped(&superblock(RaidLevel::Mirror, UUID_A, 2, 1, 5));
+    array.place_member(1, returning).expect("the copy returns");
+    let clock = TestClock::new();
+    drive(&mut array, &clock, |array| {
+        array.array_health() == ArrayHealth::Optimal
+    });
+    let len = array.serve(&request(BlkOp::Read, 1, 1), &mut window, &mut reply, 0);
+    assert_eq!(decode_outcome(&reply[..len]).status, BlkStatus::Ok);
+    assert_eq!(array.health().state(), BlkHealthState::Healthy);
 }
 
 #[test]

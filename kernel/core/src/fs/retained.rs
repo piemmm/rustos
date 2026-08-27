@@ -60,6 +60,7 @@ use alloc::vec::Vec;
 use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, DiscardCapability};
 use tairix_abi::driver::BufferClass;
+use tairix_abi::sysinfo::MountAvailability;
 use tairix_abi::DriverError;
 use tairix_reclaim::{CacheBudget, GrowthAllowance, MemoryPressure};
 use tairix_sync::SpinLock;
@@ -559,6 +560,10 @@ impl<B: Block> Block for JournaledBlock<B> {
 
     fn device_health(&self) -> Result<DeviceHealth, DriverError> {
         self.device.device_health()
+    }
+
+    fn backing_availability(&self) -> MountAvailability {
+        self.device.backing_availability()
     }
 }
 

@@ -40,6 +40,7 @@ pub mod mbr;
 use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, DiscardCapability};
 use tairix_abi::driver::BufferClass;
+use tairix_abi::sysinfo::MountAvailability;
 use tairix_abi::DriverError;
 
 /// Largest number of present partitions [`parse_partition_table`] retains
@@ -357,6 +358,14 @@ impl<B: Block> Block for PartitionBlock<B> {
     /// them to decide how hard to verify the medium.
     fn device_health(&self) -> Result<DeviceHealth, DriverError> {
         self.inner.device_health()
+    }
+
+    /// What the disk can promise a background consumer is a property of the
+    /// disk, not of a window onto it. Inheriting the available default instead
+    /// would tell a filesystem on a partition that its backing is whole while
+    /// the composed device beneath is rebuilding.
+    fn backing_availability(&self) -> MountAvailability {
+        self.inner.backing_availability()
     }
 
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {

@@ -100,47 +100,13 @@
 //!   scrub from, rebuild from, or hot-swap
 //!   ([`RaidLevel::is_redundant`](tairix_abi::raid::RaidLevel::is_redundant)).
 
-use tairix_abi::blkio::BlkDeviceClass;
+use tairix_abi::blkio::{BlkDeviceClass, DutyPacer, MaintenanceBudget};
 use tairix_abi::driver::block::Block;
 
 use crate::array::{RaidArray, RaidError};
 use crate::backoff::{RetryCadence, RetryState};
 use crate::superblock::ArrayProgress;
 use tairix_abi::raid::{ArrayHealth, MemberState};
-
-/// How long after the last foreground request an array still counts as busy.
-///
-/// This measures the *workload's* burstiness, not the device's speed: a
-/// second comfortably bridges the gap between the requests of one burst, so a
-/// rebuild does not read an inter-request lull as an idle array and grab full
-/// bandwidth from a workload that is still running. It is therefore one
-/// default for every device class, unlike the pacing share and backoff below.
-const FOREGROUND_IDLE_NS: u64 = 1_000_000_000;
-
-/// How long a redundant array goes between proactive scrub passes by default.
-///
-/// This is the operator's tolerated *exposure window*: the time a latent media
-/// error may sit undetected on a copy the read path never consults before a
-/// scrub finds and heals it while redundancy still exists. It is a property of
-/// the risk accepted, not of the hardware, so it is one default for every class
-/// and is overridable per array through [`MaintenancePolicy::scrub_period_ns`].
-/// A week matches the cadence a general-purpose desktop and a server both
-/// tolerate: long enough that the pass is unobtrusive, short enough that a
-/// second fault rarely arrives first.
-const SCRUB_PERIOD_NS: u64 = 7 * 24 * 60 * 60 * 1_000_000_000;
-
-/// How often an advancing pass writes its position to the members by default.
-///
-/// The interval is the whole trade-off: it bounds the work an unclean stop can
-/// discard at one interval's worth of maintenance progress — itself already
-/// bounded by the duty share — while keeping the metadata cost at one small
-/// write per current member per interval, so even a pass measured in days
-/// costs a member a few thousand writes rather than one per chunk. Half a
-/// minute leaves both sides comfortably small at any array size, and like the
-/// scrub cadence it is a property of the re-work an operator tolerates rather
-/// than of the hardware, so it is one default for every class, overridable per
-/// array through [`MaintenancePolicy::checkpoint_period_ns`].
-const CHECKPOINT_PERIOD_NS: u64 = 30 * 1_000_000_000;
 
 /// What a serve loop should do next for one composed array.
 ///
@@ -199,26 +165,19 @@ pub enum MaintenanceAction {
 /// machine.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct MaintenancePolicy {
-    /// How long a redundant array goes between proactive scrub passes,
-    /// measured from the end of one pass to the start of the next.
-    pub scrub_period_ns: u64,
-    /// The share of wall-clock time maintenance may occupy while the array is
-    /// also serving foreground I/O, as a percentage. After a chunk taking `d`,
-    /// the next is held off for `d × (100 − duty) / duty`, so the share holds
-    /// whatever chunk size the caller's scratch buffer implies. An idle array
-    /// runs maintenance at full speed. Values outside `1..=100` are clamped, so
-    /// a mis-set policy can never stall maintenance completely.
-    pub busy_duty_percent: u32,
-    /// How long after the last request reported to
-    /// [`ArrayMaintenance::note_foreground`] the array still counts as busy.
-    pub foreground_idle_ns: u64,
-    /// The shortest interval between two [`MaintenanceAction::Checkpoint`]s of
-    /// an advancing pass. It bounds both the progress an unclean stop discards
-    /// and the metadata writes a long pass costs its members.
-    pub checkpoint_period_ns: u64,
+    /// The cadences an array shares with every other layer that paces a
+    /// background pass over the same spindles: the exposure window between
+    /// verification passes, the duty share of a busy device, the busy window,
+    /// and the checkpoint interval. Held as the one shared
+    /// [`MaintenanceBudget`] rather than as four fields of its own, because two
+    /// layers pacing to two notions of "busy" would together take twice the
+    /// share either intends.
+    pub background: MaintenanceBudget,
     /// The escalating cadence a faulted member is re-probed on, and the delay
     /// a failed maintenance chunk is held off by. Its base delay is the floor
-    /// no recovery signal may pull an attempt below.
+    /// no recovery signal may pull an attempt below. RAID's own, unlike
+    /// [`background`](Self::background): re-admitting a member is not something
+    /// a layer without members does.
     pub readd: RetryCadence,
 }
 
@@ -226,36 +185,16 @@ impl MaintenancePolicy {
     /// The default policy for an array of `class` — the class its members'
     /// fold declares through [`Block::device_class`].
     ///
-    /// The two class-dependent quantities are derived from that class's own I/O
-    /// budget rather than a second hand-written table that could drift from it:
-    ///
-    /// - The **first re-add delay** is the class's recovery grace window
-    ///   (`IoBudget::grace_ns`). Re-probing a member sooner is pointless: it is
-    ///   still inside the window its own driver gives it to come back, so the
-    ///   probe would only ask a device that has not yet been given up on.
-    /// - The **busy duty share** reflects how destructive maintenance is to
-    ///   foreground latency on that class. Every seek a scrub or rebuild costs
-    ///   a rotational disk is one the workload waits for, and a removable unit
-    ///   has a shallow queue that saturates as easily, so both keep a small
-    ///   share; a solid-state device absorbs a parallel background stream with
-    ///   far less interference, and a paravirtual device sits between the two.
-    ///
-    /// The scrub cadence, the busy window, and the checkpoint interval are
-    /// properties of the accepted risk and of the workload rather than of the
-    /// hardware, so they are the same for every class (see
-    /// [`Self::scrub_period_ns`], [`Self::foreground_idle_ns`],
-    /// [`Self::checkpoint_period_ns`]).
+    /// Both parts are derived from that class rather than from a second
+    /// hand-written table that could drift: the background cadences from
+    /// [`BlkDeviceClass::maintenance_budget`], and the **first re-add delay**
+    /// from the class's recovery grace window (`IoBudget::grace_ns`) —
+    /// re-probing a member sooner is pointless, since it is still inside the
+    /// window its own driver gives it to come back.
     #[must_use]
     pub const fn for_class(class: BlkDeviceClass) -> Self {
         Self {
-            scrub_period_ns: SCRUB_PERIOD_NS,
-            busy_duty_percent: match class {
-                BlkDeviceClass::Rotational | BlkDeviceClass::Removable => 10,
-                BlkDeviceClass::Virtual => 25,
-                BlkDeviceClass::SolidState => 40,
-            },
-            foreground_idle_ns: FOREGROUND_IDLE_NS,
-            checkpoint_period_ns: CHECKPOINT_PERIOD_NS,
+            background: class.maintenance_budget(),
             readd: RetryCadence::for_class(class),
         }
     }
@@ -323,12 +262,13 @@ pub enum MaintenanceError {
 pub struct ArrayMaintenance<R> {
     policy: MaintenancePolicy,
     retries: R,
-    /// Monotonic time the next paced maintenance chunk may run.
-    next_chunk_ns: u64,
+    /// The shared duty pacer holding maintenance to its share of a busy array:
+    /// the one definition of that arithmetic, so this scheduler and a
+    /// filesystem's over the same spindles cannot pace to two notions of
+    /// "busy".
+    pacer: DutyPacer,
     /// Monotonic time the next proactive scrub pass may begin.
     next_scrub_ns: u64,
-    /// The last foreground request the caller reported, if any.
-    last_foreground_ns: Option<u64>,
     /// The position the members' on-disk records are believed to hold. A
     /// checkpoint is worth writing exactly when the array has moved away from
     /// it, so a verified, idle array writes no metadata at all.
@@ -355,7 +295,7 @@ impl<R: AsRef<[MemberRetry]> + AsMut<[MemberRetry]>> ArrayMaintenance<R> {
     /// `since_last_scrub_ns` is how long ago the array's last scrub pass
     /// completed, as the caller knows it from the array's persisted maintenance
     /// record; the first pass is then due once the remainder of
-    /// [`MaintenancePolicy::scrub_period_ns`] has elapsed. A caller with **no**
+    /// [`MaintenanceBudget::scrub_period_ns`] has elapsed. A caller with **no**
     /// record passes [`u64::MAX`], which makes the first pass due immediately:
     /// an array whose verification history is unknown is verified rather than
     /// assumed clean, and the duty pacing bounds what that costs.
@@ -373,7 +313,7 @@ impl<R: AsRef<[MemberRetry]> + AsMut<[MemberRetry]>> ArrayMaintenance<R> {
     /// Building it first is safe but wasteful: the first checkpoint then
     /// rewrites a position the members already hold. For the same reason the
     /// first checkpoint of a session is not due until one
-    /// [`checkpoint_period_ns`](MaintenancePolicy::checkpoint_period_ns) has
+    /// [`checkpoint_period_ns`](MaintenanceBudget::checkpoint_period_ns) has
     /// passed — nothing is owed while the array and its records agree, and a
     /// service that restarts repeatedly never writes metadata merely for
     /// starting.
@@ -395,18 +335,21 @@ impl<R: AsRef<[MemberRetry]> + AsMut<[MemberRetry]>> ArrayMaintenance<R> {
         for retry in retries.as_mut() {
             *retry = MemberRetry::new();
         }
-        let next_scrub_ns =
-            now_ns.saturating_add(policy.scrub_period_ns.saturating_sub(since_last_scrub_ns));
+        let next_scrub_ns = now_ns.saturating_add(
+            policy
+                .background
+                .scrub_period_ns
+                .saturating_sub(since_last_scrub_ns),
+        );
         Ok(Self {
             policy,
             retries,
-            next_chunk_ns: now_ns,
+            pacer: DutyPacer::new(policy.background, now_ns),
             next_scrub_ns,
-            last_foreground_ns: None,
             scrub_active: array.scrubbing(),
             checkpointed: array.progress(),
             completion_unwritten: false,
-            next_checkpoint_ns: now_ns.saturating_add(policy.checkpoint_period_ns),
+            next_checkpoint_ns: now_ns.saturating_add(policy.background.checkpoint_period_ns),
             wake_ns: None,
         })
     }
@@ -414,7 +357,7 @@ impl<R: AsRef<[MemberRetry]> + AsMut<[MemberRetry]>> ArrayMaintenance<R> {
     /// Report that the array served a foreground request at `now_ns`, so
     /// maintenance holds to its busy duty share instead of running flat out.
     pub fn note_foreground(&mut self, now_ns: u64) {
-        self.last_foreground_ns = Some(now_ns);
+        self.pacer.note_foreground(now_ns);
     }
 
     /// Report that `member`'s device has demonstrably returned — the recovery
@@ -455,7 +398,7 @@ impl<R: AsRef<[MemberRetry]> + AsMut<[MemberRetry]>> ArrayMaintenance<R> {
         if self.scrub_active && !array.scrubbing() {
             self.scrub_active = false;
             self.completion_unwritten = true;
-            self.next_scrub_ns = now_ns.saturating_add(self.policy.scrub_period_ns);
+            self.next_scrub_ns = now_ns.saturating_add(self.policy.background.scrub_period_ns);
         }
         if array.health() == ArrayHealth::Failed {
             return MaintenanceAction::Idle;
@@ -470,7 +413,7 @@ impl<R: AsRef<[MemberRetry]> + AsMut<[MemberRetry]>> ArrayMaintenance<R> {
             };
         }
         if let Some(chunk) = chunk_pending(array) {
-            if now_ns >= self.next_chunk_ns {
+            if self.pacer.chunk_due(now_ns) {
                 return chunk;
             }
         } else if array.health() == ArrayHealth::Optimal && now_ns >= self.next_scrub_ns {
@@ -502,7 +445,8 @@ impl<R: AsRef<[MemberRetry]> + AsMut<[MemberRetry]>> ArrayMaintenance<R> {
                 if outcome.is_ok() {
                     self.scrub_active = true;
                 } else {
-                    self.next_scrub_ns = now_ns.saturating_add(self.policy.scrub_period_ns);
+                    self.next_scrub_ns =
+                        now_ns.saturating_add(self.policy.background.scrub_period_ns);
                 }
             }
             MaintenanceAction::Checkpoint {
@@ -593,7 +537,8 @@ impl<R: AsRef<[MemberRetry]> + AsMut<[MemberRetry]>> ArrayMaintenance<R> {
         if outcome.is_ok() {
             self.checkpointed = progress;
             self.completion_unwritten &= !pass_completed;
-            self.next_checkpoint_ns = now_ns.saturating_add(self.policy.checkpoint_period_ns);
+            self.next_checkpoint_ns =
+                now_ns.saturating_add(self.policy.background.checkpoint_period_ns);
         } else {
             self.next_checkpoint_ns = now_ns.saturating_add(self.policy.readd.base_ns());
         }
@@ -611,29 +556,16 @@ impl<R: AsRef<[MemberRetry]> + AsMut<[MemberRetry]>> ArrayMaintenance<R> {
         }
     }
 
-    /// Hold the next maintenance chunk off long enough to keep maintenance
-    /// inside its duty share of a busy array, or let it run flat out on an idle
-    /// one.
+    /// Hold the next maintenance chunk off through the shared duty pacer, or —
+    /// when the members reported the transfer failed — for the recovery grace
+    /// window their class allows, rather than hammering hardware that is
+    /// already unwell.
     fn pace_chunk(&mut self, started_ns: u64, now_ns: u64, outcome: Result<(), RaidError>) {
         if outcome.is_err() {
-            // The members reported the transfer failed. Give them the recovery
-            // grace window their class allows before asking again, rather than
-            // hammering hardware that is already unwell.
-            self.next_chunk_ns = now_ns.saturating_add(self.policy.readd.base_ns());
-            return;
+            self.pacer.hold_off(now_ns, self.policy.readd.base_ns());
+        } else {
+            self.pacer.note_chunk(started_ns, now_ns);
         }
-        if !self.foreground_busy(now_ns) {
-            self.next_chunk_ns = now_ns;
-            return;
-        }
-        let duty = u64::from(self.policy.busy_duty_percent.clamp(1, 100));
-        let elapsed = now_ns.saturating_sub(started_ns);
-        self.next_chunk_ns = now_ns.saturating_add(elapsed.saturating_mul(100 - duty) / duty);
-    }
-
-    fn foreground_busy(&self, now_ns: u64) -> bool {
-        self.last_foreground_ns
-            .is_some_and(|at| now_ns.saturating_sub(at) < self.policy.foreground_idle_ns)
     }
 
     /// The soonest time at which [`Self::next_action`] could answer differently:
@@ -653,7 +585,7 @@ impl<R: AsRef<[MemberRetry]> + AsMut<[MemberRetry]>> ArrayMaintenance<R> {
             .filter_map(|retry| retry.0.due_ns())
             .min();
         let next_cycle = if chunk_pending(array).is_some() {
-            Some(self.next_chunk_ns)
+            Some(self.pacer.next_chunk_ns())
         } else if array.health() == ArrayHealth::Optimal {
             Some(self.next_scrub_ns)
         } else {

@@ -59,6 +59,7 @@ use crate::stripe::{StripeArray, StripeError, StripeMember};
 use crate::superblock::ArrayProgress;
 use crate::triple::{TripleParityArray, TripleParityError, TripleParityMember};
 use tairix_abi::raid::{ArrayHealth, MemberState, RaidLevel};
+use tairix_abi::sysinfo::MountAvailability;
 
 #[cfg(test)]
 mod tests;
@@ -79,6 +80,10 @@ trait LiveMember<B: Block> {
     /// The backing device, or [`None`] if this member does not currently
     /// speak for the array.
     fn live_device(&self) -> Option<&B>;
+
+    /// This slot's membership state, which the redundancy rules in
+    /// [`crate::health`] read.
+    fn member_state(&self) -> MemberState;
 }
 
 impl<B: Block> LiveMember<B> for MirrorMember<B> {
@@ -86,6 +91,10 @@ impl<B: Block> LiveMember<B> for MirrorMember<B> {
         crate::health::member_participates(self.state())
             .then(|| self.device())
             .flatten()
+    }
+
+    fn member_state(&self) -> MemberState {
+        self.state()
     }
 }
 
@@ -95,6 +104,10 @@ impl<B: Block> LiveMember<B> for ParityMember<B> {
             .then(|| self.device())
             .flatten()
     }
+
+    fn member_state(&self) -> MemberState {
+        self.state()
+    }
 }
 
 impl<B: Block> LiveMember<B> for DualParityMember<B> {
@@ -102,6 +115,10 @@ impl<B: Block> LiveMember<B> for DualParityMember<B> {
         crate::health::member_participates(self.state())
             .then(|| self.device())
             .flatten()
+    }
+
+    fn member_state(&self) -> MemberState {
+        self.state()
     }
 }
 
@@ -111,6 +128,10 @@ impl<B: Block> LiveMember<B> for TripleParityMember<B> {
             .then(|| self.device())
             .flatten()
     }
+
+    fn member_state(&self) -> MemberState {
+        self.state()
+    }
 }
 
 /// The live devices of `members`, folding the shared participation predicate
@@ -119,6 +140,14 @@ fn live_devices<'a, B: Block + 'a, M: LiveMember<B>>(
     members: &'a [M],
 ) -> impl Iterator<Item = &'a B> {
     members.iter().filter_map(LiveMember::live_device)
+}
+
+/// The membership states of `members`, for the redundancy rules in
+/// [`crate::health`].
+fn member_states<'a, B: Block + 'a, M: LiveMember<B>>(
+    members: &'a [M],
+) -> impl Iterator<Item = MemberState> + 'a {
+    members.iter().map(LiveMember::member_state)
 }
 
 /// The live devices of a [`StripeArray`]'s members: a stripe has no
@@ -513,10 +542,46 @@ impl<B: Block> OwnedRaidArray<B> {
         self.with_array(|v| v.level())
     }
 
-    /// The current [`ArrayHealth`].
+    /// The current [`ArrayHealth`], derived from this array's own state
+    /// through the same per-family redundancy rules the borrowed engines read
+    /// (`crate::health`), so the owned and borrowed forms of one array can
+    /// never disagree about it.
     #[must_use]
-    pub fn health(&mut self) -> ArrayHealth {
-        self.with_array(|v| v.health())
+    pub fn health(&self) -> ArrayHealth {
+        match self {
+            Self::Mirror { members, .. } => crate::health::mirror_health(member_states(members)),
+            // A stripe has no redundancy to lose: it serves until a member
+            // suffers a whole-device fault, after which it never serves again.
+            Self::Stripe { failed, .. } => {
+                if *failed {
+                    ArrayHealth::Failed
+                } else {
+                    ArrayHealth::Optimal
+                }
+            }
+            Self::Parity { members, .. } => {
+                crate::health::parity_health(member_states(members), crate::parity::PARITY_MEMBERS)
+            }
+            Self::DualParity { members, .. } => crate::health::parity_health(
+                member_states(members),
+                crate::dualparity::PARITY_MEMBERS,
+            ),
+            Self::TripleParity { members, .. } => {
+                crate::health::parity_health(member_states(members), crate::triple::PARITY_MEMBERS)
+            }
+            Self::Raid10 { members, .. } => {
+                let (columns, odd) = members.as_chunks::<{ crate::raid10::MIRROR_COPIES }>();
+                crate::health::stripe_of_mirrors_health(
+                    columns
+                        .iter()
+                        .map(|column| column.iter().map(MirrorMember::state))
+                        .map(crate::health::mirror_health)
+                        .chain((!odd.is_empty()).then(|| {
+                            crate::health::mirror_health(odd.iter().map(MirrorMember::state))
+                        })),
+                )
+            }
+        }
     }
 
     /// The number of member slots the array is defined to have.
@@ -717,6 +782,34 @@ impl<B: Block> Block for OwnedRaidArray<B> {
     fn discard(&mut self, lba: u64, blocks: u64) -> Result<(), DriverError> {
         let _ = (lba, blocks);
         Err(DriverError::Unsupported)
+    }
+
+    fn backing_availability(&self) -> MountAvailability {
+        let own = self.health();
+        match self {
+            Self::Mirror { members, .. } | Self::Raid10 { members, .. } => {
+                crate::health::aggregate_backing_availability(
+                    own,
+                    live_devices(members).map(Block::backing_availability),
+                )
+            }
+            Self::Stripe { members, .. } => crate::health::aggregate_backing_availability(
+                own,
+                stripe_live_devices(members).map(Block::backing_availability),
+            ),
+            Self::Parity { members, .. } => crate::health::aggregate_backing_availability(
+                own,
+                live_devices(members).map(Block::backing_availability),
+            ),
+            Self::DualParity { members, .. } => crate::health::aggregate_backing_availability(
+                own,
+                live_devices(members).map(Block::backing_availability),
+            ),
+            Self::TripleParity { members, .. } => crate::health::aggregate_backing_availability(
+                own,
+                live_devices(members).map(Block::backing_availability),
+            ),
+        }
     }
 
     fn device_health(&self) -> Result<DeviceHealth, DriverError> {

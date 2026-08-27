@@ -1,11 +1,28 @@
-//! Aggregating member device properties into one array-level answer.
+//! Deriving an array's own health, and aggregating member device properties
+//! into one array-level answer.
 //!
 //! A composed array is itself a device, so it must answer a consumer's
 //! questions about *itself* from what its members report rather than inherit a
 //! trait default that hides them. This module is the *one* definition of how
 //! each such property folds, shared by every composition so they cannot answer
-//! differently: health telemetry ([`aggregate_device_health`]) and the device
-//! class the consumer derives its I/O budget from ([`aggregate_device_class`]).
+//! differently: the redundancy arithmetic each family's [`ArrayHealth`] follows
+//! ([`mirror_health`], [`parity_health`], [`stripe_of_mirrors_health`]), health
+//! telemetry ([`aggregate_device_health`]), the device class the consumer
+//! derives its I/O budget from ([`aggregate_device_class`]), and what the array
+//! can promise a background consumer ([`aggregate_backing_availability`]).
+//!
+//! # Redundancy arithmetic
+//!
+//! Two families cover every level. A **mirrored group** — a whole RAID1 array,
+//! or one column of a RAID10 stripe of mirrors — can serve only from a copy
+//! that is current, so a group left with nothing but a rebuild target has no
+//! source to serve or to finish that rebuild from and has failed. A
+//! **syndrome-striped** array (RAID5, RAID6, RAID-TP) reconstructs up to as
+//! many missing chunks per stripe as it has syndromes, so it fails exactly
+//! when more members than that are gone. Both are stated once here, and each
+//! engine's `health()` reads them, so a family's rule cannot differ between
+//! the borrowed and owned forms of the same array or between two levels of the
+//! same family.
 //!
 //! # Health telemetry
 //!
@@ -63,8 +80,9 @@
 use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::{DeviceHealth, HealthSnapshot};
 use tairix_abi::driver::DriverError;
+use tairix_abi::sysinfo::MountAvailability;
 
-use tairix_abi::raid::MemberState;
+use tairix_abi::raid::{ArrayHealth, MemberState};
 
 /// Whether a redundant array member contributes to the array-level answers
 /// this module folds.
@@ -76,6 +94,113 @@ use tairix_abi::raid::MemberState;
 /// health from one set of members and its class from another.
 pub(crate) fn member_participates(state: MemberState) -> bool {
     matches!(state, MemberState::InSync | MemberState::Resyncing)
+}
+
+/// The [`ArrayHealth`] of a mirrored group from its members' states — a whole
+/// RAID1 array, or one column of a RAID10 stripe of mirrors.
+///
+/// A group serves only from a copy that is *current*, so one left with nothing
+/// but a rebuild target has failed: there is no source to serve a read from,
+/// and none to finish that rebuild from either. Otherwise a member still
+/// rebuilding makes the group recovering, a copy the group is defined to have
+/// but is not serving (faulted or absent — each reduces redundancy the same
+/// way) makes it degraded, and a full set of current copies makes it optimal.
+pub(crate) fn mirror_health<I>(states: I) -> ArrayHealth
+where
+    I: IntoIterator<Item = MemberState>,
+{
+    let mut in_sync = 0usize;
+    let mut resyncing = 0usize;
+    let mut missing = 0usize;
+    for state in states {
+        match state {
+            MemberState::InSync => in_sync += 1,
+            MemberState::Resyncing => resyncing += 1,
+            MemberState::Faulted | MemberState::Absent => missing += 1,
+        }
+    }
+    if in_sync == 0 {
+        ArrayHealth::Failed
+    } else if resyncing > 0 {
+        ArrayHealth::Recovering
+    } else if missing > 0 {
+        ArrayHealth::Degraded
+    } else {
+        ArrayHealth::Optimal
+    }
+}
+
+/// The [`ArrayHealth`] of a syndrome-striped array from its members' states and
+/// its syndrome count: `1` for RAID5's parity, `2` for RAID6's P and Q, `3` for
+/// RAID-TP's P, Q, and R.
+///
+/// Each stripe reserves `parity` members' chunks for syndromes over the others,
+/// so it can solve for up to `parity` missing chunks and no more: the array has
+/// failed exactly when more than `parity` members are gone. A member still
+/// rebuilding then makes it recovering, one gone but still reconstructible
+/// makes it degraded, and a full set makes it optimal.
+pub(crate) fn parity_health<I>(states: I, parity: usize) -> ArrayHealth
+where
+    I: IntoIterator<Item = MemberState>,
+{
+    let mut resyncing = 0usize;
+    let mut missing = 0usize;
+    for state in states {
+        match state {
+            MemberState::InSync => {}
+            MemberState::Resyncing => resyncing += 1,
+            MemberState::Faulted | MemberState::Absent => missing += 1,
+        }
+    }
+    if missing > parity {
+        ArrayHealth::Failed
+    } else if resyncing > 0 {
+        ArrayHealth::Recovering
+    } else if missing > 0 {
+        ArrayHealth::Degraded
+    } else {
+        ArrayHealth::Optimal
+    }
+}
+
+/// The [`ArrayHealth`] of a stripe of independently-redundant groups (RAID10)
+/// from its groups' own healths: the worst of them.
+///
+/// The array holds every group's stripes, so it is only as healthy as its
+/// weakest — a group that cannot serve makes the array unable to serve the
+/// stripes that live there. An array with no groups at all can serve nothing
+/// and fails closed.
+pub(crate) fn stripe_of_mirrors_health<I>(groups: I) -> ArrayHealth
+where
+    I: IntoIterator<Item = ArrayHealth>,
+{
+    groups
+        .into_iter()
+        .reduce(ArrayHealth::worse_of)
+        .unwrap_or(ArrayHealth::Failed)
+}
+
+/// Fold what an array itself can promise a background consumer with what its
+/// live members report, into the one
+/// [`backing_availability`](tairix_abi::driver::block::Block::backing_availability)
+/// answer the array gives.
+///
+/// `own` is the array's own [`ArrayHealth`] as an availability: short of
+/// redundancy, its bandwidth belongs to its own rebuild. But a member that is
+/// still in sync while *itself* degraded or riding out a recovery window leaves
+/// the array optimal, and handing that member discretionary reads is exactly
+/// what the query exists to prevent — so the members' own answers fold in too
+/// ([`MountAvailability::worse_of`]), and the worst answer anywhere in the
+/// stack is what the layer above acts on. Only live members contribute: a
+/// faulted or absent slot has no device to ask, and the copy it is not serving
+/// is already counted in `own`.
+pub(crate) fn aggregate_backing_availability<I>(own: ArrayHealth, members: I) -> MountAvailability
+where
+    I: IntoIterator<Item = MountAvailability>,
+{
+    members
+        .into_iter()
+        .fold(own.to_mount_availability(), MountAvailability::worse_of)
 }
 
 /// Fold the [`device_health`](tairix_abi::driver::block::Block::device_health)
@@ -272,6 +397,102 @@ mod tests {
             panic!("expected an aggregated snapshot");
         };
         assert_eq!(got.media_errors, u64::MAX);
+    }
+
+    #[test]
+    fn a_mirrored_group_needs_a_current_copy_to_serve() {
+        use MemberState::{Absent, Faulted, InSync, Resyncing};
+        assert_eq!(mirror_health([InSync, InSync]), ArrayHealth::Optimal);
+        // A copy the group is defined to have but is not serving reduces
+        // redundancy the same way whether the slot holds a dropped device or
+        // none at all.
+        assert_eq!(mirror_health([InSync, Faulted]), ArrayHealth::Degraded);
+        assert_eq!(mirror_health([InSync, Absent]), ArrayHealth::Degraded);
+        assert_eq!(mirror_health([InSync, Resyncing]), ArrayHealth::Recovering);
+        // Nothing but a rebuild target: no source to serve from, and none to
+        // finish the rebuild from either.
+        assert_eq!(mirror_health([Resyncing, Faulted]), ArrayHealth::Failed);
+        assert_eq!(mirror_health([Faulted, Absent]), ArrayHealth::Failed);
+        assert_eq!(mirror_health(core::iter::empty()), ArrayHealth::Failed);
+    }
+
+    #[test]
+    fn a_syndrome_striped_array_fails_past_its_syndrome_count() {
+        use MemberState::{Faulted, InSync, Resyncing};
+        for parity in 1..=3usize {
+            let width = parity + 2;
+            let full = core::iter::repeat_n(InSync, width);
+            assert_eq!(parity_health(full, parity), ArrayHealth::Optimal);
+            // Exactly as many members gone as there are syndromes is still
+            // reconstructible; one more is not.
+            for missing in 1..=parity {
+                let states = core::iter::repeat_n(Faulted, missing)
+                    .chain(core::iter::repeat_n(InSync, width - missing));
+                assert_eq!(
+                    parity_health(states, parity),
+                    ArrayHealth::Degraded,
+                    "{missing} of {parity} syndromes spent is still solvable"
+                );
+            }
+            let states = core::iter::repeat_n(Faulted, parity + 1)
+                .chain(core::iter::repeat_n(InSync, width - parity - 1));
+            assert_eq!(parity_health(states, parity), ArrayHealth::Failed);
+            // A rebuild in flight outranks a merely-degraded report, and a
+            // failed array outranks both.
+            let states = core::iter::once(Resyncing).chain(core::iter::repeat_n(InSync, width - 1));
+            assert_eq!(parity_health(states, parity), ArrayHealth::Recovering);
+        }
+    }
+
+    #[test]
+    fn a_stripe_of_groups_is_only_as_healthy_as_its_weakest() {
+        use ArrayHealth::{Degraded, Failed, Optimal, Recovering};
+        assert_eq!(stripe_of_mirrors_health([Optimal, Optimal]), Optimal);
+        assert_eq!(stripe_of_mirrors_health([Optimal, Degraded]), Degraded);
+        assert_eq!(stripe_of_mirrors_health([Degraded, Recovering]), Recovering);
+        assert_eq!(stripe_of_mirrors_health([Recovering, Failed]), Failed);
+        // Commutative, so the groups may be walked in any order.
+        assert_eq!(stripe_of_mirrors_health([Failed, Optimal]), Failed);
+        // An array with no groups can serve nothing.
+        assert_eq!(stripe_of_mirrors_health(core::iter::empty()), Failed);
+    }
+
+    #[test]
+    fn the_array_promises_the_worst_of_its_own_state_and_its_members() {
+        use MountAvailability::{Available, Degraded, Recovering, UnavailableLost};
+        // A whole array is only available when it is optimal *and* every live
+        // member says it is available.
+        assert_eq!(
+            aggregate_backing_availability(ArrayHealth::Optimal, [Available, Available]),
+            Available
+        );
+        // A member that is still in sync while riding out its own recovery
+        // window leaves the array optimal, and is exactly what a background
+        // consumer must not be handed discretionary reads for.
+        assert_eq!(
+            aggregate_backing_availability(ArrayHealth::Optimal, [Available, Recovering]),
+            Recovering
+        );
+        // The array's own lost redundancy stands on its own, with no member
+        // needing to complain.
+        assert_eq!(
+            aggregate_backing_availability(ArrayHealth::Degraded, [Available]),
+            Degraded
+        );
+        // The worse of the two wins in either direction.
+        assert_eq!(
+            aggregate_backing_availability(ArrayHealth::Degraded, [Recovering]),
+            Recovering
+        );
+        assert_eq!(
+            aggregate_backing_availability(ArrayHealth::Failed, [Available]),
+            UnavailableLost
+        );
+        // An array with no live member to ask still reports its own state.
+        assert_eq!(
+            aggregate_backing_availability(ArrayHealth::Optimal, core::iter::empty()),
+            Available
+        );
     }
 
     #[test]

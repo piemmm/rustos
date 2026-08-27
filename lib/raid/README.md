@@ -54,7 +54,10 @@ The RAID1 mirror (`MirrorArray`):
 - A returning copy is rebuilt by a **bounded, interruptible resync**
   (`resync_step`), so a 100 TB+ rebuild never blocks the system or busy-spins
   (`AGENTS.md` §26.6). Array health maps onto the shared
-  `MountAvailability` vocabulary.
+  `MountAvailability` vocabulary, and `Block::backing_availability` folds it
+  with the live members' own answers so a layer above stands its background
+  work down while anything beneath the array is short of redundancy or riding
+  out a recovery window.
 
 At the boundary of what it can vouch for (no surviving copy for a read, no copy
 accepting a write, no copy committing a flush) the array **fails closed**
@@ -72,7 +75,10 @@ one-shot deadline the serve loop parks on (`AGENTS.md` §2.23).
 
 Restoring redundancy outranks verifying it (re-add, then rebuild, then scrub),
 a scrub runs only on a fully `Optimal` array and pauses at its cursor while
-redundancy is reduced, and maintenance keeps to a duty share of a busy array.
+redundancy is reduced, and maintenance keeps to a duty share of a busy array —
+the shared `blkio::DutyPacer` over the shared `blkio::MaintenanceBudget`, not a
+second copy, so a filesystem scrubbing the same spindles paces to the same
+notion of "busy" (`AGENTS.md` §2.2).
 A faulted member is re-probed on a bounded, doubling cadence whose base is that
 device class's own recovery grace window, so a dead disk is not hammered and a
 returning one always rejoins without a reboot (`AGENTS.md` §18.4). The
@@ -101,7 +107,8 @@ This crate is the host-testable composition **engine** — one module per level
 `src/triple.rs`, `src/raid10.rs`, over the shared `src/gf256.rs` field) — plus
 the level-agnostic layers above it: the `src/array.rs` composed-device
 dispatch, the `src/assemble.rs` reassembly→member bridge, the `src/health.rs`
-and device-class folds, and the `src/maintenance.rs` scheduler. Each is proven
+per-family redundancy rules and device-class/health/availability folds, and the
+`src/maintenance.rs` scheduler. Each is proven
 host-side over a fault-injecting `Block` double (its `*/tests.rs`). It is
 `no_std`, `forbid(unsafe_code)`, and allocation-free: every array borrows a
 caller-owned member slice (and, for the parity levels, a scratch buffer; and,

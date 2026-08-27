@@ -390,6 +390,97 @@ impl BlkCall for FaultingDevice {
     }
 }
 
+/// A device that serves every request successfully while reporting the health
+/// status a test names — a stand-in for a composed backing that is short of
+/// redundancy but still answering.
+struct PromisingDevice {
+    status: tairix_abi::blkio::BlkStatus,
+}
+impl BlkCall for PromisingDevice {
+    fn call(
+        &mut self,
+        request: &[u8],
+        reply: &mut [u8],
+        _window: &mut [u8],
+        _deadline_ns: u64,
+    ) -> Result<usize, Errno> {
+        let completion = if BlkRequest::decode(request)?.op == BlkOp::Geometry {
+            BlkCompletion {
+                block_size: 512,
+                block_count: 64,
+                flags: 0,
+                class: Some(DEVICE_CLASS),
+            }
+        } else {
+            BlkCompletion::default()
+        };
+        completion.encode_status(self.status, reply)
+    }
+}
+
+#[test]
+fn a_served_backings_reported_health_reaches_a_layer_above_this_client() {
+    use tairix_abi::blkio::BlkStatus;
+    let mut window = vec![0u8; BLK_DATA_LEN];
+    let mut client = RemoteBlock::connect_read_only(
+        PromisingDevice {
+            status: BlkStatus::Degraded,
+        },
+        &mut window,
+    )
+    .expect("connects");
+    let mut buf = [0u8; 512];
+    // The transfer succeeds — a degraded backing still serves — and what it
+    // can promise is what a composition layered over this client folds in.
+    client
+        .read_blocks(0, &mut buf)
+        .expect("degraded still serves");
+    assert_eq!(
+        client.backing_availability(),
+        MountAvailability::Degraded,
+        "a composition over this client must see the backing's lost redundancy"
+    );
+
+    // A device answering normally promises availability, and a later valid
+    // answer clears an earlier unwell reading.
+    let mut window = vec![0u8; BLK_DATA_LEN];
+    let mut client = RemoteBlock::connect_read_only(
+        PromisingDevice {
+            status: BlkStatus::Ok,
+        },
+        &mut window,
+    )
+    .expect("connects");
+    assert_eq!(
+        client.backing_availability(),
+        MountAvailability::Available,
+        "the geometry exchange at connect already reflects a healthy device"
+    );
+    client.read_blocks(0, &mut buf).expect("healthy serves");
+    assert_eq!(client.backing_availability(), MountAvailability::Available);
+}
+
+#[test]
+fn a_per_request_verdict_that_says_nothing_about_the_volume_leaves_the_promise_alone() {
+    use tairix_abi::blkio::BlkStatus;
+    // A bad sector is a verdict on those blocks, not on the device's
+    // reachability, so it must not be read as the backing going unwell.
+    let mut window = vec![0u8; BLK_DATA_LEN];
+    let mut client = RemoteBlock::connect_read_only(
+        FaultingDevice {
+            status: BlkStatus::MediumError,
+        },
+        &mut window,
+    )
+    .expect("connects");
+    let mut buf = [0u8; 512];
+    assert_eq!(
+        client.read_blocks(0, &mut buf),
+        Err(DriverError::MediumError)
+    );
+    assert_eq!(client.backing_availability(), MountAvailability::Available);
+}
+
 #[test]
 fn the_health_axis_surfaces_as_the_matching_typed_driver_error() {
     use tairix_abi::blkio::BlkStatus;

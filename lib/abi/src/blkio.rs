@@ -19,6 +19,7 @@
 
 use crate::driver::block::Block;
 use crate::le::{put_i32, put_u32, put_u64, read_i32, read_u32, read_u64};
+use crate::sysinfo::MountAvailability;
 use crate::{DriverError, Errno};
 
 /// Length of the shared-memory data window a block-service endpoint
@@ -300,6 +301,27 @@ impl BlkStatus {
             DriverError::EndpointStalled => Some(Self::Reset),
             DriverError::DeviceFault => Some(Self::Fatal),
             _ => None,
+        }
+    }
+
+    /// The status a **successful** transfer carries given what the serving
+    /// device says it can promise
+    /// ([`Block::backing_availability`]).
+    ///
+    /// A composed device — an array over disks, a stack of them — serves a
+    /// read perfectly well while short of redundancy, so its consumer would
+    /// otherwise be told [`Ok`](Self::Ok) and read a clean bill off a volume
+    /// standing on sand. On a transfer that *succeeded* the data is valid, so
+    /// the only honest word for a serving-but-unwell device is
+    /// [`Degraded`](Self::Degraded): every other non-`Ok` status either says
+    /// the payload cannot be consumed or invites the consumer to reissue a
+    /// good answer. A device that cannot serve at all never reaches this
+    /// mapping — its transfer failed, and the error path classifies it.
+    #[must_use]
+    pub const fn for_backing(availability: MountAvailability) -> Self {
+        match availability {
+            MountAvailability::Available => Self::Ok,
+            _ => Self::Degraded,
         }
     }
 
@@ -732,6 +754,34 @@ impl BlkDeviceClass {
         }
     }
 
+    /// The background-maintenance budget this class is served with — the one
+    /// place every storage consumer that runs a paced background pass reads
+    /// its cadences, so a composed array's scrub and a filesystem's scrub
+    /// cannot pace to two different notions of "busy".
+    ///
+    /// Only the duty share is class-dependent: it reflects how destructive
+    /// background I/O is to foreground latency on that medium. Every seek a
+    /// scrub or rebuild costs a rotational disk is one the workload waits
+    /// for, and a removable unit has a shallow queue that saturates as
+    /// easily, so both keep a small share; a solid-state device absorbs a
+    /// parallel background stream with far less interference, and a
+    /// paravirtual device sits between the two. The other three are
+    /// properties of the accepted risk and of the workload rather than of the
+    /// hardware (see [`MaintenanceBudget`]).
+    #[must_use]
+    pub const fn maintenance_budget(self) -> MaintenanceBudget {
+        MaintenanceBudget {
+            scrub_period_ns: SCRUB_PERIOD_NS,
+            busy_duty_percent: match self {
+                Self::Rotational | Self::Removable => 10,
+                Self::Virtual => 25,
+                Self::SolidState => 40,
+            },
+            foreground_idle_ns: FOREGROUND_IDLE_NS,
+            checkpoint_period_ns: CHECKPOINT_PERIOD_NS,
+        }
+    }
+
     /// The more patient of two classes: the one whose [`budget`](Self::budget)
     /// waits longer before failing a device closed.
     ///
@@ -808,6 +858,168 @@ impl IoBudget {
     #[must_use]
     pub const fn should_reissue(self, status: BlkStatus, attempts: u32) -> bool {
         status.is_retryable() && attempts < self.max_retries
+    }
+}
+
+/// How long after the last foreground request a storage consumer still counts
+/// as busy.
+///
+/// This measures the *workload's* burstiness, not the device's speed: a second
+/// comfortably bridges the gap between the requests of one burst, so a
+/// background pass does not read an inter-request lull as an idle device and
+/// grab full bandwidth from a workload that is still running.
+const FOREGROUND_IDLE_NS: u64 = 1_000_000_000;
+
+/// How long a storage element goes between proactive verification passes.
+///
+/// This is the operator's tolerated *exposure window*: the time a latent media
+/// error may sit undetected on a copy the read path never consults before a
+/// scrub finds and heals it while redundancy still exists. A week matches the
+/// cadence a general-purpose desktop and a server both tolerate — long enough
+/// that the pass is unobtrusive, short enough that a second fault rarely
+/// arrives first.
+const SCRUB_PERIOD_NS: u64 = 7 * 24 * 60 * 60 * 1_000_000_000;
+
+/// How often an advancing background pass writes its position down.
+///
+/// The interval is the whole trade-off: it bounds the work an unclean stop can
+/// discard at one interval's worth of progress — itself already bounded by the
+/// duty share — while keeping the metadata cost at one small write per
+/// interval, so even a pass measured in days costs a few thousand writes
+/// rather than one per chunk. Half a minute leaves both sides comfortably
+/// small at any device size.
+const CHECKPOINT_PERIOD_NS: u64 = 30 * 1_000_000_000;
+
+/// The **background-maintenance budget** a storage consumer paces its own
+/// autonomous passes by, derived from the device's discovered
+/// [`BlkDeviceClass`] through [`BlkDeviceClass::maintenance_budget`].
+///
+/// Any layer that verifies, discards, or rebuilds its own storage in the
+/// background faces the same four questions, and their answers are equal by
+/// definition across layers: they are properties of the workload's
+/// burstiness, of the medium, of the re-work an operator tolerates, and of
+/// the accepted exposure window — never of what the layer happens to be
+/// scrubbing. So a composed array's maintenance scheduler
+/// (`tairix_raid::ArrayMaintenance`) and a filesystem's read the same budget
+/// here rather than each holding its own copy, which is what lets them
+/// compose: two layers over the same spindles pacing to two different notions
+/// of "busy" would together take twice the share either intends.
+///
+/// The *action vocabulary* is not shared — an array re-admits members and
+/// rebuilds parity while a filesystem discards and verifies — only the
+/// cadences.
+///
+/// Every field is public, so a consumer that knows better about a particular
+/// device (an operator-set cadence, a maintenance window) sets it directly.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct MaintenanceBudget {
+    /// How long a storage element goes between proactive verification passes,
+    /// measured from the end of one pass to the start of the next.
+    pub scrub_period_ns: u64,
+    /// The share of wall-clock time background maintenance may occupy while
+    /// the device is also serving foreground I/O, as a percentage. Applied by
+    /// [`DutyPacer`]; values outside `1..=100` are clamped there, so a
+    /// mis-set budget can never stall maintenance completely.
+    pub busy_duty_percent: u32,
+    /// How long after the last foreground request the device still counts as
+    /// busy for the duty share.
+    pub foreground_idle_ns: u64,
+    /// The shortest interval between two position writes of an advancing
+    /// pass. It bounds both the progress an unclean stop discards and the
+    /// metadata writes a long pass costs the medium.
+    pub checkpoint_period_ns: u64,
+}
+
+/// The shared **duty pacer**: the one definition of how a background pass is
+/// held to its share of a device the foreground workload is also using.
+///
+/// After a chunk taking `d`, the next is held off for `d × (100 − duty) /
+/// duty`, so the share holds whatever chunk size the caller's buffer implies
+/// — unlike a fixed bytes-per-second limit, which has to be retuned for every
+/// device. A consumer whose device has been idle for a whole
+/// [`MaintenanceBudget::foreground_idle_ns`] runs at full speed, because there
+/// is no workload to yield to.
+///
+/// It is pure and event-timed: it holds no clock, the caller supplies the
+/// monotonic reading on every entry point, and
+/// [`next_chunk_ns`](Self::next_chunk_ns) is the absolute deadline a serve
+/// loop arms its one-shot wait to — nothing here sleeps, polls, or spins.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DutyPacer {
+    /// The share of a busy device background work may take, clamped once at
+    /// construction so no arithmetic can divide by zero.
+    duty_percent: u64,
+    /// How long after a foreground request the device still counts as busy.
+    foreground_idle_ns: u64,
+    /// The last foreground request the caller reported, if any.
+    last_foreground_ns: Option<u64>,
+    /// The monotonic time the next paced chunk may run.
+    next_chunk_ns: u64,
+}
+
+impl DutyPacer {
+    /// A pacer over `budget`'s share and busy window, with the first chunk
+    /// runnable at `now_ns`.
+    #[must_use]
+    pub fn new(budget: MaintenanceBudget, now_ns: u64) -> Self {
+        Self {
+            duty_percent: u64::from(budget.busy_duty_percent.clamp(1, 100)),
+            foreground_idle_ns: budget.foreground_idle_ns,
+            last_foreground_ns: None,
+            next_chunk_ns: now_ns,
+        }
+    }
+
+    /// Report that the device served a foreground request at `now_ns`, so the
+    /// next chunk is held to the duty share instead of running flat out.
+    pub fn note_foreground(&mut self, now_ns: u64) {
+        self.last_foreground_ns = Some(now_ns);
+    }
+
+    /// Whether the device has served foreground I/O recently enough to still
+    /// count as busy at `now_ns`.
+    #[must_use]
+    pub const fn foreground_busy(&self, now_ns: u64) -> bool {
+        match self.last_foreground_ns {
+            Some(at) => now_ns.saturating_sub(at) < self.foreground_idle_ns,
+            None => false,
+        }
+    }
+
+    /// Whether the next chunk may run at `now_ns`.
+    #[must_use]
+    pub const fn chunk_due(&self, now_ns: u64) -> bool {
+        now_ns >= self.next_chunk_ns
+    }
+
+    /// The absolute monotonic time the next chunk may run — the deadline a
+    /// serve loop folds into its one-shot wait.
+    #[must_use]
+    pub const fn next_chunk_ns(&self) -> u64 {
+        self.next_chunk_ns
+    }
+
+    /// Record a completed chunk that ran from `started_ns` to `now_ns`,
+    /// holding the next off long enough to keep background work inside its
+    /// duty share of a busy device, or letting it run flat out on an idle one.
+    pub fn note_chunk(&mut self, started_ns: u64, now_ns: u64) {
+        if !self.foreground_busy(now_ns) {
+            self.next_chunk_ns = now_ns;
+            return;
+        }
+        let elapsed = now_ns.saturating_sub(started_ns);
+        self.next_chunk_ns = now_ns
+            .saturating_add(elapsed.saturating_mul(100 - self.duty_percent) / self.duty_percent);
+    }
+
+    /// Hold the next chunk off for `delay_ns` from `now_ns`, whatever the
+    /// duty share would have allowed.
+    ///
+    /// This is the failed-chunk path: hardware that has just refused a
+    /// transfer is given the recovery delay its class allows rather than being
+    /// asked again at the pace of a healthy device.
+    pub fn hold_off(&mut self, now_ns: u64, delay_ns: u64) {
+        self.next_chunk_ns = now_ns.saturating_add(delay_ns);
     }
 }
 
@@ -1834,7 +2046,12 @@ pub fn serve_request_recovering<B: Block>(
     match classify(device, read_only, request, window) {
         Served::Refused(err) => encode_error_completion(reply, err).unwrap_or(0),
         Served::Device(Ok(completion)) => {
-            let status = health.observe(BlkStatus::Ok, now_ns);
+            // A composed device serves a read perfectly well while short of
+            // redundancy, so what it can *promise* is asked here rather than
+            // assumed from the transfer having succeeded — else a filesystem
+            // on a degraded array reads a clean bill off it.
+            let raw = BlkStatus::for_backing(device.backing_availability());
+            let status = health.observe(raw, now_ns);
             completion.encode_status(status, reply).unwrap_or(0)
         }
         Served::Device(Err(err)) => match BlkStatus::for_driver_health(err) {
@@ -1930,6 +2147,224 @@ fn data_extent<B: Block>(device: &B, blocks: u32, window_len: usize) -> Result<u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A device that declares what it can promise, so the serve engine's
+    /// success status can be observed against it.
+    struct PromisingBlock {
+        blocks: u64,
+        promise: MountAvailability,
+    }
+
+    impl Block for PromisingBlock {
+        fn geometry(&self) -> Result<BlockGeometry, DriverError> {
+            Ok(BlockGeometry {
+                block_size: 512,
+                block_count: self.blocks,
+            })
+        }
+
+        fn read_blocks(&mut self, _lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
+            buf.fill(0xA5);
+            Ok(())
+        }
+
+        fn write_blocks(&mut self, _lba: u64, _buf: &[u8]) -> Result<(), DriverError> {
+            Ok(())
+        }
+
+        fn flush(&mut self) -> Result<(), DriverError> {
+            Ok(())
+        }
+
+        fn backing_availability(&self) -> MountAvailability {
+            self.promise
+        }
+    }
+
+    #[test]
+    fn every_class_derives_its_background_budget_from_one_table() {
+        // Only the duty share is class-dependent: a seek-bound or
+        // shallow-queue medium keeps a smaller share of a busy device than one
+        // that absorbs a parallel stream.
+        let rotational = BlkDeviceClass::Rotational.maintenance_budget();
+        let removable = BlkDeviceClass::Removable.maintenance_budget();
+        let paravirtual = BlkDeviceClass::Virtual.maintenance_budget();
+        let solid_state = BlkDeviceClass::SolidState.maintenance_budget();
+
+        assert_eq!(
+            rotational.busy_duty_percent, removable.busy_duty_percent,
+            "a spinning disk pays for every seek and a removable unit saturates as easily"
+        );
+        assert!(rotational.busy_duty_percent < paravirtual.busy_duty_percent);
+        assert!(paravirtual.busy_duty_percent < solid_state.busy_duty_percent);
+
+        for budget in [rotational, removable, paravirtual, solid_state] {
+            assert!(
+                (1..=100).contains(&budget.busy_duty_percent),
+                "a share outside 1..=100 would stall maintenance or overrun the device"
+            );
+            // The exposure window, the busy window, and the checkpoint
+            // interval are properties of the accepted risk and of the
+            // workload, so they are one default for every class.
+            assert_eq!(budget.scrub_period_ns, rotational.scrub_period_ns);
+            assert_eq!(budget.foreground_idle_ns, rotational.foreground_idle_ns);
+            assert_eq!(budget.checkpoint_period_ns, rotational.checkpoint_period_ns);
+        }
+    }
+
+    #[test]
+    fn an_idle_device_runs_background_work_flat_out() {
+        let mut pacer = DutyPacer::new(BlkDeviceClass::Rotational.maintenance_budget(), 0);
+        assert!(pacer.chunk_due(0));
+        pacer.note_chunk(0, 1_000);
+        assert_eq!(
+            pacer.next_chunk_ns(),
+            1_000,
+            "with no workload to yield to there is nothing to pace against"
+        );
+        assert!(pacer.chunk_due(1_000));
+    }
+
+    #[test]
+    fn a_busy_device_holds_background_work_to_its_duty_share() {
+        let budget = MaintenanceBudget {
+            busy_duty_percent: 25,
+            foreground_idle_ns: 1_000,
+            ..BlkDeviceClass::Rotational.maintenance_budget()
+        };
+        let mut pacer = DutyPacer::new(budget, 0);
+        pacer.note_foreground(100);
+        // A chunk of 400 ns at a quarter share is followed by 1200 ns off, so
+        // the share holds whatever the chunk size is.
+        pacer.note_chunk(100, 500);
+        assert_eq!(pacer.next_chunk_ns(), 500 + 400 * 3);
+        assert!(!pacer.chunk_due(500));
+        assert!(pacer.chunk_due(1_700));
+    }
+
+    #[test]
+    fn the_busy_window_expires_so_a_quiet_device_stops_being_paced() {
+        let budget = MaintenanceBudget {
+            busy_duty_percent: 10,
+            foreground_idle_ns: 1_000,
+            ..BlkDeviceClass::Rotational.maintenance_budget()
+        };
+        let mut pacer = DutyPacer::new(budget, 0);
+        pacer.note_foreground(0);
+        assert!(pacer.foreground_busy(999));
+        assert!(!pacer.foreground_busy(1_000));
+        // A chunk finishing after the window has expired is not held off.
+        pacer.note_chunk(500, 1_500);
+        assert_eq!(pacer.next_chunk_ns(), 1_500);
+    }
+
+    #[test]
+    fn a_mis_set_duty_share_is_clamped_so_background_work_can_never_stall() {
+        for share in [0u32, 1, 100, 101, u32::MAX] {
+            let budget = MaintenanceBudget {
+                busy_duty_percent: share,
+                foreground_idle_ns: 1_000,
+                ..BlkDeviceClass::Virtual.maintenance_budget()
+            };
+            let mut pacer = DutyPacer::new(budget, 0);
+            pacer.note_foreground(0);
+            pacer.note_chunk(0, 10);
+            // A zero share would divide by zero and a share above 100 would
+            // subtract past zero; both are clamped into the runnable range.
+            assert!(pacer.next_chunk_ns() >= 10);
+            assert!(pacer.next_chunk_ns() <= 10 + 10 * 99);
+        }
+    }
+
+    #[test]
+    fn a_failed_chunk_is_held_off_by_the_delay_its_caller_names() {
+        let mut pacer = DutyPacer::new(BlkDeviceClass::SolidState.maintenance_budget(), 0);
+        pacer.hold_off(5_000, 2_000);
+        assert_eq!(pacer.next_chunk_ns(), 7_000);
+        assert!(!pacer.chunk_due(6_999));
+        assert!(pacer.chunk_due(7_000));
+    }
+
+    #[test]
+    fn a_successful_transfer_reports_what_the_device_can_promise() {
+        // A plain device promising availability answers exactly as before.
+        assert_eq!(
+            BlkStatus::for_backing(MountAvailability::Available),
+            BlkStatus::Ok
+        );
+        // Anything less is served-but-unwell: the data is valid (the transfer
+        // succeeded) and reissuing it would be pointless.
+        for promise in [
+            MountAvailability::Degraded,
+            MountAvailability::Recovering,
+            MountAvailability::RecoveryConflict,
+            MountAvailability::UnavailableDirty,
+            MountAvailability::UnavailableLost,
+        ] {
+            let status = BlkStatus::for_backing(promise);
+            assert_eq!(status, BlkStatus::Degraded);
+            assert!(status.data_valid());
+            assert!(!status.is_retryable());
+        }
+    }
+
+    #[test]
+    fn the_serve_engine_surfaces_a_composed_devices_degradation_to_its_consumer() {
+        let mut window = [0u8; 512];
+        let mut reply = [0u8; BLK_COMPLETION_LEN];
+        let mut request = [0u8; BLK_REQUEST_LEN];
+        let len = BlkRequest {
+            op: BlkOp::Read,
+            lba: 0,
+            blocks: 1,
+        }
+        .encode(&mut request)
+        .expect("the request frame is exactly this long");
+
+        // A device with nothing composed beneath it is served as it always was.
+        let mut healthy = PromisingBlock {
+            blocks: 8,
+            promise: MountAvailability::Available,
+        };
+        let mut health = BlkHealth::new(BlkDeviceClass::Virtual);
+        let got = serve_request_recovering(
+            &mut healthy,
+            false,
+            &request[..len],
+            &mut window,
+            &mut reply,
+            &mut health,
+            0,
+        );
+        assert_eq!(decode_outcome(&reply[..got]).status, BlkStatus::Ok);
+        assert_eq!(health.state(), BlkHealthState::Healthy);
+
+        // A composed device short of redundancy still serves the read, and its
+        // consumer is told so rather than being handed a clean bill.
+        let mut degraded = PromisingBlock {
+            blocks: 8,
+            promise: MountAvailability::Degraded,
+        };
+        let mut health = BlkHealth::new(BlkDeviceClass::Virtual);
+        let got = serve_request_recovering(
+            &mut degraded,
+            false,
+            &request[..len],
+            &mut window,
+            &mut reply,
+            &mut health,
+            0,
+        );
+        let outcome = decode_outcome(&reply[..got]);
+        assert_eq!(outcome.status, BlkStatus::Degraded);
+        assert!(outcome.status.data_valid(), "the transfer did succeed");
+        assert_eq!(health.state(), BlkHealthState::Degraded);
+        assert_eq!(
+            MountAvailability::from_block_status(outcome.status),
+            Some(MountAvailability::Degraded),
+            "the consumer's mount overlay reflects it through the one shared mapping"
+        );
+    }
 
     #[test]
     fn fault_domain_state_wire_codec_round_trips_and_fails_closed() {

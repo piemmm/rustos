@@ -69,6 +69,14 @@ them, so it lives here once and both consumers link it.
   bounded unclassified envelope and no extra patience. Hence `device_class`
   reports what the device is *served as*, while `declared_class` reports
   what it actually said.
+- A served device may itself be a composition, so each completion's health
+  status is reflected onto a `MountAvailability` reading through the one
+  shared `from_block_status` mapping and reported by
+  `Block::backing_availability`. A consumer layered on top — a further
+  composition, a filesystem running its own background verification — then
+  learns that the thing underneath is short of redundancy instead of reading
+  a clean bill off it. There is no second state machine: the serving driver
+  owns the sticky one and this client mirrors its per-request verdict.
 - `RtBlkCall` builds cleanly on the host (its syscall trap fails closed
   with a sentinel there rather than requiring a kernel), so this crate
   needs no target-conditional gate to stay host-testable end to end.

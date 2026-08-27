@@ -18,7 +18,7 @@ use crate::backoff::RetryCadence;
 use crate::mirror::{MirrorArray, MirrorMember};
 use crate::stripe::{StripeArray, StripeMember};
 use crate::superblock::ArrayProgress;
-use tairix_abi::blkio::BlkDeviceClass;
+use tairix_abi::blkio::{BlkDeviceClass, MaintenanceBudget};
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::DriverError;
 use tairix_abi::raid::{ArrayHealth, MemberState};
@@ -35,10 +35,12 @@ const CHUNK: u32 = 2;
 /// deadlines directly instead of about a real class's multi-second budget.
 /// [`MaintenancePolicy::for_class`] is proven separately.
 const TEST_POLICY: MaintenancePolicy = MaintenancePolicy {
-    scrub_period_ns: 1_000,
-    busy_duty_percent: 50,
-    foreground_idle_ns: 100,
-    checkpoint_period_ns: 200,
+    background: MaintenanceBudget {
+        scrub_period_ns: 1_000,
+        busy_duty_percent: 50,
+        foreground_idle_ns: 100,
+        checkpoint_period_ns: 200,
+    },
     readd: RetryCadence::new(10, 40),
 };
 
@@ -232,11 +234,36 @@ fn the_first_readd_delay_is_the_classs_own_recovery_grace_window() {
 }
 
 #[test]
+fn the_background_cadences_are_the_shared_budget_not_a_second_copy() {
+    // An array's background pacing is not RAID's to define: it is a property
+    // of the medium and of the workload, and a filesystem scrubbing the same
+    // spindles must read the same answers or the two together take twice the
+    // share either intends.
+    for class in [
+        BlkDeviceClass::Rotational,
+        BlkDeviceClass::SolidState,
+        BlkDeviceClass::Removable,
+        BlkDeviceClass::Virtual,
+    ] {
+        assert_eq!(
+            MaintenancePolicy::for_class(class).background,
+            class.maintenance_budget(),
+            "the policy derives its cadences from the one shared table"
+        );
+    }
+}
+
+#[test]
 fn a_seek_bound_class_keeps_a_smaller_share_of_a_busy_array_than_a_fast_one() {
-    let rotational = MaintenancePolicy::for_class(BlkDeviceClass::Rotational).busy_duty_percent;
-    let removable = MaintenancePolicy::for_class(BlkDeviceClass::Removable).busy_duty_percent;
-    let paravirtual = MaintenancePolicy::for_class(BlkDeviceClass::Virtual).busy_duty_percent;
-    let solid_state = MaintenancePolicy::for_class(BlkDeviceClass::SolidState).busy_duty_percent;
+    let share = |class| {
+        MaintenancePolicy::for_class(class)
+            .background
+            .busy_duty_percent
+    };
+    let rotational = share(BlkDeviceClass::Rotational);
+    let removable = share(BlkDeviceClass::Removable);
+    let paravirtual = share(BlkDeviceClass::Virtual);
+    let solid_state = share(BlkDeviceClass::SolidState);
 
     assert_eq!(rotational, removable);
     assert!(rotational < paravirtual);
@@ -632,7 +659,10 @@ fn a_mis_set_duty_share_is_clamped_so_maintenance_can_never_stall() {
         &array,
         starved.as_mut_slice(),
         MaintenancePolicy {
-            busy_duty_percent: 0,
+            background: MaintenanceBudget {
+                busy_duty_percent: 0,
+                ..TEST_POLICY.background
+            },
             ..TEST_POLICY
         },
         0,
@@ -649,7 +679,10 @@ fn a_mis_set_duty_share_is_clamped_so_maintenance_can_never_stall() {
         &array,
         greedy.as_mut_slice(),
         MaintenancePolicy {
-            busy_duty_percent: 1_000,
+            background: MaintenanceBudget {
+                busy_duty_percent: 1_000,
+                ..TEST_POLICY.background
+            },
             ..TEST_POLICY
         },
         0,

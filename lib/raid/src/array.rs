@@ -34,6 +34,7 @@ use crate::stripe::StripeArray;
 use crate::superblock::ArrayProgress;
 use crate::triple::{TripleParityArray, TripleParityError};
 use tairix_abi::raid::{ArrayHealth, MemberState, RaidLevel};
+use tairix_abi::sysinfo::MountAvailability;
 
 /// A reason a level-agnostic [`RaidArray`] operation could not be carried out.
 ///
@@ -656,6 +657,17 @@ impl<B: Block> Block for RaidArray<'_, B> {
             Self::DualParity(a) => a.device_health(),
             Self::TripleParity(a) => a.device_health(),
             Self::Raid10(a) => a.device_health(),
+        }
+    }
+
+    fn backing_availability(&self) -> MountAvailability {
+        match self {
+            Self::Mirror(a) => a.backing_availability(),
+            Self::Stripe(a) => a.backing_availability(),
+            Self::Parity(a) => a.backing_availability(),
+            Self::DualParity(a) => a.backing_availability(),
+            Self::TripleParity(a) => a.backing_availability(),
+            Self::Raid10(a) => a.backing_availability(),
         }
     }
 }

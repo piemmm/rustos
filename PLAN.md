@@ -2870,17 +2870,21 @@ itself. One `arxfs` command app exposes the operator-driven operations (`check`,
   and gets back one bounded action plus the absolute deadline to park on, so
   every policy decision is a host unit test. The shape is the one already proven
   for composed arrays (`lib/raid/src/maintenance.rs`).
-- **One shared pacer.** The foreground-idle window, the per-`BlkDeviceClass`
-  background duty share, the checkpoint cadence, and the duty arithmetic are
-  equal by definition for a filesystem scrub and an array scrub, so they are
-  hoisted beside `IoBudget` in `lib/abi/src/blkio.rs` and consumed by both
-  schedulers — and by FEC's job engine later. Two layers pacing to two notions
-  of "busy" cannot compose.
-- **Restoring redundancy below outranks verifying above.** Background work
-  stands down entirely while the backing reports anything but fully available,
-  via one default-provided `Block::backing_availability()` query reusing
-  `MountAvailability`, with the RAID composer and the kernel block client as its
-  two producers. A discard is never issued to a fault domain in doubt.
+- **One shared pacer** (M0, landed). The foreground-idle window, the
+  per-`BlkDeviceClass` background duty share, the exposure window, the
+  checkpoint cadence, and the duty arithmetic are equal by definition for a
+  filesystem scrub and an array scrub, so they live beside `IoBudget` in
+  `lib/abi/src/blkio.rs` as `MaintenanceBudget` + `DutyPacer` and are consumed
+  by both schedulers — and by FEC's job engine later. Two layers pacing to two
+  notions of "busy" cannot compose.
+- **Restoring redundancy below outranks verifying above** (M0, landed).
+  Background work stands down entirely while the backing reports anything but
+  fully available, via one default-provided `Block::backing_availability()`
+  query reusing `MountAvailability`: every wrapper forwards it, every
+  composition folds its own health with its live members' answers, both
+  block-service clients produce it, and the shared serve engine carries it
+  across the seam so a degraded array no longer reads as available in the mount
+  table. A discard is never issued to a fault domain in doubt.
 - **One runner, not one task per mount.** A single kernel maintenance task takes
   the mount's own sleeping lock for one chunk, performs it through a new
   `FilesystemMaintenance` driver-ABI facet (so it holds no ARXFS type and moves
@@ -2895,9 +2899,10 @@ itself. One `arxfs` command app exposes the operator-driven operations (`check`,
   remount and is reported — never a silent multi-hour `check` on next boot, and
   never a refused mount.
 
-**Four defects it owns**, each fixed with its regression test in the stage that
-owns it, and the list explicitly open — a defect found while implementing any
-stage is fixed in that stage, never filed for later. Scrub's metadata
+**Three defects it still owns**, each fixed with its regression test in the
+stage that owns it, and the list explicitly open — a defect found while
+implementing any stage is fixed in that stage, never filed for later. Scrub's
+metadata
 copy-repair writes to the device with no read-only guard (the read path has
 one), so a read-only mount — including a re-inserted volume deliberately held
 read-only because its medium state is in doubt — is written. `health` runs an
@@ -2914,7 +2919,9 @@ discard **sweep of the allocation map** — already the authoritative record of
 what is free — in the same resumable-cursor shape as scrub's pass, landing
 before the runner exists.
 
-**Status: planned.** No implementation has landed.
+**Status: in progress.** M0 (the shared pacer and the cross-layer query) has
+landed; M1–M7 are planned. The ordered ledger is
+`plans/IMPLEMENT-OUTSTANDING-ARXFS.md`.
 
 ---
 

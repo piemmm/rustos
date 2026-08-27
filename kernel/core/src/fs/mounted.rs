@@ -39,7 +39,6 @@
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::Ordering;
 
 use tairix_abi::driver::filesystem::{
     FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
@@ -150,14 +149,9 @@ fn overlaid_availability(
     if !matches!(stored, MountAvailability::Available) {
         return stored;
     }
-    match health.map(|h| MountAvailability::from_u8(h.availability.load(Ordering::Relaxed))) {
-        Some(Ok(
-            live @ (MountAvailability::Available
-            | MountAvailability::Degraded
-            | MountAvailability::Recovering),
-        )) => live,
-        _ => MountAvailability::Available,
-    }
+    health
+        .and_then(VolumeHealthSource::live_availability)
+        .unwrap_or(MountAvailability::Available)
 }
 
 /// A set-once VFS policy layer plus a registry of backing filesystem drivers

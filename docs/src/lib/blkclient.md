@@ -90,6 +90,21 @@ target-conditional gate: a host test double plays the serving driver by
 filling the shared window directly, and every geometry-validation,
 chunking, and bounded-reissue path is exercised without a kernel.
 
+## What the served backing can promise
+
+A device served over this seam may itself be a composition — a RAID array over
+several disks — and a consumer that layers on top of this client (a further
+composition, a filesystem) must know when the thing underneath is short of
+redundancy. Each completion's health status is therefore reflected onto an
+availability reading through the one shared
+`MountAvailability::from_block_status` mapping, and
+[`Block::backing_availability`](../drivers/block.md) reports it. There is no
+second state machine: the serving driver owns the sticky one and its recovery
+grace window, and this client mirrors its per-request verdict. A per-request
+verdict that says nothing about the *volume* — a bad sector — leaves the reading
+alone, and until the device has answered anything there is nothing to stand
+background work down for.
+
 ## Fail-closed by construction
 
 Everything a served device reports is untrusted: the geometry is validated

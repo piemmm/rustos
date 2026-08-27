@@ -150,7 +150,7 @@ fn a_start_that_cannot_see_a_member_fences_it_on_every_survivor() {
     let survivor = stamped(&present);
     let mut supply = [Some(survivor.clone())];
 
-    let mut assembled = assemble_array(
+    let assembled = assemble_array(
         identity_of(UUID_A, &[present]),
         &candidates(&[present]),
         NOW,

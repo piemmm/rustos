@@ -605,11 +605,19 @@ on geometry and to be a whole number of stripe chunks; an odd member count
 (`Raid10Error::OddMembers`) or fewer than four (`TooFewMembers`) is refused.
 A pair with one copy down is `ArrayHealth::Degraded` (or `Recovering` while
 that copy rebuilds) but keeps serving from the survivor through the mirror's
-recover-and-repair path; a pair that loses *both* copies can no longer serve
-its stripes, so the whole array is `ArrayHealth::Failed` and that region fails
-closed (`DeviceOffline`, `AGENTS.md` §5.4) while the *other* pairs keep serving
-(head-of-line freedom, §26.1). The array is `Optimal` only when every pair
-holds two in-sync copies.
+recover-and-repair path; a pair left with **no current copy** can no longer
+serve its stripes — a lone rebuild target is not a read source, and there is
+nothing to finish its rebuild from either — so the whole array is
+`ArrayHealth::Failed` and that region fails closed (`DeviceOffline`,
+`AGENTS.md` §5.4) while the *other* pairs keep serving (head-of-line freedom,
+§26.1). The array is `Optimal` only when every pair holds two in-sync copies.
+
+That is the *mirror's* rule, not a second one: a RAID10 column is a mirrored
+group, so its health comes from the same `mirror_health` definition a whole
+RAID1 array's does, and the array's health is the worst of its columns
+(`stripe_of_mirrors_health`). The syndrome-striped levels share one rule the
+same way — RAID5, RAID6, and RAID-TP differ only in how many syndromes each
+stripe reserves, so one `parity_health` over that count serves all three.
 
 `begin_scrub` / `scrub_step` drive one shared member-local cursor across every
 pair, healing latent media errors chunk by chunk (`AGENTS.md` §26.5, §26.6);
@@ -867,6 +875,29 @@ array with no live member left declares the bounded unclassified envelope
 rather than the widest one, so its callers fail closed sooner instead of
 waiting out disks that are not there.
 
+## What the array can promise a background consumer (`backing_availability`)
+
+A filesystem on an array runs its own background verification, and doing that
+while the array is short of redundancy spends the exact bandwidth the rebuild
+needs. So an array answers the shared
+[`Block::backing_availability`](../drivers/block.md) query rather than
+inheriting the "available" default, folding two things through
+`MountAvailability::worse_of` (`aggregate_backing_availability`):
+
+- **Its own `ArrayHealth`**, mapped through `to_mount_availability`. A degraded
+  or rebuilding array's bandwidth belongs to restoring the copy.
+- **Its live members' own answers.** A member that is still in sync while
+  *itself* degraded or riding out a recovery grace window leaves the array
+  optimal — and handing that member discretionary reads is precisely what the
+  query exists to prevent. Only live members contribute, on the same
+  participation predicate the class and health folds use: a faulted or absent
+  slot has no device to ask, and the copy it is not serving is already counted
+  in the array's own health.
+
+Because the ranking is total and commutative, a stack of arbitrary depth —
+filesystem over array over partition window over client over disk — folds to
+the worst answer anywhere in it, in any order.
+
 ## Composed-device dispatch (`RaidArray`)
 
 The six compositions above are siblings over the same block seam (`AGENTS.md`
@@ -997,7 +1028,7 @@ behind a rebuild running flat out — which on a large array would mean the
 position is not recorded for days, precisely the work a restart discards — nor
 counts against the duty share the data chunks are held to.
 
-### Pacing — a duty share, not a fixed rate
+### Pacing — a duty share, not a fixed rate, and not RAID's to define
 
 An idle array runs maintenance flat out. While the array is also serving
 foreground I/O, a chunk that took `d` holds the next one off for
@@ -1009,31 +1040,46 @@ completely nor divide by zero. A chunk the members failed backs off by the
 class's recovery grace window rather than hammering hardware that is already
 unwell.
 
+That arithmetic is **not RAID's**. Any layer that runs a paced background pass
+over the same spindles — a filesystem's own scrub, a redundancy engine's
+rebalance — faces the identical question, so it lives once as
+`blkio::DutyPacer` and `ArrayMaintenance` holds one. Two layers pacing to two
+notions of "busy" would together take twice the share either intends, which is
+the whole reason the pacer is shared rather than copied.
+
 ### Cadences come from the array's discovered class
 
 `MaintenancePolicy::for_class` derives the defaults from the class the members'
 fold declares through `Block::device_class` (see [Device class](#device-class-device_class)),
-never a frozen scalar (`AGENTS.md` §24.2). The two genuinely hardware-dependent
-quantities come from that class's own `IoBudget` rather than a second table that
-could drift from it (`AGENTS.md` §2.2):
+never a frozen scalar (`AGENTS.md` §24.2). Both parts come from that class's own
+shared tables rather than a second one that could drift from them
+(`AGENTS.md` §2.2):
 
-- The **first re-add delay** is the class's recovery grace window (`grace_ns`).
-  Re-probing sooner asks a device that is still inside the window its own driver
-  gives it to come back. The delay doubles on each refusal up to 32× it, so a
-  dead disk is not re-probed at the cadence of a merely slow one, yet a disk
-  that returns after a long absence still rejoins within a bounded wait. A
-  recovery signal collapses an escalated wait back to the base delay after the
-  last attempt and no further, so neither a flapping member nor a repeating
-  signal can turn the hook into a re-probe storm.
-- The **busy duty share** reflects how destructive maintenance is to foreground
-  latency on that class: a rotational disk pays for every extra seek and a
+- The **background cadences** are the shared
+  `BlkDeviceClass::maintenance_budget()` — the exposure window between
+  verification passes, the busy duty share, the busy window, and the checkpoint
+  interval. `MaintenancePolicy` holds that `MaintenanceBudget` whole
+  (`policy.background`) rather than four fields of its own, so a filesystem
+  scrubbing the same disks reads the same answers. Only the duty share is
+  class-dependent: it reflects how destructive background I/O is to foreground
+  latency on that medium — a rotational disk pays for every extra seek and a
   removable unit has a shallow queue that saturates as easily, so both keep a
   small share; a solid-state device absorbs a parallel background stream with
   far less interference, and a paravirtual device sits between them.
+- The **first re-add delay** is RAID's own (`policy.readd`) — re-admitting a
+  member is not something a layer without members does — and is the class's
+  recovery grace window (`grace_ns`). Re-probing sooner asks a device that is
+  still inside the window its own driver gives it to come back. The delay
+  doubles on each refusal up to 32× it, so a dead disk is not re-probed at the
+  cadence of a merely slow one, yet a disk that returns after a long absence
+  still rejoins within a bounded wait. A recovery signal collapses an escalated
+  wait back to the base delay after the last attempt and no further, so neither
+  a flapping member nor a repeating signal can turn the hook into a re-probe
+  storm.
 
 The scrub period, the busy window, and the checkpoint interval are properties of
 the accepted risk and of the workload rather than of the hardware, so they are
-one default for every class and are overridable per array through the policy's
+one default for every class and are overridable per array through the budget's
 public fields. The period is measured end-of-pass to start-of-pass.
 `ArrayMaintenance::new` takes how long ago the last pass completed, as the
 caller knows it from the array's persisted maintenance record; a caller with
@@ -1049,7 +1095,7 @@ period would start it again at once, verifying the array back-to-back forever.
 
 ### Checkpointing — what is written, and when
 
-`checkpoint_period_ns` (30 s by default) is the shortest interval between two
+`background.checkpoint_period_ns` (30 s by default) is the shortest interval between two
 position writes of an advancing pass, and the interval *is* the whole trade-off:
 it bounds the progress an unclean stop can discard at one interval's worth of
 maintenance — itself already bounded by the duty share — while keeping the cost

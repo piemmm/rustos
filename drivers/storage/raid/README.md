@@ -250,7 +250,9 @@ into transfers:
   more turns, never a bigger buffer.
 - **Paced against the workload.** Every request served tells the scheduler the
   array is in demand, so maintenance holds to its duty share of a busy array and
-  runs flat out only on an idle one.
+  runs flat out only on an idle one — through the shared `blkio::DutyPacer` over
+  the shared class-keyed budget, so a filesystem verifying the same spindles
+  cannot pace to a different notion of "busy".
 - **Durable position.** An advancing pass writes its position into every
   *current* member's maintenance record, so a scrub or rebuild measured in days
   survives a restart instead of beginning again. The record goes only to current
@@ -263,7 +265,11 @@ into transfers:
   recorded in the shared block-health vocabulary every layer uses, so it reads
   the same as a leaf disk doing the same; losing an array outright, a failed
   maintenance turn, a resumed pass, and a verification pass completing each get
-  their own record.
+  their own record. It also travels **on the completions themselves**: a
+  degraded array serves its reads and says so (`BlkStatus::Degraded`, valid data
+  and not reissuable), so the consumer's mount reads as at-risk and a filesystem
+  on it stands its own background verification down instead of spending the
+  bandwidth the rebuild needs.
 
 ## Limitations
 

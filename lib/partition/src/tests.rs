@@ -514,6 +514,10 @@ impl Block for TelemetryBlock {
         BlkDeviceClass::Rotational
     }
 
+    fn backing_availability(&self) -> MountAvailability {
+        MountAvailability::Recovering
+    }
+
     fn device_health(&self) -> Result<DeviceHealth, DriverError> {
         Ok(DeviceHealth::Available(HealthSnapshot {
             power_on_hours: 0,
@@ -653,6 +657,13 @@ fn window_reports_the_underlying_disks_class_and_health() {
     assert_eq!(snapshot.media_errors, 7);
     assert_eq!(snapshot.reallocated_sectors, 3);
     assert!(snapshot.critical_warning);
+    assert_eq!(
+        win.backing_availability(),
+        MountAvailability::Recovering,
+        "a window that reported the available default would have a filesystem \
+         spend discretionary I/O on a disk that is being given a chance to \
+         come back"
+    );
 }
 
 #[test]

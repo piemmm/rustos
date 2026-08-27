@@ -445,8 +445,10 @@ the request/render libraries stay testable against in-memory fixtures.
   by [`MOUNT_SOURCE_MAX`]), the `target` mount point ([`MOUNT_TARGET_MAX`]),
   the driver `fstype` ([`MOUNT_FSTYPE_MAX`]), the [`MountFlags`]
   mount-policy bitmap (`ro`/`nosuid`/`nodev`/`noexec`), the volume's live
-  [`MountAvailability`] (so a surprise-removed volume never reads as
-  healthy), its stable 16-byte volume identity ([`MOUNT_VOLUME_ID_LEN`],
+  [`MountAvailability`] (so neither a surprise-removed volume nor one on a
+  composed backing that has lost redundancy reads as healthy — a degraded
+  array's completions carry that state across the block-service seam,
+  [block drivers](../drivers/block.md)), its stable 16-byte volume identity ([`MOUNT_VOLUME_ID_LEN`],
   all-zero when the mount publishes none — the identity a `volume_detach`
   request names), the storage `medium` of the block device backing it, and
   the volume's space accounting as a `VolumeStats` usage block (block size

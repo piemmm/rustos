@@ -11,6 +11,7 @@ use tairix_abi::blkio::{BlkDeviceClass, BlkStatus};
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth};
 use tairix_abi::driver::{BufferClass, DriverError};
 use tairix_abi::raid::{ArrayHealth, MemberState, SlotDisposition};
+use tairix_abi::sysinfo::MountAvailability;
 
 /// Whether a member joining the array holds a copy believed **current** or
 /// one the reassembly proved is **stale** and must be rebuilt before it can
@@ -377,27 +378,7 @@ impl<'a, B: Block> MirrorArray<'a, B> {
     /// copy at all is [`Failed`](ArrayHealth::Failed).
     #[must_use]
     pub fn health(&self) -> ArrayHealth {
-        let mut in_sync = 0usize;
-        let mut resyncing = 0usize;
-        let mut degraded_slots = 0usize;
-        for member in &*self.members {
-            match member.state {
-                MemberState::InSync => in_sync += 1,
-                MemberState::Resyncing => resyncing += 1,
-                // A faulted or absent slot each reduces redundancy the same
-                // way: a copy the array is defined to have is not serving.
-                MemberState::Faulted | MemberState::Absent => degraded_slots += 1,
-            }
-        }
-        if in_sync == 0 {
-            ArrayHealth::Failed
-        } else if resyncing > 0 {
-            ArrayHealth::Recovering
-        } else if degraded_slots > 0 {
-            ArrayHealth::Degraded
-        } else {
-            ArrayHealth::Optimal
-        }
+        crate::health::mirror_health(self.members.iter().map(MirrorMember::state))
     }
 
     /// Whether any member is still rebuilding (i.e. [`resync_step`] has more
@@ -1072,6 +1053,13 @@ impl<'a, B: Block> MirrorArray<'a, B> {
 impl<B: Block> Block for MirrorArray<'_, B> {
     fn device_class(&self) -> BlkDeviceClass {
         crate::health::aggregate_device_class(self.live_devices().map(Block::device_class))
+    }
+
+    fn backing_availability(&self) -> MountAvailability {
+        crate::health::aggregate_backing_availability(
+            self.health(),
+            self.live_devices().map(Block::backing_availability),
+        )
     }
 
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {

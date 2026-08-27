@@ -394,6 +394,22 @@ impl ArrayHealth {
         !matches!(self, Self::Failed)
     }
 
+    /// The worse of two healths, in this enum's declared best → worst order.
+    ///
+    /// An array composed of independently-redundant groups — a RAID10 stripe
+    /// of mirrors — is only as healthy as its weakest group: one group short
+    /// of a copy makes the whole array at-risk, and one that cannot serve
+    /// makes the array unable to serve the stripes it holds. The fold is total
+    /// and commutative, so the groups may be walked in any order.
+    #[must_use]
+    pub const fn worse_of(self, other: Self) -> Self {
+        if other.as_u8() > self.as_u8() {
+            other
+        } else {
+            self
+        }
+    }
+
     /// The volume-availability this array health maps to, so a serving process
     /// can surface array health through the same `sysinfo` mount surface a leaf
     /// volume uses (`plans/FIX-IO.md` IO2/IO5) rather than a second vocabulary.

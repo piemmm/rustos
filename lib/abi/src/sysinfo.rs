@@ -2404,6 +2404,61 @@ impl MountAvailability {
         }
     }
 
+    /// How far from fully available this state is, as a rank two states can be
+    /// ordered by: the higher the rank, the less the volume can be relied on.
+    /// The order is available → serving-but-unwell → riding-out-a-blip →
+    /// serving-read-only-in-conflict → vanished-with-writes-held → vanished:
+    /// [`Available`](Self::Available) < [`Degraded`](Self::Degraded) <
+    /// [`Recovering`](Self::Recovering) <
+    /// [`RecoveryConflict`](Self::RecoveryConflict) <
+    /// [`UnavailableDirty`](Self::UnavailableDirty) <
+    /// [`UnavailableLost`](Self::UnavailableLost).
+    ///
+    /// The three live states rank in the order [`crate::raid::ArrayHealth`]
+    /// already documents (optimal, degraded, recovering); a state that still
+    /// serves reads outranks one that fails every operation closed, so
+    /// `RecoveryConflict` — a read-only mount whose retained write set is
+    /// still held — sits below the vanish states, and `UnavailableLost`, the
+    /// one state that admits data is gone, is last.
+    ///
+    /// This is the single, explicit definition of "which availability wins"
+    /// when a stack of storage layers each report their own
+    /// ([`crate::driver::block::Block::backing_availability`]), so
+    /// [`worse_of`](Self::worse_of) and every consumer that folds them cannot
+    /// order them differently. It is kept deliberately independent of the wire
+    /// byte [`as_u8`](Self::as_u8) so the transport encoding and the
+    /// fold precedence can never silently couple.
+    #[must_use]
+    pub const fn severity(self) -> u8 {
+        match self {
+            Self::Available => 0,
+            Self::Degraded => 1,
+            Self::Recovering => 2,
+            Self::RecoveryConflict => 3,
+            Self::UnavailableDirty => 4,
+            Self::UnavailableLost => 5,
+        }
+    }
+
+    /// The state that most conservatively describes a volume both `self` and
+    /// `other` apply to: the further-from-available of the two by
+    /// [`severity`](Self::severity).
+    ///
+    /// This is how a composed storage element folds what it can promise with
+    /// what the elements beneath it report — a filesystem over an array over
+    /// disks — so background work stands down on the worst answer anywhere in
+    /// the stack rather than on the topmost layer's optimism. Because the
+    /// ranking is total, the fold is associative and commutative: a stack can
+    /// be walked in any order for the same result.
+    #[must_use]
+    pub const fn worse_of(self, other: Self) -> Self {
+        if other.severity() > self.severity() {
+            other
+        } else {
+            self
+        }
+    }
+
     /// Classify the change from `prev` to `next` as a storage-health audit
     /// transition, or [`None`] when the change carries no such signal.
     ///
@@ -6679,6 +6734,49 @@ mod tests {
         ] {
             assert_eq!(MountAvailability::from_block_status(status), None);
         }
+    }
+
+    #[test]
+    fn availability_ranks_from_available_to_gone_and_folds_to_the_worst() {
+        const ORDER: [MountAvailability; 6] = [
+            MountAvailability::Available,
+            MountAvailability::Degraded,
+            MountAvailability::Recovering,
+            MountAvailability::RecoveryConflict,
+            MountAvailability::UnavailableDirty,
+            MountAvailability::UnavailableLost,
+        ];
+        // The rank is total and strictly increasing along the documented
+        // order, and deliberately not the wire byte.
+        for (rank, state) in ORDER.iter().enumerate() {
+            assert_eq!(usize::from(state.severity()), rank);
+        }
+        assert_ne!(
+            MountAvailability::Degraded.severity(),
+            MountAvailability::Degraded.as_u8(),
+            "the fold precedence and the transport encoding stay independent"
+        );
+        // A fold over a stack of layers takes the worst answer anywhere in it,
+        // and is commutative and idempotent, so the stack may be walked in any
+        // order.
+        for a in ORDER {
+            assert_eq!(a.worse_of(a), a);
+            for b in ORDER {
+                assert_eq!(a.worse_of(b), b.worse_of(a));
+                let worse = a.worse_of(b);
+                assert!(worse == a || worse == b);
+                assert_eq!(worse.severity(), a.severity().max(b.severity()));
+            }
+        }
+        // Only a stack that is available at every layer is available.
+        assert_eq!(
+            MountAvailability::Available.worse_of(MountAvailability::Available),
+            MountAvailability::Available
+        );
+        assert_eq!(
+            MountAvailability::Available.worse_of(MountAvailability::Recovering),
+            MountAvailability::Recovering
+        );
     }
 
     #[test]

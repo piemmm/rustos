@@ -37,10 +37,12 @@ validated fail-closed against an untrusted, possibly-hostile disk
 
   A window is a range of the *same* hardware, so the device's own
   answers pass through rather than being replaced by the trait defaults:
-  its I/O class, its health telemetry, and its discard support. Nearly
-  every filesystem is mounted on a partition, so a defaulted answer here
-  would hide a failing drive's counters from the scrub scheduler and
-  withhold every trim from the medium. Discard is additionally reported
+  its I/O class, its health telemetry, its discard support, and what its
+  backing can promise a background consumer. Nearly every filesystem is
+  mounted on a partition, so a defaulted answer here would hide a failing
+  drive's counters from the scrub scheduler, withhold every trim from the
+  medium, and have a filesystem spend discretionary I/O on a composed
+  device that is rebuilding. Discard is additionally reported
   only when the window's start block is **aligned** to the device's
   discard granularity: a caller that aligns to what it is told must
   produce a request the device accepts, so a misaligned window withdraws

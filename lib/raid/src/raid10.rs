@@ -52,6 +52,12 @@ use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth};
 use tairix_abi::driver::{BufferClass, DriverError};
 use tairix_abi::raid::{ArrayHealth, MemberState, RaidLevel};
+use tairix_abi::sysinfo::MountAvailability;
+
+/// Copies per mirror column. RAID10 pairs its members two to a column, so the
+/// member count is twice the number of stripe columns and every column-local
+/// index derives from this.
+pub(crate) const MIRROR_COPIES: usize = 2;
 
 /// A reason a RAID10 array could not be assembled. Distinct from
 /// [`DriverError`] (which flows on the I/O path) because these are
@@ -263,7 +269,7 @@ impl<'a, B: Block> Raid10Array<'a, B> {
 
     /// The number of mirror pairs (stripe columns) the array is composed of.
     const fn pairs(&self) -> u64 {
-        self.members.len() as u64 / 2
+        (self.members.len() / MIRROR_COPIES) as u64
     }
 
     /// The logical geometry of the composed array (block size shared with the
@@ -307,9 +313,9 @@ impl<'a, B: Block> Raid10Array<'a, B> {
     /// `scrub_next_lba` seeds the pair's scrub cursor (the per-member block
     /// count when no scrub is in progress).
     fn pair(&mut self, column: usize, scrub_next_lba: u64) -> MirrorArray<'_, B> {
-        let base = column * 2;
+        let base = column * MIRROR_COPIES;
         MirrorArray::from_prepared(
-            &mut self.members[base..base + 2],
+            &mut self.members[base..base + MIRROR_COPIES],
             self.per_member,
             scrub_next_lba,
         )
@@ -324,34 +330,20 @@ impl<'a, B: Block> Raid10Array<'a, B> {
     /// every pair holds two in-sync copies.
     #[must_use]
     pub fn health(&self) -> ArrayHealth {
-        let mut recovering = false;
-        let mut degraded = false;
-        for column in 0..self.members.len() / 2 {
-            let base = column * 2;
-            let (mut in_sync, mut resyncing) = (0usize, 0usize);
-            for member in &self.members[base..base + 2] {
-                match member.state() {
-                    MemberState::InSync => in_sync += 1,
-                    MemberState::Resyncing => resyncing += 1,
-                    MemberState::Faulted | MemberState::Absent => {}
-                }
-            }
-            if in_sync == 0 && resyncing == 0 {
-                return ArrayHealth::Failed;
-            }
-            if resyncing > 0 || in_sync == 0 {
-                recovering = true;
-            } else if in_sync < 2 {
-                degraded = true;
-            }
-        }
-        if recovering {
-            ArrayHealth::Recovering
-        } else if degraded {
-            ArrayHealth::Degraded
-        } else {
-            ArrayHealth::Optimal
-        }
+        let (columns, odd) = self.members.as_chunks::<MIRROR_COPIES>();
+        // Assembly refuses an odd member count, so there is no partial column;
+        // folding one in anyway keeps a broken invariant fail-closed rather
+        // than silently dropping a copy from the answer.
+        crate::health::stripe_of_mirrors_health(
+            columns
+                .iter()
+                .map(|column| column.iter().map(MirrorMember::state))
+                .map(crate::health::mirror_health)
+                .chain(
+                    (!odd.is_empty())
+                        .then(|| crate::health::mirror_health(odd.iter().map(MirrorMember::state))),
+                ),
+        )
     }
 
     /// Whether any member is still rebuilding.
@@ -452,9 +444,10 @@ impl<'a, B: Block> Raid10Array<'a, B> {
     ///   block-size multiple.
     /// * The mirror pair's error if a rebuild transfer fails.
     pub fn resync_step(&mut self, scratch: &mut [u8]) -> Result<(), DriverError> {
-        for column in 0..self.members.len() / 2 {
+        for column in 0..self.members.len() / MIRROR_COPIES {
             let idle = self.per_member.block_count;
-            if !self.members[column * 2..column * 2 + 2]
+            let base = column * MIRROR_COPIES;
+            if !self.members[base..base + MIRROR_COPIES]
                 .iter()
                 .any(|m| m.state() == MemberState::Resyncing)
             {
@@ -552,7 +545,7 @@ impl<'a, B: Block> Raid10Array<'a, B> {
         let cursor = self.scrub_next_lba;
         let mut next = cursor;
         let mut worst: Option<DriverError> = None;
-        for column in 0..self.members.len() / 2 {
+        for column in 0..self.members.len() / MIRROR_COPIES {
             let mut pair = self.pair(column, cursor);
             let outcome = pair.scrub_step(scratch);
             // Every pair shares the per-member geometry and starts from the
@@ -575,7 +568,7 @@ impl<'a, B: Block> Raid10Array<'a, B> {
         if index >= self.members.len() {
             return Err(Raid10Error::UnknownMember);
         }
-        Ok((index / 2, index % 2))
+        Ok((index / MIRROR_COPIES, index % MIRROR_COPIES))
     }
 
     /// Begin rebuilding a currently-faulted member from its pair's surviving
@@ -656,6 +649,13 @@ impl<B: Block> Block for Raid10Array<'_, B> {
         crate::health::aggregate_device_class(self.live_devices().map(Block::device_class))
     }
 
+    fn backing_availability(&self) -> MountAvailability {
+        crate::health::aggregate_backing_availability(
+            self.health(),
+            self.live_devices().map(Block::backing_availability),
+        )
+    }
+
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {
         Ok(self.geometry)
     }
@@ -688,7 +688,7 @@ impl<B: Block> Block for Raid10Array<'_, B> {
 
     fn flush(&mut self) -> Result<(), DriverError> {
         let idle = self.per_member.block_count;
-        for column in 0..self.members.len() / 2 {
+        for column in 0..self.members.len() / MIRROR_COPIES {
             self.pair(column, idle).flush()?;
         }
         Ok(())

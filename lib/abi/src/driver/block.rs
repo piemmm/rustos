@@ -5,6 +5,7 @@
 //! the filesystem layer needs.
 
 use crate::blkio::BlkDeviceClass;
+use crate::sysinfo::MountAvailability;
 
 use super::{BufferClass, DriverError};
 
@@ -412,6 +413,41 @@ pub trait Block {
     fn device_class(&self) -> BlkDeviceClass {
         BlkDeviceClass::Virtual
     }
+
+    /// What this device can currently promise a consumer that is deciding
+    /// whether to spend *discretionary* I/O on it.
+    ///
+    /// A layer that verifies, discards, or rebuilds its own storage in the
+    /// background must not do so while something beneath it is short of
+    /// redundancy or being given a bounded chance to come back: a degraded or
+    /// rebuilding array's bandwidth belongs to its own rebuild, a device
+    /// inside its recovery grace window must not be handed reads it did not
+    /// have to serve, and a discard — destructive and irreversible — must
+    /// never be issued to a fault domain whose state is in doubt. Restoring
+    /// redundancy below outranks verifying above, and asking is the only way a
+    /// layer can know.
+    ///
+    /// The default is [`MountAvailability::Available`] — the honest answer for
+    /// a plain device with nothing composed beneath it. A device that
+    /// *wraps* another forwards the inner answer (a partition window, a cache,
+    /// a retention journal), and a device that *composes* others folds its own
+    /// state with theirs through
+    /// [`MountAvailability::worse_of`], so the worst answer anywhere in the
+    /// stack is the one the top layer acts on.
+    ///
+    /// This governs discretionary background I/O only: a user's read or write
+    /// is unaffected, and reporting the state is a pure observation that
+    /// touches no hardware, cannot fail, and needs no capability beyond the
+    /// handle that already reaches the device.
+    ///
+    /// # Capabilities
+    ///
+    /// Caller must present the driver's [`DriverHandle`].
+    ///
+    /// [`DriverHandle`]: crate::driver::DriverHandle
+    fn backing_availability(&self) -> MountAvailability {
+        MountAvailability::Available
+    }
 }
 
 /// A `&mut B` is itself a [`Block`], forwarding every method to the
@@ -472,6 +508,10 @@ impl<B: Block + ?Sized> Block for &mut B {
 
     fn device_class(&self) -> BlkDeviceClass {
         (**self).device_class()
+    }
+
+    fn backing_availability(&self) -> MountAvailability {
+        (**self).backing_availability()
     }
 }
 
@@ -834,6 +874,69 @@ mod tests {
         }
         fn flush(&mut self) -> Result<(), DriverError> {
             Ok(())
+        }
+    }
+
+    #[test]
+    fn a_plain_device_promises_availability_and_a_wrapper_forwards_the_answer() {
+        // A device with nothing composed beneath it has nothing to stand
+        // background work down for, so the honest default is available.
+        let mut dev = MockBlock {
+            geo: BlockGeometry {
+                block_size: 64,
+                block_count: 16,
+            },
+            store: [0u8; 1024],
+        };
+        assert_eq!(dev.backing_availability(), MountAvailability::Available);
+
+        // A `&mut` adapter is the same hardware, so it answers the same.
+        let borrowed = &mut dev;
+        assert_eq!(
+            borrowed.backing_availability(),
+            MountAvailability::Available
+        );
+
+        // A device that composes others reports the worst it knows of, and a
+        // wrapper over it must not launder that into optimism.
+        let mut composed = PromisingBlock {
+            promise: MountAvailability::Recovering,
+        };
+        assert_eq!(
+            composed.backing_availability(),
+            MountAvailability::Recovering
+        );
+        let borrowed = &mut composed;
+        assert_eq!(
+            borrowed.backing_availability(),
+            MountAvailability::Recovering
+        );
+    }
+
+    /// A device that reports a composed backing's state, for the forwarding
+    /// test above.
+    struct PromisingBlock {
+        promise: MountAvailability,
+    }
+
+    impl Block for PromisingBlock {
+        fn geometry(&self) -> Result<BlockGeometry, DriverError> {
+            Ok(BlockGeometry {
+                block_size: 512,
+                block_count: 1,
+            })
+        }
+        fn read_blocks(&mut self, _lba: u64, _buf: &mut [u8]) -> Result<(), DriverError> {
+            Err(DriverError::Unsupported)
+        }
+        fn write_blocks(&mut self, _lba: u64, _buf: &[u8]) -> Result<(), DriverError> {
+            Err(DriverError::Unsupported)
+        }
+        fn flush(&mut self) -> Result<(), DriverError> {
+            Ok(())
+        }
+        fn backing_availability(&self) -> MountAvailability {
+            self.promise
         }
     }
 

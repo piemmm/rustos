@@ -53,6 +53,7 @@ use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth};
 use tairix_abi::driver::{BufferClass, DriverError};
 use tairix_abi::raid::{ArrayHealth, RaidLevel};
+use tairix_abi::sysinfo::MountAvailability;
 
 /// One member of a [`StripeArray`]: a child [`Block`] device and whether it
 /// has been dropped by a whole-device fault.
@@ -419,6 +420,13 @@ impl<'a, B: Block> StripeArray<'a, B> {
 impl<B: Block> Block for StripeArray<'_, B> {
     fn device_class(&self) -> BlkDeviceClass {
         crate::health::aggregate_device_class(self.live_devices().map(Block::device_class))
+    }
+
+    fn backing_availability(&self) -> MountAvailability {
+        crate::health::aggregate_backing_availability(
+            self.health(),
+            self.live_devices().map(Block::backing_availability),
+        )
     }
 
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {

@@ -385,7 +385,7 @@ impl<B: Block> ArrayRuntime<B> {
 
     /// The array's current health.
     #[must_use]
-    pub fn array_health(&mut self) -> ArrayHealth {
+    pub fn array_health(&self) -> ArrayHealth {
         self.array.health()
     }
 

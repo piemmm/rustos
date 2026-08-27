@@ -7,6 +7,7 @@ use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, HealthSnapshot};
 use tairix_abi::driver::{BufferClass, DriverError};
 use tairix_abi::raid::{ArrayHealth, MemberState, SlotDisposition};
+use tairix_abi::sysinfo::MountAvailability;
 
 const BS: u32 = 512;
 const NBLK: u64 = 8;
@@ -27,6 +28,7 @@ struct FaultBlock {
     health: Cell<DeviceHealth>,
     health_fault: Cell<bool>,
     class: Cell<BlkDeviceClass>,
+    promise: Cell<MountAvailability>,
     reads: Cell<u32>,
     writes: Cell<u32>,
 }
@@ -46,6 +48,7 @@ impl FaultBlock {
             health: Cell::new(DeviceHealth::Unavailable),
             health_fault: Cell::new(false),
             class: Cell::new(BlkDeviceClass::SolidState),
+            promise: Cell::new(MountAvailability::Available),
             reads: Cell::new(0),
             writes: Cell::new(0),
         }
@@ -156,6 +159,10 @@ impl Block for FaultBlock {
 
     fn device_class(&self) -> BlkDeviceClass {
         self.class.get()
+    }
+
+    fn backing_availability(&self) -> MountAvailability {
+        self.promise.get()
     }
 }
 
@@ -658,8 +665,52 @@ fn the_class_carrying_read_and_write_thread_the_sensitivity_class() {
 }
 
 #[test]
+fn a_composed_array_promises_the_worst_of_itself_and_its_members() {
+    let mut members = [
+        MirrorMember::new(FaultBlock::new(0)),
+        MirrorMember::new(FaultBlock::new(0)),
+    ];
+    let mut array = MirrorArray::assemble(&mut members).expect("assembles");
+    assert_eq!(array.health(), ArrayHealth::Optimal);
+    assert_eq!(
+        array.backing_availability(),
+        MountAvailability::Available,
+        "a whole array over available disks has nothing to stand background work down for"
+    );
+
+    // A member still in sync but riding out its own recovery window leaves the
+    // array optimal, and must not be handed discretionary reads.
+    dev(&array, 1).promise.set(MountAvailability::Recovering);
+    assert_eq!(array.health(), ArrayHealth::Optimal);
+    assert_eq!(
+        array.backing_availability(),
+        MountAvailability::Recovering,
+        "a member's own recovery window reaches the layer above the array"
+    );
+    dev(&array, 1).promise.set(MountAvailability::Available);
+
+    // The array's own lost redundancy needs no member to complain: its
+    // bandwidth belongs to restoring the copy. A read is served from the first
+    // copy, so faulting that one is what drops it.
+    dev(&array, 0)
+        .read_fault
+        .set(Some(DriverError::DeviceOffline));
+    let mut buf = block(0);
+    array.read_blocks(0, &mut buf).expect("survivor serves");
+    assert_eq!(array.member_state(0), Some(MemberState::Faulted));
+    assert_eq!(array.health(), ArrayHealth::Degraded);
+    assert_eq!(array.backing_availability(), MountAvailability::Degraded);
+
+    // A dropped member no longer speaks for the array, so its own promise
+    // cannot make the answer worse than the array's redundancy state.
+    dev(&array, 0)
+        .promise
+        .set(MountAvailability::UnavailableLost);
+    assert_eq!(array.backing_availability(), MountAvailability::Degraded);
+}
+
+#[test]
 fn array_health_maps_onto_the_shared_mount_availability_vocabulary() {
-    use tairix_abi::sysinfo::MountAvailability;
     assert_eq!(
         ArrayHealth::Optimal.to_mount_availability(),
         MountAvailability::Available
