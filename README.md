@@ -1,4 +1,4 @@
-# TAIRiX /'taɪ.rɪks/ - An attempt at making a sensible OS.
+# TAIRiX /'taɪ.rɪks/ - An exploration of practical operating system design
 
 A security-first, multi-user, multi-core operating system written in Rust,
 targeting bare-metal x86_64, AArch64, RISC-V 64, and the browser via wasm32. TAIRiX is _not_ Linux.
