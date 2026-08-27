@@ -106,7 +106,9 @@ mod tests {
     use core::cell::RefCell;
     use tairix_abi::sysinfo::{MemoryPressureBand, SysinfoQueryId, SysinfoRequestHeader};
     use tairix_abi::Errno;
-    use tairix_reclaim::{PressureBand, PressureGauge, ReportedPressure};
+    use tairix_reclaim::{
+        CacheBudget, PressureBand, PressureGauge, ReclaimClass, ReportedPressure,
+    };
 
     /// A `sysinfod` stand-in answering the band query with one depth, or
     /// refusing it, and recording which query it was actually asked.
@@ -169,12 +171,14 @@ mod tests {
         // The whole point of wiring the band up: an unreported gauge admits
         // nothing, so every cached value is rebuilt on every use.
         let gauge = ReportedPressure::unknown();
-        assert!(!gauge.growth_permitted(1));
+        let class = ReclaimClass::CleanFileData;
+        let budget = CacheBudget::from_ceiling(1 << 20);
+        assert!(!gauge.growth_permitted(class, budget, 1));
         assert!(refresh_into(
             &Fixture::answering(PressureBand::Normal.depth()),
             &gauge
         ));
-        assert!(gauge.growth_permitted(1));
+        assert!(gauge.growth_permitted(class, budget, 1));
     }
 
     #[test]
@@ -200,7 +204,13 @@ mod tests {
             &gauge
         ));
         assert_eq!(gauge.band(), PressureBand::Severe);
-        assert!(!gauge.growth_permitted(1));
+        // Severe takes every class to zero, so nothing is admitted at all.
+        for class in ReclaimClass::ALL {
+            assert!(
+                !gauge.growth_permitted(class, CacheBudget::from_ceiling(1 << 20), 1),
+                "{class:?}"
+            );
+        }
     }
 
     #[test]

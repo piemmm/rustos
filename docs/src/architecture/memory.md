@@ -1244,10 +1244,10 @@ normal, mild, moderate, severe, critical — is shared with
 - **Reserves, fail closed.** The thresholds carry a reserve floor
   (1/64 of the backing). A reading at or below it is critical
   regardless of history; a zero-size (unknown) backing reports critical
-  for every reading and admits nothing. `growth_permitted` allows cache
-  growth only at normal pressure and never lets it take the free
-  reading into the reserve — cache expansion can never be the cause of
-  reserve exhaustion.
+  for every reading and admits nothing. `growth_permitted(class, budget,
+  cost)` never lets growth take the free reading into the reserve — cache
+  expansion can never be the cause of reserve exhaustion — and never past
+  the band's own ceiling for that class.
 - **One reading per request, not per entry.** `growth_allowance` takes
   the reading once and returns a `GrowthAllowance` carrying the folded
   band and the headroom above the reserve; a consumer admitting a whole
@@ -1262,14 +1262,30 @@ normal, mild, moderate, severe, critical — is shared with
   headroom its first answer covered. It is also the difference between
   one and 2N acquisitions of the global frame-allocator lock per
   request, since in the kernel the reading *is* that allocator.
-- **Reclaim ordering.** `shrink_target(band, class, budget)` is the
-  pure per-band ceiling each `ReclaimClass` must shrink to: at mild
-  pressure the disposable/speculative classes drop and semantic,
-  runtime, and clean-file classes shrink to the low watermark; at
-  moderate, clean file and transform cache drain fully while metadata
-  and recovery assist are capped at the low watermark; at severe and
-  critical every class shrinks to zero. Targets are monotonically
-  non-increasing with depth.
+- **Reclaim ordering, and admission with it.** `shrink_target(band,
+  class, budget)` is the pure per-band ceiling each `ReclaimClass` must
+  shrink to: at mild pressure the disposable/speculative classes drop and
+  semantic, runtime, and clean-file classes shrink to the low watermark; at
+  moderate, clean file and transform cache drain fully while metadata and
+  recovery assist are capped at the low watermark; at severe and critical
+  every class shrinks to zero. Targets are monotonically non-increasing with
+  depth.
+
+  **Growth reads the same figure.** An admission is bounded by
+  `shrink_target` for its own class, so a class the band preserves keeps
+  admitting and one the band empties admits nothing — a costless entry
+  included. A separate "no growth above normal" rule would contradict the
+  ceilings this table states: a metadata cache told it may keep everything
+  while being refused every new entry decays to uselessness under sustained
+  mild pressure, and reports a healthy ledger while doing it.
+
+  **A working-set floor is the one exception to a class's target.** A cache
+  whose entries cannot be rebuilt without the filesystem or another process
+  declares part of its budget as live working set
+  (`CacheBudget::with_working_set_floor`); mild and moderate leave that many
+  bytes alone, severe and critical still take everything. Two caches declare
+  it — the desktop's decoded icon artwork and the client side of the glyph
+  cache — for the reason §7g gives.
 - **`ramzip` handoff and escalation.** `ramzip_handoff` fixes the
   `plans/SWAPSWAPSWAP.md` ordering: no compression at normal/mild; at
   moderate, compression of cold anonymous pages may start only once
@@ -2209,6 +2225,46 @@ reclaim policy anyway (`plans/SMARTRAM.md` SMART5, section 6.4).
   ceiling (`tairix_reclaim::desktop::screenful_ui_cache`): one screenful of
   pixels rather than the small fraction a cursor or a glyph is allowed,
   because no more of either than fills the screen can be visible at once.
+- **What the desktop cannot rebuild by itself keeps a working-set floor.**
+  Every cache above is rebuilt from data the process already holds: a
+  rasterise, a blur. Two are not. A decoded icon costs a capability-gated
+  read *plus* a parser-sandbox round trip, and a glyph on the client side of
+  the font endpoint costs an IPC round trip — so those two are built through
+  `tairix_reclaim::desktop::working_set_ui_cache` and
+  `tairix_font::client_glyph_cache_budget`, which declare their whole budget
+  the session's live working set. Mild and moderate pressure leave them
+  alone; severe and critical still take them.
+
+  Not a special case, a measured one. Their budgets are a small fraction of
+  one frame of the output the pixels are drawn on, and no more of them than
+  fills that output can be visible at once, so there is nothing in them to
+  trim that the desktop is not currently drawing: releasing them frees a
+  negligible figure and immediately costs a read and a round trip per icon
+  and a round trip per glyph, while the machine is short. On a 256 MiB board
+  a screenful of terminal windows takes the machine into mild pressure, and
+  before the floor existed each further window took 10 to 120 seconds instead
+  of a fifth of one — the bar and the desktop drawing built-in glyphs in
+  place of every icon, and every glyph re-fetched over the font endpoint on
+  every repaint.
+- **A refusal is reported, not retried per frame.** At severe pressure, or
+  for an entry larger than the whole budget, the cache genuinely cannot
+  retain the decode. `ArtworkResolver::declined` is how it says so, and the
+  session's icon desk holds that key back until the pressure band moves
+  (`ArtworkDesk::decline` / `retry_declined`). The draw falls to its built-in
+  glyph — the tier that exists for exactly this — rather than to a storm of
+  reads that cannot be kept.
+- **Proved end to end on a real desktop.**
+  `tests/integration/desktop_pressure_qemu_aarch64` boots the production
+  aarch64 graphical session on the `virt` board and opens a screenful of
+  terminal windows, one per primary click on the application's own icon-bar
+  slot. The guest passes only when all three of its witnesses are in: the
+  bundle loaded, every window created, and the machine's *published* pressure
+  band left normal — read through `MEM_STATS`, so the vertical observes the
+  production gauge rather than steering it, and a run that never left normal
+  cannot pass. The host then compares the icon bar's untouched application
+  slot against the frame taken before any of that memory was spent, and
+  requires the pixels to be identical: a desktop that answered pressure by
+  dropping its decoded icons draws built-in glyphs there instead.
 
   There is exactly one constructor and it demands the real backing size,
   the real gauge, and the real audit sink; each consumer takes its cache

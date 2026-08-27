@@ -150,15 +150,6 @@ mod program {
     /// that window lives and is never reused after it goes.
     const WINDOW_TOKEN_BASE: u64 = 16;
 
-    /// Most windows one terminal process hosts at once.
-    ///
-    /// A **bound on the process's own resources**, not a capacity to scale:
-    /// each window costs a pseudo-terminal, a shell child, a frame region,
-    /// and two wait-set members, and a user who has asked for more than this
-    /// many terminals has asked for something no screen can show. A refused
-    /// *New window* is reported and the terminal carries on.
-    const MAX_WINDOWS: usize = 32;
-
     /// How long the program parks between frames of an animated screen
     /// effect: fifty milliseconds, twenty frames a second.
     ///
@@ -1435,10 +1426,14 @@ mod program {
         match outcome {
             EventOutcome::Continue => Applied::Running,
             EventOutcome::NewWindow => {
-                if windows.len() >= MAX_WINDOWS {
-                    report("this terminal already hosts as many windows as it can");
-                    return Applied::Running;
-                }
+                // No count of its own: every resource a window costs is
+                // already bounded by something derived from the machine and
+                // enforced with a typed refusal — the session's per-client
+                // frame budget, and this process's own stream, process, and
+                // address-space limits. `open_window` states the reason on
+                // stderr and the terminal carries on, so a second
+                // hand-picked ceiling in front of those would only refuse
+                // windows the machine could have given.
                 let slot = *ctx.next_slot;
                 if let Some((opened, _)) = open_window(WindowContext {
                     client,

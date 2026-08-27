@@ -65,6 +65,16 @@ guarantees.
   returning borrows so a hundred-tile grid never copies a hundred images per
   frame. Negative results are cached too, so a bad asset — or a bundle with
   no icon at all — is not re-read every frame.
+- **Decoded once means once, not once per band.** The cache is the *working
+  set* of the surfaces drawing from it, not speculation around one: re-deriving
+  an entry costs a capability-gated read plus a sandbox round trip, and the
+  whole budget is a small fraction of one frame of the output the icons are
+  drawn on. So mild and moderate memory pressure leave it alone
+  (`tairix_reclaim::working_set_ui_cache`, `plans/SMARTRAM.md` section 6.4);
+  severe and critical still take it, and the glyph tier is then the honest
+  answer. A refusal the cache cannot avoid is reported to the resolver
+  (`ArtworkResolver::declined`) and not re-offered until the band moves, so
+  giving the pixels up is never a storm of reads that cannot be kept.
 - **Rendered exactly, at the size it is drawn.** A vector asset is rasterised
   straight onto the requested `side`×`side` surface — never at a nominal size
   and rescaled — and every pixel takes the *exact* fraction of its own area

@@ -25,8 +25,10 @@
 //!   name a created frame, and the damage rectangle must lie inside the
 //!   window's surface; each failure is a typed refusal, never a clamp.
 //! * **A hostile client is bounded.** At most
-//!   [`WINDOWS_PER_CLIENT_MAX`] windows per attested client, so one app
-//!   cannot pin unbounded shared memory or flood the taskbar.
+//!   [`client_frame_budget_bytes`] of mapped window frame per attested
+//!   client — bytes, not windows, because that is the resource a window
+//!   actually spends here — so one app cannot pin unbounded shared memory
+//!   or flood the taskbar, however large or numerous its windows.
 //! * **Teardown fails closed.** [`WindowServer::client_exited`] drops a
 //!   dead client's windows (and their region mappings) and tells the
 //!   host, so an exited app never leaks a mapped grant or a ghost
@@ -56,19 +58,57 @@ pub const WINDOW_REPLY_MAX: usize = if WINDOW_CREATE_REPLY_LEN > WINDOW_DESKTOP_
     WINDOW_DESKTOP_REPLY_LEN
 };
 
-/// Most windows one attested client may hold open at once. A validation
-/// bound, not a capacity: each window pins its shared frame region in the
-/// session, so an unbounded count would let one hostile app exhaust the
-/// session's address space.
+/// The share of the machine's RAM one attested client may hold mapped in the
+/// session as window frames: a quarter of it.
 ///
-/// Sized so ordinary use never meets it — a terminal opens every one of its
-/// windows in a single process, and a user with dozens of them is doing
-/// nothing unusual — while a runaway client is still stopped well before the
-/// session's own mappings are. The bound is on the *count* because that is
-/// what this engine can see; the bytes behind it are bounded by the session's
-/// address-space limit, which the kernel enforces and a refused mapping
-/// already fails this call closed on.
-pub const WINDOWS_PER_CLIENT_MAX: usize = 32;
+/// The *physical* memory behind those frames is the client's own allocation,
+/// already bounded by its address-space limit and by the machine; what this
+/// bound protects is the session, which must not let one client's windows
+/// crowd out every other client's ability to map and draw. A quarter is far
+/// more than any application's windows measure — fifty terminal windows on a
+/// 256 MiB board, and thirty full-screen ones on a 4 GiB machine driving a 4K
+/// display — while still leaving three quarters for the session and every
+/// other client. An eighth was tried first and refused the twenty-seventh
+/// terminal window on that board, which is a bound tighter than the machine
+/// rather than a defence.
+const CLIENT_FRAME_RAM_DIVISOR: u64 = 4;
+
+/// Frames of the session's own output one client may hold when the machine's
+/// RAM total is unknown.
+///
+/// A window is clamped to the screen, so what a client can *show* is one
+/// frame; the rest is stacked-under, minimised, and double-buffered windows.
+/// Enough of those that no ordinary desktop meets the bound, and still a bound.
+const CLIENT_FRAME_SCREENFULS: u64 = 32;
+
+/// The bytes of window frame one attested client may hold mapped in the
+/// session at once.
+///
+/// A **validation bound**, not a capacity, and deliberately measured in bytes
+/// rather than windows: each window pins its shared frame region in the
+/// session's address space, and a count says nothing about how much that is.
+/// Thirty-two windows of a 4K frame is a gigabyte, while a hundred terminal
+/// windows are a few tens of megabytes — a count generous enough for the
+/// second is catastrophic for the first, and one tight enough for the first
+/// refuses the second for no reason. Bounding the bytes bounds the resource
+/// actually at stake, and the number of windows follows from how big the ones
+/// a client opens really are. It also covers a resize, which a count cannot
+/// see at all.
+///
+/// Both inputs are discovered, never hand-picked: `total_ram_bytes` is the
+/// machine's usable physical RAM (the System Information API's total) and
+/// `output_frame_bytes` is one frame of the session's own display mode. RAM is
+/// the resource at stake so it decides wherever it is known; a total of zero
+/// means the query went unanswered, and falling back to the display keeps the
+/// desktop working under a bound instead of refusing every window.
+#[must_use]
+pub fn client_frame_budget_bytes(total_ram_bytes: u64, output_frame_bytes: usize) -> u64 {
+    let from_ram = total_ram_bytes / CLIENT_FRAME_RAM_DIVISOR;
+    if from_ram > 0 {
+        return from_ram;
+    }
+    (output_frame_bytes as u64).saturating_mul(CLIENT_FRAME_SCREENFULS)
+}
 
 /// The caller-attestation seam — the kernel's `call_peer_origin` behind
 /// a trait, so the engine is host-testable and never trusts a claimed
@@ -380,6 +420,14 @@ struct WindowRecord<R> {
     parent: Option<u64>,
 }
 
+impl<R> WindowRecord<R> {
+    /// Bytes of client frame region this window holds mapped in the
+    /// session: every frame of it, which is what the mapping validated.
+    fn mapped_bytes(&self) -> u64 {
+        (self.frame_len as u64).saturating_mul(u64::from(self.frame_count))
+    }
+}
+
 /// The window-channel engine: one instance serves one desktop session.
 pub struct WindowServer<M: ShmMapper> {
     mapper: M,
@@ -397,20 +445,47 @@ pub struct WindowServer<M: ShmMapper> {
     /// engine keeps only the route, so an application-scoped event can be
     /// delivered without asking the host where it goes.
     app_bars: BTreeMap<ProcId, u64>,
+    /// Bytes of window frame one client may hold mapped here at once
+    /// ([`client_frame_budget_bytes`]).
+    client_frame_max: u64,
 }
 
 impl<M: ShmMapper> WindowServer<M> {
     /// An engine with no windows, mapping through `mapper`, replying as
     /// `server` (the session's own kernel-attested `ProcId`, e.g. from
-    /// `self_origin`).
-    pub const fn new(mapper: M, server: ProcId) -> Self {
+    /// `self_origin`), bounding each client to `client_frame_max` bytes of
+    /// mapped window frame ([`client_frame_budget_bytes`]).
+    pub const fn new(mapper: M, server: ProcId, client_frame_max: u64) -> Self {
         Self {
             mapper,
             server,
             windows: BTreeMap::new(),
             next_id: 1,
             app_bars: BTreeMap::new(),
+            client_frame_max,
         }
+    }
+
+    /// Bytes of window frame `owner` currently holds mapped here, ignoring
+    /// window `except` (the one a resize is replacing).
+    ///
+    /// A pass over the live windows rather than a running per-client tally:
+    /// a create, a resize, and a close are each one mapping operation on a
+    /// map of at most a few hundred entries, so the sum costs nothing
+    /// measurable there, while a denormalised total is one missed update
+    /// away from admitting whatever it has lost track of.
+    fn client_frame_bytes(&self, owner: ProcId, except: Option<u64>) -> u64 {
+        self.windows
+            .iter()
+            .filter(|(id, record)| record.owner == owner && Some(**id) != except)
+            .map(|(_, record)| record.mapped_bytes())
+            .fold(0u64, u64::saturating_add)
+    }
+
+    /// Whether `owner` may hold `bytes` more frame, with `except` excluded
+    /// from what it already holds.
+    fn client_frames_fit(&self, owner: ProcId, bytes: u64, except: Option<u64>) -> bool {
+        self.client_frame_bytes(owner, except).saturating_add(bytes) <= self.client_frame_max
     }
 
     /// Number of live windows across every client.
@@ -617,18 +692,13 @@ impl<M: ShmMapper> WindowServer<M> {
         if caller.is_kernel() {
             return Err(Errno::PermissionDenied);
         }
-        let owned = self
-            .windows
-            .values()
-            .filter(|record| record.owner == caller)
-            .count();
-        if owned >= WINDOWS_PER_CLIENT_MAX {
-            return Err(Errno::NoSpace);
-        }
         let frame_len = frame_bytes(&spec.surface)?;
         let total = frame_len
             .checked_mul(spec.frame_count as usize)
             .ok_or(Errno::LengthOutOfRange)?;
+        if !self.client_frames_fit(caller, total as u64, None) {
+            return Err(Errno::NoSpace);
+        }
         let region = self.mapper.map(spec.shm_handle, total)?;
         let window_id = self.next_id;
         // Minting never wraps in practice (2^64 creates); refuse rather
@@ -666,9 +736,10 @@ impl<M: ShmMapper> WindowServer<M> {
     /// A popup is validated exactly like a top-level [`Self::create`] —
     /// no kernel caller, the geometry holds every frame — and additionally
     /// requires that the parent window is one the caller owns (a foreign
-    /// or unknown parent answers `NotFound`, leaking nothing). It counts
-    /// against the **same** per-client budget as a top-level window, so a
-    /// popup can never be used to exceed [`WINDOWS_PER_CLIENT_MAX`]. The
+    /// or unknown parent answers `NotFound`, leaking nothing). Its frames
+    /// are charged against the **same** per-client budget as a top-level
+    /// window's, so a popup can never be used to hold more than the client
+    /// is allowed ([`client_frame_budget_bytes`]). The
     /// host is told before committing, so a refused popup leaves no record
     /// and drops the mapping (fail closed).
     fn create_popup(
@@ -683,21 +754,16 @@ impl<M: ShmMapper> WindowServer<M> {
         // The parent must be a live window the caller owns; a foreign or
         // unknown parent is refused before anything is mapped.
         owned_window(&self.windows, caller, spec.parent_window_id)?;
-        // A popup counts against the same per-client budget as a top-level
-        // window (the parent it needs is itself one of those windows), so
-        // "popup" cannot be used to hold open more than the cap allows.
-        let owned = self
-            .windows
-            .values()
-            .filter(|record| record.owner == caller)
-            .count();
-        if owned >= WINDOWS_PER_CLIENT_MAX {
-            return Err(Errno::NoSpace);
-        }
         let frame_len = frame_bytes(&spec.surface)?;
         let total = frame_len
             .checked_mul(spec.frame_count as usize)
             .ok_or(Errno::LengthOutOfRange)?;
+        // A popup's frames are charged against the same per-client budget as
+        // a top-level window's, so "popup" cannot be used to hold more than
+        // the client is allowed.
+        if !self.client_frames_fit(caller, total as u64, None) {
+            return Err(Errno::NoSpace);
+        }
         let region = self.mapper.map(spec.shm_handle, total)?;
         let window_id = self.next_id;
         let next = window_id.checked_add(1).ok_or(Errno::NoSpace)?;
@@ -749,6 +815,13 @@ impl<M: ShmMapper> WindowServer<M> {
         let total = frame_len
             .checked_mul(spec.frame_count as usize)
             .ok_or(Errno::LengthOutOfRange)?;
+        // The new geometry replaces this window's own frames, so it is the
+        // one excluded from what the client already holds. A resize is how a
+        // client grows its mapped bytes without opening a window, which is
+        // exactly what a per-client *count* could never bound.
+        if !self.client_frames_fit(caller, total as u64, Some(spec.window_id)) {
+            return Err(Errno::NoSpace);
+        }
         let region = self.mapper.map(spec.shm_handle, total)?;
         // Tell the host before committing: a refused resize drops the
         // freshly mapped region and leaves the record's old geometry.

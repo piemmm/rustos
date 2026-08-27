@@ -146,7 +146,7 @@ speculative:
   can retitle only its own window and the attested `ProcId` reaches
   `window_opened` as the sole source of a window's identity icon —
   map-once regions via the
-  shared `tairix_display::ShmMapper`, `WINDOWS_PER_CLIENT_MAX` cap,
+  shared `tairix_display::ShmMapper`, per-client frame-byte budget,
   `client_exited` teardown, `deliver_event` app-ward routing validated
   against the live window) and `WindowClient`/`WindowEvents` (typed
   calls over `WindowTransport`, parked — never polling — event wait
@@ -365,7 +365,7 @@ Done. What now holds:
 - **Engine rules** (`lib/window`): no kernel caller; the parent must be a
   live window the attested caller owns (foreign *and* unknown parents both
   answer `NotFound`); the geometry is validated exactly as `Create`; the
-  popup counts against the same `WINDOWS_PER_CLIENT_MAX` budget; the host
+  popup's frames are charged against the same per-client byte budget; the host
   is told before anything is committed, so a refusal leaves no record, no
   id consumed, and the mapping dropped. One shared `PopupSpec` describes
   the request on both halves (`WindowClient::create_popup`).

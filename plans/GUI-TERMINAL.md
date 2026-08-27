@@ -392,8 +392,10 @@ screen model, retained picture, `Look`, and overlay, over **one** wait-set
 that carries one event mailbox for the whole process plus that window's own
 shell-output and child members. Opening another window costs a pty, a spawn, a
 frame region, and two wait-set members; it costs no second process, no second
-event mailbox, and no second icon-bar slot. `MAX_WINDOWS` bounds the
-process's own resources; the last window closing ends it.
+event mailbox, and no second icon-bar slot. What a window costs is bounded by
+the session's per-client frame budget and by this process's own stream,
+process, and address-space limits — no count of its own; the last window
+closing ends it.
 
 Two things make it work:
 

@@ -190,19 +190,20 @@ fn purge_drops_everything_and_zeroes_the_ledger() {
 }
 
 #[test]
-fn growth_stops_outside_normal_pressure_and_moderate_drains_the_class() {
+fn growth_follows_the_band_ceiling_and_moderate_drains_the_class() {
     let (source, pressure) = pressured(free_for(PressureBand::Normal));
     let mut cache = TransformClusterCache::new(budget(), owner(), pressure, sink());
     cache.put(10, 1, &payload(1));
     assert!(cache.get(10).is_some());
 
-    // Mild pressure: no new growth, but the transform class is
-    // preserved (its shrink target stays at the hard limit).
+    // Mild pressure preserves the transform class to the hard limit, so
+    // it goes on admitting: growth reads the same ceiling a forced shrink
+    // evicts to, and a class the band keeps is one that keeps working.
     source
         .free
         .store(free_for(PressureBand::Mild), Ordering::Relaxed);
     cache.put(20, 1, &payload(2));
-    assert!(cache.get(20).is_none(), "no growth at mild pressure");
+    assert!(cache.get(20).is_some(), "a preserved class keeps admitting");
     assert!(cache.get(10).is_some(), "existing entries are preserved");
 
     // Moderate pressure: the class drains to zero before `ramzip` is
@@ -215,6 +216,9 @@ fn growth_stops_outside_normal_pressure_and_moderate_drains_the_class() {
         "moderate pressure drains the class"
     );
     assert_eq!(cache.accounting().total_bytes(), 0);
+    // And it admits nothing there either, for the same reason.
+    cache.put(30, 1, &payload(3));
+    assert!(cache.get(30).is_none(), "a drained class admits nothing");
 }
 
 #[test]

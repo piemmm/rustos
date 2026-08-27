@@ -2930,6 +2930,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-desktop-pressure-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-appload",
+ "tairix-arch-aarch64",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-kernel-core",
+ "tairix-kernel-ipc",
+ "tairix-log",
+ "tairix-reclaim",
+ "tairix-util",
+]
+
+[[package]]
 name = "tairix-test-devmgr-hwtree-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
@@ -5467,6 +5484,7 @@ dependencies = [
  "tairix-test-arxfs-image",
  "tairix-test-autoload-input-qemu-aarch64",
  "tairix-test-datetime-elevate-qemu-aarch64",
+ "tairix-test-desktop-pressure-qemu-aarch64",
  "tairix-test-encrypted-root-image",
  "tairix-test-fat32-image",
  "tairix-test-memsoak",

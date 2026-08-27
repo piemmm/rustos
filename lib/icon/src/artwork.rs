@@ -50,7 +50,7 @@ use tairix_abi::{AppInfoHeader, BundleEntry, APPINFO_WIRE_MAX};
 use tairix_log::Sink;
 use tairix_raster::Surface;
 use tairix_reclaim::{
-    disposable_ui_cache, CacheLedger, CachedBytes, PressureGauge, ReclaimCache, Served,
+    working_set_ui_cache, CacheLedger, CachedBytes, PressureGauge, ReclaimCache, Served,
 };
 
 use crate::glyph::IconKind;
@@ -201,6 +201,21 @@ pub trait ArtworkResolver {
     /// the calling thread: it has nothing to prepare, and "preparing" would be
     /// exactly the stall a caller prefetches to avoid.
     fn prefetch(&mut self, _key: &ArtworkKey, _side: u32) {}
+
+    /// The cache could not retain what this resolver produced for `key` at
+    /// `side`: its budget has no room the current pressure band allows.
+    ///
+    /// The draw that asked has already fallen back to the built-in glyph. What
+    /// matters is the *next* one: a resolver that simply re-answers will have
+    /// the same answer refused again, so a desktop redrawing its icons pays a
+    /// read and a decode per icon per repaint and never keeps one. A resolver
+    /// that defers should therefore stop offering this key until something
+    /// changes the answer — the band relaxing, or a scale change asking for a
+    /// different side.
+    ///
+    /// The default does nothing, which is right for a resolver that produces
+    /// on the calling thread: it holds no queue to hold back.
+    fn declined(&mut self, _key: &ArtworkKey, _side: u32) {}
 }
 
 /// The resolver that reads and decodes on the calling thread.
@@ -395,7 +410,10 @@ impl CachedBytes for CachedArtwork {
 pub const ARTWORK_ENTRY_METADATA_BYTES: usize = 256;
 
 /// Build the reclaimable cache an [`ArtworkCache`] wraps, classified and
-/// budgeted by the one shared desktop policy.
+/// budgeted by the one shared desktop policy — the *working-set* one, because
+/// re-deriving an entry here means a capability-gated read and a
+/// parser-sandbox round trip, so pressure short of severe leaves it alone
+/// (`tairix_reclaim::working_set_ui_cache`).
 ///
 /// `label` names the cache in audit records, `seat` is the owning seat,
 /// `fb_bytes` is the output's frame size (so the artwork a consumer may retain
@@ -412,7 +430,7 @@ pub fn artwork_cache(
     pressure: &'static (dyn PressureGauge + 'static),
     sink: &'static (dyn Sink + Sync),
 ) -> ArtworkCache {
-    ArtworkCache::new(disposable_ui_cache(
+    ArtworkCache::new(working_set_ui_cache(
         label,
         seat,
         fb_bytes,
@@ -680,7 +698,10 @@ impl ArtworkCache {
                 }
             }
         }) {
-            Some(Served::Uncached(artwork)) => Slot::Uncached(artwork.0),
+            Some(Served::Uncached(artwork)) => {
+                resolver.declined(&key.0, key.1);
+                Slot::Uncached(artwork.0)
+            }
             Some(served) if served.surface().is_some() => Slot::Served,
             _ => Slot::Empty,
         };

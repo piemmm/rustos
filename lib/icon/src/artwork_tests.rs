@@ -806,7 +806,9 @@ fn owned_artwork_hands_back_a_picture_the_cache_could_not_retain() {
     let mut ras = SquareRasteriser;
     let request = IconRequest::asset(IconKind::AppBundle, "/a.png");
 
-    gauge.report(PressureBand::Mild);
+    // Severe: the band at which even the icon working set yields, so the
+    // cache genuinely retains nothing.
+    gauge.report(PressureBand::Severe);
     let inline = &mut InlineArtwork::new(&mut reader, &mut ras);
     assert!(
         c.artwork(inline, request, 8).is_none(),
@@ -881,4 +883,106 @@ fn a_warm_up_skips_the_tiers_already_refused() {
         vec![(vector, 8)],
         "the refused raster tier is retained, so the vector tier is what is wanted"
     );
+}
+
+/// A resolver that counts decodes and records every key it was asked for,
+/// so a test can prove the desktop does not ask again for an answer that
+/// cannot be kept.
+struct DecliningResolver<'r> {
+    inner: InlineArtwork<&'r mut CountingReader, &'r mut SquareRasteriser>,
+    declined: Vec<(ArtworkKey, u32)>,
+    decodes: usize,
+}
+
+impl<'r> DecliningResolver<'r> {
+    fn new(reader: &'r mut CountingReader, rasteriser: &'r mut SquareRasteriser) -> Self {
+        Self {
+            inner: InlineArtwork::new(reader, rasteriser),
+            declined: Vec::new(),
+            decodes: 0,
+        }
+    }
+}
+
+impl ArtworkResolver for DecliningResolver<'_> {
+    fn resolve(&mut self, key: &ArtworkKey, side: u32) -> Resolved {
+        self.decodes += 1;
+        self.inner.resolve(key, side)
+    }
+
+    fn declined(&mut self, key: &ArtworkKey, side: u32) {
+        self.declined.push((key.clone(), side));
+    }
+}
+
+/// A cache at `band`, wired like a real seat's.
+fn cache_at(band: PressureBand) -> (&'static ReportedPressure, ArtworkCache) {
+    let gauge: &'static ReportedPressure = Box::leak(Box::new(ReportedPressure::unknown()));
+    gauge.report(band);
+    let sink: &'static DiscardSink = Box::leak(Box::new(DiscardSink));
+    (
+        gauge,
+        artwork_cache("test.icon-artwork", 1, 1920 * 1080 * 4, gauge, sink),
+    )
+}
+
+#[test]
+fn tightening_pressure_never_takes_the_drawn_icon_away() {
+    // The regression: a desktop whose machine merely *tightened* — a screenful
+    // of windows on a small board is enough — drew a built-in glyph in place of
+    // every icon it had already decoded, and re-read and re-decoded each of
+    // them on every repaint thereafter.
+    let path = icon_artwork_path(IconKind::Folder);
+    for band in [
+        PressureBand::Normal,
+        PressureBand::Mild,
+        PressureBand::Moderate,
+    ] {
+        let (_gauge, mut cache) = cache_at(band);
+        let mut reader = CountingReader::new().with(&path, vec![0u8; 64]);
+        let mut ras = SquareRasteriser;
+        let mut resolver = DecliningResolver::new(&mut reader, &mut ras);
+        assert!(
+            cache
+                .artwork(&mut resolver, IconRequest::kind(IconKind::Folder), 32)
+                .is_some(),
+            "{band:?} draws the decoded artwork"
+        );
+        assert!(resolver.declined.is_empty(), "{band:?} retained the decode");
+        // Drawing it again is a cache hit, so nothing is read twice.
+        assert!(cache
+            .artwork(&mut resolver, IconRequest::kind(IconKind::Folder), 32)
+            .is_some());
+        assert_eq!(resolver.decodes, 1, "{band:?} decoded once");
+    }
+}
+
+#[test]
+fn a_decode_the_cache_cannot_keep_is_reported_once_not_repeated() {
+    // At severe pressure the pixels genuinely must go. What must not happen is
+    // the desktop asking for them again on every frame: the resolver is told
+    // the answer was declined, so it can hold the key back until the band
+    // moves.
+    let path = icon_artwork_path(IconKind::Folder);
+    let (gauge, mut cache) = cache_at(PressureBand::Severe);
+    let mut reader = CountingReader::new().with(&path, vec![0u8; 64]);
+    let mut ras = SquareRasteriser;
+    let mut resolver = DecliningResolver::new(&mut reader, &mut ras);
+    let request = IconRequest::kind(IconKind::Folder);
+
+    assert!(
+        cache.artwork(&mut resolver, request, 32).is_none(),
+        "severe pressure falls back to the glyph tier"
+    );
+    assert_eq!(
+        resolver.declined,
+        vec![(ArtworkKey::Asset(path.clone()), 32)],
+        "the refusal is reported to the resolver that produced it"
+    );
+    assert_eq!(cache.charged_bytes(), 0);
+
+    // Relaxing the band retains it, and the picture is back.
+    gauge.report(PressureBand::Normal);
+    assert!(cache.artwork(&mut resolver, request, 32).is_some());
+    assert!(cache.charged_bytes() > 0);
 }

@@ -117,7 +117,8 @@ pub use font::{BitmapFont, TextLine, TextShadow, TextWrap, ELLIPSIS};
 pub use glyph::{lookup, lookup_or_fallback, Glyph};
 #[cfg(feature = "glyph-cache")]
 pub use glyph_cache::{
-    glyph_cache_budget, glyph_cache_candidate, CachedGlyph, GLYPH_CACHE_ENTRY_METADATA_BYTES,
+    client_glyph_cache_budget, glyph_cache_budget, glyph_cache_candidate, CachedGlyph,
+    GLYPH_CACHE_ENTRY_METADATA_BYTES,
 };
 #[cfg(feature = "render")]
 pub use tairix_abi::font_ipc::{FamilyEntry, FamilyKey, FamilyKind, FontMetrics, FontWeight};

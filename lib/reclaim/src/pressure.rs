@@ -40,14 +40,25 @@
 //! pressure, clean file data begins reclaim at mild and finishes at
 //! moderate together with transform cache, metadata and recovery
 //! assist are preserved longest, and at severe or critical pressure
-//! every class obeys a forced shrink to zero.
+//! every class obeys a forced shrink to zero. A cache whose entries
+//! cannot be rebuilt without the filesystem or another process declares
+//! a working-set floor ([`CacheBudget::with_working_set_floor`]) that
+//! mild and moderate leave alone; severe still takes it.
+//!
+//! Growth reads that same [`shrink_target`], so a class the band
+//! preserves keeps admitting and one the band empties admits nothing.
+//! Two policies would eventually disagree, and the disagreement is
+//! invisible: a cache that may keep three quarters of its entries but
+//! admit none of them decays to uselessness while reporting a healthy
+//! ledger.
 //!
 //! # Reserves
 //!
 //! The thresholds carry a reserve floor derived from the backing size.
 //! A reading at or below the reserve is critical pressure regardless
 //! of band history, and the [`GrowthAllowance`] one reading yields
-//! refuses any cache growth that would dip into the reserve — cache
+//! refuses any cache growth that would dip into the reserve or exceed
+//! the band's own ceiling for the growing cache's class — cache
 //! expansion can never be the cause of reserve exhaustion, and a
 //! caller admitting a whole run of entries draws each one down from
 //! that single allowance rather than re-asking per entry. A backing
@@ -446,9 +457,9 @@ impl MemoryPressure {
     }
 
     /// One reading, folded once, carrying the headroom above the reserve
-    /// floor it leaves: growth is permitted only at normal pressure, and
-    /// never past the floor — cache expansion can never be the cause of
-    /// reserve exhaustion.
+    /// floor it leaves: an admission is bounded by its class's own band
+    /// ceiling and never reaches the floor — cache expansion can never be
+    /// the cause of reserve exhaustion.
     ///
     /// Taking the reading here rather than per admission is what lets a
     /// caller admitting a *run* of entries decide all of them from one
@@ -527,31 +538,66 @@ impl GrowthAllowance {
         self.remaining
     }
 
-    /// Whether a draw of `cost_bytes` would be admitted, without taking
-    /// it — the question a caller asks before doing *speculative* work
-    /// whose only value is that the result can be retained.
+    /// Whether `cost_bytes` may be drawn without reaching the reserve
+    /// floor — the bound every draw obeys, classified or not.
+    ///
+    /// This alone is the whole question for a bounded consumer that is
+    /// *not* a reclaimable cache (the retained-write journal: the only
+    /// copy of data the medium may not hold, which nothing may shrink
+    /// behind its owner's back). A cache asks [`permits`](Self::permits)
+    /// instead, which adds its class's band ceiling.
     #[must_use]
-    pub const fn permits(self, cost_bytes: usize) -> bool {
-        if !matches!(self.band, PressureBand::Normal) {
-            return false;
-        }
+    pub const fn permits_reserve(self, cost_bytes: usize) -> bool {
         // Strictly above the floor: a draw that lands exactly on the
-        // reserve is refused, so cache growth can never be what exhausts
-        // it.
+        // reserve is refused.
         match self.remaining.checked_sub(cost_bytes) {
             Some(left) => left > 0,
             None => false,
         }
     }
 
+    /// Whether a draw of `cost_bytes` into a `class` cache bounded by
+    /// `budget` would be admitted, without taking it — the question a
+    /// caller asks before doing *speculative* work whose only value is
+    /// that the result can be retained.
+    ///
+    /// Two bounds, and both must hold: the reserve floor
+    /// ([`permits_reserve`](Self::permits_reserve)), and the band's own
+    /// ceiling for that class ([`shrink_target`]). The ceiling is the same
+    /// figure a forced shrink evicts down to, so growth and shrink are one
+    /// policy rather than two that can disagree — a class the band
+    /// preserves keeps admitting, and one the band takes to zero admits
+    /// nothing, a costless entry included: "hold nothing" is the policy,
+    /// not "hold nothing that measures".
+    #[must_use]
+    pub const fn permits(
+        self,
+        class: ReclaimClass,
+        budget: CacheBudget,
+        cost_bytes: usize,
+    ) -> bool {
+        let ceiling = shrink_target(self.band, class, budget);
+        ceiling > 0 && cost_bytes <= ceiling && self.permits_reserve(cost_bytes)
+    }
+
+    /// Draw `cost_bytes` from the allowance against the reserve floor
+    /// alone, reporting whether it was admitted.
+    pub fn take_reserve(&mut self, cost_bytes: usize) -> bool {
+        self.drawn(self.permits_reserve(cost_bytes), cost_bytes)
+    }
+
     /// Draw `cost_bytes` from the allowance, reporting whether it was
     /// admitted. A refusal leaves the allowance untouched, so a caller
     /// may keep offering smaller entries.
-    pub fn take(&mut self, cost_bytes: usize) -> bool {
-        if !self.permits(cost_bytes) {
+    pub fn take(&mut self, class: ReclaimClass, budget: CacheBudget, cost_bytes: usize) -> bool {
+        self.drawn(self.permits(class, budget, cost_bytes), cost_bytes)
+    }
+
+    fn drawn(&mut self, permitted: bool, cost_bytes: usize) -> bool {
+        if !permitted {
             return false;
         }
-        // `permits` proved the headroom strictly exceeds the cost, so the
+        // The permit proved the headroom strictly exceeds the cost, so the
         // saturating form is exact and there is no underflow to guard.
         self.remaining = self.remaining.saturating_sub(cost_bytes);
         true
@@ -575,10 +621,16 @@ pub trait PressureGauge: Sync {
     /// One reading, from which a run of admissions is decided.
     fn growth_allowance(&self) -> GrowthAllowance;
 
-    /// Whether a cache may grow by `cost_bytes` right now — a run of
-    /// one, so it is the allowance and never a second policy.
-    fn growth_permitted(&self, cost_bytes: usize) -> bool {
-        self.growth_allowance().take(cost_bytes)
+    /// Whether a `class` cache bounded by `budget` may grow by
+    /// `cost_bytes` right now — a run of one, so it is the allowance and
+    /// never a second policy.
+    fn growth_permitted(
+        &self,
+        class: ReclaimClass,
+        budget: CacheBudget,
+        cost_bytes: usize,
+    ) -> bool {
+        self.growth_allowance().take(class, budget, cost_bytes)
     }
 }
 
@@ -666,9 +718,14 @@ impl PressureGauge for ReportedPressure {
 ///   are preserved, and only to the low watermark.
 /// - **severe / critical** — every class obeys a forced shrink to
 ///   zero.
+///
+/// A budget that declares a working-set floor
+/// ([`CacheBudget::with_working_set_floor`]) keeps that many bytes
+/// through mild and moderate pressure whatever its class's target is;
+/// severe and critical still take everything.
 #[must_use]
 pub const fn shrink_target(band: PressureBand, class: ReclaimClass, budget: CacheBudget) -> usize {
-    match band {
+    let target = match band {
         PressureBand::Normal => budget.hard(),
         PressureBand::Mild => match class {
             ReclaimClass::DisposableUi
@@ -685,7 +742,12 @@ pub const fn shrink_target(band: PressureBand, class: ReclaimClass, budget: Cach
             ReclaimClass::FsMetadata | ReclaimClass::ReliabilityAssist => budget.low(),
             _ => 0,
         },
-        PressureBand::Severe | PressureBand::Critical => 0,
+        PressureBand::Severe | PressureBand::Critical => return 0,
+    };
+    if target < budget.floor() {
+        budget.floor()
+    } else {
+        target
     }
 }
 
@@ -753,7 +815,7 @@ mod tests {
     fn normal_state_permits_bounded_growth() {
         let (_, pressure) = gauge(TOTAL / 2);
         assert_eq!(pressure.sample(), PressureBand::Normal);
-        assert!(pressure.growth_permitted(4096));
+        assert!(pressure.growth_permitted(ReclaimClass::DisposableUi, budget(), 4096));
     }
 
     #[test]
@@ -764,8 +826,12 @@ mod tests {
         let free = t.enter[0] + 4096;
         let (_, pressure) = gauge(free);
         assert_eq!(pressure.sample(), PressureBand::Normal);
-        assert!(!pressure.growth_permitted(free - t.reserve));
-        assert!(pressure.growth_permitted(4096));
+        assert!(!pressure.growth_permitted(
+            ReclaimClass::DisposableUi,
+            CacheBudget::from_ceiling(free),
+            free - t.reserve
+        ));
+        assert!(pressure.growth_permitted(ReclaimClass::DisposableUi, budget(), 4096));
     }
 
     #[test]
@@ -783,22 +849,26 @@ mod tests {
         let headroom = free - t.reserve;
         let cost = headroom / 4;
 
+        // A ceiling wide enough to hold the whole run, so the reserve is
+        // the only bound under test.
+        let wide = CacheBudget::from_ceiling(free);
+        let class = ReclaimClass::CleanFileData;
         let mut allowance = pressure.growth_allowance();
         assert_eq!(allowance.band(), PressureBand::Normal);
         assert_eq!(allowance.remaining_bytes(), headroom);
         // Three quarters of the headroom is admissible; the fourth would
         // land exactly on the floor and is refused, and a refusal leaves
         // the allowance intact for a smaller entry.
-        assert!(allowance.take(cost));
-        assert!(allowance.take(cost));
-        assert!(allowance.take(cost));
-        assert!(!allowance.take(cost));
+        assert!(allowance.take(class, wide, cost));
+        assert!(allowance.take(class, wide, cost));
+        assert!(allowance.take(class, wide, cost));
+        assert!(!allowance.take(class, wide, cost));
         assert_eq!(allowance.remaining_bytes(), headroom - 3 * cost);
-        assert!(allowance.take(cost - 1));
+        assert!(allowance.take(class, wide, cost - 1));
 
         // Re-asking per entry would have admitted the fourth: proof the
         // per-entry question was the weaker one.
-        assert!(pressure.growth_permitted(cost));
+        assert!(pressure.growth_permitted(class, wide, cost));
     }
 
     #[test]
@@ -809,20 +879,96 @@ mod tests {
         let t = PressureThresholds::from_total(TOTAL);
         let free = t.enter[0] + 4096;
         let (_, pressure) = gauge(free);
+        let wide = CacheBudget::from_ceiling(free);
+        let class = ReclaimClass::CleanFileData;
         let mut allowance = pressure.growth_allowance();
         let before = allowance.remaining_bytes();
-        assert!(allowance.permits(4096));
+        assert!(allowance.permits(class, wide, 4096));
         assert_eq!(allowance.remaining_bytes(), before, "a query draws nothing");
         assert!(
-            !allowance.permits(before),
+            !allowance.permits(class, wide, before),
             "landing on the floor is refused"
         );
-        assert!(allowance.take(4096));
+        assert!(allowance.take(class, wide, 4096));
         assert_eq!(allowance.remaining_bytes(), before - 4096);
+    }
 
-        // Outside normal pressure nothing is permitted, whatever the cost.
+    #[test]
+    fn admission_follows_the_bands_own_ceiling_for_the_class() {
+        // The band decides admission through exactly the figure a forced
+        // shrink evicts to, so the two halves of the policy cannot
+        // disagree. At mild pressure that means the disposable classes
+        // admit nothing while the preserved ones keep admitting — a
+        // blanket "nothing above normal" would quietly decay every cache
+        // the policy says to keep.
+        let b = budget();
         let mild = GrowthAllowance::new(PressureBand::Mild, usize::MAX);
-        assert!(!mild.permits(0));
+        assert!(!mild.permits(ReclaimClass::DisposableUi, b, 1));
+        assert!(mild.permits(ReclaimClass::FsMetadata, b, b.hard()));
+        assert!(mild.permits(ReclaimClass::CleanFileData, b, b.low()));
+        assert!(!mild.permits(ReclaimClass::CleanFileData, b, b.low() + 1));
+        // Moderate keeps only metadata and recovery assist, to the low
+        // watermark.
+        let moderate = GrowthAllowance::new(PressureBand::Moderate, usize::MAX);
+        assert!(moderate.permits(ReclaimClass::ReliabilityAssist, b, b.low()));
+        assert!(!moderate.permits(ReclaimClass::ReliabilityAssist, b, b.low() + 1));
+        assert!(!moderate.permits(ReclaimClass::TransformCache, b, 1));
+        // Severe and critical admit nothing, of any class.
+        for band in [PressureBand::Severe, PressureBand::Critical] {
+            let deep = GrowthAllowance::new(band, usize::MAX);
+            for class in ReclaimClass::ALL {
+                assert!(!deep.permits(class, b, 1), "{band:?} {class:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn growth_and_forced_shrink_read_one_policy() {
+        // The invariant behind the fix: whatever a band lets a class hold
+        // is what it lets that class grow to. Anything a shrink would keep
+        // is admissible, and anything above it is not.
+        let b = budget().with_working_set_floor(budget().hard() / 8);
+        for band in PressureBand::ALL {
+            for class in ReclaimClass::ALL {
+                let target = shrink_target(band, class, b);
+                let allowance = GrowthAllowance::new(band, usize::MAX);
+                assert_eq!(
+                    allowance.permits(class, b, target),
+                    target > 0,
+                    "{band:?} {class:?} at the target"
+                );
+                assert!(
+                    !allowance.permits(class, b, target + 1),
+                    "{band:?} {class:?} past the target"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_working_set_floor_survives_mild_and_moderate_but_not_severe() {
+        // Declared by a cache whose entries cannot be rebuilt without the
+        // filesystem or another process, so dropping them at the first
+        // tightening frees a negligible figure and costs the machine the
+        // I/O and IPC it has least of.
+        let floor = budget().hard() / 4;
+        let b = budget().with_working_set_floor(floor);
+        let class = ReclaimClass::DisposableUi;
+        assert_eq!(shrink_target(PressureBand::Normal, class, b), b.hard());
+        assert_eq!(shrink_target(PressureBand::Mild, class, b), floor);
+        assert_eq!(shrink_target(PressureBand::Moderate, class, b), floor);
+        assert_eq!(shrink_target(PressureBand::Severe, class, b), 0);
+        assert_eq!(shrink_target(PressureBand::Critical, class, b), 0);
+        // Without the declaration the same class drops at mild, as before.
+        assert_eq!(shrink_target(PressureBand::Mild, class, budget()), 0);
+        // A floor never widens a budget: one above the ceiling is clamped
+        // to it, so it can never describe bytes the cache cannot hold.
+        let clamped = budget().with_working_set_floor(usize::MAX);
+        assert_eq!(clamped.floor(), clamped.hard());
+        assert_eq!(
+            shrink_target(PressureBand::Moderate, class, clamped),
+            clamped.hard()
+        );
     }
 
     #[test]
@@ -832,8 +978,9 @@ mod tests {
         let mut refused = GrowthAllowance::refused();
         assert_eq!(refused.band(), PressureBand::Critical);
         assert_eq!(refused.remaining_bytes(), 0);
-        assert!(!refused.take(0));
-        assert!(!refused.take(1));
+        assert!(!refused.take(ReclaimClass::FsMetadata, budget(), 0));
+        assert!(!refused.take(ReclaimClass::FsMetadata, budget(), 1));
+        assert!(!refused.take_reserve(1));
     }
 
     #[test]
@@ -852,15 +999,17 @@ mod tests {
             0,
         ] {
             for cost in [0usize, 4096, TOTAL] {
-                let (_, pressure) = gauge(free);
-                let mut allowance = pressure.growth_allowance();
-                let via_allowance = allowance.take(cost);
-                let (_, fresh) = gauge(free);
-                assert_eq!(
-                    via_allowance,
-                    fresh.growth_permitted(cost),
-                    "free={free} cost={cost}"
-                );
+                for class in ReclaimClass::ALL {
+                    let (_, pressure) = gauge(free);
+                    let mut allowance = pressure.growth_allowance();
+                    let via_allowance = allowance.take(class, budget(), cost);
+                    let (_, fresh) = gauge(free);
+                    assert_eq!(
+                        via_allowance,
+                        fresh.growth_permitted(class, budget(), cost),
+                        "free={free} cost={cost} class={class:?}"
+                    );
+                }
             }
         }
     }
@@ -869,16 +1018,24 @@ mod tests {
     fn a_reported_gauge_bounds_a_run_by_its_band_alone() {
         // A process cannot see the reserve floor, so its allowance is
         // bounded only by the band it was told and by its own budget.
+        let b = CacheBudget::from_ceiling(64 << 20);
+        let class = ReclaimClass::CleanFileData;
         let reported = ReportedPressure::unknown();
-        assert!(!reported.growth_allowance().take(0));
+        assert!(!reported.growth_allowance().take(class, b, 0));
         assert!(reported.report(PressureBand::Normal));
         let mut allowance = reported.growth_allowance();
         assert_eq!(allowance.remaining_bytes(), usize::MAX);
         for _ in 0..8 {
-            assert!(allowance.take(1 << 20));
+            assert!(allowance.take(class, b, 1 << 20));
         }
+        // Told a deeper band, the same gauge admits exactly what that
+        // band's ceiling for the class allows — and nothing for a class
+        // the band empties.
         assert!(reported.report(PressureBand::Mild));
-        assert!(!reported.growth_allowance().take(1));
+        assert!(reported.growth_allowance().take(class, b, b.low()));
+        assert!(!reported
+            .growth_allowance()
+            .take(ReclaimClass::DisposableUi, b, 1));
     }
 
     #[test]
@@ -886,7 +1043,11 @@ mod tests {
         let t = PressureThresholds::from_total(TOTAL);
         let (_, pressure) = gauge(t.enter[0] - 4096);
         assert_eq!(pressure.sample(), PressureBand::Mild);
-        assert!(!pressure.growth_permitted(0));
+        // The speculative classes stop; the classes the band preserves go
+        // on caching, which is what "stop speculative growth" means.
+        assert!(!pressure.growth_permitted(ReclaimClass::DisposableUi, budget(), 0));
+        assert!(!pressure.growth_permitted(ReclaimClass::PredictivePrefetch, budget(), 0));
+        assert!(pressure.growth_permitted(ReclaimClass::FsMetadata, budget(), 4096));
     }
 
     #[test]
@@ -904,7 +1065,15 @@ mod tests {
             };
             let (_, pressure) = gauge(free);
             assert_eq!(pressure.sample(), band);
-            assert!(!pressure.growth_permitted(0));
+            for class in ReclaimClass::ALL {
+                let admits = pressure.growth_permitted(class, budget(), 4096);
+                let preserved = matches!(band, PressureBand::Moderate)
+                    && matches!(
+                        class,
+                        ReclaimClass::FsMetadata | ReclaimClass::ReliabilityAssist
+                    );
+                assert_eq!(admits, preserved, "{band:?} {class:?}");
+            }
         }
     }
 
@@ -993,7 +1162,7 @@ mod tests {
         }));
         let pressure = MemoryPressure::over(source);
         assert_eq!(pressure.sample(), PressureBand::Critical);
-        assert!(!pressure.growth_permitted(0));
+        assert!(!pressure.growth_permitted(ReclaimClass::FsMetadata, budget(), 0));
     }
 
     #[test]

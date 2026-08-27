@@ -29,8 +29,8 @@ use crate::client::{
 };
 use crate::desktop::Desktop;
 use crate::server::{
-    CallerIdentity, EventSink, PopupSpec, WindowHost, WindowServer, WindowSizing,
-    WINDOWS_PER_CLIENT_MAX, WINDOW_REPLY_MAX,
+    client_frame_budget_bytes, CallerIdentity, EventSink, PopupSpec, WindowHost, WindowServer,
+    WindowSizing, WINDOW_REPLY_MAX,
 };
 
 /// 4×3 BGRA test surface, stride == one scanline.
@@ -43,6 +43,15 @@ const SURFACE: DisplayMode = DisplayMode {
 
 /// Bytes one SURFACE frame occupies.
 const FRAME_LEN: usize = 48;
+
+/// Window frames one test client may hold: eight [`SURFACE`] frames, so a
+/// test can reach the bound in a handful of creates and prove the ninth is
+/// refused. A real session derives this from the machine's RAM and its own
+/// output ([`client_frame_budget_bytes`]).
+const CLIENT_FRAME_MAX: u64 = 8 * FRAME_LEN as u64;
+
+/// Frames a client may hold under [`CLIENT_FRAME_MAX`].
+const FRAMES_PER_CLIENT: usize = 8;
 
 /// The ticket the loopback presents for client A.
 const TICKET_A: u64 = 1;
@@ -353,7 +362,7 @@ struct Loopback {
 impl Loopback {
     fn with_regions(regions: &[(u64, usize)]) -> Rc<RefCell<Self>> {
         Rc::new(RefCell::new(Self {
-            server: WindowServer::new(MockMapper::with_regions(regions), SERVER),
+            server: WindowServer::new(MockMapper::with_regions(regions), SERVER, CLIENT_FRAME_MAX),
             host: RecordingHost::default(),
             identity: MockIdentity,
             ticket: TICKET_A,
@@ -869,13 +878,33 @@ fn create_is_refused_fail_closed() {
     assert!(inner.host.opened.is_empty());
 }
 
+/// The budget is derived from the machine, so a small board and a large
+/// server get proportionate bounds from the same policy — and an
+/// unanswered RAM query falls back to the display rather than to nothing.
 #[test]
-fn a_client_is_bounded_to_its_window_cap() {
+fn the_client_budget_scales_with_the_machine() {
+    let screen = 1024 * 768 * 4;
+    let small = client_frame_budget_bytes(1 << 30, screen); // 1 GiB
+    let large = client_frame_budget_bytes(64 << 30, screen); // 64 GiB
+    assert!(small > 0);
+    assert_eq!(large, small * 64, "the bound follows the machine's RAM");
+    // A screenful is the unit a window is measured in, so even the small
+    // machine's bound holds a useful number of them.
+    assert!(small > (screen as u64) * 8);
+    // No RAM reading: bounded by the display instead of refusing every
+    // window, and still bounded.
+    let blind = client_frame_budget_bytes(0, screen);
+    assert!(blind > 0);
+    assert!(blind < small);
+}
+
+#[test]
+fn a_client_is_bounded_by_the_bytes_it_holds_mapped() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
     let mut client = WindowClient::new(Rc::clone(&loopback));
 
-    for _ in 0..WINDOWS_PER_CLIENT_MAX {
-        create_id(&mut client, 7, EVENTS_A, 1, "w").expect("in cap");
+    for _ in 0..FRAMES_PER_CLIENT {
+        create_id(&mut client, 7, EVENTS_A, 1, "w").expect("within the budget");
     }
     assert_eq!(
         create_id(&mut client, 7, EVENTS_A, 1, "w"),
@@ -883,7 +912,61 @@ fn a_client_is_bounded_to_its_window_cap() {
     );
     // Another client still has its own budget.
     loopback.borrow_mut().ticket = TICKET_B;
-    create_id(&mut client, 7, EVENTS_B, 1, "w").expect("B's own cap");
+    create_id(&mut client, 7, EVENTS_B, 1, "w").expect("B's own budget");
+}
+
+/// The bound is on bytes, so a client asking for *bigger* windows gets
+/// correspondingly fewer of them — the thing a per-window count could not
+/// express, and the reason it was the wrong bound.
+#[test]
+fn a_bigger_window_spends_more_of_the_same_budget() {
+    const WIDE: DisplayMode = DisplayMode {
+        width_px: 4,
+        height_px: 3,
+        stride_bytes: 16,
+        format: DisplayFormat::Bgra8888,
+    };
+    // Four frames of this surface, so two windows fill the whole budget.
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN * 4)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    for _ in 0..2 {
+        client
+            .create(7, EVENTS_A, 4, &WIDE, "w", WindowSizing::default())
+            .expect("within the budget");
+    }
+    assert_eq!(
+        client.create(7, EVENTS_A, 4, &WIDE, "w", WindowSizing::default()),
+        Err(Errno::NoSpace),
+        "two four-frame windows spend what eight one-frame windows would"
+    );
+}
+
+/// A resize is the other way a client grows what it holds mapped, and the
+/// one a per-window count is blind to.
+#[test]
+fn a_resize_past_the_budget_is_refused_and_keeps_the_old_geometry() {
+    // Eight times as tall as [`SURFACE`], so one frame of it is the client's
+    // whole budget and two frames are twice it.
+    const TALL: DisplayMode = DisplayMode {
+        width_px: 4,
+        height_px: 24,
+        stride_bytes: 16,
+        format: DisplayFormat::Bgra8888,
+    };
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN * 8 * 2)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "w").expect("first window");
+
+    assert_eq!(
+        client.resize(window, 8, 2, &TALL),
+        Err(Errno::NoSpace),
+        "a resize is charged against the same budget as a create"
+    );
+    // Resizing within the budget is still allowed, and the window keeps
+    // working: the refusal above changed nothing.
+    client
+        .resize(window, 8, 1, &TALL)
+        .expect("a resize inside the budget");
 }
 
 #[test]
@@ -1028,15 +1111,15 @@ fn a_popup_over_a_foreign_or_unknown_parent_is_refused() {
 }
 
 #[test]
-fn a_popup_counts_against_the_same_per_client_cap() {
+fn a_popup_counts_against_the_same_per_client_budget() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
     let mut client = WindowClient::new(Rc::clone(&loopback));
 
     let parent = create_id(&mut client, 7, EVENTS_A, 1, "w").expect("first window");
-    for _ in 1..WINDOWS_PER_CLIENT_MAX {
-        create_id(&mut client, 7, EVENTS_A, 1, "w").expect("in cap");
+    for _ in 1..FRAMES_PER_CLIENT {
+        create_id(&mut client, 7, EVENTS_A, 1, "w").expect("within the budget");
     }
-    // The client now holds exactly the cap; a popup cannot be used to
+    // The client now holds its whole budget; a popup cannot be used to
     // exceed it.
     assert_eq!(
         client.create_popup(&popup_spec(parent, 8, EVENTS_A, 0, 0)),
@@ -1474,7 +1557,7 @@ fn backdrop_blur_defaults_to_an_accepted_no_op() {
     // trait's own default: a host with no compositor to tell accepts the
     // radius and draws nothing, rather than failing a request it validated.
     let mapper = MockMapper::with_regions(&[(7, FRAME_LEN)]);
-    let mut server = WindowServer::new(mapper, SERVER);
+    let mut server = WindowServer::new(mapper, SERVER, CLIENT_FRAME_MAX);
     let mut host = MinimalHost;
     let mut identity = MockIdentity;
     let mut reply = [0u8; WINDOW_REPLY_MAX];

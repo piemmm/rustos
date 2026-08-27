@@ -435,10 +435,15 @@ pub enum AccountingError {
 /// the watermark a forced shrink evicts down to. Keeping them apart is
 /// the hysteresis `plans/SMARTRAM.md` section 7 requires: growth up to
 /// `hard`, shrink down to `low`, never both on one threshold.
+///
+/// `floor` is the working-set share of `hard` that pressure short of
+/// severe does not take (see [`with_working_set_floor`](Self::with_working_set_floor));
+/// it is zero for a cache that is speculation all the way down.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct CacheBudget {
     hard: usize,
     low: usize,
+    floor: usize,
 }
 
 /// The backing-resource fraction one bounded cache may occupy.
@@ -470,6 +475,7 @@ impl CacheBudget {
         Self {
             hard,
             low: hard / LOW_DIVISOR * LOW_NUMERATOR,
+            floor: 0,
         }
     }
 
@@ -493,7 +499,53 @@ impl CacheBudget {
         Self {
             hard: hard_bytes,
             low: hard_bytes / LOW_DIVISOR * LOW_NUMERATOR,
+            floor: 0,
         }
+    }
+
+    /// This budget, declaring `floor_bytes` of it the owner's live
+    /// **working set**: bytes pressure short of severe leaves alone.
+    ///
+    /// A reclaimable cache is normally pure speculation — the shallowest
+    /// pressure may take all of it, because rebuilding an entry is local
+    /// work the owner can repeat at will. Some derived state is not like
+    /// that: rebuilding it needs the filesystem, or a round trip to
+    /// another process, and those are exactly what a machine short of
+    /// memory has least of. Dropping such a cache at the first tightening
+    /// does not free memory the system can use — the desktop's whole icon
+    /// set is a fraction of one screen — while the owner, still drawing
+    /// the same screen, immediately reads and decodes every entry again.
+    /// The measured result is a machine that spends its scarcest resources
+    /// re-deriving what it just discarded.
+    ///
+    /// So a cache may declare the part of its budget that is not
+    /// speculation. The floor is honoured up to moderate pressure and
+    /// yields entirely at severe and critical, where every class shrinks
+    /// to zero and a coarser fallback is the honest answer. It binds
+    /// growth and forced shrink alike, because both read the one
+    /// [`shrink_target`](crate::shrink_target) policy.
+    ///
+    /// `floor_bytes` is clamped to `hard`: a floor above the ceiling
+    /// would describe bytes the cache could never hold. It must itself be
+    /// derived from discovered hardware — the display the icons are drawn
+    /// on, the machine's RAM — never a hand-picked constant.
+    #[must_use]
+    pub const fn with_working_set_floor(mut self, floor_bytes: usize) -> Self {
+        self.floor = if floor_bytes > self.hard {
+            self.hard
+        } else {
+            floor_bytes
+        };
+        self
+    }
+
+    /// The working-set bytes a forced shrink short of severe pressure
+    /// leaves in place. Zero unless
+    /// [`with_working_set_floor`](Self::with_working_set_floor) declared
+    /// otherwise.
+    #[must_use]
+    pub const fn floor(self) -> usize {
+        self.floor
     }
 
     /// The ceiling an insert may never push usage past.

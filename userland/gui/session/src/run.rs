@@ -1860,7 +1860,17 @@ mod program {
         // exists before the first frame). The engine stamps this session's
         // own kernel-attested identity into every create reply, so apps can
         // authenticate the sender of each later event.
-        let mut server = WindowServer::new(RtShmMapper, self_origin.proc_id());
+        // What one client may hold mapped here, from the machine's own RAM
+        // total and one frame of this session's output — never a window count,
+        // which says nothing about the bytes a window actually costs.
+        let mut server = WindowServer::new(
+            RtShmMapper,
+            self_origin.proc_id(),
+            tairix_window::client_frame_budget_bytes(
+                tairix_procinfo::memory_total_bytes(&tairix_procinfo::IpcTransport).unwrap_or(0),
+                frame_len,
+            ),
+        );
         let mut identity = RtWindowIdentity::new();
         let mut sink = RtEventSink::new(set);
         let mut focused: Option<u64> = None;
@@ -2343,6 +2353,12 @@ mod program {
                 if tairix_procinfo::pressure::refresh() {
                     let _ = shell.trim_caches(&mut compositor);
                     tairix_font::trim_glyph_cache();
+                    // A band that refused to keep a decode may now allow it,
+                    // and a band that has just tightened will refuse it once
+                    // more and be recorded again. Either way the decision is
+                    // remade here, on the band's own wake, rather than by
+                    // every repaint in between.
+                    artworks.retry_declined();
                     deliver_pending_redraws(
                         &mut server,
                         &mut sink,
@@ -3132,6 +3148,17 @@ mod program {
             self.desk.lock().begin_round();
         }
 
+        /// Note that the cache refused to keep this decode, so no round asks
+        /// for it again until the band moves.
+        fn decline(&self, key: &ArtworkKey, side: u32) {
+            self.desk.lock().decline(key, side);
+        }
+
+        /// The band moved: offer the refused decodes again.
+        fn retry_declined(&self) {
+            self.desk.lock().retry_declined();
+        }
+
         /// Ask the decoder to leave.
         fn stop(&self) {
             self.desk.lock().stop();
@@ -3154,6 +3181,10 @@ mod program {
 
         fn prefetch(&mut self, key: &ArtworkKey, side: u32) {
             self.0.want(key, side);
+        }
+
+        fn declined(&mut self, key: &ArtworkKey, side: u32) {
+            self.0.decline(key, side);
         }
     }
 

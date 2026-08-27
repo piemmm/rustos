@@ -141,7 +141,12 @@ fn one_gauge_drives_both_caches_through_the_documented_band_order() {
             > 0,
         "clean file data is not drained at mild pressure"
     );
-    assert!(!pressure.growth_permitted(4096), "no growth outside normal");
+    // At mild pressure the speculative classes stop growing while the
+    // classes the band preserves go on caching: one policy for growth and
+    // for forced shrink, so a preserved cache cannot decay to uselessness
+    // while its ledger still reports headroom.
+    assert!(!pressure.growth_permitted(ReclaimClass::DisposableUi, budget(), 4096));
+    assert!(pressure.growth_permitted(ReclaimClass::FsMetadata, budget(), 4096));
 
     // Moderate: the launch cache and the clean file data finish
     // reclaim; hot metadata alone is preserved (to the low watermark).
@@ -229,10 +234,12 @@ fn the_reserve_floor_is_shared_and_admits_nothing() {
     assert_eq!(pressure.band(), PressureBand::Critical);
     assert_eq!(fs_cache.accounting().total_bytes(), 0);
     assert_eq!(launch.accounting().total_bytes(), 0);
-    assert!(
-        !pressure.growth_permitted(0),
-        "growth is never permitted from inside the reserve"
-    );
+    for class in ReclaimClass::ALL {
+        assert!(
+            !pressure.growth_permitted(class, budget(), 4096),
+            "growth is never permitted from inside the reserve ({class:?})"
+        );
+    }
 }
 
 #[test]
@@ -276,14 +283,14 @@ fn band_flapping_cannot_churn_cache_rebuilds() {
     touch(&mut fs_cache, &mut launch);
     assert_eq!(pressure.band(), PressureBand::Mild);
     let insertions_fs = fs_cache.accounting().insertions();
+    let resident_fs = fs_cache.accounting().total_bytes();
     let insertions_launch = launch.accounting().insertions();
     let mild_entries = pressure.band_entries(PressureBand::Mild);
 
     // Flap the free reading between the mild enter watermark and the
-    // hysteresis window below the exit watermark. The band holds, so
-    // the caches never oscillate between rebuild and reclaim: admission
-    // stays refused (the churn is *detected* as counted refusals, and
-    // *reduced* to zero rebuilds).
+    // hysteresis window below the exit watermark. The band holds, so the
+    // caches never oscillate between rebuild and reclaim: what is resident
+    // stays resident and nothing is rebuilt.
     let held = free_for(PressureBand::Mild) + 8192;
     for _ in 0..8 {
         source.set_free(held);
@@ -307,18 +314,21 @@ fn band_flapping_cannot_churn_cache_rebuilds() {
         insertions_launch,
         "no launch-cache rebuild churn under the flap"
     );
-    assert!(
-        fs_cache.accounting().refusals() > 0,
-        "the refused re-admissions are counted"
+    assert_eq!(
+        fs_cache.accounting().total_bytes(),
+        resident_fs,
+        "the flap neither dropped nor re-read a single entry"
     );
 
-    // A genuine recovery above the exit watermark rebuilds exactly once
-    // per touched entry, not once per flap.
+    // A genuine recovery above the exit watermark leaves the band normal
+    // with nothing to rebuild — the flap cost no reclaim, so it can cost no
+    // repopulation either.
     source.set_free(free_for(PressureBand::Normal));
     touch(&mut fs_cache, &mut launch);
     assert_eq!(pressure.band(), PressureBand::Normal);
     touch(&mut fs_cache, &mut launch);
-    assert!(fs_cache.accounting().insertions() > insertions_fs);
+    assert_eq!(fs_cache.accounting().insertions(), insertions_fs);
+    assert_eq!(fs_cache.accounting().total_bytes(), resident_fs);
 }
 
 /// Work-avoided and latency evidence behind the retention policy

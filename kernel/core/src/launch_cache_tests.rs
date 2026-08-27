@@ -182,13 +182,26 @@ fn an_over_long_bundle_key_is_refused() {
 }
 
 #[test]
-fn admission_is_refused_outside_normal_pressure_and_recovers() {
+fn admission_follows_the_band_ceiling_and_recovers() {
     let (source, pressure) = pressured(free_for(PressureBand::Mild));
     let mut cache = LaunchCache::new(budget(), pressure, sink());
     let app = verified_app();
+    // Mild pressure shrinks the semantic class toward its low watermark
+    // rather than closing it: an entry that fits under that watermark is
+    // still admitted, which is what keeps the cache useful while the band
+    // holds.
     cache.insert("/System/Commands/a.app", &app);
-    assert_eq!(cache.accounting().refusals(), 1);
+    assert_eq!(cache.accounting().refusals(), 0);
+    assert!(cache.lookup("/System/Commands/a.app").is_some());
+    assert!(cache.accounting().total_bytes() <= budget().low());
+
+    // Moderate finishes that reclaim: the class is emptied and admits
+    // nothing.
+    source.set_free(free_for(PressureBand::Moderate));
+    cache.insert("/System/Commands/b.app", &app);
+    assert!(cache.lookup("/System/Commands/b.app").is_none());
     assert_eq!(cache.accounting().total_bytes(), 0);
+
     // Back at normal pressure (above the mild exit watermark), admission
     // resumes.
     source.set_free(free_for(PressureBand::Normal));

@@ -669,7 +669,7 @@ fn default_cache() -> GlyphCache {
         crate::glyph_cache::glyph_cache_candidate(ReclaimOwner::UserlandProcess(
             CLIENT_CACHE_OWNER,
         )),
-        crate::glyph_cache::glyph_cache_budget(total),
+        crate::glyph_cache::client_glyph_cache_budget(total),
         tairix_rt::pressure::gauge(),
         &LOG_SINK,
     );

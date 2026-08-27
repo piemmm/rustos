@@ -6171,6 +6171,67 @@ static TESTS: &[QemuTest] = &[
         pointer_script: Some(datetime_elevate_pointer_script),
         serial: &[],
     },
+    // `plans/SMARTRAM.md` + `plans/ICONS.md`: the desktop keeps drawing its
+    // real icon artwork while the machine is genuinely short of memory.
+    //
+    // Opening windows is how a user spends memory, so the script opens a
+    // screenful of terminal windows — one per primary click on the
+    // application's own icon-bar slot, each click gated on the session's
+    // witness that the previous window reached the screen. On this board's
+    // default RAM that takes free memory below the mild watermark, and the
+    // guest refuses to pass unless the published band really left normal, so
+    // the run can never report a pass without having tested the state it is
+    // named for.
+    //
+    // The two dumps are the bare revealed desktop and the frame just before
+    // the last window opens (`WINDOWS_SHOWN_AT_DUMP` — the guest's own witness
+    // is a create reply, which precedes the frame). The assertion reads the
+    // *file manager's* slot across them:
+    // the script never touches that slot, so a picture that changes between
+    // the frames changed because of what the desktop did to its own caches
+    // under pressure — a desktop that dropped its decoded icons draws
+    // built-in glyphs instead.
+    //
+    // Single CPU and the same 300-second *inactivity* budget as its siblings:
+    // the longest the guest may fall silent, never a runtime deadline, so
+    // co-scheduling cannot turn a slow guest into a timeout.
+    QemuTest {
+        package: "tairix-test-desktop-pressure-qemu-aarch64",
+        binary: "tairix-test-desktop-pressure-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: true,
+        fs_disk: FsDisk::AutoloadRootDisk,
+        keyboard: None,
+        typed_keys: &[
+            (
+                AUTOLOAD_INPUT_KEY_MARKER,
+                AUTOLOAD_INPUT_ARMED_OCCURRENCES,
+                UNLOCK_PASSPHRASE_LINE,
+            ),
+            (AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
+        ],
+        screendumps: &[
+            ScreendumpPlan {
+                marker: AUTOLOAD_DESKTOP_REVEALED_MARKER,
+                occurrences: 1,
+                suffix: DESKTOP_PRESSURE_ICONS_DRAWN_DUMP,
+                assert: assert_icons_drawn_dark_screendump,
+            },
+            ScreendumpPlan {
+                marker: APPBAR_WINDOW_SHOWN_MARKER,
+                occurrences: tairix_test_desktop_pressure_qemu_aarch64::WINDOWS_SHOWN_AT_DUMP,
+                suffix: DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP,
+                assert: assert_bar_artwork_survived_screendump,
+            },
+        ],
+        pointer_script: Some(desktop_pressure_pointer_script),
+        serial: &[],
+    },
     // `plans/NEW-DESKTOP-LOGIN.md` G7.1: a display-capable machine that
     // nobody has configured boots to the **graphical** login screen on its
     // own. The sibling verticals above all plant `os.loginType text` because
@@ -8266,19 +8327,20 @@ fn appbar_slot_rect(
         .ok_or_else(|| format!("icon-bar script: the bar reserves no application slot {index}"))
 }
 
-/// The share of the bar's application slot `index` whose pixels differ from
-/// the same slot in `bare` — the fraction a drawn slot's glyph covers, and
-/// for an unoccupied slot the noise floor of reading the same bar twice.
+/// The share of the bar's application slot `index` whose pixels differ
+/// between two frames of one run.
 ///
 /// The bar is floating chrome: a translucent fill over a backdrop the
-/// compositor blurs, so an empty slot has no single expected colour to test
-/// against. What it does have is the pixels that very slot showed earlier in
-/// the same run, before anything was running. Reading one screen position
-/// across the two frames holds the wallpaper, the blur, and the bar's own
-/// fill fixed, so what is left is the application — a direct measure of what
-/// the script's gesture put there, rather than of a colour the bar no longer
-/// has.
-fn app_slot_glyph_share(
+/// compositor blurs, so a slot has no single expected colour to test against.
+/// What it does have is the pixels that very slot showed in another frame of
+/// the same run. Reading one screen position across two frames holds the
+/// wallpaper, the blur, and the bar's own fill fixed, so what is left is the
+/// slot's own content — which is what makes the figure a direct measure of
+/// change rather than of a colour the bar no longer has. Read against a bare
+/// frame it measures what a gesture put in a slot; read across two running
+/// frames it measures what the desktop did to a slot it was not asked to
+/// touch.
+fn app_slot_pixel_drift(
     t: &QemuTest,
     path: &Path,
     frames: (
@@ -8320,13 +8382,19 @@ fn app_slot_glyph_share(
     })
 }
 
-/// The bare-bar dump taken earlier in the same run, beside `path`.
+/// The dump of the same run whose suffix is `baseline` rather than `path`'s
+/// own, beside `path`.
 ///
-/// The runner names a dump after the plan entry that scheduled it, so a
-/// running-application frame's own path names its baseline; a `path` that is
-/// not one of those frames is a wiring mistake and fails closed rather than
-/// reading some other frame.
-fn bare_bar_dump_path(t: &QemuTest, path: &Path) -> Result<PathBuf, String> {
+/// The runner names a dump after the plan entry that scheduled it, so a later
+/// frame's own path names the earlier one it is read against. A `path` that
+/// carries none of the `taken` suffixes is a wiring mistake and fails closed
+/// rather than reading some other frame.
+fn baseline_dump_path(
+    t: &QemuTest,
+    path: &Path,
+    taken: &[&str],
+    baseline: &str,
+) -> Result<PathBuf, String> {
     let name = path.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
         format!(
             "test --qemu ({}): screendump {} has no readable file name",
@@ -8334,24 +8402,30 @@ fn bare_bar_dump_path(t: &QemuTest, path: &Path) -> Result<PathBuf, String> {
             path.display(),
         )
     })?;
-    let bare = name
-        .replace(
-            &format!(".{APPBAR_ONE_WINDOW_DUMP}."),
-            &format!(".{APPBAR_BARE_BAR_DUMP}."),
-        )
-        .replace(
-            &format!(".{APPBAR_TWO_WINDOWS_DUMP}."),
-            &format!(".{APPBAR_BARE_BAR_DUMP}."),
-        );
-    if bare == name {
+    let mut named = name.to_string();
+    for suffix in taken {
+        named = named.replace(&format!(".{suffix}."), &format!(".{baseline}."));
+    }
+    if named == name {
         return Err(format!(
-            "test --qemu ({}): screendump {} is not one of the running-application dumps, \
-             so the bare-bar frame it is read against cannot be named",
+            "test --qemu ({}): screendump {} is not one of the frames read against the \
+             {baseline} frame, so the baseline it is compared with cannot be named",
             t.package,
             path.display(),
         ));
     }
-    Ok(path.with_file_name(bare))
+    Ok(path.with_file_name(named))
+}
+
+/// The bare-bar dump the icon-bar vertical's running-application frames are
+/// read against.
+fn bare_bar_dump_path(t: &QemuTest, path: &Path) -> Result<PathBuf, String> {
+    baseline_dump_path(
+        t,
+        path,
+        &[APPBAR_ONE_WINDOW_DUMP, APPBAR_TWO_WINDOWS_DUMP],
+        APPBAR_BARE_BAR_DUMP,
+    )
 }
 
 /// [`ScreendumpPlan`] assertion for the icon-bar vertical's **first** dump,
@@ -8360,7 +8434,7 @@ fn bare_bar_dump_path(t: &QemuTest, path: &Path) -> Result<PathBuf, String> {
 /// script has launched yet.
 ///
 /// This frame is also the baseline the later dumps are read against
-/// ([`app_slot_glyph_share`]), which is what turns "a glyph is in the slot"
+/// ([`app_slot_pixel_drift`]), which is what turns "a glyph is in the slot"
 /// into "this run's gesture put it there": the frames are the same screen, so
 /// an application slot that differs between them differs *because of the
 /// launch*.
@@ -8404,6 +8478,80 @@ fn assert_two_windows_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), S
     assert_no_slot_beyond_the_launched_app(t, path, (&image, &bare), &theme)?;
     for slot in 0..2 {
         assert_cascade_slot_covered(t, path, &image, &theme, slot)?;
+    }
+    Ok(())
+}
+
+/// The desktop-under-pressure vertical's screendump names: the frame taken
+/// before the script has spent any memory, and the frame taken once every
+/// window is open and the machine has left the normal pressure band.
+const DESKTOP_PRESSURE_ICONS_DRAWN_DUMP: &str = "icons-drawn";
+const DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP: &str = "under-pressure";
+
+/// The strip index the desktop-under-pressure vertical reads: the leading
+/// slot, the file manager the session autostarts.
+///
+/// It is the one slot in the frame the script never points at, clicks, hovers,
+/// or launches, and its application neither opens nor closes a window for the
+/// whole run — so its picture is a function of the desktop's own state and of
+/// nothing the run did to it.
+const DESKTOP_PRESSURE_UNTOUCHED_SLOT: usize = 0;
+
+/// The most of the untouched slot that may differ between the two frames.
+///
+/// Zero. The slot is the same screen position in two frames of one run, with
+/// the same wallpaper behind it, the same bar fill over it, the same
+/// application in it, and no pointer near it; the vertical's windows cascade
+/// from the top left and never reach the bar. So the bytes are the same bytes
+/// — unless the desktop drew something else there, which under pressure means
+/// it gave up the decoded artwork and fell back to a built-in glyph.
+const MAX_UNDER_PRESSURE_SLOT_DRIFT: f64 = 0.0;
+
+/// [`ScreendumpPlan`] assertion for the desktop-under-pressure vertical's
+/// **first** dump, taken on the first fully-revealed desktop frame: a real
+/// composited dark-theme desktop, with the autostarted file manager already
+/// holding the leading slot.
+///
+/// This frame is the artwork baseline the second one is read against.
+fn assert_icons_drawn_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
+    let theme = tairix_theme::Theme::dark();
+    let image = read_screendump(t, path)?;
+    assert_desktop_wallpaper(t, path, &image, &theme, &[])
+}
+
+/// [`ScreendumpPlan`] assertion for the desktop-under-pressure vertical's
+/// **second** dump, taken once every window is open and the guest has
+/// witnessed the machine leave the normal pressure band: the icon bar still
+/// draws exactly the artwork it drew before.
+fn assert_bar_artwork_survived_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
+    let theme = tairix_theme::Theme::dark();
+    let image = read_screendump(t, path)?;
+    let drawn = read_screendump(
+        t,
+        &baseline_dump_path(
+            t,
+            path,
+            &[DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP],
+            DESKTOP_PRESSURE_ICONS_DRAWN_DUMP,
+        )?,
+    )?;
+    let drift = app_slot_pixel_drift(
+        t,
+        path,
+        (&image, &drawn),
+        &theme,
+        DESKTOP_PRESSURE_UNTOUCHED_SLOT,
+    )?;
+    if drift > MAX_UNDER_PRESSURE_SLOT_DRIFT {
+        return Err(format!(
+            "test --qemu ({}): screendump {}: {:.1}% of the icon bar's untouched application \
+             slot changed while the machine was under memory pressure (at most {:.1}% may) — \
+             the desktop stopped drawing its decoded icon artwork",
+            t.package,
+            path.display(),
+            drift * 100.0,
+            MAX_UNDER_PRESSURE_SLOT_DRIFT * 100.0,
+        ));
     }
     Ok(())
 }
@@ -8483,7 +8631,7 @@ fn assert_app_slot_drawn(
     ),
     theme: &tairix_theme::Theme,
 ) -> Result<(), String> {
-    let share = app_slot_glyph_share(t, path, frames, theme, APPBAR_LAUNCHED_SLOT)?;
+    let share = app_slot_pixel_drift(t, path, frames, theme, APPBAR_LAUNCHED_SLOT)?;
     if share < MIN_APP_GLYPH_SHARE {
         return Err(format!(
             "test --qemu ({}): screendump {} shows no application in the bar's slot \
@@ -8514,7 +8662,7 @@ fn assert_no_slot_beyond_the_launched_app(
     ),
     theme: &tairix_theme::Theme,
 ) -> Result<(), String> {
-    let share = app_slot_glyph_share(t, path, frames, theme, APPBAR_EMPTY_SLOT)?;
+    let share = app_slot_pixel_drift(t, path, frames, theme, APPBAR_EMPTY_SLOT)?;
     if share > MAX_BARE_APP_SLOT_SHARE {
         return Err(format!(
             "test --qemu ({}): screendump {} shows an application slot beyond the launched \
@@ -8624,46 +8772,100 @@ fn datetime_elevate_aim_points() -> Result<(tairix_geometry::Point, tairix_geome
     Ok((clock, set_row))
 }
 
+/// A pointer script under construction, tracking where it left the guest's
+/// pointer.
+///
+/// The QEMU monitor moves the pointer by a *delta*, so a script that names
+/// screen positions must remember the last one it aimed at; every script here
+/// does, and each one open-coding that bookkeeping is how two of them come to
+/// disagree about it.
+struct PointerPen {
+    at: tairix_geometry::Point,
+    steps: Vec<tairix_qemu::PointerStep>,
+}
+
+impl PointerPen {
+    /// A pen holding the pointer at the screen origin, gated on `marker`.
+    ///
+    /// The session centres the pointer at bring-up, so the opening move
+    /// overshoots both axes leftward and upward on a `screen` of that size;
+    /// the guest clamps at the origin, which is what makes every later
+    /// displacement exact.
+    fn pinned_at_origin(marker: &str, screen: (u32, u32)) -> Self {
+        #[allow(clippy::cast_possible_wrap)] // Screen extents are far below i32::MAX.
+        let overshoot = tairix_qemu::PointerAction::Move {
+            dx: -(2 * screen.0 as i32),
+            dy: -(2 * screen.1 as i32),
+        };
+        let mut pen = Self {
+            at: tairix_geometry::Point::ORIGIN,
+            steps: Vec::new(),
+        };
+        pen.push(marker, 1, overshoot);
+        pen
+    }
+
+    /// Move the pointer to `to` once `marker` has appeared `occurrences`
+    /// times.
+    fn aim(&mut self, marker: &str, occurrences: u32, to: tairix_geometry::Point) {
+        let delta = tairix_qemu::PointerAction::Move {
+            dx: to.x - self.at.x,
+            dy: to.y - self.at.y,
+        };
+        self.at = to;
+        self.push(marker, occurrences, delta);
+    }
+
+    /// Aim at `to` and click `button` there, both gated on the same witness.
+    fn click(
+        &mut self,
+        marker: &str,
+        occurrences: u32,
+        button: tairix_qemu::MouseButton,
+        to: tairix_geometry::Point,
+    ) {
+        self.aim(marker, occurrences, to);
+        self.push(
+            marker,
+            occurrences,
+            tairix_qemu::PointerAction::Click(button),
+        );
+    }
+
+    /// The ordered script.
+    fn steps(self) -> Vec<tairix_qemu::PointerStep> {
+        self.steps
+    }
+
+    fn push(&mut self, marker: &str, occurrences: u32, action: tairix_qemu::PointerAction) {
+        self.steps.push(tairix_qemu::PointerStep {
+            ready_marker: marker.to_owned(),
+            ready_occurrences: occurrences.max(1),
+            action,
+        });
+    }
+}
+
 /// Right-click the taskbar clock, then click the *Set Date & Time…* row of the
 /// menu that opens, so the session opens its credential prompt.
 fn datetime_elevate_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
-    use tairix_geometry::Point;
-    use tairix_qemu::{MouseButton, PointerAction, PointerStep};
+    use tairix_qemu::MouseButton;
 
     let (clock, set_row) = datetime_elevate_aim_points()?;
-
-    let width = tairix_fwcfg::RAMFB_CONSOLE_WIDTH_PX;
-    let height = tairix_fwcfg::RAMFB_CONSOLE_HEIGHT_PX;
-    #[allow(clippy::cast_possible_wrap)] // Screen extents are far below i32::MAX.
-    let pin_cursor = PointerAction::Move {
-        dx: -(2 * width as i32),
-        dy: -(2 * height as i32),
-    };
-    let move_by = |from: Point, to: Point| PointerAction::Move {
-        dx: to.x - from.x,
-        dy: to.y - from.y,
-    };
-    let step = |marker: &str, action: PointerAction| PointerStep {
-        ready_marker: marker.to_owned(),
-        ready_occurrences: 1,
-        action,
-    };
-    let aim_and_press = |marker: &str, button: MouseButton, from: Point, to: Point| {
-        [
-            step(marker, move_by(from, to)),
-            step(marker, PointerAction::Click(button)),
-        ]
-    };
     let ready = AUTOLOAD_DESKTOP_REVEALED_MARKER;
-    let mut steps = vec![step(ready, pin_cursor)];
-    steps.extend(aim_and_press(
-        ready,
-        MouseButton::Secondary,
-        Point::ORIGIN,
-        clock,
-    ));
-    steps.extend(aim_and_press(ready, MouseButton::Primary, clock, set_row));
-    Ok(steps)
+    let mut pen = PointerPen::pinned_at_origin(ready, ramfb_screen());
+    pen.click(ready, 1, MouseButton::Secondary, clock);
+    pen.click(ready, 1, MouseButton::Primary, set_row);
+    Ok(pen.steps())
+}
+
+/// The board's display extent, the screen every reconstructed layout and
+/// pointer script here is laid out against.
+const fn ramfb_screen() -> (u32, u32) {
+    (
+        tairix_fwcfg::RAMFB_CONSOLE_WIDTH_PX,
+        tairix_fwcfg::RAMFB_CONSOLE_HEIGHT_PX,
+    )
 }
 
 /// Open the program library, right-click the slot the session gives its process on
@@ -8697,15 +8899,67 @@ fn datetime_elevate_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
 /// be photographed: it opens the third window, which is the create that
 /// completes the guest's PASS, and the runner sends no pointer step until
 /// every dump already asked for has been read back and parsed.
-#[allow(clippy::too_many_lines)] // One linear, ordered click-through script; splitting it would obscure the staging.
-fn appbar_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
+/// A host copy of the desktop model advanced to "the terminal has been
+/// launched from the program library", with the screen points that gesture
+/// used and the slot the session gives it.
+///
+/// Every rectangle is reconstructed by driving the **production** taskbar
+/// model — the same layout, hit-testing, and menu-building code the guest runs
+/// — so a script clicks where the guest actually draws rather than at
+/// coordinates copied from a screenshot. Two verticals launch the terminal
+/// this way and then diverge, so the launch itself is reconstructed once.
+struct BarLaunch {
+    /// The model, advanced to the launched state, for a caller that must keep
+    /// driving it (opening the declared menu, say).
+    shell: tairix_desktop_session::DesktopShell,
+    /// Router carrying the model's input state, so a caller's further presses
+    /// continue the same gesture history.
+    router: tairix_taskbar::TaskbarInput,
+    /// Centre of the program-library button.
+    library_button: tairix_geometry::Point,
+    /// Centre of the library popup's row for the terminal's bundle.
+    entry_row: tairix_geometry::Point,
+    /// Centre of the bar slot the session gives the launched application.
+    slot: tairix_geometry::Point,
+}
+
+/// The scale every reconstruction here lays out at: the board presents one
+/// display at the reference density.
+const RECONSTRUCTION_SCALE: tairix_geometry::Scale = tairix_geometry::Scale::ONE;
+
+/// One instant for a whole reconstruction: the model is driven only for
+/// geometry, and no rectangle depends on how long a press was held.
+const RECONSTRUCTION_INSTANT_NS: u64 = 0;
+
+/// Press and release `button` at `at` in the reconstructed model.
+fn bar_press(
+    shell: &mut tairix_desktop_session::DesktopShell,
+    router: &mut tairix_taskbar::TaskbarInput,
+    at: tairix_geometry::Point,
+    button: tairix_input::PointerButton,
+) {
+    use tairix_input::InputEvent;
+    let taskbar = shell.session_mut().taskbar_mut();
+    for event in [
+        InputEvent::PointerMoved { to: at },
+        InputEvent::PointerPressed { button },
+        InputEvent::PointerReleased { button },
+    ] {
+        router.handle(
+            event,
+            taskbar,
+            RECONSTRUCTION_SCALE,
+            RECONSTRUCTION_INSTANT_NS,
+        );
+    }
+}
+
+/// Reconstruct the launch of the terminal from the program library.
+fn reconstruct_bar_launch() -> Result<BarLaunch, String> {
     use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_desktop_session::{DesktopShell, FILES_LABEL};
-    use tairix_geometry::{Point, Scale};
-    use tairix_input::{InputEvent, PointerButton};
+    use tairix_input::PointerButton;
     use tairix_log::DiscardSink;
-    use tairix_qemu::{MouseButton, PointerAction, PointerStep};
-    use tairix_reclaim::ReportedPressure;
     use tairix_taskbar::{AppSlot, LibraryRow, TaskbarConfig, TaskbarInput};
     use tairix_test_appbar_qemu_aarch64::BAR_APP_NAME;
 
@@ -8715,15 +8969,12 @@ fn appbar_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     // truthfully rather than plausibly: no display backing (a zero-sized
     // backing budgets nothing) and a gauge that has never been told a band
     // (which answers critical, so nothing is admitted).
-    static NO_PRESSURE_FEED: ReportedPressure = ReportedPressure::unknown();
+    static NO_PRESSURE_FEED: tairix_reclaim::ReportedPressure =
+        tairix_reclaim::ReportedPressure::unknown();
     static DISCARD_SINK: DiscardSink = DiscardSink;
 
-    let width = tairix_fwcfg::RAMFB_CONSOLE_WIDTH_PX;
-    let height = tairix_fwcfg::RAMFB_CONSOLE_HEIGHT_PX;
-    let scale = Scale::ONE;
-    // One instant for the whole reconstruction: the model is driven only for
-    // geometry, and no rectangle here depends on how long a press was held.
-    let now_ns: u64 = 0;
+    let (width, height) = ramfb_screen();
+    let scale = RECONSTRUCTION_SCALE;
     let mut shell = DesktopShell::new(
         TaskbarConfig::bottom_bar(width, height),
         SEAT_PRIMARY,
@@ -8744,25 +8995,14 @@ fn appbar_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     let library_button = rect_centre(bar.library, "Library button")?;
 
     let mut router = TaskbarInput::new();
-    let mut press_at = |shell: &mut DesktopShell, at: Point, button: PointerButton| {
-        let taskbar = shell.session_mut().taskbar_mut();
-        router.handle(InputEvent::PointerMoved { to: at }, taskbar, scale, now_ns);
-        router.handle(
-            InputEvent::PointerPressed { button },
-            taskbar,
-            scale,
-            now_ns,
-        );
-        router.handle(
-            InputEvent::PointerReleased { button },
-            taskbar,
-            scale,
-            now_ns,
-        );
-    };
 
     // Open the program-library popup, exactly as the first click will.
-    press_at(&mut shell, library_button, PointerButton::Primary);
+    bar_press(
+        &mut shell,
+        &mut router,
+        library_button,
+        PointerButton::Primary,
+    );
 
     // The popup's row for the application whose bar this drives — keyed by
     // the bundle it launches (the same on-disk identity the guest PASS
@@ -8802,7 +9042,7 @@ fn appbar_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     // bar, so the model is advanced to the state the guest will be in: the
     // autostarted file manager already in the leading slot, and the launched
     // application beside it carrying the declaration it makes.
-    press_at(&mut shell, entry_row, PointerButton::Primary);
+    bar_press(&mut shell, &mut router, entry_row, PointerButton::Primary);
     let declared = tairix_terminal::appbar::declaration(0)
         .map_err(|err| format!("icon-bar script: the terminal's declaration is invalid: {err}"))?;
     let mut seated = (0..APPBAR_LAUNCHED_SLOT)
@@ -8814,13 +9054,62 @@ fn appbar_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     );
     shell.session_mut().taskbar_mut().set_apps(seated);
 
-    // The slot the session gives the launched application, and the menu a
-    // secondary press there opens.
+    // The slot the session gives the launched application.
     let slot = rect_centre(
         appbar_slot_rect(shell.session().taskbar().theme(), APPBAR_LAUNCHED_SLOT)?,
         "slot",
     )?;
-    press_at(&mut shell, slot, PointerButton::Secondary);
+    Ok(BarLaunch {
+        shell,
+        router,
+        library_button,
+        entry_row,
+        slot,
+    })
+}
+
+/// Open the program library, right-click the slot the session gives its
+/// process on the bar, choose the *New window* row of the menu the application
+/// declared, then primary-click that same slot to take its declared default
+/// action.
+///
+/// The launch itself is [`reconstruct_bar_launch`]; the declared menu comes
+/// from the terminal's own `appbar` module, so the row this clicks is named
+/// once rather than restated by position.
+///
+/// Every gate is **causal** rather than timed, and each is the strongest fact
+/// the emitting side can honestly state:
+///
+/// - The desktop's own reveal witness opens the script, so nothing is
+///   injected before there is a bar to hit.
+/// - The two slot gestures wait on the session's per-window
+///   [`APPBAR_WINDOW_SHOWN_MARKER`]: the *first* occurrence for the
+///   right-click, the *second* for the final primary click. That witness
+///   follows a frame the session actually put on screen, so by then the
+///   application has declared its bar (it declares before it opens a window),
+///   the session has grouped that window under its attested owner, and the
+///   strip has been re-resolved and drawn. A create reply would say only that
+///   the window exists.
+/// - The menu row's click follows its right-click immediately — that press is
+///   what opens the menu, so the row is on screen by construction.
+///
+/// The final primary click is also what keeps the guest alive long enough to
+/// be photographed: it opens the third window, which is the create that
+/// completes the guest's PASS, and the runner sends no pointer step until
+/// every dump already asked for has been read back and parsed.
+fn appbar_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
+    use tairix_input::PointerButton;
+    use tairix_qemu::MouseButton;
+
+    let BarLaunch {
+        mut shell,
+        mut router,
+        library_button,
+        entry_row,
+        slot,
+    } = reconstruct_bar_launch()?;
+    let scale = RECONSTRUCTION_SCALE;
+    bar_press(&mut shell, &mut router, slot, PointerButton::Secondary);
     if !shell.session().taskbar().menu().is_open() {
         return Err("icon-bar script: a secondary press on the slot opened no menu".to_string());
     }
@@ -8852,76 +9141,74 @@ fn appbar_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
         "New window row",
     )?;
 
-    // Relative-motion arithmetic: the pointer starts at an unknown position
-    // (the session centres it), so the first move overshoots both axes
-    // leftward/upward; the guest clamps at (0, 0), making every later
-    // displacement exact.
-    #[allow(clippy::cast_possible_wrap)] // Screen extents are far below i32::MAX.
-    let pin_cursor = PointerAction::Move {
-        dx: -(2 * width as i32),
-        dy: -(2 * height as i32),
-    };
-    let move_by = |from: Point, to: Point| PointerAction::Move {
-        dx: to.x - from.x,
-        dy: to.y - from.y,
-    };
-    let step = |marker: &str, action: PointerAction| PointerStep {
-        ready_marker: marker.to_owned(),
-        ready_occurrences: 1,
-        action,
-    };
-    let click = |marker: &str, button: MouseButton, from: Point, to: Point| {
-        [
-            step(marker, move_by(from, to)),
-            step(marker, PointerAction::Click(button)),
-        ]
-    };
     let ready = AUTOLOAD_DESKTOP_REVEALED_MARKER;
-    let mut steps = vec![step(ready, pin_cursor)];
-    steps.extend(click(
-        ready,
-        MouseButton::Primary,
-        Point::ORIGIN,
-        library_button,
-    ));
-    steps.extend(click(
-        ready,
-        MouseButton::Primary,
-        library_button,
-        entry_row,
-    ));
+    let mut pen = PointerPen::pinned_at_origin(ready, ramfb_screen());
+    pen.click(ready, 1, MouseButton::Primary, library_button);
+    pen.click(ready, 1, MouseButton::Primary, entry_row);
     // The application's first window is on screen, so its slot is drawn and
     // carries the declaration it made before opening that window.
-    steps.extend(click(
+    pen.click(APPBAR_WINDOW_SHOWN_MARKER, 1, MouseButton::Secondary, slot);
+    pen.click(
         APPBAR_WINDOW_SHOWN_MARKER,
-        MouseButton::Secondary,
+        1,
+        MouseButton::Primary,
+        new_window,
+    );
+    // The chosen row's window is on screen too — the frame the third dump
+    // reads. The pointer is still on that row, so this walks back to the slot
+    // and presses it: the declaration claims the application handles a primary
+    // click, so this is its default action rather than a raise, and the window
+    // it opens is the guest's last witness.
+    pen.click(APPBAR_WINDOW_SHOWN_MARKER, 2, MouseButton::Primary, slot);
+    Ok(pen.steps())
+}
+
+/// Launch the terminal from the program library, then open one further window
+/// per primary click on its icon-bar slot until the whole screenful is open.
+///
+/// The launch is [`reconstruct_bar_launch`]. Each further click is gated on the
+/// session's per-window [`APPBAR_WINDOW_SHOWN_MARKER`], counted: the click that
+/// opens window *n* waits for window *n − 1*'s frame to have reached the
+/// screen. So the script never runs ahead of the desktop, however slowly a
+/// guest short of memory opens the next one.
+///
+/// Between clicks the pointer is walked off the bar. Resting it on a slot is
+/// the gesture that opens that application's hover window picker, and from the
+/// second window onwards there is a picker to open; parking the pointer away
+/// from the bar while the script waits keeps every click a click on the slot.
+fn desktop_pressure_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
+    use tairix_qemu::MouseButton;
+    use tairix_test_desktop_pressure_qemu_aarch64::WINDOWS_OPENED;
+
+    let BarLaunch {
+        library_button,
         entry_row,
         slot,
-    ));
-    steps.extend(click(
-        APPBAR_WINDOW_SHOWN_MARKER,
-        MouseButton::Primary,
-        slot,
-        new_window,
-    ));
-    // The chosen row's window is on screen too — the frame the third dump
-    // reads. The pointer is still on that row, so this walks back to the
-    // slot and presses it: the declaration claims the application handles a
-    // primary click, so this is its default action rather than a raise, and
-    // the window it opens is the guest's last witness.
-    steps.extend(
-        click(
+        ..
+    } = reconstruct_bar_launch()?;
+    let (width, height) = ramfb_screen();
+    // Clear of the bar along the bottom edge and of the window cascade in the
+    // top left, so the pointer waits over bare wallpaper: nothing there dwells,
+    // hovers, or is raised by a pointer resting on it.
+    #[allow(clippy::cast_possible_wrap)] // Screen extents are far below i32::MAX.
+    let rest = tairix_geometry::Point::new(width as i32 - 1, height as i32 / 2);
+
+    let ready = AUTOLOAD_DESKTOP_REVEALED_MARKER;
+    let mut pen = PointerPen::pinned_at_origin(ready, ramfb_screen());
+    pen.click(ready, 1, MouseButton::Primary, library_button);
+    pen.click(ready, 1, MouseButton::Primary, entry_row);
+    // The launch opened the first window, so each remaining one is a click on
+    // the slot once its predecessor is on screen.
+    for opened in 1..WINDOWS_OPENED {
+        pen.click(
             APPBAR_WINDOW_SHOWN_MARKER,
+            opened,
             MouseButton::Primary,
-            new_window,
             slot,
-        )
-        .map(|mut step| {
-            step.ready_occurrences = 2;
-            step
-        }),
-    );
-    Ok(steps)
+        );
+        pen.aim(APPBAR_WINDOW_SHOWN_MARKER, opened, rest);
+    }
+    Ok(pen.steps())
 }
 
 /// The label the terminal gives its *New window* row, as the script names the

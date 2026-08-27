@@ -101,6 +101,49 @@ The open items, in priority order:
   image underneath itself — DONE.** Up to four simultaneous runs of one
   enrolment shared a planted-image path, so a replica rewrote a live sibling's
   disk mid-run. Sidecar paths are now per-run, not per-binary.
+- **D57 — the first tightening of memory stopped every cache in the system
+  from admitting, and took the desktop's pictures with it — DONE.** Reported
+  as "32 terminal windows and the icons all become the same white silhouette
+  and the desktop stops responding". Reproduced on the aarch64 `virt` board at
+  the default 256 MiB: windows 1–24 opened in a fifth of a second each, then
+  25 took 9 s, 26 took 29 s, 27 took 65 s and 28 took 118 s, with ~1800
+  `fs_open`/`fs_write` pairs and ~1500 font-endpoint calls per 6000 audit
+  lines — every icon re-read and re-decoded and every glyph re-fetched, per
+  repaint. Three defects, all in the shared reclaim model:
+  - `GrowthAllowance::permits` refused **all** cache growth in any band above
+    normal (below 20% free), contradicting `shrink_target`'s own per-class
+    ceilings: a class the policy says to preserve could keep what it held but
+    never admit again, so every cache in the system — kernel filesystem
+    metadata, block, launch, transform — decayed to uselessness while its
+    ledger read healthy. Admission now reads the same `shrink_target` a forced
+    shrink evicts to, so growth and shrink are one policy.
+  - The desktop's decoded icons and client-side glyphs were classed as
+    drop-at-mild disposable UI, though rebuilding one needs a capability-gated
+    read plus a parser-sandbox round trip (icons) or an IPC round trip
+    (glyphs) — the resources a machine short of memory has least of. Both now
+    declare a display-derived working-set floor that mild and moderate leave
+    alone; severe and critical still take everything.
+  - A retention refusal was re-attempted every round for ever.
+    `ArtworkResolver::declined` reports it and the session's icon desk holds
+    that key back until the band moves.
+  The same reproduction now completes in 30 s with the bar drawing its real
+  artwork throughout, and is enrolled as
+  `tests/integration/desktop_pressure_qemu_aarch64` — the guest passing only
+  when the published band really left normal, so it cannot pass without having
+  tested the state it is named for. Adjacent and **not** fixed by this: D54,
+  the session-start burst of file opens from the same worker.
+- **D58 — three window counts stood in for the bytes a window actually costs
+  — DONE.** Found while fixing D57. The session bounded one client to 32
+  *windows* (`WINDOWS_PER_CLIENT_MAX`), a figure that says nothing about the
+  address space it maps for them: 32 windows of a 4K frame is a gigabyte,
+  while a hundred terminal windows are a few tens of megabytes — and a resize,
+  which is the other way a client grows what the session holds, was not
+  bounded at all. It is now a byte budget derived from the machine's RAM
+  (`client_frame_budget_bytes`), charged by creates, popups, and resizes
+  alike. The terminal (32) and the file manager (8) each carried a further
+  hand-picked count in front of it; both are gone, because every resource they
+  stood for — the frame region, the pty, the shell child — is already bounded
+  by something derived and fail-closed that those apps already report.
 - **D56 — the x86_64 page-table walk recovers a table by its raw physical
   address**, so every page table, and the direct map that shares the window
   with them, must live below the user virtual base. A machine with more than
@@ -640,8 +683,10 @@ build but the protocol had to refuse, dying in silence because a graphical
 elevation's `stderr` reaches no one (fixed), and D52 is an x86_64 cross-CPU
 shootdown protocol defect that only became reachable once a production caller
 existed — the tree is safe by the current caller set, not by the protocol
-(open). Do not collapse the open items into one change; land each on its own
-whole-project-green gate (§7).
+(open), and D57/D58 were a *policy* pair rather than a coding slip — a
+pressure model whose two halves disagreed, and three counts standing in for
+the resource they were meant to bound (both fixed). Do not collapse the open
+items into one change; land each on its own whole-project-green gate (§7).
 
 ## Coupling to be aware of
 

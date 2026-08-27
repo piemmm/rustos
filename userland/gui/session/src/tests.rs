@@ -7311,7 +7311,7 @@ fn pin_artwork_never_outgrows_the_budget_its_output_allows() {
 }
 
 #[test]
-fn pin_artwork_is_given_back_under_pressure_and_wiped_on_teardown() {
+fn pin_artwork_survives_tightening_pressure_and_is_wiped_on_teardown() {
     // A gauge of this test's own, so moving the band cannot perturb the
     // shared one other tests hold at normal.
     static PRESSURED: ReportedPressure = ReportedPressure::unknown();
@@ -7320,41 +7320,44 @@ fn pin_artwork_is_given_back_under_pressure_and_wiped_on_teardown() {
     let mut reader = artwork_assets(&["/Apps/One.app"]);
     let mut rasteriser = ArtworkSandbox(CountingRasteriser::working());
     let path = artwork_source("/Apps/One.app");
+    let mut drawn = |cache: &mut ArtworkCache| {
+        cache
+            .path_artwork(
+                &mut InlineArtwork::new(&mut reader, &mut rasteriser),
+                &path,
+                16,
+            )
+            .is_some()
+    };
 
-    assert!(cache
-        .path_artwork(
-            &mut InlineArtwork::new(&mut reader, &mut rasteriser),
-            &path,
-            16
-        )
-        .is_some());
-    assert!(cache.charged_bytes() > 0);
+    assert!(drawn(&mut cache));
+    let held = cache.charged_bytes();
+    assert!(held > 0);
 
-    PRESSURED.report(PressureBand::Mild);
-    assert!(cache.trim() > 0, "mild pressure releases disposable UI");
+    // Tightening memory does not take the desktop's pictures away. A
+    // decoded icon is not local work the session can repeat at will: it is
+    // a capability-gated read plus a parser-sandbox round trip, so dropping
+    // it frees a fraction of one screenful and then costs both again, per
+    // icon, on the next repaint — with the machine already short. Mild and
+    // moderate therefore leave the working set alone.
+    for band in [PressureBand::Mild, PressureBand::Moderate] {
+        PRESSURED.report(band);
+        assert_eq!(cache.trim(), 0, "{band:?} keeps the icon working set");
+        assert_eq!(cache.charged_bytes(), held);
+        assert!(drawn(&mut cache), "{band:?} still draws real artwork");
+    }
+
+    // Severe is where it genuinely matters more than the pictures do: the
+    // whole cache goes, the draw site falls back to its built-in glyph, and
+    // a lookup retains nothing rather than re-acquiring what was released.
+    PRESSURED.report(PressureBand::Severe);
+    assert!(cache.trim() > 0, "severe pressure releases the working set");
     assert_eq!(cache.charged_bytes(), 0);
-
-    // A lookup while pressure holds retains nothing, so it hands back no
-    // artwork and the draw site falls back to its built-in glyph:
-    // correctness never depended on the artwork, and answering pressure by
-    // re-acquiring the pixels it just released would defeat the release.
-    assert!(cache
-        .path_artwork(
-            &mut InlineArtwork::new(&mut reader, &mut rasteriser),
-            &path,
-            16
-        )
-        .is_none());
-    assert_eq!(cache.charged_bytes(), 0, "no growth under pressure");
+    assert!(!drawn(&mut cache), "the glyph tier takes over");
+    assert_eq!(cache.charged_bytes(), 0, "no growth under severe pressure");
 
     PRESSURED.report(PressureBand::Normal);
-    assert!(cache
-        .path_artwork(
-            &mut InlineArtwork::new(&mut reader, &mut rasteriser),
-            &path,
-            16
-        )
-        .is_some());
+    assert!(drawn(&mut cache));
     assert!(cache.charged_bytes() > 0, "retention resumes when it may");
 
     cache.teardown();

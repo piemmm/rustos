@@ -582,7 +582,7 @@ fn eviction_takes_the_least_recently_used_block_first() {
 }
 
 #[test]
-fn growth_stops_outside_normal_pressure_and_moderate_drains_the_class() {
+fn growth_follows_the_band_ceiling_and_moderate_drains_the_class() {
     let (gauge_source, pressure) = pressured(free_for(PressureBand::Normal));
     let (store, disk) = MemDisk::new();
     let mut cache = BlockCache::new(disk, budget(), pressure, sink()).unwrap();
@@ -590,8 +590,9 @@ fn growth_stops_outside_normal_pressure_and_moderate_drains_the_class() {
     cache.read_blocks(0, &mut buf).unwrap();
     assert_eq!(cache.accounting().total_bytes(), COST);
 
-    // Mild pressure: no new growth; the resident block (under the low
-    // watermark) is preserved.
+    // Mild pressure begins reclaiming clean file data rather than
+    // stopping it: the class may hold its low watermark, so a read under
+    // that watermark is still cached and the resident block held.
     gauge_source
         .free
         .store(free_for(PressureBand::Mild), Ordering::Relaxed);
@@ -599,7 +600,8 @@ fn growth_stops_outside_normal_pressure_and_moderate_drains_the_class() {
     // sequential continuation that would arm readahead.
     let mut other = block_of(0);
     cache.read_blocks(2, &mut other).unwrap();
-    assert_eq!(cache.accounting().refusals(), 1, "no growth at mild");
+    assert_eq!(cache.accounting().refusals(), 0, "growth to the watermark");
+    assert!(cache.accounting().total_bytes() <= budget().low());
     let reads_before = store.borrow().reads;
     cache.read_blocks(0, &mut buf).unwrap();
     assert_eq!(
@@ -616,6 +618,9 @@ fn growth_stops_outside_normal_pressure_and_moderate_drains_the_class() {
     cache.read_blocks(0, &mut buf).unwrap();
     assert_eq!(cache.accounting().total_bytes(), 0);
     assert!(cache.accounting().pressure_shrinks() >= 1);
+    // A drained class admits nothing there either.
+    cache.read_blocks(4, &mut other).unwrap();
+    assert_eq!(cache.accounting().total_bytes(), 0);
 
     // Recovery: normal pressure admits growth again.
     gauge_source

@@ -844,10 +844,10 @@ What now stands:
   and its own *New window* row through the shared convention
   (`tairix_terminal::appbar` over `appbar::declaration`), so the menu reads
   `About`, *New window*, a rule, *Quit* — its slot opens a fresh window on a
-  click and its menu can close them all. `MAX_WINDOWS` (32) bounds the
-  process's own resources and matches `WINDOWS_PER_CLIENT_MAX`, the windows
-  the session will pin for one client, so a user who asks for one too many
-  meets the terminal's own stated refusal rather than the session's. Its
+  click and its menu can close them all. The terminal keeps no window count of
+  its own: what a window costs is bounded by the session's per-client frame
+  budget and by the process's own stream, process, and address-space limits,
+  each derived from the machine and each refusing with a stated reason. Its
   bring-up asks the desktop for the window **before** creating the pty and
   spawning the shell, so a refused window costs one round trip instead of a
   whole process load and teardown. The last window closing ends it.

@@ -504,12 +504,17 @@ impl<B: Block> BlockCache<B> {
                 entry.data.copy_from_slice(bytes);
                 continue;
             }
-            if cost > self.budget.hard() || !allowance.take(cost) {
+            if !allowance.take(ReclaimClass::CleanFileData, self.budget, cost) {
                 self.accounting.record_refusal(ReclaimClass::CleanFileData);
                 return;
             }
-            if self.accounting.total_bytes().saturating_add(cost) > self.budget.hard() {
-                let headroom = self.budget.low().min(self.budget.hard() - cost);
+            // The band's ceiling for this class bounds the *total*, not
+            // just the entry: a band that has begun reclaiming clean file
+            // data must not be grown back past its watermark by the very
+            // request that shrank to it.
+            let ceiling = shrink_target(allowance.band(), ReclaimClass::CleanFileData, self.budget);
+            if self.accounting.total_bytes().saturating_add(cost) > ceiling {
+                let headroom = self.budget.low().min(ceiling.saturating_sub(cost));
                 self.evict_until(headroom);
                 if self.poisoned {
                     return;
@@ -642,7 +647,11 @@ impl<B: Block> BlockCache<B> {
         }
         self.accounting.record_miss(ReclaimClass::CleanFileData);
         let (payload, metadata) = self.cost_of();
-        let admissible = allowance.permits(payload.saturating_add(metadata));
+        let admissible = allowance.permits(
+            ReclaimClass::CleanFileData,
+            self.budget,
+            payload.saturating_add(metadata),
+        );
         let prefetch = self.plan_readahead(lba, blocks, sequential, admissible);
         let want_bytes = usize::try_from(prefetch)
             .unwrap_or(0)

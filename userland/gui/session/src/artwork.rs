@@ -83,6 +83,10 @@ enum State {
     Done(Option<Surface>),
     /// Collected already in this round.
     Answered,
+    /// Collected, and the cache could not keep it: no room the current
+    /// pressure band allows. Kept across rounds, unlike [`State::Answered`],
+    /// because decoding it again would only be refused again.
+    Declined,
 }
 
 /// The artwork arrangement's policy: what has been asked for, what is being
@@ -139,7 +143,9 @@ impl ArtworkDesk {
                 };
                 Resolved::Done(artwork)
             }
-            Some(State::Wanted | State::Running | State::Answered) => Resolved::Pending,
+            Some(State::Wanted | State::Running | State::Answered | State::Declined) => {
+                Resolved::Pending
+            }
             None => {
                 if !self.stopping {
                     self.slots.insert(job.clone(), State::Wanted);
@@ -232,11 +238,38 @@ impl ArtworkDesk {
         core::mem::take(&mut self.landed)
     }
 
+    /// Note that the cache could not keep what `job` produced, so this desk
+    /// stops offering it until the band that refused it moves.
+    ///
+    /// Without this the refusal is silent and self-renewing: the round the
+    /// landing triggered asks again, the answer is refused again, and the
+    /// desktop reads and decodes every icon it draws on every repaint —
+    /// spending the disk and the parser sandbox precisely when the machine is
+    /// short of the memory that would have held the answer.
+    pub fn decline(&mut self, key: &ArtworkKey, side: u32) {
+        let job = ArtworkJob {
+            key: key.clone(),
+            side,
+        };
+        if let Some(state) = self.slots.get_mut(&job) {
+            *state = State::Declined;
+        }
+    }
+
+    /// Offer every declined key again, because the pressure band moved and the
+    /// answer may now be retainable.
+    pub fn retry_declined(&mut self) {
+        self.slots
+            .retain(|_, state| !matches!(state, State::Declined));
+    }
+
     /// Open a fresh round: every key answered in the last one may be asked for
     /// again.
     ///
     /// Work in flight and answers not yet collected are kept, so a round
     /// boundary never discards a decode or causes one to be run twice.
+    /// Declined keys are kept too: a round boundary is not what makes a
+    /// refused answer retainable.
     pub fn begin_round(&mut self) {
         self.slots
             .retain(|_, state| !matches!(state, State::Answered));

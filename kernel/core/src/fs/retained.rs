@@ -314,7 +314,7 @@ impl RetainedWrites {
                 if self.bytes.saturating_add(cost) > self.budget.hard()
                     || !allowance
                         .get_or_insert_with(|| pressure.growth_allowance())
-                        .take(cost)
+                        .take_reserve(cost)
                 {
                     self.mark_lost();
                     return;
@@ -620,6 +620,20 @@ mod tests {
     }
     static STARVED: StarvedSource = StarvedSource;
 
+    /// A memory source in the mild band: free memory is tightening, but the
+    /// reserve floor is nowhere near.
+    struct TighteningSource;
+    impl FreeMemorySource for TighteningSource {
+        fn free_bytes(&self) -> usize {
+            // Just below the mild enter watermark (a fifth of the total).
+            (1 << 30) / 5 - 4096
+        }
+        fn total_bytes(&self) -> usize {
+            1 << 30
+        }
+    }
+    static TIGHTENING: TighteningSource = TighteningSource;
+
     fn ample_pressure() -> &'static MemoryPressure {
         Box::leak(Box::new(MemoryPressure::over(&AMPLE)))
     }
@@ -808,6 +822,28 @@ mod tests {
         assert!(journal.is_lost(), "retention was abandoned");
         assert!(journal.is_dirty(), "lost still reads as dirty");
         assert_eq!(journal.retained_bytes(), 0, "nothing is retained");
+    }
+
+    #[test]
+    fn a_tightening_band_alone_does_not_throw_away_uncommitted_writes() {
+        // The journal is the only copy of data the medium may not hold, so it
+        // is not a reclaimable cache and no band ceiling applies to it: what
+        // bounds its growth is its own budget and the reserve floor. A band
+        // that has merely begun tightening therefore keeps the retained set —
+        // losing it would forfeit the surprise-removal report for no memory
+        // the system could use.
+        let journal = Arc::new(SpinLock::new(RetainedWrites::new(
+            BLOCK_SIZE,
+            small_budget(),
+        )));
+        let pressure: &'static MemoryPressure =
+            Box::leak(Box::new(MemoryPressure::over(&TIGHTENING)));
+        let mut device = JournaledBlock::new(RamFlushBlock::new(8), Arc::clone(&journal), pressure);
+        device.device.fail_flush = true;
+        device.write_blocks(0, &[1u8; BLOCK_SIZE as usize]).unwrap();
+        let held = journal.lock();
+        assert!(!held.is_lost(), "a tightening band retains the write");
+        assert!(held.retained_bytes() > 0);
     }
 
     #[test]

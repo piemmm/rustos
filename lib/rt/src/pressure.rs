@@ -61,7 +61,7 @@ pub fn report(band: PressureBand) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tairix_reclaim::PressureGauge;
+    use tairix_reclaim::{CacheBudget, PressureGauge, ReclaimClass};
 
     #[test]
     fn an_unreported_band_admits_nothing() {
@@ -69,7 +69,10 @@ mod tests {
         // start state rather than mutating the process-wide one.
         let fresh = ReportedPressure::unknown();
         assert_eq!(fresh.band(), PressureBand::Critical);
-        assert!(!fresh.growth_permitted(1));
+        let budget = CacheBudget::from_ceiling(1 << 20);
+        for class in ReclaimClass::ALL {
+            assert!(!fresh.growth_permitted(class, budget, 1), "{class:?}");
+        }
     }
 
     #[test]

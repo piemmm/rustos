@@ -226,6 +226,51 @@ fn a_fresh_round_lets_an_answered_key_be_decoded_again() {
     );
 }
 
+/// A refusal the *cache* made — no room the band allows — is not a reason to
+/// decode again. Without this the desktop read and decoded every icon it drew
+/// on every repaint, spending the disk and the parser sandbox precisely when
+/// the machine was short of the memory that would have held the answer.
+#[test]
+fn a_declined_answer_is_not_offered_again_until_the_band_moves() {
+    let mut desk = ArtworkDesk::new();
+    let _ = desk.collect(&asset("/a.png"), 8);
+    let running = desk.next_job().expect("a job");
+    assert!(desk.deliver(&running, Some(picture(8))));
+    assert!(matches!(
+        desk.collect(&asset("/a.png"), 8),
+        Resolved::Done(_)
+    ));
+    desk.decline(&asset("/a.png"), 8);
+
+    // Every later round asks for nothing: the draw takes its glyph.
+    for _ in 0..3 {
+        desk.begin_round();
+        assert!(is_pending(&desk.collect(&asset("/a.png"), 8)));
+        assert!(!desk.has_work(), "a declined key queues no decode");
+        assert!(desk.next_job().is_none());
+    }
+
+    // The band moving is what makes the answer worth having again.
+    desk.retry_declined();
+    assert!(is_pending(&desk.collect(&asset("/a.png"), 8)));
+    assert_eq!(desk.next_job(), Some(job("/a.png", 8)));
+}
+
+/// Declining a key the desk is not holding changes nothing: the cache and the
+/// desk are separate, so a stale report must not resurrect a slot.
+#[test]
+fn declining_an_unknown_key_records_nothing() {
+    let mut desk = ArtworkDesk::new();
+    desk.decline(&asset("/gone.png"), 8);
+    assert!(!desk.has_work());
+    assert!(is_pending(&desk.collect(&asset("/gone.png"), 8)));
+    assert_eq!(
+        desk.next_job(),
+        Some(job("/gone.png", 8)),
+        "the key is new, not declined"
+    );
+}
+
 /// A round boundary governs re-asking, never the decode itself: an answer
 /// nobody has collected yet survives it, so no work is thrown away.
 #[test]

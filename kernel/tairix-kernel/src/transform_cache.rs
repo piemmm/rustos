@@ -57,8 +57,8 @@ use tairix_kernel_core::{CacheClass, CacheControl, CACHE_CONTROL};
 use tairix_log::Sink;
 use tairix_reclaim::{
     log_cache_poisoned, log_cache_refused, shrink_target, CacheAccounting, CacheBudget,
-    CacheCandidate, CacheLedger, CachePolicy, InvalidationSource, MemoryPressure, PressureGauge,
-    RebuildCost, ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity,
+    CacheCandidate, CacheLedger, CachePolicy, InvalidationSource, MemoryPressure, RebuildCost,
+    ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity,
 };
 use zeroize::Zeroize;
 
@@ -389,12 +389,17 @@ impl ClusterCache for TransformClusterCache {
         }
         let (payload, metadata) = Self::cost_of(plaintext.len());
         let cost = payload.saturating_add(metadata);
-        if cost > self.budget.hard() || !self.pressure.growth_permitted(cost) {
-            self.accounting.record_refusal(ReclaimClass::TransformCache);
+        let class = ReclaimClass::TransformCache;
+        // One reading: the ceiling and the reserve draw must agree on the
+        // band, so both come from the same fold.
+        let mut allowance = self.pressure.growth_allowance();
+        let ceiling = shrink_target(allowance.band(), class, self.budget);
+        if !allowance.take(class, self.budget, cost) {
+            self.accounting.record_refusal(class);
             return;
         }
-        if self.accounting.total_bytes().saturating_add(cost) > self.budget.hard() {
-            let headroom = self.budget.low().min(self.budget.hard() - cost);
+        if self.accounting.total_bytes().saturating_add(cost) > ceiling {
+            let headroom = self.budget.low().min(ceiling - cost);
             self.evict_until(headroom);
             if self.poisoned {
                 return;

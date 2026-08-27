@@ -140,6 +140,50 @@ where
     )
 }
 
+/// Build a desktop-session cache of pixels the session cannot rebuild
+/// without leaving its own address space — a decoded on-disk icon
+/// (a capability-gated read plus a parser-sandbox round trip), a glyph
+/// fetched over the font endpoint.
+///
+/// Classified and bounded exactly like [`disposable_ui_cache`]: same
+/// declaration, same display-derived budget, so it is still the first
+/// memory the model reclaims among equals. It differs in one respect —
+/// the whole of that budget is declared the session's live working set
+/// ([`CacheBudget::with_working_set_floor`]), so mild and moderate
+/// pressure leave it alone and severe still takes it.
+///
+/// The budget *is* the working set here rather than a speculative
+/// allowance around one: it is a small fraction of one frame of the very
+/// output the pixels are drawn on, and no more of them than fills that
+/// output can be visible at once. There is nothing in it to trim that the
+/// session is not currently drawing, which is why dropping it frees a
+/// negligible figure and immediately costs a read and a round trip per
+/// icon and a round trip per glyph — the resources a machine short of
+/// memory has least of.
+#[must_use]
+pub fn working_set_ui_cache<K, V, E>(
+    label: &'static str,
+    seat: u64,
+    fb_bytes: usize,
+    entry_metadata_bytes: usize,
+    pressure: &'static (dyn PressureGauge + 'static),
+    sink: &'static (dyn Sink + Sync),
+) -> ReclaimCache<K, V, E>
+where
+    K: Ord + Clone,
+    V: CachedBytes,
+    E: PartialEq + Clone,
+{
+    let budget = CacheBudget::from_backing(fb_bytes);
+    ReclaimCache::new(
+        label,
+        disposable_ui_candidate(seat, entry_metadata_bytes),
+        budget.with_working_set_floor(budget.hard()),
+        pressure,
+        sink,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

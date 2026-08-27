@@ -152,6 +152,25 @@ pub fn glyph_cache_budget(total_ram_bytes: u64) -> CacheBudget {
     CacheBudget::from_ceiling(hard)
 }
 
+/// The **client** side's budget: [`glyph_cache_budget`] with the whole of it
+/// declared the process's live working set
+/// ([`CacheBudget::with_working_set_floor`]).
+///
+/// The two sides of the endpoint retain the same bitmaps but rebuild them
+/// very differently. The service re-rasterises an outline it already holds in
+/// memory; a client has to ask for the glyph again over the font endpoint. So
+/// a client that gives its glyphs up at the first tightening of memory
+/// re-fetches every character on screen, over IPC, while the machine is short
+/// — which frees a fraction of a screenful and costs a round trip per glyph
+/// per repaint. Mild and moderate pressure therefore leave the client's
+/// glyphs alone; severe still takes them, and the text is re-fetched then
+/// because at that point the memory genuinely matters more.
+#[must_use]
+pub fn client_glyph_cache_budget(total_ram_bytes: u64) -> CacheBudget {
+    let budget = glyph_cache_budget(total_ram_bytes);
+    budget.with_working_set_floor(budget.hard())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,6 +203,40 @@ mod tests {
         // A glyph working set is small: even a large server is left a
         // vanishing fraction of its RAM, never a large slice.
         assert!(large.hard() < (1 << 30));
+    }
+
+    #[test]
+    fn the_client_budget_keeps_its_glyphs_until_severe_pressure() {
+        use tairix_reclaim::{shrink_target, PressureBand};
+
+        // The client rebuilds a dropped glyph by asking the font service for
+        // it again, so giving them up at the first tightening re-fetches every
+        // character on screen over IPC while the machine is short. The service,
+        // which re-rasterises an outline it already holds, keeps the plain
+        // budget and drops at mild as the reclaim order says.
+        let client = client_glyph_cache_budget(1 << 30);
+        let service = glyph_cache_budget(1 << 30);
+        assert_eq!(client.hard(), service.hard(), "same ceiling");
+        assert_eq!(client.floor(), client.hard(), "all of it is working set");
+        assert_eq!(service.floor(), 0);
+        for band in [PressureBand::Mild, PressureBand::Moderate] {
+            assert_eq!(
+                shrink_target(band, ReclaimClass::DisposableUi, client),
+                client.hard(),
+                "{band:?} keeps the client's glyphs"
+            );
+            assert_eq!(
+                shrink_target(band, ReclaimClass::DisposableUi, service),
+                0,
+                "{band:?} drops the service's own atlas"
+            );
+        }
+        for band in [PressureBand::Severe, PressureBand::Critical] {
+            assert_eq!(shrink_target(band, ReclaimClass::DisposableUi, client), 0);
+        }
+        // A machine whose RAM total went unanswered gets no floor to keep,
+        // because it gets no budget: fail closed to uncached.
+        assert_eq!(client_glyph_cache_budget(0).floor(), 0);
     }
 
     #[test]

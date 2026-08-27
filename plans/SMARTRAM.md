@@ -422,6 +422,37 @@ what the user can currently see and asked back through the window protocol's
 redraw handshake (SMART5). Recently-closed-window snapshots are not retained
 at all.
 
+**Two kinds, one class.** Everything above is one `ReclaimClass`, and under
+pressure it is still the first memory reclaimed among equals. But the entries
+divide by what rebuilding one *needs*, and that division decides how deep a
+band may take them:
+
+- **Locally rebuilt** — cursors, rendered theme primitives, window furniture
+  strips, frosted backdrops, the font service's own glyph atlas. A rasterise
+  or a blur over data already in memory. These drop at mild pressure, as the
+  ordering above says.
+- **Rebuilt off-process** — a decoded on-disk icon (a capability-gated read
+  *plus* a parser-sandbox round trip) and a glyph on the *client* side of the
+  font endpoint (an IPC round trip). These declare a working-set floor
+  (`CacheBudget::with_working_set_floor`) that mild and moderate leave alone;
+  severe and critical still take everything.
+
+The floor exists because dropping those entries does not free memory the
+system can use — the desktop's whole icon set is a fraction of one screen —
+while the owner, still drawing the same screen, immediately reads and decodes
+every one of them again. Measured on a 256 MiB board: a screenful of terminal
+windows took the machine into mild pressure, and from there each further
+window took 10 to 120 seconds instead of a fifth of one, the desktop drawing
+built-in glyphs in place of every icon and re-fetching every glyph over the
+font endpoint on every repaint. The floor is also why growth and forced shrink
+read one policy (section 7): a cache that may keep its working set but not
+admit into it decays to the same place more slowly.
+
+A refusal the cache *cannot* avoid — severe pressure, or an entry larger than
+the whole budget — must not be retried per frame either. The desktop's icon
+resolver is told a decode was declined and holds that key back until the band
+moves, so the fallback is a built-in glyph rather than a storm of reads.
+
 Rules:
 
 - the compositor and desktop services use existing shared raster, SVG, theme,
@@ -431,7 +462,8 @@ Rules:
   desktop-specific kernel policy;
 - cached window contents are user/session data and must not cross users,
   seats, or sessions;
-- UI cache is normally among the first memory released under pressure;
+- UI cache is normally among the first memory released under pressure, save
+  for the off-process working-set floor above;
 - pressure hints to userland services are added only with current in-tree
   callers, complete capability checks where needed, docs, tests, and validation.
 
@@ -512,7 +544,9 @@ normal:
   bounded cache growth is allowed while reserves remain protected
 
 mild pressure:
-  stop speculative cache growth
+  stop speculative cache growth (a class the band preserves keeps admitting:
+    growth is bounded by the same per-class ceiling a forced shrink evicts to,
+    never by a blanket "nothing above normal")
   drop disposable UI, predictive, and background-validation cache
   shrink semantic cache entries that are cheap to rebuild
   begin reclaiming clean file cache, matching SWAPSWAPSWAP section 6
@@ -532,6 +566,12 @@ critical pressure:
   forced reclaim completes without panics or retry loops
   escalation follows the VM and SWAPSWAPSWAP pressure policy
 ```
+
+Growth and forced shrink must read **one** policy: whatever a band lets a
+class hold is what it lets that class grow to (`shrink_target`). Two policies
+disagree invisibly — a cache permitted to keep three quarters of its entries
+but to admit none of them reports a healthy ledger while decaying to
+uselessness, and every consumer of it silently pays the uncached cost.
 
 The implementation must use hysteresis. It must not grow a cache and shrink it
 on the same threshold. Exact numbers are not ABI and must be benchmarked, but

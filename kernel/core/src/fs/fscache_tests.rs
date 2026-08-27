@@ -799,7 +799,7 @@ fn pressured_fixture(contents: &[u8]) -> (&'static TestSource, CachedFs<Counting
 }
 
 #[test]
-fn admission_stops_outside_normal_pressure() {
+fn admission_follows_each_classs_band_ceiling() {
     let (source, pressure) = pressured(free_for(PressureBand::Mild));
     let mut fs = RwMockFs::new();
     let root = fs.root();
@@ -808,12 +808,25 @@ fn admission_stops_outside_normal_pressure() {
     fs.write_at(root, b"f", 0, b"still served").expect("seed");
     let mut cache = CachedFs::new(Counting::new(fs), budget(), owner(), pressure, sink());
 
-    // Under mild pressure nothing is admitted, but every operation is
-    // still served correctly straight from the driver.
+    // Mild pressure preserves metadata and begins reclaiming file data, so
+    // the cache goes on admitting within those ceilings — a cache the
+    // policy says to keep must be one that keeps working, not one that
+    // holds its existing entries and can never take another.
     let file = cache.lookup(root, b"f").expect("resolves");
     let mut buf = [0u8; 16];
     let n = cache.read_at(file, 0, &mut buf).expect("reads");
     assert_eq!(&buf[..n], b"still served");
+    assert!(cache.accounting().class_bytes(ReclaimClass::FsMetadata) > 0);
+    assert!(
+        cache.accounting().class_bytes(ReclaimClass::CleanFileData) <= budget().low(),
+        "clean file data is held to the watermark mild reclaims toward"
+    );
+
+    // Severe pressure takes every class to zero: nothing is admitted, and
+    // every operation is still served correctly straight from the driver.
+    source.set_free(free_for(PressureBand::Severe));
+    let m = cache.read_at(file, 0, &mut buf).expect("reads");
+    assert_eq!(&buf[..m], b"still served");
     assert_eq!(cache.accounting().total_bytes(), 0);
     assert!(cache.accounting().refusals() > 0);
 

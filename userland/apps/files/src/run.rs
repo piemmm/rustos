@@ -13,8 +13,8 @@
 //! it is instead a **component of the desktop**
 //! ([`Role::Desktop`](command::Role::Desktop)): it comes up with the session,
 //! holds a permanent icon-bar slot offering the user's places and whatever is
-//! mounted, opens a window per place the user chooses (up to a bounded
-//! `MAX_WINDOWS`), and cannot be quit — closing every
+//! mounted, opens a window per place the user chooses (bounded by the
+//! session's per-client frame budget), and cannot be quit — closing every
 //! window puts it away rather than ending it, and its menu carries neither an
 //! information row nor *Quit*. Only the session passes the switch, so a second
 //! component can never appear.
@@ -355,14 +355,6 @@ mod program {
         /// outlives one frame: the location is only sent again when it moves.
         title: &'a mut String,
     }
-
-    /// Most windows one file-manager process holds open at once.
-    ///
-    /// A bound on this process's *own* resources — each window carries a mapped
-    /// frame region and a listing of its own — not a policy about how many
-    /// folders a user may look at: a further window is refused with a stated
-    /// reason rather than mapping memory without limit.
-    const MAX_WINDOWS: usize = 8;
 
     /// One open browser window: everything a frame is drawn from, and nothing
     /// shared with another window.
@@ -755,12 +747,11 @@ mod program {
         event_endpoint: u64,
         location: Option<alloc::vec::Vec<String>>,
     ) {
-        if windows.len() >= MAX_WINDOWS {
-            report_error(&alloc::format!(
-                "already showing {MAX_WINDOWS} windows; close one before opening another"
-            ));
-            return;
-        }
+        // No count of its own: a window's mapped frame region is bounded by
+        // the session's per-client frame budget and by this process's own
+        // address-space limit, both derived from the machine and both refusing
+        // with a stated reason. A hand-picked ceiling in front of them would
+        // only refuse windows the machine could have given.
         let Ok(mut win) = open_window(client, event_endpoint, desktop, places, location) else {
             // Already stated by `open_window`; a component simply has one
             // fewer window and the desktop carries on.

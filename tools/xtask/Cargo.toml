@@ -284,6 +284,10 @@ tairix-test-appbar-qemu-aarch64 = { path = "../../tests/integration/appbar_qemu_
 # The elevated Date & Time vertical's shared interaction contract (the
 # application the elevate path starts and the window count the guest latches).
 tairix-test-datetime-elevate-qemu-aarch64 = { path = "../../tests/integration/datetime_elevate_qemu_aarch64", version = "=0.0.0" }
+# The desktop-under-pressure vertical's shared contract: the count of windows
+# the pointer script opens, which is also the occurrence the last screendump
+# is gated on, so the script and the guest's PASS gate read one definition.
+tairix-test-desktop-pressure-qemu-aarch64 = { path = "../../tests/integration/desktop_pressure_qemu_aarch64", version = "=0.0.0" }
 # The kernel/ipc audit vocabulary: the AW3 vertical's markers key on the
 # `MessageDelivered` / `CallReplied` records the kernel emits for the
 # window channel — the shared definitions, never literals.

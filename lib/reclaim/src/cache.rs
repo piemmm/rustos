@@ -537,15 +537,28 @@ where
         let payload = value.payload_bytes();
         let cost = payload.saturating_add(self.entry_metadata_bytes);
 
-        if cost > self.budget.hard() || !self.pressure.growth_permitted(cost) {
+        // One reading for the whole admission: the ceiling this class may
+        // hold at the band it folds to, and the reserve headroom that same
+        // reading leaves. Sampling twice would fold two readings and could
+        // decide the two halves against different bands.
+        let mut allowance = self.pressure.growth_allowance();
+        let ceiling = shrink_target(allowance.band(), policy.class(), self.budget);
+        if !allowance.take(policy.class(), self.budget, cost) {
             self.accounting.record_refusal(policy.class());
             return Served::Uncached(value);
         }
 
-        if self.charged_bytes().saturating_add(cost) > self.budget.hard() {
-            self.evict_to(self.budget.low().saturating_sub(cost));
+        if self.charged_bytes().saturating_add(cost) > ceiling {
+            // Evict to the shrink watermark, or to the band's ceiling where
+            // that is the tighter of the two.
+            let watermark = if ceiling < self.budget.low() {
+                ceiling
+            } else {
+                self.budget.low()
+            };
+            self.evict_to(watermark.saturating_sub(cost));
         }
-        if self.charged_bytes().saturating_add(cost) > self.budget.hard() {
+        if self.charged_bytes().saturating_add(cost) > ceiling {
             self.accounting.record_refusal(policy.class());
             return Served::Uncached(value);
         }

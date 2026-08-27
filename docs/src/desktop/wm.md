@@ -1157,9 +1157,10 @@ parent, which any app can open for any transient overlay
   caller, requires that `parent_window_id` is a live window the
   **kernel-attested** caller owns (a foreign or unknown parent answers
   `NotFound` — no existence oracle), and validates the geometry exactly as
-  a `Create` does. A popup counts against the same
-  `WINDOWS_PER_CLIENT_MAX` cap, so "popup" cannot be used to pin more
-  shared memory than `Create` may (`AGENTS.md` §5.4).
+  a `Create` does. A popup's frames are charged against the same
+  per-client budget as a top-level window's
+  (`tairix_window::client_frame_budget_bytes`), so "popup" cannot be used to
+  pin more shared memory than `Create` may (`AGENTS.md` §5.4).
 - **Undecorated by construction, not by a flag.**
   `ShellWindowHost::popup_opened` opens it through
   `DesktopShell::open_popup_window`, which adds the window to the
