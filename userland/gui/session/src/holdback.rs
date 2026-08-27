@@ -314,17 +314,23 @@ fn fold(queue: &mut VecDeque<WindowEvent>, next: &WindowEvent) -> bool {
                 action: PointerAction::Moved,
                 x,
                 y,
+                modifiers,
                 ..
             }),
             WindowEvent::Pointer {
                 action: PointerAction::Moved,
                 x: newest_x,
                 y: newest_y,
+                modifiers: newest_modifiers,
                 ..
             },
         ) => {
+            // The fold delivers the newest sample whole: keeping the older
+            // modifiers beside the newer position would report a state the
+            // pointer was never in.
             *x = newest_x;
             *y = newest_y;
+            *modifiers = newest_modifiers;
             true
         }
         (
