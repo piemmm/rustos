@@ -28,6 +28,7 @@ fn moved(window_id: u64, x: u32) -> WindowEvent {
         x,
         y: 4,
         action: PointerAction::Moved,
+        modifiers: Modifiers::default(),
     }
 }
 
@@ -37,6 +38,7 @@ fn pressed(window_id: u64) -> WindowEvent {
         x: 1,
         y: 1,
         action: PointerAction::Pressed(PointerButtonCode::Primary),
+        modifiers: Modifiers::default(),
     }
 }
 
@@ -46,6 +48,7 @@ fn released(window_id: u64) -> WindowEvent {
         x: 1,
         y: 1,
         action: PointerAction::Released(PointerButtonCode::Primary),
+        modifiers: Modifiers::default(),
     }
 }
 
@@ -334,6 +337,34 @@ fn a_run_of_samples_collapses_and_a_run_of_ticks_sums() {
             moved(WINDOW, 4),
         ]
     );
+}
+
+/// A folded sample carries the newest modifiers as well as the newest
+/// position: reporting the older held set beside the newer position would name
+/// a state the pointer was never in.
+#[test]
+fn a_collapsed_run_of_samples_carries_the_newest_modifiers() {
+    let shift = Modifiers {
+        shift: true,
+        ..Modifiers::default()
+    };
+    let with_shift = |x: u32| WindowEvent::Pointer {
+        window_id: WINDOW,
+        x,
+        y: 4,
+        action: PointerAction::Moved,
+        modifiers: shift,
+    };
+    let mut held = HoldBack::new();
+    let _ = hold(&mut held, moved(WINDOW, 1));
+    let _ = hold(&mut held, with_shift(2));
+    assert_eq!(drain_events(&mut held), vec![with_shift(2)]);
+
+    // And the other way: shift released mid-run is folded too.
+    let mut held = HoldBack::new();
+    let _ = hold(&mut held, with_shift(1));
+    let _ = hold(&mut held, moved(WINDOW, 2));
+    assert_eq!(drain_events(&mut held), vec![moved(WINDOW, 2)]);
 }
 
 /// A press between two samples breaks the run: an occurrence the app must

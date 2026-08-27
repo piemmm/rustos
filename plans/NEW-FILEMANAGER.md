@@ -71,15 +71,23 @@ band resolves to the first enabled command, the rail's row grid, no rail row
 above the band, degenerate windows total) and the `operation` cancel-routing
 set (a press on the drawn button cancels; the same y over the rail does not).
 
-**FM12 (double-click activation)**: a double-click on an item now activates it (descend / launch a bundle /
-open a file), driven by the shared pure `lib/browse::click::DoubleClickTracker`
-over the capability-free monotonic clock, through the very same `activate`
-dispatch a keyboard `Enter` uses (so pointer and keyboard never diverge, §2.2).
-The `files.app` primary-press routing is factored into `apply_primary_press`
-(manager tool → item single-select vs same-item double-activate → read-only
-chrome via the trimmed `apply_chrome_press`), the tracker reset on any
-tool/chrome press so a click through the chrome and back never mis-pairs; nine
-host tests in `lib/browse`, freestanding app builds + lints clean. FM1–FM11
+**FM12 (pointer activation gestures)**: four gestures reach the one `activate`
+dispatch a keyboard `Enter` uses (so pointer and keyboard never diverge, §2.2)
+— double-click (activate), shift-double-click (list a bundle rather than run
+it), right-click (context menu), and right-double-click (activate, then close
+the window once the entry is handed over). The pairing is the shared pure
+`lib/browse::click::DoubleClickTracker` over the capability-free monotonic
+clock, keyed on the **button** as well as the item so one press of each is two
+gestures begun, never one completed. Which gesture a press is comes from the
+app's own pure, host-tested `gesture` module (`bundle_intent`,
+`primary_press`, `secondary_press`, `AfterHandoff`), mirroring how `command`
+keeps the freestanding binary's decisions testable; `apply_primary_press` /
+`apply_secondary_press` are then thin routers, and the tracker is reset on any
+tool/chrome press so a click through the chrome and back never mis-pairs. The
+shift modifier arrives on the pointer event itself (`WindowEvent::Pointer`'s
+`modifiers`, stamped by the seat from the `KeyInput::ModifiersChanged` edges the
+keyboard drivers now report) — a modifier key reaches no surface as a key, so
+an app could not otherwise know one is held. FM1–FM11
 remain landed, including **FM11c (the empty-Trash QEMU
 witness)**: the aarch64 `autoload_input` vertical now proves the empty-Trash
 click-through end to end (after FM10's move-to-Trash `op=rename`, the runner
@@ -1599,38 +1607,56 @@ wiring, exactly as FM6/FM7/FM8/FM10 were.
   live beside the guest PASS gate (`FM11_TRASH_FILLED_MARKER` in the vertical
   crate's `lib.rs`), so the script and its observer cannot drift (§2.2).
 
-### FM12 — double-click activation `[x]`
+### FM12 — pointer activation gestures `[x]`
 
-Done. The pointer pass FM6b deferred: a double-click on an item now activates
-it (descend / launch a bundle / open a file), exactly as a keyboard `Enter`
-does. Not speculative surface — the activation behaviour already exists
-(`Enter`, context-menu Open), so this only adds the pointer *gesture* that
-drives it (§2.4).
+Done. Four gestures drive the one `activate` dispatch a keyboard `Enter` uses,
+so pointer and keyboard can never open different things (§2.2):
+
+| gesture | what it does |
+|---|---|
+| double-click / `Enter` | activate: descend, run a bundle, or open a file |
+| shift-double-click / `Shift+Enter` | list a bundle's contents instead of running it |
+| right-click | open the context menu on the item |
+| right-double-click | activate, then close this window |
 
 - **The pure detector `[x]`.** `lib/browse::click::DoubleClickTracker` is the
-  one host-proven rule that turns a stream of primary presses into single- and
-  double-click gestures (`ClickKind`). `register(now_ns, index)` pairs a press
-  with the previous one only when it lands on the **same** item within
-  `DOUBLE_CLICK_INTERVAL_NS` (half a second); a completed double *consumes*
-  both presses (a third quick press begins a fresh single — standard
-  triple-click semantics), a non-monotonic clock reading fails closed to a
-  single, and `reset` breaks the pair when an intervening interaction (a chrome
-  click) interrupts it. It holds no authority and does no I/O — the caller
-  supplies the hit-test index and the timestamp — so it is fully host-tested
-  and the read-only picker can compose it for free (§2.2). Host-tested in
-  `lib/browse` (lone single, quick same-item double, exactly-at-interval pair,
-  slow-second single, different-item single, double-consumes-both,
-  reset-breaks-pair, backwards-clock fail-closed, custom interval).
-- **The app wiring `[x]`.** The `files.app` `Run` binary threads a
-  `DoubleClickTracker` in its `Overlays` state and reads the capability-free
-  monotonic clock (`tairix_rt::clock_get`) at each primary press. Primary-press
-  routing is factored into `apply_primary_press` (manager write tool → item
-  single-select vs same-item double-**activate** via the shared `activate` →
-  read-only chrome) with `apply_chrome_press` the trimmed toolbar router;
-  the tracker is `reset` on any tool or chrome press so a click through the
-  chrome and back never mis-pairs. The freestanding binary builds and lints
-  clean cross-compiled. Docs: `docs/src/desktop/apps.md`, `lib/browse/README.md`
-  + rustdoc.
+  one host-proven rule that turns a stream of presses into single- and
+  double-click gestures (`ClickKind`). `register(now_ns, index, button)` pairs a
+  press with the previous one only when it lands on the **same** item with the
+  **same** button within `DOUBLE_CLICK_INTERVAL_NS` (half a second), so one
+  press of each button is two gestures begun rather than one completed; a
+  completed double *consumes* both presses (a third quick press begins a fresh
+  single — standard triple-click semantics), a non-monotonic clock reading fails
+  closed to a single, and `reset` breaks the pair when an intervening
+  interaction (a chrome click) interrupts it. It holds no authority and does no
+  I/O — the caller supplies the hit-test index, the button, and the timestamp —
+  so it is fully host-tested and the read-only picker can compose it for free
+  (§2.2). `PointerButton` is re-exported from `lib/browse` because it is now
+  part of that surface.
+- **The bundle intent `[x]`.** `lib/browse::BundleIntent` (`Launch` / `Browse`)
+  is what `activate_selected`/`activate_index` take: a bundle is both a program
+  and a directory, so the caller names what the *gesture* meant while
+  dispatch-by-kind stays in the engine. `Browse` descends by the entry's own
+  name (through the link, when it is one) via the shared `descend_index`
+  `open_index` already used, and returns `Descended`.
+- **The app's own gesture decisions `[x]`.** `files.app`'s `gesture` module is
+  pure and host-tested, mirroring how `command` keeps the freestanding binary's
+  decisions testable: `bundle_intent(shift)` (one spelling, so the pointer and
+  `Shift+Enter` cannot diverge), `primary_press`/`secondary_press` (which resolve
+  a press to `Activate`/`Select`/`Chrome` and `OpenAndLeave`/`OpenMenu`/`Ignore`,
+  registering against the tracker and resetting it on a press that resolves to
+  no item), `AfterHandoff` (whether a completed hand-off closes the window), and
+  `MenuOnSingle` (whether a lone right-press opens the menu or leaves an open
+  one alone).
+- **The app wiring `[x]`.** `apply_primary_press` and `apply_secondary_press`
+  are thin routers over those decisions; the shift modifier arrives on the
+  pointer event itself (`WindowEvent::Pointer`'s `modifiers`). A
+  right-double-click closes the window only on a `LaunchBundle`/`OpenFile` — a
+  `Descended` is the window's new content, so closing it would leave the user
+  with nothing — and supersedes the context menu the first of its two presses
+  opened. `open_context_menu` now takes the caller's already-resolved index, so
+  a press costs one hit-test. Docs: `docs/src/desktop/apps.md`,
+  `lib/browse/README.md` + rustdoc.
 
 ### FM13 — the places / devices sidebar `[x]`
 

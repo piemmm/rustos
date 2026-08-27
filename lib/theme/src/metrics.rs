@@ -147,11 +147,26 @@ pub struct Metrics {
     /// The square extent of the resize grabber's visible affordance, in
     /// logical pixels.
     pub resize_grabber_extent: u32,
+    /// How far a resizable window's **edge** resize zone reaches in from the
+    /// outer frame edge, in logical pixels.
+    ///
+    /// A hit reach, not a drawn width: the frame band stays thin, so most of
+    /// this lies over the client's own outermost pixels — a border that costs
+    /// no visible space, at the price of a few app pixels that draw but do not
+    /// click. Wide enough to hit without aiming, which is the whole point of
+    /// an invisible border; the same trade-off macOS, GNOME, and Windows make.
+    pub resize_edge_grab: u32,
+    /// How far a resizable window's **corner** resize zone reaches in from
+    /// each of the two outer edges that meet there, in logical pixels.
+    ///
+    /// Larger than [`resize_edge_grab`](Self::resize_edge_grab): a corner
+    /// resizes both axes at once, so it is the zone a user aims for most and
+    /// the one an edge-width zone makes hardest to hit — it shrinks to a
+    /// few pixels square at the very tip. Never taken as smaller than the
+    /// edge reach.
+    pub resize_corner_grab: u32,
     /// The invisible slop added around a furniture hit target so it stays
-    /// grabbable, in logical pixels. Never extends over another control. On a
-    /// resizable window's frame this is also how far the resize-edge hit zone
-    /// reaches into the client's own outer pixels, trading a few unclickable
-    /// app pixels for a border that costs no visible space.
+    /// grabbable, in logical pixels. Never extends over another control.
     pub hit_slop: u32,
     /// How far the hue a title bar takes from its window's identity icon
     /// travels from that icon before it has faded out, in logical pixels.

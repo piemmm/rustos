@@ -1,7 +1,7 @@
 //! Unit tests for the virtio-input keyboard console producer.
 
 use super::*;
-use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode};
+use tairix_abi::input::{KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyCode};
 
 /// Build one keyboard [`InputEvent`] for `keycode` with the given `value`
 /// (`1` = press, `0` = release, `2` = repeat).
@@ -19,7 +19,17 @@ fn key(keycode: u16, value: i32) -> InputEvent {
 fn pressed_value(record: Option<KeyInput>) -> KeyValue {
     match record.expect("a record was produced") {
         KeyInput::Pressed { key, .. } => key,
-        KeyInput::Released { .. } => panic!("expected a press record"),
+        other => panic!("expected a press record, got {other:?}"),
+    }
+}
+
+/// The held set a modifier edge reported changing to, or `None` when the
+/// collapsed set did not change.
+fn modifier_set(record: Option<KeyInput>) -> Option<AbiModifiers> {
+    match record {
+        None => None,
+        Some(KeyInput::ModifiersChanged { modifiers }) => Some(modifiers),
+        Some(other) => panic!("a modifier edge produced {other:?}"),
     }
 }
 
@@ -30,18 +40,24 @@ fn plain_letter_press_and_release_resolve_to_the_char() {
     assert_eq!(pressed_value(kbd.feed(key(35, 1))), KeyValue::Char('h'));
     match kbd.feed(key(35, 0)).expect("release record") {
         KeyInput::Released { key, .. } => assert_eq!(key, KeyValue::Char('h')),
-        KeyInput::Pressed { .. } => panic!("expected a release record"),
+        other => panic!("expected a release record, got {other:?}"),
     }
 }
 
 #[test]
-fn shift_held_uppercases_the_letter_and_emits_no_record_itself() {
+fn shift_held_uppercases_the_letter_and_reports_its_own_edge() {
     let mut kbd = VirtioKeyboardConsole::new();
-    // Pressing Left Shift (42) is a modifier edge: no record.
-    assert_eq!(kbd.feed(key(42, 1)), None);
+    // Pressing Left Shift (42) names no key, but reports the held set.
+    assert_eq!(
+        modifier_set(kbd.feed(key(42, 1))),
+        Some(AbiModifiers {
+            shift: true,
+            ..AbiModifiers::default()
+        })
+    );
     // KEY_A = 30 with shift held → 'A', and the record carries shift.
     let record = kbd.feed(key(30, 1)).expect("record");
-    assert_eq!(record.key(), KeyValue::Char('A'));
+    assert_eq!(record.key(), Some(KeyValue::Char('A')));
     assert!(record.modifiers().shift);
 }
 
@@ -52,14 +68,14 @@ fn caps_lock_toggles_letter_case_and_shift_xor_caps_holds() {
     assert_eq!(kbd.feed(key(58, 1)), None);
     assert_eq!(pressed_value(kbd.feed(key(30, 1))), KeyValue::Char('A'));
     // Shift while caps is on → back to lowercase (shift XOR caps).
-    assert_eq!(kbd.feed(key(42, 1)), None);
+    assert!(modifier_set(kbd.feed(key(42, 1))).is_some());
     assert_eq!(pressed_value(kbd.feed(key(30, 1))), KeyValue::Char('a'));
 }
 
 #[test]
 fn shifted_digit_resolves_to_its_symbol() {
     let mut kbd = VirtioKeyboardConsole::new();
-    assert_eq!(kbd.feed(key(42, 1)), None); // shift down
+    assert!(modifier_set(kbd.feed(key(42, 1))).is_some()); // shift down
     assert_eq!(pressed_value(kbd.feed(key(2, 1))), KeyValue::Char('!')); // KEY_1
 }
 
@@ -109,14 +125,18 @@ fn function_keys_span_f1_through_f12() {
 #[test]
 fn left_right_modifier_pair_stays_held_until_both_release() {
     let mut kbd = VirtioKeyboardConsole::new();
-    // Hold both control keys, release the left one, control is still held.
-    assert_eq!(kbd.feed(key(29, 1)), None); // left ctrl down
-    assert_eq!(kbd.feed(key(97, 1)), None); // right ctrl down
-    assert_eq!(kbd.feed(key(29, 0)), None); // left ctrl up
+    // Hold both control keys, release the left one, control is still held —
+    // so only the first press and the last release are observable changes.
+    assert!(modifier_set(kbd.feed(key(29, 1))).is_some()); // left ctrl down
+    assert_eq!(modifier_set(kbd.feed(key(97, 1))), None); // right ctrl down
+    assert_eq!(modifier_set(kbd.feed(key(29, 0))), None); // left ctrl up
     let record = kbd.feed(key(46, 1)).expect("record"); // KEY_C
     assert!(record.modifiers().ctrl);
     // Releasing the right one too clears control.
-    assert_eq!(kbd.feed(key(97, 0)), None);
+    assert_eq!(
+        modifier_set(kbd.feed(key(97, 0))),
+        Some(AbiModifiers::default())
+    );
     let record = kbd.feed(key(46, 1)).expect("record");
     assert!(!record.modifiers().ctrl);
 }
@@ -152,4 +172,24 @@ fn non_key_events_and_unknown_or_repeat_edges_produce_nothing() {
     assert_eq!(kbd.feed(key(0xFFFF, 1)), None);
     // A key-repeat edge (`value == 2`) carries no press/release.
     assert_eq!(kbd.feed(key(35, 2)), None);
+}
+
+#[test]
+fn a_modifier_edge_reports_only_an_observable_change() {
+    let mut kbd = VirtioKeyboardConsole::new();
+    // Left Shift down is a change; the right shift joining and leaving the
+    // chord is not, and shift stays held throughout.
+    assert_eq!(
+        modifier_set(kbd.feed(key(42, 1))),
+        Some(AbiModifiers {
+            shift: true,
+            ..AbiModifiers::default()
+        })
+    );
+    assert_eq!(modifier_set(kbd.feed(key(54, 1))), None);
+    assert_eq!(modifier_set(kbd.feed(key(54, 0))), None);
+    assert_eq!(
+        modifier_set(kbd.feed(key(42, 0))),
+        Some(AbiModifiers::default())
+    );
 }

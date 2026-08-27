@@ -443,12 +443,29 @@ Two gaps that made resizable windows only nominally resizable are closed:
   resizable or not (`band_inset`, consumed by `insets`/`layout`): a band wide
   enough to grab showed as dead space around every resizable app's content.
   The grab room lives in the hit map instead — `WindowFrame::hit` reports
-  `ResizeEdge` for the client's outermost `hit_slop` pixels, so an edge is
-  grabbable while the client stays as large as a fixed window's. The app
-  still draws those pixels but does not receive presses on them, the accepted
-  trade macOS, GNOME, and Windows make. The frame therefore draws no corner
-  grip (there is no band to hold one), and a fixed-size window trades
-  nothing: every client pixel reaches it.
+  `ResizeEdge` for a reach measured from the **outer** rectangle, so the thin
+  band and the client pixels beyond it are one continuous zone rather than two
+  that could disagree about where a corner ends. `GrabReach::of` resolves it
+  from the theme: `resize_edge_grab` for the left/right/bottom edges and the
+  wider `resize_corner_grab` for the two bottom corners, whose square would
+  otherwise narrow to the edge width at its tip and be the hardest thing on
+  the frame to hit; a corner wins over the two edges that form it, and the
+  corner reach is clamped never to fall below the edge reach so the very corner
+  can never classify as a plain edge. The title bar is resolved first and keeps
+  its whole band, so the zones start below it. An edge is grabbable while the
+  client stays as large as a fixed window's; the app still draws those pixels
+  but does not receive presses on them, the accepted trade macOS, GNOME, and
+  Windows make. The frame therefore draws no corner grip (there is no band to
+  hold one), and a fixed-size window trades nothing: every client pixel
+  reaches it.
+- **A secondary title-bar drag moves the window without restacking it.** A
+  right-press on the drag region begins the same move-grab a primary press
+  does — one clamp, one motion path — but skips the raise, so a window can be
+  repositioned while it stays where it is in the stack. A `MoveGrab` records
+  the button that began it, so only that button's release ends the gesture and
+  a press of the other one mid-drag is consumed rather than dropping the
+  window somewhere the user did not let go. Every other secondary press still
+  raises and focuses.
 - **Client-area pointer motion and release reach the app.** The window manager
   gives a client press an implicit pointer grab (`client_grab`), so the
   subsequent motion (clamped into the client) and the release are delivered to

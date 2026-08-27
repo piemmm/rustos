@@ -71,6 +71,10 @@ tairix-cursor = { path = "../../../lib/cursor", version = "=0.0.0" }
 tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
 # The kernel-boundary `Errno` returned by the filesystem-read seam.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The one wire-vocabulary <-> routing-vocabulary key and modifier mapping: the
+# seat decodes the records it drains and stamps its held modifiers back onto
+# the pointer events it delivers, both through this one map.
+tairix-keymap = { path = "../../../lib/keymap", version = "=0.0.0" }
 # The window-channel protocol engine (plans/APPWIN.md AW2/AW3): the session
 # composes `WindowServer` over the `WindowHost` bridge in `src/windows.rs`,
 # serving app windows from the reserved WINDOW_ENDPOINT into the compositor.

@@ -37,6 +37,7 @@ use crate::bounded_text::BoundedText;
 use crate::desktop::DesktopInfo;
 use crate::driver::display::{DamageRect, DisplayFormat};
 use crate::input::KeyInput;
+use crate::input::Modifiers;
 use crate::input::PointerButtonCode;
 use crate::le::{put_i32, put_u16, put_u32, put_u64, read_i32, read_u16, read_u32, read_u64};
 use crate::{Errno, ProcId};
@@ -1635,6 +1636,10 @@ pub enum WindowEvent {
         y: u32,
         /// What happened at that position.
         action: PointerAction,
+        /// The keyboard modifiers held when it happened, so a gesture can be
+        /// qualified by one (a shift-click) without the app having to shadow
+        /// the seat's modifier state from key events it may never see.
+        modifiers: Modifiers,
     },
     /// The user asked the session to close the window (title-bar close).
     /// The app owns the decision: it saves, then issues
@@ -1849,7 +1854,13 @@ impl WindowEvent {
                 put_u16(&mut out, 6, EV_KEY);
                 out[16..16 + KeyInput::WIRE_LEN].copy_from_slice(&key.to_le_bytes());
             }
-            Self::Pointer { x, y, action, .. } => {
+            Self::Pointer {
+                x,
+                y,
+                action,
+                modifiers,
+                ..
+            } => {
                 put_u16(&mut out, 6, EV_POINTER);
                 put_u32(&mut out, 16, x);
                 put_u32(&mut out, 20, y);
@@ -1860,6 +1871,7 @@ impl WindowEvent {
                 };
                 put_u16(&mut out, 24, kind);
                 put_u16(&mut out, 26, button);
+                put_u16(&mut out, 28, modifiers.to_bits());
             }
             Self::CloseRequested { .. } => {
                 put_u16(&mut out, 6, EV_CLOSE_REQUESTED);
@@ -1961,11 +1973,12 @@ impl WindowEvent {
                 Ok(Self::Key { window_id, key })
             }
             EV_POINTER => {
-                event_reserved_zero(bytes, 28)?;
+                event_reserved_zero(bytes, 30)?;
                 let x = read_u32(bytes, 16);
                 let y = read_u32(bytes, 20);
                 let ptr_kind = read_u16(bytes, 24);
                 let button = read_u16(bytes, 26);
+                let modifiers = Modifiers::from_bits(read_u16(bytes, 28))?;
                 let action = match ptr_kind {
                     PTR_MOVED => {
                         if button != crate::input::BUTTON_NONE {
@@ -1982,6 +1995,7 @@ impl WindowEvent {
                     x,
                     y,
                     action,
+                    modifiers,
                 })
             }
             EV_FILE_PICKED => {
@@ -3059,18 +3073,29 @@ mod tests {
                 x: 17,
                 y: 23,
                 action: PointerAction::Moved,
+                modifiers: Modifiers::default(),
             },
             WindowEvent::Pointer {
                 window_id: 4,
                 x: 0,
                 y: 0,
                 action: PointerAction::Pressed(PointerButtonCode::Primary),
+                modifiers: Modifiers {
+                    shift: true,
+                    ..Modifiers::default()
+                },
             },
             WindowEvent::Pointer {
                 window_id: 4,
                 x: 1,
                 y: 2,
                 action: PointerAction::Released(PointerButtonCode::Middle),
+                modifiers: Modifiers {
+                    ctrl: true,
+                    alt: true,
+                    meta: true,
+                    ..Modifiers::default()
+                },
             },
             WindowEvent::CloseRequested { window_id: 4 },
             WindowEvent::AlternateCloseRequested { window_id: 4 },
@@ -3242,9 +3267,10 @@ mod tests {
             x: 1,
             y: 2,
             action: PointerAction::Moved,
+            modifiers: Modifiers::default(),
         }
         .to_le_bytes();
-        pointer[28] = 1;
+        pointer[30] = 1;
         assert_eq!(WindowEvent::from_bytes(&pointer), Err(Errno::BadMagic));
         let mut close = WindowEvent::CloseRequested { window_id: 4 }.to_le_bytes();
         close[16] = 1;
@@ -3281,6 +3307,7 @@ mod tests {
             x: 1,
             y: 2,
             action: PointerAction::Moved,
+            modifiers: Modifiers::default(),
         }
         .to_le_bytes();
         moved[26] = 1;
@@ -3291,6 +3318,7 @@ mod tests {
             x: 1,
             y: 2,
             action: PointerAction::Pressed(PointerButtonCode::Primary),
+            modifiers: Modifiers::default(),
         }
         .to_le_bytes();
         pressed[26] = 0;
@@ -3300,9 +3328,24 @@ mod tests {
             x: 1,
             y: 2,
             action: PointerAction::Moved,
+            modifiers: Modifiers::default(),
         }
         .to_le_bytes();
         bad_action[24] = 9;
         assert_eq!(WindowEvent::from_bytes(&bad_action), Err(Errno::OutOfRange));
+        // A modifier bit outside the defined mask.
+        let mut bad_modifiers = WindowEvent::Pointer {
+            window_id: 4,
+            x: 1,
+            y: 2,
+            action: PointerAction::Moved,
+            modifiers: Modifiers::default(),
+        }
+        .to_le_bytes();
+        bad_modifiers[28] = 0x80;
+        assert_eq!(
+            WindowEvent::from_bytes(&bad_modifiers),
+            Err(Errno::OutOfRange)
+        );
     }
 }

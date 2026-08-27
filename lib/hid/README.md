@@ -17,7 +17,11 @@ See `docs/src/lib/hid.md` for the full description and test surface.
   `tairix_abi::driver::input::ReportSource` seam.
 - `KeyboardConsole`, `pump_once`, `ConsoleSink` — the console-input producer
   that resolves HID usages to `KeyInput` records (via `lib/keymap`) and injects
-  them through a sink.
+  them through a sink. Held modifiers are tracked over the shared
+  `tairix_input::ModifierState`, and a modifier edge that changes the
+  *observable* set emits a `KeyInput::ModifiersChanged` record so the desktop
+  can qualify a gesture that is not a key (a shift-click); a repeat, or letting
+  go of one shift key while the other is held, emits nothing.
 - `bring_up_boot_keyboard`, `derive_keyboard_resources`, `KeyboardResources`,
   `KeyboardSource` — the user-space boot-keyboard bring-up over a
   `DriverHost` + the grant→BAR/DMA-aperture derivation.

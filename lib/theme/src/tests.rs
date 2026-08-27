@@ -892,6 +892,8 @@ fn sample_theme(id: ThemeId) -> Theme {
             title_bar_height: 24,
             frame_inset: 1,
             resize_grabber_extent: 14,
+            resize_edge_grab: 7,
+            resize_corner_grab: 13,
             hit_slop: 3,
             title_hue_reach: 400,
         },

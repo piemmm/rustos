@@ -156,6 +156,9 @@ pub const fn key_input_event(input: KeyInput) -> InputEvent {
             key: key_value(key),
             modifiers: key_modifiers(modifiers),
         },
+        KeyInput::ModifiersChanged { modifiers } => InputEvent::ModifiersChanged {
+            modifiers: key_modifiers(modifiers),
+        },
     }
 }
 

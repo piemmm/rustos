@@ -19,7 +19,7 @@ use core::mem;
 
 use tairix_abi::Errno;
 
-use crate::activate::Activation;
+use crate::activate::{Activation, BundleIntent};
 use crate::clipboard::{Clipboard, ClipboardOp};
 use crate::delete::DeletePlan;
 use crate::entry::{resolve_target, Entry, EntryKind, LinkTarget, Occupancy};
@@ -757,7 +757,25 @@ impl<S: DirectorySource> Browser<S> {
         if !entry.is_directory() {
             return Err(BrowseError::NotADirectory);
         }
+        self.descend_index(index)
+    }
 
+    /// Descend into the entry at `index` by its own name, whatever kind it is.
+    ///
+    /// The descent [`open_index`](Self::open_index) performs once its kind
+    /// guard has passed, shared with the bundle-browse activation, which
+    /// descends a node the browser does not otherwise treat as a directory.
+    /// Descending *by name* is what makes the browser's location read as the
+    /// user navigated, and is why a link is followed rather than resolved
+    /// first.
+    ///
+    /// # Errors
+    ///
+    /// * [`BrowseError::NoSuchEntry`] if `index` is out of range.
+    /// * [`BrowseError::Source`] if the child cannot be listed; the browser
+    ///   stays on the current directory.
+    fn descend_index(&mut self, index: usize) -> Result<(), BrowseError> {
+        let entry = self.entries.get(index).ok_or(BrowseError::NoSuchEntry)?;
         // Build the child path and list it *before* mutating any state, so a
         // failed read leaves the browser exactly where it was.
         let mut child = self.components.clone();
@@ -771,7 +789,9 @@ impl<S: DirectorySource> Browser<S> {
     /// file manager and the trusted picker act identically: a directory is
     /// descended into (as [`open_selected`](Self::open_selected) does) and a
     /// bundle or file is *named* for the caller to launch or open (the engine
-    /// performs neither — it holds no such authority).
+    /// performs neither — it holds no such authority). `intent` says what the
+    /// gesture meant for a bundle, which is the one kind that is both a
+    /// program and a directory.
     ///
     /// # Errors
     ///
@@ -780,9 +800,9 @@ impl<S: DirectorySource> Browser<S> {
     /// * [`BrowseError::Source`] if a descended directory cannot be listed, or
     ///   a bundle/file target cannot be named as a valid absolute path; the
     ///   browser stays on the current directory in either case.
-    pub fn activate_selected(&mut self) -> Result<Activation, BrowseError> {
+    pub fn activate_selected(&mut self, intent: BundleIntent) -> Result<Activation, BrowseError> {
         let index = self.selected_index().ok_or(BrowseError::NoSuchEntry)?;
-        self.activate_index(index)
+        self.activate_index(index, intent)
     }
 
     /// Activate the entry at `index` — the pointer-hit form of
@@ -792,10 +812,20 @@ impl<S: DirectorySource> Browser<S> {
     ///
     /// * [`BrowseError::NoSuchEntry`] if `index` is out of range.
     /// * [`BrowseError::Source`] as for [`activate_selected`](Self::activate_selected).
-    pub fn activate_index(&mut self, index: usize) -> Result<Activation, BrowseError> {
+    pub fn activate_index(
+        &mut self,
+        index: usize,
+        intent: BundleIntent,
+    ) -> Result<Activation, BrowseError> {
         let entry = self.entries.get(index).ok_or(BrowseError::NoSuchEntry)?;
         let kind = entry.kind();
         let name = String::from(entry.name());
+        // A bundle browsed rather than run is a directory like any other, and
+        // is descended by its own name — through the link, when it is one.
+        if intent == BundleIntent::Browse && kind.is_bundle() {
+            self.descend_index(index)?;
+            return Ok(Activation::Descended);
+        }
         // A link is activated as what it names, and the *path* it is
         // activated by depends on which: a directory is descended through the
         // link (the browser's location then reads as the user navigated), a

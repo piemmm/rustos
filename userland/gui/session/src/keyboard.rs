@@ -21,9 +21,10 @@
 //! [`InputEvent`]: tairix_wm::InputEvent
 //! [`DeviceInputSource`]: crate::DeviceInputSource
 
-use tairix_abi::input::{KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyCode};
+use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode};
 use tairix_abi::Errno;
-use tairix_wm::{InputEvent, Key, Modifiers, NamedKey};
+use tairix_keymap::modifiers_from_abi;
+use tairix_wm::{InputEvent, Key, NamedKey};
 
 use crate::shell::InputSource;
 
@@ -80,21 +81,6 @@ impl<C> KeyboardInputSource<C> {
     }
 }
 
-/// Map the ABI wire [`AbiModifiers`] to the desktop's [`Modifiers`].
-///
-/// The two structs are deliberately separate — the first is the wire ABI, the
-/// second the `lib/input` routing vocabulary — and this is the single place
-/// the desktop crosses between them (the same split as `PointerButtonCode` vs
-/// `PointerButton`).
-const fn modifiers(abi: AbiModifiers) -> Modifiers {
-    Modifiers {
-        shift: abi.shift,
-        ctrl: abi.ctrl,
-        alt: abi.alt,
-        meta: abi.meta,
-    }
-}
-
 /// Map an ABI wire [`NamedKeyCode`] to the desktop's [`NamedKey`].
 ///
 /// The wire ABI gives every function key its own discriminant; the routing
@@ -146,11 +132,17 @@ const fn key(value: KeyValue) -> Key {
 /// the router reaches by window id rather than through this source) reads it
 /// exactly as every other event was read.
 pub(crate) fn to_input_event(record: KeyInput) -> InputEvent {
-    let key = key(record.key());
-    let modifiers = modifiers(record.modifiers());
+    let modifiers = modifiers_from_abi(record.modifiers());
     match record {
-        KeyInput::Pressed { .. } => InputEvent::KeyPressed { key, modifiers },
-        KeyInput::Released { .. } => InputEvent::KeyReleased { key, modifiers },
+        KeyInput::Pressed { key: value, .. } => InputEvent::KeyPressed {
+            key: key(value),
+            modifiers,
+        },
+        KeyInput::Released { key: value, .. } => InputEvent::KeyReleased {
+            key: key(value),
+            modifiers,
+        },
+        KeyInput::ModifiersChanged { .. } => InputEvent::ModifiersChanged { modifiers },
     }
 }
 

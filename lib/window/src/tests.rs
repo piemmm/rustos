@@ -1330,6 +1330,7 @@ fn events_reach_the_owning_endpoint_and_decode_through_the_client() {
             x: 3,
             y: 2,
             action: PointerAction::Pressed(PointerButtonCode::Primary),
+            modifiers: Modifiers::default(),
         },
         WindowEvent::CloseRequested { window_id: a },
     ];
@@ -1461,6 +1462,7 @@ fn event_routing_fails_closed() {
                 x: SURFACE.width_px,
                 y: 0,
                 action: PointerAction::Moved,
+                modifiers: Modifiers::default(),
             }
         ),
         Err(Errno::OutOfRange)

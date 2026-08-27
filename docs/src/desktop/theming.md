@@ -122,7 +122,8 @@ bundles, under a stable `ThemeId`:
   floating chrome (`taskbar_margin`, `chrome_backdrop_blur`); and the window
   furniture
   (`title_bar_height`, `frame_inset`, `title_hue_reach`,
-  `resize_grabber_extent`, `hit_slop`).
+  `resize_grabber_extent`, `resize_edge_grab`, `resize_corner_grab`,
+  `hit_slop`).
   - `taskbar_margin` is how far the taskbar stands off the screen edges it
     faces, `5` logical pixels in both themes. The bar floats: the margin
     applies to the three sides facing a screen edge — for a bottom bar the

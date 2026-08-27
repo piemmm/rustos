@@ -518,7 +518,8 @@ impl TaskbarInput {
             InputEvent::PointerMoved { .. }
             | InputEvent::PointerReleased { .. }
             | InputEvent::KeyPressed { .. }
-            | InputEvent::KeyReleased { .. } => TaskbarResponse::Ignored,
+            | InputEvent::KeyReleased { .. }
+            | InputEvent::ModifiersChanged { .. } => TaskbarResponse::Ignored,
         }
     }
 

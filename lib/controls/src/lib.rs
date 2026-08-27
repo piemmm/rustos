@@ -309,9 +309,9 @@ pub use text::{SearchField, TextAction, TextField};
 pub use toolbar::{ToolActivation, Toolbar, ToolbarAction};
 pub use value::{Progress, Slider, SliderAction};
 pub use window::{
-    BandCorner, FrameInsets, FrameLayout, FrameRim, FurniturePart, ResizeEdge, ResizeEvent,
-    ResizeGrabber, ScrollCorner, TitleBar, TitleBarEvent, TitleBarLayout, TitleHit, WindowControl,
-    WindowControlAction, WindowFrame,
+    BandCorner, FrameInsets, FrameLayout, FrameRim, FurniturePart, GrabReach, ResizeEdge,
+    ResizeEvent, ResizeGrabber, ScrollCorner, TitleBar, TitleBarEvent, TitleBarLayout, TitleHit,
+    WindowControl, WindowControlAction, WindowFrame,
 };
 
 #[cfg(test)]

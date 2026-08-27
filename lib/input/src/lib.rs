@@ -73,6 +73,120 @@ pub struct Modifiers {
     pub meta: bool,
 }
 
+/// The number of modifiers a keyboard reports, and so how far above the left
+/// key's bit the right key's sits: a pair is one contiguous mask, and the
+/// eight bits fit the [`ModifierState`] bitmap exactly.
+const MODIFIERS: u8 = 4;
+
+/// Which modifier a keyboard's modifier key is, as the index
+/// [`ModifierState`] tracks it under.
+///
+/// The left and right key of a pair are tracked *separately* — releasing one
+/// while its sibling is still held must not clear the modifier — and collapse
+/// to one [`Modifiers`] flag only when the set is read.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ModifierKey {
+    /// A shift key.
+    Shift,
+    /// A control key.
+    Ctrl,
+    /// An alt key.
+    Alt,
+    /// A meta (super / command) key.
+    Meta,
+}
+
+/// Which of a modifier pair a key is.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ModifierSide {
+    /// The left-hand key of the pair.
+    Left,
+    /// The right-hand key of the pair.
+    Right,
+}
+
+/// The modifier keys a keyboard currently holds down.
+///
+/// The one definition of "which modifiers are held", shared by every keyboard
+/// producer: each maps its own device's usage or keycode space to a
+/// [`ModifierKey`] + [`ModifierSide`] and feeds the edge here, so the
+/// left/right collapsing rule and the "did the visible set actually change?"
+/// test cannot differ between two drivers.
+///
+/// [`press`](Self::press) and [`release`](Self::release) report whether the
+/// collapsed [`Modifiers`] changed, which is what makes a producer able to
+/// emit one edge per *observable* change: holding both shift keys and letting
+/// one go is not a change, and a key repeat on a held modifier is not one
+/// either.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct ModifierState {
+    held: u8,
+}
+
+impl ModifierState {
+    /// A state with no modifier key held.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { held: 0 }
+    }
+
+    /// Record `key` on `side` going down, reporting whether the collapsed
+    /// [`Modifiers`] changed.
+    pub fn press(&mut self, key: ModifierKey, side: ModifierSide) -> bool {
+        self.set(key, side, true)
+    }
+
+    /// Record `key` on `side` coming up, reporting whether the collapsed
+    /// [`Modifiers`] changed.
+    pub fn release(&mut self, key: ModifierKey, side: ModifierSide) -> bool {
+        self.set(key, side, false)
+    }
+
+    /// The modifiers held, collapsing each left/right pair.
+    #[must_use]
+    pub const fn modifiers(self) -> Modifiers {
+        Modifiers {
+            shift: self.pair_held(ModifierKey::Shift),
+            ctrl: self.pair_held(ModifierKey::Ctrl),
+            alt: self.pair_held(ModifierKey::Alt),
+            meta: self.pair_held(ModifierKey::Meta),
+        }
+    }
+
+    /// Whether either key of `key`'s pair is held.
+    const fn pair_held(self, key: ModifierKey) -> bool {
+        let left = 1u8 << Self::index(key, ModifierSide::Left);
+        let right = 1u8 << Self::index(key, ModifierSide::Right);
+        self.held & (left | right) != 0
+    }
+
+    /// Apply one edge, reporting whether the collapsed set changed.
+    fn set(&mut self, key: ModifierKey, side: ModifierSide, down: bool) -> bool {
+        let before = self.modifiers();
+        let bit = 1u8 << Self::index(key, side);
+        if down {
+            self.held |= bit;
+        } else {
+            self.held &= !bit;
+        }
+        self.modifiers() != before
+    }
+
+    /// The bit index of one modifier key.
+    const fn index(key: ModifierKey, side: ModifierSide) -> u8 {
+        let modifier = match key {
+            ModifierKey::Shift => 0,
+            ModifierKey::Ctrl => 1,
+            ModifierKey::Alt => 2,
+            ModifierKey::Meta => 3,
+        };
+        match side {
+            ModifierSide::Left => modifier,
+            ModifierSide::Right => modifier + MODIFIERS,
+        }
+    }
+}
+
 /// A named non-character key the desktop distinguishes.
 ///
 /// Character-producing keys are not listed here: they arrive as a
@@ -174,6 +288,18 @@ pub enum InputEvent {
         /// The modifiers held while it was released.
         modifiers: Modifiers,
     },
+    /// The set of held modifiers changed, and no key was produced.
+    ///
+    /// A modifier key produces no character and is no [`NamedKey`], so it
+    /// reaches no surface as a key — but the *state* it leaves behind
+    /// qualifies gestures that are not keys at all (a shift-click). The seat
+    /// keeps the current set from these edges and stamps it onto what it
+    /// routes, so a surface never has to reconstruct it from keys it may
+    /// never be sent.
+    ModifiersChanged {
+        /// The modifiers held after the change.
+        modifiers: Modifiers,
+    },
 }
 
 /// Whether the pointer rests on one surface, as the desktop's seat resolved
@@ -243,6 +369,80 @@ mod tests {
             PointerFocus::Left => panic!("expected an enter"),
         }
         assert_ne!(focus, PointerFocus::Left);
+    }
+
+    #[test]
+    fn a_fresh_modifier_state_holds_nothing() {
+        assert_eq!(ModifierState::new().modifiers(), Modifiers::default());
+    }
+
+    #[test]
+    fn pressing_and_releasing_one_key_reports_both_edges() {
+        let mut state = ModifierState::new();
+        assert!(state.press(ModifierKey::Shift, ModifierSide::Left));
+        assert!(state.modifiers().shift);
+        assert!(state.release(ModifierKey::Shift, ModifierSide::Left));
+        assert!(!state.modifiers().shift);
+    }
+
+    #[test]
+    fn a_repeat_of_a_held_key_is_not_a_change() {
+        let mut state = ModifierState::new();
+        assert!(state.press(ModifierKey::Ctrl, ModifierSide::Right));
+        assert!(!state.press(ModifierKey::Ctrl, ModifierSide::Right));
+        assert!(state.modifiers().ctrl);
+    }
+
+    #[test]
+    fn releasing_one_of_a_pair_keeps_the_modifier_held() {
+        let mut state = ModifierState::new();
+        assert!(state.press(ModifierKey::Shift, ModifierSide::Left));
+        // The sibling is already-collapsed state: pressing it changes nothing
+        // observable, and releasing it leaves shift held by the other key.
+        assert!(!state.press(ModifierKey::Shift, ModifierSide::Right));
+        assert!(!state.release(ModifierKey::Shift, ModifierSide::Right));
+        assert!(state.modifiers().shift);
+        assert!(state.release(ModifierKey::Shift, ModifierSide::Left));
+        assert!(!state.modifiers().shift);
+    }
+
+    #[test]
+    fn releasing_a_key_that_was_never_held_is_not_a_change() {
+        let mut state = ModifierState::new();
+        assert!(!state.release(ModifierKey::Alt, ModifierSide::Left));
+        assert_eq!(state.modifiers(), Modifiers::default());
+    }
+
+    #[test]
+    fn each_modifier_is_tracked_independently() {
+        let mut state = ModifierState::new();
+        for key in [
+            ModifierKey::Shift,
+            ModifierKey::Ctrl,
+            ModifierKey::Alt,
+            ModifierKey::Meta,
+        ] {
+            assert!(state.press(key, ModifierSide::Left));
+        }
+        assert_eq!(
+            state.modifiers(),
+            Modifiers {
+                shift: true,
+                ctrl: true,
+                alt: true,
+                meta: true,
+            }
+        );
+        assert!(state.release(ModifierKey::Alt, ModifierSide::Left));
+        assert_eq!(
+            state.modifiers(),
+            Modifiers {
+                shift: true,
+                ctrl: true,
+                alt: false,
+                meta: true,
+            }
+        );
     }
 
     #[test]

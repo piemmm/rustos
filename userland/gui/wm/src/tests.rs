@@ -3691,6 +3691,131 @@ fn a_title_bar_drag_moves_the_window() {
     assert!(!router.is_moving());
 }
 
+fn release_secondary() -> InputEvent {
+    InputEvent::PointerReleased {
+        button: PointerButton::Secondary,
+    }
+}
+
+#[test]
+fn a_secondary_title_bar_drag_moves_the_window_without_restacking_it() {
+    let (mut c, lower) = decorated_compositor();
+    let upper = c.add_window(Point::new(120, 120), opaque(80, 60, BLUE));
+    assert!(c.set_window_frame(upper, WindowFrame::new(decorated())));
+    let mut router = InputRouter::new();
+
+    let drag = scan_title(&c, lower, |p| matches!(p, FurniturePart::TitleBar)).expect("drag");
+    let origin = c.window(lower).map(super::window::Window::origin);
+    router.handle(moved(drag.x, drag.y), &mut c);
+    assert_eq!(
+        router.handle(press_secondary(), &mut c),
+        InputResponse::FurniturePressed { window: lower }
+    );
+    // The gesture drags and focuses, but `upper` is still the top of the
+    // stack: that is the whole difference from the primary drag.
+    assert!(router.is_moving());
+    assert_eq!(router.focused(), Some(lower));
+    assert_eq!(c.window_at(Point::new(150, 150)), Some(upper));
+
+    let moved_to = router.handle(moved(drag.x + 12, drag.y + 7), &mut c);
+    assert_eq!(
+        moved_to,
+        InputResponse::Moved {
+            window: lower,
+            origin: Point::new(
+                origin.expect("origin").x + 12,
+                origin.expect("origin").y + 7
+            ),
+        }
+    );
+    // A primary release belongs to no gesture here and must not end this one.
+    assert_eq!(
+        router.handle(release_primary(), &mut c),
+        InputResponse::Ignored
+    );
+    assert!(router.is_moving());
+    assert_eq!(
+        router.handle(release_secondary(), &mut c),
+        InputResponse::MoveEnded { window: lower }
+    );
+    assert!(!router.is_moving());
+    assert_eq!(c.window_at(Point::new(150, 150)), Some(upper));
+}
+
+#[test]
+fn a_secondary_press_off_the_title_bar_still_raises() {
+    let (mut c, lower) = decorated_compositor();
+    // Placed clear of `lower`'s title band, so a press aimed at that band
+    // resolves to `lower` and not to the window in front of it.
+    let upper = c.add_window(Point::new(20, 120), opaque(200, 60, BLUE));
+    assert!(c.set_window_frame(upper, WindowFrame::new(decorated())));
+    let mut router = InputRouter::new();
+
+    // A right-click on client content opens a context menu, which is a normal
+    // activation: only the title-bar drag opts out of the raise.
+    let client = c.window_client_rect(upper).expect("client");
+    router.handle(moved(centre(client).x, centre(client).y), &mut c);
+    router.handle(press_secondary(), &mut c);
+    assert!(!router.is_moving());
+    assert_eq!(c.window_at(centre(client)), Some(upper));
+
+    let drag = scan_title(&c, lower, |p| matches!(p, FurniturePart::TitleBar)).expect("drag");
+    router.handle(moved(drag.x, drag.y), &mut c);
+    router.handle(press_primary(), &mut c);
+    assert!(router.is_moving());
+    // A secondary press arriving mid-drag changes nothing: the gesture holds
+    // the pointer until the button that started it comes up.
+    assert_eq!(
+        router.handle(press_secondary(), &mut c),
+        InputResponse::Ignored
+    );
+    assert!(router.is_moving());
+    assert_eq!(
+        router.handle(release_primary(), &mut c),
+        InputResponse::MoveEnded { window: lower }
+    );
+}
+
+#[test]
+fn the_router_holds_the_seats_modifiers_from_every_edge() {
+    let mut c = new_compositor(mode(60, 60), BLUE).expect("compositor");
+    let mut router = InputRouter::new();
+    assert_eq!(router.modifiers(), Modifiers::default());
+
+    let shift = Modifiers {
+        shift: true,
+        ..Modifiers::default()
+    };
+    // A bare modifier edge is the only report of a held modifier: no key
+    // reaches a surface for it, and nothing on screen changes.
+    assert_eq!(
+        router.handle(InputEvent::ModifiersChanged { modifiers: shift }, &mut c),
+        InputResponse::Ignored
+    );
+    assert_eq!(router.modifiers(), shift);
+
+    // A key event carries the set too, so the two sources agree.
+    let ctrl = Modifiers {
+        ctrl: true,
+        ..Modifiers::default()
+    };
+    router.handle(
+        InputEvent::KeyPressed {
+            key: Key::Char('c'),
+            modifiers: ctrl,
+        },
+        &mut c,
+    );
+    assert_eq!(router.modifiers(), ctrl);
+    router.handle(
+        InputEvent::ModifiersChanged {
+            modifiers: Modifiers::default(),
+        },
+        &mut c,
+    );
+    assert_eq!(router.modifiers(), Modifiers::default());
+}
+
 #[test]
 fn a_title_bar_drag_keeps_a_grabbable_patch_of_the_bar_on_screen() {
     // A window may hang off any edge — that is normal on a desktop — but never

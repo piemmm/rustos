@@ -349,7 +349,12 @@ const fn named_key_to_abi(named: NamedKey) -> Option<NamedKeyCode> {
 }
 
 /// Map the wire [`AbiModifiers`] to the `lib/input` [`Modifiers`].
-const fn modifiers_from_abi(m: AbiModifiers) -> Modifiers {
+///
+/// The one definition of that field mapping, so the kernel arbiter, the
+/// desktop seat, and an app's own key handling cannot disagree about which
+/// modifier a record names.
+#[must_use]
+pub const fn modifiers_from_abi(m: AbiModifiers) -> Modifiers {
     Modifiers {
         shift: m.shift,
         ctrl: m.ctrl,
@@ -358,8 +363,14 @@ const fn modifiers_from_abi(m: AbiModifiers) -> Modifiers {
     }
 }
 
-/// Map the `lib/input` [`Modifiers`] to the wire [`AbiModifiers`].
-const fn modifiers_to_abi(m: Modifiers) -> AbiModifiers {
+/// Map the `lib/input` [`Modifiers`] to the wire [`AbiModifiers`], the inverse
+/// of [`modifiers_from_abi`].
+///
+/// The desktop holds the seat's modifier state in the routing vocabulary and
+/// stamps it onto the wire events it delivers, so it needs this direction as
+/// much as a driver does.
+#[must_use]
+pub const fn modifiers_to_abi(m: Modifiers) -> AbiModifiers {
     AbiModifiers {
         shift: m.shift,
         ctrl: m.ctrl,
@@ -385,7 +396,8 @@ const fn key_from_abi(value: KeyValue) -> Key {
 /// [`Modifiers`] and encodes them, so the arbiter never owns a second copy of
 /// the layout-to-tty mapping. Only a key **press** produces
 /// bytes — a terminal sends nothing on key release — so a
-/// [`KeyInput::Released`] writes nothing and returns `Ok(0)`.
+/// [`KeyInput::Released`] — and a [`KeyInput::ModifiersChanged`], which names
+/// no key at all — writes nothing and returns `Ok(0)`.
 ///
 /// # Errors
 ///
@@ -400,7 +412,7 @@ pub fn encode_key_input(record: &KeyInput, out: &mut [u8]) -> Result<usize, Keym
         KeyInput::Pressed { key, modifiers } => {
             encode_key(key_from_abi(key), modifiers_from_abi(modifiers), out)
         }
-        KeyInput::Released { .. } => Ok(0),
+        KeyInput::Released { .. } | KeyInput::ModifiersChanged { .. } => Ok(0),
     }
 }
 
@@ -434,6 +446,20 @@ pub fn key_input(key: Key, modifiers: Modifiers, pressed: bool) -> Option<KeyInp
             modifiers,
         }
     })
+}
+
+/// Build a wire [`KeyInput::ModifiersChanged`] record from the `lib/input`
+/// [`Modifiers`] a keyboard driver now holds — the modifier-edge counterpart
+/// of [`key_input`], so the one `lib/input`→wire modifier mapping serves both.
+///
+/// # Capabilities
+///
+/// None.
+#[must_use]
+pub const fn modifier_change(modifiers: Modifiers) -> KeyInput {
+    KeyInput::ModifiersChanged {
+        modifiers: modifiers_to_abi(modifiers),
+    }
 }
 
 #[cfg(test)]
@@ -651,7 +677,7 @@ mod tests {
             Key::Named(NamedKey::Function { number: 7 }),
         ] {
             let record = key_input(key, Modifiers::default(), true).expect("wire form");
-            assert_eq!(key_from_abi(record.key()), key);
+            assert_eq!(key_from_abi(record.key().expect("a key edge")), key);
         }
     }
 

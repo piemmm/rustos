@@ -327,6 +327,8 @@ pub const KEY_INPUT_MAGIC: u32 = u32::from_le_bytes(*b"KIN1");
 pub const KIND_KEY_PRESSED: u16 = 1;
 /// `kind` code for a key-release record.
 pub const KIND_KEY_RELEASED: u16 = 2;
+/// `kind` code for a modifier-state-change record (no key).
+pub const KIND_MODIFIERS_CHANGED: u16 = 3;
 
 /// `key_class` code for a [`KeyValue::Char`] record (a produced character).
 pub const KEY_CLASS_CHAR: u16 = 0;
@@ -535,7 +537,8 @@ pub enum KeyValue {
 ///
 /// The desktop-level counterpart of [`PointerInput`]: a key going down or
 /// coming up, the [`KeyValue`] it produced, and the [`Modifiers`] held at the
-/// time. [`from_bytes`](Self::from_bytes) is the only way to build one from
+/// time — or a bare change of the held modifiers, which names no key at all.
+/// [`from_bytes`](Self::from_bytes) is the only way to build one from
 /// untrusted bytes and validates the whole record before returning it.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum KeyInput {
@@ -553,17 +556,30 @@ pub enum KeyInput {
         /// The modifiers held while it was released.
         modifiers: Modifiers,
     },
+    /// The set of held modifiers changed, and no key was produced.
+    ///
+    /// A modifier is not a [`KeyValue`]: it produces no character and names
+    /// no editing, navigation, or function key, so it can never be typed into
+    /// a text sink. It still has to be *reported*, because a consumer that
+    /// only ever sees keys cannot know a modifier is held when something
+    /// other than a key arrives — a pointer press, most of all.
+    ModifiersChanged {
+        /// The modifiers held after the change.
+        modifiers: Modifiers,
+    },
 }
 
 impl KeyInput {
     /// Encoded size of a keyboard input record on the wire, in bytes.
     pub const WIRE_LEN: usize = 20;
 
-    /// The [`KeyValue`] this event carries.
+    /// The [`KeyValue`] this event carries, or `None` for a bare modifier
+    /// change.
     #[must_use]
-    pub const fn key(&self) -> KeyValue {
+    pub const fn key(&self) -> Option<KeyValue> {
         match *self {
-            Self::Pressed { key, .. } | Self::Released { key, .. } => key,
+            Self::Pressed { key, .. } | Self::Released { key, .. } => Some(key),
+            Self::ModifiersChanged { .. } => None,
         }
     }
 
@@ -571,7 +587,9 @@ impl KeyInput {
     #[must_use]
     pub const fn modifiers(&self) -> Modifiers {
         match *self {
-            Self::Pressed { modifiers, .. } | Self::Released { modifiers, .. } => modifiers,
+            Self::Pressed { modifiers, .. }
+            | Self::Released { modifiers, .. }
+            | Self::ModifiersChanged { modifiers } => modifiers,
         }
     }
 
@@ -584,12 +602,16 @@ impl KeyInput {
         let kind = match self {
             Self::Pressed { .. } => KIND_KEY_PRESSED,
             Self::Released { .. } => KIND_KEY_RELEASED,
+            Self::ModifiersChanged { .. } => KIND_MODIFIERS_CHANGED,
         };
         put_u16(&mut out, 6, kind);
         put_u16(&mut out, 8, self.modifiers().to_bits());
+        // A record naming no key spells its key fields all-zero, the one
+        // encoding `from_bytes` accepts for it.
         let (class, codepoint, named) = match self.key() {
-            KeyValue::Char(c) => (KEY_CLASS_CHAR, c as u32, 0),
-            KeyValue::Named(named) => (KEY_CLASS_NAMED, 0, named.code()),
+            None => (0, 0, 0),
+            Some(KeyValue::Char(c)) => (KEY_CLASS_CHAR, c as u32, 0),
+            Some(KeyValue::Named(named)) => (KEY_CLASS_NAMED, 0, named.code()),
         };
         put_u16(&mut out, 10, class);
         put_u32(&mut out, 12, codepoint);
@@ -609,8 +631,8 @@ impl KeyInput {
     /// * [`Errno::BufferTooSmall`] if `bytes.len() < WIRE_LEN`.
     /// * [`Errno::BadMagic`] if the magic word does not match, if the reserved
     ///   field is non-zero, or if the unused key field for the record's class
-    ///   is non-zero (a named code on a character record, or a codepoint on a
-    ///   named record).
+    ///   is non-zero (a named code on a character record, a codepoint on a
+    ///   named record, or any key field at all on a modifier-change record).
     /// * [`Errno::AbiVersionUnsupported`] if `version` is not
     ///   [`crate::ABI_VERSION_CURRENT`].
     /// * [`Errno::OutOfRange`] if `kind`, `key_class`, the modifier bits, the
@@ -634,6 +656,15 @@ impl KeyInput {
         let class = read_u16(bytes, 10);
         let codepoint = read_u32(bytes, 12);
         let named = read_u16(bytes, 16);
+        if kind == KIND_MODIFIERS_CHANGED {
+            // A modifier change names no key, so an all-zero key field is its
+            // only spelling; a dirty one is refused rather than read as a NUL
+            // character.
+            if class != 0 || codepoint != 0 || named != 0 {
+                return Err(Errno::BadMagic);
+            }
+            return Ok(Self::ModifiersChanged { modifiers });
+        }
         let key = match class {
             KEY_CLASS_CHAR => {
                 if named != 0 {
@@ -662,12 +693,13 @@ mod tests {
     use super::{
         KeyInput, KeyValue, Modifiers, NamedKeyCode, PointerButtonCode, PointerInput, BUTTON_NONE,
         KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC, KIND_KEY_PRESSED, KIND_KEY_RELEASED,
-        KIND_MOVED_BY, KIND_PRESSED, KIND_RELEASED, KIND_SCROLLED, MOD_ALT, MOD_CTRL, MOD_META,
-        MOD_SHIFT, POINTER_INPUT_MAGIC,
+        KIND_MODIFIERS_CHANGED, KIND_MOVED_BY, KIND_PRESSED, KIND_RELEASED, KIND_SCROLLED, MOD_ALT,
+        MOD_CTRL, MOD_META, MOD_SHIFT, POINTER_INPUT_MAGIC,
     };
     use crate::driver::input::{
         InputEvent, InputEventKind, AXIS_X, AXIS_Y, POINTER_BUTTON_CODE_BASE,
     };
+    use crate::le::read_u16;
     use crate::{Errno, ABI_VERSION_CURRENT};
 
     #[test]
@@ -948,7 +980,7 @@ mod tests {
         };
         let decoded = KeyInput::from_bytes(&event.to_le_bytes()).expect("valid record");
         assert_eq!(decoded, event);
-        assert_eq!(decoded.key(), KeyValue::Char('Q'));
+        assert_eq!(decoded.key(), Some(KeyValue::Char('Q')));
         assert!(decoded.modifiers().shift && decoded.modifiers().ctrl);
         assert!(!decoded.modifiers().alt && !decoded.modifiers().meta);
     }
@@ -988,7 +1020,52 @@ mod tests {
             modifiers: Modifiers::default(),
         };
         let decoded = KeyInput::from_bytes(&event.to_le_bytes()).expect("valid record");
-        assert_eq!(decoded.key(), KeyValue::Char('é'));
+        assert_eq!(decoded.key(), Some(KeyValue::Char('é')));
+    }
+
+    #[test]
+    fn modifier_change_round_trips_and_names_no_key() {
+        let event = KeyInput::ModifiersChanged {
+            modifiers: Modifiers {
+                shift: true,
+                meta: true,
+                ..Modifiers::default()
+            },
+        };
+        let bytes = event.to_le_bytes();
+        assert_eq!(read_u16(&bytes, 6), KIND_MODIFIERS_CHANGED);
+        let decoded = KeyInput::from_bytes(&bytes).expect("valid record");
+        assert_eq!(decoded, event);
+        assert_eq!(decoded.key(), None);
+        assert!(decoded.modifiers().shift && decoded.modifiers().meta);
+        assert!(!decoded.modifiers().ctrl && !decoded.modifiers().alt);
+    }
+
+    #[test]
+    fn modifier_change_round_trips_an_empty_set() {
+        // Every modifier released is the edge that matters most: a consumer
+        // that missed it would believe one is still held.
+        let event = KeyInput::ModifiersChanged {
+            modifiers: Modifiers::default(),
+        };
+        let decoded = KeyInput::from_bytes(&event.to_le_bytes()).expect("valid record");
+        assert_eq!(decoded, event);
+    }
+
+    #[test]
+    fn modifier_change_rejects_a_dirty_key_field() {
+        for offset in [10usize, 12, 16] {
+            let mut bytes = KeyInput::ModifiersChanged {
+                modifiers: Modifiers::default(),
+            }
+            .to_le_bytes();
+            bytes[offset] = 1;
+            assert_eq!(
+                KeyInput::from_bytes(&bytes),
+                Err(Errno::BadMagic),
+                "key field at {offset} must be zero on a modifier change"
+            );
+        }
     }
 
     #[test]

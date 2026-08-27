@@ -70,16 +70,27 @@ turning raw keycodes and a keyboard layout into a produced character is
 policy above the driver, not a second copy of the data (`AGENTS.md`
 §2.2).
 
+A third kind names no key at all: `ModifiersChanged` reports that the set
+of held modifiers changed. A modifier produces no character and is no
+`NamedKeyCode`, so it can never be typed into a text sink — but it still
+has to be *reported*, because a consumer that only ever sees keys cannot
+know a modifier is held when something other than a key arrives, a
+pointer press most of all. The keyboard drivers emit one per *observable*
+change: a key repeat, or letting go of one shift key while the other is
+still held, produces nothing.
+
 A record is exactly [`KeyInput::WIRE_LEN`] (20) bytes, little-endian: a
-`"KIN1"` magic, the ABI version, a `kind` code (pressed / released), the
-modifier bitmask, a `key_class` (char / named), a 4-byte codepoint, a
-2-byte named-key code, and a reserved half-word. Exactly one of the two
-key fields is set for a given class; [`KeyInput::from_bytes`] validates
-every field — magic, version, reserved, `kind`, `key_class`, the
-modifier bits, the named-key code, and that the codepoint is a real
-Unicode scalar (an unpaired surrogate is refused) — and fails closed with
-the matching [`Errno`] (`AGENTS.md` §5.4 / §19.5). It too is enrolled in
-the `lib/abi` fuzz harness (`AGENTS.md` §19.6).
+`"KIN1"` magic, the ABI version, a `kind` code (pressed / released /
+modifiers-changed), the modifier bitmask, a `key_class` (char / named), a
+4-byte codepoint, a 2-byte named-key code, and a reserved half-word.
+Exactly one of the two key fields is set for a given class, and a
+modifiers-changed record carries an all-zero key field — its one legal
+spelling, so a dirty field is refused rather than read as a NUL character.
+[`KeyInput::from_bytes`] validates every field — magic, version, reserved,
+`kind`, `key_class`, the modifier bits, the named-key code, and that the
+codepoint is a real Unicode scalar (an unpaired surrogate is refused) — and
+fails closed with the matching [`Errno`] (`AGENTS.md` §5.4 / §19.5). It too
+is enrolled in the `lib/abi` fuzz harness (`AGENTS.md` §19.6).
 
 ## Where it is consumed
 
@@ -90,6 +101,15 @@ the same `lib/input` `InputEvent` stream: `DeviceInputSource` reads
 `KeyboardInputSource` reads `KeyInput` records from the kernel keyboard
 channel. The window manager delivers a decoded key event to the
 focused window; the taskbar takes no keyboard input.
+
+A `ModifiersChanged` record decodes to `InputEvent::ModifiersChanged` and
+always reaches the window-manager router, whatever the pointer is over: it
+is seat state, not a key any surface receives. The router keeps the current
+set and the session stamps it onto every `WindowEvent::Pointer` it delivers,
+so an application can qualify a click by a modifier (a shift-click) without
+shadowing state it could never see. In *text* focus the kernel arbiter types
+nothing for it — the shared `lib/keymap` encoder yields no bytes — so a held
+modifier never reaches a console as input.
 
 [`PointerInput`]: ../../tairix_abi/input/enum.PointerInput.html
 [`KeyInput`]: ../../tairix_abi/input/enum.KeyInput.html

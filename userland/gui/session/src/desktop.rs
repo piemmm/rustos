@@ -77,7 +77,7 @@ use tairix_proglib::{Catalog, EntryId};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 use tairix_wallpaper::{IconFlow, IconSort, PinboardSettings};
-use tairix_wm::{Key, NamedKey};
+use tairix_wm::{Key, NamedKey, PointerButton};
 
 use crate::library::catalogued;
 use crate::pinboard::PinboardCommand;
@@ -628,7 +628,7 @@ impl<S: DirectorySource> Desktop<S> {
         };
         self.selected = Some(index);
         Self::mark_cell(layout, self.selected, damage);
-        if self.clicks.register(now_ns, index) == ClickKind::Double {
+        if self.clicks.register(now_ns, index, PointerButton::Primary) == ClickKind::Double {
             return self.activate(index, apps);
         }
         DesktopOutcome::ignored()

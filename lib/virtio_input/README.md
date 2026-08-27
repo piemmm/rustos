@@ -22,10 +22,15 @@ See `docs/src/drivers/input.md` for the full description and test surface.
 - `VirtioKeyboardConsole` (`console` module) — the keyboard producer half:
   `feed` turns each decoded `evdev`-keycode `Key` `InputEvent` edge into the
   `tairix_abi::input::KeyInput` record a driver injects through `key_inject`,
-  tracking modifiers + caps/num lock and resolving the US layout through the
-  shared `tairix_keymap::key_input` map (the one `Key`→record definition the
-  `lib/hid` USB console producer reaches too, §2.2). Allocation-free and
-  fail-closed (`AGENTS.md` §2.9).
+  tracking modifiers (over the shared `tairix_input::ModifierState`, so the
+  left/right collapsing rule is one definition, §2.2) + caps/num lock and
+  resolving the US layout through the shared `tairix_keymap::key_input` map
+  (the one `Key`→record definition the `lib/hid` USB console producer reaches
+  too). A modifier edge that changes the *observable* held set emits a
+  `KeyInput::ModifiersChanged` record — the desktop needs it to qualify a
+  gesture that is not a key — while a repeat, or letting go of one shift key
+  while the other is held, emits nothing. Allocation-free and fail-closed
+  (`AGENTS.md` §2.9).
 
 ## Dependencies
 

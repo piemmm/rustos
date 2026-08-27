@@ -145,7 +145,7 @@ pub mod source;
 pub mod trash;
 pub mod vfs;
 
-pub use activate::Activation;
+pub use activate::{Activation, BundleIntent};
 pub use browser::Browser;
 pub use chrome::{
     apply_command, ContextCommand, ContextMenuModel, ManagerTool, ManagerToolModel, ToolbarCommand,
@@ -182,6 +182,11 @@ pub use select::Selection;
 pub use sort::{sort_entries, SortDirection, SortKey, SortMode};
 pub use source::{DirectorySource, Listing};
 pub use tairix_abi::window_ipc::WindowSizing;
+/// The pointer button [`DoubleClickTracker::register`] pairs on. Re-exported
+/// because it is part of this engine's own surface: a consumer that reports a
+/// press has to name the button, and should not need a dependency of its own to
+/// do it.
+pub use tairix_input::PointerButton;
 /// The one shared path-spelling rules a consumer of this engine needs beside
 /// it: the final component of a path, and the `parent`/`name` join. Re-exported
 /// rather than re-implemented so a surface that spells a resolved link target

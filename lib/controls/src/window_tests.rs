@@ -26,9 +26,10 @@ use crate::state::{
 };
 use crate::testkit::high_contrast;
 use crate::window::{
-    BandCorner, FrameInsets, FrameRim, FurniturePart, ResizeEdge, ResizeEvent, ResizeGrabber,
-    ScrollCorner, TitleBar, TitleBarEvent, TitleHit, WindowControl, WindowControlAction,
-    WindowFrame, CONTROL_ORDER, IDENTITY_SATURATION_ACTIVE, IDENTITY_SATURATION_INACTIVE,
+    BandCorner, FrameInsets, FrameRim, FurniturePart, GrabReach, ResizeEdge, ResizeEvent,
+    ResizeGrabber, ScrollCorner, TitleBar, TitleBarEvent, TitleHit, WindowControl,
+    WindowControlAction, WindowFrame, CONTROL_ORDER, IDENTITY_SATURATION_ACTIVE,
+    IDENTITY_SATURATION_INACTIVE,
 };
 
 fn premul(rgba: Rgba) -> Pixel {
@@ -1965,7 +1966,8 @@ fn resize_edges_only_when_resizable() {
     // maps apart: it resizes one window and is inert furniture on the other.
     let client = resizable.layout(bounds, Scale::ONE, &theme).client;
     assert_eq!(client, fixed.layout(bounds, Scale::ONE, &theme).client);
-    let below = Point::new(client.left() + 10, client.bottom());
+    // Mid-span along the bottom, clear of both corner zones.
+    let below = Point::new(client.left() + half(client.width), client.bottom());
     assert_eq!(
         resizable.hit(bounds, Scale::ONE, &theme, below),
         FurniturePart::ResizeEdge(ResizeEdge::Bottom)
@@ -2012,16 +2014,19 @@ fn a_resizable_window_gives_up_no_client_space() {
 
 #[test]
 fn the_resize_zone_overlaps_the_clients_outer_pixels() {
-    // The invisible border: the outermost `hit_slop` columns of the client
-    // resize the window, and the very next column inward reaches the app.
+    // The invisible border: the edge reach is measured from the *outer* edge,
+    // so everything past the thin band lies over the client's own columns, and
+    // the very next column inward reaches the app.
     let theme = Theme::dark();
     let bounds = frame_bounds();
     let frame = WindowFrame::new(furniture());
     let client = frame.layout(bounds, Scale::ONE, &theme).client;
-    let grab = i32::try_from(Scale::ONE.scale_length(theme.metrics().hit_slop)).expect("slop");
-    assert!(grab > 0, "an invisible border needs some depth");
+    let reach = GrabReach::of(Scale::ONE, &theme);
+    let band = client.left() - bounds.left();
+    let overlap = i32::try_from(reach.edge).expect("reach") - band;
+    assert!(overlap > 0, "an invisible border needs some depth");
     let y = client.top() + half(client.height);
-    for step in 0..grab {
+    for step in 0..overlap {
         assert_eq!(
             frame.hit(
                 bounds,
@@ -2038,10 +2043,116 @@ fn the_resize_zone_overlaps_the_clients_outer_pixels() {
             bounds,
             Scale::ONE,
             &theme,
-            Point::new(client.left() + grab, y)
+            Point::new(client.left() + overlap, y)
         ),
         FurniturePart::Client,
         "one column further in belongs to the app"
+    );
+}
+
+#[test]
+fn a_corner_grabs_further_than_the_edges_that_form_it() {
+    // The complaint this answered: the diagonal corners were as thin as the
+    // edges, so the zone that resizes both axes at once was the hardest thing
+    // on the frame to hit.
+    let theme = Theme::dark();
+    let bounds = frame_bounds();
+    let frame = WindowFrame::new(furniture());
+    let reach = GrabReach::of(Scale::ONE, &theme);
+    assert!(
+        reach.corner > reach.edge,
+        "a corner must be easier to hit than an edge"
+    );
+    let hit = |x: i32, y: i32| frame.hit(bounds, Scale::ONE, &theme, Point::new(x, y));
+    let corner = i32::try_from(reach.corner).expect("corner");
+    let edge = i32::try_from(reach.edge).expect("edge");
+
+    // Along the bottom, out past the edge reach but inside the corner reach:
+    // both bottom corners still answer as corners.
+    let inset = corner - 1;
+    assert!(
+        inset > edge,
+        "the corner zone must reach past the edge zone"
+    );
+    assert_eq!(
+        hit(bounds.left() + inset, bounds.bottom() - inset),
+        FurniturePart::ResizeEdge(ResizeEdge::BottomLeft)
+    );
+    assert_eq!(
+        hit(bounds.right() - 1 - inset, bounds.bottom() - inset),
+        FurniturePart::ResizeEdge(ResizeEdge::BottomRight)
+    );
+    // One pixel further in on both axes and the corner is behind us: the
+    // point is clear of every edge and belongs to the app.
+    assert_eq!(
+        hit(bounds.left() + corner, bounds.bottom() - 1 - corner),
+        FurniturePart::Client
+    );
+    // The corner reach does *not* widen the edges it meets: a point that far
+    // in from the left, at mid-height, is the app's.
+    let mid_y = i32::midpoint(bounds.top(), bounds.bottom());
+    assert_eq!(hit(bounds.left() + edge, mid_y), FurniturePart::Client);
+}
+
+#[test]
+fn a_scaled_frame_grabs_by_the_scaled_reach() {
+    let theme = Theme::dark();
+    let scale = Scale::from_percent(200).expect("scale");
+    let one = GrabReach::of(Scale::ONE, &theme);
+    let two = GrabReach::of(scale, &theme);
+    assert_eq!(two.edge, one.edge * 2);
+    assert_eq!(two.corner, one.corner * 2);
+    // The zones are physical pixels, so a doubled-density frame grabs by twice
+    // as many of them and covers the same apparent distance.
+    let bounds = frame_bounds();
+    let frame = WindowFrame::new(furniture());
+    let deep = i32::try_from(one.edge).expect("reach");
+    let mid_y = i32::midpoint(bounds.top(), bounds.bottom());
+    assert_eq!(
+        frame.hit(
+            bounds,
+            scale,
+            &theme,
+            Point::new(bounds.left() + deep, mid_y)
+        ),
+        FurniturePart::ResizeEdge(ResizeEdge::Left),
+        "a column the reference density had released is still the border at 200%"
+    );
+}
+
+#[test]
+fn a_corner_reach_below_the_edge_reach_is_clamped_up() {
+    // A theme that named a corner narrower than an edge would leave the very
+    // corner classifying as a plain edge; the reach refuses to go there.
+    let base = Theme::dark();
+    let mut metrics = *base.metrics();
+    metrics.resize_edge_grab = 12;
+    metrics.resize_corner_grab = 3;
+    let theme = Theme::new(
+        base.id(),
+        "Test Narrow Corner",
+        base.appearance(),
+        *base.palette(),
+        metrics,
+        *base.fonts(),
+        base.cursors().clone(),
+        base.motion(),
+        base.density(),
+        base.contrast(),
+    );
+    let reach = GrabReach::of(Scale::ONE, &theme);
+    assert_eq!(reach.edge, 12);
+    assert_eq!(reach.corner, 12);
+    let bounds = frame_bounds();
+    let frame = WindowFrame::new(furniture());
+    assert_eq!(
+        frame.hit(
+            bounds,
+            Scale::ONE,
+            &theme,
+            Point::new(bounds.left(), bounds.bottom() - 1)
+        ),
+        FurniturePart::ResizeEdge(ResizeEdge::BottomLeft)
     );
 }
 

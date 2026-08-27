@@ -97,8 +97,8 @@
 
 use tairix_taskbar::{Taskbar, TaskbarInput, TaskbarResponse};
 use tairix_wm::{
-    Compositor, InputEvent, InputResponse, InputRouter, Point, PointerButton, PointerFocus, Scale,
-    WindowId,
+    Compositor, InputEvent, InputResponse, InputRouter, Modifiers, Point, PointerButton,
+    PointerFocus, Scale, WindowId,
 };
 
 use crate::presenter::TaskbarPresenter;
@@ -287,6 +287,16 @@ impl SessionInputRouter {
         self.wm.begin_move(compositor)
     }
 
+    /// The modifiers the seat currently holds.
+    ///
+    /// Held by the window-manager router, which every modifier edge reaches
+    /// whatever the pointer is over, so the desktop has one answer to stamp
+    /// onto the pointer events it delivers.
+    #[must_use]
+    pub const fn modifiers(&self) -> Modifiers {
+        self.wm.modifiers()
+    }
+
     /// Route one input `event` to the surface holding the pointer, resolving
     /// any time-driven taskbar gesture against the monotonic `now_ns`, and
     /// return what changed.
@@ -315,6 +325,12 @@ impl SessionInputRouter {
         // The taskbar hit-tests at the output's density, which the compositor
         // owns; the seat reads it here rather than keeping its own copy.
         let scale = compositor.scale();
+        // A modifier edge is neither a key any surface receives nor a pointer
+        // event: it is seat state, so it always reaches the window manager,
+        // which holds the one copy the desktop stamps onto what it routes.
+        if matches!(event, InputEvent::ModifiersChanged { .. }) {
+            return wm_response(self.wm.handle(event, compositor));
+        }
         // The keyboard has a focus of its own, and the pointer does not decide
         // it: a pointer resting on the bar must never divert a keystroke from
         // the window the user is typing in. A modal surface of the bar's takes

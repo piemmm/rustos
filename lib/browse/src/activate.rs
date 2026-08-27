@@ -21,6 +21,25 @@
 
 use alloc::string::String;
 
+/// What an activation should do when the entry turns out to be an application
+/// bundle (`<Name>.app`).
+///
+/// A bundle is a directory that is *also* a program, so activating one is
+/// genuinely ambiguous and the user says which they meant — a plain
+/// double-click runs it, a shift-double-click opens it. Naming the intent here
+/// keeps the dispatch-by-kind decision in the engine: the app says what the
+/// gesture meant, never what kind the entry is.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
+pub enum BundleIntent {
+    /// Run the bundle through the ordinary signed app-load gate — what
+    /// activating a program means, and the default.
+    #[default]
+    Launch,
+    /// Descend into the bundle directory and list what is inside it, exactly
+    /// as activating any other directory does.
+    Browse,
+}
+
 /// What activating an entry does, decided once by the shared engine.
 ///
 /// Returned by [`Browser::activate_selected`](crate::Browser::activate_selected)
@@ -30,7 +49,8 @@ use alloc::string::String;
 /// browser shows); the engine performs no launch or open itself.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Activation {
-    /// The entry was a directory and the browser descended into it: the
+    /// The entry was a directory — or a bundle activated with
+    /// [`BundleIntent::Browse`] — and the browser descended into it: the
     /// listing changed and the caller repaints. The descent is the engine's
     /// own fail-closed navigation (an unreadable target leaves the browser
     /// where it was and surfaces the error instead), so there is nothing for

@@ -33,13 +33,17 @@ fn press(console: &mut KeyboardConsole, code: u16) -> KeyInput {
 
 /// The [`KeyValue`] a key press resolves to.
 fn press_value(console: &mut KeyboardConsole, code: u16) -> KeyValue {
-    press(console, code).key()
+    press(console, code).key().expect("a key press names a key")
 }
 
-/// Hold or release a modifier usage (`0xE0 + n`), asserting it produces no
-/// record (modifier state is folded into the next key edge).
-fn modifier(console: &mut KeyboardConsole, code: u16, down: bool) {
-    assert_eq!(console.feed(key_event(code, i32::from(down))), None);
+/// Hold or release a modifier usage (`0xE0 + n`), returning the held set the
+/// edge reported changing to (`None` when the collapsed set did not change).
+fn modifier(console: &mut KeyboardConsole, code: u16, down: bool) -> Option<AbiModifiers> {
+    match console.feed(key_event(code, i32::from(down))) {
+        None => None,
+        Some(KeyInput::ModifiersChanged { modifiers }) => Some(modifiers),
+        Some(other) => panic!("a modifier edge produced {other:?}"),
+    }
 }
 
 #[test]
@@ -51,9 +55,9 @@ fn lowercase_letter_is_itself() {
 #[test]
 fn shift_held_uppercases_a_letter_and_marks_the_modifier() {
     let mut console = KeyboardConsole::new();
-    modifier(&mut console, MODIFIER_USAGE_BASE + 1, true); // LeftShift down
+    let _ = modifier(&mut console, MODIFIER_USAGE_BASE + 1, true); // LeftShift down
     let record = press(&mut console, USAGE_A);
-    assert_eq!(record.key(), KeyValue::Char('A'));
+    assert_eq!(record.key(), Some(KeyValue::Char('A')));
     assert_eq!(
         record.modifiers(),
         AbiModifiers {
@@ -61,7 +65,7 @@ fn shift_held_uppercases_a_letter_and_marks_the_modifier() {
             ..AbiModifiers::default()
         }
     );
-    modifier(&mut console, MODIFIER_USAGE_BASE + 1, false); // LeftShift up
+    let _ = modifier(&mut console, MODIFIER_USAGE_BASE + 1, false); // LeftShift up
     assert_eq!(press_value(&mut console, USAGE_A), KeyValue::Char('a'));
 }
 
@@ -74,18 +78,18 @@ fn caps_lock_uppercases_letters_only() {
     // A digit is unaffected by caps lock.
     assert_eq!(press_value(&mut console, 0x1E), KeyValue::Char('1'));
     // Shift with caps lock cancels for letters.
-    modifier(&mut console, MODIFIER_USAGE_BASE + 5, true); // RightShift down
+    let _ = modifier(&mut console, MODIFIER_USAGE_BASE + 5, true); // RightShift down
     assert_eq!(press_value(&mut console, USAGE_A), KeyValue::Char('a'));
 }
 
 #[test]
 fn ctrl_letter_carries_the_ctrl_modifier() {
     let mut console = KeyboardConsole::new();
-    modifier(&mut console, MODIFIER_USAGE_BASE, true); // LeftControl down
-                                                       // usage 0x06 = 'c'; the control-code encoding now lives in the kernel
-                                                       // arbiter, so the driver emits the character plus the held ctrl modifier.
+    let _ = modifier(&mut console, MODIFIER_USAGE_BASE, true); // LeftControl down
+                                                               // usage 0x06 = 'c'; the control-code encoding now lives in the kernel
+                                                               // arbiter, so the driver emits the character plus the held ctrl modifier.
     let record = press(&mut console, 0x06);
-    assert_eq!(record.key(), KeyValue::Char('c'));
+    assert_eq!(record.key(), Some(KeyValue::Char('c')));
     assert_eq!(
         record.modifiers(),
         AbiModifiers {
@@ -99,7 +103,7 @@ fn ctrl_letter_carries_the_ctrl_modifier() {
 fn shifted_symbols_use_the_us_layout() {
     let mut console = KeyboardConsole::new();
     assert_eq!(press_value(&mut console, 0x1F), KeyValue::Char('2')); // '2', unshifted
-    modifier(&mut console, MODIFIER_USAGE_BASE + 1, true); // shift
+    let _ = modifier(&mut console, MODIFIER_USAGE_BASE + 1, true); // shift
     assert_eq!(press_value(&mut console, 0x1F), KeyValue::Char('@')); // Shift-2 = '@'
     assert_eq!(press_value(&mut console, 0x2D), KeyValue::Char('_')); // Shift-'-' = '_'
 }
@@ -291,5 +295,54 @@ fn pump_delivers_a_completed_report_before_reading_another() {
             key: KeyValue::Char('r'),
             modifiers: AbiModifiers::default(),
         }]
+    );
+}
+
+#[test]
+fn a_modifier_edge_reports_the_new_held_set() {
+    let mut console = KeyboardConsole::new();
+    // A lone shift press produces no key, but the held set must still be
+    // reported: nothing downstream could otherwise know shift is down when a
+    // pointer press arrives.
+    assert_eq!(
+        modifier(&mut console, MODIFIER_USAGE_BASE + 1, true),
+        Some(AbiModifiers {
+            shift: true,
+            ..AbiModifiers::default()
+        })
+    );
+    assert_eq!(
+        modifier(&mut console, MODIFIER_USAGE_BASE, true),
+        Some(AbiModifiers {
+            shift: true,
+            ctrl: true,
+            ..AbiModifiers::default()
+        })
+    );
+    assert_eq!(
+        modifier(&mut console, MODIFIER_USAGE_BASE + 1, false),
+        Some(AbiModifiers {
+            ctrl: true,
+            ..AbiModifiers::default()
+        })
+    );
+    assert_eq!(
+        modifier(&mut console, MODIFIER_USAGE_BASE, false),
+        Some(AbiModifiers::default())
+    );
+}
+
+#[test]
+fn a_modifier_edge_that_changes_nothing_observable_reports_nothing() {
+    let mut console = KeyboardConsole::new();
+    assert!(modifier(&mut console, MODIFIER_USAGE_BASE + 1, true).is_some());
+    // The right shift key joining and leaving the chord is not an observable
+    // change, and neither is a repeat of the key already held.
+    assert_eq!(modifier(&mut console, MODIFIER_USAGE_BASE + 5, true), None);
+    assert_eq!(modifier(&mut console, MODIFIER_USAGE_BASE + 5, false), None);
+    assert_eq!(modifier(&mut console, MODIFIER_USAGE_BASE + 1, true), None);
+    assert_eq!(
+        modifier(&mut console, MODIFIER_USAGE_BASE + 1, false),
+        Some(AbiModifiers::default())
     );
 }

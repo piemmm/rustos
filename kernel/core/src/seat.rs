@@ -1431,6 +1431,47 @@ mod tests {
     }
 
     #[test]
+    fn a_modifier_change_types_nothing_in_text_focus() {
+        // A modifier names no key, so the text console must receive no bytes
+        // for it — and the record must not be refused either: the arbiter
+        // consumes it and the seat's sink stays untouched.
+        let queue = text_queue();
+        let seat = SeatRegistry::new(queue);
+        let record = KeyInput::ModifiersChanged {
+            modifiers: Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+        };
+        assert_eq!(seat.inject(SEAT_PRIMARY, record), Ok(KeyInput::WIRE_LEN));
+        let mut buf = [0u8; 8];
+        assert_eq!(queue.read(&mut buf).expect("queue read"), 0);
+    }
+
+    #[test]
+    fn a_held_seat_relays_a_modifier_change_to_the_owner() {
+        // The desktop is the consumer that needs it: it holds the seat's
+        // modifier state and cannot reconstruct it from keys alone.
+        let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
+        seat.acquire(SEAT_PRIMARY, WM)
+            .expect("fresh seat is acquirable");
+        let record = KeyInput::ModifiersChanged {
+            modifiers: Modifiers {
+                shift: true,
+                meta: true,
+                ..Modifiers::default()
+            },
+        };
+        assert_eq!(seat.inject(SEAT_PRIMARY, record), Ok(KeyInput::WIRE_LEN));
+        let mut buf = [0u8; KeyInput::WIRE_LEN];
+        assert_eq!(
+            seat.read_key(SEAT_PRIMARY, WM, &mut buf),
+            Ok(KeyInput::WIRE_LEN)
+        );
+        assert_eq!(KeyInput::from_bytes(&buf), Ok(record));
+    }
+
+    #[test]
     fn an_unowned_seat_with_no_injectable_sink_fails_closed() {
         // The NULL sink accepts no injected input: a press that would be
         // enqueued there surfaces `NotImplemented` rather than dropping it.

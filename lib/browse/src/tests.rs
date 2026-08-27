@@ -3261,7 +3261,7 @@ mod owner_edit_model {
 
 // --- FM6a: activating an entry (descend / launch a bundle / open a file) --
 
-use crate::activate::Activation;
+use crate::activate::{Activation, BundleIntent};
 
 /// A tree source whose root holds a plain subdirectory, an application
 /// bundle, and a regular file — the three activation kinds side by side.
@@ -3276,6 +3276,12 @@ fn activation_source() -> VfsDirectorySource<impl FnMut(&str) -> Result<Vec<u8>,
         ]),
     );
     dirs.insert("/Docs".to_string(), encoded_stream(&[]));
+    // A bundle is a real directory on disk, so the browse-intent activation
+    // has something to list.
+    dirs.insert(
+        "/Editor.app".to_string(),
+        encoded_stream(&[(b"AppInfo", FileKind::Regular), (b"Run", FileKind::Regular)]),
+    );
     tree_source(dirs)
 }
 
@@ -3284,7 +3290,10 @@ fn activating_a_directory_descends_into_it() {
     let mut browser = Browser::open_root(activation_source()).expect("root");
     // Default order: the directory first, then the bundle and the file.
     assert_eq!(browser.selected_name(), Some("Docs"));
-    assert_eq!(browser.activate_selected(), Ok(Activation::Descended));
+    assert_eq!(
+        browser.activate_selected(BundleIntent::Launch),
+        Ok(Activation::Descended)
+    );
     // The engine performed the navigation itself: the listing changed.
     assert_eq!(browser.path(), "/Docs");
     assert!(!browser.is_root());
@@ -3298,7 +3307,7 @@ fn activating_a_bundle_names_it_for_launch_without_descending() {
     // A bundle is a sealed unit: the engine names it for the launcher and does
     // not descend — the browser stays exactly where it was.
     assert_eq!(
-        browser.activate_selected(),
+        browser.activate_selected(BundleIntent::Launch),
         Ok(Activation::LaunchBundle {
             path: "/Editor.app".to_string()
         })
@@ -3308,11 +3317,67 @@ fn activating_a_bundle_names_it_for_launch_without_descending() {
 }
 
 #[test]
+fn browsing_a_bundle_descends_into_it_instead_of_launching_it() {
+    let mut browser = Browser::open_root(activation_source()).expect("root");
+    browser.select(1).expect("select Editor.app");
+    // Shift-activation: a bundle is also a directory, and this is the gesture
+    // that says which the user meant.
+    assert_eq!(
+        browser.activate_selected(BundleIntent::Browse),
+        Ok(Activation::Descended)
+    );
+    assert_eq!(browser.path(), "/Editor.app");
+    assert!(!browser.is_root());
+    // What is inside a bundle is what the user asked to see.
+    let inside: Vec<&str> = browser.entries().iter().map(Entry::name).collect();
+    assert_eq!(inside, ["AppInfo", "Run"]);
+}
+
+#[test]
+fn the_browse_intent_changes_nothing_for_a_directory_or_a_file() {
+    // Only a bundle is ambiguous; every other kind activates the same way
+    // whether or not the modifier was held.
+    let mut browser = Browser::open_root(activation_source()).expect("root");
+    assert_eq!(
+        browser.activate_selected(BundleIntent::Browse),
+        Ok(Activation::Descended)
+    );
+    assert_eq!(browser.path(), "/Docs");
+
+    let mut browser = Browser::open_root(activation_source()).expect("root");
+    browser.select(2).expect("select notes.txt");
+    assert_eq!(
+        browser.activate_selected(BundleIntent::Browse),
+        Ok(Activation::OpenFile {
+            path: "/notes.txt".to_string()
+        })
+    );
+    assert!(browser.is_root());
+}
+
+#[test]
+fn browsing_an_unreadable_bundle_fails_closed_and_stays_put() {
+    let mut dirs = BTreeMap::new();
+    dirs.insert(
+        "/".to_string(),
+        encoded_stream(&[(b"Sealed.app", FileKind::Directory)]),
+    );
+    // `/Sealed.app` is deliberately absent from the tree, so listing it fails.
+    let mut browser = Browser::open_root(tree_source(dirs)).expect("root");
+    assert!(matches!(
+        browser.activate_selected(BundleIntent::Browse),
+        Err(BrowseError::Source(_))
+    ));
+    assert_eq!(browser.path(), "/");
+    assert_eq!(browser.selected_name(), Some("Sealed.app"));
+}
+
+#[test]
 fn activating_a_file_names_it_for_open_without_descending() {
     let mut browser = Browser::open_root(activation_source()).expect("root");
     browser.select(2).expect("select notes.txt");
     assert_eq!(
-        browser.activate_selected(),
+        browser.activate_selected(BundleIntent::Launch),
         Ok(Activation::OpenFile {
             path: "/notes.txt".to_string()
         })
@@ -3337,7 +3402,7 @@ fn activate_index_spells_a_nested_target_path() {
     // The named target is spelled through the one shared path spelling, so it
     // reflects the current directory, not just the leaf name.
     assert_eq!(
-        browser.activate_index(0),
+        browser.activate_index(0, BundleIntent::Launch),
         Ok(Activation::OpenFile {
             path: "/System/motd.txt".to_string()
         })
@@ -3351,13 +3416,19 @@ fn activating_with_no_selection_is_refused() {
     browser.open_index(2).expect("enter System");
     browser.open_index(0).expect("enter the empty Fonts");
     assert_eq!(browser.selected_name(), None);
-    assert_eq!(browser.activate_selected(), Err(BrowseError::NoSuchEntry));
+    assert_eq!(
+        browser.activate_selected(BundleIntent::Launch),
+        Err(BrowseError::NoSuchEntry)
+    );
 }
 
 #[test]
 fn activating_an_out_of_range_index_is_refused() {
     let mut browser = Browser::open_root(activation_source()).expect("root");
-    assert_eq!(browser.activate_index(99), Err(BrowseError::NoSuchEntry));
+    assert_eq!(
+        browser.activate_index(99, BundleIntent::Launch),
+        Err(BrowseError::NoSuchEntry)
+    );
     // The browser is untouched by the refused activation.
     assert!(browser.is_root());
 }
@@ -3374,7 +3445,7 @@ fn activating_an_unreadable_directory_fails_closed_and_stays_put() {
         .position(|e| e.name() == "Security")
         .expect("Security is listed");
     assert_eq!(
-        browser.activate_index(security),
+        browser.activate_index(security, BundleIntent::Launch),
         Err(BrowseError::Source(Errno::PermissionDenied))
     );
     // The descent failed before any state changed: the browser is still on
@@ -7545,7 +7616,10 @@ fn activating_a_link_acts_on_what_it_names() {
     // A link to a directory descends *through* the link, so the browser's
     // location reads as the user navigated.
     select_named(&mut browser, "Docs");
-    assert_eq!(browser.activate_selected(), Ok(Activation::Descended));
+    assert_eq!(
+        browser.activate_selected(BundleIntent::Launch),
+        Ok(Activation::Descended)
+    );
     assert_eq!(browser.components(), ["Docs".to_string()].as_slice());
     browser.go_up().expect("climb back");
 
@@ -7553,7 +7627,7 @@ fn activating_a_link_acts_on_what_it_names() {
     // final link on open, so the link's own path names the right bytes.
     select_named(&mut browser, "notes");
     assert_eq!(
-        browser.activate_selected(),
+        browser.activate_selected(BundleIntent::Launch),
         Ok(Activation::OpenFile {
             path: "/notes".to_string()
         })
@@ -7564,7 +7638,7 @@ fn activating_a_link_acts_on_what_it_names() {
     // the program is not that shape.
     select_named(&mut browser, "Editor");
     assert_eq!(
-        browser.activate_selected(),
+        browser.activate_selected(BundleIntent::Launch),
         Ok(Activation::LaunchBundle {
             path: "/Apps/Editor.app".to_string()
         })
@@ -7573,7 +7647,7 @@ fn activating_a_link_acts_on_what_it_names() {
     // A link that names nothing has nothing to activate.
     select_named(&mut browser, "gone");
     assert_eq!(
-        browser.activate_selected(),
+        browser.activate_selected(BundleIntent::Launch),
         Err(crate::error::BrowseError::Source(Errno::NotFound))
     );
 }

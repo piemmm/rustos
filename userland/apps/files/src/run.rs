@@ -83,6 +83,7 @@ extern crate alloc;
 
 pub mod appbar;
 pub mod command;
+pub mod gesture;
 pub mod location;
 pub mod operation;
 pub mod sidebar;
@@ -121,7 +122,7 @@ mod program {
     use tairix_browse::{
         applications_for, association_from_appinfo, empty_trash_plan, paste_strategy, plan_paste,
         suggest_new_dir_name, trash_dest_path, trash_dir, trash_strategy, validate_new_name,
-        Activation, AppAssociation, Browser, BundleSource, ClickKind, Clipboard, ClipboardOp,
+        Activation, AppAssociation, Browser, BundleIntent, BundleSource, Clipboard, ClipboardOp,
         ContextCommand, ContextMenuModel, CopyAction, CopyCursor, CopyKind, CopyWalk, DeleteAction,
         DeleteDisposition, DeletePlan, DeleteWalk, DirectorySource, DoubleClickTracker, EntryKind,
         ManagerChrome, ManagerTool, ManagerToolModel, OwnerChange, PasteItem, PasteStrategy,
@@ -154,6 +155,9 @@ mod program {
 
     use crate::appbar;
     use crate::command::{self, unlistable_reason, Command, Role, UsageError, USAGE};
+    use crate::gesture::{
+        self, bundle_intent, AfterHandoff, MenuOnSingle, PrimaryPress, SecondaryPress,
+    };
     use crate::location::{leave_directory, location_title, retitle, Leave};
     use crate::operation::{operation_control, OperationControl};
     use crate::sidebar::{self, press_point};
@@ -1718,15 +1722,25 @@ mod program {
                 ..
             } => {
                 // Alt+Enter opens the Properties overlay, a plain Enter
-                // activates the selection (needs the launcher for a bundle
-                // launch), Delete opens the delete confirmation, and
-                // Ctrl+X/C/V drive the clipboard verbs (all need the
-                // overlay/clipboard/launcher state); every other navigation-
-                // mode key is handled by the shared `apply_nav_key`.
+                // activates the selection and Shift+Enter lists a bundle
+                // rather than running it — the keyboard spelling of the
+                // pointer's shift-double-click, so the two cannot diverge —
+                // Delete opens the delete confirmation, and Ctrl+X/C/V drive
+                // the clipboard verbs (all need the overlay/clipboard/launcher
+                // state); every other navigation-mode key is handled by the
+                // shared `apply_nav_key`.
                 if matches!(key, KeyValue::Named(NamedKeyCode::Enter)) && modifiers.alt {
                     begin_properties(browser, &mut overlays.properties)
                 } else if matches!(key, KeyValue::Named(NamedKeyCode::Enter)) {
-                    activate(browser, launcher, scale, theme, viewport)
+                    activate(
+                        browser,
+                        launcher,
+                        scale,
+                        theme,
+                        viewport,
+                        bundle_intent(modifiers.shift),
+                        AfterHandoff::Keep,
+                    )
                 } else if matches!(key, KeyValue::Named(NamedKeyCode::Delete)) {
                     begin_delete(browser, &mut overlays.delete)
                 } else if let Some(verb) = clipboard_verb(*key, *modifiers) {
@@ -1886,7 +1900,14 @@ mod program {
     ) -> (bool, bool) {
         let theme = canvas.theme();
         let scale = canvas.scale;
-        let WindowEvent::Pointer { x, y, action, .. } = event else {
+        let WindowEvent::Pointer {
+            x,
+            y,
+            action,
+            modifiers,
+            ..
+        } = event
+        else {
             return (false, false);
         };
         let point = Point::new(
@@ -1909,12 +1930,21 @@ mod program {
             return (false, false);
         }
         if let Some(point) = secondary_press_point(*action, *x, *y) {
-            return open_context_menu(browser, overlays, scale, theme, viewport, point);
+            return apply_secondary_press(
+                browser,
+                overlays,
+                launcher,
+                scale,
+                theme,
+                viewport,
+                point,
+                MenuOnSingle::Open,
+            );
         }
         match press_point(*action, *x, *y) {
-            Some(point) => {
-                apply_primary_press(browser, overlays, launcher, canvas, viewport, point)
-            }
+            Some(point) => apply_primary_press(
+                browser, overlays, launcher, canvas, viewport, point, *modifiers,
+            ),
             None => (false, false),
         }
     }
@@ -2039,7 +2069,10 @@ mod program {
     /// drives, over the shared [`Browser::activate_selected`] so the file
     /// manager and the trusted picker act on the same [`Activation`]. The
     /// engine decides *what* the target is; the launch stays here, in the app's
-    /// own capability-checked tail under the user's identity.
+    /// own capability-checked tail under the user's identity. `intent` says
+    /// what the gesture meant for a bundle (run it, or list what is inside it)
+    /// and `handoff` whether the window's job ends with a successful launch or
+    /// open.
     ///
     /// * [`Activation::Descended`] — the engine descended into a directory (its
     ///   own transactional, fail-closed navigation); the selection is revealed
@@ -2064,19 +2097,21 @@ mod program {
         scale: Scale,
         theme: &Theme,
         viewport: Rect,
+        intent: BundleIntent,
+        handoff: AfterHandoff,
     ) -> (bool, bool) {
-        match browser.activate_selected() {
+        match browser.activate_selected(intent) {
             Ok(Activation::Descended) => {
                 tairix_browse::render::reveal_selection(browser, scale, theme, viewport);
                 (true, false)
             }
             Ok(Activation::LaunchBundle { path }) => {
                 launcher.borrow_mut().launch(&path);
-                (false, false)
+                (false, handoff == AfterHandoff::CloseWindow)
             }
             Ok(Activation::OpenFile { path }) => {
                 launcher.borrow_mut().open_file(&path);
-                (false, false)
+                (false, handoff == AfterHandoff::CloseWindow)
             }
             Err(_) => (false, false),
         }
@@ -3189,9 +3224,10 @@ mod program {
     ///   descend / launch a bundle / open a file, through the very same
     ///   [`activate`] dispatch a keyboard `Enter` drives, so pointer and
     ///   keyboard can never diverge — and merely selected on a first or lone
-    ///   press. The monotonic [`tairix_rt::clock_get`] needs no capability, and
-    ///   the pairing rule lives once in the shared engine
-    ///   ([`DoubleClickTracker`]);
+    ///   press. Held shift lists a bundle instead of running it, the pointer
+    ///   spelling of `Shift+Enter`. The monotonic [`tairix_rt::clock_get`]
+    ///   needs no capability, and the pairing rule lives once in the shared
+    ///   engine ([`DoubleClickTracker`]);
     /// * anything else lands on the read-only **chrome** and routes through
     ///   [`apply_chrome_press`].
     ///
@@ -3209,6 +3245,7 @@ mod program {
         canvas: Canvas<'_>,
         viewport: Rect,
         point: Point,
+        modifiers: AbiModifiers,
     ) -> (bool, bool) {
         let theme = canvas.theme();
         let scale = canvas.scale;
@@ -3224,22 +3261,23 @@ mod program {
             overlays.double_click.reset();
             return apply_manager_tool(browser, overlays, scale, theme, viewport, tool);
         }
-        if let Some(index) =
-            tairix_browse::render::entry_index_at(browser, scale, theme, viewport, point)
-        {
-            return match overlays
-                .double_click
-                .register(tairix_rt::clock_get(), index)
-            {
-                ClickKind::Double => {
-                    let _ = browser.select(index);
-                    activate(browser, launcher, scale, theme, viewport)
-                }
-                ClickKind::Single => (browser.select(index).is_ok(), false),
-            };
+        let hit = tairix_browse::render::entry_index_at(browser, scale, theme, viewport, point);
+        match gesture::primary_press(&mut overlays.double_click, tairix_rt::clock_get(), hit) {
+            PrimaryPress::Activate { index } => {
+                let _ = browser.select(index);
+                activate(
+                    browser,
+                    launcher,
+                    scale,
+                    theme,
+                    viewport,
+                    bundle_intent(modifiers.shift),
+                    AfterHandoff::Keep,
+                )
+            }
+            PrimaryPress::Select { index } => (browser.select(index).is_ok(), false),
+            PrimaryPress::Chrome => apply_chrome_press(browser, canvas, viewport, point),
         }
-        overlays.double_click.reset();
-        apply_chrome_press(browser, canvas, viewport, point)
     }
 
     /// Apply one primary press that landed on the read-only **chrome** (the
@@ -3286,30 +3324,77 @@ mod program {
         ))
     }
 
-    /// Open the right-click context menu at window-local `point`.
+    /// Apply one **secondary** press at window-local `point`, acting on what
+    /// the shared [`gesture::secondary_press`] decision makes of it.
     ///
-    /// The item under the pointer is selected first so the menu's commands act
-    /// on what was clicked; a right-click on empty space (or the chrome) clears
-    /// the selection so the menu offers only the directory-scoped Paste. The
-    /// menu is built from the shared [`ContextMenuModel`] with the app's own
-    /// held-clipboard state, so an inapplicable command renders disabled. The
-    /// menu itself performs nothing — a chosen command runs the user's own
-    /// permission-checked verb in [`dispatch_context_command`], no new
-    /// authority.
-    fn open_context_menu<S: DirectorySource>(
+    /// A right-double-click runs the very same [`activate`] dispatch a primary
+    /// double-click does and then closes this window, because the entry has
+    /// been handed to another program and there is nothing left here to do. A
+    /// lone press is the ordinary right-click; `single` says whether that means
+    /// opening the context menu or leaving an already-open one alone.
+    #[allow(clippy::too_many_arguments)] // The press, its context, and the two policies it needs.
+    fn apply_secondary_press<S: DirectorySource>(
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
+        launcher: &RefCell<Launcher>,
         scale: Scale,
         theme: &Theme,
         viewport: Rect,
         point: Point,
+        single: MenuOnSingle,
     ) -> (bool, bool) {
-        if let Some(index) =
-            tairix_browse::render::entry_index_at(browser, scale, theme, viewport, point)
-        {
-            let _ = browser.select(index);
-        } else {
-            browser.clear_selection();
+        let hit = tairix_browse::render::entry_index_at(browser, scale, theme, viewport, point);
+        match gesture::secondary_press(
+            &mut overlays.double_click,
+            tairix_rt::clock_get(),
+            hit,
+            single,
+        ) {
+            SecondaryPress::OpenAndLeave { index } => {
+                // The menu the first press opened is superseded by the gesture
+                // it turned out to begin.
+                let repaint = overlays.menu.take().is_some();
+                let _ = browser.select(index);
+                let (changed, close) = activate(
+                    browser,
+                    launcher,
+                    scale,
+                    theme,
+                    viewport,
+                    BundleIntent::Launch,
+                    AfterHandoff::CloseWindow,
+                );
+                (changed || repaint, close)
+            }
+            SecondaryPress::OpenMenu { index } => {
+                open_context_menu(browser, overlays, point, index)
+            }
+            SecondaryPress::Ignore => (false, false),
+        }
+    }
+
+    /// Open the right-click context menu at window-local `point`, on the item
+    /// `index` the caller's hit-test resolved (`None` for empty space or the
+    /// chrome).
+    ///
+    /// The item is selected first so the menu's commands act on what was
+    /// clicked; a right-click on nothing clears the selection so the menu
+    /// offers only the directory-scoped Paste. The menu is built from the
+    /// shared [`ContextMenuModel`] with the app's own held-clipboard state, so
+    /// an inapplicable command renders disabled. The menu itself performs
+    /// nothing — a chosen command runs the user's own permission-checked verb
+    /// in [`dispatch_context_command`], no new authority.
+    fn open_context_menu<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        overlays: &mut Overlays,
+        point: Point,
+        index: Option<usize>,
+    ) -> (bool, bool) {
+        match index {
+            Some(index) => {
+                let _ = browser.select(index);
+            }
+            None => browser.clear_selection(),
         }
         let model = ContextMenuModel::for_browser(browser, overlays.clipboard.is_some());
         overlays.menu = Some(ContextMenu {
@@ -3324,7 +3409,10 @@ mod program {
     /// `Escape` dismisses it. A primary-button press on an enabled command runs
     /// that command's verb (and closes the menu); a press off the menu, or on a
     /// disabled row, simply dismisses it (fail closed — a disabled row never
-    /// acts). Every other event leaves the menu open.
+    /// acts). A **secondary** press is the second half of a right-double-click:
+    /// on the same item within the interval it supersedes this menu and opens
+    /// the entry, and anything else leaves the menu exactly as it is. Every
+    /// other event leaves the menu open.
     fn apply_menu_event<S: DirectorySource>(
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
@@ -3347,6 +3435,20 @@ mod program {
                 (true, false)
             }
             WindowEvent::Pointer { x, y, action, .. } => {
+                // A second secondary press completes the "open this and leave"
+                // gesture the first one began, superseding the menu it opened.
+                if let Some(point) = secondary_press_point(*action, *x, *y) {
+                    return apply_secondary_press(
+                        browser,
+                        overlays,
+                        launcher,
+                        scale,
+                        theme,
+                        viewport,
+                        point,
+                        MenuOnSingle::Leave,
+                    );
+                }
                 let Some(point) = press_point(*action, *x, *y) else {
                     return (false, false);
                 };
@@ -3389,7 +3491,15 @@ mod program {
         command: ContextCommand,
     ) -> (bool, bool) {
         match command {
-            ContextCommand::Open => activate(browser, launcher, scale, theme, viewport),
+            ContextCommand::Open => activate(
+                browser,
+                launcher,
+                scale,
+                theme,
+                viewport,
+                BundleIntent::Launch,
+                AfterHandoff::Keep,
+            ),
             // Open With… opens a submenu anchored at the right-click point, so
             // it is dispatched by `apply_menu_event` (which holds the anchor)
             // rather than here.

@@ -939,6 +939,7 @@ dependencies = [
  "tairix-greeter",
  "tairix-help",
  "tairix-icon",
+ "tairix-keymap",
  "tairix-log",
  "tairix-parallel",
  "tairix-path",

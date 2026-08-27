@@ -1534,6 +1534,72 @@ pub enum ResizeEdge {
     BottomRight,
 }
 
+/// How far a resizable window's resize zones reach in from its outer edges,
+/// in physical pixels at a given scale and theme.
+///
+/// Two reaches, not one: an *edge* zone only has to be wide enough to grab,
+/// while a *corner* zone is a square where two edges meet and would otherwise
+/// shrink to that width at its tip — the hardest thing on the frame to hit,
+/// and the one that resizes both axes at once. The corner is therefore the
+/// wider of the two, and is clamped never to fall below the edge reach so the
+/// very corner can never classify as a plain edge.
+///
+/// Measured from the **outer** rectangle, so the thin drawn furniture band and
+/// the client pixels the zone reaches over are one continuous region rather
+/// than two zones that could disagree about where a corner ends.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct GrabReach {
+    /// The left/right/bottom edge reach, at least one pixel so a resizable
+    /// window always has a grabbable edge.
+    pub edge: u32,
+    /// The bottom-left/bottom-right corner reach along each axis.
+    pub corner: u32,
+}
+
+impl GrabReach {
+    /// The reaches a resizable window's frame grabs by at `scale` under
+    /// `theme`.
+    #[must_use]
+    pub fn of(scale: Scale, theme: &Theme) -> Self {
+        let metrics = theme.metrics();
+        let edge = scale.scale_length(metrics.resize_edge_grab).max(1);
+        Self {
+            edge,
+            corner: scale.scale_length(metrics.resize_corner_grab).max(edge),
+        }
+    }
+
+    /// The resize edge (or corner) `point` falls in within the outer
+    /// rectangle `bounds`, or `None` when it is clear of every edge.
+    ///
+    /// A corner wins over the two edges that form it, and the top edge is
+    /// never a resize edge — the title bar lives there, and it is resolved
+    /// before this is reached.
+    fn edge_at(self, bounds: Rect, point: Point) -> Option<ResizeEdge> {
+        let near_left = |reach: u32| point.x < bounds.left().saturating_add(to_i32(reach));
+        let near_right = |reach: u32| point.x >= bounds.right().saturating_sub(to_i32(reach));
+        let near_bottom = |reach: u32| point.y >= bounds.bottom().saturating_sub(to_i32(reach));
+        if near_bottom(self.corner) {
+            if near_left(self.corner) {
+                return Some(ResizeEdge::BottomLeft);
+            }
+            if near_right(self.corner) {
+                return Some(ResizeEdge::BottomRight);
+            }
+        }
+        if near_bottom(self.edge) {
+            return Some(ResizeEdge::Bottom);
+        }
+        if near_left(self.edge) {
+            return Some(ResizeEdge::Left);
+        }
+        if near_right(self.edge) {
+            return Some(ResizeEdge::Right);
+        }
+        None
+    }
+}
+
 /// Where a point falls within a window frame.
 ///
 /// This is the frame's furniture hit map: it classifies every point as either
@@ -1717,27 +1783,12 @@ impl WindowFrame {
     ///
     /// This is the plain frame inset for every window, resizable or not: a
     /// visible band wide enough to grab would waste space an app's content
-    /// could otherwise fill (the resize hit zone overlaps the client's outer
-    /// pixels instead — see [`Self::grab_overlap`]). Never thinner than the
+    /// could otherwise fill (the resize hit zone reaches over the client's
+    /// outer pixels instead — see [`GrabReach`]). Never thinner than the
     /// frame border, so a rim always draws.
     fn band_inset(scale: Scale, theme: &Theme) -> u32 {
         let (_, _, inset_amt) = Self::edges(scale, theme);
         inset_amt
-    }
-
-    /// How far a resizable window's resize-edge hit zone reaches past the
-    /// (thin) furniture band, into the client's own outer pixels.
-    ///
-    /// The band shrank to the plain frame inset on every window, so a
-    /// resizable window's furniture alone is too thin to grab reliably. The
-    /// theme's `hit_slop` — invisible padding around a hit target — is the
-    /// natural fit: unlike `resize_grabber_extent` (the corner grabber's
-    /// *visible* affordance size, unrelated to hit-testing) it exists solely
-    /// to widen a hit region without changing anything drawn, exactly the
-    /// trade-off macOS, GNOME, and Windows make for an invisible resize
-    /// border.
-    fn grab_overlap(scale: Scale, theme: &Theme) -> u32 {
-        scale.scale_length(theme.metrics().hit_slop)
     }
 
     /// The rim this frame draws its shape with, at the active scale and theme.
@@ -1862,12 +1913,16 @@ impl WindowFrame {
     /// The client *viewport* stays exactly [`Self::layout`]'s `client` rect —
     /// an app's content is never inset further than the plain frame band. The
     /// resize **hit** zone is deliberately wider: on a resizable window it
-    /// overlaps the client's outermost pixels — the theme's invisible hit
-    /// slop — so a grabbable edge costs no visible space. A press landing
-    /// there is reported as [`FurniturePart::ResizeEdge`], not
-    /// [`FurniturePart::Client`] — those outermost app pixels are still drawn
-    /// by the app but no longer deliver pointer input to it, the accepted
-    /// trade-off for an invisible border.
+    /// reaches in from the outer edge far enough to grab
+    /// ([`GrabReach`]), which over a thin band means it overlaps the client's
+    /// outermost pixels. A press landing there is reported as
+    /// [`FurniturePart::ResizeEdge`], not [`FurniturePart::Client`] — those
+    /// outermost app pixels are still drawn by the app but no longer deliver
+    /// pointer input to it, the accepted trade-off for an invisible border.
+    ///
+    /// The title bar is resolved first and keeps its whole band: a window is
+    /// dragged from its title bar far more often than it is resized from the
+    /// sliver of edge beside one, so the resize zones start below it.
     #[must_use]
     pub fn hit(&self, bounds: Rect, scale: Scale, theme: &Theme, point: Point) -> FurniturePart {
         if !bounds.contains(point) {
@@ -1880,41 +1935,17 @@ impl WindowFrame {
                 TitleHit::Drag => FurniturePart::TitleBar,
             };
         }
+        let inside = if layout.client.contains(point) {
+            FurniturePart::Client
+        } else {
+            FurniturePart::Frame
+        };
         if !self.furniture.resizable {
-            return if layout.client.contains(point) {
-                FurniturePart::Client
-            } else {
-                FurniturePart::Frame
-            };
+            return inside;
         }
-        if layout.client.contains(point) {
-            let grab = to_i32(Self::grab_overlap(scale, theme));
-            let left = point.x < layout.client.left().saturating_add(grab);
-            let right = point.x >= layout.client.right().saturating_sub(grab);
-            let bottom = point.y >= layout.client.bottom().saturating_sub(grab);
-            return Self::resize_edge(left, right, bottom)
-                .map_or(FurniturePart::Client, FurniturePart::ResizeEdge);
-        }
-        let left = point.x < layout.client.left();
-        let right = point.x >= layout.client.right();
-        let bottom = point.y >= layout.client.bottom();
-        Self::resize_edge(left, right, bottom)
-            .map_or(FurniturePart::Frame, FurniturePart::ResizeEdge)
-    }
-
-    /// The resize edge (or corner) `left`/`right`/`bottom` proximity flags
-    /// select, or `None` when none of them are set. Shared by the thin
-    /// furniture band and the client-overlap zone in [`Self::hit`], so the
-    /// edge-vs-corner priority is defined once.
-    fn resize_edge(left: bool, right: bool, bottom: bool) -> Option<ResizeEdge> {
-        match (left, right, bottom) {
-            (true, _, true) => Some(ResizeEdge::BottomLeft),
-            (_, true, true) => Some(ResizeEdge::BottomRight),
-            (true, _, false) => Some(ResizeEdge::Left),
-            (_, true, false) => Some(ResizeEdge::Right),
-            (false, false, true) => Some(ResizeEdge::Bottom),
-            _ => None,
-        }
+        GrabReach::of(scale, theme)
+            .edge_at(bounds, point)
+            .map_or(inside, FurniturePart::ResizeEdge)
     }
 
     /// Paint the frame chrome (rim, body background, title bar) into `surface`

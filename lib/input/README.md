@@ -10,10 +10,20 @@ This crate owns the device-level input types the desktop routes:
 - `Modifiers` / `NamedKey` / `Key` — the keyboard vocabulary: the held
   modifier keys, the named non-character keys (Enter, the arrows, F1–F12, …),
   and a `Key` that is either a produced `Char` or a `NamedKey`.
+- `ModifierState` / `ModifierKey` / `ModifierSide` — which modifier keys are
+  held. The one definition every keyboard producer shares: each maps its own
+  device's usage or keycode space to a `ModifierKey` + `ModifierSide` and feeds
+  the edge here, so the left/right collapsing rule (releasing one shift key
+  while the other is held is not a change) and the "did the visible set
+  actually change?" test cannot differ between two drivers.
 - `InputEvent` — what a device reports: the pointer's `PointerMoved`,
   `PointerPressed`, `PointerReleased` (button events act at the pointer's
-  current position, which a router tracks from the motion events) and the
-  keyboard's `KeyPressed` / `KeyReleased`, delivered to the focused surface.
+  current position, which a router tracks from the motion events), the
+  keyboard's `KeyPressed` / `KeyReleased`, delivered to the focused surface,
+  and `ModifiersChanged` — a modifier key produces no character and is no
+  `NamedKey`, so it reaches no surface as a key, but the state it leaves
+  behind qualifies gestures that are not keys at all (a shift-click). The seat
+  keeps the current set from these edges and stamps it onto what it routes.
 - `PointerFocus` — the *derived* half: `Entered { at }` / `Left`, the
   enter/leave pair a seat hands to a surface's router. No device produces it;
   the seat resolves it from the window stack, which is the one fact a surface

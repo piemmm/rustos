@@ -148,7 +148,11 @@ can never diverge in navigation semantics, listing policy, or look.
   *descended into* by the engine itself (its own fail-closed navigation); a
   bundle is named as `Activation::LaunchBundle` for the caller to launch
   through the ordinary signed app-load gate; a file is named as
-  `Activation::OpenFile` for the caller to open in the associated viewer. The
+  `Activation::OpenFile` for the caller to open in the associated viewer. A
+  bundle is both a program and a directory, so the caller passes a
+  `BundleIntent`: `Launch` runs it, `Browse` descends into it and returns
+  `Descended` like any other directory — the caller names what the *gesture*
+  meant, never the kind. The
   target's absolute path is spelled through the one shared `absolute_path`, so
   a launch or open can never name a different node than the browser shows, and
   a name that cannot be spelled fails closed. The engine holds no launch or
@@ -156,16 +160,18 @@ can never diverge in navigation semantics, listing policy, or look.
   performs the spawn or the `fs_open` (so the read-only picker never launches).
 - **Double-click detection** (`click`, `DoubleClickTracker`,
   `plans/NEW-FILEMANAGER.md` FM12): the one pure rule that turns a stream of
-  primary presses into single-click and double-click gestures, so a pointer
+  presses into single-click and double-click gestures, so a pointer
   double-click on an item runs the very same `Activation` a keyboard `Enter`
-  does (§2.2). `register(now_ns, index)` pairs a press with the previous one
-  only when it lands on the *same* item within `DOUBLE_CLICK_INTERVAL_NS`
-  (half a second); a completed double consumes both presses (a third quick
-  press starts a fresh single), a non-monotonic clock reading fails closed to
-  a single, and `reset` breaks the pair when an intervening chrome click
+  does (§2.2). `register(now_ns, index, button)` pairs a press with the
+  previous one only when it lands on the *same* item with the *same* button
+  within `DOUBLE_CLICK_INTERVAL_NS` (half a second) — the two buttons mean
+  different gestures, so one press of each is two begun rather than one
+  completed; a completed double consumes both presses (a third quick press
+  starts a fresh single), a non-monotonic clock reading fails closed to a
+  single, and `reset` breaks the pair when an intervening chrome click
   interrupts it. It holds no authority and does no I/O — the app supplies the
-  hit-test index and the capability-free monotonic clock and performs the
-  activation itself.
+  hit-test index, the button, and the capability-free monotonic clock and
+  performs the activation itself.
 - **"Open With…" association** (`open_with`, `plans/NEW-FILEMANAGER.md` FM6b):
   the pure type→bundle model behind offering a file to a chosen application.
   A file's content type is the shared registry's (`media_for_name`), so the

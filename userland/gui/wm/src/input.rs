@@ -280,6 +280,10 @@ struct MoveGrab {
     /// [`Rect::EMPTY`] for an undecorated window, which is not clamped at all
     /// — it has no move surface of its own to keep reachable.
     drag: Rect,
+    /// The button whose press started the drag. Only *its* release ends the
+    /// gesture, so a stray click of the other button mid-drag cannot drop the
+    /// window somewhere the user did not let go.
+    button: PointerButton,
 }
 
 /// An in-flight scrollbar thumb drag: the window, which bar is being
@@ -363,6 +367,12 @@ pub struct InputRouter {
     /// window manager sees a pointer over its own decorations, so nothing
     /// else can clear one.
     frame_hover: Option<WindowId>,
+    /// The modifiers the seat currently holds, from the key and
+    /// modifier-edge events routed through here. A modifier key produces no
+    /// key a surface can see, so this is the only place the state exists on
+    /// the desktop side — and it is what qualifies a *pointer* gesture as a
+    /// shift-click.
+    modifiers: Modifiers,
 }
 
 impl InputRouter {
@@ -384,6 +394,17 @@ impl InputRouter {
     #[must_use]
     pub const fn focused(&self) -> Option<WindowId> {
         self.focused
+    }
+
+    /// The modifiers the seat currently holds.
+    ///
+    /// The desktop stamps this onto the pointer events it delivers, so an
+    /// application can qualify a click by a modifier without shadowing the
+    /// seat's state from key events it may never be sent (a modifier key
+    /// reaches no surface as a key).
+    #[must_use]
+    pub const fn modifiers(&self) -> Modifiers {
+        self.modifiers
     }
 
     /// `true` while an interactive move-grab is in progress.
@@ -523,14 +544,26 @@ impl InputRouter {
             InputEvent::PointerPressed {
                 button: PointerButton::Secondary,
             } => self.press_secondary(compositor),
+            InputEvent::PointerReleased {
+                button: PointerButton::Secondary,
+            } => self.release_secondary(),
             InputEvent::PointerPressed { .. } | InputEvent::PointerReleased { .. } => {
                 InputResponse::Ignored
             }
             InputEvent::KeyPressed { key, modifiers } => {
+                self.modifiers = modifiers;
                 self.deliver_key(key, modifiers, true, compositor)
             }
             InputEvent::KeyReleased { key, modifiers } => {
+                self.modifiers = modifiers;
                 self.deliver_key(key, modifiers, false, compositor)
+            }
+            // A modifier edge changes no window and reaches no surface as a
+            // key; it only updates the state the desktop stamps onto what it
+            // routes.
+            InputEvent::ModifiersChanged { modifiers } => {
+                self.modifiers = modifiers;
+                InputResponse::Ignored
             }
         }
     }
@@ -603,7 +636,15 @@ impl InputRouter {
     /// Decorations call this when a press lands on a window's move
     /// handle (e.g. its title bar); the subsequent pointer motion then
     /// drags the window through [`InputResponse::Moved`].
+    ///
+    /// The drag is a primary-button gesture, so the primary release ends it.
     pub fn begin_move(&mut self, compositor: &Compositor) -> bool {
+        self.begin_move_with(PointerButton::Primary, compositor)
+    }
+
+    /// [`begin_move`](Self::begin_move) for a drag started by `button`: only
+    /// that button's release ends the gesture.
+    fn begin_move_with(&mut self, button: PointerButton, compositor: &Compositor) -> bool {
         let Some(window) = self.focused else {
             return false;
         };
@@ -631,12 +672,31 @@ impl InputRouter {
                 self.pointer.y.saturating_sub(origin.y),
             ),
             drag,
+            button,
         });
         true
     }
 
+    /// End a move-grab that `button` started, naming the window it moved.
+    ///
+    /// A grab another button started is left running: the gesture belongs to
+    /// the button still held down.
+    fn end_move(&mut self, button: PointerButton) -> Option<WindowId> {
+        let window = self.grab.filter(|grab| grab.button == button)?.window;
+        self.grab = None;
+        Some(window)
+    }
+
     /// Handle a primary-button press at the current pointer position.
+    ///
+    /// A press arriving while a move-grab of the *other* button is in flight
+    /// changes nothing: that gesture holds the pointer until its own button is
+    /// released, so this press must not restack, refocus, or start a second
+    /// interaction under the window being dragged.
     fn press_primary(&mut self, compositor: &mut Compositor) -> InputResponse {
+        if self.grab.is_some() {
+            return InputResponse::Ignored;
+        }
         // A fresh press supersedes any prior client grab; it is re-armed below
         // only when this press lands on client content.
         self.client_grab = None;
@@ -781,10 +841,32 @@ impl InputRouter {
     /// [`InputResponse::WindowControlAlternate`] so the embedder can offer
     /// the control's alternate gesture. The control itself neither arms nor
     /// changes appearance, and no window command runs.
+    ///
+    /// The title-bar drag region is the one exception to the raise: a
+    /// secondary press there drags the window **in place**, leaving the
+    /// z-order exactly as it was, so a window can be repositioned without
+    /// being brought over whatever is in front of it. Everything else about
+    /// the drag — the clamp, the motion, the [`InputResponse::Moved`] ticks —
+    /// is the primary drag's one path.
     fn press_secondary(&mut self, compositor: &mut Compositor) -> InputResponse {
+        if self.grab.is_some() {
+            return InputResponse::Ignored;
+        }
         let Some(window) = compositor.window_at(self.pointer) else {
             return InputResponse::DesktopSecondaryPressed;
         };
+        // Hit-tested before the raise below, which is what this gesture opts
+        // out of. Raising changes stacking only, so the answer is the same
+        // either side of it.
+        if matches!(
+            compositor.frame_hit(window, self.pointer),
+            Some(FurniturePart::TitleBar)
+        ) {
+            self.client_grab = None;
+            self.focused = Some(window);
+            self.begin_move_with(PointerButton::Secondary, compositor);
+            return InputResponse::FurniturePressed { window };
+        }
         compositor.raise(window);
         self.focused = Some(window);
         // Route the press through the frame furniture, which owns the one
@@ -1088,10 +1170,18 @@ impl InputRouter {
                 local: client_local(self.pointer, client),
             };
         }
-        match self.grab.take() {
-            Some(grab) => InputResponse::MoveEnded {
-                window: grab.window,
-            },
+        match self.end_move(PointerButton::Primary) {
+            Some(window) => InputResponse::MoveEnded { window },
+            None => InputResponse::Ignored,
+        }
+    }
+
+    /// Handle a secondary-button release: end a move-grab a secondary press
+    /// on a title bar started. A secondary press begins no other grab, so
+    /// there is nothing else for this release to conclude.
+    fn release_secondary(&mut self) -> InputResponse {
+        match self.end_move(PointerButton::Secondary) {
+            Some(window) => InputResponse::MoveEnded { window },
             None => InputResponse::Ignored,
         }
     }

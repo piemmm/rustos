@@ -25,8 +25,8 @@
 
 use tairix_abi::driver::input::{InputEvent, InputEventKind};
 use tairix_abi::input::KeyInput;
-use tairix_input::{Key, Modifiers, NamedKey};
-use tairix_keymap::key_input;
+use tairix_input::{Key, ModifierKey, ModifierSide, ModifierState, NamedKey};
+use tairix_keymap::{key_input, modifier_change};
 
 /// Linux `evdev` keycodes this producer recognises (`input-event-codes.h`).
 /// Only the constants the resolver and the modifier/lock tracking name are
@@ -105,16 +105,11 @@ const VALUE_RELEASE: i32 = 0;
 /// [`KeyInput`] records a driver injects through `key_inject`.
 ///
 /// The only state carried between [`feed`](Self::feed) calls is the held
-/// modifier bitmap and the two lock toggles, so a reload starts from a clean
+/// modifiers and the two lock toggles, so a reload starts from a clean
 /// state by constructing a fresh instance.
 #[derive(Debug, Default)]
 pub struct VirtioKeyboardConsole {
-    /// Bit `n` set ⇒ the modifier whose index is `n` (see [`modifier_index`])
-    /// is currently held. Tracking each of the eight modifier keys
-    /// independently — rather than four collapsed booleans — keeps releasing
-    /// one of a left/right pair from clearing the modifier while its sibling
-    /// is still held (mirrors the `lib/hid` console).
-    modifier_bits: u8,
+    modifiers: ModifierState,
     caps_lock: bool,
     num_lock: bool,
 }
@@ -124,22 +119,9 @@ impl VirtioKeyboardConsole {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            modifier_bits: 0,
+            modifiers: ModifierState::new(),
             caps_lock: false,
             num_lock: false,
-        }
-    }
-
-    /// The modifiers currently held, collapsing the left/right pairs.
-    fn modifiers(&self) -> Modifiers {
-        let held = |left: u8, right: u8| self.modifier_bits & ((1u8 << left) | (1u8 << right)) != 0;
-        Modifiers {
-            // Indices: ctrl 0/4, shift 1/5, alt 2/6, meta 3/7 (see
-            // [`modifier_index`]).
-            ctrl: held(0, 4),
-            shift: held(1, 5),
-            alt: held(2, 6),
-            meta: held(3, 7),
         }
     }
 
@@ -147,10 +129,14 @@ impl VirtioKeyboardConsole {
     /// record its key edge resolves to, or [`None`] when the edge produces no
     /// record.
     ///
-    /// Modifier edges and the lock keys update the internal state and produce
-    /// no record. A *press* or *release* of a printable or named key produces
-    /// the corresponding [`KeyInput::Pressed`] / [`KeyInput::Released`] record
-    /// carrying the resolved [`Key`] and the modifiers held; an unknown
+    /// A modifier edge that changes the *observable* set of held modifiers
+    /// produces a [`KeyInput::ModifiersChanged`] record — the desktop needs it
+    /// to qualify a gesture that is not a key (a shift-click) — while one that
+    /// does not (a repeat, or letting go of one shift key while the other is
+    /// held) produces nothing. The lock keys update the internal state and
+    /// produce no record. A *press* or *release* of a printable or named key
+    /// produces the corresponding [`KeyInput::Pressed`] / [`KeyInput::Released`]
+    /// record carrying the resolved [`Key`] and the modifiers held; an unknown
     /// keycode or a non-keyboard event produces nothing. Both edges are
     /// emitted so the desktop sees key-up as well as key-down; the text path
     /// ignores releases in the kernel arbiter.
@@ -170,13 +156,13 @@ impl VirtioKeyboardConsole {
             _ => return None,
         };
         let keycode = event.code;
-        if let Some(bit) = modifier_index(keycode) {
-            if pressed {
-                self.modifier_bits |= 1u8 << bit;
+        if let Some((key, side)) = modifier_of(keycode) {
+            let changed = if pressed {
+                self.modifiers.press(key, side)
             } else {
-                self.modifier_bits &= !(1u8 << bit);
-            }
-            return None;
+                self.modifiers.release(key, side)
+            };
+            return changed.then(|| modifier_change(self.modifiers.modifiers()));
         }
         if keycode == code::CAPS_LOCK {
             if pressed {
@@ -190,7 +176,7 @@ impl VirtioKeyboardConsole {
             }
             return None;
         }
-        let modifiers = self.modifiers();
+        let modifiers = self.modifiers.modifiers();
         let key = resolve_keycode(keycode, modifiers.shift, self.caps_lock, self.num_lock)?;
         // `key_input` returns `None` only for a `Key` with no wire form (a
         // function number outside `F1..=F12`); `resolve_keycode` never
@@ -199,19 +185,18 @@ impl VirtioKeyboardConsole {
     }
 }
 
-/// The modifier-bitmap index of a modifier keycode, or [`None`] if `keycode`
-/// is not a modifier key. The left/right members of each pair occupy indices
-/// `n` and `n + 4` so [`VirtioKeyboardConsole::modifiers`] can collapse them.
-fn modifier_index(keycode: u16) -> Option<u8> {
+/// The modifier a modifier keycode names, or [`None`] if `keycode` is not a
+/// modifier key.
+fn modifier_of(keycode: u16) -> Option<(ModifierKey, ModifierSide)> {
     Some(match keycode {
-        code::LEFT_CTRL => 0,
-        code::LEFT_SHIFT => 1,
-        code::LEFT_ALT => 2,
-        code::LEFT_META => 3,
-        code::RIGHT_CTRL => 4,
-        code::RIGHT_SHIFT => 5,
-        code::RIGHT_ALT => 6,
-        code::RIGHT_META => 7,
+        code::LEFT_CTRL => (ModifierKey::Ctrl, ModifierSide::Left),
+        code::LEFT_SHIFT => (ModifierKey::Shift, ModifierSide::Left),
+        code::LEFT_ALT => (ModifierKey::Alt, ModifierSide::Left),
+        code::LEFT_META => (ModifierKey::Meta, ModifierSide::Left),
+        code::RIGHT_CTRL => (ModifierKey::Ctrl, ModifierSide::Right),
+        code::RIGHT_SHIFT => (ModifierKey::Shift, ModifierSide::Right),
+        code::RIGHT_ALT => (ModifierKey::Alt, ModifierSide::Right),
+        code::RIGHT_META => (ModifierKey::Meta, ModifierSide::Right),
         _ => return None,
     })
 }

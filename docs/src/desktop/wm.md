@@ -928,8 +928,16 @@ as its colour. See [theming](./theming.md) for the four roles.
   decorating a window never shifts its content coordinates.
 - **The resize zone is invisible (it overlaps the client).** Because the band
   is only the thin rim, a resizable window's resize edges reach *inward* over
-  the client's outermost `hit_slop` pixels — the invisible resize border
-  macOS, GNOME, and Windows use. A press there is `ResizeEdge`, not `Client`:
+  the client's outermost pixels — the invisible resize border macOS, GNOME, and
+  Windows use. The reach is measured from the **outer** rectangle, so the thin
+  band and the client pixels beyond it are one continuous zone: `GrabReach`
+  resolves the theme's `resize_edge_grab` for the left, right, and bottom edges
+  and the wider `resize_corner_grab` for the two bottom corners, whose square
+  would otherwise narrow to the edge width at its very tip and be the hardest
+  thing on the frame to hit. The corner wins over the two edges that form it
+  and is clamped never to fall below the edge reach. The title bar keeps its
+  whole band — it is resolved first — so the zones start below it. A press
+  there is `ResizeEdge`, not `Client`:
   the app still draws those pixels but does not receive presses on them, the
   accepted trade for a border that costs no visible space. Since the router
   consults the frame first, that outer strip also wins over a window's
@@ -939,6 +947,20 @@ as its colour. See [theming](./theming.md) for the four roles.
   cursor selection, so crossing into the zone swaps the arrow for the double
   arrow of the axis that edge moves along, and a grab keeps that shape for the
   whole gesture (see [Pointer cursors](./cursors.md)).
+- **A secondary title-bar drag moves the window without restacking it.** A
+  right-press on the title-bar drag region begins the *same* move-grab a
+  primary press does — one clamp, one motion path, one `Moved` response — but
+  skips the raise, so the window can be repositioned while it stays where it is
+  in the stack. Every other secondary press still raises and focuses. A
+  move-grab records the button that began it, so only that button's release
+  ends it and a stray click of the other one mid-drag is consumed rather than
+  dropping the window.
+- **The seat's held modifiers live here.** A modifier key produces no character
+  and is no `NamedKey`, so it reaches no surface as a key; the driver reports
+  the edge as an `InputEvent::ModifiersChanged` instead and the router keeps the
+  current set (`InputRouter::modifiers`). The session stamps it onto every
+  `WindowEvent::Pointer` it delivers, which is what lets an app qualify a click
+  by a modifier (a shift-click) without shadowing state it could never see.
 - **Pointer and keyboard routing.** A title-bar press begins the cooperative
   move-grab; a command-control press captures the frame, feeds the click to
   `TitleBar::on_pointer`, and emits `WindowControl { window, control }` on the

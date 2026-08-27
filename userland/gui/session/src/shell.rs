@@ -58,9 +58,9 @@ use tairix_taskbar::{
 use tairix_theme::MotionInteraction;
 use tairix_wallpaper::Backdrop;
 use tairix_wm::{
-    cursor_cache, Color, Compositor, Corners, CursorController, InputEvent, InputResponse, Point,
-    Rect, Scale, Surface, WindowActivationState, WindowFrame, WindowFurnitureState, WindowId,
-    WindowSizeState,
+    cursor_cache, Color, Compositor, Corners, CursorController, InputEvent, InputResponse,
+    Modifiers, Point, Rect, Scale, Surface, WindowActivationState, WindowFrame,
+    WindowFurnitureState, WindowId, WindowSizeState,
 };
 
 use crate::apps::{picker_cells, prefetch_bar_icons, resolve_library_icons, thumbnail};
@@ -1675,6 +1675,13 @@ impl DesktopShell {
     /// decorations call this on a title-bar press.
     pub fn begin_move(&mut self, compositor: &Compositor) -> bool {
         self.router.begin_move(compositor)
+    }
+
+    /// The modifiers the seat currently holds, for stamping onto the pointer
+    /// events the session delivers to applications.
+    #[must_use]
+    pub const fn modifiers(&self) -> Modifiers {
+        self.router.modifiers()
     }
 
     /// Remove the bar and popup windows from `compositor` and forget them, so a

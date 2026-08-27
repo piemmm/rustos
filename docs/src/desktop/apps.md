@@ -381,6 +381,13 @@ identically (`AGENTS.md` §2.2). It is exhaustive over the three entry kinds:
 - a **regular file** returns `OpenFile { path }`, naming the file for the
   caller to open in the associated viewer.
 
+A bundle is both a program and a directory, so activating one is genuinely
+ambiguous and the caller passes a `BundleIntent` saying which the *gesture*
+meant: `Launch` runs it, `Browse` descends into it and returns `Descended`
+like any other directory (through the link, when the entry is one). The
+caller names the intent, never the kind — dispatch-by-kind stays in the
+engine.
+
 The target's absolute path is spelled through the one shared `absolute_path`,
 so a launch or open can never name a different node than the browser shows;
 a name that cannot be spelled as a valid, bounded absolute path fails closed
@@ -395,14 +402,40 @@ The `files.app` `Run` binary acts on this decision when the user presses
 `Enter`, **double-clicks an item**, and chooses **Open** from the right-click
 menu — all three route through the one shared `activate`, so a pointer
 double-click can never open something a keyboard `Enter` would not
-(`AGENTS.md` §2.2). The double-click is the shared, pure
-`click::DoubleClickTracker` (`plans/NEW-FILEMANAGER.md` FM12): a primary press
-selects the item under the pointer, and a second press on that *same* item
-within `DOUBLE_CLICK_INTERVAL_NS` (half a second, timed by the capability-free
-monotonic `clock_get`) activates it. The tracker is reset whenever a press
-lands on chrome (a toolbar tool) rather than an item, so a
-click *through* the chrome and back is never mistaken for a double-click; a
-non-monotonic clock reading fails closed to a single click. On any activation,
+(`AGENTS.md` §2.2). Four gestures reach it, and which one a press is comes
+from the app's own pure, host-tested `gesture` module:
+
+| gesture | what it does |
+|---|---|
+| double-click / `Enter` | activate: descend, run a bundle, or open a file |
+| shift-double-click / `Shift+Enter` | list a bundle's contents instead of running it |
+| right-click | open the context menu on the item |
+| right-double-click | activate, then close this window |
+
+The pairing is the shared, pure `click::DoubleClickTracker`
+(`plans/NEW-FILEMANAGER.md` FM12), keyed on the **button** as well as the item:
+a press selects the item under the pointer, and a second press *of the same
+button* on that *same* item within `DOUBLE_CLICK_INTERVAL_NS` (half a second,
+timed by the capability-free monotonic `clock_get`) completes the gesture. One
+press of each button is therefore two gestures begun, never one completed. The
+tracker is reset whenever a press lands on chrome (a toolbar tool) rather than
+an item, so a click *through* the chrome and back is never mistaken for a
+double-click; a non-monotonic clock reading fails closed to a single click.
+
+The modifier a shift-double-click carries reaches the app on the pointer event
+itself (`WindowEvent::Pointer`'s `modifiers`, stamped by the seat): a modifier
+key reaches no surface as a key, so an app could not otherwise know one is
+held. `Shift+Enter` is the same intent from the keyboard, resolved through the
+one `gesture::bundle_intent` spelling so the two cannot diverge.
+
+A right-double-click closes the window **only** once the entry has been handed
+to another program (`AfterHandoff::CloseWindow` on a `LaunchBundle` or
+`OpenFile`). A `Descended` never closes it whichever was asked for — the
+folder just listed *is* the window's new content, so closing it would leave the
+user with nothing. The context menu the first of the two presses opened is
+superseded by the gesture it turned out to begin.
+
+On any activation,
 a `Descended` reveals the selection and repaints, and a
 `LaunchBundle { path }` **launches the bundle** — its own `Launcher` spawns the
 bundle's own `Run` (`<path>/Run`) through the ordinary signed app-load gate

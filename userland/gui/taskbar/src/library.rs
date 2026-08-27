@@ -639,7 +639,10 @@ impl LibraryPopup {
                     None => changed_outcome(changed),
                 }
             }
-            InputEvent::PointerReleased { .. } => changed_outcome(changed),
+            InputEvent::PointerReleased { .. }
+            | InputEvent::KeyPressed { .. }
+            | InputEvent::KeyReleased { .. }
+            | InputEvent::ModifiersChanged { .. } => changed_outcome(changed),
             InputEvent::PointerScrolled { dx, dy } => {
                 // A popup whose rows fit lays out no bar and cannot scroll,
                 // so there is nothing to feed the wheel to.
@@ -651,9 +654,6 @@ impl LibraryPopup {
                     self.scroll_to(offset);
                     return PopupOutcome::Changed;
                 }
-                changed_outcome(changed)
-            }
-            InputEvent::KeyPressed { .. } | InputEvent::KeyReleased { .. } => {
                 changed_outcome(changed)
             }
         }

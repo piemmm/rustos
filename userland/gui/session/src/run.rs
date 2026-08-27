@@ -82,7 +82,7 @@ mod program {
     use tairix_abi::display_ipc::DISPLAY_ENDPOINT;
     use tairix_abi::driver::display::DisplayMode;
     use tairix_abi::elevate::{elevate_endpoint, ElevateReply, ElevateRequest};
-    use tairix_abi::input::KeyInput;
+    use tairix_abi::input::{KeyInput, Modifiers as AbiModifiers};
     use tairix_abi::notify_ipc::{NotifyRequest, NOTIFY_ENDPOINT, NOTIFY_MAX_REQUEST};
     use tairix_abi::pinboard_ipc::{PINBOARD_ENDPOINT, PINBOARD_MAX_REQUEST};
     use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
@@ -134,6 +134,7 @@ mod program {
     use tairix_greeter::{Verdict, Verifier};
     use tairix_help::{own_short_help, BundleHelp};
     use tairix_icon::{ArtworkKey, ArtworkResolver, InlineArtwork, Resolved};
+    use tairix_keymap::modifiers_to_abi;
     use tairix_log::{
         log, Event as LogEvent, Field as LogField, FieldValue as LogFieldValue, Level as LogLevel,
     };
@@ -3923,6 +3924,7 @@ mod program {
                                 action: PointerAction::Pressed(
                                     tairix_abi::input::PointerButtonCode::Primary,
                                 ),
+                                modifiers: pointer_modifiers(shell),
                             },
                         );
                     }
@@ -4015,6 +4017,7 @@ mod program {
                                 action: PointerAction::Pressed(
                                     tairix_abi::input::PointerButtonCode::Secondary,
                                 ),
+                                modifiers: pointer_modifiers(shell),
                             },
                         );
                     }
@@ -4203,6 +4206,7 @@ mod program {
                                 x,
                                 y,
                                 action: PointerAction::Moved,
+                                modifiers: pointer_modifiers(shell),
                             },
                         );
                     }
@@ -4231,6 +4235,7 @@ mod program {
                                 action: PointerAction::Released(
                                     tairix_abi::input::PointerButtonCode::Primary,
                                 ),
+                                modifiers: pointer_modifiers(shell),
                             },
                         );
                     }
@@ -5227,6 +5232,16 @@ mod program {
                 &WindowEvent::DesktopChanged { window_id, desktop },
             );
         }
+    }
+
+    /// The wire modifiers a pointer event delivered right now carries: the
+    /// seat's held set, in the ABI vocabulary.
+    ///
+    /// A modifier key reaches no surface as a key, so an application cannot
+    /// track the seat's state itself; stamping it here is what lets one
+    /// qualify a click (a shift-click) by what is held.
+    fn pointer_modifiers(shell: &DesktopShell) -> AbiModifiers {
+        modifiers_to_abi(shell.modifiers())
     }
 
     /// Deliver one app-ward event, tearing the owner's windows down when

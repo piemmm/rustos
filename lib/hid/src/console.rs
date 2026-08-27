@@ -22,8 +22,10 @@
 use tairix_abi::driver::input::{Input, InputEvent, InputEventKind};
 use tairix_abi::input::KeyInput;
 use tairix_abi::DriverError;
-use tairix_input::{Key, Modifiers, NamedKey};
-use tairix_keymap::key_input;
+use tairix_input::{Key, ModifierKey, ModifierSide, ModifierState, NamedKey};
+
+use crate::keyboard::MODIFIER_USAGE_BASE;
+use tairix_keymap::{key_input, modifier_change};
 
 /// HID usage of the Caps Lock key (HID Usage Tables, page `0x07`).
 const USAGE_CAPS_LOCK: u16 = 0x39;
@@ -31,11 +33,25 @@ const USAGE_CAPS_LOCK: u16 = 0x39;
 /// HID usage of the Num Lock / Clear key.
 const USAGE_NUM_LOCK: u16 = 0x53;
 
-/// First modifier usage (`LeftControl`); the eight modifiers occupy
-/// `0xE0..=0xE7`, matching [`crate::keyboard::MODIFIER_USAGE_BASE`].
-const USAGE_MODIFIER_FIRST: u16 = 0xE0;
-/// Last modifier usage (`RightGUI`).
-const USAGE_MODIFIER_LAST: u16 = 0xE7;
+/// The modifier a usage names, or [`None`] if it is not one of the eight
+/// modifiers the boot protocol reports at [`MODIFIER_USAGE_BASE`] (HID Usage
+/// Tables, page `0x07`).
+const fn modifier_of(usage: u16) -> Option<(ModifierKey, ModifierSide)> {
+    let Some(offset) = usage.checked_sub(MODIFIER_USAGE_BASE) else {
+        return None;
+    };
+    Some(match offset {
+        0 => (ModifierKey::Ctrl, ModifierSide::Left),
+        1 => (ModifierKey::Shift, ModifierSide::Left),
+        2 => (ModifierKey::Alt, ModifierSide::Left),
+        3 => (ModifierKey::Meta, ModifierSide::Left),
+        4 => (ModifierKey::Ctrl, ModifierSide::Right),
+        5 => (ModifierKey::Shift, ModifierSide::Right),
+        6 => (ModifierKey::Alt, ModifierSide::Right),
+        7 => (ModifierKey::Meta, ModifierSide::Right),
+        _ => return None,
+    })
+}
 
 /// `value` of a press edge in an [`InputEvent`].
 const VALUE_PRESS: i32 = 1;
@@ -63,12 +79,11 @@ pub trait ConsoleSink {
 /// bytes.
 ///
 /// The only state carried between [`feed`](Self::feed) calls is the held
-/// modifier bitmap and the two lock toggles, so a reload starts from a clean
+/// modifiers and the two lock toggles, so a reload starts from a clean
 /// state by constructing a fresh instance.
 #[derive(Debug, Default)]
 pub struct KeyboardConsole {
-    /// Bit `n` set ⇒ modifier usage `0xE0 + n` is currently held.
-    modifier_bits: u8,
+    modifiers: ModifierState,
     caps_lock: bool,
     num_lock: bool,
 }
@@ -78,20 +93,9 @@ impl KeyboardConsole {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            modifier_bits: 0,
+            modifiers: ModifierState::new(),
             caps_lock: false,
             num_lock: false,
-        }
-    }
-
-    /// The modifiers currently held, collapsing the left/right pairs.
-    fn modifiers(&self) -> Modifiers {
-        let held = |left: u8, right: u8| self.modifier_bits & ((1u8 << left) | (1u8 << right)) != 0;
-        Modifiers {
-            ctrl: held(0, 4),
-            shift: held(1, 5),
-            alt: held(2, 6),
-            meta: held(3, 7),
         }
     }
 
@@ -99,7 +103,11 @@ impl KeyboardConsole {
     /// [`KeyInput`] record its key edge resolves to, or [`None`] when the
     /// edge produces no record.
     ///
-    /// Modifier edges and the lock keys update the internal state and
+    /// A modifier edge that changes the *observable* set of held modifiers
+    /// produces a [`KeyInput::ModifiersChanged`] record — the desktop needs it
+    /// to qualify a gesture that is not a key (a shift-click) — while one that
+    /// does not (a repeat, or letting go of one shift key while the other is
+    /// held) produces nothing. The lock keys update the internal state and
     /// produce no record. A *press* or *release* of a printable or named
     /// key produces the corresponding [`KeyInput::Pressed`] /
     /// [`KeyInput::Released`] record carrying the resolved [`Key`] and the
@@ -120,14 +128,13 @@ impl KeyboardConsole {
             _ => return None,
         };
         let usage = event.code;
-        if (USAGE_MODIFIER_FIRST..=USAGE_MODIFIER_LAST).contains(&usage) {
-            let bit = u8::try_from(usage - USAGE_MODIFIER_FIRST).unwrap_or(0);
-            if pressed {
-                self.modifier_bits |= 1u8 << bit;
+        if let Some((key, side)) = modifier_of(usage) {
+            let changed = if pressed {
+                self.modifiers.press(key, side)
             } else {
-                self.modifier_bits &= !(1u8 << bit);
-            }
-            return None;
+                self.modifiers.release(key, side)
+            };
+            return changed.then(|| modifier_change(self.modifiers.modifiers()));
         }
         if usage == USAGE_CAPS_LOCK {
             if pressed {
@@ -141,7 +148,7 @@ impl KeyboardConsole {
             }
             return None;
         }
-        let modifiers = self.modifiers();
+        let modifiers = self.modifiers.modifiers();
         let key = resolve_usage(usage, modifiers.shift, self.caps_lock, self.num_lock)?;
         // `key_input` returns `None` only for a `Key` with no wire form (a
         // function number outside `F1..=F12`); `resolve_usage` never

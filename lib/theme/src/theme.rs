@@ -405,6 +405,8 @@ fn common_metrics() -> Metrics {
         title_bar_height: 28,
         frame_inset: 1,
         resize_grabber_extent: 16,
+        resize_edge_grab: 8,
+        resize_corner_grab: 16,
         hit_slop: 4,
         title_hue_reach: 500,
     }
