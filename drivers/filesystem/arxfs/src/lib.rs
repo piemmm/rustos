@@ -107,6 +107,7 @@ pub use xform::{ClusterCache, MAX_CLUSTER_PLAINTEXT};
 
 use allocator::{Allocator, MAX_PENDING_DISCARD};
 use allocmap::MapGeometry;
+use btree::{NodeTrail, TreeWalk};
 use dedupe::{
     chunk_spec, dedupe_key, reverse_ref_spec, ChunkRecord, DedupeCandidate, REVERSE_REF_CAP,
 };
@@ -1885,46 +1886,77 @@ impl<B: Block> ARXFS<B> {
     /// physical runs they map. Every metadata block accounts for both its
     /// physical copies (`docs/src/filesystem/arxfs-spec.md` §4, §5).
     pub(crate) fn mark_reachable_metadata(&mut self) -> Result<(), DriverError> {
-        for node in self.btree_collect_nodes(self.chunk_tree_root, chunk_spec())? {
-            self.mark_meta_used_checked(node)?;
+        let mut walk = TreeWalk::new(self.block_size)?;
+        let mut extent_walk = TreeWalk::new(self.block_size)?;
+        self.mark_tree_nodes(self.chunk_tree_root, chunk_spec(), &mut walk)?;
+        self.mark_tree_nodes(self.reverse_ref_tree_root, reverse_ref_spec(), &mut walk)?;
+
+        let spec = inode_spec();
+        let mut trail = NodeTrail::new();
+        walk.restart();
+        while self.btree_next_leaf(self.inode_tree_root, spec, &mut walk)? {
+            trail.advance(walk.path());
+            for &node in trail.entered() {
+                self.mark_meta_used_checked(node)?;
+            }
+            for (key, value) in walk.entries() {
+                let inode = Inode::decode(value)?.ok_or(DriverError::DeviceFault)?;
+                let ino = u32::try_from(key).map_err(|_| DriverError::DeviceFault)?;
+                self.mark_inode_blocks(ino, &inode, &mut extent_walk)?;
+            }
         }
-        for node in self.btree_collect_nodes(self.reverse_ref_tree_root, reverse_ref_spec())? {
-            self.mark_meta_used_checked(node)?;
-        }
-        let inode_spec = inode_spec();
-        let (nodes, inodes) = self.btree_collect_tree(self.inode_tree_root, inode_spec)?;
-        for node in nodes {
-            self.mark_meta_used_checked(node)?;
-        }
-        for (ino, value) in inodes {
-            let inode = Inode::decode(&value)?.ok_or(DriverError::DeviceFault)?;
-            let ino = u32::try_from(ino).map_err(|_| DriverError::DeviceFault)?;
-            self.mark_inode_blocks(ino, &inode)?;
+        Ok(())
+    }
+
+    /// Mark every node of the tree at `root` as used, without reading its
+    /// records: what the trees whose values name no further blocks need.
+    fn mark_tree_nodes(
+        &mut self,
+        root: u64,
+        spec: btree::TreeSpec,
+        walk: &mut TreeWalk,
+    ) -> Result<(), DriverError> {
+        let mut trail = NodeTrail::new();
+        walk.restart();
+        while self.btree_next_leaf(root, spec, walk)? {
+            trail.advance(walk.path());
+            for &node in trail.entered() {
+                self.mark_meta_used_checked(node)?;
+            }
         }
         Ok(())
     }
 
     /// Mark every extent-tree node and every physical run reachable from
     /// `inode` (number `ino`) as used while the allocation map is rebuilt.
-    fn mark_inode_blocks(&mut self, ino: u32, inode: &Inode) -> Result<(), DriverError> {
+    fn mark_inode_blocks(
+        &mut self,
+        ino: u32,
+        inode: &Inode,
+        walk: &mut TreeWalk,
+    ) -> Result<(), DriverError> {
         let spec = extent_spec(ino);
-        let (nodes, extents) = self.btree_collect_tree(inode.extent_root, spec)?;
-        for node in nodes {
-            self.mark_meta_used_checked(node)?;
-        }
         // A directory's content blocks are themselves metadata
         // ([`BlockType::Directory`], mirrored pairs); a regular file's and a
         // link's are single-copy data. Account for the directory mirror so
         // the rebuilt free set matches the live one
         // (`docs/src/filesystem/arxfs-spec.md` §5).
         let mirrored = inode.kind.content_is_metadata();
-        for (_, value) in extents {
-            let ext = Extent::decode(&value)?;
-            for b in 0..ext.stored {
-                if mirrored {
-                    self.mark_meta_used_checked(ext.phys + b)?;
-                } else {
-                    self.mark_used_checked(ext.phys + b)?;
+        let mut trail = NodeTrail::new();
+        walk.restart();
+        while self.btree_next_leaf(inode.extent_root, spec, walk)? {
+            trail.advance(walk.path());
+            for &node in trail.entered() {
+                self.mark_meta_used_checked(node)?;
+            }
+            for (_, value) in walk.entries() {
+                let ext = Extent::decode(value)?;
+                for b in 0..ext.stored {
+                    if mirrored {
+                        self.mark_meta_used_checked(ext.phys + b)?;
+                    } else {
+                        self.mark_used_checked(ext.phys + b)?;
+                    }
                 }
             }
         }
@@ -2512,21 +2544,32 @@ impl<B: Block> ARXFS<B> {
     fn free_all_blocks(&mut self, inode: &mut Inode, ino: u32) -> Result<(), DriverError> {
         let spec = extent_spec(ino);
         let mirrored = inode.kind.content_is_metadata();
-        for (start, value) in self.btree_collect_entries(inode.extent_root, spec)? {
-            let ext = Extent::decode(&value)?;
-            if ext.compressed {
-                self.release_cluster(&ext, ino, start)?;
-                continue;
+        let mut walk = TreeWalk::new(self.block_size)?;
+        let mut trail = NodeTrail::new();
+        // One walk frees both the runs and the tree that maps them: a node is
+        // freed as the walk leaves it, so no later step descends through a
+        // block that has already gone back to the allocator.
+        while self.btree_next_leaf(inode.extent_root, spec, &mut walk)? {
+            trail.advance(walk.path());
+            for &node in trail.closed() {
+                self.free_meta(node);
             }
-            for b in 0..ext.len {
-                if mirrored {
-                    self.free_meta(ext.phys + b);
-                } else {
-                    self.release_block_ref(ext.phys + b, ino, start + b)?;
+            for (start, value) in walk.entries() {
+                let ext = Extent::decode(value)?;
+                if ext.compressed {
+                    self.release_cluster(&ext, ino, start)?;
+                    continue;
+                }
+                for b in 0..ext.len {
+                    if mirrored {
+                        self.free_meta(ext.phys + b);
+                    } else {
+                        self.release_block_ref(ext.phys + b, ino, start + b)?;
+                    }
                 }
             }
         }
-        for node in self.btree_collect_nodes(inode.extent_root, spec)? {
+        for &node in trail.close() {
             self.free_meta(node);
         }
         if inode.attr_root != 0 {
@@ -2837,11 +2880,14 @@ impl<B: Block> ARXFS<B> {
         if inode.extent_root == 0 {
             return Ok(0);
         }
-        let entries = self.btree_collect_entries(inode.extent_root, extent_spec(ino))?;
+        let spec = extent_spec(ino);
+        let mut walk = TreeWalk::new(self.block_size)?;
         let mut blocks = 0u64;
-        for (_, value) in &entries {
-            let ext = Extent::decode(value)?;
-            blocks = blocks.saturating_add(ext.stored);
+        while self.btree_next_leaf(inode.extent_root, spec, &mut walk)? {
+            for (_, value) in walk.entries() {
+                let ext = Extent::decode(value)?;
+                blocks = blocks.saturating_add(ext.stored);
+            }
         }
         Ok(blocks.saturating_mul(self.block_size as u64))
     }
@@ -2964,8 +3010,30 @@ impl<B: Block> ARXFS<B> {
         keep: u64,
     ) -> Result<(), DriverError> {
         let spec = extent_spec(ino);
-        for (start, value) in self.btree_collect_entries(inode.extent_root, spec)? {
-            let ext = Extent::decode(&value)?;
+        // The run covering `keep` is where the tail starts, so the walk skips
+        // straight to it instead of reading the map from block zero.
+        let begin = self
+            .btree_get_floor(inode.extent_root, keep, spec)?
+            .map_or(keep, |(start, _)| start);
+        let mut walk = TreeWalk::new(self.block_size)?;
+        walk.seek(begin);
+        // Each step re-descends from the current root, so removing and
+        // reinserting a run mid-walk cannot leave the walk on a superseded
+        // node. Taking one entry per step is what keeps that true.
+        while self.btree_next_leaf(inode.extent_root, spec, &mut walk)? {
+            let Some((start, ext)) = walk
+                .entries()
+                .next()
+                .map(|(start, value)| Extent::decode(value).map(|ext| (start, ext)))
+                .transpose()?
+            else {
+                break;
+            };
+            match start.checked_add(1) {
+                Some(next) => walk.seek(next),
+                // Nothing follows the largest key a tree can hold.
+                None => walk.stop(),
+            }
             let end = start + ext.len;
             if end <= keep {
                 continue;
@@ -3274,15 +3342,21 @@ impl<B: Block> ARXFS<B> {
         let mut dst = Inode::empty(InodeKind::File, src.sec, now);
         let dst_ino = self.alloc_inode(&dst)?;
         // Walk the source's extents: a raw run shares per block, a compressed
-        // cluster shares its whole stored run in one reference.
-        for (start, value) in self.btree_collect_entries(src.extent_root, extent_spec(src_ino))? {
-            let ext = Extent::decode(&value)?;
-            if ext.compressed {
-                self.clone_cluster_ref(src_ino, &mut dst, dst_ino, start, &ext)?;
-                continue;
-            }
-            for b in 0..ext.len {
-                self.clone_block_ref(src_ino, &mut dst, dst_ino, start + b, ext.phys + b)?;
+        // cluster shares its whole stored run in one reference. Only the
+        // destination's tree is written, so the source walk reads a tree
+        // nothing is changing under it.
+        let src_spec = extent_spec(src_ino);
+        let mut walk = TreeWalk::new(self.block_size)?;
+        while self.btree_next_leaf(src.extent_root, src_spec, &mut walk)? {
+            for (start, value) in walk.entries() {
+                let ext = Extent::decode(value)?;
+                if ext.compressed {
+                    self.clone_cluster_ref(src_ino, &mut dst, dst_ino, start, &ext)?;
+                    continue;
+                }
+                for b in 0..ext.len {
+                    self.clone_block_ref(src_ino, &mut dst, dst_ino, start + b, ext.phys + b)?;
+                }
             }
         }
         dst.size = src.size;

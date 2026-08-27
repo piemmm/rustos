@@ -36,6 +36,7 @@ use tairix_abi::driver::block::Block;
 use tairix_abi::{CapabilityId, CapabilityQuery, DriverError};
 use tairix_log::{log, Event, EventId, Level, Sink};
 
+use crate::btree::TreeWalk;
 use crate::header::{BlockType, HEADER_LEN};
 use crate::scrub::{ScrubReport, ARXFS_RANGE_END, ARXFS_RANGE_START};
 use crate::superblock;
@@ -366,13 +367,17 @@ impl<B: Block> ARXFS<B> {
         if self.incompat & superblock::INCOMPAT_SYMLINKS != 0 {
             return Ok(0);
         }
-        for (_, value) in self.btree_collect_entries(self.inode_tree_root, inode_spec())? {
-            let Some(inode) = Inode::decode(&value)? else {
-                continue;
-            };
-            if inode.kind == InodeKind::Link {
-                self.incompat |= superblock::INCOMPAT_SYMLINKS;
-                return Ok(1);
+        let spec = inode_spec();
+        let mut walk = TreeWalk::new(self.block_size)?;
+        while self.btree_next_leaf(self.inode_tree_root, spec, &mut walk)? {
+            for (_, value) in walk.entries() {
+                let Some(inode) = Inode::decode(value)? else {
+                    continue;
+                };
+                if inode.kind == InodeKind::Link {
+                    self.incompat |= superblock::INCOMPAT_SYMLINKS;
+                    return Ok(1);
+                }
             }
         }
         Ok(0)
@@ -395,36 +400,62 @@ impl<B: Block> ARXFS<B> {
     /// storage a live name still does — the second being the corruption the
     /// feature bit exists to keep an unaware reader from causing.
     fn check_link_counts(&mut self) -> Result<u64, DriverError> {
+        let spec = inode_spec();
+        let mut walk = TreeWalk::new(self.block_size)?;
         let mut counted: BTreeMap<u32, u32> = BTreeMap::new();
-        for (_, value) in self.btree_collect_entries(self.inode_tree_root, inode_spec())? {
-            let Some(inode) = Inode::decode(&value)? else {
-                continue;
-            };
-            if !inode.is_dir() {
-                continue;
-            }
-            for (child, _) in self.dir_entries(&inode)? {
-                let slot = counted.entry(child).or_insert(0);
-                *slot = slot.saturating_add(1);
+        while self.btree_next_leaf(self.inode_tree_root, spec, &mut walk)? {
+            for (_, value) in walk.entries() {
+                let Some(inode) = Inode::decode(value)? else {
+                    continue;
+                };
+                if !inode.is_dir() {
+                    continue;
+                }
+                for (child, _) in self.dir_entries(&inode)? {
+                    let slot = counted.entry(child).or_insert(0);
+                    *slot = slot.saturating_add(1);
+                }
             }
         }
         let mut corrected = 0;
-        for (ino_key, value) in self.btree_collect_entries(self.inode_tree_root, inode_spec())? {
-            let Some(mut inode) = Inode::decode(&value)? else {
-                continue;
-            };
-            let ino = u32::try_from(ino_key).map_err(|_| DriverError::DeviceFault)?;
-            // An inode no entry names is an orphan, already reclaimed above;
-            // rewriting its count here would only fight that repair.
-            let Some(&names) = counted.get(&ino) else {
-                continue;
-            };
-            if inode.nlink == names {
-                continue;
+        walk.restart();
+        while self.btree_next_leaf(self.inode_tree_root, spec, &mut walk)? {
+            // Rewriting an inode copies-on-writes the tree the walk is
+            // reading, so one correction per step and then resume past it.
+            let mut wrong = None;
+            for (ino_key, value) in walk.entries() {
+                let Some(inode) = Inode::decode(value)? else {
+                    continue;
+                };
+                let ino = u32::try_from(ino_key).map_err(|_| DriverError::DeviceFault)?;
+                // An inode no entry names is an orphan, already reclaimed
+                // above; rewriting its count here would only fight that
+                // repair.
+                let Some(&names) = counted.get(&ino) else {
+                    continue;
+                };
+                if inode.nlink == names {
+                    continue;
+                }
+                wrong = Some((
+                    ino_key,
+                    ino,
+                    Inode {
+                        nlink: names,
+                        ..inode
+                    },
+                ));
+                break;
             }
-            inode.nlink = names;
+            let Some((key, ino, inode)) = wrong else {
+                continue;
+            };
             self.write_inode(ino, &inode)?;
             corrected += 1;
+            match key.checked_add(1) {
+                Some(next) => walk.seek(next),
+                None => walk.stop(),
+            }
         }
         Ok(corrected)
     }
@@ -503,27 +534,35 @@ impl<B: Block> ARXFS<B> {
         }
 
         // Any live inode the walk did not reach (other than the root) is an
-        // orphan.
-        let inodes = self.btree_collect_entries(self.inode_tree_root, inode_spec())?;
-        let mut orphans: Vec<u32> = Vec::new();
-        for (ino_key, value) in &inodes {
-            if Inode::decode(value)?.is_none() {
+        // orphan. Reclaiming one removes it from the tree being walked, so a
+        // step reclaims at most one and then resumes past it.
+        let spec = inode_spec();
+        let mut walk = TreeWalk::new(self.block_size)?;
+        while self.btree_next_leaf(self.inode_tree_root, spec, &mut walk)? {
+            let mut orphan = None;
+            for (ino_key, value) in walk.entries() {
+                if Inode::decode(value)?.is_none() {
+                    continue;
+                }
+                let ino = u32::try_from(ino_key).map_err(|_| DriverError::DeviceFault)?;
+                if ino == ROOT_INO || reachable.contains(&ino) {
+                    continue;
+                }
+                orphan = Some((ino_key, ino));
+                break;
+            }
+            let Some((key, ino)) = orphan else {
                 continue;
-            }
-            let ino = u32::try_from(*ino_key).map_err(|_| DriverError::DeviceFault)?;
-            if ino == ROOT_INO {
-                continue;
-            }
-            if !reachable.contains(&ino) {
-                report.orphaned_inodes += 1;
-                orphans.push(ino);
-            }
-        }
-        for ino in orphans {
+            };
+            report.orphaned_inodes += 1;
             let mut inode = self.read_inode(ino)?;
             self.free_all_blocks(&mut inode, ino)?;
             self.free_inode(ino)?;
             report.orphans_reclaimed += 1;
+            match key.checked_add(1) {
+                Some(next) => walk.seek(next),
+                None => walk.stop(),
+            }
         }
         Ok(report.orphans_reclaimed > 0)
     }
@@ -627,9 +666,10 @@ impl<B: Block> ARXFS<B> {
     /// Walk the inode tree the recovered root names and emit every readable
     /// file-data block to `out`. A block that fails the Stage 5/6 integrity
     /// pipeline is skipped (counted, never emitted); an inode whose extent tree
-    /// cannot be read at all is counted as unreadable and skipped. An inode
-    /// tree too damaged to enumerate leaves the report's root-found state but
-    /// extracts nothing rather than failing.
+    /// cannot be read at all is counted as unreadable and skipped. Damage in
+    /// the inode tree ends the enumeration there and keeps every file the
+    /// readable part of it already named, rather than failing the pass or
+    /// discarding what it recovered.
     ///
     /// A symbolic link is **counted and skipped**, never extracted: the sink
     /// takes file bytes, so emitting a link's target through it would recreate
@@ -642,65 +682,81 @@ impl<B: Block> ARXFS<B> {
         report: &mut RescueReport,
     ) -> Result<(), DriverError> {
         let cap = as_usize(self.data_capacity());
-        let Ok(inodes) = self.btree_collect_entries(self.inode_tree_root, inode_spec()) else {
-            return Ok(());
-        };
+        let spec = inode_spec();
+        let mut walk = TreeWalk::new(self.block_size)?;
+        let mut extent_walk = TreeWalk::new(self.block_size)?;
         let mut buf = [0u8; MAX_BLOCK_SIZE];
-        for (ino_key, value) in inodes {
-            let Some(inode) = Inode::decode(&value)? else {
-                continue;
-            };
-            match inode.kind {
-                InodeKind::File => {}
-                InodeKind::Dir => continue,
-                InodeKind::Link => {
-                    report.links_skipped += 1;
-                    continue;
-                }
+        loop {
+            match self.btree_next_leaf(self.inode_tree_root, spec, &mut walk) {
+                Ok(true) => {}
+                // Extraction keeps whatever the readable part of the tree
+                // named: a damaged region ends the walk, it does not discard
+                // the files already emitted.
+                Ok(false) | Err(_) => return Ok(()),
             }
-            let ino = u32::try_from(ino_key).map_err(|_| DriverError::DeviceFault)?;
-            report.files_mapped += 1;
-            let spec = extent_spec(ino);
-            let Ok(entries) = self.btree_collect_entries(inode.extent_root, spec) else {
-                report.unreadable_inodes += 1;
-                continue;
-            };
-            for (start, ev) in entries {
-                let Ok(ext) = Extent::decode(&ev) else {
-                    // A malformed extent value cannot name its blocks; count
-                    // one skip and keep extracting the rest of the file.
-                    report.blocks_skipped += 1;
+            for (ino_key, value) in walk.entries() {
+                let Some(inode) = Inode::decode(value)? else {
                     continue;
                 };
-                if ext.compressed {
-                    // A cluster extracts whole or not at all: its blocks only
-                    // exist through the decompressed frame.
-                    match self.read_data_cluster(&ext) {
-                        Ok(plain) => {
-                            for b in 0..ext.len {
-                                let slice = &plain[as_usize(b) * cap..][..cap];
-                                out.emit_block(ino, start + b, inode.size, slice);
+                match inode.kind {
+                    InodeKind::File => {}
+                    InodeKind::Dir => continue,
+                    InodeKind::Link => {
+                        report.links_skipped += 1;
+                        continue;
+                    }
+                }
+                let ino = u32::try_from(ino_key).map_err(|_| DriverError::DeviceFault)?;
+                report.files_mapped += 1;
+                let extent_spec = extent_spec(ino);
+                extent_walk.restart();
+                loop {
+                    match self.btree_next_leaf(inode.extent_root, extent_spec, &mut extent_walk) {
+                        Ok(true) => {}
+                        Ok(false) => break,
+                        Err(_) => {
+                            report.unreadable_inodes += 1;
+                            break;
+                        }
+                    }
+                    for (start, ev) in extent_walk.entries() {
+                        let Ok(ext) = Extent::decode(ev) else {
+                            // A malformed extent value cannot name its blocks;
+                            // count one skip and keep extracting the rest of
+                            // the file.
+                            report.blocks_skipped += 1;
+                            continue;
+                        };
+                        if ext.compressed {
+                            // A cluster extracts whole or not at all: its
+                            // blocks only exist through the decompressed frame.
+                            match self.read_data_cluster(&ext) {
+                                Ok(plain) => {
+                                    for b in 0..ext.len {
+                                        let slice = &plain[as_usize(b) * cap..][..cap];
+                                        out.emit_block(ino, start + b, inode.size, slice);
+                                        report.blocks_extracted += 1;
+                                    }
+                                }
+                                Err(_) => report.blocks_skipped += ext.len,
+                            }
+                            continue;
+                        }
+                        for b in 0..ext.len {
+                            let logical = start + b;
+                            if self
+                                .read_data_block_classified(ext.phys + b, &mut buf)
+                                .is_ok()
+                            {
+                                out.emit_block(ino, logical, inode.size, &buf[..cap]);
                                 report.blocks_extracted += 1;
+                            } else {
+                                report.blocks_skipped += 1;
                             }
                         }
-                        Err(_) => report.blocks_skipped += ext.len,
-                    }
-                    continue;
-                }
-                for b in 0..ext.len {
-                    let logical = start + b;
-                    if self
-                        .read_data_block_classified(ext.phys + b, &mut buf)
-                        .is_ok()
-                    {
-                        out.emit_block(ino, logical, inode.size, &buf[..cap]);
-                        report.blocks_extracted += 1;
-                    } else {
-                        report.blocks_skipped += 1;
                     }
                 }
             }
         }
-        Ok(())
     }
 }

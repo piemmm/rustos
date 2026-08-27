@@ -753,21 +753,47 @@ fn crash_at_every_write_count_during_commit_never_tears() {
 // Stage 2: copy-on-write inode tree + per-file extent trees.
 // ---------------------------------------------------------------------------
 
+/// Every `(key, value)` of the tree at `root`, in key order. The driver walks
+/// trees a leaf at a time so its resident bytes never scale with the tree; a
+/// test asserting over a whole small tree gathers the walk's steps here.
+fn tree_entries(fs: &mut ARXFS<MemBlock>, root: u64, spec: btree::TreeSpec) -> Vec<(u64, Vec<u8>)> {
+    let mut walk = TreeWalk::new(fs.block_size).expect("walk buffer");
+    let mut out = Vec::new();
+    while fs
+        .btree_next_leaf(root, spec, &mut walk)
+        .expect("walk tree")
+    {
+        out.extend(walk.entries().map(|(key, value)| (key, value.to_vec())));
+    }
+    out
+}
+
+/// Physical addresses of every node of the tree at `root`, in walk order.
+fn tree_nodes(fs: &mut ARXFS<MemBlock>, root: u64, spec: btree::TreeSpec) -> Vec<u64> {
+    let mut walk = TreeWalk::new(fs.block_size).expect("walk buffer");
+    let mut trail = NodeTrail::new();
+    let mut out = Vec::new();
+    while fs
+        .btree_next_leaf(root, spec, &mut walk)
+        .expect("walk tree")
+    {
+        trail.advance(walk.path());
+        out.extend_from_slice(trail.entered());
+    }
+    out
+}
+
 /// Number of nodes in the inode B-tree (its block count on disk).
 fn inode_tree_nodes(fs: &mut ARXFS<MemBlock>) -> usize {
     let spec = inode_spec();
-    fs.btree_collect_nodes(fs.inode_tree_root, spec)
-        .expect("walk inode tree")
-        .len()
+    tree_nodes(fs, fs.inode_tree_root, spec).len()
 }
 
 /// Number of nodes in `ino`'s per-file extent tree.
 fn extent_tree_nodes(fs: &mut ARXFS<MemBlock>, ino: u32) -> usize {
     let inode = fs.read_inode(ino).expect("read inode");
     let spec = extent_spec(ino);
-    fs.btree_collect_nodes(inode.extent_root, spec)
-        .expect("walk extent tree")
-        .len()
+    tree_nodes(fs, inode.extent_root, spec).len()
 }
 
 #[test]
@@ -883,9 +909,7 @@ fn large_contiguous_write_collapses_to_few_extents() {
     let node = fs.lookup(root, b"big").expect("lookup");
     let ino = u32::try_from(node.raw()).unwrap();
     let inode = fs.read_inode(ino).expect("inode");
-    let extents = fs
-        .btree_collect_entries(inode.extent_root, extent_spec(ino))
-        .expect("walk extents");
+    let extents = tree_entries(&mut fs, inode.extent_root, extent_spec(ino));
     assert_eq!(extents.len(), 1, "contiguous write should be one extent");
 
     // The compressible variant instead stores one bounded compressed extent
@@ -899,9 +923,7 @@ fn large_contiguous_write_collapses_to_few_extents() {
     let clusters = blocks / COMPRESS_CLUSTER_BLOCKS;
     let ino = u32::try_from(fs.lookup(root, b"zip").expect("lookup").raw()).unwrap();
     let inode = fs.read_inode(ino).expect("inode");
-    let entries = fs
-        .btree_collect_entries(inode.extent_root, extent_spec(ino))
-        .expect("walk extents");
+    let entries = tree_entries(&mut fs, inode.extent_root, extent_spec(ino));
     let compressed = entries
         .iter()
         .filter(|(_, v)| Extent::decode(v).expect("decodes").compressed)
@@ -1725,10 +1747,7 @@ fn unaligned_and_sub_cluster_writes_store_per_block() {
     );
     let ino = file_ino(&mut fs, b"u");
     let inode = fs.read_inode(ino).expect("inode");
-    for (_, value) in fs
-        .btree_collect_entries(inode.extent_root, extent_spec(ino))
-        .expect("walk extents")
-    {
+    for (_, value) in tree_entries(&mut fs, inode.extent_root, extent_spec(ino)) {
         assert!(
             !Extent::decode(&value).expect("decodes").compressed,
             "an unaligned span never forms a compressed extent"
@@ -1767,10 +1786,7 @@ fn truncate_into_a_compressed_cluster_decomposes_and_keeps_the_prefix() {
     assert_eq!(fs.node_info(node).expect("info").size, (keep) as u64);
     let ino = file_ino(&mut fs, b"t");
     let inode = fs.read_inode(ino).expect("inode");
-    for (_, value) in fs
-        .btree_collect_entries(inode.extent_root, extent_spec(ino))
-        .expect("walk extents")
-    {
+    for (_, value) in tree_entries(&mut fs, inode.extent_root, extent_spec(ino)) {
         assert!(
             !Extent::decode(&value).expect("decodes").compressed,
             "the straddled cluster decomposed"
@@ -1968,9 +1984,7 @@ fn file_ino(fs: &mut ARXFS<MemBlock>, name: &[u8]) -> u32 {
 
 /// The number of records in the chunk/refcount tree (one per shared chunk).
 fn chunk_count(fs: &mut ARXFS<MemBlock>) -> usize {
-    fs.btree_collect_entries(fs.chunk_tree_root, chunk_spec())
-        .expect("walk chunk tree")
-        .len()
+    tree_entries(fs, fs.chunk_tree_root, chunk_spec()).len()
 }
 
 #[test]
@@ -4507,8 +4521,7 @@ fn corruption_injection_data_block_faults_are_classified_not_repaired() {
 fn mapped_block_count(fs: &mut ARXFS<MemBlock>, ino: u32) -> u64 {
     let inode = fs.read_inode(ino).expect("read inode");
     let spec = extent_spec(ino);
-    fs.btree_collect_entries(inode.extent_root, spec)
-        .expect("walk extent tree")
+    tree_entries(fs, inode.extent_root, spec)
         .iter()
         .map(|(_, value)| Extent::decode(value).expect("extent decodes").len)
         .sum()
@@ -4519,9 +4532,7 @@ fn mapped_block_count(fs: &mut ARXFS<MemBlock>, ino: u32) -> u64 {
 fn assert_extents_ordered_and_disjoint(fs: &mut ARXFS<MemBlock>, ino: u32) {
     let inode = fs.read_inode(ino).expect("read inode");
     let spec = extent_spec(ino);
-    let entries = fs
-        .btree_collect_entries(inode.extent_root, spec)
-        .expect("walk extent tree");
+    let entries = tree_entries(fs, inode.extent_root, spec);
     let mut prev_end = 0u64;
     for (start, value) in entries {
         assert!(start >= prev_end, "extent at {start} overlaps prior run");
@@ -7144,5 +7155,394 @@ fn rescue_extracts_a_twice_named_inode_once() {
         sink.blocks.keys().filter(|(i, _)| *i == ino).count(),
         1,
         "one inode, one emitted block, however many names reach it"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Bounded, resumable tree iteration: the walk is the driver's only way to
+// read more than one record, so its order, its resumability, its node
+// reporting, and its refusal of an impossible tree are all load-bearing.
+// ---------------------------------------------------------------------------
+
+/// A three-level inode tree on a 512-byte volume, whose one-entry leaves make
+/// the tree deep without needing thousands of inodes: `count` leaves under
+/// 23-entry internal nodes is a root, a middle level, and the leaves.
+fn deep_inode_tree(count: u32) -> (ARXFS<MemBlock>, Vec<u64>) {
+    let mut fs = fmt(512, 4096, 64);
+    let root = fs.root();
+    let mut keys = Vec::new();
+    for i in 0..count {
+        let name = alloc::format!("f{i}");
+        fs.create(root, name.as_bytes(), NodeKind::RegularFile)
+            .expect("create");
+        keys.push(fs.lookup(root, name.as_bytes()).expect("lookup").raw());
+    }
+    keys.push(u64::from(ROOT_INO));
+    keys.sort_unstable();
+    (fs, keys)
+}
+
+/// The level of the tree at `root` (0 for a single leaf), read from its root
+/// node — the depth the walk must descend on every step.
+fn tree_level(fs: &mut ARXFS<MemBlock>, root: u64) -> u32 {
+    let mut buf = [0u8; MAX_BLOCK_SIZE];
+    fs.read_meta(root, BlockType::Btree, &mut buf)
+        .expect("read root node");
+    u32::from_le_bytes([
+        buf[HEADER_LEN + 4],
+        buf[HEADER_LEN + 5],
+        buf[HEADER_LEN + 6],
+        buf[HEADER_LEN + 7],
+    ])
+}
+
+#[test]
+fn a_walk_yields_every_entry_in_key_order_one_leaf_at_a_time() {
+    let (mut fs, keys) = deep_inode_tree(300);
+    let spec = inode_spec();
+    let inode_root = fs.inode_tree_root;
+    assert!(
+        tree_level(&mut fs, inode_root) >= 2,
+        "the fixture must build a tree deeper than one internal level"
+    );
+
+    let mut walk = TreeWalk::new(fs.block_size).expect("walk buffer");
+    let mut seen = Vec::new();
+    let mut steps = 0u32;
+    // A 512-byte leaf holds exactly one inode record, so no step may yield
+    // more: the walk's yield is bounded by the node, never by the tree.
+    while fs
+        .btree_next_leaf(inode_root, spec, &mut walk)
+        .expect("walk the inode tree")
+    {
+        let batch: Vec<u64> = walk.entries().map(|(key, _)| key).collect();
+        assert!(!batch.is_empty(), "a step that yields must yield an entry");
+        assert!(batch.len() <= 1, "one 512-byte leaf holds one inode record");
+        seen.extend(batch);
+        steps += 1;
+    }
+    assert_eq!(seen, keys, "every entry, once, in key order");
+    assert_eq!(steps as usize, keys.len(), "one leaf per step");
+}
+
+#[test]
+fn a_walk_interrupted_at_every_entry_yields_the_uninterrupted_sequence() {
+    let (mut fs, keys) = deep_inode_tree(120);
+    let spec = inode_spec();
+    let inode_root = fs.inode_tree_root;
+
+    // Stop after every entry, persist that entry's key as a scrub would, and
+    // resume a fresh walk there: the concatenation must be the whole tree.
+    for stride in [1usize, 3, 7] {
+        let mut resumed = Vec::new();
+        let mut from = 0u64;
+        loop {
+            let mut walk = TreeWalk::new(fs.block_size).expect("walk buffer");
+            walk.seek(from);
+            let mut taken = 0usize;
+            let mut stopped = None;
+            'steps: while fs
+                .btree_next_leaf(inode_root, spec, &mut walk)
+                .expect("walk")
+            {
+                for (key, _) in walk.entries() {
+                    if taken == stride {
+                        stopped = Some(key);
+                        break 'steps;
+                    }
+                    resumed.push(key);
+                    taken += 1;
+                }
+            }
+            match stopped {
+                Some(key) => from = key,
+                None => break,
+            }
+        }
+        assert_eq!(resumed, keys, "resuming at stride {stride} loses nothing");
+    }
+}
+
+#[test]
+fn a_walk_seeks_to_a_key_a_gap_and_past_the_end() {
+    let (mut fs, keys) = deep_inode_tree(80);
+    let spec = inode_spec();
+    let inode_root = fs.inode_tree_root;
+    let last = *keys.last().expect("keys");
+
+    let from = |fs: &mut ARXFS<MemBlock>, key: u64| -> Vec<u64> {
+        let mut walk = TreeWalk::new(fs.block_size).expect("walk buffer");
+        walk.seek(key);
+        let mut out = Vec::new();
+        while fs
+            .btree_next_leaf(inode_root, spec, &mut walk)
+            .expect("walk")
+        {
+            out.extend(walk.entries().map(|(k, _)| k));
+        }
+        out
+    };
+
+    // A key that exists starts there; the tail is exact either side of it.
+    let middle = keys[keys.len() / 2];
+    assert_eq!(from(&mut fs, middle), keys[keys.len() / 2..]);
+    // Before every key the walk yields the whole tree; past the last key it
+    // yields nothing, and neither does an absent tree.
+    assert_eq!(from(&mut fs, 0), keys);
+    assert!(from(&mut fs, last + 1).is_empty());
+    let mut walk = TreeWalk::new(fs.block_size).expect("walk buffer");
+    assert!(!fs
+        .btree_next_leaf(0, spec, &mut walk)
+        .expect("an absent tree walks to nothing"));
+
+    // A sparse file's extent tree has real gaps between its keys, which is
+    // where seeking matters: a truncate seeks straight to the run covering
+    // the cut. A seek into a gap resumes at the next run that exists.
+    let root = fs.root();
+    let cap = fs.data_capacity();
+    for run in 0..60u64 {
+        assert_eq!(fs.write_at(root, b"f0", run * 4 * cap, &[0x11]), Ok(1));
+    }
+    let ino = file_ino(&mut fs, b"f0");
+    let inode = fs.read_inode(ino).expect("inode");
+    let extent_spec = extent_spec(ino);
+    let starts: Vec<u64> = tree_entries(&mut fs, inode.extent_root, extent_spec)
+        .into_iter()
+        .map(|(start, _)| start)
+        .collect();
+    assert_eq!(starts.len(), 60, "each written run is its own extent");
+    for (i, start) in starts.iter().enumerate() {
+        let mut walk = TreeWalk::new(fs.block_size).expect("walk buffer");
+        // One past a run's start is inside the hole that follows it.
+        walk.seek(start + 1);
+        let mut seen = Vec::new();
+        while fs
+            .btree_next_leaf(inode.extent_root, extent_spec, &mut walk)
+            .expect("walk")
+        {
+            seen.extend(walk.entries().map(|(k, _)| k));
+        }
+        assert_eq!(seen, starts[i + 1..], "a seek into a hole skips no run");
+    }
+}
+
+#[test]
+fn a_walk_reports_every_node_of_the_tree_exactly_once() {
+    let (mut fs, _) = deep_inode_tree(200);
+    let spec = inode_spec();
+    let inode_root = fs.inode_tree_root;
+    let nodes = tree_nodes(&mut fs, inode_root, spec);
+
+    assert_eq!(
+        nodes.first(),
+        Some(&inode_root),
+        "the root is reported first"
+    );
+    let unique: BTreeSet<u64> = nodes.iter().copied().collect();
+    assert_eq!(unique.len(), nodes.len(), "no node is reported twice");
+
+    // Cross-check against scrub's own enumeration, which descends the tree by
+    // its child pointers rather than by key order: two independent walks must
+    // find the same number of nodes.
+    let mut report = ScrubReport::default();
+    assert!(fs.scrub_btree(inode_root, &mut report).expect("scrub tree"));
+    assert_eq!(report.metadata_blocks_checked, nodes.len() as u64);
+}
+
+#[test]
+fn a_tree_whose_shape_is_impossible_is_refused_rather_than_walked_forever() {
+    let spec = inode_spec();
+
+    // A child pointer that leads back to its own parent: levels no longer
+    // decrease, which is the shape that would otherwise descend forever.
+    let (mut fs, _) = deep_inode_tree(60);
+    let root = fs.inode_tree_root;
+    let mut buf = [0u8; MAX_BLOCK_SIZE];
+    fs.read_meta(root, BlockType::Btree, &mut buf)
+        .expect("root");
+    let child_at = HEADER_LEN + 8 + 8;
+    buf[child_at..child_at + 8].copy_from_slice(&root.to_le_bytes());
+    fs.begin();
+    let cycled = fs
+        .cow_meta(0, &mut buf, BlockType::Btree, spec.owner, 0)
+        .expect("seal the cyclic node");
+    let mut walk = TreeWalk::new(fs.block_size).expect("walk buffer");
+    assert_eq!(
+        fs.btree_next_leaf(cycled, spec, &mut walk),
+        Err(DriverError::DeviceFault),
+        "a child that does not sit one level down is refused"
+    );
+    assert_eq!(
+        fs.btree_get(cycled, 2, spec),
+        Err(DriverError::DeviceFault),
+        "a point lookup refuses the same shape"
+    );
+
+    // A node claiming a level no device could hold a tree that deep for.
+    let mut deep = [0u8; MAX_BLOCK_SIZE];
+    fs.read_meta(root, BlockType::Btree, &mut deep)
+        .expect("root");
+    deep[HEADER_LEN + 4..HEADER_LEN + 8].copy_from_slice(&200u32.to_le_bytes());
+    let too_deep = fs
+        .cow_meta(0, &mut deep, BlockType::Btree, spec.owner, 0)
+        .expect("seal the over-deep node");
+    let mut walk = TreeWalk::new(fs.block_size).expect("walk buffer");
+    assert_eq!(
+        fs.btree_next_leaf(too_deep, spec, &mut walk),
+        Err(DriverError::DeviceFault)
+    );
+
+    // A leaf claiming more entries than its block can hold: reading them
+    // would index past the buffer.
+    let mut wide = [0u8; MAX_BLOCK_SIZE];
+    let leaf = tree_nodes(&mut fs, root, spec)
+        .into_iter()
+        .find(|node| {
+            let mut probe = [0u8; MAX_BLOCK_SIZE];
+            fs.read_meta(*node, BlockType::Btree, &mut probe).is_ok()
+                && tree_level(&mut fs, *node) == 0
+        })
+        .expect("a leaf");
+    fs.read_meta(leaf, BlockType::Btree, &mut wide)
+        .expect("leaf");
+    wide[HEADER_LEN..HEADER_LEN + 4].copy_from_slice(&4096u32.to_le_bytes());
+    let overfull = fs
+        .cow_meta(0, &mut wide, BlockType::Btree, spec.owner, 0)
+        .expect("seal the overfull node");
+    let mut walk = TreeWalk::new(fs.block_size).expect("walk buffer");
+    assert_eq!(
+        fs.btree_next_leaf(overfull, spec, &mut walk),
+        Err(DriverError::DeviceFault)
+    );
+    fs.rollback();
+
+    // A leaf whose keys descend cannot be walked in key order: stepping past
+    // its last key would skip the entries above it, so the walk refuses it
+    // rather than quietly handing back part of the tree.
+    let mut fs = fmt(4096, 512, 64);
+    let root = fs.root();
+    for i in 0..4u32 {
+        let name = alloc::format!("g{i}");
+        fs.create(root, name.as_bytes(), NodeKind::RegularFile)
+            .expect("create");
+    }
+    let mut leaf = [0u8; MAX_BLOCK_SIZE];
+    let inode_root = fs.inode_tree_root;
+    fs.read_meta(inode_root, BlockType::Btree, &mut leaf)
+        .expect("the small tree is one leaf");
+    assert_eq!(tree_level(&mut fs, inode_root), 0);
+    let stride = 8 + 256;
+    let first = HEADER_LEN + 8;
+    let last = first + 4 * stride;
+    let high = rd_u64(&leaf, last);
+    wr_u64(&mut leaf, first, high + 1);
+    wr_u64(&mut leaf, last, 1);
+    fs.begin();
+    let descending = fs
+        .cow_meta(0, &mut leaf, BlockType::Btree, spec.owner, 0)
+        .expect("seal the descending leaf");
+    let mut walk = TreeWalk::new(fs.block_size).expect("walk buffer");
+    walk.seek(high);
+    assert_eq!(
+        fs.btree_next_leaf(descending, spec, &mut walk),
+        Err(DriverError::DeviceFault)
+    );
+    fs.rollback();
+}
+
+/// Fragment `runs` single-block writes into `name`, one extent each, and
+/// return the resulting extent tree's level.
+fn fragment(fs: &mut ARXFS<MemBlock>, name: &[u8], runs: u64) -> u32 {
+    let root = fs.root();
+    let cap = fs.data_capacity();
+    for run in 0..runs {
+        assert_eq!(fs.write_at(root, name, run * 2 * cap, &[0x5A]), Ok(1));
+    }
+    let ino = file_ino(fs, name);
+    let inode = fs.read_inode(ino).expect("inode");
+    tree_level(fs, inode.extent_root)
+}
+
+/// Free space after creating `name`, fragmenting it into `runs` extents, and
+/// discarding it: by `Discard::Truncate` back to zero length, or by
+/// `Discard::Remove` of the whole file. Also returns the free count right
+/// after the (empty) create and the extent tree's level.
+fn free_after_discard(runs: u64, discard: Discard) -> (u64, u64, u32) {
+    let mut fs = fmt(512, 8192, 64);
+    let root = fs.root();
+    fs.create(root, b"frag", NodeKind::RegularFile)
+        .expect("create");
+    fs.commit().expect("commit");
+    let after_create = fs.free_count;
+    let level = fragment(&mut fs, b"frag", runs);
+    match discard {
+        Discard::Truncate => fs.truncate(root, b"frag", 0).expect("truncate"),
+        Discard::Remove => fs.remove(root, b"frag").expect("remove"),
+    }
+    (fs.free_count, after_create, level)
+}
+
+/// How [`free_after_discard`] gives the file's blocks back.
+#[derive(Copy, Clone)]
+enum Discard {
+    Truncate,
+    Remove,
+}
+
+#[test]
+fn freeing_a_deep_extent_tree_returns_every_block_it_held() {
+    // A fragmented file on a 512-byte volume is one extent per written run,
+    // so a few hundred writes build a multi-level extent tree. The walk must
+    // free every node of it exactly once: a node it misses leaks the pair for
+    // the life of the volume, and one it frees twice corrupts the map.
+    let (deep_truncate, after_create, deep_level) = free_after_discard(300, Discard::Truncate);
+    assert!(deep_level >= 2, "the fixture must build a deep extent tree");
+    assert_eq!(
+        deep_truncate, after_create,
+        "truncating the deep file to zero returns every extent and every node          of the tree that mapped them"
+    );
+
+    // Deleting the file frees the same extents and nodes; what create left
+    // behind (the inode record's tree node, the directory's block) is not the
+    // file's to return, so the assertion is that the depth of the tree makes
+    // no difference to what a delete gives back.
+    let (deep_remove, _, level) = free_after_discard(300, Discard::Remove);
+    assert!(level >= 2);
+    let (shallow_remove, _, shallow_level) = free_after_discard(1, Discard::Remove);
+    assert_eq!(shallow_level, 0, "one extent is one leaf");
+    assert_eq!(
+        deep_remove, shallow_remove,
+        "deleting a file with a three-level extent tree returns as much as          deleting one with a single leaf"
+    );
+}
+
+#[test]
+fn rebuilding_free_space_over_a_deep_tree_reproduces_the_live_map() {
+    // The rebuild marks every node of every tree from the walk's path rather
+    // than from a collected node list, so it must reach exactly the blocks the
+    // live map already holds.
+    let (mut fs, _) = deep_inode_tree(200);
+    let root = fs.root();
+    let cap = fs.data_capacity();
+    for run in 0..200u64 {
+        assert_eq!(fs.write_at(root, b"f0", run * 2 * cap, &[0xA5]), Ok(1));
+    }
+    fs.commit().expect("commit");
+    let live = fs.used_blocks();
+    let free = fs.free_count;
+
+    fs.rebuild_free_space().expect("rebuild the allocation map");
+    assert_eq!(
+        fs.used_blocks(),
+        live,
+        "the rebuilt used set is the live one"
+    );
+    assert_eq!(fs.free_count, free);
+    // The rebuild reads the trees a leaf at a time, so the only thing it holds
+    // across the walk is the map's own bounded page cache.
+    assert!(
+        fs.map_cached_blocks() <= MAX_CACHED_MAP_BLOCKS,
+        "the rebuild left a bounded map cache (cached {})",
+        fs.map_cached_blocks()
     );
 }

@@ -115,6 +115,19 @@ fixed-width **263-byte slots** (an 8-byte header — 4-byte inode number, 4-byte
 name length — plus a maximum-length 255-byte name) reached through the extent
 map; `.`/`..` are stored on disk and hidden from `read_dir`.
 
+Every tree is read through one bounded, resumable walk (`TreeWalk`): a step
+descends one root-to-leaf path and yields that leaf's records into the walk's
+own block-sized buffer, so a stat, truncate, delete, scrub step, or mount-time
+free-space rebuild holds a node's worth of bytes whatever the tree's size, and
+allocates nothing per record. The position is a key, so a caller may mutate the
+tree between steps and a long pass may stop, persist it, and resume with the
+sequence an uninterrupted walk would have given. Callers needing every *node*
+(the free-space rebuild, freeing a whole tree) take them from the walk's path
+as it moves (`NodeTrail`) rather than from a collected list. A tree whose shape
+is impossible — a level that does not decrease, an entry count wider than its
+block, keys that do not ascend in a leaf — is a fail-closed device fault, never
+a read past a buffer or an endless descent.
+
 ## Serving reads: one device request per contiguous run
 
 An extent maps a **contiguous** physical run, so a read spanning one asks the

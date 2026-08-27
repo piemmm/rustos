@@ -2670,15 +2670,20 @@ ledger of every outstanding ARXFS item, with its owner and dependencies, is
   paced from the device class, bounded and resumable, standing down while the
   backing is degraded, and escalating what a mounted volume cannot repair
   itself.
-- **Tree iteration materialises whole trees.** `btree_collect_entries` returns
-  every leaf entry of a tree in one `Vec`, and its callers include `scrub` (the
-  whole inode tree, before its budget applies), `check` (five times over), and
-  the truncate/reflink/read-span paths. On the combined floor — a ~1 GiB machine
-  serving several 100 TB volumes — that is a device-proportional allocation on
-  paths that must be working-set-bounded, and it makes a bounded maintenance
-  chunk unbounded in memory before it does any work. Owned as item A0 of
-  `plans/IMPLEMENT-OUTSTANDING-ARXFS.md` §3: a resumable cursor becomes the
-  primary iteration primitive and the collecting form is deleted.
+- **Tree iteration is bounded and resumable (item A0, done).** Every
+  multi-record read goes through one walk (`TreeWalk`): a step descends one
+  root-to-leaf path and yields that leaf's records from the walk's own
+  block-sized buffer, so resident bytes follow the block size and not the tree,
+  and nothing is allocated per record. Its position is a key, so a caller may
+  mutate the tree between steps and a bounded pass may stop, persist it, and
+  resume with the sequence an uninterrupted walk would give; callers needing
+  every *node* (the free-space rebuild, freeing a tree) take them from the
+  walk's path as it moves. The collecting forms are deleted and no read path
+  recurses per tree level. Two defects that surfaced from it are the ledger's
+  next items: the *mutation* path still recurses 8 KiB of stack per level
+  (`plans/OPEN-DEFECTS.md` D65, item A1), and `scrub`/`check` still hold
+  whole-volume reconcile and reachability state in RAM
+  (`plans/ARXFS-MAINTENANCE.md` §13 D-M5, item A2).
 - **The §5 fixed-constant targets are not met.** The spec's 16 KiB metadata
   block, 128 KiB / 256 KiB data-record targets, and inline/packed small-file
   storage are unimplemented: a metadata block and a data record are each one
@@ -2820,8 +2825,9 @@ batching that pays for it (WB1), not alone.
 
 **Dependencies:** Stage 5 follow-up (ARXFS v1), the write-back commit barrier
 above (a background writer on a barrier-less commit path multiplies that defect's
-exposure across every pass), and bounded tree iteration (item A0 of
-`plans/IMPLEMENT-OUTSTANDING-ARXFS.md`). Staged plan:
+exposure across every pass), and the bounded reconcile state of item A2 of
+`plans/IMPLEMENT-OUTSTANDING-ARXFS.md` (bounded tree iteration, item A0, is
+done). Staged plan:
 `plans/ARXFS-MAINTENANCE.md` (stages M0–M7); spec section
 `docs/src/filesystem/arxfs-spec.md` §24, stage 18.
 

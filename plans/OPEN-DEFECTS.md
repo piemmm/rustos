@@ -822,7 +822,11 @@ an interior tree node beneath a durable root and the volume will not mount
 per-commit barrier affordable lands with it); and ARXFS scrub's metadata
 copy-repair writes to the device with no read-only guard, so a mount held
 read-only precisely because its medium must not be touched is written anyway
-(fixed in `plans/ARXFS-MAINTENANCE.md` M1).
+(fixed in `plans/ARXFS-MAINTENANCE.md` M1). D65 joins them: ARXFS's B-tree
+insert recurses 8 KiB of stack per tree level, which overflows a release
+kernel's 32 KiB stack at four levels — an ordinary fragmented file on a
+512-byte volume (fixed as item A1 of
+`plans/IMPLEMENT-OUTSTANDING-ARXFS.md`, the next item in that ledger).
 
 ## Coupling to be aware of
 
@@ -3603,3 +3607,55 @@ rewrite it. `plans/ARXFS-MAINTENANCE.md` M1, ahead of the runner.
 finds a repairable metadata block, the finding is still reported, `health`
 returns a valid reading on a read-only handle instead of failing at its baseline
 commit, and a regression test covers each.
+
+---
+
+## D65 — ARXFS's B-tree insert recurses 8 KiB of stack per tree level (OPEN)
+
+**Where.** `drivers/filesystem/arxfs/src/btree.rs` `btree_insert_rec` (with
+`btree_insert_leaf`), and the depth-unbounded descent they share.
+
+**Mechanism.** Insert descends by recursion, and each level keeps two
+block-sized buffers live *across* the recursive call: the node it is editing,
+and a second one it reads the child back into afterwards, only to recover the
+child's minimum key for the separator. A split adds a third in
+`btree_insert_leaf`. Measured on the release build for x86_64, one level of
+`btree_insert_rec` reserves **8312 bytes** (`sub $0x1000` twice plus `$0x78`).
+
+The kernel hosts this driver, on 32 KiB per-thread stacks in a release image
+(`kernel/core/src/kthread.rs` `KTHREAD_STACK_BYTES`) behind a 4 KiB guard page.
+So **four levels of insert overflow the stack**, and three leave under 4 KiB for
+everything beneath — the syscall entry, the VFS, `write_file`, `store_block`. A
+three-level extent tree is an ordinary fragmented file, not a pathological one:
+about 30 000 extents on a 4 KiB volume, and about **250 on a 512-byte one**,
+where a leaf holds eleven extent records. Nothing bounds the depth on this path
+either, so a corrupt child pointer that leads back to an ancestor recurses until
+the guard page catches it.
+
+The guard turns the overrun into a detected failure rather than silent
+corruption of the neighbouring allocation, so the symptom is a failed-closed
+task on an ordinary write, not a wrong result. The read paths no longer recurse
+at all (item A0 of `plans/IMPLEMENT-OUTSTANDING-ARXFS.md`): the walk's step
+frame measures 24 bytes and its descent 104, with its one node buffer on the
+heap. This is the mutation path's remaining half.
+
+**Severity.** A reachable kernel-stack overflow on a routine write to a
+fragmented file, worst on the smallest block size — the SD-card geometry, which
+is a shipped target. Not a wrong result and not a security bypass, but a fault
+an ordinary workload can reach.
+
+**Fix.** Make the mutation path iterative over a bounded path stack, as the read
+descent now is, and return the child's minimum key from the step instead of
+re-reading the node for it — which removes a block read per level as well as the
+buffer. Apply the read descent's level-continuity check so an impossible tree is
+refused rather than run off the stack. The per-record `Vec` decode
+`btree_load_entries` performs at every level of the remove path goes with it: the
+same node buffer serves. Item **A1** of
+`plans/IMPLEMENT-OUTSTANDING-ARXFS.md` §7, the next item in that ledger.
+
+**Done when:** the measured frame of every mutation entry point is a few hundred
+bytes and independent of tree depth, an insert and a remove over a three-level
+tree allocate a bounded handful rather than per record (asserted against the
+allocation counter in `drivers/filesystem/arxfs/tests/bounded_iteration.rs`), a
+cyclic tree is refused on the write path as it now is on the read path, and the
+tree, crash-replay, and fuzz suites pass unchanged.

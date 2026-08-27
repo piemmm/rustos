@@ -184,6 +184,22 @@ Rebuildable metadata:
 A corrupt rebuildable structure must not make a valid volume unmountable.
 `arxfs check` must rebuild it from authoritative metadata.
 
+### Tree iteration (resident footprint)
+
+Every metadata tree is read through a **bounded, resumable walk**: one step
+descends one root-to-leaf path and yields that leaf's records, so the bytes an
+operation holds are set by the block size, never by the tree. The walk's
+position is a single key, so a caller may mutate the tree between steps and may
+persist where it stopped and resume later — a resumed walk yields exactly what
+an uninterrupted one would. Callers that must touch every *node* (the
+allocation-map rebuild, freeing a whole tree) take them from the walk's own
+path as it moves, so no operation ever materialises a tree's records or node
+list. A walk refuses a tree whose shape is impossible (a level that does not
+decrease on the way down, an entry count wider than its block, keys that do not
+ascend within a leaf) rather than reading past a buffer or descending forever,
+and it never ends early and silently, because a caller freeing or accounting
+for every record would then miss some.
+
 ### On-disk allocation map (mount-time footprint)
 
 Free space is tracked by a contiguous **on-disk paged allocation map**, not
@@ -947,9 +963,11 @@ trusted. A four-slot superblock ring of mirrored pairs opens the volume; a
 transaction root carries an inline commit record, so a half-written root is
 rejected and the ring falls back. One generic B-tree node implementation
 (`src/btree.rs`) backs every tree — inode, per-file extent, chunk/refcount,
-reverse-reference — so there is no second tree. A free-space rebuild walks
-those trees whenever the on-disk allocation map cannot be adopted, and a
-two-cursor allocator keeps sequential data contiguous.
+reverse-reference — so there is no second tree, and one bounded resumable walk
+(§4) reads them all, so no operation's resident bytes scale with a tree. A
+free-space rebuild walks those trees whenever the on-disk allocation map cannot
+be adopted, taking each node from the walk's own path, and a two-cursor
+allocator keeps sequential data contiguous.
 
 **Redundancy and authentication (3).** Every metadata block is authenticated
 with a keyed HMAC-SHA256 over identity plus payload and stored in **two**

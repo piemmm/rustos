@@ -729,6 +729,27 @@ is the smallest key in the child.
   an offset, and a sequential write merges into the adjacent run so the map
   stays compact.
 
+Reading more than one record goes through one primitive, a **bounded resumable
+walk** (`TreeWalk`): a step descends one root-to-leaf path and yields that
+leaf's records into the walk's own block-sized buffer, so an operation over a
+tree of any size holds a node's worth of bytes and allocates nothing per step.
+Its position is a single key, which is what lets a caller mutate the tree
+between steps — truncation frees run by run as it goes — and lets a long pass
+stop, persist that key, and resume in a later call with the sequence an
+uninterrupted walk would have produced. A caller that must reach every *node*
+rather than every record — the allocation-map rebuild marking them used, freeing
+a whole extent tree — takes them from the walk's path as it moves (`NodeTrail`),
+which reports each node when the walk enters it and again when it leaves the
+last key beneath it; freeing on the second is what keeps a later step from
+descending through a block already returned to the allocator. Nothing
+materialises a tree's records or its node list, so a stat, a truncate, a delete,
+a scrub step, or a mount-time rebuild costs the same resident bytes on a
+100 TB volume as on a small one (`arxfs-spec.md` §4). A tree whose shape is
+impossible — a level that does not decrease, an entry count wider than its
+block, keys that do not ascend within a leaf — is refused as a device fault
+rather than read past a buffer, descended forever, or walked part-way and
+reported complete.
+
 Mutations copy-on-write the touched node to a fresh (or transaction-private)
 block and bubble the change up to a new root; nodes split on overflow and
 borrow-or-merge on underflow, all `Result`-based and panic-free with no

@@ -22,6 +22,17 @@
 //! (`docs/src/filesystem/arxfs-spec.md` §2). Overflowing nodes split and underflowing nodes
 //! borrow from or merge with a sibling, so the tree grows and shrinks without
 //! a fixed record cap. Every path is `Result`-based and panic-free; there is no `unsafe`.
+//!
+//! # Iteration
+//!
+//! [`TreeWalk`] is the only way to read more than one entry: it yields at most
+//! one leaf node's entries per step into its own block-sized buffer, so the
+//! bytes a caller holds are bounded by the node size rather than by the tree,
+//! whatever the volume's size. Its position is a single key, so a walk both
+//! survives mutation of the tree between steps and can be persisted and
+//! resumed in a later call. [`NodeTrail`] turns that key-order walk into the
+//! node enumeration the free-space rebuild and whole-tree freeing need,
+//! holding one path instead of a node list.
 
 use alloc::vec::Vec;
 
@@ -38,6 +49,18 @@ const N_ENTRIES: usize = HEADER_LEN + 8;
 
 /// Internal-entry stride: separator key (`u64`) plus child pointer (`u64`).
 const INTERNAL_STRIDE: usize = 16;
+
+/// Deepest node level a descent will accept.
+///
+/// This is a validation bound, not a capacity. The narrowest legal geometry —
+/// a 512-byte block, whose internal node holds 23 entries and rebalances down
+/// to 11 — spans every block of a 2^48-block device within 16 levels, so no
+/// well-formed tree approaches this. Refusing a deeper level is what stops a
+/// child pointer that leads back to an ancestor from descending forever.
+pub(crate) const MAX_TREE_LEVEL: u32 = 32;
+
+/// Path slots a descent records: one per level, root first.
+const PATH_SLOTS: usize = MAX_TREE_LEVEL as usize + 1;
 
 /// Static description of one B-tree's record shape, so the single node code
 /// serves trees with different value widths and block owners.
@@ -90,6 +113,52 @@ struct InsertOutcome {
     split: Option<(u64, u64)>,
 }
 
+/// Where a descent ended up: the nodes it passed through, root first, and the
+/// smallest key that begins a subtree *after* the one it landed in.
+///
+/// That second value is the key a walk resumes at once the landing leaf is
+/// exhausted, and its absence means the landing leaf is the tree's last.
+struct Descent {
+    path: [u64; PATH_SLOTS],
+    depth: usize,
+    next_subtree: Option<u64>,
+}
+
+impl Descent {
+    const fn new() -> Self {
+        Self {
+            path: [0; PATH_SLOTS],
+            depth: 0,
+            next_subtree: None,
+        }
+    }
+}
+
+/// Index of the last of `count` entries whose key is `<= key`, or `0` when
+/// `key` precedes them all: the child an internal node's search descends into.
+/// `key_at` reads the key of one entry, so the buffer-backed search and the
+/// decoded-entry search of the mutation path share this one definition.
+fn child_index(
+    count: usize,
+    key: u64,
+    key_at: impl Fn(usize) -> u64,
+) -> Result<usize, DriverError> {
+    if count == 0 {
+        // An internal node with no children cannot be searched, and treating
+        // it as "child 0" would follow a zeroed pointer.
+        return Err(DriverError::DeviceFault);
+    }
+    let mut chosen = 0usize;
+    for i in 0..count {
+        if key_at(i) <= key {
+            chosen = i;
+        } else {
+            break;
+        }
+    }
+    Ok(chosen)
+}
+
 impl<B: Block> ARXFS<B> {
     /// Maximum leaf entries that fit one node block.
     fn btree_leaf_cap(&self, spec: TreeSpec) -> usize {
@@ -120,6 +189,90 @@ impl<B: Block> ARXFS<B> {
         wr_u32(buf, N_COUNT, crate::as_u32(count));
     }
 
+    /// Read the node at `phys` into `buf` and validate the two shapes every
+    /// other reader then trusts: that it sits at the level the descent
+    /// expects, and that its entry count fits the block.
+    ///
+    /// Levels strictly decrease on the way down, so a child pointer leading
+    /// back to an ancestor is refused here instead of descending forever, and
+    /// an entry count wider than the block would otherwise index past the
+    /// buffer. Both are impossible in a tree this driver wrote, which is why
+    /// meeting one is a fail-closed device fault rather than a repair.
+    fn btree_read_node(
+        &mut self,
+        phys: u64,
+        expect_level: Option<u32>,
+        spec: TreeSpec,
+        buf: &mut [u8],
+    ) -> Result<(u32, usize), DriverError> {
+        self.read_meta(phys, BlockType::Btree, buf)?;
+        let level = node_level(buf);
+        if level > MAX_TREE_LEVEL || expect_level.is_some_and(|expect| expect != level) {
+            return Err(DriverError::DeviceFault);
+        }
+        let count = node_count(buf);
+        let cap = if level == 0 {
+            self.btree_leaf_cap(spec)
+        } else {
+            self.btree_internal_cap()
+        };
+        if count > cap {
+            return Err(DriverError::DeviceFault);
+        }
+        Ok((level, count))
+    }
+
+    /// Descend from `root` to the leaf that would hold `key`, leaving that
+    /// leaf's bytes in `buf` and returning its entry count.
+    ///
+    /// `trace`, when given, records the path taken and the smallest key
+    /// beginning a later subtree, which is what lets a walk step to the next
+    /// leaf and report the nodes it entered. The descent is the one place a
+    /// search chooses a child, so a lookup and a walk can never disagree
+    /// about where a key lives.
+    fn btree_descend(
+        &mut self,
+        root: u64,
+        key: u64,
+        spec: TreeSpec,
+        buf: &mut [u8],
+        mut trace: Option<&mut Descent>,
+    ) -> Result<usize, DriverError> {
+        if let Some(trace) = trace.as_deref_mut() {
+            trace.depth = 0;
+            trace.next_subtree = None;
+        }
+        let mut phys = root;
+        let mut expect_level = None;
+        loop {
+            let (level, count) = self.btree_read_node(phys, expect_level, spec, buf)?;
+            if let Some(trace) = trace.as_deref_mut() {
+                let slot = trace.depth;
+                if slot >= PATH_SLOTS {
+                    return Err(DriverError::DeviceFault);
+                }
+                trace.path[slot] = phys;
+                trace.depth = slot + 1;
+            }
+            if level == 0 {
+                return Ok(count);
+            }
+            let chosen = child_index(count, key, |i| rd_u64(buf, N_ENTRIES + i * INTERNAL_STRIDE))?;
+            if let Some(trace) = trace.as_deref_mut() {
+                if chosen + 1 < count {
+                    // A separator is the smallest key in its child, so the one
+                    // after the chosen child starts the next subtree. Deeper
+                    // levels overwrite shallower ones, leaving the tightest
+                    // bound the path offers.
+                    trace.next_subtree =
+                        Some(rd_u64(buf, N_ENTRIES + (chosen + 1) * INTERNAL_STRIDE));
+                }
+            }
+            phys = rd_u64(buf, N_ENTRIES + chosen * INTERNAL_STRIDE + 8);
+            expect_level = Some(level - 1);
+        }
+    }
+
     /// Look up `key`, returning its value bytes when present.
     pub(crate) fn btree_get(
         &mut self,
@@ -130,23 +283,16 @@ impl<B: Block> ARXFS<B> {
         if root == 0 {
             return Ok(None);
         }
-        let mut phys = root;
         let mut buf = [0u8; MAX_BLOCK_SIZE];
-        loop {
-            self.read_meta(phys, BlockType::Btree, &mut buf)?;
-            let count = node_count(&buf);
-            if node_level(&buf) == 0 {
-                let stride = spec.leaf_stride();
-                for i in 0..count {
-                    let base = N_ENTRIES + i * stride;
-                    if rd_u64(&buf, base) == key {
-                        return Ok(Some(buf[base + 8..base + stride].to_vec()));
-                    }
-                }
-                return Ok(None);
+        let count = self.btree_descend(root, key, spec, &mut buf, None)?;
+        let stride = spec.leaf_stride();
+        for i in 0..count {
+            let base = N_ENTRIES + i * stride;
+            if rd_u64(&buf, base) == key {
+                return Ok(Some(buf[base + 8..base + stride].to_vec()));
             }
-            phys = Self::btree_child_for(&buf, count, key);
         }
+        Ok(None)
     }
 
     /// Look up the entry with the largest key `<= key` (a "floor" query),
@@ -161,42 +307,20 @@ impl<B: Block> ARXFS<B> {
         if root == 0 {
             return Ok(None);
         }
-        let mut phys = root;
         let mut buf = [0u8; MAX_BLOCK_SIZE];
-        loop {
-            self.read_meta(phys, BlockType::Btree, &mut buf)?;
-            let count = node_count(&buf);
-            if node_level(&buf) == 0 {
-                let stride = spec.leaf_stride();
-                let mut found: Option<(u64, Vec<u8>)> = None;
-                for i in 0..count {
-                    let base = N_ENTRIES + i * stride;
-                    let k = rd_u64(&buf, base);
-                    if k <= key {
-                        found = Some((k, buf[base + 8..base + stride].to_vec()));
-                    } else {
-                        break;
-                    }
-                }
-                return Ok(found);
-            }
-            phys = Self::btree_child_for(&buf, count, key);
-        }
-    }
-
-    /// The child pointer of internal node `buf` that covers `key`: the last
-    /// separator `<= key`, or the first child when `key` precedes them all.
-    fn btree_child_for(buf: &[u8], count: usize, key: u64) -> u64 {
-        let mut chosen = 0usize;
+        let count = self.btree_descend(root, key, spec, &mut buf, None)?;
+        let stride = spec.leaf_stride();
+        let mut found: Option<(u64, Vec<u8>)> = None;
         for i in 0..count {
-            let base = N_ENTRIES + i * INTERNAL_STRIDE;
-            if rd_u64(buf, base) <= key {
-                chosen = i;
+            let base = N_ENTRIES + i * stride;
+            let k = rd_u64(&buf, base);
+            if k <= key {
+                found = Some((k, buf[base + 8..base + stride].to_vec()));
             } else {
                 break;
             }
         }
-        rd_u64(buf, N_ENTRIES + chosen * INTERNAL_STRIDE + 8)
+        Ok(found)
     }
 
     /// Insert or replace `key -> value`, returning the (possibly new) root.
@@ -246,15 +370,9 @@ impl<B: Block> ARXFS<B> {
         if node_level(&buf) == 0 {
             return self.btree_insert_leaf(phys, &mut buf, count, key, value, spec);
         }
-        // Choose the covering child and recurse.
-        let mut ci = 0usize;
-        for i in 0..count {
-            if rd_u64(&buf, N_ENTRIES + i * INTERNAL_STRIDE) <= key {
-                ci = i;
-            } else {
-                break;
-            }
-        }
+        let ci = child_index(count, key, |i| {
+            rd_u64(&buf, N_ENTRIES + i * INTERNAL_STRIDE)
+        })?;
         let child = rd_u64(&buf, N_ENTRIES + ci * INTERNAL_STRIDE + 8);
         let child_outcome = self.btree_insert_rec(child, key, value, spec)?;
         // Refresh the child's pointer and separator (its min key may shift if
@@ -518,14 +636,7 @@ impl<B: Block> ARXFS<B> {
             }
             return self.btree_store_entries(phys, 0, &entries, spec);
         }
-        let mut ci = 0usize;
-        for (i, (k, _)) in entries.iter().enumerate() {
-            if *k <= key {
-                ci = i;
-            } else {
-                break;
-            }
-        }
+        let ci = child_index(entries.len(), key, |i| entries[i].0)?;
         let child = child_ptr(&entries[ci].1);
         let new_child = self.btree_remove_rec(child, key, spec)?;
         let (child_level, child_entries) = self.btree_load_entries(new_child, spec)?;
@@ -595,127 +706,265 @@ impl<B: Block> ARXFS<B> {
         Ok(())
     }
 
-    /// Collect the physical address of every node in the tree (pre-order),
-    /// for the mount-time free-space rebuild and for freeing a whole tree.
-    pub(crate) fn btree_collect_nodes(
-        &mut self,
-        root: u64,
-        spec: TreeSpec,
-    ) -> Result<Vec<u64>, DriverError> {
-        let mut out = Vec::new();
-        if root != 0 {
-            self.btree_collect_nodes_rec(root, spec, &mut out)?;
-        }
-        Ok(out)
-    }
-
-    fn btree_collect_nodes_rec(
-        &mut self,
-        phys: u64,
-        spec: TreeSpec,
-        out: &mut Vec<u64>,
-    ) -> Result<(), DriverError> {
-        out.push(phys);
-        let (level, entries) = self.btree_load_entries(phys, spec)?;
-        if level > 0 {
-            for (_, v) in &entries {
-                self.btree_collect_nodes_rec(child_ptr(v), spec, out)?;
-            }
-        }
-        Ok(())
-    }
-
     /// Parse the level and, for an internal node, the child pointers out of an
     /// already-verified node buffer `buf`. Used by the scrub verifying walk,
     /// which authenticates each node itself (counting any companion repair)
-    /// before recursing, so it must not re-read the node through the
+    /// before descending, so it must not re-read the node through the
     /// repair-on-read [`crate::ARXFS::read_meta`] path. A leaf returns level
     /// `0` and no children.
-    pub(crate) fn btree_node_children(&self, buf: &[u8]) -> (u32, Vec<u64>) {
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::DeviceFault`] when the node claims a level past
+    /// [`MAX_TREE_LEVEL`] or more entries than its block holds — shapes no
+    /// tree this driver wrote can have, so they are refused rather than
+    /// silently truncated.
+    pub(crate) fn btree_node_children(&self, buf: &[u8]) -> Result<(u32, Vec<u64>), DriverError> {
         let level = node_level(buf);
+        if level > MAX_TREE_LEVEL {
+            return Err(DriverError::DeviceFault);
+        }
         let count = node_count(buf);
         if level == 0 {
-            return (0, Vec::new());
+            return Ok((0, Vec::new()));
         }
-        let cap = self.btree_internal_cap();
-        let mut children = Vec::with_capacity(count.min(cap));
-        for i in 0..count.min(cap) {
-            let base = N_ENTRIES + i * INTERNAL_STRIDE;
-            if base + INTERNAL_STRIDE > self.block_size {
-                break;
-            }
-            children.push(rd_u64(buf, base + 8));
+        if count > self.btree_internal_cap() {
+            return Err(DriverError::DeviceFault);
         }
-        (level, children)
+        let mut children = Vec::new();
+        children
+            .try_reserve_exact(count)
+            .map_err(|_| DriverError::NoSpace)?;
+        for i in 0..count {
+            children.push(rd_u64(buf, N_ENTRIES + i * INTERNAL_STRIDE + 8));
+        }
+        Ok((level, children))
     }
 
-    /// Collect every `(key, value)` leaf entry of the tree, in key order.
-    pub(crate) fn btree_collect_entries(
-        &mut self,
-        root: u64,
-        spec: TreeSpec,
-    ) -> Result<NodeEntries, DriverError> {
-        let mut out = Vec::new();
-        if root != 0 {
-            self.btree_collect_entries_rec(root, spec, &mut out)?;
-        }
-        Ok(out)
-    }
-
-    fn btree_collect_entries_rec(
-        &mut self,
-        phys: u64,
-        spec: TreeSpec,
-        out: &mut NodeEntries,
-    ) -> Result<(), DriverError> {
-        let (level, entries) = self.btree_load_entries(phys, spec)?;
-        if level == 0 {
-            out.extend(entries);
-        } else {
-            for (_, v) in &entries {
-                self.btree_collect_entries_rec(child_ptr(v), spec, out)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Collect every node address *and* every leaf entry of the tree in one
-    /// walk, for callers that need both.
+    /// Advance `walk` to the tree's next leaf entries, returning whether it
+    /// yielded any.
     ///
-    /// [`Self::btree_collect_nodes`] and [`Self::btree_collect_entries`] each
-    /// read every node, so asking for both separately reads the whole tree
-    /// twice. The allocation-map rebuild wants exactly both, over every inode
-    /// on the volume, which is where that doubling is worth avoiding.
-    pub(crate) fn btree_collect_tree(
+    /// One call reads one root-to-leaf path and yields the entries of that
+    /// leaf at or after the walk's position — at most one node's worth,
+    /// already in the walk's buffer, so nothing is allocated per step and a
+    /// caller's resident bytes do not grow with the tree. The walk then stands
+    /// at the first key of the next leaf, which it reaches by descending
+    /// afresh: that is what lets a caller mutate the tree, or stop and resume
+    /// from a persisted key ([`TreeWalk::seek`]), between calls.
+    ///
+    /// Every step either ends the walk or leaves it standing at a strictly
+    /// higher key, so a walk over any tree — including a corrupt one — always
+    /// terminates.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::DeviceFault`] when a node fails to authenticate or the
+    /// tree's shape is impossible (a level that does not decrease, an entry
+    /// count wider than the block, keys that do not ascend within a leaf). A
+    /// walk never ends early and quietly on a corrupt tree, because a caller
+    /// freeing or accounting for every entry would then miss some.
+    pub(crate) fn btree_next_leaf(
         &mut self,
         root: u64,
         spec: TreeSpec,
-    ) -> Result<(Vec<u64>, NodeEntries), DriverError> {
-        let mut nodes = Vec::new();
-        let mut entries = Vec::new();
-        if root != 0 {
-            self.btree_collect_tree_rec(root, spec, &mut nodes, &mut entries)?;
+        walk: &mut TreeWalk,
+    ) -> Result<bool, DriverError> {
+        let stride = spec.leaf_stride();
+        walk.stride = stride;
+        walk.first = 0;
+        walk.count = 0;
+        if root == 0 {
+            walk.stop();
+            return Ok(false);
         }
-        Ok((nodes, entries))
+        while let Some(key) = walk.next {
+            let count =
+                self.btree_descend(root, key, spec, &mut walk.buf, Some(&mut walk.descent))?;
+            let first = (0..count).find(|i| rd_u64(&walk.buf, N_ENTRIES + i * stride) >= key);
+            let Some(first) = first else {
+                // The landing leaf holds only keys below the position, so the
+                // next entry — if there is one — starts the following subtree.
+                match walk.descent.next_subtree {
+                    None => {
+                        walk.stop();
+                        return Ok(false);
+                    }
+                    // The descent stops at the first separator above the
+                    // position, so a later subtree always starts after it and
+                    // this retry cannot stand still.
+                    Some(bound) => walk.next = Some(bound),
+                }
+                continue;
+            };
+            walk.first = first;
+            walk.count = count - first;
+            let last = rd_u64(&walk.buf, N_ENTRIES + (count - 1) * stride);
+            walk.next = match last.checked_add(1) {
+                // The largest key a tree can hold was just yielded.
+                None => None,
+                // Keys ascend within a leaf, so the last of the entries this
+                // step yields cannot be below the position it started at. A
+                // leaf that says otherwise cannot be walked in order at all:
+                // stepping past its last key would skip the entries above it.
+                Some(after) if after <= key => return Err(DriverError::DeviceFault),
+                Some(after) => walk.descent.next_subtree.map(|bound| bound.max(after)),
+            };
+            return Ok(true);
+        }
+        walk.stop();
+        Ok(false)
+    }
+}
+
+/// A bounded, resumable walk over a tree's leaf entries in key order.
+///
+/// The walk owns one node-sized buffer and holds its position as a single
+/// key, so it costs the same whether the tree has ten entries or a hundred
+/// million: [`ARXFS::btree_next_leaf`] fills the buffer with one leaf's worth
+/// of entries, and the caller reads them through [`Self::entries`] before
+/// asking for the next. Because the position is a key rather than a pointer
+/// into the tree, a caller may mutate the tree between steps, and may stop at
+/// an entry and persist that entry's key to [`Self::seek`] back to in a later
+/// call — a walk resumed that way yields exactly what an uninterrupted one
+/// would.
+pub(crate) struct TreeWalk {
+    /// The current leaf's bytes; exactly one filesystem block wide.
+    buf: Vec<u8>,
+    descent: Descent,
+    /// Index within the leaf of the first yielded entry.
+    first: usize,
+    count: usize,
+    stride: usize,
+    /// The key the next step starts at, or `None` once the tree is exhausted.
+    next: Option<u64>,
+}
+
+impl TreeWalk {
+    /// A walk over a tree of `block_size`-byte nodes, positioned before every
+    /// key.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::NoSpace`] when the one node-sized buffer cannot be
+    /// allocated; the walk allocates nothing thereafter.
+    pub(crate) fn new(block_size: usize) -> Result<Self, DriverError> {
+        let mut buf = Vec::new();
+        buf.try_reserve_exact(block_size)
+            .map_err(|_| DriverError::NoSpace)?;
+        buf.resize(block_size, 0);
+        Ok(Self {
+            buf,
+            descent: Descent::new(),
+            first: 0,
+            count: 0,
+            stride: 0,
+            next: Some(0),
+        })
     }
 
-    fn btree_collect_tree_rec(
-        &mut self,
-        phys: u64,
-        spec: TreeSpec,
-        nodes: &mut Vec<u64>,
-        out: &mut NodeEntries,
-    ) -> Result<(), DriverError> {
-        nodes.push(phys);
-        let (level, entries) = self.btree_load_entries(phys, spec)?;
-        if level == 0 {
-            out.extend(entries);
-        } else {
-            for (_, v) in &entries {
-                self.btree_collect_tree_rec(child_ptr(v), spec, nodes, out)?;
-            }
+    /// Position the walk at `key`, so the next step yields the first entry at
+    /// or after it.
+    pub(crate) fn seek(&mut self, key: u64) {
+        self.next = Some(key);
+        self.first = 0;
+        self.count = 0;
+    }
+
+    /// Position the walk before every key, for reuse over another tree.
+    pub(crate) fn restart(&mut self) {
+        self.seek(0);
+        self.descent.depth = 0;
+        self.descent.next_subtree = None;
+    }
+
+    /// The last step's entries, in key order.
+    pub(crate) fn entries(&self) -> impl Iterator<Item = (u64, &[u8])> + '_ {
+        let (first, stride) = (self.first, self.stride);
+        (0..self.count).map(move |i| {
+            let base = N_ENTRIES + (first + i) * stride;
+            (rd_u64(&self.buf, base), &self.buf[base + 8..base + stride])
+        })
+    }
+
+    /// The nodes the last step descended through, root first.
+    pub(crate) fn path(&self) -> &[u64] {
+        &self.descent.path[..self.descent.depth]
+    }
+
+    /// End the walk: no further step yields anything. A caller that has just
+    /// consumed the largest key a tree can hold stops here rather than
+    /// looking for a key beyond it.
+    pub(crate) fn stop(&mut self) {
+        self.next = None;
+        self.descent.depth = 0;
+        self.descent.next_subtree = None;
+    }
+}
+
+/// Which nodes a key-order walk has entered and finished with.
+///
+/// A walk visits paths in key order, so the moment a level of the path
+/// changes, the node that stood there has no keys left beneath it and every
+/// deeper level of the new path is a node just entered. That turns the leaf
+/// walk into a node enumeration for the callers that need one — the
+/// free-space rebuild marking every node used, freeing a whole tree — with a
+/// single path's worth of state instead of the tree's node list, and without a
+/// second traversal to maintain.
+pub(crate) struct NodeTrail {
+    open: [u64; PATH_SLOTS],
+    open_depth: usize,
+    entered: [u64; PATH_SLOTS],
+    entered_len: usize,
+    closed: [u64; PATH_SLOTS],
+    closed_len: usize,
+}
+
+impl NodeTrail {
+    pub(crate) const fn new() -> Self {
+        Self {
+            open: [0; PATH_SLOTS],
+            open_depth: 0,
+            entered: [0; PATH_SLOTS],
+            entered_len: 0,
+            closed: [0; PATH_SLOTS],
+            closed_len: 0,
         }
-        Ok(())
+    }
+
+    /// Move the trail onto `path`, recomputing [`Self::entered`] and
+    /// [`Self::closed`].
+    pub(crate) fn advance(&mut self, path: &[u64]) {
+        let path = &path[..path.len().min(PATH_SLOTS)];
+        let common = path
+            .iter()
+            .zip(&self.open[..self.open_depth])
+            .take_while(|(new, open)| new == open)
+            .count();
+        self.closed_len = self.open_depth - common;
+        for (slot, node) in self.open[common..self.open_depth].iter().rev().enumerate() {
+            self.closed[slot] = *node;
+        }
+        self.entered_len = path.len() - common;
+        self.entered[..self.entered_len].copy_from_slice(&path[common..]);
+        self.open[..path.len()].copy_from_slice(path);
+        self.open_depth = path.len();
+    }
+
+    /// Nodes the last [`Self::advance`] entered, shallowest first.
+    pub(crate) fn entered(&self) -> &[u64] {
+        &self.entered[..self.entered_len]
+    }
+
+    /// Nodes whose subtree the last [`Self::advance`] finished, deepest first.
+    pub(crate) fn closed(&self) -> &[u64] {
+        &self.closed[..self.closed_len]
+    }
+
+    /// The nodes still open, deepest first, leaving the trail empty: what a
+    /// caller freeing a tree has left to free once the walk ends.
+    pub(crate) fn close(&mut self) -> &[u64] {
+        self.advance(&[]);
+        self.closed()
     }
 }
 

@@ -18,11 +18,10 @@ the charter and this brief disagree the charter wins (stop and ask, charter
 transactions, so this stage lands *after* the write-back and commit-barrier
 work (`plans/ARXFS-WRITEBACK.md`, spec stage 17): a snapshot published without
 the barrier could name a root whose subtree never reached media, which is
-precisely the guarantee a snapshot exists to give. It also depends on bounded,
-resumable tree iteration (`plans/IMPLEMENT-OUTSTANDING-ARXFS.md` §3): the
+precisely the guarantee a snapshot exists to give. It builds on the bounded,
+resumable tree walk of `plans/IMPLEMENT-OUTSTANDING-ARXFS.md` §3 (done): the
 diff walk, the reachability computation, and the `exclusive` accounting are all
-paged, bounded walks, and the tree helper they would otherwise reach for
-materialises a whole tree per call. The ordered ledger is
+paged, bounded walks over it. The ordered ledger is
 `plans/IMPLEMENT-OUTSTANDING-ARXFS.md`.
 
 Snapshots are designed first as a **correctness/retention feature** and second

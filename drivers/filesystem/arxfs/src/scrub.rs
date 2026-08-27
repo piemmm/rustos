@@ -143,6 +143,7 @@ use alloc::vec::Vec;
 use tairix_abi::driver::block::Block;
 use tairix_abi::{CapabilityId, CapabilityQuery, DriverError};
 
+use crate::btree::{TreeWalk, MAX_TREE_LEVEL};
 use crate::dedupe::{ChunkRecord, Referrer, REVERSE_REF_CAP};
 use crate::header::{BlockHeader, BlockType, HEADER_LEN};
 use crate::integrity::DataFault;
@@ -165,6 +166,21 @@ const SP_CURSOR: usize = HEADER_LEN + 8;
 const SP_COUNTS: usize = HEADER_LEN + 16;
 /// Number of `u64` count fields persisted after the cursor.
 const SP_COUNT_FIELDS: usize = 10;
+
+/// The next unvisited child of the deepest tree level still owing one, with
+/// the level it must sit at, dropping levels that have none left.
+fn next_pending_child(pending: &mut Vec<(u32, Vec<u64>)>) -> Option<(u64, u32)> {
+    loop {
+        let frame = pending.last_mut()?;
+        let level = frame.0;
+        match frame.1.pop() {
+            Some(child) => return Some((child, level)),
+            None => {
+                pending.pop();
+            }
+        }
+    }
+}
 
 /// Outcome of verifying one metadata block's two physical copies.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -240,33 +256,36 @@ impl<B: Block> ARXFS<B> {
     /// a clean scrub idempotent — metadata copy-repairs are direct block
     /// writes, not transactional).
     fn scrub_run(&mut self, budget: ScrubBudget) -> Result<(ScrubReport, bool), DriverError> {
-        let (mut report, mut cursor) = self.scrub_resume_point()?;
+        let (mut report, cursor) = self.scrub_resume_point()?;
         let mut mutated = false;
 
-        let inodes = self.btree_collect_entries(self.inode_tree_root, inode_spec())?;
         let limit = match budget {
             ScrubBudget::Unlimited => usize::MAX,
             ScrubBudget::Inodes(n) => as_usize(n),
         };
+        let spec = inode_spec();
+        let mut walk = TreeWalk::new(self.block_size)?;
+        let mut extent_walk = TreeWalk::new(self.block_size)?;
+        walk.seek(cursor);
         let mut processed = 0usize;
-        let mut paused = false;
-        for (ino_key, value) in &inodes {
-            if *ino_key < cursor {
-                continue;
+        let mut paused = None;
+        'walk: while self.btree_next_leaf(self.inode_tree_root, spec, &mut walk)? {
+            for (ino_key, value) in walk.entries() {
+                if processed >= limit {
+                    // The budget stops the pass *before* this inode, so the
+                    // cursor it persists is the one a resumed pass starts at.
+                    paused = Some(ino_key);
+                    break 'walk;
+                }
+                let ino = u32::try_from(ino_key).map_err(|_| DriverError::DeviceFault)?;
+                if let Some(inode) = Inode::decode(value)? {
+                    self.scrub_inode(ino, &inode, &mut extent_walk, &mut report)?;
+                }
+                processed += 1;
             }
-            if processed >= limit {
-                paused = true;
-                break;
-            }
-            let ino = u32::try_from(*ino_key).map_err(|_| DriverError::DeviceFault)?;
-            if let Some(inode) = Inode::decode(value)? {
-                self.scrub_inode(ino, &inode, &mut report)?;
-            }
-            processed += 1;
-            cursor = ino_key.wrapping_add(1);
         }
 
-        if paused {
+        if let Some(cursor) = paused {
             self.store_scrub_progress(cursor, &report)?;
             report.complete = false;
             return Ok((report, true));
@@ -274,7 +293,7 @@ impl<B: Block> ARXFS<B> {
 
         // Every inode has been verified: recompute and reconcile the chunk
         // refcounts and reverse-reference sets against the on-disk trees.
-        if self.scrub_refcounts(&inodes, &mut report)? {
+        if self.scrub_refcounts(&mut report)? {
             mutated = true;
         }
         // Clear the resumable progress record now the pass is complete.
@@ -300,14 +319,18 @@ impl<B: Block> ARXFS<B> {
         report: &mut ScrubReport,
     ) -> Result<bool, DriverError> {
         self.scrub_global_metadata(report)?;
-        let inodes = self.btree_collect_entries(self.inode_tree_root, inode_spec())?;
-        for (ino_key, value) in &inodes {
-            let ino = u32::try_from(*ino_key).map_err(|_| DriverError::DeviceFault)?;
-            if let Some(inode) = Inode::decode(value)? {
-                self.scrub_inode(ino, &inode, report)?;
+        let spec = inode_spec();
+        let mut walk = TreeWalk::new(self.block_size)?;
+        let mut extent_walk = TreeWalk::new(self.block_size)?;
+        while self.btree_next_leaf(self.inode_tree_root, spec, &mut walk)? {
+            for (ino_key, value) in walk.entries() {
+                let ino = u32::try_from(ino_key).map_err(|_| DriverError::DeviceFault)?;
+                if let Some(inode) = Inode::decode(value)? {
+                    self.scrub_inode(ino, &inode, &mut extent_walk, report)?;
+                }
             }
         }
-        self.scrub_refcounts(&inodes, report)
+        self.scrub_refcounts(report)
     }
 
     /// Determine where this scrub call starts: resume the persisted cursor and
@@ -354,6 +377,7 @@ impl<B: Block> ARXFS<B> {
         &mut self,
         ino: u32,
         inode: &Inode,
+        walk: &mut TreeWalk,
         report: &mut ScrubReport,
     ) -> Result<(), DriverError> {
         let extent_ok = self.scrub_btree(inode.extent_root, report)?;
@@ -365,35 +389,38 @@ impl<B: Block> ARXFS<B> {
         }
         let spec = extent_spec(ino);
         let mirrored = inode.kind.content_is_metadata();
-        let entries = self.btree_collect_entries(inode.extent_root, spec)?;
         let mut buf = [0u8; MAX_BLOCK_SIZE];
-        for (_, value) in entries {
-            let ext = Extent::decode(&value)?;
-            if ext.compressed {
-                if mirrored {
-                    // A directory never holds a compressed extent; record the
-                    // impossible shape rather than scan the wrong blocks.
-                    report.note_meta(MetaStatus::Unrepairable);
+        walk.restart();
+        while self.btree_next_leaf(inode.extent_root, spec, walk)? {
+            for (_, value) in walk.entries() {
+                let ext = Extent::decode(value)?;
+                if ext.compressed {
+                    if mirrored {
+                        // A directory never holds a compressed extent; record
+                        // the impossible shape rather than scan the wrong
+                        // blocks.
+                        report.note_meta(MetaStatus::Unrepairable);
+                        continue;
+                    }
+                    // The whole cluster verifies in one bounded pass: every
+                    // stored block's integrity layers plus the frame shape and
+                    // its decompression.
+                    report.data_blocks_checked += ext.stored;
+                    if let Err(fault) = self.read_data_cluster_classified(&ext) {
+                        report.note_data_fault(fault);
+                    }
                     continue;
                 }
-                // The whole cluster verifies in one bounded pass: every
-                // stored block's integrity layers plus the frame shape and
-                // its decompression.
-                report.data_blocks_checked += ext.stored;
-                if let Err(fault) = self.read_data_cluster_classified(&ext) {
-                    report.note_data_fault(fault);
-                }
-                continue;
-            }
-            for b in 0..ext.len {
-                let block = ext.phys + b;
-                if mirrored {
-                    let status = self.scrub_meta(block, BlockType::Directory)?;
-                    report.note_meta(status);
-                } else {
-                    report.data_blocks_checked += 1;
-                    if let Err(fault) = self.read_data_block_classified(block, &mut buf) {
-                        report.note_data_fault(fault);
+                for b in 0..ext.len {
+                    let block = ext.phys + b;
+                    if mirrored {
+                        let status = self.scrub_meta(block, BlockType::Directory)?;
+                        report.note_meta(status);
+                    } else {
+                        report.data_blocks_checked += 1;
+                        if let Err(fault) = self.read_data_block_classified(block, &mut buf) {
+                            report.note_data_fault(fault);
+                        }
                     }
                 }
             }
@@ -416,20 +443,38 @@ impl<B: Block> ARXFS<B> {
             return Ok(true);
         }
         let mut buf = [0u8; MAX_BLOCK_SIZE];
-        let status = self.scrub_meta_into(root, BlockType::Btree, &mut buf)?;
-        report.note_meta(status);
-        if status == MetaStatus::Unrepairable {
-            return Ok(false);
-        }
-        let (level, children) = self.btree_node_children(&buf);
-        if level == 0 {
-            return Ok(true);
-        }
+        // One frame per tree level, holding that level's not-yet-visited
+        // children, so the walk costs the tree's depth rather than its node
+        // count and cannot overrun a kernel stack on a deep tree. Levels must
+        // decrease by one on the way down, so a pointer leading back to an
+        // ancestor is refused instead of walked forever.
+        let mut pending: Vec<(u32, Vec<u64>)> = Vec::new();
         let mut all_ok = true;
-        for child in children {
-            if !self.scrub_btree(child, report)? {
+        let mut next = Some((root, None));
+        while let Some((phys, expect_level)) = next {
+            let status = self.scrub_meta_into(phys, BlockType::Btree, &mut buf)?;
+            report.note_meta(status);
+            if status == MetaStatus::Unrepairable {
+                // An unrepairable node's children cannot be reached, let alone
+                // verified: record it and carry on with its siblings.
                 all_ok = false;
+            } else {
+                let (level, mut children) = self.btree_node_children(&buf)?;
+                if expect_level.is_some_and(|expect| expect != level) {
+                    return Err(DriverError::DeviceFault);
+                }
+                if level > 0 {
+                    if pending.len() >= MAX_TREE_LEVEL as usize {
+                        return Err(DriverError::DeviceFault);
+                    }
+                    // Visited by popping the tail, so reversing keeps the
+                    // ascending key order the recursive walk had.
+                    children.reverse();
+                    pending.try_reserve(1).map_err(|_| DriverError::NoSpace)?;
+                    pending.push((level - 1, children));
+                }
             }
+            next = next_pending_child(&mut pending).map(|(child, level)| (child, Some(level)));
         }
         Ok(all_ok)
     }
@@ -529,7 +574,6 @@ impl<B: Block> ARXFS<B> {
     /// correction was made (so the caller commits the new root).
     pub(crate) fn scrub_refcounts(
         &mut self,
-        inodes: &[(u64, Vec<u8>)],
         report: &mut ScrubReport,
     ) -> Result<bool, DriverError> {
         // Build the authoritative referrer set per physical data block from
@@ -537,28 +581,36 @@ impl<B: Block> ARXFS<B> {
         // it shares chunks like any other; only directories are mirrored
         // metadata rather than shared chunks and never participate).
         let mut referrers: BTreeMap<u64, Vec<Referrer>> = BTreeMap::new();
-        for (ino_key, value) in inodes {
-            let Some(inode) = Inode::decode(value)? else {
-                continue;
-            };
-            if inode.kind.content_is_metadata() {
-                continue;
-            }
-            let ino = u32::try_from(*ino_key).map_err(|_| DriverError::DeviceFault)?;
-            let spec = extent_spec(ino);
-            for (start, ev) in self.btree_collect_entries(inode.extent_root, spec)? {
-                let ext = Extent::decode(&ev)?;
-                if ext.compressed {
-                    // A cluster is shared as a unit: one referrer, keyed by
-                    // its first physical block, naming its logical start.
-                    referrers.entry(ext.phys).or_default().push((ino, start));
+        let mut walk = TreeWalk::new(self.block_size)?;
+        let mut extent_walk = TreeWalk::new(self.block_size)?;
+        while self.btree_next_leaf(self.inode_tree_root, inode_spec(), &mut walk)? {
+            for (ino_key, value) in walk.entries() {
+                let Some(inode) = Inode::decode(value)? else {
+                    continue;
+                };
+                if inode.kind.content_is_metadata() {
                     continue;
                 }
-                for b in 0..ext.len {
-                    referrers
-                        .entry(ext.phys + b)
-                        .or_default()
-                        .push((ino, start + b));
+                let ino = u32::try_from(ino_key).map_err(|_| DriverError::DeviceFault)?;
+                let spec = extent_spec(ino);
+                extent_walk.restart();
+                while self.btree_next_leaf(inode.extent_root, spec, &mut extent_walk)? {
+                    for (start, ev) in extent_walk.entries() {
+                        let ext = Extent::decode(ev)?;
+                        if ext.compressed {
+                            // A cluster is shared as a unit: one referrer,
+                            // keyed by its first physical block, naming its
+                            // logical start.
+                            referrers.entry(ext.phys).or_default().push((ino, start));
+                            continue;
+                        }
+                        for b in 0..ext.len {
+                            referrers
+                                .entry(ext.phys + b)
+                                .or_default()
+                                .push((ino, start + b));
+                        }
+                    }
                 }
             }
         }

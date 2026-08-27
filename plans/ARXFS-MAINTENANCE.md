@@ -449,17 +449,13 @@ These are not maintenance work, but a paced background pass is impossible until
 they land, so they are named here and sequenced ahead of M2 in
 `plans/IMPLEMENT-OUTSTANDING-ARXFS.md`.
 
-- **Bounded tree iteration.** `btree_collect_entries` materialises an entire
-  tree into a `Vec` before its caller looks at the first entry. `scrub_run`
-  therefore collects *every inode in the volume* before its budget applies, and
-  `scrub_inode` collects every extent of one inode; `check` does the same five
-  times over, and the truncate, reflink, and read paths in `lib.rs` use it too.
-  On the combined floor — a 1 GiB machine serving several 100 TB volumes — that
-  is a whole-volume-proportional allocation on a path that must be
-  working-set-bounded, and it makes a "bounded" scrub chunk unbounded in memory
-  before it does any work. The fix is a resumable cursor-based walk (`seek` to a
-  key, yield entries, return where it stopped) as the primary iteration
-  primitive, with the collecting form deleted rather than left beside it.
+- **Bounded tree iteration — done** (item A0 of
+  `plans/IMPLEMENT-OUTSTANDING-ARXFS.md` §3). `TreeWalk` is the driver's only
+  multi-record read: one step, one root-to-leaf path, one leaf's records from
+  the walk's own block-sized buffer, positioned by a single key so a pass may
+  stop, persist it, and resume. The scrub and check walks are converted and the
+  collecting forms are gone. What is *not* yet bounded is the state those passes
+  accumulate around the walk (§13 D-M5), which M2 needs first.
 - **A work-shaped scrub budget.** `ScrubBudget::Inodes(n)` bounds *inodes*, and
   `scrub_inode` has no budget check inside it, so a single 100 TB file is one
   "unit" and `Inodes(1)` is an uninterruptible multi-hour call holding the mount
@@ -545,6 +541,26 @@ when M7 has landed **and** this section is empty.
   re-sweep and never correctness. If the sweep cannot be given a home without
   changing the transaction-root layout, **stop and ask** rather than guessing an
   on-disk change.
+- **D-M5 — `scrub` and `check` hold whole-volume state in RAM, so neither can
+  complete on the machine the charter requires the volume to be served from.**
+  Found while converting these passes to the bounded walk (item A0): the
+  *iteration* is bounded now, the accumulators around it are not.
+  `scrub_refcounts` builds a `BTreeMap<u64, Vec<Referrer>>` keyed by **every
+  physical data block on the volume** before it reconciles anything — tens of
+  billions of entries on the combined floor, so the reconcile phase of both
+  `scrub` and `check` is unreachable there, not merely slow.
+  `check_directories_and_orphans` holds a reachable-inode `BTreeSet<u32>` and
+  its walk stack, `check_link_counts` a `BTreeMap<u32, u32>` of every named
+  inode, and `check::dir_entries` a `Vec` of a whole directory's entries. The
+  fix is not more iteration: the derived truth needs a bounded home. ARXFS
+  already has the shape — an on-disk paged structure with a bounded resident
+  cache — so the reconcile streams the extents through a scratch map (a second
+  claim on a block is the double-mark the map already detects) and verifies each
+  chunk with bounded lookups against the chunk and reverse-reference trees,
+  behind a persisted cursor like the scrub cursor. That is an on-disk layout
+  decision: **stop and ask before guessing one.** Fix in **A2**, which is
+  sequenced ahead of M2 in `plans/IMPLEMENT-OUTSTANDING-ARXFS.md` because a
+  "bounded pass" over an unbounded accumulator is not one.
 - **D-M4 — `health` commits a whole transaction on every poll even when the
   baseline has not changed.** `health` unconditionally runs `begin()` /
   `store_health_baseline` / `commit()`. On a device reporting
@@ -689,7 +705,8 @@ One shared read-only repair rule for both copy-repair sites; `scrub` and
 ### M2 — bounded passes: scrub, discard, and health (D-M2, D-M3, D-M4). **planned**
 The stage that makes every maintenance operation a bounded, resumable, lossless
 pass, so the runner has something honest to drive. Consumes the §12
-prerequisite. Three pieces: cursor-based iteration in the scrub walk with a
+prerequisites: the bounded walk (done) and the bounded reconcile state A2
+lands. Three pieces: cursor-based iteration in the scrub walk with a
 work-shaped budget and an `(inode, offset)` cursor; the discard sweep over the
 allocation map replacing the per-block queue outright, with its own persisted
 cursor and the bounded recently-freed hint; and `health` recommending instead of

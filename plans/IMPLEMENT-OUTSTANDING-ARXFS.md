@@ -32,7 +32,9 @@ no-deferral rule), ahead of everything below it.
 
 | # | Item | Owner | Spec stage | Depends on | Status |
 |---|---|---|---|---|---|
-| A0 | Bounded, resumable tree iteration | §3 here | — | — | planned |
+| A0 | Bounded, resumable tree iteration | §3 here | — | — | **done** |
+| A1 | Bounded-stack B-tree mutation path (defect `OPEN-DEFECTS.md` D65) | §7 here | — | A0 | **next** |
+| A2 | Bounded whole-volume reconcile and reachability state (defect D-M5) | `ARXFS-MAINTENANCE.md` | 18 | A1 | planned |
 | M0 | Shared background pacer + cross-layer availability query | `ARXFS-MAINTENANCE.md` | 18 | — | planned |
 | M1 | The read-only repair rule (defect D64) | `ARXFS-MAINTENANCE.md` | 18 | — | planned |
 | WB0 | Write-amplification measurement harness | `ARXFS-WRITEBACK.md` | 17 | — | planned |
@@ -42,7 +44,7 @@ no-deferral rule), ahead of everything below it.
 | WB4 | Commit scheduler | `ARXFS-WRITEBACK.md` | 17 | WB1 | planned |
 | WB5 | The bound and memory pressure | `ARXFS-WRITEBACK.md` | 17 | WB1 | planned |
 | WB6 | Hardware acceptance + docs | `ARXFS-WRITEBACK.md` | 17 | WB2–WB5 | planned |
-| M2 | Bounded passes: scrub, discard sweep, health (D-M2/3/4) | `ARXFS-MAINTENANCE.md` | 18 | A0, M1 | planned |
+| M2 | Bounded passes: scrub, discard sweep, health (D-M2/3/4) | `ARXFS-MAINTENANCE.md` | 18 | A2, M1 | planned |
 | M3 | The maintenance scheduler | `ARXFS-MAINTENANCE.md` | 18 | M0, M2 | planned |
 | M4 | The `FilesystemMaintenance` driver-ABI facet | `ARXFS-MAINTENANCE.md` | 18 | M3 | planned |
 | M5 | The maintenance runner | `ARXFS-MAINTENANCE.md` | 18 | M4, WB1 | planned |
@@ -75,8 +77,15 @@ their reason recorded there, not here:
   serving several 100 TB volumes at once. A tree walk that materialises a whole
   tree into a `Vec` before its caller reads the first entry cannot pass that on
   any stage, and it makes a "bounded" maintenance chunk unbounded in memory
-  before it does any work. Fixing it once, first, is also the difference between
-  one change and six that each work around it.
+  before it does any work. Fixing it once, first, was also the difference
+  between one change and six that each work around it.
+- **A1 and A2 next, because A0's work surfaced them (§7) and the no-deferral
+  rule puts a found defect ahead of everything planned.** A1 is a reachable
+  kernel-stack overflow on the write path — the read paths A0 converted no
+  longer recurse, the mutation path still does, at 8 KiB per tree level against
+  a 32 KiB stack. A2 is what is left of the boundedness A0 was taken for: the
+  iteration under `scrub` and `check` is bounded now, their own whole-volume
+  accumulators are not, and M2 cannot honestly claim a bounded pass over them.
 - **The barrier before every background writer and every durable-root
   consumer.** WB1 closes the commit-barrier defect (`OPEN-DEFECTS.md` D63): a
   superblock slot published with no barrier before it can name a root whose
@@ -94,8 +103,8 @@ their reason recorded there, not here:
   Neither needs the barrier, and M1 should not wait behind six write-back
   stages.
 - **M2 before M3, because a scheduler over broken operations is worse than
-  none.** M2 makes each operation a bounded, resumable, lossless pass. Until it
-  lands, `scrub` is one uninterruptible call over a whole volume, `trim`
+  none.** M2 makes each operation a bounded, resumable, lossless pass (over the
+  reconcile state A2 bounds first). Until it lands, `scrub` is one uninterruptible call over a whole volume, `trim`
   silently forfeits most of the space it is asked to discard, and `health`
   scrubs inline — so a runner driving them would *look* correct while doing the
   wrong thing quietly. That is the one ordering in this ledger where getting it
@@ -107,39 +116,38 @@ their reason recorded there, not here:
   pacer M0 hoists — a third background scheduler pacing to a third notion of
   "busy" is the defect that plan and `ARXFS-MAINTENANCE.md` §6 both forbid.
 
-## 3. A0 — bounded, resumable tree iteration
+## 3. A0 — bounded, resumable tree iteration — done
 
-**Owned here** because no plan owned it and four do not work without it.
+`TreeWalk` (`drivers/filesystem/arxfs/src/btree.rs`) is the driver's only way
+to read more than one record from a tree. A step descends one root-to-leaf path
+and yields that leaf's records from the walk's own block-sized buffer, so an
+operation's resident bytes are set by the block size and never by the tree, and
+nothing is allocated per record. The position is a single key, so a caller may
+mutate the tree between steps — truncation frees run by run, seeking straight to
+the run covering the cut — and a bounded pass may stop, persist that key, and
+resume with the sequence an uninterrupted walk would have yielded. `NodeTrail`
+turns the same walk into the node enumeration the free-space rebuild and
+whole-tree freeing need, reporting each node as the walk enters it and again
+when it leaves the last key beneath it; freeing on the second is what stops a
+later step descending through a block already back in the allocator. The
+collecting forms (`btree_collect_entries`, `btree_collect_nodes`,
+`btree_collect_tree`) are deleted, and `scrub`'s verifying node walk is a
+bounded frame stack rather than recursion, so no read path recurses per tree
+level.
 
-`ARXFS::btree_collect_entries` walks a whole tree and returns every leaf entry
-in one `Vec`. Its callers are not incidental:
+One descent now serves lookups, floor queries, and the walk, and it validates
+what every reader then trusts: a level that decreases by one per step (so a
+child pointer leading back to an ancestor is refused, where the old descent
+looped or recursed forever), an entry count that fits the block (the old one
+indexed the buffer straight from the on-disk count), and keys that ascend
+within a leaf. Each is a fail-closed device fault; a walk never ends early and
+quietly, because a caller freeing or accounting for every record would then
+miss some.
 
-- `scrub_run` collects **every inode in the volume** before its budget applies,
-  then `scrub_inode` collects every extent of one inode;
-- `check` does the same over the inode tree five times, plus per-inode extents;
-- `lib.rs`'s truncate, reflink, and read-span paths collect a file's whole
-  extent map to walk part of it.
-
-On the combined floor that is a device-proportional allocation on paths that
-must be working-set-bounded, and it is the reason a scrub cannot honestly claim
-a bounded chunk. It is a live scalability defect independent of the maintenance
-work, not a refactor for tidiness.
-
-**Deliverable.** A resumable cursor is the tree's *primary* iteration
-primitive: seek to a key, yield entries in order under a caller-supplied bound,
-return the key to resume from. It is allocation-free per step (the caller owns
-one node-sized buffer), it is the same single generic B-tree node
-implementation — there is no second tree — and every call site above is
-converted to it. The collecting form is **deleted**, not kept beside it: a
-superseded helper left in place is dead code that the next caller will reach
-for.
-
-**Acceptance.** Every converted path is bounded in resident bytes by its
-caller's buffer, asserted against an allocation counter, not by inspection; a
-walk interrupted and resumed yields exactly the same sequence as an
-uninterrupted one; the tree suite and the existing scrub/check/truncate/reflink
-tests pass unchanged; a large-volume floor test shows resident bytes independent
-of volume size.
+*Measured:* a stat over a file with 800 extents holds 512 bytes and allocates
+twice — the same as one with 200 (`tests/bounded_iteration.rs`). The
+allocation-map rebuild over sixteen times the records stays inside a
+geometry-fixed budget rather than scaling with them.
 
 ## 4. S1 — hole-aware seek and punch-hole/zero-range
 
@@ -268,7 +276,80 @@ fix.** This binds every item in this ledger and every plan it names.
   ARXFS is not done while any plan's defect section is non-empty. "All items
   planned → done" and "every defect section empty" are the same finish line.
 
-## 7. The implementation prompt
+## 7. A1 and A2 — the two defects A0 surfaced
+
+A0's own scope is closed. Reading the code it converted surfaced two defects
+that are too large to fold into it, so under §6 they are the next items to be
+taken and they block every row below them.
+
+### A1 — the B-tree mutation path recurses with an 8 KiB frame per level
+
+**Owned here**; tracked in `plans/OPEN-DEFECTS.md` D65 for its severity.
+
+`btree_insert_rec` recurses once per tree level holding two block-sized buffers
+live across the recursive call (the node it is editing and the child it re-reads
+to refresh a separator), and `btree_insert_leaf` adds a third on a split.
+Measured on the release build for x86_64, one level of `btree_insert_rec` is
+**8312 bytes** of stack (`sub $0x1000` twice plus `$0x78`). The kernel hosts
+this driver on 32 KiB per-thread stacks (`KTHREAD_STACK_BYTES`, release) behind
+a 4 KiB guard page, so **four levels overflow the stack and three leave under
+4 KiB for the syscall, VFS, and write path beneath it**. A three-level extent
+tree is ordinary: about 30 000 extents on a 4 KiB volume, and about 250 on a
+512-byte one — a fragmented file, not a pathological one. Nothing bounds the
+depth on that path either, so a corrupt tree recurses until the guard page
+catches it.
+
+The fix is the same shape as A0's: make the mutation path iterative over a
+bounded path stack, and drop the child re-read by returning the child's minimum
+key from the recursive step instead of reading the node back to fetch it. The
+per-entry `Vec` decode `btree_load_entries` performs at every level of the
+remove path (one allocation per record, per node, per level) goes with it — the
+same node buffer serves. Landing it needs the level-continuity check the read
+descent now applies, so the mutation path refuses an impossible tree instead of
+running off the stack.
+
+*Acceptance:* the measured frame of every mutation entry point is a few hundred
+bytes, independent of tree depth; an insert and a remove on a three-level tree
+allocate a bounded handful rather than per record, asserted against the
+allocation counter `tests/bounded_iteration.rs` already installs; the depth
+bound refuses a cyclic tree on the write path as it now does on the read path;
+the tree suite, the crash-replay suite, and the fuzz corpus pass unchanged.
+
+### A2 — scrub and check hold whole-volume state in RAM
+
+**Owned by `ARXFS-MAINTENANCE.md`** (defect D-M5 there); listed here because it
+blocks this ledger.
+
+A0 made the *iteration* under these passes bounded, which leaves their own
+accumulators as the remaining volume-proportional state:
+
+- `scrub_refcounts` builds `BTreeMap<u64, Vec<Referrer>>` keyed by **every
+  physical data block on the volume** before it reconciles anything. On the
+  combined floor that is tens of billions of entries — a structure that cannot
+  exist on the machine the charter requires the volume to be served from, so
+  the reconcile phase of `scrub` and of `check` cannot complete there at all.
+- `check_directories_and_orphans` holds a `BTreeSet<u32>` of every reachable
+  inode plus its walk stack, and `check_link_counts` a `BTreeMap<u32, u32>` of
+  every named inode: proportional to the inode count rather than the working
+  set.
+- `check::dir_entries` returns a `Vec` of a whole directory's entries, so one
+  huge directory is unbounded even though the caller consumes it in order.
+
+The fix is not more iteration: the truth these passes derive has to live
+somewhere bounded. ARXFS already has the right home — an on-disk paged map with
+a bounded resident cache — so the shape is a scratch on-disk structure the
+reconcile streams through (marking each mapped block, detecting a second claim
+where the map already detects a double-mark) plus bounded per-chunk lookups
+against the chunk and reverse-reference trees, with a persisted cursor like the
+scrub cursor. That is an on-disk layout decision: **stop and ask before
+guessing one**.
+
+*Acceptance:* a scrub and a check over a volume with sixteen times the records
+hold the same resident bytes, asserted against the allocation counter; both stay
+resumable and reach the same report as an uninterrupted pass; the existing
+scrub/check suites pass unchanged.
+
+## 8. The implementation prompt
 
 Paste this, naming the item:
 
@@ -337,7 +418,7 @@ For FEC (item F1) use the stage prompt in `plans/ARXFS-FEC.md` §30 instead of
 the body above; it carries that plan's mandatory design constraints. The reading
 list, the ledger check, and the closing gate still apply.
 
-## 8. Non-goals
+## 9. Non-goals
 
 - **Not a redesign.** Every item's design lives in its owning plan; this file
   changes none of it.
