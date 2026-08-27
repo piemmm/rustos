@@ -1,6 +1,6 @@
 //! Resolving an icon to drawable pixels: the shared artwork layer.
 //!
-//! [`IconKind`] and [`builtin_icon`](crate::builtin_icon) give the desktop a
+//! [`IconKind`] and [`builtin_icon`] give the desktop a
 //! *total* set of scalable vector glyphs — every kind always draws something.
 //! On top of that floor this module adds the preferred tiers: the shipped
 //! **class artwork** under `/System/Graphics/Icons`, as either an
@@ -48,12 +48,12 @@ use alloc::vec::Vec;
 
 use tairix_abi::{AppInfoHeader, BundleEntry, APPINFO_WIRE_MAX};
 use tairix_log::Sink;
-use tairix_raster::Surface;
+use tairix_raster::{Color, Surface};
 use tairix_reclaim::{
     working_set_ui_cache, CacheLedger, CachedBytes, PressureGauge, ReclaimCache, Served,
 };
 
-use crate::glyph::IconKind;
+use crate::glyph::{builtin_icon, IconKind};
 
 /// Where the OS ships its desktop graphics assets.
 pub const GRAPHICS_DIR: &str = "/System/Graphics";
@@ -344,16 +344,54 @@ impl Tier<'_> {
     }
 }
 
-/// A draw-site lookup: the pre-rasterised artwork for `request` at `side`, or
-/// `None` to draw the built-in glyph instead.
+/// The picture a draw site was handed for an icon.
+///
+/// The two are drawn differently, so which one it is travels with it rather
+/// than being inferred: shipped artwork already carries its own colours, while
+/// a glyph mask carries only coverage and takes the colour the drawing control
+/// chooses for its state.
+#[derive(Copy, Clone, Debug)]
+pub enum IconPicture<'a> {
+    /// Ready-coloured artwork: composited as it is.
+    Artwork(&'a Surface),
+    /// A built-in glyph's coverage mask: composited tinted
+    /// ([`Surface::blit_tinted`]).
+    Mask(&'a Surface),
+}
+
+impl<'a> IconPicture<'a> {
+    /// The shipped artwork this picture is, or `None` when it is a glyph mask.
+    ///
+    /// For a caller that *stores* a picture instead of drawing it now — a
+    /// taskbar slot keeping its application's icon, a library row keeping its
+    /// entry's: a mask takes its colour from whichever control draws it, so it
+    /// is not finished pixels and cannot be held as though it were. Such a
+    /// caller stores nothing and lets the drawing control resolve the glyph
+    /// through its own cache at paint time.
+    #[must_use]
+    pub const fn artwork(self) -> Option<&'a Surface> {
+        match self {
+            Self::Artwork(art) => Some(art),
+            Self::Mask(_) => None,
+        }
+    }
+}
+
+/// A draw-site lookup: the pre-rasterised picture for `request` at `side`, or
+/// `None` when this lookup holds nothing at all.
 ///
 /// The borrow keeps the pixels in the cache the lookup owns, so a grid that
 /// draws many icons a frame reads each surface in place rather than copying
 /// it.
 pub trait IconArtwork {
-    /// The artwork for `request` at `side` pixels, or `None` to fall back to
-    /// the built-in glyph.
-    fn artwork(&mut self, request: IconRequest<'_>, side: u32) -> Option<&Surface>;
+    /// The picture for `request` at `side` pixels.
+    ///
+    /// A real cache answers for *every* request: the built-in glyph is the last
+    /// tier and always resolves, so a draw site never has to rasterise vector
+    /// art itself. `None` means this lookup is [`NoArtwork`] — it holds no
+    /// cache to rasterise into, and the caller falls back to drawing the glyph
+    /// inline.
+    fn artwork(&mut self, request: IconRequest<'_>, side: u32) -> Option<IconPicture<'_>>;
 }
 
 /// The all-glyph lookup: never any artwork.
@@ -364,7 +402,7 @@ pub trait IconArtwork {
 pub struct NoArtwork;
 
 impl IconArtwork for NoArtwork {
-    fn artwork(&mut self, _request: IconRequest<'_>, _side: u32) -> Option<&Surface> {
+    fn artwork(&mut self, _request: IconRequest<'_>, _side: u32) -> Option<IconPicture<'_>> {
         None
     }
 }
@@ -454,6 +492,12 @@ pub enum ArtworkKey {
     Asset(String),
     /// An application-bundle directory, resolved through its own manifest.
     Bundle(String),
+    /// A built-in glyph's *coverage mask*, rasterised in this process from the
+    /// first-party vector art compiled into it — no read, no decode, no
+    /// sandbox. Retained like any asset because resolving coverage is the
+    /// expensive part of a vector glyph and it does not depend on the colour
+    /// the glyph is drawn in: one mask serves every tint and state.
+    Glyph(IconKind),
 }
 
 /// The outcome of building one cache slot.
@@ -601,22 +645,46 @@ impl ArtworkCache {
         resolver: &mut dyn ArtworkResolver,
         request: IconRequest<'_>,
         side: u32,
-    ) -> Option<&Surface> {
-        let mut served = None;
+    ) -> Option<IconPicture<'_>> {
         for tier in request.tiers() {
             let key = (tier.cache_key(), side);
             match self.build_slot(&key, resolver) {
-                Slot::Served => {
-                    served = Some(key);
-                    break;
-                }
+                Slot::Served => return self.borrow_slot(&key).map(IconPicture::Artwork),
                 // Nothing is being retained, so a later tier could only
-                // repeat the same refusal at the cost of another decode.
-                Slot::Uncached(_) | Slot::Pending => return None,
+                // repeat the same refusal at the cost of another decode. The
+                // glyph below is still reached: it costs no decode at all, and
+                // drawing nothing while a decode is in flight would leave the
+                // slot empty on screen.
+                Slot::Uncached(_) | Slot::Pending => break,
                 Slot::Empty => {}
             }
         }
-        self.borrow_slot(&served?)
+        self.glyph_mask(request.icon_kind(), side)
+    }
+
+    /// The retained coverage mask for `kind`'s built-in glyph at `side`,
+    /// rasterising it on a miss.
+    ///
+    /// Resolved here rather than through the [`ArtworkResolver`] because it
+    /// needs neither: the vector art is first-party and compiled in, so there
+    /// is nothing to read and nothing untrusted to decode in a sandbox. That
+    /// also keeps it *synchronous* — a glyph is on screen in the first frame
+    /// that asks for it, where an asset may take a frame or two to arrive.
+    ///
+    /// One mask serves every colour and every control state, because coverage
+    /// does not depend on the tint the drawing control chooses
+    /// ([`Surface::blit_tinted`]).
+    fn glyph_mask(&mut self, kind: IconKind, side: u32) -> Option<IconPicture<'_>> {
+        let key = (ArtworkKey::Glyph(kind), side);
+        match self.entries.get_or_build(&(), key.clone(), || {
+            Some(CachedArtwork(glyph_mask(kind, side)))
+        }) {
+            // Retained: read it back out of the slot it now occupies.
+            Some(_) => self.borrow_slot(&key).map(IconPicture::Mask),
+            // Too tight to retain, so there is nothing to borrow. The caller
+            // draws the glyph inline this frame rather than nothing at all.
+            None => None,
+        }
     }
 
     /// The picture for `request` at `side` pixels, copied out, together with
@@ -742,8 +810,32 @@ pub fn render_artwork<R: ArtworkReader + ?Sized, D: ArtworkRasteriser + ?Sized>(
             let path = bundle_icon_path(reader, dir)?;
             render_icon(reader, rasteriser, &path, side)
         }
+        // A glyph is first-party vector art compiled into this binary, so the
+        // cache rasterises it in place and no resolver is ever handed one.
+        ArtworkKey::Glyph(kind) => glyph_mask(*kind, side),
     }
 }
+
+/// The coverage mask for `kind`'s built-in glyph at `side` pixels: the glyph
+/// rasterised in opaque white, so every pixel's alpha *is* its coverage and the
+/// drawing control supplies the colour ([`Surface::blit_tinted`]).
+///
+/// Rasterising a multi-layer glyph is the expensive step — the layers are
+/// painted enlarged and averaged back down to resolve the seams between them —
+/// which is exactly why the result is retained rather than redrawn per frame.
+///
+/// Public so the *one* uncached draw path — a control handed no picture at all
+/// — draws through the same mask-and-tint arithmetic a cached one does. Baking
+/// the colour into the rasterise instead would round it at a different step,
+/// and a cached icon and an uncached one would not be the same pixels.
+#[must_use]
+pub fn glyph_mask(kind: IconKind, side: u32) -> Option<Surface> {
+    builtin_icon(kind, MASK_COLOR).rasterise(side)
+}
+
+/// The colour a glyph mask is rasterised in: opaque white, so the mask's alpha
+/// carries the coverage and its colour channels never tint the result.
+const MASK_COLOR: Color = Color::rgba(255, 255, 255, 255);
 
 /// The path of the icon an application bundle names in its own manifest, or
 /// `None` when it names none.
@@ -814,7 +906,7 @@ impl<'a> IconArtworkSource<'a> {
 }
 
 impl IconArtwork for IconArtworkSource<'_> {
-    fn artwork(&mut self, request: IconRequest<'_>, side: u32) -> Option<&Surface> {
+    fn artwork(&mut self, request: IconRequest<'_>, side: u32) -> Option<IconPicture<'_>> {
         self.cache.artwork(self.resolver, request, side)
     }
 }

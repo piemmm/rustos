@@ -176,6 +176,13 @@ This crate owns:
   identity, `0` pure grey). One definition of saturation reduction, applied on
   the way in, so a caller that draws the same sprite hot and greyed — a window
   title bar's identity icon, focused and not — keeps one cached copy of it.
+- `Surface::blit_tinted` — the same walk taking the source's *alpha* as
+  coverage and drawing a caller's colour through it, arithmetically identical
+  to filling the shape that mask was rasterised from in that colour. That
+  equivalence is the point: coverage is the expensive half of a vector glyph
+  and does not depend on the colour, so a monochrome shape is resolved once,
+  untinted, and then drawn in any theme colour rather than re-rasterised per
+  colour or per frame.
 - `Surface::blit_faded` — the same walk with each source pixel weakened to a
   strength as it lands, so an opaque source mixes the destination toward it in
   exactly that proportion. One picture dissolving into another is this: the

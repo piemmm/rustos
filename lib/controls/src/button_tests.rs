@@ -7,7 +7,7 @@
 
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
-use tairix_icon::IconKind;
+use tairix_icon::{IconKind, IconPicture};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Rgba, Theme};
@@ -411,7 +411,7 @@ fn icon_button_blits_supplied_artwork_and_falls_back_to_the_glyph_without_it() {
         bounds,
         Scale::ONE,
         &theme,
-        Some(&artwork(side, ART)),
+        Some(IconPicture::Artwork(&artwork(side, ART))),
     );
     let drawn = bbox(&with_art, ART.premultiply()).expect("artwork drawn");
     assert_eq!(drawn.2 + 1 - drawn.0, side);

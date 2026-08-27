@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
-use tairix_icon::{builtin_icon, IconKind};
+use tairix_icon::{glyph_mask, IconKind};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{TextRole, Theme};
@@ -333,11 +333,9 @@ impl MenuItem {
         // neither, so a menu's labels line up (text stability, spec §14).
         if icon_slot > 0 {
             if let Some(kind) = self.icon {
-                if let Some(image) =
-                    builtin_icon(kind, Color::from(label_color)).rasterise(icon_slot)
-                {
+                if let Some(mask) = glyph_mask(kind, icon_slot) {
                     let iy = to_i32(y) + (to_i32(h) - to_i32(icon_slot)).max(0) / 2;
-                    surface.blit(to_i32(cursor), iy, &image);
+                    surface.blit_tinted(to_i32(cursor), iy, &mask, Color::from(label_color));
                 }
             } else {
                 let my = y + (h.saturating_sub(icon_slot)) / 2;

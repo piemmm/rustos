@@ -13,7 +13,7 @@ use alloc::string::String;
 use alloc::vec;
 
 use tairix_geometry::{Point, Rect, Scale};
-use tairix_icon::IconKind;
+use tairix_icon::{IconKind, IconPicture};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Rgba, Theme};
@@ -439,7 +439,13 @@ fn taskbar_item_artwork_replaces_the_builtin_glyph_at_any_slot_shape() {
         assert!(side > 0);
         let art = Surface::filled(side, side, magenta).expect("artwork");
         let mut s = Surface::new(w, h).expect("surface");
-        item.render(&mut s, bounds, Scale::ONE, &theme, Some(&art));
+        item.render(
+            &mut s,
+            bounds,
+            Scale::ONE,
+            &theme,
+            Some(IconPicture::Artwork(&art)),
+        );
         assert!(has_pixel(&s, magenta));
     }
 }
@@ -478,7 +484,7 @@ fn window_preview_draws_its_thumbnail_and_caption() {
         let magenta = Color::rgb(255, 0, 255).premultiply();
         let image = Surface::filled(thumb.width, thumb.height, magenta).expect("thumbnail");
         let mut s = Surface::new(PW, PH).expect("surface");
-        preview.render(&mut s, bounds, Scale::ONE, &theme, Some(&image));
+        preview.render(&mut s, bounds, Scale::ONE, &theme, Some(&image), None);
         // The owner-scaled frame is blitted exactly where the query said.
         assert!(has_pixel(&s, magenta));
         // And the caption's ink is under it, not over it.
@@ -504,7 +510,7 @@ fn window_preview_without_a_thumbnail_falls_back_to_its_glyph() {
     let bounds = Rect::new(0, 0, PW, PH);
     let preview = WindowPreview::new("Terminal", IconKind::AppBundle);
     let mut s = Surface::new(PW, PH).expect("surface");
-    preview.render(&mut s, bounds, Scale::ONE, &theme, None);
+    preview.render(&mut s, bounds, Scale::ONE, &theme, None, None);
     assert!(has_pixel(&s, premul(theme.palette().on_surface)));
 }
 
@@ -585,7 +591,13 @@ fn tray_surface_with_artwork(sig: &TraySignal, theme: &Theme, colour: Color) -> 
     let side = sig.icon_side(bounds, Scale::ONE, theme);
     let art = Surface::filled(side, side, colour.premultiply()).expect("artwork");
     let mut s = Surface::new(SS, SS).expect("surface");
-    sig.render(&mut s, bounds, Scale::ONE, theme, Some(&art));
+    sig.render(
+        &mut s,
+        bounds,
+        Scale::ONE,
+        theme,
+        Some(IconPicture::Artwork(&art)),
+    );
     s
 }
 

@@ -1702,3 +1702,111 @@ fn the_read_only_row_span_admits_what_the_writable_one_does() {
     let (_, span) = surface.row_span(2, 0, 6).expect("row two");
     assert_eq!(span[3], Color::rgb(9, 9, 9).premultiply());
 }
+
+/// A shape drawn as a tinted coverage mask is pixel-for-pixel what filling it
+/// in that colour produces — the equivalence that lets a glyph be rasterised
+/// once, untinted, and drawn in any theme colour.
+#[test]
+fn a_tinted_mask_blit_equals_filling_the_same_shape_in_that_colour() {
+    // A triangle: axis-aligned edges give whole coverage, the diagonal gives
+    // partial, so the comparison covers both.
+    let triangle = alloc::vec![alloc::vec![(2, 2), (18, 2), (2, 18)]];
+    let tint = Color::rgba(40, 160, 220, 255);
+
+    let mut filled = Surface::new(20, 20).expect("surface");
+    filled.fill_contours(&triangle, 20, FillRule::NonZero, &Paint::Solid(tint));
+
+    // The mask is the same shape in opaque white, so its alpha *is* the
+    // coverage; blitting it tinted must reproduce the fill.
+    let mut mask = Surface::new(20, 20).expect("surface");
+    mask.fill_contours(
+        &triangle,
+        20,
+        FillRule::NonZero,
+        &Paint::Solid(Color::rgba(255, 255, 255, 255)),
+    );
+    let mut blitted = Surface::new(20, 20).expect("surface");
+    blitted.blit_tinted(0, 0, &mask, tint);
+
+    for y in 0..20 {
+        for x in 0..20 {
+            assert_eq!(
+                blitted.get(x, y),
+                filled.get(x, y),
+                "pixel ({x}, {y}) differs between a tinted mask and a direct fill"
+            );
+        }
+    }
+}
+
+/// The equivalence holds over a non-empty destination too: the tint composites
+/// *over* what is already there, and a pixel the mask does not cover is left
+/// exactly as it was.
+#[test]
+fn a_tinted_mask_blit_composites_over_what_is_already_drawn() {
+    let square = alloc::vec![alloc::vec![(4, 4), (12, 4), (12, 12), (4, 12)]];
+    let tint = Color::rgba(200, 30, 30, 128);
+    let ground = Pixel {
+        r: 10,
+        g: 20,
+        b: 30,
+        a: 255,
+    };
+
+    let mut filled = Surface::filled(16, 16, ground).expect("surface");
+    filled.fill_contours(&square, 16, FillRule::NonZero, &Paint::Solid(tint));
+
+    let mut mask = Surface::new(16, 16).expect("surface");
+    mask.fill_contours(
+        &square,
+        16,
+        FillRule::NonZero,
+        &Paint::Solid(Color::rgba(255, 255, 255, 255)),
+    );
+    let mut blitted = Surface::filled(16, 16, ground).expect("surface");
+    blitted.blit_tinted(0, 0, &mask, tint);
+
+    for y in 0..16 {
+        for x in 0..16 {
+            assert_eq!(blitted.get(x, y), filled.get(x, y), "pixel ({x}, {y})");
+        }
+    }
+    // A corner the square never reaches keeps the ground untouched.
+    assert_eq!(blitted.get(0, 0), Some(ground));
+}
+
+/// A mask blit is placed and clipped exactly as any other blit: it is the same
+/// walk, so an off-surface offset draws only the part that lands.
+#[test]
+fn a_tinted_mask_blit_clips_like_every_other_blit() {
+    let mut mask = Surface::filled(
+        4,
+        4,
+        Pixel {
+            r: 255,
+            g: 255,
+            b: 255,
+            a: 255,
+        },
+    )
+    .expect("surface");
+    mask.set(
+        0,
+        0,
+        Pixel {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0,
+        },
+    );
+    let tint = Color::rgba(90, 90, 90, 255);
+    let mut surface = Surface::new(6, 6).expect("surface");
+    // Two columns and two rows hang off the top-left corner.
+    surface.blit_tinted(-2, -2, &mask, tint);
+    // The covered part landed...
+    assert_eq!(surface.get(0, 0).map(|p| p.a), Some(255));
+    assert_eq!(surface.get(1, 1).map(|p| p.a), Some(255));
+    // ...and nothing was drawn where the mask does not reach.
+    assert_eq!(surface.get(2, 2).map(|p| p.a), Some(0));
+}

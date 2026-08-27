@@ -11,7 +11,7 @@ use tairix_abi::Duration64;
 use tairix_controls::{damage, TextAction, TextField, ValidationState};
 use tairix_font::{BitmapFont, TextShadow};
 use tairix_geometry::{Rect, Scale};
-use tairix_icon::{builtin_icon, IconKind};
+use tairix_icon::{glyph_mask, IconKind};
 use tairix_input::{InputEvent, Key, NamedKey};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{Contrast, MotionInteraction, TextRole, Theme};
@@ -1543,13 +1543,14 @@ fn paint_submit(row: &mut Surface, inset: u32, theme: &Theme) {
         return;
     }
     let ink = Color::from(theme.palette().on_surface_muted);
-    let Some(mark) = builtin_icon(IconKind::NavForward, ink).rasterise(side) else {
+    let Some(mark) = glyph_mask(IconKind::NavForward, side) else {
         return;
     };
-    row.blit(
+    row.blit_tinted(
         i32::try_from(w - margin - side).unwrap_or(0),
         i32::try_from((h - side) / 2).unwrap_or(0),
         &mark,
+        ink,
     );
 }
 

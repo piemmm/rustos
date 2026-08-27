@@ -47,7 +47,7 @@ use alloc::string::String;
 
 use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Scale};
-use tairix_icon::IconKind;
+use tairix_icon::{IconKind, IconPicture};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{SignalRole, TextRole, Theme};
 
@@ -298,7 +298,14 @@ impl MetricTile {
     /// height remains; a `bounds` too small for the full anatomy degrades by
     /// omitting the instrument, then the detail line, rather than overlapping
     /// or drawing past its own edge (fail closed).
-    pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+    pub fn render(
+        &self,
+        surface: &mut Surface,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        artwork: Option<IconPicture<'_>>,
+    ) {
         let font = role_font(theme, scale, TextRole::Body);
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
@@ -327,7 +334,7 @@ impl MetricTile {
             let side = Self::icon_side(primary_h, ch);
             if side > 0 {
                 let tint = signal_color(theme, self.kind);
-                paint_icon_slot(surface, (cx, cy, side), kind, tint, None, FULL_COLOUR);
+                paint_icon_slot(surface, (cx, cy, side), kind, tint, artwork, FULL_COLOUR);
                 let gutter = side.saturating_add(gap);
                 primary_x = cx.saturating_add(gutter);
                 primary_w = cw.saturating_sub(gutter);

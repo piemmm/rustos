@@ -1913,7 +1913,7 @@ impl SectionView for TasksSection {
             .iter()
             .zip(self.census_rects(rect, scale, theme))
         {
-            tile.render(surface, rect, scale, theme);
+            tile.render(surface, rect, scale, theme, None);
         }
     }
 
@@ -1938,7 +1938,7 @@ impl SectionView for TasksSection {
             let item = info.item_rect(slot);
             entry
                 .row
-                .render(surface, item, ctx.scale, ctx.theme, &COLUMN_WEIGHTS);
+                .render(surface, item, ctx.scale, ctx.theme, &COLUMN_WEIGHTS, None);
             if let Some(rect) = entry.spark_rect(item, ctx.scale, ctx.theme) {
                 entry.spark.render(surface, rect, ctx.scale, ctx.theme);
             }

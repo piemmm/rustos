@@ -37,6 +37,24 @@ guarantees.
   asset path, or a kind plus a bundle directory) and owns the tier order, so
   a taskbar button, a launcher row, a desktop icon and a file-manager tile
   cannot resolve the same thing three different ways.
+- **Every tier is retained, the glyph included, so no frame resolves coverage
+  twice.** A glyph is cached as an *untinted coverage mask* keyed
+  `(kind, side)` — the shape does not depend on the colour it is drawn in, so
+  one mask serves every tint and control state, and the drawing control
+  composites it with `Surface::blit_tinted`. Resolving a multi-layer glyph
+  means painting its layers enlarged and averaging them back down to remove
+  the seams between them, which measured 20–38 µs per icon: paid per icon per
+  frame that is what made a long listing crawl, and paid once it is free
+  thereafter. The mask is resolved *in this process*, not through the
+  `ArtworkResolver`, because first-party vector art compiled into the binary
+  needs neither a read nor a sandbox — and that also keeps it synchronous, so a
+  glyph is on screen in the first frame that asks for it.
+- **The draw path blits and never rasterises.** `IconArtwork::artwork` is
+  total: it always answers, with shipped artwork or a glyph mask, tagged as
+  `IconPicture` so the control knows which to tint. The one uncached path — a
+  caller holding `NoArtwork`, a headless build or a test — draws through the
+  same mask-and-tint arithmetic, so a cached icon and an uncached one are the
+  same pixels.
 - **A bundle's own icon is its identity, not a launcher detail.** The
   manifest's `library-icon` is independent of its `library` listing: every
   command app declares an icon and none of them is listed in the program
@@ -202,6 +220,14 @@ strictly demand-driven: only visible tiles, only newly visible kinds on
 scroll, released on teardown and trimmed when pressure deepens (driven by
 the same kernel pressure wake the session uses, never a timer).
 
+Every other icon the window draws resolves through that same cache too: the
+**list** view's row icons, the toolbar's tools, and the places rail's rows. The
+list asks by *class* rather than naming a bundle — a row-height picture cannot
+show one application apart from another, and reading each bundle's manifest to
+find out would be per-bundle I/O the reader never sees — while the grid, whose
+tiles are large enough to tell two applications apart, names the bundle. Only
+the rows and tools on screen are asked for.
+
 ## 7. I6 — storage media are real, not guessed — **done**
 
 A volume's medium is threaded from the block device's own declaration
@@ -250,7 +276,43 @@ system shipped one picture for *all* applications. Now:
   directory, so a hostile `library-icon` cannot aim the desktop at a file
   elsewhere. It draws its class picture instead.
 
-## 9. Open — two SVG class-asset decode paths
+## 9. Open — two surfaces still rasterise their glyphs per frame
+
+The glyph tier is cached and the draw path blits, but a control only benefits
+where its owner holds a cache to resolve through. Two surfaces hold none, so
+their `paint_icon_slot` calls still take the inline path and re-resolve
+coverage every frame:
+
+- **The Switchboard** (`userland/gui/switchboard`) owns no `ArtworkCache` at
+  all. Its metric tiles and task rows each draw a glyph per frame, and its
+  resource tiles use the multi-layer kinds that cost most (20–38 µs per icon
+  at a row-height side, measured). Closing it means giving the crate a cache
+  built through the one shared `artwork_cache` constructor with its own seat,
+  frame size, pressure gauge and audit sink — as `files.app` and the session
+  do — and threading the lookup through `SectionCtx`, which every section
+  render already receives.
+- **The widgets gallery** (`userland/apps/widgets`) is a demo of the control
+  family; it draws each control once per frame with `NoArtwork` deliberately,
+  and is not a surface a user scrolls. It needs a cache only if the gallery is
+  ever meant to demonstrate the cached path.
+
+Three controls also draw their glyph outside the shared icon slot, so they
+resolve coverage per frame even when their owner *does* hold a cache: a
+`Button`'s leading icon (`ButtonContent::Icon`/`IconLabel`), a `MenuItem`'s
+row icon, and the greeter's continue mark. All three now draw through the one
+`glyph_mask` + `Surface::blit_tinted` arithmetic every other icon uses — so no
+two surfaces disagree about a glyph's pixels — but none of them takes a
+picture, so none is cached. Giving them one means an artwork parameter on
+`Button::render`, `Menu::render` and the greeter's row painter, which their
+callers would have to thread.
+
+None of this is a correctness defect — the pixels are identical either way,
+which is the point of routing every path through the same arithmetic — and
+none is on the file manager's hot path, which is what the caching tier was
+added for. They are the remainder of "no surface rasterises on the draw
+path".
+
+## 10. Open — two SVG class-asset decode paths
 
 The crate now decodes a vector class asset in two places. `lib/icon/src/load.rs`
 builds a whole `IconSet` up front, one slot per `IconKind`, from an injected
@@ -261,7 +323,7 @@ the right shape for the always-resident chrome glyphs, the bounded cache for
 artwork drawn at a slot's pixel side. Deciding which owns what is a design
 question this plan has not settled.
 
-## 10. Open — an undrawable element is skipped, not refused
+## 11. Open — an undrawable element is skipped, not refused
 
 `lib/svg` now decodes the drawable part of SVG 1.1 in full (`plans/SVG.md`),
 so an authored master ships as its designer drew it. What it still cannot
@@ -278,7 +340,7 @@ desktop wants is a decision this plan has not taken; the build gate already
 refuses a master that draws nothing, so only the *partially* drawable case is
 at stake.
 
-## 11. What this plan deliberately does not cover
+## 12. What this plan deliberately does not cover
 
 - **Cursors and window chrome stay vector.** They are tintable silhouettes
   resolved from the theme; a raster master would be the wrong source format

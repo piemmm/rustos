@@ -1007,6 +1007,26 @@ impl Surface {
         });
     }
 
+    /// Composite `mask` over this surface in `color`, taking `mask`'s alpha as
+    /// each pixel's coverage.
+    ///
+    /// The same arithmetic as filling the shape `mask` was rasterised from in
+    /// `color` directly — `color` premultiplied, scaled by the coverage,
+    /// composited *over* the destination — so the two are interchangeable. That
+    /// is what lets a monochrome shape be rasterised **once**, untinted, and
+    /// then drawn in any colour: the expensive part of a vector glyph is
+    /// resolving its coverage, and coverage does not depend on the colour it is
+    /// painted in. A zero-coverage pixel leaves its destination exactly as it
+    /// found it.
+    pub fn blit_tinted(&mut self, x: i32, y: i32, mask: &Surface, color: Color) {
+        let tint = color.premultiply();
+        self.blit_with(x, y, mask, |dst, source| {
+            blend_span_mapped(dst, source, 255, DitherRow::NEAREST, 0, |pixel| {
+                tint.scale_alpha(pixel.a)
+            });
+        });
+    }
+
     /// [`blit`](Self::blit), with every source pixel weakened to `strength`
     /// of itself as it lands — `0` draws nothing at all, `255` is a plain
     /// blit, and an opaque source at `s` mixes the destination toward it in

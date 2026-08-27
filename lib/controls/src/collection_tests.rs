@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 
 use tairix_font::{BitmapFont, TextShadow, ELLIPSIS};
 use tairix_geometry::{to_i32, Point, Rect, Scale};
-use tairix_icon::IconKind;
+use tairix_icon::{IconKind, IconPicture};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{div255, Color, DitherRow, Pixel, Surface, ROUND_NEAREST};
 use tairix_theme::{Rgba, Theme};
@@ -415,7 +415,13 @@ fn list_row_blits_supplied_artwork_and_falls_back_to_the_glyph_without_it() {
 
     let art = artwork(side, ART);
     let mut with = Surface::new(W, H).expect("surface");
-    row.render(&mut with, bounds, Scale::ONE, &theme, Some(&art));
+    row.render(
+        &mut with,
+        bounds,
+        Scale::ONE,
+        &theme,
+        Some(IconPicture::Artwork(&art)),
+    );
     let drawn = bbox(&with, ART.premultiply()).expect("artwork drawn");
     // Slot-sized artwork fills exactly the column the row advertised.
     assert_eq!(drawn.2 + 1 - drawn.0, side);
@@ -440,7 +446,7 @@ fn a_row_with_no_icon_ignores_supplied_artwork() {
         Rect::new(0, 0, W, H),
         Scale::ONE,
         &theme,
-        Some(&art),
+        Some(IconPicture::Artwork(&art)),
     );
     assert!(!has_pixel(&s, ART.premultiply()));
 }
@@ -463,6 +469,7 @@ fn table_surface(row: &TableRow, theme: &Theme, columns: &[u32]) -> Surface {
         Scale::ONE,
         theme,
         columns,
+        None,
     );
     surface
 }
@@ -1539,7 +1546,13 @@ fn tile_over_backdrop(state: ControlState, theme: &Theme, art: Option<&Surface>)
     let mut s = Surface::new(TW, TH).expect("surface");
     s.fill(BEHIND);
     let tile = IconTile::new("Report.txt", IconKind::Text).with_state(state);
-    tile.render(&mut s, TILE, Scale::ONE, theme, art);
+    tile.render(
+        &mut s,
+        TILE,
+        Scale::ONE,
+        theme,
+        art.map(IconPicture::Artwork),
+    );
     s
 }
 
@@ -2345,7 +2358,13 @@ fn label_surface(label: &str, state: ControlState, theme: &Theme, bounds: Rect) 
     let art = artwork(IconTile::icon_side(bounds, Scale::ONE, theme).max(1), ART);
     IconTile::new(label, IconKind::Text)
         .with_state(state)
-        .render(&mut s, bounds, Scale::ONE, theme, Some(&art));
+        .render(
+            &mut s,
+            bounds,
+            Scale::ONE,
+            theme,
+            Some(IconPicture::Artwork(&art)),
+        );
     s
 }
 
@@ -2529,7 +2548,13 @@ fn a_selected_name_reads_over_the_selection_fill_on_both_themes() {
         let art = artwork(IconTile::icon_side(bounds, Scale::ONE, &theme).max(1), ART);
         IconTile::new("System Administrator", IconKind::Text)
             .with_state(ControlState::idle().with_selection(SelectionState::Selected))
-            .render(&mut s, bounds, Scale::ONE, &theme, Some(&art));
+            .render(
+                &mut s,
+                bounds,
+                Scale::ONE,
+                &theme,
+                Some(IconPicture::Artwork(&art)),
+            );
 
         let ink = premul(p.on_surface);
         let lines = ink_lines(&s, ink);

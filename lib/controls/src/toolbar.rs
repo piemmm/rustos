@@ -14,6 +14,7 @@
 use alloc::vec::Vec;
 
 use tairix_geometry::{Point, Rect, Region, Scale};
+use tairix_icon::{IconArtwork, IconRequest};
 use tairix_input::{InputEvent, Key, NamedKey};
 use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
@@ -249,7 +250,19 @@ impl Toolbar {
     }
 
     /// Paint the toolbar into `surface` at `bounds` for the active theme.
-    pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+    ///
+    /// Each icon tool's picture is resolved through `artwork` at that tool's
+    /// own icon side, so a toolbar of glyphs costs a cache lookup per tool
+    /// rather than re-resolving vector coverage every frame. The lookup is
+    /// taken inside the loop because a cache serves one borrow at a time.
+    pub fn render(
+        &self,
+        surface: &mut Surface,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        artwork: &mut dyn IconArtwork,
+    ) {
         let palette = theme.palette();
         if let Some((x, y, w, h)) = surface_rect(bounds) {
             if w > 0 && h > 0 {
@@ -281,7 +294,11 @@ impl Toolbar {
 
         for (entry, rect) in self.entries.iter().zip(rects.iter()) {
             match &entry.tool {
-                Tool::Icon(b) => b.render(surface, *rect, scale, theme, None),
+                Tool::Icon(b) => {
+                    let side = b.icon_side(*rect, scale, theme);
+                    let picture = artwork.artwork(IconRequest::kind(b.icon()), side);
+                    b.render(surface, *rect, scale, theme, picture);
+                }
                 Tool::Split(b) => b.render(surface, *rect, scale, theme),
             }
             if entry.active {

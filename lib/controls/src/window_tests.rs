@@ -15,6 +15,7 @@
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::IconKind;
+use tairix_icon::IconPicture;
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{round_rect_coverage, Color, Pixel, Surface};
 use tairix_theme::{Rgba, TextRole, Theme};
@@ -1760,7 +1761,13 @@ fn an_identity_draws_its_artwork_and_falls_back_to_the_glyph() {
     let bounds = title_bounds();
     let paint = |bar: &TitleBar, artwork: Option<&Surface>| {
         let mut surface = Surface::new(300, 28).expect("surface");
-        bar.render(&mut surface, bounds, Scale::ONE, &theme, artwork);
+        bar.render(
+            &mut surface,
+            bounds,
+            Scale::ONE,
+            &theme,
+            artwork.map(IconPicture::Artwork),
+        );
         surface
     };
     let mut bar = TitleBar::new(furniture());
@@ -1819,7 +1826,13 @@ fn the_identity_artwork_desaturates_with_the_frame() {
         bar.set_identity(Some(IconKind::AppBundle));
         bar.set_title("Report");
         let mut surface = Surface::new(bounds.width, bounds.height).expect("surface");
-        bar.render(&mut surface, bounds, Scale::ONE, &theme, Some(&art));
+        bar.render(
+            &mut surface,
+            bounds,
+            Scale::ONE,
+            &theme,
+            Some(IconPicture::Artwork(&art)),
+        );
         surface
     };
 

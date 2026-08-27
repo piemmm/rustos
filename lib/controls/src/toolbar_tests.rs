@@ -8,6 +8,7 @@
 use alloc::vec::Vec;
 
 use tairix_geometry::{Point, Rect, Scale};
+use tairix_icon::NoArtwork;
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Rgba, Theme};
@@ -73,7 +74,13 @@ fn grouped_toolbar() -> Toolbar {
 
 fn render(toolbar: &Toolbar, theme: &Theme) -> Surface {
     let mut surface = Surface::new(W, H).expect("surface");
-    toolbar.render(&mut surface, Rect::new(0, 0, W, H), Scale::ONE, theme);
+    toolbar.render(
+        &mut surface,
+        Rect::new(0, 0, W, H),
+        Scale::ONE,
+        theme,
+        &mut NoArtwork,
+    );
     surface
 }
 
@@ -294,7 +301,13 @@ fn renders_at_a_larger_scale_without_panicking() {
     let scale = Scale::from_percent(200).expect("valid scale");
     let toolbar = grouped_toolbar();
     let mut surface = Surface::new(W * 2, H * 2).expect("surface");
-    toolbar.render(&mut surface, Rect::new(0, 0, W * 2, H * 2), scale, &theme);
+    toolbar.render(
+        &mut surface,
+        Rect::new(0, 0, W * 2, H * 2),
+        scale,
+        &theme,
+        &mut NoArtwork,
+    );
     assert!(has_pixel(&surface, premul(theme.palette().surface_raised)));
 }
 

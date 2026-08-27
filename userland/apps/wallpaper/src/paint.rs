@@ -15,7 +15,7 @@ use tairix_controls::collection::IconTile;
 use tairix_controls::state::{ControlState, FocusState, PointerState, SelectionState};
 use tairix_font::BitmapFont;
 use tairix_geometry::Rect;
-use tairix_icon::IconKind;
+use tairix_icon::{IconKind, IconPicture};
 use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 use tairix_wallpaper::{Backdrop, WallpaperChoice};
@@ -242,7 +242,13 @@ fn paint_tile(
     };
     IconTile::new(candidate.label.clone(), IconKind::Image)
         .with_state(state)
-        .render(surface, bounds, style.scale(), style.theme(), artwork);
+        .render(
+            surface,
+            bounds,
+            style.scale(),
+            style.theme(),
+            artwork.map(IconPicture::Artwork),
+        );
 
     if candidate.thumbnail == Thumbnail::Refused {
         let side = IconTile::icon_side(bounds, style.scale(), style.theme());

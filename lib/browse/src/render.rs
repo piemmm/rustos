@@ -144,6 +144,7 @@ pub fn render<S: DirectorySource>(
         viewport,
         chrome.tools,
         chrome.tool_model,
+        artwork,
     );
 
     let content = content_viewport(area, scale, theme);
@@ -152,7 +153,7 @@ pub fn render<S: DirectorySource>(
         return Some(surface);
     }
     match browser.view_mode() {
-        ViewMode::List => draw_list(&mut surface, scale, theme, browser, content),
+        ViewMode::List => draw_list(&mut surface, scale, theme, browser, content, artwork),
         ViewMode::Grid => draw_grid(&mut surface, scale, theme, browser, content, artwork),
     }
     draw_scrollbar(&mut surface, scale, theme, browser, area);
@@ -436,12 +437,25 @@ fn place_row(place: &Place, places: &Places, index: usize, selected: Option<usiz
 
 /// Draw the visible list rows below the toolbar as shared [`TableRow`]s,
 /// giving the selected entry the row chrome's selection state.
+///
+/// Each row's identity icon resolves through `artwork` at the row's own icon
+/// side, exactly as a grid tile's does — so a row draws the shipped class
+/// artwork where there is any and the cached built-in glyph otherwise, and
+/// **no** row rasterises vector coverage a previous frame already resolved.
+/// Only the rows on screen are asked for.
+///
+/// A row asks by *class* rather than naming a bundle: a list is a dense text
+/// view of a directory that may hold hundreds of bundles, and reading each
+/// one's manifest to find its own icon is work a row-height picture cannot
+/// show. The grid, whose tiles are large enough to tell two applications
+/// apart, names the bundle.
 fn draw_list<S: DirectorySource>(
     surface: &mut Surface,
     scale: Scale,
     theme: &Theme,
     browser: &Browser<S>,
     content: Rect,
+    artwork: &mut dyn IconArtwork,
 ) {
     let view = list_view(browser, scale, theme, content);
     let offset = browser.scroll_offset();
@@ -455,12 +469,11 @@ fn draw_list<S: DirectorySource>(
         let Some(bounds) = view.row_rect(offset, index) else {
             continue;
         };
-        let row = entry_row(
-            entry,
-            selected == Some(index),
-            icon_for_entry(entry, parent),
-        );
-        row.render(surface, bounds, scale, theme, &COLUMNS);
+        let kind = icon_for_entry(entry, parent);
+        let row = entry_row(entry, selected == Some(index), kind);
+        let side = TableRow::icon_side(bounds, scale, theme);
+        let art = artwork.artwork(IconRequest::kind(kind), side);
+        row.render(surface, bounds, scale, theme, &COLUMNS, art);
     }
 }
 
@@ -842,6 +855,7 @@ fn build_toolbar(
 /// [`ToolbarModel`], spanning the full window width above the item view. A
 /// disabled command reads muted rather than vanishing (the model decides
 /// which).
+#[allow(clippy::too_many_arguments)] // The band, its model, its tools, and the icon lookup.
 fn draw_toolbar<S: DirectorySource>(
     surface: &mut Surface,
     scale: Scale,
@@ -850,10 +864,11 @@ fn draw_toolbar<S: DirectorySource>(
     window: Rect,
     tools: &[ManagerTool],
     tool_model: ManagerToolModel,
+    artwork: &mut dyn IconArtwork,
 ) {
     let toolbar = build_toolbar(ToolbarModel::for_browser(browser), tools, tool_model);
     let bounds = toolbar_bounds(scale, theme, window);
-    toolbar.render(surface, bounds, scale, theme);
+    toolbar.render(surface, bounds, scale, theme, artwork);
 }
 
 /// The actionable toolbar command at window-local pixel `point`, or `None`

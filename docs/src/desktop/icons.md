@@ -71,7 +71,10 @@ a §19.5 parser sandbox — into the in-memory `VectorIcon` form shown here.
 `VectorIcon::from_svg`) performs that conversion; a malformed or undecodable
 asset fails closed, so the caller substitutes a `builtin_icon` glyph rather
 than crashing (`AGENTS.md` §2.9). See [SVG asset decoding](./svg-assets.md).
-The built-in glyphs remain the always-present fallback.
+The built-in glyphs remain the always-present fallback, and are cached like
+every other tier: a glyph is retained as an untinted coverage mask keyed
+`(kind, side)`, so the shape is resolved once and drawn in whatever colour the
+control's state calls for rather than re-rasterised per icon per frame.
 
 SVG is likewise the preferred form for an **application bundle's own** icon,
 which every app must ship (`plans/APPS.md` §14) and which decodes through this

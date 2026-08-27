@@ -13,7 +13,7 @@ use alloc::string::String;
 
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
-use tairix_icon::{builtin_icon, IconKind};
+use tairix_icon::{glyph_mask, IconKind, IconPicture};
 use tairix_input::{InputEvent, Key};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{TextRole, Theme};
@@ -315,10 +315,10 @@ fn paint_content(
             // plate, so it fills the button while staying clear of the frame.
             let side = icon_content_side(w, h, border);
             if side > 0 {
-                if let Some(image) = builtin_icon(*kind, res.label).rasterise(side) {
+                if let Some(mask) = glyph_mask(*kind, side) {
                     let ix = cx - to_i32(side) / 2;
                     let iy = to_i32(y) + (to_i32(h) - to_i32(side)).max(0) / 2;
-                    surface.blit(ix, iy, &image);
+                    surface.blit_tinted(ix, iy, &mask, res.label);
                 }
             }
         }
@@ -331,9 +331,9 @@ fn paint_content(
             let total = side.saturating_add(gap).saturating_add(width);
             let start = group_start(total);
             if side > 0 {
-                if let Some(image) = builtin_icon(*icon, res.label).rasterise(side) {
+                if let Some(mask) = glyph_mask(*icon, side) {
                     let iy = to_i32(y) + (to_i32(h) - to_i32(side)).max(0) / 2;
-                    surface.blit(start, iy, &image);
+                    surface.blit_tinted(start, iy, &mask, res.label);
                 }
             }
             let text_x = start + to_i32(side.saturating_add(gap));
@@ -615,7 +615,7 @@ impl IconButton {
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
-        artwork: Option<&Surface>,
+        artwork: Option<IconPicture<'_>>,
     ) {
         let res = resolve(theme, self.role, self.state, self.seating);
         paint_frame(surface, bounds, scale, theme, &res);

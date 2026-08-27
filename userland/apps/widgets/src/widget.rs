@@ -20,6 +20,7 @@ use tairix_controls::{
     WindowControl,
 };
 use tairix_geometry::{Rect, Region, Scale};
+use tairix_icon::NoArtwork;
 use tairix_input::{InputEvent, Key, Modifiers};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
@@ -173,14 +174,14 @@ impl DemoWidget {
             DemoWidget::ListRow(w) => w.render(surface, rect, scale, theme, None),
             DemoWidget::TableRow(w) => {
                 let columns = equal_columns(w.cells().len(), rect.width);
-                w.render(surface, rect, scale, theme, &columns);
+                w.render(surface, rect, scale, theme, &columns, None);
             }
             DemoWidget::Card(w) => w.render(surface, rect, scale, theme),
             DemoWidget::Panel(w) => w.render(surface, rect, scale, theme),
             DemoWidget::Dialog(w) => w.render(surface, rect, scale, theme),
             DemoWidget::Tooltip(w) => w.render(surface, rect, scale, theme),
             DemoWidget::HelpTip(w) => w.render(surface, rect, scale, theme),
-            DemoWidget::Toolbar(w) => w.render(surface, rect, scale, theme),
+            DemoWidget::Toolbar(w) => w.render(surface, rect, scale, theme, &mut NoArtwork),
             DemoWidget::ScrollBar(w) => w.render(surface, rect, scale, theme),
             // Shown in the gallery rather than seated in a real title bar, so
             // it has no band end to curve against.

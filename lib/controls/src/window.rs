@@ -27,7 +27,7 @@ use alloc::string::String;
 
 use tairix_font::ELLIPSIS;
 use tairix_geometry::{Point, Rect, Region, Scale};
-use tairix_icon::IconKind;
+use tairix_icon::{IconKind, IconPicture};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{div255, round_rect_coverage, Color, Surface, SUBPIXEL};
 use tairix_theme::{Palette, Rgba, TextRole, Theme};
@@ -1152,7 +1152,7 @@ impl TitleBar {
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
-        artwork: Option<&Surface>,
+        artwork: Option<IconPicture<'_>>,
     ) {
         // Window furniture is titling text, not interface body text.
         let font = role_font(theme, scale, TextRole::WindowTitle);
@@ -1962,7 +1962,7 @@ impl WindowFrame {
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
-        artwork: Option<&Surface>,
+        artwork: Option<IconPicture<'_>>,
     ) {
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;

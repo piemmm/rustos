@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
-use tairix_icon::IconKind;
+use tairix_icon::{IconKind, IconPicture};
 use tairix_input::{InputEvent, Key};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{TextRole, Theme};
@@ -363,7 +363,7 @@ impl TaskbarItem {
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
-        artwork: Option<&Surface>,
+        artwork: Option<IconPicture<'_>>,
     ) {
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
@@ -438,7 +438,7 @@ impl TaskbarItem {
         y: u32,
         side: u32,
         tint: Color,
-        artwork: Option<&Surface>,
+        artwork: Option<IconPicture<'_>>,
     ) {
         paint_icon_slot(surface, (x, y, side), self.icon, tint, artwork, FULL_COLOUR);
     }
@@ -624,7 +624,8 @@ impl WindowPreview {
     ///
     /// `thumbnail` is the window's own scaled frame, pre-rasterised by the
     /// owner at [`thumbnail_bounds`](Self::thumbnail_bounds); `None` falls
-    /// back to the class glyph so the cell always states something.
+    /// back to the class icon so the cell always states something, drawn from
+    /// the `artwork` the owner resolved for it.
     pub fn render(
         &self,
         surface: &mut Surface,
@@ -632,6 +633,7 @@ impl WindowPreview {
         scale: Scale,
         theme: &Theme,
         thumbnail: Option<&Surface>,
+        artwork: Option<IconPicture<'_>>,
     ) {
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
@@ -677,7 +679,7 @@ impl WindowPreview {
                 ),
                 self.icon,
                 frame.label,
-                None,
+                artwork,
                 FULL_COLOUR,
             );
         }
@@ -1039,7 +1041,7 @@ impl TraySignal {
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
-        artwork: Option<&Surface>,
+        artwork: Option<IconPicture<'_>>,
     ) {
         let font = role_font(theme, scale, TextRole::Body);
         let Some((x, y, w, h)) = surface_rect(bounds) else {

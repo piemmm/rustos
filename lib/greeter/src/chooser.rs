@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use tairix_controls::{ControlState, FocusState, IconTile, PointerState, SelectionState};
 use tairix_font::{BitmapFont, TextShadow};
 use tairix_geometry::{Point, Rect, Scale};
-use tairix_icon::IconKind;
+use tairix_icon::{IconKind, IconPicture};
 use tairix_input::{InputEvent, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{Rgba, TextRole, Theme, Timeline};
@@ -649,7 +649,13 @@ impl Chooser {
             BitmapFont::for_role(theme.fonts(), TextRole::Heading, scale),
             (disc, ink),
         );
-        tile.render(surface, bounds, scale, theme, artwork.as_ref());
+        tile.render(
+            surface,
+            bounds,
+            scale,
+            theme,
+            artwork.as_ref().map(IconPicture::Artwork),
+        );
         if account.is_some_and(AccountTile::has_live_session) {
             paint_live_badge(surface, bounds, scale, theme);
         }

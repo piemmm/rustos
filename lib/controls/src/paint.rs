@@ -11,7 +11,7 @@
 
 use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Region, Scale};
-use tairix_icon::{builtin_icon, IconKind};
+use tairix_icon::{glyph_mask, IconKind, IconPicture};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{Contrast, Palette, Rgba, SignalRole, SurfaceGround, TextRole, Theme};
@@ -298,40 +298,61 @@ pub(crate) fn icon_slot_side(font: BitmapFont, content_height: u32) -> u32 {
 /// [`Pixel::desaturate`](tairix_raster::Pixel::desaturate).
 pub(crate) const FULL_COLOUR: u8 = 255;
 
-/// Paint a content icon into the `(x, y, side)` square `slot`: the
-/// owner-supplied `artwork` when present, else the built-in class glyph for
-/// `kind` tinted `tint`.
+/// Paint a content icon into the `(x, y, side)` square `slot` from the
+/// `picture` its owner resolved: shipped artwork as it is, or a built-in glyph
+/// mask tinted `tint`.
 ///
 /// This is the one place every collection control — a taskbar item, a card, a
-/// list row — applies the "blit centred artwork, else rasterise the built-in
-/// glyph" rule, so the three can never draw it differently. The artwork is
-/// blitted centred in the slot: a stale cache entry from mid-scale-change, or
-/// a surface sized differently from `side`, is placed in the middle rather
-/// than overflowing the slot from its corner. The built-in glyph rasterises to
-/// fill the slot exactly. Artwork is decoded and rasterised by the owner long
-/// before it reaches here — a control never parses image bytes.
+/// list row — turns a resolved picture into pixels, so the three can never draw
+/// it differently. A picture is blitted centred in the slot: a stale cache
+/// entry from mid-scale-change, or a surface sized differently from `side`, is
+/// placed in the middle rather than overflowing the slot from its corner.
+///
+/// **Nothing is rasterised here on the cached path.** Both the decode of
+/// shipped artwork and the coverage of a built-in glyph are resolved once per
+/// (picture, pixel side) by the owner's cache and blitted thereafter, so no
+/// frame pays for vector coverage a previous frame already resolved. The inline
+/// rasterise below is reached only by a caller holding *no* cache
+/// ([`NoArtwork`](tairix_icon::NoArtwork)) — a headless build or a test — where
+/// drawing nothing would blank an icon the reader needs. It draws through the
+/// same mask-and-tint arithmetic, so a cached icon and an uncached one are the
+/// same pixels.
 ///
 /// `saturation` reduces the *artwork's* colour on its way in
 /// ([`Pixel::desaturate`](tairix_raster::Pixel::desaturate): [`FULL_COLOUR`]
 /// draws it as cached, `0` draws it grey), which is how a control states that
 /// what the artwork identifies is not the thing in hand — an unfocused
-/// window's title bar. It does not touch the built-in glyph: that is already a
-/// theme tint, with no application colour in it to reduce.
+/// window's title bar. It does not touch a glyph: that takes `tint` from the
+/// control's own state and has no application colour in it to reduce.
 pub(crate) fn paint_icon_slot(
     surface: &mut Surface,
     slot: (u32, u32, u32),
     kind: IconKind,
     tint: Color,
-    artwork: Option<&Surface>,
+    picture: Option<IconPicture<'_>>,
     saturation: u8,
 ) {
     let (x, y, side) = slot;
-    if let Some(art) = artwork {
-        let ax = to_i32(x) + (to_i32(side) - to_i32(art.width())) / 2;
-        let ay = to_i32(y) + (to_i32(side) - to_i32(art.height())) / 2;
-        surface.blit_desaturated(ax, ay, art, saturation);
-    } else if let Some(image) = builtin_icon(kind, tint).rasterise(side) {
-        surface.blit(to_i32(x), to_i32(y), &image);
+    let centred = |art: &Surface| {
+        (
+            to_i32(x) + (to_i32(side) - to_i32(art.width())) / 2,
+            to_i32(y) + (to_i32(side) - to_i32(art.height())) / 2,
+        )
+    };
+    match picture {
+        Some(IconPicture::Artwork(art)) => {
+            let (ax, ay) = centred(art);
+            surface.blit_desaturated(ax, ay, art, saturation);
+        }
+        Some(IconPicture::Mask(mask)) => {
+            let (ax, ay) = centred(mask);
+            surface.blit_tinted(ax, ay, mask, tint);
+        }
+        None => {
+            if let Some(mask) = glyph_mask(kind, side) {
+                surface.blit_tinted(to_i32(x), to_i32(y), &mask, tint);
+            }
+        }
     }
 }
 

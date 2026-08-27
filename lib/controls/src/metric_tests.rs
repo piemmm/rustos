@@ -65,7 +65,7 @@ fn measured(permille: u16) -> MeterValue {
 
 fn tile_surface_at(tile: &MetricTile, theme: &Theme, scale: Scale, w: u32, h: u32) -> Surface {
     let mut surface = Surface::new(w, h).expect("surface");
-    tile.render(&mut surface, Rect::new(0, 0, w, h), scale, theme);
+    tile.render(&mut surface, Rect::new(0, 0, w, h), scale, theme, None);
     surface
 }
 
@@ -394,7 +394,13 @@ fn a_tile_far_smaller_than_its_content_still_renders_without_panicking() {
         .with_instrument(MetricInstrument::Track(measured(620)));
     for (w, h) in [(1, 1), (0, 40), (40, 0)] {
         let mut surface = Surface::new(w.max(1), h.max(1)).expect("surface");
-        tile.render(&mut surface, Rect::new(0, 0, w, h), Scale::ONE, &theme);
+        tile.render(
+            &mut surface,
+            Rect::new(0, 0, w, h),
+            Scale::ONE,
+            &theme,
+            None,
+        );
         assert_eq!(
             surface.pixels().len() as u64,
             u64::from(w.max(1)) * u64::from(h.max(1))
@@ -815,7 +821,13 @@ fn every_new_combination_renders_without_panicking_in_degenerate_bounds() {
     for tile in variants {
         for (w, h) in [(1_u32, 1_u32), (0, 40), (40, 0)] {
             let mut surface = Surface::new(w.max(1), h.max(1)).expect("surface");
-            tile.render(&mut surface, Rect::new(0, 0, w, h), Scale::ONE, &theme);
+            tile.render(
+                &mut surface,
+                Rect::new(0, 0, w, h),
+                Scale::ONE,
+                &theme,
+                None,
+            );
             assert_eq!(
                 surface.pixels().len() as u64,
                 u64::from(w.max(1)) * u64::from(h.max(1))

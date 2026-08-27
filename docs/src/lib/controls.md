@@ -306,6 +306,13 @@ reaches it already decoded and rasterised through the desktop's sandboxed
 asset path (`AGENTS.md` §19.5), so a malformed file can only fail to produce
 artwork, never reach a drawing path.
 
+The recipe **blits and never rasterises**: the owner's cache resolves both a
+shipped decode and a built-in glyph's coverage once per (picture, pixel side)
+and hands the control an `IconPicture` — artwork to composite as it is, or a
+mask to composite tinted. A control given no picture at all (`NoArtwork`: a
+headless build, a test) draws the glyph inline through the same mask-and-tint
+arithmetic, so a cached icon and an uncached one are the same pixels.
+
 The recipe also takes a **saturation** factor, which pulls each artwork pixel
 toward its own luminance as it lands (`Surface::blit_desaturated`, the one
 saturation definition in `lib/raster`). It is how a control states that what its

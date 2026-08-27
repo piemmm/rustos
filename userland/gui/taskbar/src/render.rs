@@ -62,7 +62,7 @@ use tairix_controls::state::{ActivityState, ValidationState};
 use tairix_controls::{paint_surface_plate, plate_border, ChromeLayer, ControlRole, ControlState};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
-use tairix_icon::{IconArtwork, IconKind, IconRequest, IconSet};
+use tairix_icon::{IconArtwork, IconKind, IconPicture, IconRequest, IconSet};
 use tairix_log::Sink;
 use tairix_raster::{Color, Surface};
 use tairix_reclaim::{disposable_ui_cache, CacheAccounting, PressureGauge, ReclaimCache};
@@ -431,12 +431,17 @@ impl TaskbarRenderer {
             else {
                 continue;
             };
+            // The picker holds no icon cache of its own, and this fallback is
+            // the transient case of a window whose first frame has not
+            // arrived: a popup that opens on a gesture, not a surface being
+            // scrolled, so the glyph is drawn inline here.
             preview.render(
                 &mut surface,
                 local_rect(*cell, origin),
                 scale,
                 theme,
                 entry.thumbnail(),
+                None,
             );
         }
         if let Some(scrollbar) = layout.scrollbar {
@@ -494,7 +499,7 @@ impl TaskbarRenderer {
                 local_rect(rect, origin),
                 scale,
                 theme,
-                popup.row_artwork(index),
+                popup.row_artwork(index).map(IconPicture::Artwork),
             );
         }
 
@@ -724,9 +729,9 @@ fn slot_artwork<'a>(
     kind: IconKind,
     side: u32,
     artwork: &'a mut dyn IconArtwork,
-) -> Option<&'a Surface> {
+) -> Option<IconPicture<'a>> {
     match app {
-        Some(surface) => Some(surface),
+        Some(surface) => Some(IconPicture::Artwork(surface)),
         None => artwork.artwork(IconRequest::kind(kind), side),
     }
 }

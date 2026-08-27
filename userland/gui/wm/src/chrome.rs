@@ -42,6 +42,7 @@
 //! every released strip is overwritten before its heap becomes reusable.
 
 use tairix_controls::WindowFrame;
+use tairix_icon::IconPicture;
 use tairix_log::Sink;
 use tairix_reclaim::{screenful_ui_cache, CachedBytes, PressureGauge, ReclaimCache};
 use tairix_theme::Theme;
@@ -177,7 +178,13 @@ impl WindowChrome {
         let (ow, oh) = outer_size;
         let mut transient = Surface::new(ow, oh)?;
         let outer = Rect::new(0, 0, ow, oh);
-        frame.render(&mut transient, outer, scale, theme, artwork);
+        frame.render(
+            &mut transient,
+            outer,
+            scale,
+            theme,
+            artwork.map(IconPicture::Artwork),
+        );
 
         // No corner grip: a resizable window's band is the plain frame inset,
         // too thin to hold one without painting into the client. The grab zone

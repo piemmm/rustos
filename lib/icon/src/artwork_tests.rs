@@ -20,10 +20,10 @@ use tairix_log::DiscardSink;
 use tairix_reclaim::pressure::{PressureBand, ReportedPressure};
 
 use super::{
-    artwork_cache, artwork_kind_for_file, icon_artwork_path, icon_vector_path, ArtworkCache,
-    ArtworkKey, ArtworkOutcome, ArtworkRasteriser, ArtworkReader, ArtworkResolver, IconArtwork,
-    IconArtworkSource, IconRequest, InlineArtwork, NoArtwork, Resolved, Surface, MAX_ARTWORK_BYTES,
-    VECTOR_SUFFIX,
+    artwork_cache, artwork_kind_for_file, glyph_mask, icon_artwork_path, icon_vector_path,
+    ArtworkCache, ArtworkKey, ArtworkOutcome, ArtworkRasteriser, ArtworkReader, ArtworkResolver,
+    IconArtwork, IconArtworkSource, IconPicture, IconRequest, InlineArtwork, NoArtwork, Resolved,
+    Surface, MAX_ARTWORK_BYTES, VECTOR_SUFFIX,
 };
 use crate::glyph::IconKind;
 use crate::load::ICON_KINDS;
@@ -299,13 +299,18 @@ fn a_kind_with_no_class_master_is_remembered_as_having_none() {
     let mut reader = CountingReader::new();
     let mut ras = SquareRasteriser;
     let request = IconRequest::kind(IconKind::Folder);
-    assert!(c
-        .artwork(&mut InlineArtwork::new(&mut reader, &mut ras), request, 8)
-        .is_none());
+    assert!(
+        matches!(
+            c.artwork(&mut InlineArtwork::new(&mut reader, &mut ras), request, 8),
+            Some(IconPicture::Mask(_))
+        ),
+        "neither class master resolved, so the built-in glyph answers"
+    );
     assert_eq!(reader.reads, 2, "each class format was tried once");
-    assert!(c
-        .artwork(&mut InlineArtwork::new(&mut reader, &mut ras), request, 8)
-        .is_none());
+    assert!(matches!(
+        c.artwork(&mut InlineArtwork::new(&mut reader, &mut ras), request, 8),
+        Some(IconPicture::Mask(_))
+    ));
     assert_eq!(reader.reads, 2, "both refusals were retained");
 }
 
@@ -390,7 +395,9 @@ fn a_bundle_draws_the_icon_its_own_manifest_names() {
             IconRequest::bundle(IconKind::AppBundle, "/Apps/x.app"),
             8,
         )
-        .expect("the bundle's own icon");
+        .expect("the bundle's own icon")
+        .artwork()
+        .expect("shipped artwork, not a glyph mask");
     assert_eq!(surface.width(), 8);
     assert_eq!(reader.reads, 2, "the manifest and the asset it names");
 }
@@ -457,7 +464,9 @@ fn a_bundle_icon_escaping_its_own_resources_is_refused() {
             IconRequest::bundle(IconKind::AppBundle, "/Apps/x.app"),
             8,
         )
-        .expect("the class artwork still resolves");
+        .expect("the class artwork still resolves")
+        .artwork()
+        .expect("shipped artwork, not a glyph mask");
     assert_eq!(surface.width(), 8);
     assert!(
         !reader
@@ -728,7 +737,10 @@ fn a_pending_tier_stops_the_walk_rather_than_falling_through() {
     let mut c = cache();
     let mut deferring = Deferring::new();
     let request = IconRequest::asset(IconKind::AppBundle, "/Apps/One.app/Resources/icon.png");
-    assert!(c.artwork(&mut deferring, request, 8).is_none());
+    assert!(matches!(
+        c.artwork(&mut deferring, request, 8),
+        Some(IconPicture::Mask(_))
+    ));
     assert_eq!(
         deferring.asked,
         vec![(
@@ -751,7 +763,10 @@ fn a_landed_refusal_advances_the_walk_one_tier_at_a_time() {
 
     deferring.land(&own, 8, None);
     assert!(
-        c.artwork(&mut deferring, request, 8).is_none(),
+        matches!(
+            c.artwork(&mut deferring, request, 8),
+            Some(IconPicture::Mask(_))
+        ),
         "the own-icon tier refused, so the next tier is only now asked for"
     );
     assert_eq!(deferring.asked, vec![(own, 8), (raster.clone(), 8)]);
@@ -870,7 +885,10 @@ fn a_warm_up_skips_the_tiers_already_refused() {
     let request = IconRequest::kind(IconKind::AppBundle);
 
     deferring.land(&raster, 8, None);
-    assert!(c.artwork(&mut deferring, request, 8).is_none());
+    assert!(matches!(
+        c.artwork(&mut deferring, request, 8),
+        Some(IconPicture::Mask(_))
+    ));
 
     deferring.warmed.clear();
     c.prefetch(&mut deferring, request, 8);
@@ -1022,4 +1040,64 @@ fn no_band_takes_the_decoded_icons_away() {
         );
         assert_eq!(resolver.decodes, 1, "{band:?} decoded once");
     }
+}
+
+/// The glyph tier is retained like any other: a kind drawn on a hundred rows
+/// resolves its coverage once, not once per draw.
+///
+/// This is the defect the tier exists to close. Resolving a multi-layer glyph
+/// means painting its layers enlarged and averaging them back down, and doing
+/// that per icon per frame is what made a long listing crawl.
+#[test]
+fn a_glyph_is_resolved_once_however_many_times_it_is_drawn() {
+    let mut c = cache();
+    let mut reader = CountingReader::new();
+    let mut ras = SquareRasteriser;
+    // A kind that ships no asset, so every request falls through to the glyph.
+    let request = IconRequest::kind(IconKind::Refresh);
+
+    let first = c.artwork(&mut InlineArtwork::new(&mut reader, &mut ras), request, 18);
+    let Some(IconPicture::Mask(mask)) = first else {
+        panic!("the glyph tier always resolves");
+    };
+    assert_eq!(mask.width(), 18);
+    assert_eq!(mask.height(), 18);
+    let after_first = reader.reads;
+
+    // Ninety-nine more draws of the same kind at the same side read nothing
+    // further and produce the same retained mask.
+    for _ in 0..99 {
+        assert!(matches!(
+            c.artwork(&mut InlineArtwork::new(&mut reader, &mut ras), request, 18),
+            Some(IconPicture::Mask(_))
+        ));
+    }
+    assert_eq!(
+        reader.reads, after_first,
+        "a retained glyph costs no further asset reads"
+    );
+
+    // A different pixel side is a different picture, so it resolves on its own.
+    let Some(IconPicture::Mask(other)) =
+        c.artwork(&mut InlineArtwork::new(&mut reader, &mut ras), request, 24)
+    else {
+        panic!("the glyph tier always resolves at any side");
+    };
+    assert_eq!(other.width(), 24);
+}
+
+/// A glyph mask carries coverage, not colour, so the same retained mask serves
+/// every tint a control draws it in — which is what keeps the cache key free of
+/// the theme's state colours.
+#[test]
+fn one_glyph_mask_serves_every_tint() {
+    let mask = glyph_mask(IconKind::Folder, 16).expect("mask");
+    // Opaque white: the alpha channel is the coverage and the colour channels
+    // never tint what is drawn from it.
+    let opaque = (0..16)
+        .flat_map(|y| (0..16).map(move |x| (x, y)))
+        .filter_map(|(x, y)| mask.get(x, y))
+        .find(|pixel| pixel.a == 255)
+        .expect("the glyph covers some pixel fully");
+    assert_eq!((opaque.r, opaque.g, opaque.b), (255, 255, 255));
 }

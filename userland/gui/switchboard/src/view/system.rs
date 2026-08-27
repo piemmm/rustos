@@ -659,7 +659,7 @@ impl SystemSection {
                 each,
                 band.height,
             );
-            tile.render(surface, rect, ctx.scale, ctx.theme);
+            tile.render(surface, rect, ctx.scale, ctx.theme, None);
         }
     }
 

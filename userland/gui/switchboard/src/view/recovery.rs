@@ -571,7 +571,7 @@ impl RecoverySection {
                 column.width,
                 each,
             );
-            tile.render(surface, rect, ctx.scale, ctx.theme);
+            tile.render(surface, rect, ctx.scale, ctx.theme, None);
         }
     }
 

@@ -16,7 +16,7 @@ use tairix_controls::{
     MenuMark, PressureKind, PressureState, RecoveryState, TrayBadgeContent, TrayBadgeTone,
 };
 use tairix_geometry::{Point, Rect, Scale};
-use tairix_icon::{IconArtwork, IconKind, IconRequest, IconSet, NoArtwork};
+use tairix_icon::{IconArtwork, IconKind, IconPicture, IconRequest, IconSet, NoArtwork};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton, PointerFocus};
 use tairix_proglib::{BundlePath, Catalog, DisplayName, EntryId, LibraryCategory, LibraryEntry};
 use tairix_raster::{Color, Pixel, Surface};
@@ -4782,13 +4782,13 @@ impl FakeArtwork {
 }
 
 impl IconArtwork for FakeArtwork {
-    fn artwork(&mut self, request: IconRequest<'_>, side: u32) -> Option<&Surface> {
+    fn artwork(&mut self, request: IconRequest<'_>, side: u32) -> Option<IconPicture<'_>> {
         let kind = request.icon_kind();
         self.asked.push((kind, side));
         self.held
             .iter()
             .find(|(held, _)| *held == kind)
-            .map(|(_, art)| art)
+            .map(|(_, art)| IconPicture::Artwork(art))
     }
 }
 

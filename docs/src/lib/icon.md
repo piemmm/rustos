@@ -43,7 +43,14 @@ draw site always gets something:
    be absent, so the desktop always shows a meaningful icon even with no
    on-disk assets at all (a headless or freshly-installed system), which is
    why it is the **required** fail-closed fallback for every kind
-   (`AGENTS.md` §2.9).
+   (`AGENTS.md` §2.9). It is retained like the asset tiers: `glyph_mask(kind,
+   side)` rasterises the silhouette in opaque white so the mask's alpha *is*
+   its coverage, and the drawing control supplies the colour
+   (`Surface::blit_tinted`). Coverage does not depend on the tint, so one
+   retained mask serves every colour and control state — and resolving a
+   multi-layer glyph is expensive enough (its layers are painted enlarged and
+   averaged back down to remove their seams) that paying it per icon per frame
+   is what a caching tier exists to prevent.
 
 A fine-grained file-class kind (`TextHtml`, `TextRust`, `ImagePng`,
 `ImageSvg`, `DiskHard`, `DiskUsb`, …) names its own distinct raster/vector
@@ -61,6 +68,16 @@ through injected seams, so the crate stays `no_std` and the untrusted decode
 never runs in this library or in the renderer that consumes it
 (`AGENTS.md` §19.5):
 
+- `ArtworkCache::artwork` is **total**: it answers every request, with shipped
+  artwork or with the glyph mask that always resolves, tagged as an
+  `IconPicture` so the drawing control knows whether to composite the pixels as
+  they are or to tint them. A draw site therefore never rasterises vector art
+  itself; the one exception is a caller holding `NoArtwork` (a headless build,
+  a test), which draws through the *same* mask-and-tint arithmetic so a cached
+  icon and an uncached one are the same pixels. A caller that *stores* a
+  picture rather than drawing it now — a taskbar slot keeping its
+  application's icon — takes `IconPicture::artwork()` and stores nothing for a
+  mask, because a mask is not finished pixels.
 - `ArtworkReader` reads an asset's bytes (a capability-gated filesystem read
   in production); a missing or refused asset is `None`, never fatal.
 - `ArtworkRasteriser` turns encoded bytes into `side`×`side` straight-alpha

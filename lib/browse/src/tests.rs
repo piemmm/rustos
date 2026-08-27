@@ -14,7 +14,7 @@ use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::Errno;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Scale};
-use tairix_icon::{IconArtwork, IconKind, IconRequest, NoArtwork};
+use tairix_icon::{IconArtwork, IconKind, IconPicture, IconRequest, NoArtwork};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{TextRole, Theme};
 
@@ -2019,9 +2019,9 @@ impl RecordingArtwork {
 }
 
 impl IconArtwork for RecordingArtwork {
-    fn artwork(&mut self, request: IconRequest<'_>, side: u32) -> Option<&Surface> {
+    fn artwork(&mut self, request: IconRequest<'_>, side: u32) -> Option<IconPicture<'_>> {
         self.asked.push((request.icon_kind(), side));
-        Some(&self.art)
+        Some(IconPicture::Artwork(&self.art))
     }
 }
 
@@ -2053,10 +2053,11 @@ fn the_grid_resolves_each_tile_through_the_artwork_lookup_and_draws_what_it_retu
     )
     .expect("grid surface");
     assert!(!artwork.asked.is_empty(), "the grid consults the lookup");
-    assert!(artwork
-        .asked
+    assert!(!content_kinds(&artwork.asked).is_empty());
+    assert!(content_kinds(&artwork.asked)
         .iter()
-        .all(|(kind, side)| *kind == IconKind::File && *side > 0));
+        .all(|kind| *kind == IconKind::File));
+    assert!(artwork.asked.iter().all(|(_, side)| *side > 0));
     assert!(
         shows(&drawn, art_colour),
         "the supplied artwork reaches the tile"
@@ -2077,7 +2078,10 @@ fn the_grid_resolves_each_tile_through_the_artwork_lookup_and_draws_what_it_retu
 }
 
 #[test]
-fn the_list_view_is_text_only_and_never_consults_the_artwork_lookup() {
+fn the_list_view_resolves_each_rows_icon_through_the_artwork_lookup() {
+    // A row's icon costs a cache lookup, never a rasterise: the built-in glyph
+    // is the lookup's last tier, so a list of a hundred rows scrolling past
+    // resolves coverage once per (kind, side) rather than once per row drawn.
     let theme = Theme::dark();
     let browser = many_files(20);
     let mut artwork = RecordingArtwork::new(24, Color::rgb(255, 0, 255));
@@ -2090,7 +2094,15 @@ fn the_list_view_is_text_only_and_never_consults_the_artwork_lookup() {
         &mut artwork,
     )
     .expect("list surface");
-    assert!(artwork.asked.is_empty());
+    let asked = content_kinds(&artwork.asked);
+    assert!(!asked.is_empty(), "the list consults the lookup");
+    // The fixture's names carry no extension, so every row is the generic
+    // content type — asked for by *class*, never by naming a bundle: a
+    // row-height picture cannot show one application apart from another, and
+    // reading each bundle's manifest to find out would be work the reader
+    // never sees.
+    assert!(asked.iter().all(|kind| *kind == IconKind::File));
+    assert!(artwork.asked.iter().all(|(_, side)| *side > 0));
 }
 
 // --- The grid over the real shipped-artwork cache ------------------------
@@ -2105,8 +2117,8 @@ fn the_list_view_is_text_only_and_never_consults_the_artwork_lookup() {
 use alloc::boxed::Box;
 
 use tairix_icon::{
-    artwork_cache, icon_artwork_path, ArtworkCache, ArtworkRasteriser, ArtworkReader,
-    IconArtworkSource, InlineArtwork, MAX_ARTWORK_BYTES,
+    artwork_cache, icon_artwork_path, icon_vector_path, ArtworkCache, ArtworkRasteriser,
+    ArtworkReader, IconArtworkSource, InlineArtwork, MAX_ARTWORK_BYTES,
 };
 use tairix_log::DiscardSink;
 use tairix_reclaim::pressure::{PressureBand, ReportedPressure};
@@ -2221,6 +2233,40 @@ fn grid_surface<S: DirectorySource>(
         artwork,
     )
     .expect("grid surface")
+}
+
+/// The toolbar's own icons. Every window render resolves its chrome through the
+/// same cache as its content, so a test about the content filters these out
+/// rather than restating the toolbar's contents beside its own subject.
+const CHROME_KINDS: &[IconKind] = &[
+    IconKind::NavBack,
+    IconKind::NavForward,
+    IconKind::NavUp,
+    IconKind::Refresh,
+    IconKind::ViewToggle,
+    IconKind::Sort,
+];
+
+/// `asked` with the window chrome's own icons dropped: what the *content*
+/// asked for.
+fn content_kinds(asked: &[(IconKind, u32)]) -> Vec<IconKind> {
+    asked
+        .iter()
+        .map(|(kind, _)| *kind)
+        .filter(|kind| !CHROME_KINDS.contains(kind))
+        .collect()
+}
+
+/// `read` with the window chrome's own asset paths dropped.
+fn content_reads(read: &[String]) -> Vec<String> {
+    let chrome: Vec<String> = CHROME_KINDS
+        .iter()
+        .flat_map(|&kind| [icon_artwork_path(kind), icon_vector_path(kind)])
+        .collect();
+    read.iter()
+        .filter(|path| !chrome.contains(path))
+        .cloned()
+        .collect()
 }
 
 /// A grid of `n` extension-less files, every one of them the generic content
@@ -2479,10 +2525,36 @@ fn a_hundred_tiles_of_one_kind_are_read_and_decoded_exactly_once() {
         ),
     );
     assert!(shows(&drawn, art_colour));
-    // Every tile shares one `(asset, side)` key, so a hundred-entry grid
-    // costs one read and one decode, not a hundred of each.
-    assert_eq!(reader.read.len(), 1);
-    assert_eq!(rasteriser.decodes, 1);
+    // Every tile shares one `(asset, side)` key, so a hundred-entry grid costs
+    // one read of that asset and one decode, not a hundred of each. The
+    // toolbar above the grid resolves its own icons through the same cache, so
+    // the count is asserted for the *tiles'* asset rather than over the whole
+    // window.
+    let tile_asset = icon_artwork_path(IconKind::File);
+    assert_eq!(
+        reader
+            .read
+            .iter()
+            .filter(|path| **path == tile_asset)
+            .count(),
+        1
+    );
+
+    // And the cost does not grow with the grid: a ten-tile grid of the same
+    // kind reads and decodes exactly as much as the hundred-tile one.
+    let mut small_reader = CountingReader::new().shipping(IconKind::File, vec![0xab; 64]);
+    let mut small_rasteriser = CountingRasteriser::new(art_colour);
+    let mut small_cache = test_artwork_cache();
+    let _ = grid_surface(
+        &generic_grid(10),
+        vp,
+        &mut IconArtworkSource::new(
+            &mut small_cache,
+            &mut InlineArtwork::new(&mut small_reader, &mut small_rasteriser),
+        ),
+    );
+    assert_eq!(reader.read.len(), small_reader.read.len());
+    assert_eq!(rasteriser.decodes, small_rasteriser.decodes);
 }
 
 #[test]
@@ -2508,8 +2580,7 @@ fn scrolling_to_new_entries_decodes_only_the_newly_visible_kinds() {
             &mut InlineArtwork::new(&mut reader, &mut rasteriser),
         ),
     );
-    assert_eq!(reader.read, core::slice::from_ref(&png));
-    assert_eq!(rasteriser.decodes, 1);
+    assert_eq!(content_reads(&reader.read), core::slice::from_ref(&png));
 
     // Scroll to the end (the layout clamps the request to the last page):
     // only the kind that just became visible is read and decoded, and the
@@ -2523,8 +2594,14 @@ fn scrolling_to_new_entries_decodes_only_the_newly_visible_kinds() {
             &mut InlineArtwork::new(&mut reader, &mut rasteriser),
         ),
     );
-    assert_eq!(reader.read, [png, text]);
-    assert_eq!(rasteriser.decodes, 2);
+    assert_eq!(content_reads(&reader.read), [png, text]);
+    // The chrome's own icons were resolved on the first frame and are not
+    // resolved again, so the only new decodes are the content's.
+    assert_eq!(
+        content_reads(&reader.read).len(),
+        2,
+        "the image artwork already held is not read a second time"
+    );
 }
 
 #[test]
@@ -6942,7 +7019,7 @@ mod occupancy {
     fn tile_kinds<S: DirectorySource>(browser: &Browser<S>) -> Vec<IconKind> {
         let mut artwork = RecordingArtwork::new(8, Color::rgb(0x10, 0x20, 0x30));
         let _ = frame(browser, &mut artwork);
-        artwork.asked.iter().map(|(kind, _)| *kind).collect()
+        content_kinds(&artwork.asked)
     }
 
     #[test]

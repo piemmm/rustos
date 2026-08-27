@@ -30,7 +30,7 @@ use alloc::vec::Vec;
 
 use tairix_font::{BitmapFont, TextShadow, ELLIPSIS};
 use tairix_geometry::{Point, Rect, Region, Scale};
-use tairix_icon::IconKind;
+use tairix_icon::{IconKind, IconPicture};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{div255, round_rect_coverage, BlurScratch, Color, Surface};
 use tairix_theme::{Rgba, SurfaceGround, TextRole, Theme};
@@ -139,6 +139,19 @@ fn row_content_span(scale: Scale, theme: &Theme, x: u32, w: u32, h: u32) -> Opti
 /// ever paints *inside* the already-reserved trailing band, it never resizes
 /// it, so a row that merely becomes denied or gains a recovery mark never
 /// shifts its own cells, let alone its neighbours'.
+/// What every cell of one row paints against: the row's resolved text face and
+/// disposition, and the desktop's scale and theme.
+///
+/// One value rather than four parameters, because a cell resolves all of them
+/// from the row it belongs to and threading them separately is how a cell and
+/// its row come to disagree.
+struct CellContext<'a> {
+    scale: Scale,
+    theme: &'a Theme,
+    font: BitmapFont,
+    row_disposition: ControlDisposition,
+}
+
 fn paint_row(
     surface: &mut Surface,
     rect: (u32, u32, u32, u32),
@@ -417,7 +430,7 @@ impl ListRow {
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
-        artwork: Option<&Surface>,
+        artwork: Option<IconPicture<'_>>,
     ) {
         let font = role_font(theme, scale, TextRole::Body);
         let Some(rect) = surface_rect(bounds) else {
@@ -626,11 +639,15 @@ impl TableCell {
         &self,
         surface: &mut Surface,
         rect: (u32, u32, u32, u32),
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-        row_disposition: ControlDisposition,
+        row: &CellContext<'_>,
+        picture: Option<IconPicture<'_>>,
     ) {
+        let CellContext {
+            scale,
+            theme,
+            font,
+            row_disposition,
+        } = *row;
         let (x, y, w, h) = rect;
         if w == 0 || h == 0 {
             return;
@@ -667,7 +684,7 @@ impl TableCell {
             let side = Self::icon_side(font, h);
             if side > 0 && right > left.saturating_add(side).saturating_add(pad) {
                 let iy = y + (h.saturating_sub(side)) / 2;
-                paint_icon_slot(surface, (left, iy, side), kind, fg, None, FULL_COLOUR);
+                paint_icon_slot(surface, (left, iy, side), kind, fg, picture, FULL_COLOUR);
                 left = left.saturating_add(side).saturating_add(pad);
             }
         }
@@ -801,12 +818,37 @@ impl TableRow {
         )
     }
 
+    /// The pixel side the row's leading identity icon paints at inside
+    /// `bounds`.
+    ///
+    /// An owner resolves its picture at this side, so what it caches is what
+    /// the row draws. An associated function because the slot is the row
+    /// height's, not any one row's content.
+    #[must_use]
+    pub fn icon_side(bounds: Rect, scale: Scale, theme: &Theme) -> u32 {
+        let font = role_font(theme, scale, TextRole::Body);
+        // Sized purely off the text line and the row height; the scale and
+        // theme are accepted only so the query matches the shared
+        // collection-control shape.
+        let _ = scale;
+        let Some((_, _, _, h)) = surface_rect(bounds) else {
+            return 0;
+        };
+        TableCell::icon_side(font, h)
+    }
+
     /// Paint the row into `surface` at `bounds`, laying its cells out across
     /// `columns` (physical pixel widths) through the shared `column_spans`
     /// helper — the same one [`TableHeader::render`] derives its column
     /// rectangles from, so a header can never drift out of alignment with the
     /// rows beneath it. The last cell absorbs any rounding remainder so the
     /// columns fill the content width exactly.
+    ///
+    /// `artwork` is the picture for the row's **leading** icon — the identity
+    /// icon a row carries ahead of its text — resolved by the owner through its
+    /// cache so the row rasterises nothing. One picture rather than one per
+    /// cell because a cache hands out one borrow at a time, which is also the
+    /// shape a row wants: the identity icon is the row's, not a column's.
     pub fn render(
         &self,
         surface: &mut Surface,
@@ -814,6 +856,7 @@ impl TableRow {
         scale: Scale,
         theme: &Theme,
         columns: &[u32],
+        artwork: Option<IconPicture<'_>>,
     ) {
         let font = role_font(theme, scale, TextRole::Body);
         let Some(rect) = surface_rect(bounds) else {
@@ -822,17 +865,23 @@ impl TableRow {
         let Some((cx, cy, cw, ch)) = paint_row(surface, rect, scale, theme, self.state) else {
             return;
         };
-        let disposition = self.state.disposition();
+        let row = CellContext {
+            scale,
+            theme,
+            font,
+            row_disposition: self.state.disposition(),
+        };
         let spans = column_spans(cx, cw, columns, self.cells.len());
+        // The picture belongs to the first cell that carries an icon: that is
+        // the row's identity icon, and the one the owner resolved for.
+        let mut identity = artwork;
         for (cell, &(col_x, col_w)) in self.cells.iter().zip(spans.iter()) {
-            cell.paint(
-                surface,
-                (col_x, cy, col_w, ch),
-                scale,
-                theme,
-                font,
-                disposition,
-            );
+            let picture = if cell.icon.is_some() {
+                identity.take()
+            } else {
+                None
+            };
+            cell.paint(surface, (col_x, cy, col_w, ch), &row, picture);
         }
     }
 
@@ -2144,7 +2193,7 @@ impl IconTile {
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
-        artwork: Option<&Surface>,
+        artwork: Option<IconPicture<'_>>,
     ) {
         let font = role_font(theme, scale, TextRole::Body);
         let Some((x, y, w, h)) = surface_rect(bounds) else {

@@ -36,7 +36,8 @@ use tairix_abi::window_ipc::{AppBar, AppMenu};
 use tairix_abi::{AppInfoHeader, Errno, ProcId, APPINFO_WIRE_MAX};
 use tairix_geometry::Scale;
 use tairix_icon::{
-    ArtworkCache, ArtworkRasteriser, ArtworkReader, ArtworkResolver, IconKind, IconRequest,
+    ArtworkCache, ArtworkRasteriser, ArtworkReader, ArtworkResolver, IconKind, IconPicture,
+    IconRequest,
 };
 use tairix_proglib::{Catalog, EntryId, IconAsset};
 use tairix_raster::{Region, Surface};
@@ -219,7 +220,11 @@ impl AppBarService {
                     .with_identity(identity);
                 if let Some(bundle) = group.bundle.as_deref() {
                     let request = IconRequest::bundle(IconKind::AppBundle, bundle);
-                    if let Some(art) = cache.artwork(resolver, request, side).cloned() {
+                    if let Some(art) = cache
+                        .artwork(resolver, request, side)
+                        .and_then(IconPicture::artwork)
+                        .cloned()
+                    {
                         slot = slot.with_artwork(art);
                     }
                 }
@@ -548,7 +553,10 @@ pub fn resolve_library_icons(
             || IconRequest::kind(IconKind::AppBundle),
             |path| IconRequest::asset(IconKind::AppBundle, path),
         );
-        let art = cache.artwork(resolver, request, side).cloned();
+        let art = cache
+            .artwork(resolver, request, side)
+            .and_then(IconPicture::artwork)
+            .cloned();
         taskbar.set_library_row_artwork(row, art);
     }
 }
