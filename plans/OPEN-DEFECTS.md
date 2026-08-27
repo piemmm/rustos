@@ -814,12 +814,15 @@ D59's third half). D61/D62 are the two stream-wake defects that had been filed
 under numbers D52 and D53 already held by the shootdown and kernel-heap
 entries; the citations in the tree now resolve to one defect each. Do not
 collapse the open items into one change; land each on its own
-whole-project-green gate (§7). D63 is the one defect here that is *not* a
-kernel defect: an ARXFS commit publishes its superblock slot with no durability
-barrier, so a reordering device can lose an interior tree node beneath a durable
-root and the volume will not mount. It is tracked here because of its severity
-and fixed in `plans/ARXFS-WRITEBACK.md` WB1, where the batching that makes a
-per-commit barrier affordable lands with it.
+whole-project-green gate (§7). D63 and D64 are the two defects here that are
+*not* kernel defects, tracked here for their severity: an ARXFS commit publishes
+its superblock slot with no durability barrier, so a reordering device can lose
+an interior tree node beneath a durable root and the volume will not mount
+(fixed in `plans/ARXFS-WRITEBACK.md` WB1, where the batching that makes a
+per-commit barrier affordable lands with it); and ARXFS scrub's metadata
+copy-repair writes to the device with no read-only guard, so a mount held
+read-only precisely because its medium must not be touched is written anyway
+(fixed in `plans/ARXFS-MAINTENANCE.md` M1).
 
 ## Coupling to be aware of
 
@@ -3554,3 +3557,49 @@ stage 20), FEC commit witnesses (stage 21) — may land before it.
 media before the barrier that precedes it, the crash-replay sweep still leaves
 prior-or-new at every write budget, and a commit whose barrier faults publishes
 nothing.
+
+## D64 — ARXFS scrub's copy-repair write bypasses the read-only guard (OPEN)
+
+**Where.** `drivers/filesystem/arxfs/src/scrub.rs` `scrub_meta_into`, and the
+missing gate on `ARXFS::scrub` / `ARXFS::health`.
+
+**Mechanism.** One metadata read path serves every metadata class: read the
+primary, fall back to the companion mirror, and repair the bad copy from the
+good one. `read_meta` guards that repair with `if !self.read_only`, and says
+why — a read-only handle must never mutate the device. `scrub_meta_into`
+performs the *same* repair with a bare `self.write_block(comp, …)` and no guard,
+and neither `scrub` nor `health` calls `deny_if_read_only` (only `trim` does).
+The repair is a direct block write, not a transaction, so `commit`'s read-only
+refusal does not catch it.
+
+A read-only ARXFS handle therefore writes to its device whenever a scrub — or
+any scrub-path verification reached from `health` — finds a repairable mirror.
+That contradicts the guarantee the driver states for `/System`, and it is
+actively dangerous in the state the flag exists for: a re-inserted volume whose
+non-mutation could not be proven is mounted read-only *with its uncommitted
+write set still held* (`plans/DEVICES.md` D4c) so that nothing touches a medium
+whose contents are in doubt until an operator decides. A copy-repair there
+mutates exactly that medium, and the retained-write replay decision is then
+being made about a device the filesystem has already altered.
+
+`health` is additionally wasteful on a read-only handle: it reads telemetry,
+runs a whole-volume scrub, and only then fails at the baseline `commit()` —
+discarding a valid health reading it could have reported.
+
+**Severity.** A read-only guarantee that does not hold, on the one path where
+"read-only" is a data-preservation decision rather than a policy one. Reachable
+today only by an explicit `scrub`/`health` call on a read-only handle, which
+nothing in production makes (D-M1 in `plans/ARXFS-MAINTENANCE.md` §13 — the
+operations have no production caller at all); it becomes systematically
+reachable the moment the maintenance runner exists, which is why it is fixed
+first.
+
+**Fix.** One read-only repair rule shared by both repair sites, and `scrub` /
+`health` verifying and reporting without writing on a read-only handle — a
+read-only scrub still finds and *reports* the damaged mirror, it simply does not
+rewrite it. `plans/ARXFS-MAINTENANCE.md` M1, ahead of the runner.
+
+**Done when:** a read-only mount issues no device write during a scrub that
+finds a repairable metadata block, the finding is still reported, `health`
+returns a valid reading on a read-only handle instead of failing at its baseline
+commit, and a regression test covers each.

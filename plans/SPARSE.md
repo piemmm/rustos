@@ -3,8 +3,9 @@
 Status: **done.** Sparse support is implemented in
 `drivers/filesystem/arxfs/`, specified in
 `docs/src/filesystem/arxfs-spec.md` §19, and covered by the §17 test set
-below. What remains is named in §19 of this file and is genuinely blocked on
-interfaces TAIRiX does not yet expose.
+below. What remains is named in §19 of this file: two behaviours that need a
+filesystem operation TAIRiX does not expose yet, added in place with its first
+consumer as item S1 of `plans/IMPLEMENT-OUTSTANDING-ARXFS.md`.
 
 ARXFS represents a hole **implicitly**, as a gap between per-file extent-tree
 mappings — the form §2 permits — rather than as an explicit `Zero` extent
@@ -199,7 +200,7 @@ ARXFS must not create a global dedupe-index entry for an all-zero logical range 
 
 Rationale: every zero range is already represented in the optimal shared form: no physical data at all.
 
-If an existing physical all-zero data chunk is discovered during background work, ARXFS may rewrite references to that chunk as ZERO extents. The physical chunk is then released when its refcount reaches zero and all snapshot/recovery constraints allow it.
+If an existing physical all-zero data chunk is discovered, ARXFS may rewrite references to that chunk as ZERO extents. The physical chunk is then released when its refcount reaches zero and all snapshot/recovery constraints allow it. No background optimiser performs that rewrite today and none is planned: `plans/ARXFS-MAINTENANCE.md` drives verification and discard, and deliberately excludes data-rewriting optimisation from a health scheduler (§17 there). Scrub *reporting* the opportunity lands with that plan — it already decrypts every data block it verifies, so the all-zero test is free at that point — but acting on it is not scheduled work.
 
 ## 9. Interaction With Compression
 
@@ -225,7 +226,7 @@ Scrub must verify ZERO extents by validating their metadata only.
 
 Deep scrub must treat ZERO extents as logically valid zero bytes and must not attempt to read a backing block.
 
-If scrub sees a Data extent whose decrypted/decompressed logical contents are all zero, it may report it as a sparse-conversion opportunity. Conversion may be performed by existing background optimisation only if it preserves COW, snapshots, refcounts, and transaction safety.
+If scrub sees a Data extent whose decrypted/decompressed logical contents are all zero, it reports it as a sparse-conversion opportunity (`plans/ARXFS-MAINTENANCE.md`). Conversion is not performed automatically: it is a data rewrite with refcount and snapshot interactions, so it belongs to an explicit operation that preserves COW, snapshots, refcounts, and transaction safety — never to the health scheduler.
 
 ## 12. Interaction With TRIM and Free Space
 
@@ -403,8 +404,11 @@ Every criterion below is met:
 ```
 ## 19. Remaining work
 
-Both items are blocked on an interface that does not exist yet, not on ARXFS.
-Neither is optional once its interface lands (§15).
+Both items need a filesystem operation TAIRiX does not expose yet. That
+interface is TAIRiX's own and `abi-v1` is unfrozen, so "the interface does not
+exist" is work to do, not a blocker: it is added in place, with its first
+consumer, as item **S1** of `plans/IMPLEMENT-OUTSTANDING-ARXFS.md` §4. Neither
+item is optional once the operation lands (§15).
 
 - **`SEEK_DATA` / `SEEK_HOLE`.** No TAIRiX seek ABI exposes a hole-aware seek,
   so ARXFS has nothing to answer. When one lands, the driver reports an

@@ -2654,7 +2654,9 @@ are real freed space; a single-block record always stores raw (inside a fixed
 can be freed). Partial overwrites decompose a cluster back to per-block
 records; reflinks share clusters whole; seeks stay one extent-tree descent.
 
-**Two gaps this "done" does not cover, each its own change.**
+**Three gaps this "done" does not cover, each its own change. The ordered
+ledger of every outstanding ARXFS item, with its owner and dependencies, is
+`plans/IMPLEMENT-OUTSTANDING-ARXFS.md`.**
 
 - **The maintenance operations have no production caller.** `scrub`, `check`,
   `trim`, `health`, and `rescue` are implemented, tested, and capability-gated
@@ -2663,7 +2665,20 @@ records; reflinks share clusters whole; seeks stay one extent-tree descent.
   pending-discard queue accumulates and is dropped at unmount), scrub never
   runs, and the health baseline never advances past mkfs. There is no `arxfs`
   command app, so the §12 operations the spec describes are unreachable by an
-  administrator. Spec stage 18.
+  administrator. Spec stage 18, owned by `plans/ARXFS-MAINTENANCE.md`: a pure
+  event-timed maintenance scheduler per volume plus one runner beside the mount,
+  paced from the device class, bounded and resumable, standing down while the
+  backing is degraded, and escalating what a mounted volume cannot repair
+  itself.
+- **Tree iteration materialises whole trees.** `btree_collect_entries` returns
+  every leaf entry of a tree in one `Vec`, and its callers include `scrub` (the
+  whole inode tree, before its budget applies), `check` (five times over), and
+  the truncate/reflink/read-span paths. On the combined floor — a ~1 GiB machine
+  serving several 100 TB volumes — that is a device-proportional allocation on
+  paths that must be working-set-bounded, and it makes a bounded maintenance
+  chunk unbounded in memory before it does any work. Owned as item A0 of
+  `plans/IMPLEMENT-OUTSTANDING-ARXFS.md` §3: a resumable cursor becomes the
+  primary iteration primitive and the collecting form is deleted.
 - **The §5 fixed-constant targets are not met.** The spec's 16 KiB metadata
   block, 128 KiB / 256 KiB data-record targets, and inline/packed small-file
   storage are unimplemented: a metadata block and a data record are each one
@@ -2674,7 +2689,8 @@ records; reflinks share clusters whole; seeks stay one extent-tree descent.
   states the real values and records the targets as stage 19; reaching them
   needs a filesystem block size decoupled from the device's, which is an on-disk
   change and must follow the write-path coalescing (stage 17) or a wider record
-  simply multiplies the per-record command count.
+  simply multiplies the per-record command count. Owned as item B1 of
+  `plans/IMPLEMENT-OUTSTANDING-ARXFS.md` §5.
 
 ---
 
@@ -2795,6 +2811,76 @@ batching that pays for it (WB1), not alone.
 - The kernel block cache (SMART11) stays a read cache: there is one dirty layer
   in the stack and it is this one. `plans/SMARTRAM.md` §6.1 already reserves
   dirty data for the filesystem's own write policy.
+
+**Status: planned.** No implementation has landed.
+
+---
+
+## Stage 5 follow-up — ARXFS autonomous maintenance (`plans/ARXFS-MAINTENANCE.md`)
+
+**Dependencies:** Stage 5 follow-up (ARXFS v1), the write-back commit barrier
+above (a background writer on a barrier-less commit path multiplies that defect's
+exposure across every pass), and bounded tree iteration (item A0 of
+`plans/IMPLEMENT-OUTSTANDING-ARXFS.md`). Staged plan:
+`plans/ARXFS-MAINTENANCE.md` (stages M0–M7); spec section
+`docs/src/filesystem/arxfs-spec.md` §24, stage 18.
+
+**Goal.** Give `scrub`, `trim`, and `health` the production caller they have
+never had, so the filesystem keeps itself healthy with no human and no
+configuration: discard what it has freed, verify what it holds while a good copy
+still exists, watch the device telemetry, and escalate what it cannot repair
+itself. One `arxfs` command app exposes the operator-driven operations (`check`,
+`rescue`, `grow`) and the accumulated health, which are unreachable today.
+
+**Design decisions (load-bearing).**
+- A **pure, event-timed scheduler** per volume (`maintain.rs`) holding no clock
+  and doing no I/O: the caller supplies its monotonic reading and observations
+  and gets back one bounded action plus the absolute deadline to park on, so
+  every policy decision is a host unit test. The shape is the one already proven
+  for composed arrays (`lib/raid/src/maintenance.rs`).
+- **One shared pacer.** The foreground-idle window, the per-`BlkDeviceClass`
+  background duty share, the checkpoint cadence, and the duty arithmetic are
+  equal by definition for a filesystem scrub and an array scrub, so they are
+  hoisted beside `IoBudget` in `lib/abi/src/blkio.rs` and consumed by both
+  schedulers — and by FEC's job engine later. Two layers pacing to two notions
+  of "busy" cannot compose.
+- **Restoring redundancy below outranks verifying above.** Background work
+  stands down entirely while the backing reports anything but fully available,
+  via one default-provided `Block::backing_availability()` query reusing
+  `MountAvailability`, with the RAID composer and the kernel block client as its
+  two producers. A discard is never issued to a fault domain in doubt.
+- **One runner, not one task per mount.** A single kernel maintenance task takes
+  the mount's own sleeping lock for one chunk, performs it through a new
+  `FilesystemMaintenance` driver-ABI facet (so it holds no ARXFS type and moves
+  with ARXFS when the driver leaves the kernel), then parks on the soonest
+  deadline across every volume. Per-volume tasks would be the fixed per-volume
+  cost the scalability rule forbids.
+- **No new capability.** The runner acts under the authority that established the
+  mount it serves, per volume, audited per chunk; `CAP_FS_MOUNT` already
+  expresses it and a `CAP_FS_MAINTAIN` would have no other holder.
+- **`check` and `rescue` never become background actions.** Damage a mounted
+  volume cannot repair sets a sticky check-requested mark that survives a
+  remount and is reported — never a silent multi-hour `check` on next boot, and
+  never a refused mount.
+
+**Four defects it owns**, each fixed with its regression test in the stage that
+owns it, and the list explicitly open — a defect found while implementing any
+stage is fixed in that stage, never filed for later. Scrub's metadata
+copy-repair writes to the device with no read-only guard (the read path has
+one), so a read-only mount — including a re-inserted volume deliberately held
+read-only because its medium state is in doubt — is written. `health` runs an
+unbounded whole-volume `ScrubBudget::Unlimited` scrub inline, holding the mount
+lock, where it should only recommend one, and commits a whole transaction on
+every poll even when its baseline has not changed. And the pending-discard
+queue **silently and permanently loses** discard eligibility — a per-block
+`Vec` capped at 65536 entries that drops the excess, emptied by `trim` before it
+starts so one device fault forfeits the remainder, and nothing ever requeues a
+dropped block despite the rustdoc claiming a mount rebuild does; driving that
+queue would have produced a runner that looked correct while the device never
+learned about most of the freed space. The fix replaces it with a persisted
+discard **sweep of the allocation map** — already the authoritative record of
+what is free — in the same resumable-cursor shape as scrub's pass, landing
+before the runner exists.
 
 **Status: planned.** No implementation has landed.
 

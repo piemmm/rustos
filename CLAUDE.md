@@ -36,6 +36,11 @@ Each of these names a general default that has actually produced a violation.
 
 ## Running the validation gate under the 10-minute tool cap
 
+First check whether you need to run it at all: a change confined to
+`plans/*.md` is exempt (§2.15) — no pipeline stage reads that directory, so
+the run would prove nothing. Anything else, including an `AGENTS.md`,
+`PLAN.md`, `README.md`, or `docs/` edit, runs the whole gate.
+
 §7's gate rule is "watch it to completion and report the status it actually
 produced", and it names this case: `cargo xtask ci` is ~15 min warm, so it does
 not fit one tool call, and a foreground call is **killed at the cap with no exit

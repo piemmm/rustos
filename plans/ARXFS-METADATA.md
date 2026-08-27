@@ -407,12 +407,19 @@ Incomplete unless these pass (charter §7, §16, §23.4):
 
 ## 10. Remaining work
 
-The foundation is built; these consume it and are each their own change.
+The foundation is built; these consume it and are each their own change. Their
+order relative to the rest of the outstanding ARXFS work, and the two of them
+that are genuinely blocked on drivers and tools the tree does not have, are
+recorded in `plans/IMPLEMENT-OUTSTANDING-ARXFS.md`.
 
 - **Copy/move/archive preservation (§6.2, §6.3).** `cp`, `mv`, the desktop file
   manager, and the archive tools must carry the representable attribute set by
-  default and report what they could not carry — a `stdinfo` `omission` record
-  where a stream consumer exists (charter §20.1), a plain diagnostic otherwise.
+  default and report what they could not carry. A copy that preserves metadata
+  should preserve *sparseness* too, so this lands with the hole-aware seek and
+  punch-hole operations (`plans/IMPLEMENT-OUTSTANDING-ARXFS.md` §4) — one pass
+  over the same tools. What could not be carried is reported: a `stdinfo`
+  `omission` record where a stream consumer exists (charter §20.1), a plain
+  diagnostic otherwise.
   An exact-preservation copy that cannot represent an attribute on the target
   fails closed with `MetadataNotRepresentable`; dropping happens only under an
   explicitly requested, documented lossy policy. None of these tools links

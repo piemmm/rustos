@@ -193,11 +193,13 @@ These are absolute. They override any local convenience.
     syscall means removing the thing itself and updating §3 / §16.4 / `PLAN.md`
     accordingly.
 15. **No work is "done" until the validation gate is green.** Every piece of
-    work — a feature, a bug fix, a refactor, a docs-only change, a plan
-    update, anything that touches the tree — MUST end by running the full
-    validation pipeline over the **entire** workspace and seeing it pass
-    before it is reported, submitted, merged, or marked complete. This is not
-    optional and has no "trivial change" exemption.
+    work — a feature, a bug fix, a refactor, a docs-only change, anything that
+    touches the tree — MUST end by running the full validation pipeline over
+    the **entire** workspace and seeing it pass before it is reported,
+    submitted, merged, or marked complete. This is not optional and has no
+    "trivial change" exemption. It has exactly **one** exemption, stated below
+    and nowhere else: a change confined to `plans/*.md`, which no pipeline
+    stage can observe.
     - The gate is the §7 "Definition of done" sequence, run from the
       repository root and never scoped to a single crate with `-p`:
       `cargo fmt --all` (verified with `cargo fmt --all --check`), the full
@@ -211,6 +213,28 @@ These are absolute. They override any local convenience.
       "Pre-existing" and "out of scope" are not exits (§2.5, §7).
     - Skipping, deferring ("CI will catch it"), faking, or partially running
       the gate is a §2.1 hack and a review blocker (§15.3, §15.6).
+    - **The one exemption: a change confined to `plans/*.md`.** When *every*
+      path the change adds, modifies, or deletes is a `.md` file under
+      `plans/`, the gate is **not** run — there is nothing for it to observe.
+      No pipeline stage reads that directory: `charter-cite` scans only
+      `.rs`/`.s`/`.toml`/`.sh`/`.yml`/`.yaml`, `spec-review` only `.rs`,
+      `help-lint` only the `userland/` bundles, and `docs-check` (rustdoc,
+      mdBook, the link and stale-symbol checks) only `docs/` — and nothing in
+      the workspace compiles, includes, or tests a plan. A fifteen-minute run
+      that cannot see the change proves nothing, so starting one is waste, not
+      diligence.
+      - **One path outside `plans/` and the full gate applies to the whole
+        change.** `AGENTS.md`, `PLAN.md`, `README.md`, `docs/`, `include/`,
+        and every source tree are outside it. `AGENTS.md` in particular is
+        *read by the pipeline* — `charter-cite` derives its valid
+        section-label set from this file — so a charter edit changes gate
+        behaviour and is never exempt.
+      - **Everything else still binds.** The §13 content rules for plan
+        files (state the plan, not a changelog; no waffle), the §15.18
+        jump-sheet obligation for a new or deleted plan, the §23
+        adversarial self-review, and the §23.5 completion report are
+        unaffected: the exemption is about running a pipeline, not about
+        care.
 16. **Performance is a first-class goal, never an afterthought.** A correct,
     secure result that is needlessly slow is not finished work; choosing the
     efficient design when a clean one exists is part of the §2.6 bar.
@@ -836,9 +860,10 @@ an update to this section.
   6. `cargo doc --no-deps` (doc build must succeed; broken links fail the build).
 - **Definition of done — the whole project, not just the touched crate.**
   A change is not "done" until the **entire** workspace test suite has been
-  run and is green. This is non-negotiable. Before reporting any task
-  complete you MUST run, over the whole project (never scoped to a single
-  crate with `-p`):
+  run and is green. This is non-negotiable, subject to the single §2.15
+  exemption (a change confined to `plans/*.md`, which no stage below can
+  observe). Before reporting any task complete you MUST run, over the whole
+  project (never scoped to a single crate with `-p`):
   1. `cargo fmt --all` (and verify with `cargo fmt --all --check`).
   2. `cargo xtask ci` — the full pull-request pipeline (clippy, deps-check,
      cfg-check, the test matrix, docs-check, `cargo deny`, supply-chain,
@@ -1286,7 +1311,9 @@ You are not exempt from any rule above. In addition:
 5. **Do not add "convenience" wrappers** unless they are used in at least two
    independent places and documented.
 6. **Run the full test suite over the *entire* project** before reporting a
-   task complete — never a per-crate (`-p`) subset. At minimum this means
+   task complete — never a per-crate (`-p`) subset, and never skipped except
+   under the single §2.15 exemption (a change confined to `plans/*.md`). At
+   minimum this means
    `cargo fmt --all`, the complete `cargo xtask ci` pipeline run **exactly
    once** (it is internally idempotent — a second consecutive `cargo xtask ci`
    is pure waste and is forbidden), and a fuzzing run of at least 5 seconds
@@ -1434,8 +1461,9 @@ You are not exempt from any rule above. In addition:
     | Civil time zones: the vendored IANA rules, the compiled zone store, the `lib/tz` engine, the `TZ`/machine-setting/UTC resolution order, and local rendering | `plans/TIMEZONES.md` |
     | Storage namespace: drives, volumes, aliases, paths, resource references | `docs/src/filesystem/drives.md` (binding spec); `plans/ALIAS.md`; `plans/DRIVES.md` |
     | Links, symbolic and hard, and path canonicalisation: the `FileKind`/`NodeKind` kind, `NO_FOLLOW`, `fs_symlink`/`fs_readlink`/`fs_link`/`fs_realpath`, VFS per-component resolution with its hop bound and mount-projection floor, `RealpathMode`, the per-format on-disk spellings, the link-count lifecycle, `ln`/`ls`/`readlink`, desktop shortcuts | `plans/SYMLINKS.md` |
-    | ARXFS | `docs/src/filesystem/arxfs-spec.md` (binding spec); `plans/SPARSE.md`; `plans/ARXFS-METADATA.md`; `plans/ARXFS-WRITEBACK.md`; `plans/ARXFS-SNAPSHOT.md`; `plans/ARXFS-FEC.md` |
+    | ARXFS | `docs/src/filesystem/arxfs-spec.md` (binding spec); `plans/IMPLEMENT-OUTSTANDING-ARXFS.md` (the ordered ledger of what is left); `plans/SPARSE.md`; `plans/ARXFS-METADATA.md`; `plans/ARXFS-WRITEBACK.md`; `plans/ARXFS-MAINTENANCE.md`; `plans/ARXFS-SNAPSHOT.md`; `plans/ARXFS-FEC.md` |
     | Filesystem write durability: the ARXFS dirty-block set, commit batching, the commit barrier, and the device-class dirty-age policy | `plans/ARXFS-WRITEBACK.md` |
+    | Autonomous filesystem health: what drives `scrub`/`trim`/`health`, the maintenance scheduler and runner, the shared background-work pacer, the cross-layer stand-down, the `arxfs` command app | `plans/ARXFS-MAINTENANCE.md` |
     | System log / audit trail | `plans/SYSLOG.md` |
     | Memory pressure, reclaimable memory, swap tiers | `plans/SMARTRAM.md`; `plans/SWAPSWAPSWAP.md`; `plans/FIX-SWAPFILE.md` (partition swap / SWAP5) |
     | Kernel-heap growth: fragmentation-immune growth, the frame-backed heap source, the heap-allocation-size vs `MAX_ORDER` decoupling | `plans/FIX-KHEAP.md` |
@@ -2958,7 +2986,9 @@ Trace, do not assume. For every entry point the change adds or touches
   *beyond* `cargo xtask ci` itself — the `tools/ci/soak.sh` soak, not a second
   `cargo xtask ci`) were executed over the **entire** workspace — never a `-p`
   subset — and the actual output is quoted in the completion report. The
-  coverage targets (§7) still hold.
+  coverage targets (§7) still hold. A change confined to `plans/*.md` is the
+  one exemption (§2.15) and is not failed for having no gate output; every
+  other item of this gate still applies to it.
 - **Docs updated in the same change (§2.8, §13).** Rustdoc on every public
   item, the relevant `docs/src/` page, and any affected `README.md` stability
   tier (§6) are current. No stale symbol references remain.

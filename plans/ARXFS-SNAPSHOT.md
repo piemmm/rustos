@@ -18,7 +18,12 @@ the charter and this brief disagree the charter wins (stop and ask, charter
 transactions, so this stage lands *after* the write-back and commit-barrier
 work (`plans/ARXFS-WRITEBACK.md`, spec stage 17): a snapshot published without
 the barrier could name a root whose subtree never reached media, which is
-precisely the guarantee a snapshot exists to give.
+precisely the guarantee a snapshot exists to give. It also depends on bounded,
+resumable tree iteration (`plans/IMPLEMENT-OUTSTANDING-ARXFS.md` §3): the
+diff walk, the reachability computation, and the `exclusive` accounting are all
+paged, bounded walks, and the tree helper they would otherwise reach for
+materialises a whole tree per call. The ordered ledger is
+`plans/IMPLEMENT-OUTSTANDING-ARXFS.md`.
 
 Snapshots are designed first as a **correctness/retention feature** and second
 as the **foundation of a future backup solution**. Every on-disk and ABI choice
@@ -167,7 +172,10 @@ Instead:
   from that (now removed) root become eligible for the normal COW/refcount/free
   and pending-discard pipeline (arxfs-spec §11). Freeing is incremental and
   interruptible, never a foreground O(volume) stall (charter §26.6), and never
-  busy-spins (charter §2.23).
+  busy-spins (charter §2.23). The thing that *drives* that incremental freeing
+  is the maintenance runner (`plans/ARXFS-MAINTENANCE.md`): a deletion enqueues
+  the freed set and wakes it, and the discard batching, pacing, and
+  interruptibility are that plan's, not a second scheduler here.
 
 The spec author must state precisely how the existing refcount/reverse-ref
 machinery and the snapshot-root set combine so that the "unreachable from every

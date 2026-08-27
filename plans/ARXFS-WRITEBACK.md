@@ -358,10 +358,13 @@ own rather than folded in silently (`AGENTS.md` §2.18):
   filesystem block size from the device's — formatting at 4 KiB (or wider on
   flash) over a 512-byte device — is a larger, separate on-disk change and is
   **not** in this plan. It compounds with C1–C3 and is the next thing to
-  measure after WB6.
+  measure after WB6. Owned as spec stage 19 by
+  `plans/IMPLEMENT-OUTSTANDING-ARXFS.md` §5.
 - **`scrub`, `check`, `trim`, `health`, and `rescue` have no production
   caller.** They are implemented, tested, and capability-gated, but nothing in
   the kernel, a service, or a command app invokes them, so on a live system TRIM
   never issues, scrub never runs, and the health baseline never advances past
-  mkfs. There is no `arxfs` command app. Tracked in
-  `docs/src/filesystem/arxfs-spec.md` §18 (stage 16) rather than here.
+  mkfs. There is no `arxfs` command app. Now owned by
+  `plans/ARXFS-MAINTENANCE.md` (spec stage 18), which sequences behind WB1: a
+  background writer on a barrier-less commit path would multiply C4's exposure
+  across every maintenance pass.

@@ -779,7 +779,9 @@ Discard may never destroy data reachable from retained roots.
 ## 15. Implementation order
 
 The dependency order every stage lands in. §18 carries the same numbering with
-each stage's status and owning plan.
+each stage's status and owning plan; the finer-grained ordered ledger of the
+remaining work — including the two prerequisites no stage names — is
+`plans/IMPLEMENT-OUTSTANDING-ARXFS.md`.
 
 1. On-disk headers, superblock ring, transaction roots.
 2. COW metadata trees, inode tree, extent tree, free-space rebuild.
@@ -799,7 +801,8 @@ each stage's status and owning plan.
 16. Extended-metadata preservation: copy/move/archive tooling, named streams,
     per-family foreign-filesystem wiring.
 17. Write-back cache, commit batching, and the commit barrier (§22).
-18. Maintenance callers and the `arxfs` command app.
+18. Autonomous maintenance: the scheduler and runner that drive scrub,
+    trim, and health, plus the `arxfs` command app (§24).
 19. The §5 constant targets: wider metadata and data records, a filesystem
     block size decoupled from the device's, small-file inline/packed storage.
 20. Snapshots: the snapshot tree, lifecycle, diff, and send/receive (§23).
@@ -809,7 +812,10 @@ Do not implement dedupe before COW, checksums, refcounts, and check/rebuild
 logic are solid. Do not batch commits (17) before the barrier they amortise
 exists, and do not widen the §5 record targets (19) before the write path
 coalesces (17) — a wider record over a single-block write path multiplies the
-per-record command count rather than reducing it.
+per-record command count rather than reducing it. Do not drive maintenance in
+the background (18), publish a snapshot (20), or write a FEC commit witness
+(21) before the commit barrier (17): each depends on a published root whose
+subtree has reached media.
 
 ---
 
@@ -921,8 +927,8 @@ Status legend: `✓` done · `*` in progress · `!` blocked · (blank) not start
 | 15 | Links and the incompatible-feature word. | — | ✓ |
 | 16 | Extended-metadata preservation. | `plans/ARXFS-METADATA.md` §10 | |
 | 17 | Write-back cache, batching, commit barrier. | `plans/ARXFS-WRITEBACK.md` | |
-| 18 | Maintenance callers and the `arxfs` command app. | — | |
-| 19 | The §5 constant targets. | — | |
+| 18 | Autonomous maintenance and the `arxfs` command app. | `plans/ARXFS-MAINTENANCE.md` | |
+| 19 | The §5 constant targets. | `plans/IMPLEMENT-OUTSTANDING-ARXFS.md` §5 | |
 | 20 | Snapshots. | `plans/ARXFS-SNAPSHOT.md` | |
 | 21 | FEC and multi-device redundancy. | `plans/ARXFS-FEC.md` | |
 
@@ -1432,3 +1438,34 @@ The forward references already in this spec resolve here: the §11 TRIM
 reachability rule ("unreachable from every retained root, snapshot, reflink,
 deduped extent, and recovery root") and the §16 test of the same name both name
 the snapshot half of the liveness check, which lands with this stage.
+
+---
+
+## 24. Autonomous maintenance
+
+*Stage 18 — planned, nothing implemented. The design brief is
+`plans/ARXFS-MAINTENANCE.md`, which this section will be generated from.*
+
+`scrub`, `trim`, and `health` (§11, §12) are implemented and capability-gated
+but have **no production caller**, so on a live system discard never issues,
+verification never runs, and the health baseline never advances past mkfs. This
+stage supplies the thing that drives them: a pure, event-timed **maintenance
+scheduler** per mounted volume and one **maintenance runner** beside the mount
+that performs one bounded chunk per turn and parks on the soonest deadline.
+
+The shape is fixed by four rules. Maintenance is *paced* — it takes a share of
+the device derived from the device's own class and yields to the foreground
+workload. It is *bounded and resumable* — every action is one chunk with a
+persisted resume point, so a 100 TB volume is maintained on a 1 GiB machine.
+It is *subordinate across layers* — restoring redundancy beneath the filesystem
+outranks verifying above it, so background work stands down while the backing is
+degraded, recovering, or unavailable. And it is *event-driven* — a trigger wakes
+it and a single one-shot deadline is its fallback; there is no periodic tick and
+no polling loop.
+
+`check`, `rescue`, and `grow` are never background actions: the first two are
+offline supersets and the third is an operator's instruction. They, and the
+health this stage accumulates, are reached through the `arxfs` command app that
+lands with it. Damage a mounted volume cannot repair itself sets a sticky
+check-requested mark that survives a remount and is reported rather than
+silently acted on.

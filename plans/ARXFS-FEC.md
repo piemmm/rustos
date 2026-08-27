@@ -57,6 +57,11 @@ The implementing agent must read these files before touching code:
     and the `mdadm` command app. Section 5.1 is the boundary.
 12. `plans/ARXFS-WRITEBACK.md`, whose commit barrier every distributed commit
     witness in section 16 depends on.
+13. `plans/ARXFS-MAINTENANCE.md`, which owns the shared background-work pacer
+    section 21 consumes, the cross-layer stand-down rule, and the `arxfs`
+    command app section 27 extends; and
+    `plans/IMPLEMENT-OUTSTANDING-ARXFS.md`, the ordered ledger this plan is the
+    last item of.
 
 If this document conflicts with `AGENTS.md`, `AGENTS.md` wins. If it conflicts
 with the actual ARXFS code or `arxfs-spec.md`, the implementing agent must stop
@@ -120,9 +125,12 @@ it is corrected here in the same change (charter §13).
   reported from mapped extents.
 - Scrub, check, rescue, trim, and health exist, share one verification core, and
   are capability-gated on `CAP_FS_MOUNT`. **None has a production caller** and
-  there is no `arxfs` command app — the administration surface this plan's
-  section 27 describes has no predecessor to extend, so it is built from
-  nothing (spec stage 18).
+  there is no `arxfs` command app. Both are fixed by spec stage 18
+  (`plans/ARXFS-MAINTENANCE.md`), which lands the maintenance scheduler, the
+  runner, and the `arxfs` command app — so by the time this plan runs, section
+  27's administration surface extends that app rather than being built from
+  nothing, and section 21's scheduler joins an existing pacer rather than
+  inventing one.
 
 **Storage stack.**
 
@@ -1344,6 +1352,13 @@ The scheduler must:
 - Issue independent shard I/O concurrently.
 - Yield based on actual queue pressure and measured foreground latency, not a
   fixed sleep loop.
+- Pace against the foreground through the **one shared background-work pacer and
+  class-keyed budget** every storage layer uses (`plans/ARXFS-MAINTENANCE.md`
+  section 5), never a third copy of the duty arithmetic. Three schedulers pacing
+  to three notions of "busy" cannot compose: their shares sum on one device and
+  a filesystem-level verification can spend the bandwidth a rebuild needs. The
+  cross-layer rule — restoring redundancy outranks verifying it — is the same
+  rule stated there, applied inside ARXFS once ARXFS owns the redundancy.
 - Avoid holding filesystem-global locks while reading or writing segment data.
 - Release segment-level state between committed work units.
 - Prioritise urgent metadata repair and failed-device reconstruction above
@@ -2255,7 +2270,9 @@ Docs:
 
 ### FEC13 - Persistent job engine and foreground-aware scheduler
 
-Dependencies: FEC12.
+Dependencies: FEC12, and the shared pacer and class-keyed background budget
+`plans/ARXFS-MAINTENANCE.md` M0 hoists (section 21.2 - this engine consumes
+them, it does not restate the duty arithmetic).
 
 Deliverables:
 
