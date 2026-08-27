@@ -814,7 +814,12 @@ D59's third half). D61/D62 are the two stream-wake defects that had been filed
 under numbers D52 and D53 already held by the shootdown and kernel-heap
 entries; the citations in the tree now resolve to one defect each. Do not
 collapse the open items into one change; land each on its own
-whole-project-green gate (§7).
+whole-project-green gate (§7). D63 is the one defect here that is *not* a
+kernel defect: an ARXFS commit publishes its superblock slot with no durability
+barrier, so a reordering device can lose an interior tree node beneath a durable
+root and the volume will not mount. It is tracked here because of its severity
+and fixed in `plans/ARXFS-WRITEBACK.md` WB1, where the batching that makes a
+per-commit barrier affordable lands with it.
 
 ## Coupling to be aware of
 
@@ -3499,3 +3504,53 @@ have to bring the map up first.
 **Done when:** an x86_64 guest with RAM above the user virtual base reaches a
 frame at the top of its pool through `direct_phys_map()`, and a vertical pins
 it.
+
+---
+
+## D63 — an ARXFS commit publishes its superblock slot with no barrier (OPEN)
+
+**Where.** `drivers/filesystem/arxfs/src/lib.rs` `ARXFS::commit`.
+
+**Mechanism.** Commit writes the transaction's copy-on-write blocks, then the
+transaction root, then the superblock slot naming that root — and issues no
+`Block::flush()` at any point. `src/transaction.rs` documented the opposite
+("each step flushed before the next"); the comment is now corrected to state
+the real behaviour. Only `map_persist`, reached from an explicit `fs_sync`,
+ever forces the device cache.
+
+Every device with a volatile write cache — every SD card, every consumer SSD,
+every HDD — may therefore commit those writes to media in any order. The
+damaging order is: the superblock slot and the transaction root reach media
+while an interior B-tree node beneath that root does not. `open` re-validates
+the root before accepting a slot, so a lost *root* falls back to the previous
+slot and is survivable; a lost interior node beneath a **durable** root is not.
+Both mirror copies of that node are absent, so the read fails closed and the
+volume does not mount — a whole-volume loss recoverable only by `check` or
+`rescue`, from a single power cut at the wrong microsecond.
+
+The QEMU and in-memory devices used by every test are strictly ordered, so no
+existing test can observe this; it needs a device model that reorders within a
+barrier window.
+
+**Severity.** Data loss on ordinary power failure, on the class of device the
+Pi 4 boots from. Not reachable on a device that does not reorder, which is why
+it has survived: the emulated devices in CI do not.
+
+**Fix.** One barrier per commit: drain every block the transaction publishes,
+`flush()`, then write the slot. One is sufficient — the root is just another
+block that must be durable before the slot naming it — and a second is issued
+only for an explicit `fs_sync`, where the commit itself must be durable before
+the call returns.
+
+**Sequencing.** A barrier on today's unbatched commit path would add a full
+device-cache flush per VFS operation, on a driver already issuing 5.6×–20.1×
+write amplification in single-block writes. The fix therefore lands with the
+batching that pays for it: `plans/ARXFS-WRITEBACK.md` stage WB1, specified in
+`docs/src/filesystem/arxfs-spec.md` §22. It is not deferred past that stage,
+and no ARXFS work that depends on a durable published root — snapshots (spec
+stage 20), FEC commit witnesses (stage 21) — may land before it.
+
+**Done when:** a reordering device model proves no superblock slot reaches
+media before the barrier that precedes it, the crash-replay sweep still leaves
+prior-or-new at every write budget, and a commit whose barrier faults publishes
+nothing.

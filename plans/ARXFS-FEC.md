@@ -1,6 +1,16 @@
 # ARXFS-FEC.md - Forward Error Correction and Multi-Device Redundancy for ARXFS
 
-Status: planned specification for implementation work.
+Status: **planned. Nothing implemented** — no FEC code, no pool model, no
+`lib/fec`, no `arxfs`/`arxfsadmin` command app. This is spec-stage 21
+(`docs/src/filesystem/arxfs-spec.md` §15/§18), the last ARXFS stage.
+
+This document predates the block-layer RAID stack that has since shipped
+(`lib/raid`, `lib/raidmeta`, `drivers/storage/raid`, `drivers/storage/raid_member`,
+`mdadm.app` — `plans/FIX-IO.md` IO6). Section 5.1 states the boundary between
+the two and is binding: ARXFS FEC and block-layer RAID are different layers with
+different capabilities, they are not alternatives, and neither reimplements the
+other's mathematics.
+
 Repository placement: `plans/ARXFS-FEC.md`, binding under `AGENTS.md` and
 listed in its section 15.18 jump-sheet.
 Primary code area: `drivers/filesystem/arxfs`.
@@ -39,6 +49,14 @@ The implementing agent must read these files before touching code:
     `lib/partition`, `lib/fsprobe`, the hardware tree
     (`lib/abi/src/hwtree.rs`), and the hotplug, IPC, sysinfo, curses,
     terminal, and standard-I/O code used by the implementation.
+11. The block-layer RAID stack this work sits above and must not duplicate:
+    `plans/FIX-IO.md` IO6, `docs/src/lib/raid.md`, `lib/raid` (the six
+    composition engines, the `gf256` GF(2^8) field, and the P/Q/R syndrome
+    code), `lib/raidmeta` (the member superblock and reassembly), the
+    `drivers/storage/raid` composer and `drivers/storage/raid_member` agent,
+    and the `mdadm` command app. Section 5.1 is the boundary.
+12. `plans/ARXFS-WRITEBACK.md`, whose commit barrier every distributed commit
+    witness in section 16 depends on.
 
 If this document conflicts with `AGENTS.md`, `AGENTS.md` wins. If it conflicts
 with the actual ARXFS code or `arxfs-spec.md`, the implementing agent must stop
@@ -59,50 +77,80 @@ capability-gated `dev::` resolver, which lands only with its first consumer.
 Live system information flows through the System Information API, never a
 `/proc`-style tree.
 
-## 2. Assumptions to verify in the repository
+## 2. The state this builds on (verified against the tree)
 
-The current plan describes ARXFS as copy-on-write, always encrypted,
-keyed-integrity protected, compressed, deduplicating, sparse-file aware,
-SSD-aware, scrub-capable, and recoverable. It also states that online grow,
-offline check/rescue, safe discard, crash replay, corruption injection, and a
-first-party compression codec already exist. This work builds on that state.
+These were open questions when this plan was written. They are now answered
+from the code, so no stage starts by re-deriving them. Where an answer changes,
+it is corrected here in the same change (charter §13).
 
-Before implementation, verify and record:
+**Format and pipeline.**
 
-- The current ARXFS logical record size and maximum sealed-record size.
-- The exact COW transaction, root-ring, block-header, and generation model.
-- The current keyed-MAC or AEAD associated-data fields.
-- The existing metadata mirror/triplication policy.
-- The compression abstraction. The current plan says first-party
-  `lib/compress`, not an external zstd dependency.
-- The dedupe scope and its actual limit. The user expects a roughly 100 MiB
-  limit, but repository code is authoritative.
-- The sparse-hole representation and allocation accounting.
-- The current scrub/check/rescue code-sharing boundaries.
-- The block-driver flush, discard, hotplug, identity, and error semantics.
-- The existing storage-discovery path for listing, claiming, removing, and
-  identifying block devices: storage-class hardware-tree nodes, their `blkio`
-  block-service endpoints, and the volume manager (`drivers/storage/volmgr`)
-  that consumes them.
-- The existing IPC service pattern for a capability-gated administration API.
-- The exact capability IDs already available for filesystem status,
-  filesystem administration, block-device claiming, and audit access.
-- The installed and complete `lib/curses`, `lib/termcap`, and `lib/vt` APIs.
-- The existing standard-stream and structured `stdinfo` conventions for CLI
-  programs.
+- Filesystem block size **is** the device's logical block size (512..4096) —
+  `bootstrap` takes it straight from `geometry()`. A metadata block and a data
+  record are each exactly one filesystem block, so a 512-byte SD card yields 439
+  usable content bytes per record and 384 payload bytes per B-tree node. The
+  16 KiB / 128 KiB / 256 KiB record targets in `arxfs-spec.md` §5 are **not**
+  implemented and are their own stage (spec stage 19). Any shard geometry this
+  plan chooses must be stated in terms of the real record size, not the target.
+- Commit model: a four-slot superblock ring of mirrored pairs; a transaction
+  root carrying an inline commit record; commit order is copy-on-write blocks,
+  root, then slot. `open` re-validates the root before accepting a slot.
+- **The barrier is missing today** and is fixed by spec stage 17
+  (`plans/ARXFS-WRITEBACK.md`): an ordinary commit issues no `Block::flush()`.
+  Every distributed commit witness in section 16 depends on that barrier
+  existing, so FEC cannot land before it.
+- Authenticator: HMAC-SHA256 through `lib/crypto` over block identity plus
+  payload, keyed from the per-volume master key. Data records additionally carry
+  a 28-byte ChaCha20-Poly1305 nonce+tag trailer, a 5-byte stored-form
+  descriptor, and a 40-byte integrity trailer (SHA-256 logical hash plus CRC-32C
+  physical checksum through `lib/crc32c`).
+- Metadata redundancy: exactly two copies, the companion at `primary + 1`, one
+  shared read path that falls back on an unauthenticated *or unreadable* primary
+  and repairs from the good copy. Not triplicated.
+- Compression: the first-party `lib/compress` LZ77 codec, no external zstd. A
+  whole aligned 16-block cluster compresses into fewer physical blocks; an
+  incompressible record is stored raw. Pipeline order is dedupe → compress →
+  encrypt.
+- Dedupe: an in-memory, non-authoritative index bounded at 100 MiB (20 MiB
+  frequently-used / 80 MiB general, LRU), scoped to the encryption domain, every
+  candidate liveness-checked and byte-verified before sharing. An unshared block
+  has an implicit refcount of one and no tree record.
+- Sparse: holes are **implicit** — the absence of an extent — with no
+  `ExtentKind` field on disk (`plans/SPARSE.md`, spec §19). Allocated size is
+  reported from mapped extents.
+- Scrub, check, rescue, trim, and health exist, share one verification core, and
+  are capability-gated on `CAP_FS_MOUNT`. **None has a production caller** and
+  there is no `arxfs` command app — the administration surface this plan's
+  section 27 describes has no predecessor to extend, so it is built from
+  nothing (spec stage 18).
 
-The user mentioned zstd. Therefore:
+**Storage stack.**
 
-- If ARXFS still uses `lib/compress`, use it.
-- If approved prior work replaced it with zstd behind the existing abstraction,
-  use that abstraction.
-- Do not add a new zstd dependency as part of this work unless `AGENTS.md`,
-  `PLAN.md`, dependency policy, lockfile, license audit, advisory audit, tests,
-  and docs are updated in the same approved change.
+- Devices are reached through the `blkio` block-service endpoint granted on a
+  storage-class hardware-tree node; `drivers/storage/volmgr` probes partitions
+  and filesystem signatures and attaches a driver through `volume_attach` under
+  `CAP_FS_MOUNT`. Leaf drivers: `virtio_blk`, `emmc2` (SD/eMMC, 512-byte
+  blocks, 64 KiB multi-block ADMA2 transfers, declares `Removable`),
+  `usb_msd`.
+- `Block` carries `flush`, `discard_capability`/`discard`, `device_health`, and
+  `device_class` (`Rotational`/`SolidState`/`Removable`/`Virtual`). ARXFS
+  currently consults none of `device_class`.
+- `volmgr` already refuses to attach a filesystem to a device whose first block
+  probes as RAID member metadata (`PlanSummary::raid_members`), so a pool member
+  cannot be silently mounted as a bare volume.
+- ARXFS runs **in-kernel** today (`kernel/tairix-kernel/src/root_mount.rs`,
+  `system_mount.rs`, `volume_service.rs`), not as a user-space driver, and
+  `tools/mkimage` drives the same driver on the host. A pool model must work in
+  both, and the administration service (section 27) is where the user-space
+  half lives.
+- A whole-disk read cache sits below ARXFS
+  (`kernel/tairix-kernel::block_cache::BlockCache`, `plans/SMARTRAM.md`
+  SMART11): read-only, write-through, pressure-governed. There is no dirty layer
+  below ARXFS and there must not be a second one.
 
-The FEC work must not widen a dedupe, parser, allocation, or on-disk format bound
-merely for convenience. Any bound change must satisfy the repository's anti-DoS
-and validation policy.
+**Bounds.** No dedupe, parser, allocation, or on-disk format bound may be
+widened for FEC's convenience; the validation bounds are security bounds
+(charter §24.4).
 
 ## 3. Terminology
 
@@ -227,6 +275,77 @@ This work must not implement any of the following:
 TAIRiX has not shipped. The ARXFS-native format evolves in place. Obsolete
 no-FEC fixtures, code, docs, and generated images must be deleted or regenerated
 in the same change that makes them obsolete.
+
+### 5.1 Relationship to the block-layer RAID stack
+
+TAIRiX already ships a complete block-layer RAID stack: `lib/raid` (RAID0/1/5/6/
+RAID-TP/RAID10 over a first-party `gf256` GF(2^8) field, with P/Q/R syndromes),
+`lib/raidmeta` (member superblock, event counts, reassembly), the
+`drivers/storage/raid` composer and `drivers/storage/raid_member` agent, and the
+`mdadm` command app (`plans/FIX-IO.md` IO6). ARXFS FEC does **not** replace it
+and is not an alternative to it. The two are different layers, and the boundary
+below is binding.
+
+**What block-layer RAID can do that ARXFS FEC cannot.** It protects *any*
+filesystem — ext4, FAT32, ADFS, a foreign volume, a swap device — because it
+knows nothing about content. It composes at attach time, before any filesystem
+exists. It is the only redundancy available to a non-ARXFS volume, and it stays
+the supported way to give one redundancy.
+
+**What ARXFS FEC can do that block-layer RAID cannot.** Three things, each
+structural rather than a matter of effort:
+
+1. **Checksum-directed repair.** A block-layer array that finds two mirror
+   copies disagreeing, or a RAID5 stripe whose parity does not match, cannot
+   tell *which* copy is right — it has no checksum of its own and no notion of
+   what the data should be. ARXFS authenticates every metadata block and
+   checksums and hashes every data record, so it knows which reconstruction is
+   correct and can prove it before returning a byte.
+2. **Rebuild only live data.** A block-layer rebuild must reconstruct the whole
+   device because it cannot tell an allocated block from a free one. ARXFS knows
+   its allocation map and its reachability, so a rebuild copies only what is
+   live — the difference between hours and minutes on a mostly-empty 100 TB
+   volume, and a large reduction in the second-failure window.
+3. **No parity write hole.** Block-layer RAID5/6 updates parity in place, so a
+   power loss between the data and parity write leaves a stripe whose parity is
+   wrong and whose loss is silent. ARXFS never overwrites a committed block, so
+   a protected segment is written once, whole, and published by the transaction
+   — the write hole cannot exist.
+
+**Stacking is forbidden.** ARXFS FEC over a `lib/raid` array is a
+double-redundancy configuration that wastes capacity, hides the physical failure
+domains from the layer choosing placement, and makes the protection floor
+unstateable — the filesystem would believe it has one failure domain where the
+array has several, or vice versa. Concretely:
+
+- A pool whose member is a composed RAID array is **refused** at pool create/add
+  with that reason, fail-closed. The array is offered as a *single* device, so
+  ARXFS would place every shard of a segment inside one apparent failure domain
+  and its stated floor would be a lie.
+- A single-device ARXFS pool on top of an array is allowed and is the *only*
+  legal combination: ARXFS provides intra-device media repair over what the
+  array presents, the array provides whole-device redundancy beneath, and
+  neither claims the other's floor. Section 4's "one active device: local
+  RS(8+2), whole-device protection floor = 0" is exactly the honest statement of
+  that case.
+- `volmgr` already refuses to attach a filesystem to a raw RAID member, so the
+  reverse mistake — ARXFS directly on a member disk of a live array — is already
+  closed.
+
+**The mathematics is shared, never reimplemented.** `lib/raid/src/gf256.rs` and
+the P/Q/R syndrome code are the existing first-party GF(2^8) and Reed-Solomon
+implementation. ARXFS FEC MUST consume that one definition rather than write a
+second (charter §2.2, which permits parallel *implementations of a trait* but not
+a second copy of the same arithmetic). Since `drivers/*` may not depend on
+another driver's crate and `lib/raid` is a `lib/*` crate, the shared home is
+either `lib/raid` directly or a `lib/fec` crate the field and codec are hoisted
+into and both consumers depend on. That choice is FEC1's first decision and it
+updates `AGENTS.md` §3 and `PLAN.md` in the same change; what is *not* open is
+whether a second GF(2^8) field may exist. It may not.
+
+**Administration stays separate.** `mdadm` administers arrays; the `arxfs` CLI
+and TUI administer pools. Neither grows the other's commands, and neither
+mutates a raw device directly (section 27.1).
 
 ## 6. Mandatory invariants
 
@@ -1497,6 +1616,15 @@ configuration rules of `AGENTS.md`.
 Use a systematic Reed-Solomon code over a fixed finite field with deterministic
 profile tables and known-answer vectors.
 
+**The field and the codec are the existing first-party ones.**
+`lib/raid/src/gf256.rs` and the P/Q/R syndrome code already implement GF(2^8)
+and Reed-Solomon in this workspace. A second GF(2^8) field or a second RS
+codec is forbidden (section 5.1). FEC1 decides the shared home — depend on
+`lib/raid` or hoist the field and codec into a `lib/fec` both consumers use —
+and updates `AGENTS.md` section 3 and `PLAN.md` in the same change. The
+*profile tables*, the protected-segment model, and the placement evaluator are
+this plan's own; the arithmetic beneath them is not.
+
 The internal API must support the closed profile set, conceptually:
 
 ```text
@@ -1801,17 +1929,23 @@ adversarial self-review under `AGENTS.md` section 23.
 
 ### FEC0 - Source-of-truth and plan integration
 
+**Blocked until spec stage 17 lands** (`plans/ARXFS-WRITEBACK.md`): every
+distributed commit witness in section 16 requires the commit barrier that stage
+adds, and section 2 records that an ordinary ARXFS commit issues none today.
+
 Deliverables:
 
 - Update `PLAN.md`'s and the spec's "one mandatory profile" wording so it
   means all safety features remain mandatory while ARXFS may select from a
   closed, topology-derived profile set. Do not add raw user-selected `k+m`
   options.
-- Update `docs/src/filesystem/arxfs-spec.md` with the high-level single- and
-  multi-device model, protection-floor terminology, and mandatory invariants.
-- Confirm actual compression, dedupe limit, record size, integrity fields,
-  metadata replication, block hotplug, device identity, IPC, sysinfo, curses,
-  and standard-I/O seams.
+- Add the high-level single- and multi-device model, protection-floor
+  terminology, and mandatory invariants to `docs/src/filesystem/arxfs-spec.md`
+  as its next free section, and tick the section 18 stage-21 row.
+- Re-confirm section 2 against the tree and correct it where the tree has moved.
+  Section 2 is the record of that check; it is not re-derived per stage.
+- State the section 5.1 boundary in the spec too, so a reader of the spec alone
+  cannot mistake ARXFS FEC for a replacement for `lib/raid`.
 - Record unresolved source conflicts explicitly and stop rather than guessing.
 
 Tests:
@@ -1826,6 +1960,10 @@ Acceptance:
 - No implementation begins until source-of-truth conflicts are resolved.
 
 ### FEC1 - Closed profile engine and FEC mathematics
+
+**First decision of this stage:** the shared home for the existing GF(2^8) field
+and Reed-Solomon codec (section 5.1, section 25) — depend on `lib/raid` or hoist
+into `lib/fec`. A second copy of the arithmetic is forbidden either way.
 
 Deliverables:
 

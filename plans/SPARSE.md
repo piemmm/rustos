@@ -1,6 +1,20 @@
 # ARXFS Sparse File Support
 
-This appendix defines the sparse-file layer for ARXFS. It is intended to be appended to an existing ARXFS specification that already implements copy-on-write transactions, checksums, encryption, compression, dedupe, scrub, check, rescue, TRIM, and device-health handling.
+Status: **done.** Sparse support is implemented in
+`drivers/filesystem/arxfs/`, specified in
+`docs/src/filesystem/arxfs-spec.md` §19, and covered by the §17 test set
+below. What remains is named in §19 of this file and is genuinely blocked on
+interfaces TAIRiX does not yet expose.
+
+ARXFS represents a hole **implicitly**, as a gap between per-file extent-tree
+mappings — the form §2 permits — rather than as an explicit `Zero` extent
+record. §3 below describes both permitted representations; the chosen one is
+the implicit gap, so no `ExtentKind` field, no on-disk format bump, and nothing
+extra to checksum, encrypt, compress, dedupe, scrub, relocate, or trim. Read
+§3's `Zero`-extent shape as the alternative it rules on, not as a required
+field.
+
+This appendix defines the sparse-file layer for ARXFS. It is appended to the ARXFS specification, which already implements copy-on-write transactions, checksums, encryption, compression, dedupe, scrub, check, rescue, TRIM, and device-health handling.
 
 Sparse support is mandatory, always enabled, and not tunable. There is no mount option, feature flag, user knob, or profile that disables it.
 
@@ -32,7 +46,10 @@ A **sparse file** is any file whose logical size is larger than the physical dat
 
 ## 3. On-Disk Representation
 
-ARXFS extent metadata must support a ZERO/Hole extent kind.
+A hole is either an explicit `Zero` extent record or an unmapped logical range.
+ARXFS chose the unmapped range (see the status note at the head of this file),
+so the `Zero`-extent shape below is the alternative this section rules on and
+bounds, not a field the format carries.
 
 ```text
 ExtentKind:
@@ -42,7 +59,7 @@ ExtentKind:
 
 A `Data` extent references an existing ARXFS physical chunk or record.
 
-A `Zero` extent contains:
+A `Zero` extent, in the explicit representation, contains:
 
 ```text
 inode_id
@@ -297,6 +314,9 @@ clone/reflink sparse file -> preserve ZERO extents exactly
 snapshot sparse file -> preserve ZERO extents exactly
 ```
 
+Two behaviours are conditional on interfaces TAIRiX does not yet expose, and
+are the whole of this appendix's remaining work (§19):
+
 If TAIRiX exposes `SEEK_DATA` / `SEEK_HOLE`-style behaviour, ARXFS must report ZERO extents and implicit holes as holes, not as data.
 
 If TAIRiX exposes an explicit punch-hole or zero-range API, ARXFS must implement it by creating ZERO extents and releasing replaced Data extents through the normal COW/refcount/free path.
@@ -315,7 +335,10 @@ Sparse writes must avoid unnecessary physical allocation.
 
 ## 17. Mandatory Tests
 
-The ARXFS sparse implementation is incomplete unless these tests pass.
+All of these pass, in `drivers/filesystem/arxfs/src/tests.rs` (the
+`sparse_*` set plus `all_zero_cluster_write_becomes_holes_not_a_compressed_extent`).
+Test 10 is inherent rather than separate: every ARXFS volume is encrypted, so
+every other case already runs on an encrypted volume.
 
 ```text
 1. create 10 MiB zero file
@@ -365,7 +388,7 @@ The ARXFS sparse implementation is incomplete unless these tests pass.
 
 ## 18. Acceptance Criteria
 
-Sparse support is accepted only when:
+Every criterion below is met:
 
 ```text
 - all-zero logical ranges use ZERO/Hole extents;
@@ -378,3 +401,22 @@ Sparse support is accepted only when:
 - no RLE/FILL storage mode is introduced by this appendix;
 - the implementation uses first-party Rust only and adds no external dependency.
 ```
+## 19. Remaining work
+
+Both items are blocked on an interface that does not exist yet, not on ARXFS.
+Neither is optional once its interface lands (§15).
+
+- **`SEEK_DATA` / `SEEK_HOLE`.** No TAIRiX seek ABI exposes a hole-aware seek,
+  so ARXFS has nothing to answer. When one lands, the driver reports an
+  unmapped range as a hole from the extent tree it already walks; the file
+  offset arithmetic is the only new code.
+- **Punch-hole / zero-range.** No explicit punch-hole or zero-range operation
+  exists in the filesystem ABI. When one lands, ARXFS implements it by dropping
+  the covering mappings and releasing the replaced data extents through the
+  normal copy-on-write refcount/free path — the same code `store_block` already
+  runs for an all-zero write, so the operation is a bound and a range walk, not
+  a new pipeline.
+
+An explicit `Zero` extent record is **not** remaining work: §2 permits the
+implicit representation, ARXFS implements it, and adding the field would be an
+on-disk change buying nothing.

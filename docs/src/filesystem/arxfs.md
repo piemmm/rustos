@@ -45,8 +45,9 @@ The superblock also carries an **incompatible-feature word**: a plaintext
 bitmap of on-disk structures a reader must implement to mount at all, covered
 by the block's keyed authenticator. A volume declaring a bit this build does
 not know is refused with `DriverError::Unsupported` — refused with its reason
-rather than mounted and misread. Today the one bit is `symlinks`, and a volume
-gains it from its first link, never at format time, so a link-free volume stays
+rather than mounted and misread. Two bits are defined, `symlinks` and
+`hardlinks`, and a volume gains each from its first use of the structure it
+names rather than at format time, so a volume that has never held a link stays
 readable by a build without the feature.
 
 Every **metadata** block is self-identifying (`AGENTS.md` §8 block
@@ -58,10 +59,12 @@ verifies all of that against the address the reader *expected*, so a stale,
 misdirected, wrong-type, torn, bit-rotted, or wrong-key block is rejected at
 decode time and the mount fails closed (`AGENTS.md` §5.4). Raw file-data
 blocks carry no header; their tail holds a 28-byte per-block crypto trailer
-(a 12-byte nonce and a 16-byte AEAD tag, see [Encryption](#encryption)) and a
-40-byte **data-integrity trailer** (a 32-byte logical content hash and an
-8-byte physical checksum, see [Data integrity](#data-integrity)), so a data
-block holds `block_size - 68` bytes of file content.
+(a 12-byte nonce and a 16-byte AEAD tag, see [Encryption](#encryption)), a
+5-byte compression descriptor (see [Compression](#compression)), and a 36-byte
+**data-integrity trailer** (a 32-byte logical content hash and a 4-byte
+physical checksum, see [Data integrity](#data-integrity)), so a data block
+holds `block_size - 69` bytes of file content — 443 on a 512-byte device, 4027
+on a 4096-byte one.
 
 Inodes are 256-byte records held in a **copy-on-write inode tree** keyed by
 inode number (see the next section); inode 1 is the root directory. Each
@@ -181,8 +184,8 @@ predictable key material (`AGENTS.md` §5.4).
 ## Data integrity
 
 Every file-data block carries a two-layer **data-integrity field**
-(`arxfs-spec.md` §6, §8), stored in a 40-byte trailer that follows the crypto
-trailer (`src/integrity.rs`). It complements — and is distinct from — the
+(`arxfs-spec.md` §6, §8), stored in a 36-byte trailer that follows the crypto
+trailer and the compression descriptor (`src/integrity.rs`). It complements — and is distinct from — the
 Stage-4 AEAD tag: the AEAD proves *authenticity* of the ciphertext, while this
 field gives a cheap media-corruption check plus a content-addressable name for
 the plaintext.
@@ -769,6 +772,17 @@ in place**:
   selected; a crash mid-publish overwrites only the oldest ring slot, so
   the most recent committed root always survives — the mount lands on a
   whole transaction boundary, never a torn one.
+- **The barrier that makes the order real** (`arxfs-spec.md` §22, spec
+  stage 17 — **not yet implemented**). Issuing the writes in that order is
+  only half the guarantee: a device with a volatile write cache may commit
+  them to media in any order, so the slot can become durable while an
+  interior tree node beneath its root is not, and the mount then fails
+  closed. The rule is one `Block::flush()` after every block the
+  transaction publishes and before the slot itself — sufficient, because
+  the root is just another block that must be durable before the slot
+  naming it. Until that stage lands, an ordinary commit issues no barrier
+  and this ordering holds only on a device that does not reorder; only an
+  explicit `fs_sync` forces the device cache today.
 
 ## Operations
 

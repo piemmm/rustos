@@ -2654,6 +2654,28 @@ are real freed space; a single-block record always stores raw (inside a fixed
 can be freed). Partial overwrites decompose a cluster back to per-block
 records; reflinks share clusters whole; seeks stay one extent-tree descent.
 
+**Two gaps this "done" does not cover, each its own change.**
+
+- **The maintenance operations have no production caller.** `scrub`, `check`,
+  `trim`, `health`, and `rescue` are implemented, tested, and capability-gated
+  on `CAP_FS_MOUNT`, but nothing in the kernel, a service, or a command app
+  invokes any of them. On a live system TRIM therefore never issues (the
+  pending-discard queue accumulates and is dropped at unmount), scrub never
+  runs, and the health baseline never advances past mkfs. There is no `arxfs`
+  command app, so the §12 operations the spec describes are unreachable by an
+  administrator. Spec stage 18.
+- **The §5 fixed-constant targets are not met.** The spec's 16 KiB metadata
+  block, 128 KiB / 256 KiB data-record targets, and inline/packed small-file
+  storage are unimplemented: a metadata block and a data record are each one
+  *device* block, because `bootstrap` takes the filesystem block size straight
+  from the device geometry. On a 512-byte SD card that leaves 439 usable content
+  bytes per record and 384 payload bytes per B-tree node, so trees are far
+  deeper and extent records far more numerous than on a 4 KiB volume. §5 now
+  states the real values and records the targets as stage 19; reaching them
+  needs a filesystem block size decoupled from the device's, which is an on-disk
+  change and must follow the write-path coalescing (stage 17) or a wider record
+  simply multiplies the per-record command count.
+
 ---
 
 ## Stage 5 follow-up — ARXFS extended file metadata (`plans/ARXFS-METADATA.md`)
@@ -2715,9 +2737,111 @@ caller.
 
 ---
 
-## Stage 5 follow-up — ARXFS FEC and multi-device redundancy (`plans/ARXFS-FEC.md`)
+## Stage 5 follow-up — ARXFS write-back cache and commit barrier (`plans/ARXFS-WRITEBACK.md`)
 
 **Dependencies:** Stage 5 follow-up (ARXFS v1). Staged plan:
+`plans/ARXFS-WRITEBACK.md` (stages WB0–WB6); spec section
+`docs/src/filesystem/arxfs-spec.md` §22, stage 17.
+
+**Goal.** Make ARXFS writes fast enough for an SD card and correct on any device
+with a volatile write cache, with one mechanism: a transaction-scoped dirty
+block set, a run coalescer, a commit scheduler, and the single barrier that
+becomes affordable once commits are batched. No capability, no ABI surface, no
+mount option, no second data path.
+
+**Measured baseline** (in-memory device, incompressible payload, counting
+`Block::write_blocks` calls): a 64 KiB file written in one call costs 746
+single-block writes at a 512-byte block size and 89 at 4096 — 5.8× and 5.6×
+byte amplification; written as 4 KiB chunks it costs 2571 and 305 — 20.1× and
+19.1×. At a 512-byte block size a 34-byte append costs 13 writes and creating
+an empty file costs 18. Three
+causes, fixed one per stage: the same B-tree node is copy-on-written and written
+out once per data block within a single transaction (~600 of those 746 writes
+are superseded metadata); every VFS operation commits its own transaction root
+and superblock slot; and `write_block` is the only device write site and always
+writes exactly one block, though the read path already coalesces into 64 KiB
+runs and `emmc2` stages 128 blocks per transfer.
+
+**Durability defect this fixes.** `commit()` writes the copy-on-write blocks,
+the transaction root, then the superblock slot with **no** `Block::flush()`
+anywhere, while `src/transaction.rs` documents the opposite. On a device with a
+volatile write cache the slot can reach media before an interior tree node
+beneath its root, and the mount then fails closed with both mirrors absent.
+`open` re-validates the root before accepting a slot, so a lost *root* was
+always survivable; a lost interior node beneath a durable root was not. The fix
+is one barrier before the slot — sufficient because the root is just another
+block that must be durable before the slot publishing it — and it lands with the
+batching that pays for it (WB1), not alone.
+
+**Design decisions (load-bearing).**
+- The dirty set holds *sealed* blocks beneath the driver's single device-write
+  seam, so there is no second integrity, crypto, or allocator path. Mirroring is
+  unchanged: the companion is a second entry with identical bytes, which the
+  coalescer sees as one two-block run.
+- A dirty block is **pinned memory, not reclaimable cache**: it cannot be
+  dropped, only written, so it does not go through
+  `tairix_reclaim::ReclaimCache` (whose every class is clean and whose refusal
+  path — serve uncached — is meaningless for a block that exists nowhere else).
+  It is bounded by back-pressure with a floor of one transaction's working set,
+  and pressure shortens the deadline rather than evicting.
+- The dirty-age deadline is a pure function of `Block::device_class()`, which
+  the seam already reports and the driver currently ignores: longest for
+  `Removable` (SD/eMMC — highest per-command cost and the measured bottleneck),
+  middle for `Rotational`, shortest for `SolidState`/`Virtual`. One policy
+  function, never a global constant, never a per-volume knob.
+- `close()` does not sync — POSIX semantics, and write-then-close is exactly the
+  workload the batching exists for. `fs_sync` forces a commit and the trailing
+  barrier.
+- The kernel block cache (SMART11) stays a read cache: there is one dirty layer
+  in the stack and it is this one. `plans/SMARTRAM.md` §6.1 already reserves
+  dirty data for the filesystem's own write policy.
+
+**Status: planned.** No implementation has landed.
+
+---
+
+## Stage 5 follow-up — ARXFS snapshots (`plans/ARXFS-SNAPSHOT.md`)
+
+**Dependencies:** Stage 5 follow-up (ARXFS v1) **and** the write-back commit
+barrier above — a snapshot published without the barrier could name a root whose
+subtree never reached media, which is the one thing a snapshot exists to
+guarantee. Design brief: `plans/ARXFS-SNAPSHOT.md`; spec section
+`docs/src/filesystem/arxfs-spec.md` §23 (reserved and stubbed), stage 20.
+
+**Goal.** A named, read-only, integrity-verified reference to a committed
+transaction root, pinning everything reachable from it against reuse and
+discard: create, list, rename, hold/release, read-only mount, delete, and
+whole-volume rollback, plus the diff and send/receive primitives a backup
+service is later built on. Built from the primitives that already exist — the
+retained root history, reflink/shared chunks, refcounts, and the
+reverse-reference tree — never a second copy-on-write mechanism.
+
+**Design decisions (load-bearing).**
+- Creation is O(1) metadata: one `SnapshotRecord` naming an already-committed
+  root. It must **not** bump a per-block refcount, which would make creation
+  O(volume).
+- **Reachability from any live root** — current, retained-history, or snapshot —
+  is the single liveness authority, implemented once and shared with TRIM rather
+  than duplicated between TRIM and snapshot code. This supplies the snapshot
+  half of the reachability rule spec §11 and §16 already state as a forward
+  reference.
+- The snapshot tree reuses the one generic B-tree node; the name→id index is
+  rebuildable, so a corrupt index can never make a volume unmountable.
+- `snapshot_diff` prunes subtrees whose on-disk address is unchanged, so an
+  incremental backup costs the delta, not the volume.
+- Capabilities: `CAP_FS_SNAPSHOT_*` are candidates, not decided — each must pass
+  the §5.2 minimalism test at implementation, and `CAP_FS_MOUNT` is reused where
+  it already expresses the authority at the right granularity.
+
+**Status: planned.** No implementation has landed: no snapshot type, tree, ABI,
+or tooling exists.
+
+---
+
+## Stage 5 follow-up — ARXFS FEC and multi-device redundancy (`plans/ARXFS-FEC.md`)
+
+**Dependencies:** Stage 5 follow-up (ARXFS v1) and the write-back commit
+barrier above (every distributed commit witness needs it). Staged plan:
 `plans/ARXFS-FEC.md` (stages FEC0–FEC20).
 
 **Goal.** Always-on forward error correction and multi-device redundancy for
@@ -2729,6 +2853,17 @@ second-failure-safe COW recovery; and one capability-gated administration
 service fronted by CLI and curses-TUI command apps. Devices are reached only
 through the existing storage-discovery path (`blkio` block-service endpoints
 on storage-class hardware-tree nodes, consumed by `drivers/storage/volmgr`).
+
+**Relationship to the shipped block-layer RAID stack.** ARXFS FEC does not
+replace `lib/raid` / `drivers/storage/raid` / `mdadm` and is not an alternative
+to it: block-layer RAID is the only redundancy available to a non-ARXFS volume,
+while filesystem-integrated FEC is the only way to get checksum-directed repair,
+rebuild-live-data-only, and a structurally absent parity write hole. Stacking is
+forbidden — a pool member that is a composed RAID array is refused fail-closed,
+because the array presents several physical failure domains as one device and
+the stated protection floor would be a lie. The GF(2^8) field and Reed-Solomon
+codec are the existing first-party ones; a second copy of that arithmetic is
+forbidden. Full boundary: `plans/ARXFS-FEC.md` §5.1.
 
 **Status: planned.** Design, invariants, staging, and acceptance live in
 `plans/ARXFS-FEC.md`; no implementation has landed.

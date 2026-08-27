@@ -1615,7 +1615,7 @@ impl<B: Block> ARXFS<B> {
     }
 
     /// Grow the mounted volume to fill an enlarged backing device, online and
-    /// in place (`docs/src/filesystem/arxfs-spec.md` §15).
+    /// in place (`docs/src/filesystem/arxfs-spec.md` §13).
     ///
     /// The committed filesystem size is pinned in the superblock and may be
     /// smaller than the device — for example after an administrator enlarges

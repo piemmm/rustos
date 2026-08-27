@@ -13,8 +13,12 @@
 //! record are validated together, so a half-written root is rejected and the
 //! ring falls back to the previous committed root. The commit order is
 //! therefore: write every copy-on-write block, write this root (carrying its
-//! commit record), then publish the superblock slot pointing at it — each
-//! step flushed before the next.
+//! commit record), then publish the superblock slot pointing at it.
+//!
+//! That order is issued but not yet *enforced* against a device that
+//! reorders: the barrier before the slot is spec stage 17
+//! (`docs/src/filesystem/arxfs-spec.md` §22, `plans/ARXFS-WRITEBACK.md`), so
+//! today only an explicit sync forces the device cache.
 
 use tairix_abi::DriverError;
 use tairix_crypto::MacKey;

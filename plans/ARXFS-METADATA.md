@@ -1,13 +1,21 @@
-# ARXFS-METADATA.md — ARXFS extensible file-metadata design brief
+# ARXFS-METADATA.md — ARXFS extensible file metadata
 
-This file is an AI-facing design brief for generating the binding ARXFS
-extended-metadata specification. It is **not** the final spec. Use it as source
-material to produce a new section of `docs/src/filesystem/arxfs-spec.md`
-(`§21 Extended file metadata`), the `lib/abi` additions, the VFS/driver trait
-extension, the cross-filesystem preservation rules, the preset registry, the
-required tests, and the exact `AGENTS.md` / `PLAN.md` amendments. It is binding
-under `AGENTS.md`: every rule here is subordinate to the charter; where they
-disagree the charter wins (stop and ask, charter §15.7).
+Status: **foundation and userland surface done; the preservation tooling
+remains.** The binding specification is
+`docs/src/filesystem/arxfs-spec.md` §21 and the registry reference is
+`docs/src/filesystem/metadata-registry.md`; this file holds the design and the
+work that is left (§10). It is binding under `AGENTS.md`: every rule here is
+subordinate to the charter; where they disagree the charter wins (stop and ask,
+charter §15.7).
+
+Delivered: the shared `lib/fsmeta` crate (key grammar, `AttrSet`/`AttrEntry`,
+the preset registry with checked `Time64` conversions, fuzz harness), the
+versioned `FilesystemAttrs` ABI and its `FilesystemAttrsProvider` facet, the
+ARXFS attribute store (a `BlockType::Attr` COW metadata block off the inode's
+`attr_root`, encrypted and mirrored like a directory block), and the
+`fs_attr_get`/`fs_attr_set`/`fs_attr_list`/`fs_attr_remove` syscalls over the
+secured VFS. The ADFS driver already answers `acorn.*` presets through the same
+registry.
 
 The goal has two parts:
 
@@ -109,14 +117,21 @@ AttrEntry:
     value     0..=VALUE_MAX bytes, opaque
 ```
 
-Fixed v1 bounds (security/validation bounds, charter §24.4 — not tunable):
+Fixed v1 bounds (security/validation bounds, charter §24.4 — not tunable), one
+definition in `lib/abi` and re-exported by `lib/fsmeta`:
 
 ```text
-KEY_MAX            255 bytes
-VALUE_MAX          65536 bytes (64 KiB) for an inline/attribute value
-ATTRS_PER_INODE    a fixed cap large enough for all presets plus headroom
-TOTAL_ATTR_BYTES   a fixed per-inode cap on summed key+value bytes
+KEY_MAX            255 bytes    (tairix_abi::FS_ATTR_KEY_MAX)
+VALUE_MAX          3072 bytes   (tairix_abi::FS_ATTR_VALUE_MAX)
+ATTRS_PER_INODE    32
+TOTAL_ATTR_BYTES   3072 bytes   per-inode cap on summed key+value bytes
 ```
+
+`VALUE_MAX` is sized so a whole attribute set fits one 4 KiB metadata block
+beside its header, mirror, and crypto trailer; a set that would overflow a
+smaller block fails closed with `NoSpace` rather than spilling into a second
+block. Anything larger than `VALUE_MAX` is a **named stream** (§4.4), not an
+attribute.
 
 A value larger than `VALUE_MAX` is **not** an extended attribute; it is a
 **named stream** (§4.4) — this is how a Mac resource fork or other large
@@ -327,13 +342,12 @@ checked.
 
 ## 8. ABI, shared crate, tooling, and docs
 
-- Shared crate: add `lib/fsmeta` (name TBD) holding the namespaced-key grammar +
-  parser, the `AttrEntry`/`AttrSet` types, the preset registry, and the
-  foreign↔normalised conversion helpers — `no_std`, unit-tested, rustdoc on
-  every public item, stability tier in its `README.md` (charter §6). One
-  definition shared by ARXFS, the foreign-FS drivers, the copy/move tools, the
-  desktop, and the archive tools (charter §2.2). Adding the crate updates
-  `AGENTS.md` §3 and `PLAN.md` (charter §6).
+- Shared crate: `lib/fsmeta` holds the namespaced-key grammar + parser, the
+  `AttrEntry`/`AttrSet` types, the preset registry, and the foreign↔normalised
+  conversion helpers — `no_std`, unit-tested, rustdoc on every public item,
+  stability tier in its `README.md` (charter §6). One definition shared by
+  ARXFS, the foreign-FS drivers, the copy/move tools, the desktop, and the
+  archive tools (charter §2.2).
 - ABI/VFS: extend the filesystem driver traits (`lib/abi/src/driver/filesystem.rs`)
   with `get_attr`/`set_attr`/`list_attr`/`remove_attr` and named-stream access,
   under the syscall-table ABI discipline (charter §9): versioned, hashed,
@@ -391,31 +405,38 @@ Incomplete unless these pass (charter §7, §16, §23.4):
 
 ---
 
-## 10. AGENTS.md and PLAN.md amendments to call out
+## 10. Remaining work
 
-The generated spec must explicitly identify these charter touch-points:
+The foundation is built; these consume it and are each their own change.
 
-- **`AGENTS.md` §3** — add the shared `lib/fsmeta` crate and note the ARXFS
-  `attr`/metadata module if the charter enumerates ARXFS internals.
-- **`AGENTS.md` §5.2 / §5.3** — `user`/foreign/`tairix` attributes use the
-  existing per-inode permission model (no new capability); `system`/`trusted`
-  namespaces add a justified capability with its enforcement point. Record the
-  decision.
-- **`AGENTS.md` §16.4** — extended metadata and named streams interact with the
-  curated shared-library set (archive, image-decoding for thumbnails); confirm
-  no new library *class* is needed, or add one with a §16.4 + `PLAN.md` update.
-- **`AGENTS.md` §21** — preset timestamp values (acorn/atari) are converted to
-  and from foreign formats with checked Time64 conversions; no silent
-  truncation.
-- **`AGENTS.md` §2.13** — foreign-metadata preservation is *interoperability
-  with foreign systems' data*, explicitly allowed and distinct from TAIRiX
-  self-compatibility; state this so it is not mistaken for a compat shim.
-- **`PLAN.md`** — add a ARXFS extended-metadata stage (alongside/after the
-  snapshot stage) and a one-line "Charter Amendments" rationale for any new
-  crate or capability (charter §13).
-- **`docs/src/filesystem/arxfs-spec.md`** — new §21, §2 feature-table row, §18
-  stage, and the preset-registry reference page.
+- **Copy/move/archive preservation (§6.2, §6.3).** `cp`, `mv`, the desktop file
+  manager, and the archive tools must carry the representable attribute set by
+  default and report what they could not carry — a `stdinfo` `omission` record
+  where a stream consumer exists (charter §20.1), a plain diagnostic otherwise.
+  An exact-preservation copy that cannot represent an attribute on the target
+  fails closed with `MetadataNotRepresentable`; dropping happens only under an
+  explicitly requested, documented lossy policy. None of these tools links
+  `lib/fsmeta` yet.
+- **An attribute CLI.** No command app reads or writes attributes today;
+  `fstree`'s `a` editor is the only caller. A `getattr`/`setattr`-shaped pair
+  (or an option surface on an existing tool) over the capability-checked
+  syscalls, never a privileged bypass.
+- **Named streams (§4.4).** A fork-style payload above `VALUE_MAX` has no
+  storage path yet, so `mac.resourcefork` cannot hold a real resource fork. The
+  content path is the ordinary data pipeline addressed by a namespaced key — no
+  second data path.
+- **Per-family foreign driver wiring (§7).** ADFS answers `acorn.*`; the Amiga,
+  Atari, and classic-Mac drivers do not exist, so their preset entries have no
+  producer. Each lands with its driver.
+- **Snapshot send/receive carrying the attribute set.** Depends on
+  `plans/ARXFS-SNAPSHOT.md` §6.3; the stream must carry attributes or a backup
+  round-trip is lossy.
 
-This brief, like the rest of `plans/`, states the plan and the design, not a
-build log (charter §13): when the work lands, replace the planned/in-progress
-prose with a done-state summary rather than appending a changelog.
+The tests §9 lists for the delivered parts pass. Items 5 (per-family preset
+round-trip beyond Acorn), 6 (lossless-or-fail-closed across a copy), 7
+(`cp`/`mv`/desktop preservation), 8 (named streams), and 9 (archive round-trip)
+land with the work above.
+
+This file, like the rest of `plans/`, states the plan and the design, not a
+build log (charter §13): when the remaining work lands, replace its prose with
+a done-state summary rather than appending a changelog.

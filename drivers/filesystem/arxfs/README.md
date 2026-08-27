@@ -37,9 +37,10 @@ wrong-type, torn, bit-rotted, or wrong-key block is rejected at decode time
 and the mount fails closed (`AGENTS.md` §5.4). Raw file-data blocks carry no
 header; their tail holds a 28-byte per-block crypto trailer (nonce + AEAD
 tag, see *Encryption* below), a 5-byte compression descriptor (see
-*Compression* below), and a 40-byte data-integrity trailer (logical content
-hash + physical checksum, see *Data integrity* below), so a data block holds
-`block_size - 73` bytes of file content.
+*Compression* below), and a 36-byte data-integrity trailer (a 32-byte logical
+content hash and a 4-byte physical checksum, see *Data integrity* below), so a
+data block holds `block_size - 69` bytes of file content — 443 on a 512-byte
+device, 4027 on a 4096-byte one.
 
 ## Metadata authentication and redundancy (`arxfs-spec.md` §5, §8)
 

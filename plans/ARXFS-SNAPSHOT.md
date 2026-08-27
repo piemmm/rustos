@@ -1,13 +1,24 @@
-# ARXFS-SNAPSHOT.md — ARXFS snapshot support design brief
+# ARXFS-SNAPSHOT.md — ARXFS snapshot support
 
-This file is an AI-facing design brief for generating the binding ARXFS
-snapshot specification. It is **not** the final spec. Use it as source material
-to produce the snapshot section of `docs/src/filesystem/arxfs-spec.md` (a new
-`§20 Snapshots`), the `docs/src/filesystem/arxfs.md` overview update, the ABI
-additions in `lib/abi`, the new `arxfs` tooling, the required tests, and the
-exact `AGENTS.md` / `PLAN.md` amendments. It is binding under `AGENTS.md`: every
-rule in this brief is subordinate to the charter, and where the charter and this
-brief disagree the charter wins (stop and ask, charter §15.7).
+Status: **planned. Nothing implemented** — no snapshot type, tree, ABI, or
+tooling exists in the tree, and `arxfs-spec.md` §11 and §16 carry forward
+references to a snapshot liveness rule that has no implementation behind it.
+This is spec-stage 20 (`arxfs-spec.md` §15/§18) and its spec section is
+**§23**, reserved and stubbed there.
+
+This file is the design brief the binding specification is generated from. Use
+it as source material to produce `docs/src/filesystem/arxfs-spec.md` §23, the
+`docs/src/filesystem/arxfs.md` overview update, the ABI additions in `lib/abi`,
+the new `arxfs` tooling, and the required tests. It is binding under
+`AGENTS.md`: every rule in this brief is subordinate to the charter, and where
+the charter and this brief disagree the charter wins (stop and ask, charter
+§15.7).
+
+**Dependency.** Snapshot creation and deletion are single copy-on-write
+transactions, so this stage lands *after* the write-back and commit-barrier
+work (`plans/ARXFS-WRITEBACK.md`, spec stage 17): a snapshot published without
+the barrier could name a root whose subtree never reached media, which is
+precisely the guarantee a snapshot exists to give.
 
 Snapshots are designed first as a **correctness/retention feature** and second
 as the **foundation of a future backup solution**. Every on-disk and ABI choice
@@ -351,10 +362,11 @@ held resident for the whole volume (charter §26.6).
   `arxfs snapshot create|list|rename|delete|hold|mount|diff|send|receive`,
   backed by the capability-checked ABI — never a privileged bypass (charter
   §16.6). The CLI binds to standard streams only (charter §20).
-- Docs: add `§20 Snapshots` to `docs/src/filesystem/arxfs-spec.md`, a row to
-  the §2 mandatory feature table, a stage to the §18 staged-delivery plan, and
-  update `docs/src/filesystem/arxfs.md`. Rustdoc on every new public item
-  (charter §2.8, §13).
+- Docs: fill in `§23 Snapshots` in `docs/src/filesystem/arxfs-spec.md` (the
+  section is reserved and stubbed), add a row to the §2 mandatory feature
+  table, tick the §18 stage-20 row, and update
+  `docs/src/filesystem/arxfs.md`. Rustdoc on every new public item (charter
+  §2.8, §13).
 
 ---
 
@@ -412,13 +424,13 @@ The generated spec must explicitly identify these charter touch-points:
   exposed through the System Information API, never a `/proc`/`/sys` view.
 - **`AGENTS.md` §21** — snapshot `created` and all stream timestamps are
   `Time64`.
-- **`PLAN.md`** — add a ARXFS snapshot stage (after the v1 stages, arxfs-spec
-  §18) and, if a capability or ABI type is added, a one-line "Charter
-  Amendments" rationale (charter §13).
-- **`docs/src/filesystem/arxfs-spec.md`** — new §20, §2 feature-table row, §18
-  stage; the existing §11/§16 "snapshot" references stop being forward
-  allusions and cite §20.
+- **`PLAN.md`** — the ARXFS snapshot stage exists; keep its status in step, and
+  if a capability or ABI type is added add a one-line "Charter Amendments"
+  rationale (charter §13).
+- **`docs/src/filesystem/arxfs-spec.md`** — fill §23, add the §2 feature-table
+  row, tick the §18 stage-20 row; the existing §11/§16 "snapshot" references
+  stop being forward allusions and cite §23.
 
 This brief, like the rest of `plans/`, states the plan and the design, not a
-build log (charter §13): when the work lands, replace the planned/in-progress
-prose with the done-state summary rather than appending a changelog.
+build log (charter §13): when the work lands, replace the planned prose with
+the done-state summary rather than appending a changelog.

@@ -1434,7 +1434,8 @@ You are not exempt from any rule above. In addition:
     | Civil time zones: the vendored IANA rules, the compiled zone store, the `lib/tz` engine, the `TZ`/machine-setting/UTC resolution order, and local rendering | `plans/TIMEZONES.md` |
     | Storage namespace: drives, volumes, aliases, paths, resource references | `docs/src/filesystem/drives.md` (binding spec); `plans/ALIAS.md`; `plans/DRIVES.md` |
     | Links, symbolic and hard, and path canonicalisation: the `FileKind`/`NodeKind` kind, `NO_FOLLOW`, `fs_symlink`/`fs_readlink`/`fs_link`/`fs_realpath`, VFS per-component resolution with its hop bound and mount-projection floor, `RealpathMode`, the per-format on-disk spellings, the link-count lifecycle, `ln`/`ls`/`readlink`, desktop shortcuts | `plans/SYMLINKS.md` |
-    | ARXFS | `docs/src/filesystem/arxfs-spec.md` (binding spec); `plans/ARXFS-METADATA.md`; `plans/ARXFS-SNAPSHOT.md`; `plans/ARXFS-FEC.md`; `plans/SPARSE.md` |
+    | ARXFS | `docs/src/filesystem/arxfs-spec.md` (binding spec); `plans/SPARSE.md`; `plans/ARXFS-METADATA.md`; `plans/ARXFS-WRITEBACK.md`; `plans/ARXFS-SNAPSHOT.md`; `plans/ARXFS-FEC.md` |
+    | Filesystem write durability: the ARXFS dirty-block set, commit batching, the commit barrier, and the device-class dirty-age policy | `plans/ARXFS-WRITEBACK.md` |
     | System log / audit trail | `plans/SYSLOG.md` |
     | Memory pressure, reclaimable memory, swap tiers | `plans/SMARTRAM.md`; `plans/SWAPSWAPSWAP.md`; `plans/FIX-SWAPFILE.md` (partition swap / SWAP5) |
     | Kernel-heap growth: fragmentation-immune growth, the frame-backed heap source, the heap-allocation-size vs `MAX_ORDER` decoupling | `plans/FIX-KHEAP.md` |
