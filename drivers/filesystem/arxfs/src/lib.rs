@@ -183,6 +183,20 @@ where
 /// Largest block size the driver stages through its on-stack scratch
 /// buffers. No Tier-1 block device exceeds 4096 bytes per block.
 const MAX_BLOCK_SIZE: usize = 4096;
+
+/// Widest value any of the driver's B-trees stores beside a key.
+///
+/// A mutation's node buffer carries one entry of this width past the block, so
+/// an insert lays a full node out and then splits it rather than needing a
+/// second layout path for the overflowing case. A tree with a wider record has
+/// to raise this, which the assertion below is here to force.
+const MAX_TREE_VALUE_LEN: usize = INODE_SIZE;
+const _: () = assert!(
+    INODE_SIZE <= MAX_TREE_VALUE_LEN
+        && EXTENT_VALUE_LEN <= MAX_TREE_VALUE_LEN
+        && dedupe::CHUNK_VALUE_LEN <= MAX_TREE_VALUE_LEN
+        && dedupe::REVERSE_REF_VALUE_LEN <= MAX_TREE_VALUE_LEN
+);
 /// Smallest block size the format supports.
 const MIN_BLOCK_SIZE: usize = 512;
 
@@ -367,12 +381,22 @@ fn rd_u64(buf: &[u8], off: usize) -> u64 {
     u64::from_le_bytes(bytes)
 }
 
+fn rd_u128(buf: &[u8], off: usize) -> u128 {
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&buf[off..off + 16]);
+    u128::from_le_bytes(bytes)
+}
+
 fn wr_u32(buf: &mut [u8], off: usize, value: u32) {
     buf[off..off + 4].copy_from_slice(&value.to_le_bytes());
 }
 
 fn wr_u64(buf: &mut [u8], off: usize, value: u64) {
     buf[off..off + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+fn wr_u128(buf: &mut [u8], off: usize, value: u128) {
+    buf[off..off + 16].copy_from_slice(&value.to_le_bytes());
 }
 
 /// Write a [`Time64`] at `off` (12 bytes: 8-byte seconds + 4-byte nanos).
@@ -751,6 +775,11 @@ pub struct ARXFS<B: Block> {
     /// invalidated by [`ARXFS::free_block`] and purged by
     /// [`ARXFS::rollback`], so it can never serve a stale cluster.
     cluster_cache: Option<Box<dyn ClusterCache>>,
+    /// The mount's B-tree mutation scratch (`btree` module), lent to one
+    /// insert or remove at a time. Held here so a steady-state mutation
+    /// allocates nothing and no node buffer reaches the stack; `None` until
+    /// the first mutation, so a read-only handle never pays for one.
+    tree_edit: Option<btree::TreeEdit>,
 }
 
 /// Value width of one extent record: physical start block, logical run
@@ -1362,6 +1391,7 @@ impl<B: Block> ARXFS<B> {
             clock: epoch_clock,
             read_only: false,
             cluster_cache: None,
+            tree_edit: None,
         };
         Ok(fs)
     }

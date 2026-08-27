@@ -31,6 +31,8 @@
 use tairix_abi::DriverError;
 use tairix_crypto::{ct_eq, hmac_sha256, MacKey, MacTag, MAC_TAG_LEN};
 
+use crate::{rd_u128, rd_u32, rd_u64, wr_u128, wr_u32, wr_u64};
+
 /// Magic in a metadata block header's first eight bytes: `"ARXFSB\3"`. The
 /// trailing byte tracks the on-disk block layout; it advanced to `3` when the
 /// fast physical checksum became the keyed authenticator (Stage 3). The one
@@ -152,34 +154,6 @@ const H_PAYLOAD_LEN: usize = 64;
 const H_RESERVED: usize = 68;
 const H_MAC: usize = 72;
 const H_MAC_END: usize = H_MAC + MAC_TAG_LEN;
-
-fn rd_u32(buf: &[u8], off: usize) -> u32 {
-    u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
-}
-
-fn rd_u64(buf: &[u8], off: usize) -> u64 {
-    let mut bytes = [0u8; 8];
-    bytes.copy_from_slice(&buf[off..off + 8]);
-    u64::from_le_bytes(bytes)
-}
-
-fn rd_u128(buf: &[u8], off: usize) -> u128 {
-    let mut bytes = [0u8; 16];
-    bytes.copy_from_slice(&buf[off..off + 16]);
-    u128::from_le_bytes(bytes)
-}
-
-fn wr_u32(buf: &mut [u8], off: usize, value: u32) {
-    buf[off..off + 4].copy_from_slice(&value.to_le_bytes());
-}
-
-fn wr_u64(buf: &mut [u8], off: usize, value: u64) {
-    buf[off..off + 8].copy_from_slice(&value.to_le_bytes());
-}
-
-fn wr_u128(buf: &mut [u8], off: usize, value: u128) {
-    buf[off..off + 16].copy_from_slice(&value.to_le_bytes());
-}
 
 /// The HMAC-SHA256 keyed authenticator over every byte of `block` *except*
 /// the tag slot, computed through `lib/crypto`. Covers the identity *and* the

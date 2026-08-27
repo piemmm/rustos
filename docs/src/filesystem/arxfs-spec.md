@@ -184,7 +184,7 @@ Rebuildable metadata:
 A corrupt rebuildable structure must not make a valid volume unmountable.
 `arxfs check` must rebuild it from authoritative metadata.
 
-### Tree iteration (resident footprint)
+### Tree iteration and mutation (resident footprint)
 
 Every metadata tree is read through a **bounded, resumable walk**: one step
 descends one root-to-leaf path and yields that leaf's records, so the bytes an
@@ -194,11 +194,23 @@ persist where it stopped and resume later — a resumed walk yields exactly what
 an uninterrupted one would. Callers that must touch every *node* (the
 allocation-map rebuild, freeing a whole tree) take them from the walk's own
 path as it moves, so no operation ever materialises a tree's records or node
-list. A walk refuses a tree whose shape is impossible (a level that does not
-decrease on the way down, an entry count wider than its block, keys that do not
-ascend within a leaf) rather than reading past a buffer or descending forever,
-and it never ends early and silently, because a caller freeing or accounting
-for every record would then miss some.
+list.
+
+A **mutation is bounded in the same way, and in the stack as well as the heap.**
+An insert or a remove descends once recording the path, edits the leaf in place,
+and walks back up rewriting each ancestor in turn — nothing recurses, so no cost
+scales with the tree's depth. The node buffers an edit needs (the node being
+rewritten, plus the adjacent pair a split, borrow, or merge moves entries
+between) are a fixed handful the mount lends it, so a steady-state edit
+allocates nothing and decodes nothing per record. Every level a mutation
+re-enters on the way up is validated exactly as the descent validates it.
+
+A read or a mutation refuses a tree whose shape is impossible (a level that does
+not decrease on the way down or increase by one on the way back up, an entry
+count wider than its block, keys that do not ascend within a leaf) rather than
+reading past a buffer, descending forever, or running off the stack; and a walk
+never ends early and silently, because a caller freeing or accounting for every
+record would then miss some.
 
 ### On-disk allocation map (mount-time footprint)
 

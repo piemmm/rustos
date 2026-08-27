@@ -17,6 +17,7 @@ use tairix_crypto::MacKey;
 
 use crate::crypto::CRYPTO_HEADER_LEN;
 use crate::header::{BlockHeader, BlockType, HEADER_LEN};
+use crate::{rd_u32, rd_u64, wr_u32, wr_u64};
 
 /// Number of logical superblock-ring slots. Four slots retain a short window
 /// of recent transaction roots while keeping the ring scan trivial.
@@ -100,24 +101,6 @@ pub const INCOMPAT_HARDLINKS: u64 = 1 << 1;
 /// misread: the whole point of the word is that an unrecognised structure is
 /// a definite "no", never a guess.
 pub const INCOMPAT_SUPPORTED: u64 = INCOMPAT_SYMLINKS | INCOMPAT_HARDLINKS;
-
-fn rd_u32(buf: &[u8], off: usize) -> u32 {
-    u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
-}
-
-fn rd_u64(buf: &[u8], off: usize) -> u64 {
-    let mut bytes = [0u8; 8];
-    bytes.copy_from_slice(&buf[off..off + 8]);
-    u64::from_le_bytes(bytes)
-}
-
-fn wr_u32(buf: &mut [u8], off: usize, value: u32) {
-    buf[off..off + 4].copy_from_slice(&value.to_le_bytes());
-}
-
-fn wr_u64(buf: &mut [u8], off: usize, value: u64) {
-    buf[off..off + 8].copy_from_slice(&value.to_le_bytes());
-}
 
 /// One decoded superblock-ring slot.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

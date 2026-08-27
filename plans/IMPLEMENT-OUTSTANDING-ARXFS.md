@@ -33,8 +33,8 @@ no-deferral rule), ahead of everything below it.
 | # | Item | Owner | Spec stage | Depends on | Status |
 |---|---|---|---|---|---|
 | A0 | Bounded, resumable tree iteration | §3 here | — | — | **done** |
-| A1 | Bounded-stack B-tree mutation path (defect `OPEN-DEFECTS.md` D65) | §7 here | — | A0 | **next** |
-| A2 | Bounded whole-volume reconcile and reachability state (defect D-M5) | `ARXFS-MAINTENANCE.md` | 18 | A1 | planned |
+| A1 | Bounded-stack B-tree mutation path (defect `OPEN-DEFECTS.md` D65) | §7 here | — | A0 | **done** |
+| A2 | Bounded whole-volume reconcile and reachability state (defect D-M5) | `ARXFS-MAINTENANCE.md` | 18 | A1 | **next** |
 | M0 | Shared background pacer + cross-layer availability query | `ARXFS-MAINTENANCE.md` | 18 | — | planned |
 | M1 | The read-only repair rule (defect D64) | `ARXFS-MAINTENANCE.md` | 18 | — | planned |
 | WB0 | Write-amplification measurement harness | `ARXFS-WRITEBACK.md` | 17 | — | planned |
@@ -80,12 +80,13 @@ their reason recorded there, not here:
   before it does any work. Fixing it once, first, was also the difference
   between one change and six that each work around it.
 - **A1 and A2 next, because A0's work surfaced them (§7) and the no-deferral
-  rule puts a found defect ahead of everything planned.** A1 is a reachable
-  kernel-stack overflow on the write path — the read paths A0 converted no
-  longer recurse, the mutation path still does, at 8 KiB per tree level against
-  a 32 KiB stack. A2 is what is left of the boundedness A0 was taken for: the
-  iteration under `scrub` and `check` is bounded now, their own whole-volume
-  accumulators are not, and M2 cannot honestly claim a bounded pass over them.
+  rule puts a found defect ahead of everything planned.** A1 was a reachable
+  kernel-stack overflow on the write path, closed: the mutation path is
+  iterative like the read paths A0 converted, where it had recursed at 8 KiB per
+  tree level against a 32 KiB stack. A2 is what is left of the boundedness A0
+  was taken for: the iteration under `scrub` and `check` is bounded now, their
+  own whole-volume accumulators are not, and M2 cannot honestly claim a bounded
+  pass over them.
 - **The barrier before every background writer and every durable-root
   consumer.** WB1 closes the commit-barrier defect (`OPEN-DEFECTS.md` D63): a
   superblock slot published with no barrier before it can name a root whose
@@ -211,6 +212,13 @@ there is no shipped release, so there is no compatibility reader, no `v2`
 alongside a `v1`, and no migration path; the single living definition is the
 only definition.
 
+**Constraint A1 measured.** The driver stages metadata through *on-stack*
+block-sized buffers at some twenty sites (`write_file`, `store_cluster`,
+`map_write`, `commit`, …), and one `write_at` already spends ~11.6 KiB of the
+32 KiB kernel thread stack on them. Widening the filesystem block size
+multiplies every one of those, so decoupling it means moving that staging off
+the stack in the same change — not raising `MAX_BLOCK_SIZE` and hoping.
+
 **Acceptance.** A 512-byte device formats and mounts with a wider filesystem
 block size and the same correctness suite green; the §5 constants in the spec
 become statements of fact rather than targets, with the §18 stage-19 row ticked;
@@ -278,42 +286,59 @@ fix.** This binds every item in this ledger and every plan it names.
 
 ## 7. A1 and A2 — the two defects A0 surfaced
 
-A0's own scope is closed. Reading the code it converted surfaced two defects
-that are too large to fold into it, so under §6 they are the next items to be
-taken and they block every row below them.
+A0's own scope is closed. Reading the code it converted surfaced two defects too
+large to fold into it, so under §6 they took precedence over every row below
+them. A1 is done; A2 is the next item and still blocks the rest of the ledger.
 
-### A1 — the B-tree mutation path recurses with an 8 KiB frame per level
+### A1 — bounded-stack B-tree mutation path — done
 
-**Owned here**; tracked in `plans/OPEN-DEFECTS.md` D65 for its severity.
+`btree_insert` and `btree_remove` (`drivers/filesystem/arxfs/src/btree.rs`) are
+iterative. Each descends once through the one shared descent, recording the path,
+edits the leaf in place in a node buffer, and walks back up rewriting each
+ancestor — re-deriving the child index at each level from the same `child_index`
+the descent used, so the two cannot disagree, and taking the child's minimum key
+from the step that just wrote it rather than reading the node back. Every level
+re-entered on the way up is validated at `child_level + 1`, so the write path
+refuses a cyclic or over-deep tree exactly as the read descent does.
 
-`btree_insert_rec` recurses once per tree level holding two block-sized buffers
-live across the recursive call (the node it is editing and the child it re-reads
-to refresh a separator), and `btree_insert_leaf` adds a third on a split.
-Measured on the release build for x86_64, one level of `btree_insert_rec` is
-**8312 bytes** of stack (`sub $0x1000` twice plus `$0x78`). The kernel hosts
-this driver on 32 KiB per-thread stacks (`KTHREAD_STACK_BYTES`, release) behind
-a 4 KiB guard page, so **four levels overflow the stack and three leave under
-4 KiB for the syscall, VFS, and write path beneath it**. A three-level extent
-tree is ordinary: about 30 000 extents on a 4 KiB volume, and about 250 on a
-512-byte one — a fragmented file, not a pathological one. Nothing bounds the
-depth on that path either, so a corrupt tree recurses until the guard page
-catches it.
+The node buffers live in one `TreeEdit` scratch the mount lends per mutation:
+the node being rewritten, plus the adjacent pair (`lo`, `hi`) a split, borrow,
+or merge moves entries between. Staging the pair in key order makes a borrow one
+direction of a single entry move and a merge always a fold of the higher node
+into the lower, whichever side underflowed. Each buffer carries one entry of
+slack past the block, so an insert lays a full node out and then splits it —
+no second layout path for the overflowing case. Entries are edited in place
+(`node_insert_entry` / `node_remove_entry` / `node_move_entry` / `node_append`),
+so the per-record `Vec` decode `btree_load_entries` performed at every level is
+gone with the function. Every entry edit takes a checked region, and one place
+(`btree_write_node`) zeroes the payload past the count and refuses a count the
+block cannot hold before a node reaches the media.
 
-The fix is the same shape as A0's: make the mutation path iterative over a
-bounded path stack, and drop the child re-read by returning the child's minimum
-key from the recursive step instead of reading the node back to fetch it. The
-per-entry `Vec` decode `btree_load_entries` performs at every level of the
-remove path (one allocation per record, per node, per level) goes with it — the
-same node buffer serves. Landing it needs the level-continuity check the read
-descent now applies, so the mutation path refuses an impossible tree instead of
-running off the stack.
+*Measured (release, x86_64).* One `write_at` on a fragmented file: **48 097**
+stack bytes over a three-level extent tree and **34 633** over a single leaf —
+both past the 32 KiB thread stack the kernel hosts the driver on — become
+**11 633** and **11 609**, the difference no longer scaling with depth. What
+remains is the driver's own on-stack block staging down the write path, not the
+tree edit, whose frames measure 904 (insert) and 968 (remove) bytes.
+Removing one extent from an 800-extent tree allocated **596** times and now
+allocates **118**. Device reads are unchanged (58 per insert) and one lower per
+remove, the root re-read the collapse no longer needs.
 
-*Acceptance:* the measured frame of every mutation entry point is a few hundred
-bytes, independent of tree depth; an insert and a remove on a three-level tree
-allocate a bounded handful rather than per record, asserted against the
-allocation counter `tests/bounded_iteration.rs` already installs; the depth
-bound refuses a cyclic tree on the write path as it now does on the read path;
-the tree suite, the crash-replay suite, and the fuzz corpus pass unchanged.
+Two defects the work surfaced were fixed with it, each with a regression test
+that fails before and passes after: a merge of two empty siblings indexed into
+an empty entry list and **panicked** on the write path of a corrupt volume (now
+a fail-closed device fault); and `btree_insert` copied a caller's value with
+`copy_from_slice`, so a record of the wrong width would have panicked rather
+than been refused. The four byte-identical copies of the little-endian field
+accessors across `lib.rs`, `btree.rs`, `header.rs`, and `superblock.rs` are one
+definition.
+
+*Left for its owner, not deferred.* The whole `write_at` chain still spends
+~11.6 KiB of stack in a chain of block-sized staging buffers
+(`write_file`, `store_cluster`, `map_write`, `commit` — 4–8 KiB each). It is
+constant, within the 32 KiB budget, and guarded by a test; but it is sized by
+`MAX_BLOCK_SIZE`, so item **B1**, which widens the filesystem block size, must
+move that staging off the stack as part of decoupling it — recorded in §5.
 
 ### A2 — scrub and check hold whole-volume state in RAM
 

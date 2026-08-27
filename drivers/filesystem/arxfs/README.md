@@ -128,6 +128,17 @@ is impossible — a level that does not decrease, an entry count wider than its
 block, keys that do not ascend in a leaf — is a fail-closed device fault, never
 a read past a buffer or an endless descent.
 
+Mutations are bounded the same way. `btree_insert` and `btree_remove` descend
+once recording the path, edit the leaf in place, and walk back up rewriting each
+ancestor, working in the node buffers of one scratch (`TreeEdit`) the mount
+lends them: the node being rewritten, plus the adjacent pair a split, borrow, or
+merge moves entries between. Nothing recurses, so the stack a mutation needs is
+a few hundred bytes whatever the tree's depth — measured, against the 32 KiB
+thread stack the kernel hosts the driver on — and nothing is decoded per record,
+so an edit allocates a bounded handful. Each level re-entered on the way up is
+validated as the descent validates it, so the write path refuses an impossible
+tree rather than running off the stack.
+
 ## Serving reads: one device request per contiguous run
 
 An extent maps a **contiguous** physical run, so a read spanning one asks the

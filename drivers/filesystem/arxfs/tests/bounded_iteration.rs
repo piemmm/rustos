@@ -16,12 +16,13 @@
 //! path that gathers a tree before it reads it, allocates per record and blows
 //! both.
 //!
-//! Scope: the read paths whose own work *is* the walk. A mutating pass holds
-//! more than the walk — the transaction's freed-block set, and the mutation
-//! path's own per-record decoding — so its footprint is not the walk's to
-//! bound and is not measured here (`plans/ARXFS-WRITEBACK.md`,
-//! `plans/IMPLEMENT-OUTSTANDING-ARXFS.md`). Neither is `scrub` or the offline
-//! `check`, which accumulate whole-volume reconciliation state of their own.
+//! Scope: the read paths whose own work *is* the walk, plus a single-record
+//! insert and remove — the mutation path edits nodes in place through one
+//! borrowed scratch, so it too costs the same at any depth. A pass that frees
+//! or dirties *many* records still holds the transaction's own freed-block set,
+//! which is that plan's to bound (`plans/ARXFS-WRITEBACK.md`), as are `scrub`
+//! and the offline `check`, which accumulate whole-volume reconciliation state
+//! (`plans/IMPLEMENT-OUTSTANDING-ARXFS.md`).
 
 use std::alloc::System;
 use std::collections::BTreeMap;
@@ -217,6 +218,7 @@ fn every_measured_walk_stays_bounded() {
     // each other.
     a_stat_holds_a_node_not_a_whole_extent_map();
     a_map_rebuild_walks_every_tree_within_a_fixed_budget();
+    a_single_record_edit_allocates_the_same_at_any_depth();
 }
 
 /// `node_info` reports a file's allocated bytes by walking its whole extent
@@ -296,6 +298,53 @@ fn a_map_rebuild_walks_every_tree_within_a_fixed_budget() {
             allocs <= ALLOC_BUDGET,
             "rebuilding the map over {files} files of {runs} runs allocated \
              {allocs} times, past the {ALLOC_BUDGET} budget"
+        );
+    }
+}
+
+/// One extent added and one dropped, on volumes whose extent trees hold forty
+/// times the records apart: the edit works in place in the node buffers of the
+/// scratch the mount lends it, so what it allocates is the transaction's own
+/// bookkeeping and the descent's depth — nothing per record.
+///
+/// The path that decoded each node's entries into a vector first allocated
+/// twice per record, per node, per level: measured on the larger volume here,
+/// **596** allocations for one removed extent against **118** now, and rising
+/// with the block size as wider nodes hold more records.
+fn a_single_record_edit_allocates_the_same_at_any_depth() {
+    // Fixed by the geometry rather than by the volume. The allocation budget
+    // sits between what the per-record decode cost and what an in-place edit
+    // costs, so a reintroduced decode fails it. The byte figure is dominated by
+    // the sparse device double's own per-block storage for the blocks the
+    // copy-on-write rewrote, which is inside the measured window; it is here to
+    // catch an operation that suddenly holds far more, not to bound the driver
+    // to the byte.
+    const ALLOC_BUDGET: usize = 160;
+    const PEAK_BUDGET: usize = 24 * 1024;
+    let stride = 2 * u64::from(BLOCK_SIZE);
+
+    for runs in [20u64, 800] {
+        let mut fs = fragmented_volume(1, runs);
+        let root = fs.root();
+
+        // An insert that descends the whole tree and may split on the way up.
+        let (wrote, peak, allocs) = measure(|| fs.write_at(root, b"f0", runs * stride, &[0x5A]));
+        assert_eq!(wrote, Ok(1));
+        assert!(
+            allocs <= ALLOC_BUDGET && peak <= PEAK_BUDGET,
+            "inserting one extent into a {runs}-extent tree allocated {allocs} \
+             times and held {peak} bytes, past the {ALLOC_BUDGET} / \
+             {PEAK_BUDGET} budgets"
+        );
+
+        // A remove of exactly one record, which is where borrow-or-merge lives.
+        let (cut, peak, allocs) = measure(|| fs.truncate(root, b"f0", (runs - 1) * stride));
+        assert_eq!(cut, Ok(()));
+        assert!(
+            allocs <= ALLOC_BUDGET && peak <= PEAK_BUDGET,
+            "removing one extent from a {runs}-extent tree allocated {allocs} \
+             times and held {peak} bytes, past the {ALLOC_BUDGET} / \
+             {PEAK_BUDGET} budgets"
         );
     }
 }

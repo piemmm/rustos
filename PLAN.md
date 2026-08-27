@@ -2679,11 +2679,20 @@ ledger of every outstanding ARXFS item, with its owner and dependencies, is
   resume with the sequence an uninterrupted walk would give; callers needing
   every *node* (the free-space rebuild, freeing a tree) take them from the
   walk's path as it moves. The collecting forms are deleted and no read path
-  recurses per tree level. Two defects that surfaced from it are the ledger's
-  next items: the *mutation* path still recurses 8 KiB of stack per level
-  (`plans/OPEN-DEFECTS.md` D65, item A1), and `scrub`/`check` still hold
-  whole-volume reconcile and reachability state in RAM
-  (`plans/ARXFS-MAINTENANCE.md` §13 D-M5, item A2).
+  recurses per tree level.
+- **Tree mutation is bounded in the stack too (item A1, done).**
+  `btree_insert` and `btree_remove` descend once recording the path, edit the
+  leaf in place, and walk back up rewriting each ancestor from the node buffers
+  of one scratch the mount lends them, so nothing recurses and nothing is
+  decoded per record. Measured on the release build, one write to a fragmented
+  file fell from 48 KiB of stack over a three-level extent tree (and 34 KiB over
+  a single leaf — both past the 32 KiB thread stack) to 11.6 KiB independent of
+  depth, and one removed extent from 596 allocations to 118, at unchanged device
+  I/O. The write path now refuses an impossible tree as the read descent does,
+  and a merge of two empty siblings that used to panic fails closed
+  (`plans/OPEN-DEFECTS.md` D65 closed). What is left of the ledger's A-series is
+  item A2: `scrub`/`check` still hold whole-volume reconcile and reachability
+  state in RAM (`plans/ARXFS-MAINTENANCE.md` §13 D-M5).
 - **The §5 fixed-constant targets are not met.** The spec's 16 KiB metadata
   block, 128 KiB / 256 KiB data-record targets, and inline/packed small-file
   storage are unimplemented: a metadata block and a data record are each one
@@ -2694,8 +2703,10 @@ ledger of every outstanding ARXFS item, with its owner and dependencies, is
   states the real values and records the targets as stage 19; reaching them
   needs a filesystem block size decoupled from the device's, which is an on-disk
   change and must follow the write-path coalescing (stage 17) or a wider record
-  simply multiplies the per-record command count. Owned as item B1 of
-  `plans/IMPLEMENT-OUTSTANDING-ARXFS.md` §5.
+  simply multiplies the per-record command count. It must also move the driver's
+  on-stack block staging off the stack: one `write_at` already spends ~11.6 KiB
+  of the 32 KiB thread stack on block-sized buffers sized by `MAX_BLOCK_SIZE`.
+  Owned as item B1 of `plans/IMPLEMENT-OUTSTANDING-ARXFS.md` §5.
 
 ---
 

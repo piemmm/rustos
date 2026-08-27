@@ -32,6 +32,10 @@ struct MemBlock {
     discard: Option<DiscardCapability>,
     discarded: alloc::vec::Vec<(u64, u64)>,
     health: DeviceHealth,
+    /// Lowest stack address seen by a device call, or `usize::MAX` before any.
+    /// Every filesystem operation reaches the device at the bottom of its call
+    /// chain, so this is how deep the operation's stack actually went.
+    stack_floor: usize,
 }
 
 impl MemBlock {
@@ -47,6 +51,7 @@ impl MemBlock {
             discard: None,
             discarded: alloc::vec::Vec::new(),
             health: DeviceHealth::Unavailable,
+            stack_floor: usize::MAX,
         }
     }
 
@@ -61,6 +66,7 @@ impl MemBlock {
             discard: None,
             discarded: alloc::vec::Vec::new(),
             health: DeviceHealth::Unavailable,
+            stack_floor: usize::MAX,
         }
     }
 
@@ -97,6 +103,31 @@ impl MemBlock {
     /// admin growing the partition / logical volume / virtual disk): extend
     /// the store with fresh zeroed blocks and report the larger count. Used to
     /// exercise online [`ARXFS::grow`].
+    /// Note how deep the stack is at this device call. `#[inline(never)]`
+    /// keeps this frame's own size out of the comparison between calls.
+    #[inline(never)]
+    fn note_stack(&mut self) {
+        let here = 0u8;
+        let sp = core::ptr::addr_of!(here) as usize;
+        self.stack_floor = self.stack_floor.min(sp);
+    }
+
+    /// Start a fresh stack measurement.
+    fn arm_stack(&mut self) {
+        self.stack_floor = usize::MAX;
+    }
+
+    /// Bytes of stack the measured operation used below `base`, the address of
+    /// a local in the frame that started it.
+    fn stack_used(&self, base: usize) -> usize {
+        assert_ne!(
+            self.stack_floor,
+            usize::MAX,
+            "the measured operation never reached the device"
+        );
+        base.abs_diff(self.stack_floor)
+    }
+
     fn enlarge_to(&mut self, new_block_count: u64) {
         assert!(new_block_count >= self.block_count, "enlarge cannot shrink");
         self.store
@@ -114,6 +145,7 @@ impl Block for MemBlock {
     }
 
     fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
+        self.note_stack();
         let bs = self.block_size as usize;
         if buf.is_empty() || !buf.len().is_multiple_of(bs) {
             return Err(DriverError::BufferTooSmall);
@@ -132,6 +164,7 @@ impl Block for MemBlock {
     }
 
     fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
+        self.note_stack();
         let bs = self.block_size as usize;
         if buf.is_empty() || !buf.len().is_multiple_of(bs) {
             return Err(DriverError::BufferTooSmall);
@@ -7188,12 +7221,7 @@ fn tree_level(fs: &mut ARXFS<MemBlock>, root: u64) -> u32 {
     let mut buf = [0u8; MAX_BLOCK_SIZE];
     fs.read_meta(root, BlockType::Btree, &mut buf)
         .expect("read root node");
-    u32::from_le_bytes([
-        buf[HEADER_LEN + 4],
-        buf[HEADER_LEN + 5],
-        buf[HEADER_LEN + 6],
-        buf[HEADER_LEN + 7],
-    ])
+    rd_u32(&buf, btree::N_LEVEL)
 }
 
 #[test]
@@ -7360,8 +7388,7 @@ fn a_tree_whose_shape_is_impossible_is_refused_rather_than_walked_forever() {
     let mut buf = [0u8; MAX_BLOCK_SIZE];
     fs.read_meta(root, BlockType::Btree, &mut buf)
         .expect("root");
-    let child_at = HEADER_LEN + 8 + 8;
-    buf[child_at..child_at + 8].copy_from_slice(&root.to_le_bytes());
+    wr_u64(&mut buf, btree::N_ENTRIES + 8, root);
     fs.begin();
     let cycled = fs
         .cow_meta(0, &mut buf, BlockType::Btree, spec.owner, 0)
@@ -7382,7 +7409,7 @@ fn a_tree_whose_shape_is_impossible_is_refused_rather_than_walked_forever() {
     let mut deep = [0u8; MAX_BLOCK_SIZE];
     fs.read_meta(root, BlockType::Btree, &mut deep)
         .expect("root");
-    deep[HEADER_LEN + 4..HEADER_LEN + 8].copy_from_slice(&200u32.to_le_bytes());
+    wr_u32(&mut deep, btree::N_LEVEL, 200);
     let too_deep = fs
         .cow_meta(0, &mut deep, BlockType::Btree, spec.owner, 0)
         .expect("seal the over-deep node");
@@ -7405,7 +7432,7 @@ fn a_tree_whose_shape_is_impossible_is_refused_rather_than_walked_forever() {
         .expect("a leaf");
     fs.read_meta(leaf, BlockType::Btree, &mut wide)
         .expect("leaf");
-    wide[HEADER_LEN..HEADER_LEN + 4].copy_from_slice(&4096u32.to_le_bytes());
+    wr_u32(&mut wide, btree::N_COUNT, 4096);
     let overfull = fs
         .cow_meta(0, &mut wide, BlockType::Btree, spec.owner, 0)
         .expect("seal the overfull node");
@@ -7431,8 +7458,8 @@ fn a_tree_whose_shape_is_impossible_is_refused_rather_than_walked_forever() {
     fs.read_meta(inode_root, BlockType::Btree, &mut leaf)
         .expect("the small tree is one leaf");
     assert_eq!(tree_level(&mut fs, inode_root), 0);
-    let stride = 8 + 256;
-    let first = HEADER_LEN + 8;
+    let stride = 8 + INODE_SIZE;
+    let first = btree::N_ENTRIES;
     let last = first + 4 * stride;
     let high = rd_u64(&leaf, last);
     wr_u64(&mut leaf, first, high + 1);
@@ -7448,6 +7475,184 @@ fn a_tree_whose_shape_is_impossible_is_refused_rather_than_walked_forever() {
         Err(DriverError::DeviceFault)
     );
     fs.rollback();
+}
+
+#[test]
+fn the_write_path_refuses_an_impossible_tree_as_the_read_path_does() {
+    // A mutation descends the same shapes a walk does, and validates each
+    // level on the way back up as well, so a child pointer that leads to an
+    // ancestor or a node claiming an impossible level is refused rather than
+    // descended until the guard page stops it.
+    let spec = inode_spec();
+    let (mut fs, _) = deep_inode_tree(60);
+    let root = fs.inode_tree_root;
+    let mut record = [0u8; INODE_SIZE];
+    record[0] = 1;
+
+    let mut buf = [0u8; MAX_BLOCK_SIZE];
+    fs.read_meta(root, BlockType::Btree, &mut buf)
+        .expect("root");
+    wr_u64(&mut buf, btree::N_ENTRIES + 8, root);
+    fs.begin();
+    let cycled = fs
+        .cow_meta(0, &mut buf, BlockType::Btree, spec.owner, 0)
+        .expect("seal the cyclic node");
+    assert_eq!(
+        fs.btree_insert(cycled, 2, &record, spec),
+        Err(DriverError::DeviceFault)
+    );
+    assert_eq!(
+        fs.btree_remove(cycled, 2, spec),
+        Err(DriverError::DeviceFault)
+    );
+
+    let mut deep = [0u8; MAX_BLOCK_SIZE];
+    fs.read_meta(root, BlockType::Btree, &mut deep)
+        .expect("root");
+    wr_u32(&mut deep, btree::N_LEVEL, 200);
+    let too_deep = fs
+        .cow_meta(0, &mut deep, BlockType::Btree, spec.owner, 0)
+        .expect("seal the over-deep node");
+    assert_eq!(
+        fs.btree_insert(too_deep, 2, &record, spec),
+        Err(DriverError::DeviceFault)
+    );
+    assert_eq!(
+        fs.btree_remove(too_deep, 2, spec),
+        Err(DriverError::DeviceFault)
+    );
+
+    // A record that is not the tree's own width cannot be stored, so it is
+    // refused rather than truncated or written past the entry.
+    assert_eq!(
+        fs.btree_insert(root, 2, &record[..8], spec),
+        Err(DriverError::LengthOutOfRange)
+    );
+    fs.rollback();
+}
+
+#[test]
+fn a_merge_of_two_empty_siblings_is_refused_rather_than_indexed_into() {
+    // An internal node whose children are both empty is a shape no tree this
+    // driver writes: a leaf emptied by a remove is merged away or refilled
+    // before the operation ends. Reaching one means the volume is corrupt, so
+    // the merge that would have to name a key the pair no longer holds fails
+    // closed instead.
+    let mut fs = fmt(512, 4096, 64);
+    let spec = inode_spec();
+    fs.begin();
+
+    let mut leaf = [0u8; MAX_BLOCK_SIZE];
+    fs.btree_init_node(&mut leaf, 0, 1);
+    wr_u64(&mut leaf, btree::N_ENTRIES, 7);
+    let low = fs
+        .cow_meta(0, &mut leaf, BlockType::Btree, spec.owner, 0)
+        .expect("seal the one-entry leaf");
+
+    let mut empty = [0u8; MAX_BLOCK_SIZE];
+    fs.btree_init_node(&mut empty, 0, 0);
+    let high = fs
+        .cow_meta(0, &mut empty, BlockType::Btree, spec.owner, 0)
+        .expect("seal the empty leaf");
+
+    let mut root = [0u8; MAX_BLOCK_SIZE];
+    fs.btree_init_node(&mut root, 1, 2);
+    let second = btree::N_ENTRIES + btree::INTERNAL_STRIDE;
+    wr_u64(&mut root, btree::N_ENTRIES, 7);
+    wr_u64(&mut root, btree::N_ENTRIES + 8, low);
+    wr_u64(&mut root, second, 8);
+    wr_u64(&mut root, second + 8, high);
+    let root = fs
+        .cow_meta(0, &mut root, BlockType::Btree, spec.owner, 0)
+        .expect("seal the root naming both leaves");
+
+    assert_eq!(
+        fs.btree_remove(root, 7, spec),
+        Err(DriverError::DeviceFault)
+    );
+    fs.rollback();
+}
+
+/// Stack bytes one call of `op` used, measured from the caller's own frame down
+/// to the deepest device call it reached.
+fn stack_cost<T>(
+    fs: &mut ARXFS<MemBlock>,
+    op: impl FnOnce(&mut ARXFS<MemBlock>) -> T,
+) -> (T, usize) {
+    let anchor = 0u8;
+    let base = core::ptr::addr_of!(anchor) as usize;
+    fs.block_mut().arm_stack();
+    let out = op(fs);
+    let used = fs.block_mut().stack_used(base);
+    (out, used)
+}
+
+#[test]
+fn a_mutation_costs_the_same_stack_whatever_the_tree_depth() {
+    // Half the 32 KiB thread stack the kernel hosts this driver on. What the
+    // whole chain spends is the driver's on-stack block staging, a chain of
+    // block-sized buffers down the write path, not the tree edit: the
+    // mutation's own frames are a few hundred bytes each.
+    const STACK_BUDGET: usize = 16 * 1024;
+
+    // The kernel hosts this driver on a 32 KiB thread stack behind a guard
+    // page, so a mutation whose stack grows per tree level faults on an
+    // ordinary write to a fragmented file. Both trees below take the same
+    // insert and the same remove; what must not differ is how deep the stack
+    // went, because nothing on the path recurses and every node buffer the
+    // edit needs lives in the scratch the mount lends it.
+    let mut shallow = fmt(512, 1 << 16, 64);
+    let mut deep = fmt(512, 1 << 16, 64);
+    let root = shallow.root();
+    shallow
+        .create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    deep.create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    let cap = shallow.data_capacity();
+    let shallow_level = fragment(&mut shallow, b"f", 4);
+    let deep_level = fragment(&mut deep, b"f", 900);
+    assert_eq!(shallow_level, 0, "four extents are one leaf");
+    assert!(
+        deep_level >= 2,
+        "the deep fixture must be at least a three-level tree (level {deep_level})"
+    );
+
+    // One more extent past the end of each file: an insert that descends the
+    // whole tree and, in the deep case, may split on the way back up.
+    let at = |runs: u64| runs * 2 * cap;
+    let (wrote, shallow_insert) =
+        stack_cost(&mut shallow, |fs| fs.write_at(root, b"f", at(4), &[0x5A]));
+    assert_eq!(wrote, Ok(1));
+    let (wrote, deep_insert) =
+        stack_cost(&mut deep, |fs| fs.write_at(root, b"f", at(900), &[0x5A]));
+    assert_eq!(wrote, Ok(1));
+
+    // Then a remove of the whole map, which is where the rebalance lives.
+    let (out, shallow_remove) = stack_cost(&mut shallow, |fs| fs.truncate(root, b"f", 0));
+    assert_eq!(out, Ok(()));
+    let (out, deep_remove) = stack_cost(&mut deep, |fs| fs.truncate(root, b"f", 0));
+    assert_eq!(out, Ok(()));
+
+    // A step that recursed would carry at least the node it is editing into
+    // every extra level, so per-level growth cannot hide below one block.
+    let node = deep.block_size;
+    assert!(
+        deep_insert.abs_diff(shallow_insert) < node,
+        "an insert into a {deep_level}-level tree used {deep_insert} stack bytes \
+         against {shallow_insert} for a single leaf"
+    );
+    assert!(
+        deep_remove.abs_diff(shallow_remove) < node,
+        "a remove over a {deep_level}-level tree used {deep_remove} stack bytes \
+         against {shallow_remove} for a single leaf"
+    );
+
+    assert!(
+        deep_insert <= STACK_BUDGET && deep_remove <= STACK_BUDGET,
+        "insert used {deep_insert} bytes and remove {deep_remove}, past the \
+         {STACK_BUDGET}-byte budget"
+    );
 }
 
 /// Fragment `runs` single-block writes into `name`, one extent each, and

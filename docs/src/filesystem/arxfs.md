@@ -753,7 +753,16 @@ reported complete.
 Mutations copy-on-write the touched node to a fresh (or transaction-private)
 block and bubble the change up to a new root; nodes split on overflow and
 borrow-or-merge on underflow, all `Result`-based and panic-free with no
-`unsafe`. Block allocation draws file **data** upward from the low end of the
+`unsafe`. They are **iterative and bounded in the stack too**: an insert or a
+remove descends once recording the path, edits the leaf in place, and walks back
+up rewriting each ancestor, taking its node buffers from one scratch (`TreeEdit`)
+the mount lends it — the node being rewritten plus the adjacent pair a split,
+borrow, or merge moves entries between. So a mutation's frame is a few hundred
+bytes whatever the tree's depth, it allocates nothing in the steady state and
+nothing per record, and it costs the same device reads as the recursive form it
+replaced. Each level it re-enters on the way up is validated as the descent
+validates it, so an impossible tree is refused on the write path as on the read
+path rather than descended until the guard page stops it. Block allocation draws file **data** upward from the low end of the
 pool and **metadata** downward from the high end, with a small metadata
 reserve so a delete can always copy-on-write itself and commit even on an
 otherwise-full volume.

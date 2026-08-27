@@ -23,32 +23,42 @@
 //! borrow from or merge with a sibling, so the tree grows and shrinks without
 //! a fixed record cap. Every path is `Result`-based and panic-free; there is no `unsafe`.
 //!
-//! # Iteration
+//! # Iteration and mutation are both bounded
+//!
+//! No path here recurses, and none holds more than a fixed handful of node
+//! buffers, so the stack and the resident bytes an operation needs are set by
+//! the block size rather than by the tree's depth or its record count.
 //!
 //! [`TreeWalk`] is the only way to read more than one entry: it yields at most
-//! one leaf node's entries per step into its own block-sized buffer, so the
-//! bytes a caller holds are bounded by the node size rather than by the tree,
-//! whatever the volume's size. Its position is a single key, so a walk both
-//! survives mutation of the tree between steps and can be persisted and
-//! resumed in a later call. [`NodeTrail`] turns that key-order walk into the
-//! node enumeration the free-space rebuild and whole-tree freeing need,
-//! holding one path instead of a node list.
+//! one leaf node's entries per step into its own block-sized buffer. Its
+//! position is a single key, so a walk both survives mutation of the tree
+//! between steps and can be persisted and resumed in a later call.
+//! [`NodeTrail`] turns that key-order walk into the node enumeration the
+//! free-space rebuild and whole-tree freeing need, holding one path instead of
+//! a node list.
+//!
+//! [`ARXFS::btree_insert`] and [`ARXFS::btree_remove`] descend once recording
+//! the path, edit the leaf, then walk back up rewriting each ancestor in turn
+//! through the [`TreeEdit`] scratch the mount lends them. Only one node is
+//! being edited at a time — plus the adjacent pair a split, borrow, or merge
+//! moves entries between — and every edit happens in place in a node buffer,
+//! so nothing is decoded per record.
 
 use alloc::vec::Vec;
 
 use tairix_abi::DriverError;
 
 use crate::header::{BlockType, HEADER_LEN};
-use crate::{rd_u64, wr_u64, Block, ARXFS, MAX_BLOCK_SIZE};
+use crate::{as_u32, rd_u32, rd_u64, wr_u32, Block, ARXFS, MAX_BLOCK_SIZE};
 
 /// Node payload byte offsets, relative to the start of the block buffer
 /// (the node payload begins right after the [`HEADER_LEN`] block header).
-const N_COUNT: usize = HEADER_LEN;
-const N_LEVEL: usize = HEADER_LEN + 4;
-const N_ENTRIES: usize = HEADER_LEN + 8;
+pub(crate) const N_COUNT: usize = HEADER_LEN;
+pub(crate) const N_LEVEL: usize = HEADER_LEN + 4;
+pub(crate) const N_ENTRIES: usize = HEADER_LEN + 8;
 
 /// Internal-entry stride: separator key (`u64`) plus child pointer (`u64`).
-const INTERNAL_STRIDE: usize = 16;
+pub(crate) const INTERNAL_STRIDE: usize = 16;
 
 /// Deepest node level a descent will accept.
 ///
@@ -61,6 +71,13 @@ pub(crate) const MAX_TREE_LEVEL: u32 = 32;
 
 /// Path slots a descent records: one per level, root first.
 const PATH_SLOTS: usize = MAX_TREE_LEVEL as usize + 1;
+
+/// Widest entry stride any of the driver's trees uses.
+///
+/// A [`TreeEdit`] node buffer carries one entry of this width past the block,
+/// so an insert can lay a full node out and then split it — no second layout
+/// path for the overflowing case, and no third buffer.
+const MAX_ENTRY_STRIDE: usize = 8 + crate::MAX_TREE_VALUE_LEN;
 
 /// Static description of one B-tree's record shape, so the single node code
 /// serves trees with different value widths and block owners.
@@ -79,16 +96,15 @@ impl TreeSpec {
     }
 }
 
-/// A node's entries as `(key, value_bytes)` pairs (a leaf record or, for an
-/// internal node, a child pointer).
-pub(crate) type NodeEntries = Vec<(u64, Vec<u8>)>;
-
-fn rd_u32(buf: &[u8], off: usize) -> u32 {
-    u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
-}
-
-fn wr_u32(buf: &mut [u8], off: usize, value: u32) {
-    buf[off..off + 4].copy_from_slice(&value.to_le_bytes());
+/// A node-sized scratch buffer, fallibly allocated: a filesystem read or
+/// mutation degrades to an error rather than aborting the system on a refused
+/// allocation.
+fn node_buf(len: usize) -> Result<Vec<u8>, DriverError> {
+    let mut buf = Vec::new();
+    buf.try_reserve_exact(len)
+        .map_err(|_| DriverError::NoSpace)?;
+    buf.resize(len, 0);
+    Ok(buf)
 }
 
 fn node_count(buf: &[u8]) -> usize {
@@ -105,11 +121,197 @@ fn node_min_key(buf: &[u8]) -> u64 {
     rd_u64(buf, N_ENTRIES)
 }
 
-/// Outcome of inserting into a subtree: the visited node's (possibly new)
-/// physical address, and, when the node split, the separator key promoted to
-/// the parent and the new right sibling's physical address.
-struct InsertOutcome {
-    node_phys: u64,
+/// The smallest key of a node that must not be empty.
+///
+/// # Errors
+///
+/// [`DriverError::DeviceFault`] when the node holds nothing. Only a node this
+/// operation just emptied may be empty, and it is refilled or merged away
+/// before its parent names it, so an empty node reaching here is a tree shape
+/// the driver never wrote.
+fn node_required_min(buf: &[u8]) -> Result<u64, DriverError> {
+    if node_count(buf) == 0 {
+        return Err(DriverError::DeviceFault);
+    }
+    Ok(node_min_key(buf))
+}
+
+/// Key of entry `at`. The caller's index comes from a count validated against
+/// the block's capacity, so the field is inside the buffer.
+fn entry_key(buf: &[u8], at: usize, stride: usize) -> u64 {
+    rd_u64(buf, N_ENTRIES + at * stride)
+}
+
+/// Separator key of internal entry `at`.
+fn internal_key(buf: &[u8], at: usize) -> u64 {
+    entry_key(buf, at, INTERNAL_STRIDE)
+}
+
+/// Child pointer of internal entry `at`.
+fn internal_child(buf: &[u8], at: usize) -> u64 {
+    rd_u64(buf, N_ENTRIES + at * INTERNAL_STRIDE + 8)
+}
+
+/// The `slots` entry slots of `buf` as one checked region.
+///
+/// Every edit that moves entries takes its bytes this way, so an index the
+/// buffer cannot hold is a fail-closed device fault rather than a panic.
+fn entry_region(buf: &mut [u8], slots: usize, stride: usize) -> Result<&mut [u8], DriverError> {
+    let end = slots
+        .checked_mul(stride)
+        .and_then(|len| N_ENTRIES.checked_add(len))
+        .ok_or(DriverError::DeviceFault)?;
+    buf.get_mut(N_ENTRIES..end).ok_or(DriverError::DeviceFault)
+}
+
+/// Overwrite entry `at` with `(key, value)`, leaving the entry count alone.
+fn node_set_entry(
+    buf: &mut [u8],
+    at: usize,
+    stride: usize,
+    key: u64,
+    value: &[u8],
+) -> Result<(), DriverError> {
+    if at >= node_count(buf) || value.len() + 8 != stride {
+        return Err(DriverError::DeviceFault);
+    }
+    let region = entry_region(buf, at + 1, stride)?;
+    let slot = region
+        .get_mut(at * stride..)
+        .ok_or(DriverError::DeviceFault)?;
+    slot[..8].copy_from_slice(&key.to_le_bytes());
+    slot[8..].copy_from_slice(value);
+    Ok(())
+}
+
+/// Point internal entry `at` at `child`, under separator `key`.
+fn node_set_child(buf: &mut [u8], at: usize, key: u64, child: u64) -> Result<(), DriverError> {
+    node_set_entry(buf, at, INTERNAL_STRIDE, key, &child.to_le_bytes())
+}
+
+/// Shift entries `[at, count)` up one slot and write `(key, value)` into the
+/// gap, so the node holds one entry more.
+///
+/// A node already at capacity spills into the slack a [`TreeEdit`] buffer
+/// carries past the block; the caller splits it before it is written.
+fn node_insert_entry(
+    buf: &mut [u8],
+    stride: usize,
+    at: usize,
+    key: u64,
+    value: &[u8],
+) -> Result<(), DriverError> {
+    let count = node_count(buf);
+    if at > count || value.len() + 8 != stride {
+        return Err(DriverError::DeviceFault);
+    }
+    let region = entry_region(buf, count + 1, stride)?;
+    region.copy_within(at * stride..count * stride, (at + 1) * stride);
+    let slot = region
+        .get_mut(at * stride..(at + 1) * stride)
+        .ok_or(DriverError::DeviceFault)?;
+    slot[..8].copy_from_slice(&key.to_le_bytes());
+    slot[8..].copy_from_slice(value);
+    wr_u32(buf, N_COUNT, as_u32(count + 1));
+    Ok(())
+}
+
+/// Drop entry `at`, closing the gap behind it.
+fn node_remove_entry(buf: &mut [u8], stride: usize, at: usize) -> Result<(), DriverError> {
+    let count = node_count(buf);
+    if at >= count {
+        return Err(DriverError::DeviceFault);
+    }
+    let region = entry_region(buf, count, stride)?;
+    region.copy_within((at + 1) * stride.., at * stride);
+    wr_u32(buf, N_COUNT, as_u32(count - 1));
+    Ok(())
+}
+
+/// Move entry `from` of `src` to index `to` of `dst`: one entry crossing
+/// between adjacent siblings, which is what a borrow is.
+fn node_move_entry(
+    src: &mut [u8],
+    from: usize,
+    dst: &mut [u8],
+    to: usize,
+    stride: usize,
+) -> Result<(), DriverError> {
+    if from >= node_count(src) {
+        return Err(DriverError::DeviceFault);
+    }
+    let base = N_ENTRIES + from * stride;
+    let slot = src
+        .get(base..base + stride)
+        .ok_or(DriverError::DeviceFault)?;
+    let key = rd_u64(slot, 0);
+    let value = slot.get(8..).ok_or(DriverError::DeviceFault)?;
+    node_insert_entry(dst, stride, to, key, value)?;
+    node_remove_entry(src, stride, from)
+}
+
+/// Append every entry of `src` to `dst`: the merge of an adjacent pair.
+fn node_append(dst: &mut [u8], src: &[u8], stride: usize) -> Result<(), DriverError> {
+    let held = node_count(dst);
+    let moving = node_count(src);
+    let total = held.checked_add(moving).ok_or(DriverError::DeviceFault)?;
+    let base = N_ENTRIES + held * stride;
+    let end = base
+        .checked_add(moving * stride)
+        .ok_or(DriverError::DeviceFault)?;
+    let from = src
+        .get(N_ENTRIES..N_ENTRIES + moving * stride)
+        .ok_or(DriverError::DeviceFault)?;
+    dst.get_mut(base..end)
+        .ok_or(DriverError::DeviceFault)?
+        .copy_from_slice(from);
+    wr_u32(dst, N_COUNT, as_u32(total));
+    Ok(())
+}
+
+/// Where `key` sits in leaf `buf`: the index of an exact match, or the index
+/// it would be inserted at, and which of the two it is.
+///
+/// # Errors
+///
+/// [`DriverError::DeviceFault`] when the leaf's keys do not ascend. Such a
+/// leaf would hide an existing key from this search — inserting a duplicate —
+/// and would leave the parent naming a separator the subtree does not start
+/// at, so it is refused rather than edited.
+fn leaf_search(
+    buf: &[u8],
+    count: usize,
+    stride: usize,
+    key: u64,
+) -> Result<(usize, bool), DriverError> {
+    let mut at = count;
+    let mut found = false;
+    for i in 0..count {
+        let k = entry_key(buf, i, stride);
+        if i > 0 && k <= entry_key(buf, i - 1, stride) {
+            return Err(DriverError::DeviceFault);
+        }
+        if at == count {
+            if k == key {
+                at = i;
+                found = true;
+            } else if k > key {
+                at = i;
+            }
+        }
+    }
+    Ok((at, found))
+}
+
+/// What one level of a mutation hands to the level above it.
+struct Ascent {
+    /// The node's address after its copy-on-write.
+    phys: u64,
+    /// Its smallest key, or `None` for a node a remove emptied.
+    min: Option<u64>,
+    /// Entries it holds, which is what tells the parent whether it underflowed.
+    count: usize,
+    /// The promoted separator and new right sibling of a node that split.
     split: Option<(u64, u64)>,
 }
 
@@ -132,12 +334,24 @@ impl Descent {
             next_subtree: None,
         }
     }
+
+    /// The node recorded at `slot`, root first. A slot the descent did not
+    /// reach holds no node, so asking for one is refused rather than answered
+    /// with a stale or zeroed address.
+    fn path_at(&self, slot: usize) -> Result<u64, DriverError> {
+        self.path
+            .get(..self.depth)
+            .and_then(|reached| reached.get(slot))
+            .copied()
+            .ok_or(DriverError::DeviceFault)
+    }
 }
 
 /// Index of the last of `count` entries whose key is `<= key`, or `0` when
 /// `key` precedes them all: the child an internal node's search descends into.
-/// `key_at` reads the key of one entry, so the buffer-backed search and the
-/// decoded-entry search of the mutation path share this one definition.
+/// `key_at` reads the key of one entry, so a descent and the mutation path's
+/// walk back up share this one definition and cannot disagree about which
+/// child a key belongs to.
 fn child_index(
     count: usize,
     key: u64,
@@ -159,6 +373,43 @@ fn child_index(
     Ok(chosen)
 }
 
+/// Scratch one mutation borrows for its duration: the node it is editing, the
+/// adjacent pair a split, borrow, or merge moves entries between, and the path
+/// it descended.
+///
+/// The mount holds one and lends it out, so a steady-state insert or remove
+/// allocates nothing; and because every node buffer lives here, the entry
+/// point's stack frame is a few hundred bytes whatever the tree's depth.
+pub(crate) struct TreeEdit {
+    /// The node being edited: the leaf, then each ancestor in turn.
+    node: Vec<u8>,
+    /// The lower of an adjacent sibling pair.
+    lo: Vec<u8>,
+    /// The higher of that pair, and the node a split fills.
+    hi: Vec<u8>,
+    descent: Descent,
+}
+
+impl TreeEdit {
+    /// A scratch for a tree of `block_size`-byte nodes.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::NoSpace`] when a node buffer cannot be allocated; a
+    /// mutation holding one allocates nothing thereafter.
+    pub(crate) fn new(block_size: usize) -> Result<Self, DriverError> {
+        let len = block_size
+            .checked_add(MAX_ENTRY_STRIDE)
+            .ok_or(DriverError::NoSpace)?;
+        Ok(Self {
+            node: node_buf(len)?,
+            lo: node_buf(len)?,
+            hi: node_buf(len)?,
+            descent: Descent::new(),
+        })
+    }
+}
+
 impl<B: Block> ARXFS<B> {
     /// Maximum leaf entries that fit one node block.
     fn btree_leaf_cap(&self, spec: TreeSpec) -> usize {
@@ -170,34 +421,50 @@ impl<B: Block> ARXFS<B> {
         (self.block_size - N_ENTRIES) / INTERNAL_STRIDE
     }
 
-    /// Minimum entries a non-root node keeps before it borrows or merges.
-    fn btree_min(&self, level: u32, spec: TreeSpec) -> usize {
-        let cap = if level == 0 {
+    /// Entries one node block holds at `level`.
+    fn btree_node_cap(&self, level: u32, spec: TreeSpec) -> usize {
+        if level == 0 {
             self.btree_leaf_cap(spec)
         } else {
             self.btree_internal_cap()
-        };
-        (cap / 2).max(1)
+        }
+    }
+
+    /// Minimum entries a non-root node keeps before it borrows or merges.
+    fn btree_min(&self, level: u32, spec: TreeSpec) -> usize {
+        (self.btree_node_cap(level, spec) / 2).max(1)
+    }
+
+    /// Entry stride of the node in `buf`: a leaf stores the tree's value, an
+    /// internal node a child pointer. Taken from the node rather than passed
+    /// in, so no caller can address one with the other's stride.
+    fn btree_stride(buf: &[u8], spec: TreeSpec) -> usize {
+        if node_level(buf) == 0 {
+            spec.leaf_stride()
+        } else {
+            INTERNAL_STRIDE
+        }
     }
 
     /// Zero a fresh node buffer and stamp its `level`/`count`.
-    fn btree_init_node(&self, buf: &mut [u8], level: u32, count: usize) {
+    pub(crate) fn btree_init_node(&self, buf: &mut [u8], level: u32, count: usize) {
         for byte in &mut buf[HEADER_LEN..self.block_size] {
             *byte = 0;
         }
         wr_u32(buf, N_LEVEL, level);
-        wr_u32(buf, N_COUNT, crate::as_u32(count));
+        wr_u32(buf, N_COUNT, as_u32(count));
     }
 
     /// Read the node at `phys` into `buf` and validate the two shapes every
-    /// other reader then trusts: that it sits at the level the descent
+    /// other reader then trusts: that it sits at the level the caller
     /// expects, and that its entry count fits the block.
     ///
-    /// Levels strictly decrease on the way down, so a child pointer leading
-    /// back to an ancestor is refused here instead of descending forever, and
-    /// an entry count wider than the block would otherwise index past the
-    /// buffer. Both are impossible in a tree this driver wrote, which is why
-    /// meeting one is a fail-closed device fault rather than a repair.
+    /// Levels strictly decrease on the way down and increase by one on the way
+    /// back up, so a child pointer leading back to an ancestor is refused here
+    /// instead of descending forever, and an entry count wider than the block
+    /// would otherwise index past the buffer. Both are impossible in a tree
+    /// this driver wrote, which is why meeting one is a fail-closed device
+    /// fault rather than a repair.
     fn btree_read_node(
         &mut self,
         phys: u64,
@@ -211,12 +478,7 @@ impl<B: Block> ARXFS<B> {
             return Err(DriverError::DeviceFault);
         }
         let count = node_count(buf);
-        let cap = if level == 0 {
-            self.btree_leaf_cap(spec)
-        } else {
-            self.btree_internal_cap()
-        };
-        if count > cap {
+        if count > self.btree_node_cap(level, spec) {
             return Err(DriverError::DeviceFault);
         }
         Ok((level, count))
@@ -227,8 +489,9 @@ impl<B: Block> ARXFS<B> {
     ///
     /// `trace`, when given, records the path taken and the smallest key
     /// beginning a later subtree, which is what lets a walk step to the next
-    /// leaf and report the nodes it entered. The descent is the one place a
-    /// search chooses a child, so a lookup and a walk can never disagree
+    /// leaf, a mutation rewrite each ancestor on the way back up, and a caller
+    /// report the nodes it entered. The descent is the one place a search
+    /// chooses a child, so a lookup, a walk, and a mutation can never disagree
     /// about where a key lives.
     fn btree_descend(
         &mut self,
@@ -257,18 +520,17 @@ impl<B: Block> ARXFS<B> {
             if level == 0 {
                 return Ok(count);
             }
-            let chosen = child_index(count, key, |i| rd_u64(buf, N_ENTRIES + i * INTERNAL_STRIDE))?;
+            let chosen = child_index(count, key, |i| internal_key(buf, i))?;
             if let Some(trace) = trace.as_deref_mut() {
                 if chosen + 1 < count {
                     // A separator is the smallest key in its child, so the one
                     // after the chosen child starts the next subtree. Deeper
                     // levels overwrite shallower ones, leaving the tightest
                     // bound the path offers.
-                    trace.next_subtree =
-                        Some(rd_u64(buf, N_ENTRIES + (chosen + 1) * INTERNAL_STRIDE));
+                    trace.next_subtree = Some(internal_key(buf, chosen + 1));
                 }
             }
-            phys = rd_u64(buf, N_ENTRIES + chosen * INTERNAL_STRIDE + 8);
+            phys = internal_child(buf, chosen);
             expect_level = Some(level - 1);
         }
     }
@@ -323,7 +585,134 @@ impl<B: Block> ARXFS<B> {
         Ok(found)
     }
 
+    /// Borrow the mount's mutation scratch.
+    ///
+    /// Allocates one when the mount has not needed it yet — a read-only handle
+    /// never mutates, so it never pays for one — and when a mutation already
+    /// holds it, so the call is total rather than conditional on nothing else
+    /// being in flight.
+    fn btree_take_edit(&mut self) -> Result<TreeEdit, DriverError> {
+        match self.tree_edit.take() {
+            Some(edit) => Ok(edit),
+            None => TreeEdit::new(self.block_size),
+        }
+    }
+
+    /// Return the scratch, keeping one for the mount so the next mutation
+    /// allocates nothing.
+    fn btree_put_edit(&mut self, edit: TreeEdit) {
+        if self.tree_edit.is_none() {
+            self.tree_edit = Some(edit);
+        }
+    }
+
+    /// Zero the payload past the node's entries and copy-on-write it to
+    /// `phys`, returning its new address.
+    ///
+    /// The tail zeroing keeps a node that shrank from carrying its old entries
+    /// onto the device, so a node's bytes depend only on what it holds.
+    /// Refusing a count the block cannot fit is the last guard before a node
+    /// reaches the media.
+    fn btree_write_node(
+        &mut self,
+        phys: u64,
+        buf: &mut [u8],
+        spec: TreeSpec,
+    ) -> Result<u64, DriverError> {
+        let stride = Self::btree_stride(buf, spec);
+        let used = node_count(buf)
+            .checked_mul(stride)
+            .and_then(|len| N_ENTRIES.checked_add(len))
+            .ok_or(DriverError::DeviceFault)?;
+        if used > self.block_size {
+            return Err(DriverError::DeviceFault);
+        }
+        for byte in &mut buf[used..self.block_size] {
+            *byte = 0;
+        }
+        self.cow_meta(phys, buf, BlockType::Btree, spec.owner, 0)
+    }
+
+    /// Write `buf` back to `phys` and report what its parent must record.
+    ///
+    /// `buf` still holds the published node's payload afterwards — sealing
+    /// rewrites only the block header — which is what lets the caller read the
+    /// node it just wrote without a device round trip.
+    fn btree_publish(
+        &mut self,
+        buf: &mut [u8],
+        phys: u64,
+        spec: TreeSpec,
+    ) -> Result<Ascent, DriverError> {
+        let count = node_count(buf);
+        let min = (count > 0).then(|| node_min_key(buf));
+        let phys = self.btree_write_node(phys, buf, spec)?;
+        Ok(Ascent {
+            phys,
+            min,
+            count,
+            split: None,
+        })
+    }
+
+    /// Publish the node being edited, splitting it into `edit.hi` first when
+    /// the edit pushed it past its block's capacity.
+    fn btree_publish_split(
+        &mut self,
+        edit: &mut TreeEdit,
+        phys: u64,
+        spec: TreeSpec,
+    ) -> Result<Ascent, DriverError> {
+        let level = node_level(&edit.node);
+        let separator = if node_count(&edit.node) > self.btree_node_cap(level, spec) {
+            let mid = node_count(&edit.node) / 2;
+            Some(self.btree_split_off(&mut edit.node, &mut edit.hi, spec, mid)?)
+        } else {
+            None
+        };
+        let mut up = self.btree_publish(&mut edit.node, phys, spec)?;
+        if let Some(separator) = separator {
+            up.split = Some((separator, self.btree_write_node(0, &mut edit.hi, spec)?));
+        }
+        Ok(up)
+    }
+
+    /// Move entries `[mid, count)` of `buf` into the fresh node `dst` at the
+    /// same level, returning the smallest key now in `dst` — the separator its
+    /// parent records for it.
+    fn btree_split_off(
+        &self,
+        buf: &mut [u8],
+        dst: &mut [u8],
+        spec: TreeSpec,
+        mid: usize,
+    ) -> Result<u64, DriverError> {
+        let count = node_count(buf);
+        if mid == 0 || mid >= count {
+            return Err(DriverError::DeviceFault);
+        }
+        let stride = Self::btree_stride(buf, spec);
+        let moving = count - mid;
+        let from = buf
+            .get(N_ENTRIES + mid * stride..N_ENTRIES + count * stride)
+            .ok_or(DriverError::DeviceFault)?;
+        self.btree_init_node(dst, node_level(buf), moving);
+        dst.get_mut(N_ENTRIES..N_ENTRIES + moving * stride)
+            .ok_or(DriverError::DeviceFault)?
+            .copy_from_slice(from);
+        wr_u32(buf, N_COUNT, as_u32(mid));
+        Ok(node_min_key(dst))
+    }
+
     /// Insert or replace `key -> value`, returning the (possibly new) root.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::LengthOutOfRange`] when `value` is not the tree's record
+    /// width; [`DriverError::DeviceFault`] on a node that fails to
+    /// authenticate or a tree shape no driver-written tree can have;
+    /// [`DriverError::NoSpace`] when the volume cannot back the copy-on-write
+    /// or the tree would grow past [`MAX_TREE_LEVEL`].
     pub(crate) fn btree_insert(
         &mut self,
         root: u64,
@@ -331,273 +720,119 @@ impl<B: Block> ARXFS<B> {
         value: &[u8],
         spec: TreeSpec,
     ) -> Result<u64, DriverError> {
+        if value.len() != spec.value_len {
+            return Err(DriverError::LengthOutOfRange);
+        }
+        let mut edit = self.btree_take_edit()?;
+        let out = self.btree_insert_into(&mut edit, root, key, value, spec);
+        self.btree_put_edit(edit);
+        out
+    }
+
+    /// The body of [`Self::btree_insert`], holding the borrowed scratch.
+    ///
+    /// One descent records the path; the leaf takes the record in place; then
+    /// each ancestor in turn is re-read, has the child's separator and pointer
+    /// refreshed, adopts any promoted split, and is copy-on-written. Nothing
+    /// recurses and nothing but the scratch is held, so an insert costs the
+    /// same stack at any depth and decodes nothing per record.
+    fn btree_insert_into(
+        &mut self,
+        edit: &mut TreeEdit,
+        root: u64,
+        key: u64,
+        value: &[u8],
+        spec: TreeSpec,
+    ) -> Result<u64, DriverError> {
+        let stride = spec.leaf_stride();
         if root == 0 {
-            let mut buf = [0u8; MAX_BLOCK_SIZE];
-            self.btree_init_node(&mut buf, 0, 1);
-            let base = N_ENTRIES;
-            wr_u64(&mut buf, base, key);
-            buf[base + 8..base + spec.leaf_stride()].copy_from_slice(value);
-            return self.cow_meta(0, &mut buf, BlockType::Btree, spec.owner, 0);
+            self.btree_init_node(&mut edit.node, 0, 0);
+            node_insert_entry(&mut edit.node, stride, 0, key, value)?;
+            return self.btree_write_node(0, &mut edit.node, spec);
         }
-        let outcome = self.btree_insert_rec(root, key, value, spec)?;
-        match outcome.split {
-            None => Ok(outcome.node_phys),
-            Some((sep, right)) => {
-                let mut left_buf = [0u8; MAX_BLOCK_SIZE];
-                self.read_meta(outcome.node_phys, BlockType::Btree, &mut left_buf)?;
-                let left_min = node_min_key(&left_buf);
-                let mut buf = [0u8; MAX_BLOCK_SIZE];
-                self.btree_init_node(&mut buf, node_level(&left_buf) + 1, 2);
-                wr_u64(&mut buf, N_ENTRIES, left_min);
-                wr_u64(&mut buf, N_ENTRIES + 8, outcome.node_phys);
-                wr_u64(&mut buf, N_ENTRIES + INTERNAL_STRIDE, sep);
-                wr_u64(&mut buf, N_ENTRIES + INTERNAL_STRIDE + 8, right);
-                self.cow_meta(0, &mut buf, BlockType::Btree, spec.owner, 0)
-            }
-        }
-    }
-
-    fn btree_insert_rec(
-        &mut self,
-        phys: u64,
-        key: u64,
-        value: &[u8],
-        spec: TreeSpec,
-    ) -> Result<InsertOutcome, DriverError> {
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
-        self.read_meta(phys, BlockType::Btree, &mut buf)?;
-        let count = node_count(&buf);
-        if node_level(&buf) == 0 {
-            return self.btree_insert_leaf(phys, &mut buf, count, key, value, spec);
-        }
-        let ci = child_index(count, key, |i| {
-            rd_u64(&buf, N_ENTRIES + i * INTERNAL_STRIDE)
-        })?;
-        let child = rd_u64(&buf, N_ENTRIES + ci * INTERNAL_STRIDE + 8);
-        let child_outcome = self.btree_insert_rec(child, key, value, spec)?;
-        // Refresh the child's pointer and separator (its min key may shift if
-        // the key landed before the old minimum).
-        let mut child_buf = [0u8; MAX_BLOCK_SIZE];
-        self.read_meta(child_outcome.node_phys, BlockType::Btree, &mut child_buf)?;
-        wr_u64(
-            &mut buf,
-            N_ENTRIES + ci * INTERNAL_STRIDE,
-            node_min_key(&child_buf),
-        );
-        wr_u64(
-            &mut buf,
-            N_ENTRIES + ci * INTERNAL_STRIDE + 8,
-            child_outcome.node_phys,
-        );
-        match child_outcome.split {
-            None => {
-                let new_phys = self.cow_meta(phys, &mut buf, BlockType::Btree, spec.owner, 0)?;
-                Ok(InsertOutcome {
-                    node_phys: new_phys,
-                    split: None,
-                })
-            }
-            Some((sep, right)) => {
-                self.btree_insert_internal_entry(phys, &mut buf, count, ci + 1, sep, right, spec)
-            }
-        }
-    }
-
-    /// Insert `(key, value)` into leaf `buf` (already loaded from `phys`),
-    /// splitting when it overflows.
-    fn btree_insert_leaf(
-        &mut self,
-        phys: u64,
-        buf: &mut [u8],
-        count: usize,
-        key: u64,
-        value: &[u8],
-        spec: TreeSpec,
-    ) -> Result<InsertOutcome, DriverError> {
-        let stride = spec.leaf_stride();
-        // Replace an existing key in place.
-        for i in 0..count {
-            let base = N_ENTRIES + i * stride;
-            if rd_u64(buf, base) == key {
-                buf[base + 8..base + stride].copy_from_slice(value);
-                let new_phys = self.cow_meta(phys, buf, BlockType::Btree, spec.owner, 0)?;
-                return Ok(InsertOutcome {
-                    node_phys: new_phys,
-                    split: None,
-                });
-            }
-        }
-        // Gather the sorted entries plus the new one.
-        let mut entries: Vec<(u64, Vec<u8>)> = Vec::with_capacity(count + 1);
-        let mut inserted = false;
-        for i in 0..count {
-            let base = N_ENTRIES + i * stride;
-            let k = rd_u64(buf, base);
-            if !inserted && key < k {
-                entries.push((key, value.to_vec()));
-                inserted = true;
-            }
-            entries.push((k, buf[base + 8..base + stride].to_vec()));
-        }
-        if !inserted {
-            entries.push((key, value.to_vec()));
-        }
-        let cap = self.btree_leaf_cap(spec);
-        if entries.len() <= cap {
-            self.btree_write_leaf(phys, buf, &entries, spec)
-                .map(|node_phys| InsertOutcome {
-                    node_phys,
-                    split: None,
-                })
+        let count = self.btree_descend(root, key, spec, &mut edit.node, Some(&mut edit.descent))?;
+        let ancestors = edit
+            .descent
+            .depth
+            .checked_sub(1)
+            .ok_or(DriverError::DeviceFault)?;
+        let (at, replace) = leaf_search(&edit.node, count, stride, key)?;
+        if replace {
+            node_set_entry(&mut edit.node, at, stride, key, value)?;
         } else {
-            let mid = entries.len() / 2;
-            let sep = entries[mid].0;
-            let mut right_buf = [0u8; MAX_BLOCK_SIZE];
-            let left_phys = self.btree_write_leaf(phys, buf, &entries[..mid], spec)?;
-            let right_phys = self.btree_write_leaf(0, &mut right_buf, &entries[mid..], spec)?;
-            Ok(InsertOutcome {
-                node_phys: left_phys,
-                split: Some((sep, right_phys)),
-            })
+            node_insert_entry(&mut edit.node, stride, at, key, value)?;
+        }
+
+        let leaf = edit.descent.path_at(ancestors)?;
+        let mut up = self.btree_publish_split(edit, leaf, spec)?;
+        // The leaf sits at level 0, so the node at `slot` sits at
+        // `ancestors - slot` and the root, which the loop leaves in `up`, at
+        // `ancestors`.
+        for (child_level, slot) in (0..ancestors).rev().enumerate() {
+            let parent = edit.descent.path_at(slot)?;
+            let (_, held) =
+                self.btree_read_node(parent, Some(as_u32(child_level + 1)), spec, &mut edit.node)?;
+            let ci = child_index(held, key, |i| internal_key(&edit.node, i))?;
+            // An insert never empties a node, so the child always has a
+            // smallest key to be named by.
+            let separator = up.min.ok_or(DriverError::DeviceFault)?;
+            node_set_child(&mut edit.node, ci, separator, up.phys)?;
+            if let Some((promoted, right)) = up.split {
+                node_insert_entry(
+                    &mut edit.node,
+                    INTERNAL_STRIDE,
+                    ci + 1,
+                    promoted,
+                    &right.to_le_bytes(),
+                )?;
+            }
+            up = self.btree_publish_split(edit, parent, spec)?;
+        }
+        match up.split {
+            None => Ok(up.phys),
+            Some(_) => self.btree_grow_root(edit, as_u32(ancestors + 1), &up, spec),
         }
     }
 
-    /// Write leaf `entries` into `buf` and copy-on-write it to `phys`.
-    fn btree_write_leaf(
+    /// Publish a fresh root one level above a root that split.
+    fn btree_grow_root(
         &mut self,
-        phys: u64,
-        buf: &mut [u8],
-        entries: &[(u64, Vec<u8>)],
-        spec: TreeSpec,
-    ) -> Result<u64, DriverError> {
-        let stride = spec.leaf_stride();
-        self.btree_init_node(buf, 0, entries.len());
-        for (i, (k, v)) in entries.iter().enumerate() {
-            let base = N_ENTRIES + i * stride;
-            wr_u64(buf, base, *k);
-            buf[base + 8..base + stride].copy_from_slice(v);
-        }
-        self.cow_meta(phys, buf, BlockType::Btree, spec.owner, 0)
-    }
-
-    /// Insert separator entry `(sep, child)` at index `at` of internal node
-    /// `buf` (loaded from `phys`), splitting when it overflows.
-    #[allow(clippy::too_many_arguments)]
-    fn btree_insert_internal_entry(
-        &mut self,
-        phys: u64,
-        buf: &mut [u8],
-        count: usize,
-        at: usize,
-        sep: u64,
-        child: u64,
-        spec: TreeSpec,
-    ) -> Result<InsertOutcome, DriverError> {
-        let level = node_level(buf);
-        let mut entries: Vec<(u64, u64)> = Vec::with_capacity(count + 1);
-        for i in 0..count {
-            let base = N_ENTRIES + i * INTERNAL_STRIDE;
-            entries.push((rd_u64(buf, base), rd_u64(buf, base + 8)));
-        }
-        let at = at.min(entries.len());
-        entries.insert(at, (sep, child));
-        let cap = self.btree_internal_cap();
-        if entries.len() <= cap {
-            self.btree_write_internal(phys, buf, level, &entries, spec)
-                .map(|node_phys| InsertOutcome {
-                    node_phys,
-                    split: None,
-                })
-        } else {
-            let mid = entries.len() / 2;
-            let promoted = entries[mid].0;
-            let mut right_buf = [0u8; MAX_BLOCK_SIZE];
-            let left_phys = self.btree_write_internal(phys, buf, level, &entries[..mid], spec)?;
-            let right_phys =
-                self.btree_write_internal(0, &mut right_buf, level, &entries[mid..], spec)?;
-            Ok(InsertOutcome {
-                node_phys: left_phys,
-                split: Some((promoted, right_phys)),
-            })
-        }
-    }
-
-    /// Write internal `entries` (at tree `level`) into `buf` and
-    /// copy-on-write it to `phys`.
-    fn btree_write_internal(
-        &mut self,
-        phys: u64,
-        buf: &mut [u8],
+        edit: &mut TreeEdit,
         level: u32,
-        entries: &[(u64, u64)],
+        up: &Ascent,
         spec: TreeSpec,
     ) -> Result<u64, DriverError> {
-        self.btree_init_node(buf, level, entries.len());
-        for (i, (k, c)) in entries.iter().enumerate() {
-            let base = N_ENTRIES + i * INTERNAL_STRIDE;
-            wr_u64(buf, base, *k);
-            wr_u64(buf, base + 8, *c);
+        let (promoted, right) = up.split.ok_or(DriverError::DeviceFault)?;
+        let left_min = up.min.ok_or(DriverError::DeviceFault)?;
+        if level > MAX_TREE_LEVEL {
+            // A tree deeper than any descent will follow could not be read
+            // back, so it is refused rather than written.
+            return Err(DriverError::NoSpace);
         }
-        self.cow_meta(phys, buf, BlockType::Btree, spec.owner, 0)
-    }
-}
-
-impl<B: Block> ARXFS<B> {
-    /// Load every entry of node `phys` as `(key, value_bytes)`. For a leaf the
-    /// value is the record; for an internal node it is the 8-byte child
-    /// pointer. Returns the node level alongside the entries, so the borrow /
-    /// merge logic is identical for both node kinds.
-    fn btree_load_entries(
-        &mut self,
-        phys: u64,
-        spec: TreeSpec,
-    ) -> Result<(u32, NodeEntries), DriverError> {
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
-        self.read_meta(phys, BlockType::Btree, &mut buf)?;
-        let level = node_level(&buf);
-        let count = node_count(&buf);
-        let stride = if level == 0 {
-            spec.leaf_stride()
-        } else {
-            INTERNAL_STRIDE
-        };
-        let val_len = stride - 8;
-        let mut entries = Vec::with_capacity(count);
-        for i in 0..count {
-            let base = N_ENTRIES + i * stride;
-            entries.push((
-                rd_u64(&buf, base),
-                buf[base + 8..base + 8 + val_len].to_vec(),
-            ));
-        }
-        Ok((level, entries))
-    }
-
-    /// Store `entries` at tree `level` into a node, copy-on-writing `phys`.
-    fn btree_store_entries(
-        &mut self,
-        phys: u64,
-        level: u32,
-        entries: &[(u64, Vec<u8>)],
-        spec: TreeSpec,
-    ) -> Result<u64, DriverError> {
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
-        let stride = if level == 0 {
-            spec.leaf_stride()
-        } else {
-            INTERNAL_STRIDE
-        };
-        self.btree_init_node(&mut buf, level, entries.len());
-        for (i, (k, v)) in entries.iter().enumerate() {
-            let base = N_ENTRIES + i * stride;
-            wr_u64(&mut buf, base, *k);
-            buf[base + 8..base + stride].copy_from_slice(v);
-        }
-        self.cow_meta(phys, &mut buf, BlockType::Btree, spec.owner, 0)
+        self.btree_init_node(&mut edit.node, level, 0);
+        node_insert_entry(
+            &mut edit.node,
+            INTERNAL_STRIDE,
+            0,
+            left_min,
+            &up.phys.to_le_bytes(),
+        )?;
+        node_insert_entry(
+            &mut edit.node,
+            INTERNAL_STRIDE,
+            1,
+            promoted,
+            &right.to_le_bytes(),
+        )?;
+        self.btree_write_node(0, &mut edit.node, spec)
     }
 
     /// Remove `key` if present, returning the (possibly new, possibly `0`)
-    /// root. A root left with a single child collapses one level.
+    /// root.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::btree_insert`], less the record-width check.
     pub(crate) fn btree_remove(
         &mut self,
         root: u64,
@@ -607,105 +842,146 @@ impl<B: Block> ARXFS<B> {
         if root == 0 {
             return Ok(0);
         }
-        let new_root = self.btree_remove_rec(root, key, spec)?;
-        let (level, entries) = self.btree_load_entries(new_root, spec)?;
-        if level == 0 && entries.is_empty() {
-            self.free_meta(new_root);
-            return Ok(0);
-        }
-        if level > 0 && entries.len() == 1 {
-            let child = child_ptr(&entries[0].1);
-            self.free_meta(new_root);
-            return Ok(child);
-        }
-        Ok(new_root)
+        let mut edit = self.btree_take_edit()?;
+        let out = self.btree_remove_from(&mut edit, root, key, spec);
+        self.btree_put_edit(edit);
+        out
     }
 
-    fn btree_remove_rec(
+    /// The body of [`Self::btree_remove`], holding the borrowed scratch.
+    ///
+    /// The mirror of [`Self::btree_insert_into`]: one descent, the leaf drops
+    /// the record in place, then each ancestor is re-read and rewritten,
+    /// rebalancing a child the removal left below its minimum occupancy before
+    /// it does.
+    fn btree_remove_from(
         &mut self,
-        phys: u64,
+        edit: &mut TreeEdit,
+        root: u64,
         key: u64,
         spec: TreeSpec,
     ) -> Result<u64, DriverError> {
-        let (level, mut entries) = self.btree_load_entries(phys, spec)?;
-        if level == 0 {
-            let before = entries.len();
-            entries.retain(|(k, _)| *k != key);
-            if entries.len() == before {
-                return Ok(phys);
+        let stride = spec.leaf_stride();
+        let count = self.btree_descend(root, key, spec, &mut edit.node, Some(&mut edit.descent))?;
+        let ancestors = edit
+            .descent
+            .depth
+            .checked_sub(1)
+            .ok_or(DriverError::DeviceFault)?;
+        let (at, found) = leaf_search(&edit.node, count, stride, key)?;
+        if !found {
+            return Ok(root);
+        }
+        node_remove_entry(&mut edit.node, stride, at)?;
+
+        let leaf = edit.descent.path_at(ancestors)?;
+        let mut up = self.btree_publish(&mut edit.node, leaf, spec)?;
+        for (child_level, slot) in (0..ancestors).rev().enumerate() {
+            let child_level = as_u32(child_level);
+            let parent = edit.descent.path_at(slot)?;
+            let (_, held) =
+                self.btree_read_node(parent, Some(child_level + 1), spec, &mut edit.node)?;
+            let ci = child_index(held, key, |i| internal_key(&edit.node, i))?;
+            // A child the removal emptied has no key left to name it, so its
+            // separator stands until the rebalance below or the root collapse
+            // takes the entry away.
+            let separator = up.min.unwrap_or_else(|| internal_key(&edit.node, ci));
+            node_set_child(&mut edit.node, ci, separator, up.phys)?;
+            if up.count < self.btree_min(child_level, spec) && held >= 2 {
+                self.btree_rebalance(edit, ci, child_level, spec)?;
             }
-            return self.btree_store_entries(phys, 0, &entries, spec);
+            up = self.btree_publish(&mut edit.node, parent, spec)?;
         }
-        let ci = child_index(entries.len(), key, |i| entries[i].0)?;
-        let child = child_ptr(&entries[ci].1);
-        let new_child = self.btree_remove_rec(child, key, spec)?;
-        let (child_level, child_entries) = self.btree_load_entries(new_child, spec)?;
-        entries[ci] = (
-            child_entries.first().map_or(entries[ci].0, |(k, _)| *k),
-            child_ptr_bytes(new_child),
-        );
-        let min = self.btree_min(child_level, spec);
-        if child_entries.len() < min && entries.len() >= 2 {
-            self.btree_rebalance(&mut entries, ci, child_level, child_entries, spec)?;
-        }
-        self.btree_store_entries(phys, level, &entries, spec)
+        self.btree_collapse_root(edit, &up, spec)
     }
 
-    /// Restore the minimum-occupancy invariant for child `ci` by borrowing
-    /// from or merging with an adjacent sibling. `child_entries` are the
-    /// freshly loaded entries of child `ci`.
+    /// Restore child `ci`'s minimum occupancy by borrowing from or merging
+    /// with its adjacent sibling, editing the parent in `edit.node` to match.
+    ///
+    /// The pair is staged in key order in `edit.lo` and `edit.hi`, so a borrow
+    /// is one direction of a single entry move and a merge always folds the
+    /// higher node into the lower — whichever side of the pair the underfull
+    /// child is on.
     fn btree_rebalance(
         &mut self,
-        entries: &mut NodeEntries,
+        edit: &mut TreeEdit,
         ci: usize,
-        child_level: u32,
-        child_entries: NodeEntries,
+        level: u32,
         spec: TreeSpec,
     ) -> Result<(), DriverError> {
-        let min = self.btree_min(child_level, spec);
-        let child_phys = child_ptr(&entries[ci].1);
-        if ci > 0 {
-            let si = ci - 1;
-            let left_phys = child_ptr(&entries[si].1);
-            let (_, mut left) = self.btree_load_entries(left_phys, spec)?;
-            let mut child = child_entries;
-            if left.len() > min {
-                let moved = left.pop().ok_or(DriverError::DeviceFault)?;
-                child.insert(0, moved);
-                let new_left = self.btree_store_entries(left_phys, child_level, &left, spec)?;
-                let new_child = self.btree_store_entries(child_phys, child_level, &child, spec)?;
-                entries[si] = (left[0].0, child_ptr_bytes(new_left));
-                entries[ci] = (child[0].0, child_ptr_bytes(new_child));
-            } else {
-                left.extend(child);
-                let new_left = self.btree_store_entries(left_phys, child_level, &left, spec)?;
-                self.free_meta(child_phys);
-                entries[si] = (left[0].0, child_ptr_bytes(new_left));
-                entries.remove(ci);
-            }
-        } else {
-            let si = ci + 1;
-            let right_phys = child_ptr(&entries[si].1);
-            let (_, mut right) = self.btree_load_entries(right_phys, spec)?;
-            let mut child = child_entries;
-            if right.len() > min {
-                let moved = right.remove(0);
-                child.push(moved);
-                let new_child = self.btree_store_entries(child_phys, child_level, &child, spec)?;
-                let new_right = self.btree_store_entries(right_phys, child_level, &right, spec)?;
-                entries[ci] = (child[0].0, child_ptr_bytes(new_child));
-                entries[si] = (right[0].0, child_ptr_bytes(new_right));
-            } else {
-                child.extend(right);
-                let new_child = self.btree_store_entries(child_phys, child_level, &child, spec)?;
-                self.free_meta(right_phys);
-                entries[ci] = (child[0].0, child_ptr_bytes(new_child));
-                entries.remove(si);
-            }
+        // The leftmost child has only a right sibling; every other pairs with
+        // the one below it.
+        let lo_index = ci.saturating_sub(1);
+        let hi_index = lo_index + 1;
+        if hi_index >= node_count(&edit.node) {
+            return Err(DriverError::DeviceFault);
         }
-        Ok(())
+        let lo_phys = internal_child(&edit.node, lo_index);
+        let hi_phys = internal_child(&edit.node, hi_index);
+        let (_, lo_count) = self.btree_read_node(lo_phys, Some(level), spec, &mut edit.lo)?;
+        let (_, hi_count) = self.btree_read_node(hi_phys, Some(level), spec, &mut edit.hi)?;
+        let stride = Self::btree_stride(&edit.lo, spec);
+        let child_is_lo = ci == lo_index;
+        let donor = if child_is_lo { hi_count } else { lo_count };
+        if donor > self.btree_min(level, spec) {
+            if child_is_lo {
+                node_move_entry(&mut edit.hi, 0, &mut edit.lo, lo_count, stride)?;
+            } else {
+                node_move_entry(&mut edit.lo, lo_count - 1, &mut edit.hi, 0, stride)?;
+            }
+            let lo_min = node_required_min(&edit.lo)?;
+            let hi_min = node_required_min(&edit.hi)?;
+            let lo = self.btree_write_node(lo_phys, &mut edit.lo, spec)?;
+            let hi = self.btree_write_node(hi_phys, &mut edit.hi, spec)?;
+            node_set_child(&mut edit.node, lo_index, lo_min, lo)?;
+            return node_set_child(&mut edit.node, hi_index, hi_min, hi);
+        }
+        // Neither side can spare an entry: fold the pair into its lower node,
+        // so the parent loses exactly one entry whichever side underflowed.
+        node_append(&mut edit.lo, &edit.hi, stride)?;
+        let lo_min = node_required_min(&edit.lo)?;
+        let lo = self.btree_write_node(lo_phys, &mut edit.lo, spec)?;
+        self.free_meta(hi_phys);
+        node_set_child(&mut edit.node, lo_index, lo_min, lo)?;
+        node_remove_entry(&mut edit.node, INTERNAL_STRIDE, hi_index)
     }
 
+    /// Reduce a root the removal left degenerate, returning the tree's root.
+    ///
+    /// An emptied leaf root leaves no tree at all, and an internal root down to
+    /// one child is replaced by that child — repeatedly, so a root is always
+    /// either a leaf or names two or more subtrees. `edit.node` still holds the
+    /// root as it was just written, which is what makes the common case (no
+    /// collapse) free of a device read.
+    fn btree_collapse_root(
+        &mut self,
+        edit: &mut TreeEdit,
+        up: &Ascent,
+        spec: TreeSpec,
+    ) -> Result<u64, DriverError> {
+        let mut phys = up.phys;
+        let mut level = node_level(&edit.node);
+        let mut count = up.count;
+        loop {
+            if level == 0 {
+                if count == 0 {
+                    self.free_meta(phys);
+                    return Ok(0);
+                }
+                return Ok(phys);
+            }
+            if count != 1 {
+                return Ok(phys);
+            }
+            let only = internal_child(&edit.node, 0);
+            self.free_meta(phys);
+            phys = only;
+            (level, count) = self.btree_read_node(phys, Some(level - 1), spec, &mut edit.node)?;
+        }
+    }
+}
+
+impl<B: Block> ARXFS<B> {
     /// Parse the level and, for an internal node, the child pointers out of an
     /// already-verified node buffer `buf`. Used by the scrub verifying walk,
     /// which authenticates each node itself (counting any companion repair)
@@ -780,7 +1056,7 @@ impl<B: Block> ARXFS<B> {
         while let Some(key) = walk.next {
             let count =
                 self.btree_descend(root, key, spec, &mut walk.buf, Some(&mut walk.descent))?;
-            let first = (0..count).find(|i| rd_u64(&walk.buf, N_ENTRIES + i * stride) >= key);
+            let first = (0..count).find(|i| entry_key(&walk.buf, *i, stride) >= key);
             let Some(first) = first else {
                 // The landing leaf holds only keys below the position, so the
                 // next entry — if there is one — starts the following subtree.
@@ -798,7 +1074,7 @@ impl<B: Block> ARXFS<B> {
             };
             walk.first = first;
             walk.count = count - first;
-            let last = rd_u64(&walk.buf, N_ENTRIES + (count - 1) * stride);
+            let last = entry_key(&walk.buf, count - 1, stride);
             walk.next = match last.checked_add(1) {
                 // The largest key a tree can hold was just yielded.
                 None => None,
@@ -848,12 +1124,8 @@ impl TreeWalk {
     /// [`DriverError::NoSpace`] when the one node-sized buffer cannot be
     /// allocated; the walk allocates nothing thereafter.
     pub(crate) fn new(block_size: usize) -> Result<Self, DriverError> {
-        let mut buf = Vec::new();
-        buf.try_reserve_exact(block_size)
-            .map_err(|_| DriverError::NoSpace)?;
-        buf.resize(block_size, 0);
         Ok(Self {
-            buf,
+            buf: node_buf(block_size)?,
             descent: Descent::new(),
             first: 0,
             count: 0,
@@ -966,14 +1238,4 @@ impl NodeTrail {
         self.advance(&[]);
         self.closed()
     }
-}
-
-/// Decode an internal entry's 8-byte value as a child pointer.
-fn child_ptr(value: &[u8]) -> u64 {
-    rd_u64(value, 0)
-}
-
-/// Encode a child pointer as an internal entry's 8-byte value.
-fn child_ptr_bytes(phys: u64) -> Vec<u8> {
-    phys.to_le_bytes().to_vec()
 }
