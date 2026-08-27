@@ -66,8 +66,8 @@ mod program {
         WIN_WIDTH,
     };
     use tairix_window::{
-        pointer_input_events, Desktop, EventSource, WindowClient, WindowEvents, WindowSizing,
-        WindowTransport,
+        pointer_input_events, Desktop, EventSource, WindowClient, WindowEvents, WindowFrames,
+        WindowSizing, WindowTransport,
     };
 
     /// Exit code when the shared frame region could not be created or
@@ -271,50 +271,6 @@ mod program {
         (mode.stride_bytes as usize) * (mode.height_px as usize) * FRAME_COUNT as usize
     }
 
-    /// Create a `total`-byte frame region and grant it to the window
-    /// endpoint, returning the region id, its mapped base, and the
-    /// endpoint-directed grant handle. Fails closed to `None` on any
-    /// refusal, unmapping a region that mapped but could not be granted so
-    /// a refused (re)allocation never leaves pinned memory behind.
-    fn allocate_frames(total: usize) -> Option<(u64, usize, u64)> {
-        let mut region_id: u64 = 0;
-        let base = tairix_rt::shm_create(total, &mut region_id);
-        if base < 0 {
-            return None;
-        }
-        let base = usize::try_from(base).ok()?;
-        let grant = tairix_rt::shm_grant(region_id, WINDOW_ENDPOINT);
-        if grant < 1 {
-            let _ = tairix_rt::shm_unmap(base as u64, total);
-            return None;
-        }
-        #[allow(clippy::cast_sign_loss)] // `grant >= 1` checked above; it is a kernel handle.
-        Some((region_id, base, grant as u64))
-    }
-
-    /// The live frame region: the once-granted shared surface the app
-    /// paints into. Re-mapped on every resize; the old mapping is unmapped
-    /// only after the session adopts the new one, so a refused resize keeps
-    /// the current surface intact.
-    struct Frames {
-        base: usize,
-        len: usize,
-    }
-
-    impl Frames {
-        /// The region as a mutable byte slice.
-        fn as_mut(&mut self) -> &mut [u8] {
-            // SAFETY: the kernel mapped exactly `len` zeroed bytes
-            // read/write at `base` (`shm_create` maps the length it was
-            // asked for) and the mapping stays live until the next resize
-            // unmaps it — nothing else aliases it, and the window protocol
-            // serialises access (the app is parked in `present` while the
-            // session reads). A resize replaces `base`/`len` together only
-            // after the old region is unmapped, so the pair is never stale.
-            unsafe { core::slice::from_raw_parts_mut(self.base as *mut u8, self.len) }
-        }
-    }
-
     /// Draw the whole viewer window — the header, the "Open…" button, the
     /// text area, and the scrollbar — and present it.
     fn present_viewer<T: WindowTransport>(
@@ -323,13 +279,16 @@ mod program {
         scale: Scale,
         client: &mut WindowClient<T>,
         window: u64,
-        frames: &mut Frames,
+        frames: &mut WindowFrames,
         mode: &DisplayMode,
     ) -> Result<(), Errno> {
-        viewer
+        let surface = viewer
             .render(theme, scale, mode.width_px, mode.height_px)
-            .ok_or(Errno::NoSpace)
-            .and_then(|surface| present_surface(&surface, client, window, frames.as_mut(), mode))
+            .ok_or(Errno::NoSpace)?;
+        let pixels = client
+            .frame_pixels(frames, window, FRAME_COUNT, mode)
+            .ok_or(Errno::NotAttached)?;
+        present_surface(&surface, client, window, pixels, mode)
     }
 
     /// The live window channel this app owns: the transport to the desktop
@@ -344,7 +303,7 @@ mod program {
         /// This app's window id, assigned by the session at create.
         window: u64,
         /// The shared frame region the app paints into.
-        frames: Frames,
+        frames: WindowFrames,
         /// The region's current shape; every resize replaces it together
         /// with `frames`.
         mode: DisplayMode,
@@ -389,29 +348,27 @@ mod program {
             scale: Scale,
             viewer: &mut Viewer,
         ) {
-            let total = region_bytes(&new_mode);
-            let Some((_region_id, new_base, new_grant)) = allocate_frames(total) else {
+            let Some(spare) = WindowFrames::create(region_bytes(&new_mode)) else {
                 // Out of memory for a new region: honestly keep the
                 // current window rather than fail the whole app.
                 return;
             };
+            let Some(grant) = spare.grant() else {
+                return;
+            };
             if self
                 .client
-                .resize(self.window, new_grant, FRAME_COUNT, &new_mode)
+                .resize(self.window, grant, FRAME_COUNT, &new_mode)
                 .is_err()
             {
-                // The session refused the re-map: drop the new region and
-                // stand on the old geometry (fail closed, no crash).
-                let _ = tairix_rt::shm_unmap(new_base as u64, total);
+                // The session refused the re-map: the spare drops here, which
+                // unmaps it, and the app stands on the old geometry (fail
+                // closed, no crash).
                 return;
             }
-            // The session adopted the new region; release the old mapping
-            // and switch the app onto the new one.
-            let _ = tairix_rt::shm_unmap(self.frames.base as u64, self.frames.len);
-            self.frames = Frames {
-                base: new_base,
-                len: total,
-            };
+            // The session adopted the new region; adopting it here drops the
+            // old one, which unmaps it.
+            self.frames = spare;
             self.mode = new_mode;
             // Re-wrap the open file (if any) to the new width, keeping the
             // reader near their place; a status message needs no
@@ -703,19 +660,16 @@ mod program {
                 ViewerOutcome::REPAINT
             }
             // The desktop asked, or *Quit* was chosen on the viewer's own
-            // icon-bar slot: close the window and free the frame region
-            // before ending so nothing is left pinned (the runtime reclaims
-            // on exit, but the app is explicit about the mapping it owns). A
-            // row the declaration never carried names no command and is
-            // ignored (fail closed).
+            // icon-bar slot: close the window and end; the frame region is
+            // unmapped by its own drop, so nothing is left pinned. A row the
+            // declaration never carried names no command and is ignored (fail
+            // closed).
             WindowEvent::CloseRequested { .. } => {
                 let _ = surface.client.close(surface.window);
-                let _ = tairix_rt::shm_unmap(surface.frames.base as u64, surface.frames.len);
                 ViewerOutcome::CLOSE
             }
             WindowEvent::AppBarMenu { item } if tairix_window::is_quit(item) => {
                 let _ = surface.client.close(surface.window);
-                let _ = tairix_rt::shm_unmap(surface.frames.base as u64, surface.frames.len);
                 ViewerOutcome::CLOSE
             }
             // `DesktopChanged` is adopted by the caller before this
@@ -743,6 +697,15 @@ mod program {
             | WindowEvent::Focus { .. }
             | WindowEvent::Minimized { .. }
             | WindowEvent::RedrawRequested { .. } => ViewerOutcome::IDLE,
+            // Nobody can see the window, so the session gave its copy of the
+            // pixels back and unmapped the region. Let go of this side too —
+            // the pages go only when both do — and ask for no repaint: the
+            // redraw request that follows the window being shown again is
+            // what re-attaches a fresh region and fills it.
+            WindowEvent::ContentReleased { .. } => {
+                surface.frames.release();
+                ViewerOutcome::IDLE
+            }
         }
     }
 
@@ -830,12 +793,11 @@ mod program {
         // unmapped) whenever the window manager reports a new client size.
         let (initial_w, initial_h) = desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
         let mode = mode_for(initial_w, initial_h);
-        let Some((_region_id, base, grant)) = allocate_frames(region_bytes(&mode)) else {
+        let Some(frames) = WindowFrames::create(region_bytes(&mode)) else {
             return fail(EXIT_NO_FRAMES, "shared frame region refused");
         };
-        let frames = Frames {
-            base,
-            len: region_bytes(&mode),
+        let Some(grant) = frames.grant() else {
+            return fail(EXIT_NO_FRAMES, "shared frame region refused");
         };
 
         // --- The event mailbox the app parks on.

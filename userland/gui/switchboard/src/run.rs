@@ -91,7 +91,7 @@ mod program {
         SESSION_REFUSED, WIN_HEIGHT, WIN_SIZING, WIN_WIDTH,
     };
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
-    use tairix_window::{Desktop, WindowClient, WindowTransport};
+    use tairix_window::{Desktop, WindowClient, WindowFrames, WindowTransport};
 
     /// Frames in the shared region. The window protocol serialises a
     /// present (the app is parked in the call while the session reads), so
@@ -217,56 +217,6 @@ mod program {
         BitmapFont::for_role(theme.fonts(), TextRole::Body, scale)
     }
 
-    /// The live frame region: the once-granted shared surface the panel is
-    /// painted into. Re-mapped on every resize; the old mapping is unmapped
-    /// only after the session adopts the new one, so a refused resize keeps
-    /// the current surface intact.
-    struct Frames {
-        base: usize,
-        len: usize,
-        grant: u64,
-    }
-
-    impl Frames {
-        /// The region as a mutable byte slice.
-        fn as_mut(&mut self) -> &mut [u8] {
-            // SAFETY: the kernel mapped exactly `len` zeroed bytes
-            // read/write at `base` (`shm_create` maps the length it was
-            // asked for) and the mapping stays live until this `Frames` is
-            // released — nothing else aliases it, and the window protocol
-            // serialises access (this process is parked in its present call
-            // while the session reads). A resize replaces `base`/`len`
-            // together only after the old region is unmapped, so the pair is
-            // never stale.
-            unsafe { core::slice::from_raw_parts_mut(self.base as *mut u8, self.len) }
-        }
-    }
-
-    /// Create a frame region shaped as `mode` and grant it to the window
-    /// endpoint. Fails closed to `None` on any refusal, unmapping a region
-    /// that mapped but could not be granted so a refused allocation never
-    /// leaves pinned memory behind.
-    fn allocate_frames(mode: &DisplayMode) -> Option<Frames> {
-        let len = region_bytes(mode);
-        let mut region_id: u64 = 0;
-        let base = tairix_rt::shm_create(len, &mut region_id);
-        if base < 0 {
-            return None;
-        }
-        let base = usize::try_from(base).ok()?;
-        let grant = tairix_rt::shm_grant(region_id, WINDOW_ENDPOINT);
-        if grant < 1 {
-            let _ = tairix_rt::shm_unmap(base as u64, len);
-            return None;
-        }
-        #[allow(clippy::cast_sign_loss)] // `grant >= 1` checked above; it is a kernel handle.
-        Some(Frames {
-            base,
-            len,
-            grant: grant as u64,
-        })
-    }
-
     /// The one open overview window: its session-side id, the identity that
     /// serves it, the surface it is painted through, and the shared frames
     /// the session blits from.
@@ -275,7 +225,7 @@ mod program {
         server: ProcId,
         mode: DisplayMode,
         surface: Surface,
-        frames: Frames,
+        frames: WindowFrames,
     }
 
     /// The production [`WindowTransport`]: one synchronous `ipc_call` to the
@@ -368,23 +318,26 @@ mod program {
             if mode.width_px == window.mode.width_px && mode.height_px == window.mode.height_px {
                 return;
             }
-            let Some(frames) = allocate_frames(&mode) else {
+            let Some(spare) = WindowFrames::create(region_bytes(&mode)) else {
+                return;
+            };
+            let Some(grant) = spare.grant() else {
                 return;
             };
             let Some(surface) = Surface::new(mode.width_px, mode.height_px) else {
-                let _ = tairix_rt::shm_unmap(frames.base as u64, frames.len);
                 return;
             };
             if self
                 .client
-                .resize(window.id, frames.grant, FRAME_COUNT, &mode)
+                .resize(window.id, grant, FRAME_COUNT, &mode)
                 .is_err()
             {
-                let _ = tairix_rt::shm_unmap(frames.base as u64, frames.len);
                 return;
             }
-            let _ = tairix_rt::shm_unmap(window.frames.base as u64, window.frames.len);
-            window.frames = frames;
+            // Adopting drops the old region, which unmaps it; every early
+            // return above drops the spare instead, so no path can leave a
+            // region pinned or the surface half-replaced.
+            window.frames = spare;
             window.surface = surface;
             window.mode = mode;
         }
@@ -394,27 +347,22 @@ mod program {
         fn open_window(&mut self) -> Result<(), Errno> {
             let (initial_w, initial_h) = self.desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
             let mode = mode_for(initial_w, initial_h);
-            let frames = allocate_frames(&mode).ok_or(Errno::OutOfMemory)?;
+            let frames = WindowFrames::create(region_bytes(&mode)).ok_or(Errno::OutOfMemory)?;
+            let grant = frames.grant().ok_or(Errno::OutOfMemory)?;
             let surface =
                 Surface::new(mode.width_px, mode.height_px).ok_or(Errno::LengthOutOfRange)?;
             // The window manager decorates and resizes the window server-side;
             // the app draws no chrome and only re-maps its region when a
             // `WindowEvent::Resized` arrives.
             let created = self.client.create(
-                frames.grant,
+                grant,
                 self.event_endpoint,
                 FRAME_COUNT,
                 &mode,
                 PANEL_TITLE,
                 WIN_SIZING,
             );
-            let (id, server) = match created {
-                Ok(pair) => pair,
-                Err(refusal) => {
-                    let _ = tairix_rt::shm_unmap(frames.base as u64, frames.len);
-                    return Err(refusal);
-                }
-            };
+            let (id, server) = created?;
             if tairix_rt::waitset_ctl(
                 self.set,
                 WaitSetOp::Add,
@@ -424,7 +372,6 @@ mod program {
             ) != 0
             {
                 let _ = self.client.close(id);
-                let _ = tairix_rt::shm_unmap(frames.base as u64, frames.len);
                 return Err(Errno::NotFound);
             }
             self.window = Some(Window {
@@ -449,7 +396,6 @@ mod program {
                 WaitToken::WindowEvent.as_u64(),
             );
             let closed = self.client.close(window.id);
-            let _ = tairix_rt::shm_unmap(window.frames.base as u64, window.frames.len);
             if disarmed != 0 {
                 return Err(Errno::NotFound);
             }
@@ -476,13 +422,10 @@ mod program {
                 panel_font(theme, desktop.scale()),
             );
             let damage = DamageRect::full(&window.mode);
-            winframe::encode(
-                &window.surface,
-                window.frames.as_mut(),
-                &window.mode,
-                damage,
-                &SERIAL,
-            )?;
+            let pixels = client
+                .frame_pixels(&mut window.frames, window.id, FRAME_COUNT, &window.mode)
+                .ok_or(Errno::NotAttached)?;
+            winframe::encode(&window.surface, pixels, &window.mode, damage, &SERIAL)?;
             client.present(window.id, 0, damage)
         }
 
@@ -761,6 +704,16 @@ mod program {
                 ..
             } => {
                 host.resize(width_px, height_px);
+                return;
+            }
+            // Nobody can see the window, so the session gave its copy of the
+            // pixels back and unmapped the region. Let go of this side too —
+            // the pages go only when both do; the redraw request that follows
+            // the window being shown again re-attaches a fresh region.
+            WindowEvent::ContentReleased { .. } => {
+                if let Some(window) = host.window.as_mut() {
+                    window.frames.release();
+                }
                 return;
             }
             WindowEvent::Key {

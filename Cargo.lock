@@ -5401,6 +5401,7 @@ dependencies = [
  "tairix-display",
  "tairix-geometry",
  "tairix-input",
+ "tairix-rt",
 ]
 
 [[package]]

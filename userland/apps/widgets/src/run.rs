@@ -46,7 +46,7 @@ mod program {
     use tairix_widgets::Gallery;
     use tairix_window::{
         key_input_event, pointer_input_events, present_damage, Desktop, EventSource, Repaint,
-        WindowClient, WindowEvents, WindowSizing, WindowTransport,
+        WindowClient, WindowEvents, WindowFrames, WindowSizing, WindowTransport,
     };
 
     /// The gallery window's logical width in physical pixels.
@@ -185,20 +185,28 @@ mod program {
 
     impl GalleryWindow {
         /// Draw the gallery, convert `damage` into `frames` (the shared window
-        /// surface, shaped as `mode`) and present that rectangle.
+        /// region, shaped as `mode`) and present that rectangle.
         ///
         /// The draw is clipped to `damage` too: everything outside it is already
         /// in the surface from the last frame, and neither the conversion nor
-        /// the present would carry it.
+        /// the present would carry it. A region the session released while the
+        /// window was hidden is re-attached first, so the whole frame is what
+        /// the conversion then carries.
         fn present(
             &mut self,
             gallery: &Gallery,
             theme: &Theme,
             scale: Scale,
-            frames: &mut [u8],
+            frames: &mut WindowFrames,
             mode: &DisplayMode,
             damage: DamageRect,
         ) -> Result<(), Errno> {
+            let reattached = frames.is_released();
+            let damage = if reattached {
+                DamageRect::full(mode)
+            } else {
+                damage
+            };
             let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
             let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
             self.surface.with_clip(
@@ -208,7 +216,11 @@ mod program {
                 damage.height_px,
                 |surface| gallery.render(surface, viewport, scale, theme, font),
             );
-            winframe::encode(&self.surface, frames, mode, damage, &SERIAL)?;
+            let pixels = self
+                .client
+                .frame_pixels(frames, self.window, FRAME_COUNT, mode)
+                .ok_or(Errno::NotAttached)?;
+            winframe::encode(&self.surface, pixels, mode, damage, &SERIAL)?;
             self.client.present(self.window, 0, damage)
         }
     }
@@ -280,6 +292,7 @@ mod program {
             | WindowEvent::Minimized { .. }
             | WindowEvent::Resized { .. }
             | WindowEvent::RedrawRequested { .. }
+            | WindowEvent::ContentReleased { .. }
             | WindowEvent::FilePicked { .. }
             | WindowEvent::PickCancelled { .. }
             // The desktop change is adopted by the caller before this match,
@@ -388,26 +401,16 @@ mod program {
     /// total, grant)`: the mapped base address, the region's byte length,
     /// and the endpoint-directed grant handle. Fails closed with the
     /// reserved [`EXIT_NO_FRAMES`] code for `main` on any refusal.
-    fn create_frame_region(mode: &DisplayMode) -> Result<(usize, usize, u64), i32> {
+    fn create_frame_region(mode: &DisplayMode) -> Result<(WindowFrames, u64), i32> {
         let frame_len = (mode.stride_bytes as usize) * (mode.height_px as usize);
         let total = frame_len * FRAME_COUNT as usize;
-        let mut region_id: u64 = 0;
-        let base = tairix_rt::shm_create(total, &mut region_id);
-        if base < 0 {
+        let Some(frames) = WindowFrames::create(total) else {
             return Err(fail(EXIT_NO_FRAMES, "shared frame region refused"));
-        }
-        let grant = tairix_rt::shm_grant(region_id, WINDOW_ENDPOINT);
-        if grant < 1 {
-            return Err(fail(EXIT_NO_FRAMES, "frame region grant refused"));
-        }
-        let Ok(base) = usize::try_from(base) else {
-            return Err(fail(
-                EXIT_NO_FRAMES,
-                "frame region base outside the address width",
-            ));
         };
-        #[allow(clippy::cast_sign_loss)] // `grant >= 1` checked above; it is a kernel handle.
-        Ok((base, total, grant as u64))
+        let Some(grant) = frames.grant() else {
+            return Err(fail(EXIT_NO_FRAMES, "frame region grant refused"));
+        };
+        Ok((frames, grant))
     }
 
     /// Open the gallery's window and present its first frame.
@@ -422,7 +425,7 @@ mod program {
         mode: &DisplayMode,
         theme: &Theme,
         scale: Scale,
-        frames: &mut [u8],
+        frames: &mut WindowFrames,
     ) -> Result<(GalleryWindow, ProcId, Gallery), i32> {
         // The icon-bar presence first: a declared presence belongs to the
         // process, so declaring it before this process owns a window is what
@@ -466,7 +469,7 @@ mod program {
         desktop: &mut Desktop,
         themes: &mut ThemeRegistry,
         gallery: &mut Gallery,
-        frames: &mut [u8],
+        frames: &mut WindowFrames,
         mode: &DisplayMode,
         mut events: WindowEvents<RtEventSource>,
     ) -> i32 {
@@ -508,6 +511,14 @@ mod program {
             if close {
                 let _ = surface.client.close(surface.window);
                 return 0;
+            }
+            // Nobody can see the window, so the session gave its copy of the
+            // pixels back and unmapped the region. Let go of this side too —
+            // the pages go only when both do — and paint nothing until the
+            // redraw request that follows the window being shown again.
+            if matches!(event, WindowEvent::ContentReleased { .. }) {
+                frames.release();
+                continue;
             }
             // An adopted desktop change re-themes and re-densifies every pixel,
             // so no report could describe it.
@@ -555,17 +566,10 @@ mod program {
             stride_bytes: initial_w * 4,
             format: DisplayFormat::Rgba8888,
         };
-        let (base, total, grant) = match create_frame_region(&mode) {
-            Ok(triple) => triple,
+        let (mut frames, grant) = match create_frame_region(&mode) {
+            Ok(pair) => pair,
             Err(code) => return code,
         };
-        // SAFETY: the kernel mapped exactly `total` zeroed bytes read/write
-        // into this process at `base` (`shm_create` maps the length it was
-        // asked for) and the mapping stays live for the life of the process —
-        // nothing below unmaps or aliases it. The session maps the same frames
-        // read-only for its blit, and the protocol serialises access: this app
-        // is parked in its present call while the session reads.
-        let frames = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, total) };
 
         let (event_endpoint, set) = match bind_event_mailbox() {
             Ok(pair) => pair,
@@ -579,7 +583,7 @@ mod program {
             &mode,
             themes.active(),
             desktop.scale(),
-            frames,
+            &mut frames,
         ) {
             Ok(triple) => triple,
             Err(code) => return code,
@@ -595,7 +599,7 @@ mod program {
             &mut desktop,
             &mut themes,
             &mut gallery,
-            frames,
+            &mut frames,
             &mode,
             events,
         )

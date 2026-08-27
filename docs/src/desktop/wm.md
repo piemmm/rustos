@@ -989,6 +989,22 @@ pressure-driven release **policy** over the same shared `PressureGauge`
 and the same `tairix_reclaim::shrink_target` ordering the caches use: one
 memory model, two mechanisms suited to two different kinds of memory.
 
+- **Both sides let go, or nothing is freed.** The compositor's copy is one
+  of *three*: the app's render target, the frame region it presents from, and
+  this. The pages behind the region go only when the app and the session have
+  both unmapped it, so a release the session keeps to itself frees a third of
+  a window and leaves two thirds pinned. It therefore unmaps its side
+  (`WindowServer::release_frames`) and tells the client
+  (`WindowEvent::ContentReleased`), which releases its own two and re-attaches
+  a fresh region on the paint that follows the next redraw request
+  (`WindowClient::frame_pixels`). A present against a released window is
+  refused `NotAttached` rather than reading a mapping neither side has.
+- **A window nobody can see is not asked to present.** Asking one would have
+  its client establish the buffer the release just freed, for pixels nobody can
+  see: the release would free nothing and cost a repaint per hidden window,
+  under pressure. The request is made by `set_visible` when the window is next
+  shown; a *visible* window released at critical pressure is still asked
+  straight away, because it must not be left blank.
 - **What survives a release.** Only the pixels go. The window keeps its
   client size (`Window::client_size`, retained independently of the
   buffer), origin, z-order, visibility, furniture, cursor, viewport, and

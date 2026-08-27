@@ -34,6 +34,8 @@ extern crate alloc;
 pub mod appbar;
 pub mod client;
 pub mod desktop;
+#[cfg(feature = "rt")]
+pub mod frames;
 pub mod server;
 
 pub use appbar::{declaration, info_and_quit, is_quit, DESKTOP_ROLE_SWITCH, QUIT_ROW};
@@ -42,6 +44,8 @@ pub use client::{
     EventSource, Repaint, WindowClient, WindowEvents, WindowTransport, EVENT_MAILBOX_CAPACITY,
 };
 pub use desktop::Desktop;
+#[cfg(feature = "rt")]
+pub use frames::WindowFrames;
 pub use server::{
     client_frame_budget_bytes, CallerIdentity, EventSink, PopupSpec, WindowHost, WindowServer,
     WindowSizing, WINDOW_REPLY_MAX,

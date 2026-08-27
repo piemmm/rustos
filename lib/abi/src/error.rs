@@ -379,6 +379,20 @@ pub enum Errno {
     /// be nearly empty, and freeing blocks cannot help — only removing one
     /// of the node's existing names can.
     TooManyLinks = 44,
+    /// The call needs a resource both the caller and the service had let go
+    /// of, so there is nothing attached to act on: re-attach and retry.
+    ///
+    /// Emitted by the window channel when a client presents into a window
+    /// whose frame region the session released under memory pressure — the
+    /// pages went precisely because both sides unmapped them, so accepting
+    /// the present would mean reading a mapping neither side has. Distinct
+    /// from [`NotFound`](Self::NotFound) (the window is alive and keeps its
+    /// geometry, title, focus and place in the stack) and from
+    /// [`NotConnected`](Self::NotConnected) (a socket that never had a peer):
+    /// the resource existed, was deliberately given back, and the caller can
+    /// restore it — the `tairix-window` client library re-attaches on the next
+    /// paint.
+    NotAttached = 45,
 }
 
 impl Errno {
@@ -490,6 +504,7 @@ impl Errno {
             42 => Some(Self::LinkLoop),
             43 => Some(Self::IsADirectory),
             44 => Some(Self::TooManyLinks),
+            45 => Some(Self::NotAttached),
             _ => None,
         }
     }
@@ -542,6 +557,7 @@ impl fmt::Display for Errno {
             Self::LinkLoop => "too many symbolic links in path resolution",
             Self::IsADirectory => "is a directory",
             Self::TooManyLinks => "too many links",
+            Self::NotAttached => "resource released; re-attach and retry",
         };
         f.write_str(message)
     }
@@ -649,11 +665,12 @@ mod tests {
             Errno::LinkLoop,
             Errno::IsADirectory,
             Errno::TooManyLinks,
+            Errno::NotAttached,
         ] {
             assert_eq!(Errno::from_i32(errno.as_i32()), Some(errno));
         }
         assert_eq!(Errno::from_i32(0), None);
-        assert_eq!(Errno::from_i32(45), None);
+        assert_eq!(Errno::from_i32(46), None);
         assert_eq!(Errno::from_i32(-1), None);
     }
 

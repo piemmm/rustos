@@ -111,6 +111,10 @@ pub struct Compositor {
     /// [`pending_redraws`](Self::pending_redraws); the compositor never
     /// speaks the window protocol itself.
     pending_redraws: Vec<WindowId>,
+    /// Windows whose content was released while nobody could see them, for
+    /// the embedder to tell their clients they may let go of their own copies
+    /// ([`take_released_notices`](Self::take_released_notices)).
+    released_notices: Vec<WindowId>,
     background: Color,
     order: ChannelOrder,
     /// The desktop's own layer: the session's wallpaper-and-icons surface,
@@ -246,6 +250,7 @@ impl Compositor {
             frost,
             pressure,
             pending_redraws: Vec::new(),
+            released_notices: Vec::new(),
             background,
             order,
             desktop: None,
@@ -704,6 +709,7 @@ impl Compositor {
             window.release_content();
         }
         self.pending_redraws.clear();
+        self.released_notices.clear();
     }
 
     /// Release window *content* pixels according to the machine's current
@@ -743,10 +749,19 @@ impl Compositor {
     ///   outcome than exhausting memory; the focused window is never
     ///   released because there would be nothing to show in its place.
     ///
-    /// Every released window is queued for a redraw request
-    /// ([`pending_redraws`](Self::pending_redraws)) and its outer bounds
-    /// are marked dirty, so the desktop shows through immediately rather
-    /// than keeping a stale image the compositor no longer has.
+    /// A released **visible** window is queued for a redraw request
+    /// ([`pending_redraws`](Self::pending_redraws)) and its outer bounds are
+    /// marked dirty, so the desktop shows through immediately rather than
+    /// keeping a stale image the compositor no longer has.
+    ///
+    /// A released **hidden** window is not asked at all. Asking one would
+    /// spend the memory the release just recovered — the client presents, and
+    /// the buffer is established again — for pixels nobody can see; the
+    /// release would free nothing and cost a repaint per window, under
+    /// pressure. It is asked by [`set_visible`](Self::set_visible) when it is
+    /// next shown, and meanwhile it is queued in
+    /// [`take_released_notices`](Self::take_released_notices) so the embedder
+    /// can tell its client to let go of its own copies.
     pub fn release_content_under_pressure(&mut self, focused: Option<WindowId>) -> usize {
         let band = self.pressure.sample();
         if band == PressureBand::Normal {
@@ -777,12 +792,38 @@ impl Compositor {
             }
         }
         for (id, exposed) in freed {
-            self.request_redraw(id);
-            if let Some(bounds) = exposed {
-                self.mark_layer(id, bounds);
+            match exposed {
+                // Visible: it must not be left blank, so its pixels are asked
+                // for now and the rectangle it vacated is repainted.
+                Some(bounds) => {
+                    self.request_redraw(id);
+                    self.mark_layer(id, bounds);
+                }
+                // Hidden: asking now would spend the very memory the release
+                // recovered, and nobody would see the result.
+                // `set_visible` asks when the window is next shown, so what
+                // this owes its client is only the news that it may let go of
+                // its own copies too.
+                None => {
+                    if !self.released_notices.contains(&id) {
+                        self.released_notices.push(id);
+                    }
+                }
             }
         }
         released
+    }
+
+    /// Take every window whose content was released while hidden, leaving the
+    /// queue empty.
+    ///
+    /// The embedder tells each one's client that the session let go of its
+    /// frames ([`tairix_abi::window_ipc::WindowEvent::ContentReleased`]) and
+    /// unmaps its side, which is what turns a release into pages the machine
+    /// gets back: the compositor's own copy is one of three, and the other two
+    /// are the client's.
+    pub fn take_released_notices(&mut self) -> Vec<WindowId> {
+        core::mem::take(&mut self.released_notices)
     }
 
     /// Heap bytes every window's retained content pixels currently

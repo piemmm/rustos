@@ -18,6 +18,17 @@ tairix-geometry = { path = "../geometry", version = "=0.0.0" }
 # one wire-to-control translation every windowed app needs lives here rather
 # than as a private copy per app.
 tairix-input = { path = "../input", version = "=0.0.0" }
+# The syscalls an application's own half needs: one `shm_create`d, granted
+# frame region per window. Optional so the server engine the session composes
+# stays free of the runtime.
+tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }
+
+[features]
+default = ["rt"]
+# The client-side frame region (`WindowFrames`), which calls the runtime's
+# shared-memory syscalls. Disable for the engine-only, syscall-free view a
+# host test or the server side takes.
+rt = ["dep:tairix-rt"]
 
 [lints]
 workspace = true

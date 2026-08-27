@@ -539,6 +539,37 @@ impl<T: WindowTransport> WindowClient<T> {
         Ok(())
     }
 
+    /// The bytes of `frames` for window `window_id`, re-attaching the region
+    /// first if the session released it.
+    ///
+    /// An app's paint path calls this instead of touching the region
+    /// directly, so coming back from a release costs it no code: a region the
+    /// app gave up after [`WindowEvent::ContentReleased`] is re-created here
+    /// and handed to the session with an ordinary
+    /// [`resize`](Self::resize) at the same geometry, and the caller then
+    /// paints and presents as it always does. `surface` is the window's
+    /// current mode and `frame_count` its frame count, which the re-attach
+    /// re-states because it is the same request a real resize makes.
+    ///
+    /// `None` when the region could not be re-created or the session refused
+    /// the re-attach: the caller draws nothing this frame and the window shows
+    /// through, exactly as it did while released. It is not an error path an
+    /// app has to report — the next redraw request tries again.
+    #[cfg(feature = "rt")]
+    pub fn frame_pixels<'f>(
+        &mut self,
+        frames: &'f mut crate::frames::WindowFrames,
+        window_id: u64,
+        frame_count: u32,
+        surface: &DisplayMode,
+    ) -> Option<&'f mut [u8]> {
+        if frames.is_released() {
+            let grant = frames.reattach()?;
+            self.resize(window_id, grant, frame_count, surface).ok()?;
+        }
+        frames.pixels()
+    }
+
     /// Retitle window `window_id` — one of the caller's own windows — to
     /// `title`, replacing the title given at creation.
     ///

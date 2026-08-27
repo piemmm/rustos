@@ -144,6 +144,35 @@ The open items, in priority order:
   hand-picked count in front of it; both are gone, because every resource they
   stood for — the frame region, the pty, the shell child — is already bounded
   by something derived and fail-closed that those apps already report.
+- **D59 — the release that was meant to bound many-window memory freed
+  nothing, and reached only one of a window's three copies — DONE.** Found by
+  reading the release ladder while answering "can 32 windows of a 4K frame cost
+  less than a gigabyte". Two halves:
+  - The compositor released a *hidden* window's pixels and, in the same wake,
+    asked its client to present again; the client did, the buffer was
+    established afresh, and the bytes came straight back. At mild pressure —
+    the band where only hidden windows are released — the ladder therefore
+    freed nothing and cost one repaint per hidden window while the machine was
+    short of memory. Every compositor test passed: they call the release
+    directly and none models the session delivering the redraw it queued. The
+    request is now made by `set_visible` when the window is next shown, which
+    that path already did.
+  - A window's pixels exist three times — the app's render target, the frame
+    region, and the compositor's converted copy — and the pages behind the
+    region go only when *both* sides unmap it. The session released only its
+    own, so a hidden 4K window still cost ~64 MiB of the ~96 it had. It now
+    unmaps its side (`WindowServer::release_frames`) and tells the client
+    (`WindowEvent::ContentReleased`, `Errno::NotAttached` on a present against
+    a released window), which lets go of its own two and re-attaches on the
+    paint that follows the next redraw request.
+  Adjacent, deliberate, and **not** changed: the session keeps converting each
+  present into its own copy rather than compositing from the client's buffer.
+  That would halve a *visible* window's cost, but it moves the
+  straight-alpha-to-premultiplied conversion from once per damaged pixel to
+  once per composited pixel per frame and gives up the stable snapshot, which
+  is a speed and integrity trade rather than a win; the zero-copy path for
+  visible windows is the hardware layer scanout `plans/FIX-DISPLAY-ACCELERATION.md`
+  stages.
 - **D56 — the x86_64 page-table walk recovers a table by its raw physical
   address**, so every page table, and the direct map that shares the window
   with them, must live below the user virtual base. A machine with more than
@@ -683,9 +712,10 @@ build but the protocol had to refuse, dying in silence because a graphical
 elevation's `stderr` reaches no one (fixed), and D52 is an x86_64 cross-CPU
 shootdown protocol defect that only became reachable once a production caller
 existed — the tree is safe by the current caller set, not by the protocol
-(open), and D57/D58 were a *policy* pair rather than a coding slip — a
-pressure model whose two halves disagreed, and three counts standing in for
-the resource they were meant to bound (both fixed). Do not collapse the open
+(open), and D57/D58/D59 were a *policy* group rather than coding slips — a
+pressure model whose two halves disagreed, three counts standing in for the
+resource they were meant to bound, and a release that undid itself one line
+later (all fixed). Do not collapse the open
 items into one change; land each on its own whole-project-green gate (§7).
 
 ## Coupling to be aware of

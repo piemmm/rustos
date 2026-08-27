@@ -407,7 +407,11 @@ struct WindowRecord<R> {
     surface: DisplayMode,
     frame_count: u32,
     frame_len: usize,
-    region: R,
+    /// The mapped client frame region, or `None` while released: the session
+    /// unmaps a hidden window's frames under memory pressure so the physical
+    /// pages can actually go, which needs both sides to let go. The geometry
+    /// stays, so the window still lays out, hit-tests, and re-attaches.
+    region: Option<R>,
     /// A `PickFile` was accepted and neither conclusion
     /// (`FilePicked`/`PickCancelled`) has been delivered yet. At most one
     /// pick is pending per window; the engine sets it on acceptance and
@@ -424,6 +428,9 @@ impl<R> WindowRecord<R> {
     /// Bytes of client frame region this window holds mapped in the
     /// session: every frame of it, which is what the mapping validated.
     fn mapped_bytes(&self) -> u64 {
+        if self.region.is_none() {
+            return 0;
+        }
         (self.frame_len as u64).saturating_mul(u64::from(self.frame_count))
     }
 }
@@ -722,7 +729,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 surface: spec.surface,
                 frame_count: spec.frame_count,
                 frame_len,
-                region,
+                region: Some(region),
                 pick_pending: false,
                 parent: None,
             },
@@ -785,7 +792,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 surface: spec.surface,
                 frame_count: spec.frame_count,
                 frame_len,
-                region,
+                region: Some(region),
                 pick_pending: false,
                 parent: Some(spec.parent_window_id),
             },
@@ -832,7 +839,7 @@ impl<M: ShmMapper> WindowServer<M> {
             record.surface = spec.surface;
             record.frame_count = spec.frame_count;
             record.frame_len = frame_len;
-            record.region = region;
+            record.region = Some(region);
         }
         Ok(())
     }
@@ -853,8 +860,11 @@ impl<M: ShmMapper> WindowServer<M> {
         damage
             .validate_in(&record.surface)
             .map_err(|_| Errno::LengthOutOfRange)?;
+        // A window whose frames the session released holds no pixels to
+        // present. Refusing typed is what lets a client re-attach on its next
+        // paint instead of writing into a mapping neither side has.
+        let bytes = record.region.as_ref().ok_or(Errno::NotAttached)?.bytes();
         let base = frame_index as usize * record.frame_len;
-        let bytes = record.region.bytes();
         // The region was validated to hold every frame at create time; a
         // region that shrank underneath us is a fault, not a clamp.
         let frame = bytes
@@ -973,6 +983,32 @@ impl<M: ShmMapper> WindowServer<M> {
             self.windows.remove(&popup);
             host.window_closed(popup);
         }
+    }
+
+    /// Unmap window `window_id`'s frame region, keeping the window itself:
+    /// the bytes given back, or zero if it holds none (or the id is unknown).
+    ///
+    /// The session calls this for a window whose content it released while
+    /// nobody could see it, and tells the client the same
+    /// ([`WindowEvent::ContentReleased`]). Both sides have to let go for the
+    /// physical pages to be freed at all — a mapping either side keeps holds
+    /// every page of them — so releasing here without telling the client
+    /// frees only address space, and telling the client without releasing
+    /// here frees nothing.
+    ///
+    /// Everything else about the window survives: its geometry, owner, event
+    /// route, title, and place in the stack. The client re-attaches a fresh
+    /// region with an ordinary [`WindowRequest::Resize`], which is what its
+    /// next paint does; until then a present is refused
+    /// ([`Errno::NotAttached`]) rather than reading a mapping nobody has.
+    pub fn release_frames(&mut self, window_id: u64) -> u64 {
+        let Some(record) = self.windows.get_mut(&window_id) else {
+            return 0;
+        };
+        let bytes = record.mapped_bytes();
+        // Dropping the region is the unmap: the mapper owns that side.
+        record.region = None;
+        bytes
     }
 
     /// Tear down every window `client` owns: the session calls this when

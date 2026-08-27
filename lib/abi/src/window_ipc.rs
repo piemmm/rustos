@@ -1577,6 +1577,9 @@ const EV_APP_BAR_DEFAULT: u16 = 13;
 /// Wire kind of [`WindowEvent::AppBarMenu`].
 const EV_APP_BAR_MENU: u16 = 14;
 
+/// Wire event discriminant of [`WindowEvent::ContentReleased`].
+const EV_CONTENT_RELEASED: u16 = 15;
+
 /// Wire pointer-action discriminant of [`PointerAction::Moved`].
 const PTR_MOVED: u16 = 0;
 /// Wire pointer-action discriminant of [`PointerAction::Pressed`].
@@ -1723,6 +1726,27 @@ pub enum WindowEvent {
         /// The window whose content must be presented again.
         window_id: u64,
     },
+    /// The session released this window's pixels *and* unmapped the frame
+    /// region they were presented from, because nobody can currently see the
+    /// window and the machine is short of memory.
+    ///
+    /// Unlike [`RedrawRequested`](Self::RedrawRequested) this is not a request
+    /// to draw — the window is not visible, and drawing it now would spend the
+    /// very memory the release recovered. It is permission to let go: the app
+    /// may release its own frame region and whatever it renders from, and will
+    /// be sent a `RedrawRequested` before the window is seen again. That is
+    /// what makes a hidden window cost nothing rather than two copies of its
+    /// pixels — on a 4K display, sixty megabytes each.
+    ///
+    /// A client that ignores it keeps its own copies and its window keeps
+    /// working: the next present re-attaches a region as any resize does. What
+    /// it must not do is assume the region it holds is still mapped by the
+    /// session — a present against a released window is refused, typed, and the
+    /// `tairix-window` client library re-attaches on the next paint.
+    ContentReleased {
+        /// The window whose frame region the session let go.
+        window_id: u64,
+    },
     /// The scroll wheel turned over the window while the window owns its
     /// own content scrolling (it exposes no window-manager root viewport,
     /// so the session forwards the ticks to the app instead of consuming
@@ -1802,6 +1826,7 @@ impl WindowEvent {
             | Self::Minimized { window_id }
             | Self::Resized { window_id, .. }
             | Self::RedrawRequested { window_id }
+            | Self::ContentReleased { window_id }
             | Self::Scrolled { window_id, .. }
             | Self::DesktopChanged { window_id, .. } => Some(window_id),
             Self::AppBarDefault | Self::AppBarMenu { .. } => None,
@@ -1872,6 +1897,9 @@ impl WindowEvent {
             }
             Self::RedrawRequested { .. } => {
                 put_u16(&mut out, 6, EV_REDRAW_REQUESTED);
+            }
+            Self::ContentReleased { .. } => {
+                put_u16(&mut out, 6, EV_CONTENT_RELEASED);
             }
             Self::AppBarDefault => {
                 put_u16(&mut out, 6, EV_APP_BAR_DEFAULT);
@@ -2043,6 +2071,7 @@ fn read_id_only_event(
         EV_PICK_CANCELLED => WindowEvent::PickCancelled { window_id },
         EV_MINIMIZED => WindowEvent::Minimized { window_id },
         EV_REDRAW_REQUESTED => WindowEvent::RedrawRequested { window_id },
+        EV_CONTENT_RELEASED => WindowEvent::ContentReleased { window_id },
         _ => return None,
     };
     Some(event_reserved_zero(bytes, 16).map(|()| event))
@@ -3067,11 +3096,25 @@ mod tests {
                 dy: -5,
             },
             WindowEvent::RedrawRequested { window_id: 4 },
+            WindowEvent::ContentReleased { window_id: 4 },
         ] {
             let bytes = event.to_le_bytes();
             assert_eq!(WindowEvent::from_bytes(&bytes), Ok(event));
             assert_eq!(event.window_id(), Some(4));
         }
+    }
+
+    /// The two release-related events are distinct on the wire, because they
+    /// ask for opposite things: one to draw, one to let go.
+    #[test]
+    fn a_release_is_not_a_redraw_request() {
+        let released = WindowEvent::ContentReleased { window_id: 9 };
+        let redraw = WindowEvent::RedrawRequested { window_id: 9 };
+        assert_ne!(released.to_le_bytes(), redraw.to_le_bytes());
+        assert_eq!(
+            WindowEvent::from_bytes(&released.to_le_bytes()),
+            Ok(released)
+        );
     }
 
     #[test]

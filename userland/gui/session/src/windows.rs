@@ -2160,13 +2160,29 @@ mod tests {
         assert!(held(&compositor, background));
         assert!(held(&compositor, hidden));
 
-        // Mild: only what nobody is looking at.
+        // Mild: only what nobody is looking at — and it is *not* asked to
+        // present again. Asking would have the client establish the buffer
+        // the release just freed, for pixels nobody can see: the release
+        // would free nothing and cost a repaint per hidden window, under
+        // pressure. What it gets instead is the news that it may let go of
+        // its own two copies as well.
         PRESSURE.report(PressureBand::Mild);
         assert!(shell.trim_caches(&mut compositor) > 0);
         assert!(held(&compositor, focused));
         assert!(held(&compositor, background));
         assert!(!held(&compositor, hidden));
+        assert_eq!(
+            compositor.pending_redraws(),
+            alloc::vec![],
+            "a window nobody can see is not asked to present"
+        );
+        assert_eq!(compositor.take_released_notices(), alloc::vec![hidden]);
+
+        // Showing it again is what asks: the window has nothing to draw, so
+        // the request goes out at the moment it can be seen.
+        assert!(compositor.set_visible(hidden, true));
         assert_eq!(compositor.pending_redraws(), alloc::vec![hidden]);
+        assert!(compositor.set_visible(hidden, false));
 
         // Critical: the background window too, never the focused one, and
         // never the bar the session paints itself.
@@ -2181,7 +2197,16 @@ mod tests {
             held(&compositor, bar),
             "no client would answer a redraw for the session's own bar"
         );
-        assert_eq!(compositor.pending_redraws(), alloc::vec![background]);
+        assert_eq!(
+            compositor.pending_redraws(),
+            alloc::vec![background],
+            "a visible window must not be left blank"
+        );
+        assert_eq!(
+            compositor.take_released_notices(),
+            alloc::vec![],
+            "a window that was asked to present is not told to let go"
+        );
         PRESSURE.report(PressureBand::Normal);
     }
 }

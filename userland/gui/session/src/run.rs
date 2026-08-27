@@ -2348,11 +2348,24 @@ mod program {
                 // already acted on is almost free.
                 //
                 // Window *content* is the one thing the desktop cannot
-                // re-render itself, so every window whose pixels the same
-                // trim released is asked to present again straight away.
+                // re-render itself, so a *visible* window whose pixels the
+                // same trim released is asked to present again straight away.
+                // A hidden one is told it may let go of its own copies
+                // instead, and asked when it is next shown: presenting it now
+                // would spend the memory the release recovered on pixels
+                // nobody can see.
                 if tairix_procinfo::pressure::refresh() {
                     let _ = shell.trim_caches(&mut compositor);
                     tairix_font::trim_glyph_cache();
+                    deliver_released_notices(
+                        &mut server,
+                        &mut sink,
+                        &mut shell,
+                        &mut compositor,
+                        &mut windows,
+                        &mut picker,
+                        &mut apps.service,
+                    );
                     // A band that refused to keep a decode may now allow it,
                     // and a band that has just tightened will refuse it once
                     // more and be recorded again. Either way the decision is
@@ -5090,6 +5103,45 @@ mod program {
                 picker,
                 apps,
                 &WindowEvent::RedrawRequested { window_id },
+            );
+        }
+    }
+
+    /// Tell every client whose window content was released while nobody could
+    /// see it that the session has let go of its frames, unmapping this side
+    /// first.
+    ///
+    /// Both sides have to let go for the pages to be freed: the compositor's
+    /// copy of a window's pixels is one of three, and the other two — the
+    /// app's render target and the frame region it presents from — are the
+    /// client's. Unmapping here before the event goes out means any present
+    /// that crosses it is refused typed rather than writing into a mapping
+    /// that is about to vanish; the client library re-attaches on the paint
+    /// that follows the redraw request the window's next showing sends.
+    #[allow(clippy::too_many_arguments)] // The delivery path's whole mutable state, threaded explicitly.
+    fn deliver_released_notices<S: DirectorySource, F: FnMut() -> S>(
+        server: &mut WindowServer<RtShmMapper>,
+        sink: &mut RtEventSink,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        windows: &mut SessionWindows,
+        picker: &mut SessionPicker<S, F>,
+        apps: &mut dyn AppBarBridge,
+    ) {
+        for wm in compositor.take_released_notices() {
+            let Some(window_id) = windows.ipc_id(wm) else {
+                continue;
+            };
+            let _ = server.release_frames(window_id);
+            deliver(
+                server,
+                sink,
+                shell,
+                compositor,
+                windows,
+                picker,
+                apps,
+                &WindowEvent::ContentReleased { window_id },
             );
         }
     }

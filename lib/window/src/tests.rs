@@ -941,6 +941,84 @@ fn a_bigger_window_spends_more_of_the_same_budget() {
     );
 }
 
+/// Releasing a window's frames is what makes a hidden window cost nothing:
+/// the session unmaps its side, the client unmaps its own, and the pages go
+/// because both did. Everything else about the window survives, and the next
+/// paint re-attaches.
+#[test]
+fn released_frames_refuse_a_present_and_come_back_on_a_resize() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "w").expect("window");
+    client
+        .present(window, 0, DamageRect::full(&SURFACE))
+        .expect("presents");
+
+    // The session's half of the release.
+    let released = loopback.borrow_mut().server.release_frames(window);
+    assert_eq!(released, FRAME_LEN as u64, "the mapped bytes are reported");
+    assert_eq!(
+        loopback.borrow().server.window_count(),
+        1,
+        "the window itself survives its pixels"
+    );
+    assert_eq!(
+        client.present(window, 0, DamageRect::full(&SURFACE)),
+        Err(Errno::NotAttached),
+        "a present with nothing attached is refused, not guessed at"
+    );
+    // The client's own next paint re-attaches with an ordinary resize.
+    client
+        .resize(window, 8, 1, &SURFACE)
+        .expect("a released window re-attaches");
+    client
+        .present(window, 0, DamageRect::full(&SURFACE))
+        .expect("and presents again");
+}
+
+/// A released window holds no frames, so its bytes are free for another
+/// window: what the client may hold is what it is actually holding.
+#[test]
+fn released_frames_stop_counting_against_the_client_budget() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut opened = Vec::new();
+    for _ in 0..FRAMES_PER_CLIENT {
+        opened.push(create_id(&mut client, 7, EVENTS_A, 1, "w").expect("within the budget"));
+    }
+    assert_eq!(
+        create_id(&mut client, 7, EVENTS_A, 1, "w"),
+        Err(Errno::NoSpace),
+        "the budget is full"
+    );
+    let released = loopback.borrow_mut().server.release_frames(opened[0]);
+    assert_eq!(released, FRAME_LEN as u64);
+    create_id(&mut client, 7, EVENTS_A, 1, "w").expect("the released window's bytes are free");
+}
+
+/// Releasing twice, or releasing a window that never existed, changes
+/// nothing: the session may report a release the client already handled.
+#[test]
+fn releasing_frames_is_idempotent_and_total() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "w").expect("window");
+    assert_eq!(
+        loopback.borrow_mut().server.release_frames(window),
+        FRAME_LEN as u64
+    );
+    assert_eq!(
+        loopback.borrow_mut().server.release_frames(window),
+        0,
+        "a second release has nothing left to give back"
+    );
+    assert_eq!(
+        loopback.borrow_mut().server.release_frames(9999),
+        0,
+        "an unknown window is not an error"
+    );
+}
+
 /// A resize is the other way a client grows what it holds mapped, and the
 /// one a per-window count is blind to.
 #[test]

@@ -102,7 +102,7 @@ mod program {
     use tairix_users::DEFAULT_SHELL;
     use tairix_window::{
         damage_in, event_endpoint_for, key_input_event, pointer_input_events, Desktop, PopupSpec,
-        WindowClient, WindowTransport, EVENT_MAILBOX_CAPACITY,
+        WindowClient, WindowFrames, WindowTransport, EVENT_MAILBOX_CAPACITY,
     };
 
     /// Exit code when the event mailbox or a wait-set member could not be
@@ -180,43 +180,23 @@ mod program {
     /// still mapped so the current surface stays valid (never a crash or a
     /// blank window).
     ///
-    /// The fresh region is created and granted first and adopted only once
-    /// [`WindowClient::resize`] succeeds; the old mapping is released only
-    /// after adoption, and a refused resize releases the freshly-allocated
-    /// region so nothing leaks.
+    /// The fresh region is created and granted first and returned only once
+    /// [`WindowClient::resize`] has accepted it, so the caller's old region is
+    /// dropped — and unmapped — by adopting the new one, while every refusal
+    /// drops the fresh region here and leaves the window on its old geometry.
     fn resize_frames(
         client: &mut WindowClient<RtWindowTransport>,
         window: u64,
-        old_base: usize,
-        old_len: usize,
         new_mode: &DisplayMode,
-    ) -> Option<(usize, usize)> {
+    ) -> Option<WindowFrames> {
         let new_len = (new_mode.stride_bytes as usize)
             .checked_mul(new_mode.height_px as usize)?
             .checked_mul(FRAME_COUNT as usize)?;
-        let mut region_id: u64 = 0;
-        let new_base = tairix_rt::shm_create(new_len, &mut region_id);
-        if new_base < 0 {
-            return None;
-        }
-        let Ok(new_base) = usize::try_from(new_base) else {
-            return None;
-        };
-        let grant = tairix_rt::shm_grant(region_id, WINDOW_ENDPOINT);
-        if grant < 1 {
-            let _ = tairix_rt::shm_unmap(new_base as u64, new_len);
-            return None;
-        }
-        #[allow(clippy::cast_sign_loss)] // `grant >= 1` checked above; it is a kernel handle.
-        let accepted = client
-            .resize(window, grant as u64, FRAME_COUNT, new_mode)
-            .is_ok();
-        if !accepted {
-            let _ = tairix_rt::shm_unmap(new_base as u64, new_len);
-            return None;
-        }
-        let _ = tairix_rt::shm_unmap(old_base as u64, old_len);
-        Some((new_base, new_len))
+        let frames = WindowFrames::create(new_len)?;
+        client
+            .resize(window, frames.grant()?, FRAME_COUNT, new_mode)
+            .ok()?;
+        Some(frames)
     }
 
     /// State the abnormal-exit reason on `stderr` (fail loud: an exit
@@ -351,10 +331,8 @@ mod program {
         content: Content,
         /// The popup's window-channel id, which its events arrive under.
         window: u64,
-        /// Base address of the popup's own shared frame region.
-        base: usize,
-        /// Length of that region in bytes.
-        len: usize,
+        /// The popup's own shared frame region.
+        frames: WindowFrames,
         /// The geometry the region is shaped as; also the popup-local
         /// viewport the overlay is laid out and hit-tested in.
         mode: DisplayMode,
@@ -379,13 +357,9 @@ mod program {
             Rect::new(0, 0, self.mode.width_px, self.mode.height_px)
         }
 
-        /// Close the popup and release its frame region.
-        ///
-        /// Consuming the overlay is what makes `present_overlay`'s raw frame
-        /// access sound: no one can hold an overlay whose region is gone.
+        /// Close the popup; its frame region is unmapped by its own drop.
         fn close(self, client: &mut WindowClient<RtWindowTransport>) {
             let _ = client.close(self.window);
-            let _ = tairix_rt::shm_unmap(self.base as u64, self.len);
         }
     }
 
@@ -406,7 +380,7 @@ mod program {
         event_endpoint: u64,
         mode: &DisplayMode,
         offset: (i32, i32),
-    ) -> Option<(u64, usize, usize)> {
+    ) -> Option<(u64, WindowFrames)> {
         let Some(len) = (mode.stride_bytes as usize)
             .checked_mul(mode.height_px as usize)
             .and_then(|frame| frame.checked_mul(FRAME_COUNT as usize))
@@ -414,42 +388,33 @@ mod program {
             report("popup frame region larger than the address width");
             return None;
         };
-        let mut region_id: u64 = 0;
-        let base = tairix_rt::shm_create(len, &mut region_id);
-        if base < 0 {
+        let Some(frames) = WindowFrames::create(len) else {
             report("popup frame region refused");
             return None;
-        }
-        let Ok(base) = usize::try_from(base) else {
-            report("popup frame region base outside the address width");
-            return None;
         };
-        let grant = tairix_rt::shm_grant(region_id, WINDOW_ENDPOINT);
-        if grant < 1 {
-            let _ = tairix_rt::shm_unmap(base as u64, len);
+        let Some(grant) = frames.grant() else {
             report("popup frame region grant refused");
             return None;
-        }
-        #[allow(clippy::cast_sign_loss)] // `grant >= 1` checked above; it is a kernel handle.
+        };
         let created = client.create_popup(&PopupSpec {
             parent_window_id: parent,
-            shm_handle: grant as u64,
+            shm_handle: grant,
             event_endpoint,
             frame_count: FRAME_COUNT,
             surface: *mode,
             offset_x: offset.0,
             offset_y: offset.1,
         });
+        // Every refusal below drops `frames`, which unmaps it, so no path
+        // leaves a popup region pinned.
         match created {
-            Ok((window, replied)) if replied == server => Some((window, base, len)),
+            Ok((window, replied)) if replied == server => Some((window, frames)),
             Ok((window, _)) => {
                 let _ = client.close(window);
-                let _ = tairix_rt::shm_unmap(base as u64, len);
                 report("popup reply came from another sender; not shown");
                 None
             }
             Err(err) => {
-                let _ = tairix_rt::shm_unmap(base as u64, len);
                 report(&alloc::format!("popup refused ({err}); not shown"));
                 None
             }
@@ -529,17 +494,15 @@ mod program {
             return None;
         }
         let mode = mode_for(extent.0, extent.1);
-        let (window, base, len) =
-            open_popup(client, parent, server, event_endpoint, &mode, offset)?;
-        let overlay = Overlay {
+        let (window, frames) = open_popup(client, parent, server, event_endpoint, &mode, offset)?;
+        let mut overlay = Overlay {
             content,
             window,
-            base,
-            len,
+            frames,
             mode,
             dismissed: false,
         };
-        if present_overlay(&overlay, theme, scale, client).is_err() {
+        if present_overlay(&mut overlay, theme, scale, client).is_err() {
             report("overlay present refused; not shown");
             overlay.close(client);
             return None;
@@ -553,7 +516,7 @@ mod program {
     /// its popup (the settings sheet's centred panel) lets the terminal show
     /// through around it exactly as it did when the sheet was drawn in-window.
     fn present_overlay(
-        overlay: &Overlay,
+        overlay: &mut Overlay,
         theme: &Theme,
         scale: Scale,
         client: &mut WindowClient<RtWindowTransport>,
@@ -565,13 +528,14 @@ mod program {
             Content::Menu(menu) => menu.render(&mut surface, viewport, scale, theme),
             Content::Sheet(sheet) => sheet.render(&mut surface, viewport, scale, theme),
         }
-        // SAFETY: `open_popup` mapped `overlay.len` zeroed read/write bytes
-        // at `overlay.base` and nothing has unmapped or aliased them since —
-        // the region is released only by `close_popup`, which consumes the
-        // overlay. The protocol serialises access: this app is parked in the
-        // present call below while the session reads the same frame.
-        let frame =
-            unsafe { core::slice::from_raw_parts_mut(overlay.base as *mut u8, overlay.len) };
+        let frame = client
+            .frame_pixels(
+                &mut overlay.frames,
+                overlay.window,
+                FRAME_COUNT,
+                &overlay.mode,
+            )
+            .ok_or(Errno::NotAttached)?;
         write_frame(&surface, frame, &overlay.mode, viewport)?;
         client.present(overlay.window, 0, DamageRect::full(&overlay.mode))
     }
@@ -725,10 +689,9 @@ mod program {
         look: Look,
         /// The geometry its frame region is shaped as.
         mode: DisplayMode,
-        /// Base address of its shared frame region.
-        base: usize,
-        /// Length of that region in bytes.
-        len: usize,
+        /// Its shared frame region, released when the session releases its
+        /// side and re-attached by the next present.
+        frames: WindowFrames,
         /// Its one open overlay, if any.
         overlay: Option<Overlay>,
     }
@@ -746,15 +709,13 @@ mod program {
 
         /// Bring this window's picture up to date and present what changed.
         ///
-        /// SAFETY: `open_window` (or a `resize_frames` the session accepted)
-        /// mapped `self.len` zeroed read/write bytes at `self.base`, and
-        /// nothing unmaps or aliases them while the window lives — the region
-        /// is released only by `close`, which consumes the window. The
-        /// protocol serialises access: this process is parked in the present
-        /// call below while the session reads the same frame.
+        /// A region the session released while the window was hidden is
+        /// re-attached first, so this paints into a live one.
         fn present(&mut self, client: &mut WindowClient<RtWindowTransport>) -> Result<(), Errno> {
-            let (mode, window, base, len) = (self.mode, self.window, self.base, self.len);
-            let frame = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, len) };
+            let (mode, window) = (self.mode, self.window);
+            let frame = client
+                .frame_pixels(&mut self.frames, window, FRAME_COUNT, &mode)
+                .ok_or(Errno::NotAttached)?;
             present_frame(
                 &self.terminal,
                 &mut self.look,
@@ -766,7 +727,8 @@ mod program {
             )
         }
 
-        /// Close this window, its overlay, its frame region, and its shell.
+        /// Close this window, its overlay, and its shell; the frame regions
+        /// are unmapped by their own drops.
         ///
         /// The pty master is closed here rather than left to process exit,
         /// because a process that keeps running must not hold a dead
@@ -794,7 +756,6 @@ mod program {
                 },
                 self.child_token(),
             );
-            let _ = tairix_rt::shm_unmap(self.base as u64, self.len);
             let _ = tairix_rt::fs_close(self.pty_master);
         }
     }
@@ -856,18 +817,14 @@ mod program {
             report("frame region larger than the address width; no window opened");
             return None;
         };
-        let mut region_id: u64 = 0;
-        let base = tairix_rt::shm_create(total, &mut region_id);
-        let Ok(base) = usize::try_from(base) else {
+        let Some(frames) = WindowFrames::create(total) else {
             report("shared frame region refused; no window opened");
             return None;
         };
-        let grant = tairix_rt::shm_grant(region_id, WINDOW_ENDPOINT);
-        if grant < 1 {
-            let _ = tairix_rt::shm_unmap(base as u64, total);
+        let Some(grant) = frames.grant() else {
             report("frame region grant refused; no window opened");
             return None;
-        }
+        };
 
         // The desktop is asked *before* a pty is created or a shell spawned,
         // because the session can refuse (it bounds the windows one client
@@ -882,7 +839,7 @@ mod program {
         let (min_width_px, min_height_px) = grid_size(1, 1, look.font);
         #[allow(clippy::cast_sign_loss)] // `grant >= 1` checked above; it is a kernel handle.
         let created = ctx.client.create(
-            grant as u64,
+            grant,
             ctx.event_endpoint,
             FRAME_COUNT,
             &mode,
@@ -890,13 +847,12 @@ mod program {
             win_sizing(min_width_px, min_height_px),
         );
         let Ok((window, server)) = created else {
-            let _ = tairix_rt::shm_unmap(base as u64, total);
+            // `frames` drops here, which unmaps it.
             report("desktop session refused the window");
             return None;
         };
         let close_window = |client: &mut WindowClient<RtWindowTransport>| {
             let _ = client.close(window);
-            let _ = tairix_rt::shm_unmap(base as u64, total);
         };
 
         // The pty is created at the grid the window will actually show, so
@@ -938,8 +894,7 @@ mod program {
             screen,
             look,
             mode,
-            base,
-            len: total,
+            frames,
             overlay: None,
         };
         let members = [
@@ -1509,7 +1464,7 @@ mod program {
                 // Only the overlay's own pixels moved, so the terminal's
                 // window is left exactly as it is.
                 let scale = ctx.desktop.scale();
-                if let Some(open) = windows[index].overlay.as_ref() {
+                if let Some(open) = windows[index].overlay.as_mut() {
                     if present_overlay(open, ctx.themes.active(), scale, client).is_err() {
                         return Applied::Lost("overlay present refused");
                     }
@@ -1564,7 +1519,7 @@ mod program {
                 }
                 let scale = ctx.desktop.scale();
                 if let Some(index) = index(windows, window) {
-                    if let Some(open) = windows[index].overlay.as_ref() {
+                    if let Some(open) = windows[index].overlay.as_mut() {
                         if present_overlay(open, ctx.themes.active(), scale, client).is_err() {
                             return Applied::Lost("overlay present refused");
                         }
@@ -1601,11 +1556,9 @@ mod program {
                     return Applied::Running;
                 }
                 let new_mode = mode_for(snapped_w, snapped_h);
-                if let Some((base, len)) =
-                    resize_frames(client, open.window, open.base, open.len, &new_mode)
-                {
-                    open.base = base;
-                    open.len = len;
+                if let Some(frames) = resize_frames(client, open.window, &new_mode) {
+                    // Adopting drops the old region, which unmaps it.
+                    open.frames = frames;
                     open.mode = new_mode;
                     let (cols, rows) = grid_dims(snapped_w, snapped_h, open.look.font);
                     let _ = open.terminal.resize(cols, rows);
@@ -2073,6 +2026,18 @@ mod program {
                         }
                         WindowEvent::RedrawRequested { .. } => {
                             return EventOutcome::Repaint { window }
+                        }
+                        // Nobody can see this window, so the session gave its
+                        // copy of the pixels back and unmapped the region. Let
+                        // go of this side too — the pages go only when both do
+                        // — and paint nothing: the redraw request that follows
+                        // the window being shown again re-attaches a fresh
+                        // region and fills it. A popup is never hidden, so
+                        // only the top-level window's region is released here.
+                        WindowEvent::ContentReleased { .. } => {
+                            if !for_popup {
+                                open.frames.release();
+                            }
                         }
                         // The window manager resized the window (a settled
                         // drag-resize, or a maximize/restore): hand the new

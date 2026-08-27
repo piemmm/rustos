@@ -6268,17 +6268,24 @@ fn each_release_queues_exactly_one_redraw_request() {
 
     PRESSURE.report(PressureBand::Critical);
     assert!(c.release_content_under_pressure(None) > 0);
-    let mut queued = c.pending_redraws();
-    queued.sort_unstable_by_key(|id| id.0);
-    assert_eq!(queued, alloc::vec![visible, hidden]);
+    // The visible one is asked, because it must not be left blank. The hidden
+    // one is not: it is queued as a released notice instead, and asked when it
+    // is next shown.
+    assert_eq!(c.pending_redraws(), alloc::vec![visible]);
     assert!(
         c.pending_redraws().is_empty(),
         "draining must leave the queue empty"
+    );
+    assert_eq!(c.take_released_notices(), alloc::vec![hidden]);
+    assert!(
+        c.take_released_notices().is_empty(),
+        "draining must leave the notices empty"
     );
 
     // A second release with nothing left to give back asks for nothing.
     assert_eq!(c.release_content_under_pressure(None), 0);
     assert!(c.pending_redraws().is_empty());
+    assert!(c.take_released_notices().is_empty());
 
     // Showing a window whose pixels are gone asks again, once.
     assert!(c.set_visible(hidden, true));

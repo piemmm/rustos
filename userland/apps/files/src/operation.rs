@@ -74,7 +74,8 @@ pub fn operation_control(
         // Nothing else reaches the running operation. A redraw request needs no
         // arm of its own: the modal loop that polls this re-presents the
         // progress panel in full on every pass, so the released pixels are back
-        // on the next step. A desktop change is already adopted by the caller
+        // on the next step — and a released frame region is re-attached by the
+        // same present. A desktop change is already adopted by the caller
         // before this is reached. The alternate close means "leave this folder",
         // which would move the listing the running operation is walking, so it
         // is ignored while the panel is up rather than deferred. An icon-bar
@@ -89,6 +90,7 @@ pub fn operation_control(
         | WindowEvent::Focus { .. }
         | WindowEvent::Minimized { .. }
         | WindowEvent::RedrawRequested { .. }
+        | WindowEvent::ContentReleased { .. }
         | WindowEvent::Resized { .. }
         | WindowEvent::Scrolled { .. }
         | WindowEvent::FilePicked { .. }

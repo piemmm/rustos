@@ -51,8 +51,8 @@ mod program {
     use tairix_rt::io::{Stderr, Write};
     use tairix_theme::{Theme, ThemeRegistry};
     use tairix_window::{
-        key_input_event, Desktop, EventSource, WindowClient, WindowEvents, WindowSizing,
-        WindowTransport,
+        key_input_event, Desktop, EventSource, WindowClient, WindowEvents, WindowFrames,
+        WindowSizing, WindowTransport,
     };
 
     /// Exit code when the shared frame region could not be created or granted
@@ -243,59 +243,24 @@ mod program {
         (mode.stride_bytes as usize) * (mode.height_px as usize) * FRAME_COUNT as usize
     }
 
-    /// Create a `total`-byte frame region and grant it to the window endpoint,
-    /// returning its mapped base and the endpoint-directed grant handle. Fails
-    /// closed to `None` on any refusal, unmapping a region that mapped but
-    /// could not be granted so a refused allocation never leaves pinned memory
-    /// behind.
-    fn allocate_frames(total: usize) -> Option<(usize, u64)> {
-        let mut region_id: u64 = 0;
-        let base = tairix_rt::shm_create(total, &mut region_id);
-        if base < 0 {
-            return None;
-        }
-        let base = usize::try_from(base).ok()?;
-        let grant = tairix_rt::shm_grant(region_id, WINDOW_ENDPOINT);
-        if grant < 1 {
-            let _ = tairix_rt::shm_unmap(base as u64, total);
-            return None;
-        }
-        #[allow(clippy::cast_sign_loss)] // `grant >= 1` checked above; it is a kernel handle.
-        Some((base, grant as u64))
-    }
-
-    /// The live frame region: the once-granted shared surface the app paints
-    /// into.
-    struct Frames {
-        base: usize,
-        len: usize,
-    }
-
-    impl Frames {
-        /// The region as a mutable byte slice.
-        fn as_mut(&mut self) -> &mut [u8] {
-            // SAFETY: the kernel mapped exactly `len` zeroed bytes read/write
-            // at `base` (`shm_create` maps the length it was asked for) and
-            // the mapping stays live for the life of the process — this app
-            // never resizes, so the pair can never go stale. Nothing else
-            // aliases it, and the window protocol serialises access (the app
-            // is parked in `present` while the session reads).
-            unsafe { core::slice::from_raw_parts_mut(self.base as *mut u8, self.len) }
-        }
-    }
-
     /// Paint the editor and present the whole frame.
+    ///
+    /// The pixels come through the client, which re-attaches the region first
+    /// if the session released it while the window was hidden.
     fn repaint<T: WindowTransport>(
         editor: &Editor,
         theme: &Theme,
         scale: Scale,
         client: &mut WindowClient<T>,
         window: u64,
-        frames: &mut Frames,
+        frames: &mut WindowFrames,
         mode: &DisplayMode,
     ) -> Result<(), Errno> {
         let surface = view::render(editor, scale, theme).ok_or(Errno::NoSpace)?;
-        present_surface(&surface, client, window, frames.as_mut(), mode)
+        let pixels = client
+            .frame_pixels(frames, window, FRAME_COUNT, mode)
+            .ok_or(Errno::NotAttached)?;
+        present_surface(&surface, client, window, pixels, mode)
     }
 
     /// Copy `surface` into the shared window frame and present it whole.
@@ -420,12 +385,11 @@ mod program {
         // --- The shared window surface, shaped at the desktop's own scale.
         let bounds = view::window_bounds(desktop.scale());
         let mode = mode_for(bounds.width, bounds.height);
-        let Some((base, grant)) = allocate_frames(region_bytes(&mode)) else {
+        let Some(mut frames) = WindowFrames::create(region_bytes(&mode)) else {
             return fail(EXIT_NO_FRAMES, "shared frame region refused");
         };
-        let mut frames = Frames {
-            base,
-            len: region_bytes(&mode),
+        let Some(grant) = frames.grant() else {
+            return fail(EXIT_NO_FRAMES, "shared frame region refused");
         };
 
         // --- The event mailbox the app parks on.
@@ -519,6 +483,15 @@ mod program {
                 }
                 // The session asked the window to close: a clean end.
                 WindowEvent::CloseRequested { .. } => return 0,
+                // Nobody can see the window, so the session gave its copy of
+                // the pixels back and unmapped the region. Let go of this side
+                // too — the pages go only when both do — and paint nothing
+                // until the redraw request that follows the window being shown
+                // again, which re-attaches a fresh region.
+                WindowEvent::ContentReleased { .. } => {
+                    frames.release();
+                    continue;
+                }
                 _ => {}
             }
 

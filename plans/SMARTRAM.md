@@ -422,6 +422,22 @@ what the user can currently see and asked back through the window protocol's
 redraw handshake (SMART5). Recently-closed-window snapshots are not retained
 at all.
 
+**A window's pixels exist three times, and a release must reach all three.**
+The app's render target, the frame region it presents from, and the
+compositor's converted copy. The pages behind the region are freed only when
+the app and the session have both unmapped it, so the session unmaps its side
+and tells the client (`WindowEvent::ContentReleased`), which releases its own
+two and re-attaches on the paint that follows the next redraw request. A
+release the session keeps to itself frees a third of a window — on a 4K
+display, 32 MiB of 96 — and leaves the rest pinned.
+
+**And a window nobody can see is not asked to present.** The redraw request is
+made when the window is next *shown*, not when its pixels are released: asking
+a hidden window immediately has its client establish the buffer the release
+just freed, so the release frees nothing and costs one repaint per hidden
+window at exactly the wrong moment. A *visible* window released at critical
+pressure is still asked at once, because it must not be left blank.
+
 **Two kinds, one class.** Everything above is one `ReclaimClass`, and under
 pressure it is still the first memory reclaimed among equals. But the entries
 divide by what rebuilding one *needs*, and that division decides how deep a

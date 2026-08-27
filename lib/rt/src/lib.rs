@@ -85,6 +85,8 @@ pub mod net;
 
 pub mod pressure;
 
+pub mod shm;
+
 pub mod sync;
 
 pub mod thread;

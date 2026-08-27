@@ -144,6 +144,7 @@ const ERRNO_NAMES: &[(&str, Errno)] = &[
     ("LINK_LOOP", Errno::LinkLoop),
     ("IS_A_DIRECTORY", Errno::IsADirectory),
     ("TOO_MANY_LINKS", Errno::TooManyLinks),
+    ("NOT_ATTACHED", Errno::NotAttached),
 ];
 
 /// One generated C header: its file name (relative to the include directory)

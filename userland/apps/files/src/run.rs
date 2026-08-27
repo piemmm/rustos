@@ -148,7 +148,8 @@ mod program {
     use tairix_sandbox::{ParserSandbox, ServeEnd};
     use tairix_theme::{Theme, ThemeRegistry};
     use tairix_window::{
-        pointer_input_events, Desktop, EventSource, WindowClient, WindowEvents, WindowTransport,
+        pointer_input_events, Desktop, EventSource, WindowClient, WindowEvents, WindowFrames,
+        WindowTransport,
     };
 
     use crate::appbar;
@@ -234,44 +235,24 @@ mod program {
     /// re-map, in which case the old region is left intact and still mapped so
     /// the current surface stays valid (never a crash or a blank window).
     ///
-    /// The ordering is deliberately fail-closed: the fresh region is created
-    /// and granted first and adopted only once [`WindowClient::resize`]
-    /// succeeds; the old mapping is released only after adoption, and a refused
-    /// resize releases the freshly-allocated region so nothing leaks.
+    /// The ordering is fail-closed by ownership: the fresh region is created
+    /// and granted first and returned only once [`WindowClient::resize`] has
+    /// accepted it, so the caller's old region is dropped — and unmapped — by
+    /// adopting the new one, while every refusal drops the fresh region here
+    /// instead and leaves the window on the geometry it had.
     fn resize_frames(
         client: &mut WindowClient<RtWindowTransport>,
         window: u64,
-        old_base: usize,
-        old_len: usize,
         new_mode: &DisplayMode,
-    ) -> Option<(usize, usize)> {
+    ) -> Option<WindowFrames> {
         let new_len = (new_mode.stride_bytes as usize)
             .checked_mul(new_mode.height_px as usize)?
             .checked_mul(FRAME_COUNT as usize)?;
-        let mut region_id: u64 = 0;
-        let new_base = tairix_rt::shm_create(new_len, &mut region_id);
-        if new_base < 0 {
-            return None;
-        }
-        let Ok(new_base) = usize::try_from(new_base) else {
-            return None;
-        };
-        let grant = tairix_rt::shm_grant(region_id, WINDOW_ENDPOINT);
-        if grant < 1 {
-            let _ = tairix_rt::shm_unmap(new_base as u64, new_len);
-            return None;
-        }
-        #[allow(clippy::cast_sign_loss)] // `grant >= 1` checked above; it is a kernel handle.
-        let accepted = client
-            .resize(window, grant as u64, FRAME_COUNT, new_mode)
-            .is_ok();
-        if !accepted {
-            let _ = tairix_rt::shm_unmap(new_base as u64, new_len);
-            return None;
-        }
-        // The session adopted the new region; release the old one.
-        let _ = tairix_rt::shm_unmap(old_base as u64, old_len);
-        Some((new_base, new_len))
+        let frames = WindowFrames::create(new_len)?;
+        client
+            .resize(window, frames.grant()?, FRAME_COUNT, new_mode)
+            .ok()?;
+        Some(frames)
     }
 
     /// State the abnormal-exit reason on `stderr` (fail loud: an exit
@@ -378,11 +359,9 @@ mod program {
         places: Places,
         /// The pixel layout its frame region is shaped as.
         mode: DisplayMode,
-        /// Base of the live frame region, tracked alongside its length so a
-        /// resize can unmap the old region and adopt a fresh one.
-        region_base: usize,
-        /// Length of the live frame region, in bytes.
-        region_len: usize,
+        /// The live frame region this window presents from, released when the
+        /// session releases its side and re-attached by the next paint.
+        frames: WindowFrames,
         /// The title the session was last told. Kept so a frame retitles only
         /// when the location actually moves.
         title: String,
@@ -405,17 +384,11 @@ mod program {
         icons: &RefCell<IconPipeline>,
         scale: Scale,
     ) -> Result<(), Errno> {
-        let (base, len) = (win.region_base, win.region_len);
-        // SAFETY: `base`/`len` name the region this window was created over —
-        // `region_len` zeroed read/write bytes the kernel mapped into this
-        // process at `region_base`, adopted by the session. The resize path is
-        // the only thing that changes them, and it unmaps the old region only
-        // after the session has adopted a freshly-mapped replacement, so this
-        // is never read against an unmapped or aliased address. The session
-        // maps the same frames read-only for its blit and the protocol
-        // serialises access: this app is parked in its present call while the
-        // session reads.
-        let frame = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, len) };
+        // Re-attached first if the session released it while the window was
+        // hidden, so a paint after a release paints into a live region.
+        let frame = client
+            .frame_pixels(&mut win.frames, win.window, FRAME_COUNT, &win.mode)
+            .ok_or(Errno::NotAttached)?;
         present_frame(
             &mut win.browser,
             &win.overlays,
@@ -464,27 +437,19 @@ mod program {
         let (w, h) = desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
         let mode = mode_for(w, h);
         let total = (mode.stride_bytes as usize) * (mode.height_px as usize) * FRAME_COUNT as usize;
-        let mut region_id: u64 = 0;
-        let base = tairix_rt::shm_create(total, &mut region_id);
-        if base < 0 {
+        let Some(frames) = WindowFrames::create(total) else {
             report_error("shared frame region refused; no window opened");
             return Err(EXIT_NO_FRAMES);
-        }
-        let grant = tairix_rt::shm_grant(region_id, WINDOW_ENDPOINT);
-        if grant < 1 {
+        };
+        let Some(grant) = frames.grant() else {
             report_error("frame region grant refused; no window opened");
-            return Err(EXIT_NO_FRAMES);
-        }
-        let Ok(region_base) = usize::try_from(base) else {
-            report_error("frame region base outside the address width; no window opened");
             return Err(EXIT_NO_FRAMES);
         };
         // The window opens carrying the location it shows, rather than a name
         // the first frame would have to replace.
         let title = location_title(&browser);
-        #[allow(clippy::cast_sign_loss)] // `grant >= 1` checked above; it is a kernel handle.
         let Ok((window, _)) = client.create(
-            grant as u64,
+            grant,
             event_endpoint,
             FRAME_COUNT,
             &mode,
@@ -500,8 +465,7 @@ mod program {
             overlays: initial_overlays(),
             places: places.clone(),
             mode,
-            region_base,
-            region_len: total,
+            frames,
             title,
         })
     }
@@ -669,20 +633,24 @@ mod program {
         {
             let win = &mut windows[index];
             let new_mode = mode_for(width_px, height_px);
-            if let Some((new_base, new_len)) = resize_frames(
-                client,
-                win.window,
-                win.region_base,
-                win.region_len,
-                &new_mode,
-            ) {
-                win.region_base = new_base;
-                win.region_len = new_len;
+            if let Some(frames) = resize_frames(client, win.window, &new_mode) {
+                // Adopting drops the old region, which unmaps it.
+                win.frames = frames;
                 win.mode = new_mode;
                 if present_window(win, client, theme, icons, desktop.scale()).is_err() {
                     return Some(fail(EXIT_CHANNEL_LOST, "present refused"));
                 }
             }
+            return None;
+        }
+
+        // Nobody can see the window, so the session gave its copy of the pixels
+        // back and unmapped the region. Let go of this side too — the pages go
+        // only when both do — and paint nothing: the redraw request that
+        // follows the window being shown again is what re-attaches a fresh
+        // region and fills it.
+        if matches!(event, WindowEvent::ContentReleased { .. }) {
+            windows[index].frames.release();
             return None;
         }
 
@@ -1847,6 +1815,7 @@ mod program {
             | WindowEvent::Focus { .. }
             | WindowEvent::Minimized { .. }
             | WindowEvent::RedrawRequested { .. }
+            | WindowEvent::ContentReleased { .. }
             | WindowEvent::Resized { .. }
             | WindowEvent::FilePicked { .. }
             | WindowEvent::PickCancelled { .. }
