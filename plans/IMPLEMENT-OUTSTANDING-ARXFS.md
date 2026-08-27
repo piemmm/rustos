@@ -37,8 +37,8 @@ no-deferral rule), ahead of everything below it.
 | A2 | Bounded whole-volume reconcile and reachability state (defect D-M5) | `ARXFS-MAINTENANCE.md` | 18 | A1 | **done** |
 | M0 | Shared background pacer + cross-layer availability query | `ARXFS-MAINTENANCE.md` | 18 | — | **done** |
 | M1 | The read-only repair rule (defect D64) | `ARXFS-MAINTENANCE.md` | 18 | — | **done** |
-| WB0 | Write-amplification measurement harness | `ARXFS-WRITEBACK.md` | 17 | — | **next** |
-| WB1 | Dirty block set + the commit barrier (defect D63) | `ARXFS-WRITEBACK.md` | 17 | WB0 | planned |
+| WB0 | Write-amplification measurement harness | `ARXFS-WRITEBACK.md` | 17 | — | **done** |
+| WB1 | Dirty block set + the commit barrier (defect D63) | `ARXFS-WRITEBACK.md` | 17 | WB0 | **next** |
 | WB2 | Run coalescer | `ARXFS-WRITEBACK.md` | 17 | WB1 | planned |
 | WB3 | Fold in the allocation map's dirty pages | `ARXFS-WRITEBACK.md` | 17 | WB1 | planned |
 | WB4 | Commit scheduler | `ARXFS-WRITEBACK.md` | 17 | WB1 | planned |

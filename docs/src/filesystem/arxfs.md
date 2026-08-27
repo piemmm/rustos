@@ -1072,6 +1072,21 @@ the spec's required "compression decode" target (`arxfs-spec.md` §10,
 frames and pure noise to `tairix_compress::decompress`, asserting it never
 panics and fails closed.
 
+The **write path's cost is measured, not described** (`arxfs-spec.md` §22,
+`plans/ARXFS-WRITEBACK.md` §1). An in-RAM device records every command the
+driver issues it, in order — each write's start block and run length, and each
+cache barrier — and a baseline asserts, exactly, what a single-call 64 KiB
+write, the same bytes in sixteen calls, a 34-byte append, and a metadata-only
+create each cost at both block sizes: the commands, the blocks they carry, how
+many of those a later write in the same transaction supersedes, the bytes, and
+the write amplification. Three of its assertions are the acceptance hooks of
+the write-back stages and record the present rather than a goal — every write
+carries exactly one block, a transaction rewrites its metadata once per data
+block it stores, and sixteen calls cost half again one call's commands — as does
+the barrier count, which is zero until the commit barrier lands. The same
+workloads on a 100 TiB volume produce an identical command stream, so the
+figures are properties of the write path and not of the device measured on.
+
 The `pjdfstest`-equivalent POSIX suite remains tracked in
 `plans/WIRING.md`.
 

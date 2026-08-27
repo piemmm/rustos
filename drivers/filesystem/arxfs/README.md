@@ -571,6 +571,19 @@ check validating sparse metadata with no physical read for a hole, and an
 all-zero record bypassing compression while a non-zero constant still
 compresses.
 
+The **write-amplification baseline** (`write_amplification`,
+`arxfs-spec.md` §22, `plans/ARXFS-WRITEBACK.md` §1) prices the write path
+instead of describing it: an in-RAM device records every command the driver
+issues it, in order — each write's start block and run length, and each cache
+barrier — and the harness asserts exactly what a single-call 64 KiB write, the
+same bytes in sixteen calls, a 34-byte append, and an empty-file create each
+cost at both block sizes (commands, blocks, blocks superseded within the
+transaction, bytes, amplification). Every write carrying one block, a
+transaction rewriting its metadata once per stored data block, sixteen calls
+costing half again one call's commands, and a commit issuing no barrier are all
+recorded as the present state, each the acceptance hook of a write-back stage.
+The same workloads on a 100 TiB volume produce an identical command stream.
+
 The 1 GiB filesystem soak (`cargo xtask fssoak --target arxfs`) drives the
 shared cross-filesystem exerciser, and `cargo xtask fuzz` harnesses fuzz the
 mount / metadata-decode path (`fuzz_mount`, which since Stage 7 also decodes

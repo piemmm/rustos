@@ -1,13 +1,13 @@
 # ARXFS-WRITEBACK.md — ARXFS write-back cache, commit batching, and the commit barrier
 
-Status: **planned** (stages WB0–WB6, none landed).
+Status: **WB0 done** (the measurement harness); WB1–WB6 planned.
 Binding under `AGENTS.md` and listed in its §15.18 jump-sheet.
 Primary code area: `drivers/filesystem/arxfs/`.
 Companion spec section: `docs/src/filesystem/arxfs-spec.md` §22.
 
 ARXFS today issues one single-block device write per copy-on-write block, one
 transaction per VFS operation, and **no durability barrier at all**. That makes
-writes both slow — measured 5.6×–20.1× byte amplification and, on a 512-byte SD
+writes both slow — measured 5.6×–17.8× byte amplification and, on a 512-byte SD
 card, one device command per 512 bytes — and unsafe on any device with a
 volatile write cache. This plan fixes both with one mechanism: a
 transaction-scoped dirty block set, a run coalescer, a commit scheduler, and the
@@ -22,17 +22,26 @@ seam already reports.
 
 ## 1. The measured problem
 
-Measured with the driver's in-memory device write counter, incompressible
-payload, one file per case, counting `Block::write_blocks` calls:
+Measured, and **machine-checked** by the WB0 harness
+(`drivers/filesystem/arxfs/tests/write_amplification.rs`): a device recording
+every command it is issued, incompressible payload, one file per case, one
+freshly formatted volume per case. "Superseded" is the block writes a later
+write in the same window replaced — bytes sealed and sent whose only surviving
+version is the last one.
 
-| Workload | fs block size | device writes | bytes to device | byte amplification |
-|---|---|---|---|---|
-| 64 KiB in one `write_at` | 512 | 746 | 373 KiB | 5.8× |
-| 64 KiB as 16 × 4 KiB `write_at` | 512 | 2571 | 1.26 MiB | 20.1× |
-| 64 KiB in one `write_at` | 4096 | 89 | 356 KiB | 5.6× |
-| 64 KiB as 16 × 4 KiB `write_at` | 4096 | 305 | 1.19 MiB | 19.0× |
-| 34-byte append to an existing file | 512 | 13 | 6.5 KiB | 196× |
-| create one empty file | 512 | 18 | 9 KiB | — |
+| Workload | fs block size | device writes | superseded | bytes to device | byte amplification |
+|---|---|---|---|---|---|
+| 64 KiB in one `write_at` | 512 | 746 | 294 | 373 KiB | 5.82× |
+| 64 KiB as 16 × 4 KiB `write_at` | 512 | 1183 | 852 | 591.5 KiB | 9.24× |
+| 64 KiB in one `write_at` | 4096 | 89 | 32 | 356 KiB | 5.56× |
+| 64 KiB as 16 × 4 KiB `write_at` | 4096 | 284 | 144 | 1.109 MiB | 17.75× |
+| 34-byte append to an existing file | 512 | 13 | 0 | 6.5 KiB | 195.8× |
+| create one empty file | 512 | 18 | 4 | 9 KiB | — |
+
+Every one of those writes carries exactly one block, and no commit in the table
+issues a barrier. The figures are properties of the write path, not of the
+device measured on: the harness reproduces each of them on a 100 TiB volume,
+thirteen million times the size, to the command.
 
 Amplification is essentially block-size independent in *bytes*, because it is
 structural, not granular. It has three separate causes, and the plan fixes each
@@ -44,16 +53,18 @@ writes it — and its companion mirror — to the device immediately. So the sam
 extent leaf, the same inode-tree spine, and the same allocation-map pages are
 rewritten and re-sealed once per data block, and only the last version of each
 survives the transaction. This is the dominant cost: 64 KiB at a 512-byte block
-size is 148 data blocks, so **598 of the 746 writes are superseded metadata**,
-each carrying its own HMAC-SHA256 over the whole block — which on a Pi 4, with
-no ARMv8 crypto extensions, is a CPU cost as well as an I/O one.
+size is 148 data blocks, each written once, so **598 of the 746 writes are
+metadata and 294 of those are superseded before the transaction ends** — each
+carrying its own HMAC-SHA256 over the whole block, which on a Pi 4, with no
+ARMv8 crypto extensions, is a CPU cost as well as an I/O one.
 
 **C2 — one transaction per operation.** Every mutating operation ends in
 `commit()`: a fresh transaction root (2 writes, 1 seal) plus a superblock slot
 (2 writes, 1 seal). Four writes of pure per-operation overhead however small the
 operation, and it forces C1's churn out to the device at every operation
-boundary — which is why the chunked 4 KiB case costs 3.4× the single-call case
-for identical bytes.
+boundary — which is why the chunked 4 KiB case costs 1.6× the single-call
+command count at a 512-byte block size and 3.2× at 4096, for identical bytes,
+and why it supersedes nearly three times as many blocks as it keeps.
 
 **C3 — single-block device I/O.** `write_block` is the only device write site in
 the driver and always writes exactly one block. `Block::write_blocks` already
@@ -66,19 +77,19 @@ that does not coalesce.
 
 **C4 — no commit barrier (a durability defect, fixed here).** `commit()` writes
 the copy-on-write blocks, then the transaction root, then the superblock slot,
-with no `Block::flush()` between any of them — while `src/transaction.rs`
-documents the opposite ("each step flushed before the next"). On every device
-with a volatile write cache the slot may reach stable media before the tree
-blocks the root it names transitively references. `open` does re-validate the
-root before accepting a slot, so a *lost root* is survivable; a **lost interior
-tree node beneath a durable root** is not — both mirror copies are absent and
-the mount fails closed. Only `map_persist` (explicit `fs_sync`) issues a barrier
-today, so an ordinary commit has none.
+with no `Block::flush()` between any of them; both it and `src/transaction.rs`
+now say so, having each claimed durability the code does not provide. On every
+device with a volatile write cache the slot may reach stable media before the
+tree blocks the root it names transitively references. `open` does re-validate
+the root before accepting a slot, so a *lost root* is survivable; a **lost
+interior tree node beneath a durable root** is not — both mirror copies are
+absent and the mount fails closed. Only `map_persist` (explicit `fs_sync`)
+issues a barrier today, so an ordinary commit has none.
 
 C4 is a defect that exists now, filed as `plans/OPEN-DEFECTS.md` D63 and owned
 by this plan. It is fixed in WB1 rather than alone, because a barrier per
 unbatched per-operation commit would add a full device-cache flush to every VFS
-operation on a driver already amplifying 5.6×–20.1× in single-block writes; WB1
+operation on a driver already amplifying 5.6×–17.8× in single-block writes; WB1
 lands the batching mechanism and the barrier in the same change. No ARXFS work
 that depends on a durable published root — snapshots (spec stage 20), FEC commit
 witnesses (stage 21) — may land before it.
@@ -252,15 +263,33 @@ Each stage is one session's work, ends with the whole-project gate green
 (`AGENTS.md` §7), and updates this file's status plus §22 of the spec before it
 is reported.
 
-### WB0 — measurement harness. **planned**
+### WB0 — measurement harness. **done**
 
-Tests only; no behaviour change. Land the write-amplification and
-device-command-count regression tests as a reusable fixture (a counting device
-recording call count, block count, and per-call run length), asserting the §1
-numbers as the baseline every later stage measures against. Add the
-run-length histogram assertion the coalescer will move.
+`drivers/filesystem/arxfs/tests/write_amplification.rs` is the write path's
+device-command ledger: an in-RAM device recording every command it is issued, in
+order — each write's start block and run length, and each cache barrier. One
+ledger yields the commands a window costs, the blocks they carry, how many of
+those a later write in the window supersedes, and the run-length histogram; the
+recorded order is also what a barrier is proved by, so WB1 asserts against this
+fixture rather than a second one. The device stores only the blocks written, so
+one workload can be priced on a small volume and on a volume far larger than the
+host's RAM.
 
-Acceptance: the §1 table is reproduced by a test, not by a note.
+The §1 table is that harness's output, asserted row by row — six rows over four
+workloads and both block sizes, every figure exact, with the amplification
+checked as an integer ratio rather than a float. Four of its assertions record
+the present rather than a goal, and each is a later stage's acceptance hook:
+every write carrying exactly one block (WB2 moves that histogram), a transaction
+rewriting its metadata once per data block it stores (WB1), the chunked case
+costing more than half again the single call's commands (WB4), and a commit
+issuing no barrier at all (WB1). The floor case runs every workload again on a
+100 TiB volume and requires an identical command stream, which is what makes the
+table a property of the write path and not of the device it was measured on.
+
+Fixed with it: `commit` claimed in a comment that the root and slot it wrote
+were "durably published", when nothing barriers them; `transaction.rs` already
+stated the truth, and the harness's zero-barrier rows are the machine-checked
+evidence for it.
 
 ### WB1 — dirty block set and the commit barrier. **planned**
 

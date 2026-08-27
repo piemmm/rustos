@@ -988,10 +988,15 @@ Minimum acceptance tests:
   when copy-on-write rules allow, truncate up creates a hole and truncate down
   frees only real extents, a reflink preserves holes without creating dedupe
   chunks, and scrub and check validate a hole's metadata without reading a
-  backing block.
+  backing block;
+- the write path's device-command cost — commands, blocks, superseded rewrites,
+  run lengths, and barriers — is asserted against a recorded baseline for a
+  single-call write, the same bytes in many calls, a small append, and a
+  metadata-only create, at both block sizes, and is identical on a 100 TiB
+  volume.
 
-Stage 17 (§22) adds, and stage 20 (§23) will add, the tests their owning plans
-enumerate.
+Stage 17 (§22) adds, and stage 20 (§23) will add, the remaining tests their
+owning plans enumerate.
 
 The implementing agent must run the full TAIRiX CI/test requirements from
 `AGENTS.md` before reporting completion.
@@ -1047,7 +1052,7 @@ Status legend: `✓` done · `*` in progress · `!` blocked · (blank) not start
 | 14 | Extended file metadata. | `plans/ARXFS-METADATA.md` | ✓ |
 | 15 | Links and the incompatible-feature word. | — | ✓ |
 | 16 | Extended-metadata preservation. | `plans/ARXFS-METADATA.md` §10 | |
-| 17 | Write-back cache, batching, commit barrier. | `plans/ARXFS-WRITEBACK.md` | |
+| 17 | Write-back cache, batching, commit barrier. | `plans/ARXFS-WRITEBACK.md` | * |
 | 18 | Autonomous maintenance and the `arxfs` command app. | `plans/ARXFS-MAINTENANCE.md` | * |
 | 19 | The §5 constant targets. | `plans/IMPLEMENT-OUTSTANDING-ARXFS.md` §5 | |
 | 20 | Snapshots. | `plans/ARXFS-SNAPSHOT.md` | |
@@ -1534,6 +1539,15 @@ every crash still leaves the prior committed state or the new one, never a torn
 one (§14). What batching trades is how *recent* the surviving state is, bounded
 by the deadline. There is no mount option and no knob (§1): the behaviour is
 derived from the device, not configured.
+
+**Measured, not asserted.** What a write costs a device is a number, so it is
+recorded and machine-checked rather than described: one in-RAM device logs every
+command the driver issues it, in order, and the write-amplification and
+command-count figures the stages below are judged on — including the run-length
+histogram the coalescer changes and the barrier count this section makes
+mandatory — are asserted against that recording. The cost is identical on a
+100 TiB volume, so it is a property of the write path rather than of the device
+it was measured on. The figures live in `plans/ARXFS-WRITEBACK.md` §1.
 
 **Bounds.** The ceiling is derived from discovered RAM, never a hand-picked
 constant, with a floor of one transaction's own working set — below that floor a

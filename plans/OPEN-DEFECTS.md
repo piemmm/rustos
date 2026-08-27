@@ -3552,7 +3552,7 @@ only for an explicit `fs_sync`, where the commit itself must be durable before
 the call returns.
 
 **Sequencing.** A barrier on today's unbatched commit path would add a full
-device-cache flush per VFS operation, on a driver already issuing 5.6×–20.1×
+device-cache flush per VFS operation, on a driver already issuing 5.6×–17.8×
 write amplification in single-block writes. The fix therefore lands with the
 batching that pays for it: `plans/ARXFS-WRITEBACK.md` stage WB1, specified in
 `docs/src/filesystem/arxfs-spec.md` §22. It is not deferred past that stage,

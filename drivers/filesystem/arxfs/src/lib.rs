@@ -1415,8 +1415,9 @@ impl<B: Block> ARXFS<B> {
             &self.crypto_header,
         )?;
         self.write_meta(slot, &buf)?;
-        // Commit point passed: the new root (and its mirror) is durably
-        // published, as is the superblock slot pointing at it.
+        // Commit point passed: the slot naming the new root is written, so a
+        // mount now selects the new state. Ordered, but not yet barriered
+        // against a device that reorders (`plans/ARXFS-WRITEBACK.md` WB1).
         self.generation = next_gen;
         self.ring_pos = self.ring_pos.wrapping_add(1);
         self.root_phys = root_phys;

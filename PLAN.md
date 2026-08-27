@@ -2809,18 +2809,21 @@ block set, a run coalescer, a commit scheduler, and the single barrier that
 becomes affordable once commits are batched. No capability, no ABI surface, no
 mount option, no second data path.
 
-**Measured baseline** (in-memory device, incompressible payload, counting
-`Block::write_blocks` calls): a 64 KiB file written in one call costs 746
-single-block writes at a 512-byte block size and 89 at 4096 — 5.8× and 5.6×
-byte amplification; written as 4 KiB chunks it costs 2571 and 305 — 20.1× and
-19.1×. At a 512-byte block size a 34-byte append costs 13 writes and creating
-an empty file costs 18. Three
-causes, fixed one per stage: the same B-tree node is copy-on-written and written
-out once per data block within a single transaction (~600 of those 746 writes
-are superseded metadata); every VFS operation commits its own transaction root
-and superblock slot; and `write_block` is the only device write site and always
-writes exactly one block, though the read path already coalesces into 64 KiB
-runs and `emmc2` stages 128 blocks per transfer.
+**Measured baseline**, machine-checked by the WB0 harness
+(`drivers/filesystem/arxfs/tests/write_amplification.rs`: a device recording
+every command it is issued, incompressible payload): a 64 KiB file written in
+one call costs 746 single-block writes at a 512-byte block size and 89 at
+4096 — 5.82× and 5.56× byte amplification; written as 4 KiB chunks it costs 1183
+and 284 — 9.24× and 17.75×. At a 512-byte block size a 34-byte append costs 13
+writes and creating an empty file costs 18. No commit issues a barrier, every
+write carries one block, and the figures are identical on a 100 TiB volume.
+Three causes, fixed one per stage: the same B-tree node is copy-on-written and
+written out once per data block within a single transaction (598 of those 746
+writes are metadata, 294 of them superseded before it commits); every VFS
+operation commits its own transaction root and superblock slot; and
+`write_block` is the only device write site and always writes exactly one block,
+though the read path already coalesces into 64 KiB runs and `emmc2` stages 128
+blocks per transfer.
 
 **Durability defect this fixes.** `commit()` writes the copy-on-write blocks,
 the transaction root, then the superblock slot with **no** `Block::flush()`
@@ -2856,7 +2859,7 @@ batching that pays for it (WB1), not alone.
   in the stack and it is this one. `plans/SMARTRAM.md` §6.1 already reserves
   dirty data for the filesystem's own write policy.
 
-**Status: planned.** No implementation has landed.
+**Status: WB0 done** — the measurement harness, tests only. WB1–WB6 planned.
 
 ---
 
