@@ -33,6 +33,12 @@
 //! through a structured [`ScrubReport`], logging security-relevant findings
 //! through `lib/log` with stable event IDs. It
 //! never silently mutates: a clean scrub of a clean volume changes nothing.
+//!
+//! On a **read-only handle it writes nothing at all** — no copy-repair, no
+//! refcount correction, no cursor, no transaction — because the state exists
+//! for a medium whose contents must not be touched. It still verifies, and it
+//! still reports every finding: a mirror it may not rewrite counts as
+//! [`ScrubReport::metadata_damaged`], never as a repair that did not happen.
 
 use tairix_log::{log, Event, EventId, Level, Sink};
 
@@ -49,6 +55,10 @@ pub const SCRUB_FAULTS_FOUND: EventId = EventId(12_002);
 pub const SCRUB_PAUSED: EventId = EventId(12_003);
 /// A scrub was refused because the caller lacks `CAP_FS_MOUNT`.
 pub const SCRUB_DENIED: EventId = EventId(12_004);
+/// A scrub pass was bounded by its budget and persisted **no** cursor, because
+/// the handle is read-only: the volume past this pass's reach stays unverified
+/// however often the call is repeated.
+pub const SCRUB_STOPPED: EventId = EventId(12_005);
 
 /// Every scrub event identifier falls inside the reserved `arxfs` range, so
 /// the stable IDs external audit-log consumers rely on never collide with
@@ -58,6 +68,7 @@ const _: () = {
     assert!(SCRUB_FAULTS_FOUND.0 >= ARXFS_RANGE_START && SCRUB_FAULTS_FOUND.0 < ARXFS_RANGE_END);
     assert!(SCRUB_PAUSED.0 >= ARXFS_RANGE_START && SCRUB_PAUSED.0 < ARXFS_RANGE_END);
     assert!(SCRUB_DENIED.0 >= ARXFS_RANGE_START && SCRUB_DENIED.0 < ARXFS_RANGE_END);
+    assert!(SCRUB_STOPPED.0 >= ARXFS_RANGE_START && SCRUB_STOPPED.0 < ARXFS_RANGE_END);
 };
 
 /// How much work one [`crate::ARXFS::scrub`] call may do before persisting a
@@ -72,18 +83,44 @@ pub enum ScrubBudget {
     Inodes(u64),
 }
 
+/// How far one scrub pass got, and whether a later call continues it — the
+/// counterpart of [`crate::StructureVerdict`] for the online pass.
+///
+/// The distinction between the two stopped states is not cosmetic: only a pass
+/// that persisted its cursor is continued by the next call, so a bounded pass
+/// on a handle that cannot persist one never reaches past its own budget
+/// however often it is repeated. A caller that cannot tell them apart cannot
+/// tell a volume being progressively verified from one being re-verified from
+/// the start forever.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum PassVerdict {
+    /// The whole volume was verified.
+    Complete,
+    /// The budget stopped the pass and its cursor was persisted, so a later
+    /// call resumes it and reaches the report an uninterrupted pass would.
+    Paused,
+    /// The budget stopped the pass and nothing was persisted, because the
+    /// handle is read-only and writes nothing to the medium it holds. The next
+    /// call starts afresh.
+    #[default]
+    Stopped,
+}
+
 /// The structured outcome of a scrub pass (`docs/src/filesystem/arxfs-spec.md`
 /// §12). Counts accumulate across the resumable calls of a single scrub, so a
 /// completed scrub's report is identical whether it ran in one call or many.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct ScrubReport {
-    /// `true` once the whole volume has been verified; `false` when the budget
-    /// paused the pass and a resumable cursor was persisted.
-    pub complete: bool,
+    /// How far this pass got, and whether a later call continues it.
+    pub pass: PassVerdict,
     /// Metadata blocks (counting each mirrored block once) authenticated.
     pub metadata_blocks_checked: u64,
     /// Metadata blocks whose bad copy was repaired from its good companion.
     pub metadata_repaired: u64,
+    /// Metadata blocks with one bad copy the pass left as it is, because the
+    /// handle is read-only and writes nothing to the medium it holds. The good
+    /// copy served the read; the mirror is still degraded.
+    pub metadata_damaged: u64,
     /// Metadata blocks whose **both** copies failed: an unrepairable finding.
     pub metadata_unrepairable: u64,
     /// File-data blocks run through the integrity read pipeline.
@@ -116,6 +153,7 @@ impl ScrubReport {
     #[must_use]
     pub fn found_faults(&self) -> bool {
         self.metadata_repaired != 0
+            || self.metadata_damaged != 0
             || self.metadata_unrepairable != 0
             || self.data_physical_faults != 0
             || self.data_aead_faults != 0
@@ -126,12 +164,20 @@ impl ScrubReport {
 
     /// Emit the closing scrub event for this report to `sink` (log security-relevant findings with a stable event ID).
     pub(crate) fn log_outcome(&self, sink: &dyn Sink) {
-        let (id, level, message) = if !self.complete {
-            (SCRUB_PAUSED, Level::Info, "arxfs scrub paused (resumable)")
-        } else if self.found_faults() {
-            (SCRUB_FAULTS_FOUND, Level::Warn, "arxfs scrub found faults")
-        } else {
-            (SCRUB_CLEAN, Level::Info, "arxfs scrub clean")
+        let (id, level, message) = match self.pass {
+            PassVerdict::Paused => (SCRUB_PAUSED, Level::Info, "arxfs scrub paused (resumable)"),
+            // A bounded pass that kept no position leaves the volume past its
+            // reach unverified, so it is a finding in its own right rather
+            // than an ordinary pause.
+            PassVerdict::Stopped => (
+                SCRUB_STOPPED,
+                Level::Warn,
+                "arxfs scrub stopped at its budget (read-only: no cursor kept)",
+            ),
+            PassVerdict::Complete if self.found_faults() => {
+                (SCRUB_FAULTS_FOUND, Level::Warn, "arxfs scrub found faults")
+            }
+            PassVerdict::Complete => (SCRUB_CLEAN, Level::Info, "arxfs scrub clean"),
         };
         log(
             sink,
@@ -193,8 +239,24 @@ pub(crate) enum MetaStatus {
     Clean,
     /// One copy was bad and repaired from its good companion.
     Repaired,
+    /// One copy was bad and left as it is: the good copy served the read, but
+    /// the handle is read-only and must not write to the medium it holds. The
+    /// block is readable and its mirror is still degraded.
+    Damaged,
     /// Both copies failed: an unrepairable finding (recorded, never panicked).
     Unrepairable,
+}
+
+impl MetaStatus {
+    /// The verdict for a block whose bad copy the one repair rule either
+    /// rewrote or declined to.
+    pub(crate) fn from_repair(repaired: bool) -> Self {
+        if repaired {
+            Self::Repaired
+        } else {
+            Self::Damaged
+        }
+    }
 }
 
 impl<B: Block> ARXFS<B> {
@@ -207,6 +269,12 @@ impl<B: Block> ARXFS<B> {
     /// caller can resume later — the accumulated [`ScrubReport`] of a completed
     /// scrub is identical either way. The closing finding is logged to `sink`
     /// with a stable event ID.
+    ///
+    /// A **read-only handle verifies and reports without writing anything**:
+    /// no copy-repair (the damaged mirror is reported through
+    /// [`ScrubReport::metadata_damaged`] instead), no refcount correction, no
+    /// persisted cursor, and no transaction. Its bounded pass is therefore not
+    /// resumable and says so through [`ScrubReport::pass`].
     ///
     /// # Errors
     ///
@@ -290,8 +358,15 @@ impl<B: Block> ARXFS<B> {
         }
 
         if let Some(cursor) = paused {
+            // A read-only handle persists nothing, so its bounded pass is not
+            // resumable: it reports what it verified and says the next call
+            // starts afresh.
+            if self.read_only {
+                report.pass = PassVerdict::Stopped;
+                return Ok((report, false));
+            }
+            report.pass = PassVerdict::Paused;
             self.store_scrub_progress(cursor, &report)?;
-            report.complete = false;
             return Ok((report, true));
         }
 
@@ -300,14 +375,17 @@ impl<B: Block> ARXFS<B> {
         if self.reconcile_refcounts(&mut report)? {
             mutated = true;
         }
-        // Clear the resumable progress record now the pass is complete.
-        if self.scrub_progress_root != 0 {
+        // Clear the resumable progress record now the pass is complete. A
+        // read-only handle leaves it where it is: it writes nothing, and
+        // dropping the reference in memory alone would hide a record the
+        // committed root still names.
+        if !self.read_only && self.scrub_progress_root != 0 {
             let old = self.scrub_progress_root;
             self.free_meta(old);
             self.scrub_progress_root = 0;
             mutated = true;
         }
-        report.complete = true;
+        report.pass = PassVerdict::Complete;
         Ok((report, mutated))
     }
 
@@ -334,7 +412,9 @@ impl<B: Block> ARXFS<B> {
                 }
             }
         }
-        self.reconcile_refcounts(report)
+        let corrected = self.reconcile_refcounts(report)?;
+        report.pass = PassVerdict::Complete;
+        Ok(corrected)
     }
 
     /// Determine where this scrub call starts: resume the persisted cursor and
@@ -486,7 +566,7 @@ impl<B: Block> ARXFS<B> {
     /// Verify the two physical copies of the metadata block at `phys`,
     /// repairing a bad copy from its good companion (Stage 3 seam). Discards
     /// the verified bytes; use [`Self::scrub_meta_into`] when the caller needs
-    /// them (to recurse into a tree).
+    /// them (to walk into a tree).
     pub(crate) fn scrub_meta(
         &mut self,
         phys: u64,
@@ -497,9 +577,13 @@ impl<B: Block> ARXFS<B> {
     }
 
     /// Verify the two physical copies of the metadata block at `phys` and, on
-    /// success, leave the good copy's bytes in `out`. Repairs a bad copy from
-    /// its good companion; a both-copies-bad block is reported as
-    /// [`MetaStatus::Unrepairable`] (recorded, never panicked).
+    /// success, leave the good copy's bytes in `out`.
+    ///
+    /// A bad copy is repaired from its good companion through the one repair
+    /// rule ([`crate::ARXFS::repair_meta_copy`]), so a read-only handle
+    /// reports [`MetaStatus::Damaged`] rather than writing to the medium it
+    /// holds. A both-copies-bad block is [`MetaStatus::Unrepairable`]
+    /// (recorded, never panicked).
     pub(crate) fn scrub_meta_into(
         &mut self,
         phys: u64,
@@ -534,14 +618,14 @@ impl<B: Block> ARXFS<B> {
                 Ok(MetaStatus::Clean)
             }
             (true, false) => {
-                self.write_block(comp, &primary[..bs])?;
+                let repaired = self.repair_meta_copy(comp, &primary[..bs])?;
                 out[..bs].copy_from_slice(&primary[..bs]);
-                Ok(MetaStatus::Repaired)
+                Ok(MetaStatus::from_repair(repaired))
             }
             (false, true) => {
-                self.write_block(phys, &companion[..bs])?;
+                let repaired = self.repair_meta_copy(phys, &companion[..bs])?;
                 out[..bs].copy_from_slice(&companion[..bs]);
-                Ok(MetaStatus::Repaired)
+                Ok(MetaStatus::from_repair(repaired))
             }
             (false, false) => Ok(MetaStatus::Unrepairable),
         }
@@ -555,6 +639,7 @@ impl ScrubReport {
         match status {
             MetaStatus::Clean => {}
             MetaStatus::Repaired => self.metadata_repaired += 1,
+            MetaStatus::Damaged => self.metadata_damaged += 1,
             MetaStatus::Unrepairable => self.metadata_unrepairable += 1,
         }
     }
@@ -587,12 +672,17 @@ impl<B: Block> ARXFS<B> {
             *slot = rd_u64(&buf, SP_COUNTS + i * 8);
         }
         let report = ScrubReport {
-            complete: false,
+            // The cursor exists on the device, so this pass is a continuation
+            // of a paused one until the call that finishes the walk says so.
+            pass: PassVerdict::Paused,
             // A resumed pass has not reached the reconcile, so it has counted
             // nothing yet; the call that finishes the walk sets this.
             claims_counted: false,
             metadata_blocks_checked: counts[0],
             metadata_repaired: counts[1],
+            // Only a read-only handle leaves a bad copy unrepaired, and a
+            // read-only handle persists no cursor, so a resumed pass has none.
+            metadata_damaged: 0,
             metadata_unrepairable: counts[2],
             data_blocks_checked: counts[3],
             data_physical_faults: counts[4],

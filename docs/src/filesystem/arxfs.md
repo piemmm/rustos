@@ -447,9 +447,12 @@ What scrub verifies, and what it repairs versus records:
   B-trees, and the chunk and reverse-reference trees — is authenticated in
   **both** physical copies. A copy that fails the keyed authenticator is
   **repaired from its good companion** (the same redundancy seam `open` uses),
-  and the repair is counted. A block whose **both** copies fail is recorded as
-  an unrepairable finding — fail-closed, never a panic (`AGENTS.md` §5.4 /
-  §2.9).
+  and the repair is counted. There is exactly one copy-repair site
+  (`ARXFS::repair_meta_copy`, `AGENTS.md` §2.2), so a read-only handle's
+  refusal to write is stated once rather than remembered at each site; a mirror
+  it declines to rewrite is counted as **damaged** instead (see below). A block
+  whose **both** copies fail is recorded as an unrepairable finding —
+  fail-closed, never a panic (`AGENTS.md` §5.4 / §2.9).
 - **Data (verify + record).** Every live file-data block is run through the
   integrity read pipeline and any failure is classified by its layer —
   `Physical` (fast checksum), `Aead` (tag), or `Logical` (content hash) — and
@@ -493,13 +496,32 @@ leaves a fully mountable volume and ordinary crash recovery never needs scrub
 (§14); a corrupt progress record simply restarts the scrub rather than failing
 the mount. The cursor is cleared when the pass completes.
 
+`ScrubReport::pass` says which of the three it was — `PassVerdict::Complete`,
+`Paused` (the cursor was persisted, so a later call continues this pass), or
+`Stopped` (nothing was persisted, so the next call starts afresh). Only a
+read-only handle produces the last, and the distinction earns its own audit
+event: repeating a `Stopped` pass never reaches past its own budget, so a
+caller that could not tell it from `Paused` could not tell a volume being
+progressively verified from one being re-verified from the start forever.
+
+**A read-only handle verifies and reports; it writes nothing at all**
+(`arxfs-spec.md` §12) — no copy-repair, no refcount correction, no cursor, no
+cleared progress record, no transaction. That is the state a volume is held in
+when its medium must not be touched, so a well-meant repair there is itself the
+damage. Nothing is lost from the report: a mirror the pass may not rewrite is
+counted as `ScrubReport::metadata_damaged` — the good copy served the read and
+the mirror is still degraded — never as a repair that did not happen, and it
+classifies the volume exactly as a repaired copy would, because a copy that
+went bad is the same medium signal either way.
+
 **Report, never silent mutation.** Scrub returns a structured `ScrubReport`
-(blocks checked, faults per class, repairs made, divergences corrected,
-unrepairable findings) and logs its closing outcome through `lib/log` with a
-stable event ID in the `arxfs` `12000` range (`AGENTS.md` §5.4 / §19.4). A
-clean scrub of a clean volume changes nothing on disk and is idempotent —
-metadata copy-repairs are direct block writes, and a transaction is committed
-only when scrub actually corrected something or persisted a cursor.
+(blocks checked, faults per class, repairs made, mirrors left damaged,
+divergences corrected, unrepairable findings) and logs its closing outcome
+through `lib/log` with a stable event ID in the `arxfs` `12000` range
+(`AGENTS.md` §5.4 / §19.4). A clean scrub of a clean volume changes nothing on
+disk and is idempotent — metadata copy-repairs are direct block writes, and a
+transaction is committed only when scrub actually corrected something or
+persisted a cursor.
 
 ## Offline check and rescue (`arxfs-spec.md` §12)
 
@@ -682,6 +704,13 @@ resumable/interrupt-safe core — never a parallel verifier (`AGENTS.md` §2.2),
 and folds the scrub's findings into the accumulated counters. It then stores
 the current telemetry as the new baseline so the next pass measures a fresh
 delta (a pass with no new device activity triggers no scrub).
+
+**On a read-only handle it stores no baseline** and returns the reading anyway
+(`arxfs-spec.md` §12): like the scrub it may trigger, it writes nothing to the
+medium it holds, and the next pass simply measures its delta from the same
+stored baseline. A mirror that scrub found damaged but could not rewrite
+classifies the volume exactly as a repaired one would, so a read-only volume
+with degraded mirrors reports `Degraded` rather than a clean bill.
 
 `health` is **capability-gated** on `CAP_FS_MOUNT` (the mount-management
 capability that already gates scrub/check/trim; fail-closed and logged

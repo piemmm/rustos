@@ -650,7 +650,8 @@ Mounted trim rules:
   root, snapshot, reflink, deduped extent, and recovery root;
 - discard is batched, aligned to device granularity, and rate-limited;
 - ARXFS must not assume discarded blocks read back as zero;
-- devices without discard support are recorded, not failed.
+- devices without discard support are recorded, not failed;
+- a read-only handle is refused before anything is touched (§12).
 
 There is no `nodiscard` or `trim=off` mode.
 
@@ -670,7 +671,8 @@ Health behaviour:
 - unsafe-shutdown deltas schedule metadata scrub;
 - media-error deltas schedule deep scrub;
 - critical multi-device health avoids new allocations to failing devices;
-- critical single-device health raises warnings and may force read-only mount.
+- critical single-device health raises warnings and may force read-only mount;
+- a read-only handle returns its reading and stores no baseline (§12).
 
 If health data is unavailable, store `HealthUnavailable`; the health subsystem
 remains enabled.
@@ -695,6 +697,39 @@ free-space by rebuild, dedupe index by rebuild, and orphaned inodes.
 `arxfs rescue` scans for self-identifying metadata blocks, lists valid roots,
 maps physical LBAs to files when possible, and extracts readable files without
 requiring a fully mountable filesystem.
+
+### Read-only means read-only: a verifying pass writes nothing
+
+A read-only handle **verifies and reports; it never writes**. That is the state
+a volume is held in when its medium must not be touched at all — a re-inserted
+volume whose non-mutation could not be proven is mounted read-only *with its
+uncommitted write set still held* so that an operator, not the filesystem,
+decides what happens to it. A well-meant repair there mutates exactly the
+bytes that decision is about.
+
+So on a read-only handle a scrub performs no metadata copy-repair, corrects no
+refcount divergence, persists no cursor, clears no progress record, and
+publishes no transaction; a health pass stores no baseline; and both a discard
+and a `check` are refused before anything is touched (a discard is destructive
+and irreversible, so a medium whose state is in doubt never receives one, and
+`check`'s first act is a rebuild it has no allocator for). None of that costs a
+finding:
+
+- The copy-repair lives in **one** place, so the rule is stated once and cannot
+  be honoured at some repair sites and forgotten at another. A mirror the pass
+  may not rewrite is reported as **damaged** — the good copy served the read
+  and the mirror is still degraded — never as a repair that did not happen, and
+  it classifies the volume exactly as a repaired copy would: a copy that went
+  bad is the same medium signal either way.
+- A refcount divergence is reported and left alone, as it is for any pass
+  without an exact claim count.
+- A bounded pass that kept no cursor says so distinctly from one that will be
+  resumed (`PassVerdict::Stopped` against `Paused`, with its own audit event),
+  because repeating the first never reaches past its own budget: a caller that
+  could not tell them apart could not tell a volume being progressively
+  verified from one being re-verified from the start forever.
+- A health pass returns the reading it took. Only the durable baseline is
+  skipped, so the next pass measures its delta from the same stored one.
 
 ### Derived truth lives in transient on-disk scratch, never in RAM
 
@@ -1013,7 +1048,7 @@ Status legend: `✓` done · `*` in progress · `!` blocked · (blank) not start
 | 15 | Links and the incompatible-feature word. | — | ✓ |
 | 16 | Extended-metadata preservation. | `plans/ARXFS-METADATA.md` §10 | |
 | 17 | Write-back cache, batching, commit barrier. | `plans/ARXFS-WRITEBACK.md` | |
-| 18 | Autonomous maintenance and the `arxfs` command app. | `plans/ARXFS-MAINTENANCE.md` | |
+| 18 | Autonomous maintenance and the `arxfs` command app. | `plans/ARXFS-MAINTENANCE.md` | * |
 | 19 | The §5 constant targets. | `plans/IMPLEMENT-OUTSTANDING-ARXFS.md` §5 | |
 | 20 | Snapshots. | `plans/ARXFS-SNAPSHOT.md` | |
 | 21 | FEC and multi-device redundancy. | `plans/ARXFS-FEC.md` | |
@@ -1531,8 +1566,10 @@ the snapshot half of the liveness check, which lands with this stage.
 
 ## 24. Autonomous maintenance
 
-*Stage 18 — planned, nothing implemented. The design brief is
-`plans/ARXFS-MAINTENANCE.md`, which this section will be generated from.*
+*Stage 18 — in progress. The design brief is `plans/ARXFS-MAINTENANCE.md`,
+which this section will be generated from. Landed so far, from that plan's
+staging: the shared background pacer and the cross-layer availability query
+(M0), and the read-only rule §12 states (M1).*
 
 `scrub`, `trim`, and `health` (§11, §12) are implemented and capability-gated
 but have **no production caller**, so on a live system discard never issues,

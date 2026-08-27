@@ -360,6 +360,7 @@ impl<B: Block> ARXFS<B> {
         let v = &report.verification;
         let divergences = v.refcount_divergences + v.reverse_ref_divergences;
         report.unrecoverable_findings = v.metadata_unrepairable
+            + v.metadata_damaged
             + v.data_physical_faults
             + v.data_aead_faults
             + v.data_logical_faults

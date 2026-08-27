@@ -1,6 +1,6 @@
 # ARXFS-MAINTENANCE.md — autonomous filesystem health: the maintenance runner
 
-Status: **in progress** (M0 done; M1–M7 planned).
+Status: **in progress** (M0, M1 done; M2–M7 planned).
 Binding under `AGENTS.md` and listed in its §15.18 jump-sheet.
 This plan owns ARXFS spec **stage 18** (`docs/src/filesystem/arxfs-spec.md`
 §15/§18), whose spec section is **§24**.
@@ -493,23 +493,28 @@ not an exit and a write-up is not a fix; an entry here says the next piece of
 work is closing it. So this plan is not finished when M7 lands: it is finished
 when M7 has landed **and** this section is empty.
 
-- **D-M1 — `scrub`'s copy-repair write bypasses the read-only guard**
-  (`plans/OPEN-DEFECTS.md` D64, tracked there for its severity).
-  `read_meta` correctly guards its repair-on-read write with `if
-  !self.read_only`; `scrub_meta_into` performs the same repair with
-  `self.write_block(comp, …)` and **no** guard, and neither `scrub` nor `health`
-  calls `deny_if_read_only` (only `trim` does). So a read-only mount writes to
-  its device. That is wrong wherever `read_only` is set, and it is dangerous in
-  the one case the state exists for: a re-inserted volume whose non-mutation
-  could not be proven is mounted read-only *with its uncommitted write set
-  held* precisely so nothing touches a medium whose state is in doubt — and a
-  copy-repair there mutates it. `health` is additionally wasteful on a
-  read-only handle: it performs the whole telemetry read and (today) a
-  whole-volume scrub, then fails at the baseline `commit()`, discarding a valid
-  health reading it could have reported. Fix in **M1**: one read-only rule
-  shared by both repair sites, `scrub` and `health` verifying and reporting
-  without writing on a read-only handle, and a test that a read-only mount
-  issues no device write during a scrub that finds a repairable block.
+- **D-M1 — a read-only mount wrote to its device on the verifying paths —
+  fixed** (M1; `plans/OPEN-DEFECTS.md` D64 closed with it). The mirror
+  copy-repair is one method (`ARXFS::repair_meta_copy`) that a read-only handle
+  declines, so the rule the three repair-on-read sites each spelled for
+  themselves — and `scrub_meta_into` did not — is stated once and cannot be
+  forgotten again. A read-only scrub now writes nothing at all: no copy-repair,
+  no refcount correction (which the absent claim array already prevented), no
+  cursor, no cleared progress record, no transaction. `health` skips only the
+  durable baseline and returns the reading it took, and `trim` and `check` are
+  refused before anything is touched — so the guarantee now holds across all
+  four maintenance operations.
+
+  Nothing is lost from a report. A mirror the pass may not rewrite is
+  `ScrubReport::metadata_damaged` rather than a repair that did not happen, and
+  it classifies the volume exactly as a repaired copy would, because a copy that
+  went bad is the same medium signal whether or not the handle could rewrite
+  it — so a read-only volume with degraded mirrors reports `Degraded`, not a
+  clean bill. `ScrubReport::pass` carries the three states that exist rather
+  than a `complete` bool, because a bounded pass that kept no position is a
+  different audit fact (`PassVerdict::Stopped`, its own event ID) from one that
+  will be resumed: repeating the first never reaches past its own budget, so the
+  M5 runner must be able to tell them apart.
 - **D-M2 — `health` runs an unbounded whole-volume scrub inline.** On a
   baseline delta, `health` calls `self.scrub(caps, sink, ScrubBudget::Unlimited)`
   in its own call, holding the mount lock for the whole volume's verification —
@@ -637,9 +642,13 @@ when M7 has landed **and** this section is empty.
    scrub pauses at its cursor and resumes at the same cursor on return to
    `Available`; foreground I/O is unaffected throughout; a trim is never issued
    to a non-available backing.
-4. **Read-only**: a read-only mount performs no device write during a scrub that
-   finds a repairable block, reports the finding, and returns a valid health
-   reading (D-M1); a read-only mount never trims.
+4. **Read-only**: a read-only mount performs no device write during a scrub
+   that finds a repairable block and reports it as damaged rather than
+   repaired; a bounded pass reports its progress and says it kept no cursor; a
+   pass that finishes one a read-write mount had paused leaves that record
+   alone; a health pass returns a valid reading and stores no baseline; a
+   damaged mirror still classifies the volume degraded; and a read-only mount
+   never trims and refuses `check` before touching anything (D-M1).
 5. **Bounded chunks**: a scrub chunk over a single file larger than the chunk
    budget stops inside the file, persists a cursor, and resumes there; resident
    bytes during a pass over a large volume stay within the derived chunk bound;
@@ -749,10 +758,16 @@ the fourth shared quantity §5 names, but no non-RAID consumer exists yet, so
 they are hoisted into `blkio` by **M3** with the ARXFS scheduler that needs
 them — not moved now with no second consumer.
 
-### M1 — the read-only rule (D-M1). **planned**
-One shared read-only repair rule for both copy-repair sites; `scrub` and
-`health` verify and report without writing on a read-only handle.
-*Acceptance:* test 4.
+### M1 — the read-only rule (D-M1). **done**
+`ARXFS::repair_meta_copy` is the one mirror copy-repair site and declines on a
+read-only handle; a read-only scrub additionally persists no cursor, clears no
+progress record, and publishes no transaction, and `health` skips only its
+baseline. A mirror left unrepaired is reported (`metadata_damaged`) and reaches
+the health classification, and `ScrubReport::pass` distinguishes a bounded pass
+that kept its cursor from one that kept none. `CheckReport`'s structure verdict
+type is exported, so a consumer can name the type of a public field it reads.
+*Acceptance:* test 4, plus a test per read-only write path, each failing before
+and passing after.
 
 ### M2 — bounded passes: scrub, discard, and health (D-M2, D-M3, D-M4). **planned**
 The stage that makes every maintenance operation a bounded, resumable, lossless

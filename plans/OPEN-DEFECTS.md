@@ -818,11 +818,12 @@ whole-project-green gate (§7). D63 and D64 are the two defects here that are
 *not* kernel defects, tracked here for their severity: an ARXFS commit publishes
 its superblock slot with no durability barrier, so a reordering device can lose
 an interior tree node beneath a durable root and the volume will not mount
-(fixed in `plans/ARXFS-WRITEBACK.md` WB1, where the batching that makes a
+(open; fixed in `plans/ARXFS-WRITEBACK.md` WB1, where the batching that makes a
 per-commit barrier affordable lands with it); and ARXFS scrub's metadata
-copy-repair writes to the device with no read-only guard, so a mount held
-read-only precisely because its medium must not be touched is written anyway
-(fixed in `plans/ARXFS-MAINTENANCE.md` M1). D65 joined them and is now fixed: ARXFS's
+copy-repair wrote to the device with no read-only guard, so a mount held
+read-only precisely because its medium must not be touched was written anyway
+(fixed — the copy-repair is one read-only-aware rule, and reading that code
+found two more read-only writes on the same path). D65 joined them and is now fixed: ARXFS's
 B-tree insert recursed 8 KiB of stack per tree level, overflowing a release
 kernel's 32 KiB stack — measured at 48 KiB for one write to a fragmented file,
 and 34 KiB for one to a single-leaf tree, so it was reachable without any depth
@@ -3563,51 +3564,62 @@ media before the barrier that precedes it, the crash-replay sweep still leaves
 prior-or-new at every write budget, and a commit whose barrier faults publishes
 nothing.
 
-## D64 — ARXFS scrub's copy-repair write bypasses the read-only guard (OPEN)
+## D64 — ARXFS scrub's copy-repair write bypassed the read-only guard (FIXED)
 
 **Where.** `drivers/filesystem/arxfs/src/scrub.rs` `scrub_meta_into`, and the
 missing gate on `ARXFS::scrub` / `ARXFS::health`.
 
 **Mechanism.** One metadata read path serves every metadata class: read the
 primary, fall back to the companion mirror, and repair the bad copy from the
-good one. `read_meta` guards that repair with `if !self.read_only`, and says
+good one. `read_meta` guarded that repair with `if !self.read_only`, and said
 why — a read-only handle must never mutate the device. `scrub_meta_into`
-performs the *same* repair with a bare `self.write_block(comp, …)` and no guard,
-and neither `scrub` nor `health` calls `deny_if_read_only` (only `trim` does).
-The repair is a direct block write, not a transaction, so `commit`'s read-only
-refusal does not catch it.
+performed the *same* repair with a bare `self.write_block(comp, …)` and no
+guard, and neither `scrub` nor `health` called `deny_if_read_only` (only `trim`
+did). The repair is a direct block write, not a transaction, so `commit`'s
+read-only refusal did not catch it.
 
-A read-only ARXFS handle therefore writes to its device whenever a scrub — or
-any scrub-path verification reached from `health` — finds a repairable mirror.
-That contradicts the guarantee the driver states for `/System`, and it is
-actively dangerous in the state the flag exists for: a re-inserted volume whose
+A read-only ARXFS handle therefore wrote to its device whenever a scrub — or any
+scrub-path verification reached from `health` — found a repairable mirror. That
+contradicted the guarantee the driver states for `/System`, and it was actively
+dangerous in the state the flag exists for: a re-inserted volume whose
 non-mutation could not be proven is mounted read-only *with its uncommitted
 write set still held* (`plans/DEVICES.md` D4c) so that nothing touches a medium
 whose contents are in doubt until an operator decides. A copy-repair there
 mutates exactly that medium, and the retained-write replay decision is then
 being made about a device the filesystem has already altered.
 
-`health` is additionally wasteful on a read-only handle: it reads telemetry,
-runs a whole-volume scrub, and only then fails at the baseline `commit()` —
-discarding a valid health reading it could have reported.
-
-**Severity.** A read-only guarantee that does not hold, on the one path where
+**Severity.** A read-only guarantee that did not hold, on the one path where
 "read-only" is a data-preservation decision rather than a policy one. Reachable
-today only by an explicit `scrub`/`health` call on a read-only handle, which
-nothing in production makes (D-M1 in `plans/ARXFS-MAINTENANCE.md` §13 — the
-operations have no production caller at all); it becomes systematically
-reachable the moment the maintenance runner exists, which is why it is fixed
-first.
+only by an explicit `scrub`/`health` call on a read-only handle, which nothing
+in production makes yet; it becomes systematically reachable the moment the
+maintenance runner exists, which is why it was fixed ahead of it.
 
-**Fix.** One read-only repair rule shared by both repair sites, and `scrub` /
-`health` verifying and reporting without writing on a read-only handle — a
-read-only scrub still finds and *reports* the damaged mirror, it simply does not
-rewrite it. `plans/ARXFS-MAINTENANCE.md` M1, ahead of the runner.
+**Fix (item M1 of `plans/IMPLEMENT-OUTSTANDING-ARXFS.md`).** The mirror
+copy-repair is one method, `ARXFS::repair_meta_copy`, which a read-only handle
+declines — so the rule the three repair-on-read sites each spelled for
+themselves, and this one did not, is stated once and cannot be forgotten again.
+A read-only scrub writes nothing at all: no copy-repair, no refcount correction,
+no cursor, no cleared progress record, no transaction; `health` skips only its
+durable baseline and returns the reading it took.
 
-**Done when:** a read-only mount issues no device write during a scrub that
-finds a repairable metadata block, the finding is still reported, `health`
-returns a valid reading on a read-only handle instead of failing at its baseline
-commit, and a regression test covers each.
+The finding survives the fix rather than being traded for it. A mirror the pass
+may not rewrite is `ScrubReport::metadata_damaged`, never a repair that did not
+happen, and it reaches the health classification, because a copy that went bad
+is the same medium signal whether or not the handle could rewrite it — a
+read-only volume with degraded mirrors reports `Degraded`, not a clean bill.
+
+**Also fixed, found by the same reading, each with its own regression test.**
+Two more read-only writes sat on the same path and failed the whole call rather
+than reporting: a bounded pass died at the cursor it may not persist (the exact
+call the maintenance runner drives), and a pass that finished one a read-write
+mount had paused died at the progress record it may not clear — which would also
+have dropped, in memory only, a reference the committed root still names.
+`ScrubReport::complete` became `ScrubReport::pass`, the three states that
+actually exist, because a bounded pass that kept no position is a different
+audit fact (`PassVerdict::Stopped`, with its own event ID) from one that will be
+resumed: repeating the first never reaches past its own budget. And
+`CheckReport::structure` is a public field whose type could not be named by a
+consumer; `StructureVerdict` is exported.
 
 ---
 

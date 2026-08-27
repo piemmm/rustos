@@ -2708,6 +2708,19 @@ ledger of every outstanding ARXFS item, with its owner and dependencies, is
   times the records holds 3 412 bytes against 3 028, and a stale chunk record
   no extent claims (invisible to the deleted extent-driven recompute) is now
   removed (`plans/ARXFS-MAINTENANCE.md` §13 D-M5 closed).
+- **Read-only means read-only on the verifying paths too (item M1, done).**
+  The mirror copy-repair is one read-only-aware rule
+  (`ARXFS::repair_meta_copy`), so the guard the three repair-on-read sites each
+  spelled for themselves — and scrub's own copy-repair did not — is stated once.
+  A read-only scrub now writes nothing at all: no copy-repair, no refcount
+  correction, no cursor, no cleared progress record, no transaction; `health`
+  skips only its durable baseline and returns the reading it took. A mirror the
+  pass may not rewrite is reported as damaged rather than as a repair that did
+  not happen, and it classifies the volume exactly as a repaired copy would, so
+  a read-only volume with degraded mirrors reports `Degraded`. Reading that code
+  found two further read-only writes that failed the whole call rather than
+  reporting — the cursor a bounded pass may not persist, and the progress record
+  a completing pass may not clear (`plans/OPEN-DEFECTS.md` D64 closed).
 - **The §5 fixed-constant targets are not met.** The spec's 16 KiB metadata
   block, 128 KiB / 256 KiB data-record targets, and inline/packed small-file
   storage are unimplemented: a metadata block and a data record are each one
@@ -2919,8 +2932,10 @@ discard **sweep of the allocation map** — already the authoritative record of
 what is free — in the same resumable-cursor shape as scrub's pass, landing
 before the runner exists.
 
-**Status: in progress.** M0 (the shared pacer and the cross-layer query) has
-landed; M1–M7 are planned. The ordered ledger is
+**Status: in progress.** M0 (the shared pacer and the cross-layer query) and
+M1 (the read-only rule: one read-only-aware copy-repair site, and a scrub or
+health pass on such a handle verifying and reporting without writing) have
+landed; M2–M7 are planned. The ordered ledger is
 `plans/IMPLEMENT-OUTSTANDING-ARXFS.md`.
 
 ---

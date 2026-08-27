@@ -296,6 +296,19 @@ scrub). Scrub returns a structured `ScrubReport` and logs its outcome through
 `lib/log` with a stable event ID; a clean scrub changes nothing and is
 idempotent.
 
+**A read-only handle verifies and reports without writing anything**
+(`arxfs-spec.md` §12): no copy-repair, no refcount correction, no cursor, no
+cleared progress record, no transaction — and no trim, which is refused
+outright. That is the state a volume is held in when its medium must not be
+touched, so a well-meant repair there is itself the damage. The rule lives in
+**one** place (`ARXFS::repair_meta_copy`, the sole mirror copy-repair site, so
+it cannot be honoured at three sites and forgotten at a fourth), and it costs no
+finding: a mirror the pass may not rewrite is counted as
+`ScrubReport::metadata_damaged` rather than a repair that did not happen, and
+`ScrubReport::pass` distinguishes a bounded pass that kept its cursor
+(`PassVerdict::Paused`) from one that kept none (`Stopped`, with its own audit
+event) — repeating the latter never reaches past its own budget.
+
 ## Offline check and rescue (`arxfs-spec.md` §12)
 
 Scrub is the online verifier; `check` and `rescue` are the offline recovery
@@ -375,6 +388,9 @@ baseline — **triggers a scrub** through the Stage-8 `scrub` machinery (never a
 parallel verifier, §2.2), folding its findings into the counters. It stores the
 current telemetry as the new baseline and returns a structured `HealthReport`,
 logging its outcome with stable event IDs in the `arxfs` `12000..13000` range.
+A read-only handle stores no baseline and returns its reading anyway; a mirror
+the triggered scrub found damaged but could not rewrite classifies the volume
+exactly as a repaired one would, because the copy went bad either way.
 
 ## Crash consistency (copy-on-write + superblock ring)
 
@@ -406,9 +422,13 @@ every inode and extent on it, and the resident cost is a bounded cache of
 A **read-only handle holds no allocator at all** — the field is `None` — so it
 cannot allocate, free, dedupe, or trim by construction, builds no allocation
 state, and reports the committed free count straight from the transaction root.
-Block allocation draws data upward and metadata downward from the pool with a
-small metadata reserve, so a delete can copy-on-write itself even on a full
-volume. No `unwrap`/`expect`/`panic!` and no `unsafe`.
+It also writes nothing on the *verifying* paths, which do not allocate: the one
+copy-repair site and both the scrub cursor and the health baseline are gated on
+the same flag, so a scrub or health pass on such a handle verifies and reports
+without touching the medium. Block allocation draws data upward and metadata
+downward from the pool with a small metadata reserve, so a delete can
+copy-on-write itself even on a full volume. No `unwrap`/`expect`/`panic!` and no
+`unsafe`.
 
 > **Staged build.** A volume is a complete, mountable copy-on-write
 > filesystem with B-tree metadata, a `lib/crypto` keyed-MAC authenticator in

@@ -33,7 +33,9 @@ use core::alloc::{GlobalAlloc, Layout};
 use tairix_abi::driver::block::{Block, BlockGeometry, DiscardCapability};
 use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
 use tairix_abi::{CapabilityId, CapabilityQuery, DriverError};
-use tairix_drv_fs_arxfs::{EntropySource, ScrubBudget, VolumeKey, ARXFS, VOLUME_KEY_LEN};
+use tairix_drv_fs_arxfs::{
+    EntropySource, PassVerdict, ScrubBudget, VolumeKey, ARXFS, VOLUME_KEY_LEN,
+};
 use tairix_log::{Event, Sink};
 
 /// A pass-through allocator that tracks live bytes and their high-water mark
@@ -274,7 +276,7 @@ fn a_whole_volume_verification_holds_no_per_record_state() {
         let (report, scrub_peak, _) =
             measure(|| fs.scrub(&GrantAll, &NullSink, ScrubBudget::Unlimited));
         let report = report.expect("scrub the fixture");
-        assert!(report.complete, "{report:?}");
+        assert_eq!(report.pass, PassVerdict::Complete, "{report:?}");
         assert!(
             report.claims_counted,
             "the claim counts were recomputed: {report:?}"

@@ -1963,7 +1963,7 @@ fn rebuild_scrub_and_check_agree_on_a_compressed_volume() {
         "the rebuilt free set accounts compressed extents by stored size"
     );
     let report = scrub_full(&mut fs);
-    assert!(report.complete, "scrub completes");
+    assert_eq!(report.pass, PassVerdict::Complete, "scrub completes");
     assert!(!report.found_faults(), "the volume is clean: {report:?}");
     assert!(
         report.data_blocks_checked >= 1,
@@ -2792,7 +2792,7 @@ fn clean_scrub_finds_nothing_and_is_idempotent() {
     let used_before = fs.used_blocks();
     let free_before = fs.free_count;
     let report = scrub_full(&mut fs);
-    assert!(report.complete);
+    assert_eq!(report.pass, PassVerdict::Complete);
     assert!(!report.found_faults(), "{report:?}");
     assert_eq!(report.metadata_repaired, 0);
     assert_eq!(report.metadata_unrepairable, 0);
@@ -2846,7 +2846,7 @@ fn scrub_repairs_a_single_copy_metadata_corruption_from_the_companion() {
     let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 4096, 512), &TEST_KEY)
         .expect("mounts via the companion mirror");
     let report = scrub_full(&mut fs);
-    assert!(report.complete);
+    assert_eq!(report.pass, PassVerdict::Complete);
     assert_eq!(report.metadata_repaired, 1, "{report:?}");
     assert_eq!(report.metadata_unrepairable, 0);
 
@@ -2941,7 +2941,7 @@ fn scrub_detects_and_corrects_a_refcount_divergence() {
     assert_eq!(fs.data_refcount(shared).expect("refcount"), 5);
 
     let report = scrub_full(&mut fs);
-    assert!(report.complete);
+    assert_eq!(report.pass, PassVerdict::Complete);
     assert!(report.refcount_divergences >= 1, "{report:?}");
     assert!(report.divergences_corrected >= 1, "{report:?}");
     assert_eq!(
@@ -3321,7 +3321,7 @@ fn a_volume_with_no_room_for_a_scratch_array_says_so() {
     assert!(fs.free_count <= 17, "free after filling: {}", fs.free_count);
 
     let report = scrub_full(&mut fs);
-    assert!(report.complete, "{report:?}");
+    assert_eq!(report.pass, PassVerdict::Complete, "{report:?}");
     assert!(
         !report.claims_counted,
         "a full volume cannot spare a run, and must say so: {report:?}"
@@ -3353,7 +3353,7 @@ fn a_read_only_scrub_counts_no_claims_and_writes_nothing() {
     let mut fs = ARXFS::open_read_only(MemBlock::from_bytes(bytes.clone(), 4096, 512), &TEST_KEY)
         .expect("read-only mount");
     let report = scrub_full(&mut fs);
-    assert!(report.complete);
+    assert_eq!(report.pass, PassVerdict::Complete);
     assert!(
         !report.claims_counted,
         "a read-only handle has no allocator, so it counts nothing"
@@ -3414,6 +3414,159 @@ fn a_pass_that_counted_no_claims_reports_a_divergence_without_writing() {
     );
     let after = fs.into_block();
     assert_eq!(after.writes, 0, "no write is even attempted");
+    assert_eq!(after.bytes(), bytes, "the device is untouched");
+}
+
+/// Wound one physical copy of a live metadata block and scrub a read-only
+/// mount: the damaged mirror is reported, and the medium is not written.
+///
+/// The read-only rule was observed at the repair-on-read sites and missing from
+/// scrub's own copy-repair, so a mount held read-only precisely because its
+/// medium must not be touched wrote to it on the first repairable block.
+#[test]
+fn a_read_only_scrub_reports_a_damaged_mirror_without_repairing_it() {
+    let mut fs = populated();
+    // A directory data block: the mount's own reads never reach directory
+    // contents, so a wounded primary survives to be scrubbed.
+    let root_inode = fs.read_inode(ROOT_INO).expect("root inode");
+    let target = fs.block_ptr(&root_inode, 0).expect("root dir block");
+    assert_ne!(target, 0);
+    let bs = 4096usize;
+    let mut bytes = fs.into_block().bytes();
+    bytes[as_usize(target) * bs + HEADER_LEN] ^= 0xff;
+
+    let mut fs = ARXFS::open_read_only(MemBlock::from_bytes(bytes.clone(), 4096, 512), &TEST_KEY)
+        .expect("mounts via the companion mirror");
+    let report = scrub_full(&mut fs);
+    assert_eq!(report.pass, PassVerdict::Complete, "{report:?}");
+    assert_eq!(
+        report.metadata_damaged, 1,
+        "the damaged mirror is reported: {report:?}"
+    );
+    assert_eq!(
+        report.metadata_repaired, 0,
+        "never as a repair that did not happen: {report:?}"
+    );
+    assert_eq!(report.metadata_unrepairable, 0, "{report:?}");
+    assert!(report.found_faults(), "a damaged mirror is a finding");
+
+    let after = fs.into_block();
+    assert_eq!(after.writes, 0, "a read-only scrub issues no write");
+    assert_eq!(after.bytes(), bytes, "the wounded copy is left as it is");
+}
+
+/// A bounded read-only scrub reports the chunk it verified instead of failing
+/// at the cursor it may not persist, and says the position was not kept.
+///
+/// Persisting the cursor allocates, which a read-only handle refuses, so the
+/// whole call failed after doing its work — and the maintenance runner drives
+/// exactly this call. A pass that keeps no position is a different audit fact
+/// from one that will be resumed: repeating it never reaches past its budget.
+#[test]
+fn a_read_only_bounded_scrub_reports_progress_without_persisting_a_cursor() {
+    let bytes = populated().into_block().bytes();
+    let mut fs = ARXFS::open_read_only(MemBlock::from_bytes(bytes.clone(), 4096, 512), &TEST_KEY)
+        .expect("read-only mount");
+    let sink = RecordingSink::new();
+    let report = fs
+        .scrub(&GrantAll, &sink, ScrubBudget::Inodes(1))
+        .expect("a bounded read-only scrub reports rather than failing");
+    assert_eq!(
+        report.pass,
+        PassVerdict::Stopped,
+        "the budget stopped the pass and kept no cursor: {report:?}"
+    );
+    assert!(
+        report.metadata_blocks_checked > 0,
+        "and it verified a chunk first: {report:?}"
+    );
+    assert_eq!(fs.scrub_progress_root, 0, "no cursor was persisted");
+    assert!(sink.saw(scrub::SCRUB_STOPPED), "the stop is logged as such");
+    assert!(
+        !sink.saw(scrub::SCRUB_PAUSED),
+        "never as a pause a later call resumes"
+    );
+    let after = fs.into_block();
+    assert_eq!(after.writes, 0, "and no write was issued");
+    assert_eq!(after.bytes(), bytes, "the device is untouched");
+}
+
+/// A read-only scrub that finishes a pass a read-write mount had paused leaves
+/// the progress record the committed root still names.
+///
+/// Clearing it freed metadata and committed, which a read-only handle refuses,
+/// failing a scrub that had already completed its verification; and dropping
+/// the reference in memory alone would hide a record the volume still names.
+#[test]
+fn a_read_only_scrub_leaves_a_paused_cursor_the_volume_still_names() {
+    let mut fs = populated();
+    fs.scrub(&GrantAll, &NullSink, ScrubBudget::Inodes(1))
+        .expect("pause a scrub");
+    let paused_at = fs.scrub_progress_root;
+    assert_ne!(paused_at, 0, "a read-write pass persisted its cursor");
+    let bytes = fs.into_block().bytes();
+
+    let mut fs = ARXFS::open_read_only(MemBlock::from_bytes(bytes.clone(), 4096, 512), &TEST_KEY)
+        .expect("read-only mount");
+    assert_eq!(fs.scrub_progress_root, paused_at, "the record is adopted");
+    let report = scrub_full(&mut fs);
+    assert_eq!(
+        report.pass,
+        PassVerdict::Complete,
+        "the resumed pass finished: {report:?}"
+    );
+    assert_eq!(
+        fs.scrub_progress_root, paused_at,
+        "and left the record the committed root still names"
+    );
+    let after = fs.into_block();
+    assert_eq!(after.writes, 0, "no write was issued");
+    assert_eq!(after.bytes(), bytes, "the device is untouched");
+}
+
+/// A read-only mount refuses `check` before it touches anything, completing the
+/// guarantee across every maintenance operation: `scrub` and `health` verify
+/// and report, `trim` and `check` are refused, and none of the four writes.
+///
+/// `check`'s first act is to rebuild the free-space derivation, which a
+/// read-only handle has no allocator for, so it fails closed there rather than
+/// part-way through a repair it cannot finish.
+#[test]
+fn a_read_only_mount_refuses_check_before_touching_the_device() {
+    let bytes = populated().into_block().bytes();
+    let mut fs = ARXFS::open_read_only(MemBlock::from_bytes(bytes.clone(), 4096, 512), &TEST_KEY)
+        .expect("read-only mount");
+    assert_eq!(
+        fs.check(&GrantAll, &NullSink),
+        Err(DriverError::PermissionDenied)
+    );
+    let after = fs.into_block();
+    assert_eq!(after.writes, 0, "no write was issued");
+    assert_eq!(after.bytes(), bytes, "the device is untouched");
+}
+
+/// A read-only mount refuses the discard sweep before it touches anything: a
+/// discard is destructive and irreversible, so a medium whose state is in doubt
+/// never receives one.
+#[test]
+fn a_read_only_mount_never_trims() {
+    let bytes = populated().into_block().bytes();
+    let mut fs = ARXFS::open_read_only(
+        MemBlock::from_bytes(bytes.clone(), 4096, 512).with_discard(1, 0),
+        &TEST_KEY,
+    )
+    .expect("read-only mount");
+    assert_eq!(
+        fs.trim(&GrantAll, &NullSink),
+        Err(DriverError::PermissionDenied)
+    );
+    let after = fs.into_block();
+    assert!(
+        after.discarded.is_empty(),
+        "not one range was discarded: {:?}",
+        after.discarded
+    );
+    assert_eq!(after.writes, 0, "and no write was issued");
     assert_eq!(after.bytes(), bytes, "the device is untouched");
 }
 
@@ -3562,7 +3715,7 @@ fn scrub_accounts_a_shared_chunk_once_and_respects_the_domain() {
     let before = fs.chunk_get(shared).expect("get").expect("shared");
 
     let report = scrub_full(&mut fs);
-    assert!(report.complete);
+    assert_eq!(report.pass, PassVerdict::Complete);
     assert_eq!(report.refcount_divergences, 0, "{report:?}");
     assert_eq!(report.reverse_ref_divergences, 0);
     assert_eq!(report.divergences_corrected, 0);
@@ -3583,7 +3736,7 @@ fn scrub_is_resumable_and_matches_an_uninterrupted_pass() {
     let mut whole = ARXFS::open(MemBlock::from_bytes(base.clone(), 4096, 512), &TEST_KEY)
         .expect("reopen whole");
     let reference = scrub_full(&mut whole);
-    assert!(reference.complete);
+    assert_eq!(reference.pass, PassVerdict::Complete);
 
     // Resumed pass: one inode per call until it completes.
     let mut fs =
@@ -3594,7 +3747,7 @@ fn scrub_is_resumable_and_matches_an_uninterrupted_pass() {
             .scrub(&GrantAll, &NullSink, ScrubBudget::Inodes(1))
             .expect("scrub step");
         calls += 1;
-        if report.complete {
+        if report.pass == PassVerdict::Complete {
             break report;
         }
         assert_ne!(
@@ -3624,7 +3777,7 @@ fn a_crash_mid_scrub_leaves_a_mountable_volume() {
     let paused = fs
         .scrub(&GrantAll, &NullSink, ScrubBudget::Inodes(1))
         .expect("first step");
-    assert!(!paused.complete);
+    assert_eq!(paused.pass, PassVerdict::Paused);
     assert_ne!(fs.scrub_progress_root, 0);
 
     // Simulate a crash: drop the in-memory state and reopen from disk.
@@ -3639,7 +3792,7 @@ fn a_crash_mid_scrub_leaves_a_mountable_volume() {
     let report = fs
         .scrub(&GrantAll, &NullSink, ScrubBudget::Unlimited)
         .expect("resume");
-    assert!(report.complete);
+    assert_eq!(report.pass, PassVerdict::Complete);
     assert_eq!(fs.scrub_progress_root, 0);
 }
 
@@ -3661,7 +3814,8 @@ fn invariants_hold_across_scrub_remount_and_cow_rewrite() {
     assert_eq!(fs.data_refcount(shared).expect("refcount"), 2);
 
     let report = scrub_full(&mut fs);
-    assert!(report.complete && !report.found_faults(), "{report:?}");
+    assert_eq!(report.pass, PassVerdict::Complete, "{report:?}");
+    assert!(!report.found_faults(), "{report:?}");
 
     // Remount, then rewrite one sharer (copy-on-write off the shared chunk).
     let bytes = fs.into_block().bytes();
@@ -3678,7 +3832,8 @@ fn invariants_hold_across_scrub_remount_and_cow_rewrite() {
 
     // Scrub again: still clean, and the data reads back correctly.
     let report = scrub_full(&mut fs);
-    assert!(report.complete && !report.found_faults(), "{report:?}");
+    assert_eq!(report.pass, PassVerdict::Complete, "{report:?}");
+    assert!(!report.found_faults(), "{report:?}");
     let node_a = fs.lookup(root, b"a").expect("lookup a");
     assert_eq!(read_all(&mut fs, node_a, cap), replacement);
     let node_b = fs.lookup(root, b"b").expect("lookup b");
@@ -4504,6 +4659,100 @@ fn health_triggers_a_scrub_when_the_device_reports_new_unsafe_shutdowns() {
     assert_eq!(report.unsafe_shutdown_delta, 0);
     assert!(report.scrub.is_none(), "no new delta, no scrub");
     assert_eq!(report.scrubs_triggered, 1, "the lifetime count persisted");
+}
+
+/// Reopen a 4096-byte volume from `bytes` read-only, reporting `health`.
+fn open_health_read_only(
+    bytes: alloc::vec::Vec<u8>,
+    block_count: u64,
+    health: DeviceHealth,
+) -> ARXFS<MemBlock> {
+    ARXFS::open_read_only(
+        MemBlock::from_bytes(bytes, 4096, block_count).with_health(health),
+        &TEST_KEY,
+    )
+    .expect("read-only mount with health")
+}
+
+/// A read-only health pass returns the reading it took and stores no baseline.
+///
+/// It read the telemetry, compared the baseline, classified the volume, and
+/// then died at the baseline commit — throwing away a valid reading it already
+/// held.
+#[test]
+fn a_read_only_health_pass_returns_its_reading_and_stores_no_baseline() {
+    let mut fs = fmt_health(256, DeviceHealth::Available(healthy_snapshot(0, 0)));
+    fs.health(&GrantAll, &NullSink)
+        .expect("establish a baseline");
+    let bytes = fs.into_block().bytes();
+
+    let mut fs = open_health_read_only(
+        bytes.clone(),
+        256,
+        DeviceHealth::Available(healthy_snapshot(3, 0)),
+    );
+    let baseline_at = fs.health_baseline_root;
+    assert_ne!(baseline_at, 0, "the stored baseline is adopted");
+    let report = fs
+        .health(&GrantAll, &NullSink)
+        .expect("a read-only health pass reports rather than failing");
+    assert_eq!(report.unsafe_shutdown_delta, 3, "{report:?}");
+    assert!(report.metadata_scrub_recommended, "{report:?}");
+    assert!(report.scrub.is_some(), "the recommendation was acted on");
+    assert!(report.device.is_some(), "the telemetry is reported");
+    assert_eq!(report.state, HealthState::Healthy, "{report:?}");
+    assert_eq!(
+        fs.health_baseline_root, baseline_at,
+        "the stored baseline is untouched"
+    );
+    let after = fs.into_block();
+    assert_eq!(after.writes, 0, "a read-only health pass issues no write");
+    assert_eq!(after.bytes(), bytes, "the device is untouched");
+}
+
+/// A mirror the read-only scrub found damaged but may not rewrite classifies
+/// the volume exactly as a repaired one would.
+///
+/// A copy that went bad is the same medium signal either way, and it can never
+/// enter the durable history because the handle that observes it stores none —
+/// so without reaching the classification directly the finding would be lost
+/// and the volume would read as healthy.
+#[test]
+fn a_read_only_volume_with_a_damaged_mirror_classifies_degraded() {
+    let mut fs = fmt_health(512, DeviceHealth::Available(healthy_snapshot(0, 0)));
+    let root = fs.root();
+    fs.create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    fs.health(&GrantAll, &NullSink)
+        .expect("establish a baseline");
+    let root_inode = fs.read_inode(ROOT_INO).expect("root inode");
+    let target = fs.block_ptr(&root_inode, 0).expect("root dir block");
+    let bs = 4096usize;
+    let mut bytes = fs.into_block().bytes();
+    bytes[as_usize(target) * bs + HEADER_LEN] ^= 0xff;
+
+    let mut fs = open_health_read_only(
+        bytes.clone(),
+        512,
+        DeviceHealth::Available(healthy_snapshot(1, 0)),
+    );
+    let report = fs.health(&GrantAll, &NullSink).expect("health");
+    let scrub = report.scrub.expect("the delta triggered a scrub");
+    assert_eq!(scrub.metadata_damaged, 1, "{scrub:?}");
+    assert_eq!(scrub.metadata_repaired, 0, "{scrub:?}");
+    assert_eq!(
+        report.metadata_repaired, 0,
+        "and no repair reached the lifetime counters: {report:?}"
+    );
+    assert_eq!(
+        report.state,
+        HealthState::Degraded,
+        "a mirror that went bad is a watch-level signal whether or not it \
+         could be rewritten: {report:?}"
+    );
+    let after = fs.into_block();
+    assert_eq!(after.writes, 0, "and the pass wrote nothing");
+    assert_eq!(after.bytes(), bytes, "the device is untouched");
 }
 
 #[test]
@@ -5435,7 +5684,11 @@ fn sparse_scrub_and_check_validate_metadata_only() {
         .expect("trailing hole");
 
     let report = scrub_full(&mut fs);
-    assert!(report.complete, "scrub completes on a sparse file");
+    assert_eq!(
+        report.pass,
+        PassVerdict::Complete,
+        "scrub completes on a sparse file"
+    );
     assert!(!report.found_faults(), "a sparse file is clean: {report:?}");
 
     let check = fs.check(&GrantAll, &NullSink).expect("check");

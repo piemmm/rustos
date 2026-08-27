@@ -90,7 +90,7 @@ mod xform;
 #[cfg(test)]
 mod tests;
 
-pub use check::{CheckReport, RescueReport, RescueSink};
+pub use check::{CheckReport, RescueReport, RescueSink, StructureVerdict};
 use crypto::{
     decrypt_region, encrypt_region, CryptoHeader, VolumeKeys, CRYPTO_HEADER_LEN, CRYPTO_TRAILER,
 };
@@ -101,7 +101,7 @@ use integrity::{
     logical_hash, physical_checksum, read_stored_form, write_stored_form, DataFault, StoredForm,
     COMPRESSION_DESCRIPTOR_LEN, DATA_INTEGRITY_TRAILER, LOGICAL_HASH_LEN, PHYS_CHECKSUM_LEN,
 };
-pub use scrub::{ScrubBudget, ScrubReport};
+pub use scrub::{PassVerdict, ScrubBudget, ScrubReport};
 pub use unlock::{
     UnlockDescriptor, ROOT_UNLOCK_NAME, SYSTEM_VOLUME_KEY, UNLOCK_DEFAULT_ITERATIONS,
     UNLOCK_DESCRIPTOR_LEN, UNLOCK_MAX_ITERATIONS, UNLOCK_MIN_ITERATIONS, UNLOCK_SALT_LEN,
@@ -1021,6 +1021,25 @@ impl<B: Block> ARXFS<B> {
         self.block.write_blocks(phys, &buf[..bs])
     }
 
+    /// Restore the bad physical copy of a mirrored metadata block at `phys`
+    /// from `good`, the good copy's still-sealed bytes, reporting whether the
+    /// copy was rewritten.
+    ///
+    /// The one place a mirror copy-repair happens, so the read-only rule
+    /// cannot be observed at three sites and forgotten at a fourth. A
+    /// read-only handle rewrites nothing and reports `false`: a volume held
+    /// read-only because its non-mutation could not be proven is exactly where
+    /// a well-meant repair is itself the damage. The good copy served the read
+    /// either way, so a caller reports the finding rather than losing it
+    /// (`docs/src/filesystem/arxfs-spec.md` §8, §12).
+    fn repair_meta_copy(&mut self, phys: u64, good: &[u8]) -> Result<bool, DriverError> {
+        if self.read_only {
+            return Ok(false);
+        }
+        self.write_block(phys, good)?;
+        Ok(true)
+    }
+
     /// The companion mirror of metadata block `phys`: its adjacent block at
     /// `phys + 1`. Every metadata block is stored twice — at `phys` and at
     /// `companion(phys)` — so a stale, torn, or bit-rotted copy can be
@@ -1046,9 +1065,10 @@ impl<B: Block> ARXFS<B> {
     /// Reads the primary copy first; if it fails to authenticate (stale,
     /// misdirected, torn, bit-rotted, or wrong-key), it falls back to the
     /// companion mirror and, when that copy is good, **repairs** the primary
-    /// from it (`docs/src/filesystem/arxfs-spec.md` §8 — try redundant
-    /// copies, repair bad from good). On success `buf` holds the good block's
-    /// bytes. If neither copy authenticates the read fails closed with
+    /// from it ([`Self::repair_meta_copy`], which a read-only handle declines —
+    /// `docs/src/filesystem/arxfs-spec.md` §8, try redundant copies, repair bad
+    /// from good). On success `buf` holds the good block's bytes. If neither
+    /// copy authenticates the read fails closed with
     /// [`DriverError::DeviceFault`].
     fn read_meta(
         &mut self,
@@ -1076,13 +1096,9 @@ impl<B: Block> ARXFS<B> {
         self.read_block(Self::companion(phys), buf)?;
         let header =
             BlockHeader::decode_verify(&buf[..bs], expect_type, self.fs_uuid, phys, &self.mac_key)?;
-        // The companion is good: repair the primary copy from it (the
-        // still-encrypted bytes), then decrypt the caller's copy. A read-only
-        // handle (rescue) skips the repair write so it never mutates the
-        // damaged device (`docs/src/filesystem/arxfs-spec.md` §12).
-        if !self.read_only {
-            self.write_block(phys, buf)?;
-        }
+        // The companion is good: repair the primary from its still-encrypted
+        // bytes, then decrypt the caller's copy.
+        self.repair_meta_copy(phys, buf)?;
         self.decrypt_meta_payload(expect_type, buf, phys)?;
         Ok(header)
     }
@@ -1934,9 +1950,9 @@ impl<B: Block> ARXFS<B> {
         else {
             return Ok(None);
         };
-        if !self.read_only {
-            let _ = self.write_block(primary, buf);
-        }
+        // The ring scan tries every slot and keeps the best, so a repair the
+        // device refuses must not make a slot that decoded cleanly invisible.
+        let _ = self.repair_meta_copy(primary, buf);
         Ok(Some(found))
     }
 
@@ -1970,9 +1986,7 @@ impl<B: Block> ARXFS<B> {
         }
         self.read_block(Self::companion(root_phys), buf)?;
         let root = TxnRoot::decode_verify(&buf[..bs], uuid, root_phys, expect_generation, &key)?;
-        if !self.read_only {
-            self.write_block(root_phys, buf)?;
-        }
+        self.repair_meta_copy(root_phys, buf)?;
         Ok(root)
     }
 

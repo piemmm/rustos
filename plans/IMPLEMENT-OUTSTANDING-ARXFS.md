@@ -36,8 +36,8 @@ no-deferral rule), ahead of everything below it.
 | A1 | Bounded-stack B-tree mutation path (defect `OPEN-DEFECTS.md` D65) | §7 here | — | A0 | **done** |
 | A2 | Bounded whole-volume reconcile and reachability state (defect D-M5) | `ARXFS-MAINTENANCE.md` | 18 | A1 | **done** |
 | M0 | Shared background pacer + cross-layer availability query | `ARXFS-MAINTENANCE.md` | 18 | — | **done** |
-| M1 | The read-only repair rule (defect D64) | `ARXFS-MAINTENANCE.md` | 18 | — | **next** |
-| WB0 | Write-amplification measurement harness | `ARXFS-WRITEBACK.md` | 17 | — | planned |
+| M1 | The read-only repair rule (defect D64) | `ARXFS-MAINTENANCE.md` | 18 | — | **done** |
+| WB0 | Write-amplification measurement harness | `ARXFS-WRITEBACK.md` | 17 | — | **next** |
 | WB1 | Dirty block set + the commit barrier (defect D63) | `ARXFS-WRITEBACK.md` | 17 | WB0 | planned |
 | WB2 | Run coalescer | `ARXFS-WRITEBACK.md` | 17 | WB1 | planned |
 | WB3 | Fold in the allocation map's dirty pages | `ARXFS-WRITEBACK.md` | 17 | WB1 | planned |
@@ -97,13 +97,14 @@ their reason recorded there, not here:
 - **The rest of write-back before the format targets.** A wider record on an
   uncoalesced write path multiplies the per-record device command count instead
   of reducing it, so B1 follows WB2.
-- **M0 and M1 go first, and M0 is done.** M0 was a hoist plus one
+- **M0 and M1 went first, and both are done.** M0 was a hoist plus one
   default-provided query, and it also closed a live reporting defect: a mount
   over a degraded composed array read as `Available`, because a degraded array
   serves its reads and the completion said only that the transfer succeeded.
-  M1 is a security fix — a read-only mount currently writes to its device
-  through scrub's unguarded copy-repair (`plans/OPEN-DEFECTS.md` D64). Neither
-  needs the barrier, and M1 should not wait behind six write-back stages.
+  M1 was the security fix that could not wait behind six write-back stages: a
+  read-only mount wrote to its device through scrub's unguarded copy-repair
+  (D64), and reading that code found two more read-only writes on the same
+  path. Neither stage needed the barrier.
 - **M2 before M3, because a scheduler over broken operations is worse than
   none.** M2 makes each operation a bounded, resumable, lossless pass (over the
   reconcile state A2 bounded first). Until it lands, `scrub` is one

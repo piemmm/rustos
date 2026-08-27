@@ -366,16 +366,24 @@ fn snapshot_from_array(a: [u64; SNAPSHOT_FIELDS]) -> HealthSnapshot {
 }
 
 /// Classify a volume against `thresholds` from its accumulated
-/// filesystem-observed counters and its current device snapshot. The worse of
-/// the two signals wins (`HealthState` is ordered worst-last).
+/// filesystem-observed counters, `metadata_damaged` (bad metadata copies this
+/// pass left unrepaired), and its current device snapshot. The worse of the
+/// signals wins (`HealthState` is ordered worst-last).
+///
+/// A copy that went bad is the same medium signal whether or not the handle
+/// could rewrite it, so the two count against one threshold. Only a read-only
+/// handle produces the second, and a read-only handle stores no baseline, so it
+/// reaches the classification without ever entering the durable history.
 fn classify(
     counters: &FaultCounters,
+    metadata_damaged: u64,
     device: DeviceHealth,
     thresholds: &HealthThresholds,
 ) -> HealthState {
     let mut state = HealthState::Healthy;
     let data_faults = counters.total_data_faults();
-    if counters.metadata_repaired >= thresholds.degraded_metadata_repairs
+    let mirror_faults = counters.metadata_repaired.saturating_add(metadata_damaged);
+    if mirror_faults >= thresholds.degraded_metadata_repairs
         || data_faults >= thresholds.degraded_data_faults
     {
         state = state.max(HealthState::Degraded);
@@ -428,6 +436,12 @@ impl<B: Block> ARXFS<B> {
     /// A device that exposes no telemetry yields a report whose
     /// classification rests on the accumulated filesystem-observed counters
     /// alone; the subsystem stays enabled regardless.
+    ///
+    /// A **read-only handle stores no baseline** — like the scrub it may
+    /// trigger, it writes nothing to the medium it holds — and still returns
+    /// the reading it took. A mirror the scrub found damaged but could not
+    /// rewrite classifies exactly as a repaired one would: the copy went bad
+    /// either way.
     ///
     /// # Errors
     ///
@@ -485,7 +499,8 @@ impl<B: Block> ARXFS<B> {
             scrub = Some(report);
         }
 
-        let state = classify(&counters, current, &thresholds);
+        let metadata_damaged = scrub.map_or(0, |report| report.metadata_damaged);
+        let state = classify(&counters, metadata_damaged, current, &thresholds);
         let read_only_recommended = match current {
             DeviceHealth::Available(s) => device_is_critical(&s, &thresholds),
             DeviceHealth::Unavailable => false,
@@ -494,17 +509,21 @@ impl<B: Block> ARXFS<B> {
         // Persist the new baseline: the current telemetry becomes the next
         // "last clean state" and the folded counters become the new history.
         // A crash mid-update leaves the previous committed baseline selected
-        // and never loses live data.
-        self.begin();
-        let new_baseline = Baseline {
-            device: current,
-            counters,
-        };
-        if let Err(err) = self.store_health_baseline(&new_baseline) {
-            self.rollback();
-            return Err(err);
+        // and never loses live data. A read-only handle stores nothing — the
+        // reading it has just taken is valid and is returned regardless, and
+        // the next pass simply measures its delta from the same baseline.
+        if !self.read_only {
+            self.begin();
+            let new_baseline = Baseline {
+                device: current,
+                counters,
+            };
+            if let Err(err) = self.store_health_baseline(&new_baseline) {
+                self.rollback();
+                return Err(err);
+            }
+            self.commit()?;
         }
-        self.commit()?;
 
         let device = match current {
             DeviceHealth::Available(s) => Some(s),
