@@ -40,15 +40,14 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use crate::btree::TreeSpec;
+use crate::header::ReservedOwner;
 use crate::integrity::LOGICAL_HASH_LEN;
 
-/// Owner object stamped in every chunk-tree node header; a
-/// reserved sentinel distinct from any inode number and from the inode tree's
-/// own [`u64::MAX`] owner.
-pub(crate) const CHUNK_TREE_OWNER: u64 = u64::MAX - 1;
+/// Owner object stamped in every chunk-tree node header.
+pub(crate) const CHUNK_TREE_OWNER: u64 = ReservedOwner::ChunkTree.sentinel();
 
 /// Owner object stamped in every reverse-reference-tree node header.
-pub(crate) const REVERSE_REF_TREE_OWNER: u64 = u64::MAX - 2;
+pub(crate) const REVERSE_REF_TREE_OWNER: u64 = ReservedOwner::ReverseRefTree.sentinel();
 
 /// Fixed on-disk width of one [`ChunkRecord`]: refcount (8) + domain (8) +
 /// logical length (4) + logical hash (32).
@@ -149,10 +148,17 @@ pub(crate) fn encode_reverse_ref(referrers: &[Referrer]) -> [u8; REVERSE_REF_VAL
     out
 }
 
-/// Decode a reverse-reference value into its referrer list. Returns `None` if
-/// `value` is too short or its count exceeds [`REVERSE_REF_CAP`] (corruption is
-/// surfaced, never panicked).
-pub(crate) fn decode_reverse_ref(value: &[u8]) -> Option<Vec<Referrer>> {
+/// Decode a reverse-reference value into `out`, returning how many referrers
+/// it holds. Returns `None` if `value` is too short or its count exceeds
+/// [`REVERSE_REF_CAP`] (corruption is surfaced, never panicked).
+///
+/// The record never holds more than the cap, so a caller that can lend a
+/// fixed array — the reconcile, which reads one record per shared chunk on the
+/// whole volume — decodes without allocating.
+pub(crate) fn decode_reverse_ref_into(
+    value: &[u8],
+    out: &mut [Referrer; REVERSE_REF_CAP],
+) -> Option<usize> {
     if value.len() < REVERSE_REF_VALUE_LEN {
         return None;
     }
@@ -162,16 +168,22 @@ pub(crate) fn decode_reverse_ref(value: &[u8]) -> Option<Vec<Referrer>> {
     if count > REVERSE_REF_CAP {
         return None;
     }
-    let mut out = Vec::with_capacity(count);
-    for i in 0..count {
+    for (i, slot) in out.iter_mut().enumerate().take(count) {
         let base = 4 + i * (4 + 8);
         let mut inode = [0u8; 4];
         inode.copy_from_slice(&value[base..base + 4]);
         let mut logical = [0u8; 8];
         logical.copy_from_slice(&value[base + 4..base + 12]);
-        out.push((u32::from_le_bytes(inode), u64::from_le_bytes(logical)));
+        *slot = (u32::from_le_bytes(inode), u64::from_le_bytes(logical));
     }
-    Some(out)
+    Some(count)
+}
+
+/// Decode a reverse-reference value into its referrer list.
+pub(crate) fn decode_reverse_ref(value: &[u8]) -> Option<Vec<Referrer>> {
+    let mut buf = [(0u32, 0u64); REVERSE_REF_CAP];
+    let count = decode_reverse_ref_into(value, &mut buf)?;
+    Some(buf[..count].to_vec())
 }
 
 /// The in-memory dedupe-index key: `(domain, length, logical hash)`. It is the

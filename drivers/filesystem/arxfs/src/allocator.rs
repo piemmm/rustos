@@ -10,8 +10,9 @@
 //! `/System` volume a handful of block reads rather than a walk over every
 //! inode and extent on it.
 //!
-//! The map's layout, cache, and bit arithmetic are [`crate::allocmap`]; this
-//! module is the I/O and the allocation policy over them.
+//! The map's layout and bit arithmetic are [`crate::allocmap`] and its resident
+//! pages live in the shared bounded cache [`crate::pagecache`]; this module is
+//! the I/O and the allocation policy over them.
 //!
 //! # Keeping the resident cost bounded
 //!
@@ -43,11 +44,12 @@ use tairix_abi::driver::block::Block;
 use tairix_abi::DriverError;
 
 use crate::allocmap::{
-    bit_get, bit_set, find_free_bit, find_free_bit_rev, map_payload_len, set_bit_range,
-    summary_get, summary_set, MapCache, MapGeometry, MapHeader, ALLOC_MAP_OWNER,
+    bit_get, bit_set, clear_bit_range, find_free_bit, find_free_bit_rev, find_used_bit,
+    set_bit_range, summary_get, summary_set, MapGeometry, MapHeader, ALLOC_MAP_OWNER,
 };
 use crate::dedupe::DedupeIndex;
 use crate::header::{BlockHeader, BlockType, HEADER_LEN};
+use crate::pagecache::{page_payload_len, BlockCache};
 use crate::superblock::RING_BLOCKS;
 use crate::{as_u32, ARXFS, MAX_BLOCK_SIZE, METADATA_RESERVE};
 
@@ -73,7 +75,7 @@ pub(crate) struct Allocator {
     /// Where the map region sits and what it covers.
     pub(crate) geom: MapGeometry,
     /// Bounded cache of resident region blocks.
-    pub(crate) cache: MapCache,
+    pub(crate) cache: BlockCache,
     /// Bit changes whose page or summary block was not resident when they were
     /// made, folded in at the next allocation or commit.
     pub(crate) pending: BTreeMap<u64, bool>,
@@ -121,7 +123,7 @@ impl Allocator {
     pub(crate) fn new(geom: MapGeometry, block_size: usize, total_blocks: u64) -> Self {
         Self {
             geom,
-            cache: MapCache::new(block_size),
+            cache: BlockCache::new(block_size),
             pending: BTreeMap::new(),
             stamped_clean: false,
             alloc_cursor: RING_BLOCKS,
@@ -224,7 +226,7 @@ impl<B: Block> ARXFS<B> {
             generation: self.generation,
             logical_addr: region_block - start,
             physical_addr: region_block,
-            payload_len: as_u32(map_payload_len(bs)),
+            payload_len: as_u32(page_payload_len(bs)),
         };
         header.seal(&mut buf[..bs], &self.mac_key)?;
         self.write_block(region_block, &buf)?;
@@ -252,7 +254,7 @@ impl<B: Block> ARXFS<B> {
             generation: self.generation,
             logical_addr: 0,
             physical_addr: geom.header_block(),
-            payload_len: as_u32(map_payload_len(bs)),
+            payload_len: as_u32(page_payload_len(bs)),
         };
         block.seal(&mut buf[..bs], &self.mac_key)?;
         self.write_block(geom.header_block(), &buf)?;
@@ -281,7 +283,7 @@ impl<B: Block> ARXFS<B> {
     /// correctness.
     pub(crate) fn map_persist(&mut self) -> Result<(), DriverError> {
         self.map_fold_pending()?;
-        for region_block in self.allocator()?.cache.dirty_blocks() {
+        for region_block in self.allocator()?.cache.dirty_pages() {
             self.map_write(region_block)?;
         }
         self.block.flush()?;
@@ -318,7 +320,7 @@ impl<B: Block> ARXFS<B> {
         };
         if free >= geom.page_capacity(page) {
             self.map_make_room()?;
-            let bytes = vec![0u8; map_payload_len(self.block_size)];
+            let bytes = vec![0u8; page_payload_len(self.block_size)];
             self.allocator_mut()?.cache.insert_clean(page_block, &bytes);
             return Ok(());
         }
@@ -476,15 +478,27 @@ impl<B: Block> ARXFS<B> {
 
     /// Reserve the whole run `from..from + len`, a page at a time.
     ///
-    /// The rebuild reserves the superblock ring and the map region this way.
-    /// The region is hundreds of thousands of blocks on a very large volume,
-    /// so marking it block by block would cost a cache lookup each; filling
-    /// whole bytes of a resident page instead keeps the rebuild proportional
-    /// to the *pages* the run spans.
-    ///
-    /// Only the rebuild uses this, immediately after the map is laid out, so
-    /// there are never deferred marks in the run to reconcile.
+    /// The rebuild reserves the superblock ring and the map region this way,
+    /// and a reconcile reserves its scratch array. Such a run is hundreds of
+    /// thousands of blocks on a very large volume, so marking it block by
+    /// block would cost a cache lookup each; filling whole bytes of a resident
+    /// page instead keeps the cost proportional to the *pages* the run spans,
+    /// and records nothing per block for a rollback to undo.
     pub(crate) fn mark_range_used(&mut self, from: u64, len: u64) -> Result<(), DriverError> {
+        self.mark_range(from, len, true)
+    }
+
+    /// Release the whole run `from..from + len`, on the same terms as
+    /// [`Self::mark_range_used`]: what a reconcile does with its scratch array
+    /// once the pass that needed it is over.
+    pub(crate) fn mark_range_free(&mut self, from: u64, len: u64) -> Result<(), DriverError> {
+        self.mark_range(from, len, false)
+    }
+
+    fn mark_range(&mut self, from: u64, len: u64, used: bool) -> Result<(), DriverError> {
+        // A deferred mark inside the run would be folded in later and undo
+        // part of this one, so the run is made exact from an exact map.
+        self.map_fold_pending()?;
         let geom = self.map_geometry()?;
         let end = from.saturating_add(len).min(geom.covered());
         let mut block = from;
@@ -495,23 +509,40 @@ impl<B: Block> ARXFS<B> {
             self.map_page_load(page)?;
             let (summary_index, offset) = geom.summary_slot_of(page);
             let summary_block = geom.summary_block(summary_index);
-            let claimed = {
+            let moved = {
                 let alloc = self.allocator_mut()?;
                 let payload = alloc
                     .cache
                     .write(geom.page_block(page))
                     .ok_or(DriverError::DeviceFault)?;
-                set_bit_range(payload, block - first, page_end - first)
+                if used {
+                    set_bit_range(payload, block - first, page_end - first)
+                } else {
+                    clear_bit_range(payload, block - first, page_end - first)
+                }
             };
-            if claimed > 0 {
+            if moved > 0 {
+                let volume_free = if used {
+                    self.free_count.saturating_sub(moved)
+                } else {
+                    self.free_count.saturating_add(moved)
+                };
                 let alloc = self.allocator_mut()?;
                 let summary = alloc
                     .cache
                     .write(summary_block)
                     .ok_or(DriverError::DeviceFault)?;
                 let free = summary_get(summary, offset);
-                summary_set(summary, offset, free.saturating_sub(claimed));
-                self.free_count = self.free_count.saturating_sub(claimed);
+                summary_set(
+                    summary,
+                    offset,
+                    if used {
+                        free.saturating_sub(moved)
+                    } else {
+                        free.saturating_add(moved)
+                    },
+                );
+                self.free_count = volume_free;
             }
             block = page_end;
         }
@@ -596,34 +627,88 @@ impl<B: Block> ARXFS<B> {
     }
 
     /// The lowest start of `run` consecutive free blocks in `lo..hi`.
+    ///
+    /// Walks the map a page at a time, carrying the free run across page
+    /// boundaries: a page the summary reports full ends the run without being
+    /// read, one it reports wholly free extends it without being read, and only
+    /// a partly-used page is read and scanned — whole bytes at a time. The
+    /// callers ask for runs of hundreds of thousands of blocks (the map region
+    /// a grow relays, a reconcile's scratch array), so a per-block test would
+    /// scan a very large volume block by block, slowest of all when the answer
+    /// is that no such run exists.
     pub(crate) fn map_find_free_run(
         &mut self,
         run: u64,
         lo: u64,
         hi: u64,
     ) -> Result<Option<u64>, DriverError> {
-        if run == 0 {
+        let geom = self.map_geometry()?;
+        let hi = hi.min(geom.covered());
+        if run == 0 || lo >= hi || run > hi - lo {
             return Ok(None);
         }
+        self.map_fold_pending()?;
+        // Start of the free run in progress, or `None` while the last block
+        // examined was used.
+        let mut open: Option<u64> = None;
         let mut block = lo;
-        while block + run <= hi {
-            let Some(start) = self.map_scan_up(block, hi)? else {
-                return Ok(None);
-            };
-            if start + run > hi {
-                return Ok(None);
+        while block < hi {
+            let page = geom.page_of(block);
+            let first = geom.page_first_block(page);
+            let capacity = geom.page_capacity(page);
+            let end = (first + capacity).min(hi);
+            let free = self.map_page_free(page)?;
+            if free == 0 {
+                open = None;
+                block = end;
+                continue;
             }
-            let mut offset = 1;
-            while offset < run {
-                if self.bit_used(start + offset)? {
+            if free == capacity {
+                let start = *open.get_or_insert(block);
+                if end - start >= run {
+                    return Ok(Some(start));
+                }
+                block = end;
+                continue;
+            }
+            self.map_page_load(page)?;
+            let page_block = geom.page_block(page);
+            let limit = end - first;
+            let mut bit = block - first;
+            while bit < limit {
+                let span = {
+                    let alloc = self.allocator_mut()?;
+                    let payload = alloc
+                        .cache
+                        .read(page_block)
+                        .ok_or(DriverError::DeviceFault)?;
+                    find_free_bit(payload, bit, limit).map(|free_at| {
+                        (
+                            free_at,
+                            find_used_bit(payload, free_at, limit).unwrap_or(limit),
+                        )
+                    })
+                };
+                let Some((free_at, used_at)) = span else {
+                    open = None;
+                    break;
+                };
+                if free_at > bit {
+                    open = None;
+                }
+                let start = *open.get_or_insert(first + free_at);
+                if first + used_at - start >= run {
+                    return Ok(Some(start));
+                }
+                if used_at == limit {
+                    // The free span runs to the edge of the page or the
+                    // window, so a following page may still extend it.
                     break;
                 }
-                offset += 1;
+                open = None;
+                bit = used_at + 1;
             }
-            if offset == run {
-                return Ok(Some(start));
-            }
-            block = start + offset + 1;
+            block = end;
         }
         Ok(None)
     }
@@ -755,7 +840,7 @@ impl<B: Block> ARXFS<B> {
             }
         }
         self.alloc_map_start = start;
-        let payload_len = map_payload_len(self.block_size);
+        let payload_len = page_payload_len(self.block_size);
         let slots = payload_len / 2;
         for index in 0..geom.summary_blocks() {
             self.map_make_room()?;

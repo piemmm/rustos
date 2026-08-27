@@ -1,5 +1,5 @@
-//! The on-disk paged allocation map: layout, bounded page cache, and the bit
-//! and summary arithmetic over it (`docs/src/filesystem/arxfs-spec.md` §4).
+//! The on-disk paged allocation map: its layout and the bit and summary
+//! arithmetic over it (`docs/src/filesystem/arxfs-spec.md` §4).
 //!
 //! Free space is *rebuildable* metadata, so unlike the inode, extent, chunk,
 //! and reverse-reference trees the map is not copy-on-written. It lives in a
@@ -41,32 +41,18 @@
 //! mirrored: a second copy would only protect state the authoritative trees
 //! can already reproduce.
 //!
-//! This module is pure layout, arithmetic, and caching. The block I/O that
-//! fills, flushes, and stamps the region lives in [`crate::allocator`].
-
-use alloc::collections::BTreeMap;
-use alloc::vec;
-use alloc::vec::Vec;
+//! This module is pure layout and arithmetic. The region pages through the
+//! shared bounded cache ([`crate::pagecache`]), and the block I/O that fills,
+//! flushes, and stamps it lives in [`crate::allocator`].
 
 use tairix_abi::DriverError;
 
 use crate::as_usize;
-use crate::header::HEADER_LEN;
+use crate::header::ReservedOwner;
+use crate::pagecache::page_payload_len;
 
-/// Owner object stamped in every allocation-map block header: a reserved
-/// sentinel distinct from any inode number and from the other trees' owners.
-pub(crate) const ALLOC_MAP_OWNER: u64 = u64::MAX - 3;
-
-/// Region blocks — summary and bitmap pages together — held in RAM at once.
-///
-/// This is a cache bound, not a capacity: a miss costs one block read, never a
-/// failure, so the ceiling is deliberately fixed and **volume-independent**,
-/// exactly like the pending-discard queue's. Sizing it from the device would
-/// make resident memory scale with volume size, which is the very thing the
-/// paged map exists to avoid — several 100 TB+ volumes must mount together on
-/// a 1 GiB machine, so each volume's map footprint stays a quarter of a
-/// megabyte however large the volume is.
-pub(crate) const MAX_CACHED_MAP_BLOCKS: usize = 64;
+/// Owner object stamped in every allocation-map block header.
+pub(crate) const ALLOC_MAP_OWNER: u64 = ReservedOwner::AllocMap.sentinel();
 
 /// Header payload offsets, relative to the end of the sealed block header.
 const H_COVERED: usize = 0;
@@ -142,11 +128,6 @@ fn wr(payload: &mut [u8], at: usize, value: u64) {
     payload[at..at + 8].copy_from_slice(&value.to_le_bytes());
 }
 
-/// Bytes of a region block available to the map after its sealed header.
-pub(crate) const fn map_payload_len(block_size: usize) -> usize {
-    block_size - HEADER_LEN
-}
-
 /// Where every part of the map region sits, derived from the device block
 /// size and the block count the map must cover.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -177,7 +158,7 @@ impl MapGeometry {
         if covered == 0 {
             return Err(DriverError::Unsupported);
         }
-        let payload = map_payload_len(block_size);
+        let payload = page_payload_len(block_size);
         let bits_per_page = (payload as u64) * 8;
         let summary_slots = (payload / 2) as u64;
         if bits_per_page == 0 || bits_per_page > u64::from(u16::MAX) || summary_slots == 0 {
@@ -262,143 +243,6 @@ impl MapGeometry {
     }
 }
 
-/// One region block held in the bounded cache.
-struct CachedBlock {
-    payload: Vec<u8>,
-    dirty: bool,
-    stamp: u64,
-}
-
-/// A bounded, least-recently-used cache of allocation-map region blocks.
-///
-/// The cache is the whole resident cost of a mounted map. Evicting a dirty
-/// block writes it back first, which the owning filesystem does — the cache
-/// itself performs no I/O.
-pub(crate) struct MapCache {
-    entries: BTreeMap<u64, CachedBlock>,
-    payload_len: usize,
-    clock: u64,
-}
-
-impl MapCache {
-    pub(crate) fn new(block_size: usize) -> Self {
-        Self {
-            entries: BTreeMap::new(),
-            payload_len: map_payload_len(block_size),
-            clock: 0,
-        }
-    }
-
-    fn tick(&mut self) -> u64 {
-        self.clock = self.clock.wrapping_add(1);
-        self.clock
-    }
-
-    pub(crate) fn contains(&self, region_block: u64) -> bool {
-        self.entries.contains_key(&region_block)
-    }
-
-    /// The least-recently-used region block, with whether it holds unwritten
-    /// changes, or `None` while the cache still has room.
-    pub(crate) fn eviction_candidate(&self) -> Option<(u64, bool)> {
-        if self.entries.len() < MAX_CACHED_MAP_BLOCKS {
-            return None;
-        }
-        self.entries
-            .iter()
-            .min_by_key(|(_, entry)| entry.stamp)
-            .map(|(block, entry)| (*block, entry.dirty))
-    }
-
-    /// Forget a cached region block; the owner has written it back already if
-    /// it held changes.
-    pub(crate) fn remove(&mut self, region_block: u64) {
-        self.entries.remove(&region_block);
-    }
-
-    /// Install a region block whose bytes match the device.
-    pub(crate) fn insert_clean(&mut self, region_block: u64, payload: &[u8]) {
-        let stamp = self.tick();
-        let mut bytes = vec![0u8; self.payload_len];
-        let len = payload.len().min(self.payload_len);
-        bytes[..len].copy_from_slice(&payload[..len]);
-        self.entries.insert(
-            region_block,
-            CachedBlock {
-                payload: bytes,
-                dirty: false,
-                stamp,
-            },
-        );
-    }
-
-    /// Install a region block that exists only in RAM so far — a synthesised
-    /// all-free page, or a page of a map being built — so a flush writes it.
-    pub(crate) fn insert_dirty(&mut self, region_block: u64, payload: Vec<u8>) {
-        let stamp = self.tick();
-        self.entries.insert(
-            region_block,
-            CachedBlock {
-                payload,
-                dirty: true,
-                stamp,
-            },
-        );
-    }
-
-    /// A cached region block's bytes for reading, refreshing its recency.
-    pub(crate) fn read(&mut self, region_block: u64) -> Option<&[u8]> {
-        let stamp = self.tick();
-        let entry = self.entries.get_mut(&region_block)?;
-        entry.stamp = stamp;
-        Some(&entry.payload)
-    }
-
-    /// A cached region block's bytes for writing, marking it dirty.
-    pub(crate) fn write(&mut self, region_block: u64) -> Option<&mut [u8]> {
-        let stamp = self.tick();
-        let entry = self.entries.get_mut(&region_block)?;
-        entry.stamp = stamp;
-        entry.dirty = true;
-        Some(&mut entry.payload)
-    }
-
-    /// A cached region block's bytes without touching its recency, for the
-    /// flush path that is about to write them out.
-    pub(crate) fn peek(&self, region_block: u64) -> Option<&[u8]> {
-        self.entries
-            .get(&region_block)
-            .map(|e| e.payload.as_slice())
-    }
-
-    /// Region blocks holding unwritten changes, in device-address order.
-    pub(crate) fn dirty_blocks(&self) -> Vec<u64> {
-        self.entries
-            .iter()
-            .filter(|(_, entry)| entry.dirty)
-            .map(|(block, _)| *block)
-            .collect()
-    }
-
-    /// Note that a region block's bytes are now on the device.
-    pub(crate) fn mark_written(&mut self, region_block: u64) {
-        if let Some(entry) = self.entries.get_mut(&region_block) {
-            entry.dirty = false;
-        }
-    }
-
-    /// Drop every cached block, discarding unwritten changes. Used when the
-    /// map is replaced wholesale by a rebuild.
-    pub(crate) fn clear(&mut self) {
-        self.entries.clear();
-    }
-
-    #[cfg(test)]
-    pub(crate) fn len(&self) -> usize {
-        self.entries.len()
-    }
-}
-
 /// Whether bit `bit` of a bitmap page payload is set (the block is used).
 pub(crate) fn bit_get(payload: &[u8], bit: u64) -> bool {
     let byte = (bit / 8) as usize;
@@ -459,6 +303,37 @@ pub(crate) fn set_bit_range(payload: &mut [u8], lo: u64, hi: u64) -> u64 {
     changed
 }
 
+/// Clear every bit in `lo..hi` of a bitmap page payload, returning how many of
+/// them were set beforehand.
+///
+/// The mirror of [`set_bit_range`], and it matters for the same reason: the
+/// runs released whole — a relayed map region, a reconcile's scratch array —
+/// are hundreds of thousands of blocks long.
+pub(crate) fn clear_bit_range(payload: &mut [u8], lo: u64, hi: u64) -> u64 {
+    let mut changed = 0;
+    let mut bit = lo;
+    while bit < hi {
+        let byte = (bit / 8) as usize;
+        let Some(slot) = payload.get_mut(byte) else {
+            break;
+        };
+        let offset = bit % 8;
+        if offset == 0 && hi - bit >= 8 {
+            changed += u64::from(slot.count_ones());
+            *slot = 0;
+            bit += 8;
+            continue;
+        }
+        let mask = 1u8 << offset;
+        if *slot & mask != 0 {
+            *slot &= !mask;
+            changed += 1;
+        }
+        bit += 1;
+    }
+    changed
+}
+
 /// The lowest clear bit in `from..capacity`, skipping wholly-used bytes.
 pub(crate) fn find_free_bit(payload: &[u8], from: u64, capacity: u64) -> Option<u64> {
     let mut bit = from;
@@ -470,6 +345,28 @@ pub(crate) fn find_free_bit(payload: &[u8], from: u64, capacity: u64) -> Option<
             continue;
         }
         if value & (1u8 << (bit % 8)) == 0 {
+            return Some(bit);
+        }
+        bit += 1;
+    }
+    None
+}
+
+/// The lowest set bit in `from..capacity`, skipping wholly-clear bytes.
+///
+/// The dual of [`find_free_bit`]: together they turn a page into its free
+/// spans in time proportional to its bytes rather than its bits, which is what
+/// keeps [`crate::ARXFS::map_find_free_run`] off a per-block walk.
+pub(crate) fn find_used_bit(payload: &[u8], from: u64, capacity: u64) -> Option<u64> {
+    let mut bit = from;
+    while bit < capacity {
+        let byte = (bit / 8) as usize;
+        let value = *payload.get(byte)?;
+        if value == 0 {
+            bit = (bit / 8 + 1) * 8;
+            continue;
+        }
+        if value & (1u8 << (bit % 8)) != 0 {
             return Some(bit);
         }
         bit += 1;
@@ -525,7 +422,7 @@ mod tests {
     use super::*;
 
     const BS: usize = 4096;
-    const PAYLOAD: usize = BS - HEADER_LEN;
+    const PAYLOAD: usize = page_payload_len(BS);
 
     #[test]
     fn geometry_lays_header_summary_then_pages() {
@@ -693,53 +590,5 @@ mod tests {
         summary_set(&mut payload, 4, u64::MAX);
         assert_eq!(summary_get(&payload, 4), u64::from(u16::MAX));
         assert_eq!(summary_get(&payload, 64), 0);
-    }
-
-    #[test]
-    fn cache_evicts_the_least_recently_used_block_once_full() {
-        let mut cache = MapCache::new(BS);
-        for block in 0..MAX_CACHED_MAP_BLOCKS as u64 {
-            cache.insert_clean(block, &[0u8; 4]);
-        }
-        assert_eq!(cache.len(), MAX_CACHED_MAP_BLOCKS);
-        // Touch every block but block 0, so it is the coldest.
-        for block in 1..MAX_CACHED_MAP_BLOCKS as u64 {
-            assert!(cache.read(block).is_some());
-        }
-        assert_eq!(cache.eviction_candidate(), Some((0, false)));
-        cache.remove(0);
-        assert!(cache.eviction_candidate().is_none());
-    }
-
-    #[test]
-    fn cache_tracks_dirty_blocks_until_they_are_written() {
-        let mut cache = MapCache::new(BS);
-        cache.insert_clean(5, &[0u8; 4]);
-        assert!(cache.dirty_blocks().is_empty());
-        cache.write(5).expect("cached")[0] = 0xAA;
-        assert_eq!(cache.dirty_blocks(), alloc::vec![5]);
-        assert_eq!(cache.peek(5).expect("cached")[0], 0xAA);
-        cache.mark_written(5);
-        assert!(cache.dirty_blocks().is_empty());
-    }
-
-    #[test]
-    fn cache_reports_a_dirty_eviction_candidate_so_it_is_written_back() {
-        let mut cache = MapCache::new(BS);
-        for block in 0..MAX_CACHED_MAP_BLOCKS as u64 {
-            cache.insert_dirty(block, alloc::vec![0u8; 4]);
-        }
-        let (block, dirty) = cache.eviction_candidate().expect("full");
-        assert_eq!(block, 0);
-        assert!(dirty);
-    }
-
-    #[test]
-    fn clearing_the_cache_drops_every_block() {
-        let mut cache = MapCache::new(BS);
-        cache.insert_dirty(1, alloc::vec![0u8; 4]);
-        cache.clear();
-        assert_eq!(cache.len(), 0);
-        assert!(cache.peek(1).is_none());
     }
 }

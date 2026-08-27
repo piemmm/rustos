@@ -78,6 +78,9 @@ mod discard;
 mod header;
 mod health;
 mod integrity;
+mod pagecache;
+mod reconcile;
+mod scratch;
 mod scrub;
 mod superblock;
 mod transaction;
@@ -780,6 +783,69 @@ pub struct ARXFS<B: Block> {
     /// allocates nothing and no node buffer reaches the stack; `None` until
     /// the first mutation, so a read-only handle never pays for one.
     tree_edit: Option<btree::TreeEdit>,
+}
+
+/// A bounded cursor over one directory's entries.
+///
+/// Holds one directory block, so walking a directory of any size costs the
+/// block size — the same contract [`btree::TreeWalk`] gives the metadata
+/// trees. The position is a single slot index, so a caller may stop, remember
+/// it, and resume.
+pub(crate) struct DirScan {
+    buf: Vec<u8>,
+    /// Slot to examine next, as `block * dirents_per_block + slot`.
+    next: u64,
+    /// The directory block currently in `buf`.
+    loaded: Option<u64>,
+    /// Where the last yielded entry's name sits in `buf`, and its length.
+    entry: Option<(usize, usize)>,
+}
+
+impl DirScan {
+    /// A scan positioned before the directory's first entry.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::NoSpace`] when the one block-sized buffer cannot be
+    /// allocated; the scan allocates nothing thereafter.
+    pub(crate) fn new(block_size: usize) -> Result<Self, DriverError> {
+        let mut buf = Vec::new();
+        buf.try_reserve_exact(block_size)
+            .map_err(|_| DriverError::NoSpace)?;
+        buf.resize(block_size, 0);
+        Ok(Self {
+            buf,
+            next: 0,
+            loaded: None,
+            entry: None,
+        })
+    }
+
+    /// Position the scan at slot `position`, so the next step yields the first
+    /// occupied entry at or after it.
+    ///
+    /// The resident block is dropped: a scan is reused across *directories*,
+    /// and a block index means nothing without the directory it came from.
+    pub(crate) fn seek(&mut self, position: u64) {
+        self.next = position;
+        self.loaded = None;
+        self.entry = None;
+    }
+
+    /// The name of the entry the last step yielded (empty before the first).
+    pub(crate) fn name(&self) -> &[u8] {
+        match self.entry {
+            Some((at, len)) => &self.buf[at..at + len],
+            None => &[],
+        }
+    }
+
+    /// Whether the last entry is a directory's own `.` or its parent `..`,
+    /// which name a directory without being a reference to it.
+    pub(crate) fn is_dot(&self) -> bool {
+        let name = self.name();
+        name == b"." || name == b".."
+    }
 }
 
 /// Value width of one extent record: physical start block, logical run
@@ -2638,29 +2704,59 @@ impl<B: Block> ARXFS<B> {
         dir.size / self.block_size as u64
     }
 
-    /// Resolve `name` within directory `dir`, returning its inode index.
-    fn dir_lookup(&mut self, dir: &Inode, name: &[u8]) -> Result<Option<u32>, DriverError> {
-        let per = self.dirents_per_block();
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
-        for blk in 0..self.dir_block_count(dir) {
-            let ptr = self.block_ptr(dir, blk)?;
-            if ptr == 0 {
-                continue;
+    /// Advance `scan` to the next occupied entry of directory `dir`, returning
+    /// its slot position and the inode it names, or `None` at the end.
+    ///
+    /// One directory block is resident at a time, in the scan's own buffer, so
+    /// a caller that must see every entry of a directory of any size — path
+    /// resolution, a listing, the structural check — holds a block rather than
+    /// the directory. The name is [`DirScan::name`] once this returns.
+    pub(crate) fn dir_next(
+        &mut self,
+        dir: &Inode,
+        scan: &mut DirScan,
+    ) -> Result<Option<(u64, u32)>, DriverError> {
+        let per = self.dirents_per_block() as u64;
+        let blocks = self.dir_block_count(dir);
+        scan.entry = None;
+        loop {
+            let blk = scan.next / per;
+            if blk >= blocks {
+                return Ok(None);
             }
-            self.read_meta(ptr, BlockType::Directory, &mut buf)?;
-            for slot in 0..per {
-                let base = HEADER_LEN + slot * DIRENT_SIZE;
-                let ino = rd_u32(&buf, base);
-                if ino == 0 {
+            if scan.loaded != Some(blk) {
+                let ptr = self.block_ptr(dir, blk)?;
+                if ptr == 0 {
+                    // A hole holds no entries at all, so skip the block whole
+                    // rather than its slots one by one.
+                    scan.next = (blk + 1) * per;
                     continue;
                 }
-                let name_len = rd_u32(&buf, base + 4) as usize;
-                if name_len > NAME_MAX {
-                    return Err(DriverError::DeviceFault);
-                }
-                if &buf[base + 8..base + 8 + name_len] == name {
-                    return Ok(Some(ino));
-                }
+                self.read_meta(ptr, BlockType::Directory, &mut scan.buf)?;
+                scan.loaded = Some(blk);
+            }
+            let position = scan.next;
+            let base = HEADER_LEN + as_usize(scan.next % per) * DIRENT_SIZE;
+            scan.next += 1;
+            let ino = rd_u32(&scan.buf, base);
+            if ino == 0 {
+                continue;
+            }
+            let name_len = as_usize(u64::from(rd_u32(&scan.buf, base + 4)));
+            if name_len == 0 || name_len > NAME_MAX {
+                return Err(DriverError::DeviceFault);
+            }
+            scan.entry = Some((base + 8, name_len));
+            return Ok(Some((position, ino)));
+        }
+    }
+
+    /// Resolve `name` within directory `dir`, returning its inode index.
+    fn dir_lookup(&mut self, dir: &Inode, name: &[u8]) -> Result<Option<u32>, DriverError> {
+        let mut scan = DirScan::new(self.block_size)?;
+        while let Some((_, ino)) = self.dir_next(dir, &mut scan)? {
+            if scan.name() == name {
+                return Ok(Some(ino));
             }
         }
         Ok(None)
@@ -2668,28 +2764,10 @@ impl<B: Block> ARXFS<B> {
 
     /// Whether `dir` holds no entries other than `.` and `..`.
     fn dir_is_empty(&mut self, dir: &Inode) -> Result<bool, DriverError> {
-        let per = self.dirents_per_block();
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
-        for blk in 0..self.dir_block_count(dir) {
-            let ptr = self.block_ptr(dir, blk)?;
-            if ptr == 0 {
-                continue;
-            }
-            self.read_meta(ptr, BlockType::Directory, &mut buf)?;
-            for slot in 0..per {
-                let base = HEADER_LEN + slot * DIRENT_SIZE;
-                let ino = rd_u32(&buf, base);
-                if ino == 0 {
-                    continue;
-                }
-                let name_len = rd_u32(&buf, base + 4) as usize;
-                if name_len > NAME_MAX {
-                    return Err(DriverError::DeviceFault);
-                }
-                let name = &buf[base + 8..base + 8 + name_len];
-                if name != b"." && name != b".." {
-                    return Ok(false);
-                }
+        let mut scan = DirScan::new(self.block_size)?;
+        while self.dir_next(dir, &mut scan)?.is_some() {
+            if !scan.is_dot() {
+                return Ok(false);
             }
         }
         Ok(true)
@@ -3839,59 +3917,34 @@ impl<B: Block> FilesystemRead for ARXFS<B> {
         if !dir_inode.is_dir() {
             return Err(DriverError::Unsupported);
         }
-        // The cursor is the entry's global slot position (`blk * per +
-        // slot`), so resumption seeks straight to the block and slot after
-        // the previously returned entry instead of rescanning the whole
-        // directory per call. Any cursor past the last block — including
-        // an arbitrary value that was never returned — falls off the block
-        // loop and ends the listing (fail closed, never out of bounds).
-        let per = self.dirents_per_block() as u64;
-        let blocks = self.dir_block_count(&dir_inode);
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
-        let mut blk = cursor / per;
-        let mut slot = cursor % per;
-        while blk < blocks {
-            let ptr = self.block_ptr(&dir_inode, blk)?;
-            if ptr == 0 {
-                blk += 1;
-                slot = 0;
+        // The cursor is the entry's global slot position, so resumption seeks
+        // straight past the previously returned entry instead of rescanning
+        // the whole directory per call. Any cursor past the last block —
+        // including an arbitrary value that was never returned — ends the
+        // listing (fail closed, never out of bounds).
+        let mut scan = DirScan::new(self.block_size)?;
+        scan.seek(cursor);
+        while let Some((position, ino)) = self.dir_next(&dir_inode, &mut scan)? {
+            if scan.is_dot() {
                 continue;
             }
-            self.read_meta(ptr, BlockType::Directory, &mut buf)?;
-            while slot < per {
-                let position = blk * per + slot;
-                let base = HEADER_LEN + as_usize(slot) * DIRENT_SIZE;
-                slot += 1;
-                let ino = rd_u32(&buf, base);
-                if ino == 0 {
-                    continue;
-                }
-                let name_len = rd_u32(&buf, base + 4) as usize;
-                if name_len == 0 || name_len > NAME_MAX {
-                    return Err(DriverError::DeviceFault);
-                }
-                let name = &buf[base + 8..base + 8 + name_len];
-                if name == b"." || name == b".." {
-                    continue;
-                }
-                if name_out.len() < name_len {
-                    return Err(DriverError::BufferTooSmall);
-                }
-                name_out[..name_len].copy_from_slice(name);
-                // The child inode is read once here and its metadata
-                // returned with the entry, so a listing consumer never
-                // re-resolves the child by path to learn its sizes.
-                let child = self.read_inode(ino)?;
-                let child_info = self.inode_info(ino, &child)?;
-                return Ok(Some(DirEntry {
-                    node: NodeId::from_raw(u64::from(ino)),
-                    info: child_info,
-                    name_len,
-                    next_cursor: position + 1,
-                }));
+            let name = scan.name();
+            let name_len = name.len();
+            if name_out.len() < name_len {
+                return Err(DriverError::BufferTooSmall);
             }
-            blk += 1;
-            slot = 0;
+            name_out[..name_len].copy_from_slice(name);
+            // The child inode is read once here and its metadata returned with
+            // the entry, so a listing consumer never re-resolves the child by
+            // path to learn its sizes.
+            let child = self.read_inode(ino)?;
+            let child_info = self.inode_info(ino, &child)?;
+            return Ok(Some(DirEntry {
+                node: NodeId::from_raw(u64::from(ino)),
+                info: child_info,
+                name_len,
+                next_cursor: position + 1,
+            }));
         }
         Ok(None)
     }

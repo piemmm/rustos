@@ -8,7 +8,7 @@
 use alloc::collections::BTreeSet;
 
 use super::*;
-use crate::allocmap::MAX_CACHED_MAP_BLOCKS;
+use crate::pagecache::MAX_CACHED_PAGES;
 use tairix_abi::driver::block::{DeviceHealth, DiscardCapability, HealthSnapshot};
 use tairix_abi::driver::filesystem::{
     FilesystemAttrs, FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeKind,
@@ -1970,7 +1970,11 @@ fn rebuild_scrub_and_check_agree_on_a_compressed_volume() {
         "the cluster's stored blocks were verified"
     );
     let check = fs.check(&GrantAll, &NullSink).expect("check");
-    assert!(check.structure_sound, "check validates: {check:?}");
+    assert_eq!(
+        check.structure,
+        StructureVerdict::Sound,
+        "check validates: {check:?}"
+    );
 
     let node = fs.lookup(fs.root(), b"mix").expect("lookup");
     assert_eq!(read_all(&mut fs, node, payload.len()), payload);
@@ -2706,6 +2710,38 @@ impl Sink for RecordingSink {
 }
 
 /// Run a full scrub with all capabilities granted, asserting it succeeds.
+/// Assert that a verification pass left every block the committed volume
+/// depends on byte-identical, and the free-space accounting exactly as it was.
+///
+/// This is what "a clean pass mutates nothing" means now that the refcount
+/// reconcile streams its per-block claim counts through a transient scratch
+/// array in free space (`crate::scratch`): the committed structures, the
+/// allocation map, the used-block set, and the free count are all unchanged,
+/// while the run the pass borrowed and handed back holds whatever it wrote.
+/// Comparing the used set as well as the bytes pins more than a whole-device
+/// comparison did — a pass that leaked or lost a block would fail here even if
+/// every surviving block matched.
+fn assert_committed_state_unchanged(
+    before: &[u8],
+    fs: &mut ARXFS<MemBlock>,
+    used_before: &BTreeSet<u64>,
+    free_before: u64,
+) {
+    assert_eq!(fs.free_count, free_before, "the free count is unchanged");
+    let used_after = fs.used_blocks();
+    assert_eq!(&used_after, used_before, "the used-block set is unchanged");
+    let bs = 4096;
+    let after = fs.block_mut().bytes();
+    for block in used_after {
+        let at = as_usize(block) * bs;
+        assert_eq!(
+            &after[at..at + bs],
+            &before[at..at + bs],
+            "block {block} of the committed volume changed"
+        );
+    }
+}
+
 fn scrub_full(fs: &mut ARXFS<MemBlock>) -> ScrubReport {
     fs.scrub(&GrantAll, &NullSink, ScrubBudget::Unlimited)
         .expect("scrub")
@@ -2753,6 +2789,8 @@ fn clean_scrub_finds_nothing_and_is_idempotent() {
     let mut fs =
         ARXFS::open(MemBlock::from_bytes(before.clone(), 4096, 512), &TEST_KEY).expect("reopen");
 
+    let used_before = fs.used_blocks();
+    let free_before = fs.free_count;
     let report = scrub_full(&mut fs);
     assert!(report.complete);
     assert!(!report.found_faults(), "{report:?}");
@@ -2761,12 +2799,13 @@ fn clean_scrub_finds_nothing_and_is_idempotent() {
     assert_eq!(report.divergences_corrected, 0);
     assert!(report.metadata_blocks_checked > 0, "metadata was verified");
     assert!(report.data_blocks_checked > 0, "data was verified");
+    assert!(report.claims_counted, "the claim counts were recomputed");
 
-    // A clean scrub mutates nothing on disk.
-    let after = fs.into_block().bytes();
-    assert_eq!(after, before, "a clean scrub must change nothing");
+    // A clean scrub mutates nothing the committed volume depends on.
+    assert_committed_state_unchanged(&before, &mut fs, &used_before, free_before);
 
     // Idempotent: a second scrub agrees.
+    let after = fs.into_block().bytes();
     let mut fs = ARXFS::open(MemBlock::from_bytes(after, 4096, 512), &TEST_KEY).expect("reopen2");
     let again = scrub_full(&mut fs);
     assert_eq!(again, report, "scrub is idempotent on a clean volume");
@@ -2918,6 +2957,556 @@ fn scrub_detects_and_corrects_a_refcount_divergence() {
     let again = scrub_full(&mut fs);
     assert_eq!(again.refcount_divergences, 0, "clean after correction");
     assert_eq!(again.divergences_corrected, 0);
+}
+
+/// Every reserved owner sentinel is distinct and sits outside the
+/// inode-number range, so no two classes of metadata block seal themselves
+/// under the same identity.
+///
+/// The allocation map and the scrub-progress record both used to stamp
+/// `u64::MAX - 3`, declared as separate constants in separate files. Nothing
+/// read the owner back, so nothing failed — but the field exists to say
+/// *which object* a block belongs to, and two objects sharing an answer makes
+/// it unable to. Deriving each sentinel from one enum's discriminant turns a
+/// repeat into a compile error; this pins the range they must all stay in.
+#[test]
+fn every_reserved_owner_sentinel_is_distinct() {
+    use crate::header::ReservedOwner::{
+        AllocMap, ChunkTree, HealthBaseline, InodeTree, ReverseRefTree, ScratchClaims,
+        ScratchFrontier, ScratchNames, ScratchReachable, ScrubProgress,
+    };
+    let owners = [
+        InodeTree,
+        ChunkTree,
+        ReverseRefTree,
+        ScrubProgress,
+        HealthBaseline,
+        AllocMap,
+        ScratchClaims,
+        ScratchReachable,
+        ScratchFrontier,
+        ScratchNames,
+    ];
+    let mut seen = BTreeSet::new();
+    for owner in owners {
+        let sentinel = owner.sentinel();
+        assert!(
+            seen.insert(sentinel),
+            "{owner:?} reuses the sentinel {sentinel}"
+        );
+        assert!(
+            sentinel > u64::from(u32::MAX),
+            "{owner:?} sits inside the inode-number range"
+        );
+    }
+}
+
+/// Point a second file's extent at another file's block without touching the
+/// chunk table, so the volume holds a claim the refcount does not know about.
+fn claim_block_behind_the_refcount(fs: &mut ARXFS<MemBlock>, name: &[u8], phys: u64) {
+    let root = fs.root();
+    let ino = fs.lookup(root, name).expect("look up the claimant");
+    let ino = fs.ino_of(ino).expect("inode number");
+    let mut inode = fs.read_inode(ino).expect("read the claimant");
+    fs.begin();
+    fs.extent_assign(&mut inode, ino, 0, phys)
+        .expect("assign the extent");
+    fs.write_inode(ino, &inode).expect("write the claimant");
+    fs.commit().expect("commit the extra claim");
+}
+
+/// A third extent claiming a shared block is counted, and the refcount is
+/// raised to match rather than left below the truth.
+///
+/// This is the corruption class that costs data: a refcount below the number
+/// of live claims frees the block while an extent still maps it. Detecting it
+/// needs the *exact* claim count, which is why the reconcile streams one per
+/// block through its scratch array — the referrer list alone cannot show that
+/// a claim is missing from it.
+#[test]
+fn an_unlisted_claim_raises_the_refcount_to_the_counted_truth() {
+    let mut fs = fmt(4096, 256, 64);
+    let root = fs.root();
+    let cap = as_usize(fs.data_capacity());
+    for name in [b"a".as_slice(), b"b".as_slice(), b"c".as_slice()] {
+        fs.create(root, name, NodeKind::RegularFile)
+            .expect("create");
+    }
+    let body = alloc::vec![0x5Au8; cap];
+    fs.write_at(root, b"a", 0, &body).expect("write a");
+    fs.write_at(root, b"b", 0, &body).expect("write b");
+    fs.write_at(root, b"c", 0, &alloc::vec![0x11u8; cap])
+        .expect("write c");
+    let shared = data_block_phys(&mut fs, b"a", 0);
+    assert_eq!(fs.data_refcount(shared).expect("refcount"), 2);
+
+    claim_block_behind_the_refcount(&mut fs, b"c", shared);
+    assert_eq!(
+        fs.data_refcount(shared).expect("refcount"),
+        2,
+        "the chunk record still says two"
+    );
+
+    let report = scrub_full(&mut fs);
+    assert!(report.claims_counted);
+    assert!(report.refcount_divergences >= 1, "{report:?}");
+    assert_eq!(
+        fs.data_refcount(shared).expect("refcount"),
+        3,
+        "the refcount rose to the counted truth"
+    );
+    let referrers = fs.reverse_refs(shared).expect("reverse refs");
+    assert_eq!(referrers.len(), 3, "the missing referrer was recovered");
+    let c_node = fs.lookup(root, b"c").expect("c");
+    let c = fs.ino_of(c_node).expect("ino");
+    assert!(referrers.contains(&(c, 0)), "{referrers:?}");
+
+    let again = scrub_full(&mut fs);
+    assert_eq!(again.refcount_divergences, 0, "clean after correction");
+    assert_eq!(again.reverse_ref_divergences, 0);
+}
+
+/// Two extents claiming a block that has no chunk record at all is reported.
+///
+/// The record cannot be recreated here — a chunk's logical length and hash come
+/// from its data, not from the extents — so the pass reports the divergence
+/// instead of inventing one.
+#[test]
+fn a_block_claimed_twice_with_no_chunk_record_is_reported() {
+    let mut fs = fmt(4096, 256, 64);
+    let root = fs.root();
+    let cap = as_usize(fs.data_capacity());
+    for name in [b"a".as_slice(), b"c".as_slice()] {
+        fs.create(root, name, NodeKind::RegularFile)
+            .expect("create");
+    }
+    fs.write_at(root, b"a", 0, &alloc::vec![0x22u8; cap])
+        .expect("write a");
+    fs.write_at(root, b"c", 0, &alloc::vec![0x33u8; cap])
+        .expect("write c");
+    let lone = data_block_phys(&mut fs, b"a", 0);
+    assert!(fs.chunk_get(lone).expect("get").is_none(), "not shared yet");
+
+    claim_block_behind_the_refcount(&mut fs, b"c", lone);
+
+    let report = scrub_full(&mut fs);
+    assert!(report.claims_counted);
+    assert!(report.refcount_divergences >= 1, "{report:?}");
+    assert!(
+        fs.chunk_get(lone).expect("get").is_none(),
+        "no record was invented for it"
+    );
+}
+
+/// An inode above the high-water mark the committed root records makes the
+/// structural check fail closed rather than reclaim on the strength of a range
+/// the inode falls outside.
+///
+/// The reachability array has one bit per allocated inode, so such an inode
+/// cannot be recorded reachable — and if it is a directory, its own children
+/// would then look like orphans and be freed. Both the root and the inode tree
+/// are sealed under the same key, so the two disagreeing is a driver defect,
+/// not a volume to repair.
+#[test]
+fn an_inode_above_the_high_water_mark_fails_the_check_closed() {
+    let mut fs = fmt(4096, 256, 64);
+    let root = fs.root();
+    fs.create(root, b"live", NodeKind::RegularFile)
+        .expect("create");
+    let beyond = u32::try_from(fs.next_ino).expect("inode numbers are 32-bit") + 5;
+    let node = fs.lookup(root, b"live").expect("look up");
+    let ino = fs.ino_of(node).expect("inode number");
+    let inode = fs.read_inode(ino).expect("read");
+    fs.begin();
+    fs.write_inode(beyond, &inode).expect("plant the inode");
+    fs.commit().expect("commit the impossible inode");
+
+    assert_eq!(
+        fs.check(&GrantAll, &NullSink),
+        Err(DriverError::DeviceFault),
+        "an inode outside the allocated range is refused, not repaired"
+    );
+    // The live file is untouched: the failed pass rolled back.
+    assert!(fs.lookup(fs.root(), b"live").is_ok());
+}
+
+/// A chunk record keyed on a block the volume does not have is stale, and is
+/// removed.
+///
+/// Windows cover the device, so such a record falls outside every one of them;
+/// nothing can claim a block that does not exist, which makes removing it exact
+/// rather than a guess.
+#[test]
+fn a_chunk_record_beyond_the_last_block_is_removed() {
+    let mut fs = fmt(4096, 256, 64);
+    let root = fs.root();
+    let cap = as_usize(fs.data_capacity());
+    fs.create(root, b"a", NodeKind::RegularFile)
+        .expect("create a");
+    fs.create(root, b"b", NodeKind::RegularFile)
+        .expect("create b");
+    let body = alloc::vec![0x5Au8; cap];
+    fs.write_at(root, b"a", 0, &body).expect("write a");
+    fs.write_at(root, b"b", 0, &body).expect("write b");
+    let shared = data_block_phys(&mut fs, b"a", 0);
+    let record = fs.chunk_get(shared).expect("get").expect("shared");
+
+    let beyond = fs.total_blocks + 4096;
+    fs.begin();
+    fs.chunk_put(beyond, &record).expect("put");
+    fs.commit().expect("commit the impossible record");
+
+    let report = scrub_full(&mut fs);
+    assert!(report.refcount_divergences >= 1, "{report:?}");
+    assert!(
+        fs.chunk_get(beyond).expect("get").is_none(),
+        "the record for a block off the end of the device was removed"
+    );
+    assert_eq!(
+        fs.chunk_get(shared).expect("get"),
+        Some(record),
+        "the live record is untouched"
+    );
+}
+
+/// A chunk record no extent claims at all is stale, and is removed.
+///
+/// The old reconcile built its truth by walking the extents, so a block no
+/// extent named never appeared in it and its record was invisible — leaving a
+/// refcount that holds a block allocated forever.
+#[test]
+fn a_chunk_record_no_extent_claims_is_removed() {
+    let mut fs = fmt(4096, 256, 64);
+    let root = fs.root();
+    let cap = as_usize(fs.data_capacity());
+    fs.create(root, b"a", NodeKind::RegularFile)
+        .expect("create a");
+    fs.create(root, b"b", NodeKind::RegularFile)
+        .expect("create b");
+    let body = alloc::vec![0x5Au8; cap];
+    fs.write_at(root, b"a", 0, &body).expect("write a");
+    fs.write_at(root, b"b", 0, &body).expect("write b");
+    let shared = data_block_phys(&mut fs, b"a", 0);
+    let record = fs.chunk_get(shared).expect("get").expect("shared");
+
+    // A record keyed on a block nothing maps.
+    let unclaimed = shared + 1;
+    assert!(fs.chunk_get(unclaimed).expect("get").is_none());
+    fs.begin();
+    fs.chunk_put(unclaimed, &record).expect("put");
+    fs.commit().expect("commit the stale record");
+
+    let report = scrub_full(&mut fs);
+    assert!(report.refcount_divergences >= 1, "{report:?}");
+    assert!(report.divergences_corrected >= 1);
+    assert!(
+        fs.chunk_get(unclaimed).expect("get").is_none(),
+        "the stale record was removed"
+    );
+    assert_eq!(
+        fs.chunk_get(shared).expect("get"),
+        Some(record),
+        "the live record is untouched"
+    );
+}
+
+/// A reconcile that has to cover the volume in several scratch windows reaches
+/// exactly the report one window reaches.
+///
+/// The window count is set by the run the volume can spare, so the same volume
+/// must be reconciled identically however the array was sized — otherwise a
+/// full volume would silently get a weaker check than an empty one.
+#[test]
+fn a_windowed_reconcile_reaches_the_same_report_as_a_single_window() {
+    // 512-byte blocks put 768 claim counts in a page, so this volume needs
+    // several pages and a one-page array covers it in several windows.
+    let mut fs = fmt(512, 2400, 64);
+    let root = fs.root();
+    let cap = as_usize(fs.data_capacity());
+    let body = alloc::vec![0x71u8; cap];
+    for name in [b"a".as_slice(), b"b".as_slice()] {
+        fs.create(root, name, NodeKind::RegularFile)
+            .expect("create");
+        fs.write_at(root, name, 0, &body).expect("write");
+    }
+    let shared = data_block_phys(&mut fs, b"a", 0);
+    let record = fs.chunk_get(shared).expect("get").expect("shared");
+    fs.begin();
+    fs.chunk_put(
+        shared,
+        &ChunkRecord {
+            refcount: 6,
+            ..record
+        },
+    )
+    .expect("put");
+    fs.commit().expect("commit the tampered refcount");
+    let tampered = fs.into_block().bytes();
+
+    let mut single =
+        ARXFS::open(MemBlock::from_bytes(tampered.clone(), 512, 2400), &TEST_KEY).expect("open");
+    let one_window = scrub_full(&mut single);
+    assert!(one_window.claims_counted);
+    assert!(one_window.refcount_divergences >= 1, "{one_window:?}");
+    assert_eq!(single.data_refcount(shared).expect("refcount"), 2);
+
+    let mut windowed =
+        ARXFS::open(MemBlock::from_bytes(tampered, 512, 2400), &TEST_KEY).expect("open");
+    let mut report = ScrubReport::default();
+    windowed.begin();
+    let corrected = windowed
+        .reconcile_refcounts_in_windows(1, &mut report)
+        .expect("windowed reconcile");
+    assert!(corrected);
+    windowed.commit().expect("commit the windowed corrections");
+    assert!(
+        report.refcount_divergences >= 1 && report.divergences_corrected >= 1,
+        "{report:?}"
+    );
+    assert_eq!(windowed.data_refcount(shared).expect("refcount"), 2);
+    assert_eq!(
+        (
+            report.refcount_divergences,
+            report.reverse_ref_divergences,
+            report.divergences_corrected
+        ),
+        (
+            one_window.refcount_divergences,
+            one_window.reverse_ref_divergences,
+            one_window.divergences_corrected
+        ),
+        "windowed: {report:?} single: {one_window:?}"
+    );
+}
+
+/// A volume with no room for a scratch array reports what it could not verify
+/// rather than reporting a soundness nothing established.
+///
+/// This is the honest end of the "grow before you fail" rule: the pass takes at
+/// most a share of the free space so it never squeezes a running system, and
+/// where even that will not fit it does the half that needs no array and says
+/// the other half did not run. Guessing a refcount from a partial count would
+/// be worse than not counting: a refcount lowered wrongly frees a block a live
+/// extent still maps.
+#[test]
+fn a_volume_with_no_room_for_a_scratch_array_says_so() {
+    let mut fs = fmt(512, 96, 64);
+    let root = fs.root();
+    let body = alloc::vec![0x5Au8; 4096];
+    let mut idx = 0;
+    loop {
+        let name = alloc::format!("f{idx}");
+        if fs
+            .create(root, name.as_bytes(), NodeKind::RegularFile)
+            .is_err()
+        {
+            break;
+        }
+        match fs.write_at(root, name.as_bytes(), 0, &body) {
+            Ok(_) => idx += 1,
+            Err(DriverError::NoSpace) => break,
+            Err(e) => panic!("unexpected {e:?}"),
+        }
+        assert!(idx <= 10_000, "never ran out of space");
+    }
+    assert!(idx > 0, "the volume holds something to verify");
+    // Then take the last of it a block at a time, down to the metadata reserve
+    // the allocator keeps back so a shrinking transaction can still
+    // copy-on-write itself.
+    let mut at = 0;
+    while fs.write_at(root, b"f0", at, &[0x11]).is_ok() {
+        at += 512;
+        assert!(at < 1 << 20, "never ran out of space");
+    }
+    assert!(fs.free_count <= 17, "free after filling: {}", fs.free_count);
+
+    let report = scrub_full(&mut fs);
+    assert!(report.complete, "{report:?}");
+    assert!(
+        !report.claims_counted,
+        "a full volume cannot spare a run, and must say so: {report:?}"
+    );
+    assert_eq!(
+        report.divergences_corrected, 0,
+        "no correction is made from a truth the pass does not have"
+    );
+    assert!(report.metadata_blocks_checked > 0, "verification still ran");
+
+    let check = check_full(&mut fs);
+    assert_eq!(
+        check.structure,
+        StructureVerdict::NotWalked,
+        "nothing walked the structure, so nothing vouches for it: {check:?}"
+    );
+    assert_eq!(
+        check.orphaned_inodes, 0,
+        "and nothing was reclaimed on a guess"
+    );
+    assert!(check.rebuilt_derived_state, "the rebuild still ran");
+}
+
+/// A read-only mount cannot place a scratch array, so it says so and corrects
+/// nothing — and still writes not one block.
+#[test]
+fn a_read_only_scrub_counts_no_claims_and_writes_nothing() {
+    let bytes = populated().into_block().bytes();
+    let mut fs = ARXFS::open_read_only(MemBlock::from_bytes(bytes.clone(), 4096, 512), &TEST_KEY)
+        .expect("read-only mount");
+    let report = scrub_full(&mut fs);
+    assert!(report.complete);
+    assert!(
+        !report.claims_counted,
+        "a read-only handle has no allocator, so it counts nothing"
+    );
+    assert_eq!(report.divergences_corrected, 0, "{report:?}");
+    assert!(!report.found_faults(), "{report:?}");
+    let after = fs.into_block();
+    assert_eq!(after.writes, 0, "a read-only scrub issues no write");
+    assert_eq!(after.bytes(), bytes, "the device is untouched");
+}
+
+/// The pass that counted no claims reports every divergence it can see and
+/// still writes nothing, even one it would have corrected had it counted.
+///
+/// This is the invariant that keeps a read-only handle — the one that can never
+/// place a scratch array — off the write path entirely, rather than relying on
+/// each repair site to remember to check.
+#[test]
+fn a_pass_that_counted_no_claims_reports_a_divergence_without_writing() {
+    let mut fs = fmt(4096, 256, 64);
+    let root = fs.root();
+    let cap = as_usize(fs.data_capacity());
+    fs.create(root, b"a", NodeKind::RegularFile)
+        .expect("create a");
+    fs.create(root, b"b", NodeKind::RegularFile)
+        .expect("create b");
+    let body = alloc::vec![0x5Au8; cap];
+    fs.write_at(root, b"a", 0, &body).expect("write a");
+    fs.write_at(root, b"b", 0, &body).expect("write b");
+    let shared = data_block_phys(&mut fs, b"a", 0);
+    let record = fs.chunk_get(shared).expect("get").expect("shared");
+    fs.begin();
+    fs.chunk_put(
+        shared,
+        &ChunkRecord {
+            refcount: 5,
+            ..record
+        },
+    )
+    .expect("put");
+    // A record for a block the volume does not have: the counted pass removes
+    // it, so this proves the uncounted one leaves even that alone.
+    fs.chunk_put(fs.total_blocks + 8, &record).expect("put");
+    fs.commit().expect("commit the tampered records");
+    let bytes = fs.into_block().bytes();
+
+    let mut fs = ARXFS::open_read_only(MemBlock::from_bytes(bytes.clone(), 4096, 256), &TEST_KEY)
+        .expect("read-only mount");
+    let report = scrub_full(&mut fs);
+    assert!(!report.claims_counted, "{report:?}");
+    assert!(
+        report.refcount_divergences >= 1,
+        "the divergence is still reported: {report:?}"
+    );
+    assert_eq!(
+        report.divergences_corrected, 0,
+        "and nothing is corrected from a truth the pass does not have"
+    );
+    let after = fs.into_block();
+    assert_eq!(after.writes, 0, "no write is even attempted");
+    assert_eq!(after.bytes(), bytes, "the device is untouched");
+}
+
+/// A directory scan reused across directories reads each one's own blocks.
+///
+/// The cursor keeps one directory block resident, so its identity has to be
+/// dropped when the scan is re-seeked: a block index means nothing without the
+/// directory it came from, and keeping the previous one made the second
+/// directory read back the first one's entries.
+#[test]
+fn a_directory_scan_reused_across_directories_reads_each_ones_entries() {
+    let mut fs = fmt(4096, 256, 64);
+    let root = fs.root();
+    fs.create(root, b"d1", NodeKind::Directory).expect("d1");
+    fs.create(root, b"d2", NodeKind::Directory).expect("d2");
+    let d1 = fs.lookup(root, b"d1").expect("d1");
+    let d2 = fs.lookup(root, b"d2").expect("d2");
+    fs.create(d1, b"only-in-one", NodeKind::RegularFile)
+        .expect("x");
+    fs.create(d2, b"only-in-two", NodeKind::RegularFile)
+        .expect("y");
+
+    let d1_ino = fs.ino_of(d1).expect("ino");
+    let d2_ino = fs.ino_of(d2).expect("ino");
+    let d1 = fs.read_inode(d1_ino).expect("inode");
+    let d2 = fs.read_inode(d2_ino).expect("inode");
+    let mut scan = DirScan::new(4096).expect("scan");
+    let mut first = alloc::vec::Vec::new();
+    while fs.dir_next(&d1, &mut scan).expect("step").is_some() {
+        first.push(scan.name().to_vec());
+    }
+    scan.seek(0);
+    let mut second = alloc::vec::Vec::new();
+    while fs.dir_next(&d2, &mut scan).expect("step").is_some() {
+        second.push(scan.name().to_vec());
+    }
+    assert!(first.contains(&b"only-in-one".to_vec()), "{first:?}");
+    assert!(second.contains(&b"only-in-two".to_vec()), "{second:?}");
+    assert!(
+        !second.contains(&b"only-in-one".to_vec()),
+        "the second directory read the first one's block: {second:?}"
+    );
+}
+
+/// A free run is found across a bitmap-page boundary, and a wholly-used page
+/// ends the run rather than being walked block by block.
+#[test]
+fn a_free_run_is_found_across_bitmap_page_boundaries() {
+    // 512-byte blocks give 3072 bits per bitmap page, so this volume spans
+    // several pages and a run can straddle one.
+    let mut fs = fmt(512, 9000, 64);
+    let total = fs.total_blocks;
+    let bits_per_page = (512 - HEADER_LEN) as u64 * 8;
+    fs.mark_range_used(0, total).expect("fill the volume");
+    assert_eq!(
+        fs.map_find_free_run(1, 0, total).expect("search"),
+        None,
+        "a full volume has no run"
+    );
+
+    // A run that starts in one page and ends in the next.
+    let straddle = bits_per_page - 4;
+    fs.mark_range_free(straddle, 8).expect("free a run");
+    assert_eq!(
+        fs.map_find_free_run(8, 0, total).expect("search"),
+        Some(straddle),
+        "the run straddling the page boundary is found whole"
+    );
+    assert_eq!(
+        fs.map_find_free_run(9, 0, total).expect("search"),
+        None,
+        "and is not reported as longer than it is"
+    );
+
+    // A second, longer run further on: the shorter one no longer satisfies the
+    // request, and the search carries on past it rather than stopping.
+    let later = bits_per_page * 2 + 100;
+    fs.mark_range_free(later, 20).expect("free a longer run");
+    assert_eq!(
+        fs.map_find_free_run(20, 0, total).expect("search"),
+        Some(later)
+    );
+    assert_eq!(
+        fs.map_find_free_run(8, 0, total).expect("search"),
+        Some(straddle),
+        "the lowest run that fits still wins"
+    );
+    // A window that excludes both runs finds nothing.
+    assert_eq!(
+        fs.map_find_free_run(8, 0, straddle + 4).expect("search"),
+        None,
+        "a run is never reported past the window's end"
+    );
 }
 
 #[test]
@@ -3100,7 +3689,7 @@ fn invariants_hold_across_scrub_remount_and_cow_rewrite() {
 // Stage 9: offline check and rescue.
 // ---------------------------------------------------------------------------
 
-use crate::check::{self, RescueSink};
+use crate::check::{self, RescueSink, StructureVerdict};
 use crate::CheckReport;
 
 /// A rescue sink that collects every emitted block keyed by `(inode, logical)`.
@@ -3146,10 +3735,12 @@ fn check_on_a_clean_volume_is_sound_and_rebuilds_nothing() {
     let mut fs =
         ARXFS::open(MemBlock::from_bytes(before.clone(), 4096, 512), &TEST_KEY).expect("reopen");
 
+    let used_before = fs.used_blocks();
+    let free_before = fs.free_count;
     let sink = RecordingSink::new();
     let report = fs.check(&GrantAll, &sink).expect("check");
     assert!(report.complete);
-    assert!(report.structure_sound, "{report:?}");
+    assert_eq!(report.structure, StructureVerdict::Sound, "{report:?}");
     assert!(report.rebuilt_derived_state);
     assert_eq!(report.unrecoverable_findings, 0);
     assert!(!report.made_repairs(), "a clean check repairs nothing");
@@ -3161,11 +3752,11 @@ fn check_on_a_clean_volume_is_sound_and_rebuilds_nothing() {
         "a clean check logs CHECK_CLEAN"
     );
 
-    // A clean check mutates nothing on disk.
-    let after = fs.into_block().bytes();
-    assert_eq!(after, before, "a clean check must change nothing");
+    // A clean check mutates nothing the committed volume depends on.
+    assert_committed_state_unchanged(&before, &mut fs, &used_before, free_before);
 
     // Idempotent: a second check agrees.
+    let after = fs.into_block().bytes();
     let mut fs = ARXFS::open(MemBlock::from_bytes(after, 4096, 512), &TEST_KEY).expect("reopen2");
     let again = check_full(&mut fs);
     assert_eq!(again, report, "check is idempotent on a clean volume");
@@ -3200,7 +3791,7 @@ fn check_rebuilds_a_corrupt_free_space_derivation() {
     );
     assert_eq!(fs.free_count, good_count, "the free count was rebuilt");
     // The volume is mountable and the structure is sound.
-    assert!(report.structure_sound, "{report:?}");
+    assert_eq!(report.structure, StructureVerdict::Sound, "{report:?}");
     let bytes = fs.into_block().bytes();
     assert!(ARXFS::open(MemBlock::from_bytes(bytes, 4096, 512), &TEST_KEY).is_ok());
 }
@@ -3229,7 +3820,11 @@ fn check_reclaims_an_orphaned_inode() {
     assert_eq!(report.orphaned_inodes, 1, "{report:?}");
     assert_eq!(report.orphans_reclaimed, 1);
     assert!(report.made_repairs());
-    assert!(report.structure_sound, "the orphan was safely reclaimed");
+    assert_eq!(
+        report.structure,
+        StructureVerdict::Sound,
+        "the orphan was safely reclaimed"
+    );
 
     // The orphan is gone, and the named file is untouched.
     assert_eq!(fs.read_inode(orphan), Err(DriverError::NotFound));
@@ -3238,7 +3833,7 @@ fn check_reclaims_an_orphaned_inode() {
     // A re-check finds nothing left to reclaim.
     let again = check_full(&mut fs);
     assert_eq!(again.orphans_reclaimed, 0);
-    assert!(again.structure_sound);
+    assert_eq!(again.structure, StructureVerdict::Sound);
 }
 
 #[test]
@@ -3306,8 +3901,9 @@ fn check_reports_an_unrepairable_data_block_it_cannot_fix() {
     let report = check_full(&mut fs);
     assert!(report.complete);
     assert_eq!(report.verification.data_physical_faults, 1, "{report:?}");
-    assert!(
-        !report.structure_sound,
+    assert_eq!(
+        report.structure,
+        StructureVerdict::Unsound,
         "an unrepaired data fault is reported, not hidden"
     );
     assert!(report.unrecoverable_findings >= 1);
@@ -4372,7 +4968,11 @@ fn corruption_injection_single_metadata_copy_is_recovered_from_the_companion() {
         let check = fs
             .check(&GrantAll, &NullSink)
             .unwrap_or_else(|e| panic!("{label}: check: {e:?}"));
-        assert!(check.structure_sound, "{label}: {check:?}");
+        assert_eq!(
+            check.structure,
+            StructureVerdict::Sound,
+            "{label}: {check:?}"
+        );
         fs.health(&GrantAll, &NullSink)
             .unwrap_or_else(|e| panic!("{label}: health: {e:?}"));
 
@@ -4416,8 +5016,9 @@ fn corruption_injection_both_copies_of_mount_critical_metadata_never_tears() {
                 let report = fs
                     .check(&GrantAll, &NullSink)
                     .unwrap_or_else(|e| panic!("{label}: check: {e:?}"));
-                assert!(
-                    report.structure_sound,
+                assert_eq!(
+                    report.structure,
+                    StructureVerdict::Sound,
                     "{label}: an earlier root must be consistent, not torn ({report:?})"
                 );
                 let keep = fs.lookup(fs.root(), b"keep").expect("keep survives");
@@ -4838,8 +5439,9 @@ fn sparse_scrub_and_check_validate_metadata_only() {
     assert!(!report.found_faults(), "a sparse file is clean: {report:?}");
 
     let check = fs.check(&GrantAll, &NullSink).expect("check");
-    assert!(
-        check.structure_sound,
+    assert_eq!(
+        check.structure,
+        StructureVerdict::Sound,
         "sparse metadata validates: {check:?}"
     );
 
@@ -5151,9 +5753,9 @@ fn the_allocation_map_costs_a_bounded_cache_not_one_entry_per_block() {
     let mut fs = fmt(512, 65536, 32);
     assert_eq!(fs.total_blocks, 65536);
     assert!(
-        fs.map_cached_blocks() <= MAX_CACHED_MAP_BLOCKS,
+        fs.map_cached_blocks() <= MAX_CACHED_PAGES,
         "the resident map is a bounded cache, not one entry per device block \
-         (cached {} of at most {MAX_CACHED_MAP_BLOCKS})",
+         (cached {} of at most {MAX_CACHED_PAGES})",
         fs.map_cached_blocks()
     );
     // The region the map occupies on the device is a rounding error of it.
@@ -5178,7 +5780,7 @@ fn the_allocation_map_costs_a_bounded_cache_not_one_entry_per_block() {
         fs.used_blocks().len() < before.len() + 64,
         "a small write must add only a handful of used blocks"
     );
-    assert!(fs.map_cached_blocks() <= MAX_CACHED_MAP_BLOCKS);
+    assert!(fs.map_cached_blocks() <= MAX_CACHED_PAGES);
 }
 
 #[test]
@@ -5218,7 +5820,7 @@ fn a_100_tib_volume_formats_mounts_and_serves_with_working_set_bounded_memory() 
     // A freshly formatted volume holds only a bounded cache of map blocks —
     // a few dozen at most, never one entry per device block.
     assert!(
-        fs.map_cached_blocks() <= MAX_CACHED_MAP_BLOCKS,
+        fs.map_cached_blocks() <= MAX_CACHED_PAGES,
         "a near-empty 100 TiB volume must hold only a bounded map cache \
          (cached {})",
         fs.map_cached_blocks()
@@ -5250,7 +5852,7 @@ fn a_100_tib_volume_formats_mounts_and_serves_with_working_set_bounded_memory() 
     // Serving that file left the resident map a bounded cache, not something
     // proportional to the 100 TiB device.
     assert!(
-        fs.map_cached_blocks() <= MAX_CACHED_MAP_BLOCKS,
+        fs.map_cached_blocks() <= MAX_CACHED_PAGES,
         "serving a 200 KiB file must leave the map cache bounded (cached {})",
         fs.map_cached_blocks()
     );
@@ -5270,7 +5872,7 @@ fn a_100_tib_volume_formats_mounts_and_serves_with_working_set_bounded_memory() 
     let mut reopened = ARXFS::open(device, &TEST_KEY).expect("reopen 100 TiB volume");
     assert_eq!(reopened.total_blocks, HUGE_BLOCK_COUNT);
     assert!(
-        reopened.map_cached_blocks() <= MAX_CACHED_MAP_BLOCKS,
+        reopened.map_cached_blocks() <= MAX_CACHED_PAGES,
         "mounting a 100 TiB volume holds only a bounded map cache (cached {})",
         reopened.map_cached_blocks()
     );
@@ -6800,7 +7402,7 @@ fn scrub_verifies_a_links_target_blocks_as_data() {
     assert_eq!(report.data_logical_faults, 0);
     // The offline check agrees, and finds no orphan or dangling entry.
     let check = fs.check(&GrantAll, &NullSink).expect("check");
-    assert!(check.structure_sound);
+    assert_eq!(check.structure, StructureVerdict::Sound);
     assert_eq!(check.orphaned_inodes, 0);
     assert_eq!(check.dangling_entries, 0);
 }
@@ -7133,7 +7735,7 @@ fn check_leaves_correct_link_counts_alone_for_every_kind() {
 
     let report = fs.check(&GrantAll, &NullSink).expect("check");
     assert_eq!(report.link_counts_corrected, 0);
-    assert!(report.structure_sound);
+    assert_eq!(report.structure, StructureVerdict::Sound);
 }
 
 #[test]
@@ -7746,7 +8348,7 @@ fn rebuilding_free_space_over_a_deep_tree_reproduces_the_live_map() {
     // The rebuild reads the trees a leaf at a time, so the only thing it holds
     // across the walk is the map's own bounded page cache.
     assert!(
-        fs.map_cached_blocks() <= MAX_CACHED_MAP_BLOCKS,
+        fs.map_cached_blocks() <= MAX_CACHED_PAGES,
         "the rebuild left a bounded map cache (cached {})",
         fs.map_cached_blocks()
     );

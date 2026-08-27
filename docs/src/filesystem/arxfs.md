@@ -462,9 +462,24 @@ What scrub verifies, and what it repairs versus records:
   and compared with the on-disk chunk and reverse-reference trees
   (`arxfs-spec.md` §9). A divergence is a finding; scrub corrects it toward the
   extent-derived truth without dropping a referrer (a wrong refcount is reset, a
-  bogus referrer struck out, a stale shared record removed). A genuinely shared
-  block missing its chunk record is recorded but not fabricated (that
-  reconstruction belongs to the offline `check`).
+  bogus referrer struck out, a stale shared record removed, a claim the record
+  never named added back). A genuinely shared block missing its chunk record is
+  recorded but not fabricated (recreating one needs the chunk's logical length
+  and hash, which only the data carries).
+
+  **Bounded, not accumulated.** The recompute holds nothing proportional to the
+  volume. The write path keeps the referrer list complete — sharing past the cap
+  declines to dedupe (§9) — so verifying each stored referrer against the extent
+  it claims to come from is one bounded lookup per referrer. The one
+  irreducibly global question, whether a block with no chunk record is claimed
+  by exactly one extent, is answered by streaming every claim through a
+  **transient on-disk claim array** (`arxfs-spec.md` §12) at four bits per
+  block: exact over every lawful refcount, so "the refcount says two but three
+  extents claim it" — the divergence that frees live data — is detected rather
+  than suspected. Where the volume can spare no run for the array (a read-only
+  handle, a nearly-full or fragmented volume) the bounded half still runs and
+  `ScrubReport::claims_counted` reports that claims were not counted; no
+  correction is made from a partial truth.
 
 **Resumable + interrupt-safe.** Scrub takes a `ScrubBudget`:
 `ScrubBudget::Unlimited` verifies the whole volume in one call, while
@@ -510,17 +525,32 @@ otherwise) and:
   reusing the online scrub's verification core (`verify_everything`);
 - **validates the directory tree** by walking it from the root: an entry
   pointing at a missing inode is a *dangling* finding (reported, not
-  auto-deleted — removing a live name is not a safe automatic repair); and
+  auto-deleted — removing a live name is not a safe automatic repair);
 - **detects and reclaims orphaned inodes** — live inodes the directory tree no
   longer reaches — freeing their data blocks (releasing any shared-chunk
-  references) and their inode slot.
+  references) and their inode slot; and
+- **reconciles every inode's stored name count** against the directory entries
+  that really name it.
+
+The last three each derive one value per inode — reachable or not, still owed
+an expansion, how many names — so each lives in a **transient on-disk scratch
+array** over the inode space rather than in RAM (`arxfs-spec.md` §12). Each
+directory enters the expansion frontier exactly once, which is what bounds the
+queue and makes a directory cycle terminate instead of looping. Where no run
+can be placed, `CheckReport::structure` reports `NotWalked` rather than a
+soundness nothing established.
 
 `check` returns a structured `CheckReport` (the embedded scrub `verification`,
-directories checked, dangling entries, orphans found/reclaimed, whether the
-derived state was rebuilt, and the count of findings it could **not** safely
-repair) and logs its outcome with a stable `arxfs` `12000`-range event ID. A
-clean check changes nothing on disk and is idempotent; it commits only when it
-actually corrected or reclaimed something.
+directories checked, dangling entries, orphans found/reclaimed, name counts
+corrected, whether the derived state was rebuilt, whether the structure was
+walked and found sound, and the count of findings it could **not** safely
+repair). An inode above the high-water mark the committed root records is
+refused outright rather than repaired: the reachability array has no bit for
+it, so a directory there would have its own children reclaimed as orphans, and
+the root and the inode tree disagreeing is a driver defect rather than a volume
+to fix and logs its outcome with a stable `arxfs` `12000`-range event ID. A
+clean check leaves every committed structure byte-identical and is idempotent;
+it commits only when it actually corrected or reclaimed something.
 
 **`ARXFS::rescue` — damaged-volume root discovery and file extraction.**
 `rescue` does **not** require a mountable filesystem. It is an associated

@@ -32,8 +32,9 @@ use core::alloc::{GlobalAlloc, Layout};
 
 use tairix_abi::driver::block::{Block, BlockGeometry, DiscardCapability};
 use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
-use tairix_abi::DriverError;
-use tairix_drv_fs_arxfs::{EntropySource, VolumeKey, ARXFS, VOLUME_KEY_LEN};
+use tairix_abi::{CapabilityId, CapabilityQuery, DriverError};
+use tairix_drv_fs_arxfs::{EntropySource, ScrubBudget, VolumeKey, ARXFS, VOLUME_KEY_LEN};
+use tairix_log::{Event, Sink};
 
 /// A pass-through allocator that tracks live bytes and their high-water mark
 /// while counting is armed, so a measured window can be asserted to hold a
@@ -182,6 +183,23 @@ impl Block for SparseBlock {
     }
 }
 
+/// Grants every capability: these measurements are about footprint, not the
+/// capability gate the driver's own tests cover.
+struct GrantAll;
+
+impl CapabilityQuery for GrantAll {
+    fn holds(&self, _id: CapabilityId) -> bool {
+        true
+    }
+}
+
+/// Discards the findings: the reports are asserted directly.
+struct NullSink;
+
+impl Sink for NullSink {
+    fn write_event(&self, _event: &Event<'_>) {}
+}
+
 /// Blocks of the device the volumes are formatted on. Large enough that the
 /// bigger fixture never runs out, and sparse, so it costs only what it uses.
 const DEVICE_BLOCKS: u64 = 1 << 18;
@@ -219,6 +237,79 @@ fn every_measured_walk_stays_bounded() {
     a_stat_holds_a_node_not_a_whole_extent_map();
     a_map_rebuild_walks_every_tree_within_a_fixed_budget();
     a_single_record_edit_allocates_the_same_at_any_depth();
+    a_whole_volume_verification_holds_no_per_record_state();
+}
+
+/// A scrub and an offline check over sixteen times the records hold the same
+/// bounded footprint: the truth they derive about every block and every inode
+/// lives in transient on-disk scratch arrays, not in RAM.
+///
+/// This is the measurement the reconcile was rebuilt for. The path that
+/// recomputed refcounts into a `BTreeMap<u64, Vec<Referrer>>` keyed by every
+/// physical data block held one entry per block *before* it reconciled
+/// anything — around ninety bytes each with the map node and the referrer
+/// vector, so a hundred-terabyte volume asked for something no machine could
+/// give it. Sixteen times the records here took sixteen times the bytes with
+/// it, and would blow the budget below by a wide margin.
+fn a_whole_volume_verification_holds_no_per_record_state() {
+    // Fixed by the geometry, not the volume: the walks' node buffers, the two
+    // bounded page caches (the allocation map's and a scratch array's, 64
+    // pages each), and the scratch arrays' own inode-space pages. The old
+    // per-block accumulator would have wanted some 576 KiB for the larger
+    // fixture alone.
+    const PEAK_BUDGET: usize = 128 * 1024;
+
+    let mut verification = Vec::new();
+    for (files, runs) in [(20u32, 20u64), (80, 80)] {
+        let mut fs = fragmented_volume(files, runs);
+        // Warm the device double first: a pass writes its scratch run, and the
+        // double stores every block written to it. That storage is the
+        // harness's, not the driver's footprint, and it is charged once —
+        // measuring the second pass leaves only what the driver itself holds.
+        fs.scrub(&GrantAll, &NullSink, ScrubBudget::Unlimited)
+            .expect("warm the device double");
+        fs.check(&GrantAll, &NullSink)
+            .expect("warm the device double");
+
+        let (report, scrub_peak, _) =
+            measure(|| fs.scrub(&GrantAll, &NullSink, ScrubBudget::Unlimited));
+        let report = report.expect("scrub the fixture");
+        assert!(report.complete, "{report:?}");
+        assert!(
+            report.claims_counted,
+            "the claim counts were recomputed: {report:?}"
+        );
+        assert!(
+            report.data_blocks_checked >= u64::from(files) * runs,
+            "the fixture must really hold the records: {report:?}"
+        );
+
+        let (check, check_peak, _) = measure(|| fs.check(&GrantAll, &NullSink));
+        let check = check.expect("check the fixture");
+        assert!(check.complete && check.directories_checked > 0, "{check:?}");
+
+        for (what, peak) in [("scrub", scrub_peak), ("check", check_peak)] {
+            assert!(
+                peak <= PEAK_BUDGET,
+                "a {what} over {files} files of {runs} runs held {peak} bytes, \
+                 past the {PEAK_BUDGET}-byte budget"
+            );
+        }
+        verification.push(scrub_peak);
+    }
+
+    // Sharper than the budget: the shared verification core — the metadata and
+    // data walks and the whole refcount reconcile — must hold the *same* bytes
+    // at sixteen times the records, not merely stay under a ceiling. (An
+    // offline check adds the free-space rebuild, whose own footprint is the
+    // map's bounded page cache filling up, so it is held to the budget above
+    // rather than to flatness.)
+    let (small, large) = (verification[0], verification[1]);
+    assert!(
+        large <= small * 2,
+        "a scrub over sixteen times the records held {large} bytes against \
+         {small}: the verification core is tracking the record count"
+    );
 }
 
 /// `node_info` reports a file's allocated bytes by walking its whole extent

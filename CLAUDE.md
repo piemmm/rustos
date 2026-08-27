@@ -57,6 +57,12 @@ the run reached the end — stage list finishing at `[image]`, enrolled and
 completed QEMU counts matching — rather than judging by elapsed time. Every
 stage prints `done in <elapsed>`, so one grep profiles a run.
 
+**Arm one waiter, then stop looking** (§7). A `Monitor` with an until-loop on
+`CI-RC=`, or the harness's completion notification for the backgrounded task,
+is the whole waiting mechanism. Grepping the log again to see which stage it is
+on buys nothing the completion signal does not, and a run of those probes spends
+the context the rest of the work needs. One check that it started, then wait.
+
 The limits §7 puts on this are the ones worth repeating: finish every source
 and doc edit *first*, do no other work while it runs, and run `ci` exactly once
 on the final tree. An edit that becomes necessary mid-run means stopping the

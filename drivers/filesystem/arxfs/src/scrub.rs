@@ -100,6 +100,14 @@ pub struct ScrubReport {
     pub reverse_ref_divergences: u64,
     /// Divergences scrub corrected in place (without losing a referrer).
     pub divergences_corrected: u64,
+    /// Whether the pass counted, exactly, how many extents claim each physical
+    /// block — the refcount reconcile's one volume-wide question
+    /// (`docs/src/filesystem/arxfs-spec.md` §12). `false` when the volume could
+    /// spare no run for the transient array that counting needs (a read-only
+    /// handle, a nearly-full or badly fragmented volume): the refcount and
+    /// reverse-reference checks that need no count still ran, and no correction
+    /// was made from a partial truth.
+    pub claims_counted: bool,
 }
 
 impl ScrubReport {
@@ -137,25 +145,21 @@ impl ScrubReport {
     }
 }
 
-use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use tairix_abi::driver::block::Block;
 use tairix_abi::{CapabilityId, CapabilityQuery, DriverError};
 
 use crate::btree::{TreeWalk, MAX_TREE_LEVEL};
-use crate::dedupe::{ChunkRecord, Referrer, REVERSE_REF_CAP};
-use crate::header::{BlockHeader, BlockType, HEADER_LEN};
+use crate::header::{BlockHeader, BlockType, ReservedOwner, HEADER_LEN};
 use crate::integrity::DataFault;
 use crate::{
     as_usize, extent_spec, inode_spec, rd_u64, wr_u64, Extent, Inode, ARXFS, MAX_BLOCK_SIZE,
     ROOT_INO,
 };
 
-/// Owner object stamped in the scrub-progress block header; a reserved
-/// sentinel distinct from any inode number and from the chunk and
-/// reverse-reference tree owners (`crate::dedupe`).
-const SCRUB_PROGRESS_OWNER: u64 = u64::MAX - 3;
+/// Owner object stamped in the scrub-progress block header.
+const SCRUB_PROGRESS_OWNER: u64 = ReservedOwner::ScrubProgress.sentinel();
 
 /// Magic in the scrub-progress payload: `"RFSSCRB1"`.
 const SCRUB_MAGIC: u64 = 0x5246_5353_4352_4231;
@@ -293,7 +297,7 @@ impl<B: Block> ARXFS<B> {
 
         // Every inode has been verified: recompute and reconcile the chunk
         // refcounts and reverse-reference sets against the on-disk trees.
-        if self.scrub_refcounts(&mut report)? {
+        if self.reconcile_refcounts(&mut report)? {
             mutated = true;
         }
         // Clear the resumable progress record now the pass is complete.
@@ -330,7 +334,7 @@ impl<B: Block> ARXFS<B> {
                 }
             }
         }
-        self.scrub_refcounts(report)
+        self.reconcile_refcounts(report)
     }
 
     /// Determine where this scrub call starts: resume the persisted cursor and
@@ -566,128 +570,6 @@ impl ScrubReport {
 }
 
 impl<B: Block> ARXFS<B> {
-    /// Recompute the chunk refcounts and reverse-reference sets from the live
-    /// inode/extent trees and reconcile them with the on-disk chunk and
-    /// reverse-reference trees (`docs/src/filesystem/arxfs-spec.md` §9). The
-    /// extent-derived references are the liveness truth, so a divergence is
-    /// corrected toward them without dropping a referrer. Returns `true` when a
-    /// correction was made (so the caller commits the new root).
-    pub(crate) fn scrub_refcounts(
-        &mut self,
-        report: &mut ScrubReport,
-    ) -> Result<bool, DriverError> {
-        // Build the authoritative referrer set per physical data block from
-        // every file's and link's extents (a link's target is node data, so
-        // it shares chunks like any other; only directories are mirrored
-        // metadata rather than shared chunks and never participate).
-        let mut referrers: BTreeMap<u64, Vec<Referrer>> = BTreeMap::new();
-        let mut walk = TreeWalk::new(self.block_size)?;
-        let mut extent_walk = TreeWalk::new(self.block_size)?;
-        while self.btree_next_leaf(self.inode_tree_root, inode_spec(), &mut walk)? {
-            for (ino_key, value) in walk.entries() {
-                let Some(inode) = Inode::decode(value)? else {
-                    continue;
-                };
-                if inode.kind.content_is_metadata() {
-                    continue;
-                }
-                let ino = u32::try_from(ino_key).map_err(|_| DriverError::DeviceFault)?;
-                let spec = extent_spec(ino);
-                extent_walk.restart();
-                while self.btree_next_leaf(inode.extent_root, spec, &mut extent_walk)? {
-                    for (start, ev) in extent_walk.entries() {
-                        let ext = Extent::decode(ev)?;
-                        if ext.compressed {
-                            // A cluster is shared as a unit: one referrer,
-                            // keyed by its first physical block, naming its
-                            // logical start.
-                            referrers.entry(ext.phys).or_default().push((ino, start));
-                            continue;
-                        }
-                        for b in 0..ext.len {
-                            referrers
-                                .entry(ext.phys + b)
-                                .or_default()
-                                .push((ino, start + b));
-                        }
-                    }
-                }
-            }
-        }
-
-        let mut corrected = false;
-        // A block with two or more live referrers must be an explicit shared
-        // chunk whose refcount and reverse-ref set match the truth.
-        for (phys, refs) in &referrers {
-            let count = refs.len() as u64;
-            if count < 2 {
-                // A single referrer is the implicit-refcount-1 case: there must
-                // be no chunk record. A stale shared record is a divergence.
-                if let Some(_record) = self.chunk_get(*phys)? {
-                    report.refcount_divergences += 1;
-                    self.chunk_remove(*phys)?;
-                    self.reverse_refs_remove(*phys)?;
-                    report.divergences_corrected += 1;
-                    corrected = true;
-                }
-                continue;
-            }
-            match self.chunk_get(*phys)? {
-                Some(record) => {
-                    if record.refcount != count {
-                        report.refcount_divergences += 1;
-                        let fixed = ChunkRecord {
-                            refcount: count,
-                            ..record
-                        };
-                        self.chunk_put(*phys, &fixed)?;
-                        report.divergences_corrected += 1;
-                        corrected = true;
-                    }
-                    if !self.reverse_refs_match(*phys, refs)? {
-                        report.reverse_ref_divergences += 1;
-                        let capped: Vec<Referrer> =
-                            refs.iter().take(REVERSE_REF_CAP).copied().collect();
-                        self.reverse_refs_put(*phys, &capped)?;
-                        report.divergences_corrected += 1;
-                        corrected = true;
-                    }
-                }
-                None => {
-                    // The block is genuinely shared but carries no chunk
-                    // record. Recreating it needs the chunk's logical length
-                    // and hash, which scrub does not reconstruct here (that is
-                    // the Stage 9 offline check). Record honestly without
-                    // pretending to repair.
-                    report.refcount_divergences += 1;
-                }
-            }
-        }
-
-        Ok(corrected)
-    }
-
-    /// Whether the on-disk reverse-reference set for the chunk at `phys` equals
-    /// the recomputed `expected` set (compared as sets, capped at
-    /// [`REVERSE_REF_CAP`] — the on-disk record never holds more).
-    fn reverse_refs_match(
-        &mut self,
-        phys: u64,
-        expected: &[Referrer],
-    ) -> Result<bool, DriverError> {
-        let stored = self.reverse_refs(phys)?;
-        let want: Vec<Referrer> = expected.iter().take(REVERSE_REF_CAP).copied().collect();
-        if stored.len() != want.len() {
-            return Ok(false);
-        }
-        for r in &want {
-            if !stored.contains(r) {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-
     /// Load the persisted scrub cursor and accumulated counts from the
     /// progress record. Returns `None` when the record is unreadable or its
     /// magic is wrong: the record is rebuildable, so a corrupt one simply
@@ -706,6 +588,9 @@ impl<B: Block> ARXFS<B> {
         }
         let report = ScrubReport {
             complete: false,
+            // A resumed pass has not reached the reconcile, so it has counted
+            // nothing yet; the call that finishes the walk sets this.
+            claims_counted: false,
             metadata_blocks_checked: counts[0],
             metadata_repaired: counts[1],
             metadata_unrepairable: counts[2],

@@ -280,7 +280,15 @@ live file-data block through the integrity pipeline and **classifies** any
 fault (`Physical`/`Aead`/`Logical`) without panicking (deep data repair is a
 later stage); and **recomputes** the chunk refcounts and reverse-reference sets
 from the live extents, **correcting** a divergence toward that truth without
-dropping a referrer. A `ScrubBudget::Inodes(n)` call is resumable: it persists
+dropping a referrer. The recompute holds nothing proportional to the volume:
+the referrer list is complete by construction, so each stored referrer is
+verified with one bounded lookup, and the one irreducibly global question —
+whether a block with no chunk record is claimed by exactly one extent — is
+answered by streaming every claim through a **transient on-disk claim array**
+(`src/scratch.rs`) at four bits per block, released before the pass returns.
+Where the volume can spare no run for it, `ScrubReport::claims_counted` says
+so and no correction is made from a partial truth. A `ScrubBudget::Inodes(n)`
+call is resumable: it persists
 a rebuildable **scrub-progress record** (reached from the transaction root)
 holding the cursor and accumulated counts and resumes to the same
 `ScrubReport`; a crash mid-scrub still mounts (ordinary recovery never needs
@@ -301,9 +309,14 @@ authoritative trees (the same `rebuild_free_space` walk `open` uses), so a
 corrupt derivation can never keep a sound volume unmountable; reuses the scrub
 verification core to verify/repair metadata copies, classify data faults, and
 reconcile refcounts; validates the directory tree (an entry to a missing inode
-is a *dangling* finding, reported not auto-deleted); and detects and
-**reclaims orphaned inodes**. It returns a structured `CheckReport`, is
-idempotent, and commits only when it actually repaired something.
+is a *dangling* finding, reported not auto-deleted); detects and **reclaims
+orphaned inodes**; and reconciles every inode's stored name count. The last
+three derive one value per inode — reachable, still owed an expansion, how
+many names — so each lives in a transient on-disk scratch array over the inode
+space, and `CheckReport::structure` reports `NotWalked` rather than a soundness
+nothing established when no run can be placed. It returns a structured
+`CheckReport`, is idempotent, and commits only when it actually repaired
+something.
 
 `ARXFS::rescue` recovers files from a volume too damaged to mount. It is an
 associated function (it takes the block device), **read-only** on the device
@@ -388,7 +401,7 @@ address the committed root names and is stamped clean at that generation;
 otherwise it rebuilds by walking the trees from the selected root. Mounting a
 synced volume therefore costs a handful of block reads rather than a walk of
 every inode and extent on it, and the resident cost is a bounded cache of
-`MAX_CACHED_MAP_BLOCKS` region blocks however large the volume.
+`MAX_CACHED_PAGES` pages however large the volume.
 
 A **read-only handle holds no allocator at all** — the field is `None` — so it
 cannot allocate, free, dedupe, or trim by construction, builds no allocation

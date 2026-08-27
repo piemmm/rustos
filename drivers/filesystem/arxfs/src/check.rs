@@ -29,21 +29,19 @@
 //! log their outcome through `lib/log` with stable event IDs in the reserved
 //! `arxfs` `12000..13000` range (`crate::scrub`).
 
-use alloc::collections::{BTreeMap, BTreeSet};
-use alloc::vec::Vec;
-
 use tairix_abi::driver::block::Block;
 use tairix_abi::{CapabilityId, CapabilityQuery, DriverError};
 use tairix_log::{log, Event, EventId, Level, Sink};
 
 use crate::btree::TreeWalk;
-use crate::header::{BlockType, HEADER_LEN};
+use crate::header::ReservedOwner;
+use crate::scratch::{ElementWidth, ScratchArray};
 use crate::scrub::{ScrubReport, ARXFS_RANGE_END, ARXFS_RANGE_START};
 use crate::superblock;
 use crate::transaction::TxnRoot;
 use crate::{
-    as_usize, extent_spec, inode_spec, rd_u32, Extent, Inode, InodeKind, ARXFS, DIRENT_SIZE,
-    MAX_BLOCK_SIZE, NAME_MAX, ROOT_INO,
+    as_usize, extent_spec, inode_spec, DirScan, Extent, Inode, InodeKind, ARXFS, MAX_BLOCK_SIZE,
+    ROOT_INO,
 };
 
 /// An offline `check` finished and the structure validated clean.
@@ -83,8 +81,8 @@ const _: () = {
 pub struct CheckReport {
     /// `true` once the whole offline pass has run.
     pub complete: bool,
-    /// `true` when the pass found nothing it could not safely repair.
-    pub structure_sound: bool,
+    /// What the pass can say about the volume's structure.
+    pub structure: StructureVerdict,
     /// The metadata / data / refcount verification (and copy-repair / refcount
     /// reconcile) shared with the online scrub.
     pub verification: ScrubReport,
@@ -120,6 +118,28 @@ pub struct CheckReport {
     /// value above the truth leaks storage no name reaches and one below it
     /// frees storage a live name still does. Both are repaired by counting.
     pub link_counts_corrected: u64,
+}
+
+/// What an offline [`ARXFS::check`] can say about the volume's structure.
+///
+/// The distinction is not cosmetic: the directory-reachability, orphan, and
+/// name-count passes each need a transient scratch array over the inode space
+/// (`docs/src/filesystem/arxfs-spec.md` §12), because the truth they derive is
+/// one value per inode
+/// and that cannot be held in RAM on the machine a very large volume has to be
+/// served from. When the volume can spare no run for one, the pass has walked
+/// nothing — and must say so rather than report a soundness no walk
+/// established.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum StructureVerdict {
+    /// Nothing walked the structure, so nothing vouches for it either way. The
+    /// verification, rebuild, and feature checks still ran.
+    #[default]
+    NotWalked,
+    /// Walked, and every finding was repaired or was benign.
+    Sound,
+    /// Walked, and findings remain that the pass could not safely repair.
+    Unsound,
 }
 
 impl CheckReport {
@@ -305,7 +325,13 @@ impl<B: Block> ARXFS<B> {
     /// on-disk tree state (so the caller commits only then, keeping a clean
     /// check idempotent).
     fn check_run(&mut self) -> Result<(CheckReport, bool), DriverError> {
+        // Every pass that needs a scratch array clears this if it could not
+        // place one, so the report never claims a structure nothing walked.
         let mut report = CheckReport::default();
+        // Cleared by any pass that could not place the scratch array its
+        // per-inode state needs, so the report never claims a structure
+        // nothing walked.
+        let mut walked = true;
 
         // Rebuild the rebuildable derived state first, from the authoritative
         // trees, before any allocation: a corrupt free-space derivation must
@@ -320,7 +346,7 @@ impl<B: Block> ARXFS<B> {
 
         // Structural validation scrub does not do: walk the directory tree from
         // the root, validate every entry's target, and reclaim orphaned inodes.
-        let reclaimed = self.check_directories_and_orphans(&mut report)?;
+        let reclaimed = self.check_directories_and_orphans(&mut report, &mut walked)?;
 
         // The feature word must cover what the volume actually holds, or a
         // reader lacking the feature would mount and misread instead of
@@ -329,7 +355,7 @@ impl<B: Block> ARXFS<B> {
 
         // The stored name counts must match the names that exist, or an
         // unlink frees storage too early or never at all.
-        report.link_counts_corrected = self.check_link_counts()?;
+        report.link_counts_corrected = self.check_link_counts(&mut walked)?;
 
         let v = &report.verification;
         let divergences = v.refcount_divergences + v.reverse_ref_divergences;
@@ -339,7 +365,11 @@ impl<B: Block> ARXFS<B> {
             + v.data_logical_faults
             + report.dangling_entries
             + divergences.saturating_sub(v.divergences_corrected);
-        report.structure_sound = report.unrecoverable_findings == 0;
+        report.structure = match (walked, report.unrecoverable_findings) {
+            (false, _) => StructureVerdict::NotWalked,
+            (true, 0) => StructureVerdict::Sound,
+            (true, _) => StructureVerdict::Unsound,
+        };
         report.complete = true;
 
         Ok((
@@ -399,10 +429,34 @@ impl<B: Block> ARXFS<B> {
     /// value that has drifted either leaks storage nothing reaches or frees
     /// storage a live name still does — the second being the corruption the
     /// feature bit exists to keep an unaware reader from causing.
-    fn check_link_counts(&mut self) -> Result<u64, DriverError> {
+    ///
+    /// The counts live in a transient scratch array over the inode space, not
+    /// in RAM: one per inode is proportional to the volume, and a 100 TB
+    /// volume has to be checkable from a machine that cannot hold that.
+    fn check_link_counts(&mut self, walked: &mut bool) -> Result<u64, DriverError> {
+        let Some(mut names) = self.scratch_alloc(
+            ReservedOwner::ScratchNames,
+            ElementWidth::Word,
+            self.next_ino,
+            1,
+        )?
+        else {
+            *walked = false;
+            return Ok(0);
+        };
+        let outcome = self.count_and_fix_link_counts(&mut names);
+        let released = self.scratch_release(names);
+        if outcome.is_ok() {
+            released?;
+        }
+        outcome
+    }
+
+    /// [`Self::check_link_counts`] with its scratch array in hand.
+    fn count_and_fix_link_counts(&mut self, names: &mut ScratchArray) -> Result<u64, DriverError> {
         let spec = inode_spec();
         let mut walk = TreeWalk::new(self.block_size)?;
-        let mut counted: BTreeMap<u32, u32> = BTreeMap::new();
+        let mut scan = DirScan::new(self.block_size)?;
         while self.btree_next_leaf(self.inode_tree_root, spec, &mut walk)? {
             for (_, value) in walk.entries() {
                 let Some(inode) = Inode::decode(value)? else {
@@ -411,9 +465,9 @@ impl<B: Block> ARXFS<B> {
                 if !inode.is_dir() {
                     continue;
                 }
-                for (child, _) in self.dir_entries(&inode)? {
-                    let slot = counted.entry(child).or_insert(0);
-                    *slot = slot.saturating_add(1);
+                scan.seek(0);
+                while let Some((_, child)) = self.dir_next(&inode, &mut scan)? {
+                    self.scratch_bump(names, u64::from(child))?;
                 }
             }
         }
@@ -428,20 +482,18 @@ impl<B: Block> ARXFS<B> {
                     continue;
                 };
                 let ino = u32::try_from(ino_key).map_err(|_| DriverError::DeviceFault)?;
+                let counted = self.scratch_get(names, ino_key)?;
                 // An inode no entry names is an orphan, already reclaimed
                 // above; rewriting its count here would only fight that
                 // repair.
-                let Some(&names) = counted.get(&ino) else {
-                    continue;
-                };
-                if inode.nlink == names {
+                if counted == 0 || inode.nlink == counted {
                     continue;
                 }
                 wrong = Some((
                     ino_key,
                     ino,
                     Inode {
-                        nlink: names,
+                        nlink: counted,
                         ..inode
                     },
                 ));
@@ -460,39 +512,6 @@ impl<B: Block> ARXFS<B> {
         Ok(corrected)
     }
 
-    /// Collect a directory's `(child inode, is "." or "..")` entries, reusing
-    /// the same on-disk directory layout as [`Self::dir_lookup`]. Self and
-    /// parent links (`.` / `..`) are flagged so the reachability walk and the
-    /// orphan detection ignore them (an entry's own directory must not count as
-    /// a reference to itself).
-    fn dir_entries(&mut self, dir: &Inode) -> Result<Vec<(u32, bool)>, DriverError> {
-        let per = self.dirents_per_block();
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
-        let mut out = Vec::new();
-        for blk in 0..self.dir_block_count(dir) {
-            let ptr = self.block_ptr(dir, blk)?;
-            if ptr == 0 {
-                continue;
-            }
-            self.read_meta(ptr, BlockType::Directory, &mut buf)?;
-            for slot in 0..per {
-                let base = HEADER_LEN + slot * DIRENT_SIZE;
-                let ino = rd_u32(&buf, base);
-                if ino == 0 {
-                    continue;
-                }
-                let name_len = as_usize(u64::from(rd_u32(&buf, base + 4)));
-                if name_len > NAME_MAX {
-                    return Err(DriverError::DeviceFault);
-                }
-                let name = &buf[base + 8..base + 8 + name_len];
-                let dot = name == b"." || name == b"..";
-                out.push((ino, dot));
-            }
-        }
-        Ok(out)
-    }
-
     /// Walk the directory tree from the root, validate every entry's target
     /// exists, and detect and reclaim orphaned inodes — live inodes the
     /// directory tree no longer reaches (`docs/src/filesystem/arxfs-spec.md`
@@ -501,41 +520,126 @@ impl<B: Block> ARXFS<B> {
     /// reclaimed (so the caller commits). An entry pointing at a missing inode
     /// is a *dangling* finding: it is reported, not auto-deleted, since removing
     /// a live name is not a safe automatic repair.
+    ///
+    /// Which inodes are reachable, and which directories are still owed an
+    /// expansion, both live in transient scratch arrays over the inode space
+    /// ([`crate::scratch`]) rather than in RAM: a set holding every reachable
+    /// inode and a stack holding every directory are each proportional to the
+    /// volume, and the machine a 100 TB volume must be checkable from cannot
+    /// hold either. Each directory enters the frontier once — the reachable
+    /// bit is what guarantees it — so the queue can never outgrow the inode
+    /// space it is sized for, and a directory cycle terminates instead of
+    /// looping.
     fn check_directories_and_orphans(
         &mut self,
         report: &mut CheckReport,
+        walked: &mut bool,
     ) -> Result<bool, DriverError> {
-        let mut reachable: BTreeSet<u32> = BTreeSet::new();
-        reachable.insert(ROOT_INO);
-        let mut stack: Vec<u32> = alloc::vec![ROOT_INO];
-        while let Some(dir_ino) = stack.pop() {
+        let Some(mut reachable) = self.scratch_alloc(
+            ReservedOwner::ScratchReachable,
+            ElementWidth::Bit,
+            self.next_ino,
+            1,
+        )?
+        else {
+            *walked = false;
+            return Ok(false);
+        };
+        let frontier = self.scratch_alloc(
+            ReservedOwner::ScratchFrontier,
+            ElementWidth::Word,
+            self.next_ino,
+            1,
+        );
+        let mut frontier = match frontier {
+            Ok(Some(frontier)) => frontier,
+            Ok(None) => {
+                *walked = false;
+                self.scratch_release(reachable)?;
+                return Ok(false);
+            }
+            Err(err) => {
+                let _ = self.scratch_release(reachable);
+                return Err(err);
+            }
+        };
+        let outcome = self.walk_directories(&mut reachable, &mut frontier, report);
+        let released = self
+            .scratch_release(frontier)
+            .and(self.scratch_release(reachable));
+        if outcome.is_ok() {
+            released?;
+        }
+        outcome
+    }
+
+    /// [`Self::check_directories_and_orphans`] with its scratch arrays in hand.
+    fn walk_directories(
+        &mut self,
+        reachable: &mut ScratchArray,
+        frontier: &mut ScratchArray,
+        report: &mut CheckReport,
+    ) -> Result<bool, DriverError> {
+        let mut scan = DirScan::new(self.block_size)?;
+        self.scratch_set(reachable, u64::from(ROOT_INO), 1)?;
+        self.scratch_set(frontier, 0, ROOT_INO)?;
+        let mut head = 0;
+        let mut tail = 1;
+        while head < tail {
+            let dir_ino = self.scratch_get(frontier, head)?;
+            head += 1;
             let dir = self.read_inode(dir_ino)?;
             if !dir.is_dir() {
                 continue;
             }
             report.directories_checked += 1;
-            for (child, is_dot) in self.dir_entries(&dir)? {
-                if is_dot {
+            scan.seek(0);
+            while let Some((_, child)) = self.dir_next(&dir, &mut scan)? {
+                if scan.is_dot() {
                     continue;
                 }
-                let spec = inode_spec();
-                let exists = self
-                    .btree_get(self.inode_tree_root, u64::from(child), spec)?
-                    .and_then(|value| Inode::decode(&value).ok().flatten())
-                    .is_some();
-                if !exists {
+                if !self.inode_exists(child)? {
                     report.dangling_entries += 1;
                     continue;
                 }
-                if reachable.insert(child) {
-                    stack.push(child);
+                if u64::from(child) >= self.next_ino {
+                    // A live inode above the high-water mark the committed
+                    // root records: the reachability array has no bit for it,
+                    // so its own children would look like orphans and be
+                    // reclaimed. Both the root and the inode tree are sealed
+                    // under the same key, so this is a driver defect rather
+                    // than a volume to repair — fail closed instead of
+                    // guessing which of the two is wrong.
+                    return Err(DriverError::DeviceFault);
                 }
+                if self.scratch_get(reachable, u64::from(child))? != 0 {
+                    continue;
+                }
+                if tail >= self.next_ino {
+                    // Every inode enters the frontier at most once and the
+                    // queue is sized for the inode space, so this is
+                    // unreachable — but dropping a directory here would make
+                    // the orphan sweep reclaim a live subtree, so it fails
+                    // closed rather than silently.
+                    return Err(DriverError::DeviceFault);
+                }
+                self.scratch_set(reachable, u64::from(child), 1)?;
+                self.scratch_set(frontier, tail, child)?;
+                tail += 1;
             }
         }
+        self.reclaim_orphans(reachable, report)
+    }
 
-        // Any live inode the walk did not reach (other than the root) is an
-        // orphan. Reclaiming one removes it from the tree being walked, so a
-        // step reclaims at most one and then resumes past it.
+    /// Reclaim every live inode the directory walk did not reach.
+    ///
+    /// Reclaiming one removes it from the tree being walked, so a step
+    /// reclaims at most one and then resumes past it.
+    fn reclaim_orphans(
+        &mut self,
+        reachable: &mut ScratchArray,
+        report: &mut CheckReport,
+    ) -> Result<bool, DriverError> {
         let spec = inode_spec();
         let mut walk = TreeWalk::new(self.block_size)?;
         while self.btree_next_leaf(self.inode_tree_root, spec, &mut walk)? {
@@ -545,7 +649,16 @@ impl<B: Block> ARXFS<B> {
                     continue;
                 }
                 let ino = u32::try_from(ino_key).map_err(|_| DriverError::DeviceFault)?;
-                if ino == ROOT_INO || reachable.contains(&ino) {
+                if ino == ROOT_INO {
+                    continue;
+                }
+                if ino_key >= self.next_ino {
+                    // As above: an inode outside the allocated range makes the
+                    // range untrustworthy, and reclaiming on the strength of
+                    // it would free live storage.
+                    return Err(DriverError::DeviceFault);
+                }
+                if self.scratch_get(reachable, ino_key)? != 0 {
                     continue;
                 }
                 orphan = Some((ino_key, ino));
@@ -565,6 +678,14 @@ impl<B: Block> ARXFS<B> {
             }
         }
         Ok(report.orphans_reclaimed > 0)
+    }
+
+    /// Whether inode `ino` exists in the inode tree.
+    fn inode_exists(&mut self, ino: u32) -> Result<bool, DriverError> {
+        Ok(self
+            .btree_get(self.inode_tree_root, u64::from(ino), inode_spec())?
+            .and_then(|value| Inode::decode(&value).ok().flatten())
+            .is_some())
     }
 
     /// Recover readable files from a volume too damaged to mount normally

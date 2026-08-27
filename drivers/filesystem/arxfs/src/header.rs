@@ -95,6 +95,13 @@ pub enum BlockType {
     /// place and stored as a single copy — a page that fails to authenticate
     /// makes the mount rebuild the map rather than repair it.
     AllocMap = 8,
+    /// A page of a transient scratch array a whole-volume pass streams its
+    /// derived truth through (`crate::scratch`). Like an allocation-map page
+    /// it is single-copy and updated in place; unlike one it exists only for
+    /// the length of the pass that allocated it, and the pass writes every
+    /// page before it reads any, so a page that fails to authenticate is a
+    /// device fault rather than a rebuild.
+    Scratch = 9,
 }
 
 impl BlockType {
@@ -115,10 +122,60 @@ impl BlockType {
             6 => Some(Self::HealthBaseline),
             7 => Some(Self::Attr),
             8 => Some(Self::AllocMap),
+            9 => Some(Self::Scratch),
             _ => None,
         }
     }
 }
+
+/// Every object that owns metadata blocks without being an inode, and the
+/// [`BlockHeader::owner`] sentinel it stamps.
+///
+/// The sentinels must stay mutually distinct and out of the inode-number
+/// range, so they are enumerated here once rather than declared beside each
+/// owner: two owners that happened to pick the same value would seal their
+/// blocks under the same identity, and a check on the owner alone could not
+/// tell one's block from the other's.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ReservedOwner {
+    /// The inode tree's nodes.
+    InodeTree,
+    /// The chunk/refcount tree's nodes (`crate::dedupe`).
+    ChunkTree,
+    /// The reverse-reference tree's nodes (`crate::dedupe`).
+    ReverseRefTree,
+    /// The scrub-progress record (`crate::scrub`).
+    ScrubProgress,
+    /// The device-health baseline record (`crate::health`).
+    HealthBaseline,
+    /// The allocation-map region (`crate::allocmap`).
+    AllocMap,
+    /// A reconcile pass's per-block claim-count array (`crate::scratch`).
+    ScratchClaims,
+    /// A check pass's reachable-inode bitmap (`crate::scratch`).
+    ScratchReachable,
+    /// A check pass's directory-expansion frontier (`crate::scratch`).
+    ScratchFrontier,
+    /// A check pass's per-inode name-count array (`crate::scratch`).
+    ScratchNames,
+}
+
+impl ReservedOwner {
+    /// The owner sentinel this object seals its blocks under. Counted down
+    /// from [`u64::MAX`], so every sentinel sits far above any inode number.
+    #[must_use]
+    pub const fn sentinel(self) -> u64 {
+        u64::MAX - (self as u64)
+    }
+}
+
+/// Inode numbers are 32-bit, so the sentinels — the top handful of the 64-bit
+/// space — can never collide with one, and the discriminants keep them
+/// distinct from each other by construction.
+const _: () = {
+    assert!(ReservedOwner::InodeTree.sentinel() == u64::MAX);
+    assert!(ReservedOwner::ScratchNames.sentinel() > u32::MAX as u64);
+};
 
 /// The identity a metadata block carries, independent of its payload.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

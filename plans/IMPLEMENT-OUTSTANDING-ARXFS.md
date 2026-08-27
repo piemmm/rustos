@@ -34,8 +34,8 @@ no-deferral rule), ahead of everything below it.
 |---|---|---|---|---|---|
 | A0 | Bounded, resumable tree iteration | §3 here | — | — | **done** |
 | A1 | Bounded-stack B-tree mutation path (defect `OPEN-DEFECTS.md` D65) | §7 here | — | A0 | **done** |
-| A2 | Bounded whole-volume reconcile and reachability state (defect D-M5) | `ARXFS-MAINTENANCE.md` | 18 | A1 | **next** |
-| M0 | Shared background pacer + cross-layer availability query | `ARXFS-MAINTENANCE.md` | 18 | — | planned |
+| A2 | Bounded whole-volume reconcile and reachability state (defect D-M5) | `ARXFS-MAINTENANCE.md` | 18 | A1 | **done** |
+| M0 | Shared background pacer + cross-layer availability query | `ARXFS-MAINTENANCE.md` | 18 | — | **next** |
 | M1 | The read-only repair rule (defect D64) | `ARXFS-MAINTENANCE.md` | 18 | — | planned |
 | WB0 | Write-amplification measurement harness | `ARXFS-WRITEBACK.md` | 17 | — | planned |
 | WB1 | Dirty block set + the commit barrier (defect D63) | `ARXFS-WRITEBACK.md` | 17 | WB0 | planned |
@@ -79,14 +79,14 @@ their reason recorded there, not here:
   any stage, and it makes a "bounded" maintenance chunk unbounded in memory
   before it does any work. Fixing it once, first, was also the difference
   between one change and six that each work around it.
-- **A1 and A2 next, because A0's work surfaced them (§7) and the no-deferral
-  rule puts a found defect ahead of everything planned.** A1 was a reachable
-  kernel-stack overflow on the write path, closed: the mutation path is
-  iterative like the read paths A0 converted, where it had recursed at 8 KiB per
-  tree level against a 32 KiB stack. A2 is what is left of the boundedness A0
-  was taken for: the iteration under `scrub` and `check` is bounded now, their
-  own whole-volume accumulators are not, and M2 cannot honestly claim a bounded
-  pass over them.
+- **A1 and A2 came next, because A0's work surfaced them (§7) and the
+  no-deferral rule puts a found defect ahead of everything planned.** Both are
+  closed. A1 was a reachable kernel-stack overflow on the write path: the
+  mutation path is iterative like the read paths A0 converted, where it had
+  recursed at 8 KiB per tree level against a 32 KiB stack. A2 finished the
+  boundedness A0 was taken for: the iteration under `scrub` and `check` was
+  bounded, their own whole-volume accumulators were not, and M2 could not have
+  claimed a bounded pass over them.
 - **The barrier before every background writer and every durable-root
   consumer.** WB1 closes the commit-barrier defect (`OPEN-DEFECTS.md` D63): a
   superblock slot published with no barrier before it can name a root whose
@@ -105,7 +105,8 @@ their reason recorded there, not here:
   stages.
 - **M2 before M3, because a scheduler over broken operations is worse than
   none.** M2 makes each operation a bounded, resumable, lossless pass (over the
-  reconcile state A2 bounds first). Until it lands, `scrub` is one uninterruptible call over a whole volume, `trim`
+  reconcile state A2 bounded first). Until it lands, `scrub` is one
+  uninterruptible call over a whole volume, `trim`
   silently forfeits most of the space it is asked to discard, and `health`
   scrubs inline — so a runner driving them would *look* correct while doing the
   wrong thing quietly. That is the one ordering in this ledger where getting it
@@ -288,7 +289,7 @@ fix.** This binds every item in this ledger and every plan it names.
 
 A0's own scope is closed. Reading the code it converted surfaced two defects too
 large to fold into it, so under §6 they took precedence over every row below
-them. A1 is done; A2 is the next item and still blocks the rest of the ledger.
+them. Both are done and neither blocks the ledger any longer.
 
 ### A1 — bounded-stack B-tree mutation path — done
 
@@ -340,39 +341,74 @@ constant, within the 32 KiB budget, and guarded by a test; but it is sized by
 `MAX_BLOCK_SIZE`, so item **B1**, which widens the filesystem block size, must
 move that staging off the stack as part of decoupling it — recorded in §5.
 
-### A2 — scrub and check hold whole-volume state in RAM
+### A2 — bounded whole-volume reconcile and reachability state — done
 
-**Owned by `ARXFS-MAINTENANCE.md`** (defect D-M5 there); listed here because it
-blocks this ledger.
+**Owned by `ARXFS-MAINTENANCE.md`** (defect D-M5 there).
 
-A0 made the *iteration* under these passes bounded, which leaves their own
-accumulators as the remaining volume-proportional state:
+A0 made the *iteration* under `scrub` and `check` bounded; A2 moved the truth
+they derive out of RAM. Where a pass must decide something about every block or
+every inode, it streams that decision through a **transient on-disk scratch
+array** (`drivers/filesystem/arxfs/src/scratch.rs`): a flat array of
+fixed-width elements in a contiguous run of the volume's own free space, paged
+through the same bounded 64-page cache the allocation map uses
+(`src/pagecache.rs`, hoisted so there is one such cache, not two), sealed per
+page, zero-filled at allocation so no read can fall back on unauthenticated
+bytes, and released before the pass returns. It is scratch, not metadata: a
+crash leaves stale bytes in blocks the next mount finds free, and free space is
+derived from the trees, so nothing leaks.
 
-- `scrub_refcounts` builds `BTreeMap<u64, Vec<Referrer>>` keyed by **every
-  physical data block on the volume** before it reconciles anything. On the
-  combined floor that is tens of billions of entries — a structure that cannot
-  exist on the machine the charter requires the volume to be served from, so
-  the reconcile phase of `scrub` and of `check` cannot complete there at all.
-- `check_directories_and_orphans` holds a `BTreeSet<u32>` of every reachable
-  inode plus its walk stack, and `check_link_counts` a `BTreeMap<u32, u32>` of
-  every named inode: proportional to the inode count rather than the working
-  set.
-- `check::dir_entries` returns a `Vec` of a whole directory's entries, so one
-  huge directory is unbounded even though the caller consumes it in order.
+The refcount reconcile (`src/reconcile.rs`) splits the question in two. Two
+thirds of it needs no accumulation at all, because the write path keeps the
+referrer list **complete** — sharing past `REVERSE_REF_CAP` declines to dedupe
+— so a lawful record satisfies `refcount == referrers.len()` with every referrer
+named, and each stored referrer is verified against the extent it claims to come
+from with one bounded lookup. The remaining question is irreducibly global:
+whether a block with no chunk record is claimed by exactly one extent, since the
+only record of a claim is the extent that makes it and the extent trees are
+ordered by `(inode, logical block)`. That is what the claim array counts, at
+**four bits per block** — exact over every lawful refcount, with a distinct
+saturated state above them — which makes "the refcount says two but three
+extents claim it", the divergence that frees live data, detectable rather than
+suspected.
 
-The fix is not more iteration: the truth these passes derive has to live
-somewhere bounded. ARXFS already has the right home — an on-disk paged map with
-a bounded resident cache — so the shape is a scratch on-disk structure the
-reconcile streams through (marking each mapped block, detecting a second claim
-where the map already detects a double-mark) plus bounded per-chunk lookups
-against the chunk and reverse-reference trees, with a persisted cursor like the
-scrub cursor. That is an on-disk layout decision: **stop and ask before
-guessing one**.
+Where the run does not fit whole the pass covers the volume in **windows**, one
+extra extent-metadata walk each, bounded at eight and never taking more than an
+eighth of free space. Where no run can be placed at all — a read-only handle, a
+nearly-full or badly fragmented volume — the bounded half still runs and the
+report says claims were not counted (`ScrubReport::claims_counted`,
+`CheckReport::structure`); **no correction is made from a partial truth**,
+because a refcount lowered on a guess frees a block a live extent still maps.
 
-*Acceptance:* a scrub and a check over a volume with sixteen times the records
-hold the same resident bytes, asserted against the allocation counter; both stay
-resumable and reach the same report as an uninterrupted pass; the existing
-scrub/check suites pass unchanged.
+`check`'s three per-inode accumulators are the same shape over the inode space:
+a reachability bit, an expansion frontier (each directory enters it once, which
+bounds the queue and terminates a directory cycle), and a name count.
+`check::dir_entries` is gone; one directory cursor holding a single block
+(`DirScan`) serves the structural check, path resolution, `readdir`, and the
+empty-directory test, replacing four copies of the same slot scan and two
+on-stack block buffers.
+
+*Measured (`tests/bounded_iteration.rs`).* A scrub over sixteen times the
+records holds **3 412** bytes against **3 028** — flat. A check adds the
+free-space rebuild, whose footprint is the allocation map's bounded page cache
+filling up, and stays inside a 128 KiB budget that the deleted per-block
+accumulator blows at 819 KiB.
+
+*Fixed with it, each with a regression test.* A chunk record that no extent
+claims, or one keyed past the last block of the device, was invisible to the
+extent-driven recompute and held its block allocated for the life of the volume;
+both are now removed on exact knowledge. The allocation map and the
+scrub-progress record both stamped the owner sentinel `u64::MAX - 3`, declared
+as separate constants in separate files — every reserved owner now derives from
+one enum, so a repeat is a compile error. `map_find_free_run` tested one block
+at a time, so placing a large run on a fragmented volume scanned the whole map
+block by block and was slowest exactly when the answer was "no such run"; it is
+page-oriented, skipping a wholly-used or wholly-free page without reading it.
+
+*Deliberately not done here.* The reconcile still runs to completion inside the
+call that reaches it. Making it stop and resume mid-pass is the budget rework
+M2 owns (`ARXFS-MAINTENANCE.md` §12: the budget must count verified blocks and
+the cursor must be `(inode, logical offset)`), and doing it now would collide
+with that design. The scratch machinery A2 lands is what M2 needs to do it.
 
 ## 8. The implementation prompt
 

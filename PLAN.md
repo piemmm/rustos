@@ -2690,9 +2690,24 @@ ledger of every outstanding ARXFS item, with its owner and dependencies, is
   depth, and one removed extent from 596 allocations to 118, at unchanged device
   I/O. The write path now refuses an impossible tree as the read descent does,
   and a merge of two empty siblings that used to panic fails closed
-  (`plans/OPEN-DEFECTS.md` D65 closed). What is left of the ledger's A-series is
-  item A2: `scrub`/`check` still hold whole-volume reconcile and reachability
-  state in RAM (`plans/ARXFS-MAINTENANCE.md` §13 D-M5).
+  (`plans/OPEN-DEFECTS.md` D65 closed).
+- **Whole-volume verification holds nothing per record (item A2, done).**
+  `scrub` and `check` put the truth they derive in transient on-disk scratch
+  arrays (`src/scratch.rs`) rather than in RAM, paged through the one bounded
+  page cache the allocation map already used. The refcount reconcile
+  (`src/reconcile.rs`) verifies each stored referrer with one bounded extent
+  lookup — the write path keeps the referrer list complete — and streams every
+  claim through a four-bit-per-block claim array for the one irreducibly global
+  question, whether a block with no chunk record is claimed exactly once; four
+  bits count every lawful refcount exactly, so a refcount below the live claim
+  count is detected rather than suspected. `check`'s reachability, expansion
+  frontier, and name counts are the same shape over the inode space. Where the
+  volume can spare no run — a read-only handle, a nearly-full or fragmented
+  volume — the bounded half runs and the report says what it did not verify;
+  no correction is made from a partial truth. Measured, a scrub over sixteen
+  times the records holds 3 412 bytes against 3 028, and a stale chunk record
+  no extent claims (invisible to the deleted extent-driven recompute) is now
+  removed (`plans/ARXFS-MAINTENANCE.md` §13 D-M5 closed).
 - **The §5 fixed-constant targets are not met.** The spec's 16 KiB metadata
   block, 128 KiB / 256 KiB data-record targets, and inline/packed small-file
   storage are unimplemented: a metadata block and a data record are each one
@@ -2834,11 +2849,11 @@ batching that pays for it (WB1), not alone.
 
 ## Stage 5 follow-up — ARXFS autonomous maintenance (`plans/ARXFS-MAINTENANCE.md`)
 
-**Dependencies:** Stage 5 follow-up (ARXFS v1), the write-back commit barrier
+**Dependencies:** Stage 5 follow-up (ARXFS v1) and the write-back commit barrier
 above (a background writer on a barrier-less commit path multiplies that defect's
-exposure across every pass), and the bounded reconcile state of item A2 of
-`plans/IMPLEMENT-OUTSTANDING-ARXFS.md` (bounded tree iteration, item A0, is
-done). Staged plan:
+exposure across every pass). Items A0–A2 of
+`plans/IMPLEMENT-OUTSTANDING-ARXFS.md` — bounded tree iteration, bounded tree
+mutation, and bounded whole-volume verification state — are done. Staged plan:
 `plans/ARXFS-MAINTENANCE.md` (stages M0–M7); spec section
 `docs/src/filesystem/arxfs-spec.md` §24, stage 18.
 
@@ -5058,7 +5073,7 @@ and fail-closed (§24.4) — this work must not loosen them.
   update was left in flight; otherwise it rebuilds from the authoritative
   trees, so a crash between syncs costs one rebuild, never a correctness
   problem. Resident cost is a bounded LRU cache of at most
-  `MAX_CACHED_MAP_BLOCKS` (64) region blocks per mounted volume,
+  `MAX_CACHED_PAGES` (64) pages per paged region,
   volume-independent, so several 100 TB+ volumes mount together on a 1 GiB
   machine — including a near-full one, which the previous working-set-sized
   approach did not cover. A **read-only mount holds no allocator state at

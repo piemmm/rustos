@@ -455,7 +455,7 @@ they land, so they are named here and sequenced ahead of M2 in
   the walk's own block-sized buffer, positioned by a single key so a pass may
   stop, persist it, and resume. The scrub and check walks are converted and the
   collecting forms are gone. What is *not* yet bounded is the state those passes
-  accumulate around the walk (§13 D-M5), which M2 needs first.
+  accumulate around the walk (§13 D-M5, fixed), which M2 builds on.
 - **A work-shaped scrub budget.** `ScrubBudget::Inodes(n)` bounds *inodes*, and
   `scrub_inode` has no budget check inside it, so a single 100 TB file is one
   "unit" and `Inodes(1)` is an uninterruptible multi-hour call holding the mount
@@ -541,26 +541,23 @@ when M7 has landed **and** this section is empty.
   re-sweep and never correctness. If the sweep cannot be given a home without
   changing the transaction-root layout, **stop and ask** rather than guessing an
   on-disk change.
-- **D-M5 — `scrub` and `check` hold whole-volume state in RAM, so neither can
-  complete on the machine the charter requires the volume to be served from.**
-  Found while converting these passes to the bounded walk (item A0): the
-  *iteration* is bounded now, the accumulators around it are not.
-  `scrub_refcounts` builds a `BTreeMap<u64, Vec<Referrer>>` keyed by **every
-  physical data block on the volume** before it reconciles anything — tens of
-  billions of entries on the combined floor, so the reconcile phase of both
-  `scrub` and `check` is unreachable there, not merely slow.
-  `check_directories_and_orphans` holds a reachable-inode `BTreeSet<u32>` and
-  its walk stack, `check_link_counts` a `BTreeMap<u32, u32>` of every named
-  inode, and `check::dir_entries` a `Vec` of a whole directory's entries. The
-  fix is not more iteration: the derived truth needs a bounded home. ARXFS
-  already has the shape — an on-disk paged structure with a bounded resident
-  cache — so the reconcile streams the extents through a scratch map (a second
-  claim on a block is the double-mark the map already detects) and verifies each
-  chunk with bounded lookups against the chunk and reverse-reference trees,
-  behind a persisted cursor like the scrub cursor. That is an on-disk layout
-  decision: **stop and ask before guessing one.** Fix in **A2**, which is
-  sequenced ahead of M2 in `plans/IMPLEMENT-OUTSTANDING-ARXFS.md` because a
-  "bounded pass" over an unbounded accumulator is not one.
+- **D-M5 — `scrub` and `check` held whole-volume state in RAM — fixed.** Both
+  passes now put the truth they derive in transient on-disk scratch arrays
+  (`drivers/filesystem/arxfs/src/scratch.rs`), paged through the same bounded
+  64-page cache the allocation map uses and released before the pass returns.
+  The refcount reconcile (`src/reconcile.rs`) verifies each stored referrer with
+  one bounded extent lookup — the write path keeps the list complete, so
+  `refcount == referrers.len()` with every referrer named — and streams every
+  claim through a four-bit-per-block claim array for the one irreducibly global
+  question, whether a block with no chunk record is claimed exactly once. Four
+  bits count every lawful refcount exactly, so a refcount below the live claim
+  count is detected rather than suspected. Where no run can be placed (a
+  read-only handle, a nearly-full or fragmented volume) the bounded half runs
+  and the report says claims were not counted; no correction is made from a
+  partial truth. `check`'s reachability, expansion frontier, and name counts are
+  the same shape over the inode space; `check::dir_entries` is gone, replaced by
+  a directory cursor holding one block. *Measured:* a scrub over sixteen times
+  the records holds 3 412 bytes against 3 028 (`tests/bounded_iteration.rs`).
 - **D-M4 — `health` commits a whole transaction on every poll even when the
   baseline has not changed.** `health` unconditionally runs `begin()` /
   `store_health_baseline` / `commit()`. On a device reporting

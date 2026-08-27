@@ -913,6 +913,17 @@ an update to this section.
     an edit that becomes necessary mid-run means stopping the run. Confirm the
     run reached the end of the pipeline (its final stage, and matching enrolled
     and completed test counts) rather than judging by elapsed time.
+  - **Arm exactly one waiter, then stop looking.** Waiting on a backgrounded
+    gate means one mechanism that reports its completion — a watcher on the
+    exit-code line, or the harness's own notification for the launched
+    process — and then nothing until it fires. Re-reading the log to see how
+    far it has got is waste, not diligence: each check costs a round trip and
+    tells you nothing the completion signal will not, and doing it *alongside*
+    a waiter you already armed is pure duplication. One check to confirm the
+    run started is enough; after that the next thing you do is read the
+    recorded exit code. A ladder of short sleeps, or a loop of "is it done
+    yet" probes, is the polling this rule forbids — and it burns the limited
+    context the rest of the work needs.
   - The completion report quotes the output of a run watched to its end.
   `tools/ci/soak.sh` is additionally capped on a developer machine (that's
   us) to a **maximum of 20 seconds** (`tools/ci/soak.sh both --secs 20`); the
@@ -1329,7 +1340,10 @@ You are not exempt from any rule above. In addition:
    foreground wherever you can, and where a single tool call cannot span the
    run, capture the exit code durably and read it back rather than inferring
    it. Finish every edit before launching, do no other work while it runs, and
-   never poll a log in place of waiting.
+   never poll a log in place of waiting — arm one waiter for the run's
+   completion and then leave it alone. Repeated "how far has it got" checks buy
+   nothing the completion signal does not, and spend the context the rest of
+   the work needs.
 7. **State your assumptions** at the top of any non-trivial change. If an
    assumption cannot be verified from the repository, stop and ask.
 8. **Never** edit generated files, `target/`, or `.idea/` content as part of

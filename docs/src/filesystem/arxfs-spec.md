@@ -179,6 +179,7 @@ Rebuildable metadata:
 - directory acceleration indexes;
 - health summaries;
 - scrub progress;
+- a verification pass's transient scratch arrays (§12);
 - allocation heat maps.
 
 A corrupt rebuildable structure must not make a valid volume unmountable.
@@ -194,7 +195,9 @@ persist where it stopped and resume later — a resumed walk yields exactly what
 an uninterrupted one would. Callers that must touch every *node* (the
 allocation-map rebuild, freeing a whole tree) take them from the walk's own
 path as it moves, so no operation ever materialises a tree's records or node
-list.
+list. A **directory** is read the same way, through a cursor holding one
+directory block, so path resolution, a listing, and the structural check each
+cost the block size and not the directory.
 
 A **mutation is bounded in the same way, and in the stack as well as the heap.**
 An insert or a remove descends once recording the path, edits the leaf in place,
@@ -254,7 +257,8 @@ correctness problem. `mkfs` leaves the map stamped clean, so a freshly built
 image mounts fast.
 
 **Resident cost.** The region is read through a bounded LRU cache of at most
-**64 region blocks per mounted volume** (`MAX_CACHED_MAP_BLOCKS`),
+**64 pages per region** (`MAX_CACHED_PAGES`, shared with the
+reconcile scratch arrays of §12),
 volume-independent: a cache miss costs one block read, never a failure, so
 several 100 TB+ volumes mount together on a 1 GiB machine. Every other
 write-path-only structure — the map's allocation/metadata cursors, the
@@ -278,7 +282,9 @@ rebuild involved.
 otherwise it relays the region (preferring the freshly added tail, else the
 first contiguous free run) and rebuilds it from the authoritative trees.
 `check` always rebuilds the map from the authoritative trees; a clean check
-therefore leaves the device byte-identical.
+therefore leaves every committed structure and the map byte-identical, apart
+from the transient scratch run its reconcile borrows from free space and
+releases (§12).
 
 ---
 
@@ -689,6 +695,58 @@ free-space by rebuild, dedupe index by rebuild, and orphaned inodes.
 `arxfs rescue` scans for self-identifying metadata blocks, lists valid roots,
 maps physical LBAs to files when possible, and extracts readable files without
 requiring a fully mountable filesystem.
+
+### Derived truth lives in transient on-disk scratch, never in RAM
+
+A pass that must decide something about *every* block or *every* inode — how
+many extents claim a physical block, which inodes the directory tree reaches,
+how many names each inode has — holds one small value per index. In RAM that is
+proportional to the volume, so on the machine §26.7 of `AGENTS.md` requires a
+100 TB volume to be served from it cannot exist at all. Each such value
+therefore lives in a **transient scratch array**: a flat array of fixed-width
+elements in a contiguous run of the volume's own free space, paged through the
+same bounded 64-page cache the allocation map uses, released before the pass
+returns. A pass's resident cost is a fixed handful of blocks whatever the
+volume's size, and a scrub or a check over sixteen times the records measures
+the same footprint.
+
+- The array is **scratch, not metadata**: nothing outside the pass that
+  allocated it reads it, and a crash simply leaves stale bytes in blocks the
+  next mount finds free — free space is derived from the authoritative trees,
+  so an interrupted pass leaks nothing. Like the allocation map it is
+  single-copy and updated in place, never copy-on-written.
+- Every page is nonetheless **sealed** with the ordinary keyed block header,
+  and the pass **writes every page before it reads any**, so a page that fails
+  to authenticate at its own address under its array's owner is a device fault.
+  The array's contents drive corrections to authoritative refcounts, so
+  "unauthenticated bytes read as zero" would be a fail-open path.
+- Where the run does not fit whole, the pass covers the index space in
+  **windows**, one extra metadata walk each, up to a bounded window count. It
+  never takes more than an eighth of free space, so a verification pass cannot
+  be the reason a write fails for want of space.
+- Where no run can be placed at all — a read-only handle, a nearly-full or
+  badly fragmented volume — the pass runs the half that needs no array and
+  **reports what it did not verify** (`ScrubReport::claims_counted`,
+  `CheckReport::structure`). It makes no correction from a partial truth: a
+  refcount lowered on a guess frees a block a live extent still maps.
+
+**What the reconcile actually checks.** The write path keeps the
+reverse-reference list *complete* — sharing that would exceed the cap declines
+to dedupe instead (§9) — so a lawful record satisfies
+`refcount == referrers.len()` with every referrer named. Verifying each stored
+referrer against the extent it claims to come from is therefore one bounded
+lookup per referrer with no accumulated state. Only one question is
+irreducibly global: whether a block with no chunk record is claimed by exactly
+one extent, because the sole record of a claim is the extent that makes it and
+the extent trees are ordered by `(inode, logical block)`. That is what the
+claim array counts, at four bits per block — exact over every lawful refcount,
+with a distinct saturated state above them — which is what makes "the refcount
+says two but three extents claim it", the divergence that frees live data,
+detectable rather than merely suspected.
+
+A clean pass leaves every committed structure and the allocation map
+byte-identical; the scratch run it borrowed and handed back holds whatever it
+wrote.
 
 ---
 

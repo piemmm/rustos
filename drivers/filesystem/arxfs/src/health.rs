@@ -42,7 +42,7 @@ use tairix_abi::driver::block::{Block, DeviceHealth, HealthSnapshot};
 use tairix_abi::{CapabilityId, CapabilityQuery, DriverError};
 use tairix_log::{log, Event, EventId, Level, Sink};
 
-use crate::header::{BlockType, HEADER_LEN};
+use crate::header::{BlockType, ReservedOwner, HEADER_LEN};
 use crate::scrub::{ScrubBudget, ScrubReport, ARXFS_RANGE_END, ARXFS_RANGE_START};
 use crate::{rd_u64, wr_u64, ARXFS, MAX_BLOCK_SIZE};
 
@@ -71,11 +71,8 @@ const _: () = {
     assert!(HEALTH_DENIED.0 >= ARXFS_RANGE_START && HEALTH_DENIED.0 < ARXFS_RANGE_END);
 };
 
-/// Owner object stamped in the health-baseline block header; a reserved
-/// sentinel distinct from any inode number and from the chunk
-/// (`u64::MAX - 1`), reverse-reference (`u64::MAX - 2`), and scrub-progress
-/// (`u64::MAX - 3`) owners.
-const HEALTH_BASELINE_OWNER: u64 = u64::MAX - 4;
+/// Owner object stamped in the health-baseline block header.
+const HEALTH_BASELINE_OWNER: u64 = ReservedOwner::HealthBaseline.sentinel();
 
 /// Magic in the health-baseline payload: `"RFSHLTH1"`.
 const HEALTH_MAGIC: u64 = 0x5246_5348_4c54_4831;
