@@ -7967,13 +7967,14 @@ the software path, which stays the mandatory fallback on every target
 
 **The defect that remains.** A pointer-motion sample over a control-rich
 window still costs three whole-window passes above the compositor: the app
-re-renders its whole surface, unpremultiplies and copies every pixel into the
-shared frame, and the session converts and diffs every one of them. The
-compositor itself is *not* the bottleneck here — `convert_damage` already
+re-renders its whole surface, converts and copies every pixel into the
+shared frame, and the session decodes and diffs every one of them. The
+compositor itself is *not* the bottleneck here — the session's decode already
 compares each presented pixel with what is there and reports only the
 sub-rectangle that genuinely changed — so the waste is entirely upstream, and
 closing it needs each app to present the rectangles it changed (C.3), which
-has landed for `userland/apps/widgets` and remains for five apps.
+has landed for `userland/apps/widgets` and `userland/apps/terminal` and remains
+for `viewer`, `wallpaper`, `files` and `switchboard`.
 
 **Staged (detail in the plan; do not duplicate it here, §13):**
 
@@ -8004,7 +8005,8 @@ has landed for `userland/apps/widgets` and remains for five apps.
   theme/reclaim → abi`). Bit-identity is proven by composing each scene
   twice, with the copy path on and off, and comparing bytes.
 - **C — repaint the control, not the window. [C.0, C.1, C.2, C.4b, C.4c, C.5
-  done; C.3 done for `widgets`, five apps remain; C.4a withdrawn]**
+  done; C.3 done for `widgets` and `terminal`, four apps remain; C.4a
+  withdrawn]**
   `tairix_geometry::Region` is the one
   region type (pairwise-disjoint band-canonical rectangles, a linear merge
   walk, an optional rectangle budget), and the WM's private copy is deleted;
@@ -8022,22 +8024,18 @@ has landed for `userland/apps/widgets` and remains for five apps.
   bitmap being composited rather than fetched again for it, and whether the
   face is fixed-pitch is resolved once per run — as **two written-out loops**,
   because sharing one glyph-blitting call makes a fixed-pitch run pay for an
-  advance it discards (~7% worse on both faces), and a single loop with a
-  per-character branch *regressed* the terminal's fixed-pitch path ~4%.
-  **Measured** (release, `--iters 400 --rounds 25`, three runs, ~1% spread; the
-  untouched measurement case moved +3% between sessions, which bounds the
-  drift): a 74-character proportional row **17.3 → 14.2 µs (−18%)** and a
-  monospace row **16.0 → 15.2 µs (−6%)**. At the harness's default budget the
-  spread is ±15% on a case this small, so a default-budget pair is not
-  evidence — recorded in the plan. The shell settles once per drained input
+  advance it discards, and a single loop with a per-character branch
+  *regressed* the terminal's fixed-pitch path. A case this small needs the
+  harness's large budget (`--iters 400 --rounds 25`) before a pair is evidence
+  at all — recorded in the plan. The shell settles once per drained input
   batch instead of once per sample (as do the keyboard and pinboard drains),
   and C.4a is **withdrawn**:
   building a `BitmapFont` is a theme read and arithmetic — no lock, client
-  call or cache lookup — so hoisting it cannot buy measurable time, and only
-  the dead parameters it exposed are worth removing. Remaining: the five apps
-  that still present their whole surface (C.3).
-- **D — blur costs what it changes. [D.1–D.4 done; D.5 is decision 2 below;
-  D.6 is an unmeasured follow-up]** A frosted window's backdrop is retained
+  call or cache lookup — so hoisting it cannot buy measurable time. Remaining:
+  the four apps that still present their whole surface (C.3).
+- **D — blur costs what it changes. [D.1–D.4 and D.7–D.12 done; D.5 is
+  decision 2 below; D.6 is an unmeasured follow-up]** A frosted window's
+  backdrop is retained
   (`userland/gui/wm/src/frost.rs`, `frost_cache`) because that blur is a
   function of the layers *beneath* the window and of nothing the window
   draws. Every `damage.add` in the compositor became one of three funnels —
@@ -8067,12 +8065,11 @@ has landed for `userland/apps/widgets` and remains for five apps.
   of four divides per pixel per pass, *exactly* equal to the divide (the
   condition is checked for every window size in range, and that the cutoff is
   where it stops holding), and the sliding window's three strided walks are
-  bounds-checked once per line. **Measured:** a `64×24` repaint inside a
-  backdrop-blurred window **17.43 ms → 27.2 µs** (×640, with the pixels it
-  touched falling from 564 000 to the 1 536 it marked), a full-screen re-frost
-  **17.98 → 16.52 ns/px**, opaque cases unchanged. Bit-identity is proven by
-  composing one scene twice — reusing frosts and blurring afresh — and by a
-  naive `O(area·radius)` blur oracle.
+  bounds-checked once per line. A repaint inside a backdrop-blurred window now
+  touches exactly the rectangle it marked and blurs nothing, which the frame
+  counters gate in CI. Bit-identity is proven by composing one scene twice —
+  reusing frosts and blurring afresh — and by a naive `O(area·radius)` blur
+  oracle.
 - **E — one present per frame. [E.1, E.2 done; pacing planned]** A frame is
   presented **once**, naming every disjoint rectangle it changed:
   `Display::present_rects` and the `DamageList` the `Present` request carries
