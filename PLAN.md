@@ -2817,8 +2817,11 @@ one call puts 158 blocks on the device at a 512-byte block size and 25 at
 either way; written as 4 KiB chunks it puts out 335 and 160 blocks — 2.61× and
 10.00× — in 64 commands. At a 512-byte block size a 34-byte append costs 11
 blocks in 4 commands and creating an empty file after a clean mkfs costs 15 in
-four commands. Every commit issues
-exactly one barrier, and the figures are identical on a 100 TiB volume. Of the
+four commands. Every commit issues exactly one barrier, save the map's
+once-per-sync-period clean-to-dirty transition, and the figures are identical on
+a 100 TiB volume — as is the cost of the operation *after a refused one*, which a
+rollback that discarded the allocation map instead made scale with the volume's
+metadata (fixed, with the regression test that catches it). Of the
 four causes, one remains: every VFS operation still commits its own transaction
 root and superblock slot (C2, WB4). Closed by WB1: the intra-transaction rewrite
 churn that made 598 of the original 746 writes metadata, 294 of them superseded
@@ -2858,6 +2861,14 @@ write.
   authoritative phase, so the normal commit barrier makes it durable before
   any in-place page can land; `fs_sync` drains the map pages, barriers once,
   then restores the clean generation stamp.
+- Discarding the map and re-deriving it from the trees is a **device-fault
+  answer only** — a failed stage, page write, or barrier. Every other failure
+  undoes its own marks: an unpublished transaction reserves its deferred frees
+  again and releases its still-private allocations, so a rollback costs the
+  transaction and never the volume. Otherwise a `create` over a taken name — a
+  call that changes nothing, available to anyone who may create a name — makes
+  the next operation walk every tree on the volume, and each repetition does it
+  again.
 - A dirty block is **pinned memory, not reclaimable cache**: it cannot be
   dropped, only written, so it does not go through
   `tairix_reclaim::ReclaimCache` (whose every class is clean and whose refusal

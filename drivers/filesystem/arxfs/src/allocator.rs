@@ -65,6 +65,15 @@ use crate::{as_u32, ARXFS, MAX_BLOCK_SIZE, METADATA_RESERVE};
 /// requeues it, so nothing is lost.
 pub(crate) const MAX_PENDING_DISCARD: usize = 1 << 16;
 
+/// Blocks the allocation-map drain gathers into one device request.
+///
+/// A fraction of the resident page cache, so the transient gather window stays
+/// well inside the footprint those pages already occupy rather than reaching
+/// for the read path's much wider transfer window.
+const MAP_DRAIN_BLOCKS: usize = MAX_CACHED_PAGES / 4;
+
+const _: () = assert!(MAP_DRAIN_BLOCKS >= 1);
+
 /// Durability of the allocation-map header's validity stamp.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) enum MapStampState {
@@ -93,9 +102,9 @@ pub(crate) struct Allocator {
     pub(crate) pending: BTreeMap<u64, bool>,
     /// Whether the validity stamp is clean, pending invalidation, or durably
     /// dirty.
-    pub(crate) stamped_clean: MapStampState,
-    /// Whether rollback discarded map state that must be re-derived before an
-    /// allocator operation.
+    pub(crate) stamp: MapStampState,
+    /// Whether a device fault left the map's image ambiguous, so it must be
+    /// re-derived from the committed trees before an allocator operation.
     pub(crate) needs_rebuild: bool,
     /// Where the next upward data scan starts.
     pub(crate) alloc_cursor: u64,
@@ -136,7 +145,7 @@ impl Allocator {
             geom,
             cache: BlockCache::new(block_size),
             pending: BTreeMap::new(),
-            stamped_clean: MapStampState::Dirty,
+            stamp: MapStampState::Dirty,
             needs_rebuild: true,
             alloc_cursor: RING_BLOCKS,
             meta_cursor: total_blocks.saturating_sub(1),
@@ -201,12 +210,24 @@ impl<B: Block> ARXFS<B> {
             return Ok(());
         };
         if dirty {
-            self.map_write(victim)?;
-            self.map_confirm_dirty()?;
-            self.drain_map_pages()?;
+            // A page stopped part-way to the device leaves the map's device
+            // image ambiguous and its bytes in two places at once, so neither
+            // copy can be trusted and no per-block undo can mend it: demand
+            // the map be derived afresh from the committed trees.
+            if let Err(err) = self.evict_dirty_page(victim) {
+                self.require_map_rebuild();
+                return Err(err);
+            }
         }
         self.allocator_mut()?.cache.remove(victim);
         Ok(())
+    }
+
+    /// Stage the changed page, make the invalidation durable, and write it out.
+    fn evict_dirty_page(&mut self, victim: u64) -> Result<(), DriverError> {
+        self.map_write(victim)?;
+        self.map_confirm_dirty()?;
+        self.drain_map_pages()
     }
 
     /// Seal one cached region block into the shared post-barrier dirty set.
@@ -257,9 +278,7 @@ impl<B: Block> ARXFS<B> {
 
     /// Drain map pages through a window bounded below their resident cache.
     pub(crate) fn drain_map_pages(&mut self) -> Result<(), DriverError> {
-        let run_bytes = self
-            .block_size
-            .saturating_mul(MAX_CACHED_PAGES.saturating_div(4).max(1));
+        let run_bytes = self.block_size.saturating_mul(MAP_DRAIN_BLOCKS);
         self.drain_dirty(WritePhase::AfterBarrier, run_bytes)
     }
 
@@ -292,7 +311,7 @@ impl<B: Block> ARXFS<B> {
             self.dirty
                 .stage(WritePhase::BeforeBarrier, geom.header_block(), &buf)?;
         }
-        self.allocator_mut()?.stamped_clean = if clean {
+        self.allocator_mut()?.stamp = if clean {
             MapStampState::Clean
         } else {
             MapStampState::Invalidating
@@ -302,7 +321,7 @@ impl<B: Block> ARXFS<B> {
 
     /// Issue an invalid stamp before any changed map page reaches the device.
     pub(crate) fn map_mark_dirty(&mut self) -> Result<(), DriverError> {
-        if self.allocator()?.stamped_clean == MapStampState::Dirty {
+        if self.allocator()?.stamp == MapStampState::Dirty {
             return Ok(());
         }
         self.map_stamp(false, 0)
@@ -311,15 +330,15 @@ impl<B: Block> ARXFS<B> {
     /// Record that the invalid stamp crossed a successful barrier.
     pub(crate) fn map_barrier_completed(&mut self) {
         if let Ok(alloc) = self.allocator_mut() {
-            if alloc.stamped_clean == MapStampState::Invalidating {
-                alloc.stamped_clean = MapStampState::Dirty;
+            if alloc.stamp == MapStampState::Invalidating {
+                alloc.stamp = MapStampState::Dirty;
             }
         }
     }
 
     /// Make the invalid stamp durable before draining a bounded cache eviction.
     pub(crate) fn map_confirm_dirty(&mut self) -> Result<(), DriverError> {
-        if self.allocator()?.stamped_clean == MapStampState::Dirty {
+        if self.allocator()?.stamp == MapStampState::Dirty {
             return Ok(());
         }
         self.map_mark_dirty()?;
@@ -336,6 +355,11 @@ impl<B: Block> ARXFS<B> {
     }
 
     /// Discard untrusted map staging and require derivation from the trees.
+    ///
+    /// For a device fault only — a write, drain, or barrier that leaves the
+    /// map's device image ambiguous. An ordinary failed transaction undoes its
+    /// own marks instead, which costs its own size rather than a walk of the
+    /// volume.
     pub(crate) fn require_map_rebuild(&mut self) {
         self.dirty.clear();
         if let Ok(alloc) = self.allocator_mut() {
@@ -368,14 +392,14 @@ impl<B: Block> ARXFS<B> {
         self.map_fold_pending()?;
         self.map_stage_dirty_pages()?;
         if self.dirty.has(WritePhase::AfterBarrier)
-            && self.allocator()?.stamped_clean != MapStampState::Dirty
+            && self.allocator()?.stamp != MapStampState::Dirty
         {
             self.map_confirm_dirty()?;
         }
         self.drain_map_pages()?;
         self.block.flush()?;
         self.map_barrier_completed();
-        if self.allocator()?.stamped_clean == MapStampState::Clean {
+        if self.allocator()?.stamp == MapStampState::Clean {
             return Ok(());
         }
         let generation = self.generation;
@@ -995,7 +1019,7 @@ impl<B: Block> ARXFS<B> {
         Ok(())
     }
 
-    /// Re-derive map state discarded by a failed transaction before reuse.
+    /// Re-derive a map a device fault left ambiguous, before it is used again.
     pub(crate) fn ensure_allocation_map(&mut self) -> Result<(), DriverError> {
         if !self.allocator()?.needs_rebuild {
             return Ok(());
@@ -1050,7 +1074,7 @@ impl<B: Block> ARXFS<B> {
             return false;
         }
         let mut allocator = Allocator::new(geom, self.block_size, self.total_blocks);
-        allocator.stamped_clean = MapStampState::Clean;
+        allocator.stamp = MapStampState::Clean;
         allocator.needs_rebuild = false;
         self.alloc = Some(allocator);
         true
@@ -1097,7 +1121,7 @@ impl<B: Block> ARXFS<B> {
     /// Whether the map on the device is currently stamped clean.
     pub(crate) fn map_is_stamped_clean(&self) -> bool {
         self.allocator()
-            .is_ok_and(|alloc| alloc.stamped_clean == MapStampState::Clean)
+            .is_ok_and(|alloc| alloc.stamp == MapStampState::Clean)
     }
 
     /// First block of the mounted allocation-map region.

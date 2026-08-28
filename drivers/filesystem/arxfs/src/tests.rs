@@ -5675,6 +5675,7 @@ fn a_failed_slot_write_freezes_the_handle_and_publishes_nothing() {
         let (mut fs, slot) = volatile_volume();
         assert_eq!(slot, probe_slot, "the fixture is deterministic");
         let root = fs.root();
+        let old_root = fs.root_phys;
         fs.block_mut().write_faults.insert(faulted);
         assert_eq!(
             fs.write_at(root, b"new", 0, VOLATILE_PAYLOAD),
@@ -5690,20 +5691,34 @@ fn a_failed_slot_write_freezes_the_handle_and_publishes_nothing() {
             Err(DriverError::PermissionDenied),
             "a frozen handle accepts no further mutation"
         );
-        let expected_free = fs
-            .saved_free_count
-            .saturating_sub(fs.allocator().expect("allocator").txn_private.len() as u64);
-        assert_eq!(
-            fs.free_count, expected_free,
-            "the frozen handle did not reserve both candidate roots"
-        );
         assert_eq!(
             fs.inode_tree_root, fs.saved_inode_tree_root,
             "the frozen handle exposed unpublished tree state"
         );
+        // Both candidate roots stay reserved: the prior one because a mount may
+        // still select it, the new one because a mount may select that instead.
         assert!(
-            fs.allocator().expect("allocator").needs_rebuild,
-            "the frozen handle still trusted an ambiguous allocation map"
+            fs.is_used(old_root) && fs.is_used(ARXFS::<MemBlock>::companion(old_root)),
+            "the previously committed root was freed while it may still be \
+             selected (faulted {faulted})"
+        );
+        let unpublished: alloc::vec::Vec<u64> = fs
+            .allocator()
+            .expect("allocator")
+            .txn_private
+            .iter()
+            .copied()
+            .collect();
+        assert!(!unpublished.is_empty(), "the fixture published nothing");
+        assert!(
+            unpublished.iter().all(|&block| fs.is_used(block)),
+            "the frozen handle released a block the unpublished root may name \
+             (faulted {faulted})"
+        );
+        let mapped_free = fs.total_blocks - fs.used_blocks().len() as u64;
+        assert_eq!(
+            fs.free_count, mapped_free,
+            "the frozen handle's free count contradicts its own map"
         );
         // Reads still work on the frozen handle.
         let witness = fs.lookup(fs.root(), b"keep").expect("the witness survives");
@@ -5929,6 +5944,109 @@ fn a_failed_sync_rebuilds_every_partially_persisted_map() {
             );
         }
     }
+}
+
+/// An operation refused for an ordinary reason undoes its own marks and leaves
+/// the map trusted, so the next one does not pay for a rebuild. Only a device
+/// fault makes the map ambiguous enough to need one, which the sibling tests
+/// cover.
+///
+/// The map is checked against the trees either side of the refusal: an undo
+/// that got a bit wrong would be as bad as the rebuild it avoids.
+#[test]
+fn a_refused_operation_leaves_the_allocation_map_exact_and_trusted() {
+    let (mut fs, _slot) = volatile_volume();
+    let root = fs.root();
+    fs.create(root, b"taken", NodeKind::RegularFile)
+        .expect("create");
+    let before_used = fs.used_blocks();
+    let before_free = fs.free_count;
+
+    assert_eq!(
+        fs.create(root, b"taken", NodeKind::RegularFile),
+        Err(DriverError::Busy),
+        "a name already taken must be refused"
+    );
+
+    assert!(
+        !fs.allocator().expect("allocator").needs_rebuild,
+        "an ordinary refusal demanded a whole-volume map rebuild"
+    );
+    assert_eq!(
+        fs.used_blocks(),
+        before_used,
+        "the refusal moved a bit in the allocation map"
+    );
+    assert_eq!(
+        fs.free_count, before_free,
+        "the refusal moved the free count"
+    );
+    let alloc = fs.allocator().expect("allocator");
+    assert!(
+        alloc.txn_private.is_empty() && alloc.txn_freed.is_empty(),
+        "the refusal left transaction bookkeeping behind"
+    );
+
+    // And the volume is still writable and correct afterwards.
+    fs.create(root, b"fresh", NodeKind::RegularFile)
+        .expect("create after a refusal");
+    FilesystemWrite::flush(&mut fs).expect("sync");
+    let expected_used = fs.used_blocks();
+    let bytes = fs.into_block().bytes();
+    let mut reopened =
+        ARXFS::open(MemBlock::from_bytes(bytes, CRASH_BS, CRASH_BC), &TEST_KEY).expect("reopen");
+    assert_eq!(reopened.used_blocks(), expected_used);
+    assert!(reopened.lookup(reopened.root(), b"fresh").is_ok());
+}
+
+/// A failed transaction that *did* free blocks reserves them back, so a block
+/// the committed root still owns can never be handed out because a later
+/// operation was refused.
+#[test]
+fn a_failed_commit_reserves_the_blocks_it_had_already_deferred_for_freeing() {
+    let (mut fs, _slot) = volatile_volume();
+    let root = fs.root();
+    fs.write_at(root, b"new", 0, VOLATILE_PAYLOAD)
+        .expect("write");
+    let before_used = fs.used_blocks();
+    let before_free = fs.free_count;
+    let old_root = fs.root_phys;
+
+    // Rewriting the file releases its old data and metadata into the deferred
+    // set, and the commit's barrier is the first thing that can fail after
+    // `prepare_deferred_frees` has already marked them free.
+    fs.block_mut().fail_flush = true;
+    assert_eq!(
+        fs.write_at(root, b"new", 0, b"replacement"),
+        Err(DriverError::DeviceFault)
+    );
+    fs.block_mut().fail_flush = false;
+
+    assert!(
+        !fs.read_only,
+        "a pre-slot failure must not freeze the handle"
+    );
+    assert!(
+        fs.is_used(old_root) && fs.is_used(ARXFS::<MemBlock>::companion(old_root)),
+        "the committed root was left free after a failed commit"
+    );
+    assert_eq!(
+        fs.used_blocks(),
+        before_used,
+        "a failed commit left the map disagreeing with the committed trees"
+    );
+    assert_eq!(
+        fs.free_count, before_free,
+        "a failed commit moved the count"
+    );
+    let mut out = alloc::vec![0u8; VOLATILE_PAYLOAD.len()];
+    let victim = fs.lookup(root, b"new").expect("the file survives");
+    assert_eq!(
+        fs.read_at(victim, 0, &mut out),
+        Ok(VOLATILE_PAYLOAD.len()),
+        "the committed contents were lost"
+    );
+    assert_eq!(out, VOLATILE_PAYLOAD);
 }
 
 #[test]
@@ -7732,22 +7850,41 @@ fn a_commit_and_a_sync_each_barrier_once() {
     );
 }
 
+/// A pass that publishes nothing writes nothing, so it owes the device no
+/// barrier at all: the map image it rebuilt in RAM needs the invalidation
+/// marker only once a page is actually going to the device.
+///
+/// The sync that follows one then pays the clean-to-dirty transition itself —
+/// the marker's barrier, then the pages' — because no commit came between to
+/// carry the marker in its own pre-slot barrier. That is two barriers once per
+/// sync period, never per write, and a check never followed by a sync costs
+/// none.
 #[test]
-fn a_clean_check_and_its_following_sync_each_barrier_once() {
-    let (mut fs, _dir) = counted_dir_fixture(1);
+fn a_clean_check_costs_no_barrier_and_its_following_sync_the_transition() {
+    let (mut fs, dir) = counted_dir_fixture(1);
+    assert!(fs.map_is_stamped_clean(), "the fixture starts clean");
     fs.block_mut().flushes = 0;
     let report = fs.check(&GrantAll, &NullSink).expect("check");
     assert_eq!(report.structure, StructureVerdict::Sound, "{report:?}");
     assert_eq!(
         fs.block_mut().flushes,
-        1,
-        "the rebuilt map was not invalidated by one barrier"
+        0,
+        "a check that published nothing forced the device cache"
     );
     FilesystemWrite::flush(&mut fs).expect("sync");
     assert_eq!(
         fs.block_mut().flushes,
         2,
-        "sync used more than one barrier after a clean check"
+        "sync used more than the clean-to-dirty transition's two barriers"
+    );
+    // A second sync has no transition left to pay for.
+    fs.block_mut().flushes = 0;
+    fs.write_at(dir, b"f0.txt", 0, b"x").expect("write");
+    FilesystemWrite::flush(&mut fs).expect("sync");
+    assert_eq!(
+        fs.block_mut().flushes,
+        2,
+        "a write and its sync must each barrier exactly once"
     );
 }
 

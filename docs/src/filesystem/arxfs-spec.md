@@ -249,9 +249,11 @@ Resident pages remain in the bounded map cache between commits. An explicit
 sync (`fs_sync`) moves them into the shared dirty set, writes them in bounded
 runs, forces the device cache once, then stamps the region clean at the
 committed generation. A cache eviction uses the same set and may write only
-after the invalid stamp is durable. A failed stage, page write, or sync barrier
-discards the untrusted cache and staging; the next allocator operation rebuilds
-from the committed trees before touching state.
+after the invalid stamp is durable. A failed stage, page write, or barrier —
+whether under a sync or under an eviction — discards the untrusted cache and
+staging; the next allocator operation rebuilds from the committed trees before
+touching state. That is the *only* path to a rebuild: a transaction refused for
+an ordinary reason undoes its own marks instead, at its own cost (§22).
 Ordinary commits therefore leave the on-disk map dirty while it stays exact
 in RAM. A mount adopts the map only when it authenticates at the address the
 committed transaction root names (`TxnRoot::alloc_map_start`), its coverage
@@ -1519,6 +1521,12 @@ barrier costs a full cache flush per step and buys nothing. An explicit
 `fs_sync` issues one further barrier to make the slot and rebuildable map pages
 durable before it returns. A commit that cannot barrier does not publish.
 
+The one addition to that count is the map's clean-to-dirty transition below,
+which needs its invalidation durable before any page write: it is paid once per
+sync period, by whichever of the commit or the sync first has a map page to
+write, and never per write. A pass that publishes nothing — a clean `check` or
+`scrub` — writes nothing and so barriers not at all.
+
 This closes the only ordering hole the pre-stage-17 driver had: it wrote the
 copy-on-write blocks, the root, and the slot with no barrier at all, so a device
 with a volatile write cache could make the slot durable while an interior tree
@@ -1531,9 +1539,21 @@ written companion-first, so the *primary* — the copy a mount reads and prefers
 — is the last write of the commit and a half-written pair publishes nothing.
 Everything before that write is rolled back on failure. A failure *of* the slot
 writes leaves publication genuinely unknown, because the device may have taken
-one copy: the handle then forces itself read-only rather than guessing, freeing
-nothing, so whichever of the two roots the device holds stays intact for the
-next mount.
+one copy: the handle then reserves the union of both candidate roots — the
+deferred frees the commit had already applied to the map are reserved back, its
+own blocks stay reserved — and forces itself read-only rather than guessing, so
+whichever of the two roots the device holds stays intact for the next mount.
+
+**A rollback costs the transaction, never the volume.** Undoing an unpublished
+transaction is its own bookkeeping run backwards: the blocks it staged are
+dropped, its deferred frees are reserved again, and its still-private
+allocations are released. Both marks are no-ops where the change they undo never
+reached the map, so the free count is exact either way. This bound is a
+requirement, not an optimisation: an operation refused for an ordinary reason —
+a name already taken, a name not found — changes nothing, and a caller who may
+create a name must not be able to make each refusal walk every tree on the
+volume (§26.2, §26.6). Only a device fault that leaves the map's image genuinely
+ambiguous discards it and re-derives from the committed trees.
 
 **The allocation map's clean stamp is invalidated durably.** The map is adopted
 only when it is stamped clean at the generation the mount selected. Its

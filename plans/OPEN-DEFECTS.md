@@ -93,6 +93,31 @@ The open items, in priority order:
   released only by unrelated pipe traffic and, once the broadcast was gone,
   never; `Pty::purge_session` now wakes both rings' space itself, where no
   caller can pick the wrong queue.
+- **D66 — `DriverError::Busy` carries three unrelated meanings, and the generic
+  mapping turns one of them into an I/O error — OPEN.** Noticed while reviewing
+  the ARXFS write-back work; recorded rather than fixed there because the fix is
+  an ABI change touching every filesystem driver, and mixing it into a
+  rollback-cost fix would make neither reviewable.
+  - Filesystem drivers return `Busy` for "a name is already taken" (`arxfs`
+    `create`/`create_link`/`link`/`rename`, and the same in `adfs`, `ext4`,
+    `fat32`, `memfs`), for "this directory is not empty", *and* for its
+    documented meaning of a retryable transient. Nothing in the value says
+    which; the VFS disambiguates by *which mapper the call site picked*
+    (`kernel/core/src/fs/delegate.rs`: `map_link_error` → `AlreadyExists`,
+    `map_rename_error` → `NotEmpty`, `map_driver_error` → `Io`).
+  - **The live misreport.** `VfsDelegate::create` pre-checks the name and
+    answers `AlreadyExists` itself, so the ordinary path is right. But the
+    driver's own refusal maps through `map_driver_error`, so if the name appears
+    between that pre-check and the driver call, a taken name is reported as an
+    I/O error. `DriverError::Busy.as_errno()` is `Errno::WouldBlock`, so any
+    consumer reaching the driver without the VFS's per-operation mapping sees
+    `EWOULDBLOCK` for `EEXIST` — wrong for a coreutils-faithful `mkdir`/`ln`.
+  - **The fix.** `Errno::AlreadyExists` (17) already exists; add the matching
+    `DriverError` variant, use it at the name-taken sites, keep `Busy` for the
+    transient it documents, and give "directory not empty" its own value too.
+    `abi-v1` is unfrozen, so this is in-place evolution with no shim: every
+    driver, `map_*_error`, the `blkio` status mapping, and the generated
+    `include/` header move in the one change.
 - **D54 — a desktop worker thread issues ~2500 file opens at session start,
   starving every concurrent reader — OPEN.** It is the measured whole of the
   read-throughput gap `plans/FIX-KHEAP.md` reported: bundle load rate tracks

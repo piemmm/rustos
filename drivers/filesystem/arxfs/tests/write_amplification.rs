@@ -29,7 +29,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use tairix_abi::driver::block::{Block, BlockGeometry, DiscardCapability};
-use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
+use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeId, NodeKind};
 use tairix_abi::DriverError;
 use tairix_drv_fs_arxfs::{EntropySource, VolumeKey, ARXFS, RUN_BYTES, VOLUME_KEY_LEN};
 use tairix_fuzzseed::Lcg;
@@ -48,12 +48,18 @@ enum Command {
 #[derive(Default)]
 struct Ledger {
     commands: Vec<Command>,
+    /// Blocks the window read. Counted apart from `commands` because a read
+    /// costs the device nothing a write ledger prices, but a *path* that reads
+    /// more of the volume than its working set is exactly the amplification
+    /// the scaling assertions bound.
+    read_blocks: u64,
 }
 
 impl Ledger {
     /// Drop the recorded commands, opening a fresh measurement window.
     fn arm(&mut self) {
         self.commands.clear();
+        self.read_blocks = 0;
     }
 
     /// How many writes carried each run length: the shape a coalescer changes
@@ -175,7 +181,8 @@ impl Block for LedgerBlock {
     }
 
     fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
-        self.run(lba, buf.len())?;
+        let blocks = self.run(lba, buf.len())?;
+        self.ledger.borrow_mut().read_blocks += blocks;
         for (index, chunk) in buf.chunks_mut(self.block_size as usize).enumerate() {
             let at = lba + u64::try_from(index).expect("a run length fits a u64");
             match self.blocks.get(&at) {
@@ -756,6 +763,87 @@ fn chunking_one_payload_into_many_calls_costs_far_more_than_one_call() {
 /// the device it happened to be measured on, and it is the floor ARXFS is held
 /// to — a machine that could not hold a millionth of a volume still has to
 /// write to it at a cost set by the working set, never by the volume.
+/// Directories the refusal fixture fills the volume's trees with, in the two
+/// sizes the scaling assertion compares — sixteen times the metadata, so a cost
+/// that walks it shows as a multiple rather than as noise.
+const REFUSAL_FIXTURE_SIZES: [usize; 2] = [64, 1024];
+
+/// Device size the refusal fixture is measured on: room for the larger of those
+/// directory counts and the trees over them, where the baseline's eight
+/// mebibytes has none. Nothing materialises it — the fixture stores only the
+/// blocks written.
+const REFUSAL_DEVICE_BYTES: u64 = 256 << 20;
+
+/// A volume holding `dirs` directories off the root, plus one nearly-empty
+/// working directory, and the ledger recording what its driver issues.
+///
+/// The metadata lives away from the directory the measured operations act on,
+/// so what varies between fixture sizes is the volume's total metadata and not
+/// the size of the directory being written.
+fn refusal_fixture(dirs: usize) -> (ARXFS<LedgerBlock>, NodeId, Rc<RefCell<Ledger>>) {
+    let (mut fs, ledger) = volume(4096, REFUSAL_DEVICE_BYTES);
+    let root = fs.root();
+    for index in 0..dirs {
+        let name = format!("d{index:05}");
+        fs.create(root, name.as_bytes(), NodeKind::Directory)
+            .expect("fixture directory");
+    }
+    let work = fs
+        .create(root, b"work", NodeKind::Directory)
+        .expect("working directory");
+    (fs, work, ledger)
+}
+
+/// An operation refused for an ordinary reason — a name already taken — leaves
+/// the operation after it costing exactly what it would have cost had the
+/// refusal never happened, and the refusal itself reads no more than the
+/// operation it refused.
+///
+/// Rolling back an unpublished transaction is that transaction's own
+/// bookkeeping run backwards, so neither figure may grow with the volume's
+/// metadata. A rollback that instead discarded the allocation map made every
+/// refusal provoke a walk of every tree on the volume: unbounded read
+/// amplification from a call that changes nothing, reachable by any caller who
+/// may create a name, and worse the fuller the volume.
+#[test]
+fn a_refused_operation_leaves_the_next_one_costing_what_it_always_did() {
+    for dirs in REFUSAL_FIXTURE_SIZES {
+        let (mut fs, work, ledger) = refusal_fixture(dirs);
+        let taken = b"already-here";
+        fs.create(work, taken, NodeKind::RegularFile)
+            .expect("the name under test");
+
+        ledger.borrow_mut().arm();
+        fs.create(work, b"clean", NodeKind::RegularFile)
+            .expect("create with no refusal before it");
+        let clean = ledger.borrow().read_blocks;
+
+        ledger.borrow_mut().arm();
+        assert_eq!(
+            fs.create(work, taken, NodeKind::RegularFile),
+            Err(DriverError::Busy),
+            "the fixture's taken name must be refused"
+        );
+        let refusal = ledger.borrow().read_blocks;
+
+        ledger.borrow_mut().arm();
+        fs.create(work, b"after", NodeKind::RegularFile)
+            .expect("create after a refusal");
+        let after = ledger.borrow().read_blocks;
+
+        assert_eq!(
+            after, clean,
+            "over {dirs} directories, a create read {after} blocks after a \
+             refused one against {clean} with none before it"
+        );
+        assert!(
+            refusal <= clean,
+            "over {dirs} directories, refusing a create read {refusal} blocks \
+             where performing one reads {clean}"
+        );
+    }
+}
+
 #[test]
 fn the_cost_of_a_write_does_not_grow_with_the_volume() {
     for workload in [

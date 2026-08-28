@@ -41,7 +41,8 @@ no-deferral rule), ahead of everything below it.
 | WB1 | Dirty block set + the commit barrier (defect D63) | `ARXFS-WRITEBACK.md` | 17 | WB0 | **done** |
 | WB2 | Run coalescer | `ARXFS-WRITEBACK.md` | 17 | WB1 | **done** |
 | WB3 | Fold in the allocation map's dirty pages | `ARXFS-WRITEBACK.md` | 17 | WB1 | **done** |
-| WB4 | Commit scheduler | `ARXFS-WRITEBACK.md` | 17 | WB1 | **next** |
+| D66 | One `DriverError` per filesystem conflict (defect `OPEN-DEFECTS.md` D66) | `OPEN-DEFECTS.md` | — | — | **next** |
+| WB4 | Commit scheduler | `ARXFS-WRITEBACK.md` | 17 | WB1 | planned |
 | WB5 | The bound and memory pressure | `ARXFS-WRITEBACK.md` | 17 | WB1 | planned |
 | WB6 | Hardware acceptance + docs | `ARXFS-WRITEBACK.md` | 17 | WB2–WB5 | planned |
 | M2 | Bounded passes: scrub, discard sweep, health (D-M2/3/4) | `ARXFS-MAINTENANCE.md` | 18 | A2, M1 | planned |
@@ -72,6 +73,14 @@ their reason recorded there, not here:
 
 ## 2. Why this order
 
+- **D66 blocks the rest, because the no-deferral rule (§6) puts a found defect
+  ahead of everything planned.** Reviewing WB3 found that filesystem drivers
+  spell three unrelated refusals — name taken, directory not empty, retryable
+  transient — as the single `DriverError::Busy`, which the VFS disambiguates only
+  by which mapping function a call site picked, and which the generic mapping
+  turns into an I/O error. It is not ARXFS-only (every filesystem driver and
+  `lib/abi` move together), so `OPEN-DEFECTS.md` owns it; it still blocks this
+  ledger until closed.
 - **A0 first, because it is the floor everything else is tested against.**
   Every plan's scalability acceptance is the combined floor — a ~1 GiB machine
   serving several 100 TB volumes at once. A tree walk that materialises a whole

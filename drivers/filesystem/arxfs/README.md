@@ -413,9 +413,17 @@ while a tree node beneath its root is not. Those copies go out companion-first, 
 — the copy a mount prefers — is the last write of the commit and a half-written
 pair publishes nothing; anything failing before it rolls the transaction back,
 while a failure *of* those writes leaves publication unknown and the handle
-forces itself read-only rather than freeing a root the device may have
-published. An explicit `fs_sync` drains rebuildable map pages and issues one
-further barrier before returning.
+reserves both candidate roots and forces itself read-only rather than freeing a
+root the device may have published. An explicit `fs_sync` drains rebuildable map
+pages and issues one further barrier before returning.
+
+A rollback is the transaction's own bookkeeping run backwards — its deferred
+frees reserved again, its still-private allocations released — so it costs the
+transaction's size and never the volume's. That bound is what keeps an
+*ordinary* refusal cheap: a create over a name already taken, or a remove of one
+that is not there, changes nothing and must not be able to provoke a walk of
+every tree on the volume, however full it is. Only a device fault that leaves
+the map's image genuinely ambiguous demands the rebuild.
 
 The blocks and allocation-map pages use the one dirty layer beneath the
 driver's device-write seam (`wcache`): a physical-block-keyed set of sealed
@@ -454,9 +462,10 @@ a clean sync stages the invalid stamp with the commit's authoritative phase, so
 its existing barrier makes invalidation durable before any page write. Pages
 stay in the bounded cache between commits, then move into the same dirty set;
 `fs_sync` drains them in bounded runs, barriers once, and writes the clean
-stamp. If staging, a page write, or that barrier fails, the cache and staged
-pages are discarded as untrusted and the next allocator operation rebuilds
-from the committed trees. A mount adopts the map only when it authenticates at the
+stamp. If staging, a page write, or a barrier fails — under a sync or under an
+eviction — the cache and staged pages are discarded as untrusted and the next
+allocator operation rebuilds from the committed trees; nothing short of a device
+fault does that. A mount adopts the map only when it authenticates at the
 address the committed root names and is stamped clean at that generation;
 otherwise it rebuilds by walking the trees from the selected root. Mounting a
 synced volume therefore costs a handful of block reads rather than a walk of

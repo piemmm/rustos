@@ -1395,28 +1395,28 @@ impl<B: Block> ARXFS<B> {
     }
 
     /// End a pass that changed no authoritative tree state.
-    fn finish_unpublished(&mut self) -> Result<(), DriverError> {
+    ///
+    /// The map changes such a pass leaves — a rebuilt free image, a scratch
+    /// array reserved and released again — stay resident: nothing was written,
+    /// so nothing needs the invalidation marker until a page actually reaches
+    /// the device, and every path that writes one makes the marker durable
+    /// first. A pass that did stage or reserve something after all has a
+    /// transaction to undo like any other.
+    fn finish_unpublished(&mut self) {
         if self.read_only {
-            return Ok(());
+            return;
         }
-        let must_rollback = self
+        let uncommitted = self
             .allocator()
             .is_ok_and(|alloc| !alloc.txn_private.is_empty() || !alloc.txn_freed.is_empty())
             || self.dirty.has(WritePhase::BeforeBarrier);
-        if must_rollback {
+        if uncommitted {
             self.rollback();
-            return Ok(());
-        }
-        if self.map_has_changes() {
-            if let Err(err) = self.map_confirm_dirty() {
-                self.require_map_rebuild();
-                return Err(err);
-            }
+            return;
         }
         if let Ok(alloc) = self.allocator_mut() {
             alloc.txn_allocated.clear();
         }
-        Ok(())
     }
 
     fn restore_saved_roots(&mut self) {
@@ -1430,9 +1430,15 @@ impl<B: Block> ARXFS<B> {
     }
 
     /// Discard an operation that failed before committing: drop every block it
-    /// staged, restore the inode tree root and inode counter, and free this
-    /// transaction's allocations. Nothing was published, so the committed
-    /// on-disk root is untouched.
+    /// staged, restore the published tree roots, and put the allocation map
+    /// back as the committed root has it. Nothing was published, so the
+    /// committed on-disk root is untouched.
+    ///
+    /// The pre-barrier phase is this transaction's alone — copy-on-write means
+    /// none of its blocks overwrote one the committed root reaches — so dropping
+    /// them unwritten loses nothing and spares the device the writes. Only that
+    /// phase is dropped: allocation-map bytes are staged in the other one and
+    /// belong to committed state this transaction never owned.
     fn rollback(&mut self) {
         // A read-only handle has no transaction to undo, and one that turned
         // itself read-only because a commit's publication is unknown must free
@@ -1441,22 +1447,56 @@ impl<B: Block> ARXFS<B> {
         if self.read_only {
             return;
         }
-        self.dirty.clear();
+        self.dirty.clear_phase(WritePhase::BeforeBarrier);
         self.restore_saved_roots();
-        self.free_count = self.saved_free_count;
-        if let Ok(alloc) = self.allocator_mut() {
-            alloc.cache.clear();
-            alloc.pending.clear();
-            alloc.txn_allocated.clear();
-            alloc.txn_freed.clear();
-            alloc.txn_private.clear();
-            alloc.needs_rebuild = true;
-        }
-        // The freed allocations bypassed `free_block`, so no per-block
+        self.release_txn_state();
+        // The undone allocations bypassed `free_block`, so no per-block
         // invalidation ran: drop everything rather than risk a stale
         // cluster over a recycled run (fail closed).
         if let Some(cache) = self.cluster_cache.as_mut() {
             cache.purge();
+        }
+    }
+
+    /// Undo the map marks of a transaction that never published, and clear its
+    /// bookkeeping.
+    ///
+    /// This is the transaction's own bookkeeping run backwards, so it costs the
+    /// transaction's size and never the volume's: an unpublished operation —
+    /// including one refused for an ordinary reason like a name already taken —
+    /// must not be able to provoke a walk of every tree on the volume. Both
+    /// marks are no-ops when the change they undo never reached the map, so the
+    /// free count they move is exact either way, becoming so again at the next
+    /// fold where a mark had to be deferred.
+    fn release_txn_state(&mut self) {
+        if self.allocator().is_ok_and(|alloc| alloc.needs_rebuild) {
+            // A device fault already demanded the map be re-derived, so there
+            // is no image left for a per-block undo to correct. Nothing was
+            // published, so the count the committed volume has is the one this
+            // transaction started from.
+            self.free_count = self.saved_free_count;
+            if let Ok(alloc) = self.allocator_mut() {
+                alloc.txn_allocated.clear();
+                alloc.txn_freed.clear();
+                alloc.txn_private.clear();
+            }
+            return;
+        }
+        self.reserve_deferred_frees();
+        let allocated = match self.allocator_mut() {
+            Ok(alloc) => core::mem::take(&mut alloc.txn_allocated),
+            Err(_) => return,
+        };
+        for block in allocated {
+            // A block this transaction allocated and then released again is
+            // already back in the pool; only one that is still private has an
+            // allocation left to undo.
+            if self
+                .allocator_mut()
+                .is_ok_and(|alloc| alloc.txn_private.remove(&block))
+            {
+                self.mark_free(block);
+            }
         }
     }
 
@@ -1473,15 +1513,40 @@ impl<B: Block> ARXFS<B> {
         self.map_fold_pending()
     }
 
-    /// Freeze the union of both candidate roots after a slot-write failure.
+    /// Reserve again the blocks a transaction deferred for freeing, undoing the
+    /// pre-barrier map image [`Self::prepare_deferred_frees`] built.
+    ///
+    /// Idempotent: a transaction that failed before that point never freed
+    /// them, so the mark finds each block already used and changes nothing.
+    fn reserve_deferred_frees(&mut self) {
+        let freed = match self.allocator_mut() {
+            Ok(alloc) => core::mem::take(&mut alloc.txn_freed),
+            Err(_) => return,
+        };
+        for block in freed {
+            self.mark_used(block);
+        }
+    }
+
+    /// Freeze the handle after a slot write whose outcome is unknown, holding
+    /// the union of both candidate roots reserved.
+    ///
+    /// Either root may be the one the device took, so no block either names may
+    /// be handed out again: the deferred frees the commit had already applied
+    /// are reserved back, and this transaction's own blocks stay reserved where
+    /// they are. The handle then refuses every mutation, so that reservation is
+    /// what a remount reads rather than something a later allocation could
+    /// erode.
     fn freeze_unknown_publication(&mut self) {
-        let union_free = self.allocator().map_or(self.free_count, |alloc| {
+        self.reserve_deferred_frees();
+        self.restore_saved_roots();
+        // No allocation will fold a deferred mark on a frozen handle, so state
+        // the union's count outright: what the transaction started from, less
+        // the blocks it still holds.
+        self.free_count = self.allocator().map_or(self.free_count, |alloc| {
             self.saved_free_count
                 .saturating_sub(alloc.txn_private.len() as u64)
         });
-        self.require_map_rebuild();
-        self.restore_saved_roots();
-        self.free_count = union_free;
         self.read_only = true;
     }
 

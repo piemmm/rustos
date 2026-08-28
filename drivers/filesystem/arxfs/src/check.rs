@@ -309,7 +309,7 @@ impl<B: Block> ARXFS<B> {
                 if mutated {
                     self.commit()?;
                 } else {
-                    self.finish_unpublished()?;
+                    self.finish_unpublished();
                 }
                 report.log_outcome(sink);
                 Ok(report)

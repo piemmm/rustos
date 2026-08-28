@@ -43,9 +43,12 @@ version is the last one.
 
 Commands are fewer than blocks because the drain gathers adjacent staged blocks
 into runs, so the exact run-length histogram is part of the baseline too. Every
-commit issues exactly one barrier. The figures are properties of the write path,
-not of the device measured on: the harness reproduces each of them on a 100 TiB
-volume, thirteen million times the size, to the command.
+commit issues exactly one barrier, save the map's once-per-sync-period
+clean-to-dirty transition. The figures are properties of the write path, not of
+the device measured on: the harness reproduces each of them on a 100 TiB volume,
+thirteen million times the size, to the command — and it holds the same
+independence for the operation *after a refused one*, which a rollback that
+discarded the map instead made scale with the volume's metadata.
 
 Amplification is structural, not granular. It had four separate causes, one
 stage each so each win is separately measurable. **C1 and C4 are closed by WB1
@@ -398,15 +401,32 @@ lawful; the old clean generation would then adopt a map that can reallocate live
 blocks. If a clean map fills its bounded cache before commit, eviction confirms
 the invalid marker first rather than weakening this ordering.
 
-Each ordinary commit and `fs_sync` uses one barrier on the normal path. A clean
-sync is adoptable; an ordinary crash or any partial map-page persistence rebuilds
-from whichever transaction root survives. The power-loss tests cover both roots
-and retained none/all/even/odd map-page subsets, and the 100 TiB rebuild stays
-inside the fixed resident-memory budget. A failed page write or sync barrier
-poisons and drops both staging and cache; the next check, write, or grow derives
-the exact map from the committed trees before using it. Unknown slot publication
-restores the last published tree view, reserves both candidate roots, and freezes
-the handle read-only.
+Each ordinary commit and `fs_sync` uses one barrier, plus one for the map's
+clean-to-dirty transition, paid once per sync period by whichever of the two
+first has a page to write. A pass that publishes nothing — a clean `check` or
+`scrub` — writes nothing and barriers not at all. A clean sync is adoptable; an
+ordinary crash or any partial map-page persistence rebuilds from whichever
+transaction root survives. The power-loss tests cover both roots and retained
+none/all/even/odd map-page subsets, and the 100 TiB rebuild stays inside the
+fixed resident-memory budget.
+
+**A rebuild is a device-fault answer only.** A failed stage, page write, or
+barrier — under a sync or under an eviction — poisons and drops both staging and
+cache; the next check, write, or grow derives the exact map from the committed
+trees before using it. Everything else undoes its own marks: an unpublished
+transaction reserves its deferred frees again and releases its still-private
+allocations, so a rollback costs the transaction and never the volume. That bound
+is load-bearing, not incidental — an operation refused for an ordinary reason
+(`create` over a taken name, `remove` of a missing one) changes nothing, and a
+caller who may create a name must not be able to make each refusal walk every
+tree on the volume. `tests/write_amplification.rs` holds it: a create after a
+refused one reads exactly what it reads with no refusal before it, over 64 and
+1024 directories alike, and a refusal reads no more than the create it refused.
+
+Unknown slot publication restores the last published tree view, reserves the
+union of both candidate roots — the frees the commit had already applied are
+reserved back, its own blocks stay reserved — and freezes the handle read-only,
+so nothing can erode that reservation before a remount reads it.
 
 ### WB4 — commit scheduler. **next**
 

@@ -845,9 +845,17 @@ stamp durable before any in-place map page can land. Map pages remain in the
 bounded cache between commits, then move into the same dirty set for bounded
 run writes at `fs_sync`; that sync issues one barrier before restoring the
 clean generation stamp. A page evicted earlier uses the same set and cannot be
-written until invalidation is durable. A failed page write or sync barrier
-invalidates the in-memory derivation; the next allocating operation rebuilds it
-from the committed trees before proceeding.
+written until invalidation is durable. A failed page write or barrier — under a
+sync or under an eviction — invalidates the in-memory derivation; the next
+allocating operation rebuilds it from the committed trees before proceeding.
+
+A device fault is the *only* thing that provokes that rebuild. An unpublished
+transaction instead undoes its own marks — reserving its deferred frees again and
+releasing its still-private allocations — so a failure costs the transaction and
+never the volume. Otherwise an operation refused for an ordinary reason, such as
+a `create` over a name already taken, would make the next one walk every tree on
+the volume, which is unbounded read amplification from a call that changes
+nothing.
 
 ## Copy-on-write and the superblock ring
 
