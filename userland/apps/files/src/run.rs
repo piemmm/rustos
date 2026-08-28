@@ -84,6 +84,7 @@ extern crate alloc;
 pub mod appbar;
 pub mod command;
 pub mod gesture;
+pub mod listing;
 pub mod location;
 pub mod operation;
 pub mod sidebar;
@@ -116,8 +117,8 @@ mod program {
         build_context_menu, build_delete_dialog, build_open_with_menu, context_menu_command_at,
         delete_dialog_action_at, draw_context_menu, draw_delete_dialog, draw_owner_control,
         draw_progress_dialog, draw_properties_editable, manager_tool_at, open_with_index_at,
-        owner_editor_rect, owner_field_at, permission_cell_at, render, scroll_pointer, OwnerField,
-        DELETE_CANCEL_INDEX, DELETE_CONFIRM_INDEX,
+        owner_editor_rect, owner_field_at, permission_cell_at, render_into, scroll_pointer,
+        OwnerField, DELETE_CANCEL_INDEX, DELETE_CONFIRM_INDEX,
     };
     use tairix_browse::{
         applications_for, association_from_appinfo, empty_trash_plan, paste_strategy, plan_paste,
@@ -135,7 +136,7 @@ mod program {
     use tairix_controls::text::{TextAction, TextField};
     use tairix_controls::Menu;
     use tairix_display::{winframe, SERIAL};
-    use tairix_geometry::{Point, Rect, Scale};
+    use tairix_geometry::{Point, Rect, Region, Scale};
     use tairix_help::{own_short_help, BundleHelp};
     use tairix_icon::{
         artwork_cache, ArtworkCache, ArtworkRasteriser, ArtworkReader, IconArtworkSource,
@@ -143,14 +144,15 @@ mod program {
     };
     use tairix_input::{Key, Modifiers, NamedKey};
     use tairix_procinfo::{IpcTransport, WalkStep};
+    use tairix_raster::Surface;
     use tairix_rt::io::{self, Stderr, Stdout, Write};
     use tairix_sandbox::imagerender::{rasterise_icon, ImageRenderService};
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
     use tairix_sandbox::{ParserSandbox, ServeEnd};
     use tairix_theme::{Theme, ThemeRegistry};
     use tairix_window::{
-        pointer_input_events, pointer_point, Desktop, EventSource, WindowClient, WindowEvents,
-        WindowFrames, WindowTransport,
+        pointer_input_events, pointer_point, present_damage, Desktop, EventSource, Repaint,
+        WindowClient, WindowEvents, WindowFrames, WindowTransport,
     };
 
     use crate::appbar;
@@ -158,6 +160,7 @@ mod program {
     use crate::gesture::{
         self, bundle_intent, AfterHandoff, MenuOnSingle, PrimaryPress, SecondaryPress,
     };
+    use crate::listing::{self, ViewMark};
     use crate::location::{leave_directory, location_title, retitle, Leave};
     use crate::operation::{operation_control, OperationControl};
     use crate::sidebar::{self, press_point};
@@ -167,8 +170,10 @@ mod program {
     /// value: the browser never shows a fabricated listing.
     const EXIT_NO_LISTING: i32 = 80;
 
-    /// Exit code when the shared frame region could not be created or
-    /// granted to the window endpoint. A reserved, fail-closed value.
+    /// Exit code when the memory a window's pixels need could not be had —
+    /// the shared frame region could not be created or granted to the window
+    /// endpoint, or the surface each frame is drawn in could not be
+    /// allocated. A reserved, fail-closed value.
     const EXIT_NO_FRAMES: i32 = 81;
 
     /// Exit code when the event mailbox could not be bound or observed
@@ -248,15 +253,50 @@ mod program {
         client: &mut WindowClient<RtWindowTransport>,
         window: u64,
         new_mode: &DisplayMode,
-    ) -> Option<WindowFrames> {
+    ) -> Option<(WindowFrames, Surface)> {
         let new_len = (new_mode.stride_bytes as usize)
             .checked_mul(new_mode.height_px as usize)?
             .checked_mul(FRAME_COUNT as usize)?;
         let frames = WindowFrames::create(new_len)?;
+        let surface = Surface::new(new_mode.width_px, new_mode.height_px)?;
         client
             .resize(window, frames.grant()?, FRAME_COUNT, new_mode)
             .ok()?;
-        Some(frames)
+        Some((frames, surface))
+    }
+
+    /// What a router that only answers "did anything change" concludes: it
+    /// moved pixels it cannot name, so the window is drawn whole.
+    ///
+    /// Every path that replaces the listing, opens or closes an overlay, or
+    /// re-derives the model is one of these — correct, and cheap enough at one
+    /// window's size that describing it would buy nothing.
+    const fn whole_if(changed: bool) -> Repaint {
+        if changed {
+            Repaint::Whole
+        } else {
+            Repaint::Nothing
+        }
+    }
+
+    /// What a round that reported its own rectangles concludes.
+    const fn reported_if(changed: bool) -> Repaint {
+        if changed {
+            Repaint::Reported
+        } else {
+            Repaint::Nothing
+        }
+    }
+
+    /// The stronger of two conclusions about one round, so a round that both
+    /// reported a rectangle and moved something no report describes still
+    /// covers the window.
+    const fn merge(a: Repaint, b: Repaint) -> Repaint {
+        match (a, b) {
+            (Repaint::Whole, _) | (_, Repaint::Whole) => Repaint::Whole,
+            (Repaint::Reported, _) | (_, Repaint::Reported) => Repaint::Reported,
+            (Repaint::Nothing, Repaint::Nothing) => Repaint::Nothing,
+        }
     }
 
     /// State the abnormal-exit reason on `stderr` (fail loud: an exit
@@ -339,6 +379,10 @@ mod program {
         /// The title the window currently carries, owned by the run so it
         /// outlives one frame: the location is only sent again when it moves.
         title: &'a mut String,
+        /// The window-lifetime surface the frame is drawn in and copied from.
+        surface: &'a mut Surface,
+        /// The rectangle this frame redraws and presents.
+        damage: DamageRect,
     }
 
     /// One open browser window: everything a frame is drawn from, and nothing
@@ -369,6 +413,12 @@ mod program {
         /// The title the session was last told. Kept so a frame retitles only
         /// when the location actually moves.
         title: String,
+        /// The window-sized surface every frame is drawn into, held for the
+        /// life of the window: allocating and zeroing one per present would be
+        /// a whole-window pass of its own, and holding it is what makes a
+        /// clipped repaint sound — every pixel outside the clip is the one
+        /// already on screen.
+        surface: Surface,
     }
 
     /// Paint `win`'s current state and present it.
@@ -387,7 +437,24 @@ mod program {
         theme: &Theme,
         icons: &RefCell<IconPipeline>,
         scale: Scale,
+        repaint: Repaint,
+        damage: &Region,
     ) -> Result<(), Errno> {
+        if repaint == Repaint::Nothing {
+            // Nothing moved, so a released window stays released rather than
+            // being re-attached to redraw pixels nobody can see.
+            return Ok(());
+        }
+        // A region the session released holds none of the pixels a partial
+        // present would leave standing, so it is re-attached and drawn whole.
+        let repaint = if win.frames.is_released() {
+            Repaint::Whole
+        } else {
+            repaint
+        };
+        let Some(damage) = present_damage(&win.mode, repaint, damage) else {
+            return Ok(());
+        };
         // Re-attached first if the session released it while the window was
         // hidden, so a paint after a release paints into a live region.
         let frame = client
@@ -404,9 +471,38 @@ mod program {
                 frame,
                 mode: &win.mode,
                 title: &mut win.title,
+                surface: &mut win.surface,
+                damage,
             },
             icons,
             scale,
+        )
+    }
+
+    /// Repaint and present the whole of `win`.
+    ///
+    /// The first frame, a resize onto a fresh surface, a re-theme, and a model
+    /// refresh a round could not describe all cover the window, so they name
+    /// the one conclusion here rather than each spelling it out.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the present refuses.
+    fn present_whole(
+        win: &mut OpenWindow,
+        client: &mut WindowClient<RtWindowTransport>,
+        theme: &Theme,
+        icons: &RefCell<IconPipeline>,
+        scale: Scale,
+    ) -> Result<(), Errno> {
+        present_window(
+            win,
+            client,
+            theme,
+            icons,
+            scale,
+            Repaint::Whole,
+            &Region::new(),
         )
     }
 
@@ -449,6 +545,10 @@ mod program {
             report_error("frame region grant refused; no window opened");
             return Err(EXIT_NO_FRAMES);
         };
+        let Some(surface) = Surface::new(mode.width_px, mode.height_px) else {
+            report_error("window surface refused; no window opened");
+            return Err(EXIT_NO_FRAMES);
+        };
         // The window opens carrying the location it shows, rather than a name
         // the first frame would have to replace.
         let title = location_title(&browser);
@@ -471,6 +571,7 @@ mod program {
             mode,
             frames,
             title,
+            surface,
         })
     }
 
@@ -637,11 +738,14 @@ mod program {
         {
             let win = &mut windows[index];
             let new_mode = mode_for(width_px, height_px);
-            if let Some(frames) = resize_frames(client, win.window, &new_mode) {
-                // Adopting drops the old region, which unmaps it.
+            if let Some((frames, surface)) = resize_frames(client, win.window, &new_mode) {
+                // Adopting drops the old region, which unmaps it; the fresh
+                // drawing surface holds none of the last frame's pixels, so
+                // the repaint that follows can only be a whole one.
                 win.frames = frames;
                 win.mode = new_mode;
-                if present_window(win, client, theme, icons, desktop.scale()).is_err() {
+                win.surface = surface;
+                if present_whole(win, client, theme, icons, desktop.scale()).is_err() {
                     return Some(fail(EXIT_CHANNEL_LOST, "present refused"));
                 }
             }
@@ -685,18 +789,23 @@ mod program {
                 declare_app_bar(client, event_endpoint, role, places);
             }
         }
-        let (changed, close) = apply_event(
+        // One sink per round: every control the event reaches, and the rail
+        // and listing for the marks they move themselves, report into this
+        // one, which is what the present is clipped to.
+        let mut damage = damage::sink();
+        let (repaint, close) = apply_event(
             &mut win.browser,
             &mut win.overlays,
             &mut win.places,
             launcher,
             canvas,
             event,
+            &mut damage,
         );
         if close {
             return close_window(windows, index, client, role);
         }
-        if changed && present_window(win, client, theme, icons, desktop.scale()).is_err() {
+        if present_window(win, client, theme, icons, desktop.scale(), repaint, &damage).is_err() {
             return Some(fail(EXIT_CHANNEL_LOST, "present refused"));
         }
         None
@@ -732,7 +841,7 @@ mod program {
         // A window nobody can see is worse than none: a refused first present
         // takes it back down and says so, rather than leaving an empty frame
         // on the desktop.
-        if present_window(&mut win, client, theme, icons, desktop.scale()).is_err() {
+        if present_whole(&mut win, client, theme, icons, desktop.scale()).is_err() {
             let _ = client.close(win.window);
             report_error("the new window could not be painted; it was closed again");
             return;
@@ -1467,12 +1576,13 @@ mod program {
         }
     }
 
-    /// Render the browser into `frame` (the shared window surface) and
-    /// present the whole window.
+    /// Render the browser into the window's retained surface, clipped to
+    /// `target.damage`, and present that rectangle.
     ///
-    /// The full-window damage is deliberate: a listing change repaints the
-    /// toolbar, the rows, and the selection highlight together, and the surface
-    /// is one window — not a screen — so the copy is small.
+    /// Clipping is sound because the surface lives for the life of the window:
+    /// every pixel outside the clip is the one already on screen, and the
+    /// single shared frame holds the same. A round that could not describe
+    /// what it changed asks for the whole window instead.
     ///
     /// The window's title is the location it is showing, so the frame begins by
     /// retitling when — and only when — the browser has moved since the last
@@ -1531,76 +1641,90 @@ mod program {
         // resolves. Only the tiles the grid actually draws are asked for, so
         // nothing scrolled out of view is ever decoded. The borrow is taken for
         // the render alone; the parked event source holds it only to trim.
-        let mut surface = {
-            let mut pipeline = icons.borrow_mut();
-            render(
-                browser,
-                scale,
-                theme,
-                window,
-                &ManagerChrome {
-                    tools: MANAGER_TOOLS,
-                    tool_model: manager_tool_model(browser),
-                    sidebar: Some(places),
-                },
-                &mut pipeline.source(),
-            )
-        }
-        .ok_or(Errno::LengthOutOfRange)?;
-        // In rename mode, overlay the inline editor exactly over the selected
-        // item's row through the shared selection geometry, so the field sits
-        // on the item the user is renaming.
-        if let Some(field) = rename {
-            if let Some(bounds) =
-                tairix_browse::render::selection_rect(browser, scale, theme, viewport)
-            {
-                field.render(&mut surface, bounds, scale, theme);
-            }
-        }
-        // With the Properties overlay open, draw it centered on top of the
-        // view (the shared drawn panel painting the already-authorised
-        // metadata). Rename and Properties are never open together.
-        if let Some(props) = properties {
-            draw_properties_editable(&mut surface, props, scale, theme, viewport);
-            // Reassigning an owner is privileged, so the ownership control is
-            // drawn only where the launching user holds `CAP_FS_CHOWN` — never
-            // shown to a session that cannot use it.
-            if can_chown {
-                let active = owner.map(|ed| (ed.field, &ed.editor));
-                draw_owner_control(&mut surface, props, scale, theme, viewport, active);
-            }
-        }
-        // The delete-confirmation dialog is modal: drawn last, on top of the
-        // view, and never open together with the rename/Properties overlays.
-        if let Some(confirm) = overlays.delete.as_ref() {
-            draw_delete_dialog(&mut surface, &confirm.dialog, scale, theme, viewport);
-        }
-        // The right-click context menu draws last, on top of the view. It opens
-        // only in navigation mode, so it never overlaps the modal overlays
-        // above; drawing it last keeps it topmost regardless.
-        if let Some(ctx) = overlays.menu.as_ref() {
-            draw_context_menu(&mut surface, &ctx.menu, ctx.anchor, scale, theme, viewport);
-        }
-        // The "Open With…" chooser draws on top of the view exactly as the
-        // context menu does; the two are never open together (the chooser
-        // replaces the context menu that opened it).
-        if let Some(chooser) = overlays.open_with.as_ref() {
-            draw_context_menu(
-                &mut surface,
-                &chooser.menu,
-                chooser.anchor,
-                scale,
-                theme,
-                viewport,
-            );
-        }
-        // A running long operation's progress + cancel panel is modal: drawn
-        // last so it is topmost while the walk runs interleaved with input.
-        if let Some(operation) = overlays.operation.as_ref() {
-            draw_progress_dialog(&mut surface, &operation.progress, scale, theme, viewport);
-        }
-        let damage = DamageRect::full(mode);
-        winframe::encode(&surface, target.frame, mode, damage, &SERIAL)?;
+        let damage = target.damage;
+        let surface = &mut *target.surface;
+        surface.with_clip(
+            damage.x,
+            damage.y,
+            damage.width_px,
+            damage.height_px,
+            |surface| {
+                {
+                    let mut pipeline = icons.borrow_mut();
+                    render_into(
+                        surface,
+                        browser,
+                        scale,
+                        theme,
+                        window,
+                        &ManagerChrome {
+                            tools: MANAGER_TOOLS,
+                            tool_model: manager_tool_model(browser),
+                            sidebar: Some(places),
+                        },
+                        &mut pipeline.source(),
+                    );
+                }
+                // In rename mode, overlay the inline editor exactly over the
+                // selected item's row through the shared selection geometry, so
+                // the field sits on the item the user is renaming.
+                if let Some(field) = rename {
+                    if let Some(bounds) =
+                        tairix_browse::render::selection_rect(browser, scale, theme, viewport)
+                    {
+                        field.render(surface, bounds, scale, theme);
+                    }
+                }
+                // With the Properties overlay open, draw it centered on top of
+                // the view (the shared drawn panel painting the
+                // already-authorised metadata). Rename and Properties are never
+                // open together.
+                if let Some(props) = properties {
+                    draw_properties_editable(surface, props, scale, theme, viewport);
+                    // Reassigning an owner is privileged, so the ownership
+                    // control is drawn only where the launching user holds
+                    // `CAP_FS_CHOWN` — never shown to a session that cannot use
+                    // it.
+                    if can_chown {
+                        let active = owner.map(|ed| (ed.field, &ed.editor));
+                        draw_owner_control(surface, props, scale, theme, viewport, active);
+                    }
+                }
+                // The delete-confirmation dialog is modal: drawn last, on top of
+                // the view, and never open together with the rename/Properties
+                // overlays.
+                if let Some(confirm) = overlays.delete.as_ref() {
+                    draw_delete_dialog(surface, &confirm.dialog, scale, theme, viewport);
+                }
+                // The right-click context menu draws last, on top of the view.
+                // It opens only in navigation mode, so it never overlaps the
+                // modal overlays above; drawing it last keeps it topmost
+                // regardless.
+                if let Some(ctx) = overlays.menu.as_ref() {
+                    draw_context_menu(surface, &ctx.menu, ctx.anchor, scale, theme, viewport);
+                }
+                // The "Open With…" chooser draws on top of the view exactly as
+                // the context menu does; the two are never open together (the
+                // chooser replaces the context menu that opened it).
+                if let Some(chooser) = overlays.open_with.as_ref() {
+                    draw_context_menu(
+                        surface,
+                        &chooser.menu,
+                        chooser.anchor,
+                        scale,
+                        theme,
+                        viewport,
+                    );
+                }
+                // A running long operation's progress + cancel panel is modal:
+                // drawn last so it is topmost while the walk runs interleaved
+                // with input.
+                if let Some(operation) = overlays.operation.as_ref() {
+                    draw_progress_dialog(surface, &operation.progress, scale, theme, viewport);
+                }
+            },
+        );
+        winframe::encode(surface, target.frame, mode, damage, &SERIAL)?;
         let window = target.window;
         target.client.present(window, 0, damage)
     }
@@ -1620,7 +1744,8 @@ mod program {
         launcher: &RefCell<Launcher>,
         canvas: Canvas<'_>,
         event: &WindowEvent,
-    ) -> (bool, bool) {
+        damage: &mut Region,
+    ) -> (Repaint, bool) {
         let theme = canvas.theme();
         let scale = canvas.scale;
         let window = canvas.window();
@@ -1638,7 +1763,7 @@ mod program {
         // application rather than a window, so the run resolves them before it
         // resolves which window an event belongs to.
         if let WindowEvent::CloseRequested { .. } = event {
-            return (false, true);
+            return (Repaint::Nothing, true);
         }
 
         // The right-click context menu owns input while it is open (it opens
@@ -1646,26 +1771,32 @@ mod program {
         // launcher for a context-menu Open, so it is handled here rather than
         // in the launcher-less modal router.
         if overlays.menu.is_some() {
-            return apply_menu_event(browser, overlays, launcher, scale, theme, viewport, event);
+            let (changed, close) =
+                apply_menu_event(browser, overlays, launcher, scale, theme, viewport, event);
+            return (whole_if(changed), close);
         }
 
         // The "Open With…" chooser likewise owns input while open (it replaces
         // the context menu that opened it) and needs the launcher to hand the
         // chosen application its file.
         if overlays.open_with.is_some() {
-            return apply_open_with_event(overlays, launcher, scale, theme, viewport, event);
+            let (changed, close) =
+                apply_open_with_event(overlays, launcher, scale, theme, viewport, event);
+            return (whole_if(changed), close);
         }
 
         // A modal overlay (the Properties overlay, or the owner-id editor
         // nested in it) owns the window while it is open; handle it and return.
-        if let Some(result) = apply_modal_event(browser, overlays, scale, theme, viewport, event) {
-            return result;
+        if let Some((changed, close)) =
+            apply_modal_event(browser, overlays, scale, theme, viewport, event)
+        {
+            return (whole_if(changed), close);
         }
 
         // Rename mode: the inline editor owns the keyboard. Its keys never
         // navigate the listing, and non-key events leave the edit untouched.
         if overlays.rename.is_some() {
-            return match event {
+            let (changed, close) = match event {
                 WindowEvent::Key {
                     key: KeyInput::Pressed { key, modifiers },
                     ..
@@ -1680,23 +1811,28 @@ mod program {
                 ),
                 _ => (false, false),
             };
+            return (whole_if(changed), close);
         }
 
         // The rail owns the window's leading edge: its hover highlight tracks
         // every motion that reaches here, and it consumes the presses and keys
         // that belong to it. Whatever it does not consume routes to the view,
         // carrying any repaint the highlight alone owed.
-        let hover_moved = sidebar::track_hover(places, scale, theme, window, event);
-        if let Some(outcome) = sidebar::apply_event(browser, places, scale, theme, window, event) {
+        let hover = reported_if(sidebar::track_hover(
+            places, scale, theme, window, event, damage,
+        ));
+        if let Some(outcome) =
+            sidebar::apply_event(browser, places, scale, theme, window, event, damage)
+        {
             if let Some(reason) = &outcome.refused {
                 report_error(reason);
             }
-            return (outcome.changed || hover_moved, false);
+            return (merge(outcome.repaint, hover), false);
         }
 
-        let (changed, close) =
-            apply_nav_event(browser, overlays, launcher, canvas, viewport, event);
-        (changed || hover_moved, close)
+        let (repaint, close) =
+            apply_nav_event(browser, overlays, launcher, canvas, viewport, event, damage);
+        (merge(repaint, hover), close)
     }
 
     /// Route one event in plain navigation mode — no overlay is open, and the
@@ -1713,7 +1849,8 @@ mod program {
         canvas: Canvas<'_>,
         viewport: Rect,
         event: &WindowEvent,
-    ) -> (bool, bool) {
+        damage: &mut Region,
+    ) -> (Repaint, bool) {
         let theme = canvas.theme();
         let scale = canvas.scale;
         match event {
@@ -1730,9 +1867,9 @@ mod program {
                 // state); every other navigation-mode key is handled by the
                 // shared `apply_nav_key`.
                 if matches!(key, KeyValue::Named(NamedKeyCode::Enter)) && modifiers.alt {
-                    begin_properties(browser, &mut overlays.properties)
+                    whole(begin_properties(browser, &mut overlays.properties))
                 } else if matches!(key, KeyValue::Named(NamedKeyCode::Enter)) {
-                    activate(
+                    whole(activate(
                         browser,
                         launcher,
                         scale,
@@ -1740,16 +1877,16 @@ mod program {
                         viewport,
                         bundle_intent(modifiers.shift),
                         AfterHandoff::Keep,
-                    )
+                    ))
                 } else if matches!(key, KeyValue::Named(NamedKeyCode::Delete)) {
-                    begin_delete(browser, &mut overlays.delete)
+                    whole(begin_delete(browser, &mut overlays.delete))
                 } else if let Some(verb) = clipboard_verb(*key, *modifiers) {
-                    apply_clipboard_verb(
+                    whole(apply_clipboard_verb(
                         browser,
                         &mut overlays.clipboard,
                         &mut overlays.operation,
                         verb,
-                    )
+                    ))
                 } else {
                     apply_nav_key(
                         browser,
@@ -1759,6 +1896,7 @@ mod program {
                         viewport,
                         *key,
                         *modifiers,
+                        damage,
                     )
                 }
             }
@@ -1775,12 +1913,15 @@ mod program {
                     viewport,
                     i64::from(*dy),
                 );
-                (moved, false)
+                if moved {
+                    listing::scrolled(scale, theme, viewport, damage);
+                }
+                (reported_if(moved), false)
             }
             // A pointer event the desktop routed into this window's local
             // coordinates: routed by `apply_pointer`.
             WindowEvent::Pointer { .. } => {
-                apply_pointer(browser, overlays, launcher, canvas, viewport, event)
+                apply_pointer(browser, overlays, launcher, canvas, viewport, event, damage)
             }
             // A secondary press on the window's Close control asks to leave the
             // folder rather than the window: it climbs to the parent and closes
@@ -1788,11 +1929,11 @@ mod program {
             // that cannot be listed keeps the window open and states which place
             // was refused.
             WindowEvent::AlternateCloseRequested { .. } => match leave_directory(browser) {
-                Leave::Climbed => (true, false),
-                Leave::Closed => (false, true),
+                Leave::Climbed => (Repaint::Whole, false),
+                Leave::Closed => (Repaint::Nothing, true),
                 Leave::Refused(reason) => {
                     report_error(&reason);
-                    (false, false)
+                    (Repaint::Nothing, false)
                 }
             },
             // Focus changes and key releases repaint nothing. The browser
@@ -1833,8 +1974,14 @@ mod program {
             | WindowEvent::Resized { .. }
             | WindowEvent::FilePicked { .. }
             | WindowEvent::PickCancelled { .. }
-            | WindowEvent::DesktopChanged { .. } => (false, false),
+            | WindowEvent::DesktopChanged { .. } => (Repaint::Nothing, false),
         }
+    }
+
+    /// The conclusion of a router that answers `(changed, close)` and cannot
+    /// name what it changed.
+    const fn whole(outcome: (bool, bool)) -> (Repaint, bool) {
+        (whole_if(outcome.0), outcome.1)
     }
 
     /// The mounted volumes offered to the places rail, read from the live
@@ -1897,7 +2044,8 @@ mod program {
         canvas: Canvas<'_>,
         viewport: Rect,
         event: &WindowEvent,
-    ) -> (bool, bool) {
+        damage: &mut Region,
+    ) -> (Repaint, bool) {
         let theme = canvas.theme();
         let scale = canvas.scale;
         let WindowEvent::Pointer {
@@ -1908,29 +2056,29 @@ mod program {
             ..
         } = event
         else {
-            return (false, false);
+            return (Repaint::Nothing, false);
         };
-        let point = Point::new(
-            i32::try_from(*x).unwrap_or(i32::MAX),
-            i32::try_from(*y).unwrap_or(i32::MAX),
-        );
+        let point = pointer_point(*x, *y);
         let mut scrolled = None;
-        let mut damage = damage::sink();
+        let mark = ViewMark::of(browser);
         for input in pointer_input_events(*action, point) {
             if let Some(repaint) =
-                scroll_pointer(browser, scale, theme, viewport, point, &input, &mut damage)
+                scroll_pointer(browser, scale, theme, viewport, point, &input, damage)
             {
                 scrolled = Some(scrolled.unwrap_or(false) || repaint);
             }
         }
         if let Some(repaint) = scrolled {
-            return (repaint, false);
+            // The bar reported its own drawn state; an offset it actually
+            // moved draws every entry somewhere new besides.
+            mark.report(browser, scale, theme, viewport, damage);
+            return (reported_if(repaint), false);
         }
         if *action == PointerAction::Moved {
-            return (false, false);
+            return (Repaint::Nothing, false);
         }
         if let Some(point) = secondary_press_point(*action, *x, *y) {
-            return apply_secondary_press(
+            return whole(apply_secondary_press(
                 browser,
                 overlays,
                 launcher,
@@ -1939,13 +2087,13 @@ mod program {
                 viewport,
                 point,
                 MenuOnSingle::Open,
-            );
+            ));
         }
         match press_point(*action, *x, *y) {
             Some(point) => apply_primary_press(
-                browser, overlays, launcher, canvas, viewport, point, *modifiers,
+                browser, overlays, launcher, canvas, viewport, point, *modifiers, damage,
             ),
-            None => (false, false),
+            None => (Repaint::Nothing, false),
         }
     }
 
@@ -2013,6 +2161,7 @@ mod program {
     /// the app to close). Mirrors [`apply_rename_key`]'s shape; Alt+Enter
     /// (Properties) and a plain Enter (activation, which needs the launcher)
     /// are handled by the caller, which owns the overlay and launcher state.
+    #[allow(clippy::too_many_arguments)] // The key, its context, and the round's report.
     fn apply_nav_key<S: DirectorySource>(
         browser: &mut Browser<S>,
         rename: &mut Option<TextField>,
@@ -2021,48 +2170,93 @@ mod program {
         viewport: Rect,
         key: KeyValue,
         modifiers: AbiModifiers,
-    ) -> (bool, bool) {
+        damage: &mut Region,
+    ) -> (Repaint, bool) {
         match key {
             // Toolbar-command accelerators: Alt+←/→/↑ drive the history and
             // climb commands, F5 refreshes — the same shared dispatch a toolbar
             // click uses, so the keyboard and the toolbar cannot disagree.
-            KeyValue::Named(NamedKeyCode::Left) if modifiers.alt => {
-                apply_toolbar_command(browser, scale, theme, viewport, ToolbarCommand::Back)
-            }
-            KeyValue::Named(NamedKeyCode::Right) if modifiers.alt => {
-                apply_toolbar_command(browser, scale, theme, viewport, ToolbarCommand::Forward)
-            }
-            KeyValue::Named(NamedKeyCode::Up) if modifiers.alt => {
-                apply_toolbar_command(browser, scale, theme, viewport, ToolbarCommand::Up)
-            }
-            KeyValue::Named(NamedKeyCode::F5) => {
-                apply_toolbar_command(browser, scale, theme, viewport, ToolbarCommand::Refresh)
-            }
+            KeyValue::Named(NamedKeyCode::Left) if modifiers.alt => whole(apply_toolbar_command(
+                browser,
+                scale,
+                theme,
+                viewport,
+                ToolbarCommand::Back,
+            )),
+            KeyValue::Named(NamedKeyCode::Right) if modifiers.alt => whole(apply_toolbar_command(
+                browser,
+                scale,
+                theme,
+                viewport,
+                ToolbarCommand::Forward,
+            )),
+            KeyValue::Named(NamedKeyCode::Up) if modifiers.alt => whole(apply_toolbar_command(
+                browser,
+                scale,
+                theme,
+                viewport,
+                ToolbarCommand::Up,
+            )),
+            KeyValue::Named(NamedKeyCode::F5) => whole(apply_toolbar_command(
+                browser,
+                scale,
+                theme,
+                viewport,
+                ToolbarCommand::Refresh,
+            )),
             // Ctrl+Shift+N: the keyboard equivalent of the New Folder tool.
             // Shift may deliver 'n' upper- or lower-case, so match either.
             KeyValue::Char(ch)
                 if modifiers.ctrl && modifiers.shift && ch.eq_ignore_ascii_case(&'n') =>
             {
-                begin_new_folder(browser, rename, scale, theme, viewport)
+                whole(begin_new_folder(browser, rename, scale, theme, viewport))
             }
-            KeyValue::Named(NamedKeyCode::Down) => {
-                browser.select_next();
-                tairix_browse::render::reveal_selection(browser, scale, theme, viewport);
-                (true, false)
+            KeyValue::Named(NamedKeyCode::Down) => walk_selection(
+                browser,
+                scale,
+                theme,
+                viewport,
+                damage,
+                Browser::select_next,
+            ),
+            KeyValue::Named(NamedKeyCode::Up) => walk_selection(
+                browser,
+                scale,
+                theme,
+                viewport,
+                damage,
+                Browser::select_previous,
+            ),
+            KeyValue::Named(NamedKeyCode::Backspace) => {
+                (whole_if(browser.go_up().unwrap_or(false)), false)
             }
-            KeyValue::Named(NamedKeyCode::Up) => {
-                browser.select_previous();
-                tairix_browse::render::reveal_selection(browser, scale, theme, viewport);
-                (true, false)
-            }
-            KeyValue::Named(NamedKeyCode::Backspace) => (browser.go_up().unwrap_or(false), false),
             // F2 begins an in-place rename of the selected item; with nothing
             // selected (an empty directory) it is a no-op.
             KeyValue::Named(NamedKeyCode::F2) => {
-                begin_rename(browser, rename, scale, theme, viewport)
+                whole(begin_rename(browser, rename, scale, theme, viewport))
             }
-            _ => (false, false),
+            _ => (Repaint::Nothing, false),
         }
+    }
+
+    /// Move the listing's focus with `step`, keep it on screen, and report the
+    /// entries the mark moved between — or the whole item area when keeping it
+    /// on screen scrolled the view.
+    fn walk_selection<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        scale: Scale,
+        theme: &Theme,
+        viewport: Rect,
+        damage: &mut Region,
+        step: fn(&mut Browser<S>),
+    ) -> (Repaint, bool) {
+        let mark = ViewMark::of(browser);
+        step(browser);
+        tairix_browse::render::reveal_selection(browser, scale, theme, viewport);
+        (
+            reported_if(mark.report(browser, scale, theme, viewport, damage)),
+            false,
+        )
     }
 
     /// Activate the selected entry — the one dispatch-by-kind decision `Enter`
@@ -3238,6 +3432,7 @@ mod program {
     /// `viewport` is the rail-inset content area the items occupy; the write
     /// tools sit on the toolbar band, which spans the whole window
     /// (`canvas.window()`).
+    #[allow(clippy::too_many_arguments)] // The press, its context, and the round's report.
     fn apply_primary_press<S: DirectorySource>(
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
@@ -3246,7 +3441,8 @@ mod program {
         viewport: Rect,
         point: Point,
         modifiers: AbiModifiers,
-    ) -> (bool, bool) {
+        damage: &mut Region,
+    ) -> (Repaint, bool) {
         let theme = canvas.theme();
         let scale = canvas.scale;
         if let Some(tool) = manager_tool_at(
@@ -3259,13 +3455,15 @@ mod program {
             manager_tool_model(browser),
         ) {
             overlays.double_click.reset();
-            return apply_manager_tool(browser, overlays, scale, theme, viewport, tool);
+            return whole(apply_manager_tool(
+                browser, overlays, scale, theme, viewport, tool,
+            ));
         }
         let hit = tairix_browse::render::entry_index_at(browser, scale, theme, viewport, point);
         match gesture::primary_press(&mut overlays.double_click, tairix_rt::clock_get(), hit) {
             PrimaryPress::Activate { index } => {
                 let _ = browser.select(index);
-                activate(
+                whole(activate(
                     browser,
                     launcher,
                     scale,
@@ -3273,10 +3471,17 @@ mod program {
                     viewport,
                     bundle_intent(modifiers.shift),
                     AfterHandoff::Keep,
-                )
+                ))
             }
-            PrimaryPress::Select { index } => (browser.select(index).is_ok(), false),
-            PrimaryPress::Chrome => apply_chrome_press(browser, canvas, viewport, point),
+            // Selecting moves the highlight between two entries and nothing
+            // else, so the round reports exactly those two.
+            PrimaryPress::Select { index } => {
+                let mark = ViewMark::of(browser);
+                let selected = browser.select(index).is_ok();
+                let moved = mark.report(browser, scale, theme, viewport, damage);
+                (reported_if(selected && moved), false)
+            }
+            PrimaryPress::Chrome => whole(apply_chrome_press(browser, canvas, viewport, point)),
         }
     }
 
@@ -4596,7 +4801,7 @@ mod program {
                 // left to be.
                 Err(code) => return code,
             };
-            if present_window(&mut win, &mut client, theme, &icons, desktop.scale()).is_err() {
+            if present_whole(&mut win, &mut client, theme, &icons, desktop.scale()).is_err() {
                 return fail(EXIT_CHANNEL_LOST, "first present refused");
             }
             windows.push(win);
@@ -4643,7 +4848,7 @@ mod program {
                     .operation
                     .as_mut()
                     .is_some_and(advance_operation);
-                if present_window(
+                if present_whole(
                     &mut windows[busy],
                     &mut client,
                     theme,
@@ -4664,7 +4869,7 @@ mod program {
                     // Reap any launched bundle that exited while the operation
                     // ran (the wait-set was not parked on during it).
                     launcher.borrow_mut().reap();
-                    if present_window(
+                    if present_whole(
                         &mut windows[busy],
                         &mut client,
                         theme,
@@ -4765,7 +4970,7 @@ mod program {
                     themes.set_appearance(desktop.appearance());
                     theme = themes.active();
                     for win in &mut windows {
-                        if present_window(win, &mut client, theme, &icons, desktop.scale()).is_err()
+                        if present_whole(win, &mut client, theme, &icons, desktop.scale()).is_err()
                         {
                             return fail(EXIT_CHANNEL_LOST, "present refused");
                         }

@@ -25,17 +25,19 @@ use alloc::vec::Vec;
 
 use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode, PointerButtonCode};
 use tairix_abi::window_ipc::{PointerAction, WindowEvent};
-use tairix_browse::render::{sidebar_index_at, toolbar_command_at};
+use tairix_browse::render::{sidebar_index_at, sidebar_view, toolbar_command_at};
 use tairix_browse::{Browser, DirectorySource, Places, ToolbarCommand, Volume};
-use tairix_geometry::{Point, Rect, Scale};
+use tairix_controls::damage;
+use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_theme::Theme;
-use tairix_window::pointer_point;
+use tairix_window::{pointer_point, Repaint};
 
 /// What routing an event to the rail did.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SidebarOutcome {
-    /// Whether anything the window draws changed, and so owes a re-present.
-    pub changed: bool,
+    /// What the window owes the screen: nothing, the rectangles the rail
+    /// reported, or the whole window when the listing behind it moved too.
+    pub repaint: Repaint,
     /// The reason a place could not be opened, ready to be stated on the
     /// error stream, or `None` when nothing was refused.
     ///
@@ -45,14 +47,96 @@ pub struct SidebarOutcome {
     pub refused: Option<String>,
 }
 
+impl Default for SidebarOutcome {
+    fn default() -> Self {
+        Self::QUIET
+    }
+}
+
 impl SidebarOutcome {
-    /// An outcome that owes a repaint (or not) and refused nothing.
+    /// Nothing changed and nothing was refused.
+    pub const QUIET: Self = Self {
+        repaint: Repaint::Nothing,
+        refused: None,
+    };
+
+    /// An outcome that repainted what it reported (or nothing at all) and
+    /// refused nothing.
     #[must_use]
-    pub const fn quiet(changed: bool) -> Self {
+    pub const fn reported(changed: bool) -> Self {
         Self {
-            changed,
+            repaint: if changed {
+                Repaint::Reported
+            } else {
+                Repaint::Nothing
+            },
             refused: None,
         }
+    }
+}
+
+/// The rail's drawn interaction state — every field of it a round can move
+/// without the listing beside it changing.
+///
+/// The rail is drawn from this state rather than from retained per-row
+/// controls, so what a round repainted is the difference between the state
+/// before it and the state after: exactly the two rows a mark moved between,
+/// or the whole rail when the focus flipped, since a rail that holds the
+/// keyboard draws *every* row as a member of the focus field.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RailMark {
+    focused: bool,
+    cursor: usize,
+    hovered: Option<usize>,
+}
+
+impl RailMark {
+    /// The rail's drawn state right now.
+    #[must_use]
+    pub fn of(places: &Places) -> Self {
+        Self {
+            focused: places.is_focused(),
+            cursor: places.cursor(),
+            hovered: places.hovered(),
+        }
+    }
+
+    /// Report what moving from `self` to the rail's current state repainted,
+    /// answering whether anything did.
+    ///
+    /// The window is the *whole* window: the rail lays out below the toolbar
+    /// band across the leading edge, and that inset is the renderer's own
+    /// ([`sidebar_view`]), so the reported rectangles are the painted ones.
+    pub fn report(
+        self,
+        places: &Places,
+        scale: Scale,
+        theme: &Theme,
+        window: Rect,
+        damage: &mut Region,
+    ) -> bool {
+        let now = Self::of(places);
+        if now == self {
+            return false;
+        }
+        let Some(view) = sidebar_view(window, scale, theme, Some(places)) else {
+            return true;
+        };
+        if now.focused != self.focused {
+            damage.add(view.rail_rect());
+            return true;
+        }
+        damage::move_mark(self.hovered, now.hovered, |row| view.row_rect(row), damage);
+        // The cursor is drawn only while the rail holds the keyboard.
+        if now.focused {
+            damage::move_mark(
+                Some(self.cursor),
+                Some(now.cursor),
+                |row| view.row_rect(row),
+                damage,
+            );
+        }
+        true
     }
 }
 
@@ -114,8 +198,8 @@ pub fn refresh_places(places: &mut Places, home: &[String], volumes: &[Volume]) 
     places.set_cursor(cursor);
 }
 
-/// Track the rail's hover highlight for a pointer motion, reporting whether
-/// the highlight moved (and so owes a repaint).
+/// Track the rail's hover highlight for a pointer motion, reporting the rows
+/// the highlight moved between and answering whether it moved at all.
 ///
 /// Kept apart from [`apply_event`] because a motion that *leaves* the rail
 /// must both clear the highlight and still reach the view below — the bundle
@@ -126,6 +210,7 @@ pub fn track_hover(
     theme: &Theme,
     window: Rect,
     event: &WindowEvent,
+    damage: &mut Region,
 ) -> bool {
     let WindowEvent::Pointer {
         x,
@@ -136,12 +221,16 @@ pub fn track_hover(
     else {
         return false;
     };
-    let point = Point::new(
-        i32::try_from(*x).unwrap_or(i32::MAX),
-        i32::try_from(*y).unwrap_or(i32::MAX),
+    let row = sidebar_index_at(window, scale, theme, Some(places), pointer_point(*x, *y));
+    let view = sidebar_view(window, scale, theme, Some(places));
+    let moved = damage::move_mark(
+        places.hovered(),
+        row,
+        |marked| view.as_ref()?.row_rect(marked),
+        damage,
     );
-    let row = sidebar_index_at(window, scale, theme, Some(places), point);
-    places.set_hovered(row)
+    places.set_hovered(row);
+    moved
 }
 
 /// Route one event to the rail, returning `Some(outcome)` when the rail
@@ -161,7 +250,12 @@ pub fn apply_event<S: DirectorySource>(
     theme: &Theme,
     window: Rect,
     event: &WindowEvent,
+    damage: &mut Region,
 ) -> Option<SidebarOutcome> {
+    let before = RailMark::of(places);
+    let marked = |places: &Places, damage: &mut Region| {
+        SidebarOutcome::reported(before.report(places, scale, theme, window, damage))
+    };
     match event {
         WindowEvent::Key {
             key: KeyInput::Pressed { key, modifiers },
@@ -173,17 +267,19 @@ pub fn apply_event<S: DirectorySource>(
             {
                 let focused = places.is_focused();
                 places.set_focused(!focused);
-                return Some(SidebarOutcome::quiet(true));
+                return Some(marked(places, damage));
             }
             if !places.is_focused() {
                 return None;
             }
             match key {
                 KeyValue::Named(NamedKeyCode::Down) => {
-                    Some(SidebarOutcome::quiet(places.move_cursor(1)))
+                    places.move_cursor(1);
+                    Some(marked(places, damage))
                 }
                 KeyValue::Named(NamedKeyCode::Up) => {
-                    Some(SidebarOutcome::quiet(places.move_cursor(-1)))
+                    places.move_cursor(-1);
+                    Some(marked(places, damage))
                 }
                 KeyValue::Named(NamedKeyCode::Enter) => {
                     let cursor = places.cursor();
@@ -191,12 +287,12 @@ pub fn apply_event<S: DirectorySource>(
                 }
                 KeyValue::Named(NamedKeyCode::Escape) => {
                     places.set_focused(false);
-                    Some(SidebarOutcome::quiet(true))
+                    Some(marked(places, damage))
                 }
                 // While the rail holds focus its keys are its own: a keystroke
                 // it has no use for is swallowed rather than navigating the
                 // listing behind it.
-                _ => Some(SidebarOutcome::quiet(false)),
+                _ => Some(SidebarOutcome::QUIET),
             }
         }
         WindowEvent::Pointer { x, y, action, .. } => {
@@ -205,9 +301,11 @@ pub fn apply_event<S: DirectorySource>(
             places.set_focused(true);
             places.set_cursor(index);
             let mut outcome = navigate_to(browser, places, index);
-            // The focus and cursor moved whatever the navigation did, so the
-            // press always owes a repaint.
-            outcome.changed = true;
+            if outcome.repaint == Repaint::Nothing {
+                // The press moved the focus and the cursor even where it
+                // navigated nowhere, so those rows are what it repainted.
+                outcome.repaint = marked(places, damage).repaint;
+            }
             Some(outcome)
         }
         _ => None,
@@ -227,21 +325,32 @@ pub fn navigate_to<S: DirectorySource>(
     index: usize,
 ) -> SidebarOutcome {
     let Some(place) = places.rows().get(index) else {
-        return SidebarOutcome::quiet(false);
+        return SidebarOutcome::QUIET;
     };
     if !place.is_available() {
-        return SidebarOutcome::quiet(false);
+        return SidebarOutcome::QUIET;
     }
     let label = String::from(place.label());
     let components: Vec<String> = place.components().to_vec();
     let Ok(moved) = browser.navigate_to(components) else {
         places.set_unavailable(index);
         return SidebarOutcome {
-            changed: true,
+            // The row reads disabled from now on and the refusal is stated;
+            // which rows that changes is not a report the rail can make.
+            repaint: Repaint::Whole,
             refused: Some(alloc::format!("could not open {label}")),
         };
     };
-    SidebarOutcome::quiet(moved)
+    SidebarOutcome {
+        // A move replaces the listing, the toolbar's enable states, and the
+        // rail's own selected row together — no report describes that.
+        repaint: if moved {
+            Repaint::Whole
+        } else {
+            Repaint::Nothing
+        },
+        refused: None,
+    }
 }
 
 #[cfg(test)]

@@ -1610,6 +1610,23 @@ probe, never guessed (§2.1/§2.16/§2.19).
   real-Pi masked-section hard lockup is therefore a *separate* defect (below)
   that this fix does not claim to close.
 
+**A second QEMU manifestation, cheaper than `stress --cpu 20` and not the B4
+cause.** `stress_qemu_aarch64` (4 vCPUs, UART-only console, no `ramfb`) wedges
+**during early boot**, before the login prompt, when the CI QEMU matrix runs it
+concurrently with six other guests. The transcript's last line is
+`id=4139 root-unlock: users database installed; login can authenticate`; in a
+healthy run the next line is `comm=login sc=users_db_read` **1 ms of guest time
+later**, and in the wedge no core emits anything again — the kernel's own
+per-syscall DEBUG stream included — for the harness's whole 300 s inactivity
+budget. Total silence across every core rules out a merely-starved guest and
+places it in the same IRQ-masked section as the reports above. It is *not* the
+B4 GIC priority inversion, which was `ramfb`-only and is fixed. It reproduces
+only under host contention, so it is probabilistic rather than deterministic,
+but it needs no 20-worker load and no display: the interleaving of early
+multi-core spawn during root-mount is enough. Anyone driving the FIQ or EDPCSR
+samplers at this defect should try this guest first — it reaches the wedge in
+seconds of guest time.
+
 The Pi-4B armstub FIQ-routing dependency remains a hardware-capability concern
 for `plans/FIX-HARDWARE-FEATURES.md`.
 

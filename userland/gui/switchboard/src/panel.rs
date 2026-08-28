@@ -20,6 +20,12 @@ use alloc::string::String;
 use tairix_abi::switchboard_ipc::{CommandSection, FrameReport, SeatReport, SwitchboardRequest};
 use tairix_abi::window_ipc::WindowSizing;
 use tairix_abi::{CapabilityQuery, Errno, Signal};
+use tairix_controls::damage;
+use tairix_font::BitmapFont;
+use tairix_geometry::{Rect, Region, Scale};
+use tairix_input::{InputEvent, Key};
+use tairix_theme::Theme;
+use tairix_window::Repaint;
 
 use crate::model::{
     apply_action, map_section, signal_pid, Effect, GroupingEdit, PanelModel, SessionReport,
@@ -57,8 +63,9 @@ struct Presented {
     inputs: RenderInputs,
 }
 
-/// The overview panel: the live model, the window when one is open, and
-/// what the session has last reported about itself.
+/// The overview panel: the live model, the window when one is open, what
+/// the session has last reported about itself, and what the next present
+/// owes the screen.
 #[derive(Debug)]
 pub struct Panel {
     own_pid: u64,
@@ -66,6 +73,8 @@ pub struct Panel {
     model: PanelModel,
     view: Option<Switchboard>,
     presented: Option<Presented>,
+    repaint: Repaint,
+    damage: Region,
 }
 
 impl Panel {
@@ -79,6 +88,8 @@ impl Panel {
             model,
             view: None,
             presented: None,
+            repaint: Repaint::Whole,
+            damage: damage::sink(),
         }
     }
 
@@ -109,13 +120,49 @@ impl Panel {
         &self.session
     }
 
-    /// The open composition, for the caller to route one input event into.
+    /// Route one pointer event into the open composition, accumulating the
+    /// rectangles its controls repainted, and report the action it produced.
     ///
-    /// Input routing needs the window's geometry, theme, and font, which
-    /// only the hosting program has, so the caller feeds the event and
-    /// hands any resulting [`SwitchboardAction`] back to [`Panel::act`].
-    pub fn view_mut(&mut self) -> Option<&mut Switchboard> {
-        self.view.as_mut()
+    /// Input routing needs the window's geometry, theme, and font, which only
+    /// the hosting program has, so the caller feeds the event and hands any
+    /// resulting [`SwitchboardAction`] back to [`Panel::act`]. It goes through
+    /// the panel rather than the composition because the panel is what knows
+    /// what is on screen, and so what the next present owes it.
+    pub fn on_pointer(
+        &mut self,
+        event: &InputEvent,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+    ) -> Option<SwitchboardAction> {
+        let view = self.view.as_mut()?;
+        view.on_pointer(event, bounds, scale, theme, font, &mut self.damage)
+    }
+
+    /// Route one key into the open composition, on the same terms as
+    /// [`Panel::on_pointer`].
+    pub fn on_key(
+        &mut self,
+        key: Key,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+    ) -> Option<SwitchboardAction> {
+        let view = self.view.as_mut()?;
+        view.on_key(key, bounds, scale, theme, font, &mut self.damage)
+    }
+
+    /// Mark the next present as covering the whole window.
+    ///
+    /// A change no control round described — a resize onto a fresh surface, a
+    /// desktop appearance or density change, a fresh model — moves pixels the
+    /// accumulated report says nothing about, so the report is dropped and the
+    /// window is drawn whole rather than left partly stale.
+    pub fn repaint_whole(&mut self) {
+        self.repaint = Repaint::Whole;
+        self.damage.clear();
     }
 
     /// Show the panel on the wire `section`, opening the window if none is
@@ -167,6 +214,9 @@ impl Panel {
         if let Some(view) = self.view.as_mut() {
             let _ = view.select_section(section);
         }
+        // Opening a window, raising it, or showing a different section is
+        // never a control round, so nothing described what moved.
+        self.repaint_whole();
     }
 
     /// Adopt a freshly built model, re-rendering only when it actually
@@ -188,6 +238,9 @@ impl Panel {
             return;
         };
         view.set_model(&self.model.model);
+        // A fresh reading re-derives every row, card, and meter at once; no
+        // control round described that, so the window is drawn whole.
+        self.repaint_whole();
     }
 
     /// Apply every effect `action` implies under `authority`, in order, and
@@ -316,6 +369,13 @@ impl Panel {
     /// [`ServiceHost::report_refusal`], and re-attempting an unchanged
     /// panel on every wake would storm the refusal path. The next genuine
     /// change compares unequal again and presents.
+    ///
+    /// What the present *covers* is the rectangles the wake's control rounds
+    /// reported, unless [`Panel::repaint_whole`] marked the wake as one no
+    /// report could describe. A round that moved pixels and reported nothing
+    /// leaves an empty region, which covers the window rather than nothing at
+    /// all, so an unreported change can only ever over-cover (see
+    /// [`present_damage`](tairix_window::present_damage)).
     pub fn flush(&mut self, host: &mut dyn ServiceHost) {
         let Some(view) = self.view.as_mut() else {
             return;
@@ -342,9 +402,12 @@ impl Panel {
                 });
             }
         }
-        if let Err(refusal) = host.present(view) {
+        let repaint = self.repaint;
+        self.repaint = Repaint::Reported;
+        if let Err(refusal) = host.present(view, repaint, &self.damage) {
             host.report_refusal("redraw the overview window", refusal);
         }
+        self.damage.clear();
     }
 
     /// Forget what was last presented, so the next [`Panel::flush`] draws
@@ -356,8 +419,12 @@ impl Panel {
     /// difference test would suppress the very present the screen now
     /// needs. Dropping the record restores the invariant instead of adding
     /// a second present path.
+    ///
+    /// The discarded pixels are the *whole* window's, so the present it
+    /// unblocks covers the whole window too.
     pub fn invalidate_presented(&mut self) {
         self.presented = None;
+        self.repaint_whole();
     }
 
     /// Destroy the window and return to headless sampling. Closing an
@@ -372,6 +439,7 @@ impl Panel {
             return;
         }
         self.presented = None;
+        self.repaint_whole();
         if let Err(refusal) = host.close_window() {
             host.report_refusal("close the overview window", refusal);
         }

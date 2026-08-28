@@ -32,6 +32,32 @@ use crate::places::{PlaceKind, Places, Volume};
 use crate::select::Selection;
 use crate::source::{DirectorySource, Listing};
 
+/// Paint `browser` into a freshly allocated `viewport`-sized surface.
+///
+/// The renderer paints into a surface its caller owns and keeps for the life
+/// of its window; a test that only wants the pixels of one frame allocates one
+/// here rather than each repeating the two lines.
+fn paint<S: DirectorySource>(
+    browser: &Browser<S>,
+    scale: Scale,
+    theme: &Theme,
+    viewport: Rect,
+    chrome: &crate::ManagerChrome<'_>,
+    artwork: &mut dyn IconArtwork,
+) -> Surface {
+    let mut surface = Surface::new(viewport.width, viewport.height).expect("surface");
+    crate::render_into(
+        &mut surface,
+        browser,
+        scale,
+        theme,
+        viewport,
+        chrome,
+        artwork,
+    );
+    surface
+}
+
 /// The absolute-path key the mock indexes a directory by — the one shared
 /// spelling, so tests, the model, and the VFS engine agree on the path
 /// string.
@@ -277,7 +303,7 @@ fn the_toolbar_band_spans_the_whole_window_above_the_rail() {
     browser.open_index(2).expect("enter System");
 
     let paint = |sidebar: Option<&Places>| {
-        crate::render(
+        paint(
             &browser,
             Scale::ONE,
             &theme,
@@ -289,7 +315,6 @@ fn the_toolbar_band_spans_the_whole_window_above_the_rail() {
             },
             &mut NoArtwork,
         )
-        .expect("surface")
     };
     // The band is measured from the window, so drawing a rail changes not one
     // pixel of it: the manager's toolbar sits exactly where the picker's does.
@@ -466,7 +491,7 @@ fn the_toolbar_is_painted_where_the_window_hit_test_finds_it() {
     let top = u32::try_from(rect.top()).expect("tool y");
 
     let paint = |sidebar: Option<&Places>, tools: &[ManagerTool]| {
-        crate::render(
+        paint(
             &browser,
             Scale::ONE,
             &theme,
@@ -478,7 +503,6 @@ fn the_toolbar_is_painted_where_the_window_hit_test_finds_it() {
             },
             &mut NoArtwork,
         )
-        .expect("surface")
     };
     for sidebar in [None, Some(&places)] {
         // The write tools are the only difference between the two renders, so
@@ -535,7 +559,7 @@ fn the_chrome_geometry_stays_total_for_a_degenerate_window() {
         None
     );
     for window in [squat, narrow, nothing] {
-        let surface = crate::render(
+        let surface = paint(
             &browser,
             Scale::ONE,
             &theme,
@@ -546,8 +570,7 @@ fn the_chrome_geometry_stays_total_for_a_degenerate_window() {
                 sidebar: Some(&places),
             },
             &mut NoArtwork,
-        )
-        .expect("surface");
+        );
         assert_eq!(surface.width(), window.width);
         assert_eq!(surface.height(), window.height);
     }
@@ -577,28 +600,26 @@ fn the_rail_selects_the_row_matching_the_browsers_location() {
         tool_model: crate::ManagerToolModel::none(),
         sidebar: Some(&places),
     };
-    let unselected = crate::render(
+    let unselected = paint(
         &browser,
         Scale::ONE,
         &theme,
         viewport,
         &chrome,
         &mut NoArtwork,
-    )
-    .expect("surface");
+    );
     let mut at_place = Browser::open_root(MockFs::fixture()).expect("root");
     at_place
         .navigate_to(vec!["System".to_string()])
         .expect("navigate to System");
-    let selected = crate::render(
+    let selected = paint(
         &at_place,
         Scale::ONE,
         &theme,
         viewport,
         &chrome,
         &mut NoArtwork,
-    )
-    .expect("surface");
+    );
     let rail = crate::render::sidebar_view(viewport, Scale::ONE, &theme, Some(&places))
         .expect("rail")
         .row_rect(4)
@@ -929,15 +950,14 @@ fn refresh_clamps_a_stale_selection_into_the_new_listing() {
 fn render_produces_a_surface_the_size_of_the_viewport() {
     let browser = Browser::open_root(MockFs::fixture()).expect("root");
     let theme = Theme::dark();
-    let surface = crate::render(
+    let surface = paint(
         &browser,
         Scale::ONE,
         &theme,
         Rect::new(0, 0, 200, 120),
         &crate::ManagerChrome::none(),
         &mut NoArtwork,
-    )
-    .expect("surface");
+    );
     assert_eq!(surface.width(), 200);
     assert_eq!(surface.height(), 120);
 }
@@ -952,15 +972,14 @@ fn render_gives_the_selected_entry_the_shared_selection_chrome() {
     let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, Scale::ONE);
     let row_height = font.glyph_height() + 4;
     let header = crate::render::chrome_height(Scale::ONE, &theme);
-    let surface = crate::render(
+    let surface = paint(
         &browser,
         Scale::ONE,
         &theme,
         Rect::new(0, 0, 200, header + row_height * 3),
         &crate::ManagerChrome::none(),
         &mut NoArtwork,
-    )
-    .expect("surface");
+    );
 
     let accent = Color::from(theme.palette().accent).premultiply();
     let raised = Color::from(theme.palette().surface_raised).premultiply();
@@ -999,15 +1018,14 @@ fn render_into_a_tiny_viewport_does_not_panic() {
     let theme = Theme::dark();
     // Too short for even the path bar: paints what it can and returns a
     // surface rather than panicking.
-    let surface = crate::render(
+    let surface = paint(
         &browser,
         Scale::ONE,
         &theme,
         Rect::new(0, 0, 4, 3),
         &crate::ManagerChrome::none(),
         &mut NoArtwork,
-    )
-    .expect("surface");
+    );
     assert_eq!(surface.width(), 4);
     assert_eq!(surface.height(), 3);
 }
@@ -1072,7 +1090,7 @@ fn the_chrome_scales_with_the_desktop_density_not_only_its_text() {
     assert!(popup_hidpi.height > popup.height);
 
     // And the whole view still paints at the higher density.
-    assert!(crate::render(
+    assert!(paint(
         &browser,
         hidpi,
         &theme,
@@ -1080,7 +1098,9 @@ fn the_chrome_scales_with_the_desktop_density_not_only_its_text() {
         &crate::ManagerChrome::none(),
         &mut NoArtwork,
     )
-    .is_some());
+    .pixels()
+    .iter()
+    .any(|p| p.a > 0));
 }
 
 // --- The VFS engine ------------------------------------------------------
@@ -1951,15 +1971,14 @@ fn the_grid_view_renders_and_hit_tests_the_first_tile() {
     browser.select(0).expect("the first entry");
     // A window wide and tall enough for several tiles.
     let vp = Rect::new(0, 0, 400, 400);
-    let surface = crate::render(
+    let surface = paint(
         &browser,
         Scale::ONE,
         &theme,
         vp,
         &crate::ManagerChrome::none(),
         &mut NoArtwork,
-    )
-    .expect("grid surface");
+    );
     assert_eq!(surface.width(), 400);
 
     // The row shares its leftover width out between its tiles, so the first
@@ -2043,15 +2062,14 @@ fn the_grid_resolves_each_tile_through_the_artwork_lookup_and_draws_what_it_retu
     // icon slot.
     let art_colour = Color::rgb(255, 0, 255);
     let mut artwork = RecordingArtwork::new(24, art_colour);
-    let drawn = crate::render(
+    let drawn = paint(
         &browser,
         Scale::ONE,
         &theme,
         vp,
         &crate::ManagerChrome::none(),
         &mut artwork,
-    )
-    .expect("grid surface");
+    );
     assert!(!artwork.asked.is_empty(), "the grid consults the lookup");
     assert!(!content_kinds(&artwork.asked).is_empty());
     assert!(content_kinds(&artwork.asked)
@@ -2065,15 +2083,14 @@ fn the_grid_resolves_each_tile_through_the_artwork_lookup_and_draws_what_it_retu
 
     // Without a lookup the same grid draws the built-in glyph instead, so the
     // colour above can only have come through the seam.
-    let plain = crate::render(
+    let plain = paint(
         &browser,
         Scale::ONE,
         &theme,
         vp,
         &crate::ManagerChrome::none(),
         &mut NoArtwork,
-    )
-    .expect("grid surface");
+    );
     assert!(!shows(&plain, art_colour));
 }
 
@@ -2085,15 +2102,14 @@ fn the_list_view_resolves_each_rows_icon_through_the_artwork_lookup() {
     let theme = Theme::dark();
     let browser = many_files(20);
     let mut artwork = RecordingArtwork::new(24, Color::rgb(255, 0, 255));
-    crate::render(
+    paint(
         &browser,
         Scale::ONE,
         &theme,
         Rect::new(0, 0, 400, 400),
         &crate::ManagerChrome::none(),
         &mut artwork,
-    )
-    .expect("list surface");
+    );
     let asked = content_kinds(&artwork.asked);
     assert!(!asked.is_empty(), "the list consults the lookup");
     // The fixture's names carry no extension, so every row is the generic
@@ -2224,7 +2240,7 @@ fn grid_surface<S: DirectorySource>(
     vp: Rect,
     artwork: &mut dyn IconArtwork,
 ) -> Surface {
-    crate::render(
+    paint(
         browser,
         Scale::ONE,
         &Theme::dark(),
@@ -2232,7 +2248,6 @@ fn grid_surface<S: DirectorySource>(
         &crate::ManagerChrome::none(),
         artwork,
     )
-    .expect("grid surface")
 }
 
 /// The toolbar's own icons. Every window render resolves its chrome through the
@@ -7004,7 +7019,7 @@ mod occupancy {
 
     /// Render `browser` with no artwork, so every icon is the built-in glyph.
     fn frame<S: DirectorySource>(browser: &Browser<S>, artwork: &mut dyn IconArtwork) -> Surface {
-        crate::render(
+        paint(
             browser,
             Scale::ONE,
             &Theme::dark(),
@@ -7012,7 +7027,6 @@ mod occupancy {
             &crate::ManagerChrome::none(),
             artwork,
         )
-        .expect("frame")
     }
 
     /// The icon kind each tile of a grid render asked artwork for, in order.
@@ -7225,7 +7239,7 @@ mod entry_labels {
         })
         .expect("root");
         browser.set_view_mode(ViewMode::List);
-        crate::render(
+        paint(
             &browser,
             Scale::ONE,
             &Theme::dark(),
@@ -7233,7 +7247,6 @@ mod entry_labels {
             &crate::ManagerChrome::none(),
             &mut NoArtwork,
         )
-        .expect("frame")
     }
 
     #[test]
@@ -7499,7 +7512,7 @@ mod listing_cue {
     }
 
     fn painted<S: DirectorySource>(browser: &Browser<S>) -> Surface {
-        crate::render(
+        paint(
             browser,
             Scale::ONE,
             &Theme::dark(),
@@ -7507,7 +7520,6 @@ mod listing_cue {
             &crate::ManagerChrome::none(),
             &mut NoArtwork,
         )
-        .expect("the view renders")
     }
 
     #[test]

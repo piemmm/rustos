@@ -65,14 +65,18 @@ tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
 tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
 tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
 tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
+# The window channel's client half. The program links its `WindowClient`, but
+# the panel's own repaint decision is the shared `Repaint`/`present_damage`
+# rule every windowed app presents through, so the crate is an ordinary
+# dependency and that decision is host-tested here rather than restated.
+tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
 
 # For the freestanding `Run` binary only: the userland runtime `tairix-rt`
 # (`_start`, canary, panic handler, `mem_map` allocator, `ipc_call`,
 # `ipc_recv`, `port_bind`, the shared-memory and wait-set syscalls,
 # `clock_get`, `cap_query`, `signal`, `signal_intake`, `stderr`), the
-# production `sysinfo` transport seam in `lib/procinfo` (`IpcTransport`), the
-# window-channel client, and the glyph service the font crate reaches through
-# `tairix-rt`. These are pulled in only for the bare-metal targets the program
+# production `sysinfo` transport seam in `lib/procinfo` (`IpcTransport`), and
+# the glyph service the font crate reaches through `tairix-rt`. These are pulled in only for the bare-metal targets the program
 # is actually built for; on the host none of them are linked, and the font
 # crate falls back to its host transport.
 [target.'cfg(target_os = "none")'.dependencies]
@@ -85,7 +89,6 @@ tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
 tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = [
     "program",
 ] }
-tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
 tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"] }
 
 # The screen's and the panel's tests draw and hit-test for real — a wheel

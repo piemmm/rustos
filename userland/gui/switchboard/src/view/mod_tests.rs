@@ -26,8 +26,9 @@ use tairix_controls::{
 use crate::panel::{MIN_WIN_HEIGHT, MIN_WIN_WIDTH};
 
 use super::test_support::{
-    bounds, centre, click, focus_task_row, font, has_ink, key, model, moved, select_task_row,
-    task_id, task_rail_rects, task_row_point, PRESS, RELEASE,
+    bounds, centre, click, focus_task_row, font, has_ink, key, model, moved, pointer, report,
+    select_task_row, shot, task_id, task_rail_rects, task_row_point, unreported_change, PRESS,
+    RELEASE,
 };
 use super::{
     resolve_section_frame, ActionVerdict, Reading, RecoveryControl, Section, Switchboard,
@@ -277,12 +278,12 @@ fn wheel_scrolls_the_active_section() {
     let theme = Theme::dark();
     let mut sb = Switchboard::new(&model());
     let b = bounds();
-    let action = sb.on_pointer(
-        &InputEvent::PointerScrolled { dx: 0, dy: 3 },
+    let action = pointer(
+        &mut sb,
         b,
         Scale::ONE,
         &theme,
-        font(),
+        &InputEvent::PointerScrolled { dx: 0, dy: 3 },
     );
     match action {
         Some(SwitchboardAction::Scrolled { offset }) => assert_eq!(offset, 3),
@@ -415,12 +416,12 @@ fn offsets_are_independent_per_section() {
     let mut sb = Switchboard::new(&model());
     let b = bounds();
     // Scroll Tasks down.
-    sb.on_pointer(
-        &InputEvent::PointerScrolled { dx: 0, dy: 4 },
+    pointer(
+        &mut sb,
         b,
         Scale::ONE,
         &theme,
-        font(),
+        &InputEvent::PointerScrolled { dx: 0, dy: 4 },
     );
     assert_eq!(sb.scroll_offset(), 4);
     // Switching to Jobs shows its own (zero) offset.
@@ -439,12 +440,12 @@ fn section_switch_reclamps_offset_to_new_content() {
     m.system = SystemReport::default();
     let mut sb = Switchboard::new(&m);
     let b = bounds();
-    sb.on_pointer(
-        &InputEvent::PointerScrolled { dx: 0, dy: 6 },
+    pointer(
+        &mut sb,
         b,
         Scale::ONE,
         &theme,
-        font(),
+        &InputEvent::PointerScrolled { dx: 0, dy: 6 },
     );
     sb.select_section(Section::System);
     // Sync against the (empty) System page clamps the offset to zero.
@@ -594,12 +595,12 @@ fn select_section_reranges_the_scroll_for_the_new_section() {
     let b = bounds();
     let mut surface = Surface::new(b.width, b.height).expect("surface");
     // Scroll deep into the long (50-item) Tasks list.
-    sb.on_pointer(
-        &InputEvent::PointerScrolled { dx: 0, dy: 20 },
+    pointer(
+        &mut sb,
         b,
         Scale::ONE,
         &theme,
-        font(),
+        &InputEvent::PointerScrolled { dx: 0, dy: 20 },
     );
     let deep = sb.scroll_offset();
     assert!(deep > 0, "the long list must actually scroll");
@@ -637,12 +638,12 @@ fn selecting_the_shown_section_changes_nothing() {
     let theme = Theme::dark();
     let mut sb = Switchboard::new(&model());
     let b = bounds();
-    sb.on_pointer(
-        &InputEvent::PointerScrolled { dx: 0, dy: 4 },
+    pointer(
+        &mut sb,
         b,
         Scale::ONE,
         &theme,
-        font(),
+        &InputEvent::PointerScrolled { dx: 0, dy: 4 },
     );
     // Move the keyboard off the first item too, so a stray reset would show.
     assert_eq!(key(&mut sb, Key::Named(NamedKey::Down)), None);
@@ -778,12 +779,12 @@ fn set_model_keeps_the_section_the_offset_and_the_focus() {
     for _ in 0..3 {
         assert_eq!(key(&mut sb, Key::Named(NamedKey::Down)), None);
     }
-    sb.on_pointer(
-        &InputEvent::PointerScrolled { dx: 0, dy: 3 },
+    pointer(
+        &mut sb,
         b,
         Scale::ONE,
         &theme,
-        font(),
+        &InputEvent::PointerScrolled { dx: 0, dy: 3 },
     );
     let offset = sb.scroll_offset();
     assert!(offset > 0, "the job list must actually scroll");
@@ -814,12 +815,12 @@ fn set_model_clamps_an_offset_past_the_end_of_a_shorter_list() {
     let mut sb = Switchboard::new(&model());
     let mut surface = Surface::new(b.width, b.height).expect("surface");
     sb.render(&mut surface, b, Scale::ONE, &theme, font());
-    sb.on_pointer(
-        &InputEvent::PointerScrolled { dx: 0, dy: 40 },
+    pointer(
+        &mut sb,
         b,
         Scale::ONE,
         &theme,
-        font(),
+        &InputEvent::PointerScrolled { dx: 0, dy: 40 },
     );
     assert!(
         sb.scroll_offset() > 5,
@@ -854,12 +855,12 @@ fn set_model_to_an_empty_model_stays_valid_and_renderable() {
     for _ in 0..4 {
         assert_eq!(key(&mut sb, Key::Named(NamedKey::Down)), None);
     }
-    sb.on_pointer(
-        &InputEvent::PointerScrolled { dx: 0, dy: 20 },
+    pointer(
+        &mut sb,
         b,
         Scale::ONE,
         &theme,
-        font(),
+        &InputEvent::PointerScrolled { dx: 0, dy: 20 },
     );
     assert!(sb.scroll_offset() > 0);
 
@@ -944,14 +945,11 @@ fn set_model_cannot_complete_a_press_begun_on_the_row_it_replaced() {
     // Arm row 0, refresh under the held pointer, let go. The replacement row
     // sits at the same place, so only the dropped arm can keep the release
     // from selecting it.
-    assert_eq!(
-        sb.on_pointer(&moved(x, y), b, Scale::ONE, &theme, font()),
-        None
-    );
-    assert_eq!(sb.on_pointer(&PRESS, b, Scale::ONE, &theme, font()), None);
+    assert_eq!(pointer(&mut sb, b, Scale::ONE, &theme, &moved(x, y)), None);
+    assert_eq!(pointer(&mut sb, b, Scale::ONE, &theme, &PRESS), None);
     sb.set_model(&model());
 
-    assert_eq!(sb.on_pointer(&RELEASE, b, Scale::ONE, &theme, font()), None);
+    assert_eq!(pointer(&mut sb, b, Scale::ONE, &theme, &RELEASE), None);
     assert_eq!(
         sb.tasks.selected,
         Some(held),
@@ -1051,22 +1049,22 @@ fn offsets_persist_for_the_new_sections() {
     let mut sb = Switchboard::new(&model());
     let b = bounds();
     sb.select_section(Section::Pressure);
-    sb.on_pointer(
-        &InputEvent::PointerScrolled { dx: 0, dy: 2 },
+    pointer(
+        &mut sb,
         b,
         Scale::ONE,
         &theme,
-        font(),
+        &InputEvent::PointerScrolled { dx: 0, dy: 2 },
     );
     assert_eq!(sb.scroll_offset(), 2);
     sb.select_section(Section::Activities);
     assert_eq!(sb.scroll_offset(), 0);
-    sb.on_pointer(
-        &InputEvent::PointerScrolled { dx: 0, dy: 3 },
+    pointer(
+        &mut sb,
         b,
         Scale::ONE,
         &theme,
-        font(),
+        &InputEvent::PointerScrolled { dx: 0, dy: 3 },
     );
     assert_eq!(sb.scroll_offset(), 3);
     sb.select_section(Section::Pressure);
@@ -1253,7 +1251,7 @@ fn content_point(sb: &Switchboard, theme: &Theme) -> (i32, i32) {
 }
 
 fn feed(sb: &mut Switchboard, theme: &Theme, event: &InputEvent) -> Option<SwitchboardAction> {
-    sb.on_pointer(event, bounds(), Scale::ONE, theme, font())
+    pointer(sb, bounds(), Scale::ONE, theme, event)
 }
 
 #[test]
@@ -1577,4 +1575,155 @@ fn model_refresh_changes_the_composition() {
     sb.set_model(&refreshed);
 
     assert_ne!(sb, before, "a re-derived row shows the new reading");
+}
+
+// --- What a round reports, and what it must cover -------------------------
+
+#[test]
+fn a_hover_reports_only_the_row_it_entered() {
+    let theme = Theme::dark();
+    let mut sb = settled(&theme);
+    let row = list_info(&sb, &theme).item_rect(0);
+    let (x, y) = centre(row);
+
+    let damage = report(&mut sb, &moved(x, y));
+
+    assert_eq!(
+        damage.rects(),
+        &[row],
+        "entering a row from nowhere marks that row and nothing else"
+    );
+}
+
+#[test]
+fn a_second_sample_inside_the_same_row_reports_nothing() {
+    let theme = Theme::dark();
+    let mut sb = settled(&theme);
+    let row = list_info(&sb, &theme).item_rect(0);
+    let (x, y) = centre(row);
+    let _ = report(&mut sb, &moved(x, y));
+
+    let damage = report(&mut sb, &moved(x + 1, y));
+
+    assert!(
+        damage.is_empty(),
+        "a motion that crosses no boundary changes no pixel and must report none"
+    );
+}
+
+#[test]
+fn a_hover_that_leaves_one_row_for_the_next_reports_both() {
+    let theme = Theme::dark();
+    let mut sb = settled(&theme);
+    let info = list_info(&sb, &theme);
+    let (first, second) = (info.item_rect(0), info.item_rect(1));
+    let (x, y) = centre(first);
+    let _ = report(&mut sb, &moved(x, y));
+
+    let (x, y) = centre(second);
+    let damage = report(&mut sb, &moved(x, y));
+
+    let mut want = tairix_controls::damage::sink();
+    want.add(first);
+    want.add(second);
+    assert_eq!(
+        damage.rects(),
+        want.rects(),
+        "the row left and the row entered are the two that changed"
+    );
+}
+
+#[test]
+fn every_pixel_a_walk_moves_lies_inside_what_it_reported() {
+    let theme = Theme::dark();
+    for section in Section::ALL {
+        let mut sb = settled(&theme);
+        sb.select_section(section);
+        let _ = painted(&mut sb, &theme);
+
+        let info = list_info(&sb, &theme);
+        let (row0, row1) = (centre(info.item_rect(0)), centre(info.item_rect(1)));
+        let layout = sb.compute_layout(bounds(), Scale::ONE, &theme);
+        let command = centre(sb.band(layout.location, &theme, Scale::ONE).command);
+        let steps = [
+            moved(row0.0, row0.1),
+            PRESS,
+            RELEASE,
+            moved(row1.0, row1.1),
+            InputEvent::PointerScrolled { dx: 0, dy: 2 },
+            moved(command.0, command.1),
+            PRESS,
+            RELEASE,
+        ];
+
+        let mut moved_any = false;
+        for (index, step) in steps.iter().enumerate() {
+            let before = shot(&mut sb);
+            let damage = report(&mut sb, step);
+            let after = shot(&mut sb);
+            assert_eq!(
+                unreported_change(&before, &after, bounds(), &damage),
+                None,
+                "{section:?} step {index} moved a pixel it did not report"
+            );
+            moved_any |= before.pixels() != after.pixels();
+        }
+        assert!(
+            moved_any,
+            "{section:?} drew nothing new for the whole walk, so it proved nothing"
+        );
+    }
+}
+
+#[test]
+fn opening_and_closing_the_section_list_reports_the_pixels_it_covers() {
+    let theme = Theme::dark();
+    let mut sb = settled(&theme);
+    let layout = sb.compute_layout(bounds(), Scale::ONE, &theme);
+    let (x, y) = centre(sb.band(layout.location, &theme, Scale::ONE).command);
+
+    let before = shot(&mut sb);
+    let _ = report(&mut sb, &moved(x, y));
+    let _ = report(&mut sb, &PRESS);
+    let opened = report(&mut sb, &RELEASE);
+    let after = shot(&mut sb);
+    assert!(
+        sb.section_menu.is_some(),
+        "the press opens the section list"
+    );
+    assert_eq!(
+        unreported_change(&before, &after, bounds(), &opened),
+        None,
+        "a popup that has never drawn cannot report itself; the route that opens it must"
+    );
+
+    // A press clear of its rows dismisses it, revealing what it covered.
+    let (x, y) = (bounds().right() - 2, bounds().bottom() - 2);
+    let before = shot(&mut sb);
+    let _ = report(&mut sb, &moved(x, y));
+    let closed = report(&mut sb, &PRESS);
+    let after = shot(&mut sb);
+    assert!(sb.section_menu.is_none(), "the press outside closes it");
+    assert_eq!(
+        unreported_change(&before, &after, bounds(), &closed),
+        None,
+        "the pixels a dismissed popup gives back are the composition's again"
+    );
+}
+
+#[test]
+fn a_scroll_reports_the_whole_list_the_bar_alone_does_not_describe() {
+    let theme = Theme::dark();
+    let mut sb = settled(&theme);
+    let before = shot(&mut sb);
+
+    let damage = report(&mut sb, &InputEvent::PointerScrolled { dx: 0, dy: 2 });
+    let after = shot(&mut sb);
+
+    assert_ne!(sb.scroll_offset(), 0, "the fixture list is scrollable");
+    assert_eq!(
+        unreported_change(&before, &after, bounds(), &damage),
+        None,
+        "every row is drawn somewhere new, not just the scrollbar's thumb"
+    );
 }

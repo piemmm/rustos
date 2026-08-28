@@ -11,7 +11,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::Errno;
-use tairix_browse::{Browser, DirectorySource, Listing};
+use tairix_browse::{Browser, DirectorySource, Entry, Listing};
 
 /// An in-memory directory tree: a path either lists (empty) or is refused.
 pub struct FakeFs {
@@ -60,4 +60,36 @@ impl DirectorySource for FakeFs {
 /// A browser opened at the storage root of [`FakeFs::fixture`].
 pub fn browser() -> Browser<FakeFs> {
     Browser::open_root(FakeFs::fixture()).expect("the fixture root lists")
+}
+
+/// A directory source whose every path lists the same `count` regular files.
+///
+/// The routing fixture above lists only empty directories, which is all a
+/// *where did the browser end up* test needs; a test about what the listing
+/// **draws** needs rows to draw, and enough of them to scroll.
+pub struct FilledFs {
+    count: usize,
+}
+
+impl FilledFs {
+    /// A source whose directories each hold `count` files.
+    #[must_use]
+    pub const fn new(count: usize) -> Self {
+        Self { count }
+    }
+}
+
+impl DirectorySource for FilledFs {
+    fn list(&mut self, _components: &[String]) -> Result<Listing, Errno> {
+        Ok(Listing::Ready(
+            (0..self.count)
+                .map(|i| Entry::file(alloc::format!("file-{i:03}")))
+                .collect(),
+        ))
+    }
+}
+
+/// A browser opened on a directory of `count` files.
+pub fn filled(count: usize) -> Browser<FilledFs> {
+    Browser::open_root(FilledFs::new(count)).expect("the filled root lists")
 }

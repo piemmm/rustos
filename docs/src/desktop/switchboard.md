@@ -84,7 +84,22 @@ most once per wake, and only when what it would draw differs from what it
 last drew — the composition itself, the window's bounds, the active
 theme, and the render scale. A wake that delivered an event but left every
 one of those unchanged, such as a pointer move that crosses no control,
-costs no render and no present. What it carries:
+costs no render and no present.
+
+A present that does happen covers what the wake's control rounds reported and
+no more. The window holds one surface for its whole life, so the render is
+clipped to that rectangle and only those pixels are copied into the shared
+frame: every pixel outside it is the one already on screen. Every control the
+input path reaches reports the rectangle it redraws into one sink the panel
+owns, so hovering a row costs the row it left and the row it entered; a
+composition-wide transition reports what it re-lays instead (a scroll marks the
+content column, a section change the whole client, and opening or dismissing
+the section list the pixels the popup covers). A change no control round could
+describe — a fresh reading, a resize onto a new surface, a desktop appearance
+or density change, or a session that discarded the window's retained pixels —
+marks the whole window, and so does a round that moved something and reported
+nothing, so an under-report can only ever cost pixels rather than leave a stale
+frame. What it carries:
 
 | Section | Source |
 |---|---|

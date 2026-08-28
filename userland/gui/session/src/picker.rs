@@ -29,7 +29,7 @@ use alloc::vec::Vec;
 use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode};
 use tairix_abi::window_ipc::WINDOW_TITLE_MAX;
 use tairix_abi::Errno;
-use tairix_browse::render::{entry_index_at, render, reveal_selection, toolbar_command_at};
+use tairix_browse::render::{entry_index_at, render_into, reveal_selection, toolbar_command_at};
 use tairix_browse::ManagerChrome;
 use tairix_browse::{apply_command, vfs, Browser, DirectorySource, WIN_HEIGHT, WIN_WIDTH};
 use tairix_geometry::Scale;
@@ -467,14 +467,17 @@ fn render_surface<S: DirectorySource>(
     // later change gives it a real cache.
     let w = scale.scale_length(WIN_WIDTH);
     let h = scale.scale_length(WIN_HEIGHT);
-    render(
+    let mut surface = tairix_wm::Surface::new(w, h)?;
+    render_into(
+        &mut surface,
         browser,
         scale,
         theme,
         Rect::new(0, 0, w, h),
         &ManagerChrome::none(),
         &mut NoArtwork,
-    )
+    );
+    Some(surface)
 }
 
 /// Repaint the picker window after a navigation change. A surface that

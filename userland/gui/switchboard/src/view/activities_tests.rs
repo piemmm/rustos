@@ -13,7 +13,7 @@ use super::{ActivityControl, ActivityRow};
 use crate::view::frame::DETAIL_PANE_WIDTH;
 use crate::view::system_data::{reading_text, Reading, Unmeasured};
 use crate::view::test_support::{
-    bounds, centre, click, font, has_ink, key, model, moved, PRESS, RELEASE,
+    bounds, centre, click, font, has_ink, key, model, moved, pointer, PRESS, RELEASE,
 };
 use crate::view::{Section, Switchboard, SwitchboardAction, SwitchboardModel};
 
@@ -553,15 +553,12 @@ fn set_model_cannot_complete_a_press_begun_on_a_replaced_activity_row() {
     sb.render(&mut surface, b, Scale::ONE, &theme, font());
     let (x, y) = activity_button_centre(&sb, b, &theme, 0, 0);
 
-    assert_eq!(
-        sb.on_pointer(&moved(x, y), b, Scale::ONE, &theme, font()),
-        None
-    );
-    assert_eq!(sb.on_pointer(&PRESS, b, Scale::ONE, &theme, font()), None);
+    assert_eq!(pointer(&mut sb, b, Scale::ONE, &theme, &moved(x, y)), None);
+    assert_eq!(pointer(&mut sb, b, Scale::ONE, &theme, &PRESS), None);
     sb.set_model(&model());
 
     assert_eq!(
-        sb.on_pointer(&RELEASE, b, Scale::ONE, &theme, font()),
+        pointer(&mut sb, b, Scale::ONE, &theme, &RELEASE),
         None,
         "a press must not complete against the row that replaced its target"
     );

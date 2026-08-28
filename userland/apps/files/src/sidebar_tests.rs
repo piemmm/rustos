@@ -14,8 +14,11 @@ use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode, PointerButt
 use tairix_abi::window_ipc::{PointerAction, WindowEvent};
 use tairix_browse::render::{sidebar_index_at, sidebar_view, toolbar_command_at};
 use tairix_browse::{Browser, Places, SidebarView, ToolbarCommand, Volume};
-use tairix_geometry::{Point, Rect, Scale};
+use tairix_controls::damage;
+use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_theme::Theme;
+
+use tairix_window::Repaint;
 
 use super::{apply_event, is_refresh_request, press_point, refresh_places, track_hover};
 use crate::test_fs::{browser, FakeFs};
@@ -98,13 +101,49 @@ fn named(code: NamedKeyCode) -> WindowEvent {
     key(KeyValue::Named(code))
 }
 
-/// Route `event` to the rail with this test's window and theme.
+/// Route `event` to the rail with this test's window and theme, discarding
+/// what it reported.
 fn route(
     browser: &mut Browser<FakeFs>,
     places: &mut Places,
     event: &WindowEvent,
 ) -> Option<super::SidebarOutcome> {
-    apply_event(browser, places, Scale::ONE, &Theme::dark(), WINDOW, event)
+    routed(browser, places, event).0
+}
+
+/// Route `event` to the rail, answering the outcome and the rectangles it
+/// reported.
+fn routed(
+    browser: &mut Browser<FakeFs>,
+    places: &mut Places,
+    event: &WindowEvent,
+) -> (Option<super::SidebarOutcome>, Region) {
+    let mut damage = damage::sink();
+    let outcome = apply_event(
+        browser,
+        places,
+        Scale::ONE,
+        &Theme::dark(),
+        WINDOW,
+        event,
+        &mut damage,
+    );
+    (outcome, damage)
+}
+
+/// Track the rail's hover for `event`, answering whether it moved and the
+/// rectangles it reported.
+fn hovered(places: &mut Places, event: &WindowEvent) -> (bool, Region) {
+    let mut damage = damage::sink();
+    let moved = track_hover(
+        places,
+        Scale::ONE,
+        &Theme::dark(),
+        WINDOW,
+        event,
+        &mut damage,
+    );
+    (moved, damage)
 }
 
 #[test]
@@ -118,7 +157,11 @@ fn a_press_on_a_row_focuses_the_rail_and_navigates_to_that_place() {
     let on_apps = press(row_centre(&places, apps));
     let outcome = route(&mut browser, &mut places, &on_apps).expect("the rail owns its own press");
 
-    assert!(outcome.changed);
+    assert_eq!(
+        outcome.repaint,
+        Repaint::Whole,
+        "the listing, the toolbar's enable states, and the rail's own mark all moved"
+    );
     assert_eq!(outcome.refused, None);
     assert_eq!(browser.components(), ["Apps".to_string()]);
     assert!(places.is_focused());
@@ -150,19 +193,19 @@ fn tab_moves_the_focus_between_the_rail_and_the_view_in_both_directions() {
 
     // Into the rail…
     let outcome = route(&mut browser, &mut places, &named(NamedKeyCode::Tab));
-    assert_eq!(outcome, Some(super::SidebarOutcome::quiet(true)));
+    assert_eq!(outcome, Some(super::SidebarOutcome::reported(true)));
     assert!(places.is_focused());
 
     // …and back out again, from the same key.
     let outcome = route(&mut browser, &mut places, &named(NamedKeyCode::Tab));
-    assert_eq!(outcome, Some(super::SidebarOutcome::quiet(true)));
+    assert_eq!(outcome, Some(super::SidebarOutcome::reported(true)));
     assert!(!places.is_focused());
 
     // Escape hands the focus back too, and only while the rail holds it.
     assert!(route(&mut browser, &mut places, &named(NamedKeyCode::Escape)).is_none());
     places.set_focused(true);
     let outcome = route(&mut browser, &mut places, &named(NamedKeyCode::Escape));
-    assert_eq!(outcome, Some(super::SidebarOutcome::quiet(true)));
+    assert_eq!(outcome, Some(super::SidebarOutcome::reported(true)));
     assert!(!places.is_focused());
 }
 
@@ -175,16 +218,20 @@ fn the_arrows_walk_the_rail_and_enter_navigates_to_the_cursor() {
     // Down to Documents (Home, Desktop, Documents).
     assert_eq!(
         route(&mut browser, &mut places, &named(NamedKeyCode::Down)),
-        Some(super::SidebarOutcome::quiet(true))
+        Some(super::SidebarOutcome::reported(true))
     );
     assert_eq!(
         route(&mut browser, &mut places, &named(NamedKeyCode::Down)),
-        Some(super::SidebarOutcome::quiet(true))
+        Some(super::SidebarOutcome::reported(true))
     );
     assert_eq!(places.cursor(), 2);
 
     let outcome = route(&mut browser, &mut places, &named(NamedKeyCode::Enter));
-    assert_eq!(outcome, Some(super::SidebarOutcome::quiet(true)));
+    assert_eq!(
+        outcome.map(|o| o.repaint),
+        Some(Repaint::Whole),
+        "a move replaces the listing, which no rail report describes"
+    );
     assert_eq!(
         browser.components(),
         [
@@ -200,7 +247,7 @@ fn the_arrows_walk_the_rail_and_enter_navigates_to_the_cursor() {
     assert_eq!(places.cursor(), 0);
     assert_eq!(
         route(&mut browser, &mut places, &named(NamedKeyCode::Up)),
-        Some(super::SidebarOutcome::quiet(false))
+        Some(super::SidebarOutcome::QUIET)
     );
 
     // The last row is reachable and clamps at the other end.
@@ -209,7 +256,7 @@ fn the_arrows_walk_the_rail_and_enter_navigates_to_the_cursor() {
     }
     assert_eq!(places.cursor(), places.len() - 1);
     let outcome = route(&mut browser, &mut places, &named(NamedKeyCode::Enter));
-    assert_eq!(outcome, Some(super::SidebarOutcome::quiet(true)));
+    assert_eq!(outcome.map(|o| o.repaint), Some(Repaint::Whole));
     assert_eq!(
         browser.components(),
         ["Storage".to_string(), "Backup".to_string()]
@@ -230,7 +277,7 @@ fn the_rail_takes_only_the_keys_it_owns_and_only_while_it_is_focused() {
     places.set_focused(true);
     assert_eq!(
         route(&mut browser, &mut places, &key(KeyValue::Char('x'))),
-        Some(super::SidebarOutcome::quiet(false))
+        Some(super::SidebarOutcome::QUIET)
     );
     // A key *release* is never the rail's, focused or not.
     let release = WindowEvent::Key {
@@ -254,7 +301,7 @@ fn the_rail_takes_only_the_keys_it_owns_and_only_while_it_is_focused() {
     };
     assert_eq!(
         route(&mut browser, &mut places, &ctrl_tab),
-        Some(super::SidebarOutcome::quiet(false))
+        Some(super::SidebarOutcome::QUIET)
     );
     assert!(places.is_focused());
 }
@@ -278,7 +325,7 @@ fn a_place_that_cannot_be_listed_reports_and_leaves_the_browser_where_it_was() {
 
     // Stated, not silent — and naming the place the user clicked.
     assert_eq!(outcome.refused.as_deref(), Some("could not open Desktop"));
-    assert!(outcome.changed);
+    assert_eq!(outcome.repaint, Repaint::Whole);
     // The browser did not move, and the row now reads disabled.
     assert_eq!(browser.components(), before.as_slice());
     assert!(!places.rows()[desktop].is_available());
@@ -288,12 +335,12 @@ fn a_place_that_cannot_be_listed_reports_and_leaves_the_browser_where_it_was() {
     places.set_cursor(desktop);
     places.set_focused(true);
     let again = route(&mut browser, &mut places, &named(NamedKeyCode::Enter));
-    assert_eq!(again, Some(super::SidebarOutcome::quiet(false)));
+    assert_eq!(again, Some(super::SidebarOutcome::QUIET));
     assert_eq!(browser.components(), before.as_slice());
 }
 
 #[test]
-fn navigating_to_the_place_already_shown_moves_nothing_but_the_focus() {
+fn pressing_the_row_already_marked_changes_and_reports_nothing() {
     let mut browser = browser();
     let mut places = places();
     let apps = places
@@ -302,57 +349,147 @@ fn navigating_to_the_place_already_shown_moves_nothing_but_the_focus() {
     let on_apps = press(row_centre(&places, apps));
     route(&mut browser, &mut places, &on_apps);
 
-    // Pressing the row the browser is already on repaints (the focus and
-    // cursor moved) but refuses nothing and does not re-list.
-    let outcome = route(&mut browser, &mut places, &on_apps);
-    assert_eq!(outcome, Some(super::SidebarOutcome::quiet(true)));
+    // The focus, the cursor, and the browser are all already there, so the
+    // second press moves no pixel and owes no present.
+    let (outcome, damage) = routed(&mut browser, &mut places, &on_apps);
+    assert_eq!(outcome, Some(super::SidebarOutcome::QUIET));
+    assert!(damage.is_empty());
     assert_eq!(browser.components(), ["Apps".to_string()]);
+}
+
+#[test]
+fn a_press_that_only_moves_the_mark_reports_the_rows_it_moved_between() {
+    let mut browser = browser();
+    let mut places = places();
+    let apps = places
+        .index_of(&["Apps".to_string()])
+        .expect("the application root is a fixed row");
+    let on_apps = press(row_centre(&places, apps));
+    route(&mut browser, &mut places, &on_apps);
+    // Put the cursor elsewhere without navigating, so the next press on the
+    // shown row moves the mark and nothing else.
+    places.set_cursor(0);
+    let view = rail(&places);
+    let (first, marked) = (
+        view.row_rect(0).expect("row 0"),
+        view.row_rect(apps).expect("the Apps row"),
+    );
+
+    let (outcome, damage) = routed(&mut browser, &mut places, &on_apps);
+
+    assert_eq!(outcome.map(|o| o.repaint), Some(Repaint::Reported));
+    let mut want = damage::sink();
+    want.add(first);
+    want.add(marked);
+    assert_eq!(damage.rects(), want.rects());
 }
 
 #[test]
 fn the_hover_highlight_follows_the_pointer_and_clears_off_the_rail() {
     let mut places = places();
-    let theme = Theme::dark();
     let width = rail(&places).width();
+    let second = rail(&places).row_rect(1).expect("the rail's second row");
 
     let over_second = motion(row_centre(&places, 1));
-    assert!(track_hover(
-        &mut places,
-        Scale::ONE,
-        &theme,
-        WINDOW,
-        &over_second
-    ));
+    let (moved, damage) = hovered(&mut places, &over_second);
+    assert!(moved);
     assert_eq!(places.hovered(), Some(1));
-    // The same row again is not a change, so it owes no repaint.
-    assert!(!track_hover(
-        &mut places,
-        Scale::ONE,
-        &theme,
-        WINDOW,
-        &over_second
-    ));
+    assert_eq!(
+        damage.rects(),
+        &[second],
+        "entering a row from nowhere marks that row and nothing else"
+    );
 
-    // Leaving the rail clears the highlight.
+    // The same row again is not a change, so it owes no repaint.
+    let (moved, damage) = hovered(&mut places, &over_second);
+    assert!(!moved);
+    assert!(damage.is_empty());
+
+    // Leaving the rail clears the highlight, marking the row it left.
     let outside = Point::new(i32::try_from(width).unwrap_or(0) + 20, 4);
-    assert!(track_hover(
-        &mut places,
-        Scale::ONE,
-        &theme,
-        WINDOW,
-        &motion(outside)
-    ));
+    let (moved, damage) = hovered(&mut places, &motion(outside));
+    assert!(moved);
     assert_eq!(places.hovered(), None);
+    assert_eq!(damage.rects(), &[second]);
 
     // A press is not a motion: the highlight is only ever moved by one.
     let on_first = press(row_centre(&places, 0));
-    assert!(!track_hover(
-        &mut places,
-        Scale::ONE,
-        &theme,
-        WINDOW,
-        &on_first
-    ));
+    let (moved, damage) = hovered(&mut places, &on_first);
+    assert!(!moved);
+    assert!(damage.is_empty());
+}
+
+#[test]
+fn a_hover_that_leaves_one_row_for_the_next_reports_both() {
+    let mut places = places();
+    let view = rail(&places);
+    let (first, second) = (
+        view.row_rect(0).expect("row 0"),
+        view.row_rect(1).expect("row 1"),
+    );
+    let (onto_first, onto_second) = (
+        motion(row_centre(&places, 0)),
+        motion(row_centre(&places, 1)),
+    );
+    let (moved, _) = hovered(&mut places, &onto_first);
+    assert!(moved);
+
+    let (moved, damage) = hovered(&mut places, &onto_second);
+
+    assert!(moved);
+    let mut want = damage::sink();
+    want.add(first);
+    want.add(second);
+    assert_eq!(damage.rects(), want.rects());
+}
+
+#[test]
+fn a_focus_flip_marks_the_whole_rail_because_every_row_redraws() {
+    let mut browser = browser();
+    let mut places = places();
+    let rail_rect = rail(&places).rail_rect();
+
+    let (outcome, damage) = routed(&mut browser, &mut places, &named(NamedKeyCode::Tab));
+
+    assert_eq!(outcome.map(|o| o.repaint), Some(Repaint::Reported));
+    assert!(places.is_focused());
+    assert_eq!(
+        damage.rects(),
+        &[rail_rect],
+        "a rail that holds the keyboard draws every row as a focus-field member"
+    );
+}
+
+#[test]
+fn walking_the_focused_cursor_marks_only_the_two_rows_it_moved_between() {
+    let mut browser = browser();
+    let mut places = places();
+    places.set_focused(true);
+    let view = rail(&places);
+    let (first, second) = (
+        view.row_rect(0).expect("row 0"),
+        view.row_rect(1).expect("row 1"),
+    );
+
+    let (outcome, damage) = routed(&mut browser, &mut places, &named(NamedKeyCode::Down));
+
+    assert_eq!(outcome.map(|o| o.repaint), Some(Repaint::Reported));
+    let mut want = damage::sink();
+    want.add(first);
+    want.add(second);
+    assert_eq!(damage.rects(), want.rects());
+}
+
+#[test]
+fn a_cursor_that_cannot_move_reports_nothing() {
+    let mut browser = browser();
+    let mut places = places();
+    places.set_focused(true);
+
+    let (outcome, damage) = routed(&mut browser, &mut places, &named(NamedKeyCode::Up));
+
+    assert_eq!(outcome, Some(super::SidebarOutcome::QUIET));
+    assert!(damage.is_empty());
 }
 
 #[test]

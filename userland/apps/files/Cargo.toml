@@ -34,9 +34,13 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # `render`, the `VfsDirectorySource` composition, and the canonical
 # browser-view geometry.
 tairix-browse = { path = "../../../lib/browse", version = "=0.0.0" }
-# Shared integer screen geometry (`Point`/`Rect`/`Scale`) for the render
-# viewport, the rail's hit-test, and the inline rename editor's overlay.
+# Shared integer screen geometry (`Point`/`Rect`/`Scale`/`Region`) for the
+# render viewport, the rail's hit-test, the inline rename editor's overlay, and
+# the damage a round reports.
 tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
+# The premultiplied-alpha rasteriser: the window-lifetime `Surface` every frame
+# is drawn into, clipped to what the round reported.
+tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
 # The single shared theme definition every desktop surface resolves from.
 tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
 # The shared text rasteriser: the rail's width and every label are measured in
@@ -55,6 +59,15 @@ tairix-path = { path = "../../../lib/path", version = "=0.0.0" }
 # icon-bar menu convention `src/command.rs` and `src/appbar.rs` are written
 # against. Those two are host-tested, so this is a plain dependency.
 tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
+# The shared Reactive Alloy GUI controls: the in-place rename editor is the one
+# shared `TextField` (its caret/selection editor and validation-message
+# surface), never a browser-private text box — and the one damage sink every
+# reporting round writes into, which the host-tested rail routing needs.
+tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
+# The shared icon vocabulary's draw-site artwork seam: the `ArtworkCache` the
+# grid resolves each tile through, and the empty lookup the host tests paint a
+# listing with.
+tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
 
 # Everything else the freestanding `Run` binary links is pulled in for the
 # bare-metal targets it is actually built for; on the host those parts of the
@@ -69,11 +82,6 @@ tairix-browse = { path = "../../../lib/browse", version = "=0.0.0", features = [
 # surface and the shared frame the desktop session reads, so no app carries a
 # private copy of the channel-order decision.
 tairix-display = { path = "../../../lib/display", version = "=0.0.0" }
-# The shared icon vocabulary's draw-site artwork seam: the reclaim-governed
-# `ArtworkCache` this app builds through the one shared `artwork_cache`
-# constructor, and the `IconArtworkSource` that binds it to the read and
-# rasterise seams the grid resolves each tile through.
-tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
 # The parser sandbox: the icon artwork the grid draws is untrusted input, so it
 # is decoded in a minimum-capability worker this binary re-enters itself as,
 # never in this process.
@@ -82,10 +90,6 @@ tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0", features =
 # so the artwork cache obeys the same band every other cache on the machine
 # does.
 tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = ["program"] }
-# The shared Reactive Alloy GUI controls: the in-place rename editor is the
-# one shared `TextField` (its caret/selection editor and validation-message
-# surface), never a browser-private text box.
-tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
 # The desktop input vocabulary (`Key`/`NamedKey`/`Modifiers`) the shared
 # controls consume; the binary maps the window channel's wire `KeyInput`
 # onto it to drive the rename editor.

@@ -41,6 +41,7 @@ use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 
+use tairix_controls::damage;
 use tairix_controls::{
     ActionRail, ActivityState, Button, ButtonContent, CellAlign, Chart, ComboAction, ComboBox,
     ControlRole, ControlState, HeaderAction, HeaderColumn, Menu, MenuAction, MenuItem,
@@ -955,7 +956,29 @@ impl TasksSection {
 
     /// Select `id` and rebuild everything that depends on which task is
     /// selected: the rows' selection marks and the rail's commands.
-    fn select(&mut self, id: ProcId) {
+    ///
+    /// The mark moves between two rows, and the rail is re-stated for the new
+    /// subject, so those are what the round repainted — reported here because
+    /// only this knows where the mark was and where it went.
+    fn select(&mut self, id: ProcId, ctx: SectionCtx<'_>, damage: &mut Region) {
+        let was = self.selected;
+        if was == Some(id) {
+            return;
+        }
+        let info = self.list_info(&ctx.frame, ctx.scale, ctx.theme);
+        damage::move_mark(
+            was,
+            Some(id),
+            |marked| {
+                (0..info.visible())
+                    .find(|slot| self.id_at_row(ctx.start + *slot as usize) == Some(marked))
+                    .map(|slot| info.item_rect(slot))
+            },
+            damage,
+        );
+        if let Some(rail) = ctx.frame.rail {
+            damage.add(rail);
+        }
         self.selected = Some(id);
         for row in 0..self.entries.len() {
             let selected = self.id_at_row(row) == Some(id);
@@ -1575,12 +1598,18 @@ impl TasksSection {
 
     /// Feed a key to the row the cursor is on: a row is selected, which is
     /// what the rail's commands act on.
-    fn row_on_key(&mut self, row: usize, key: Key) -> Option<SectionOutcome> {
+    fn row_on_key(
+        &mut self,
+        row: usize,
+        key: Key,
+        ctx: SectionCtx<'_>,
+        damage: &mut Region,
+    ) -> Option<SectionOutcome> {
         if !matches!(key, Key::Named(NamedKey::Enter) | Key::Char(' ')) {
             return None;
         }
         let id = self.id_at_row(row)?;
-        self.select(id);
+        self.select(id, ctx, damage);
         None
     }
 
@@ -1903,7 +1932,7 @@ impl SectionView for TasksSection {
             return self.invoke_rail(index);
         }
         let row = self.focused_row()?;
-        self.row_on_key(row, key)
+        self.row_on_key(row, key, ctx, damage)
     }
 
     /// Paint the census tiles the location band seated for this section.
@@ -2056,7 +2085,7 @@ impl SectionView for TasksSection {
             // occupy: a re-sort or re-filter must not move the highlight to
             // whatever row slid into that slot. Choosing a task is also what
             // gives the rail its subject, so the commands are rebuilt for it.
-            self.select(id);
+            self.select(id, ctx, damage);
         }
         None
     }

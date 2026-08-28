@@ -554,8 +554,8 @@ can never diverge in navigation semantics, listing policy, or look.
   and every chrome length — row pitch, tile size, toolbar strip, scrollbar
   gutter, panel and dialog bounds, menu placement — is authored logically and
   converted through that one scale, so the chrome tracks the display density
-  the text does. It paints the current directory
-  into a `lib/raster` `Surface` in the browser's `ViewMode` — list
+  the text does. `render_into` paints the current directory
+  into a caller-owned `lib/raster` `Surface` in the browser's `ViewMode` — list
   entries as shared `lib/controls` `TableRow`s (name/size/modified columns),
   grid entries as shared `IconTile`s, each carrying the icon of its
   registry-classified type above the label and no plate of its own (only a
@@ -564,7 +564,11 @@ can never diverge in navigation semantics, listing policy, or look.
   selected item carrying the shared selection state. The grid paints inside
   `GridView::tile_area`, so a tile can never mark the chrome above it or the
   scrollbar gutter beside it whatever it draws inside its own rectangle.
-  `render`'s trailing `artwork: &mut dyn tairix_icon::IconArtwork` is the
+  The caller owns that surface and holds it for the life of its window, so a
+  repaint clipped to what one round changed (`Surface::with_clip`) leaves the
+  pixels outside the clip standing; `entry_rect` and `item_area` name the
+  rectangles such a round reports. `render_into`'s trailing
+  `artwork: &mut dyn tairix_icon::IconArtwork` is the
   draw-site icon lookup: for each grid tile it is asked for the classified
   `IconKind` at exactly the side `IconTile::icon_side` reserves, and the tile
   blits what it returns or draws the built-in vector glyph when it returns

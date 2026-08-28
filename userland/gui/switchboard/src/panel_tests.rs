@@ -1,6 +1,7 @@
 //! Unit tests for the overview panel's window lifecycle and effect
 //! application, driven entirely through the recording host.
 
+use tairix_abi::driver::display::DamageRect;
 use tairix_abi::switchboard_ipc::{CommandSection, FrameReport, SeatReport, SwitchboardRequest};
 use tairix_abi::sysinfo::ProcessState;
 use tairix_abi::{Errno, SchedPriority, Signal};
@@ -223,22 +224,31 @@ const WINDOW: Rect = Rect::new(0, 0, 600, 400);
 /// geometry, theme metrics, and font metrics, so the offset a test reads
 /// back is the one the user would have.
 fn wheel(panel: &mut Panel, lines: i32) -> u64 {
-    let view = panel.view_mut().expect("the panel is open");
-    view.on_pointer(
+    panel.on_pointer(
         &InputEvent::PointerScrolled { dx: 0, dy: lines },
         WINDOW,
         Scale::ONE,
         &Theme::dark(),
         BitmapFont::console(),
     );
-    view.scroll_offset()
+    scroll_offset(panel)
+}
+
+/// The open composition's scroll offset, read straight off the panel's own
+/// field: these tests are the panel's own module, so no accessor exists for
+/// their sake alone.
+fn scroll_offset(panel: &Panel) -> u64 {
+    panel
+        .view
+        .as_ref()
+        .expect("the panel is open")
+        .scroll_offset()
 }
 
 /// Feed a bare pointer move to the open panel, the way the run loop
 /// delivers a `WindowEvent::Pointer` `Moved` action.
 fn pointer_move(panel: &mut Panel, to: Point) {
-    let view = panel.view_mut().expect("the panel is open");
-    view.on_pointer(
+    panel.on_pointer(
         &InputEvent::PointerMoved { to },
         WINDOW,
         Scale::ONE,
@@ -458,7 +468,8 @@ fn switching_the_section_on_show_redraws() {
     let presents = host.presents;
 
     panel
-        .view_mut()
+        .view
+        .as_mut()
         .expect("the panel is open")
         .select_section(Section::System);
     panel.flush(&mut host);
@@ -478,7 +489,7 @@ fn a_refresh_keeps_the_users_place_and_shows_the_new_reading() {
 
     assert_eq!(panel.section(), Some(Section::Tasks));
     assert_eq!(
-        panel.view_mut().expect("still open").scroll_offset(),
+        scroll_offset(&panel),
         4,
         "a live refresh must not snap the list back to the top"
     );
@@ -919,4 +930,85 @@ fn refreshing_with_an_unchanged_model_then_flushing_presents_nothing() {
     panel.flush(&mut host);
 
     assert_eq!(host.presents, presents);
+}
+
+// --- What a present covers ------------------------------------------------
+
+/// The client rectangle a present would cover in full, as the recording
+/// host's own bounds describe it.
+fn whole_client(host: &RecordingHost) -> DamageRect {
+    DamageRect {
+        x: 0,
+        y: 0,
+        width_px: host.bounds.2,
+        height_px: host.bounds.3,
+    }
+}
+
+#[test]
+fn a_hover_presents_the_control_it_crossed_rather_than_the_window() {
+    let mut host = RecordingHost::new();
+    let mut panel = Panel::new(OWN_PID, busy_model(100));
+    open(&mut panel, &mut host, CommandSection::Tasks);
+    assert_eq!(host.last_presented_rect(), Some(whole_client(&host)));
+
+    pointer_move(&mut panel, Point::new(40, 200));
+    panel.flush(&mut host);
+
+    let rect = host.last_presented_rect().expect("the hover presented");
+    assert!(
+        rect.height_px < host.bounds.3,
+        "a hover repaints the row it entered, not every row: {rect:?}"
+    );
+}
+
+#[test]
+fn a_fresh_reading_presents_the_whole_window() {
+    let mut host = RecordingHost::new();
+    let mut panel = Panel::new(OWN_PID, busy_model(100));
+    open(&mut panel, &mut host, CommandSection::Tasks);
+    pointer_move(&mut panel, Point::new(40, 200));
+    panel.flush(&mut host);
+
+    panel.refresh(busy_model(200));
+    panel.flush(&mut host);
+
+    assert_eq!(
+        host.last_presented_rect(),
+        Some(whole_client(&host)),
+        "every row is re-derived at once, which no control round described"
+    );
+}
+
+#[test]
+fn a_hover_report_does_not_survive_into_the_next_present() {
+    let mut host = RecordingHost::new();
+    let mut panel = Panel::new(OWN_PID, busy_model(100));
+    open(&mut panel, &mut host, CommandSection::Tasks);
+    pointer_move(&mut panel, Point::new(40, 200));
+    panel.flush(&mut host);
+
+    // Nothing reported this time, so the fail-safe covers the window rather
+    // than re-presenting the last round's rectangle.
+    host.theme_id += 1;
+    panel.flush(&mut host);
+
+    assert_eq!(host.last_presented_rect(), Some(whole_client(&host)));
+}
+
+#[test]
+fn discarded_pixels_are_redrawn_whole() {
+    let mut host = RecordingHost::new();
+    let mut panel = Panel::new(OWN_PID, busy_model(100));
+    open(&mut panel, &mut host, CommandSection::Tasks);
+    pointer_move(&mut panel, Point::new(40, 200));
+
+    panel.invalidate_presented();
+    panel.flush(&mut host);
+
+    assert_eq!(
+        host.last_presented_rect(),
+        Some(whole_client(&host)),
+        "the session gave back the whole window's pixels, so the whole window is drawn"
+    );
 }

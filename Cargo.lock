@@ -1425,6 +1425,7 @@ dependencies = [
  "tairix-input",
  "tairix-path",
  "tairix-procinfo",
+ "tairix-raster",
  "tairix-rt",
  "tairix-sandbox",
  "tairix-theme",

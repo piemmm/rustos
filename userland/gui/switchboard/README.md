@@ -96,6 +96,21 @@ scale (`src/panel.rs::Panel::flush`). A wake that delivered an event but
 left every one of those unchanged, such as a pointer move that crosses no
 control, costs no render and no present.
 
+A present that does happen **covers what the wake's control rounds reported**.
+The window holds one surface for its whole life, so the render is clipped to
+that rectangle and only those pixels are copied into the shared frame. Every
+control the input path reaches reports into one damage sink the `Panel` owns —
+which is why input routes through `Panel::on_pointer`/`on_key` rather than
+through the composition, since the panel is what knows the pixels already on
+screen. A composition-wide transition reports what it re-lays (a scroll marks
+the content column, a section change the whole client, opening or dismissing
+the section list the pixels the popup covers, and a Tasks selection the two
+rows plus the command rail it re-states). A change no round could describe —
+a fresh reading, a resize, a desktop appearance or density change, or a session
+that discarded the retained pixels — calls `Panel::repaint_whole`, and so does
+a round that moved something and reported nothing, so an under-report can only
+ever cost pixels rather than leave a stale frame.
+
 | Section | Source |
 |---|---|
 | Tasks | the sampled process list; the row action raises that owner's window, and its `Group` button files the task into an activity |

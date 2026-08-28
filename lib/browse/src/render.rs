@@ -1,6 +1,6 @@
 //! Painting the browser's current directory into a pixel [`Surface`].
 //!
-//! [`render`] turns a [`Browser`]'s path and entries into a premultiplied-alpha
+//! [`render_into`] turns a [`Browser`]'s path and entries into a premultiplied-alpha
 //! [`Surface`] sized to the app's content viewport, using the active theme's
 //! [`Palette`](tairix_theme::Palette) for the chrome and the shared
 //! `lib/controls` collection controls for the items, every length converted
@@ -82,8 +82,13 @@ const ROW_PADDING: u32 = 2;
 /// them once here keeps the column layout a single definition.
 const COLUMNS: [u32; 3] = [240, 96, 128];
 
-/// Paint `browser`'s current directory into a [`Surface`] the size of
-/// `viewport`, using `theme`'s palette and the shared collection controls.
+/// Paint `browser`'s current directory into `surface` at `viewport`'s size,
+/// using `theme`'s palette and the shared collection controls.
+///
+/// The caller owns the surface, and holds it for the life of its window: a
+/// repaint clipped to what a round changed
+/// ([`Surface::with_clip`](tairix_raster::Surface::with_clip)) is sound only
+/// because every pixel outside the clip is the one already on screen.
 ///
 /// `tools` are the manager-only write tools ([`chrome::MANAGER_TOOLS`]) to draw
 /// on the toolbar after the shared read-only commands: the file manager passes
@@ -109,19 +114,16 @@ const COLUMNS: [u32; 3] = [240, 96, 128];
 /// `theme`'s ladder names at that scale — the caller never chooses a typeface.
 ///
 /// Only `viewport`'s dimensions are used; the window manager places the
-/// returned surface at `viewport`'s origin. Returns `None` only when those
-/// dimensions cannot be allocated (a surface that could never exist), so the
-/// caller fails closed rather than panicking.
-#[must_use]
-pub fn render<S: DirectorySource>(
+/// surface at `viewport`'s origin.
+pub fn render_into<S: DirectorySource>(
+    surface: &mut Surface,
     browser: &Browser<S>,
     scale: Scale,
     theme: &Theme,
     viewport: Rect,
     chrome: &ManagerChrome<'_>,
     artwork: &mut dyn IconArtwork,
-) -> Option<Surface> {
-    let mut surface = Surface::new(viewport.width, viewport.height)?;
+) {
     let palette = theme.palette();
 
     surface.fill(palette.surface.into());
@@ -131,13 +133,13 @@ pub fn render<S: DirectorySource>(
         sidebar_view(viewport, scale, theme, chrome.sidebar),
     ) {
         let selected = places.index_of(browser.components());
-        draw_sidebar(&mut surface, scale, theme, places, &view, selected, artwork);
+        draw_sidebar(surface, scale, theme, places, &view, selected, artwork);
     }
     // The toolbar is window chrome: its band spans the full window, above the
     // rail, so it aligns with the rest of the desktop's chrome. Everything
     // below it is laid out in `area`, the window less the rail.
     draw_toolbar(
-        &mut surface,
+        surface,
         scale,
         theme,
         browser,
@@ -149,15 +151,14 @@ pub fn render<S: DirectorySource>(
 
     let content = content_viewport(area, scale, theme);
     if awaiting_listing(browser) {
-        draw_listing_cue(&mut surface, scale, theme, content);
-        return Some(surface);
+        draw_listing_cue(surface, scale, theme, content);
+        return;
     }
     match browser.view_mode() {
-        ViewMode::List => draw_list(&mut surface, scale, theme, browser, content, artwork),
-        ViewMode::Grid => draw_grid(&mut surface, scale, theme, browser, content, artwork),
+        ViewMode::List => draw_list(surface, scale, theme, browser, content, artwork),
+        ViewMode::Grid => draw_grid(surface, scale, theme, browser, content, artwork),
     }
-    draw_scrollbar(&mut surface, scale, theme, browser, area);
-    Some(surface)
+    draw_scrollbar(surface, scale, theme, browser, area);
 }
 
 /// What the listing area says while a directory read is still in flight.
@@ -334,7 +335,7 @@ pub fn content_area(window: Rect, scale: Scale, theme: &Theme, sidebar: Option<&
 /// drawn row.
 ///
 /// Takes the **whole** window, the rectangle [`sidebar_view`] lays the rail out
-/// in; it is the exact inverse of what [`render`] painted, through that one
+/// in; it is the exact inverse of what [`render_into`] painted, through that one
 /// shared geometry.
 #[must_use]
 pub fn sidebar_index_at(
@@ -717,7 +718,7 @@ pub fn entry_label(entry: &Entry) -> String {
 }
 
 /// Height in pixels of one rendered list row, measured on the theme's own body
-/// face at `scale` exactly as [`render`] draws them, so hit-testing and
+/// face at `scale` exactly as [`render_into`] draws them, so hit-testing and
 /// painting can never disagree.
 #[must_use]
 pub fn row_height(scale: Scale, theme: &Theme) -> u32 {
@@ -876,7 +877,7 @@ fn draw_toolbar<S: DirectorySource>(
 /// gutter, on a manager write tool, or on a command the [`ToolbarModel`] has
 /// disabled (fail closed: a disabled tool does not act). It mirrors the
 /// drawn toolbar's own layout so a click resolves to exactly the tool
-/// [`render`] painted. The read-only commands keep the same positions
+/// [`render_into`] painted. The read-only commands keep the same positions
 /// whether or not write tools follow them, so this needs no `tools` argument.
 ///
 /// `window` is the **whole** window, the rectangle the toolbar band spans —
@@ -899,13 +900,13 @@ pub fn toolbar_command_at<S: DirectorySource>(
 
 /// The manager-only write [`ManagerTool`] at window-local pixel `point`, or
 /// `None` when the click is not on one. `tools` is the same set handed to
-/// [`render`] (a read-only picker passes an empty slice and so never resolves a
+/// [`render_into`] (a read-only picker passes an empty slice and so never resolves a
 /// write tool). The full toolbar — read-only commands then the write tools — is
-/// rebuilt so the write tools sit at exactly the positions [`render`] painted
+/// rebuilt so the write tools sit at exactly the positions [`render_into`] painted
 /// them; a hit resolves only in the write-tool index range, so a click
 /// on a read-only command returns `None` here (it is handled by
 /// [`toolbar_command_at`]). `tool_model` is the same enable state handed to
-/// [`render`]: a click on a tool the model has disabled resolves to `None`
+/// [`render_into`]: a click on a tool the model has disabled resolves to `None`
 /// (fail closed — a disabled tool does not act).
 ///
 /// `window` is the **whole** window, the rectangle the toolbar band spans —
@@ -933,7 +934,7 @@ pub fn manager_tool_at<S: DirectorySource>(
 /// [`manager_tool_at`] over the same rebuilt toolbar (read-only commands then
 /// the write tools), so a caller that must aim *at* a write tool — the desktop
 /// integration harness that clicks New Folder — reads the exact geometry
-/// [`render`] paints and [`manager_tool_at`] hit-tests, never a hand-copied
+/// [`render_into`] paints and [`manager_tool_at`] hit-tests, never a hand-copied
 /// position. Fails closed: an out-of-range or unlisted tool is `None`.
 ///
 /// The toolbar left-packs fixed-width buttons and a disabled tool renders in
@@ -1059,7 +1060,7 @@ pub fn reveal_selection<S: DirectorySource>(
 /// current view and scroll offset, or `None` for the toolbar band, an empty
 /// gap, the scrollbar gutter, and any coordinate outside the item area.
 ///
-/// This mirrors [`render`]'s own layout through the shared [`ViewLayout`], so a
+/// This mirrors [`render_into`]'s own layout through the shared [`ViewLayout`], so a
 /// pointer-driven view resolves a click to exactly the item the user saw —
 /// never a re-derived guess. `theme` supplies the same scrollbar gutter width
 /// the renderer reserved.
@@ -1081,7 +1082,7 @@ pub fn entry_index_at<S: DirectorySource>(
 /// drawn in, or `None` when nothing is selected or the selection is scrolled
 /// out of view.
 ///
-/// This is [`render`]'s own layout for the selected entry, through the shared
+/// This is [`render_into`]'s own layout for the selected entry, through the shared
 /// [`ViewLayout`], so an overlay drawn there — the in-place rename editor —
 /// sits exactly over the item the renderer painted. A caller reveals the
 /// selection first (via [`reveal_selection`]) if it needs the rect to be on
@@ -1093,16 +1094,44 @@ pub fn selection_rect<S: DirectorySource>(
     theme: &Theme,
     viewport: Rect,
 ) -> Option<Rect> {
-    let selected = browser.selected_index()?;
+    entry_rect(browser, scale, theme, viewport, browser.selected_index()?)
+}
+
+/// The window-local pixel rectangle entry `index` is drawn in, or `None` when
+/// it is scrolled out of view (or the view seats nothing there).
+///
+/// [`selection_rect`] is this for the selected entry. A host that moves a mark
+/// between two entries — the file manager reporting the row the focus left and
+/// the one it arrived on — needs both rectangles, so the general form is the
+/// definition and the selected one is a call to it.
+#[must_use]
+pub fn entry_rect<S: DirectorySource>(
+    browser: &Browser<S>,
+    scale: Scale,
+    theme: &Theme,
+    viewport: Rect,
+    index: usize,
+) -> Option<Rect> {
     let view = view_layout_for(browser, scale, theme, viewport);
-    view.item_rect(browser.scroll_offset(), selected)
+    view.item_rect(browser.scroll_offset(), index)
+}
+
+/// The window-local pixel rectangle the item area occupies — every entry the
+/// view draws, and nothing else.
+///
+/// A scroll moves every row at once, and a listing change replaces them all,
+/// so this is what such a round repaints. It is the renderer's own content
+/// viewport, so the reported rectangle and the painted one are the same fact.
+#[must_use]
+pub fn item_area(scale: Scale, theme: &Theme, viewport: Rect) -> Rect {
+    content_viewport(viewport, scale, theme)
 }
 
 /// The half-open range of entry indices `browser` currently draws at
 /// `viewport` — the one definition of "what is on screen", whichever view is
 /// active.
 ///
-/// [`render`] iterates exactly this range, so a caller that resolves per-entry
+/// [`render_into`] iterates exactly this range, so a caller that resolves per-entry
 /// state through it (the file manager's folder-occupancy probe,
 /// [`Browser::resolve_occupancy`]) pays for precisely the entries the next
 /// frame paints, and the two can never disagree about which those are.

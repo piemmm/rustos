@@ -21,8 +21,10 @@ use alloc::string::String;
 
 use tairix_abi::switchboard_ipc::{SwitchboardCommand, SwitchboardRequest, TraySummary};
 use tairix_abi::{CapabilityId, CapabilityQuery, Errno, PowerAction, Signal};
+use tairix_geometry::Region;
 use tairix_log::EventId;
 use tairix_procinfo::Transport;
+use tairix_window::Repaint;
 
 use crate::activities::{Activities, Member};
 use crate::derive::{derive_summary, Hysteresis};
@@ -100,12 +102,23 @@ pub trait ServiceHost {
     /// The session's or the kernel's typed refusal.
     fn close_window(&mut self) -> Result<(), Errno>;
 
-    /// Paint `panel` into the open window's surface and present it.
+    /// Paint `panel` into the open window's retained surface and present
+    /// what `repaint` and `damage` name.
+    ///
+    /// A [`Repaint::Reported`] present redraws and copies only the
+    /// rectangle the round's controls reported; the surface is retained for
+    /// the life of the window, so every pixel outside it is the one already
+    /// on screen. An empty report, or [`Repaint::Whole`], covers the window.
     ///
     /// # Errors
     ///
     /// The session's typed refusal, or a surface that could not be built.
-    fn present(&mut self, panel: &mut Switchboard) -> Result<(), Errno>;
+    fn present(
+        &mut self,
+        panel: &mut Switchboard,
+        repaint: Repaint,
+        damage: &Region,
+    ) -> Result<(), Errno>;
 
     /// The render inputs a present would use right now — the window's
     /// client bounds, the active theme, and the render scale — or `None`

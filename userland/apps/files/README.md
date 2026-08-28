@@ -85,6 +85,13 @@ app **parks** on through its wait-set (every accepted event
 authenticated against the kernel-attested session identity the create
 reply named), and the `WindowClient` calls over `ipc_call`.
 
+Each window also holds one drawing `Surface` for its whole life, so a round
+that can say what it moved is redrawn and copied only inside that rectangle —
+every pixel outside it is the one already on screen. The rail's and the
+listing's marks (`sidebar::RailMark`, `listing::ViewMark`) are what say it, and
+every other round presents the whole window, which is the correct answer for a
+listing change, an overlay, a resize, or a re-theme rather than a deferral.
+
 The desktop is asked for first, before anything is sized or painted
 (`WindowClient::desktop`), so the window opens at a size the screen can
 hold, the listing is set at the desktop's own UI density, and a session in
@@ -255,8 +262,16 @@ host-visible `sidebar` module (`cargo test -p tairix-files`) rather than
 in the freestanding `Run` program where no host test could reach it:
 navigation on activation, keyboard traversal in both directions, focus
 toggling, the keys the rail must not steal, the refresh gesture, hover
-tracking, the focus-preserving rebuild, and the refusal path (the exact
-text to state, the row marked unavailable, the browser unmoved).
+tracking, the focus-preserving rebuild, the refusal path (the exact text to
+state, the row marked unavailable, the browser unmoved), and the rectangles
+each round reports — the two rows a hover or cursor move crosses, the whole
+rail on a focus flip, and nothing at all for a sample that crosses no boundary.
+
+The listing's own report is the host-visible `listing` module, proved in both
+directions: every pixel a scripted walk over the view draws differently lies
+inside what that round reported (asserted against a real render of the frame
+before and after), and a focus move reports exactly the two entries it moved
+between while a scroll reports the item area and the bar beside it.
 
 The command-line decision is host-visible for the same reason, in the
 `command` module: the accepted absolute path (collapsed separators and

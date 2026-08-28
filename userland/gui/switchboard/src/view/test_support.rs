@@ -6,7 +6,7 @@
 
 use tairix_abi::{ProcId, PROC_ID_LEN};
 use tairix_font::BitmapFont;
-use tairix_geometry::{Point, Rect, Scale};
+use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
@@ -282,6 +282,35 @@ pub(super) fn card_body_centre(item: Rect, footer: &[Rect]) -> (i32, i32) {
     (x, y)
 }
 
+/// The first pixel of `area` where `before` and `after` differ that `damage`
+/// does not name, or `None` when the report covered every change.
+///
+/// This is the sound half of a damage proof: whatever a round reported, the
+/// present copies only that, so every pixel the round *moved* has to be
+/// inside it or the screen keeps a stale one.
+pub(super) fn unreported_change(
+    before: &Surface,
+    after: &Surface,
+    area: Rect,
+    damage: &Region,
+) -> Option<Point> {
+    (area.top()..area.bottom()).find_map(|y| {
+        (area.left()..area.right()).find_map(|x| {
+            let (xu, yu) = (u32::try_from(x).ok()?, u32::try_from(y).ok()?);
+            (before.get(xu, yu) != after.get(xu, yu) && !damage.contains(Point::new(x, y)))
+                .then_some(Point::new(x, y))
+        })
+    })
+}
+
+/// Paint the screen into a fresh surface the size of the fixture window.
+pub(super) fn shot(sb: &mut Switchboard) -> Surface {
+    let b = bounds();
+    let mut surface = Surface::new(b.width, b.height).expect("surface");
+    sb.render(&mut surface, b, Scale::ONE, &Theme::dark(), font());
+    surface
+}
+
 pub(super) fn has_ink(surface: &Surface, rect: Rect) -> bool {
     (rect.left()..rect.right()).any(|x| {
         (rect.top()..rect.bottom()).any(|y| {
@@ -289,6 +318,21 @@ pub(super) fn has_ink(surface: &Surface, rect: Rect) -> bool {
             surface.get(xu, yu).is_some_and(|p| p.a > 0)
         })
     })
+}
+
+/// Feed one pointer event to the screen and answer the action it produced,
+/// discarding the round's report.
+///
+/// The one place a test that is not about damage builds a sink, so no test
+/// file carries its own.
+pub(super) fn pointer(
+    sb: &mut Switchboard,
+    b: Rect,
+    scale: Scale,
+    theme: &Theme,
+    event: &InputEvent,
+) -> Option<SwitchboardAction> {
+    sb.on_pointer(event, b, scale, theme, font(), &mut damage::sink())
 }
 
 /// Feed a full click (move, press, release) at `(x, y)` and collect the
@@ -303,7 +347,7 @@ pub(super) fn click(
 ) -> alloc::vec::Vec<SwitchboardAction> {
     let mut out = alloc::vec::Vec::new();
     for event in [moved(x, y), PRESS, RELEASE] {
-        if let Some(action) = sb.on_pointer(&event, b, scale, theme, font()) {
+        if let Some(action) = pointer(sb, b, scale, theme, &event) {
             out.push(action);
         }
     }
@@ -314,7 +358,32 @@ pub(super) fn click(
 /// theme — the same screen [`bounds`] and [`click`] use, which is what gives
 /// every control the key reaches the rectangle it is drawn in.
 pub(super) fn key(sb: &mut Switchboard, key: Key) -> Option<SwitchboardAction> {
-    sb.on_key(key, bounds(), Scale::ONE, &Theme::dark(), font())
+    sb.on_key(
+        key,
+        bounds(),
+        Scale::ONE,
+        &Theme::dark(),
+        font(),
+        &mut damage::sink(),
+    )
+}
+
+/// Feed one pointer event to the screen laid out in the fixture window,
+/// answering the rectangles the round reported.
+///
+/// The report is what a damage test is about, so it comes back rather than
+/// being discarded as [`click`] discards it.
+pub(super) fn report(sb: &mut Switchboard, event: &InputEvent) -> Region {
+    let mut damage = damage::sink();
+    sb.on_pointer(
+        event,
+        bounds(),
+        Scale::ONE,
+        &Theme::dark(),
+        font(),
+        &mut damage,
+    );
+    damage
 }
 
 /// Commit `key` on the section the screen is showing, laid out in the

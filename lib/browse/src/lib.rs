@@ -12,10 +12,10 @@
 //!   are transactional and fail closed: the new directory is listed
 //!   *before* any state changes, so a refused or failing read leaves the
 //!   browser exactly where it was.
-//! * [`render()`] paints the toolbar and the (scrolling) entry list into
-//!   a `lib/raster` [`Surface`](tairix_raster::Surface) using the active
-//!   theme's palette and the shared `lib/font` face — the same surface the
-//!   compositor places and rounds.
+//! * [`render_into()`] paints the toolbar and the (scrolling) entry list into
+//!   a caller-owned `lib/raster` [`Surface`](tairix_raster::Surface) using the
+//!   active theme's palette and the shared `lib/font` face — the same surface
+//!   the compositor places and rounds.
 //!
 //! # No `/proc`, no fabrication
 //!
@@ -177,7 +177,7 @@ pub use places::{Place, PlaceKind, Places, Volume, MAX_PLACE_LABEL, WIDEST_FIXED
 pub use progress::{ProgressModel, ProgressOp};
 pub use properties::Properties;
 pub use rename::{validate_new_name, RenameError};
-pub use render::{render, ManagerChrome};
+pub use render::{render_into, ManagerChrome};
 pub use select::Selection;
 pub use sort::{sort_entries, SortDirection, SortKey, SortMode};
 pub use source::{DirectorySource, Listing};

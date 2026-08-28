@@ -1,10 +1,10 @@
 # FIX-DESKTOP-SPEEDUP — Software-compositor and GUI redraw performance
 
-Status: **A done** (less A.4's QEMU hover vertical), **B done**, **C mostly
-done** (C.3 remains for two apps), **D done** (D.5 is a User decision, D.6 an
-unmeasured follow-up), **E.1/E.2 done** (E.3/E.4 frame pacing planned), **H, I,
-J done**. **F** is gated on the F.0 decision and may not land before B–C. **G**
-is kernel work gated on a User decision (§15.7).
+Status: **A done** (less A.4's QEMU hover vertical), **B done**, **C done**,
+**D done** (D.5 is a User decision, D.6 an unmeasured follow-up), **E.1/E.2
+done** (E.3/E.4 frame pacing planned), **H, I, J done**. **F** is gated on the
+F.0 decision and may not land before B–C. **G** is kernel work gated on a User
+decision (§15.7).
 
 Binding under `AGENTS.md` (§3, §15.18). This plan closes the standing
 performance defect that the desktop repaints **orders of magnitude more pixels
@@ -48,28 +48,11 @@ that should not be running is forbidden; Stage F may not land before Stages B–
 
 ---
 
-## The defect that remains
+## What is left
 
-Above the compositor a repaint costs up to three whole-window passes, and one of
-them is the app's to remove:
-
-1. the app re-renders its whole surface (a control's `PartialEq` render gate
-   fails whole-surface),
-2. the app converts and copies every pixel into the shared window frame,
-3. the session decodes and diffs every declared pixel against the window's
-   surface.
-
-`userland/apps/files` and `userland/gui/switchboard` still present
-`DamageRect::full(mode)` on every round, so all three passes run for a single
-pointer sample. C.3 closes (1) and (2) per app; (3) is not the app's to
-shrink — it is `tairix_display::winframe` (Stage J), and it costs what the app
-declares.
-
-The compositor is **not** the bottleneck for an app hover: the session's decode
-returns only the sub-rectangle that genuinely changed, so a full-window
-`DamageRect` already reaches the compositor as the few rows a highlight moved.
-That is why C.3's win is in the app and the session rather than in the
-composite.
+Stages A–E's app-side work is done. What remains is **E.3** (one-shot frame
+pacing in the session), **A.4**'s QEMU hover vertical, and the two gated
+stages: **F** behind the F.0 decision, **G** behind a User decision.
 
 Independently: **every published number is taken from a `--release`/installer
 image.** A dev-profile timing is never quoted as evidence.
@@ -232,8 +215,7 @@ Compositor-local: no ABI change, no app change.
 
 ## Stage C — Repaint the control that changed, not the window
 
-**[C.0, C.1, C.2, C.4b, C.4c, C.5 done; C.3 done for `widgets`, `terminal`,
-`viewer` and `wallpaper`, two apps remain; C.4a withdrawn]**
+**[C.0–C.3, C.4b, C.4c, C.5 done; C.4a withdrawn]**
 
 ### C.0 One region type, in one place  **[done]**
 `tairix_geometry::Region` (`lib/geometry/src/region.rs`) is the one region type;
@@ -320,7 +302,7 @@ over-grabbing only routes further events to a child that ignores them. A
 `#[cfg(test)] fan_pointer` oracle keeps the old delivery as the differential
 reference.
 
-### C.3 Apps present the rect they changed  **[`widgets`, `terminal`, `viewer`, `wallpaper` done; `files`, `switchboard` remain]**
+### C.3 Apps present the rect they changed  **[done]**
 
 No ABI change is required: `lib/window`'s `WindowClient::present` already carries
 a per-present `DamageRect`. The decision is shared, not per-app —
@@ -346,12 +328,12 @@ because the session copies only what a present declares. That safety net is
 reachable (a focus step that finds nowhere to move reports nothing yet answers
 "changed") and is **not** a licence to under-report.
 
-**Every remaining app lands with the same two-directional proof.** A host test
-renders the app before and after every event of a scripted walk over its own
-controls and asserts every changed pixel lies inside what that round reported;
-further tests hold the *tight* direction (a hover reports exactly the widget
-entered, a second sample inside it reports nothing) or the whole thing would
-pass by presenting everything. Each app also needs its host-owned reports (a
+**Every app landed with the same two-directional proof.** A host test renders
+the app before and after every event of a scripted walk over its own controls
+and asserts every changed pixel lies inside what that round reported; further
+tests hold the *tight* direction (a hover reports exactly the widget entered, a
+second sample inside it reports nothing) or the whole thing would pass by
+presenting everything. Each app also carries its host-owned reports (a
 committed value, a focus mark — C.1).
 
 A model refresh that is not a control round (a clock tick, an animation, new
@@ -394,6 +376,30 @@ which is correct and needs no report.
   on screen yet takes the unpremultiply divide path and the compositor's blend
   path for every pixel; the fix is to remove that cliff, never to snap the
   slider to hide it.
+- **`files` reports from *marks*, not control rounds**, for the terminal's
+  reason: its rows, tiles and rail rows are built afresh from the browser's own
+  state each frame, so there is no control to report itself. `sidebar::RailMark`
+  (hover, cursor, keyboard focus) and `listing::ViewMark` (focused entry, scroll
+  offset) are read before a round and reported after it, resolving back to
+  rectangles through the renderer's own geometry — `render::entry_rect`,
+  `SidebarView::row_rect`, `render::item_area` — so the reported rectangle and
+  the painted one are one fact. The painter is `render_into`, into a surface the
+  window owns for its life; the allocating `render` is **deleted**, and the
+  session's picker allocates its own. Every other round is `Repaint::Whole` and
+  that is the *correct* answer, not a deferral: a listing change, an overlay, a
+  toolbar command, a resize, a re-theme each move more than a report could
+  describe. The two conclusions merge (`Whole` wins), so a round that reported a
+  rectangle *and* replaced the listing still covers the window.
+- **`switchboard` already retained its surface and already had the sink** — its
+  sections have reported into `damage::sink()` since C.1 — but the sink was
+  built inside `Switchboard::on_pointer` and dropped. C.3 hoists it to the
+  `Panel`, which is what owns "what is on screen" (the `Presented` record), so
+  the report reaches the present. The composition-wide transitions the controls
+  cannot describe report their own rectangles (a scroll marks the content
+  column, a section change the whole client via the focus sweep, opening or
+  dismissing the section list the popup's rect, and a Tasks selection the two
+  rows plus the rail it re-states); everything else calls `Panel::repaint_whole`.
+  `Switchboard::view_mut` is **deleted**: input routes through the panel.
 
 **Receiver side is already fail-closed and needs no change:** the session's
 `window_presented` refuses a `DamageRect` outside the client's surface, or a
@@ -469,9 +475,10 @@ refresh with the same final state; the docs in
 `plans/GUI-CONTROLS-DESIGN.md`, `lib/controls/README.md`, `lib/geometry`'s
 rustdoc and `docs/src/desktop/`).
 
-**Remaining, per app as C.3 lands for it:** the two-directional differential
-proof above, plus a whole present asserted for a resize, a theme change, or a
-round that reported nothing.
+Per app, the two-directional differential proof above landed with its C.3, plus
+a whole present asserted for a resize, a theme change, or a round that reported
+nothing (`files`: `sidebar_tests.rs` + `listing_tests.rs`; `switchboard`:
+`view/mod_tests.rs` + `panel_tests.rs`).
 
 **Acceptance:** the A.4 hover vertical's damaged-pixel counter drops from
 window-area to control-area; every existing control and WM test still passes
@@ -915,10 +922,12 @@ two callers re-freeze now, both compressed-tier batches that move several pages
 at once and report no list: the ramzip warm/cluster restore and the
 direct-reclaim compress-out sweep. Detail: `docs/src/architecture/memory.md`.
 
-**What this does not close:** the remaining desktop cost of an app-owned popup
-window is the app's own whole-surface repaint (C.3) and the session's decode of
-it. Moving menus out of apps altogether is `plans/NEW-MENUS.md`, an
-architectural change rather than a performance one now that this is fixed.
+**What this does not close:** an app-owned popup window still costs the app's
+own repaint and the session's decode of it. C.3 makes both cost the rectangle a
+round reported rather than the window, but a *newly opened* popup has no prior
+frame to differ from and so always costs its whole surface. Moving menus out of
+apps altogether is `plans/NEW-MENUS.md`, an architectural change rather than a
+performance one now that this is fixed.
 
 ---
 

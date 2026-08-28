@@ -554,11 +554,14 @@ read-only picker composes the same engine and never launches.
 
 ### Rendering
 
-`render(browser, theme, font, viewport, tools, tool_model, artwork)` paints a
-command toolbar strip
-and the current directory into a `tairix-raster` `Surface` sized to
-the viewport, in whichever of the two views the browser holds
-(`ViewMode::List` or `ViewMode::Grid`). The **file manager opens on the icon
+`render_into(surface, browser, theme, font, viewport, tools, tool_model,
+artwork)` paints a command toolbar strip
+and the current directory into a caller-owned `tairix-raster` `Surface` the
+size of the viewport, in whichever of the two views the browser holds
+(`ViewMode::List` or `ViewMode::Grid`). The caller holds that surface for the
+life of its window, which is what makes a repaint clipped to the rectangles one
+round reported sound: every pixel outside the clip is the one already on
+screen. The **file manager opens on the icon
 grid** and its toolbar toggle switches to the list; the engine's own default
 and the trusted file picker stay `List`, since a chooser wants names, sizes
 and dates rather than tiles. `tools` is the manager-only
@@ -660,6 +663,35 @@ The surface is rectangular; the compositor places and rounds it through its
 single anti-aliased rounded-corner path, so there is no rounding in the app.
 Every length saturates so a degenerate viewport paints what it can rather than
 panicking (`AGENTS.md` §2.9).
+
+#### A repaint costs what changed, not a window
+
+The window holds one surface for its whole life, so a round that can say what
+it moved is redrawn and copied only inside that rectangle: every pixel outside
+it is the one already on screen, and the shared frame region holds the same.
+
+Nothing in the view is a retained control — every row, tile, and rail row is
+built afresh from the browser's own state each frame — so what a round moved is
+the difference between two readings of that state. `sidebar::RailMark` is the
+rail's (its hover, its cursor, and whether it holds the keyboard) and
+`listing::ViewMark` the listing's (the focused entry and the scroll offset);
+each resolves back to rectangles through the renderer's own geometry
+(`render::entry_rect`, `SidebarView::row_rect`, `render::item_area`), so the
+reported rectangle and the painted one are the same fact. Sliding the pointer
+down the rail costs the row it left and the row it entered; a second sample
+inside one row costs nothing at all. A scroll draws every entry somewhere new
+and moves the bar's thumb with them, so it marks the item area and the gutter.
+A focus flip on the rail marks the whole rail, because a rail that holds the
+keyboard draws every row as a member of the focus field.
+
+Every other round presents the **whole** window, and that is the correct
+answer rather than a deferral: replacing the listing, opening or dismissing an
+overlay, running a toolbar command, a resize onto a fresh surface, and a
+desktop re-theme each move more than any report could describe. A round that
+reported *some* rectangles and also did one of those covers the window too —
+the two conclusions are merged, never traded — and a round that changed
+something and reported nothing at all still covers the window, so an
+under-report can only ever cost pixels, never leave a stale frame.
 
 ### Folder occupancy
 

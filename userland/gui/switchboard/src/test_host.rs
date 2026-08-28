@@ -8,6 +8,7 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
 use tairix_abi::switchboard_ipc::{SwitchboardRequest, TraySummary};
 use tairix_abi::sysinfo::{
     ProcessListRequest, ProcessRecord, ProcessState, SysinfoQueryId, SysinfoRequestHeader,
@@ -15,7 +16,9 @@ use tairix_abi::sysinfo::{
 use tairix_abi::{
     CapabilityId, CapabilityQuery, Errno, PowerAction, ProcId, SchedPriority, Signal,
 };
+use tairix_geometry::Region;
 use tairix_procinfo::Transport;
+use tairix_window::{present_damage, Repaint};
 
 use crate::sample::{DegradedField, ProcessSummary, Sample};
 use crate::service::{RenderInputs, ServiceHost};
@@ -220,6 +223,9 @@ pub(crate) struct RecordingHost {
     pub(crate) closed: usize,
     /// Frames presented.
     pub(crate) presents: usize,
+    /// The rectangle each present covered, in order — `None` for a present
+    /// that named nothing at all.
+    pub(crate) presented_rects: Vec<Option<DamageRect>>,
     /// Every owner-directed request attempted, in order.
     pub(crate) requests: Vec<SwitchboardRequest>,
     /// Every summary publish attempted, in order.
@@ -268,6 +274,7 @@ impl RecordingHost {
             opened: 0,
             closed: 0,
             presents: 0,
+            presented_rects: Vec::new(),
             requests: Vec::new(),
             published: Vec::new(),
             signals: Vec::new(),
@@ -291,6 +298,24 @@ impl RecordingHost {
     /// The wait-set members currently armed.
     pub(crate) fn armed(&self) -> &[WaitToken] {
         &self.armed
+    }
+
+    /// The surface a present would be shaped as, from the client bounds a
+    /// test set — so a recorded damage rectangle is clipped exactly as the
+    /// production host would clip it.
+    fn mode(&self) -> DisplayMode {
+        DisplayMode {
+            width_px: self.bounds.2,
+            height_px: self.bounds.3,
+            stride_bytes: self.bounds.2.saturating_mul(4),
+            format: DisplayFormat::Rgba8888,
+        }
+    }
+
+    /// The rectangle the last present covered, or `None` when it named
+    /// nothing or nothing has been presented.
+    pub(crate) fn last_presented_rect(&self) -> Option<DamageRect> {
+        self.presented_rects.last().copied().flatten()
     }
 
     /// The actions whose refusals were stated, in order.
@@ -318,11 +343,18 @@ impl ServiceHost for RecordingHost {
         Ok(())
     }
 
-    fn present(&mut self, _panel: &mut Switchboard) -> Result<(), Errno> {
+    fn present(
+        &mut self,
+        _panel: &mut Switchboard,
+        repaint: Repaint,
+        damage: &Region,
+    ) -> Result<(), Errno> {
         if let Some(refusal) = self.present_refusal {
             return Err(refusal);
         }
         self.presents += 1;
+        self.presented_rects
+            .push(present_damage(&self.mode(), repaint, damage));
         Ok(())
     }
 

@@ -7974,23 +7974,18 @@ app's menu shell, M3 the plate becomes a cached damage-reporting surface.
 
 ---
 
-## FIX-DESKTOP-SPEEDUP — desktop redraw speed without hardware acceleration (`plans/FIX-DESKTOP-SPEEDUP.md`)  **[A DONE, B DONE, C MOSTLY DONE, D DONE, E.1+E.2 DONE, H DONE, I DONE, J DONE]**
+## FIX-DESKTOP-SPEEDUP — desktop redraw speed without hardware acceleration (`plans/FIX-DESKTOP-SPEEDUP.md`)  **[A DONE, B DONE, C DONE, D DONE, E.1+E.2 DONE, H DONE, I DONE, J DONE]**
 
 **Dependencies:** Stage 7 (compositor, taskbar, controls). Independent of
 `plans/FIX-DISPLAY-ACCELERATION.md` — that is the hardware half; this is
 the software path, which stays the mandatory fallback on every target
 (§17.3) and is what a backdrop-blur frame always takes.
 
-**The defect that remains.** A pointer-motion sample over a control-rich
-window still costs three whole-window passes above the compositor: the app
-re-renders its whole surface, converts and copies every pixel into the
-shared frame, and the session decodes and diffs every one of them. The
-compositor itself is *not* the bottleneck here — the session's decode already
-compares each presented pixel with what is there and reports only the
-sub-rectangle that genuinely changed — so the waste is entirely upstream, and
-closing it needs each app to present the rectangles it changed (C.3), which
-has landed for `userland/apps/{widgets,terminal,viewer,wallpaper}` and remains
-for `files` and `switchboard`.
+**What is left.** The app-side work of Stages A–E is done: every windowed app
+holds its surface for the window's life and presents the rectangles a round
+reported. What remains is E.3 (one-shot frame pacing in the session), A.4's
+QEMU hover vertical, and the two gated stages — F behind decision 1 below, G
+behind decision 3.
 
 **Staged (detail in the plan; do not duplicate it here, §13):**
 
@@ -8020,9 +8015,7 @@ for `files` and `switchboard`.
   cannot name a pixel type without closing the cycle `abi → raster →
   theme/reclaim → abi`). Bit-identity is proven by composing each scene
   twice, with the copy path on and off, and comparing bytes.
-- **C — repaint the control, not the window. [C.0, C.1, C.2, C.4b, C.4c, C.5
-  done; C.3 done for `widgets`, `terminal`, `viewer` and `wallpaper`, two apps
-  remain; C.4a withdrawn]**
+- **C — repaint the control, not the window. [done; C.4a withdrawn]**
   `tairix_geometry::Region` is the one
   region type (pairwise-disjoint band-canonical rectangles, a linear merge
   walk, an optional rectangle budget), and the WM's private copy is deleted;
@@ -8047,16 +8040,22 @@ for `files` and `switchboard`.
   batch instead of once per sample (as do the keyboard and pinboard drains),
   and C.4a is **withdrawn**:
   building a `BitmapFont` is a theme read and arithmetic — no lock, client
-  call or cache lookup — so hoisting it cannot buy measurable time. The viewer
-  and the wallpaper chooser now hold their window surface for the window's
-  life, clip each round's draw to what its controls reported and present that
-  rectangle; the chooser also reports the single tile a sandbox-rendered
-  thumbnail fills, so filling its grid costs one square per artwork rather
-  than one window. Remaining: the two apps that still present their whole
-  surface — `files` (whose `lib/browse` renderer allocates the surface it
-  returns, so the retained-surface step is a shared-engine change) and
-  `switchboard` (whose level-triggered `Panel::flush` decouples the reporting
-  round from the present, so the region must accumulate in the panel).
+  call or cache lookup — so hoisting it cannot buy measurable time. Every
+  windowed app now holds its surface for the window's life, clips each round's
+  draw to what it reported and presents that rectangle; the wallpaper chooser
+  also reports the single tile a sandbox-rendered thumbnail fills, so filling
+  its grid costs one square per artwork rather than one window. `files` and
+  `switchboard` closed last. `lib/browse`'s renderer became `render_into` over
+  a caller-owned surface (the allocating `render` is deleted; the session's
+  picker allocates its own), and because the file view retains no controls —
+  every row, tile and rail row is rebuilt from browser state each frame — its
+  report is a *mark* diff like the terminal's cell diff: `sidebar::RailMark`
+  and `listing::ViewMark`, resolved back to rectangles through the renderer's
+  own geometry. The switchboard's sink moved from inside
+  `Switchboard::on_pointer` (where it was dropped) up to the `Panel` that owns
+  the last-presented record, so the report survives to the level-triggered
+  flush; `Switchboard::view_mut` is deleted and input routes through the
+  panel.
 - **D — blur costs what it changes. [D.1–D.4 and D.7–D.12 done; D.5 is
   decision 2 below; D.6 is an unmeasured follow-up]** A frosted window's
   backdrop is retained

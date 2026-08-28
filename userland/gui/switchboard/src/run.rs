@@ -63,7 +63,7 @@
 // `tairix-rt`) never enter those builds.
 #[cfg(all(freestanding, feature = "program"))]
 mod program {
-    use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
+    use tairix_abi::driver::display::{DisplayFormat, DisplayMode};
     use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode, PointerButtonCode};
     use tairix_abi::reply::decode_status_reply;
     use tairix_abi::switchboard_ipc::{
@@ -77,7 +77,7 @@ mod program {
     };
     use tairix_display::{winframe, SERIAL};
     use tairix_font::BitmapFont;
-    use tairix_geometry::{Rect, Scale};
+    use tairix_geometry::{Rect, Region, Scale};
     use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
     use tairix_log::{
         log, Event as LogEvent, Field as LogField, FieldValue as LogFieldValue, Level as LogLevel,
@@ -91,7 +91,10 @@ mod program {
         SESSION_REFUSED, WIN_HEIGHT, WIN_SIZING, WIN_WIDTH,
     };
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
-    use tairix_window::{pointer_point, Desktop, WindowClient, WindowFrames, WindowTransport};
+    use tairix_window::{
+        pointer_point, present_damage, Desktop, Repaint, WindowClient, WindowFrames,
+        WindowTransport,
+    };
 
     /// Frames in the shared region. The window protocol serialises a
     /// present (the app is parked in the call while the session reads), so
@@ -402,7 +405,12 @@ mod program {
             closed
         }
 
-        fn present(&mut self, panel: &mut Switchboard) -> Result<(), Errno> {
+        fn present(
+            &mut self,
+            panel: &mut Switchboard,
+            repaint: Repaint,
+            damage: &Region,
+        ) -> Result<(), Errno> {
             let bounds = self.bounds().ok_or(Errno::NotFound)?;
             let Self {
                 client,
@@ -412,21 +420,35 @@ mod program {
                 ..
             } = self;
             let window = window.as_mut().ok_or(Errno::NotFound)?;
+            // A region the session released holds none of the pixels a partial
+            // present would leave standing, so it is re-attached and drawn
+            // whole.
+            let repaint = if window.frames.is_released() {
+                Repaint::Whole
+            } else {
+                repaint
+            };
+            let Some(rect) = present_damage(&window.mode, repaint, damage) else {
+                return Ok(());
+            };
             themes.set_appearance(desktop.appearance());
             let theme = themes.active();
-            panel.render(
-                &mut window.surface,
-                bounds,
-                desktop.scale(),
-                theme,
-                panel_font(theme, desktop.scale()),
-            );
-            let damage = DamageRect::full(&window.mode);
+            window
+                .surface
+                .with_clip(rect.x, rect.y, rect.width_px, rect.height_px, |surface| {
+                    panel.render(
+                        surface,
+                        bounds,
+                        desktop.scale(),
+                        theme,
+                        panel_font(theme, desktop.scale()),
+                    );
+                });
             let pixels = client
                 .frame_pixels(&mut window.frames, window.id, FRAME_COUNT, &window.mode)
                 .ok_or(Errno::NotAttached)?;
-            winframe::encode(&window.surface, pixels, &window.mode, damage, &SERIAL)?;
-            client.present(window.id, 0, damage)
+            winframe::encode(&window.surface, pixels, &window.mode, rect, &SERIAL)?;
+            client.present(window.id, 0, rect)
         }
 
         fn render_inputs(&self) -> Option<RenderInputs> {
@@ -612,9 +634,9 @@ mod program {
         let bounds = host.bounds()?;
         let theme = host.themes.active();
         let font = panel_font(theme, host.desktop.scale());
-        let view = service.panel_mut().view_mut()?;
+        let panel = service.panel_mut();
         let at = pointer_point(x, y);
-        let moved = view.on_pointer(
+        let moved = panel.on_pointer(
             &InputEvent::PointerMoved { to: at },
             bounds,
             host.desktop.scale(),
@@ -623,7 +645,7 @@ mod program {
         );
         let acted = match action {
             PointerAction::Moved => None,
-            PointerAction::Pressed(code) => view.on_pointer(
+            PointerAction::Pressed(code) => panel.on_pointer(
                 &InputEvent::PointerPressed {
                     button: to_button(code),
                 },
@@ -632,7 +654,7 @@ mod program {
                 theme,
                 font,
             ),
-            PointerAction::Released(code) => view.on_pointer(
+            PointerAction::Released(code) => panel.on_pointer(
                 &InputEvent::PointerReleased {
                     button: to_button(code),
                 },
@@ -652,8 +674,9 @@ mod program {
         let bounds = host.bounds()?;
         let theme = host.themes.active();
         let font = panel_font(theme, host.desktop.scale());
-        let view = service.panel_mut().view_mut()?;
-        view.on_key(key, bounds, host.desktop.scale(), theme, font)
+        service
+            .panel_mut()
+            .on_key(key, bounds, host.desktop.scale(), theme, font)
     }
 
     /// Feed one wheel gesture to the composition.
@@ -666,8 +689,7 @@ mod program {
         let bounds = host.bounds()?;
         let theme = host.themes.active();
         let font = panel_font(theme, host.desktop.scale());
-        let view = service.panel_mut().view_mut()?;
-        view.on_pointer(
+        service.panel_mut().on_pointer(
             &InputEvent::PointerScrolled { dx, dy },
             bounds,
             host.desktop.scale(),
@@ -701,6 +723,9 @@ mod program {
                 ..
             } => {
                 host.resize(width_px, height_px);
+                // The re-mapped region and the fresh drawing surface hold none
+                // of the last frame's pixels, so nothing partial can stand.
+                service.panel_mut().repaint_whole();
                 return;
             }
             // Nobody can see the window, so the session gave its copy of the
@@ -711,6 +736,7 @@ mod program {
                 if let Some(window) = host.window.as_mut() {
                     window.frames.release();
                 }
+                service.panel_mut().repaint_whole();
                 return;
             }
             WindowEvent::Key {
@@ -744,6 +770,9 @@ mod program {
                     Ok(true) => {
                         let appearance = host.desktop.appearance();
                         host.themes.set_appearance(appearance);
+                        // A new appearance, density, or screen re-draws every
+                        // pixel; no control round could have described it.
+                        service.panel_mut().repaint_whole();
                     }
                     Ok(false) => {}
                     Err(err) => {

@@ -24,8 +24,8 @@ use crate::panel::{WIN_HEIGHT, WIN_WIDTH};
 use crate::view::frame::resolve_section_frame;
 use crate::view::tasks::TasksSection;
 use crate::view::test_support::{
-    centre, click, focus_task_row, font, has_ink, key, model, moved, select_task_row, task_id,
-    task_rail_rects, task_row_point, PRESS, RELEASE,
+    centre, click, focus_task_row, font, has_ink, key, model, moved, pointer, select_task_row,
+    task_id, task_rail_rects, task_row_point, PRESS, RELEASE,
 };
 use crate::view::{
     ActionVerdict, Section, SectionView, Switchboard, SwitchboardAction, SwitchboardModel,
@@ -1169,7 +1169,7 @@ fn row_pointer(sb: &Switchboard, row: usize) -> PointerState {
 fn hover_row(sb: &mut Switchboard, b: Rect, theme: &Theme, row: usize) {
     let (x, y) = task_row_point(sb, b, Scale::ONE, theme, row);
     assert_eq!(
-        sb.on_pointer(&moved(x, y), b, Scale::ONE, theme, font()),
+        pointer(sb, b, Scale::ONE, theme, &moved(x, y)),
         None,
         "moving onto a row asks for nothing"
     );
@@ -1198,7 +1198,7 @@ fn a_refresh_drops_a_press_begun_on_a_row() {
     let mut sb = Switchboard::new(&m);
     let (b, theme) = (bounds(), Theme::dark());
     hover_row(&mut sb, b, &theme, 2);
-    assert_eq!(sb.on_pointer(&PRESS, b, Scale::ONE, &theme, font()), None);
+    assert_eq!(pointer(&mut sb, b, Scale::ONE, &theme, &PRESS), None);
     assert_eq!(row_pointer(&sb, 2), PointerState::Pressed);
 
     sb.set_model(&m);
@@ -1261,7 +1261,7 @@ fn a_refresh_keeps_the_filter_tab_under_the_pointer_lit() {
     let untouched = sb.tasks.filters.clone();
     let (x, y) = filter_tab_point(&sb, b, &theme, 1);
     assert_eq!(
-        sb.on_pointer(&moved(x, y), b, Scale::ONE, &theme, font()),
+        pointer(&mut sb, b, Scale::ONE, &theme, &moved(x, y)),
         None,
         "moving onto a filter tab asks for nothing"
     );
@@ -1282,15 +1282,12 @@ fn a_refresh_does_not_swallow_a_click_begun_on_a_filter_tab() {
     let mut sb = Switchboard::new(&m);
     let (b, theme) = (bounds(), Theme::dark());
     let (x, y) = filter_tab_point(&sb, b, &theme, 1);
-    assert_eq!(
-        sb.on_pointer(&moved(x, y), b, Scale::ONE, &theme, font()),
-        None
-    );
-    assert_eq!(sb.on_pointer(&PRESS, b, Scale::ONE, &theme, font()), None);
+    assert_eq!(pointer(&mut sb, b, Scale::ONE, &theme, &moved(x, y)), None);
+    assert_eq!(pointer(&mut sb, b, Scale::ONE, &theme, &PRESS), None);
 
     sb.set_model(&m);
 
-    assert_eq!(sb.on_pointer(&RELEASE, b, Scale::ONE, &theme, font()), None);
+    assert_eq!(pointer(&mut sb, b, Scale::ONE, &theme, &RELEASE), None);
     assert_eq!(
         sb.tasks.filters.selected(),
         Some(1),
@@ -1308,15 +1305,12 @@ fn press_rail_command(
     refresh: Option<&SwitchboardModel>,
 ) -> Option<SwitchboardAction> {
     let (x, y) = centre(task_rail_rects(sb, b, Scale::ONE, theme)[index]);
-    assert_eq!(
-        sb.on_pointer(&moved(x, y), b, Scale::ONE, theme, font()),
-        None
-    );
-    assert_eq!(sb.on_pointer(&PRESS, b, Scale::ONE, theme, font()), None);
+    assert_eq!(pointer(sb, b, Scale::ONE, theme, &moved(x, y)), None);
+    assert_eq!(pointer(sb, b, Scale::ONE, theme, &PRESS), None);
     if let Some(model) = refresh {
         sb.set_model(model);
     }
-    sb.on_pointer(&RELEASE, b, Scale::ONE, theme, font())
+    pointer(sb, b, Scale::ONE, theme, &RELEASE)
 }
 
 #[test]
