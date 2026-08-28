@@ -839,6 +839,16 @@ rebuildable, non-authoritative state, in-place update never risks the
 authoritative trees, and a read-only mount skips it entirely — it builds no
 allocation state at all (`arxfs-spec.md` §4).
 
+The first mutation after a clean sync stages an invalid stamp with the
+authoritative transaction blocks, so the commit's existing barrier makes that
+stamp durable before any in-place map page can land. Map pages remain in the
+bounded cache between commits, then move into the same dirty set for bounded
+run writes at `fs_sync`; that sync issues one barrier before restoring the
+clean generation stamp. A page evicted earlier uses the same set and cannot be
+written until invalidation is durable. A failed page write or sync barrier
+invalidates the in-memory derivation; the next allocating operation rebuilds it
+from the committed trees before proceeding.
+
 ## Copy-on-write and the superblock ring
 
 `arxfs` keeps metadata and data consistent across a crash without
@@ -869,11 +879,11 @@ in place**:
   therefore drains the blocks it wrote, issues one `Block::flush()`, and
   only then writes the slot — one barrier is sufficient, because the root
   is just another block that must be durable before the slot naming it.
-  When a commit returns, the only blocks a device may still hold in its
-  cache are that slot's two copies, so a power cut at any instant selects
-  the prior committed state or the new one, both whole. A second barrier
-  is issued only for an explicit `fs_sync`, where the commit itself must
-  have reached media before the call returns.
+  When a commit returns, the only authoritative blocks a device may still hold
+  are that slot's two copies, so a power cut selects the prior committed state
+  or the new one, both whole. An explicit `fs_sync` drains rebuildable map
+  pages and issues one further barrier, making them and the slot durable before
+  it returns.
 - **The commit point is one block write.** The slot's two mirror copies go
   out companion-first, so the *primary* — the copy a mount prefers — is the
   last write of the commit and a half-written pair publishes nothing.
@@ -883,25 +893,26 @@ in place**:
   guessing, freeing nothing, so whichever root the device holds survives
   for the next mount to read.
 - **One dirty layer, beneath the one device-write seam.** A transaction's
-  sealed blocks wait in a physical-block-keyed dirty set until that drain,
+  sealed blocks and allocation-map pages use a physical-block-keyed dirty set,
+  separated into pre- and post-barrier ordering phases,
   so the repeated copy-on-writes of one B-tree node cost one device write
   rather than one each — measured at 746 device writes down to 158 for a
   64 KiB write on a 512-byte volume. The set is read-through, so a
   read-after-write inside the transaction sees the staged bytes; it drops a
-  block the transaction frees again unwritten; and it holds nothing between
-  operations, so its footprint is the operation's working set and never the
-  volume's. Blocks that are not part of a transaction's published state —
-  the rebuildable allocation-map region, the transient verification scratch
-  arrays, an idempotent mirror copy-repair — go straight to the device,
-  having nothing to be ordered behind the barrier.
+  block the transaction frees again unwritten. Resident map pages move into
+  the set instead of remaining as a second copy; their drain window is bounded
+  below the cache footprint. Transient verification scratch arrays and an
+  idempotent mirror copy-repair go straight to the device because neither
+  participates in publication.
 - **The drain hands the device runs, not blocks.** Data blocks are allocated
   consecutively and mirrored metadata blocks are adjacent pairs, so the
   set's ascending order gathers into contiguous runs and each run is one
   `write_blocks` — bounded by the same 64 KiB transfer window the read path
   gathers to, from the one shared definition. Those same 158 blocks now cost
-  **five** commands rather than 158, and an empty-file create costs three
-  rather than fourteen; the bytes are untouched, only the commands and their
-  completion waits fall. A run stops at the first address the set does not
+  **five** commands rather than 158, and an empty-file create after a clean
+  mkfs costs four commands for fifteen blocks; the bytes are otherwise
+  untouched, only the commands and their completion waits fall. A run stops at
+  the first address the set does not
   hold, so it can never name a block outside the transaction or run past the
   end of the device. The gather buffer is one fallible reservation sized to
   the transaction's longest run, wiped on drop, and a machine too short of
@@ -1033,6 +1044,14 @@ transaction and asserts the re-opened volume always mounts, the
 pre-existing file is always intact, and the in-flight write is either
 fully applied or fully absent — never torn.
 
+The allocation-map ordering tests additionally fail the first map-page write,
+fail the sync barrier after pages enter a volatile cache, retain none, all, or
+alternating page subsets, and retain or lose the publishing slot. Every case
+rebuilds from the selected transaction root to the exact used set and free
+count; a clean sync remains directly adoptable. Same-handle tests continue with
+check, write, and grow after a failed sync, proving each rebuilds before it
+consults the poisoned map.
+
 The Stage-12 suites are the adversarial superset of all of the above
 (`arxfs-spec.md` §15.12, §16; `AGENTS.md` §7 / §19.6), reusing the same seams
 rather than adding a second integrity, scrub, or decode path (`AGENTS.md`
@@ -1113,10 +1132,10 @@ cache barrier — and a baseline asserts, exactly, what a single-call 64 KiB
 write, the same bytes in sixteen calls, a 34-byte append, and a metadata-only
 create each cost at both block sizes: the commands, the blocks they carry, how
 many of those a later write supersedes, the bytes, and the write amplification.
-It also holds the write-back cache's contract — a transaction writes each block
-it touches exactly once, the drain hands the device one request per physical
-run rather than one per block, and every commit issues exactly one barrier with
-nothing but the two copies of its publishing slot after it. One assertion
+It also holds the write-back cache's contract — a transaction writes each
+authoritative block once, the shared dirty set drains one request per physical
+run, each ordinary commit and sync issues one barrier, and map pages are ordered
+behind durable invalidation. One assertion
 records the present rather than a goal, and it is the acceptance hook of a later
 stage: sixteen calls still cost far more than one, which the commit scheduler
 converges. The same workloads on a 100 TiB

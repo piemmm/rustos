@@ -303,13 +303,13 @@ impl<B: Block> ARXFS<B> {
             );
             return Err(DriverError::PermissionDenied);
         }
-        self.begin();
+        self.begin()?;
         match self.check_run() {
             Ok((report, mutated)) => {
                 if mutated {
                     self.commit()?;
                 } else {
-                    self.rollback();
+                    self.finish_unpublished()?;
                 }
                 report.log_outcome(sink);
                 Ok(report)

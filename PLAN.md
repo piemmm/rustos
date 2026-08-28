@@ -2816,7 +2816,8 @@ one call puts 158 blocks on the device at a 512-byte block size and 25 at
 4096 — 1.23× and 1.56× byte amplification — and costs **five** write commands
 either way; written as 4 KiB chunks it puts out 335 and 160 blocks — 2.61× and
 10.00× — in 64 commands. At a 512-byte block size a 34-byte append costs 11
-blocks in 4 commands and creating an empty file 14 in 3. Every commit issues
+blocks in 4 commands and creating an empty file after a clean mkfs costs 15 in
+four commands. Every commit issues
 exactly one barrier, and the figures are identical on a 100 TiB volume. Of the
 four causes, one remains: every VFS operation still commits its own transaction
 root and superblock slot (C2, WB4). Closed by WB1: the intra-transaction rewrite
@@ -2852,6 +2853,11 @@ write.
   constant. Its gather buffer is one fallible reservation sized to the
   transaction's longest physical run, so a refused allocation costs commands
   rather than the commit.
+- Allocation-map pages use the same dirty set in a post-invalidation phase.
+  The first mutation after a clean sync stages the invalid marker with the
+  authoritative phase, so the normal commit barrier makes it durable before
+  any in-place page can land; `fs_sync` drains the map pages, barriers once,
+  then restores the clean generation stamp.
 - A dirty block is **pinned memory, not reclaimable cache**: it cannot be
   dropped, only written, so it does not go through
   `tairix_reclaim::ReclaimCache` (whose every class is clean and whose refusal
@@ -2865,15 +2871,14 @@ write.
   function, never a global constant, never a per-volume knob.
 - `close()` does not sync — POSIX semantics, and write-then-close is exactly the
   workload the batching exists for. `fs_sync` forces a commit and the trailing
-  barrier.
+  map-page barrier.
 - The kernel block cache (SMART11) stays a read cache: there is one dirty layer
   in the stack and it is this one. `plans/SMARTRAM.md` §6.1 already reserves
   dirty data for the filesystem's own write policy.
 
-**Status: WB0, WB1, and WB2 done** — the measurement harness, the dirty block set
-plus the commit barrier (closing D63), and the run coalescer (closing C3).
-WB3–WB6 planned; WB3 (folding the allocation map's dirty pages into the one
-dirty set and the one barrier) is next.
+**Status: WB0–WB3 done** — measurement, the dirty set and commit barrier
+(closing D63), run coalescing (closing C3), and allocation-map integration.
+WB4 is next; WB5–WB6 remain planned.
 
 ---
 

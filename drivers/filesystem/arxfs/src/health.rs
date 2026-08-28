@@ -513,7 +513,7 @@ impl<B: Block> ARXFS<B> {
         // reading it has just taken is valid and is returned regardless, and
         // the next pass simply measures its delta from the same baseline.
         if !self.read_only {
-            self.begin();
+            self.begin()?;
             let new_baseline = Baseline {
                 device: current,
                 counters,

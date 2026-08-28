@@ -407,35 +407,37 @@ and commit record validate — so a crash leaves the mount on a whole transactio
 boundary, never a torn one.
 
 The barrier is what makes that order real on a device with a volatile write
-cache: when a commit returns, the only blocks the device may still be holding
-are the slot's two copies, so it cannot make the slot durable while a tree node
-beneath its root is not. Those copies go out companion-first, so the *primary*
+cache: when a commit returns, the only authoritative blocks the device may
+still be holding are the slot's two copies, so it cannot make the slot durable
+while a tree node beneath its root is not. Those copies go out companion-first, so the *primary*
 — the copy a mount prefers — is the last write of the commit and a half-written
 pair publishes nothing; anything failing before it rolls the transaction back,
 while a failure *of* those writes leaves publication unknown and the handle
 forces itself read-only rather than freeing a root the device may have
-published. A second barrier is issued only for an explicit `fs_sync`.
+published. An explicit `fs_sync` drains rebuildable map pages and issues one
+further barrier before returning.
 
-The blocks wait in the one dirty layer beneath the driver's single device-write
-seam (`wcache`): a physical-block-keyed set of sealed blocks that replaces on
+The blocks and allocation-map pages use the one dirty layer beneath the
+driver's device-write seam (`wcache`): a physical-block-keyed set of sealed
+blocks with pre- and post-barrier phases that replaces on
 rewrite, so the repeated copy-on-writes of one B-tree node cost one device write
 rather than one each — 746 device writes down to 158 for a 64 KiB write on a
 512-byte volume. It is read-through, so a read-after-write inside the
-transaction sees the staged bytes; it drops a block the transaction frees again
-unwritten; and it holds nothing between operations, so what it pins is the
-operation's own write set and never the volume's. The rebuildable
-allocation-map region, the transient verification scratch arrays, and an
-idempotent mirror copy-repair have nothing to be ordered behind the barrier and
-go straight to the device.
+transaction sees the staged bytes and it drops a block the transaction frees
+again unwritten. A resident map page moves into this set before I/O instead of
+remaining as a second page-sized copy; transient verification scratch and an
+idempotent mirror repair still write directly because neither participates in
+publication.
 
 The drain then hands the device **runs rather than blocks**. Data blocks are
 allocated consecutively and mirrored metadata blocks are adjacent pairs, so the
 set's ascending order gathers into contiguous runs and each run is one
 `write_blocks`, bounded by the same 64 KiB transfer window the read path gathers
 to (`RUN_BYTES`, one definition for both directions). Those same 158 blocks cost
-**five** commands, and an empty-file create three rather than fourteen: the
-bytes on the device are unchanged, but the commands carrying them — and the
-completion wait each costs a per-command device like an SD card — collapse. A
+**five** commands, and an empty-file create after a clean mkfs costs four
+commands for fifteen blocks: the payload bytes are unchanged, but the commands
+carrying them — and the completion wait each costs a per-command device like an
+SD card — collapse. A
 run stops at the first address the set does not hold, so it can never name a
 block outside the transaction or reach past the end of the device, and the
 gather buffer is one fallible reservation sized to the transaction's longest
@@ -447,9 +449,14 @@ Free space lives in an **on-disk paged allocation map** (`allocmap`,
 bitmap page's free count, and one bit per device block, each block sealed with
 the ordinary keyed header under `BlockType::AllocMap`. Because free space is
 rebuildable rather than authoritative, the region is *not* copy-on-written but
-updated in place under a clean/dirty generation stamp — turned dirty, and that
-invalidation barriered to media, before the first page write, and stamped clean
-at an explicit sync (and at mkfs) once the pages are durable. A mount adopts the map only when it authenticates at the
+updated in place under a clean/dirty generation stamp. The first mutation after
+a clean sync stages the invalid stamp with the commit's authoritative phase, so
+its existing barrier makes invalidation durable before any page write. Pages
+stay in the bounded cache between commits, then move into the same dirty set;
+`fs_sync` drains them in bounded runs, barriers once, and writes the clean
+stamp. If staging, a page write, or that barrier fails, the cache and staged
+pages are discarded as untrusted and the next allocator operation rebuilds
+from the committed trees. A mount adopts the map only when it authenticates at the
 address the committed root names and is stamped clean at that generation;
 otherwise it rebuilds by walking the trees from the selected root. Mounting a
 synced volume therefore costs a handful of block reads rather than a walk of
@@ -467,7 +474,7 @@ downward from the pool with a small metadata reserve, so a delete can
 copy-on-write itself even on a full volume. No `unwrap`/`expect`/`panic!` and no
 `unsafe`.
 
-> **Staged build.** A volume is a complete, mountable copy-on-write
+> **Staged build.** A volume is a mountable copy-on-write
 > filesystem with B-tree metadata, a `lib/crypto` keyed-MAC authenticator in
 > two physical copies, **at-rest encryption** under a per-volume key
 > hierarchy, and a per-data-record **integrity field** (logical content hash
@@ -491,8 +498,9 @@ copy-on-write itself even on a full volume. No `unwrap`/`expect`/`panic!` and no
 > against documented thresholds, and a scrub triggered through the Stage-8
 > machinery when a device-health delta crosses a threshold (Stage 11), and the
 > **fuzz / crash-replay / corruption-injection suites** that harden every
-> earlier stage (Stage 12). **ARXFS v1 is complete** — see the
-> [specification](../../../docs/src/filesystem/arxfs-spec.md).
+> earlier stage (Stage 12), plus stages 13–15 in the
+> [specification](../../../docs/src/filesystem/arxfs-spec.md). Stages 16–21
+> remain sequenced by `plans/IMPLEMENT-OUTSTANDING-ARXFS.md`.
 
 ## Security
 
@@ -579,6 +587,13 @@ during a committing transaction and asserts the re-opened volume always
 mounts with the in-flight write either fully applied or fully absent —
 never torn.
 
+Allocation-map tests refuse the first page write and retain arbitrary map-page
+subsets across a failed sync barrier, both with and without the publishing slot.
+Every case rebuilds the exact map from the selected transaction root, while a
+clean sync remains directly adoptable. Same-handle recovery then exercises
+check, write, and grow before remounting, so no entry point can consult poisoned
+derived state.
+
 The Stage-12 suites are the adversarial superset of all the above, reusing the
 same seams (`AGENTS.md` §2.2): the crash-replay sweep is **generalised to every
 commit step across every representative transaction** (create, write, truncate,
@@ -616,9 +631,9 @@ barrier — and the harness asserts exactly what a single-call 64 KiB write, the
 same bytes in sixteen calls, a 34-byte append, and an empty-file create each
 cost at both block sizes (commands, blocks, blocks superseded, bytes,
 amplification). It also holds the write-back cache's contract: a transaction
-writes each block it touches exactly once, and every commit issues exactly one
-barrier with nothing but the two copies of its publishing slot after it, and the
-drain issuing one request per physical run rather than one per block. One figure
+writes each authoritative block once, every ordinary commit and sync issues one
+barrier, map pages share the same bounded run drain, and the drain issues one
+request per physical run rather than one per block. One figure
 is recorded as the present rather than a goal, the acceptance hook of a later
 write-back stage: sixteen calls still cost far more than one. The same workloads
 on a 100 TiB volume produce an identical command stream.

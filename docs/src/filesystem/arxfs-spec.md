@@ -242,10 +242,16 @@ self-allocation problem an authoritative copy-on-written free-space tree
 would have — allocating space to record where space is free.
 
 **Crash safety.** The region header carries a clean/dirty stamp naming the
-transaction generation the map reflects. The stamp is turned dirty before the
-first page write of an update reaches the device; an explicit sync
-(`fs_sync`) writes the dirty pages, forces the device write cache once (the
-single barrier), then stamps the region clean at the committed generation.
+transaction generation the map reflects. The first mutation after a clean sync
+stages an invalid stamp with the transaction's authoritative dirty blocks; the
+commit barrier makes it durable before any map page may reach the device.
+Resident pages remain in the bounded map cache between commits. An explicit
+sync (`fs_sync`) moves them into the shared dirty set, writes them in bounded
+runs, forces the device cache once, then stamps the region clean at the
+committed generation. A cache eviction uses the same set and may write only
+after the invalid stamp is durable. A failed stage, page write, or sync barrier
+discards the untrusted cache and staging; the next allocator operation rebuilds
+from the committed trees before touching state.
 Ordinary commits therefore leave the on-disk map dirty while it stays exact
 in RAM. A mount adopts the map only when it authenticates at the address the
 committed transaction root names (`TxnRoot::alloc_map_start`), its coverage
@@ -260,13 +266,16 @@ image mounts fast.
 **64 pages per region** (`MAX_CACHED_PAGES`, shared with the
 reconcile scratch arrays of §12),
 volume-independent: a cache miss costs one block read, never a failure, so
-several 100 TB+ volumes mount together on a 1 GiB machine. Every other
-write-path-only structure — the map's allocation/metadata cursors, the
+several 100 TB+ volumes mount together on a 1 GiB machine. A changed page
+moves out of that cache when it enters the shared dirty set, so
+staging never retains a second page-sized copy; its drain window is bounded
+below the cache footprint. Other write-path-only structures — the map's
+allocation/metadata cursors, the
 per-transaction bookkeeping (blocks a not-yet-committed transaction has
 allocated or released), the pending-discard queue (capped at
 `MAX_PENDING_DISCARD`, a dropped entry merely stays un-discarded until a
 future free, trim pass, or rebuild requeues it), and the dedupe index (§9) —
-is grouped into one `Allocator` held as `Option<Allocator>` on the mounted
+are grouped into one `Allocator` held as `Option<Allocator>` on the mounted
 handle, bounded the same way and never sized to the device.
 
 **Read-only mounts build nothing.** A read-only handle holds `None`: it
@@ -869,29 +878,29 @@ write data records
 write metadata leaves
 write metadata internal blocks
 write new root
-write commit record
-flush
-publish superblock slot
-flush
+stage allocation-map invalidation when needed
+flush authoritative blocks and map invalidation
+publish superblock slot (companion, then primary)
+
+explicit fs_sync:
+write allocation-map pages
+flush slot and map pages
+write clean map stamp
 ```
 
 After power loss, mount selects the highest valid committed root. A partial
 transaction is ignored. Full `arxfs check` is not required for ordinary crash
 recovery.
 
-**Durability vs. consistency.** Crash *consistency* — the guarantee above —
-holds without any device flush: a torn root never authenticates (its checksum
-and inline commit record are validated together), so the ring falls back to
-the previous committed generation, and a superblock slot published before its
-root reached the medium simply selects an unverifiable root that is skipped.
-*Durability* — a caller's write surviving power loss on demand — is a separate
-guarantee delivered by `fs_sync`: the two `flush` steps above, and the
-filesystem's `flush`, force the backing device's **volatile write cache** to
-stable media through the block driver's `Block::flush` (virtio-blk
-`VIRTIO_BLK_T_FLUSH`, SCSI `SYNCHRONIZE CACHE`), which returns only once the
-device confirms the commit and fails closed otherwise. A completed write is
-therefore consistent immediately but not proven durable until a flush lands;
-`fs_sync` is that barrier.
+**Durability vs. consistency.** Crash *consistency* depends on the mandatory
+pre-slot barrier: it makes every block the new root transitively names durable
+before either slot copy can publish that root. A barrier failure publishes
+nothing. The slot itself may remain volatile when an ordinary operation
+returns, so *durability* — the caller's write surviving power loss on demand —
+is delivered by `fs_sync`. Its one `Block::flush` makes the slot and allocation
+map pages stable through the block driver (virtio-blk `VIRTIO_BLK_T_FLUSH`,
+SCSI `SYNCHRONIZE CACHE`) and fails closed if the device cannot confirm them.
+The clean map stamp follows; losing only that stamp costs a rebuild.
 
 Discard may never destroy data reachable from retained roots.
 
@@ -953,6 +962,9 @@ Minimum acceptance tests:
 - dedupe never merges unequal data;
 - dedupe index rebuild works;
 - free-space rebuild matches authoritative extents;
+- allocation-map invalidation is durable before any page write, and every
+  partial page subset after a failed sync rebuilds exactly from either selected
+  transaction root;
 - TRIM never touches retained-root/snapshot/reflink/dedupe-reachable ranges;
 - mkfs issues discard on discard-capable mock devices;
 - SMART/NVMe health deltas trigger required scrub/check actions;
@@ -1495,19 +1507,17 @@ staged future work; see §18.)*
 
 ## 22. Write-back cache, commit batching, and the commit barrier
 
-*Stage 17 — in progress. The dirty block set, the commit barrier, and the run
-coalescer are implemented; the folding-in of the allocation map's dirty pages,
-the commit scheduler, and the RAM-derived bound are not. The staged design is
-`plans/ARXFS-WRITEBACK.md`.*
+*Stage 17 — in progress. The dirty block set, commit barrier, run coalescer,
+and allocation-map integration are implemented; the commit scheduler and
+RAM-derived bound are not. The staged design is `plans/ARXFS-WRITEBACK.md`.*
 
-**Commit ordering.** A commit drains every dirty block *except* the superblock
-slot to the device, issues one `Block::flush()` barrier, then writes the slot.
+**Commit ordering.** A commit drains every authoritative dirty block *except*
+the superblock slot, issues one `Block::flush()` barrier, then writes the slot.
 One barrier is sufficient and mandatory: the transaction root is just another
 block that must be durable before the slot that publishes it, so a per-step
-barrier costs a full cache flush per step and buys nothing. A second barrier
-after the slot is issued only for an explicit `fs_sync`, the one case where the
-commit itself must have reached media before the call returns. A commit that
-cannot barrier does not publish.
+barrier costs a full cache flush per step and buys nothing. An explicit
+`fs_sync` issues one further barrier to make the slot and rebuildable map pages
+durable before it returns. A commit that cannot barrier does not publish.
 
 This closes the only ordering hole the pre-stage-17 driver had: it wrote the
 copy-on-write blocks, the root, and the slot with no barrier at all, so a device
@@ -1526,28 +1536,24 @@ nothing, so whichever of the two roots the device holds stays intact for the
 next mount.
 
 **The allocation map's clean stamp is invalidated durably.** The map is adopted
-only when it is stamped clean at the generation the mount selected, so the
-stamp's invalidation reaches media — one barrier, at the clean→dirty transition,
-not per write — before the first page write can land. Without that a reordering
-device could keep a page write while the invalidation sat in its cache, and the
-next mount would adopt a map that no longer describes the generation it vouches
-for.
+only when it is stamped clean at the generation the mount selected. Its
+invalidation is staged in the dirty set's pre-barrier phase, so the ordinary
+commit barrier makes it durable before the first map page can land. Removing
+the marker is unsafe for an in-place map: a volatile cache could retain a page
+carrying committed frees while losing that commit's slot, leaving the old clean
+generation to reallocate a block still live in the selected root. If the map's
+bounded cache must evict before commit, it first confirms the invalid stamp;
+it never trades this ordering for a lower barrier count.
 
-**What is cached.** A transaction-scoped dirty set of *sealed* blocks, keyed by
-physical block, beneath the driver's single device-write seam. It replaces on
-rewrite, so the repeated copy-on-write rewrites of one B-tree node within a
-transaction cost one device write instead of one per rewrite; it is
-read-through, so a read-after-write within the transaction sees the new bytes;
-and it drains in ascending physical order, gathering adjacent blocks into one
-multi-block write bounded by the same transfer window the read path gathers to.
-Mirroring is unchanged — the companion is a second entry with identical bytes,
-which the coalescer takes as one two-block run. A block the
-transaction frees again is dropped from the set unwritten: nothing will
-reference it. Blocks that are *not* part of a transaction's published state —
-the rebuildable allocation-map region, the transient scratch arrays a
-whole-volume pass streams through, and an idempotent mirror copy-repair of an
-already-committed block — are written straight to the device, having nothing to
-be ordered behind the barrier.
+**What is cached.** One physical-block-keyed dirty set holds sealed blocks in
+two ordering phases. Authoritative copy-on-write blocks drain before the commit
+barrier; rebuildable allocation-map pages drain only after their invalid stamp
+is durable, normally at `fs_sync`. Rewriting an address replaces its staged
+bytes, reads overlay either phase, and adjacent blocks coalesce into a bounded
+multi-block request. Mirroring remains two adjacent entries. Resident map pages
+move into the set rather than being copied, and an eviction drains through that
+same path. Transient scratch arrays and idempotent repairs of already-committed
+mirrors still write directly because neither participates in publication.
 
 **Batching.** A transaction stays open and the next operation joins it, closing
 on the first of: an explicit `fs_sync`; the dirty byte ceiling (back-pressure —
@@ -1573,9 +1579,9 @@ mandatory — are asserted against that recording. The cost is identical on a
 100 TiB volume, so it is a property of the write path rather than of the device
 it was measured on. The figures live in `plans/ARXFS-WRITEBACK.md` §1.
 
-**Bounds.** The set holds one transaction's own write set and nothing between
-operations: a commit drains it, a rollback discards it, and a read-only handle
-can never stage a block into it. The drain adds one gather buffer, reserved
+**Bounds.** The set holds one transaction's authoritative write set, or a map
+page transiently moved from the bounded page cache; a rollback discards it, and
+a read-only handle can never stage a block. The drain adds one gather buffer, reserved
 fallibly for the transaction's longest physical run and never past the transfer
 window, so a machine too short of memory to hold it writes block by block
 instead of failing the commit. The ceiling that forces a commit before it

@@ -460,21 +460,20 @@ const BASELINE: &[Row] = &[
         runs: &[(1, 3), (8, 1)],
     },
     // The floor: what an operation carrying no payload at all still costs.
-    // Metadata is allocated downward from the high end of the volume, so a
-    // wholly metadata transaction's blocks are one contiguous run — twelve
-    // blocks in one command, plus the slot pair.
+    // The first mutation after mkfs also durably invalidates the clean map
+    // stamp; metadata is one twelve-block run, followed by the slot pair.
     Row {
         workload: Workload::CreateFile,
         block_size: 512,
         amplification: None,
         cost: Cost {
-            writes: 3,
-            blocks: 14,
-            distinct_blocks: 14,
-            bytes: 7_168,
+            writes: 4,
+            blocks: 15,
+            distinct_blocks: 15,
+            bytes: 7_680,
             barriers: 1,
         },
-        runs: &[(1, 2), (12, 1)],
+        runs: &[(1, 3), (12, 1)],
     },
 ];
 

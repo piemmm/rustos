@@ -118,7 +118,7 @@ use dedupe::{
 use header::{BlockHeader, BlockType, FORMAT_VERSION, HEADER_LEN, HEADER_MAGIC};
 use superblock::{slot_block, Superblock, RING_BLOCKS, RING_SLOTS};
 use transaction::TxnRoot;
-use wcache::DirtySet;
+use wcache::{DirtySet, WritePhase};
 
 /// Per-driver `DriverHandle` marker returned by [`register`].
 const REGISTER_HANDLE_MARKER: u64 = 0x5275_7374_4653_0002;
@@ -820,6 +820,7 @@ pub struct ARXFS<B: Block> {
     saved_scrub_progress_root: u64,
     saved_health_baseline_root: u64,
     saved_incompat: u64,
+    saved_free_count: u64,
     clock: fn() -> Time64,
     /// When `true`, the handle never mutates the backing device: the
     /// repair-on-read paths (`read_meta`, `read_sb_slot`, `read_txn_root`) skip
@@ -1029,7 +1030,7 @@ impl<B: Block> ARXFS<B> {
         dst_name: &[u8],
     ) -> Result<NodeId, DriverError> {
         self.deny_if_read_only()?;
-        self.begin();
+        self.begin()?;
         let result = self.reflink_inner(dir, src_name, dst_name);
         if result.is_err() {
             self.rollback();
@@ -1108,20 +1109,15 @@ impl<B: Block> ARXFS<B> {
     /// therefore cost one device write, not one each.
     fn stage_block(&mut self, phys: u64, buf: &[u8]) -> Result<(), DriverError> {
         self.deny_if_read_only()?;
-        self.dirty.stage(phys, buf)
+        self.dirty.stage(WritePhase::BeforeBarrier, phys, buf)
     }
 
     /// Write the first `block_size` bytes of `buf` straight to the block at
     /// `phys`, bypassing the dirty set.
     ///
-    /// For the blocks that are *not* part of a transaction's published state
-    /// and so have nothing to be ordered behind the commit barrier: the
-    /// rebuildable allocation-map region (`allocator`), the transient scratch
-    /// arrays a whole-volume pass streams through (`scratch`), an idempotent
-    /// mirror copy-repair of an already-committed block, and the superblock
-    /// slot itself, which is written *after* the barrier because it is the
-    /// commit point. A read-only handle is refused here as well as at the entry
-    /// points, so no path can reach the device with a write.
+    /// For writes outside the pre-barrier transaction phase: the allocation-map
+    /// stamps, transient scratch pages, committed-block mirror repair, and the
+    /// publishing superblock slot. A read-only handle is refused here too.
     fn write_device(&mut self, phys: u64, buf: &[u8]) -> Result<(), DriverError> {
         self.deny_if_read_only()?;
         let block = buf
@@ -1130,21 +1126,13 @@ impl<B: Block> ARXFS<B> {
         write_run(&mut self.block, self.block_size, phys, block)
     }
 
-    /// Send every staged block to the device, lowest address first, gathering
-    /// adjacent ones into one request each.
-    ///
-    /// Runs at the commit point, before the barrier: once it returns, every
-    /// block the new transaction root names has been issued to the device and
-    /// the barrier can order the publishing superblock slot behind all of them.
-    /// A copy-on-write transaction stages long physical runs — its data blocks
-    /// are allocated consecutively and its mirrored metadata blocks are pairs —
-    /// so the device is issued one command per run, up to the same transfer
-    /// bound the read path gathers to, rather than one per block.
-    fn drain_dirty(&mut self) -> Result<(), DriverError> {
+    /// Drain one ordering phase as bounded physical runs.
+    fn drain_dirty(&mut self, phase: WritePhase, run_bytes: usize) -> Result<(), DriverError> {
         let bs = self.block_size;
         let device = &mut self.block;
-        self.dirty
-            .drain(RUN_BYTES, |phys, run| write_run(device, bs, phys, run))
+        self.dirty.drain(phase, run_bytes, |phys, run| {
+            write_run(device, bs, phys, run)
+        })
     }
 
     /// Restore the bad physical copy of a mirrored metadata block at `phys`
@@ -1387,7 +1375,10 @@ impl<B: Block> ARXFS<B> {
 
     /// Reset the per-transaction bookkeeping at the start of an operation and
     /// snapshot the published tree state so a failed operation can roll back.
-    fn begin(&mut self) {
+    fn begin(&mut self) -> Result<(), DriverError> {
+        if !self.read_only {
+            self.ensure_allocation_map()?;
+        }
         if let Ok(alloc) = self.allocator_mut() {
             alloc.txn_allocated.clear();
             alloc.txn_freed.clear();
@@ -1399,6 +1390,43 @@ impl<B: Block> ARXFS<B> {
         self.saved_scrub_progress_root = self.scrub_progress_root;
         self.saved_health_baseline_root = self.health_baseline_root;
         self.saved_incompat = self.incompat;
+        self.saved_free_count = self.free_count;
+        Ok(())
+    }
+
+    /// End a pass that changed no authoritative tree state.
+    fn finish_unpublished(&mut self) -> Result<(), DriverError> {
+        if self.read_only {
+            return Ok(());
+        }
+        let must_rollback = self
+            .allocator()
+            .is_ok_and(|alloc| !alloc.txn_private.is_empty() || !alloc.txn_freed.is_empty())
+            || self.dirty.has(WritePhase::BeforeBarrier);
+        if must_rollback {
+            self.rollback();
+            return Ok(());
+        }
+        if self.map_has_changes() {
+            if let Err(err) = self.map_confirm_dirty() {
+                self.require_map_rebuild();
+                return Err(err);
+            }
+        }
+        if let Ok(alloc) = self.allocator_mut() {
+            alloc.txn_allocated.clear();
+        }
+        Ok(())
+    }
+
+    fn restore_saved_roots(&mut self) {
+        self.inode_tree_root = self.saved_inode_tree_root;
+        self.next_ino = self.saved_next_ino;
+        self.chunk_tree_root = self.saved_chunk_tree_root;
+        self.reverse_ref_tree_root = self.saved_reverse_ref_tree_root;
+        self.scrub_progress_root = self.saved_scrub_progress_root;
+        self.health_baseline_root = self.saved_health_baseline_root;
+        self.incompat = self.saved_incompat;
     }
 
     /// Discard an operation that failed before committing: drop every block it
@@ -1413,35 +1441,16 @@ impl<B: Block> ARXFS<B> {
         if self.read_only {
             return;
         }
-        // The staged blocks are this transaction's alone — copy-on-write means
-        // none of them overwrote a block the committed root reaches — so
-        // dropping them unwritten loses nothing and spares the device the
-        // writes.
         self.dirty.clear();
-        self.inode_tree_root = self.saved_inode_tree_root;
-        self.next_ino = self.saved_next_ino;
-        self.chunk_tree_root = self.saved_chunk_tree_root;
-        self.reverse_ref_tree_root = self.saved_reverse_ref_tree_root;
-        self.scrub_progress_root = self.saved_scrub_progress_root;
-        self.health_baseline_root = self.saved_health_baseline_root;
-        self.incompat = self.saved_incompat;
-        let allocated = match self.allocator_mut() {
-            Ok(alloc) => {
-                alloc.txn_freed.clear();
-                core::mem::take(&mut alloc.txn_allocated)
-            }
-            Err(_) => Vec::new(),
-        };
-        for block in allocated {
-            // A block this transaction allocated and then released again is
-            // already back in the pool; only one that is still private has an
-            // allocation left to undo.
-            if self
-                .allocator_mut()
-                .is_ok_and(|alloc| alloc.txn_private.remove(&block))
-            {
-                self.mark_free(block);
-            }
+        self.restore_saved_roots();
+        self.free_count = self.saved_free_count;
+        if let Ok(alloc) = self.allocator_mut() {
+            alloc.cache.clear();
+            alloc.pending.clear();
+            alloc.txn_allocated.clear();
+            alloc.txn_freed.clear();
+            alloc.txn_private.clear();
+            alloc.needs_rebuild = true;
         }
         // The freed allocations bypassed `free_block`, so no per-block
         // invalidation ran: drop everything rather than risk a stale
@@ -1451,8 +1460,32 @@ impl<B: Block> ARXFS<B> {
         }
     }
 
-    /// Apply a committed transaction's deferred frees and clear the private
-    /// markers, making superseded blocks reusable by the next transaction.
+    /// Apply deferred frees to the map image that will follow the barrier.
+    fn prepare_deferred_frees(&mut self) -> Result<(), DriverError> {
+        let freed = {
+            let alloc = self.allocator_mut()?;
+            core::mem::take(&mut alloc.txn_freed)
+        };
+        for &block in &freed {
+            self.mark_free(block);
+        }
+        self.allocator_mut()?.txn_freed = freed;
+        self.map_fold_pending()
+    }
+
+    /// Freeze the union of both candidate roots after a slot-write failure.
+    fn freeze_unknown_publication(&mut self) {
+        let union_free = self.allocator().map_or(self.free_count, |alloc| {
+            self.saved_free_count
+                .saturating_sub(alloc.txn_private.len() as u64)
+        });
+        self.require_map_rebuild();
+        self.restore_saved_roots();
+        self.free_count = union_free;
+        self.read_only = true;
+    }
+
+    /// Finalize a committed transaction's allocation bookkeeping.
     fn finish_txn(&mut self) {
         let Ok(alloc) = self.allocator_mut() else {
             return;
@@ -1464,7 +1497,6 @@ impl<B: Block> ARXFS<B> {
         alloc.txn_private.clear();
         let freed = core::mem::take(&mut alloc.txn_freed);
         for block in freed {
-            self.mark_free(block);
             self.enqueue_discard(block);
         }
     }
@@ -1530,7 +1562,7 @@ impl<B: Block> ARXFS<B> {
             }
         };
         if let Err(err) = self.publish_slot(published.slot, &buf) {
-            self.read_only = true;
+            self.freeze_unknown_publication();
             return Err(err);
         }
         // Commit point passed: the slot naming the new root is durable-ordered
@@ -1557,8 +1589,7 @@ impl<B: Block> ARXFS<B> {
         // until `finish_txn`, and nothing allocates between here and the
         // commit point.
         self.free_meta(old_root);
-        self.map_fold_pending()?;
-        let deferred = self.allocator()?.txn_freed.len() as u64;
+        self.prepare_deferred_frees()?;
         let alloc_map_start = self.alloc_map_start;
         let root = TxnRoot {
             generation: next_gen,
@@ -1570,7 +1601,7 @@ impl<B: Block> ARXFS<B> {
             health_baseline_root: self.health_baseline_root,
             alloc_map_start,
             alloc_map_covered: self.total_blocks,
-            free_count: self.free_count.saturating_add(deferred),
+            free_count: self.free_count,
         };
         root.seal(&mut buf[..bs], self.fs_uuid, root_phys, &self.mac_key)?;
         self.write_meta(root_phys, buf)?;
@@ -1590,14 +1621,12 @@ impl<B: Block> ARXFS<B> {
             &self.mac_key,
             &self.crypto_header,
         )?;
-        // Every block the new root transitively names is issued to the device,
-        // then one barrier, then the slot that publishes it. A device with a
-        // volatile write cache may reorder freely on either side of the
-        // barrier and still cannot make the slot durable ahead of a tree node
-        // beneath its root, which is the one ordering that loses a volume
-        // outright (`docs/src/filesystem/arxfs-spec.md` §22).
-        self.drain_dirty()?;
+        if self.map_has_changes() {
+            self.map_mark_dirty()?;
+        }
+        self.drain_dirty(WritePhase::BeforeBarrier, RUN_BYTES)?;
         self.block.flush()?;
+        self.map_barrier_completed();
         Ok(Published {
             generation: next_gen,
             root_phys,
@@ -1658,6 +1687,7 @@ impl<B: Block> ARXFS<B> {
             saved_scrub_progress_root: 0,
             saved_health_baseline_root: 0,
             saved_incompat: 0,
+            saved_free_count: total_blocks,
             clock: epoch_clock,
             read_only: false,
             cluster_cache: None,
@@ -1726,7 +1756,7 @@ impl<B: Block> ARXFS<B> {
         // volume's layout is fully determined by its block size and size.
         fs.rebuild_free_space_at(RING_BLOCKS, fs.total_blocks)?;
 
-        fs.begin();
+        fs.begin()?;
         let now = (fs.clock)();
         let mut root = Inode::empty(InodeKind::Dir, Security::new(0o755, 0, 0), now);
         root.nlink = 2;
@@ -1964,6 +1994,7 @@ impl<B: Block> ARXFS<B> {
         if new_total == self.total_blocks {
             return Ok(0);
         }
+        self.ensure_allocation_map()?;
         let old_total = self.total_blocks;
         let old_start = self.alloc_map_start;
         let added = new_total - old_total;
@@ -1973,7 +2004,7 @@ impl<B: Block> ARXFS<B> {
         // Widen (or relay) the map before the commit, so the free count the
         // new root records already accounts for the added tail.
         self.extend_alloc_map(new_start, new_total)?;
-        self.begin();
+        self.begin()?;
         match self.commit() {
             Ok(()) => Ok(added),
             Err(err) => {
@@ -3426,7 +3457,7 @@ impl<B: Block> ARXFS<B> {
     /// * [`DriverError::DeviceFault`] on an unrecoverable block write.
     pub fn set_security(&mut self, node: NodeId, sec: Security) -> Result<(), DriverError> {
         self.deny_if_read_only()?;
-        self.begin();
+        self.begin()?;
         let result = self.set_security_inner(node, sec);
         if result.is_err() {
             self.rollback();
@@ -4163,7 +4194,7 @@ impl<B: Block> FilesystemRead for ARXFS<B> {
 impl<B: Block> FilesystemWrite for ARXFS<B> {
     fn create(&mut self, dir: NodeId, name: &[u8], kind: NodeKind) -> Result<NodeId, DriverError> {
         self.deny_if_read_only()?;
-        self.begin();
+        self.begin()?;
         let result = self.create_inner(dir, name, kind);
         if result.is_err() {
             self.rollback();
@@ -4178,7 +4209,7 @@ impl<B: Block> FilesystemWrite for ARXFS<B> {
         target: &[u8],
     ) -> Result<NodeId, DriverError> {
         self.deny_if_read_only()?;
-        self.begin();
+        self.begin()?;
         let result = self.create_link_inner(dir, name, target);
         if result.is_err() {
             self.rollback();
@@ -4188,7 +4219,7 @@ impl<B: Block> FilesystemWrite for ARXFS<B> {
 
     fn link(&mut self, dir: NodeId, name: &[u8], node: NodeId) -> Result<(), DriverError> {
         self.deny_if_read_only()?;
-        self.begin();
+        self.begin()?;
         let result = self.link_inner(dir, name, node);
         if result.is_err() {
             self.rollback();
@@ -4204,7 +4235,7 @@ impl<B: Block> FilesystemWrite for ARXFS<B> {
         data: &[u8],
     ) -> Result<usize, DriverError> {
         self.deny_if_read_only()?;
-        self.begin();
+        self.begin()?;
         let result = self.write_inner(dir, name, offset, data);
         if result.is_err() {
             self.rollback();
@@ -4214,7 +4245,7 @@ impl<B: Block> FilesystemWrite for ARXFS<B> {
 
     fn truncate(&mut self, dir: NodeId, name: &[u8], size: u64) -> Result<(), DriverError> {
         self.deny_if_read_only()?;
-        self.begin();
+        self.begin()?;
         let result = self.truncate_inner(dir, name, size);
         if result.is_err() {
             self.rollback();
@@ -4224,7 +4255,7 @@ impl<B: Block> FilesystemWrite for ARXFS<B> {
 
     fn remove(&mut self, dir: NodeId, name: &[u8]) -> Result<(), DriverError> {
         self.deny_if_read_only()?;
-        self.begin();
+        self.begin()?;
         let result = self.remove_inner(dir, name);
         if result.is_err() {
             self.rollback();
@@ -4240,7 +4271,7 @@ impl<B: Block> FilesystemWrite for ARXFS<B> {
         dst_name: &[u8],
     ) -> Result<(), DriverError> {
         self.deny_if_read_only()?;
-        self.begin();
+        self.begin()?;
         let result = self.rename_inner(src_dir, src_name, dst_dir, dst_name);
         if result.is_err() {
             self.rollback();
@@ -4334,7 +4365,7 @@ impl<B: Block> FilesystemAttrs for ARXFS<B> {
 
     fn set_attr(&mut self, node: NodeId, key: &[u8], value: &[u8]) -> Result<(), DriverError> {
         self.deny_if_read_only()?;
-        self.begin();
+        self.begin()?;
         let result = self.set_attr_inner(node, key, value);
         if result.is_err() {
             self.rollback();
@@ -4365,7 +4396,7 @@ impl<B: Block> FilesystemAttrs for ARXFS<B> {
 
     fn remove_attr(&mut self, node: NodeId, key: &[u8]) -> Result<(), DriverError> {
         self.deny_if_read_only()?;
-        self.begin();
+        self.begin()?;
         let result = self.remove_attr_inner(node, key);
         if result.is_err() {
             self.rollback();

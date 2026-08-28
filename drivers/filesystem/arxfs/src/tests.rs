@@ -2080,7 +2080,7 @@ fn alloc_data_run_claims_contiguous_blocks_and_fails_closed_when_fragmented() {
     // The run allocator returns physically contiguous claimed blocks and
     // reports NoSpace — never a partial claim — when no gap is wide enough.
     let mut fs = fmt(512, 64, 8);
-    fs.begin();
+    fs.begin().expect("begin");
     let run = fs.alloc_data_run(4).expect("run allocates");
     for b in 0..4 {
         assert!(fs.is_used(run + b), "run block {b} is claimed");
@@ -3030,7 +3030,7 @@ fn scrub_detects_and_corrects_a_refcount_divergence() {
         refcount: 5,
         ..record
     };
-    fs.begin();
+    fs.begin().expect("begin");
     fs.chunk_put(shared, &bumped).expect("put");
     fs.commit().expect("commit");
     assert_eq!(fs.data_refcount(shared).expect("refcount"), 5);
@@ -3103,7 +3103,7 @@ fn claim_block_behind_the_refcount(fs: &mut ARXFS<MemBlock>, name: &[u8], phys: 
     let ino = fs.lookup(root, name).expect("look up the claimant");
     let ino = fs.ino_of(ino).expect("inode number");
     let mut inode = fs.read_inode(ino).expect("read the claimant");
-    fs.begin();
+    fs.begin().expect("begin");
     fs.extent_assign(&mut inode, ino, 0, phys)
         .expect("assign the extent");
     fs.write_inode(ino, &inode).expect("write the claimant");
@@ -3212,7 +3212,7 @@ fn an_inode_above_the_high_water_mark_fails_the_check_closed() {
     let node = fs.lookup(root, b"live").expect("look up");
     let ino = fs.ino_of(node).expect("inode number");
     let inode = fs.read_inode(ino).expect("read");
-    fs.begin();
+    fs.begin().expect("begin");
     fs.write_inode(beyond, &inode).expect("plant the inode");
     fs.commit().expect("commit the impossible inode");
 
@@ -3247,7 +3247,7 @@ fn a_chunk_record_beyond_the_last_block_is_removed() {
     let record = fs.chunk_get(shared).expect("get").expect("shared");
 
     let beyond = fs.total_blocks + 4096;
-    fs.begin();
+    fs.begin().expect("begin");
     fs.chunk_put(beyond, &record).expect("put");
     fs.commit().expect("commit the impossible record");
 
@@ -3287,7 +3287,7 @@ fn a_chunk_record_no_extent_claims_is_removed() {
     // A record keyed on a block nothing maps.
     let unclaimed = shared + 1;
     assert!(fs.chunk_get(unclaimed).expect("get").is_none());
-    fs.begin();
+    fs.begin().expect("begin");
     fs.chunk_put(unclaimed, &record).expect("put");
     fs.commit().expect("commit the stale record");
 
@@ -3326,7 +3326,7 @@ fn a_windowed_reconcile_reaches_the_same_report_as_a_single_window() {
     }
     let shared = data_block_phys(&mut fs, b"a", 0);
     let record = fs.chunk_get(shared).expect("get").expect("shared");
-    fs.begin();
+    fs.begin().expect("begin");
     fs.chunk_put(
         shared,
         &ChunkRecord {
@@ -3348,7 +3348,7 @@ fn a_windowed_reconcile_reaches_the_same_report_as_a_single_window() {
     let mut windowed =
         ARXFS::open(MemBlock::from_bytes(tampered, 512, 2400), &TEST_KEY).expect("open");
     let mut report = ScrubReport::default();
-    windowed.begin();
+    windowed.begin().expect("begin");
     let corrected = windowed
         .reconcile_refcounts_in_windows(1, &mut report)
         .expect("windowed reconcile");
@@ -3480,7 +3480,7 @@ fn a_pass_that_counted_no_claims_reports_a_divergence_without_writing() {
     fs.write_at(root, b"b", 0, &body).expect("write b");
     let shared = data_block_phys(&mut fs, b"a", 0);
     let record = fs.chunk_get(shared).expect("get").expect("shared");
-    fs.begin();
+    fs.begin().expect("begin");
     fs.chunk_put(
         shared,
         &ChunkRecord {
@@ -3775,7 +3775,7 @@ fn scrub_detects_and_corrects_a_reverse_reference_divergence() {
 
     let mut referrers = fs.reverse_refs(shared).expect("reverse refs");
     referrers.push((9999, 7)); // a referrer no live extent supports
-    fs.begin();
+    fs.begin().expect("begin");
     fs.reverse_refs_put(shared, &referrers).expect("put");
     fs.commit().expect("commit");
 
@@ -4057,7 +4057,7 @@ fn check_reclaims_an_orphaned_inode() {
         .expect("create keep");
 
     // Inject an orphan: allocate an inode and never link it into any directory.
-    fs.begin();
+    fs.begin().expect("begin");
     let sec = Security::new(0o644, 0, 0);
     let orphan = fs
         .alloc_inode(&Inode::empty(InodeKind::File, sec, fixed_clock()))
@@ -4107,7 +4107,7 @@ fn check_corrects_a_refcount_divergence_and_reports_what_it_cannot_fix() {
 
     // Tamper the on-disk chunk refcount to a value the extents do not support.
     let record = fs.chunk_get(shared).expect("get").expect("shared");
-    fs.begin();
+    fs.begin().expect("begin");
     fs.chunk_put(
         shared,
         &ChunkRecord {
@@ -5536,27 +5536,30 @@ fn volatile_volume() -> (ARXFS<MemBlock>, u64) {
 /// blocks and a tree above them.
 const VOLATILE_PAYLOAD: &[u8] = &[0x5A; 3 * CRASH_BS as usize + 17];
 
-/// When a commit returns, the *only* blocks a device may still be holding in
-/// its volatile cache are the two copies of the superblock slot that published
-/// it. Everything the new root transitively names is already on media, because
-/// the barrier the commit issues before writing that slot put it there.
-///
-/// This is the whole of the durability guarantee, stated where it can be
-/// observed: a device that reorders freely cannot make the slot durable while a
-/// tree node beneath its root is not, so no power cut can leave a mount naming
-/// a root whose interior is absent.
+/// A commit keeps resident allocation-map changes in RAM, so only the
+/// publishing slot remains volatile. Explicit sync drains those pages through
+/// the shared set and leaves only the dispensable clean stamp volatile.
 #[test]
-fn only_the_publishing_slot_pair_stays_volatile_when_a_commit_returns() {
+fn a_commit_keeps_map_pages_in_ram_until_sync() {
     let (mut fs, slot) = volatile_volume();
     let root = fs.root();
     assert_eq!(
         fs.write_at(root, b"new", 0, VOLATILE_PAYLOAD),
         Ok(VOLATILE_PAYLOAD.len())
     );
+    let companion = ARXFS::<MemBlock>::companion(slot);
     assert_eq!(
         fs.block_mut().volatile_blocks(),
-        alloc::vec![slot, ARXFS::<MemBlock>::companion(slot)],
-        "a commit left blocks other than its slot pair uncommitted"
+        alloc::vec![slot, companion],
+        "an ordinary commit wrote rebuildable map pages eagerly"
+    );
+    assert!(!fs.map_is_stamped_clean());
+    let map_header = fs.map_region_start();
+    FilesystemWrite::flush(&mut fs).expect("sync");
+    assert_eq!(
+        fs.block_mut().volatile_blocks(),
+        alloc::vec![map_header],
+        "sync left more than the dispensable clean stamp volatile"
     );
 }
 
@@ -5672,7 +5675,6 @@ fn a_failed_slot_write_freezes_the_handle_and_publishes_nothing() {
         let (mut fs, slot) = volatile_volume();
         assert_eq!(slot, probe_slot, "the fixture is deterministic");
         let root = fs.root();
-        let old_root = fs.root_phys;
         fs.block_mut().write_faults.insert(faulted);
         assert_eq!(
             fs.write_at(root, b"new", 0, VOLATILE_PAYLOAD),
@@ -5688,10 +5690,20 @@ fn a_failed_slot_write_freezes_the_handle_and_publishes_nothing() {
             Err(DriverError::PermissionDenied),
             "a frozen handle accepts no further mutation"
         );
+        let expected_free = fs
+            .saved_free_count
+            .saturating_sub(fs.allocator().expect("allocator").txn_private.len() as u64);
+        assert_eq!(
+            fs.free_count, expected_free,
+            "the frozen handle did not reserve both candidate roots"
+        );
+        assert_eq!(
+            fs.inode_tree_root, fs.saved_inode_tree_root,
+            "the frozen handle exposed unpublished tree state"
+        );
         assert!(
-            fs.is_used(old_root) && fs.is_used(ARXFS::<MemBlock>::companion(old_root)),
-            "the previously committed root was freed while it may still be \
-             selected (faulted {faulted})"
+            fs.allocator().expect("allocator").needs_rebuild,
+            "the frozen handle still trusted an ambiguous allocation map"
         );
         // Reads still work on the frozen handle.
         let witness = fs.lookup(fs.root(), b"keep").expect("the witness survives");
@@ -5810,15 +5822,12 @@ fn the_dirty_set_holds_nothing_between_operations() {
     );
 }
 
-/// The allocation map is adopted only when it is stamped clean at the
-/// generation the mount selected, so the stamp's *invalidation* must reach
-/// media before the first page write does. Without that barrier a reordering
-/// device could land a page while the invalidation sat in its cache, and the
-/// next mount would adopt a map that no longer describes the generation it
-/// vouches for.
+/// Refusing the first allocation-map page during sync leaves the commit's
+/// invalid stamp durable but its publishing slot volatile. Losing that slot
+/// selects the prior tree and rebuilds its map.
 #[test]
 fn the_map_turns_its_clean_stamp_dirty_durably_before_its_first_page_write() {
-    let (mut fs, _slot) = volatile_volume();
+    let (mut fs, slot) = volatile_volume();
     let root = fs.root();
     assert!(
         fs.map_is_stamped_clean(),
@@ -5828,8 +5837,6 @@ fn the_map_turns_its_clean_stamp_dirty_durably_before_its_first_page_write() {
         fs.write_at(root, b"new", 0, VOLATILE_PAYLOAD),
         Ok(VOLATILE_PAYLOAD.len())
     );
-    // Refuse every region block but the header, so the sync gets as far as
-    // turning the stamp dirty and no further.
     let start = fs.map_region_start();
     for block in start + 1..start + fs.map_region_blocks() {
         fs.block_mut().write_faults.insert(block);
@@ -5838,17 +5845,176 @@ fn the_map_turns_its_clean_stamp_dirty_durably_before_its_first_page_write() {
         FilesystemWrite::flush(&mut fs),
         Err(DriverError::DeviceFault)
     );
+    let held = fs.block_mut().volatile_blocks();
+    assert!(held.contains(&slot));
     let mut device = fs.into_block();
     device.write_faults.clear();
-    // Cut the power: only what the barrier already committed survives.
     device.power_loss(|_| false);
     let bytes = device.bytes();
-    let fs =
+    let mut fs =
         ARXFS::open(MemBlock::from_bytes(bytes, CRASH_BS, CRASH_BC), &TEST_KEY).expect("reopen");
     assert!(
         !fs.map_is_stamped_clean(),
-        "the mount adopted a map whose clean stamp the interrupted sync had \
-         already begun to contradict"
+        "the mount adopted the interrupted allocation map"
+    );
+    let node = fs.lookup(fs.root(), b"new").expect("target");
+    assert_eq!(fs.node_info(node).expect("stat").size, 0);
+}
+
+/// A failed sync may leave any subset of map pages in stable storage. The
+/// durable invalid stamp forces a rebuild against whichever slot survived, so
+/// neither partial map can free a live block or retain an orphan.
+#[test]
+fn a_failed_sync_rebuilds_every_partially_persisted_map() {
+    for publish in [false, true] {
+        for map_pattern in 0..4u8 {
+            let (mut fs, slot) = volatile_volume();
+            let old_used = fs.used_blocks();
+            let old_free = fs.free_count;
+            let root = fs.root();
+            fs.write_at(root, b"new", 0, VOLATILE_PAYLOAD)
+                .expect("write");
+            let new_used = fs.used_blocks();
+            let new_free = fs.free_count;
+            let map_start = fs.map_region_start();
+            let map_end = map_start + fs.map_region_blocks();
+            fs.block_mut().fail_flush = true;
+            assert_eq!(
+                FilesystemWrite::flush(&mut fs),
+                Err(DriverError::DeviceFault)
+            );
+            assert!(
+                fs.block_mut()
+                    .volatile_blocks()
+                    .iter()
+                    .any(|block| (map_start + 1..map_end).contains(block)),
+                "the failed sync reached no map page"
+            );
+
+            let companion = ARXFS::<MemBlock>::companion(slot);
+            let mut device = fs.into_block();
+            device.fail_flush = false;
+            device.power_loss(|block| {
+                if block == slot || block == companion {
+                    return publish;
+                }
+                if !(map_start + 1..map_end).contains(&block) {
+                    return false;
+                }
+                match map_pattern {
+                    0 => false,
+                    1 => true,
+                    2 => block.is_multiple_of(2),
+                    _ => !block.is_multiple_of(2),
+                }
+            });
+            let bytes = device.bytes();
+            let mut reopened =
+                ARXFS::open(MemBlock::from_bytes(bytes, CRASH_BS, CRASH_BC), &TEST_KEY)
+                    .expect("rebuild");
+            assert!(!reopened.map_is_stamped_clean());
+            let (expected_used, expected_free) = if publish {
+                (&new_used, new_free)
+            } else {
+                (&old_used, old_free)
+            };
+            let actual_used = reopened.used_blocks();
+            assert_eq!(
+                &actual_used, expected_used,
+                "wrong map for publish={publish}, pattern={map_pattern}"
+            );
+            assert_eq!(
+                reopened.free_count, expected_free,
+                "wrong free count for publish={publish}, pattern={map_pattern}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_failed_sync_rebuilds_before_a_same_handle_check_and_write() {
+    let (mut fs, _slot) = volatile_volume();
+    let root = fs.root();
+    fs.write_at(root, b"new", 0, VOLATILE_PAYLOAD)
+        .expect("write");
+    fs.block_mut().fail_flush = true;
+    assert_eq!(
+        FilesystemWrite::flush(&mut fs),
+        Err(DriverError::DeviceFault)
+    );
+    assert!(fs.allocator().expect("allocator").needs_rebuild);
+    assert_eq!(fs.dirty.len(), 0, "failed staging was retained ambiguously");
+
+    fs.block_mut().fail_flush = false;
+    let report = fs.check(&GrantAll, &NullSink).expect("same-handle check");
+    assert_eq!(report.structure, StructureVerdict::Sound, "{report:?}");
+    assert!(!fs.allocator().expect("allocator").needs_rebuild);
+    fs.write_at(root, b"new", 1, b"after recovery")
+        .expect("same-handle write");
+    let expected_used = fs.used_blocks();
+    let expected_free = fs.free_count;
+    FilesystemWrite::flush(&mut fs).expect("sync recovered mount");
+
+    let bytes = fs.into_block().bytes();
+    let mut reopened =
+        ARXFS::open(MemBlock::from_bytes(bytes, CRASH_BS, CRASH_BC), &TEST_KEY).expect("reopen");
+    assert_eq!(reopened.used_blocks(), expected_used);
+    assert_eq!(reopened.free_count, expected_free);
+}
+
+#[test]
+fn a_failed_sync_rebuilds_before_same_handle_growth() {
+    let (mut fs, _slot) = volatile_volume();
+    let root = fs.root();
+    fs.write_at(root, b"new", 0, VOLATILE_PAYLOAD)
+        .expect("write");
+    fs.block_mut().fail_flush = true;
+    assert_eq!(
+        FilesystemWrite::flush(&mut fs),
+        Err(DriverError::DeviceFault)
+    );
+    fs.block_mut().fail_flush = false;
+    let grown_blocks = CRASH_BC + 1024;
+    fs.block_mut().enlarge_to(grown_blocks);
+    assert_eq!(fs.grow(), Ok(1024));
+    let expected_used = fs.used_blocks();
+    let expected_free = fs.free_count;
+    FilesystemWrite::flush(&mut fs).expect("sync grown volume");
+
+    let bytes = fs.into_block().bytes();
+    let mut reopened = ARXFS::open(
+        MemBlock::from_bytes(bytes, CRASH_BS, grown_blocks),
+        &TEST_KEY,
+    )
+    .expect("reopen grown volume");
+    assert_eq!(reopened.used_blocks(), expected_used, "grown map mismatch");
+    assert_eq!(reopened.free_count, expected_free);
+}
+
+#[test]
+fn confirming_map_invalidation_leaves_authoritative_blocks_staged() {
+    let (mut fs, _slot) = volatile_volume();
+    assert!(fs.map_is_stamped_clean());
+    let authoritative = fs.map_region_start() + fs.map_region_blocks();
+    let block = [0xA5; MAX_BLOCK_SIZE];
+    let block_size = fs.block_size;
+    fs.dirty
+        .stage(
+            WritePhase::BeforeBarrier,
+            authoritative,
+            &block[..block_size],
+        )
+        .expect("stage authoritative block");
+    fs.map_confirm_dirty().expect("confirm invalidation");
+    assert!(!fs.map_is_stamped_clean());
+    assert!(
+        fs.block_mut().volatile_blocks().is_empty(),
+        "the invalid marker did not cross its barrier"
+    );
+    assert_eq!(
+        fs.dirty.staged_in(authoritative, 1),
+        1,
+        "map invalidation drained unrelated transaction state"
     );
 }
 
@@ -7544,13 +7710,11 @@ fn a_compressed_cluster_read_asks_the_device_once_for_its_stored_run() {
     );
 }
 
-/// The barrier budget of the two durability points: an ordinary commit issues
-/// the one mandatory pre-slot barrier, and `fs_sync` adds the two the
-/// allocation map needs — one to make the clean stamp's invalidation durable
-/// before the first page write lands, and one to make the pages and the
-/// committed slot themselves durable before the clean stamp is issued.
+/// An ordinary commit and an explicit sync each issue one barrier. The commit
+/// makes the map's invalidation durable before its pages; the sync makes those
+/// pages and the publishing slot durable before restoring the clean stamp.
 #[test]
-fn a_commit_barriers_once_and_a_sync_adds_the_maps_two() {
+fn a_commit_and_a_sync_each_barrier_once() {
     let (mut fs, dir) = counted_dir_fixture(1);
     fs.block_mut().flushes = 0;
     fs.write_at(dir, b"f0.txt", 0, b"durable payload")
@@ -7563,9 +7727,27 @@ fn a_commit_barriers_once_and_a_sync_adds_the_maps_two() {
     FilesystemWrite::flush(&mut fs).expect("flush");
     assert_eq!(
         fs.block_mut().flushes,
-        3,
-        "a sync turns the map's clean stamp dirty durably, then persists its \
-         pages behind the barrier that also commits the published slot"
+        2,
+        "an explicit sync adds one durability barrier"
+    );
+}
+
+#[test]
+fn a_clean_check_and_its_following_sync_each_barrier_once() {
+    let (mut fs, _dir) = counted_dir_fixture(1);
+    fs.block_mut().flushes = 0;
+    let report = fs.check(&GrantAll, &NullSink).expect("check");
+    assert_eq!(report.structure, StructureVerdict::Sound, "{report:?}");
+    assert_eq!(
+        fs.block_mut().flushes,
+        1,
+        "the rebuilt map was not invalidated by one barrier"
+    );
+    FilesystemWrite::flush(&mut fs).expect("sync");
+    assert_eq!(
+        fs.block_mut().flushes,
+        2,
+        "sync used more than one barrier after a clean check"
     );
 }
 
@@ -8709,7 +8891,7 @@ fn a_tree_whose_shape_is_impossible_is_refused_rather_than_walked_forever() {
     fs.read_meta(root, BlockType::Btree, &mut buf)
         .expect("root");
     wr_u64(&mut buf, btree::N_ENTRIES + 8, root);
-    fs.begin();
+    fs.begin().expect("begin");
     let cycled = fs
         .cow_meta(0, &mut buf, BlockType::Btree, spec.owner, 0)
         .expect("seal the cyclic node");
@@ -8784,7 +8966,7 @@ fn a_tree_whose_shape_is_impossible_is_refused_rather_than_walked_forever() {
     let high = rd_u64(&leaf, last);
     wr_u64(&mut leaf, first, high + 1);
     wr_u64(&mut leaf, last, 1);
-    fs.begin();
+    fs.begin().expect("begin");
     let descending = fs
         .cow_meta(0, &mut leaf, BlockType::Btree, spec.owner, 0)
         .expect("seal the descending leaf");
@@ -8813,7 +8995,7 @@ fn the_write_path_refuses_an_impossible_tree_as_the_read_path_does() {
     fs.read_meta(root, BlockType::Btree, &mut buf)
         .expect("root");
     wr_u64(&mut buf, btree::N_ENTRIES + 8, root);
-    fs.begin();
+    fs.begin().expect("begin");
     let cycled = fs
         .cow_meta(0, &mut buf, BlockType::Btree, spec.owner, 0)
         .expect("seal the cyclic node");
@@ -8860,7 +9042,7 @@ fn a_merge_of_two_empty_siblings_is_refused_rather_than_indexed_into() {
     // closed instead.
     let mut fs = fmt(512, 4096, 64);
     let spec = inode_spec();
-    fs.begin();
+    fs.begin().expect("begin");
 
     let mut leaf = [0u8; MAX_BLOCK_SIZE];
     fs.btree_init_node(&mut leaf, 0, 1);

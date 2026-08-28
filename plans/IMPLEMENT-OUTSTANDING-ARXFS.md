@@ -40,8 +40,8 @@ no-deferral rule), ahead of everything below it.
 | WB0 | Write-amplification measurement harness | `ARXFS-WRITEBACK.md` | 17 | — | **done** |
 | WB1 | Dirty block set + the commit barrier (defect D63) | `ARXFS-WRITEBACK.md` | 17 | WB0 | **done** |
 | WB2 | Run coalescer | `ARXFS-WRITEBACK.md` | 17 | WB1 | **done** |
-| WB3 | Fold in the allocation map's dirty pages | `ARXFS-WRITEBACK.md` | 17 | WB1 | **next** |
-| WB4 | Commit scheduler | `ARXFS-WRITEBACK.md` | 17 | WB1 | planned |
+| WB3 | Fold in the allocation map's dirty pages | `ARXFS-WRITEBACK.md` | 17 | WB1 | **done** |
+| WB4 | Commit scheduler | `ARXFS-WRITEBACK.md` | 17 | WB1 | **next** |
 | WB5 | The bound and memory pressure | `ARXFS-WRITEBACK.md` | 17 | WB1 | planned |
 | WB6 | Hardware acceptance + docs | `ARXFS-WRITEBACK.md` | 17 | WB2–WB5 | planned |
 | M2 | Bounded passes: scrub, discard sweep, health (D-M2/3/4) | `ARXFS-MAINTENANCE.md` | 18 | A2, M1 | planned |

@@ -140,13 +140,17 @@ impl BlockCache {
         self.entries.get(&page).map(|e| e.payload.as_slice())
     }
 
-    /// Region blocks holding unwritten changes, in device-address order.
-    pub(crate) fn dirty_pages(&self) -> Vec<u64> {
+    /// Lowest-address resident page holding unwritten changes.
+    pub(crate) fn first_dirty(&self) -> Option<u64> {
         self.entries
             .iter()
-            .filter(|(_, entry)| entry.dirty)
+            .find(|(_, entry)| entry.dirty)
             .map(|(block, _)| *block)
-            .collect()
+    }
+
+    /// Whether at least one resident page differs from the device.
+    pub(crate) fn has_dirty(&self) -> bool {
+        self.entries.values().any(|entry| entry.dirty)
     }
 
     /// Note that a page's bytes are now on the device.
@@ -194,12 +198,12 @@ mod tests {
     fn cache_tracks_dirty_pages_until_they_are_written() {
         let mut cache = BlockCache::new(BS);
         cache.insert_clean(5, &[0u8; 4]);
-        assert!(cache.dirty_pages().is_empty());
+        assert_eq!(cache.first_dirty(), None);
         cache.write(5).expect("cached")[0] = 0xAA;
-        assert_eq!(cache.dirty_pages(), alloc::vec![5]);
+        assert_eq!(cache.first_dirty(), Some(5));
         assert_eq!(cache.peek(5).expect("cached")[0], 0xAA);
         cache.mark_written(5);
-        assert!(cache.dirty_pages().is_empty());
+        assert_eq!(cache.first_dirty(), None);
     }
 
     #[test]

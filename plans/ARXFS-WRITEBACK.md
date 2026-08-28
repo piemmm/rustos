@@ -1,8 +1,7 @@
 # ARXFS-WRITEBACK.md — ARXFS write-back cache, commit batching, and the commit barrier
 
-Status: **WB0 done** (the measurement harness), **WB1 done** (the dirty block
-set and the commit barrier, closing `plans/OPEN-DEFECTS.md` D63), and **WB2
-done** (the run coalescer, closing C3); WB3–WB6 planned.
+Status: **WB0–WB3 done** (measurement, the dirty set and commit barrier, run
+coalescing, and allocation-map integration); **WB4 next**, WB5–WB6 planned.
 Binding under `AGENTS.md` and listed in its §15.18 jump-sheet.
 Primary code area: `drivers/filesystem/arxfs/`.
 Companion spec section: `docs/src/filesystem/arxfs-spec.md` §22.
@@ -13,9 +12,9 @@ writes both slow — measured 5.6×–17.8× byte amplification and, on a 512-by
 card, one device command per 512 bytes — and unsafe on any device with a
 volatile write cache. This plan fixes both with one mechanism: a
 transaction-scoped dirty block set, a run coalescer, a commit scheduler, and the
-single barrier that becomes affordable once commits are batched. WB1 landed the
-set and the barrier and WB2 the coalescer; the remaining stages are the map's
-dirty pages, the scheduler, and the bound.
+single barrier that becomes affordable once commits are batched. The dirty set,
+barrier, coalescer, and allocation-map integration are present; the scheduler
+and RAM-derived bound remain.
 
 It adds **no** capability, **no** ABI surface, **no** second data path, and no
 mount option: the behaviour is the one production profile
@@ -40,7 +39,7 @@ version is the last one.
 | 64 KiB in one `write_at` | 4096 | 5 | 25 | 0 | 100 KiB | 1.56× |
 | 64 KiB as 16 × 4 KiB `write_at` | 4096 | 64 | 160 | 24 | 640 KiB | 10.00× |
 | 34-byte append to an existing file | 512 | 4 | 11 | 0 | 5.5 KiB | 165.6× |
-| create one empty file | 512 | 3 | 14 | 0 | 7 KiB | — |
+| create one empty file after a clean mkfs | 512 | 4 | 15 | 0 | 7.5 KiB | — |
 
 Commands are fewer than blocks because the drain gathers adjacent staged blocks
 into runs, so the exact run-length histogram is part of the baseline too. Every
@@ -79,8 +78,9 @@ CMD24 plus completion wait where one CMD25 could carry 128 of them — while the
 already staged 128 blocks per ADMA2 multi-block transfer. WB2 gathers the
 drain's ascending order into physical runs against that same window, hoisted to
 one shared bound. A 64 KiB write on a 512-byte volume costs **five** commands
-against 158, and an empty-file create three against fourteen, for identical
-bytes.
+against 158. An empty-file create after a clean mkfs costs four commands for
+fifteen blocks: its twelve-block metadata run, the map invalidation, and the
+slot pair.
 
 **C4 — no commit barrier (a durability defect). Closed.** `commit()` wrote the
 copy-on-write blocks, then the transaction root, then the superblock slot, with
@@ -114,9 +114,10 @@ stage 20), FEC commit witnesses (stage 21) — is now unblocked.
 - **Forward progress is guaranteed.** The bound has a floor of one
   transaction's own working set. A volume that cannot hold that could not
   commit at all, so the floor is a correctness property, not a tuning choice.
-- **No second anything.** One dirty set (the allocation map's private dirty-page
-  set folds into it), one barrier, one staging-window bound shared with the read
-  path, one integrity/crypto path (blocks enter the set already sealed), one
+- **No second anything.** One dirty set serves copy-on-write blocks and the
+  allocation map; each ordinary commit and explicit sync has one barrier, one
+  staging-window bound is shared with the read path, one integrity/crypto path
+  seals blocks before staging, and one
   allocator. A dirty block is bytes already produced by the existing seal path.
 - **Read-after-write within a transaction sees the new bytes.** The B-tree
   re-reads nodes it has just written; the dirty set is authoritative for its
@@ -149,12 +150,10 @@ VFS operation
                       -> Block::write_blocks / Block::flush
 ```
 
-The non-transactional writes — the rebuildable allocation-map region, the
-transient scratch arrays, an idempotent mirror copy-repair, and the superblock
-slot at the commit point — go through `write_device` instead: they have nothing
-to be ordered behind the barrier, and the slot is what the barrier orders
-everything else *ahead of*. Both reach the device through one `write_blocks`
-call site.
+The non-transactional writes — the clean allocation-map stamp, transient
+scratch arrays, an idempotent mirror copy-repair, and the superblock slot at the
+commit point — go through `write_device`. Map pages and invalidation use the
+dirty set; both paths reach the device through one `write_blocks` call site.
 
 Above ARXFS, `kernel/core::fs::CachedFs` (clean metadata) and the driver's
 injected `ClusterCache` (clean transforms) are untouched. Below it,
@@ -344,8 +343,9 @@ strictly-ordered devices the suite used to run on:
    invalidation sat in its cache; the next mount would adopt a map stamped clean
    at a generation it no longer described, and a page carrying a committed
    transaction's frees would mark live blocks free. One barrier at the
-   transition — once per sync period, not per write — closes it. WB3 removes the
-   dirty stamp altogether by folding the pages into the barriered drain.
+   transition — once per sync period, not per write — closes it. The marker is
+   staged with the authoritative commit phase, so the commit's existing barrier
+   makes it durable without a second normal-path barrier.
 
 The test surface is the WB0 ledger for the command shape (one barrier per
 commit, nothing but the slot pair after it) and a volatile-write-cache
@@ -374,31 +374,41 @@ histogram).* Identical bytes, far fewer commands: a 64 KiB `write_at` on a
 512-byte volume **158 → 5** (a 128-block run at the bound, a 20-block
 remainder, the four mirrored metadata pairs as one 8-block run, and the slot
 pair), at 4096 **25 → 5**; a 34-byte append **11 → 4**; an empty-file create
-**14 → 3**, its whole metadata working set one 12-block run because metadata is
-allocated downward from the high end. The chunked case, which C2 owns, falls
+**14 → 4** after a clean mkfs, its metadata one 12-block run plus the map
+invalidation and slot pair. The chunked case, which C2 owns, falls
 335 → 64 and 160 → 64. The barrier shape is unchanged: one barrier per commit
 with nothing but the slot's two single-block copies after it, which stay two
 separate commands because the primary *is* the commit point.
 
-### WB3 — fold the allocation map's dirty pages in. **next**
+### WB3 — fold the allocation map's dirty pages in. **done**
 
-`allocmap`'s private dirty-page set and `map_persist`'s own `flush()` are the
-same problem solved twice. Fold the pages into the one dirty set and the barrier
-into the one barrier; the clean stamp still lands after it, for the reason it
-does today (losing the stamp costs a rebuild, never correctness).
+Allocation-map pages enter the same `DirtySet` as copy-on-write blocks, in a
+post-invalidation phase. Resident changes stay in the map's bounded page cache
+between commits; eviction moves one page into the set and drains it, while
+`fs_sync` moves all resident pages into the set, coalesces bounded runs, issues
+one barrier, then writes the clean generation stamp. A page leaves the cache
+once staged, and the transient gather window stays below the cache footprint.
 
-Doing so removes the *dirty* stamp entirely, and with it the extra barrier WB1
-had to add at the clean→dirty transition: if a page only ever reaches the device
-inside a barriered commit drain, then a stamp naming the generation those pages
-reflect is safe wherever it lands. A crash before the barrier leaves the slot
-unpublished, so the selected generation cannot match the stamp and the mount
-rebuilds.
+The clean/dirty marker remains mandatory for the in-place map. The first
+mutation after a clean sync stages its invalidation with the commit's
+authoritative phase, so the existing pre-slot barrier makes it durable before
+any map page may reach the device. Removing that marker would let a volatile
+cache persist a page carrying frees while losing the slot that made those frees
+lawful; the old clean generation would then adopt a map that can reallocate live
+blocks. If a clean map fills its bounded cache before commit, eviction confirms
+the invalid marker first rather than weakening this ordering.
 
-Acceptance: one dirty set and one barrier remain in the driver; a `fs_sync`
-issues one barrier, not two; the map is still adopted after a clean sync and
-still rebuilt after a crash; the existing map tests pass unchanged.
+Each ordinary commit and `fs_sync` uses one barrier on the normal path. A clean
+sync is adoptable; an ordinary crash or any partial map-page persistence rebuilds
+from whichever transaction root survives. The power-loss tests cover both roots
+and retained none/all/even/odd map-page subsets, and the 100 TiB rebuild stays
+inside the fixed resident-memory budget. A failed page write or sync barrier
+poisons and drops both staging and cache; the next check, write, or grow derives
+the exact map from the committed trees before using it. Unknown slot publication
+restores the last published tree view, reserves both candidate roots, and freezes
+the handle read-only.
 
-### WB4 — commit scheduler. **planned**
+### WB4 — commit scheduler. **next**
 
 Multi-operation transactions, the device-class deadline policy, the
 barrier-requiring operation list, and `fs_sync` semantics. Fixes C2.
