@@ -77,7 +77,7 @@ mod program {
     };
     use tairix_display::{winframe, SERIAL};
     use tairix_font::BitmapFont;
-    use tairix_geometry::{Point, Rect, Scale};
+    use tairix_geometry::{Rect, Scale};
     use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
     use tairix_log::{
         log, Event as LogEvent, Field as LogField, FieldValue as LogFieldValue, Level as LogLevel,
@@ -91,7 +91,7 @@ mod program {
         SESSION_REFUSED, WIN_HEIGHT, WIN_SIZING, WIN_WIDTH,
     };
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
-    use tairix_window::{Desktop, WindowClient, WindowFrames, WindowTransport};
+    use tairix_window::{pointer_point, Desktop, WindowClient, WindowFrames, WindowTransport};
 
     /// Frames in the shared region. The window protocol serialises a
     /// present (the app is parked in the call while the session reads), so
@@ -613,10 +613,7 @@ mod program {
         let theme = host.themes.active();
         let font = panel_font(theme, host.desktop.scale());
         let view = service.panel_mut().view_mut()?;
-        let at = Point::new(
-            i32::try_from(x).unwrap_or(i32::MAX),
-            i32::try_from(y).unwrap_or(i32::MAX),
-        );
+        let at = pointer_point(x, y);
         let moved = view.on_pointer(
             &InputEvent::PointerMoved { to: at },
             bounds,

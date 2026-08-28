@@ -7973,8 +7973,8 @@ compositor itself is *not* the bottleneck here — the session's decode already
 compares each presented pixel with what is there and reports only the
 sub-rectangle that genuinely changed — so the waste is entirely upstream, and
 closing it needs each app to present the rectangles it changed (C.3), which
-has landed for `userland/apps/widgets` and `userland/apps/terminal` and remains
-for `viewer`, `wallpaper`, `files` and `switchboard`.
+has landed for `userland/apps/{widgets,terminal,viewer,wallpaper}` and remains
+for `files` and `switchboard`.
 
 **Staged (detail in the plan; do not duplicate it here, §13):**
 
@@ -8005,8 +8005,8 @@ for `viewer`, `wallpaper`, `files` and `switchboard`.
   theme/reclaim → abi`). Bit-identity is proven by composing each scene
   twice, with the copy path on and off, and comparing bytes.
 - **C — repaint the control, not the window. [C.0, C.1, C.2, C.4b, C.4c, C.5
-  done; C.3 done for `widgets` and `terminal`, four apps remain; C.4a
-  withdrawn]**
+  done; C.3 done for `widgets`, `terminal`, `viewer` and `wallpaper`, two apps
+  remain; C.4a withdrawn]**
   `tairix_geometry::Region` is the one
   region type (pairwise-disjoint band-canonical rectangles, a linear merge
   walk, an optional rectangle budget), and the WM's private copy is deleted;
@@ -8031,8 +8031,16 @@ for `viewer`, `wallpaper`, `files` and `switchboard`.
   batch instead of once per sample (as do the keyboard and pinboard drains),
   and C.4a is **withdrawn**:
   building a `BitmapFont` is a theme read and arithmetic — no lock, client
-  call or cache lookup — so hoisting it cannot buy measurable time. Remaining:
-  the four apps that still present their whole surface (C.3).
+  call or cache lookup — so hoisting it cannot buy measurable time. The viewer
+  and the wallpaper chooser now hold their window surface for the window's
+  life, clip each round's draw to what its controls reported and present that
+  rectangle; the chooser also reports the single tile a sandbox-rendered
+  thumbnail fills, so filling its grid costs one square per artwork rather
+  than one window. Remaining: the two apps that still present their whole
+  surface — `files` (whose `lib/browse` renderer allocates the surface it
+  returns, so the retained-surface step is a shared-engine change) and
+  `switchboard` (whose level-triggered `Panel::flush` decouples the reporting
+  round from the present, so the region must accumulate in the panel).
 - **D — blur costs what it changes. [D.1–D.4 and D.7–D.12 done; D.5 is
   decision 2 below; D.6 is an unmeasured follow-up]** A frosted window's
   backdrop is retained

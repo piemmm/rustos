@@ -101,8 +101,8 @@ mod program {
     use tairix_theme::{Theme, ThemeRegistry};
     use tairix_users::DEFAULT_SHELL;
     use tairix_window::{
-        damage_in, event_endpoint_for, key_input_event, pointer_input_events, Desktop, PopupSpec,
-        WindowClient, WindowFrames, WindowTransport, EVENT_MAILBOX_CAPACITY,
+        damage_in, event_endpoint_for, key_input_event, pointer_input_events, pointer_point,
+        Desktop, PopupSpec, WindowClient, WindowFrames, WindowTransport, EVENT_MAILBOX_CAPACITY,
     };
 
     /// Exit code when the event mailbox or a wait-set member could not be
@@ -1956,7 +1956,7 @@ mod program {
                             let Some(held) = open.overlay.as_mut() else {
                                 continue;
                             };
-                            let at = client_point(x, y);
+                            let at = pointer_point(x, y);
                             match route_overlay_pointer(held, profile, action, at, scale, theme) {
                                 OverlayRouting::Nothing => {}
                                 OverlayRouting::Redraw => redrawn = Some(window),
@@ -2003,7 +2003,7 @@ mod program {
                             {
                                 return EventOutcome::OpenMenu {
                                     window,
-                                    at: client_point(x, y),
+                                    at: pointer_point(x, y),
                                 };
                             }
                         }
@@ -2124,14 +2124,6 @@ mod program {
             (EventOutcome::Continue, Some(window)) => EventOutcome::OverlayChanged { window },
             (other, _) => other,
         }
-    }
-
-    /// The client-local point a wire pointer position names.
-    fn client_point(x: u32, y: u32) -> Point {
-        Point::new(
-            i32::try_from(x).unwrap_or(i32::MAX),
-            i32::try_from(y).unwrap_or(i32::MAX),
-        )
     }
 
     /// What routing a key press delivered for the terminal's own window

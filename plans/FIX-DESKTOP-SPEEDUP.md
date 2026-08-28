@@ -1,7 +1,7 @@
 # FIX-DESKTOP-SPEEDUP — Software-compositor and GUI redraw performance
 
 Status: **A done** (less A.4's QEMU hover vertical), **B done**, **C mostly
-done** (C.3 remains for four apps), **D done** (D.5 is a User decision, D.6 an
+done** (C.3 remains for two apps), **D done** (D.5 is a User decision, D.6 an
 unmeasured follow-up), **E.1/E.2 done** (E.3/E.4 frame pacing planned), **H, I,
 J done**. **F** is gated on the F.0 decision and may not land before B–C. **G**
 is kernel work gated on a User decision (§15.7).
@@ -59,9 +59,9 @@ them is the app's to remove:
 3. the session decodes and diffs every declared pixel against the window's
    surface.
 
-`userland/apps/{viewer,wallpaper,files}` and `userland/gui/switchboard` still
-present `DamageRect::full(mode)` on every round, so all three passes run for a
-single pointer sample. C.3 closes (1) and (2) per app; (3) is not the app's to
+`userland/apps/files` and `userland/gui/switchboard` still present
+`DamageRect::full(mode)` on every round, so all three passes run for a single
+pointer sample. C.3 closes (1) and (2) per app; (3) is not the app's to
 shrink — it is `tairix_display::winframe` (Stage J), and it costs what the app
 declares.
 
@@ -232,8 +232,8 @@ Compositor-local: no ABI change, no app change.
 
 ## Stage C — Repaint the control that changed, not the window
 
-**[C.0, C.1, C.2, C.4b, C.4c, C.5 done; C.3 done for `widgets` and `terminal`,
-four apps remain; C.4a withdrawn]**
+**[C.0, C.1, C.2, C.4b, C.4c, C.5 done; C.3 done for `widgets`, `terminal`,
+`viewer` and `wallpaper`, two apps remain; C.4a withdrawn]**
 
 ### C.0 One region type, in one place  **[done]**
 `tairix_geometry::Region` (`lib/geometry/src/region.rs`) is the one region type;
@@ -320,7 +320,7 @@ over-grabbing only routes further events to a child that ignores them. A
 `#[cfg(test)] fan_pointer` oracle keeps the old delivery as the differential
 reference.
 
-### C.3 Apps present the rect they changed  **[`widgets`, `terminal` done; `viewer`, `wallpaper`, `files`, `switchboard` remain]**
+### C.3 Apps present the rect they changed  **[`widgets`, `terminal`, `viewer`, `wallpaper` done; `files`, `switchboard` remain]**
 
 No ABI change is required: `lib/window`'s `WindowClient::present` already carries
 a per-present `DamageRect`. The decision is shared, not per-app —
@@ -359,6 +359,22 @@ service data, a resize, a theme change, a first paint) keeps presenting whole,
 which is correct and needs no report.
 
 - **`widgets` is the control-tree recipe**, landed exactly as above.
+- **`viewer` and `wallpaper` follow it.** Both hold one window-sized surface for
+  the life of the window, reallocated with the frame region on a resize and
+  adopted only once the session accepts the re-map. The viewer's engine draws
+  through `Viewer::render_into` — the intermediate text sub-surface it used to
+  allocate and blit is gone — and reports the text area and the bar together
+  whenever the scroll offset moves, which is the one commit its host makes into
+  a control. The chooser reports its gallery marks through
+  `damage::move_mark` over the tile rectangles (`Chooser::candidate_rect`), adds
+  the preview model and its caption when the selection moves, reports the status
+  line when an apply outcome is committed, and — the win peculiar to this app —
+  reports the *one square* a thumbnail arriving from the sandbox fills, so
+  filling an N-wallpaper grid costs N tiles rather than N whole windows.
+- **The one wire-to-geometry conversion is shared.** `tairix_window::pointer_point`
+  widens a wire pointer position into the signed geometry the controls hit-test
+  in; the seven private copies (two of them identically named `client_point`)
+  are deleted.
 - **`terminal` reports from a *cell diff*, not from control rounds**, because a
   character grid has no control tree: `render::Screen` retains the surface *and*
   the cells it was last painted from, and `Screen::paint` returns the block that

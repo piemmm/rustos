@@ -26,7 +26,8 @@
 //!   "Open…" button, and the scrollbar, kept in sync through one shared
 //!   [`tairix_controls::ScrollModel`]. [`Viewer::on_pointer`] is the single
 //!   pure entry point a host feeds a translated [`tairix_input::InputEvent`]
-//!   into; [`Viewer::render`] draws the whole window.
+//!   into; [`Viewer::render_into`] draws the whole window into the
+//!   caller's retained surface.
 //! * [`ViewerLayout`] — the one definition of where the header, the
 //!   "Open…" button, the text area, and the scrollbar sit within a
 //!   `width_px` × `height_px` window, shared by rendering, hit-testing,
@@ -37,10 +38,6 @@
 //!   `max_cols` characters, every non-printable byte sanitised to a
 //!   placeholder so untrusted file content can never smuggle control
 //!   sequences into the renderer (fail closed, never raw).
-//! * [`render_status`] / [`render_lines`] — the themed painters: a
-//!   one-line status ("no file chosen", "pick refused") or the content
-//!   lines, drawn with the shared `lib/font` face onto a `lib/raster`
-//!   [`Surface`] through the active `lib/theme` palette.
 //! * [`ScrollView`] — the vertical scroll offset through a long file, held
 //!   in the shared `lib/controls` scroll model (the same behaviour the
 //!   window manager's root-viewport bars use). Arrow, page, and home/end
@@ -182,12 +179,6 @@ pub fn visible_rows_for(height_px: u32, theme: &Theme, scale: Scale) -> usize {
     usize::try_from(text_h / line).unwrap_or(0)
 }
 
-/// Rows of text the initial [`WIN_HEIGHT`]-tall viewer window shows.
-#[must_use]
-pub fn visible_rows(theme: &Theme, scale: Scale) -> usize {
-    visible_rows_for(WIN_HEIGHT, theme, scale)
-}
-
 /// Columns of text a `width_px`-wide viewer window's text area shows,
 /// derived from the shared monospace face and shrunk by the scrollbar
 /// gutter so text never runs under the bar.
@@ -202,12 +193,6 @@ pub fn visible_cols_for(width_px: u32, theme: &Theme, scale: Scale) -> usize {
     usize::try_from(text_w.saturating_sub(TEXT_PADDING * 2) / advance).unwrap_or(0)
 }
 
-/// Columns of text the initial [`WIN_WIDTH`]-wide viewer window shows.
-#[must_use]
-pub fn visible_cols(theme: &Theme, scale: Scale) -> usize {
-    visible_cols_for(WIN_WIDTH, theme, scale)
-}
-
 /// Height in pixels of one drawn text line.
 fn line_height() -> u32 {
     BitmapFont::console()
@@ -215,38 +200,25 @@ fn line_height() -> u32 {
         .saturating_add(LINE_PADDING * 2)
 }
 
-/// Paint a one-line status message (the waiting and cancelled states)
-/// centred on the first text row of a `width_px` × `height_px` window.
-/// Returns `None` only when the window surface cannot be allocated (the
-/// caller fails closed).
-#[must_use]
-pub fn render_status(text: &str, theme: &Theme, width_px: u32, height_px: u32) -> Option<Surface> {
-    let lines = [String::from(text)];
-    render_slice(&lines, theme, width_px, height_px)
-}
-
-/// Paint the picked file's display `lines` from the top of a `width_px`
-/// × `height_px` window. Returns `None` only when the window surface
-/// cannot be allocated.
-#[must_use]
-pub fn render_lines(
-    lines: &[String],
+/// Draw `lines` down the text `area` of a window surface, one per text row.
+///
+/// The rows the area cannot hold are dropped rather than drawn past it, and
+/// each line is truncated to the padded width, so the text can never reach the
+/// scrollbar gutter beside it. The area's background is the caller's fill: this
+/// writes glyphs only, which is what lets a clipped repaint redraw one band
+/// without a second whole-area pass.
+fn draw_text_area<'a>(
+    surface: &mut Surface,
+    area: Rect,
+    lines: impl Iterator<Item = &'a str>,
     theme: &Theme,
-    width_px: u32,
-    height_px: u32,
-) -> Option<Surface> {
-    render_slice(lines, theme, width_px, height_px)
-}
-
-/// The one painter behind both renderers, sized to the current window.
-fn render_slice(lines: &[String], theme: &Theme, width_px: u32, height_px: u32) -> Option<Surface> {
+) {
     let font = BitmapFont::console();
     let line = line_height();
-    let mut surface = Surface::new(width_px, height_px)?;
     let palette = theme.palette();
-    surface.fill(palette.surface.into());
     let y_offset = line.saturating_sub(font.glyph_height()) / 2;
-    for (row, text) in lines.iter().enumerate() {
+    let usable = area.width.saturating_sub(TEXT_PADDING * 2);
+    for (row, text) in lines.enumerate() {
         if text.is_empty() {
             continue;
         }
@@ -256,23 +228,22 @@ fn render_slice(lines: &[String], theme: &Theme, width_px: u32, height_px: u32) 
         let Some(top) = top else {
             break;
         };
-        if top >= height_px {
+        if top >= area.height {
             break;
         }
-        let usable = width_px.saturating_sub(TEXT_PADDING * 2);
         let fitted = font.truncate_to_width(text, usable);
         if fitted.is_empty() {
             continue;
         }
         font.draw_text(
-            &mut surface,
-            to_i32(TEXT_PADDING),
-            to_i32(top.saturating_add(y_offset)),
+            surface,
+            area.left().saturating_add(to_i32(TEXT_PADDING)),
+            area.top()
+                .saturating_add(to_i32(top.saturating_add(y_offset))),
             fitted,
             palette.on_surface.into(),
         );
     }
-    Some(surface)
 }
 
 /// Saturating `u32` → `i32`.
@@ -517,7 +488,7 @@ pub struct ViewerPointerOutcome {
 /// the authoritative one inside its [`ScrollView`] on every navigation,
 /// resize, or drag. [`Viewer::on_pointer`] is the single pure entry point a
 /// host feeds a translated pointer event into, so the routing here is
-/// host-testable without a window; [`Viewer::render`] draws the whole
+/// host-testable without a window; [`Viewer::render_into`] draws the whole
 /// window from the shared controls, adding no painting of its own.
 pub struct Viewer {
     /// The raw picked-file bytes currently shown, kept so a resize can
@@ -631,53 +602,66 @@ impl Viewer {
     }
 
     /// Scroll one line toward the start, returning whether the view moved.
-    pub fn line_up(&mut self) -> bool {
-        self.navigate(ScrollView::line_up)
+    pub fn line_up(&mut self, layout: &ViewerLayout, damage: &mut Region) -> bool {
+        self.navigate(layout, damage, ScrollView::line_up)
     }
 
     /// Scroll one line toward the end, returning whether the view moved.
-    pub fn line_down(&mut self) -> bool {
-        self.navigate(ScrollView::line_down)
+    pub fn line_down(&mut self, layout: &ViewerLayout, damage: &mut Region) -> bool {
+        self.navigate(layout, damage, ScrollView::line_down)
     }
 
     /// Scroll one page toward the start, returning whether the view moved.
-    pub fn page_up(&mut self) -> bool {
-        self.navigate(ScrollView::page_up)
+    pub fn page_up(&mut self, layout: &ViewerLayout, damage: &mut Region) -> bool {
+        self.navigate(layout, damage, ScrollView::page_up)
     }
 
     /// Scroll one page toward the end, returning whether the view moved.
-    pub fn page_down(&mut self) -> bool {
-        self.navigate(ScrollView::page_down)
+    pub fn page_down(&mut self, layout: &ViewerLayout, damage: &mut Region) -> bool {
+        self.navigate(layout, damage, ScrollView::page_down)
     }
 
     /// Jump to the first line, returning whether the view moved.
-    pub fn to_top(&mut self) -> bool {
-        self.navigate(ScrollView::to_top)
+    pub fn to_top(&mut self, layout: &ViewerLayout, damage: &mut Region) -> bool {
+        self.navigate(layout, damage, ScrollView::to_top)
     }
 
     /// Jump so the last lines are in view, returning whether the view moved.
-    pub fn to_bottom(&mut self) -> bool {
-        self.navigate(ScrollView::to_bottom)
+    pub fn to_bottom(&mut self, layout: &ViewerLayout, damage: &mut Region) -> bool {
+        self.navigate(layout, damage, ScrollView::to_bottom)
     }
 
     /// Scroll by `ticks` wheel detents (see [`ScrollView::scroll_ticks`]),
     /// returning whether the view moved.
-    pub fn scroll_ticks(&mut self, ticks: i32) -> bool {
-        self.navigate(|scroll| scroll.scroll_ticks(ticks))
+    pub fn scroll_ticks(&mut self, ticks: i32, layout: &ViewerLayout, damage: &mut Region) -> bool {
+        self.navigate(layout, damage, |scroll| scroll.scroll_ticks(ticks))
     }
 
     /// Apply a navigation step to the open file view (a no-op returning
     /// `false` while a status message is shown), resyncing the scrollbar
-    /// when it moves.
-    fn navigate(&mut self, step: impl FnOnce(&mut ScrollView) -> bool) -> bool {
+    /// when it moves and reporting what that redrew.
+    fn navigate(
+        &mut self,
+        layout: &ViewerLayout,
+        damage: &mut Region,
+        step: impl FnOnce(&mut ScrollView) -> bool,
+    ) -> bool {
         let Some(scroll) = self.scroll.as_mut() else {
             return false;
         };
         let moved = step(scroll);
         if moved {
             self.sync_scrollbar();
+            Self::mark_scrolled(layout, damage);
         }
         moved
+    }
+
+    /// Report the two regions a moved view redraws: the lines themselves and
+    /// the bar whose thumb the owner just pushed a fresh model into.
+    fn mark_scrolled(layout: &ViewerLayout, damage: &mut Region) {
+        damage.add(layout.text);
+        damage.add(layout.scrollbar);
     }
 
     /// Push the authoritative scroll model (or the empty range while no file
@@ -693,19 +677,13 @@ impl Viewer {
 
     /// Draw the whole window — the header bar and its "Open…" button, the
     /// text area (the status message or the file's visible lines), and the
-    /// scrollbar — into a fresh `width_px` × `height_px` surface. Returns
-    /// `None` only when a surface cannot be allocated (the caller fails
-    /// closed).
-    #[must_use]
-    pub fn render(
-        &self,
-        theme: &Theme,
-        scale: Scale,
-        width_px: u32,
-        height_px: u32,
-    ) -> Option<Surface> {
-        let layout = ViewerLayout::for_window(width_px, height_px, theme, scale);
-        let mut surface = Surface::new(width_px, height_px)?;
+    /// scrollbar — into the caller's retained window `surface`.
+    ///
+    /// The surface is the host's, held for the life of the window, so a caller
+    /// that has narrowed its clip to the rectangle a round reported redraws only
+    /// that band: every pixel outside it is the one already on screen.
+    pub fn render_into(&self, surface: &mut Surface, theme: &Theme, scale: Scale) {
+        let layout = ViewerLayout::for_window(surface.width(), surface.height(), theme, scale);
         let palette = theme.palette();
         surface.fill(palette.surface.into());
         surface.fill_rect(
@@ -717,24 +695,25 @@ impl Viewer {
         );
 
         self.open_button
-            .render(&mut surface, layout.button, scale, theme);
+            .render(surface, layout.button, scale, theme);
 
-        let text_surface = match self.scroll.as_ref() {
-            Some(scroll) => render_lines(
-                scroll.visible(),
+        match self.scroll.as_ref() {
+            Some(scroll) => draw_text_area(
+                surface,
+                layout.text,
+                scroll.visible().iter().map(String::as_str),
                 theme,
-                layout.text.width,
-                layout.text.height,
             ),
-            None => render_status(&self.status, theme, layout.text.width, layout.text.height),
-        };
-        if let Some(text_surface) = text_surface {
-            surface.blit(layout.text.left(), layout.text.top(), &text_surface);
+            None => draw_text_area(
+                surface,
+                layout.text,
+                core::iter::once(self.status.as_str()),
+                theme,
+            ),
         }
 
         self.scrollbar
-            .render(&mut surface, layout.scrollbar, scale, theme);
-        Some(surface)
+            .render(surface, layout.scrollbar, scale, theme);
     }
 
     /// Route one pointer event into the header button and the scrollbar, the
@@ -757,14 +736,11 @@ impl Viewer {
     pub fn on_pointer(
         &mut self,
         event: &InputEvent,
-        width_px: u32,
-        height_px: u32,
+        layout: &ViewerLayout,
         theme: &Theme,
         scale: Scale,
         damage: &mut Region,
     ) -> ViewerPointerOutcome {
-        let layout = ViewerLayout::for_window(width_px, height_px, theme, scale);
-
         let button_state_before = self.open_button.state();
         let action = self.open_button.on_pointer(event, layout.button, damage);
         let button_changed = self.open_button.state() != button_state_before;
@@ -778,10 +754,12 @@ impl Viewer {
         let mut changed = button_changed || bar_changed;
         if let Some(ScrollAction::ScrollTo { offset }) = scroll_action {
             if let Some(scroll) = self.scroll.as_mut() {
-                if scroll.scroll_to(offset) {
+                let moved = scroll.scroll_to(offset);
+                self.sync_scrollbar();
+                if moved {
                     changed = true;
+                    Self::mark_scrolled(layout, damage);
                 }
-                self.scrollbar.set_model(scroll.model());
             }
         }
 

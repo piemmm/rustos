@@ -96,6 +96,23 @@ pub fn damage_in(mode: &DisplayMode, rect: Rect) -> Option<DamageRect> {
     })
 }
 
+/// The window-local [`Point`] a wire pointer event's `(x, y)` names.
+///
+/// The protocol carries a pointer position as unsigned window-local
+/// coordinates while the controls work in signed screen geometry, so every app
+/// that routes a pointer event needs the same saturating widening — one
+/// definition here, beside the [`pointer_input_events`] translation it always
+/// precedes, rather than a copy in each app's `Run` binary. A coordinate past
+/// [`i32::MAX`] saturates there, which is outside every control the app can
+/// have laid out, so it hits nothing rather than wrapping onto one.
+#[must_use]
+pub fn pointer_point(x: u32, y: u32) -> Point {
+    Point::new(
+        i32::try_from(x).unwrap_or(i32::MAX),
+        i32::try_from(y).unwrap_or(i32::MAX),
+    )
+}
+
 /// The shared input events one delivered [`PointerAction`] at window-local
 /// `point` means, in the order a control must receive them.
 ///

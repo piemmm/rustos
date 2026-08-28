@@ -52,7 +52,9 @@ server and every app's client can never drift apart.
   every such app faces (`Repaint::Nothing` / `Reported` / `Whole`), and
   `damage_in` clips a reported client-space rectangle onto the window —
   the app's own fail-closed step, since the session refuses a rectangle
-  outside the surface. A round that changed the view but reported no
+  outside the surface. `pointer_point` widens a wire pointer position into
+  the signed geometry the controls hit-test in, saturating rather than
+  wrapping, so a coordinate past the range hits nothing. A round that changed the view but reported no
   rectangle presents the whole window: over-covering costs pixels, while
   under-covering would leave a stale frame on screen, because the session
   copies only what a present declares. The

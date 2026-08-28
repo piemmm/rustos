@@ -422,12 +422,14 @@ it guarantees:
   cannot be allocated or the session refuses the re-map. The file manager
   (`WIN_SIZING`) re-lays-out its listing on `Resized`, and the terminal is
   now resizable too (Stage G).
-- **The viewer's render is size-parameterized and host-tested.** `render_status`/
-  `render_lines` take the current `width`/`height`, `visible_{rows,cols}_for`
-  derive the grid from the client size, and `ScrollView::relayout` re-wraps and
-  clamps the offset into the resized content — all covered by `tairix_viewer`
-  unit tests (arbitrary-size render, geometry scaling, and offset-preserving
-  relayout).
+- **The viewer's render is size-parameterized and host-tested.**
+  `Viewer::render_into` lays out to whatever surface it is handed,
+  `visible_{rows,cols}_for` derive the grid from the client size, and
+  `ScrollView::relayout` re-wraps and clamps the offset into the resized
+  content — all covered by `tairix_viewer` unit tests (arbitrary-size render,
+  geometry scaling, and offset-preserving relayout). A resize reallocates the
+  retained surface with the frame region, adopting both only once the session
+  accepts the re-map.
 - **Tests.** `lib/abi` covers the `resizable` flag round-trip and its dirty-byte
   rejection; `lib/window` covers the flag forwarding to the host; `userland/gui/session`
   covers a resizable-requested open decorating with a resizable frame and a live

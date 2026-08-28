@@ -51,8 +51,8 @@ mod program {
     use tairix_rt::io::{Stderr, Write};
     use tairix_theme::{Theme, ThemeRegistry};
     use tairix_window::{
-        key_input_event, Desktop, EventSource, WindowClient, WindowEvents, WindowFrames,
-        WindowSizing, WindowTransport,
+        key_input_event, pointer_point, Desktop, EventSource, WindowClient, WindowEvents,
+        WindowFrames, WindowSizing, WindowTransport,
     };
 
     /// Exit code when the shared frame region could not be created or granted
@@ -463,11 +463,8 @@ mod program {
                     // A press inside a field gives it the keyboard; the
                     // actions are reached with Enter and Escape, which every
                     // form here answers to.
-                    if let Some(field) = view::field_at(
-                        desktop.scale(),
-                        i32::try_from(x).unwrap_or(i32::MAX),
-                        i32::try_from(y).unwrap_or(i32::MAX),
-                    ) {
+                    let at = pointer_point(x, y);
+                    if let Some(field) = view::field_at(desktop.scale(), at.x, at.y) {
                         editor.set_focus(field);
                     }
                 }

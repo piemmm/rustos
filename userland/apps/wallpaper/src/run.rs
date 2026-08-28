@@ -59,7 +59,7 @@ mod program {
     use tairix_appdata::RtHost;
     use tairix_display::{winframe, SERIAL};
     use tairix_font::BitmapFont;
-    use tairix_geometry::Point;
+    use tairix_geometry::Region;
     use tairix_input::InputEvent;
     use tairix_log::{Event, Field, Level};
     use tairix_raster::Surface;
@@ -77,8 +77,8 @@ mod program {
         MIN_WIN_HEIGHT, MIN_WIN_WIDTH, WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_window::{
-        key_input_event, pointer_input_events, Desktop, EventSource, WindowClient, WindowEvents,
-        WindowFrames, WindowSizing, WindowTransport,
+        key_input_event, pointer_input_events, pointer_point, present_damage, Desktop, EventSource,
+        Repaint, WindowClient, WindowEvents, WindowFrames, WindowSizing, WindowTransport,
     };
 
     /// Exit code when the shared frame region could not be created or
@@ -482,19 +482,6 @@ mod program {
         }
     }
 
-    /// Copy `surface` into the shared window frame and present it whole.
-    fn present_surface<T: WindowTransport>(
-        surface: &Surface,
-        client: &mut WindowClient<T>,
-        window: u64,
-        frame: &mut [u8],
-        mode: &DisplayMode,
-    ) -> Result<(), Errno> {
-        let damage = DamageRect::full(mode);
-        winframe::encode(surface, frame, mode, damage, &SERIAL)?;
-        client.present(window, 0, damage)
-    }
-
     /// A `width_px` × `height_px` RGBA window mode, one frame's worth per
     /// row. The one place the chooser's mode is shaped, so the create and
     /// every resize agree on stride and format.
@@ -526,62 +513,96 @@ mod program {
         )
     }
 
-    /// Repaint the chooser for the current window size.
-    fn repaint<T: WindowTransport>(
-        chooser: &mut Chooser,
-        theme: &Theme,
-        desktop: &Desktop,
-        client: &mut WindowClient<T>,
+    /// The live window channel this app owns: the transport to the desktop
+    /// session, the session-assigned window id, the shared frame region, the
+    /// negotiated display mode, and the surface every frame is drawn into.
+    ///
+    /// Grouped because the present and resize paths always need every one of
+    /// these together. The surface is held for the life of the window rather
+    /// than built per frame: allocating and zeroing a window-sized buffer on
+    /// every pointer sample is a whole-window pass of its own, and holding it
+    /// is what makes a clipped repaint sound — every pixel outside the clip is
+    /// the one already on screen.
+    struct WindowSurface {
+        client: WindowClient<RtWindowTransport>,
         window: u64,
-        frames: &mut WindowFrames,
-        mode: &DisplayMode,
-    ) -> Result<(), Errno> {
-        let surface = chooser
-            .render(style_for(theme, desktop))
-            .ok_or(Errno::NoSpace)?;
-        let pixels = client
-            .frame_pixels(frames, window, FRAME_COUNT, mode)
-            .ok_or(Errno::NotAttached)?;
-        present_surface(&surface, client, window, pixels, mode)
+        frames: WindowFrames,
+        mode: DisplayMode,
+        canvas: Surface,
     }
 
-    /// Re-map the window's frame region onto `new_mode` and re-lay the
-    /// chooser out at the new client size. The caller repaints, through the
-    /// one path every other change repaints through.
-    ///
-    /// The ordering is fail-closed: a fresh region is created and granted
-    /// first, then adopted only if the session accepts the resize. On
-    /// success the *old* region is unmapped (never before, so a refused
-    /// resize leaves the current surface intact); on refusal the
-    /// freshly-allocated region is unmapped so nothing leaks. A region
-    /// that cannot be allocated at all keeps the current size rather than
-    /// ending the app.
-    fn resize_window(
-        new_mode: DisplayMode,
-        chooser: &mut Chooser,
-        client: &mut WindowClient<RtWindowTransport>,
-        window: u64,
-        frames: &mut WindowFrames,
-        mode: &mut DisplayMode,
-    ) {
-        let Some(spare) = WindowFrames::create(region_bytes(&new_mode)) else {
-            return;
-        };
-        let Some(grant) = spare.grant() else {
-            return;
-        };
-        if client
-            .resize(window, grant, FRAME_COUNT, &new_mode)
-            .is_err()
-        {
-            return;
+    impl WindowSurface {
+        /// Draw `damage` of the chooser, convert that rectangle into the
+        /// shared frame region and present it.
+        ///
+        /// A region the session released while the window was hidden is
+        /// re-attached first and presented whole, because it holds none of the
+        /// pixels a partial present would leave standing.
+        fn present(
+            &mut self,
+            chooser: &mut Chooser,
+            theme: &Theme,
+            desktop: &Desktop,
+            damage: DamageRect,
+        ) -> Result<(), Errno> {
+            let damage = if self.frames.is_released() {
+                DamageRect::full(&self.mode)
+            } else {
+                damage
+            };
+            let style = style_for(theme, desktop);
+            self.canvas.with_clip(
+                damage.x,
+                damage.y,
+                damage.width_px,
+                damage.height_px,
+                |clipped| chooser.render_into(clipped, style),
+            );
+            let pixels = self
+                .client
+                .frame_pixels(&mut self.frames, self.window, FRAME_COUNT, &self.mode)
+                .ok_or(Errno::NotAttached)?;
+            winframe::encode(&self.canvas, pixels, &self.mode, damage, &SERIAL)?;
+            self.client.present(self.window, 0, damage)
         }
-        // Adopting drops the old region, which unmaps it — and a refusal above
-        // drops the spare instead, so the ordering the surface depends on is
-        // the ownership rather than a sequence a later edit could reorder.
-        *frames = spare;
-        *mode = new_mode;
-        chooser.relayout(mode.width_px, mode.height_px);
+
+        /// Re-map the frame region onto `new_mode` and re-lay the chooser out
+        /// at the new client size. The caller repaints the whole window, since
+        /// nothing of the old picture survives a re-layout.
+        ///
+        /// The ordering is fail-closed: a fresh region and a fresh surface are
+        /// allocated and the region granted first, then adopted only if the
+        /// session accepts the resize. On success the *old* region is unmapped
+        /// (never before, so a refused resize leaves the current surface
+        /// intact); on refusal the freshly-allocated region is unmapped so
+        /// nothing leaks. Anything that cannot be allocated at all keeps the
+        /// current size rather than ending the app.
+        fn resize(&mut self, new_mode: DisplayMode, chooser: &mut Chooser) {
+            let Some(spare) = WindowFrames::create(region_bytes(&new_mode)) else {
+                return;
+            };
+            let Some(fresh) = Surface::new(new_mode.width_px, new_mode.height_px) else {
+                return;
+            };
+            let Some(grant) = spare.grant() else {
+                return;
+            };
+            if self
+                .client
+                .resize(self.window, grant, FRAME_COUNT, &new_mode)
+                .is_err()
+            {
+                return;
+            }
+            // Adopting drops the old region, which unmaps it — and a refusal
+            // above drops the spare instead, so the ordering the surface
+            // depends on is the ownership rather than a sequence a later edit
+            // could reorder.
+            self.frames = spare;
+            self.mode = new_mode;
+            self.canvas = fresh;
+            chooser.relayout(self.mode.width_px, self.mode.height_px);
+        }
     }
 
     /// The later of two things the chooser was asked for while handling one
@@ -655,6 +676,7 @@ mod program {
         sandbox: &mut ParserSandbox<RtLauncher, tairix_rt::LogSink>,
         theme: &Theme,
         desktop: &Desktop,
+        damage: &mut Region,
     ) -> bool {
         let style = style_for(theme, desktop);
         if let Some(request) = chooser.next_preview(style) {
@@ -666,8 +688,8 @@ mod program {
                 request.width,
                 request.height,
             ) {
-                Some(surface) => chooser.set_preview(request, surface),
-                None => chooser.mark_preview_refused(request),
+                Some(surface) => chooser.set_preview(request, surface, style, damage),
+                None => chooser.mark_preview_refused(request, style, damage),
             }
             return true;
         }
@@ -684,8 +706,8 @@ mod program {
             request.side,
             request.side,
         ) {
-            Some(surface) => chooser.set_thumbnail(request.index, surface),
-            None => chooser.mark_thumbnail_refused(request.index),
+            Some(surface) => chooser.set_thumbnail(request.index, surface, style, damage),
+            None => chooser.mark_thumbnail_refused(request.index, style, damage),
         }
         true
     }
@@ -742,8 +764,8 @@ mod program {
         // initial window mode (the desktop's own preferred size, capped to
         // its screen), created here and granted to the session.
         let (initial_w, initial_h) = desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
-        let mut mode = mode_for(initial_w, initial_h);
-        let Some(mut frames) = WindowFrames::create(region_bytes(&mode)) else {
+        let mode = mode_for(initial_w, initial_h);
+        let Some(frames) = WindowFrames::create(region_bytes(&mode)) else {
             return fail(EXIT_NO_FRAMES, "shared frame region refused");
         };
         let Some(grant) = frames.grant() else {
@@ -775,16 +797,20 @@ mod program {
             return fail(EXIT_NO_WINDOW, "desktop session refused the window");
         };
         chooser.relayout(mode.width_px, mode.height_px);
-        if repaint(
-            &mut chooser,
-            theme,
-            &desktop,
-            &mut client,
+        let Some(canvas) = Surface::new(mode.width_px, mode.height_px) else {
+            return fail(EXIT_NO_WINDOW, "no memory for the window surface");
+        };
+        let mut surface = WindowSurface {
+            client,
             window,
-            &mut frames,
-            &mode,
-        )
-        .is_err()
+            frames,
+            mode,
+            canvas,
+        };
+        let first = DamageRect::full(&surface.mode);
+        if surface
+            .present(&mut chooser, theme, &desktop, first)
+            .is_err()
         {
             return fail(EXIT_CHANNEL_LOST, "first present refused");
         }
@@ -805,23 +831,23 @@ mod program {
             // Outstanding preview work is done before parking, so the grid
             // fills in as fast as the worker can render and the loop never
             // waits on work it already holds.
-            if resolve_one_render(&mut chooser, &mut sandbox, theme, &desktop) {
-                if repaint(
-                    &mut chooser,
-                    theme,
-                    &desktop,
-                    &mut client,
-                    window,
-                    &mut frames,
-                    &mode,
-                )
-                .is_err()
+            let mut damage = tairix_controls::damage::sink();
+            if resolve_one_render(&mut chooser, &mut sandbox, theme, &desktop, &mut damage) {
+                // A delivered preview or thumbnail redraws exactly the box it
+                // fills, so the grid fills in one tile at a time rather than
+                // repainting the window once per artwork.
+                let Some(damage) = present_damage(&surface.mode, Repaint::Reported, &damage) else {
+                    continue;
+                };
+                if surface
+                    .present(&mut chooser, theme, &desktop, damage)
+                    .is_err()
                 {
                     return fail(EXIT_CHANNEL_LOST, "present refused");
                 }
                 continue;
             }
-            let event = match events.wait(&mut client) {
+            let event = match events.wait(&mut surface.client) {
                 Ok(event) => event,
                 // A malformed frame from the authenticated session is
                 // refused and the app keeps waiting (never guessed at).
@@ -853,21 +879,18 @@ mod program {
 
             // What the event means to the chooser. Every arm answers in
             // the one vocabulary the engine speaks, so the decision about
-            // what to *do* about it is made once, below.
+            // what to *do* about it is made once, below. `damage` is that
+            // round's one sink: every control the event reaches, and the
+            // chooser for what it commits itself, reports into it.
+            let mut resized = false;
             let asked = match event {
                 // The pointer is the chooser's primary input: one delivered
                 // wire event is the position it happened at and, for a
                 // press or a release, the button transition after it — the
                 // shared translation every windowed app uses.
                 WindowEvent::Pointer { x, y, action, .. } => {
-                    let at = Point::new(
-                        i32::try_from(x).unwrap_or(i32::MAX),
-                        i32::try_from(y).unwrap_or(i32::MAX),
-                    );
+                    let at = pointer_point(x, y);
                     let mut asked = ChooserAction::None;
-                    // One sink for the whole round: both synthesised events
-                    // reach the same controls, which report into it.
-                    let mut damage = tairix_controls::damage::sink();
                     for input in pointer_input_events(action, at) {
                         asked = latest(
                             asked,
@@ -879,7 +902,7 @@ mod program {
                 WindowEvent::Scrolled { dx, dy, .. } => chooser.on_pointer(
                     &InputEvent::PointerScrolled { dx, dy },
                     style_for(theme, &desktop),
-                    &mut tairix_controls::damage::sink(),
+                    &mut damage,
                 ),
                 // The keyboard is the secondary path, and reaches
                 // everything the pointer does.
@@ -888,7 +911,7 @@ mod program {
                     ..
                 } => match key_input_event(pressed) {
                     InputEvent::KeyPressed { key, modifiers } => {
-                        chooser.on_key(key, modifiers, style_for(theme, &desktop))
+                        chooser.on_key(key, modifiers, style_for(theme, &desktop), &mut damage)
                     }
                     _ => ChooserAction::None,
                 },
@@ -905,14 +928,8 @@ mod program {
                     height_px,
                     ..
                 } => {
-                    resize_window(
-                        mode_for(width_px, height_px),
-                        &mut chooser,
-                        &mut client,
-                        window,
-                        &mut frames,
-                        &mut mode,
-                    );
+                    surface.resize(mode_for(width_px, height_px), &mut chooser);
+                    resized = true;
                     ChooserAction::Changed
                 }
                 // The desktop asked, or *Quit* was chosen on the chooser's
@@ -957,56 +974,41 @@ mod program {
                 // until the redraw request that follows the window being shown
                 // again re-attaches a fresh region.
                 WindowEvent::ContentReleased { .. } => {
-                    frames.release();
+                    surface.frames.release();
                     continue;
                 }
             };
-            let outcome = match asked {
-                ChooserAction::None => {
-                    if desktop_changed {
-                        repaint(
-                            &mut chooser,
-                            theme,
-                            &desktop,
-                            &mut client,
-                            window,
-                            &mut frames,
-                            &mode,
-                        )
-                    } else {
-                        Ok(())
-                    }
-                }
-                ChooserAction::Changed => repaint(
-                    &mut chooser,
-                    theme,
-                    &desktop,
-                    &mut client,
-                    window,
-                    &mut frames,
-                    &mode,
-                ),
+            let repaint_kind = match asked {
+                ChooserAction::None => Repaint::Nothing,
+                ChooserAction::Changed => Repaint::Reported,
                 ChooserAction::Apply => {
-                    chooser.set_apply_outcome(apply(&chooser.settings_document()));
-                    repaint(
-                        &mut chooser,
-                        theme,
-                        &desktop,
-                        &mut client,
-                        window,
-                        &mut frames,
-                        &mode,
-                    )
+                    let outcome = apply(&chooser.settings_document());
+                    chooser.set_apply_outcome(outcome, style_for(theme, &desktop), &mut damage);
+                    Repaint::Reported
                 }
                 // Close the window and end cleanly; the region this app owns
                 // is unmapped by its own drop rather than left pinned for the
                 // runtime to reclaim.
                 ChooserAction::Close => {
-                    let _ = client.close(window);
+                    let _ = surface.client.close(surface.window);
                     return 0;
                 }
             };
-            if outcome.is_err() {
+            // A re-theme redraws every pixel and a resize re-lays everything
+            // out onto a fresh surface, so neither can be described by a
+            // report.
+            let repaint_kind = if desktop_changed || resized {
+                Repaint::Whole
+            } else {
+                repaint_kind
+            };
+            let Some(damage) = present_damage(&surface.mode, repaint_kind, &damage) else {
+                continue;
+            };
+            if surface
+                .present(&mut chooser, theme, &desktop, damage)
+                .is_err()
+            {
                 return fail(EXIT_CHANNEL_LOST, "present refused");
             }
         }

@@ -22,10 +22,11 @@ use tairix_abi::window_ipc::{
 };
 use tairix_abi::Errno;
 use tairix_display::{FrameRegion, ShmMapper};
-use tairix_geometry::{Rect, Region, Scale};
+use tairix_geometry::{Point, Rect, Region, Scale};
 
 use crate::client::{
-    damage_in, present_damage, EventSource, Repaint, WindowClient, WindowEvents, WindowTransport,
+    damage_in, pointer_point, present_damage, EventSource, Repaint, WindowClient, WindowEvents,
+    WindowTransport,
 };
 use crate::desktop::Desktop;
 use crate::server::{
@@ -1954,6 +1955,17 @@ fn event_endpoint_ids_are_distinct_per_task_and_never_reserved() {
             pid
         )));
     }
+}
+
+#[test]
+fn a_wire_pointer_position_widens_saturating_into_window_geometry() {
+    assert_eq!(pointer_point(0, 0), Point::new(0, 0));
+    assert_eq!(pointer_point(7, 11), Point::new(7, 11));
+    // Past the signed range the coordinate saturates rather than wrapping onto
+    // a control: the point lands outside every laid-out rectangle.
+    let far = pointer_point(u32::MAX, u32::MAX);
+    assert_eq!(far, Point::new(i32::MAX, i32::MAX));
+    assert!(!Rect::new(0, 0, 4096, 4096).contains(far));
 }
 
 #[test]

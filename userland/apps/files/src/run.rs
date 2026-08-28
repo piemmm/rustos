@@ -149,8 +149,8 @@ mod program {
     use tairix_sandbox::{ParserSandbox, ServeEnd};
     use tairix_theme::{Theme, ThemeRegistry};
     use tairix_window::{
-        pointer_input_events, Desktop, EventSource, WindowClient, WindowEvents, WindowFrames,
-        WindowTransport,
+        pointer_input_events, pointer_point, Desktop, EventSource, WindowClient, WindowEvents,
+        WindowFrames, WindowTransport,
     };
 
     use crate::appbar;
@@ -3318,10 +3318,7 @@ mod program {
         if action != PointerAction::Pressed(PointerButtonCode::Secondary) {
             return None;
         }
-        Some(Point::new(
-            i32::try_from(x).unwrap_or(i32::MAX),
-            i32::try_from(y).unwrap_or(i32::MAX),
-        ))
+        Some(pointer_point(x, y))
     }
 
     /// Apply one **secondary** press at window-local `point`, acting on what

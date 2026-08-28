@@ -28,19 +28,20 @@ use crate::{
 /// The text the preview shows while its wallpaper is still being rendered.
 const PREVIEW_PENDING: &str = "Rendering…";
 
-/// Paint the whole window, or `None` when the surface cannot be allocated.
-pub(crate) fn render(chooser: &Chooser, layout: &Layout, style: Style<'_>) -> Option<Surface> {
-    let (width, height) = chooser.size();
-    let mut surface = Surface::new(width, height)?;
+/// Paint the whole window into the caller's retained `surface`.
+pub(crate) fn render_into(
+    surface: &mut Surface,
+    chooser: &Chooser,
+    layout: &Layout,
+    style: Style<'_>,
+) {
     surface.fill(style.theme().palette().surface.into());
 
-    paint_preview(&mut surface, chooser, layout, style);
-    paint_options(&mut surface, chooser, layout, style);
-    paint_gallery(&mut surface, chooser, layout, style);
-    paint_footer(&mut surface, chooser, layout, style);
-    paint_expanded_list(&mut surface, chooser, layout, style);
-
-    Some(surface)
+    paint_preview(surface, chooser, layout, style);
+    paint_options(surface, chooser, layout, style);
+    paint_gallery(surface, chooser, layout, style);
+    paint_footer(surface, chooser, layout, style);
+    paint_expanded_list(surface, chooser, layout, style);
 }
 
 /// Paint the preview panel: the true-scale model of the screen, the chosen
@@ -48,8 +49,8 @@ pub(crate) fn render(chooser: &Chooser, layout: &Layout, style: Style<'_>) -> Op
 /// would place it on the real screen, and a rim so the model reads as a
 /// screen sitting inside the panel rather than as a hole in the window.
 ///
-/// The panel itself is left as the ordinary window background [`render`]
-/// already painted: only the model box — [`Layout::preview_model`], the
+/// The panel itself is left as the ordinary window background
+/// [`render_into`] already painted: only the model box — [`Layout::preview_model`], the
 /// largest screen-shaped rectangle that fits centred in the panel — ever
 /// shows the backdrop or the wallpaper, so a panel wider or taller than the
 /// screen's own aspect never stretches the wallpaper to fill it.

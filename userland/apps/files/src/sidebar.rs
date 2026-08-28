@@ -29,6 +29,7 @@ use tairix_browse::render::{sidebar_index_at, toolbar_command_at};
 use tairix_browse::{Browser, DirectorySource, Places, ToolbarCommand, Volume};
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_theme::Theme;
+use tairix_window::pointer_point;
 
 /// What routing an event to the rail did.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -66,10 +67,7 @@ pub fn press_point(action: PointerAction, x: u32, y: u32) -> Option<Point> {
     if action != PointerAction::Pressed(PointerButtonCode::Primary) {
         return None;
     }
-    Some(Point::new(
-        i32::try_from(x).unwrap_or(i32::MAX),
-        i32::try_from(y).unwrap_or(i32::MAX),
-    ))
+    Some(pointer_point(x, y))
 }
 
 /// Whether `event` is the user asking the window to re-read what is there:

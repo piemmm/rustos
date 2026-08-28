@@ -45,8 +45,8 @@ mod program {
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
     use tairix_widgets::Gallery;
     use tairix_window::{
-        key_input_event, pointer_input_events, present_damage, Desktop, EventSource, Repaint,
-        WindowClient, WindowEvents, WindowFrames, WindowSizing, WindowTransport,
+        key_input_event, pointer_input_events, pointer_point, present_damage, Desktop, EventSource,
+        Repaint, WindowClient, WindowEvents, WindowFrames, WindowSizing, WindowTransport,
     };
 
     /// The gallery window's logical width in physical pixels.
@@ -259,7 +259,7 @@ mod program {
             WindowEvent::Pointer { x, y, action, .. } => (
                 apply_pointer(
                     gallery,
-                    client_point(*x, *y),
+                    pointer_point(*x, *y),
                     *action,
                     viewport,
                     scale,
@@ -317,14 +317,6 @@ mod program {
             acted |= gallery.on_pointer(&input, viewport, scale, theme, damage);
         }
         acted
-    }
-
-    /// The client-local point a wire pointer position names.
-    fn client_point(x: u32, y: u32) -> Point {
-        Point::new(
-            i32::try_from(x).unwrap_or(i32::MAX),
-            i32::try_from(y).unwrap_or(i32::MAX),
-        )
     }
 
     /// Bind the app's own event mailbox and add it to a fresh wait-set the

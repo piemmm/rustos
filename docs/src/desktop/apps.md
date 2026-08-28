@@ -1846,9 +1846,12 @@ The host-tested view engine keeps untrusted content honest:
 `content_lines` bounds the shown bytes (`CONTENT_MAX`), splits on line
 feeds, and sanitises **every** non-printable byte to a placeholder before
 anything reaches the renderer, so a hostile picked file can neither pin
-unbounded memory nor smuggle control sequences; `render_status` /
-`render_lines` paint through the active theme and the shared monospace
-face.
+unbounded memory nor smuggle control sequences; `Viewer::render_into`
+paints through the active theme and the shared monospace face, into the
+window-sized surface the `Run` binary holds for the life of the window.
+A pointer or scroll round narrows that surface's clip to the rectangle
+its controls reported and presents only that rectangle, so a hover costs
+a control's pixels rather than a window's.
 
 The window is mouse-driven, exactly as every desktop app is expected to
 be. A `Viewer` composes the current file view (or a status message) with

@@ -274,6 +274,13 @@ preview request, so a preview rendered for one screen can never be shown as
 if it were for another, and a change of screen re-renders it. What the
 preview shows is what the desktop will show (`plans/PINBOARD.md` §8).
 
+The chooser holds one window-sized surface for the life of its window and
+repaints only the rectangle a round reported: a hover redraws the tile
+entered and the tile left, a selection adds the preview model and its
+caption, and a thumbnail arriving from the sandbox redraws its own square
+rather than the window. A re-theme and a resize still redraw everything,
+because no report could describe either.
+
 ## Headless
 
 The pinboard is part of `userland/gui/*` and is therefore optional in

@@ -326,9 +326,19 @@ impl Chooser {
         self.outcome.as_ref()
     }
 
-    /// Record what the desktop session answered to the last apply.
-    pub fn set_apply_outcome(&mut self, outcome: ApplyOutcome) {
+    /// Record what the desktop session answered to the last apply, reporting
+    /// the status line that states it.
+    ///
+    /// The owner commits this value, so the owner reports it: it holds the
+    /// layout at exactly the moment it writes.
+    pub fn set_apply_outcome(
+        &mut self,
+        outcome: ApplyOutcome,
+        style: Style<'_>,
+        damage: &mut Region,
+    ) {
         self.outcome = Some(outcome);
+        damage.add(self.layout(style).status());
     }
 
     /// The settings document the current state means.
@@ -390,20 +400,38 @@ impl Chooser {
     }
 
     /// Adopt `surface` as the pixels `request` asked for.
-    pub fn set_preview(&mut self, request: PreviewRequest, surface: Surface) {
+    pub fn set_preview(
+        &mut self,
+        request: PreviewRequest,
+        surface: Surface,
+        style: Style<'_>,
+        damage: &mut Region,
+    ) {
         self.preview = PreviewSlot {
             request: Some(request),
             state: PreviewState::Ready(surface),
         };
+        self.mark_preview(style, damage);
     }
 
     /// Record that the sandbox refused `request`, so the panel says so
     /// instead of asking again on every paint.
-    pub fn mark_preview_refused(&mut self, request: PreviewRequest) {
+    pub fn mark_preview_refused(
+        &mut self,
+        request: PreviewRequest,
+        style: Style<'_>,
+        damage: &mut Region,
+    ) {
         self.preview = PreviewSlot {
             request: Some(request),
             state: PreviewState::Refused,
         };
+        self.mark_preview(style, damage);
+    }
+
+    /// Report the model box a delivered or refused preview redraws.
+    fn mark_preview(&self, style: Style<'_>, damage: &mut Region) {
+        damage.add(self.layout(style).preview_model());
     }
 
     /// The first gallery thumbnail still to be rendered, or `None` when every
@@ -448,17 +476,34 @@ impl Chooser {
     }
 
     /// Adopt `surface` as the thumbnail of the candidate at `index`.
-    pub fn set_thumbnail(&mut self, index: usize, surface: Surface) {
+    pub fn set_thumbnail(
+        &mut self,
+        index: usize,
+        surface: Surface,
+        style: Style<'_>,
+        damage: &mut Region,
+    ) {
         if let Some(candidate) = self.candidates.get_mut(index) {
             candidate.thumbnail = Thumbnail::Ready(surface);
         }
+        self.mark_thumbnail(index, style, damage);
     }
 
     /// Record that the sandbox refused the candidate at `index`, so it is
     /// asked for once and never again this session.
-    pub fn mark_thumbnail_refused(&mut self, index: usize) {
+    pub fn mark_thumbnail_refused(&mut self, index: usize, style: Style<'_>, damage: &mut Region) {
         if let Some(candidate) = self.candidates.get_mut(index) {
             candidate.thumbnail = Thumbnail::Refused;
+        }
+        self.mark_thumbnail(index, style, damage);
+    }
+
+    /// Report the one tile a delivered or refused thumbnail redraws. A
+    /// candidate the active category is not showing, or one scrolled out of
+    /// view, has no tile on screen and so reports nothing.
+    fn mark_thumbnail(&self, index: usize, style: Style<'_>, damage: &mut Region) {
+        if let Some(rect) = self.candidate_rect(index, &self.layout(style)) {
+            damage.add(rect);
         }
     }
 
@@ -499,6 +544,12 @@ impl Chooser {
         let (apply_changed, applied) =
             button_pointer(&mut self.apply, event, layout.apply(), damage);
         if applied {
+            damage::move_mark(
+                Some(self.focus),
+                Some(Focus::Apply),
+                |region| self.focus_rect(region, &layout),
+                damage,
+            );
             self.focus = Focus::Apply;
             return ChooserAction::Apply;
         }
@@ -511,7 +562,7 @@ impl Chooser {
 
         changed |= self.rail_pointer(event, &layout, damage);
         changed |= self.scroll_pointer(event, &layout, style, damage);
-        changed |= self.gallery_pointer(event, &layout);
+        changed |= self.gallery_pointer(event, &layout, damage);
         ChooserAction::changed(changed)
     }
 
@@ -520,33 +571,45 @@ impl Chooser {
     /// The keyboard is the secondary path: it reaches everything the pointer
     /// does, through the focus order Tab walks, and an expanded drop-down
     /// owns the keyboard exactly as it owns the pointer.
-    pub fn on_key(&mut self, key: Key, modifiers: Modifiers, style: Style<'_>) -> ChooserAction {
+    pub fn on_key(
+        &mut self,
+        key: Key,
+        modifiers: Modifiers,
+        style: Style<'_>,
+        damage: &mut Region,
+    ) -> ChooserAction {
         let layout = self.sync(style);
-        let mut damage = damage::sink();
 
         if let Some(group) = self.expanded() {
-            let action = self.field_key(group, key, &layout, style, &mut damage);
+            let action = self.field_key(group, key, &layout, style, damage);
             return ChooserAction::changed(action.is_some());
         }
 
         match key {
             Key::Named(NamedKey::Tab) => {
-                self.focus = if modifiers.shift {
+                let next = if modifiers.shift {
                     self.focus.prev()
                 } else {
                     self.focus.next()
                 };
-                ChooserAction::Changed
+                // The ring is the window's own mark, drawn on one region at a
+                // time, so the two that change are the one it leaves and the
+                // one it lands on.
+                let moved = damage::move_mark(
+                    Some(self.focus),
+                    Some(next),
+                    |region| self.focus_rect(region, &layout),
+                    damage,
+                );
+                self.focus = next;
+                ChooserAction::changed(moved)
             }
             Key::Named(NamedKey::Escape) => ChooserAction::Close,
             _ => match self.focus {
-                Focus::Categories => {
-                    ChooserAction::changed(self.rail_key(key, &layout, &mut damage))
-                }
-                Focus::Gallery => self.gallery_key(key, &layout),
+                Focus::Categories => ChooserAction::changed(self.rail_key(key, &layout, damage)),
+                Focus::Gallery => self.gallery_key(key, &layout, damage),
                 Focus::Setting(group) => ChooserAction::changed(
-                    self.field_key(group, key, &layout, style, &mut damage)
-                        .is_some(),
+                    self.field_key(group, key, &layout, style, damage).is_some(),
                 ),
                 Focus::Apply => match self.apply.on_key(key) {
                     Some(ButtonAction::Activated) => ChooserAction::Apply,
@@ -560,23 +623,35 @@ impl Chooser {
         }
     }
 
-    /// Paint the chooser into a `width` x `height` surface, returning `None`
-    /// only when the surface cannot be allocated.
+    /// Where the keyboard ring is drawn for `region` in the current layout.
+    ///
+    /// The gallery's ring is on the selected tile, so a selection scrolled out
+    /// of view lays out nowhere and reports nothing — which is right: no ring
+    /// is on screen to erase or draw.
+    fn focus_rect(&self, region: Focus, layout: &Layout) -> Option<Rect> {
+        let rect = match region {
+            Focus::Categories => layout.categories(),
+            Focus::Gallery => return self.candidate_rect(self.selected, layout),
+            Focus::Setting(group) => layout.option_field(group),
+            Focus::Apply => layout.apply(),
+            Focus::Close => layout.close(),
+        };
+        (!rect.is_empty()).then_some(rect)
+    }
+
+    /// Paint the chooser into the caller's retained window `surface`.
     ///
     /// Painting takes `&mut self` because it refreshes exactly the derived
     /// geometry the hit-test uses — the layout and the gallery's scroll range
     /// — through the one shared path both go through, so what was drawn and
     /// what a click is tested against cannot drift apart.
-    #[must_use]
-    pub fn render(&mut self, style: Style<'_>) -> Option<Surface> {
+    ///
+    /// The surface is the host's, held for the life of the window, so a caller
+    /// that has narrowed its clip to the rectangle a round reported redraws
+    /// only that band: every pixel outside it is the one already on screen.
+    pub fn render_into(&mut self, surface: &mut Surface, style: Style<'_>) {
         let layout = self.sync(style);
-        crate::paint::render(self, &layout, style)
-    }
-
-    /// The window's current client size.
-    #[must_use]
-    pub(crate) fn size(&self) -> (u32, u32) {
-        (self.width, self.height)
+        crate::paint::render_into(surface, self, &layout, style);
     }
 
     /// The candidate the pointer is over, if any.
@@ -918,7 +993,12 @@ impl Chooser {
     /// The gallery owns this hit-test rather than the tiles: an icon tile
     /// paints state and holds no pointer of its own, so the view resolves the
     /// pointer against the very grid it painted.
-    fn gallery_pointer(&mut self, event: &InputEvent, layout: &Layout) -> bool {
+    fn gallery_pointer(
+        &mut self,
+        event: &InputEvent,
+        layout: &Layout,
+        damage: &mut Region,
+    ) -> bool {
         let grid = layout.grid(self.visible.len());
         let at = grid
             .index_at(
@@ -929,16 +1009,22 @@ impl Chooser {
             .and_then(|position| self.visible.get(position).copied());
         match event {
             InputEvent::PointerMoved { .. } => {
-                let changed = self.hovered != at;
+                let changed = self.mark_tile(self.hovered, at, layout, damage);
                 self.hovered = at;
                 changed
             }
             InputEvent::PointerPressed {
                 button: PointerButton::Primary,
             } => {
-                let changed = self.armed != at;
+                let mut changed = self.mark_tile(self.armed, at, layout, damage);
                 self.armed = at;
                 if at.is_some() {
+                    changed |= damage::move_mark(
+                        Some(self.focus),
+                        Some(Focus::Gallery),
+                        |region| self.focus_rect(region, layout),
+                        damage,
+                    );
                     self.focus = Focus::Gallery;
                 }
                 changed
@@ -947,14 +1033,45 @@ impl Chooser {
                 button: PointerButton::Primary,
             } => {
                 let armed = self.armed.take();
+                // The tile that was armed loses its pressed look whether or
+                // not the release lands on it, so it is reported either way.
+                self.mark_tile(armed, None, layout, damage);
                 let selected = match armed {
-                    Some(index) if Some(index) == at => self.select(index),
+                    Some(index) if Some(index) == at => self.select(index, layout, damage),
                     _ => false,
                 };
                 selected || armed.is_some()
             }
             _ => false,
         }
+    }
+
+    /// The screen rectangle candidate `index` occupies, or `None` when the
+    /// active category is not showing it or it is scrolled out of the
+    /// gallery's viewport — either way nothing of it is on screen to repaint.
+    fn candidate_rect(&self, index: usize, layout: &Layout) -> Option<Rect> {
+        let position = self.position_of(index)?;
+        let grid = layout.grid(self.visible.len());
+        let cell = grid.cell_rect(self.scroll.model().offset(), position)?;
+        let shown = cell.intersection(&layout.tiles());
+        (!shown.is_empty()).then_some(shown)
+    }
+
+    /// Report the two tiles a gallery mark — the hover, the press latch —
+    /// moves between, answering whether it moved at all.
+    fn mark_tile(
+        &self,
+        mark: Option<usize>,
+        next: Option<usize>,
+        layout: &Layout,
+        damage: &mut Region,
+    ) -> bool {
+        damage::move_mark(
+            mark,
+            next,
+            |index| self.candidate_rect(index, layout),
+            damage,
+        )
     }
 
     /// Move the gallery's selection with the arrow keys, revealing the tile
@@ -965,7 +1082,7 @@ impl Chooser {
     /// candidates it is not. A selection the active category does not hold
     /// has no position to move from, so forward keys enter at its first tile
     /// and backward keys have nowhere to go.
-    fn gallery_key(&mut self, key: Key, layout: &Layout) -> ChooserAction {
+    fn gallery_key(&mut self, key: Key, layout: &Layout, damage: &mut Region) -> ChooserAction {
         let grid = layout.grid(self.visible.len());
         let per_line = grid.cells_per_line().max(1);
         let last = self.visible.len().saturating_sub(1);
@@ -987,12 +1104,18 @@ impl Chooser {
         let Some(index) = target.and_then(|at| self.visible.get(at).copied()) else {
             return ChooserAction::None;
         };
-        let changed = self.select(index);
+        let changed = self.select(index, layout, damage);
         let revealed = grid.reveal(
             self.scroll.model().offset(),
             self.position_of(self.selected),
         );
+        // Scrolling to reveal the tile moves every tile on screen, so the
+        // whole gallery viewport and its bar are what a reveal redraws.
         let moved = self.scroll_to(revealed);
+        if moved {
+            damage.add(layout.tiles());
+            damage.add(layout.scrollbar());
+        }
         ChooserAction::changed(changed || moved)
     }
 
@@ -1002,13 +1125,21 @@ impl Chooser {
         self.visible.iter().position(|shown| *shown == index)
     }
 
-    /// Select the candidate at `index`, reporting whether the selection
-    /// actually moved.
-    fn select(&mut self, index: usize) -> bool {
+    /// Select the candidate at `index`, reporting what that redrew and
+    /// whether the selection actually moved.
+    ///
+    /// A selection moves the marked tile and re-models the preview panel and
+    /// its caption, which name the chosen wallpaper — the tiles alone would
+    /// leave a stale preview of the wallpaper that was selected before.
+    fn select(&mut self, index: usize, layout: &Layout, damage: &mut Region) -> bool {
         if index >= self.candidates.len() || index == self.selected {
             return false;
         }
+        let was = self.selected;
         self.selected = index;
+        self.mark_tile(Some(was), Some(index), layout, damage);
+        damage.add(layout.preview_model());
+        damage.add(layout.caption());
         true
     }
 }

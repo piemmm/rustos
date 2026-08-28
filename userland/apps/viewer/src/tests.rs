@@ -6,6 +6,7 @@ use alloc::vec;
 use tairix_controls::{damage, ScrollPart};
 use tairix_geometry::Point;
 use tairix_input::PointerButton;
+use tairix_raster::Color;
 use tairix_theme::ThemeRegistry;
 
 /// Feed one pointer `event` at the initial window size, as its own input
@@ -16,14 +17,27 @@ fn feed(
     theme: &Theme,
     scale: Scale,
 ) -> ViewerPointerOutcome {
-    viewer.on_pointer(
-        event,
-        WIN_WIDTH,
-        WIN_HEIGHT,
-        theme,
-        scale,
-        &mut damage::sink(),
-    )
+    feed_reporting(viewer, event, theme, scale, &mut damage::sink())
+}
+
+/// Feed one pointer `event` at the initial window size, reporting into the
+/// caller's own sink so a test can assert what the round repainted.
+fn feed_reporting(
+    viewer: &mut Viewer,
+    event: &InputEvent,
+    theme: &Theme,
+    scale: Scale,
+    damage: &mut Region,
+) -> ViewerPointerOutcome {
+    let layout = ViewerLayout::for_window(WIN_WIDTH, WIN_HEIGHT, theme, scale);
+    viewer.on_pointer(event, &layout, theme, scale, damage)
+}
+
+/// Draw the whole window into a fresh [`WIN_WIDTH`] × [`WIN_HEIGHT`] surface.
+fn shot(viewer: &Viewer, theme: &Theme, scale: Scale) -> Surface {
+    let mut surface = Surface::new(WIN_WIDTH, WIN_HEIGHT).expect("a window-sized surface");
+    viewer.render_into(&mut surface, theme, scale);
+    surface
 }
 
 #[test]
@@ -47,44 +61,41 @@ fn content_lines_sanitise_every_non_printable_byte() {
 }
 
 #[test]
-fn renderers_produce_window_sized_surfaces() {
-    let themes = ThemeRegistry::with_builtins();
+fn the_status_and_content_states_draw_different_pixels() {
+    let (themes, scale) = theme_and_scale();
     let theme = themes.active();
-    let scale = Scale::ONE;
-    let status =
-        render_status("No file chosen.", theme, WIN_WIDTH, WIN_HEIGHT).expect("status renders");
-    assert_eq!((status.width(), status.height()), (WIN_WIDTH, WIN_HEIGHT));
-    let lines = content_lines(
-        b"hello\nworld",
-        visible_rows(theme, scale),
-        visible_cols(theme, scale),
-    );
-    let content = render_lines(&lines, theme, WIN_WIDTH, WIN_HEIGHT).expect("content renders");
-    assert_eq!((content.width(), content.height()), (WIN_WIDTH, WIN_HEIGHT));
-    // The two states draw observably different pixels somewhere.
+    let status = shot(&Viewer::new(), theme, scale);
+    let content = shot(&open_viewer(&themes, scale, 5), theme, scale);
     assert_ne!(status.pixels(), content.pixels());
 }
 
 #[test]
-fn renderers_track_an_arbitrary_resized_window() {
-    let themes = ThemeRegistry::with_builtins();
+fn the_render_tracks_an_arbitrary_resized_window() {
+    let (themes, scale) = theme_and_scale();
     let theme = themes.active();
-    let scale = Scale::ONE;
-    // A resized window: the surface is exactly the reported client size,
-    // not the initial one — the viewer draws into whatever the window
-    // manager gave it.
+    // A resized window: the viewer lays out to whatever surface the window
+    // manager's client size gave it, not to the initial one, so the header
+    // band spans the new width and the scrollbar sits at its new edge.
     let (w, h) = (WIN_WIDTH * 2, WIN_HEIGHT + 40);
-    let status = render_status("resized", theme, w, h).expect("status renders");
-    assert_eq!((status.width(), status.height()), (w, h));
-    let lines = content_lines(
-        b"a\nb\nc",
-        visible_rows_for(h, theme, scale),
-        visible_cols_for(w, theme, scale),
+    let mut wide = Surface::new(w, h).expect("a resized surface");
+    open_viewer(&themes, scale, 5).render_into(&mut wide, theme, scale);
+    let layout = ViewerLayout::for_window(w, h, theme, scale);
+    assert_eq!(layout.header.width, w);
+    assert_eq!(layout.scrollbar.right(), to_i32(w));
+    assert_eq!(
+        wide.get(w - 1, 0),
+        Some(Color::from(theme.palette().surface_raised).premultiply()),
+        "the header band reaches the resized window's trailing edge"
     );
-    let content = render_lines(&lines, theme, w, h).expect("content renders");
-    assert_eq!((content.width(), content.height()), (w, h));
-    // The minimum floor never yields a zero-extent surface.
-    assert!(render_status("x", theme, MIN_WIN_WIDTH, MIN_WIN_HEIGHT).is_some());
+
+    // The minimum floor is drawable rather than degenerate: a one-pixel-tall
+    // window still renders without panicking.
+    let mut floor = Surface::new(MIN_WIN_WIDTH, MIN_WIN_HEIGHT).expect("the floor surface");
+    Viewer::new().render_into(&mut floor, theme, scale);
+    assert_eq!(
+        (floor.width(), floor.height()),
+        (MIN_WIN_WIDTH, MIN_WIN_HEIGHT)
+    );
 }
 
 #[test]
@@ -93,18 +104,24 @@ fn view_geometry_is_non_degenerate_and_scales_with_size() {
     let theme = themes.active();
     let scale = Scale::ONE;
     assert!(
-        visible_rows(theme, scale) > 4,
+        visible_rows_for(WIN_HEIGHT, theme, scale) > 4,
         "the window shows several lines"
     );
     assert!(
-        visible_cols(theme, scale) > 16,
+        visible_cols_for(WIN_WIDTH, theme, scale) > 16,
         "the window shows several columns"
     );
     // A wider/taller window shows strictly more columns/rows; a narrower
     // one strictly fewer — the geometry follows the client size.
-    assert!(visible_cols_for(WIN_WIDTH * 2, theme, scale) > visible_cols(theme, scale));
-    assert!(visible_rows_for(WIN_HEIGHT * 2, theme, scale) > visible_rows(theme, scale));
-    assert!(visible_cols_for(WIN_WIDTH / 2, theme, scale) < visible_cols(theme, scale));
+    assert!(
+        visible_cols_for(WIN_WIDTH * 2, theme, scale) > visible_cols_for(WIN_WIDTH, theme, scale)
+    );
+    assert!(
+        visible_rows_for(WIN_HEIGHT * 2, theme, scale) > visible_rows_for(WIN_HEIGHT, theme, scale)
+    );
+    assert!(
+        visible_cols_for(WIN_WIDTH / 2, theme, scale) < visible_cols_for(WIN_WIDTH, theme, scale)
+    );
 }
 
 #[test]
@@ -368,13 +385,9 @@ fn hovering_the_button_changes_the_rendered_surface() {
         layout.button.top() + to_i32(layout.button.height / 2),
     );
 
-    let resting = viewer
-        .render(theme, scale, WIN_WIDTH, WIN_HEIGHT)
-        .expect("renders");
+    let resting = shot(&viewer, theme, scale);
     let _ = feed(&mut viewer, &moved(centre), theme, scale);
-    let hovered = viewer
-        .render(theme, scale, WIN_WIDTH, WIN_HEIGHT)
-        .expect("renders");
+    let hovered = shot(&viewer, theme, scale);
     assert_ne!(
         resting.pixels(),
         hovered.pixels(),
@@ -384,9 +397,7 @@ fn hovering_the_button_changes_the_rendered_surface() {
     // Moving away again restores the resting picture.
     let away = Point::new(layout.text.left(), layout.text.top());
     let _ = feed(&mut viewer, &moved(away), theme, scale);
-    let unhovered = viewer
-        .render(theme, scale, WIN_WIDTH, WIN_HEIGHT)
-        .expect("renders");
+    let unhovered = shot(&viewer, theme, scale);
     assert_eq!(
         resting.pixels(),
         unhovered.pixels(),
@@ -469,13 +480,15 @@ fn clicking_the_track_pages_the_view() {
 #[test]
 fn the_wheel_still_scrolls_an_open_file() {
     let (themes, scale) = theme_and_scale();
+    let theme = themes.active();
     let mut viewer = open_viewer(&themes, scale, 100);
+    let layout = ViewerLayout::for_window(WIN_WIDTH, WIN_HEIGHT, theme, scale);
     assert_eq!(viewer.scroll_view().expect("open file").offset(), 0);
 
-    assert!(viewer.scroll_ticks(5));
+    assert!(viewer.scroll_ticks(5, &layout, &mut damage::sink()));
     assert_eq!(viewer.scroll_view().expect("open file").offset(), 5);
 
-    assert!(viewer.scroll_ticks(-2));
+    assert!(viewer.scroll_ticks(-2, &layout, &mut damage::sink()));
     assert_eq!(viewer.scroll_view().expect("open file").offset(), 3);
 }
 
@@ -489,4 +502,166 @@ fn show_status_clears_content_and_empties_the_scrollbar() {
     assert_eq!(viewer.status(), Some("Pick refused."));
     assert!(!viewer.has_content());
     assert!(viewer.scroll_view().is_none());
+}
+
+// --- C.3: what a round presents covers what it redrew -------------------
+//
+// Two directions, because either alone passes trivially: every pixel a round
+// changes must lie inside what it reported (or a stale frame reaches the
+// screen), and a round must report only where it changed (or reporting buys
+// nothing over presenting the whole window).
+
+/// Every pixel of `before` that `after` changed, as window coordinates.
+fn changed_pixels(before: &Surface, after: &Surface) -> Vec<Point> {
+    let mut changed = Vec::new();
+    for y in 0..before.height() {
+        for x in 0..before.width() {
+            if before.get(x, y) != after.get(x, y) {
+                changed.push(Point::new(to_i32(x), to_i32(y)));
+            }
+        }
+    }
+    changed
+}
+
+/// Feed one pointer `event`, returning what it repainted and what it reported.
+fn round(
+    viewer: &mut Viewer,
+    event: &InputEvent,
+    theme: &Theme,
+    scale: Scale,
+) -> (Vec<Point>, Region) {
+    let before = shot(viewer, theme, scale);
+    let mut reported = damage::sink();
+    let _ = feed_reporting(viewer, event, theme, scale, &mut reported);
+    let after = shot(viewer, theme, scale);
+    (changed_pixels(&before, &after), reported)
+}
+
+/// The centre of `rect`.
+fn centre_of(rect: Rect) -> Point {
+    Point::new(
+        rect.left() + to_i32(rect.width / 2),
+        rect.top() + to_i32(rect.height / 2),
+    )
+}
+
+#[test]
+fn every_pixel_a_pointer_round_changes_lies_inside_what_it_reported() {
+    let (themes, scale) = theme_and_scale();
+    let theme = themes.active();
+    let mut viewer = open_viewer(&themes, scale, 1000);
+    let layout = ViewerLayout::for_window(WIN_WIDTH, WIN_HEIGHT, theme, scale);
+    let bar = ScrollBar::new(
+        ScrollOrientation::Vertical,
+        viewer.scroll_view().expect("open file").model(),
+    );
+    let thumb = find_part(&bar, layout.scrollbar, scale, theme, ScrollPart::Thumb);
+
+    // A walk over every interactive region the viewer owns: onto the button,
+    // press and release it, off to the text area, onto the scrollbar thumb,
+    // press, drag it (which scrolls the text), and release.
+    let walk = [
+        moved(centre_of(layout.button)),
+        PRESS,
+        RELEASE,
+        moved(centre_of(layout.text)),
+        moved(thumb),
+        PRESS,
+        moved(Point::new(thumb.x, thumb.y + 40)),
+        RELEASE,
+        moved(centre_of(layout.text)),
+    ];
+    let mut steps_that_changed = 0;
+    for (step, event) in walk.iter().enumerate() {
+        let (changed, reported) = round(&mut viewer, event, theme, scale);
+        if !changed.is_empty() {
+            steps_that_changed += 1;
+        }
+        for point in changed {
+            assert!(
+                reported.contains(point),
+                "step {step} ({event:?}) changed {point:?}, which it did not report"
+            );
+        }
+    }
+    assert!(
+        steps_that_changed >= 6,
+        "the walk must actually repaint for this to prove anything, not {steps_that_changed} steps"
+    );
+}
+
+#[test]
+fn a_hover_reports_the_control_it_entered_and_nothing_wider() {
+    let (themes, scale) = theme_and_scale();
+    let theme = themes.active();
+    let mut viewer = Viewer::new();
+    let layout = ViewerLayout::for_window(WIN_WIDTH, WIN_HEIGHT, theme, scale);
+
+    let mut reported = damage::sink();
+    let entered = feed_reporting(
+        &mut viewer,
+        &moved(centre_of(layout.button)),
+        theme,
+        scale,
+        &mut reported,
+    );
+    assert!(entered.changed, "entering the button repaints it");
+    assert_eq!(
+        reported.rects(),
+        &[layout.button],
+        "entering reports exactly the button, not the header or the window"
+    );
+
+    // A second sample inside the same control changes nothing, so it reports
+    // nothing and the round presents nothing at all.
+    let mut still = damage::sink();
+    let again = feed_reporting(
+        &mut viewer,
+        &moved(Point::new(
+            centre_of(layout.button).x + 1,
+            centre_of(layout.button).y,
+        )),
+        theme,
+        scale,
+        &mut still,
+    );
+    assert!(!again.changed, "a sample inside the same control is idle");
+    assert!(
+        still.is_empty(),
+        "an idle sample reports nothing: {:?}",
+        still.rects()
+    );
+}
+
+#[test]
+fn a_scroll_key_reports_the_text_and_the_bar_it_moved_and_nothing_else() {
+    let (themes, scale) = theme_and_scale();
+    let theme = themes.active();
+    let mut viewer = open_viewer(&themes, scale, 1000);
+    let layout = ViewerLayout::for_window(WIN_WIDTH, WIN_HEIGHT, theme, scale);
+
+    let before = shot(&viewer, theme, scale);
+    let mut reported = damage::sink();
+    assert!(viewer.page_down(&layout, &mut reported), "the view moves");
+    let after = shot(&viewer, theme, scale);
+    for point in changed_pixels(&before, &after) {
+        assert!(
+            reported.contains(point),
+            "paging changed {point:?}, which it did not report"
+        );
+    }
+    // The header band is untouched by a scroll, so nothing reported may
+    // reach it: reporting the whole window would pass the check above.
+    assert!(
+        !reported.intersects(layout.header),
+        "a scroll must not report the header: {:?}",
+        reported.rects()
+    );
+
+    // Paged to the bottom, a further page moves nothing and reports nothing.
+    while viewer.page_down(&layout, &mut damage::sink()) {}
+    let mut idle = damage::sink();
+    assert!(!viewer.page_down(&layout, &mut idle));
+    assert!(idle.is_empty(), "a pinned view reports nothing");
 }

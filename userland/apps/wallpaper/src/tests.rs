@@ -13,7 +13,7 @@ use tairix_controls::collection::IconTile;
 use tairix_controls::damage;
 use tairix_controls::scrollbar::ScrollPart;
 use tairix_controls::tabs::Tab;
-use tairix_geometry::{Point, Rect};
+use tairix_geometry::{Point, Rect, Region};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_theme::{TextRole, ThemeRegistry};
 use tairix_wallpaper::{CatalogEntry, PinboardSettings, WallpaperPath};
@@ -153,7 +153,25 @@ fn click(chooser: &mut Chooser, at: Point, style: Style<'_>) -> ChooserAction {
 
 /// Press a named key with no modifiers.
 fn key(chooser: &mut Chooser, named: NamedKey, style: Style<'_>) -> ChooserAction {
-    chooser.on_key(Key::Named(named), Modifiers::default(), style)
+    chooser.on_key(
+        Key::Named(named),
+        Modifiers::default(),
+        style,
+        &mut damage::sink(),
+    )
+}
+
+/// Draw the whole window into a fresh surface at the size every test's
+/// chooser lays out for, so a test can compare two pictures.
+fn shot(chooser: &mut Chooser, style: Style<'_>) -> Surface {
+    shot_at(chooser, style, WIN_WIDTH, WIN_HEIGHT)
+}
+
+/// [`shot`] onto a `width` × `height` window, for the tests that resize.
+fn shot_at(chooser: &mut Chooser, style: Style<'_>, width: u32, height: u32) -> Surface {
+    let mut surface = Surface::new(width, height).expect("a window-sized surface");
+    chooser.render_into(&mut surface, style);
+    surface
 }
 
 /// The rectangle of the gallery tile showing the candidate at `index`, which
@@ -261,7 +279,7 @@ fn a_refused_thumbnail_is_remembered_and_never_retried() {
     let mut chooser = sample_chooser();
 
     let first = chooser.next_thumbnail(style).expect("a pending thumbnail");
-    chooser.mark_thumbnail_refused(first.index);
+    chooser.mark_thumbnail_refused(first.index, style, &mut damage::sink());
     let next = chooser.next_thumbnail(style).expect("another pending one");
     assert_ne!(next.index, first.index);
     assert_eq!(
@@ -291,7 +309,7 @@ fn next_thumbnail_is_none_once_every_candidate_is_resolved() {
     let mut chooser = sample_chooser();
 
     while let Some(request) = chooser.next_thumbnail(style) {
-        chooser.mark_thumbnail_refused(request.index);
+        chooser.mark_thumbnail_refused(request.index, style, &mut damage::sink());
     }
     assert!(chooser.next_thumbnail(style).is_none());
 }
@@ -304,7 +322,7 @@ fn a_ready_thumbnail_replaces_the_pending_state() {
 
     let request = chooser.next_thumbnail(style).expect("a pending thumbnail");
     let pixels = Surface::new(request.side, request.side).expect("a test surface");
-    chooser.set_thumbnail(request.index, pixels);
+    chooser.set_thumbnail(request.index, pixels, style, &mut damage::sink());
     assert!(matches!(
         chooser.candidates()[request.index].thumbnail,
         Thumbnail::Ready(_)
@@ -324,7 +342,7 @@ fn a_thumbnail_rendered_for_another_side_is_asked_for_again() {
     let request = chooser.next_thumbnail(style).expect("a pending thumbnail");
     let index = request.index;
     let wrong_side = Surface::new(request.side / 2, request.side / 2).expect("a test surface");
-    chooser.set_thumbnail(index, wrong_side);
+    chooser.set_thumbnail(index, wrong_side, style, &mut damage::sink());
 
     let again = chooser
         .next_thumbnail(style)
@@ -333,7 +351,7 @@ fn a_thumbnail_rendered_for_another_side_is_asked_for_again() {
     assert_eq!(again.side, request.side);
 
     let fresh = Surface::new(request.side, request.side).expect("a test surface");
-    chooser.set_thumbnail(index, fresh);
+    chooser.set_thumbnail(index, fresh, style, &mut damage::sink());
     assert!(
         chooser
             .next_thumbnail(style)
@@ -352,7 +370,7 @@ fn a_refused_thumbnail_stays_refused_at_every_side() {
 
     let mut resolved = 0;
     while let Some(request) = chooser.next_thumbnail(style_for(theme)) {
-        chooser.mark_thumbnail_refused(request.index);
+        chooser.mark_thumbnail_refused(request.index, style_for(theme), &mut damage::sink());
         resolved += 1;
         assert!(resolved <= chooser.candidates().len(), "no re-asking");
     }
@@ -400,18 +418,18 @@ fn hovering_a_tile_changes_what_the_gallery_draws() {
     let style = style_for(registry.active());
     let mut chooser = sample_chooser();
 
-    let resting = chooser.render(style).expect("a rendered window");
+    let resting = shot(&mut chooser, style);
     let target = tile_rect(&chooser, 2, style);
     assert_eq!(
         move_to(&mut chooser, centre(target), style),
         ChooserAction::Changed
     );
-    let hovered = chooser.render(style).expect("a rendered window");
+    let hovered = shot(&mut chooser, style);
     assert_ne!(resting.pixels(), hovered.pixels());
 
     // ...and moving away puts it back exactly as it was.
     let _ = move_to(&mut chooser, Point::new(0, 0), style);
-    let left = chooser.render(style).expect("a rendered window");
+    let left = shot(&mut chooser, style);
     assert_eq!(resting.pixels(), left.pixels());
 }
 
@@ -423,10 +441,10 @@ fn pressing_a_tile_draws_it_pressed_before_the_release_decides() {
 
     let target = tile_rect(&chooser, 2, style);
     let _ = move_to(&mut chooser, centre(target), style);
-    let hovered = chooser.render(style).expect("a rendered window");
+    let hovered = shot(&mut chooser, style);
     let _ = press(&mut chooser, style);
     assert_eq!(chooser.armed(), Some(2));
-    let pressed = chooser.render(style).expect("a rendered window");
+    let pressed = shot(&mut chooser, style);
     assert_ne!(hovered.pixels(), pressed.pixels());
 }
 
@@ -467,12 +485,12 @@ fn hovering_apply_changes_what_the_footer_draws() {
     let mut chooser = sample_chooser();
     let layout = chooser.layout(style);
 
-    let resting = chooser.render(style).expect("a rendered window");
+    let resting = shot(&mut chooser, style);
     assert_eq!(
         move_to(&mut chooser, centre(layout.apply()), style),
         ChooserAction::Changed
     );
-    let hovered = chooser.render(style).expect("a rendered window");
+    let hovered = shot(&mut chooser, style);
     assert_ne!(resting.pixels(), hovered.pixels());
 }
 
@@ -566,7 +584,7 @@ fn dragging_the_scrollbar_thumb_scrolls_the_gallery() {
     chooser.relayout(MIN_WIN_WIDTH, MIN_WIN_HEIGHT);
     // One paint brings the bar's model in line with the resized gallery,
     // which is what gives it a thumb to grab.
-    let _ = chooser.render(style);
+    let _ = shot(&mut chooser, style);
     let gutter = chooser.layout(style).scrollbar();
 
     // Grab the thumb where it rests, then drag to the bottom of the track.
@@ -593,7 +611,7 @@ fn the_preview_is_re_asked_for_when_the_selection_changes_and_never_shows_the_ol
 
     let first = chooser.next_preview(style).expect("a preview to render");
     let pixels = Surface::new(first.width, first.height).expect("a test surface");
-    chooser.set_preview(first.clone(), pixels);
+    chooser.set_preview(first.clone(), pixels, style, &mut damage::sink());
     assert!(chooser.next_preview(style).is_none());
 
     let target = tile_rect(&chooser, 2, style);
@@ -612,11 +630,11 @@ fn changing_the_fit_re_asks_for_the_preview_but_leaves_the_thumbnails_alone() {
 
     while let Some(request) = chooser.next_thumbnail(style) {
         let pixels = Surface::new(request.side, request.side).expect("a test surface");
-        chooser.set_thumbnail(request.index, pixels);
+        chooser.set_thumbnail(request.index, pixels, style, &mut damage::sink());
     }
     let held = chooser.next_preview(style).expect("a preview to render");
     let pixels = Surface::new(held.width, held.height).expect("a test surface");
-    chooser.set_preview(held.clone(), pixels);
+    chooser.set_preview(held.clone(), pixels, style, &mut damage::sink());
 
     let field = chooser.layout(style).option_field(OptionGroup::Fit);
     let _ = click(&mut chooser, centre(field), style);
@@ -638,7 +656,7 @@ fn a_refused_preview_is_remembered_rather_than_asked_for_on_every_paint() {
     let mut chooser = sample_chooser();
 
     let request = chooser.next_preview(style).expect("a preview to render");
-    chooser.mark_preview_refused(request.clone());
+    chooser.mark_preview_refused(request.clone(), style, &mut damage::sink());
     assert!(chooser.next_preview(style).is_none());
     assert!(chooser.preview_refused(&request));
     assert!(chooser.preview_surface(&request).is_none());
@@ -691,14 +709,14 @@ fn shift_tab_cycles_focus_backward_and_wraps() {
     };
 
     let opened_on = chooser.focus();
-    let _ = chooser.on_key(Key::Named(NamedKey::Tab), back, style);
+    let _ = chooser.on_key(Key::Named(NamedKey::Tab), back, style, &mut damage::sink());
     assert_ne!(chooser.focus(), opened_on);
     let _ = key(&mut chooser, NamedKey::Tab, style);
     assert_eq!(chooser.focus(), opened_on, "back then forward returns");
 
     let mut seen = vec![opened_on];
     for _ in 1..Focus::ORDER.len() {
-        let _ = chooser.on_key(Key::Named(NamedKey::Tab), back, style);
+        let _ = chooser.on_key(Key::Named(NamedKey::Tab), back, style, &mut damage::sink());
         seen.push(chooser.focus());
     }
     for region in Focus::ORDER {
@@ -708,7 +726,7 @@ fn shift_tab_cycles_focus_backward_and_wraps() {
             "{region:?} is visited exactly once per backward cycle"
         );
     }
-    let _ = chooser.on_key(Key::Named(NamedKey::Tab), back, style);
+    let _ = chooser.on_key(Key::Named(NamedKey::Tab), back, style, &mut damage::sink());
     assert_eq!(chooser.focus(), opened_on, "the backward cycle wraps");
 }
 
@@ -828,9 +846,15 @@ fn the_rendered_document_matches_the_state_the_controls_are_in() {
 
 #[test]
 fn an_apply_outcome_starts_absent_and_reports_exactly_what_was_set() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
     let mut chooser = sample_chooser();
     assert!(chooser.apply_outcome().is_none());
-    chooser.set_apply_outcome(ApplyOutcome::Refused(String::from("denied")));
+    chooser.set_apply_outcome(
+        ApplyOutcome::Refused(String::from("denied")),
+        style,
+        &mut damage::sink(),
+    );
     assert_eq!(
         chooser.apply_outcome(),
         Some(&ApplyOutcome::Refused(String::from("denied")))
@@ -843,15 +867,15 @@ fn every_apply_outcome_draws_a_distinct_footer() {
     let style = style_for(registry.active());
     let mut chooser = sample_chooser();
 
-    let silent = chooser.render(style).expect("a rendered window");
+    let silent = shot(&mut chooser, style);
     let mut rendered = vec![silent.pixels().to_vec()];
     for outcome in [
         ApplyOutcome::Applied,
         ApplyOutcome::Refused(String::from("the session said no")),
         ApplyOutcome::NoDesktop,
     ] {
-        chooser.set_apply_outcome(outcome);
-        let painted = chooser.render(style).expect("a rendered window");
+        chooser.set_apply_outcome(outcome, style, &mut damage::sink());
+        let painted = shot(&mut chooser, style);
         let pixels = painted.pixels().to_vec();
         assert!(!rendered.contains(&pixels));
         rendered.push(pixels);
@@ -922,16 +946,25 @@ fn the_layout_keeps_every_region_inside_the_window_at_every_size() {
 }
 
 #[test]
-fn the_chooser_renders_a_window_sized_surface_at_every_size() {
+fn the_chooser_paints_within_the_surface_it_is_handed_at_every_size() {
     let registry = ThemeRegistry::with_builtins();
     let style = style_for(registry.active());
     let mut chooser = sample_chooser();
+    let mut painted = alloc::vec::Vec::new();
     for (width, height) in [(MIN_WIN_WIDTH, MIN_WIN_HEIGHT), (WIN_WIDTH, WIN_HEIGHT)] {
         chooser.relayout(width, height);
-        let painted = chooser.render(style).expect("a rendered window");
-        assert_eq!(painted.width(), width);
-        assert_eq!(painted.height(), height);
+        let shot = shot_at(&mut chooser, style, width, height);
+        assert_eq!((shot.width(), shot.height()), (width, height));
+        // Something was drawn: the surface starts transparent and the window
+        // background alone makes every pixel opaque.
+        assert!(shot.pixels().iter().all(|pixel| pixel.a == 255));
+        painted.push(shot);
     }
+    assert_ne!(
+        painted[0].width(),
+        painted[1].width(),
+        "the two sizes must differ for this to prove anything"
+    );
 }
 
 #[test]
@@ -953,7 +986,7 @@ fn a_window_resize_re_flows_the_gallery_and_clamps_the_scroll() {
 
     // A window big enough for every tile has nothing left to scroll to.
     chooser.relayout(1600, 1200);
-    let _ = chooser.render(style);
+    let _ = shot(&mut chooser, style);
     let grid = chooser.layout(style).grid(chooser.visible().len());
     assert!(grid.lines_total() <= grid.visible_lines());
     assert_eq!(chooser.scroll_offset(), 0);
@@ -1147,7 +1180,7 @@ fn a_category_change_returns_the_gallery_to_its_top() {
         &settings_without_a_wallpaper(),
     );
     chooser.relayout(MIN_WIN_WIDTH, MIN_WIN_HEIGHT);
-    let _ = chooser.render(style);
+    let _ = shot(&mut chooser, style);
 
     for _ in 0..8 {
         let _ = chooser.on_pointer(
@@ -1182,7 +1215,7 @@ fn the_keyboard_reaches_the_rail_and_narrows_the_gallery() {
     }
     // The rail's cursor starts on the active entry; Down walks to the next
     // one and Enter narrows the gallery to it.
-    assert!(chooser.render(style).is_some());
+    let _ = shot(&mut chooser, style);
     assert_eq!(chooser.rail().current(), Some(0));
     let _ = key(&mut chooser, NamedKey::Down, style);
     assert_eq!(chooser.rail().current(), Some(1));
@@ -1199,7 +1232,7 @@ fn the_rail_ignores_the_axis_it_does_not_stack_along() {
     while chooser.focus() != Focus::Categories {
         let _ = key(&mut chooser, NamedKey::Tab, style);
     }
-    let _ = chooser.render(style);
+    let _ = shot(&mut chooser, style);
     let before = chooser.rail().current();
     let _ = key(&mut chooser, NamedKey::Right, style);
     assert_eq!(chooser.rail().current(), before);
@@ -1353,7 +1386,7 @@ fn a_screen_extent_change_invalidates_the_cached_preview_and_asks_again() {
         .next_preview(landscape)
         .expect("a preview to render");
     let pixels = Surface::new(first.width, first.height).expect("a test surface");
-    chooser.set_preview(first.clone(), pixels);
+    chooser.set_preview(first.clone(), pixels, landscape, &mut damage::sink());
     assert!(chooser.next_preview(landscape).is_none());
     assert!(chooser.preview_surface(&first).is_some());
 
@@ -1370,4 +1403,207 @@ fn a_screen_extent_change_invalidates_the_cached_preview_and_asks_again() {
     assert_eq!(second.fit, first.fit);
     assert_ne!(second.screen, first.screen);
     assert!(chooser.preview_surface(&second).is_none());
+}
+
+// --- C.3: what a round presents covers what it redrew -------------------
+//
+// Two directions, because either alone passes trivially: every pixel a round
+// changes must lie inside what it reported (or a stale frame reaches the
+// screen), and a round must report only where it changed (or reporting buys
+// nothing over presenting the whole window).
+
+/// Every pixel of `before` that `after` changed, as window coordinates.
+fn changed_pixels(before: &Surface, after: &Surface) -> alloc::vec::Vec<Point> {
+    let mut changed = alloc::vec::Vec::new();
+    for y in 0..before.height() {
+        for x in 0..before.width() {
+            if before.get(x, y) != after.get(x, y) {
+                changed.push(Point::new(to_i32(x), to_i32(y)));
+            }
+        }
+    }
+    changed
+}
+
+/// Feed one pointer `event`, returning what it repainted and what it reported.
+fn round(
+    chooser: &mut Chooser,
+    event: &InputEvent,
+    style: Style<'_>,
+) -> (alloc::vec::Vec<Point>, Region) {
+    let before = shot(chooser, style);
+    let mut reported = damage::sink();
+    let _ = chooser.on_pointer(event, style, &mut reported);
+    let after = shot(chooser, style);
+    (changed_pixels(&before, &after), reported)
+}
+
+#[test]
+fn every_pixel_a_chooser_round_changes_lies_inside_what_it_reported() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let mut chooser = sample_chooser();
+    let layout = chooser.layout(style);
+
+    // A walk over every interactive region the chooser owns: onto a tile,
+    // press and release it (which moves the selection and re-models the
+    // preview), onto another tile, onto the Apply button, press and release,
+    // onto the category rail, and out over the preview panel.
+    let first = centre(tile_rect(&chooser, 1, style));
+    let second = centre(tile_rect(&chooser, 2, style));
+    let walk = [
+        InputEvent::PointerMoved { to: first },
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+        InputEvent::PointerReleased {
+            button: PointerButton::Primary,
+        },
+        InputEvent::PointerMoved { to: second },
+        InputEvent::PointerMoved {
+            to: centre(layout.apply()),
+        },
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+        InputEvent::PointerReleased {
+            button: PointerButton::Primary,
+        },
+        InputEvent::PointerMoved {
+            to: centre(layout.categories()),
+        },
+        InputEvent::PointerMoved {
+            to: centre(layout.preview()),
+        },
+    ];
+    let mut steps_that_changed = 0;
+    for (step, event) in walk.iter().enumerate() {
+        let (changed, reported) = round(&mut chooser, event, style);
+        if !changed.is_empty() {
+            steps_that_changed += 1;
+        }
+        for point in changed {
+            assert!(
+                reported.contains(point),
+                "step {step} ({event:?}) changed {point:?}, which it did not report"
+            );
+        }
+    }
+    assert!(
+        steps_that_changed >= 5,
+        "the walk must actually repaint for this to prove anything, not {steps_that_changed} steps"
+    );
+}
+
+#[test]
+fn hovering_a_tile_reports_that_tile_and_a_second_sample_in_it_reports_nothing() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let mut chooser = sample_chooser();
+    let tile = tile_rect(&chooser, 2, style);
+
+    let mut reported = damage::sink();
+    let _ = chooser.on_pointer(
+        &InputEvent::PointerMoved { to: centre(tile) },
+        style,
+        &mut reported,
+    );
+    assert_eq!(
+        reported.rects(),
+        &[tile],
+        "entering a tile reports exactly that tile, not the gallery"
+    );
+
+    // A second sample inside the same tile changes nothing, so it reports
+    // nothing and the round presents nothing at all.
+    let mut still = damage::sink();
+    let asked = chooser.on_pointer(
+        &InputEvent::PointerMoved {
+            to: Point::new(centre(tile).x + 1, centre(tile).y),
+        },
+        style,
+        &mut still,
+    );
+    assert_eq!(
+        asked,
+        ChooserAction::None,
+        "an idle sample asks for nothing"
+    );
+    assert!(
+        still.is_empty(),
+        "an idle sample reports nothing: {:?}",
+        still.rects()
+    );
+}
+
+#[test]
+fn a_delivered_thumbnail_reports_only_its_own_tile() {
+    let registry = ThemeRegistry::with_builtins();
+    let theme = registry.active();
+    let style = style_for(theme);
+    let mut chooser = sample_chooser();
+    // Resolve the preview first, so the request that follows is a thumbnail.
+    if let Some(request) = chooser.next_preview(style) {
+        let pixels = Surface::new(request.width, request.height).expect("a test surface");
+        chooser.set_preview(request, pixels, style, &mut damage::sink());
+    }
+    let request = chooser
+        .next_thumbnail(style)
+        .expect("a thumbnail to render");
+    let tile = tile_rect(&chooser, request.index, style);
+
+    let before = shot(&mut chooser, style);
+    let mut reported = damage::sink();
+    let pixels = Surface::new(request.side, request.side).expect("a test surface");
+    chooser.set_thumbnail(request.index, pixels, style, &mut reported);
+    let after = shot(&mut chooser, style);
+
+    assert_eq!(
+        reported.rects(),
+        &[tile],
+        "a delivered thumbnail redraws one tile, not the gallery"
+    );
+    for point in changed_pixels(&before, &after) {
+        assert!(
+            reported.contains(point),
+            "the thumbnail changed {point:?}, which it did not report"
+        );
+    }
+}
+
+#[test]
+fn tab_reports_the_two_regions_the_focus_ring_moves_between() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let mut chooser = sample_chooser();
+    let layout = chooser.layout(style);
+
+    // From the settings drop-downs the ring walks to Close, then to Apply:
+    // two buttons whose rectangles the layout names outright.
+    while chooser.focus() != Focus::Close {
+        let _ = key(&mut chooser, NamedKey::Tab, style);
+    }
+    let before = shot(&mut chooser, style);
+    let mut reported = damage::sink();
+    let _ = chooser.on_key(
+        Key::Named(NamedKey::Tab),
+        Modifiers::default(),
+        style,
+        &mut reported,
+    );
+    let after = shot(&mut chooser, style);
+    assert_eq!(chooser.focus(), Focus::Apply);
+    assert_eq!(
+        reported.rects().len(),
+        2,
+        "the ring leaves one and takes one"
+    );
+    assert!(reported.contains(centre(layout.close())));
+    assert!(reported.contains(centre(layout.apply())));
+    for point in changed_pixels(&before, &after) {
+        assert!(
+            reported.contains(point),
+            "the focus move changed {point:?}, which it did not report"
+        );
+    }
 }

@@ -58,16 +58,17 @@ mod program {
         Errno, Origin, ProcId, WaitSetOp, WaitSourceKind, DOCUMENT_ROLE_ARG, ORIGIN_WIRE_LEN, STDIN,
     };
     use tairix_display::{winframe, SERIAL};
-    use tairix_geometry::{Point, Scale};
+    use tairix_geometry::{Point, Region, Scale};
+    use tairix_raster::Surface;
     use tairix_rt::io::{Stderr, Write};
     use tairix_theme::ThemeRegistry;
     use tairix_viewer::{
-        Viewer, ViewerPointerOutcome, CONTENT_MAX, MIN_WIN_HEIGHT, MIN_WIN_WIDTH, WIN_HEIGHT,
-        WIN_WIDTH,
+        Viewer, ViewerLayout, ViewerPointerOutcome, CONTENT_MAX, MIN_WIN_HEIGHT, MIN_WIN_WIDTH,
+        WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_window::{
-        pointer_input_events, Desktop, EventSource, WindowClient, WindowEvents, WindowFrames,
-        WindowSizing, WindowTransport,
+        pointer_input_events, pointer_point, present_damage, Desktop, EventSource, Repaint,
+        WindowClient, WindowEvents, WindowFrames, WindowSizing, WindowTransport,
     };
 
     /// Exit code when the shared frame region could not be created or
@@ -241,19 +242,6 @@ mod program {
         Some(content)
     }
 
-    /// Copy `surface` into the shared window frame and present it whole.
-    fn present_surface<T: WindowTransport>(
-        surface: &tairix_raster::Surface,
-        client: &mut WindowClient<T>,
-        window: u64,
-        frame: &mut [u8],
-        mode: &DisplayMode,
-    ) -> Result<(), Errno> {
-        let damage = DamageRect::full(mode);
-        winframe::encode(surface, frame, mode, damage, &SERIAL)?;
-        client.present(window, 0, damage)
-    }
-
     /// A `width_px` × `height_px` RGBA window mode, one frame's worth per
     /// row. The one place the viewer's mode is shaped, so the create and
     /// every resize agree on stride and format.
@@ -269,26 +257,6 @@ mod program {
     /// Total bytes a `FRAME_COUNT`-frame region shaped as `mode` needs.
     fn region_bytes(mode: &DisplayMode) -> usize {
         (mode.stride_bytes as usize) * (mode.height_px as usize) * FRAME_COUNT as usize
-    }
-
-    /// Draw the whole viewer window — the header, the "Open…" button, the
-    /// text area, and the scrollbar — and present it.
-    fn present_viewer<T: WindowTransport>(
-        viewer: &Viewer,
-        theme: &tairix_theme::Theme,
-        scale: Scale,
-        client: &mut WindowClient<T>,
-        window: u64,
-        frames: &mut WindowFrames,
-        mode: &DisplayMode,
-    ) -> Result<(), Errno> {
-        let surface = viewer
-            .render(theme, scale, mode.width_px, mode.height_px)
-            .ok_or(Errno::NoSpace)?;
-        let pixels = client
-            .frame_pixels(frames, window, FRAME_COUNT, mode)
-            .ok_or(Errno::NotAttached)?;
-        present_surface(&surface, client, window, pixels, mode)
     }
 
     /// The live window channel this app owns: the transport to the desktop
@@ -307,40 +275,61 @@ mod program {
         /// The region's current shape; every resize replaces it together
         /// with `frames`.
         mode: DisplayMode,
+        /// The window-sized surface every frame is drawn into, held for the
+        /// life of the window: allocating and zeroing one per present would be
+        /// a whole-window pass of its own, and holding it is what makes a
+        /// clipped repaint sound — every pixel outside the clip is the one
+        /// already on screen.
+        surface: Surface,
     }
 
     impl WindowSurface {
-        /// Draw the whole viewer window under `theme`/`scale` and present it.
+        /// Draw `damage` of the viewer window under `theme`/`scale`, convert
+        /// that rectangle into the shared frame region and present it.
+        ///
+        /// A region the session released while the window was hidden is
+        /// re-attached first and presented whole, because it holds none of the
+        /// pixels a partial present would leave standing.
         fn present(
             &mut self,
             viewer: &Viewer,
             theme: &tairix_theme::Theme,
             scale: Scale,
+            damage: DamageRect,
         ) -> Result<(), Errno> {
-            present_viewer(
-                viewer,
-                theme,
-                scale,
-                &mut self.client,
-                self.window,
-                &mut self.frames,
-                &self.mode,
-            )
+            let damage = if self.frames.is_released() {
+                DamageRect::full(&self.mode)
+            } else {
+                damage
+            };
+            self.surface.with_clip(
+                damage.x,
+                damage.y,
+                damage.width_px,
+                damage.height_px,
+                |surface| viewer.render_into(surface, theme, scale),
+            );
+            let pixels = self
+                .client
+                .frame_pixels(&mut self.frames, self.window, FRAME_COUNT, &self.mode)
+                .ok_or(Errno::NotAttached)?;
+            winframe::encode(&self.surface, pixels, &self.mode, damage, &SERIAL)?;
+            self.client.present(self.window, 0, damage)
         }
 
         /// Re-map the frame region onto `new_mode` and repaint at the new
         /// size, keeping the reader's place.
         ///
-        /// The ordering is fail-closed: a fresh region is created and
-        /// granted first, then adopted only if the session accepts the
-        /// [`WindowClient::resize`]. On success the *old* region is
-        /// unmapped (never before, so a refused resize leaves the current
-        /// surface intact); on refusal the freshly-allocated region is
-        /// unmapped so nothing leaks. A region that cannot be allocated at
-        /// all keeps the current size rather than crashing or presenting
-        /// nothing. The caller repaints unconditionally afterward, since
-        /// even a refused resize leaves the reported client size unchanged
-        /// and the current picture already matches it.
+        /// The ordering is fail-closed: a fresh region and a fresh drawing
+        /// surface are allocated and the region granted first, then adopted
+        /// only if the session accepts the [`WindowClient::resize`]. On success
+        /// the *old* region is unmapped (never before, so a refused resize
+        /// leaves the current surface intact); on refusal the freshly-allocated
+        /// region is unmapped so nothing leaks. Anything that cannot be
+        /// allocated at all keeps the current size rather than crashing or
+        /// presenting nothing. The caller repaints the whole window afterward,
+        /// since even a refused resize leaves the reported client size
+        /// unchanged and the current picture already matches it.
         fn resize(
             &mut self,
             new_mode: DisplayMode,
@@ -351,6 +340,9 @@ mod program {
             let Some(spare) = WindowFrames::create(region_bytes(&new_mode)) else {
                 // Out of memory for a new region: honestly keep the
                 // current window rather than fail the whole app.
+                return;
+            };
+            let Some(canvas) = Surface::new(new_mode.width_px, new_mode.height_px) else {
                 return;
             };
             let Some(grant) = spare.grant() else {
@@ -370,6 +362,7 @@ mod program {
             // old one, which unmaps it.
             self.frames = spare;
             self.mode = new_mode;
+            self.surface = canvas;
             // Re-wrap the open file (if any) to the new width, keeping the
             // reader near their place; a status message needs no
             // re-wrapping.
@@ -525,8 +518,9 @@ mod program {
     /// window) itself; this only reports what the event loop must still
     /// do.
     struct ViewerOutcome {
-        /// The view changed; the caller repaints.
-        repaint: bool,
+        /// What the event redraws, which is what decides the rectangle the
+        /// round presents.
+        repaint: Repaint,
         /// The "Open…" button or Enter asked for a fresh pick; a refusal
         /// is not fatal, so the caller issues it and moves on.
         request_pick: bool,
@@ -538,36 +532,43 @@ mod program {
     impl ViewerOutcome {
         /// Nothing changed.
         const IDLE: Self = Self {
-            repaint: false,
+            repaint: Repaint::Nothing,
             request_pick: false,
             close: false,
         };
 
-        /// The view changed; repaint.
-        const REPAINT: Self = Self {
-            repaint: true,
+        /// A model refresh no control round could describe — new file
+        /// content, or a window the manager resized — so the whole window is
+        /// redrawn.
+        const WHOLE: Self = Self {
+            repaint: Repaint::Whole,
             request_pick: false,
             close: false,
         };
 
         /// Ask for a fresh pick; the outcome arrives as a later event.
         const REQUEST_PICK: Self = Self {
-            repaint: false,
+            repaint: Repaint::Nothing,
             request_pick: true,
             close: false,
         };
 
         /// The window is closed; end the program.
         const CLOSE: Self = Self {
-            repaint: false,
+            repaint: Repaint::Nothing,
             request_pick: false,
             close: true,
         };
 
-        /// Repaint only when `changed`.
-        const fn from_repaint(changed: bool) -> Self {
+        /// Present what the round reported, but only when it changed
+        /// something.
+        const fn from_reported(changed: bool) -> Self {
             Self {
-                repaint: changed,
+                repaint: if changed {
+                    Repaint::Reported
+                } else {
+                    Repaint::Nothing
+                },
                 request_pick: false,
                 close: false,
             }
@@ -587,7 +588,10 @@ mod program {
         surface: &mut WindowSurface,
         theme: &tairix_theme::Theme,
         scale: Scale,
+        damage: &mut Region,
     ) -> ViewerOutcome {
+        let layout =
+            ViewerLayout::for_window(surface.mode.width_px, surface.mode.height_px, theme, scale);
         match event {
             WindowEvent::FilePicked { handle, .. } => {
                 match read_picked(handle) {
@@ -604,11 +608,11 @@ mod program {
                     // viewer can show; state it honestly.
                     None => viewer.show_status("Delegated read refused."),
                 }
-                ViewerOutcome::REPAINT
+                ViewerOutcome::WHOLE
             }
             WindowEvent::PickCancelled { .. } => {
                 viewer.show_status("No file chosen.");
-                ViewerOutcome::REPAINT
+                ViewerOutcome::WHOLE
             }
             WindowEvent::Key {
                 key: KeyInput::Pressed { key, .. },
@@ -620,14 +624,16 @@ mod program {
                 KeyValue::Named(NamedKeyCode::Enter) => ViewerOutcome::REQUEST_PICK,
                 // Navigation keys drive the shared scroll model and
                 // repaint only when the view actually moved.
-                KeyValue::Named(nav) => ViewerOutcome::from_repaint(navigate(nav, viewer)),
+                KeyValue::Named(nav) => {
+                    ViewerOutcome::from_reported(navigate(nav, viewer, &layout, damage))
+                }
                 KeyValue::Char(_) => ViewerOutcome::IDLE,
             },
             // A wheel gesture the desktop forwarded because this window
             // owns its own content scrolling: drive the shared model by
             // its vertical ticks and repaint only when the view moved.
             WindowEvent::Scrolled { dy, .. } => {
-                ViewerOutcome::from_repaint(viewer.scroll_ticks(dy))
+                ViewerOutcome::from_reported(viewer.scroll_ticks(dy, &layout, damage))
             }
             // A pointer event over the client area: sync the hover
             // position, then apply the press/release the action names,
@@ -636,9 +642,14 @@ mod program {
             // regions, so this is the pointer's whole route into the
             // viewer.
             WindowEvent::Pointer { x, y, action, .. } => {
-                let outcome = apply_pointer(viewer, x, y, action, theme, &surface.mode, scale);
+                let at = pointer_point(x, y);
+                let outcome = apply_pointer(viewer, at, action, theme, &layout, scale, damage);
                 ViewerOutcome {
-                    repaint: outcome.changed,
+                    repaint: if outcome.changed {
+                        Repaint::Reported
+                    } else {
+                        Repaint::Nothing
+                    },
                     request_pick: outcome.open_requested,
                     close: false,
                 }
@@ -657,7 +668,7 @@ mod program {
                 ..
             } => {
                 surface.resize(mode_for(width_px, height_px), theme, scale, viewer);
-                ViewerOutcome::REPAINT
+                ViewerOutcome::WHOLE
             }
             // The desktop asked, or *Quit* was chosen on the viewer's own
             // icon-bar slot: close the window and end; the frame region is
@@ -731,7 +742,7 @@ mod program {
             // logic so every derived value (scale, theme) is current for
             // the repaint. A refused change logs the reason and stands on
             // the last good state.
-            let mut repaint = match desktop.apply(&event) {
+            let re_themed = match desktop.apply(&event) {
                 Ok(true) => {
                     themes.set_appearance(desktop.appearance());
                     viewer.relayout(
@@ -749,12 +760,21 @@ mod program {
                 }
             };
 
-            let event_outcome =
-                apply_window_event(event, viewer, surface, themes.active(), desktop.scale());
+            // One sink per round: every control the event reaches, and the
+            // viewer for the scroll it commits itself, reports its repainted
+            // bounds into this one, which is what the present is clipped to.
+            let mut damage = tairix_controls::damage::sink();
+            let event_outcome = apply_window_event(
+                event,
+                viewer,
+                surface,
+                themes.active(),
+                desktop.scale(),
+                &mut damage,
+            );
             if event_outcome.close {
                 return 0;
             }
-            repaint |= event_outcome.repaint;
             if event_outcome.request_pick {
                 // A refused pick (another pick showing) leaves the
                 // current content on screen; the outcome arrives as a
@@ -762,12 +782,20 @@ mod program {
                 let _ = surface.client.pick_file(surface.window);
             }
 
-            let present_result = if repaint {
-                surface.present(viewer, themes.active(), desktop.scale())
+            // An adopted desktop change re-themes and re-densifies every
+            // pixel, so no report could describe it.
+            let repaint = if re_themed {
+                Repaint::Whole
             } else {
-                Ok(())
+                event_outcome.repaint
             };
-            if present_result.is_err() {
+            let Some(damage) = present_damage(&surface.mode, repaint, &damage) else {
+                continue;
+            };
+            if surface
+                .present(viewer, themes.active(), desktop.scale(), damage)
+                .is_err()
+            {
                 return fail(EXIT_CHANNEL_LOST, "present refused");
             }
         }
@@ -820,14 +848,19 @@ mod program {
             Err(code) => return code,
         };
 
+        let Some(canvas) = Surface::new(mode.width_px, mode.height_px) else {
+            return fail(EXIT_NO_WINDOW, "no memory for the window surface");
+        };
         let mut surface = WindowSurface {
             client,
             window,
             frames,
             mode,
+            surface: canvas,
         };
+        let first = DamageRect::full(&surface.mode);
         if surface
-            .present(&viewer, themes.active(), desktop.scale())
+            .present(&viewer, themes.active(), desktop.scale(), first)
             .is_err()
         {
             return fail(EXIT_CHANNEL_LOST, "first present refused");
@@ -850,33 +883,19 @@ mod program {
     /// they have not been told about.
     fn apply_pointer(
         viewer: &mut Viewer,
-        x: u32,
-        y: u32,
+        point: Point,
         action: PointerAction,
         theme: &tairix_theme::Theme,
-        mode: &DisplayMode,
+        layout: &ViewerLayout,
         scale: Scale,
+        damage: &mut Region,
     ) -> ViewerPointerOutcome {
-        let point = Point::new(
-            i32::try_from(x).unwrap_or(i32::MAX),
-            i32::try_from(y).unwrap_or(i32::MAX),
-        );
         let mut outcome = ViewerPointerOutcome {
             changed: false,
             open_requested: false,
         };
-        // One sink for the whole round: both synthesised events reach the same
-        // two controls, which report their repainted bounds into it.
-        let mut damage = tairix_controls::damage::sink();
         for input in pointer_input_events(action, point) {
-            let step = viewer.on_pointer(
-                &input,
-                mode.width_px,
-                mode.height_px,
-                theme,
-                scale,
-                &mut damage,
-            );
+            let step = viewer.on_pointer(&input, layout, theme, scale, damage);
             outcome.changed |= step.changed;
             outcome.open_requested |= step.open_requested;
         }
@@ -884,14 +903,19 @@ mod program {
     }
 
     /// Apply a navigation key to the viewer, returning whether the view moved.
-    fn navigate(key: NamedKeyCode, viewer: &mut Viewer) -> bool {
+    fn navigate(
+        key: NamedKeyCode,
+        viewer: &mut Viewer,
+        layout: &ViewerLayout,
+        damage: &mut Region,
+    ) -> bool {
         match key {
-            NamedKeyCode::Up => viewer.line_up(),
-            NamedKeyCode::Down => viewer.line_down(),
-            NamedKeyCode::PageUp => viewer.page_up(),
-            NamedKeyCode::PageDown => viewer.page_down(),
-            NamedKeyCode::Home => viewer.to_top(),
-            NamedKeyCode::End => viewer.to_bottom(),
+            NamedKeyCode::Up => viewer.line_up(layout, damage),
+            NamedKeyCode::Down => viewer.line_down(layout, damage),
+            NamedKeyCode::PageUp => viewer.page_up(layout, damage),
+            NamedKeyCode::PageDown => viewer.page_down(layout, damage),
+            NamedKeyCode::Home => viewer.to_top(layout, damage),
+            NamedKeyCode::End => viewer.to_bottom(layout, damage),
             _ => false,
         }
     }

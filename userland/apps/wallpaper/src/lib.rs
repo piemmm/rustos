@@ -24,7 +24,7 @@
 //! * [`Layout`] — the pure window-geometry function every paint and every
 //!   hit-test agrees on, so a resize can never leave a control drawn
 //!   somewhere a click does not land.
-//! * [`Chooser::render`] — the painter over the shared `lib/font` face,
+//! * [`Chooser::render_into`] — the painter over the shared `lib/font` face,
 //!   `lib/raster` [`Surface`] and the `lib/controls` family. Every
 //!   interactive thing on screen is a shared control — the drop-downs, the
 //!   buttons, the gallery scrollbar, and the gallery's own tiles — so this
