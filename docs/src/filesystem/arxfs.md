@@ -894,6 +894,18 @@ in place**:
   the rebuildable allocation-map region, the transient verification scratch
   arrays, an idempotent mirror copy-repair — go straight to the device,
   having nothing to be ordered behind the barrier.
+- **The drain hands the device runs, not blocks.** Data blocks are allocated
+  consecutively and mirrored metadata blocks are adjacent pairs, so the
+  set's ascending order gathers into contiguous runs and each run is one
+  `write_blocks` — bounded by the same 64 KiB transfer window the read path
+  gathers to, from the one shared definition. Those same 158 blocks now cost
+  **five** commands rather than 158, and an empty-file create costs three
+  rather than fourteen; the bytes are untouched, only the commands and their
+  completion waits fall. A run stops at the first address the set does not
+  hold, so it can never name a block outside the transaction or run past the
+  end of the device. The gather buffer is one fallible reservation sized to
+  the transaction's longest run, wiped on drop, and a machine too short of
+  memory to hold it writes block by block rather than failing the commit.
 
 ## Operations
 
@@ -1102,12 +1114,12 @@ write, the same bytes in sixteen calls, a 34-byte append, and a metadata-only
 create each cost at both block sizes: the commands, the blocks they carry, how
 many of those a later write supersedes, the bytes, and the write amplification.
 It also holds the write-back cache's contract — a transaction writes each block
-it touches exactly once, and every commit issues exactly one barrier with
-nothing but the two copies of its publishing slot after it. Two assertions
-record the present rather than a goal, each the acceptance hook of a later
-stage: every write still carries exactly one block (the coalescer weights that
-histogram toward the staging window) and sixteen calls still cost far more than
-one (the commit scheduler converges them). The same workloads on a 100 TiB
+it touches exactly once, the drain hands the device one request per physical
+run rather than one per block, and every commit issues exactly one barrier with
+nothing but the two copies of its publishing slot after it. One assertion
+records the present rather than a goal, and it is the acceptance hook of a later
+stage: sixteen calls still cost far more than one, which the commit scheduler
+converges. The same workloads on a 100 TiB
 volume produce an identical command stream, so the figures are properties of
 the write path and not of the device measured on.
 

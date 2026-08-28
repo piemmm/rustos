@@ -39,8 +39,8 @@ no-deferral rule), ahead of everything below it.
 | M1 | The read-only repair rule (defect D64) | `ARXFS-MAINTENANCE.md` | 18 | — | **done** |
 | WB0 | Write-amplification measurement harness | `ARXFS-WRITEBACK.md` | 17 | — | **done** |
 | WB1 | Dirty block set + the commit barrier (defect D63) | `ARXFS-WRITEBACK.md` | 17 | WB0 | **done** |
-| WB2 | Run coalescer | `ARXFS-WRITEBACK.md` | 17 | WB1 | **next** |
-| WB3 | Fold in the allocation map's dirty pages | `ARXFS-WRITEBACK.md` | 17 | WB1 | planned |
+| WB2 | Run coalescer | `ARXFS-WRITEBACK.md` | 17 | WB1 | **done** |
+| WB3 | Fold in the allocation map's dirty pages | `ARXFS-WRITEBACK.md` | 17 | WB1 | **next** |
 | WB4 | Commit scheduler | `ARXFS-WRITEBACK.md` | 17 | WB1 | planned |
 | WB5 | The bound and memory pressure | `ARXFS-WRITEBACK.md` | 17 | WB1 | planned |
 | WB6 | Hardware acceptance + docs | `ARXFS-WRITEBACK.md` | 17 | WB2–WB5 | planned |
@@ -100,7 +100,9 @@ their reason recorded there, not here:
   ends with exactly one barrier and nothing but its publishing slot after it.
 - **The rest of write-back before the format targets.** A wider record on an
   uncoalesced write path multiplies the per-record device command count instead
-  of reducing it, so B1 follows WB2.
+  of reducing it, so B1 followed WB2, which is now done: the drain gathers its
+  ascending order into physical runs against the read path's transfer window, so
+  a 64 KiB write costs five device commands against 158 for the same bytes.
 - **M0 and M1 went first, and both are done.** M0 was a hoist plus one
   default-provided query, and it also closed a live reporting defect: a mount
   over a degraded composed array read as `Available`, because a degraded array

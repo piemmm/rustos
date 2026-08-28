@@ -1,8 +1,8 @@
 # ARXFS-WRITEBACK.md — ARXFS write-back cache, commit batching, and the commit barrier
 
-Status: **WB0 done** (the measurement harness) and **WB1 done** (the dirty
-block set and the commit barrier, closing `plans/OPEN-DEFECTS.md` D63);
-WB2–WB6 planned.
+Status: **WB0 done** (the measurement harness), **WB1 done** (the dirty block
+set and the commit barrier, closing `plans/OPEN-DEFECTS.md` D63), and **WB2
+done** (the run coalescer, closing C3); WB3–WB6 planned.
 Binding under `AGENTS.md` and listed in its §15.18 jump-sheet.
 Primary code area: `drivers/filesystem/arxfs/`.
 Companion spec section: `docs/src/filesystem/arxfs-spec.md` §22.
@@ -13,9 +13,9 @@ writes both slow — measured 5.6×–17.8× byte amplification and, on a 512-by
 card, one device command per 512 bytes — and unsafe on any device with a
 volatile write cache. This plan fixes both with one mechanism: a
 transaction-scoped dirty block set, a run coalescer, a commit scheduler, and the
-single barrier that becomes affordable once commits are batched. WB1 has landed
-the set and the barrier; the remaining stages are the coalescer, the map's dirty
-pages, the scheduler, and the bound.
+single barrier that becomes affordable once commits are batched. WB1 landed the
+set and the barrier and WB2 the coalescer; the remaining stages are the map's
+dirty pages, the scheduler, and the bound.
 
 It adds **no** capability, **no** ABI surface, **no** second data path, and no
 mount option: the behaviour is the one production profile
@@ -33,23 +33,24 @@ freshly formatted volume per case. "Superseded" is the block writes a later
 write in the same window replaced — bytes sealed and sent whose only surviving
 version is the last one.
 
-| Workload | fs block size | device writes | superseded | bytes to device | byte amplification |
-|---|---|---|---|---|---|
-| 64 KiB in one `write_at` | 512 | 158 | 0 | 79 KiB | 1.23× |
-| 64 KiB as 16 × 4 KiB `write_at` | 512 | 335 | 24 | 167.5 KiB | 2.61× |
-| 64 KiB in one `write_at` | 4096 | 25 | 0 | 100 KiB | 1.56× |
-| 64 KiB as 16 × 4 KiB `write_at` | 4096 | 160 | 24 | 640 KiB | 10.00× |
-| 34-byte append to an existing file | 512 | 11 | 0 | 5.5 KiB | 165.6× |
-| create one empty file | 512 | 14 | 0 | 7 KiB | — |
+| Workload | fs block size | device commands | blocks sent | superseded | bytes to device | byte amplification |
+|---|---|---|---|---|---|---|
+| 64 KiB in one `write_at` | 512 | 5 | 158 | 0 | 79 KiB | 1.23× |
+| 64 KiB as 16 × 4 KiB `write_at` | 512 | 64 | 335 | 24 | 167.5 KiB | 2.61× |
+| 64 KiB in one `write_at` | 4096 | 5 | 25 | 0 | 100 KiB | 1.56× |
+| 64 KiB as 16 × 4 KiB `write_at` | 4096 | 64 | 160 | 24 | 640 KiB | 10.00× |
+| 34-byte append to an existing file | 512 | 4 | 11 | 0 | 5.5 KiB | 165.6× |
+| create one empty file | 512 | 3 | 14 | 0 | 7 KiB | — |
 
-Every one of those writes still carries exactly one block, and every commit
-issues exactly one barrier. The figures are properties of the write path, not of
-the device measured on: the harness reproduces each of them on a 100 TiB volume,
-thirteen million times the size, to the command.
+Commands are fewer than blocks because the drain gathers adjacent staged blocks
+into runs, so the exact run-length histogram is part of the baseline too. Every
+commit issues exactly one barrier. The figures are properties of the write path,
+not of the device measured on: the harness reproduces each of them on a 100 TiB
+volume, thirteen million times the size, to the command.
 
 Amplification is structural, not granular. It had four separate causes, one
-stage each so each win is separately measurable. **C1 and C4 are closed by WB1**;
-C2 and C3 remain.
+stage each so each win is separately measurable. **C1 and C4 are closed by WB1
+and C3 by WB2**; C2 remains.
 
 **C1 — intra-transaction rewrite churn. Closed.** Every `store_block` ended in
 `extent_assign`, a B-tree insert that copy-on-wrote the covering leaf and wrote
@@ -71,14 +72,15 @@ device at every operation boundary — which is why the chunked 4 KiB case still
 costs 2.1× the single-call command count at a 512-byte block size and 6.4× at
 4096, for identical bytes, and is the only case left that supersedes anything.
 
-**C3 — single-block device I/O.** The drain issues one `write_blocks` per staged
-block. `Block::write_blocks` already accepts a multi-block buffer; the *read*
-path already coalesces into a 64 KiB staging window (`RunStage`/`READ_RUN_BYTES`);
-`drivers/storage/emmc2` already stages 128 blocks (64 KiB) per ADMA2 multi-block
-transfer. So on the Pi's SD card every 512-byte write is a separate CMD24 plus
-completion wait where one CMD25 could carry 128 of them. The drain hands its
-blocks over in ascending device order, which is the order a coalescer needs; the
-write path is still the only side of the driver that does not gather runs.
+**C3 — single-block device I/O. Closed.** The drain issued one `write_blocks`
+per staged block, so on the Pi's SD card every 512-byte write was a separate
+CMD24 plus completion wait where one CMD25 could carry 128 of them — while the
+*read* path already gathered a 64 KiB staging window and `drivers/storage/emmc2`
+already staged 128 blocks per ADMA2 multi-block transfer. WB2 gathers the
+drain's ascending order into physical runs against that same window, hoisted to
+one shared bound. A 64 KiB write on a 512-byte volume costs **five** commands
+against 158, and an empty-file create three against fourteen, for identical
+bytes.
 
 **C4 — no commit barrier (a durability defect). Closed.** `commit()` wrote the
 copy-on-write blocks, then the transaction root, then the superblock slot, with
@@ -143,7 +145,7 @@ VFS operation
       -> seal path (header/HMAC, AEAD, integrity trailers — unchanged)
           -> stage_block  <- write_meta / seal_data_block   the one seam
               -> dirty block set          (WB1, landed)
-                  -> run coalescer        (WB2)
+                  -> run coalescer        (WB2, landed)
                       -> Block::write_blocks / Block::flush
 ```
 
@@ -351,18 +353,34 @@ commit, nothing but the slot pair after it) and a volatile-write-cache
 that pair, and a power loss keeping any subset of them leaves the prior
 committed state or the new one, both whole.
 
-### WB2 — run coalescer. **planned**
+### WB2 — run coalescer. **done**
 
-The drain already hands its blocks over in ascending physical order; gather
-adjacent ones into runs, issue one `write_blocks` per run, bounded by the
-staging window the read path already uses — hoisted to one shared definition
-consumed by both directions rather than a second constant.
+`DirtySet::drain` gathers its ascending order into physical runs and issues one
+`write_blocks` per run. One pass both decides a run's length and lays its bytes
+into the gather window, so the blocks the set releases and the bytes the device
+is handed cannot disagree; a run stops at the first address the set does not
+hold, so it can never name a block outside the transaction or reach past the end
+of the device. The bound is the read path's transfer window, hoisted to one
+definition (`RUN_BYTES`) with one staging type (`RunWindow`) consumed by both
+directions, and the driver's single device write became `write_run`, which
+refuses a ragged or empty run rather than leaving the device to interpret it.
+The window is a fallible reservation sized to the transaction's *longest* run
+rather than to the bound — the same sizing the read path applies to a small
+read — and a machine too short of memory to hold one writes block by block from
+the set instead, so a commit costs commands rather than failing.
 
-Acceptance: C3 gone (device *command* count falls to the run count; the mirror
-pair is one 2-block command); a short run still writes correctly; the bound is
-respected; no run crosses a device end.
+*Measured (the WB0 harness, asserted row by row with the exact run-length
+histogram).* Identical bytes, far fewer commands: a 64 KiB `write_at` on a
+512-byte volume **158 → 5** (a 128-block run at the bound, a 20-block
+remainder, the four mirrored metadata pairs as one 8-block run, and the slot
+pair), at 4096 **25 → 5**; a 34-byte append **11 → 4**; an empty-file create
+**14 → 3**, its whole metadata working set one 12-block run because metadata is
+allocated downward from the high end. The chunked case, which C2 owns, falls
+335 → 64 and 160 → 64. The barrier shape is unchanged: one barrier per commit
+with nothing but the slot's two single-block copies after it, which stay two
+separate commands because the primary *is* the commit point.
 
-### WB3 — fold the allocation map's dirty pages in. **planned**
+### WB3 — fold the allocation map's dirty pages in. **next**
 
 `allocmap`'s private dirty-page set and `map_persist`'s own `flush()` are the
 same problem solved twice. Fold the pages into the one dirty set and the barrier

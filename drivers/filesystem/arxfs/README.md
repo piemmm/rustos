@@ -428,6 +428,20 @@ allocation-map region, the transient verification scratch arrays, and an
 idempotent mirror copy-repair have nothing to be ordered behind the barrier and
 go straight to the device.
 
+The drain then hands the device **runs rather than blocks**. Data blocks are
+allocated consecutively and mirrored metadata blocks are adjacent pairs, so the
+set's ascending order gathers into contiguous runs and each run is one
+`write_blocks`, bounded by the same 64 KiB transfer window the read path gathers
+to (`RUN_BYTES`, one definition for both directions). Those same 158 blocks cost
+**five** commands, and an empty-file create three rather than fourteen: the
+bytes on the device are unchanged, but the commands carrying them — and the
+completion wait each costs a per-command device like an SD card — collapse. A
+run stops at the first address the set does not hold, so it can never name a
+block outside the transaction or reach past the end of the device, and the
+gather buffer is one fallible reservation sized to the transaction's longest
+run, wiped on drop, with a machine too short of memory to hold it writing block
+by block rather than failing the commit.
+
 Free space lives in an **on-disk paged allocation map** (`allocmap`,
 `allocator`): a contiguous region of a header block, a summary recording each
 bitmap page's free count, and one bit per device block, each block sealed with
@@ -603,11 +617,11 @@ same bytes in sixteen calls, a 34-byte append, and an empty-file create each
 cost at both block sizes (commands, blocks, blocks superseded, bytes,
 amplification). It also holds the write-back cache's contract: a transaction
 writes each block it touches exactly once, and every commit issues exactly one
-barrier with nothing but the two copies of its publishing slot after it. Two
-figures are recorded as the present rather than a goal, each the acceptance hook
-of a later write-back stage — every write still carrying one block, and sixteen
-calls still costing far more than one. The same workloads on a 100 TiB volume
-produce an identical command stream.
+barrier with nothing but the two copies of its publishing slot after it, and the
+drain issuing one request per physical run rather than one per block. One figure
+is recorded as the present rather than a goal, the acceptance hook of a later
+write-back stage: sixteen calls still cost far more than one. The same workloads
+on a 100 TiB volume produce an identical command stream.
 
 The 1 GiB filesystem soak (`cargo xtask fssoak --target arxfs`) drives the
 shared cross-filesystem exerciser, and `cargo xtask fuzz` harnesses fuzz the
@@ -635,7 +649,13 @@ source of truth for the on-disk format (`AGENTS.md` §2.2).
 
 ## Public surface
 
-`AGENTS.md` §8 — the only public *function* is `register`. The `ARXFS`
-type is exported so the driver host can construct an instance with
-`ARXFS::format` / `ARXFS::open`; the host reaches into it through the
-filesystem traits and the `set_security` accessor.
+`register` is the driver entry point. `ARXFS` itself is exported so the driver
+host can construct an instance (`ARXFS::format` / `ARXFS::open`) and reach into
+it through the filesystem traits and the `set_security` accessor, and
+`plant_nested_file` authors a file at a nested path for the image builders and
+store fixtures. The rest is the vocabulary those calls need: the report and
+option types the capability-gated operations return or take, the volume-key and
+entropy seam, and the behavioural constants a caller or an acceptance test holds
+the driver to — `RUN_BYTES` (the device transfer window both I/O directions
+gather to), `TRIM_BATCH_RANGES`, `MAX_CLUSTER_PLAINTEXT`, and
+`VOLUME_KEY_LEN`.

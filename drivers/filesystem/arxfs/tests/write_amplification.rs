@@ -15,16 +15,14 @@
 //! write in the same window supersedes, and how the run lengths are
 //! distributed — plus the issue order a durability barrier is proved by.
 //!
-//! Two of the properties asserted here are measurements of the present, not
-//! endorsements of it, and each is the acceptance hook of a named later stage:
+//! One property asserted here is a measurement of the present, not an
+//! endorsement of it, and it is the acceptance hook of a named later stage:
 //! sixteen calls writing one payload still cost far more than one call writing
-//! it (the commit scheduler converges them), and every write still carries
-//! exactly one block, because the drain issues one command per staged block
-//! while the read path already gathers runs (the coalescer weights that
-//! histogram toward the staging window). The rest is the write-back cache's
-//! contract, held here: a transaction writes each block it touches once, and
-//! every commit issues exactly one barrier with nothing but the two copies of
-//! its publishing superblock slot after it.
+//! it, which the commit scheduler converges. The rest is the write-back cache's
+//! contract, held here: a transaction writes each block it touches once, the
+//! drain hands the device one request per physical run rather than one per
+//! block, and every commit issues exactly one barrier with nothing but the two
+//! copies of its publishing superblock slot after it.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -33,7 +31,7 @@ use std::rc::Rc;
 use tairix_abi::driver::block::{Block, BlockGeometry, DiscardCapability};
 use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
 use tairix_abi::DriverError;
-use tairix_drv_fs_arxfs::{EntropySource, VolumeKey, ARXFS, VOLUME_KEY_LEN};
+use tairix_drv_fs_arxfs::{EntropySource, VolumeKey, ARXFS, RUN_BYTES, VOLUME_KEY_LEN};
 use tairix_fuzzseed::Lcg;
 
 /// One command the driver issued to the device, in issue order.
@@ -75,7 +73,8 @@ impl Ledger {
 #[derive(Debug, PartialEq, Eq)]
 struct Cost {
     /// Write commands — one bus transaction each, and the figure a per-command
-    /// device (an SD card's `CMD24`) is priced by.
+    /// device is priced by: an SD card takes a run as one multi-block `CMD25`
+    /// where each block on its own would be a `CMD24` and a completion wait.
     writes: usize,
     /// Blocks those commands carried in total.
     blocks: u64,
@@ -360,10 +359,14 @@ struct Row {
     /// Write amplification in hundredths; `None` for a metadata-only workload.
     amplification: Option<u64>,
     cost: Cost,
+    /// How many commands carried each run length — the shape the coalescer
+    /// produces, as `(blocks, commands)` pairs.
+    runs: &'static [(u64, usize)],
 }
 
-/// What the write path costs the device: one command per block, one barrier per
-/// commit, and each block a transaction touches written exactly once.
+/// What the write path costs the device: one command per physical run, one
+/// barrier per commit, and each block a transaction touches written exactly
+/// once.
 ///
 /// A change to any figure here is a real change in what a write costs a device,
 /// so the stage that improves one updates the row it improved, and a change
@@ -373,101 +376,131 @@ const BASELINE: &[Row] = &[
     // records (443 content bytes fit a 512-byte block); the other ten are five
     // mirrored metadata blocks — the extent and inode trees, the transaction
     // root, and the ring slot — each written once however many times the
-    // transaction rewrote it.
+    // transaction rewrote it. Five commands carry them: the payload's
+    // consecutive data blocks as a 128-block run (the transfer bound) and a
+    // 20-block remainder, the four mirrored metadata pairs as one 8-block run,
+    // and the ring slot's two copies after the barrier.
     Row {
         workload: Workload::OneCall,
         block_size: 512,
         amplification: Some(123),
         cost: Cost {
-            writes: 158,
+            writes: 5,
             blocks: 158,
             distinct_blocks: 158,
             bytes: 80_896,
             barriers: 1,
         },
+        runs: &[(1, 2), (8, 1), (20, 1), (128, 1)],
     },
     // The same bytes in sixteen calls: sixteen transactions, each republishing
     // the spine, a fresh root, and a ring slot, and each rewriting the
     // partially filled block the previous call left. The churn that survives is
     // therefore *between* transactions, which is what the commit scheduler
-    // closes; within each one, every block is still written once.
+    // closes; within each one, every block is still written once, and each
+    // transaction's blocks leave as two runs plus its slot pair.
     Row {
         workload: Workload::Chunked,
         block_size: 512,
         amplification: Some(261),
         cost: Cost {
-            writes: 335,
+            writes: 64,
             blocks: 335,
             distinct_blocks: 311,
             bytes: 171_520,
             barriers: 16,
         },
+        runs: &[(1, 32), (8, 11), (10, 17), (11, 3), (12, 1)],
     },
     // A wider block holds a wider node, so the same payload maps through a far
-    // shallower tree and needs fewer commands — while the *bytes* rise, because
+    // shallower tree and needs fewer blocks — while the *bytes* rise, because
     // 64 KiB of payload occupies whole 4 KiB blocks whose content capacity it
-    // cannot fill exactly.
+    // cannot fill exactly. The transfer bound is sixteen of these blocks, so
+    // the payload's seventeenth data block is a command of its own.
     Row {
         workload: Workload::OneCall,
         block_size: 4096,
         amplification: Some(156),
         cost: Cost {
-            writes: 25,
+            writes: 5,
             blocks: 25,
             distinct_blocks: 25,
             bytes: 102_400,
             barriers: 1,
         },
+        runs: &[(1, 3), (6, 1), (16, 1)],
     },
     Row {
         workload: Workload::Chunked,
         block_size: 4096,
         amplification: Some(1_000),
         cost: Cost {
-            writes: 160,
+            writes: 64,
             blocks: 160,
             distinct_blocks: 136,
             bytes: 655_360,
             barriers: 16,
         },
+        runs: &[(1, 32), (2, 16), (6, 16)],
     },
     // 34 bytes appended: one rewritten data block, and ten blocks of tree,
-    // root, and ring slot to name it.
+    // root, and ring slot to name it — four commands, the eight metadata blocks
+    // among them adjacent and so gathered into one.
     Row {
         workload: Workload::SmallAppend,
         block_size: 512,
         amplification: Some(16_564),
         cost: Cost {
-            writes: 11,
+            writes: 4,
             blocks: 11,
             distinct_blocks: 11,
             bytes: 5_632,
             barriers: 1,
         },
+        runs: &[(1, 3), (8, 1)],
     },
     // The floor: what an operation carrying no payload at all still costs.
+    // Metadata is allocated downward from the high end of the volume, so a
+    // wholly metadata transaction's blocks are one contiguous run — twelve
+    // blocks in one command, plus the slot pair.
     Row {
         workload: Workload::CreateFile,
         block_size: 512,
         amplification: None,
         cost: Cost {
-            writes: 14,
+            writes: 3,
             blocks: 14,
             distinct_blocks: 14,
             bytes: 7_168,
             barriers: 1,
         },
+        runs: &[(1, 2), (12, 1)],
     },
 ];
+
+impl Row {
+    /// The row's recorded run-length histogram, in the form a measurement
+    /// yields.
+    fn run_lengths(&self) -> BTreeMap<u64, usize> {
+        self.runs.iter().copied().collect()
+    }
+}
 
 #[test]
 fn the_write_path_costs_its_measured_baseline() {
     for row in BASELINE {
-        let (cost, _) = row.workload.measure(row.block_size, DEVICE_BYTES);
+        let (cost, runs) = row.workload.measure(row.block_size, DEVICE_BYTES);
         assert_eq!(
             cost, row.cost,
             "{:?} at a {}-byte block size now costs {cost:?}",
             row.workload, row.block_size
+        );
+        assert_eq!(
+            runs,
+            row.run_lengths(),
+            "{:?} at a {}-byte block size issued runs {runs:?}",
+            row.workload,
+            row.block_size
         );
         assert_eq!(
             cost.amplification_hundredths(row.workload.payload_bytes()),
@@ -482,23 +515,91 @@ fn the_write_path_costs_its_measured_baseline() {
     }
 }
 
-/// Every write the driver issues carries exactly one block, however many
-/// adjacent blocks it has to hand — including the two identical copies of a
-/// mirrored metadata block, which are adjacent by construction.
+/// The drain hands the device one request per *physical run*, not one per
+/// block: adjacent staged blocks — a mirrored metadata pair, a transaction's
+/// consecutively allocated data blocks, the whole metadata working set of a
+/// transaction that allocated it downward from the high end — leave together,
+/// bounded only by the transfer window a controller moves on one DMA
+/// descriptor.
 ///
-/// This is the assertion the run coalescer moves: draining in ascending
-/// physical order and gathering adjacent blocks weights this histogram toward
-/// the staging window, and makes a mirror pair one two-block command.
+/// The bytes are untouched; only the command count falls. That is the whole of
+/// the claim: on a device priced per command, a 64 KiB write costs five
+/// commands where it cost 158, and an empty-file create costs three where it
+/// cost fourteen.
 #[test]
-fn every_device_write_carries_exactly_one_block() {
+fn the_drain_issues_one_request_per_physical_run() {
     for row in BASELINE {
-        let (cost, run_lengths) = row.workload.measure(row.block_size, DEVICE_BYTES);
+        let (cost, runs) = row.workload.measure(row.block_size, DEVICE_BYTES);
+        let bound = u64::try_from(RUN_BYTES).expect("a transfer bound fits a u64")
+            / u64::from(row.block_size);
+        for (&blocks, &commands) in &runs {
+            assert!(
+                blocks <= bound,
+                "{:?} at a {}-byte block size issued {commands} commands of \
+                 {blocks} blocks, past the {bound}-block transfer bound",
+                row.workload,
+                row.block_size
+            );
+        }
+        // Nothing is coalesced away: the commands carry every block the
+        // transaction wrote, and no more.
         assert_eq!(
-            run_lengths,
-            BTreeMap::from([(1, cost.writes)]),
-            "{:?} at a {}-byte block size issued runs {run_lengths:?}",
+            runs.iter()
+                .map(|(blocks, count)| blocks * *count as u64)
+                .sum::<u64>(),
+            cost.blocks,
+            "{:?} at a {}-byte block size lost blocks between the set and the \
+             device",
             row.workload,
             row.block_size
+        );
+        assert!(
+            u64::try_from(cost.writes).expect("a command count fits a u64") < cost.blocks,
+            "{:?} at a {}-byte block size still costs one command per block: \
+             {cost:?}",
+            row.workload,
+            row.block_size
+        );
+    }
+}
+
+/// A run reaching the very last block of the device is issued whole, and no run
+/// ever reaches past it.
+///
+/// Metadata is allocated downward from the high end, so the first mirrored pair
+/// a `mkfs` writes sits on the device's top two blocks and the run covering it
+/// ends exactly at its end. That is the boundary a coalescer gathering past its
+/// own evidence would overrun, and the fixture refuses an out-of-range request
+/// rather than clamping it — a run is built only from addresses the set holds,
+/// and every staged address is a block of the volume.
+#[test]
+fn a_run_reaching_the_end_of_the_device_is_written_whole() {
+    for block_size in [512_u32, 4096] {
+        // Not armed: the window under measurement is the format itself, which
+        // is what puts a mirrored pair on the last two blocks.
+        let (_fs, ledger) = volume(block_size, DEVICE_BYTES);
+        let blocks = DEVICE_BYTES / u64::from(block_size);
+        let held = ledger.borrow();
+        let ends: Vec<u64> = held
+            .commands
+            .iter()
+            .filter_map(|command| match *command {
+                Command::Write { lba, blocks: run } => Some(lba + run),
+                Command::Barrier => None,
+            })
+            .collect();
+        assert_eq!(
+            ends.iter().max().copied(),
+            Some(blocks),
+            "at a {block_size}-byte block size no run reached the device's last \
+             block: {:?}",
+            held.commands
+        );
+        assert!(
+            ends.iter().all(|&end| end <= blocks),
+            "at a {block_size}-byte block size a run ran past the {blocks}-block \
+             device: {:?}",
+            held.commands
         );
     }
 }

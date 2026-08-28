@@ -5769,19 +5769,27 @@ fn the_dirty_set_holds_nothing_between_operations() {
     );
     assert_eq!(fs.dirty.len(), 0, "a commit drains the set it filled");
 
-    // Let two writes land and refuse the rest, so the drain faults with this
-    // transaction's remaining blocks still staged.
+    // Let the drain's first run land and refuse the next, so it faults with
+    // this transaction's remaining blocks still staged. The drain issues one
+    // request per physical run — here the copied data blocks and the mirrored
+    // metadata pairs above them — so refusing the second lands the fault
+    // inside the drain rather than on the slot write after the barrier.
     fs.block_mut().writes = 0;
-    fs.block_mut().write_fault_after = Some(2);
+    fs.block_mut().write_fault_after = Some(1);
     assert_eq!(
         fs.write_at(root, b"new", 0, &[0x11; 4 * CRASH_BS as usize]),
         Err(DriverError::DeviceFault)
     );
     assert_eq!(
         fs.block_mut().writes,
-        2,
+        1,
         "the drain must have written before it faulted, so blocks were left \
          staged for the rollback to clear"
+    );
+    assert!(
+        !fs.read_only,
+        "the fault was inside the drain, so the commit rolled back rather than \
+         leaving publication unknown"
     );
     assert_eq!(
         fs.dirty.len(),
@@ -7381,7 +7389,7 @@ const RUN_FIXTURE_BYTES: usize = 1024 * 1024;
 
 /// Device blocks one coalesced request covers at the 4096-byte geometry the
 /// run fixtures format.
-const RUN_FIXTURE_BLOCKS: usize = READ_RUN_BYTES / 4096;
+const RUN_FIXTURE_BLOCKS: usize = RUN_BYTES / 4096;
 
 /// A volume holding `f`, a [`RUN_FIXTURE_BYTES`] file of incompressible
 /// content (so it is stored as raw 1:1 extents, not compressed clusters),

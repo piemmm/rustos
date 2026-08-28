@@ -1495,10 +1495,10 @@ staged future work; see §18.)*
 
 ## 22. Write-back cache, commit batching, and the commit barrier
 
-*Stage 17 — in progress. The dirty block set and the commit barrier are
-implemented; the run coalescer, the folding-in of the allocation map's dirty
-pages, the commit scheduler, and the RAM-derived bound are not. The staged
-design is `plans/ARXFS-WRITEBACK.md`.*
+*Stage 17 — in progress. The dirty block set, the commit barrier, and the run
+coalescer are implemented; the folding-in of the allocation map's dirty pages,
+the commit scheduler, and the RAM-derived bound are not. The staged design is
+`plans/ARXFS-WRITEBACK.md`.*
 
 **Commit ordering.** A commit drains every dirty block *except* the superblock
 slot to the device, issues one `Block::flush()` barrier, then writes the slot.
@@ -1538,10 +1538,10 @@ physical block, beneath the driver's single device-write seam. It replaces on
 rewrite, so the repeated copy-on-write rewrites of one B-tree node within a
 transaction cost one device write instead of one per rewrite; it is
 read-through, so a read-after-write within the transaction sees the new bytes;
-and it drains in ascending physical order, with adjacent blocks to be gathered
-into one multi-block write bounded by the same staging window the read path
-uses. Mirroring is unchanged — the companion is a second entry with identical
-bytes, which the coalescer will recognise as one two-block run. A block the
+and it drains in ascending physical order, gathering adjacent blocks into one
+multi-block write bounded by the same transfer window the read path gathers to.
+Mirroring is unchanged — the companion is a second entry with identical bytes,
+which the coalescer takes as one two-block run. A block the
 transaction frees again is dropped from the set unwritten: nothing will
 reference it. Blocks that are *not* part of a transaction's published state —
 the rebuildable allocation-map region, the transient scratch arrays a
@@ -1568,14 +1568,17 @@ derived from the device, not configured.
 recorded and machine-checked rather than described: one in-RAM device logs every
 command the driver issues it, in order, and the write-amplification and
 command-count figures the stages are judged on — including the run-length
-histogram the coalescer changes and the barrier count this section makes
+histogram the coalescer produces and the barrier count this section makes
 mandatory — are asserted against that recording. The cost is identical on a
 100 TiB volume, so it is a property of the write path rather than of the device
 it was measured on. The figures live in `plans/ARXFS-WRITEBACK.md` §1.
 
 **Bounds.** The set holds one transaction's own write set and nothing between
 operations: a commit drains it, a rollback discards it, and a read-only handle
-can never stage a block into it. The ceiling that forces a commit before it
+can never stage a block into it. The drain adds one gather buffer, reserved
+fallibly for the transaction's longest physical run and never past the transfer
+window, so a machine too short of memory to hold it writes block by block
+instead of failing the commit. The ceiling that forces a commit before it
 grows further is derived from discovered RAM, never a hand-picked constant, with
 a floor of one transaction's own working set — below that floor a transaction
 could not complete, so the floor is a correctness property. A dirty block is

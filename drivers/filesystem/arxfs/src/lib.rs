@@ -205,34 +205,77 @@ const _: () = assert!(
 /// Smallest block size the format supports.
 const MIN_BLOCK_SIZE: usize = 512;
 
-/// Bytes one coalesced data-run device request covers.
+/// Bytes one coalesced device request covers, in either direction.
 ///
-/// An extent maps a *contiguous* physical run, so a read that spans one asks
-/// the device once for the whole run instead of once per block: a storage
-/// controller moves this much on a single DMA transfer, so a megabyte-scale
-/// read parks the calling task across tens of completion interrupts rather
-/// than hundreds. The window also bounds the staging one read allocates — a
-/// larger read loops — so many volumes on a small machine stay bounded.
-const READ_RUN_BYTES: usize = 64 * 1024;
+/// A storage controller moves this much on a single DMA transfer, so both
+/// directions gather contiguous blocks up to it rather than paying a command
+/// and a completion wait per block: a read spanning one extent's physical run
+/// asks the device once for the whole run, and the commit drain issues one
+/// write per run of adjacent staged blocks. The window also bounds the staging
+/// each allocates — a longer run loops — so many volumes on a small machine
+/// stay bounded.
+pub const RUN_BYTES: usize = 64 * 1024;
 
-// A run must cover at least one block of every supported geometry, so a read
-// always makes progress, and a whole number of them, so no request is
+// A run must cover at least one block of every supported geometry, so a
+// transfer always makes progress, and a whole number of them, so no request is
 // misaligned. Held at compile time: the run length needs no runtime clamp.
-const _: () =
-    assert!(READ_RUN_BYTES >= MAX_BLOCK_SIZE && READ_RUN_BYTES.is_multiple_of(MAX_BLOCK_SIZE));
+const _: () = assert!(RUN_BYTES >= MAX_BLOCK_SIZE && RUN_BYTES.is_multiple_of(MAX_BLOCK_SIZE));
+
+/// A bounded staging window for one coalesced device run, in either direction.
+///
+/// Fallibly reserved, so a machine too short of memory to hold it does slower
+/// I/O rather than failing the operation (deterministic OOM, never a panic),
+/// and wiped on drop: a read's window holds decrypted user content and the
+/// commit drain's holds sealed blocks.
+struct RunWindow {
+    bytes: Vec<u8>,
+}
+
+impl RunWindow {
+    /// A window of `span` bytes, or none when `span` is zero or the
+    /// reservation is refused.
+    fn new(span: usize) -> Self {
+        let mut bytes = Vec::new();
+        // A fallible reservation, then the zeroing a fill needs: `vec![0;
+        // span]` aborts the whole system on allocation failure, where an I/O
+        // path must fall back to its per-block form instead.
+        if span > 0 && bytes.try_reserve_exact(span).is_ok() {
+            bytes.resize(span, 0);
+        }
+        Self { bytes }
+    }
+
+    /// Whether the window is absent, and the caller must fall back.
+    fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
+    /// The staging bytes, or `None` when there is no window.
+    fn buf(&mut self) -> Option<&mut [u8]> {
+        if self.bytes.is_empty() {
+            None
+        } else {
+            Some(&mut self.bytes)
+        }
+    }
+}
+
+impl Drop for RunWindow {
+    fn drop(&mut self) {
+        self.bytes.zeroize();
+    }
+}
 
 /// Staging for the coalesced run reads of one serving read
 /// ([`ARXFS::read_block_run`]).
 ///
-/// Holds the [`READ_RUN_BYTES`] window when it can be allocated and a single
+/// Holds the [`RUN_BYTES`] window when it can be allocated and a single
 /// on-stack block when it cannot, so a machine short of memory reads slower
-/// rather than failing the read (deterministic OOM, never a panic). The
-/// staged bytes are decrypted user content, so they are wiped when the stage
-/// is dropped, on every path out of the read.
+/// rather than failing the read.
 struct RunStage {
-    /// The run window, empty when its allocation was refused.
-    window: Vec<u8>,
-    /// The fallback single block, used only while `window` is empty.
+    /// The run window, absent when its allocation was refused.
+    window: RunWindow,
+    /// The fallback single block, used only while `window` is absent.
     block: [u8; MAX_BLOCK_SIZE],
     /// Device blocks one request through this stage covers.
     blocks: usize,
@@ -242,15 +285,8 @@ impl RunStage {
     /// A stage for a read wanting `blocks` device blocks of `block_size`,
     /// bounded by the run window.
     fn new(block_size: usize, blocks: usize) -> Self {
-        let want = blocks.clamp(1, READ_RUN_BYTES / block_size);
-        let span = want * block_size;
-        let mut window = Vec::new();
-        // A fallible reservation, then the zeroing the slice needs: `vec![0;
-        // span]` aborts the whole system on allocation failure, where a
-        // filesystem read must fall back to the single block instead.
-        if window.try_reserve_exact(span).is_ok() {
-            window.resize(span, 0);
-        }
+        let want = blocks.clamp(1, RUN_BYTES / block_size);
+        let window = RunWindow::new(want * block_size);
         let blocks = if window.is_empty() { 1 } else { want };
         Self {
             window,
@@ -267,17 +303,15 @@ impl RunStage {
 
     /// The staging bytes: the run window, or the single block it fell back to.
     fn buf(&mut self) -> &mut [u8] {
-        if self.window.is_empty() {
-            &mut self.block
-        } else {
-            &mut self.window
+        match self.window.buf() {
+            Some(window) => window,
+            None => &mut self.block,
         }
     }
 }
 
 impl Drop for RunStage {
     fn drop(&mut self) {
-        self.window.zeroize();
         self.block.zeroize();
     }
 }
@@ -424,20 +458,24 @@ fn as_u32(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
-/// The driver's one device write: `block_size` bytes of `buf` to block `phys`.
+/// The driver's one device write: the whole of `run` — a positive whole number
+/// of blocks — to the consecutive blocks from `phys`.
 ///
 /// A free function so the two callers that need it — the guarded
 /// [`ARXFS::write_device`] and the commit drain, which holds the dirty set
 /// borrowed while it writes — reach the device through the same code rather
-/// than each calling [`Block::write_blocks`] for itself.
-fn write_one<B: Block>(
+/// than each calling [`Block::write_blocks`] for itself. A ragged or empty run
+/// is refused here rather than left to the device to interpret.
+fn write_run<B: Block>(
     device: &mut B,
     block_size: usize,
     phys: u64,
-    buf: &[u8],
+    run: &[u8],
 ) -> Result<(), DriverError> {
-    let block = buf.get(..block_size).ok_or(DriverError::BufferTooSmall)?;
-    device.write_blocks(phys, block)
+    if run.is_empty() || !run.len().is_multiple_of(block_size) {
+        return Err(DriverError::BufferTooSmall);
+    }
+    device.write_blocks(phys, run)
 }
 
 /// Cheap, bounded, first-party all-zero scan over a write buffer
@@ -1086,19 +1124,27 @@ impl<B: Block> ARXFS<B> {
     /// points, so no path can reach the device with a write.
     fn write_device(&mut self, phys: u64, buf: &[u8]) -> Result<(), DriverError> {
         self.deny_if_read_only()?;
-        write_one(&mut self.block, self.block_size, phys, buf)
+        let block = buf
+            .get(..self.block_size)
+            .ok_or(DriverError::BufferTooSmall)?;
+        write_run(&mut self.block, self.block_size, phys, block)
     }
 
-    /// Send every staged block to the device, lowest address first.
+    /// Send every staged block to the device, lowest address first, gathering
+    /// adjacent ones into one request each.
     ///
     /// Runs at the commit point, before the barrier: once it returns, every
     /// block the new transaction root names has been issued to the device and
     /// the barrier can order the publishing superblock slot behind all of them.
+    /// A copy-on-write transaction stages long physical runs — its data blocks
+    /// are allocated consecutively and its mirrored metadata blocks are pairs —
+    /// so the device is issued one command per run, up to the same transfer
+    /// bound the read path gathers to, rather than one per block.
     fn drain_dirty(&mut self) -> Result<(), DriverError> {
         let bs = self.block_size;
         let device = &mut self.block;
         self.dirty
-            .drain(|phys, bytes| write_one(device, bs, phys, bytes))
+            .drain(RUN_BYTES, |phys, run| write_run(device, bs, phys, run))
     }
 
     /// Restore the bad physical copy of a mirrored metadata block at `phys`

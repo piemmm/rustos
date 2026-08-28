@@ -35,7 +35,7 @@ use tairix_abi::driver::block::{Block, BlockGeometry, DiscardCapability};
 use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
 use tairix_abi::{CapabilityId, CapabilityQuery, DriverError};
 use tairix_drv_fs_arxfs::{
-    EntropySource, PassVerdict, ScrubBudget, VolumeKey, ARXFS, VOLUME_KEY_LEN,
+    EntropySource, PassVerdict, ScrubBudget, VolumeKey, ARXFS, RUN_BYTES, VOLUME_KEY_LEN,
 };
 use tairix_log::{Event, Sink};
 
@@ -362,12 +362,12 @@ fn a_stat_holds_a_node_not_a_whole_extent_map() {
 /// metadata walk.
 fn a_map_rebuild_walks_every_tree_within_a_fixed_budget() {
     // Sixteen times the records, against a budget fixed by the geometry
-    // rather than by the volume: the rebuild holds two node buffers and the
-    // allocation map's bounded page cache (64 blocks), and the sparse device
-    // double's own per-block bookkeeping is inside the measured window too.
-    // A walk that collected a tree would allocate per record — thousands of
-    // times over for the larger volume — and blow both budgets by orders of
-    // magnitude.
+    // rather than by the volume: the rebuild holds two node buffers, the
+    // allocation map's bounded page cache (64 blocks), and the commit drain's
+    // gather window, and the sparse device double's own per-block bookkeeping
+    // is inside the measured window too. A walk that collected a tree would
+    // allocate per record — thousands of times over for the larger volume —
+    // and blow both budgets by orders of magnitude.
     const PEAK_BUDGET: usize = 64 * 1024;
     const ALLOC_BUDGET: usize = 400;
 
@@ -408,13 +408,14 @@ fn a_map_rebuild_walks_every_tree_within_a_fixed_budget() {
 fn a_single_record_edit_allocates_the_same_at_any_depth() {
     // Fixed by the geometry rather than by the volume. The allocation budget
     // sits between what the per-record decode cost and what an in-place edit
-    // costs, so a reintroduced decode fails it. The byte figure is dominated by
-    // the sparse device double's own per-block storage for the blocks the
-    // copy-on-write rewrote, which is inside the measured window; it is here to
-    // catch an operation that suddenly holds far more, not to bound the driver
-    // to the byte.
+    // costs, so a reintroduced decode fails it. The byte figure is the sparse
+    // device double's own per-block storage for the blocks the copy-on-write
+    // rewrote, which is inside the measured window, plus the commit drain's
+    // gather window — one buffer sized to the transaction's longest physical
+    // run and never past the transfer bound. It is here to catch an operation
+    // that suddenly holds far more, not to bound the driver to the byte.
     const ALLOC_BUDGET: usize = 160;
-    const PEAK_BUDGET: usize = 24 * 1024;
+    const PEAK_BUDGET: usize = 24 * 1024 + RUN_BYTES;
     let stride = 2 * u64::from(BLOCK_SIZE);
 
     for runs in [20u64, 800] {
