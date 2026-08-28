@@ -38,8 +38,8 @@ no-deferral rule), ahead of everything below it.
 | M0 | Shared background pacer + cross-layer availability query | `ARXFS-MAINTENANCE.md` | 18 | — | **done** |
 | M1 | The read-only repair rule (defect D64) | `ARXFS-MAINTENANCE.md` | 18 | — | **done** |
 | WB0 | Write-amplification measurement harness | `ARXFS-WRITEBACK.md` | 17 | — | **done** |
-| WB1 | Dirty block set + the commit barrier (defect D63) | `ARXFS-WRITEBACK.md` | 17 | WB0 | **next** |
-| WB2 | Run coalescer | `ARXFS-WRITEBACK.md` | 17 | WB1 | planned |
+| WB1 | Dirty block set + the commit barrier (defect D63) | `ARXFS-WRITEBACK.md` | 17 | WB0 | **done** |
+| WB2 | Run coalescer | `ARXFS-WRITEBACK.md` | 17 | WB1 | **next** |
 | WB3 | Fold in the allocation map's dirty pages | `ARXFS-WRITEBACK.md` | 17 | WB1 | planned |
 | WB4 | Commit scheduler | `ARXFS-WRITEBACK.md` | 17 | WB1 | planned |
 | WB5 | The bound and memory pressure | `ARXFS-WRITEBACK.md` | 17 | WB1 | planned |
@@ -88,12 +88,16 @@ their reason recorded there, not here:
   bounded, their own whole-volume accumulators were not, and M2 could not have
   claimed a bounded pass over them.
 - **The barrier before every background writer and every durable-root
-  consumer.** WB1 closes the commit-barrier defect (`OPEN-DEFECTS.md` D63): a
-  superblock slot published with no barrier before it can name a root whose
-  interior nodes never reached media, losing the whole volume to one power cut.
-  Snapshots exist to give exactly the guarantee that defect breaks, FEC's commit
-  witnesses depend on it, and the maintenance runner would multiply its exposure
-  across every background pass — so all three sequence behind WB1.
+  consumer, and it is now in place.** WB1 closed the commit-barrier defect
+  (`OPEN-DEFECTS.md` D63): a superblock slot published with no barrier before it
+  could name a root whose interior nodes never reached media, losing the whole
+  volume to one power cut. Snapshots exist to give exactly the guarantee that
+  defect broke, FEC's commit witnesses depend on it, and the maintenance runner
+  would have multiplied its exposure across every background pass — so all three
+  sequenced behind it. Its dirty set also removed the intra-transaction rewrite
+  churn that made a per-commit barrier unaffordable: a 64 KiB write on a
+  512-byte volume costs 158 device writes against 746, and every commit now
+  ends with exactly one barrier and nothing but its publishing slot after it.
 - **The rest of write-back before the format targets.** A wider record on an
   uncoalesced write path multiplies the per-record device command count instead
   of reducing it, so B1 follows WB2.

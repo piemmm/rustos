@@ -398,21 +398,44 @@ Every operation is a transaction. A block reachable from the last
 committed transaction root is **never overwritten in place**: modified
 metadata and data are written copy-on-write to freshly allocated blocks,
 and superseded blocks are deferred-freed (reusable only after the
-transaction commits). The commit order (`docs/src/filesystem/arxfs-spec.md` §14) is: write
-the copy-on-write blocks, write the new transaction root carrying its
-inline commit record, then publish the next superblock-ring slot pointing
-at it. `ARXFS::open` scans the ring and selects the highest-generation
-slot whose root and commit record validate — so a crash leaves the mount
-on a whole transaction boundary, never a torn one.
+transaction commits). The commit order (`docs/src/filesystem/arxfs-spec.md` §14,
+§22) is: stage the copy-on-write blocks and the new transaction root carrying its
+inline commit record, drain them all to the device, issue one `Block::flush()`
+barrier, then publish the next superblock-ring slot pointing at that root.
+`ARXFS::open` scans the ring and selects the highest-generation slot whose root
+and commit record validate — so a crash leaves the mount on a whole transaction
+boundary, never a torn one.
+
+The barrier is what makes that order real on a device with a volatile write
+cache: when a commit returns, the only blocks the device may still be holding
+are the slot's two copies, so it cannot make the slot durable while a tree node
+beneath its root is not. Those copies go out companion-first, so the *primary*
+— the copy a mount prefers — is the last write of the commit and a half-written
+pair publishes nothing; anything failing before it rolls the transaction back,
+while a failure *of* those writes leaves publication unknown and the handle
+forces itself read-only rather than freeing a root the device may have
+published. A second barrier is issued only for an explicit `fs_sync`.
+
+The blocks wait in the one dirty layer beneath the driver's single device-write
+seam (`wcache`): a physical-block-keyed set of sealed blocks that replaces on
+rewrite, so the repeated copy-on-writes of one B-tree node cost one device write
+rather than one each — 746 device writes down to 158 for a 64 KiB write on a
+512-byte volume. It is read-through, so a read-after-write inside the
+transaction sees the staged bytes; it drops a block the transaction frees again
+unwritten; and it holds nothing between operations, so what it pins is the
+operation's own write set and never the volume's. The rebuildable
+allocation-map region, the transient verification scratch arrays, and an
+idempotent mirror copy-repair have nothing to be ordered behind the barrier and
+go straight to the device.
 
 Free space lives in an **on-disk paged allocation map** (`allocmap`,
 `allocator`): a contiguous region of a header block, a summary recording each
 bitmap page's free count, and one bit per device block, each block sealed with
 the ordinary keyed header under `BlockType::AllocMap`. Because free space is
 rebuildable rather than authoritative, the region is *not* copy-on-written but
-updated in place under a clean/dirty generation stamp — turned dirty before the
-first page write, and stamped clean at an explicit sync (and at mkfs) once the
-pages are durable. A mount adopts the map only when it authenticates at the
+updated in place under a clean/dirty generation stamp — turned dirty, and that
+invalidation barriered to media, before the first page write, and stamped clean
+at an explicit sync (and at mkfs) once the pages are durable. A mount adopts the map only when it authenticates at the
 address the committed root names and is stamped clean at that generation;
 otherwise it rebuilds by walking the trees from the selected root. Mounting a
 synced volume therefore costs a handful of block reads rather than a walk of
@@ -577,12 +600,14 @@ instead of describing it: an in-RAM device records every command the driver
 issues it, in order — each write's start block and run length, and each cache
 barrier — and the harness asserts exactly what a single-call 64 KiB write, the
 same bytes in sixteen calls, a 34-byte append, and an empty-file create each
-cost at both block sizes (commands, blocks, blocks superseded within the
-transaction, bytes, amplification). Every write carrying one block, a
-transaction rewriting its metadata once per stored data block, sixteen calls
-costing half again one call's commands, and a commit issuing no barrier are all
-recorded as the present state, each the acceptance hook of a write-back stage.
-The same workloads on a 100 TiB volume produce an identical command stream.
+cost at both block sizes (commands, blocks, blocks superseded, bytes,
+amplification). It also holds the write-back cache's contract: a transaction
+writes each block it touches exactly once, and every commit issues exactly one
+barrier with nothing but the two copies of its publishing slot after it. Two
+figures are recorded as the present rather than a goal, each the acceptance hook
+of a later write-back stage — every write still carrying one block, and sixteen
+calls still costing far more than one. The same workloads on a 100 TiB volume
+produce an identical command stream.
 
 The 1 GiB filesystem soak (`cargo xtask fssoak --target arxfs`) drives the
 shared cross-filesystem exerciser, and `cargo xtask fuzz` harnesses fuzz the

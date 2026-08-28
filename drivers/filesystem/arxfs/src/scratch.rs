@@ -415,7 +415,7 @@ impl<B: Block> ARXFS<B> {
                 *byte = 0;
             }
             self.scratch_seal(array, page, &mut buf)?;
-            self.write_block(array.start + page, &buf[..bs])?;
+            self.write_device(array.start + page, &buf[..bs])?;
         }
         Ok(())
     }
@@ -466,7 +466,7 @@ impl<B: Block> ARXFS<B> {
         let len = payload.len().min(bs - HEADER_LEN);
         buf[HEADER_LEN..HEADER_LEN + len].copy_from_slice(&payload[..len]);
         self.scratch_seal(array, page, &mut buf)?;
-        self.write_block(array.start + page, &buf[..bs])?;
+        self.write_device(array.start + page, &buf[..bs])?;
         array.cache.mark_written(page);
         Ok(())
     }

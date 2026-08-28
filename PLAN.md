@@ -2809,32 +2809,36 @@ block set, a run coalescer, a commit scheduler, and the single barrier that
 becomes affordable once commits are batched. No capability, no ABI surface, no
 mount option, no second data path.
 
-**Measured baseline**, machine-checked by the WB0 harness
+**Measured cost**, machine-checked by the WB0 harness
 (`drivers/filesystem/arxfs/tests/write_amplification.rs`: a device recording
 every command it is issued, incompressible payload): a 64 KiB file written in
-one call costs 746 single-block writes at a 512-byte block size and 89 at
-4096 — 5.82× and 5.56× byte amplification; written as 4 KiB chunks it costs 1183
-and 284 — 9.24× and 17.75×. At a 512-byte block size a 34-byte append costs 13
-writes and creating an empty file costs 18. No commit issues a barrier, every
-write carries one block, and the figures are identical on a 100 TiB volume.
-Three causes, fixed one per stage: the same B-tree node is copy-on-written and
-written out once per data block within a single transaction (598 of those 746
-writes are metadata, 294 of them superseded before it commits); every VFS
-operation commits its own transaction root and superblock slot; and
-`write_block` is the only device write site and always writes exactly one block,
-though the read path already coalesces into 64 KiB runs and `emmc2` stages 128
-blocks per transfer.
+one call costs 158 single-block writes at a 512-byte block size and 25 at
+4096 — 1.23× and 1.56× byte amplification; written as 4 KiB chunks it costs 335
+and 160 — 2.61× and 10.00×. At a 512-byte block size a 34-byte append costs 11
+writes and creating an empty file costs 14. Every commit issues exactly one
+barrier, every write still carries one block, and the figures are identical on a
+100 TiB volume. Of the four causes, two remain: every VFS operation still
+commits its own transaction root and superblock slot (C2, WB4), and the drain
+still issues one `write_blocks` per staged block though the read path already
+coalesces into 64 KiB runs and `emmc2` stages 128 blocks per transfer (C3, WB2).
+Closed by WB1: the intra-transaction rewrite churn that made 598 of the original
+746 writes metadata, 294 of them superseded before the commit, is ten writes.
 
-**Durability defect this fixes.** `commit()` writes the copy-on-write blocks,
-the transaction root, then the superblock slot with **no** `Block::flush()`
-anywhere, while `src/transaction.rs` documents the opposite. On a device with a
-volatile write cache the slot can reach media before an interior tree node
-beneath its root, and the mount then fails closed with both mirrors absent.
-`open` re-validates the root before accepting a slot, so a lost *root* was
-always survivable; a lost interior node beneath a durable root was not. The fix
-is one barrier before the slot — sufficient because the root is just another
-block that must be durable before the slot publishing it — and it lands with the
-batching that pays for it (WB1), not alone.
+**Durability defect this fixed (`plans/OPEN-DEFECTS.md` D63).** `commit()` wrote
+the copy-on-write blocks, the transaction root, then the superblock slot with
+**no** `Block::flush()` anywhere. On a device with a volatile write cache the
+slot could reach media before an interior tree node beneath its root, and the
+mount then failed closed with both mirrors absent. `open` re-validates the root
+before accepting a slot, so a lost *root* was always survivable; a lost interior
+node beneath a durable root was not. One barrier before the slot is
+sufficient — the root is just another block that must be durable before the slot
+publishing it — and it landed with the batching that pays for it (WB1). Three
+further ordering defects the work exposed were fixed with it: a commit failing
+after its first slot copy published the transaction while the caller rolled it
+back and freed the published root's blocks; `scrub`/`check`/`health` propagated a
+failed commit without rolling back, so a later commit published its trees; and
+the allocation map's clean→dirty stamp was not barriered before the first page
+write.
 
 **Design decisions (load-bearing).**
 - The dirty set holds *sealed* blocks beneath the driver's single device-write
@@ -2859,15 +2863,17 @@ batching that pays for it (WB1), not alone.
   in the stack and it is this one. `plans/SMARTRAM.md` §6.1 already reserves
   dirty data for the filesystem's own write policy.
 
-**Status: WB0 done** — the measurement harness, tests only. WB1–WB6 planned.
+**Status: WB0 and WB1 done** — the measurement harness, and the dirty block set
+plus the commit barrier (closing D63). WB2–WB6 planned; WB2 (the run coalescer)
+is next.
 
 ---
 
 ## Stage 5 follow-up — ARXFS autonomous maintenance (`plans/ARXFS-MAINTENANCE.md`)
 
 **Dependencies:** Stage 5 follow-up (ARXFS v1) and the write-back commit barrier
-above (a background writer on a barrier-less commit path multiplies that defect's
-exposure across every pass). Items A0–A2 of
+above, now landed (a background writer on a barrier-less commit path multiplied
+that defect's exposure across every pass). Items A0–A2 of
 `plans/IMPLEMENT-OUTSTANDING-ARXFS.md` — bounded tree iteration, bounded tree
 mutation, and bounded whole-volume verification state — are done. Staged plan:
 `plans/ARXFS-MAINTENANCE.md` (stages M0–M7); spec section
@@ -2946,9 +2952,9 @@ landed; M2–M7 are planned. The ordered ledger is
 ## Stage 5 follow-up — ARXFS snapshots (`plans/ARXFS-SNAPSHOT.md`)
 
 **Dependencies:** Stage 5 follow-up (ARXFS v1) **and** the write-back commit
-barrier above — a snapshot published without the barrier could name a root whose
-subtree never reached media, which is the one thing a snapshot exists to
-guarantee. Design brief: `plans/ARXFS-SNAPSHOT.md`; spec section
+barrier above, now landed — a snapshot published without the barrier could name
+a root whose subtree never reached media, which is the one thing a snapshot
+exists to guarantee. Design brief: `plans/ARXFS-SNAPSHOT.md`; spec section
 `docs/src/filesystem/arxfs-spec.md` §23 (reserved and stubbed), stage 20.
 
 **Goal.** A named, read-only, integrity-verified reference to a committed
@@ -2984,7 +2990,8 @@ or tooling exists.
 ## Stage 5 follow-up — ARXFS FEC and multi-device redundancy (`plans/ARXFS-FEC.md`)
 
 **Dependencies:** Stage 5 follow-up (ARXFS v1) and the write-back commit
-barrier above (every distributed commit witness needs it). Staged plan:
+barrier above, now landed (every distributed commit witness needs it). Staged
+plan:
 `plans/ARXFS-FEC.md` (stages FEC0–FEC20).
 
 **Goal.** Always-on forward error correction and multi-device redundancy for

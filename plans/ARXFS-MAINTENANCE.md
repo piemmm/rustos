@@ -8,12 +8,13 @@ Primary code area: `drivers/filesystem/arxfs/`, `kernel/tairix-kernel/`,
 `lib/abi/src/driver/{block,filesystem}.rs`, `lib/abi/src/blkio.rs`,
 `userland/apps/`.
 
-**Dependency.** The runner writes to the volume (trim, copy-repair, the health
-baseline, the scrub cursor) on a cadence measured in hours, so it lands *after*
-the write-back cache and the commit barrier (`plans/ARXFS-WRITEBACK.md`, spec
-stage 17): a background writer on today's barrier-less commit path would
-multiply the exposure D63 describes (`plans/OPEN-DEFECTS.md`) across every
-maintenance pass, and would pay a device-cache flush per discarded run.
+**Dependency, met.** The runner writes to the volume (trim, copy-repair, the
+health baseline, the scrub cursor) on a cadence measured in hours, so it lands
+*after* the commit barrier (`plans/ARXFS-WRITEBACK.md` WB1, spec stage 17): a
+background writer on a barrier-less commit path would have multiplied the
+exposure D63 described (`plans/OPEN-DEFECTS.md`) across every maintenance pass.
+WB1 is done. The commit *batching* that would spare a device-cache flush per
+discarded run is WB4, still open, so the runner's own pacing must not assume it.
 
 ---
 

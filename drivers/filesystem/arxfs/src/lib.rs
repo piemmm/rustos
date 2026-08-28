@@ -85,6 +85,7 @@ mod scrub;
 mod superblock;
 mod transaction;
 mod unlock;
+mod wcache;
 mod xform;
 
 #[cfg(test)]
@@ -117,6 +118,7 @@ use dedupe::{
 use header::{BlockHeader, BlockType, FORMAT_VERSION, HEADER_LEN, HEADER_MAGIC};
 use superblock::{slot_block, Superblock, RING_BLOCKS, RING_SLOTS};
 use transaction::TxnRoot;
+use wcache::DirtySet;
 
 /// Per-driver `DriverHandle` marker returned by [`register`].
 const REGISTER_HANDLE_MARKER: u64 = 0x5275_7374_4653_0002;
@@ -420,6 +422,22 @@ fn as_usize(value: u64) -> usize {
 /// Narrow a `usize` to a `u32` without an `as` cast.
 fn as_u32(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+/// The driver's one device write: `block_size` bytes of `buf` to block `phys`.
+///
+/// A free function so the two callers that need it — the guarded
+/// [`ARXFS::write_device`] and the commit drain, which holds the dirty set
+/// borrowed while it writes — reach the device through the same code rather
+/// than each calling [`Block::write_blocks`] for itself.
+fn write_one<B: Block>(
+    device: &mut B,
+    block_size: usize,
+    phys: u64,
+    buf: &[u8],
+) -> Result<(), DriverError> {
+    let block = buf.get(..block_size).ok_or(DriverError::BufferTooSmall)?;
+    device.write_blocks(phys, block)
 }
 
 /// Cheap, bounded, first-party all-zero scan over a write buffer
@@ -765,11 +783,13 @@ pub struct ARXFS<B: Block> {
     saved_health_baseline_root: u64,
     saved_incompat: u64,
     clock: fn() -> Time64,
-    /// When `true`, the repair-on-read paths (`read_meta`, `read_sb_slot`,
-    /// `read_txn_root`) skip writing a good companion back over a bad primary,
-    /// so the handle never mutates the backing device. The offline
-    /// [`ARXFS::rescue`] sets it: rescue is read-only on the damaged volume by
-    /// default (`docs/src/filesystem/arxfs-spec.md` §12).
+    /// When `true`, the handle never mutates the backing device: the
+    /// repair-on-read paths (`read_meta`, `read_sb_slot`, `read_txn_root`) skip
+    /// writing a good companion back over a bad primary, and every write seam
+    /// refuses. Three things set it — a read-only mount, the offline
+    /// [`ARXFS::rescue`] on a damaged volume
+    /// (`docs/src/filesystem/arxfs-spec.md` §12), and [`ARXFS::commit`] freezing
+    /// itself when a slot write failed and publication is therefore unknown.
     read_only: bool,
     /// Host-injected retention of decompressed cluster plaintext
     /// ([`ClusterCache`], `plans/SMARTRAM.md` SMART3), or `None` for a
@@ -783,6 +803,19 @@ pub struct ARXFS<B: Block> {
     /// allocates nothing and no node buffer reaches the stack; `None` until
     /// the first mutation, so a read-only handle never pays for one.
     tree_edit: Option<btree::TreeEdit>,
+    /// Sealed blocks the open transaction has written but not yet sent to the
+    /// device (`wcache` module). Empty between operations: [`Self::commit`]
+    /// drains it and [`Self::rollback`] discards it, and [`Self::stage_block`]
+    /// refuses a read-only handle, so a read-only mount never holds one block
+    /// here nor pays a byte for it.
+    dirty: DirtySet,
+}
+
+/// What a prepared commit will publish once its superblock slot is written.
+struct Published {
+    generation: u64,
+    root_phys: u64,
+    slot: u64,
 }
 
 /// A bounded cursor over one directory's entries.
@@ -1012,13 +1045,60 @@ impl<B: Block> ARXFS<B> {
             .checked_mul(self.block_size)
             .ok_or(DriverError::LengthOutOfRange)?;
         let run = buf.get_mut(..span).ok_or(DriverError::LengthOutOfRange)?;
-        self.block.read_blocks(phys, run)
+        // The dirty set is authoritative for every block it holds: the block
+        // exists nowhere else yet, so a read-after-write inside the open
+        // transaction — the B-tree re-reading a node it just wrote, a dedupe
+        // candidate this transaction stored — must see the staged bytes. A run
+        // wholly staged needs no device request at all.
+        let staged = self.dirty.staged_in(phys, blocks as u64);
+        if staged == 0 {
+            return self.block.read_blocks(phys, run);
+        }
+        if staged < blocks as u64 {
+            self.block.read_blocks(phys, run)?;
+        }
+        self.dirty.overlay(phys, run)
     }
 
-    /// Write the first `block_size` bytes of `buf` to the block at `phys`.
-    fn write_block(&mut self, phys: u64, buf: &[u8]) -> Result<(), DriverError> {
+    /// Stage the sealed block in `buf` for this transaction's commit drain.
+    ///
+    /// The transactional write seam: every block a transaction publishes —
+    /// metadata through [`Self::write_meta`], data through
+    /// [`Self::seal_data_block`] — enters the dirty set here and reaches the
+    /// device once, in the [`Self::commit`] drain that precedes the durability
+    /// barrier. Repeated copy-on-writes of the same block within a transaction
+    /// therefore cost one device write, not one each.
+    fn stage_block(&mut self, phys: u64, buf: &[u8]) -> Result<(), DriverError> {
+        self.deny_if_read_only()?;
+        self.dirty.stage(phys, buf)
+    }
+
+    /// Write the first `block_size` bytes of `buf` straight to the block at
+    /// `phys`, bypassing the dirty set.
+    ///
+    /// For the blocks that are *not* part of a transaction's published state
+    /// and so have nothing to be ordered behind the commit barrier: the
+    /// rebuildable allocation-map region (`allocator`), the transient scratch
+    /// arrays a whole-volume pass streams through (`scratch`), an idempotent
+    /// mirror copy-repair of an already-committed block, and the superblock
+    /// slot itself, which is written *after* the barrier because it is the
+    /// commit point. A read-only handle is refused here as well as at the entry
+    /// points, so no path can reach the device with a write.
+    fn write_device(&mut self, phys: u64, buf: &[u8]) -> Result<(), DriverError> {
+        self.deny_if_read_only()?;
+        write_one(&mut self.block, self.block_size, phys, buf)
+    }
+
+    /// Send every staged block to the device, lowest address first.
+    ///
+    /// Runs at the commit point, before the barrier: once it returns, every
+    /// block the new transaction root names has been issued to the device and
+    /// the barrier can order the publishing superblock slot behind all of them.
+    fn drain_dirty(&mut self) -> Result<(), DriverError> {
         let bs = self.block_size;
-        self.block.write_blocks(phys, &buf[..bs])
+        let device = &mut self.block;
+        self.dirty
+            .drain(|phys, bytes| write_one(device, bs, phys, bytes))
     }
 
     /// Restore the bad physical copy of a mirrored metadata block at `phys`
@@ -1036,7 +1116,7 @@ impl<B: Block> ARXFS<B> {
         if self.read_only {
             return Ok(false);
         }
-        self.write_block(phys, good)?;
+        self.write_device(phys, good)?;
         Ok(true)
     }
 
@@ -1055,8 +1135,8 @@ impl<B: Block> ARXFS<B> {
     /// header in `buf` names `phys` as its physical address; the companion
     /// stores the same bytes and is verified against `phys` on read.
     fn write_meta(&mut self, phys: u64, buf: &[u8]) -> Result<(), DriverError> {
-        self.write_block(phys, buf)?;
-        self.write_block(Self::companion(phys), buf)
+        self.stage_block(phys, buf)?;
+        self.stage_block(Self::companion(phys), buf)
     }
 
     /// Read and validate the metadata block at `phys`, confirming it is the
@@ -1152,6 +1232,11 @@ impl<B: Block> ARXFS<B> {
             cache.invalidate(phys);
         }
         if self.is_txn_private(phys) {
+            // Anything staged for this block names a version of it that no
+            // committed or in-flight root will reference, so it never needs to
+            // reach the device; a re-use of the block within the transaction
+            // stages its new contents in the same slot.
+            self.dirty.discard(phys);
             self.mark_free(phys);
             if let Ok(alloc) = self.allocator_mut() {
                 alloc.txn_private.remove(&phys);
@@ -1270,10 +1355,23 @@ impl<B: Block> ARXFS<B> {
         self.saved_incompat = self.incompat;
     }
 
-    /// Discard an operation that failed before committing: restore the inode
-    /// tree root and inode counter and free this transaction's allocations.
-    /// Nothing was published, so the committed on-disk root is untouched.
+    /// Discard an operation that failed before committing: drop every block it
+    /// staged, restore the inode tree root and inode counter, and free this
+    /// transaction's allocations. Nothing was published, so the committed
+    /// on-disk root is untouched.
     fn rollback(&mut self) {
+        // A read-only handle has no transaction to undo, and one that turned
+        // itself read-only because a commit's publication is unknown must free
+        // nothing: whichever of the two roots the device actually holds has to
+        // stay intact until a remount reads it.
+        if self.read_only {
+            return;
+        }
+        // The staged blocks are this transaction's alone — copy-on-write means
+        // none of them overwrote a block the committed root reaches — so
+        // dropping them unwritten loses nothing and spares the device the
+        // writes.
+        self.dirty.clear();
         self.inode_tree_root = self.saved_inode_tree_root;
         self.next_ino = self.saved_next_ino;
         self.chunk_tree_root = self.saved_chunk_tree_root;
@@ -1346,10 +1444,11 @@ impl<B: Block> ARXFS<B> {
         }
     }
 
-    /// Refuse a mutating operation on a read-only handle **before** it
-    /// touches any state, so a read-only `/System` mount does no wasted
-    /// copy-on-write work and never dirties the device. The [`Self::commit`] guard is the structural backstop for any
-    /// internal write path that does not funnel through here.
+    /// Refuse a mutating operation on a read-only handle **before** it touches
+    /// any state, so a read-only `/System` mount does no wasted copy-on-write
+    /// work and never dirties the device. [`Self::commit`], [`Self::stage_block`],
+    /// and [`Self::write_device`] repeat the check as the structural backstop
+    /// for any internal write path that does not funnel through here.
     fn deny_if_read_only(&self) -> Result<(), DriverError> {
         if self.read_only {
             return Err(DriverError::PermissionDenied);
@@ -1357,11 +1456,17 @@ impl<B: Block> ARXFS<B> {
         Ok(())
     }
 
-    /// Commit the staged transaction. The inode tree and every extent tree are
-    /// already copy-on-written in place as the operation runs, so commit just
-    /// writes the new transaction root naming the inode-tree root, then
-    /// publishes the next superblock-ring slot pointing at it
+    /// Commit the staged transaction: drain every block it wrote to the device,
+    /// barrier, then publish the next superblock-ring slot naming its new root
     /// (`transaction` / `superblock`).
+    ///
+    /// The commit point is the pair of slot writes. Everything before it is
+    /// rolled back on failure, so a caller told the commit failed can never
+    /// have a later commit publish its trees. A failure *of* the slot writes
+    /// leaves publication genuinely unknown — the device may have taken one
+    /// copy — so the handle forces itself read-only instead of guessing:
+    /// nothing is freed, neither the old nor the new root can be overwritten,
+    /// and a remount re-derives from whichever slot the device actually holds.
     fn commit(&mut self) -> Result<(), DriverError> {
         // A read-only handle never publishes a transaction: every mutating
         // operation funnels through here, so refusing to commit fails the
@@ -1370,9 +1475,34 @@ impl<B: Block> ARXFS<B> {
         if self.read_only {
             return Err(DriverError::PermissionDenied);
         }
+        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        let published = match self.commit_prepare(&mut buf) {
+            Ok(published) => published,
+            Err(err) => {
+                self.rollback();
+                return Err(err);
+            }
+        };
+        if let Err(err) = self.publish_slot(published.slot, &buf) {
+            self.read_only = true;
+            return Err(err);
+        }
+        // Commit point passed: the slot naming the new root is durable-ordered
+        // behind every block it references, so a mount now selects the new
+        // state. Nothing below this line can fail.
+        self.generation = published.generation;
+        self.ring_pos = self.ring_pos.wrapping_add(1);
+        self.root_phys = published.root_phys;
+        self.finish_txn();
+        Ok(())
+    }
+
+    /// Seal the transaction root and the superblock slot that will publish it,
+    /// send every block the root names to the device, and barrier — leaving
+    /// only the slot writes to perform. `buf` holds the sealed slot on return.
+    fn commit_prepare(&mut self, buf: &mut [u8]) -> Result<Published, DriverError> {
         let bs = self.block_size;
         let next_gen = self.generation.wrapping_add(1);
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
         let old_root = self.root_phys;
         let root_phys = self.alloc_block(true)?;
         // Release the superseded root into the deferred-free set *before* the
@@ -1397,7 +1527,7 @@ impl<B: Block> ARXFS<B> {
             free_count: self.free_count.saturating_add(deferred),
         };
         root.seal(&mut buf[..bs], self.fs_uuid, root_phys, &self.mac_key)?;
-        self.write_meta(root_phys, &buf)?;
+        self.write_meta(root_phys, buf)?;
         let slot = slot_block(self.ring_pos % RING_SLOTS);
         let sb = Superblock {
             block_size: as_u32(bs),
@@ -1414,15 +1544,26 @@ impl<B: Block> ARXFS<B> {
             &self.mac_key,
             &self.crypto_header,
         )?;
-        self.write_meta(slot, &buf)?;
-        // Commit point passed: the slot naming the new root is written, so a
-        // mount now selects the new state. Ordered, but not yet barriered
-        // against a device that reorders (`plans/ARXFS-WRITEBACK.md` WB1).
-        self.generation = next_gen;
-        self.ring_pos = self.ring_pos.wrapping_add(1);
-        self.root_phys = root_phys;
-        self.finish_txn();
-        Ok(())
+        // Every block the new root transitively names is issued to the device,
+        // then one barrier, then the slot that publishes it. A device with a
+        // volatile write cache may reorder freely on either side of the
+        // barrier and still cannot make the slot durable ahead of a tree node
+        // beneath its root, which is the one ordering that loses a volume
+        // outright (`docs/src/filesystem/arxfs-spec.md` §22).
+        self.drain_dirty()?;
+        self.block.flush()?;
+        Ok(Published {
+            generation: next_gen,
+            root_phys,
+            slot,
+        })
+    }
+
+    /// Write both copies of the sealed superblock slot in `buf`, the companion
+    /// first so the copy a mount prefers is the last write of the commit.
+    fn publish_slot(&mut self, slot: u64, buf: &[u8]) -> Result<(), DriverError> {
+        self.write_device(Self::companion(slot), buf)?;
+        self.write_device(slot, buf)
     }
 
     /// Validate device geometry and build a zeroed in-memory volume state.
@@ -1475,6 +1616,7 @@ impl<B: Block> ARXFS<B> {
             read_only: false,
             cluster_cache: None,
             tree_edit: None,
+            dirty: DirtySet::new(block_size),
         };
         Ok(fs)
     }
@@ -1798,7 +1940,14 @@ impl<B: Block> ARXFS<B> {
                 self.rollback();
                 self.adopt_total_blocks(old_total);
                 self.alloc_map_start = old_start;
-                self.rebuild_free_space_at(old_start, old_total)?;
+                // A commit that froze the handle writes nothing more, so the
+                // map is left as it is: whichever geometry the device actually
+                // committed to is what the next mount reads, and relaying the
+                // region here would only replace the real fault with a
+                // permission refusal.
+                if !self.read_only {
+                    self.rebuild_free_space_at(old_start, old_total)?;
+                }
                 Err(err)
             }
         }
@@ -2626,7 +2775,7 @@ impl<B: Block> ARXFS<B> {
         let csum_off = self.phys_checksum_offset();
         let checksum = physical_checksum(&buf[..csum_off]);
         buf[csum_off..csum_off + PHYS_CHECKSUM_LEN].copy_from_slice(&checksum);
-        self.write_block(phys, buf)
+        self.stage_block(phys, buf)
     }
 
     /// Store the plaintext in `buf[..data_capacity()]` as a **raw**

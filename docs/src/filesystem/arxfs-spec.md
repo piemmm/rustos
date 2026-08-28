@@ -1495,9 +1495,10 @@ staged future work; see §18.)*
 
 ## 22. Write-back cache, commit batching, and the commit barrier
 
-*Stage 17 — planned. The staged design is `plans/ARXFS-WRITEBACK.md`. The
-durability ordering rule below is binding on the implementation from the moment
-any of it lands.*
+*Stage 17 — in progress. The dirty block set and the commit barrier are
+implemented; the run coalescer, the folding-in of the allocation map's dirty
+pages, the commit scheduler, and the RAM-derived bound are not. The staged
+design is `plans/ARXFS-WRITEBACK.md`.*
 
 **Commit ordering.** A commit drains every dirty block *except* the superblock
 slot to the device, issues one `Block::flush()` barrier, then writes the slot.
@@ -1515,15 +1516,38 @@ node beneath its root was not. `open` re-validates the root before accepting a
 slot, so a lost *root* was always survivable; a lost interior node beneath a
 durable root was not.
 
+**The commit point is one block write.** The slot's two mirror copies are
+written companion-first, so the *primary* — the copy a mount reads and prefers
+— is the last write of the commit and a half-written pair publishes nothing.
+Everything before that write is rolled back on failure. A failure *of* the slot
+writes leaves publication genuinely unknown, because the device may have taken
+one copy: the handle then forces itself read-only rather than guessing, freeing
+nothing, so whichever of the two roots the device holds stays intact for the
+next mount.
+
+**The allocation map's clean stamp is invalidated durably.** The map is adopted
+only when it is stamped clean at the generation the mount selected, so the
+stamp's invalidation reaches media — one barrier, at the clean→dirty transition,
+not per write — before the first page write can land. Without that a reordering
+device could keep a page write while the invalidation sat in its cache, and the
+next mount would adopt a map that no longer describes the generation it vouches
+for.
+
 **What is cached.** A transaction-scoped dirty set of *sealed* blocks, keyed by
 physical block, beneath the driver's single device-write seam. It replaces on
 rewrite, so the repeated copy-on-write rewrites of one B-tree node within a
 transaction cost one device write instead of one per rewrite; it is
 read-through, so a read-after-write within the transaction sees the new bytes;
-and it drains in ascending physical order with adjacent blocks gathered into
-one multi-block write, bounded by the same staging window the read path uses.
-Mirroring is unchanged — the companion is a second entry with identical bytes,
-which the coalescer recognises as one two-block run.
+and it drains in ascending physical order, with adjacent blocks to be gathered
+into one multi-block write bounded by the same staging window the read path
+uses. Mirroring is unchanged — the companion is a second entry with identical
+bytes, which the coalescer will recognise as one two-block run. A block the
+transaction frees again is dropped from the set unwritten: nothing will
+reference it. Blocks that are *not* part of a transaction's published state —
+the rebuildable allocation-map region, the transient scratch arrays a
+whole-volume pass streams through, and an idempotent mirror copy-repair of an
+already-committed block — are written straight to the device, having nothing to
+be ordered behind the barrier.
 
 **Batching.** A transaction stays open and the next operation joins it, closing
 on the first of: an explicit `fs_sync`; the dirty byte ceiling (back-pressure —
@@ -1543,19 +1567,22 @@ derived from the device, not configured.
 **Measured, not asserted.** What a write costs a device is a number, so it is
 recorded and machine-checked rather than described: one in-RAM device logs every
 command the driver issues it, in order, and the write-amplification and
-command-count figures the stages below are judged on — including the run-length
+command-count figures the stages are judged on — including the run-length
 histogram the coalescer changes and the barrier count this section makes
 mandatory — are asserted against that recording. The cost is identical on a
 100 TiB volume, so it is a property of the write path rather than of the device
 it was measured on. The figures live in `plans/ARXFS-WRITEBACK.md` §1.
 
-**Bounds.** The ceiling is derived from discovered RAM, never a hand-picked
-constant, with a floor of one transaction's own working set — below that floor a
-transaction could not complete, so the floor is a correctness property. A dirty
-block is pinned memory, not reclaimable cache: it cannot be dropped, only
-written, so pressure shortens the deadline and lowers the ceiling toward the
-floor rather than evicting. The bytes are charged to the reclaim ledger as
-pinned so they stay visible in the accounting.
+**Bounds.** The set holds one transaction's own write set and nothing between
+operations: a commit drains it, a rollback discards it, and a read-only handle
+can never stage a block into it. The ceiling that forces a commit before it
+grows further is derived from discovered RAM, never a hand-picked constant, with
+a floor of one transaction's own working set — below that floor a transaction
+could not complete, so the floor is a correctness property. A dirty block is
+pinned memory, not reclaimable cache: it cannot be dropped, only written, so
+pressure shortens the deadline and lowers the ceiling toward the floor rather
+than evicting. The bytes are charged to the reclaim ledger as pinned so they
+stay visible in the accounting.
 
 ---
 

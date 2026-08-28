@@ -1,17 +1,21 @@
 # ARXFS-WRITEBACK.md — ARXFS write-back cache, commit batching, and the commit barrier
 
-Status: **WB0 done** (the measurement harness); WB1–WB6 planned.
+Status: **WB0 done** (the measurement harness) and **WB1 done** (the dirty
+block set and the commit barrier, closing `plans/OPEN-DEFECTS.md` D63);
+WB2–WB6 planned.
 Binding under `AGENTS.md` and listed in its §15.18 jump-sheet.
 Primary code area: `drivers/filesystem/arxfs/`.
 Companion spec section: `docs/src/filesystem/arxfs-spec.md` §22.
 
-ARXFS today issues one single-block device write per copy-on-write block, one
-transaction per VFS operation, and **no durability barrier at all**. That makes
+ARXFS issued one single-block device write per copy-on-write block, one
+transaction per VFS operation, and **no durability barrier at all**. That made
 writes both slow — measured 5.6×–17.8× byte amplification and, on a 512-byte SD
 card, one device command per 512 bytes — and unsafe on any device with a
 volatile write cache. This plan fixes both with one mechanism: a
 transaction-scoped dirty block set, a run coalescer, a commit scheduler, and the
-single barrier that becomes affordable once commits are batched.
+single barrier that becomes affordable once commits are batched. WB1 has landed
+the set and the barrier; the remaining stages are the coalescer, the map's dirty
+pages, the scheduler, and the bound.
 
 It adds **no** capability, **no** ABI surface, **no** second data path, and no
 mount option: the behaviour is the one production profile
@@ -31,68 +35,64 @@ version is the last one.
 
 | Workload | fs block size | device writes | superseded | bytes to device | byte amplification |
 |---|---|---|---|---|---|
-| 64 KiB in one `write_at` | 512 | 746 | 294 | 373 KiB | 5.82× |
-| 64 KiB as 16 × 4 KiB `write_at` | 512 | 1183 | 852 | 591.5 KiB | 9.24× |
-| 64 KiB in one `write_at` | 4096 | 89 | 32 | 356 KiB | 5.56× |
-| 64 KiB as 16 × 4 KiB `write_at` | 4096 | 284 | 144 | 1.109 MiB | 17.75× |
-| 34-byte append to an existing file | 512 | 13 | 0 | 6.5 KiB | 195.8× |
-| create one empty file | 512 | 18 | 4 | 9 KiB | — |
+| 64 KiB in one `write_at` | 512 | 158 | 0 | 79 KiB | 1.23× |
+| 64 KiB as 16 × 4 KiB `write_at` | 512 | 335 | 24 | 167.5 KiB | 2.61× |
+| 64 KiB in one `write_at` | 4096 | 25 | 0 | 100 KiB | 1.56× |
+| 64 KiB as 16 × 4 KiB `write_at` | 4096 | 160 | 24 | 640 KiB | 10.00× |
+| 34-byte append to an existing file | 512 | 11 | 0 | 5.5 KiB | 165.6× |
+| create one empty file | 512 | 14 | 0 | 7 KiB | — |
 
-Every one of those writes carries exactly one block, and no commit in the table
-issues a barrier. The figures are properties of the write path, not of the
-device measured on: the harness reproduces each of them on a 100 TiB volume,
+Every one of those writes still carries exactly one block, and every commit
+issues exactly one barrier. The figures are properties of the write path, not of
+the device measured on: the harness reproduces each of them on a 100 TiB volume,
 thirteen million times the size, to the command.
 
-Amplification is essentially block-size independent in *bytes*, because it is
-structural, not granular. It has three separate causes, and the plan fixes each
-one in its own stage so each win is separately measurable.
+Amplification is structural, not granular. It had four separate causes, one
+stage each so each win is separately measurable. **C1 and C4 are closed by WB1**;
+C2 and C3 remain.
 
-**C1 — intra-transaction rewrite churn.** Every `store_block` ends in
-`extent_assign`, a B-tree insert that copy-on-writes the covering leaf and
-writes it — and its companion mirror — to the device immediately. So the same
-extent leaf, the same inode-tree spine, and the same allocation-map pages are
-rewritten and re-sealed once per data block, and only the last version of each
-survives the transaction. This is the dominant cost: 64 KiB at a 512-byte block
-size is 148 data blocks, each written once, so **598 of the 746 writes are
-metadata and 294 of those are superseded before the transaction ends** — each
-carrying its own HMAC-SHA256 over the whole block, which on a Pi 4, with no
-ARMv8 crypto extensions, is a CPU cost as well as an I/O one.
+**C1 — intra-transaction rewrite churn. Closed.** Every `store_block` ended in
+`extent_assign`, a B-tree insert that copy-on-wrote the covering leaf and wrote
+it — and its companion mirror — to the device immediately, so the same extent
+leaf, the same inode-tree spine, and the same allocation-map pages went out once
+per data block and only the last version of each survived. It was the dominant
+cost: 64 KiB at a 512-byte block size is 148 data blocks, and **598 of the 746
+writes were metadata, 294 of them superseded before the transaction ended** —
+each carrying its own HMAC-SHA256 over the whole block, which on a Pi 4 with no
+ARMv8 crypto extensions is a CPU cost as well as an I/O one. Staging the sealed
+bytes and draining at the commit point leaves **ten** metadata writes for that
+case: five mirrored blocks, each written once.
 
 **C2 — one transaction per operation.** Every mutating operation ends in
 `commit()`: a fresh transaction root (2 writes, 1 seal) plus a superblock slot
-(2 writes, 1 seal). Four writes of pure per-operation overhead however small the
-operation, and it forces C1's churn out to the device at every operation
-boundary — which is why the chunked 4 KiB case costs 1.6× the single-call
-command count at a 512-byte block size and 3.2× at 4096, for identical bytes,
-and why it supersedes nearly three times as many blocks as it keeps.
+(2 writes, 1 seal), now with a barrier between them. Pure per-operation overhead
+however small the operation, and it forces each transaction's churn out to the
+device at every operation boundary — which is why the chunked 4 KiB case still
+costs 2.1× the single-call command count at a 512-byte block size and 6.4× at
+4096, for identical bytes, and is the only case left that supersedes anything.
 
-**C3 — single-block device I/O.** `write_block` is the only device write site in
-the driver and always writes exactly one block. `Block::write_blocks` already
-accepts a multi-block buffer; the *read* path already coalesces into a 64 KiB
-staging window (`RunStage`/`READ_RUN_BYTES`); `drivers/storage/emmc2` already
-stages 128 blocks (64 KiB) per ADMA2 multi-block transfer. So on the Pi's SD
-card every 512-byte write is a separate CMD24 plus completion wait where one
-CMD25 could carry 128 of them. The write path is the only side of the driver
-that does not coalesce.
+**C3 — single-block device I/O.** The drain issues one `write_blocks` per staged
+block. `Block::write_blocks` already accepts a multi-block buffer; the *read*
+path already coalesces into a 64 KiB staging window (`RunStage`/`READ_RUN_BYTES`);
+`drivers/storage/emmc2` already stages 128 blocks (64 KiB) per ADMA2 multi-block
+transfer. So on the Pi's SD card every 512-byte write is a separate CMD24 plus
+completion wait where one CMD25 could carry 128 of them. The drain hands its
+blocks over in ascending device order, which is the order a coalescer needs; the
+write path is still the only side of the driver that does not gather runs.
 
-**C4 — no commit barrier (a durability defect, fixed here).** `commit()` writes
-the copy-on-write blocks, then the transaction root, then the superblock slot,
-with no `Block::flush()` between any of them; both it and `src/transaction.rs`
-now say so, having each claimed durability the code does not provide. On every
-device with a volatile write cache the slot may reach stable media before the
-tree blocks the root it names transitively references. `open` does re-validate
-the root before accepting a slot, so a *lost root* is survivable; a **lost
-interior tree node beneath a durable root** is not — both mirror copies are
-absent and the mount fails closed. Only `map_persist` (explicit `fs_sync`)
-issues a barrier today, so an ordinary commit has none.
-
-C4 is a defect that exists now, filed as `plans/OPEN-DEFECTS.md` D63 and owned
-by this plan. It is fixed in WB1 rather than alone, because a barrier per
-unbatched per-operation commit would add a full device-cache flush to every VFS
-operation on a driver already amplifying 5.6×–17.8× in single-block writes; WB1
-lands the batching mechanism and the barrier in the same change. No ARXFS work
-that depends on a durable published root — snapshots (spec stage 20), FEC commit
-witnesses (stage 21) — may land before it.
+**C4 — no commit barrier (a durability defect). Closed.** `commit()` wrote the
+copy-on-write blocks, then the transaction root, then the superblock slot, with
+no `Block::flush()` between any of them. On every device with a volatile write
+cache the slot could reach stable media before the tree blocks the root it names
+transitively references. `open` does re-validate the root before accepting a
+slot, so a *lost root* was survivable; a **lost interior tree node beneath a
+durable root** was not — both mirror copies absent, the mount fails closed, and
+one power cut at the wrong microsecond loses the volume. Filed as
+`plans/OPEN-DEFECTS.md` D63 and fixed in WB1 rather than alone, because a
+barrier per unbatched per-operation commit would have added a full device-cache
+flush to every VFS operation on a driver amplifying 5.6×–17.8× in single-block
+writes. The work that depends on a durable published root — snapshots (spec
+stage 20), FEC commit witnesses (stage 21) — is now unblocked.
 
 ## 2. Non-negotiable invariants
 
@@ -134,18 +134,25 @@ witnesses (stage 21) — may land before it.
 
 ## 3. Where it sits
 
-One new module, `drivers/filesystem/arxfs/src/wcache.rs`, entirely beneath the
+One module, `drivers/filesystem/arxfs/src/wcache.rs`, entirely beneath the
 driver's single existing device-write seam:
 
 ```text
 VFS operation
   -> ARXFS operation (unchanged)
       -> seal path (header/HMAC, AEAD, integrity trailers — unchanged)
-          -> write_block / write_meta  ..............  the one seam
-              -> dirty block set          (WB1)
+          -> stage_block  <- write_meta / seal_data_block   the one seam
+              -> dirty block set          (WB1, landed)
                   -> run coalescer        (WB2)
                       -> Block::write_blocks / Block::flush
 ```
+
+The non-transactional writes — the rebuildable allocation-map region, the
+transient scratch arrays, an idempotent mirror copy-repair, and the superblock
+slot at the commit point — go through `write_device` instead: they have nothing
+to be ordered behind the barrier, and the slot is what the barrier orders
+everything else *ahead of*. Both reach the device through one `write_blocks`
+call site.
 
 Above ARXFS, `kernel/core::fs::CachedFs` (clean metadata) and the driver's
 injected `ClusterCache` (clean transforms) are untouched. Below it,
@@ -181,13 +188,20 @@ Exhaustive crash outcomes:
 
 | Crash point | Selected root | State |
 |---|---|---|
-| before the barrier | previous slot | prior — unchanged from today |
+| before the barrier | previous slot | prior |
 | between barrier and slot | previous slot (new root durable but unreferenced) | prior |
 | slot write torn | previous slot (the slot fails its authenticator) | prior |
 | after the slot | new slot | new, whole |
 
-The window this closes is the one C4 opens: a durable slot naming a root whose
-subtree never reached media. After WB1 that ordering is impossible.
+The window this closes is the one C4 opened: a durable slot naming a root whose
+subtree never reached media. That ordering is now impossible — when a commit
+returns, the only blocks a device may still hold are the slot's two copies.
+
+The commit point is the *primary* copy of the slot, so the pair is written
+companion-first and a half-written pair publishes nothing. A failure of either
+write leaves publication unknown, because the device may have taken one: the
+handle forces itself read-only and frees nothing, so whichever root the device
+holds survives for the next mount.
 
 ## 5. The commit scheduler
 
@@ -252,10 +266,14 @@ sooner*, never *allocate more* and never *drop*.
 - A `flush()` that faults is a failed barrier: the slot is not written, so the
   transaction did not happen.
 - Released buffers are volatilely wiped, like every other buffer in the driver.
-  Entries hold sealed (encrypted) bytes, so no plaintext is retained; a
-  `BufferClass::Sensitive` write bypasses the set entirely and invalidates any
-  entry for its range, matching the block cache's rule.
-- A read-only handle has no dirty set at all.
+  Entries hold sealed (encrypted) bytes, so no plaintext is ever retained, and
+  the driver declares no `BufferClass` on any write: every block it sends is
+  ciphertext or authenticated metadata. A `Sensitive`-class bypass therefore has
+  no producer, and implementing one would be speculative surface — the seal path
+  is what keeps the set free of secrets, not a class flag.
+- A read-only handle can never stage a block: `stage_block` refuses one, as do
+  `commit` and the device write itself, so the set stays provably empty and
+  costs a read-only mount nothing.
 
 ## 8. Staging
 
@@ -277,39 +295,68 @@ host's RAM.
 
 The §1 table is that harness's output, asserted row by row — six rows over four
 workloads and both block sizes, every figure exact, with the amplification
-checked as an integer ratio rather than a float. Four of its assertions record
-the present rather than a goal, and each is a later stage's acceptance hook:
-every write carrying exactly one block (WB2 moves that histogram), a transaction
-rewriting its metadata once per data block it stores (WB1), the chunked case
-costing more than half again the single call's commands (WB4), and a commit
-issuing no barrier at all (WB1). The floor case runs every workload again on a
-100 TiB volume and requires an identical command stream, which is what makes the
-table a property of the write path and not of the device it was measured on.
+checked as an integer ratio rather than a float. Two of its assertions record
+the present rather than a goal, each a later stage's acceptance hook: every
+write carrying exactly one block (WB2 moves that histogram) and the chunked case
+costing far more than the single call's commands (WB4). The floor case runs every
+workload again on a 100 TiB volume and requires an identical command stream,
+which is what makes the table a property of the write path and not of the device
+it was measured on.
 
-Fixed with it: `commit` claimed in a comment that the root and slot it wrote
-were "durably published", when nothing barriers them; `transaction.rs` already
-stated the truth, and the harness's zero-barrier rows are the machine-checked
-evidence for it.
+### WB1 — dirty block set and the commit barrier. **done**
 
-### WB1 — dirty block set and the commit barrier. **planned**
+`wcache.rs` holds the physical-block-keyed `DirtySet`: sealed blocks, replaced
+on rewrite, dropped unwritten when the transaction frees the block again, wiped
+as they leave, and handed to the drain in ascending device order. It performs no
+I/O and is host-unit-tested, exactly as `pagecache.rs`. `write_meta` and
+`seal_data_block` stage through it; `read_block_run` reads through it, so a
+read-after-write inside the transaction sees the staged bytes and a wholly
+staged run needs no device request. `commit` drains, barriers once, then writes
+the slot pair.
 
-`wcache.rs`: the physical-block-keyed dirty set, replacement on rewrite,
-read-through for read-after-write, drain at commit, and the single pre-slot
-barrier that closes C4. `write_block`/`read_block`/`write_meta` route through
-it; nothing else in the driver changes.
+*Measured (the WB0 harness, asserted row by row).* A 64 KiB `write_at` on a
+512-byte volume: **746 device writes → 158**, of which 598 metadata writes
+become ten, 294 superseded writes become none, and 373 KiB on the device becomes
+79 KiB — 5.82× byte amplification down to 1.23×. At 4096: 89 → 25 writes, 5.56×
+→ 1.56×. The chunked case, which C2 owns, falls 1183 → 335 and 284 → 160. Every
+commit issues exactly one barrier, and the only writes after it are the slot's
+two copies.
 
-Acceptance: C1 gone (the 148-block case writes each metadata block once, proved
-by the WB0 counters); C4 gone (a device that records ordering proves no slot is
-written before the barrier that precedes it); crash-replay across every commit
-step still leaves prior-or-new at every write budget; a faulting drain rolls
-back and publishes nothing.
+*Fixed with it, each with a regression test that fails before and passes after.*
+Three ordering defects the barrier work exposed, none of them observable on the
+strictly-ordered devices the suite used to run on:
+
+1. **A commit that failed after its first slot copy published the transaction
+   while the caller rolled it back**, freeing the published root's blocks for
+   immediate reuse — whole-volume loss on the next mount from a single
+   media error at that LBA. The commit point is now the *primary* copy, written
+   last, and a slot-write failure leaves publication unknown, so the handle
+   forces itself read-only and frees nothing rather than guessing.
+2. **`scrub`, `check`, and `health` propagated a failed `commit()` without
+   rolling back**, leaving the handle holding an unpublished transaction that
+   the next commit would publish behind the caller's back. `commit` now rolls
+   back its own failure, so the property belongs to the primitive rather than to
+   fifteen call sites.
+3. **The allocation map's clean→dirty stamp was not barriered before the first
+   page write**, so a reordering device could keep a page while the
+   invalidation sat in its cache; the next mount would adopt a map stamped clean
+   at a generation it no longer described, and a page carrying a committed
+   transaction's frees would mark live blocks free. One barrier at the
+   transition — once per sync period, not per write — closes it. WB3 removes the
+   dirty stamp altogether by folding the pages into the barriered drain.
+
+The test surface is the WB0 ledger for the command shape (one barrier per
+commit, nothing but the slot pair after it) and a volatile-write-cache
+`MemBlock` for the consequence: after a commit the only uncommitted blocks are
+that pair, and a power loss keeping any subset of them leaves the prior
+committed state or the new one, both whole.
 
 ### WB2 — run coalescer. **planned**
 
-Drain in ascending physical order, gather adjacent blocks into runs, issue one
-`write_blocks` per run, bounded by the staging window the read path already
-uses — hoisted to one shared definition consumed by both directions rather than
-a second constant.
+The drain already hands its blocks over in ascending physical order; gather
+adjacent ones into runs, issue one `write_blocks` per run, bounded by the
+staging window the read path already uses — hoisted to one shared definition
+consumed by both directions rather than a second constant.
 
 Acceptance: C3 gone (device *command* count falls to the run count; the mirror
 pair is one 2-block command); a short run still writes correctly; the bound is
@@ -322,9 +369,16 @@ same problem solved twice. Fold the pages into the one dirty set and the barrier
 into the one barrier; the clean stamp still lands after it, for the reason it
 does today (losing the stamp costs a rebuild, never correctness).
 
-Acceptance: one dirty set and one barrier remain in the driver; the map is still
-adopted after a clean sync and still rebuilt after a crash; the existing map
-tests pass unchanged.
+Doing so removes the *dirty* stamp entirely, and with it the extra barrier WB1
+had to add at the clean→dirty transition: if a page only ever reaches the device
+inside a barriered commit drain, then a stamp naming the generation those pages
+reflect is safe wherever it lands. A crash before the barrier leaves the slot
+unpublished, so the selected generation cannot match the stamp and the mount
+rebuilds.
+
+Acceptance: one dirty set and one barrier remain in the driver; a `fs_sync`
+issues one barrier, not two; the map is still adopted after a clean sync and
+still rebuilt after a crash; the existing map tests pass unchanged.
 
 ### WB4 — commit scheduler. **planned**
 
@@ -394,6 +448,7 @@ own rather than folded in silently (`AGENTS.md` §2.18):
   the kernel, a service, or a command app invokes them, so on a live system TRIM
   never issues, scrub never runs, and the health baseline never advances past
   mkfs. There is no `arxfs` command app. Now owned by
-  `plans/ARXFS-MAINTENANCE.md` (spec stage 18), which sequences behind WB1: a
-  background writer on a barrier-less commit path would multiply C4's exposure
-  across every maintenance pass.
+  `plans/ARXFS-MAINTENANCE.md` (spec stage 18), which sequenced behind WB1
+  because a background writer on a barrier-less commit path would have
+  multiplied C4's exposure across every maintenance pass. WB1 is done, so that
+  dependency is met.

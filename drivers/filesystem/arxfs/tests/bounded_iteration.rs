@@ -16,13 +16,14 @@
 //! path that gathers a tree before it reads it, allocates per record and blows
 //! both.
 //!
-//! Scope: the read paths whose own work *is* the walk, plus a single-record
-//! insert and remove — the mutation path edits nodes in place through one
-//! borrowed scratch, so it too costs the same at any depth. A pass that frees
-//! or dirties *many* records still holds the transaction's own freed-block set,
-//! which is that plan's to bound (`plans/ARXFS-WRITEBACK.md`), as are `scrub`
-//! and the offline `check`, which accumulate whole-volume reconciliation state
-//! (`plans/IMPLEMENT-OUTSTANDING-ARXFS.md`).
+//! Scope: the read paths whose own work *is* the walk, a single-record insert
+//! and remove — the mutation path edits nodes in place through one borrowed
+//! scratch, so it too costs the same at any depth — and a whole-volume scrub
+//! and check, whose derived truth streams through on-disk scratch arrays rather
+//! than RAM. What is still not bounded is the transaction's own freed-block set
+//! and the dirty blocks it stages until its commit drains them: a pass that
+//! frees or dirties *many* records holds one entry per block, which is the
+//! write-back plan's ceiling to derive (`plans/ARXFS-WRITEBACK.md` WB5).
 
 use std::alloc::System;
 use std::collections::BTreeMap;

@@ -229,7 +229,7 @@ impl<B: Block> ARXFS<B> {
             payload_len: as_u32(page_payload_len(bs)),
         };
         header.seal(&mut buf[..bs], &self.mac_key)?;
-        self.write_block(region_block, &buf)?;
+        self.write_device(region_block, &buf)?;
         self.allocator_mut()?.cache.mark_written(region_block);
         Ok(())
     }
@@ -257,18 +257,28 @@ impl<B: Block> ARXFS<B> {
             payload_len: as_u32(page_payload_len(bs)),
         };
         block.seal(&mut buf[..bs], &self.mac_key)?;
-        self.write_block(geom.header_block(), &buf)?;
+        self.write_device(geom.header_block(), &buf)?;
         self.allocator_mut()?.stamped_clean = clean;
         Ok(())
     }
 
     /// Record on the device that the map is being changed, before the first
-    /// such change reaches it.
+    /// such change reaches it — and make that record *durable* before it does.
+    ///
+    /// The barrier is what gives the stamp its meaning. A map is adopted only
+    /// when it is stamped clean at the generation the mount selected, so a
+    /// device free to reorder could otherwise land a page write while the
+    /// stamp it invalidated was still in the volatile cache: the next mount
+    /// would then adopt a map that no longer describes the generation it
+    /// vouches for, and a page carrying the frees of a transaction whose slot
+    /// was also lost would mark live blocks free. One barrier per clean→dirty
+    /// transition costs one cache flush per sync period, not per write.
     fn map_mark_dirty(&mut self) -> Result<(), DriverError> {
         if !self.allocator()?.stamped_clean {
             return Ok(());
         }
-        self.map_stamp(false, 0)
+        self.map_stamp(false, 0)?;
+        self.block.flush()
     }
 
     /// Write every changed region block out, force the device cache, and stamp

@@ -18,8 +18,11 @@ use tairix_fsmeta::preset;
 /// In-memory block device. Optionally drops writes once a budget is reached,
 /// modelling a power loss mid-commit: a dropped write simply never reaches the
 /// platter, and the driver's in-memory state is discarded by re-opening from
-/// the stored bytes. It can also fail the *read* of named blocks, modelling
-/// the single-sector media error a mirrored metadata copy exists for.
+/// the stored bytes. It can also fail the *read* or the *write* of named
+/// blocks, modelling the single-sector media error a mirrored metadata copy
+/// exists for, and hold accepted writes in a volatile cache until a barrier
+/// commits them, modelling the reordering every SD card, consumer SSD, and
+/// HDD is free to perform.
 struct MemBlock {
     store: alloc::vec::Vec<u8>,
     block_size: u32,
@@ -29,6 +32,22 @@ struct MemBlock {
     /// Blocks whose reads fail with a device fault, modelling unreadable
     /// media at a specific LBA.
     read_faults: BTreeSet<u64>,
+    /// Blocks whose writes fail with a device fault, modelling media the
+    /// device cannot program at a specific LBA.
+    write_faults: BTreeSet<u64>,
+    /// Once this many writes have been accepted, every later one faults —
+    /// a device that starts refusing partway through a transfer, wherever the
+    /// filesystem happens to have placed its blocks.
+    write_fault_after: Option<u32>,
+    /// When set, every barrier fails, modelling a device that cannot confirm
+    /// its cache reached media.
+    fail_flush: bool,
+    /// Accepted writes not yet on stable media. `None` models a device with no
+    /// volatile cache — every accepted write is durable at once, which is what
+    /// every other test wants. `Some` models one that has a cache: a
+    /// [`Block::flush`] commits it, and [`MemBlock::power_loss`] commits an
+    /// arbitrary subset and drops the rest.
+    volatile: Option<alloc::collections::BTreeMap<u64, alloc::vec::Vec<u8>>>,
     discard: Option<DiscardCapability>,
     discarded: alloc::vec::Vec<(u64, u64)>,
     health: DeviceHealth,
@@ -48,6 +67,10 @@ impl MemBlock {
             writes: 0,
             write_budget: None,
             read_faults: BTreeSet::new(),
+            write_faults: BTreeSet::new(),
+            write_fault_after: None,
+            fail_flush: false,
+            volatile: None,
             discard: None,
             discarded: alloc::vec::Vec::new(),
             health: DeviceHealth::Unavailable,
@@ -63,6 +86,10 @@ impl MemBlock {
             writes: 0,
             write_budget: None,
             read_faults: BTreeSet::new(),
+            write_faults: BTreeSet::new(),
+            write_fault_after: None,
+            fail_flush: false,
+            volatile: None,
             discard: None,
             discarded: alloc::vec::Vec::new(),
             health: DeviceHealth::Unavailable,
@@ -75,6 +102,44 @@ impl MemBlock {
     fn fail_reads_of(mut self, lba: u64) -> Self {
         self.read_faults.insert(lba);
         self
+    }
+
+    /// Hold accepted writes in a volatile cache until a barrier commits them.
+    fn with_volatile_cache(mut self) -> Self {
+        self.volatile = Some(alloc::collections::BTreeMap::new());
+        self
+    }
+
+    /// Blocks the device has accepted but not yet committed to media.
+    fn volatile_blocks(&self) -> alloc::vec::Vec<u64> {
+        self.volatile
+            .as_ref()
+            .map(|held| held.keys().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// Cut the power: commit only the volatile blocks `keep` accepts and drop
+    /// the rest, which is exactly the freedom a device with a write cache has
+    /// between barriers.
+    fn power_loss(&mut self, keep: impl Fn(u64) -> bool) {
+        let Some(held) = self.volatile.take() else {
+            return;
+        };
+        for (lba, bytes) in held {
+            if keep(lba) {
+                self.commit_block(lba, &bytes);
+            }
+        }
+        self.volatile = Some(alloc::collections::BTreeMap::new());
+    }
+
+    /// Put one block's bytes on media.
+    fn commit_block(&mut self, lba: u64, bytes: &[u8]) {
+        let start = as_usize(lba) * self.block_size as usize;
+        let end = start + bytes.len();
+        if end <= self.store.len() {
+            self.store[start..end].copy_from_slice(bytes);
+        }
     }
 
     /// Set the health telemetry this device reports, so the health path can
@@ -160,6 +225,16 @@ impl Block for MemBlock {
             return Err(DriverError::LengthOutOfRange);
         }
         buf.copy_from_slice(&self.store[start..end]);
+        // A device serves reads from its own write cache, so an uncommitted
+        // block reads back as written, not as the media still holds it.
+        if let Some(held) = self.volatile.as_ref() {
+            for (index, chunk) in buf.chunks_mut(bs).enumerate() {
+                let at = lba + index as u64;
+                if let Some(bytes) = held.get(&at) {
+                    chunk.copy_from_slice(bytes);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -169,6 +244,12 @@ impl Block for MemBlock {
         if buf.is_empty() || !buf.len().is_multiple_of(bs) {
             return Err(DriverError::BufferTooSmall);
         }
+        let span = (buf.len() / bs) as u64;
+        if (lba..lba + span).any(|b| self.write_faults.contains(&b))
+            || matches!(self.write_fault_after, Some(n) if self.writes >= n)
+        {
+            return Err(DriverError::DeviceFault);
+        }
         let start = as_usize(lba) * bs;
         let end = start + buf.len();
         if end > self.store.len() {
@@ -177,8 +258,16 @@ impl Block for MemBlock {
         // Model power loss: once the budget is spent, the write never lands.
         let drop_write = matches!(self.write_budget, Some(b) if self.writes >= b);
         self.writes += 1;
-        if !drop_write {
-            self.store[start..end].copy_from_slice(buf);
+        if drop_write {
+            return Ok(());
+        }
+        match self.volatile.as_mut() {
+            Some(held) => {
+                for (index, chunk) in buf.chunks(bs).enumerate() {
+                    held.insert(lba + index as u64, chunk.to_vec());
+                }
+            }
+            None => self.store[start..end].copy_from_slice(buf),
         }
         Ok(())
     }
@@ -216,6 +305,12 @@ impl Block for MemBlock {
     }
 
     fn flush(&mut self) -> Result<(), DriverError> {
+        if self.fail_flush {
+            return Err(DriverError::DeviceFault);
+        }
+        // The barrier: everything the device has accepted so far reaches media
+        // before anything accepted after it can.
+        self.power_loss(|_| true);
         Ok(())
     }
 }
@@ -2507,7 +2602,7 @@ fn a_retained_cluster_serves_repeat_reads_without_the_transform_pipeline() {
     let mut raw = [0u8; MAX_BLOCK_SIZE];
     fs.read_block(ext.phys, &mut raw).expect("raw read");
     raw[HEADER_LEN] ^= 0xFF;
-    fs.write_block(ext.phys, &raw).expect("raw write");
+    fs.write_device(ext.phys, &raw).expect("raw write");
 
     assert_eq!(
         read_chunked(&mut fs, node, payload.len()),
@@ -5391,6 +5486,364 @@ fn corruption_injection_data_block_faults_are_classified_not_repaired() {
     );
 }
 
+/// A committed volume on a device with a volatile write cache: the witness
+/// `keep` holding [`CRASH_KEEP`], an empty `new` to write to, everything on
+/// media, and the ring slot the next commit will publish.
+fn volatile_volume() -> (ARXFS<MemBlock>, u64) {
+    let mut fs = ARXFS::format(
+        MemBlock::new(CRASH_BS, CRASH_BC).with_volatile_cache(),
+        64,
+        &TEST_KEY,
+        &mut TestEntropy::new(),
+    )
+    .expect("format")
+    .with_clock(fixed_clock);
+    let root = fs.root();
+    fs.create(root, b"keep", NodeKind::RegularFile)
+        .expect("create keep");
+    fs.write_at(root, b"keep", 0, CRASH_KEEP)
+        .expect("write keep");
+    fs.create(root, b"new", NodeKind::RegularFile)
+        .expect("create new");
+    fs.create(root, b"pad", NodeKind::RegularFile)
+        .expect("create pad");
+    // Fill the ring, so the slot the next commit overwrites already holds a
+    // decodable older one. That is what makes the primary copy — the one a
+    // mount prefers — the single write that publishes a transaction; on a ring
+    // whose slots have never been written, an absent primary lets the
+    // companion decide instead.
+    let mut at = 0u64;
+    while fs.ring_pos < RING_SLOTS {
+        fs.write_at(root, b"pad", at, b"x").expect("pad");
+        at += 1;
+    }
+    // Two syncs. The first persists the map and leaves only its clean stamp in
+    // the device cache — losing that stamp costs a rebuild at the next mount,
+    // never correctness, so it is deliberately the one write no barrier
+    // follows — and the second commits it, so the window starts genuinely
+    // empty.
+    FilesystemWrite::flush(&mut fs).expect("sync");
+    FilesystemWrite::flush(&mut fs).expect("sync");
+    assert!(
+        fs.block_mut().volatile_blocks().is_empty(),
+        "a sync leaves nothing in the device cache"
+    );
+    let slot = slot_block(fs.ring_pos % RING_SLOTS);
+    (fs, slot)
+}
+
+/// Payload the volatile-cache tests write, wide enough to need several data
+/// blocks and a tree above them.
+const VOLATILE_PAYLOAD: &[u8] = &[0x5A; 3 * CRASH_BS as usize + 17];
+
+/// When a commit returns, the *only* blocks a device may still be holding in
+/// its volatile cache are the two copies of the superblock slot that published
+/// it. Everything the new root transitively names is already on media, because
+/// the barrier the commit issues before writing that slot put it there.
+///
+/// This is the whole of the durability guarantee, stated where it can be
+/// observed: a device that reorders freely cannot make the slot durable while a
+/// tree node beneath its root is not, so no power cut can leave a mount naming
+/// a root whose interior is absent.
+#[test]
+fn only_the_publishing_slot_pair_stays_volatile_when_a_commit_returns() {
+    let (mut fs, slot) = volatile_volume();
+    let root = fs.root();
+    assert_eq!(
+        fs.write_at(root, b"new", 0, VOLATILE_PAYLOAD),
+        Ok(VOLATILE_PAYLOAD.len())
+    );
+    assert_eq!(
+        fs.block_mut().volatile_blocks(),
+        alloc::vec![slot, ARXFS::<MemBlock>::companion(slot)],
+        "a commit left blocks other than its slot pair uncommitted"
+    );
+}
+
+/// A power loss immediately after a commit commits an arbitrary subset of the
+/// volatile window and drops the rest — and every one of those outcomes leaves
+/// the volume mountable at a whole transaction boundary, holding either the
+/// prior committed state or the new one.
+///
+/// Keeping both copies of the slot lands the new state, because every block its
+/// root names crossed the barrier first. Keeping neither lands the prior state.
+/// Keeping one leaves the mirror to decide, and either answer is whole.
+#[test]
+fn a_power_loss_after_a_commit_leaves_prior_or_new_whatever_it_drops() {
+    for kept in 0..4u8 {
+        let (mut fs, slot) = volatile_volume();
+        let root = fs.root();
+        assert_eq!(
+            fs.write_at(root, b"new", 0, VOLATILE_PAYLOAD),
+            Ok(VOLATILE_PAYLOAD.len())
+        );
+        let comp = ARXFS::<MemBlock>::companion(slot);
+        fs.block_mut()
+            .power_loss(|lba| (lba == slot && kept & 1 != 0) || (lba == comp && kept & 2 != 0));
+        let bytes = fs.into_block().bytes();
+        let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, CRASH_BS, CRASH_BC), &TEST_KEY)
+            .expect("a power loss always leaves a mountable volume");
+
+        let witness = fs.lookup(fs.root(), b"keep").expect("the witness survives");
+        let mut out = alloc::vec![0u8; CRASH_KEEP.len()];
+        assert_eq!(fs.read_at(witness, 0, &mut out), Ok(CRASH_KEEP.len()));
+        assert_eq!(out, CRASH_KEEP, "live data lost (kept {kept:#b})");
+
+        // The primary copy is the commit point: the new state is selected
+        // exactly when it landed, whatever became of the companion.
+        let published = kept & 1 != 0;
+        let node = fs.lookup(fs.root(), b"new").expect("the target survives");
+        let size = fs.node_info(node).expect("stat").size;
+        if !published {
+            assert_eq!(
+                size, 0,
+                "the new state appeared without its slot ({kept:#b})"
+            );
+            continue;
+        }
+        assert_eq!(
+            size,
+            VOLATILE_PAYLOAD.len() as u64,
+            "torn size at kept {kept:#b}"
+        );
+        let mut read = alloc::vec![0u8; VOLATILE_PAYLOAD.len()];
+        assert_eq!(
+            fs.read_at(node, 0, &mut read),
+            Ok(VOLATILE_PAYLOAD.len()),
+            "the published root names a block that never reached media \
+             (kept {kept:#b})"
+        );
+        assert_eq!(read, VOLATILE_PAYLOAD, "torn contents at kept {kept:#b}");
+    }
+}
+
+/// A barrier that faults is a failed barrier: the slot is never written, so the
+/// transaction did not happen. The handle rolls back and a later commit
+/// publishes only its own change — a caller told a commit failed can never have
+/// its trees published behind its back.
+#[test]
+fn a_barrier_that_faults_publishes_nothing_and_leaves_no_transaction_behind() {
+    let (mut fs, slot) = volatile_volume();
+    let root = fs.root();
+    fs.block_mut().fail_flush = true;
+    assert_eq!(
+        fs.write_at(root, b"new", 0, VOLATILE_PAYLOAD),
+        Err(DriverError::DeviceFault)
+    );
+    let held = fs.block_mut().volatile_blocks();
+    let comp = ARXFS::<MemBlock>::companion(slot);
+    assert!(
+        !held.contains(&slot) && !held.contains(&comp),
+        "a commit whose barrier failed wrote its slot anyway: {held:?}"
+    );
+    // The device recovers; the next operation is the only one that commits.
+    fs.block_mut().fail_flush = false;
+    fs.write_at(root, b"new", 0, b"second").expect("write");
+    FilesystemWrite::flush(&mut fs).expect("sync");
+    let bytes = fs.into_block().bytes();
+    let mut fs =
+        ARXFS::open(MemBlock::from_bytes(bytes, CRASH_BS, CRASH_BC), &TEST_KEY).expect("reopen");
+    let node = fs.lookup(fs.root(), b"new").expect("target");
+    assert_eq!(
+        fs.node_info(node).expect("stat").size,
+        b"second".len() as u64,
+        "the failed transaction's tree was published by the next commit"
+    );
+    let mut out = [0u8; 6];
+    assert_eq!(fs.read_at(node, 0, &mut out), Ok(6));
+    assert_eq!(&out, b"second");
+}
+
+/// A slot write that faults leaves publication genuinely unknown — the device
+/// may have taken one copy — so the handle forces itself read-only rather than
+/// guessing. Nothing is freed, so whichever of the two roots the device
+/// actually holds is still intact for the next mount, and no later operation
+/// can hand out a block either of them names.
+///
+/// Whichever copy fails, the mount selects the *prior* state, matching the
+/// failure the caller was told about. That is what writing the companion first
+/// buys: the primary — the copy a mount prefers — is the last write of the
+/// commit, so a half-written pair never publishes.
+#[test]
+fn a_failed_slot_write_freezes_the_handle_and_publishes_nothing() {
+    let (probe, probe_slot) = volatile_volume();
+    drop(probe);
+    for faulted in [probe_slot, ARXFS::<MemBlock>::companion(probe_slot)] {
+        let (mut fs, slot) = volatile_volume();
+        assert_eq!(slot, probe_slot, "the fixture is deterministic");
+        let root = fs.root();
+        let old_root = fs.root_phys;
+        fs.block_mut().write_faults.insert(faulted);
+        assert_eq!(
+            fs.write_at(root, b"new", 0, VOLATILE_PAYLOAD),
+            Err(DriverError::DeviceFault)
+        );
+        assert!(
+            fs.read_only,
+            "a commit of unknown publication must force the handle read-only \
+             (faulted {faulted})"
+        );
+        assert_eq!(
+            fs.write_at(root, b"new", 0, b"again"),
+            Err(DriverError::PermissionDenied),
+            "a frozen handle accepts no further mutation"
+        );
+        assert!(
+            fs.is_used(old_root) && fs.is_used(ARXFS::<MemBlock>::companion(old_root)),
+            "the previously committed root was freed while it may still be \
+             selected (faulted {faulted})"
+        );
+        // Reads still work on the frozen handle.
+        let witness = fs.lookup(fs.root(), b"keep").expect("the witness survives");
+        let mut out = alloc::vec![0u8; CRASH_KEEP.len()];
+        assert_eq!(fs.read_at(witness, 0, &mut out), Ok(CRASH_KEEP.len()));
+        assert_eq!(out, CRASH_KEEP);
+
+        let mut device = fs.into_block();
+        device.write_faults.clear();
+        device.power_loss(|_| true);
+        let bytes = device.bytes();
+        let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, CRASH_BS, CRASH_BC), &TEST_KEY)
+            .expect("the volume still mounts");
+        let witness = fs.lookup(fs.root(), b"keep").expect("the witness survives");
+        let mut out = alloc::vec![0u8; CRASH_KEEP.len()];
+        assert_eq!(fs.read_at(witness, 0, &mut out), Ok(CRASH_KEEP.len()));
+        assert_eq!(out, CRASH_KEEP);
+        let node = fs.lookup(fs.root(), b"new").expect("the target survives");
+        assert_eq!(
+            fs.node_info(node).expect("stat").size,
+            0,
+            "a commit reported as failed was published anyway (faulted {faulted})"
+        );
+    }
+}
+
+/// A verification or telemetry pass whose commit fails leaves nothing for a
+/// later commit to publish either. These passes report the failure straight to
+/// their caller, so the rollback belongs to the commit itself rather than to
+/// each of its call sites.
+#[test]
+fn a_failed_commit_on_a_maintenance_pass_restores_the_published_roots() {
+    let (mut fs, _slot) = volatile_volume();
+    let baseline = fs.health_baseline_root;
+    assert_ne!(baseline, 0, "mkfs stored a baseline to supersede");
+    fs.block_mut().fail_flush = true;
+    assert_eq!(
+        fs.health(&GrantAll, &NullSink),
+        Err(DriverError::DeviceFault)
+    );
+    assert_eq!(
+        fs.health_baseline_root, baseline,
+        "the handle kept an unpublished baseline for a later commit to publish"
+    );
+    fs.block_mut().fail_flush = false;
+    let root = fs.root();
+    fs.write_at(root, b"new", 0, b"after").expect("write");
+    FilesystemWrite::flush(&mut fs).expect("sync");
+    let bytes = fs.into_block().bytes();
+    let fs =
+        ARXFS::open(MemBlock::from_bytes(bytes, CRASH_BS, CRASH_BC), &TEST_KEY).expect("reopen");
+    assert_eq!(
+        fs.health_baseline_root, baseline,
+        "the next commit published the failed pass's record"
+    );
+}
+
+/// The dirty set is pinned memory bounded by one transaction, never a cache
+/// that accumulates: it holds nothing between operations, whether the last one
+/// committed, rolled back after a fault partway through its drain, or rolled
+/// back after a failed barrier.
+///
+/// That is what makes the footprint the *operation's* working set rather than
+/// the volume's, which is the property a small machine serving several huge
+/// volumes depends on. What one transaction holds at its peak is the blocks it
+/// wrote, counted to the command by the write-amplification ledger.
+#[test]
+fn the_dirty_set_holds_nothing_between_operations() {
+    let (mut fs, _slot) = volatile_volume();
+    let root = fs.root();
+    assert_eq!(fs.dirty.len(), 0, "a synced volume stages nothing");
+    assert_eq!(
+        fs.write_at(root, b"new", 0, VOLATILE_PAYLOAD),
+        Ok(VOLATILE_PAYLOAD.len())
+    );
+    assert_eq!(fs.dirty.len(), 0, "a commit drains the set it filled");
+
+    // Let two writes land and refuse the rest, so the drain faults with this
+    // transaction's remaining blocks still staged.
+    fs.block_mut().writes = 0;
+    fs.block_mut().write_fault_after = Some(2);
+    assert_eq!(
+        fs.write_at(root, b"new", 0, &[0x11; 4 * CRASH_BS as usize]),
+        Err(DriverError::DeviceFault)
+    );
+    assert_eq!(
+        fs.block_mut().writes,
+        2,
+        "the drain must have written before it faulted, so blocks were left \
+         staged for the rollback to clear"
+    );
+    assert_eq!(
+        fs.dirty.len(),
+        0,
+        "a rolled-back transaction stages nothing"
+    );
+
+    fs.block_mut().write_fault_after = None;
+    fs.block_mut().fail_flush = true;
+    assert_eq!(
+        fs.write_at(root, b"new", 0, b"barrier"),
+        Err(DriverError::DeviceFault)
+    );
+    assert_eq!(
+        fs.dirty.len(),
+        0,
+        "a transaction whose barrier failed stages nothing"
+    );
+}
+
+/// The allocation map is adopted only when it is stamped clean at the
+/// generation the mount selected, so the stamp's *invalidation* must reach
+/// media before the first page write does. Without that barrier a reordering
+/// device could land a page while the invalidation sat in its cache, and the
+/// next mount would adopt a map that no longer describes the generation it
+/// vouches for.
+#[test]
+fn the_map_turns_its_clean_stamp_dirty_durably_before_its_first_page_write() {
+    let (mut fs, _slot) = volatile_volume();
+    let root = fs.root();
+    assert!(
+        fs.map_is_stamped_clean(),
+        "the fixture's sync left the map stamped clean"
+    );
+    assert_eq!(
+        fs.write_at(root, b"new", 0, VOLATILE_PAYLOAD),
+        Ok(VOLATILE_PAYLOAD.len())
+    );
+    // Refuse every region block but the header, so the sync gets as far as
+    // turning the stamp dirty and no further.
+    let start = fs.map_region_start();
+    for block in start + 1..start + fs.map_region_blocks() {
+        fs.block_mut().write_faults.insert(block);
+    }
+    assert_eq!(
+        FilesystemWrite::flush(&mut fs),
+        Err(DriverError::DeviceFault)
+    );
+    let mut device = fs.into_block();
+    device.write_faults.clear();
+    // Cut the power: only what the barrier already committed survives.
+    device.power_loss(|_| false);
+    let bytes = device.bytes();
+    let fs =
+        ARXFS::open(MemBlock::from_bytes(bytes, CRASH_BS, CRASH_BC), &TEST_KEY).expect("reopen");
+    assert!(
+        !fs.map_is_stamped_clean(),
+        "the mount adopted a map whose clean stamp the interrupted sync had \
+         already begun to contradict"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Sparse files: ZERO/Hole extents (`plans/SPARSE.md`). ARXFS represents a
 // hole implicitly as a gap between extent mappings (permitted by); an
@@ -6109,6 +6562,10 @@ fn a_100_tib_volume_formats_mounts_and_serves_with_working_set_bounded_memory() 
         "serving a 200 KiB file must leave the map cache bounded (cached {})",
         fs.map_cached_blocks()
     );
+    // And left nothing staged: the write-back set is the transaction's own
+    // working set, drained at its commit, so a huge volume pins no more of it
+    // than a small one.
+    assert_eq!(fs.dirty.len(), 0, "the commit drained its dirty set");
 
     // The device itself stored only the working set — proof the test models a
     // 100 TiB volume without a 100 TiB backing allocation, and that the driver
@@ -7079,28 +7536,28 @@ fn a_compressed_cluster_read_asks_the_device_once_for_its_stored_run() {
     );
 }
 
-/// The durability contract behind `fs_sync`: a filesystem flush forces the
-/// backing device's volatile write cache to stable media exactly once —
-/// the transaction data already reached the device, but only a device
-/// flush makes it survive power loss.
+/// The barrier budget of the two durability points: an ordinary commit issues
+/// the one mandatory pre-slot barrier, and `fs_sync` adds the two the
+/// allocation map needs — one to make the clean stamp's invalidation durable
+/// before the first page write lands, and one to make the pages and the
+/// committed slot themselves durable before the clean stamp is issued.
 #[test]
-fn fs_flush_forces_the_backing_device_cache_once() {
+fn a_commit_barriers_once_and_a_sync_adds_the_maps_two() {
     let (mut fs, dir) = counted_dir_fixture(1);
-    // The reopened counter starts clean; a mutation writes through to the
-    // device but does not itself force the cache.
     fs.block_mut().flushes = 0;
     fs.write_at(dir, b"f0.txt", 0, b"durable payload")
         .expect("write");
     assert_eq!(
         fs.block_mut().flushes,
-        0,
-        "an ordinary write does not force the device cache"
+        1,
+        "a commit issues exactly one barrier, before its superblock slot"
     );
     FilesystemWrite::flush(&mut fs).expect("flush");
     assert_eq!(
         fs.block_mut().flushes,
-        1,
-        "a filesystem flush issues exactly one device cache flush"
+        3,
+        "a sync turns the map's clean stamp dirty durably, then persists its \
+         pages behind the barrier that also commits the published slot"
     );
 }
 

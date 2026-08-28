@@ -15,16 +15,16 @@
 //! write in the same window supersedes, and how the run lengths are
 //! distributed — plus the issue order a durability barrier is proved by.
 //!
-//! Three of the properties asserted here are measurements of the present, not
-//! endorsements of it, and each is the acceptance hook of a named later stage.
-//! A transaction rewrites the same metadata block once per data block it
-//! stores; sixteen calls writing one payload cost far more than one call
-//! writing it; every write carries exactly one block, because the single-block
-//! `write_block` is the driver's only device-write site while the read path
-//! already gathers runs. The baseline also records that a commit issues no
-//! barrier at all — the durability defect filed as `plans/OPEN-DEFECTS.md`
-//! D63. Each stage that closes one of these changes the figures below, in the
-//! change that earns it.
+//! Two of the properties asserted here are measurements of the present, not
+//! endorsements of it, and each is the acceptance hook of a named later stage:
+//! sixteen calls writing one payload still cost far more than one call writing
+//! it (the commit scheduler converges them), and every write still carries
+//! exactly one block, because the drain issues one command per staged block
+//! while the read path already gathers runs (the coalescer weights that
+//! histogram toward the staging window). The rest is the write-back cache's
+//! contract, held here: a transaction writes each block it touches once, and
+//! every commit issues exactly one barrier with nothing but the two copies of
+//! its publishing superblock slot after it.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -362,84 +362,87 @@ struct Row {
     cost: Cost,
 }
 
-/// What the write path costs the device today: one command per block, no
-/// barrier, and a transaction that rewrites its metadata once per data block it
-/// stores.
+/// What the write path costs the device: one command per block, one barrier per
+/// commit, and each block a transaction touches written exactly once.
 ///
 /// A change to any figure here is a real change in what a write costs a device,
 /// so the stage that improves one updates the row it improved, and a change
 /// that did not mean to touch the write path is told that it did.
 const BASELINE: &[Row] = &[
-    // 64 KiB in one call. 148 of the 746 blocks are the payload's own data
-    // records (443 content bytes fit a 512-byte block); the other 598 are
-    // metadata, and 294 of those are superseded before the transaction ends.
+    // 64 KiB in one call. 148 of the 158 blocks are the payload's own data
+    // records (443 content bytes fit a 512-byte block); the other ten are five
+    // mirrored metadata blocks — the extent and inode trees, the transaction
+    // root, and the ring slot — each written once however many times the
+    // transaction rewrote it.
     Row {
         workload: Workload::OneCall,
         block_size: 512,
-        amplification: Some(582),
+        amplification: Some(123),
         cost: Cost {
-            writes: 746,
-            blocks: 746,
-            distinct_blocks: 452,
-            bytes: 381_952,
-            barriers: 0,
+            writes: 158,
+            blocks: 158,
+            distinct_blocks: 158,
+            bytes: 80_896,
+            barriers: 1,
         },
     },
     // The same bytes in sixteen calls: sixteen transactions, each republishing
     // the spine, a fresh root, and a ring slot, and each rewriting the
-    // partially filled block the previous call left.
+    // partially filled block the previous call left. The churn that survives is
+    // therefore *between* transactions, which is what the commit scheduler
+    // closes; within each one, every block is still written once.
     Row {
         workload: Workload::Chunked,
         block_size: 512,
-        amplification: Some(924),
+        amplification: Some(261),
         cost: Cost {
-            writes: 1_183,
-            blocks: 1_183,
-            distinct_blocks: 331,
-            bytes: 605_696,
-            barriers: 0,
+            writes: 335,
+            blocks: 335,
+            distinct_blocks: 311,
+            bytes: 171_520,
+            barriers: 16,
         },
     },
     // A wider block holds a wider node, so the same payload maps through a far
-    // shallower tree and the command count falls eightfold — while the *bytes*
-    // barely move, which is what makes this amplification structural rather
-    // than granular.
+    // shallower tree and needs fewer commands — while the *bytes* rise, because
+    // 64 KiB of payload occupies whole 4 KiB blocks whose content capacity it
+    // cannot fill exactly.
     Row {
         workload: Workload::OneCall,
         block_size: 4096,
-        amplification: Some(556),
+        amplification: Some(156),
         cost: Cost {
-            writes: 89,
-            blocks: 89,
-            distinct_blocks: 57,
-            bytes: 364_544,
-            barriers: 0,
+            writes: 25,
+            blocks: 25,
+            distinct_blocks: 25,
+            bytes: 102_400,
+            barriers: 1,
         },
     },
     Row {
         workload: Workload::Chunked,
         block_size: 4096,
-        amplification: Some(1_775),
+        amplification: Some(1_000),
         cost: Cost {
-            writes: 284,
-            blocks: 284,
-            distinct_blocks: 140,
-            bytes: 1_163_264,
-            barriers: 0,
+            writes: 160,
+            blocks: 160,
+            distinct_blocks: 136,
+            bytes: 655_360,
+            barriers: 16,
         },
     },
-    // 34 bytes appended: one rewritten data block, and twelve blocks of tree,
+    // 34 bytes appended: one rewritten data block, and ten blocks of tree,
     // root, and ring slot to name it.
     Row {
         workload: Workload::SmallAppend,
         block_size: 512,
-        amplification: Some(19_576),
+        amplification: Some(16_564),
         cost: Cost {
-            writes: 13,
-            blocks: 13,
-            distinct_blocks: 13,
-            bytes: 6_656,
-            barriers: 0,
+            writes: 11,
+            blocks: 11,
+            distinct_blocks: 11,
+            bytes: 5_632,
+            barriers: 1,
         },
     },
     // The floor: what an operation carrying no payload at all still costs.
@@ -448,11 +451,11 @@ const BASELINE: &[Row] = &[
         block_size: 512,
         amplification: None,
         cost: Cost {
-            writes: 18,
-            blocks: 18,
+            writes: 14,
+            blocks: 14,
             distinct_blocks: 14,
-            bytes: 9_216,
-            barriers: 0,
+            bytes: 7_168,
+            barriers: 1,
         },
     },
 ];
@@ -500,19 +503,17 @@ fn every_device_write_carries_exactly_one_block() {
     }
 }
 
-/// A transaction rewrites its metadata far more often than it need: every stored
-/// block ends in a B-tree insert that copy-on-writes the covering leaf and sends
-/// it, and its mirror, to the device at once — so the same leaf, the same spine,
-/// and the same allocation-map page go out once per data block, and only the
-/// last version of each survives the transaction.
+/// A transaction writes each block it touches exactly once, however many times
+/// it rewrote it.
 ///
-/// Each data block is written once and is never superseded, being a fresh
-/// copy-on-write allocation, so the churn measured here is metadata to the
-/// block — the churn a transaction-scoped dirty set absorbs. The exact figures
-/// are the baseline's; what this asserts is that the churn outweighs the payload
-/// that provoked it.
+/// Every stored data block ends in a B-tree insert that copy-on-writes the
+/// covering leaf, and the transaction re-writes that leaf, the spine above it,
+/// the inode, and the root once per data block. Holding the sealed bytes in the
+/// dirty set and draining at the commit point collapses each of those to one
+/// device write, so the 148-data-block case pays ten metadata writes — five
+/// mirrored blocks — instead of the 598 the churn used to cost.
 #[test]
-fn a_transaction_rewrites_the_same_metadata_block_repeatedly() {
+fn a_transaction_writes_each_block_it_touches_exactly_once() {
     /// Data blocks 64 KiB of incompressible payload occupies at a 512-byte
     /// block size, cross-checked below against the driver's own accounting.
     const DATA_BLOCKS: u64 = 148;
@@ -531,17 +532,98 @@ fn a_transaction_rewrites_the_same_metadata_block_repeatedly() {
         "the payload must really occupy {DATA_BLOCKS} data blocks"
     );
 
+    assert_eq!(
+        cost.superseded(),
+        0,
+        "one transaction superseded {} of its own block writes: {cost:?}",
+        cost.superseded()
+    );
     assert!(
         cost.distinct_blocks > DATA_BLOCKS,
         "the payload's {DATA_BLOCKS} blocks must be mapped by metadata blocks \
          beyond them, not by nothing: {cost:?}"
     );
     assert!(
-        cost.superseded() > DATA_BLOCKS,
-        "the churn must outweigh the payload: {} superseded writes against \
-         {DATA_BLOCKS} data blocks",
-        cost.superseded()
+        cost.blocks - DATA_BLOCKS < DATA_BLOCKS / 8,
+        "the metadata a transaction writes must be a fraction of its payload, \
+         not a multiple: {} metadata blocks against {DATA_BLOCKS} data",
+        cost.blocks - DATA_BLOCKS
     );
+}
+
+/// The durability ordering: every commit issues exactly one barrier, and the
+/// only writes after it are the two copies of the superblock slot that
+/// publishes the transaction — the companion first, so the copy a mount prefers
+/// is the single write that makes the new state selectable.
+///
+/// This is the whole of the guarantee. A device with a volatile write cache may
+/// reorder as it likes on either side of the barrier and still cannot make the
+/// slot durable while a block beneath its root is not, which is the ordering
+/// that turns one power cut into a whole-volume loss.
+#[test]
+fn a_commit_barriers_once_with_only_the_publishing_slot_after_it() {
+    for row in BASELINE {
+        let (mut fs, ledger) = volume(row.block_size, DEVICE_BYTES);
+        row.workload.prepare(&mut fs);
+        ledger.borrow_mut().arm();
+        row.workload.run(&mut fs);
+        let held = ledger.borrow();
+        let barriers: Vec<usize> = held
+            .commands
+            .iter()
+            .enumerate()
+            .filter(|(_, command)| matches!(command, Command::Barrier))
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(
+            barriers.len(),
+            row.cost.barriers,
+            "{:?} at a {}-byte block size issued {} barriers",
+            row.workload,
+            row.block_size,
+            barriers.len()
+        );
+        for at in barriers {
+            let published = held.commands.get(at + 1..at + 3).unwrap_or_default();
+            let mirror = match published {
+                [Command::Write {
+                    lba: companion,
+                    blocks: 1,
+                }, Command::Write {
+                    lba: slot,
+                    blocks: 1,
+                }] => (*slot, *companion),
+                other => panic!(
+                    "{:?} at a {}-byte block size followed its barrier with \
+                     {other:?}",
+                    row.workload, row.block_size
+                ),
+            };
+            assert_eq!(
+                mirror.1,
+                mirror.0 + 1,
+                "the two writes after a barrier must be a mirror pair, \
+                 companion first: {mirror:?}"
+            );
+        }
+        // Every command from the last barrier on is accounted for by that
+        // pair, so nothing a published root names was still unwritten when
+        // the barrier was issued.
+        let last = held
+            .commands
+            .iter()
+            .rposition(|command| matches!(command, Command::Barrier))
+            .expect("a commit always barriers");
+        assert_eq!(
+            held.commands.len() - last - 1,
+            2,
+            "{:?} at a {}-byte block size wrote {} blocks after its final \
+             barrier",
+            row.workload,
+            row.block_size,
+            held.commands.len() - last - 1
+        );
+    }
 }
 
 /// Splitting one payload across sixteen calls costs half again the commands of

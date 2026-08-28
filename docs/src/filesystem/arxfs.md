@@ -861,17 +861,39 @@ in place**:
   selected; a crash mid-publish overwrites only the oldest ring slot, so
   the most recent committed root always survives — the mount lands on a
   whole transaction boundary, never a torn one.
-- **The barrier that makes the order real** (`arxfs-spec.md` §22, spec
-  stage 17 — **not yet implemented**). Issuing the writes in that order is
-  only half the guarantee: a device with a volatile write cache may commit
-  them to media in any order, so the slot can become durable while an
-  interior tree node beneath its root is not, and the mount then fails
-  closed. The rule is one `Block::flush()` after every block the
-  transaction publishes and before the slot itself — sufficient, because
-  the root is just another block that must be durable before the slot
-  naming it. Until that stage lands, an ordinary commit issues no barrier
-  and this ordering holds only on a device that does not reorder; only an
-  explicit `fs_sync` forces the device cache today.
+- **The barrier that makes the order real** (`arxfs-spec.md` §22).
+  Issuing the writes in that order is only half the guarantee: a device
+  with a volatile write cache may commit them to media in any order, so
+  the slot could become durable while an interior tree node beneath its
+  root is not, and the mount would then fail closed. Every commit
+  therefore drains the blocks it wrote, issues one `Block::flush()`, and
+  only then writes the slot — one barrier is sufficient, because the root
+  is just another block that must be durable before the slot naming it.
+  When a commit returns, the only blocks a device may still hold in its
+  cache are that slot's two copies, so a power cut at any instant selects
+  the prior committed state or the new one, both whole. A second barrier
+  is issued only for an explicit `fs_sync`, where the commit itself must
+  have reached media before the call returns.
+- **The commit point is one block write.** The slot's two mirror copies go
+  out companion-first, so the *primary* — the copy a mount prefers — is the
+  last write of the commit and a half-written pair publishes nothing.
+  Anything that fails before it rolls the transaction back. A failure *of*
+  those writes leaves publication genuinely unknown, since the device may
+  have taken one copy: the handle forces itself read-only rather than
+  guessing, freeing nothing, so whichever root the device holds survives
+  for the next mount to read.
+- **One dirty layer, beneath the one device-write seam.** A transaction's
+  sealed blocks wait in a physical-block-keyed dirty set until that drain,
+  so the repeated copy-on-writes of one B-tree node cost one device write
+  rather than one each — measured at 746 device writes down to 158 for a
+  64 KiB write on a 512-byte volume. The set is read-through, so a
+  read-after-write inside the transaction sees the staged bytes; it drops a
+  block the transaction frees again unwritten; and it holds nothing between
+  operations, so its footprint is the operation's working set and never the
+  volume's. Blocks that are not part of a transaction's published state —
+  the rebuildable allocation-map region, the transient verification scratch
+  arrays, an idempotent mirror copy-repair — go straight to the device,
+  having nothing to be ordered behind the barrier.
 
 ## Operations
 
@@ -1078,14 +1100,16 @@ driver issues it, in order — each write's start block and run length, and each
 cache barrier — and a baseline asserts, exactly, what a single-call 64 KiB
 write, the same bytes in sixteen calls, a 34-byte append, and a metadata-only
 create each cost at both block sizes: the commands, the blocks they carry, how
-many of those a later write in the same transaction supersedes, the bytes, and
-the write amplification. Three of its assertions are the acceptance hooks of
-the write-back stages and record the present rather than a goal — every write
-carries exactly one block, a transaction rewrites its metadata once per data
-block it stores, and sixteen calls cost half again one call's commands — as does
-the barrier count, which is zero until the commit barrier lands. The same
-workloads on a 100 TiB volume produce an identical command stream, so the
-figures are properties of the write path and not of the device measured on.
+many of those a later write supersedes, the bytes, and the write amplification.
+It also holds the write-back cache's contract — a transaction writes each block
+it touches exactly once, and every commit issues exactly one barrier with
+nothing but the two copies of its publishing slot after it. Two assertions
+record the present rather than a goal, each the acceptance hook of a later
+stage: every write still carries exactly one block (the coalescer weights that
+histogram toward the staging window) and sixteen calls still cost far more than
+one (the commit scheduler converges them). The same workloads on a 100 TiB
+volume produce an identical command stream, so the figures are properties of
+the write path and not of the device measured on.
 
 The `pjdfstest`-equivalent POSIX suite remains tracked in
 `plans/WIRING.md`.
