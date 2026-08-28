@@ -25,8 +25,9 @@ iteration:
 - **Extremes (fail closed, §5.4 / §2.9).** Fills the data region until
   allocation reports `NoSpace` (then frees a file and confirms
   allocation resumes — `NoSpace` is not terminal), and asserts a
-  duplicate create and a non-empty `rmdir` report `Busy` while an empty
-  or oversize name reports `LengthOutOfRange`. Never a panic, never
+  duplicate create reports `AlreadyExists` and a non-empty `rmdir`
+  reports `DirectoryNotEmpty`, while an empty or oversize name reports
+  `LengthOutOfRange`. Never a panic, never
   silent corruption.
 
 The exerciser is deterministic: a per-iteration seed drives the content
@@ -56,7 +57,8 @@ launch**:
 - Periodically (and once at the end) the body flushes, remounts, and
   re-verifies the **whole** volume: every file's size and bytes and
   every directory's listing must match the model after a fresh `open()`.
-- Fail-closed negative probes (`Busy`, `LengthOutOfRange`, `NotFound`)
+- Fail-closed negative probes (`AlreadyExists`, `DirectoryNotEmpty`,
+  `LengthOutOfRange`, `NotFound`)
   are interleaved and must not mutate state (§5.4 / §2.9).
 
 The target's **start** seed is drawn from platform entropy (wall-clock

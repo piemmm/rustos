@@ -16,6 +16,7 @@ use tairix_abi::driver::filesystem::{
 use tairix_abi::driver::{DriverError, DriverHandle};
 use tairix_abi::fs::{OpenFlags, RealpathMode};
 use tairix_abi::time::Time64;
+use tairix_abi::Errno;
 use tairix_caps::CapabilitySet;
 use tairix_kernel_sec::{GroupId, UserId};
 
@@ -2423,4 +2424,199 @@ fn secured_rename_over_a_gated_destination_needs_the_capability() {
         vfs.rename_via_secured(&admin, &src, &dst, &mut fs),
         Err(VfsError::PermissionDenied)
     );
+}
+
+/// An empty writable volume whose every write operation answers one chosen
+/// [`DriverError`], so a test can observe what the VFS makes of a *driver's*
+/// refusal rather than of its own pre-check.
+///
+/// The read surface reports a bare root holding nothing, so each pre-check
+/// passes and the call reaches the driver.
+struct RefusingFs {
+    refusal: DriverError,
+}
+
+const REFUSING_ROOT: u64 = 1;
+
+impl FilesystemRead for RefusingFs {
+    fn root(&self) -> NodeId {
+        NodeId::from_raw(REFUSING_ROOT)
+    }
+
+    fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
+        if node.raw() != REFUSING_ROOT {
+            return Err(DriverError::NotFound);
+        }
+        Ok(NodeInfo {
+            kind: NodeKind::Directory,
+            nlink: 2,
+            size: 0,
+            allocated: 0,
+            times: MOCK_TIMES,
+        })
+    }
+
+    fn lookup(&mut self, _dir: NodeId, _name: &[u8]) -> Result<NodeId, DriverError> {
+        Err(DriverError::NotFound)
+    }
+
+    fn read_at(
+        &mut self,
+        _file: NodeId,
+        _offset: u64,
+        _buf: &mut [u8],
+    ) -> Result<usize, DriverError> {
+        Err(DriverError::NotFound)
+    }
+
+    fn read_dir(
+        &mut self,
+        _dir: NodeId,
+        _cursor: u64,
+        _out: &mut [u8],
+    ) -> Result<Option<DirEntry>, DriverError> {
+        Ok(None)
+    }
+}
+
+impl FilesystemWrite for RefusingFs {
+    fn create(
+        &mut self,
+        _dir: NodeId,
+        _name: &[u8],
+        _kind: NodeKind,
+    ) -> Result<NodeId, DriverError> {
+        Err(self.refusal)
+    }
+
+    fn create_link(
+        &mut self,
+        _dir: NodeId,
+        _name: &[u8],
+        _target: &[u8],
+    ) -> Result<NodeId, DriverError> {
+        Err(self.refusal)
+    }
+
+    fn write_at(
+        &mut self,
+        _dir: NodeId,
+        _name: &[u8],
+        _offset: u64,
+        _data: &[u8],
+    ) -> Result<usize, DriverError> {
+        Err(self.refusal)
+    }
+
+    fn truncate(&mut self, _dir: NodeId, _name: &[u8], _size: u64) -> Result<(), DriverError> {
+        Err(self.refusal)
+    }
+
+    fn remove(&mut self, _dir: NodeId, _name: &[u8]) -> Result<(), DriverError> {
+        Err(self.refusal)
+    }
+
+    fn rename(
+        &mut self,
+        _src_dir: NodeId,
+        _src_name: &[u8],
+        _dst_dir: NodeId,
+        _dst_name: &[u8],
+    ) -> Result<(), DriverError> {
+        Err(self.refusal)
+    }
+
+    fn flush(&mut self) -> Result<(), DriverError> {
+        Ok(())
+    }
+}
+
+/// A driver-reported taken name reaches the caller as a taken name, whatever
+/// operation met it.
+///
+/// The VFS pre-checks the name and answers `AlreadyExists` itself on the
+/// ordinary path, so this is the window the pre-check cannot cover: a name
+/// that appears between the check and the driver call. It used to surface as
+/// an I/O error on `create` (and as `EWOULDBLOCK` to anything reaching the
+/// driver without the VFS's per-operation mapping), because one driver value
+/// carried three meanings.
+#[test]
+fn a_driver_reported_taken_name_is_already_exists_on_every_surface() {
+    let vfs = root_backed_rw_vfs();
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let mut fs = RefusingFs {
+        refusal: DriverError::AlreadyExists,
+    };
+
+    assert_eq!(
+        vfs.create_via(&admin, &p("/appears"), &mut fs),
+        Err(VfsError::AlreadyExists)
+    );
+    assert_eq!(
+        vfs.mkdir_via(&admin, &p("/appears"), &mut fs),
+        Err(VfsError::AlreadyExists)
+    );
+    assert_eq!(
+        vfs.symlink_via(&admin, &p("/appears"), &mut fs, "/target"),
+        Err(VfsError::AlreadyExists)
+    );
+}
+
+/// A populated directory and a self-descending move are each reported as
+/// themselves, so `rmdir` and `mv` can tell them apart.
+///
+/// Rename has no VFS-side pre-check for either, so both answers here come
+/// from the driver. The move under itself used to arrive as `NotEmpty` —
+/// advice to empty a destination that emptying could never make lawful.
+#[test]
+fn a_driver_reported_structural_refusal_keeps_its_own_class() {
+    let vfs = root_backed_rw_vfs();
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+
+    let mut populated = RwMockFs::new();
+    vfs.mkdir_via(&admin, &p("/dir"), &mut populated)
+        .expect("mkdir");
+    vfs.mkdir_via(&admin, &p("/dir/inner"), &mut populated)
+        .expect("mkdir inner");
+    vfs.mkdir_via(&admin, &p("/spare"), &mut populated)
+        .expect("mkdir spare");
+    assert_eq!(
+        vfs.remove_via(&admin, &p("/dir"), &mut populated, true),
+        Err(VfsError::NotEmpty)
+    );
+    assert_eq!(
+        vfs.rename_via(&admin, &p("/spare"), &p("/dir"), &mut populated),
+        Err(VfsError::NotEmpty)
+    );
+
+    // Moving a directory under itself can never be made lawful, so it is not
+    // the emptiable `NotEmpty` and not a retryable transient.
+    assert_eq!(
+        vfs.rename_via(&admin, &p("/dir"), &p("/dir/inner/self"), &mut populated),
+        Err(VfsError::DirectoryCycle)
+    );
+    assert_eq!(VfsError::DirectoryCycle.to_errno(), Errno::OutOfRange);
+}
+
+/// A genuinely transient driver refusal keeps meaning "retry": it is not
+/// read as any of the structural conflicts that used to share its value.
+#[test]
+fn a_driver_reported_transient_is_never_read_as_a_name_conflict() {
+    let vfs = root_backed_rw_vfs();
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let mut fs = RefusingFs {
+        refusal: DriverError::Busy,
+    };
+
+    for outcome in [
+        vfs.create_via(&admin, &p("/x"), &mut fs),
+        vfs.mkdir_via(&admin, &p("/x"), &mut fs),
+        vfs.symlink_via(&admin, &p("/x"), &mut fs, "/target"),
+    ] {
+        assert_eq!(outcome, Err(VfsError::Io));
+    }
+    assert_eq!(DriverError::Busy.as_errno(), Errno::WouldBlock);
 }

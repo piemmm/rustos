@@ -228,7 +228,8 @@ capability gate, the `FilesystemSecurity::security` record for a file
 and a directory, and the write surface: create + multi-block write
 round-trips (persisting across a remount), duplicate / invalid-name /
 non-directory rejection, sparse extension, `truncate` shrink-then-grow,
-directory creation with `.`/`..` and removal (empty vs. `Busy`), inode
+directory creation with `.`/`..` and removal (empty vs.
+`DirectoryNotEmpty`), inode
 reuse after `remove`, the `write_at`/`truncate` directory and
 not-found guards, free-inode exhaustion, the fail-closed refusal of
 mutation on an unsupported (`checksum_seed`) feature set, the depth-0 →

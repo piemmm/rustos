@@ -269,7 +269,7 @@ pub fn exercise<F: SoakFs>(device_bytes: u64, seed: u64) -> Result<(), String> {
     // --- Fail-closed extremes. ---
     want_err(
         fs.create(root, b"alpha", NodeKind::RegularFile).err(),
-        DriverError::Busy,
+        DriverError::AlreadyExists,
         "duplicate create",
         seed,
     )?;
@@ -288,7 +288,7 @@ pub fn exercise<F: SoakFs>(device_bytes: u64, seed: u64) -> Result<(), String> {
     )?;
     want_err(
         fs.remove(root, b"sub").err(),
-        DriverError::Busy,
+        DriverError::DirectoryNotEmpty,
         "remove non-empty dir",
         seed,
     )?;

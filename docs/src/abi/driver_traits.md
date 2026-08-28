@@ -198,11 +198,19 @@ to every successfully-loaded driver. The all-zero value is reserved
 
 ### DriverError
 
-`#[repr(i32)] #[non_exhaustive] enum DriverError`. Twelve variants
-covering every failure path the trait surface can produce. Numeric
-values are frozen at `abi-v1` and disjoint from
-[`tairix_abi::Errno`](../lib/abi.md); use
-`DriverError::as_errno` when bridging into a syscall result.
+`#[repr(i32)] #[non_exhaustive] enum DriverError`, one variant per failure
+path the trait surface can produce. Numeric values are dense from 1, disjoint
+from [`tairix_abi::Errno`](../lib/abi.md), and freeze on the first release;
+use `DriverError::as_errno` when bridging into a syscall result.
+
+Each *distinguishable* refusal carries its own value, so no consumer has to
+infer which one was meant from the call site it came through. On the
+filesystem surface that means a taken name is `AlreadyExists`, a populated
+directory is `DirectoryNotEmpty`, and a move that would make a directory its
+own descendant is `DirectoryCycle`; `Busy` is reserved for the retryable
+transient it documents. The generated C view names every value
+(`TAIRIX_DRIVER_ERROR_*`), and a table test pins the numbering dense so a new
+variant cannot be dropped from it.
 
 ### DriverManifest
 

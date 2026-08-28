@@ -245,53 +245,39 @@ enum Walk {
     Leaf(Place),
 }
 
-/// Maps a [`DriverError`] from the read surface onto the VFS error type.
+/// Maps a [`DriverError`] onto the VFS error type.
 ///
-/// Only the errors the [`FilesystemRead`] surface documents can occur here:
-/// [`DriverError::NotFound`] for a missing child, [`DriverError::Unsupported`]
-/// for a non-directory used as one, and [`DriverError::BufferTooSmall`] /
-/// [`DriverError::LengthOutOfRange`] for an over-long on-disk name. Anything
-/// else (notably [`DriverError::DeviceFault`]) is an unrecoverable backing
-/// fault and surfaces as [`VfsError::Io`].
+/// Every structural refusal a driver can report carries its own code, so
+/// this mapping is total and the same wherever a driver call is made: a
+/// taken name is [`VfsError::AlreadyExists`] whichever operation met it, a
+/// populated directory is [`VfsError::NotEmpty`], and a move that would make
+/// a directory its own descendant is [`VfsError::DirectoryCycle`]. Only an
+/// unrecoverable backing fault reaches [`VfsError::Io`].
 const fn map_driver_error(error: DriverError) -> VfsError {
     match error {
         DriverError::NotFound => VfsError::NotFound,
         DriverError::Unsupported => VfsError::NotADirectory,
         DriverError::BufferTooSmall | DriverError::LengthOutOfRange => VfsError::InvalidPath,
+        DriverError::AlreadyExists => VfsError::AlreadyExists,
+        DriverError::DirectoryNotEmpty => VfsError::NotEmpty,
+        DriverError::DirectoryCycle => VfsError::DirectoryCycle,
+        // A fixed on-disk count, exhausted: reported as itself so a caller
+        // is not told to free space that would not help.
+        DriverError::TooManyLinks => VfsError::TooManyLinks,
         _ => VfsError::Io,
-    }
-}
-
-/// Maps a [`DriverError`] from a rename onto the VFS error type.
-///
-/// Rename adds [`DriverError::Busy`] to the errors the write surface can
-/// report: the driver returns it for a non-empty directory destination and
-/// for a refused directory-into-its-own-subtree move. Both are reported as
-/// [`VfsError::NotEmpty`] (the closest structural refusal); every other
-/// error maps as for any write ([`map_driver_error`]).
-const fn map_rename_error(error: DriverError) -> VfsError {
-    match error {
-        DriverError::Busy => VfsError::NotEmpty,
-        other => map_driver_error(other),
     }
 }
 
 /// Maps a [`DriverError`] from a link operation onto the VFS error type.
 ///
-/// A format with no link object type answers [`DriverError::Unsupported`],
-/// and a caller must be able to tell that permanent format limit from the
-/// path mapping's "a file was used as a directory": it becomes
-/// [`VfsError::NotSupported`], the refusal no retry can clear. Every other
-/// error maps as for any read ([`map_driver_error`]).
+/// The one code whose meaning is genuinely surface-specific: on the link
+/// surface [`DriverError::Unsupported`] is "this format stores no such
+/// object", the permanent limit no retry clears, where on a path walk it is
+/// "a file was used as a directory". Everything else maps as
+/// [`map_driver_error`].
 const fn map_link_error(error: DriverError) -> VfsError {
     match error {
         DriverError::Unsupported => VfsError::NotSupported,
-        // The driver owns the name space it is being asked to add to, so a
-        // name it reports as taken is a taken name, not a device fault.
-        DriverError::Busy => VfsError::AlreadyExists,
-        // A fixed on-disk count, exhausted: reported as itself so a caller
-        // is not told to free space that would not help.
-        DriverError::TooManyLinks => VfsError::TooManyLinks,
         other => map_driver_error(other),
     }
 }
@@ -1534,8 +1520,9 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
         dir_only: bool,
     ) -> Result<(), VfsError> {
         let place = self.place_for_write(cred, components, FinalLink::Keep)?;
-        // The walk distinguishes NotFound, and an empty-directory check here
-        // reports NotEmpty rather than the driver's generic Busy.
+        // Checked here so the walk's own NotFound and NotEmpty are answered
+        // without a driver round trip; the driver still checks, and its
+        // refusal carries the same class.
         let (node, info, meta) = place.found.ok_or(VfsError::NotFound)?;
         Self::authorize_name_mutation(cred, Some(&meta))?;
         if info.kind == NodeKind::Directory {
@@ -1577,8 +1564,9 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
     /// * [`VfsError::InvalidPath`] if either path is empty (names the mount
     ///   point itself).
     /// * [`VfsError::NotFound`] if the source does not exist.
-    /// * [`VfsError::NotEmpty`] if the destination is a non-empty directory,
-    ///   or the move would place a directory inside its own subtree.
+    /// * [`VfsError::NotEmpty`] if the destination is a non-empty directory.
+    /// * [`VfsError::DirectoryCycle`] if the move would place a directory
+    ///   inside its own subtree.
     /// * [`VfsError::NotADirectory`] on a kind-incompatible replacement.
     /// * [`VfsError::PermissionDenied`] — including when either end carries a
     ///   capability gate the caller does not hold.
@@ -1610,7 +1598,7 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
                 dst.parent,
                 dst.name.as_bytes(),
             )
-            .map_err(map_rename_error)
+            .map_err(map_driver_error)
     }
 }
 

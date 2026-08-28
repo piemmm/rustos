@@ -94,6 +94,15 @@ every directory descended into. An unrecoverable driver fault, or a
 directory entry whose on-disk name is not valid UTF-8, surfaces as
 `VfsError::Io`.
 
+A driver's *structural* refusals are carried across unchanged rather than
+re-derived per call site: `DriverError::AlreadyExists` is
+`VfsError::AlreadyExists` (`EEXIST`), `DriverError::DirectoryNotEmpty` is
+`VfsError::NotEmpty` (`ENOTEMPTY`), and `DriverError::DirectoryCycle` — a
+rename that would make a directory its own descendant — is
+`VfsError::DirectoryCycle`, distinct because emptying the destination can
+never make that move lawful. One mapping serves every operation, so the
+answer a caller sees does not depend on which one met the conflict.
+
 Where that `Metadata` comes from is the one place the two policies differ:
 
 - The `*_via` methods apply the **mount point's** `Metadata` as a uniform

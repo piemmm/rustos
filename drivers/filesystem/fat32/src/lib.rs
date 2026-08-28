@@ -1724,7 +1724,7 @@ impl<B: Block> Fat32<B> {
         }
         let dir_cluster = node_cluster(dir);
         if self.find_child(dir_cluster, name)?.is_some() {
-            return Err(DriverError::Busy);
+            return Err(DriverError::AlreadyExists);
         }
 
         let is_dir = matches!(kind, NodeKind::Directory);
@@ -1897,7 +1897,7 @@ impl<B: Block> Fat32<B> {
                 slot: 0,
             };
             if self.next_entry(&mut child)?.is_some() {
-                return Err(DriverError::Busy);
+                return Err(DriverError::DirectoryNotEmpty);
             }
         }
         if entry.cluster >= 2 {
@@ -2009,7 +2009,7 @@ impl<B: Block> Fat32<B> {
 
         // Refuse moving a directory into itself or its own subtree.
         if moving_dir && self.is_subdir_of(dst_cluster, src_entry.cluster)? {
-            return Err(DriverError::Busy);
+            return Err(DriverError::DirectoryCycle);
         }
 
         // Replace an existing destination, subject to kind compatibility.
@@ -2024,7 +2024,7 @@ impl<B: Block> Fat32<B> {
                     slot: 0,
                 };
                 if self.next_entry(&mut cur)?.is_some() {
-                    return Err(DriverError::Busy);
+                    return Err(DriverError::DirectoryNotEmpty);
                 }
             }
             if d.cluster >= 2 {

@@ -933,7 +933,8 @@ in place**:
 addressing a target as a `(dir, name)` pair. `write_at` extends files
 (zero-filling sparse gaps), `truncate` shrinks (freeing the tail and
 copy-on-write zeroing the partial last block) or grows, and `remove`
-refuses a non-empty directory with `Busy`. A `NodeId` is the inode index;
+refuses a non-empty directory with `DirectoryNotEmpty`. A `NodeId` is the
+inode index;
 node identity is stable across a remount. The driver additionally exposes
 `ARXFS::reflink(dir, src, dst)` — a copy-on-write clone that shares the
 source's data chunks until a side is written (see *Deduplication*) — as an
@@ -986,7 +987,8 @@ contiguous write collapsing to a single extent; the allocation-map rebuild
 matching the authoritative live set; `truncate` keeping the surviving
 prefix; `remove` reclaiming space so a full volume can allocate again; the
 fail-closed extremes
-(`Busy`/`LengthOutOfRange`/`NotFound`); the Stage-4 encryption acceptance
+(`AlreadyExists`/`DirectoryNotEmpty`/`LengthOutOfRange`/`NotFound`); the
+Stage-4 encryption acceptance
 tests — a **wrong key refusing the mount** (`PermissionDenied`, never a
 panic) while the right key still mounts, a distinctive filename and file
 content being **absent from the raw on-disk bytes** (no plaintext at rest),

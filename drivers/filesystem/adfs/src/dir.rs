@@ -341,11 +341,11 @@ impl FixedDir {
     ///
     /// # Errors
     ///
-    /// * [`DriverError::Busy`] if a same-named entry exists.
+    /// * [`DriverError::AlreadyExists`] if a same-named entry exists.
     /// * [`DriverError::NoSpace`] if the directory is full.
     pub fn insert(&mut self, object: &Object) -> Result<(), DriverError> {
         if self.find(object.name()).is_some() {
-            return Err(DriverError::Busy);
+            return Err(DriverError::AlreadyExists);
         }
         let count = self.count();
         if count == self.format.capacity() {

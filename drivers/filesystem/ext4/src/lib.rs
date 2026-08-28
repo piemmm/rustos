@@ -2556,7 +2556,7 @@ impl<B: Block> Ext4<B> {
         let moving_dir = le16(&src_raw, 0) & S_IFMT == S_IFDIR;
 
         if moving_dir && self.is_subdir_of(dst_dir_ino, src_ino)? {
-            return Err(DriverError::Busy);
+            return Err(DriverError::DirectoryCycle);
         }
 
         let dst_existing = match self.lookup_child(dst_dir_ino, dst_name) {
@@ -2575,7 +2575,7 @@ impl<B: Block> Ext4<B> {
                 return Err(DriverError::Unsupported);
             }
             if dst_is_dir && !self.dir_is_empty(dst_ino)? {
-                return Err(DriverError::Busy);
+                return Err(DriverError::DirectoryNotEmpty);
             }
             self.drop_one_name(dst_ino, &mut dst_raw, dst_is_dir)?;
             self.remove_dirent(dst_dir_ino, dst_name)?;
@@ -3140,7 +3140,7 @@ impl<B: Block> FilesystemWrite for Ext4<B> {
             .find_entry(&dir_inode, DirQuery::ByName(name), &mut scratch)?
             .is_some()
         {
-            return Err(DriverError::Busy);
+            return Err(DriverError::AlreadyExists);
         }
 
         let is_dir = kind == NodeKind::Directory;
@@ -3290,7 +3290,7 @@ impl<B: Block> FilesystemWrite for Ext4<B> {
         let mode = le16(&raw, 0);
         let is_dir = mode & S_IFMT == S_IFDIR;
         if is_dir && !self.dir_is_empty(child)? {
-            return Err(DriverError::Busy);
+            return Err(DriverError::DirectoryNotEmpty);
         }
         self.drop_one_name(child, &mut raw, is_dir)?;
         self.remove_dirent(dir_ino, name)?;

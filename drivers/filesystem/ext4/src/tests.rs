@@ -702,7 +702,7 @@ fn create_rejects_a_duplicate_name() {
     let root = fs.root();
     assert_eq!(
         fs.create(root, b"hello.txt", NodeKind::RegularFile),
-        Err(DriverError::Busy)
+        Err(DriverError::AlreadyExists)
     );
 }
 
@@ -944,7 +944,7 @@ fn remove_a_file_frees_its_inode_for_reuse() {
 fn remove_a_non_empty_directory_is_busy() {
     let mut fs = mount();
     let root = fs.root();
-    assert_eq!(fs.remove(root, b"sub"), Err(DriverError::Busy));
+    assert_eq!(fs.remove(root, b"sub"), Err(DriverError::DirectoryNotEmpty));
 }
 
 #[test]
@@ -1643,7 +1643,10 @@ fn rename_refuses_kind_mismatch_and_nonempty_dir_target() {
     );
     let d2 = fs.create(root, b"d2", NodeKind::Directory).unwrap();
     fs.create(d2, b"child", NodeKind::RegularFile).unwrap();
-    assert_eq!(fs.rename(root, b"d", root, b"d2"), Err(DriverError::Busy));
+    assert_eq!(
+        fs.rename(root, b"d", root, b"d2"),
+        Err(DriverError::DirectoryNotEmpty)
+    );
 }
 
 #[test]
@@ -1678,8 +1681,14 @@ fn rename_refuses_moving_directory_into_its_subtree() {
     let root = fs.root();
     let a = fs.create(root, b"a", NodeKind::Directory).unwrap();
     let b = fs.create(a, b"b", NodeKind::Directory).unwrap();
-    assert_eq!(fs.rename(root, b"a", b, b"a"), Err(DriverError::Busy));
-    assert_eq!(fs.rename(root, b"a", a, b"x"), Err(DriverError::Busy));
+    assert_eq!(
+        fs.rename(root, b"a", b, b"a"),
+        Err(DriverError::DirectoryCycle)
+    );
+    assert_eq!(
+        fs.rename(root, b"a", a, b"x"),
+        Err(DriverError::DirectoryCycle)
+    );
 }
 
 #[test]

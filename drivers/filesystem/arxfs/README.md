@@ -542,7 +542,8 @@ split/borrow/merge across many inodes, a many-extent file that splits its
 extent tree, a contiguous write collapsing to one extent, the free-space
 rebuild matching the authoritative live set, `truncate` prefix survival,
 `remove` reclaiming space after `NoSpace`, the fail-closed
-extremes (`Busy`/`LengthOutOfRange`/`NotFound`), the per-inode security
+extremes (`AlreadyExists`/`DirectoryNotEmpty`/`LengthOutOfRange`/
+`NotFound`), the per-inode security
 record and four §21 timestamps (incl. pre-1970 / far-future) round-tripping
 across a remount, superblock-ring generation selection, the Stage-4
 encryption acceptance tests (wrong key refuses the mount while the right key

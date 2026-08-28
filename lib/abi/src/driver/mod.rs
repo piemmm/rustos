@@ -338,6 +338,13 @@ pub enum DriverError {
     /// The underlying hardware reported an unrecoverable fault.
     DeviceFault = 10,
     /// The driver is busy; the caller may retry after backoff.
+    ///
+    /// A *transient* refusal only — a full ring, a device mid-reset, a
+    /// resource another holder still owns. A permanent structural refusal
+    /// carries its own code ([`AlreadyExists`](Self::AlreadyExists),
+    /// [`DirectoryNotEmpty`](Self::DirectoryNotEmpty),
+    /// [`DirectoryCycle`](Self::DirectoryCycle)) so a caller is never told to
+    /// retry something no retry can clear. Maps to [`Errno::WouldBlock`].
     Busy = 11,
     /// The requested operation has no implementation in this build.
     NotImplemented = 12,
@@ -399,6 +406,33 @@ pub enum DriverError {
     /// [`NoSpace`](Self::NoSpace): the volume may be almost empty and
     /// freeing blocks cannot help. Maps to [`Errno::TooManyLinks`].
     TooManyLinks = 18,
+    /// The name the operation would create is already taken in its
+    /// directory.
+    ///
+    /// The driver owns the name space it was asked to add to, so a name it
+    /// reports as taken is a taken name — not a transient
+    /// ([`Busy`](Self::Busy)) and not a backing fault. Distinct so a
+    /// coreutils-faithful `mkdir`/`ln` reports `EEXIST` no matter which
+    /// caller reached the driver. Maps to [`Errno::AlreadyExists`].
+    AlreadyExists = 19,
+    /// A directory still holds entries, so the operation that would destroy
+    /// it is refused.
+    ///
+    /// Removal never recurses implicitly and a rename replaces only an
+    /// *empty* directory, so a populated one fails closed here. Maps to
+    /// [`Errno::NotEmpty`], which `rmdir --ignore-fail-on-non-empty`
+    /// tolerates and no other condition may be confused with.
+    DirectoryNotEmpty = 20,
+    /// A rename would make a directory its own descendant.
+    ///
+    /// Moving a directory under itself detaches the resulting cycle from
+    /// the tree, so the driver — which owns the invariant that its tree
+    /// stays a tree — refuses it. Distinct from
+    /// [`DirectoryNotEmpty`](Self::DirectoryNotEmpty), which a caller can
+    /// clear by emptying the destination: no state change can make this
+    /// move lawful. `abi-v1` has no dedicated `EINVAL`, so it maps to
+    /// [`Errno::OutOfRange`] like every other malformed-argument refusal.
+    DirectoryCycle = 21,
 }
 
 impl DriverError {
@@ -438,6 +472,9 @@ impl DriverError {
             16 => Ok(Self::MediumError),
             17 => Ok(Self::DeviceOffline),
             18 => Ok(Self::TooManyLinks),
+            19 => Ok(Self::AlreadyExists),
+            20 => Ok(Self::DirectoryNotEmpty),
+            21 => Ok(Self::DirectoryCycle),
             _ => Err(Self::OutOfRange),
         }
     }
@@ -454,7 +491,9 @@ impl DriverError {
             Self::BadMagic => Errno::BadMagic,
             Self::AbiVersionUnsupported => Errno::AbiVersionUnsupported,
             Self::LengthOutOfRange => Errno::LengthOutOfRange,
-            Self::OutOfRange => Errno::OutOfRange,
+            // `abi-v1` has no `EINVAL`, so both malformed-argument refusals
+            // report the out-of-range code.
+            Self::OutOfRange | Self::DirectoryCycle => Errno::OutOfRange,
             Self::PermissionDenied => Errno::PermissionDenied,
             Self::NotFound => Errno::NotFound,
             Self::SignatureInvalid => Errno::SignatureInvalid,
@@ -464,6 +503,8 @@ impl DriverError {
             Self::MediumError => Errno::MediumError,
             Self::DeviceOffline => Errno::DeviceOffline,
             Self::TooManyLinks => Errno::TooManyLinks,
+            Self::AlreadyExists => Errno::AlreadyExists,
+            Self::DirectoryNotEmpty => Errno::NotEmpty,
             // A faulted device is its own client-visible condition; a busy
             // one is retryable (`WouldBlock`); an unsupported operation
             // reads as not implemented.
@@ -1225,6 +1266,10 @@ mod tests {
         assert_eq!(DriverError::EndpointStalled.as_i32(), 15);
         assert_eq!(DriverError::MediumError.as_i32(), 16);
         assert_eq!(DriverError::DeviceOffline.as_i32(), 17);
+        assert_eq!(DriverError::TooManyLinks.as_i32(), 18);
+        assert_eq!(DriverError::AlreadyExists.as_i32(), 19);
+        assert_eq!(DriverError::DirectoryNotEmpty.as_i32(), 20);
+        assert_eq!(DriverError::DirectoryCycle.as_i32(), 21);
     }
 
     #[test]
@@ -1245,6 +1290,12 @@ mod tests {
         );
         assert_eq!(DriverError::MediumError.as_errno(), Errno::MediumError);
         assert_eq!(DriverError::DeviceOffline.as_errno(), Errno::DeviceOffline);
+        assert_eq!(DriverError::TooManyLinks.as_errno(), Errno::TooManyLinks);
+        // The three structural filesystem conflicts each reach user space as
+        // themselves, so no consumer has to guess which one `Busy` meant.
+        assert_eq!(DriverError::AlreadyExists.as_errno(), Errno::AlreadyExists);
+        assert_eq!(DriverError::DirectoryNotEmpty.as_errno(), Errno::NotEmpty);
+        assert_eq!(DriverError::DirectoryCycle.as_errno(), Errno::OutOfRange);
     }
 
     #[test]
@@ -1268,12 +1319,15 @@ mod tests {
             DriverError::MediumError,
             DriverError::DeviceOffline,
             DriverError::TooManyLinks,
+            DriverError::AlreadyExists,
+            DriverError::DirectoryNotEmpty,
+            DriverError::DirectoryCycle,
         ];
         for err in all {
             assert_eq!(DriverError::from_i32(err.as_i32()), Ok(err));
         }
         assert_eq!(DriverError::from_i32(0), Err(DriverError::OutOfRange));
-        assert_eq!(DriverError::from_i32(19), Err(DriverError::OutOfRange));
+        assert_eq!(DriverError::from_i32(22), Err(DriverError::OutOfRange));
         assert_eq!(DriverError::from_i32(-1), Err(DriverError::OutOfRange));
     }
 

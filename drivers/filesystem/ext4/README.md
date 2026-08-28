@@ -226,7 +226,8 @@ allocation-free in-memory ext4 image (block size 1024, one block group,
 - **Writing**: create + multi-block `write_at` round-tripping across a
   remount; duplicate / invalid-name / non-directory `create` rejection;
   sparse extension past EOF; `truncate` shrink-then-grow; directory
-  creation (`.`/`..`) and removal (empty vs. `Busy`); inode reuse after
+  creation (`.`/`..`) and removal (empty vs. `DirectoryNotEmpty`); inode
+  reuse after
   `remove`; `write_at`/`truncate` directory and not-found guards;
   free-inode exhaustion; the fail-closed refusal of mutation on an
   unsupported (`checksum_seed`) feature set; and the depth-0 → depth-1

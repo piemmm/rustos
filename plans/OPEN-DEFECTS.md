@@ -93,31 +93,10 @@ The open items, in priority order:
   released only by unrelated pipe traffic and, once the broadcast was gone,
   never; `Pty::purge_session` now wakes both rings' space itself, where no
   caller can pick the wrong queue.
-- **D66 — `DriverError::Busy` carries three unrelated meanings, and the generic
-  mapping turns one of them into an I/O error — OPEN.** Noticed while reviewing
-  the ARXFS write-back work; recorded rather than fixed there because the fix is
-  an ABI change touching every filesystem driver, and mixing it into a
-  rollback-cost fix would make neither reviewable.
-  - Filesystem drivers return `Busy` for "a name is already taken" (`arxfs`
-    `create`/`create_link`/`link`/`rename`, and the same in `adfs`, `ext4`,
-    `fat32`, `memfs`), for "this directory is not empty", *and* for its
-    documented meaning of a retryable transient. Nothing in the value says
-    which; the VFS disambiguates by *which mapper the call site picked*
-    (`kernel/core/src/fs/delegate.rs`: `map_link_error` → `AlreadyExists`,
-    `map_rename_error` → `NotEmpty`, `map_driver_error` → `Io`).
-  - **The live misreport.** `VfsDelegate::create` pre-checks the name and
-    answers `AlreadyExists` itself, so the ordinary path is right. But the
-    driver's own refusal maps through `map_driver_error`, so if the name appears
-    between that pre-check and the driver call, a taken name is reported as an
-    I/O error. `DriverError::Busy.as_errno()` is `Errno::WouldBlock`, so any
-    consumer reaching the driver without the VFS's per-operation mapping sees
-    `EWOULDBLOCK` for `EEXIST` — wrong for a coreutils-faithful `mkdir`/`ln`.
-  - **The fix.** `Errno::AlreadyExists` (17) already exists; add the matching
-    `DriverError` variant, use it at the name-taken sites, keep `Busy` for the
-    transient it documents, and give "directory not empty" its own value too.
-    `abi-v1` is unfrozen, so this is in-place evolution with no shim: every
-    driver, `map_*_error`, the `blkio` status mapping, and the generated
-    `include/` header move in the one change.
+- **D66 — `DriverError::Busy` carried three unrelated meanings, and the generic
+  mapping turned one of them into an I/O error — DONE.** Every distinguishable
+  filesystem conflict now has its own driver value, so the VFS no longer
+  disambiguates by which mapper the call site picked.
 - **D54 — a desktop worker thread issues ~2500 file opens at session start,
   starving every concurrent reader — OPEN.** It is the measured whole of the
   read-throughput gap `plans/FIX-KHEAP.md` reported: bundle load rate tracks
@@ -855,6 +834,11 @@ kernel's 32 KiB stack — measured at 48 KiB for one write to a fragmented file,
 and 34 KiB for one to a single-leaf tree, so it was reachable without any depth
 at all (item A1 of `plans/IMPLEMENT-OUTSTANDING-ARXFS.md`; the mutation path is
 iterative and the measured cost no longer scales with depth).
+D66 is the fourth and is also fixed: one `DriverError` value spoke
+for a taken name, a populated directory and a retryable transient at once, so a
+name taken between the VFS's pre-check and the driver call was reported as an
+I/O error, and any consumer reaching a filesystem driver without the VFS's
+per-operation mapping read `EWOULDBLOCK` where `EEXIST` was meant.
 
 ## Coupling to be aware of
 
@@ -3715,3 +3699,54 @@ the wrong width would have panicked rather than been refused.
 budget, and now guarded by a test — but it is sized by `MAX_BLOCK_SIZE`, so item
 **B1**, which widens the filesystem block size, must move that staging off the
 stack in the same change; recorded in that item.
+
+## D66 — one `DriverError` spoke for three filesystem conflicts at once (FIXED)
+
+**Where.** `lib/abi/src/driver/mod.rs` `DriverError::Busy`, its use across
+`arxfs`, `adfs`, `ext4`, `fat32` and `kernel/core/src/fs/memfs.rs`, and the
+per-operation mappings in `kernel/core/src/fs/delegate.rs`.
+
+**Mechanism.** `Busy` meant "a name is already taken", "this directory is not
+empty", "this move would make a directory its own descendant", and its
+documented "retryable transient" — with nothing in the value saying which. The
+VFS recovered the meaning from *which mapper the call site picked*:
+`map_link_error` read it as `AlreadyExists`, `map_rename_error` as `NotEmpty`,
+and the generic `map_driver_error` as `Io`. So `VfsDelegate::create` and
+`VfsDelegate::remove`, whose own pre-checks answer `AlreadyExists` and
+`NotEmpty` correctly, each reported a conflict that arose between that check
+and the driver call as an **I/O error**; a self-descending rename was reported
+as "directory not empty", advice to empty a destination that emptying could
+never make lawful; and because `Busy.as_errno()` is
+`Errno::WouldBlock`, any consumer reaching a filesystem driver without the
+VFS's per-operation mapping saw `EWOULDBLOCK` where a coreutils-faithful
+`mkdir`/`ln`/`rmdir` needs `EEXIST`/`ENOTEMPTY`.
+
+**Fix (item D66 of `plans/IMPLEMENT-OUTSTANDING-ARXFS.md`).** `DriverError`
+gains `AlreadyExists` (19), `DirectoryNotEmpty` (20) and `DirectoryCycle` (21),
+each mapping to the `Errno` its condition already had (`AlreadyExists`,
+`NotEmpty`, and — `abi-v1` having no `EINVAL` — `OutOfRange`). Every driver
+site now names the conflict it met, `Busy` keeps only the transient it
+documents, and `map_rename_error` is deleted: `map_driver_error` is one total
+mapping every call site shares, leaving `map_link_error` a single override for
+the one code whose meaning really is surface-specific (`Unsupported` — "this
+format stores no such object" on the link surface). `VfsError` gains
+`DirectoryCycle` so the in-kernel record stays precise. In-place, with no shim.
+
+**Also fixed, found by the same reading.** The generated C header's
+driver-error table was hand-maintained with no completeness guard and had
+already drifted three variants behind `lib/abi` (`MediumError`,
+`DeviceOffline`, `TooManyLinks` were unnameable from C). It is now
+`DRIVER_ERROR_NAMES` beside `ERRNO_NAMES`, with the same dense-`1..=N` table
+test, so a variant cannot be dropped from the C view again — and both tables
+additionally round-trip every emitted code through `from_i32`, so an entry
+whose decode arm is missing fails too. And `TooManyLinks`, reachable only
+through `map_link_error`, would have become `Io` on any other surface; it is
+in the shared mapping now.
+
+**Not changed, and checked rather than assumed.** `DriverError::Unsupported`
+is also read differently per surface, but no misreport is reachable through
+it: the VFS resolves the parent before delegating (so "not a directory" cannot
+arrive at the link mapping), refuses a directory operand itself, and never
+passes `NodeKind::Symlink` to `create`. `mount`/`unmount` keep `Busy` — an
+already-mounted volume and one with open files are the resource-in-use `EBUSY`
+the code is for.

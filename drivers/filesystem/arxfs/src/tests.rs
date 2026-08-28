@@ -713,7 +713,7 @@ fn fail_closed_extremes() {
         .expect("create");
     assert_eq!(
         fs.create(root, b"dup", NodeKind::RegularFile),
-        Err(DriverError::Busy)
+        Err(DriverError::AlreadyExists)
     );
     assert_eq!(
         fs.create(root, b"", NodeKind::RegularFile),
@@ -728,7 +728,7 @@ fn fail_closed_extremes() {
     let d = fs.lookup(root, b"d").unwrap();
     fs.create(d, b"child", NodeKind::RegularFile)
         .expect("child");
-    assert_eq!(fs.remove(root, b"d"), Err(DriverError::Busy));
+    assert_eq!(fs.remove(root, b"d"), Err(DriverError::DirectoryNotEmpty));
     assert_eq!(fs.remove(root, b"nope"), Err(DriverError::NotFound));
 }
 
@@ -5964,7 +5964,7 @@ fn a_refused_operation_leaves_the_allocation_map_exact_and_trusted() {
 
     assert_eq!(
         fs.create(root, b"taken", NodeKind::RegularFile),
-        Err(DriverError::Busy),
+        Err(DriverError::AlreadyExists),
         "a name already taken must be refused"
     );
 
@@ -7037,7 +7037,7 @@ fn rename_refuses_kind_mismatch_and_nonempty_dir_target() {
     fs.create(dir2, b"child", NodeKind::RegularFile).unwrap();
     assert_eq!(
         fs.rename(root, b"dir", root, b"dir2"),
-        Err(DriverError::Busy)
+        Err(DriverError::DirectoryNotEmpty)
     );
 }
 
@@ -7067,8 +7067,14 @@ fn rename_refuses_moving_a_directory_into_its_own_subtree() {
     let a = fs.lookup(root, b"a").unwrap();
     fs.create(a, b"b", NodeKind::Directory).unwrap();
     let b = fs.lookup(a, b"b").unwrap();
-    assert_eq!(fs.rename(root, b"a", b, b"a"), Err(DriverError::Busy));
-    assert_eq!(fs.rename(root, b"a", a, b"x"), Err(DriverError::Busy));
+    assert_eq!(
+        fs.rename(root, b"a", b, b"a"),
+        Err(DriverError::DirectoryCycle)
+    );
+    assert_eq!(
+        fs.rename(root, b"a", a, b"x"),
+        Err(DriverError::DirectoryCycle)
+    );
 }
 
 #[test]
@@ -8356,7 +8362,7 @@ fn a_refused_link_creation_leaves_the_feature_undeclared() {
         .expect("create a file");
     assert_eq!(
         fs.create_link(root, b"file", b"/target"),
-        Err(DriverError::Busy)
+        Err(DriverError::AlreadyExists)
     );
     assert_eq!(fs.incompat, 0);
 }
@@ -8645,7 +8651,10 @@ fn a_hard_link_over_a_taken_name_is_refused_and_changes_nothing() {
         .expect("create the file");
     fs.create(root, b"taken", NodeKind::RegularFile)
         .expect("create the occupant");
-    assert_eq!(fs.link(root, b"taken", node), Err(DriverError::Busy));
+    assert_eq!(
+        fs.link(root, b"taken", node),
+        Err(DriverError::AlreadyExists)
+    );
     assert_eq!(fs.node_info(node).expect("stat").nlink, 1);
     assert_eq!(fs.incompat, 0, "a refused link declares nothing");
 }
@@ -8715,7 +8724,7 @@ fn a_refused_hard_link_leaves_the_feature_undeclared() {
         .expect("create the file");
     assert_eq!(
         fs.link(root, b"first", node),
-        Err(DriverError::Busy),
+        Err(DriverError::AlreadyExists),
         "the name is taken"
     );
     assert_eq!(fs.incompat, 0);

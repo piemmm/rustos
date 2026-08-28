@@ -797,14 +797,14 @@ fn mkdir_then_create_a_file_inside() {
 }
 
 #[test]
-fn creating_an_existing_name_is_busy() {
+fn creating_an_existing_name_is_refused_as_already_existing() {
     let mut fs = mount();
     let root = fs.root();
     fs.create(root, b"DUP.TXT", NodeKind::RegularFile)
         .expect("create");
     assert_eq!(
         fs.create(root, b"DUP.TXT", NodeKind::RegularFile),
-        Err(DriverError::Busy)
+        Err(DriverError::AlreadyExists)
     );
 }
 
@@ -820,10 +820,10 @@ fn writing_to_a_directory_is_unsupported() {
 }
 
 #[test]
-fn removing_a_non_empty_directory_is_busy() {
+fn removing_a_non_empty_directory_is_refused_as_not_empty() {
     let mut fs = mount();
     let root = fs.root();
-    assert_eq!(fs.remove(root, b"SUB"), Err(DriverError::Busy));
+    assert_eq!(fs.remove(root, b"SUB"), Err(DriverError::DirectoryNotEmpty));
 }
 
 #[test]
@@ -1211,7 +1211,10 @@ mod format {
         );
         let d2 = fs.create(root, b"D2", NodeKind::Directory).unwrap();
         fs.create(d2, b"CHILD", NodeKind::RegularFile).unwrap();
-        assert_eq!(fs.rename(root, b"D", root, b"D2"), Err(DriverError::Busy));
+        assert_eq!(
+            fs.rename(root, b"D", root, b"D2"),
+            Err(DriverError::DirectoryNotEmpty)
+        );
     }
 
     #[test]
@@ -1245,8 +1248,14 @@ mod format {
         let root = fs.root();
         let a = fs.create(root, b"A", NodeKind::Directory).unwrap();
         let b = fs.create(a, b"B", NodeKind::Directory).unwrap();
-        assert_eq!(fs.rename(root, b"A", b, b"A"), Err(DriverError::Busy));
-        assert_eq!(fs.rename(root, b"A", a, b"X"), Err(DriverError::Busy));
+        assert_eq!(
+            fs.rename(root, b"A", b, b"A"),
+            Err(DriverError::DirectoryCycle)
+        );
+        assert_eq!(
+            fs.rename(root, b"A", a, b"X"),
+            Err(DriverError::DirectoryCycle)
+        );
     }
 
     #[test]

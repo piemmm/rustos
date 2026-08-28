@@ -147,6 +147,41 @@ const ERRNO_NAMES: &[(&str, Errno)] = &[
     ("NOT_ATTACHED", Errno::NotAttached),
 ];
 
+/// The `abi-v1` driver-ABI error codes, paired with the
+/// `TAIRIX_DRIVER_ERROR_*` suffix each is emitted under.
+///
+/// Numbering is read from [`DriverError`] exactly as [`ERRNO_NAMES`] reads
+/// it from [`Errno`], and the in-module `driver_error_table_matches_the_enum`
+/// test pins the dense `1..=N` numbering *and* that no discriminant exists
+/// past the last entry — a newly appended variant fails the test instead of
+/// being silently dropped from the C view.
+const DRIVER_ERROR_NAMES: &[(&str, DriverError)] = &[
+    ("BUFFER_TOO_SMALL", DriverError::BufferTooSmall),
+    ("BAD_MAGIC", DriverError::BadMagic),
+    (
+        "ABI_VERSION_UNSUPPORTED",
+        DriverError::AbiVersionUnsupported,
+    ),
+    ("LENGTH_OUT_OF_RANGE", DriverError::LengthOutOfRange),
+    ("OUT_OF_RANGE", DriverError::OutOfRange),
+    ("PERMISSION_DENIED", DriverError::PermissionDenied),
+    ("NOT_FOUND", DriverError::NotFound),
+    ("SIGNATURE_INVALID", DriverError::SignatureInvalid),
+    ("UNSUPPORTED", DriverError::Unsupported),
+    ("DEVICE_FAULT", DriverError::DeviceFault),
+    ("BUSY", DriverError::Busy),
+    ("NOT_IMPLEMENTED", DriverError::NotImplemented),
+    ("NO_SPACE", DriverError::NoSpace),
+    ("SEAT_REVOKED", DriverError::SeatRevoked),
+    ("ENDPOINT_STALLED", DriverError::EndpointStalled),
+    ("MEDIUM_ERROR", DriverError::MediumError),
+    ("DEVICE_OFFLINE", DriverError::DeviceOffline),
+    ("TOO_MANY_LINKS", DriverError::TooManyLinks),
+    ("ALREADY_EXISTS", DriverError::AlreadyExists),
+    ("DIRECTORY_NOT_EMPTY", DriverError::DirectoryNotEmpty),
+    ("DIRECTORY_CYCLE", DriverError::DirectoryCycle),
+];
+
 /// One generated C header: its file name (relative to the include directory)
 /// and its full text.
 pub struct GeneratedHeader {
@@ -1946,26 +1981,7 @@ fn driver_emit_discriminants(out: &mut String) {
     out.push_str(
         "/* Stable driver-ABI error codes (int32_t), disjoint from TAIRIX_E_* errno. */\n",
     );
-    for (name, err) in [
-        ("BUFFER_TOO_SMALL", DriverError::BufferTooSmall),
-        ("BAD_MAGIC", DriverError::BadMagic),
-        (
-            "ABI_VERSION_UNSUPPORTED",
-            DriverError::AbiVersionUnsupported,
-        ),
-        ("LENGTH_OUT_OF_RANGE", DriverError::LengthOutOfRange),
-        ("OUT_OF_RANGE", DriverError::OutOfRange),
-        ("PERMISSION_DENIED", DriverError::PermissionDenied),
-        ("NOT_FOUND", DriverError::NotFound),
-        ("SIGNATURE_INVALID", DriverError::SignatureInvalid),
-        ("UNSUPPORTED", DriverError::Unsupported),
-        ("DEVICE_FAULT", DriverError::DeviceFault),
-        ("BUSY", DriverError::Busy),
-        ("NOT_IMPLEMENTED", DriverError::NotImplemented),
-        ("NO_SPACE", DriverError::NoSpace),
-        ("SEAT_REVOKED", DriverError::SeatRevoked),
-        ("ENDPOINT_STALLED", DriverError::EndpointStalled),
-    ] {
+    for (name, err) in DRIVER_ERROR_NAMES {
         let _ = writeln!(
             out,
             "#define TAIRIX_DRIVER_ERROR_{name} ((int32_t){})",
@@ -4478,6 +4494,11 @@ mod tests {
         for (idx, (_name, errno)) in ERRNO_NAMES.iter().enumerate() {
             let expected = i32::try_from(idx + 1).expect("small index");
             assert_eq!(errno.as_i32(), expected, "errno values must be dense 1..=N");
+            assert_eq!(
+                Errno::from_i32(expected),
+                Some(*errno),
+                "every emitted code must decode back to its own variant"
+            );
         }
         let last = ERRNO_NAMES
             .last()
@@ -4491,6 +4512,31 @@ mod tests {
         assert!(
             Errno::from_i32(last + 1).is_none(),
             "Errno defines discriminant {} but the C table stops at {last}",
+            last + 1
+        );
+    }
+
+    /// The driver-ABI error table is dense and complete, so a variant added
+    /// to `lib/abi` cannot silently miss the C view.
+    #[test]
+    fn driver_error_table_matches_the_enum() {
+        for (idx, (_name, err)) in DRIVER_ERROR_NAMES.iter().enumerate() {
+            let expected = i32::try_from(idx + 1).expect("small index");
+            assert_eq!(
+                err.as_i32(),
+                expected,
+                "driver-error values must be dense 1..=N"
+            );
+            assert_eq!(
+                DriverError::from_i32(expected),
+                Ok(*err),
+                "every emitted code must decode back to its own variant"
+            );
+        }
+        let last = i32::try_from(DRIVER_ERROR_NAMES.len()).expect("small table");
+        assert!(
+            DriverError::from_i32(last + 1).is_err(),
+            "DriverError defines discriminant {} but the C table stops at {last}",
             last + 1
         );
     }

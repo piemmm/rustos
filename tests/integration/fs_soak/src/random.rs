@@ -601,7 +601,7 @@ fn op_negative<F: SoakFs>(
             want_err(
                 fs.create(node, name.as_bytes(), NodeKind::RegularFile)
                     .err(),
-                DriverError::Busy,
+                DriverError::AlreadyExists,
                 "duplicate create",
                 seed,
             )
@@ -629,7 +629,7 @@ fn op_negative<F: SoakFs>(
             seed,
         ),
         _ => {
-            // Non-empty rmdir → Busy.
+            // Non-empty rmdir is refused as itself, never as a transient.
             let candidates = dirs_matching(model, false);
             if candidates.is_empty() {
                 return Ok(());
@@ -639,7 +639,7 @@ fn op_negative<F: SoakFs>(
             let node = resolve_dir(fs, dir, seed)?;
             want_err(
                 fs.remove(node, name.as_bytes()).err(),
-                DriverError::Busy,
+                DriverError::DirectoryNotEmpty,
                 "remove non-empty dir",
                 seed,
             )

@@ -821,7 +821,7 @@ fn a_refused_operation_leaves_the_next_one_costing_what_it_always_did() {
         ledger.borrow_mut().arm();
         assert_eq!(
             fs.create(work, taken, NodeKind::RegularFile),
-            Err(DriverError::Busy),
+            Err(DriverError::AlreadyExists),
             "the fixture's taken name must be refused"
         );
         let refusal = ledger.borrow().read_blocks;

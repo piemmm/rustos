@@ -97,7 +97,8 @@ allocation-free in-memory FAT32 image and exercises:
 - Write round-trips: create + write + read-back (short and long names),
   writes that extend across a cluster boundary, sparse zero-fill,
   `truncate` shrink and grow, `remove` + name reuse, `mkdir` with a
-  nested file, and the `Busy`/`Unsupported`/`NotFound` guards.
+  nested file, and the `AlreadyExists`/`DirectoryNotEmpty`/`DirectoryCycle`/
+  `Unsupported`/`NotFound` guards.
 
 38/38 host-side tests pass.
 

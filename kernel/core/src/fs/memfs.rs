@@ -281,7 +281,7 @@ impl FilesystemRead for RwMockFs {
 impl FilesystemWrite for RwMockFs {
     fn create(&mut self, dir: NodeId, name: &[u8], kind: NodeKind) -> Result<NodeId, DriverError> {
         if self.child_index(dir, name)?.is_some() {
-            return Err(DriverError::Busy);
+            return Err(DriverError::AlreadyExists);
         }
         let name = core::str::from_utf8(name)
             .map_err(|_| DriverError::LengthOutOfRange)?
@@ -315,7 +315,7 @@ impl FilesystemWrite for RwMockFs {
         target: &[u8],
     ) -> Result<NodeId, DriverError> {
         if self.child_index(dir, name)?.is_some() {
-            return Err(DriverError::Busy);
+            return Err(DriverError::AlreadyExists);
         }
         if target.is_empty() {
             return Err(DriverError::LengthOutOfRange);
@@ -341,7 +341,7 @@ impl FilesystemWrite for RwMockFs {
 
     fn link(&mut self, dir: NodeId, name: &[u8], node: NodeId) -> Result<(), DriverError> {
         if self.child_index(dir, name)?.is_some() {
-            return Err(DriverError::Busy);
+            return Err(DriverError::AlreadyExists);
         }
         let target = Self::index(node)?;
         // A second name for a directory would let the tree hold a cycle,
@@ -400,7 +400,7 @@ impl FilesystemWrite for RwMockFs {
         let child = self.child_index(dir, name)?.ok_or(DriverError::NotFound)?;
         if let RwNode::Dir(children) = &self.nodes[child] {
             if !children.is_empty() {
-                return Err(DriverError::Busy);
+                return Err(DriverError::DirectoryNotEmpty);
             }
         }
         let key = core::str::from_utf8(name).map_err(|_| DriverError::NotFound)?;
@@ -430,7 +430,7 @@ impl FilesystemWrite for RwMockFs {
 
         // Refuse moving a directory into itself or its own subtree.
         if moving_dir && self.is_in_subtree(src_idx, dst_dir_idx) {
-            return Err(DriverError::Busy);
+            return Err(DriverError::DirectoryCycle);
         }
 
         // Replace an existing destination of a compatible kind.
@@ -444,7 +444,7 @@ impl FilesystemWrite for RwMockFs {
             }
             if let RwNode::Dir(children) = &self.nodes[dst_idx] {
                 if !children.is_empty() {
-                    return Err(DriverError::Busy);
+                    return Err(DriverError::DirectoryNotEmpty);
                 }
             }
             self.unlink_name(dst_dir_idx, &dst_key);

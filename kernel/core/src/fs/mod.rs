@@ -230,6 +230,11 @@ pub enum VfsError {
     AlreadyExists,
     /// A directory targeted for removal still has entries.
     NotEmpty,
+    /// A rename would make a directory its own descendant, detaching the
+    /// resulting cycle from the tree. No state change can make the move
+    /// lawful, so it is distinct from [`Self::NotEmpty`], which emptying the
+    /// destination clears.
+    DirectoryCycle,
     /// The caller's credentials do not satisfy the inode's permission
     /// check (capability gate, ACL, or mode bits).
     PermissionDenied,
@@ -293,7 +298,8 @@ impl VfsError {
     /// [`Errno::NotEmpty`] (`ENOTEMPTY` — `rmdir --ignore-fail-on-non-empty`
     /// tolerates exactly this), and a directory where one is forbidden is
     /// [`Errno::IsADirectory`] (`EISDIR`). `abi-v1` has no dedicated
-    /// `EINVAL`, so a malformed path or attribute key collapses onto
+    /// `EINVAL`, so a malformed path or attribute key — and a rename that
+    /// would make a directory its own descendant — collapses onto
     /// [`Errno::OutOfRange`]; the read-only refusal is reported as
     /// [`Errno::PermissionDenied`]. An unrecoverable backing
     /// fault ([`Self::Io`]) is [`Errno::DeviceFault`] — the `EIO` analogue,
@@ -305,7 +311,7 @@ impl VfsError {
         match self {
             Self::NotFound => Errno::NotFound,
             Self::PermissionDenied | Self::ReadOnly => Errno::PermissionDenied,
-            Self::InvalidPath | Self::InvalidKey => Errno::OutOfRange,
+            Self::InvalidPath | Self::InvalidKey | Self::DirectoryCycle => Errno::OutOfRange,
             Self::IsADirectory => Errno::IsADirectory,
             Self::NotADirectory => Errno::NotADirectory,
             Self::AlreadyExists => Errno::AlreadyExists,
@@ -333,6 +339,7 @@ impl fmt::Display for VfsError {
             Self::IsADirectory => "is a directory",
             Self::AlreadyExists => "already exists",
             Self::NotEmpty => "directory not empty",
+            Self::DirectoryCycle => "directory moved inside itself",
             Self::PermissionDenied => "permission denied",
             Self::ReadOnly => "read-only mount",
             Self::LinkLoop => "too many symbolic links in path resolution",
@@ -366,6 +373,7 @@ mod tests {
         assert_eq!(VfsError::AlreadyExists.to_errno(), Errno::AlreadyExists);
         assert_eq!(VfsError::NotADirectory.to_errno(), Errno::NotADirectory);
         assert_eq!(VfsError::NotEmpty.to_errno(), Errno::NotEmpty);
+        assert_eq!(VfsError::DirectoryCycle.to_errno(), Errno::OutOfRange);
         assert_eq!(VfsError::CrossVolume.to_errno(), Errno::CrossVolume);
         assert_eq!(VfsError::InvalidKey.to_errno(), Errno::OutOfRange);
         assert_eq!(VfsError::NoData.to_errno(), Errno::NoData);
@@ -385,6 +393,7 @@ mod tests {
             VfsError::IsADirectory,
             VfsError::AlreadyExists,
             VfsError::NotEmpty,
+            VfsError::DirectoryCycle,
             VfsError::PermissionDenied,
             VfsError::ReadOnly,
             VfsError::Io,

@@ -178,7 +178,7 @@ fn spawn_errno_as_driver_error(errno: Errno) -> DriverError {
         Errno::BadMagic => DriverError::BadMagic,
         Errno::PermissionDenied => DriverError::PermissionDenied,
         Errno::NotImplemented => DriverError::NotImplemented,
-        Errno::AlreadyExists => DriverError::Busy,
+        Errno::AlreadyExists => DriverError::AlreadyExists,
         _ => DriverError::DeviceFault,
     }
 }

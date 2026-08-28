@@ -1102,7 +1102,7 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
         let dir_addr = node_addr(dir);
         let dir_size = node_size(dir);
         if self.dir_lookup(dir_addr, dir_size, name)?.is_some() {
-            return Err(DriverError::Busy);
+            return Err(DriverError::AlreadyExists);
         }
         let mut object = Object::named(name)?;
         match kind {
@@ -1229,7 +1229,7 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
     fn remove(&mut self, dir: NodeId, name: &[u8]) -> Result<(), DriverError> {
         let (index, object) = self.resolve_child(dir, name)?;
         if object.is_dir() && !self.dir_is_empty(object.indaddr, object.size)? {
-            return Err(DriverError::Busy);
+            return Err(DriverError::DirectoryNotEmpty);
         }
         self.dir_remove_at(node_addr(dir), node_size(dir), index)?;
         self.release_maybe_shared(object.indaddr, object.size)
@@ -1261,7 +1261,7 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
             let mut reached_root = false;
             for _ in 0..96 {
                 if cursor == object.indaddr {
-                    return Err(DriverError::Busy);
+                    return Err(DriverError::DirectoryCycle);
                 }
                 if cursor == root_addr {
                     reached_root = true;
@@ -1283,7 +1283,7 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
                 return Err(DriverError::Unsupported);
             }
             if existing.is_dir() && !self.dir_is_empty(existing.indaddr, existing.size)? {
-                return Err(DriverError::Busy);
+                return Err(DriverError::DirectoryNotEmpty);
             }
         }
         self.dir_remove_at(src_addr, node_size(src_dir), src_index)?;

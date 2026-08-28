@@ -1014,7 +1014,7 @@ impl<B: Block> ARXFS<B> {
     /// # Errors
     ///
     /// * [`DriverError::NotFound`] if `src_name` does not exist.
-    /// * [`DriverError::Busy`] if `dst_name` already exists.
+    /// * [`DriverError::AlreadyExists`] if `dst_name` already exists.
     /// * [`DriverError::Unsupported`] if `dir` is not a directory or the
     ///   source is not a regular file.
     /// * [`DriverError::LengthOutOfRange`] if `dst_name` is empty or too long.
@@ -3553,7 +3553,7 @@ impl<B: Block> ARXFS<B> {
             return Err(DriverError::Unsupported);
         }
         if self.dir_lookup(&dir_inode, name)?.is_some() {
-            return Err(DriverError::Busy);
+            return Err(DriverError::AlreadyExists);
         }
         let (kind_val, mode) = match kind {
             NodeKind::Directory => (InodeKind::Dir, 0o755),
@@ -3627,7 +3627,7 @@ impl<B: Block> ARXFS<B> {
             return Err(DriverError::Unsupported);
         }
         if self.dir_lookup(&dir_inode, name)?.is_some() {
-            return Err(DriverError::Busy);
+            return Err(DriverError::AlreadyExists);
         }
         // Declared before the link is minted, so nothing this transaction
         // writes can be reached from a volume that has not admitted to
@@ -3678,7 +3678,7 @@ impl<B: Block> ARXFS<B> {
             return Err(DriverError::Unsupported);
         }
         if self.dir_lookup(&dir_inode, name)?.is_some() {
-            return Err(DriverError::Busy);
+            return Err(DriverError::AlreadyExists);
         }
         // A fixed on-disk field, so an overflow fails closed here: wrapping
         // it would put a live inode one unlink away from being freed.
@@ -3751,7 +3751,7 @@ impl<B: Block> ARXFS<B> {
         // instead of a second link.
         Self::deny_non_file_content(src.kind)?;
         if self.dir_lookup(&dir_inode, dst_name)?.is_some() {
-            return Err(DriverError::Busy);
+            return Err(DriverError::AlreadyExists);
         }
         let mut dst = Inode::empty(InodeKind::File, src.sec, now);
         let dst_ino = self.alloc_inode(&dst)?;
@@ -3879,7 +3879,7 @@ impl<B: Block> ARXFS<B> {
             .ok_or(DriverError::NotFound)?;
         let mut child = self.read_inode(child_ino)?;
         if child.is_dir() && !self.dir_is_empty(&child)? {
-            return Err(DriverError::Busy);
+            return Err(DriverError::DirectoryNotEmpty);
         }
         let now = (self.clock)();
         // An empty directory loses both its name and its own `.`; every other
@@ -3962,7 +3962,7 @@ impl<B: Block> ARXFS<B> {
 
         // Refuse moving a directory into itself or its own subtree.
         if moving_dir && self.is_subdir_of(dst_dir_ino, src_ino)? {
-            return Err(DriverError::Busy);
+            return Err(DriverError::DirectoryCycle);
         }
 
         // Replace an existing destination, subject to kind compatibility.
@@ -3980,7 +3980,7 @@ impl<B: Block> ARXFS<B> {
                 return Err(DriverError::Unsupported);
             }
             if dst_child.is_dir() && !self.dir_is_empty(&dst_child)? {
-                return Err(DriverError::Busy);
+                return Err(DriverError::DirectoryNotEmpty);
             }
             // The replaced node loses this name like any other unlink: its
             // blocks go only if no other name still reaches them.

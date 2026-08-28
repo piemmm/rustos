@@ -436,7 +436,8 @@ pub trait FilesystemWrite {
     ///   call has nowhere to put, so it is created only by
     ///   [`create_link`](Self::create_link) and never as a side effect of
     ///   an empty-child create.
-    /// * [`DriverError::Busy`] if a child named `name` already exists.
+    /// * [`DriverError::AlreadyExists`] if a child named `name` already
+    ///   exists.
     /// * [`DriverError::LengthOutOfRange`] if `name` is empty or longer
     ///   than the filesystem's maximum component length.
     /// * [`DriverError::NoSpace`] if the volume cannot allocate the inode
@@ -458,7 +459,8 @@ pub trait FilesystemWrite {
     ///
     /// * [`DriverError::Unsupported`] if the format stores no links, or if
     ///   `dir` is not a directory.
-    /// * [`DriverError::Busy`] if a child named `name` already exists.
+    /// * [`DriverError::AlreadyExists`] if a child named `name` already
+    ///   exists.
     /// * [`DriverError::LengthOutOfRange`] if `name` is empty or longer than
     ///   the filesystem's maximum component length, or if `target` is empty
     ///   or longer than the format can store.
@@ -499,7 +501,8 @@ pub trait FilesystemWrite {
     ///
     /// * [`DriverError::Unsupported`] if the format stores only one name per
     ///   node, if `dir` is not a directory, or if `node` is a directory.
-    /// * [`DriverError::Busy`] if a child named `name` already exists.
+    /// * [`DriverError::AlreadyExists`] if a child named `name` already
+    ///   exists.
     /// * [`DriverError::NotFound`] if `node` does not name a live node.
     /// * [`DriverError::LengthOutOfRange`] if `name` is empty or longer than
     ///   the filesystem's maximum component length.
@@ -555,7 +558,8 @@ pub trait FilesystemWrite {
     ///
     /// * [`DriverError::Unsupported`] if `dir` is not a directory.
     /// * [`DriverError::NotFound`] if no child named `name` exists.
-    /// * [`DriverError::Busy`] if `name` is a non-empty directory.
+    /// * [`DriverError::DirectoryNotEmpty`] if `name` is a non-empty
+    ///   directory.
     /// * [`DriverError::DeviceFault`] on an unrecoverable block write.
     fn remove(&mut self, dir: NodeId, name: &[u8]) -> Result<(), DriverError>;
 
@@ -594,8 +598,10 @@ pub trait FilesystemWrite {
     ///   (a file over a directory, or a directory over a file).
     /// * [`DriverError::NotFound`] if `src_name` does not exist in
     ///   `src_dir`.
-    /// * [`DriverError::Busy`] if `dst_name` is a non-empty directory, or
-    ///   if the move would place a directory inside its own subtree.
+    /// * [`DriverError::DirectoryNotEmpty`] if `dst_name` is a non-empty
+    ///   directory.
+    /// * [`DriverError::DirectoryCycle`] if the move would place a directory
+    ///   inside its own subtree.
     /// * [`DriverError::LengthOutOfRange`] if `dst_name` is empty or longer
     ///   than the filesystem's maximum component length.
     /// * [`DriverError::NoSpace`] if `dst_dir` cannot grow to hold the new
@@ -1291,7 +1297,7 @@ mod tests {
                 return Err(DriverError::Unsupported);
             }
             if self.present {
-                return Err(DriverError::Busy);
+                return Err(DriverError::AlreadyExists);
             }
             self.store_name(name)?;
             self.present = true;
@@ -1394,10 +1400,11 @@ mod tests {
     fn mock_write_fs_round_trip() {
         let mut fs = MockWriteFs::empty();
         assert_eq!(fs.create(W_ROOT, W_NAME, NodeKind::RegularFile), Ok(W_FILE));
-        // Creating it again is rejected as busy.
+        // Creating it again is rejected as a taken name, never as a
+        // transient a caller would retry.
         assert_eq!(
             fs.create(W_ROOT, W_NAME, NodeKind::RegularFile),
-            Err(DriverError::Busy)
+            Err(DriverError::AlreadyExists)
         );
         assert_eq!(fs.write_at(W_ROOT, W_NAME, 0, b"abc"), Ok(3));
         assert_eq!(fs.len, 3);

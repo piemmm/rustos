@@ -261,7 +261,7 @@ impl BigDir {
     ///
     /// # Errors
     ///
-    /// * [`DriverError::Busy`] if a same-named entry exists.
+    /// * [`DriverError::AlreadyExists`] if a same-named entry exists.
     /// * [`DriverError::NoSpace`] if the directory's current size
     ///   cannot hold the new entry and name (the caller grows the
     ///   directory object and retries).
@@ -271,7 +271,7 @@ impl BigDir {
         object: &Object,
     ) -> Result<(), DriverError> {
         if self.find(store, object.name())?.is_some() {
-            return Err(DriverError::Busy);
+            return Err(DriverError::AlreadyExists);
         }
         // The name was validated against `MAX_NAME_LEN`, so it fits.
         let name_len = u32::try_from(object.name_len).unwrap_or(u32::MAX);

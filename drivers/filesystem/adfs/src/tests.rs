@@ -219,7 +219,7 @@ fn remove_reclaims_space_and_names() {
         // A populated directory refuses removal; its child does not.
         assert_eq!(
             fs.remove(root, b"Nest"),
-            Err(DriverError::Busy),
+            Err(DriverError::DirectoryNotEmpty),
             "{variant:?}"
         );
         fs.remove(sub, b"child").expect("remove child");
@@ -278,7 +278,7 @@ fn rename_moves_replaces_and_guards_cycles() {
         make(&mut fs, inner, b"leaf", b"leaf body");
         assert_eq!(
             fs.rename(root, b"Two", inner, b"Loop"),
-            Err(DriverError::Busy),
+            Err(DriverError::DirectoryCycle),
             "{variant:?}: cycle refused"
         );
 
