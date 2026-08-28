@@ -872,15 +872,17 @@ pub fn boot(
     audit_sink: &'static (dyn Sink + Sync),
     log_level: Level,
 ) -> ! {
-    // Make the global kernel-heap lock interrupt-safe before anything can be
-    // interrupted while holding it: install this port's per-hart `sstatus.SIE`
-    // mask/restore into the (already-registered) heap. Done at boot entry —
-    // before interrupts are ever enabled and before any secondary hart is
-    // started — so an interrupt can never fire on a hart mid-allocation and
-    // reenter the allocator, spinning forever on the lock its own interrupted
-    // mainline holds (a single-CPU self-deadlock). One process-global install
-    // covers every hart: the hooks mask the *current* hart's interrupts.
-    tairix_kernel_core::kheap::install_kheap_irq_control(kalloc_irq_disable, kalloc_irq_restore);
+    // Make every kernel heap's lock interrupt-safe before anything can be
+    // interrupted while holding one: install this port's per-hart
+    // `sstatus.SIE` mask/restore. Done at boot entry — before interrupts are
+    // ever enabled and before any secondary hart is started — so an interrupt
+    // can never fire on a hart mid-allocation and reenter the allocator,
+    // spinning forever on the lock its own interrupted mainline holds (a
+    // single-CPU self-deadlock). One install covers every hart and every heap
+    // the binary holds: the hooks mask the *current* hart's interrupts and
+    // are read by the allocator itself, so a bin that publishes no heap to
+    // the kernel core is covered too.
+    tairix_kalloc::install_irq_control(kalloc_irq_disable, kalloc_irq_restore);
 
     // RV-P2: enable the Sv39 identity MMU + S-mode trap vector before
     // any allocator/scheduler work, then install the production `ecall`

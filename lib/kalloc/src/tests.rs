@@ -114,32 +114,37 @@ fn adjacent_frees_coalesce_into_one_large_hole() {
 
 #[test]
 fn the_lock_masks_interrupts_via_the_installed_control() {
-    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use core::sync::atomic::{AtomicUsize, Ordering};
 
     // Recording interrupt-control hooks. `disable` returns a sentinel token
-    // that `restore` asserts it received back; both bump a counter and toggle
-    // a "masked" flag. A completed allocation then proves the allocator masks
-    // interrupts around its lock (`disable` before, `restore` after, balanced)
-    // — the property that forecloses the single-CPU self-deadlock a plain,
-    // non-interrupt-safe allocator lock would suffer when an interrupt handler
-    // reenters `alloc` on a CPU already holding the lock.
+    // that `restore` asserts it received back; both bump a monotone counter.
+    // A completed allocation then proves the allocator masks interrupts
+    // around its lock (`disable` before, `restore` after) — the property that
+    // forecloses the single-CPU self-deadlock a plain, non-interrupt-safe
+    // allocator lock would suffer when an interrupt handler reenters `alloc`
+    // on a CPU already holding the lock.
+    //
+    // The hooks are crate-global once installed, so every other test thread's
+    // allocations run them too. The counters are therefore only ever read as
+    // monotone lower bounds against a snapshot this thread took itself, and
+    // the pairing is asserted inside `restore` where it cannot race.
     static DISABLES: AtomicUsize = AtomicUsize::new(0);
     static RESTORES: AtomicUsize = AtomicUsize::new(0);
-    static MASKED: AtomicBool = AtomicBool::new(false);
     const TOKEN: usize = 0xC0FF_EE00;
 
     fn rec_disable() -> usize {
-        MASKED.store(true, Ordering::Relaxed);
         DISABLES.fetch_add(1, Ordering::Relaxed);
         TOKEN
     }
     fn rec_restore(token: usize) {
         assert_eq!(token, TOKEN, "restore receives the token disable returned");
-        assert!(
-            MASKED.swap(false, Ordering::Relaxed),
-            "restore is only ever called after a matching disable"
-        );
         RESTORES.fetch_add(1, Ordering::Relaxed);
+    }
+    fn never_disable() -> usize {
+        panic!("a second install must be refused");
+    }
+    fn never_restore(_token: usize) {
+        panic!("a second install must be refused");
     }
 
     let alloc = fixture(1 << 16);
@@ -147,7 +152,8 @@ fn the_lock_masks_interrupts_via_the_installed_control() {
 
     // Before any hook is installed the lock does not mask (the early-boot /
     // host / wasm32 window, which is single-CPU with interrupts already
-    // masked, so no ISR can reenter).
+    // masked, so no ISR can reenter). This test is the crate's only
+    // installer, so nothing else can have raised the counter yet.
     // SAFETY: non-zero layout, fresh allocator.
     let p0 = unsafe { alloc.alloc(layout) };
     assert!(!p0.is_null());
@@ -160,23 +166,65 @@ fn the_lock_masks_interrupts_via_the_installed_control() {
     );
 
     // Once installed, every lock hold masks then restores interrupts.
-    alloc.install_irq_control(rec_disable, rec_restore);
+    crate::install_irq_control(rec_disable, rec_restore);
+    let (d0, r0) = (
+        DISABLES.load(Ordering::Relaxed),
+        RESTORES.load(Ordering::Relaxed),
+    );
     // SAFETY: non-zero layout.
     let p = unsafe { alloc.alloc(layout) };
     assert!(!p.is_null());
     // SAFETY: `p` came from this allocator with `layout`.
     unsafe { alloc.dealloc(p, layout) };
 
-    let disables = DISABLES.load(Ordering::Relaxed);
-    let restores = RESTORES.load(Ordering::Relaxed);
     assert!(
-        disables >= 2,
+        DISABLES.load(Ordering::Relaxed) >= d0 + 2,
         "the alloc and the dealloc each mask interrupts around the lock"
     );
-    assert_eq!(disables, restores, "every mask is balanced by a restore");
     assert!(
-        !MASKED.load(Ordering::Relaxed),
-        "interrupts are restored after the final hold"
+        RESTORES.load(Ordering::Relaxed) >= r0 + 2,
+        "both of this thread's holds restored the prior interrupt state"
+    );
+
+    // The control describes the machine, not one heap: an allocator built
+    // after the install and never published to any registry is interrupt-safe
+    // too. Binding the hooks per instance instead left every heap the install
+    // site had not been told about spinning on a plain lock — the
+    // self-deadlock the freestanding test bins, which declare their own
+    // `#[global_allocator]` and register it nowhere, were still exposed to.
+    let unregistered = fixture(1 << 16);
+    let (d1, r1) = (
+        DISABLES.load(Ordering::Relaxed),
+        RESTORES.load(Ordering::Relaxed),
+    );
+    // SAFETY: non-zero layout, fresh allocator.
+    let q = unsafe { unregistered.alloc(layout) };
+    assert!(!q.is_null());
+    // SAFETY: `q` came from `unregistered` with `layout`.
+    unsafe { unregistered.dealloc(q, layout) };
+    assert!(
+        DISABLES.load(Ordering::Relaxed) >= d1 + 2,
+        "an allocator no registry knows about masks interrupts as well"
+    );
+    assert!(
+        RESTORES.load(Ordering::Relaxed) >= r1 + 2,
+        "and restores the prior state after each hold"
+    );
+
+    // Set-once: a later install is refused rather than swapping the live
+    // pair, which could hand a holder mid-hold a `restore` that does not
+    // match the `disable` it called. `never_*` panic if reached, and every
+    // allocation in the process runs the installed hooks.
+    crate::install_irq_control(never_disable, never_restore);
+    let d2 = DISABLES.load(Ordering::Relaxed);
+    // SAFETY: non-zero layout.
+    let r = unsafe { alloc.alloc(layout) };
+    assert!(!r.is_null());
+    // SAFETY: `r` came from this allocator with `layout`.
+    unsafe { alloc.dealloc(r, layout) };
+    assert!(
+        DISABLES.load(Ordering::Relaxed) >= d2 + 2,
+        "the originally installed pair is still the one in force"
     );
 }
 

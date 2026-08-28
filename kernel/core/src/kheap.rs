@@ -13,18 +13,21 @@
 //! byte-granular tier (below), and single direct-mapped frames for the slab
 //! tier that serves everything up to a page.
 //!
-//! Three seams connect the bin's allocator to the kernel core:
+//! Two seams connect the bin's allocator to the kernel core:
 //!
 //! * [`register_global_heap`] — each arch bin publishes its
 //!   `#[global_allocator]` here with one line before it calls `boot`, so
 //!   the core can reach the same allocator instance without naming the
 //!   bin.
-//! * [`install_kheap_irq_control`] — the bin installs its per-CPU
-//!   interrupt mask/restore so the allocator's lock is interrupt-safe.
 //! * [`install_frame_heap_source`] — the boot path calls this once the
 //!   frame allocator, the arch direct physical map, and the port's kernel
 //!   remap window all exist and are `'static`, wiring the frame-backed
 //!   source into the registered heap.
+//!
+//! The lock's interrupt-safety is deliberately **not** one of them: it is
+//! installed straight into `tairix_kalloc` by the port's boot entry, so it
+//! covers every heap in the binary rather than only the one a bin
+//! remembered to publish here.
 //!
 //! # How a region is grown
 //!
@@ -103,28 +106,6 @@ pub fn register_global_heap(heap: &'static FreeListAllocator) {
         core::ptr::from_ref::<FreeListAllocator>(heap).cast_mut(),
         Ordering::Release,
     );
-}
-
-/// Make the registered kernel heap's lock **interrupt-safe** by installing
-/// the arch's per-CPU interrupt mask/restore primitives into it.
-///
-/// TAIRiX takes interrupts while in-kernel code runs, so an interrupt
-/// service routine can fire on a CPU that is mid-allocation holding the
-/// allocator lock; without masking, an ISR that allocates would spin
-/// forever on the lock its own interrupted mainline holds — a single-CPU
-/// self-deadlock. Each arch bin calls this once from `boot`, **before**
-/// interrupts are first enabled and before any secondary CPU is started,
-/// passing its `InterruptControl` primitives (`msr daifset` on AArch64,
-/// `cli`/`pushf` on x86_64, `csrrci sstatus` on RISC-V) adapted to the
-/// opaque-token `fn` shape [`FreeListAllocator::install_irq_control`] takes.
-/// A no-op when no bin registered a heap (a host harness); the
-/// interrupt-free `wasm32` port installs nothing (fail-safe: that window is
-/// single-CPU with interrupts already masked).
-pub fn install_kheap_irq_control(disable: fn() -> usize, restore: fn(usize)) {
-    let Some(heap) = global_heap() else {
-        return;
-    };
-    heap.install_irq_control(disable, restore);
 }
 
 /// Borrow the registered heap, or `None` when no bin published one (a host

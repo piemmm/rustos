@@ -314,17 +314,19 @@ pub fn boot(
         enable_fp_el1();
     }
 
-    // Make the global kernel-heap lock interrupt-safe before anything can be
-    // interrupted while holding it: install this port's per-CPU DAIF
-    // mask/restore into the (already-registered) heap. Done here, at boot
-    // entry — before the first heap allocation, before interrupts are ever
-    // enabled, and before any secondary CPU is started — so no interrupt can
-    // ever fire on a CPU mid-allocation and reenter the allocator, spinning
-    // forever on the lock its own interrupted mainline holds (a single-CPU
-    // self-deadlock). One process-global install covers every core: the hooks
-    // mask the *current* CPU's interrupts. It stores two `fn` pointers and
-    // does not allocate, so it is safe before the heap has grown.
-    tairix_kernel_core::kheap::install_kheap_irq_control(
+    // Make every kernel heap's lock interrupt-safe before anything can be
+    // interrupted while holding one: install this port's per-CPU DAIF
+    // mask/restore. Done here, at boot entry — before the first heap
+    // allocation, before interrupts are ever enabled, and before any
+    // secondary CPU is started — so no interrupt can ever fire on a CPU
+    // mid-allocation and reenter the allocator, spinning forever on the lock
+    // its own interrupted mainline holds (a single-CPU self-deadlock). One
+    // install covers every core and every heap the binary holds: the hooks
+    // mask the *current* CPU's interrupts and are read by the allocator
+    // itself, so a bin that publishes no heap to the kernel core is covered
+    // too. It stores two `fn` pointers and does not allocate, so it is safe
+    // before the heap has grown.
+    tairix_kalloc::install_irq_control(
         crate::aarch64::gic_irq::kalloc_irq_disable,
         crate::aarch64::gic_irq::kalloc_irq_restore,
     );

@@ -364,10 +364,14 @@ The open items, in priority order:
   leaves `DAIF.F` clear and therefore stays sampleable — so a lock wedge
   could not have been silent. D23's exception-return corruption is a proven,
   reachable mechanism for a silent wedge on exactly this image, and is the
-  leading candidate for this defect too. **Remaining:** re-run
-  `stress --cpu 20` on the D23-fixed debug image; if it no longer wedges,
-  close this against D23, and if it does, the surviving report is fresh
-  evidence for a genuinely separate defect.
+  leading candidate for this defect too. The interrupt-safe allocator lock has
+  since landed, and its install — which reached only a heap a bin had
+  published, so it silently no-op'd on every QEMU test bin — is now a
+  crate-global seam covering every heap in a binary, so the QEMU matrix
+  finally runs the fix it is meant to confirm. **Remaining:** re-run
+  `stress --cpu 20` on metal; if it no longer wedges, close this, and if it
+  does, the surviving report is fresh evidence for a genuinely separate
+  defect.
 - **D14 — `sysmon-qemu-aarch64` load-dependent 120 s timeout under
   concurrent `cargo xtask ci` — OPEN (to root-cause).** The single-CPU,
   full-boot `sysmon` acceptance vertical (unlock + PBKDF2 + interactive
@@ -1685,22 +1689,53 @@ sound (physical-`CNTPCT` cross-CPU clock; idle CPUs marked `Idle`; a running
 EL0 task's liveness refreshed by the maskable watchdog IRQ), so this is a
 genuine wedge, not a false positive.
 
-**Fix.** `tairix_kalloc::FreeListAllocator` now takes an installable
-interrupt-control seam (`install_irq_control(disable, restore)`, two set-once
-`fn`-pointer atomics read outside the lock); `with_inner` masks the current
-CPU's interrupts *before* acquiring the lock and restores them *after*
-releasing — foreclosing the reentrant self-deadlock. Each freestanding bin
-installs its arch primitive at `boot()` entry, before interrupts are ever
-enabled and before any secondary CPU/hart starts (one process-global install
-covers every core; the hooks mask the *current* CPU): aarch64 via
-`DaifIrqControl`, x86_64 via `RflagsIrqControl`, riscv64 via `sstatus.SIE`
-(`csrrci`/`csrs`); the interrupt-free `wasm32` port and the host test build
-install nothing (that window is single-CPU with interrupts already masked).
-Regression test `the_lock_masks_interrupts_via_the_installed_control`
-(`lib/kalloc`) asserts the lock masks then restores interrupts, balanced, once
-a control is installed and not before. Host-tested and all four Tier-1 kernels
-build clean; the metal confirmation (no boot wedge on the Pi 4 debug image) is
-pending a user boot.
+**Fix.** `tairix_kalloc` carries an installable interrupt-control seam
+(`install_irq_control(disable, restore)`, two set-once `fn`-pointer atomics
+read outside the lock); `with_inner` masks the current CPU's interrupts
+*before* acquiring the lock and restores them *after* releasing — foreclosing
+the reentrant self-deadlock. Each port installs its arch primitive at `boot()`
+entry, before interrupts are ever enabled and before any secondary CPU/hart
+starts (one install covers every core; the hooks mask the *current* CPU):
+aarch64 via `DaifIrqControl`, x86_64 via `RflagsIrqControl`, riscv64 via
+`sstatus.SIE` (`csrrci`/`csrs`); the interrupt-free `wasm32` port and the host
+test build install nothing (that window is single-CPU with interrupts already
+masked).
+
+**The seam is crate-global, because the first shape of it was fail-open.**
+The hooks were originally per-`FreeListAllocator`, and the boot path reached
+the instance through `kheap::install_kheap_irq_control`, which forwarded to
+whatever `register_global_heap` had published — *and silently no-op'd when
+nothing had*. Only `kernel/tairix-kernel`'s production `main.rs` registers.
+Every one of the ~155 freestanding QEMU integration-test bins declares its own
+`#[global_allocator] FreeListAllocator` and registers it nowhere, so on all of
+them the install was a no-op and the heap lock stayed interrupt-unsafe: the
+D13 root cause was live in the entire QEMU matrix, including the
+`stress_qemu_aarch64` vertical whose job is to confirm D13 fixed. The hooks
+mask the *calling* CPU, so they describe the machine and not any one heap;
+they now live at crate scope in `lib/kalloc`, the ports call
+`tairix_kalloc::install_irq_control` directly, and the `kernel/core` forwarder
+is deleted. Regression test
+`the_lock_masks_interrupts_via_the_installed_control` (`lib/kalloc`) pins both
+halves: the lock masks then restores around each hold once a control is
+installed and not before, *and* an allocator built after the install that no
+registry knows about is interrupt-safe too.
+
+**Noticed while fixing it, not fixed here.**
+- The same `register_global_heap` gate also withholds the frame-backed growth
+  source (`install_frame_heap_source`) from every test bin, so a QEMU vertical
+  boots a kernel whose heap is capped at its `.bss` bootstrap region and the
+  growth path is never exercised under a guest. That is test fidelity and
+  capacity, not the D13 safety property; closing it means registering the heap
+  in every vertical and re-validating the matrix's memory behaviour, so it is
+  staged rather than smuggled into this change.
+- Heap growth runs *under* the heap lock and takes the frame allocator's and
+  kernel-remap window's plain `SpinLock`s, so an ISR that allocated while
+  interrupting an EL1 mainline holding one of those would still self-deadlock
+  one layer down. No such path exists today: every ISR-reachable path is
+  lock-free and allocation-free except the return-to-user preempt point, whose
+  interrupted context is EL0 and therefore holds no kernel lock. The allocator
+  masking is correct defence-in-depth; the layer below needs the same
+  treatment only if an ISR ever allocates from an EL1-interrupting context.
 
 **Done when:** the near-every-boot Pi 4 boot wedge no longer reproduces on
 metal with the interrupt-safe allocator lock, and `stress --cpu 20` no longer

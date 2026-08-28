@@ -602,7 +602,7 @@ fn note_resched_here() {
 /// returning the prior `DAIF` state as an opaque token.
 ///
 /// The `fn`-pointer adapter the boot path installs into the global heap
-/// (`tairix_kalloc::FreeListAllocator::install_irq_control`) so the
+/// (`tairix_kalloc::install_irq_control`) so the
 /// allocator's lock is interrupt-safe: an interrupt taken on a CPU already
 /// holding the lock can no longer reenter `alloc`/`dealloc` and spin forever
 /// on the lock its own interrupted mainline holds. It masks through the

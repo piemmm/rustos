@@ -64,6 +64,13 @@ interrupts are ever enabled; the hosted test build and the interrupt-free
 `wasm32` port install nothing and the lock does not mask (that window is
 single-CPU with interrupts already masked, so no ISR can reenter).
 
+The hooks mask the *calling* CPU, so they belong to the machine rather than
+to any one heap: they are crate-global, and one install covers every core
+and every `FreeListAllocator` the binary holds. Binding them per instance
+would leave a heap the install site was never told about — every
+freestanding test bin declares its own `#[global_allocator]` and publishes
+it to no registry — silently spinning on a plain lock.
+
 ## Stability tier
 
 `stable` — the public surface (`FreeListAllocator`, `Heap`, `HEAP_BYTES`,
