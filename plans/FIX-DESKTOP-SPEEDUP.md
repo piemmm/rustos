@@ -1,11 +1,11 @@
 # FIX-DESKTOP-SPEEDUP — Software-compositor and GUI redraw performance
 
-Status: **A done** (less A.4's QEMU hover vertical, whose observation channel
-is now in place), **B done**, **C done**, **D done** (D.5 approved, comparison
-first), **E done**, **H, I, J done**. **F.0 and F.1 done**, and F.1 closed
-F.3's item 5 and settled that items 4 and 6 need intrinsics rather than a
-source shape; F.2's candidates are unstarted and aarch64-only until Stage G.
-**G** is kernel work gated on a User decision (§15.7).
+Status: **A done**, **B done**, **C done** (less C.7, which A.4 found), **D
+done** (D.5 approved, comparison first), **E done**, **H, I, J done**. **F.0
+and F.1 done**, and F.1 closed F.3's item 5 and settled that items 4 and 6 need
+intrinsics rather than a source shape; F.2's candidates are unstarted and
+aarch64-only until Stage G. **G** is kernel work gated on a User decision
+(§15.7).
 
 Binding under `AGENTS.md` (§3, §15.18). This plan closes the standing
 performance defect that the desktop repaints **orders of magnitude more pixels
@@ -51,13 +51,13 @@ that should not be running is forbidden; Stage F may not land before Stages B–
 
 ## What is left
 
-Stages A–E are done. What remains is **A.4**'s QEMU hover vertical — its
-observation channel now **exists** (the `sysinfo` query landed; what is left is
-the vertical itself, its hover script, and the counter bounds it asserts) —
-**Stage F.2**'s packed candidates, which F.1's measurements narrow to the blur
-window and the resample row filter and which are aarch64-only until Stage G,
-**D.5**'s approved half-resolution blur (visual comparison first), and **Stage
-G**, still behind a User decision. `plans/OPEN-DEFECTS.md` D37 is a confirmed defect fixed
+Stages A–E are done. What remains is **C.7** — the whole-bar hover repaint the
+A.4 gate found on its first run, which is the one open per-control damage gap
+and the reason A.4's damage bound sits where it does — **Stage F.2**'s packed
+candidates, which F.1's measurements narrow to the blur window and the resample
+row filter and which are aarch64-only until Stage G, **D.5**'s approved
+half-resolution blur (visual comparison first), and **Stage G**, still behind a
+User decision. `plans/OPEN-DEFECTS.md` D37 is a confirmed defect fixed
 independently of this schedule.
 
 Independently: **every published number is taken from a `--release`/installer
@@ -112,7 +112,7 @@ image.** A dev-profile timing is never quoted as evidence.
 
 ---
 
-## Stage A — Measure, and measure the right binary  **[done, less A.4]**
+## Stage A — Measure, and measure the right binary  **[done]**
 
 - **A.1 Product-speed per-pixel crates in every profile.** `tairix-wm`,
   `-controls`, `-font`, `-window` and `-display` join the existing
@@ -170,28 +170,57 @@ The peaks are the load-bearing part: a hover that repaints one control and one
 that repaints the screen have similar *means*, so an average cannot express
 C.6's acceptance.
 
-**Remaining — A.4 the QEMU hover vertical itself.** A desktop vertical that
-hovers across a control-rich window and asserts **counter bounds**, not
-timings, read back through the query above. This is the regression gate every
-later stage tightens, and it does not exist yet. Unit counter tests (exact
-counts for a scripted scene, zero for an empty-damage frame, the epoch fold
-round-tripped through the ABI decoder) are in.
+**A.4's QEMU hover vertical — done.**
+`tests/integration/desktop_hover_qemu_aarch64` boots the production aarch64
+graphical session on its own `FsDisk::HoverRootDisk` image, launches the
+`framestats` fixture from the program library, sweeps the pointer the length of
+the icon bar, and launches the fixture again. The guest judges the work between
+the two samples. This is the regression gate every later stage tightens.
 
-Two things it still needs:
-
-- **A guest-side reader.** The query is userland IPC, so the freestanding test
-  kernel cannot issue it directly; the vertical needs an in-guest client
-  (an in-kernel client task, or a small userland fixture program) that reads
-  the record once the gesture has completed and latches the bounds. Nothing in
-  the audit trail can stand in: a present is not recognisable there — on
-  `DISPLAY_ENDPOINT` both `Present` and `Configure`, and every error and
-  decode-failure path on either, answer with the same four-byte status word, and
-  counting presents by reply length is precisely the guess that caused
-  `plans/OPEN-DEFECTS.md` D10.
-- **A hover in the pointer script.** `PointerPen` emits one jump-to-target
-  `Move` per step, and the enrolled-script unit test asserts every script ends
-  on a `Click`; a run of motion samples needs a `PointerPen` hover helper and
-  that test amended. That part is only effort.
+- **The reader is a fixture bundle, not the kernel.**
+  `tests/integration/framestats_program` is a `command` bundle declaring a
+  program-library folder, planted only on this disk. It reads
+  `DESKTOP_FRAME_STATS` through `lib/procinfo::for_each_desktop_frame_report`
+  under its own `CAP_SYSINFO_GLOBAL` and re-emits the eight counters the gate
+  reads as one `log_emit` record — `abi-v1` bounds a record to eight fields, so
+  it carries exactly those. It requires **one** publishing session and fails
+  closed otherwise. A run that cannot sample emits its own failure record and
+  the gate fails the run on sight of it.
+- **The gate listens on the *diagnostic* trail.** `log_emit` reaches the log
+  sink, never the audit sink, so this vertical installs its gate there and
+  hands the audit trail straight to serial — the reverse of every sibling's
+  wiring, because the witness is a userland record rather than a kernel
+  decision. Nothing in the audit trail could stand in, for the D10 reason
+  above.
+- **The gesture is bracketed, and the epoch is not judged.** The published
+  record is cumulative from the session's first frame, so bring-up's
+  full-screen frames own both its mean *and* its peak: neither says anything
+  about the gesture that followed. The two launches bracket the sweep, and
+  pointer steps fire strictly in script order, so the sweep provably lies
+  between the samples — no marker has to say when a hover ended, which is just
+  as well, because nothing observable says it. The publisher's 250 ms rate
+  limit only moves the window's edges; every counter inside it is work rather
+  than time.
+- **The sweep aims at the icon bar.** It walks the bar's own centre line from
+  the launcher button to the Switchboard capsule in `SWEEP_MOVES` samples,
+  crossing every control the bar draws. The bar is a desktop surface and never
+  covered by a window, so the gesture needs nothing else on screen reasoned
+  about first; the per-control damage under test is the same sink either way.
+- **Bounds, all derived from the screen extent** so they hold on any board:
+  frames ≥ `MIN_SWEEP_FRAMES` (an empty difference must not pass by measuring
+  nothing), mean damage per frame ≤ `screen/8`, blends ≤ 4 per damaged pixel,
+  frost work ≤ `screen/4` (a handful of one-off frosts, never one per frame),
+  no re-rendered furniture, and presents ≤ rectangles + frames.
+- **Measured baseline** (two runs, 32-move sweep, `virt` board at 1024×768):
+  delta frames 36 / 50, damaged 863 951 / 860 876 px (mean 23 999 / 17 218,
+  against a bound of 98 304), blended 1.05 per damaged pixel, frost 40 560 px
+  in both, dirty rects 31 / 30, presents 25 / 23, chrome misses 0.
+- **`PointerPen::hover`** emits the run of motion samples; the enrolled-script
+  invariant test covers the new script unchanged, because it still ends on the
+  click its guest exits on.
+- **What the gate found on its first run** is C.7 below: a bar hover repaints
+  the whole bar. That is the one open per-control damage gap, and the reason
+  this stage's damage bound sits where it does.
 
 ---
 
@@ -258,7 +287,7 @@ Compositor-local: no ABI change, no app change.
 
 ---
 
-## Stage C — Repaint the control that changed, not the window
+## Stage C — Repaint the control that changed, not the window  **[done, less C.7]**
 
 **[C.0–C.3, C.4b, C.4c, C.5 done; C.4a withdrawn]**
 
@@ -528,6 +557,39 @@ nothing (`files`: `sidebar_tests.rs` + `listing_tests.rs`; `switchboard`:
 **Acceptance:** the A.4 hover vertical's damaged-pixel counter drops from
 window-area to control-area; every existing control and WM test still passes
 unchanged.
+
+### C.7 A bar hover repaints the whole bar — found by A.4, **not yet fixed**
+
+The gate's first run found it, and it is why A.4's damage bound sits at
+`screen/8` rather than near a control's cost. Escalated rather than folded into
+A.4 (§15.7, §2.18): the fix reshapes the session's chrome present path and the
+compositor's surface-update seam for session-owned windows, and interacts with
+Stage D's frost-invalidation invariants, so it is its own change with its own
+measurement and gate run.
+
+The mechanism, read from the code and confirmed by arithmetic:
+
+1. `Taskbar::track_hover` escalates *any* library-button or app-slot hover
+   change to the whole-surface `TaskbarRepaint::BAR` flag. (The tray capsule
+   already does the right thing — it reports fine rectangles into the `damage`
+   region it is handed.)
+2. `Presenter::present_bar` then hands the compositor a **fresh** surface via
+   `Compositor::set_surface`.
+3. `set_surface` goes through `Compositor::mutate`, which marks the window's
+   *whole bounds* dirty.
+
+So one hover step costs 1014 × 40 = 40 560 screen pixels where the control that
+changed is about 40 × 40 — roughly 25× the pixels the change can be seen in.
+A.4's measured delta is about fifteen whole-bar repaints. The finer path
+already exists but only for **client** windows: the pixel-comparing convert
+marks only what genuinely changed. The session's own chrome surfaces do not use
+it.
+
+The fix is to give the chrome present path that same treatment — update the
+window's existing buffer and mark only the changed rectangle — for the bar and
+every other chrome surface (popup, menu, picker, notifications, readout). With
+it, A.4's damage bound should drop to about `screen/64`, and the drop is the
+acceptance evidence.
 
 ---
 
@@ -1262,7 +1324,7 @@ A–E are expected to dominate F entirely.
 5. ~~How the frame counters become observable to a guest~~ — **taken and
    landed**: the `DESKTOP_FRAME_REPORT` / `DESKTOP_FRAME_STATS` submission/read
    pair, held to the same ABI discipline as any other query, with `sysinfo
-   frames` as its second consumer. Only the vertical itself is left (A.4).
+   frames` as its second consumer. The vertical (A.4) has landed on top of it.
 
 ---
 

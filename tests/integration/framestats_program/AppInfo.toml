@@ -1,0 +1,25 @@
+# Signed-AppInfo manifest source for the `framestats` desktop frame-accounting
+# fixture (plans/FIX-DESKTOP-SPEEDUP.md A.4). Composed and planted ONLY on the
+# aarch64 desktop-hover QEMU vertical's disk image by tools/xtask — the crate
+# lives outside the userland discovery walk, so no production image ever ships
+# it.
+#
+# The capability list is the bundle's request, intersected with the launching
+# user's grants (the seeded root administrator ceiling): CAP_SYSINFO_GLOBAL
+# because DESKTOP_FRAME_STATS names another principal's work and sysinfod
+# enforces that gate against this process's kernel-attested origin,
+# CAP_LOG_EMIT to put the sampled counters on the system log where the guest
+# can read them back, and CAP_CONSOLE_WRITE for the fail-loud stderr
+# diagnostic when a sample cannot be taken.
+id = "os.tairix.test.framestats"
+name = "framestats"
+version = "0.1.0"
+kind = "command"
+purpose = "Sample the desktop's frame accounting onto the system log"
+author = "The TAIRiX Project"
+capabilities = ["CAP_SYSINFO_GLOBAL", "CAP_LOG_EMIT", "CAP_CONSOLE_WRITE"]
+# Listed in the desktop's program library so the vertical's pointer script can
+# launch it with a click: the desktop owns the screen, so a click is the only
+# gesture that reaches a program, and a pointer script's steps fire strictly in
+# order — which is what brackets the hover between two samples.
+library = "Programming"

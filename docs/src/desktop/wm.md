@@ -801,6 +801,24 @@ counts no composite pass could produce, and the compositor's own tests
 round-trip its fold through that decoder — a producer the receiver would
 reject is a defect on this side.
 
+**A gesture is judged on a bracketed window, never on the epoch.** The peaks
+are the right reading of *a gesture's* frames, but the published epoch begins
+at the session's first frame and bring-up legitimately composes full-screen
+ones — the wallpaper and the reveal fade — so the epoch's peak is bring-up's
+and its mean is too. A gate therefore samples the record either side of the
+gesture and judges the difference, whose counters are all work rather than
+time and so are load-independent.
+`tests/integration/desktop_hover_qemu_aarch64` is that gate: it boots the
+production aarch64 graphical session, launches the `framestats` fixture from
+the program library to take a sample, sweeps the pointer the length of the
+icon bar, and launches it again. The fixture is what makes the reading
+reachable at all — the query is userland IPC, which a freestanding test kernel
+cannot issue, so the fixture asks and re-emits the counters through the system
+log, where the guest decodes them. The window is then held to per-frame damage
+as a share of the screen, overdraw per damaged pixel, bounded one-off frost
+work, no re-rendered furniture, and no more driver calls than rectangles and
+frames.
+
 ## Server-side window decorations
 
 Window decorations — a title bar carrying the four command controls in two

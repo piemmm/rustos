@@ -2933,6 +2933,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-desktop-hover-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
+ "tairix-fwcfg",
+ "tairix-itest-finisher",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-log",
+ "tairix-test-framestats",
+]
+
+[[package]]
 name = "tairix-test-desktop-pressure-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
@@ -3251,6 +3265,16 @@ dependencies = [
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-log",
+]
+
+[[package]]
+name = "tairix-test-framestats"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-log",
+ "tairix-procinfo",
+ "tairix-rt",
 ]
 
 [[package]]
@@ -5513,9 +5537,11 @@ dependencies = [
  "tairix-test-arxfs-image",
  "tairix-test-autoload-input-qemu-aarch64",
  "tairix-test-datetime-elevate-qemu-aarch64",
+ "tairix-test-desktop-hover-qemu-aarch64",
  "tairix-test-desktop-pressure-qemu-aarch64",
  "tairix-test-encrypted-root-image",
  "tairix-test-fat32-image",
+ "tairix-test-framestats",
  "tairix-test-memsoak",
  "tairix-test-netstack-wire",
  "tairix-test-tcpecho",

@@ -277,6 +277,41 @@ pub fn memsoak_store_files(
     )
 }
 
+/// The composed store files the desktop-hover vertical's disk plants: the
+/// shared [`app_store_files`] set plus the test-only `framestats` frame-sample
+/// fixture bundle (`plans/FIX-DESKTOP-SPEEDUP.md` A.4), memoised per arch.
+///
+/// The fixture declares a program-library folder, so it rides the seeded
+/// catalog the disk derives from this very set — which is what lets the
+/// vertical's pointer script launch it with a click.
+///
+/// # Errors
+///
+/// As [`fixture_store_files`].
+pub fn framestats_store_files(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<&'static [AppStoreFile], String> {
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; MEMO_SLOTS] =
+        [const { OnceLock::new() }; MEMO_SLOTS];
+    fixture_store_files(
+        ctx,
+        arch,
+        profile,
+        FRAMESTATS_FIXTURE_CRATE,
+        "framestats",
+        &FILES,
+    )
+}
+
+/// Workspace-relative crate directory of the `framestats` fixture bundle.
+///
+/// Named once: the disk composer plants the bundle from here and the
+/// vertical's host-side pointer script reconstructs the same manifest to find
+/// the library row it clicks.
+pub const FRAMESTATS_FIXTURE_CRATE: &str = "tests/integration/framestats_program";
+
 /// The composed store files the stream vertical's disk plants: the shared
 /// [`app_store_files`] set plus the test-only `tcpecho` stream-socket client
 /// fixture bundle (`plans/NETWORK.md` N5c), memoised per arch.

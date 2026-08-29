@@ -1,0 +1,51 @@
+[package]
+name = "tairix-test-desktop-hover-qemu-aarch64"
+description = "plans/FIX-DESKTOP-SPEEDUP.md A.4 QEMU integration test: boot the graphical desktop on the aarch64 virt board, sweep the pointer across the icon bar's controls between two `framestats` samples of the desktop's published frame accounting, and hold the bracketed window to per-frame work bounds"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# The vertical's shared contract (src/lib.rs): the work bounds the bracketed
+# hover window is held to and the verdict over them, plus the sweep's shape —
+# read by the freestanding guest gate and by the host runner's pointer script,
+# so the gesture the host injects and the bounds the guest asserts can never
+# drift apart. `no_std`, host-buildable, and host-tested.
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "tairix-test-desktop-hover-qemu-aarch64"
+path = "src/main.rs"
+
+[dependencies]
+# The sample record the `framestats` fixture emits and the difference
+# arithmetic over two of them. Shared with the fixture, so the bounds are
+# applied to the counters the emitter authored.
+tairix-test-framestats = { path = "../framestats_program", version = "=0.0.0", default-features = false }
+# The board's ramfb console extent: the screen the bracketed epoch must have
+# been composed against.
+tairix-fwcfg = { path = "../../../lib/fwcfg", version = "=0.0.0" }
+
+# Freestanding "boot the production aarch64 desktop, then judge what a hover
+# cost" integration test. It runs the entire production boot pipeline through
+# `tairix-kernel`'s library half (`boot_aarch64::boot`) and only swaps the
+# audit sink for the gate. Keeping the QEMU-exit shortcut in a dedicated bin
+# (not a Cargo feature on a production crate) prevents feature unification
+# from leaking it into any production build.
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# Compile-checked non-zero finisher codes, so a failing run can never report
+# the zero status its runner reads as a pass.
+tairix-itest-finisher = { path = "../finisher", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

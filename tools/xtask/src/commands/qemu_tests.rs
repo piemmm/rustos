@@ -308,6 +308,19 @@ enum FsDisk {
     /// fixture crate lives outside the userland discovery walk, so only
     /// this disk ever carries it; no production image ships it.
     MemsoakRootDisk,
+    /// The [`Self::AutoloadRootDisk`] layout — the same graphical world, with
+    /// the signed input and display driver bundles and the text-login
+    /// document — whose store additionally carries the test-only `framestats`
+    /// frame-sample fixture bundle
+    /// ([`super::image_apps::framestats_store_files`]): the desktop-hover
+    /// vertical's backing (`plans/FIX-DESKTOP-SPEEDUP.md` A.4).
+    ///
+    /// Its own disk rather than a bundle added to the shared autoload image,
+    /// because the fixture declares a program-library folder and so appears in
+    /// the popup: planting it on the shared image would move every other
+    /// desktop vertical's library rows out from under the coordinates their
+    /// scripts click.
+    HoverRootDisk,
     /// The [`Self::EncryptedRootDisk`] layout whose **read-only `/System`
     /// volume** additionally carries the signed virtio-net driver bundle
     /// (only — no display/input driver, so the console stays the UART text
@@ -6259,6 +6272,58 @@ static TESTS: &[QemuTest] = &[
         pointer_script: Some(desktop_pressure_pointer_script),
         serial: &[],
     },
+    // `plans/FIX-DESKTOP-SPEEDUP.md` A.4: the desktop **hover** vertical — the
+    // regression gate on what a gesture costs the compositor, and the only
+    // test that reads the published frame accounting back from a running
+    // desktop.
+    //
+    // It boots the graphical world of its own `FsDisk::HoverRootDisk` image —
+    // the autoload layout plus the test-only `framestats` fixture bundle,
+    // which the seeded program-library catalog is derived from and so lists —
+    // types the unlock passphrase, logs in, and starts `desktop`. The pointer
+    // script then launches `framestats` from the library, sweeps the pointer
+    // the whole length of the icon bar, and launches `framestats` again.
+    //
+    // The two samples bracket the sweep, and the guest judges the work between
+    // them: per-frame damage as a share of the screen, overdraw per damaged
+    // pixel, no recomputed frost, no re-rendered furniture, and no more driver
+    // calls than rectangles and frames. Every bound is over counted work
+    // rather than elapsed time, so the verdict is load-independent — and the
+    // window must have composed frames at all, so an empty difference fails
+    // rather than passing by measuring nothing. A whole-epoch figure could not
+    // stand in: bring-up legitimately composes full-screen frames and owns
+    // both the epoch's mean and its peak.
+    //
+    // No screendump: the claim is what the frames cost, which is a counter and
+    // not a picture. Its siblings already assert the pixels.
+    //
+    // Single CPU and the same 300-second *inactivity* budget as its siblings:
+    // the longest the guest may fall silent, never a runtime deadline, so
+    // co-scheduling cannot turn a slow guest into a timeout.
+    QemuTest {
+        package: "tairix-test-desktop-hover-qemu-aarch64",
+        binary: "tairix-test-desktop-hover-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: true,
+        fs_disk: FsDisk::HoverRootDisk,
+        keyboard: None,
+        typed_keys: &[
+            (
+                AUTOLOAD_INPUT_KEY_MARKER,
+                AUTOLOAD_INPUT_ARMED_OCCURRENCES,
+                UNLOCK_PASSPHRASE_LINE,
+            ),
+            (AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
+        ],
+        screendumps: &[],
+        pointer_script: Some(desktop_hover_pointer_script),
+        serial: &[],
+    },
     // `plans/NEW-DESKTOP-LOGIN.md` G7.1: a display-capable machine that
     // nobody has configured boots to the **graphical** login screen on its
     // own. The sibling verticals above all plant `os.loginType text` because
@@ -7351,7 +7416,7 @@ fn root_volume_components(t: &QemuTest, path: &str) -> Result<Vec<String>, Strin
 /// parses.
 fn login_type_plant(t: &QemuTest) -> Result<Option<(Vec<String>, String)>, String> {
     let login_type = match t.fs_disk {
-        FsDisk::AutoloadRootDisk => tairix_sysconfig::LoginType::Text,
+        FsDisk::AutoloadRootDisk | FsDisk::HoverRootDisk => tairix_sysconfig::LoginType::Text,
         _ => return Ok(None),
     };
     let components = root_volume_components(t, tairix_sysconfig::CONFIG_PATH)?;
@@ -7404,6 +7469,10 @@ pub(crate) struct StoreSet {
     /// The memsoak-augmented application set the memory-stability vertical
     /// plants.
     apps_with_memsoak: &'static [AppStoreFile],
+    /// The application/service bundles the desktop-hover vertical plants: the
+    /// shared set plus the test-only `framestats` fixture bundle, which the
+    /// seeded program-library catalog is derived from and so lists.
+    apps_with_framestats: &'static [AppStoreFile],
     /// The signed autoload driver bundles the `-M virt` autoload verticals
     /// plant in the `/System/Drivers/` store.
     autoload_drivers: &'static [AppStoreFile],
@@ -7469,8 +7538,12 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         FsDisk::MemsoakRootDisk => super::image_apps::memsoak_store_files(ctx, arch, profile)?,
         _ => EMPTY,
     };
+    let apps_with_framestats = match t.fs_disk {
+        FsDisk::HoverRootDisk => super::image_apps::framestats_store_files(ctx, arch, profile)?,
+        _ => EMPTY,
+    };
     let autoload_drivers = match t.fs_disk {
-        FsDisk::AutoloadRootDisk | FsDisk::GreeterRootDisk => {
+        FsDisk::AutoloadRootDisk | FsDisk::GreeterRootDisk | FsDisk::HoverRootDisk => {
             super::image_drivers::autoload_driver_store_files(ctx, arch, profile)?
         }
         _ => EMPTY,
@@ -7519,6 +7592,7 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
     Ok(StoreSet {
         apps,
         apps_with_memsoak,
+        apps_with_framestats,
         autoload_drivers,
         apps_with_tcpecho,
         apps_with_tcpecho_ecn,
@@ -8843,6 +8917,30 @@ impl PointerPen {
         self.push(marker, occurrences, delta);
     }
 
+    /// Sweep the pointer to `to` in `samples` evenly-spaced moves, every one
+    /// gated on the same witness.
+    ///
+    /// A hover is a *run* of motion, not a jump: a single move reports one
+    /// arrival, where crossing a strip of controls is what makes each of them
+    /// report the enter and leave a repaint is owed for. The last sample lands
+    /// exactly on `to`, so the pen's bookkeeping stays exact however the
+    /// interpolation rounds.
+    fn hover(&mut self, marker: &str, occurrences: u32, to: tairix_geometry::Point, samples: u32) {
+        let from = self.at;
+        let steps = samples.max(1);
+        for step in 1..=steps {
+            #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+            // A sample index is bounded by `samples`, far below `i32::MAX`.
+            let lerp =
+                |start: i32, end: i32| start + (end - start) * (step as i32) / (steps as i32);
+            self.aim(
+                marker,
+                occurrences,
+                tairix_geometry::Point::new(lerp(from.x, to.x), lerp(from.y, to.y)),
+            );
+        }
+    }
+
     /// Aim at `to` and click `button` there, both gated on the same witness.
     fn click(
         &mut self,
@@ -8883,6 +8981,144 @@ fn datetime_elevate_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
     let mut pen = PointerPen::pinned_at_origin(ready, ramfb_screen());
     pen.click(ready, 1, MouseButton::Secondary, clock);
     pen.click(ready, 1, MouseButton::Primary, set_row);
+    Ok(pen.steps())
+}
+
+/// Build the desktop-hover script: launch the `framestats` fixture from the
+/// program library, sweep the pointer the whole length of the icon bar, then
+/// launch it again.
+///
+/// The two launches are what bracket the sweep. Pointer steps fire **strictly
+/// in script order**, so the sweep provably lies between the samples the two
+/// runs take — no marker has to say when a hover ended, which is just as well,
+/// because nothing observable says it. The gate then judges the work the
+/// desktop did inside that window; a whole-epoch figure could not, because
+/// bring-up's own full-screen frames own both its mean and its peak.
+///
+/// The sweep runs along the bar's own centre line from the leading end to the
+/// trailing one, so it crosses every control the bar draws — the launcher
+/// button, the running-application slots, the notification area, the clock,
+/// and the Switchboard capsule — in one pass. Those endpoints are read from
+/// the **production** bar layout, driven here over the shared ramfb console
+/// geometry, so the sweep tracks the bar the guest actually draws rather than
+/// coordinates copied from a screenshot. The bar is a desktop surface, never
+/// covered by a window, which is why the gesture aims at it: a window's
+/// controls would need whatever else is on screen reasoned about first, and
+/// the per-control damage under test is the same sink either way.
+///
+/// Every gate is causal:
+///
+/// - The desktop's own reveal witness opens the script, so nothing is injected
+///   before there is a bar to hit.
+/// - The row click follows its library click immediately — that press is what
+///   opens the popup, so the row is on screen by construction, and the guest
+///   applies injected events strictly in device order.
+/// - Everything after the first launch waits on the fixture's own sample
+///   record: until that record exists there is no opened window to sweep
+///   inside.
+///
+/// The final click is what completes the run: it launches the second sample,
+/// whose record is the gate's verdict.
+fn desktop_hover_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
+    use tairix_abi::seat::SEAT_PRIMARY;
+    use tairix_desktop_session::DesktopShell;
+    use tairix_geometry::Point;
+    use tairix_log::DiscardSink;
+    use tairix_qemu::MouseButton;
+    use tairix_reclaim::ReportedPressure;
+    use tairix_taskbar::{AppSlot, LibraryRow, TaskbarConfig};
+    use tairix_test_desktop_hover_qemu_aarch64::{SAMPLE_APP_NAME, SWEEP_MOVES};
+
+    // The shell exists only to reproduce the guest's layout arithmetic. It
+    // rasterises nothing and owns no display, so it is wired truthfully rather
+    // than plausibly: no display backing, and a gauge that has never been told
+    // a band (which answers critical, so nothing is admitted).
+    static NO_PRESSURE_FEED: ReportedPressure = ReportedPressure::unknown();
+    static DISCARD_SINK: DiscardSink = DiscardSink;
+
+    let (width, height) = ramfb_screen();
+    let scale = RECONSTRUCTION_SCALE;
+    let mut shell = DesktopShell::new(
+        TaskbarConfig::bottom_bar(width, height),
+        SEAT_PRIMARY,
+        0,
+        &NO_PRESSURE_FEED,
+        &DISCARD_SINK,
+    );
+    shell
+        .session_mut()
+        .taskbar_mut()
+        .library_mut()
+        .set_catalog(reconstructed_library(&[
+            super::image_apps::FRAMESTATS_FIXTURE_CRATE,
+        ])?);
+    // The file manager is autostarted at bring-up, so the bar already carries
+    // its slot by the time the script runs. The sweep's endpoints sit at the
+    // bar's two ends and so do not move with the strip, but the strip is
+    // modelled anyway: a sweep that did not cross a real slot would not
+    // exercise the hover the gate is about.
+    shell
+        .session_mut()
+        .taskbar_mut()
+        .set_apps(vec![AppSlot::new(
+            FILES_BAR_APP_NAME,
+            tairix_icon::IconKind::AppBundle,
+        )]);
+
+    let taskbar = shell.session().taskbar();
+    let bar = taskbar.layout(scale);
+    let library_button = rect_centre(bar.library, "Library button")?;
+    let sweep_end = rect_centre(bar.switchboard, "Switchboard capsule")?;
+    // The sweep walks the bar's own centre line: its ends are the launcher
+    // button and the Switchboard capsule, which anchor the two ends of the
+    // bar, so one pass between them crosses everything drawn in between.
+    let sweep_start = Point::new(library_button.x, sweep_end.y);
+
+    // The popup's row for the fixture bundle, keyed by the bundle it launches
+    // — the same on-disk identity the guest attributes the samples to — never
+    // a display-name literal.
+    let bundle = format!(
+        "{}/{SAMPLE_APP_NAME}{}",
+        tairix_abi::SYSTEM_COMMAND_STORE,
+        tairix_abi::BUNDLE_SUFFIX
+    );
+    let library = taskbar.library();
+    let row = library
+        .rows()
+        .iter()
+        .position(|row| match row {
+            LibraryRow::Entry { id, .. } => library
+                .catalog()
+                .entry(id)
+                .is_some_and(|entry| entry.bundle().as_str() == bundle),
+            LibraryRow::Folder { .. } => false,
+        })
+        .ok_or_else(|| format!("hover script: {bundle} is not listed in the program library"))?;
+    let sample_row = rect_centre(
+        taskbar
+            .library_layout(scale)
+            .rows
+            .iter()
+            .find(|(shown, _)| *shown == row)
+            .map(|(_, rect)| *rect)
+            .ok_or_else(|| {
+                "hover script: the fixture's row is not visible in the popup".to_string()
+            })?,
+        "framestats library entry",
+    )?;
+
+    let revealed = AUTOLOAD_DESKTOP_REVEALED_MARKER;
+    let sampled = tairix_test_framestats::SAMPLE_MESSAGE;
+    let mut pen = PointerPen::pinned_at_origin(revealed, ramfb_screen());
+    pen.click(revealed, 1, MouseButton::Primary, library_button);
+    pen.click(revealed, 1, MouseButton::Primary, sample_row);
+    // The first sample is in, so the bracketed window is open. Walk to the
+    // leading end of the bar, then sweep it.
+    pen.aim(sampled, 1, sweep_start);
+    pen.hover(sampled, 1, sweep_end, SWEEP_MOVES);
+    // Close the window: the second sample is the verdict.
+    pen.click(sampled, 1, MouseButton::Primary, library_button);
+    pen.click(sampled, 1, MouseButton::Primary, sample_row);
     Ok(pen.steps())
 }
 
@@ -9016,7 +9252,7 @@ fn reconstruct_bar_launch() -> Result<BarLaunch, String> {
         .session_mut()
         .taskbar_mut()
         .library_mut()
-        .set_catalog(reconstructed_library()?);
+        .set_catalog(reconstructed_library(&[])?);
 
     let bar = shell.session().taskbar().layout(scale);
     let library_button = rect_centre(bar.library, "Library button")?;
@@ -9348,7 +9584,7 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
         .session_mut()
         .taskbar_mut()
         .library_mut()
-        .set_catalog(reconstructed_library()?);
+        .set_catalog(reconstructed_library(&[])?);
     // The file manager is a core desktop component the session autostarts at
     // bring-up, so by the time the script runs the bar already carries its
     // application slot — the leading one, because Files is the first process
@@ -9547,17 +9783,27 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
 /// (`discover_app_manifests`), so the popup rows the script clicks sit
 /// exactly where the guest draws them: the app-store bundles that declare
 /// a `library` folder are exactly the seeded catalog's entries.
-fn reconstructed_library() -> Result<tairix_proglib::Catalog, String> {
-    use tairix_itest_harness::app_image::discover_app_manifests;
+fn reconstructed_library(fixtures: &[&str]) -> Result<tairix_proglib::Catalog, String> {
+    use tairix_itest_harness::app_image::{discover_app_manifests, discover_crate_manifest};
     use tairix_proglib::{BundlePath, Catalog, DisplayName, EntryId, IconAsset, LibraryEntry};
 
-    let userland = Path::new(env!("CARGO_MANIFEST_DIR"))
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(2)
-        .ok_or_else(|| "desktop pointer script: workspace root unreachable".to_string())?
-        .join("userland");
-    let discovered = discover_app_manifests(&userland)
+        .ok_or_else(|| "desktop pointer script: workspace root unreachable".to_string())?;
+    let mut discovered = discover_app_manifests(&root.join("userland"))
         .map_err(|e| format!("desktop pointer script: manifest discovery: {e}"))?;
+    // A vertical whose disk plants a test-only fixture bundle has it in the
+    // seeded catalog too — that catalog is derived from the planted store —
+    // so the reconstruction reads the fixture's own manifest source rather
+    // than a copy of what it says.
+    for fixture in fixtures {
+        let dir = root.join(fixture);
+        let app = discover_crate_manifest(&dir)
+            .map_err(|e| format!("desktop pointer script: {fixture} manifest discovery: {e}"))?
+            .ok_or_else(|| format!("desktop pointer script: {fixture} has no manifest source"))?;
+        discovered.push(app);
+    }
 
     let mut catalog = Catalog::new();
     for app in &discovered {
@@ -9666,6 +9912,7 @@ fn fs_disk_image(t: &QemuTest, stores: StoreSet) -> Result<Option<FsImage>, Stri
         // copy.
         FsDisk::AutoloadRootDisk
         | FsDisk::GreeterRootDisk
+        | FsDisk::HoverRootDisk
         | FsDisk::StreamRootDisk
         | FsDisk::EcnRootDisk
         | FsDisk::ListenRootDisk
@@ -9686,6 +9933,7 @@ fn fs_disk_image(t: &QemuTest, stores: StoreSet) -> Result<Option<FsImage>, Stri
 fn net_root_fs_disk_image(t: &QemuTest, stores: StoreSet) -> Result<FsImage, String> {
     let StoreSet {
         apps,
+        apps_with_framestats,
         autoload_drivers,
         apps_with_tcpecho,
         apps_with_tcpecho_ecn,
@@ -9700,6 +9948,12 @@ fn net_root_fs_disk_image(t: &QemuTest, stores: StoreSet) -> Result<FsImage, Str
     let (drivers, app_set, extension, label) = match t.fs_disk {
         FsDisk::AutoloadRootDisk => (autoload_drivers, apps, "autoload-root.img", "autoload-root"),
         FsDisk::GreeterRootDisk => (autoload_drivers, apps, "greeter-root.img", "greeter-root"),
+        FsDisk::HoverRootDisk => (
+            autoload_drivers,
+            apps_with_framestats,
+            "hover-root.img",
+            "hover-root",
+        ),
         FsDisk::StreamRootDisk => (
             net_only_drivers,
             apps_with_tcpecho,
@@ -10177,11 +10431,12 @@ fn persist_serial(package: &str, path: &Path, serial: &str) -> Result<(), String
 #[cfg(test)]
 mod tests {
     use super::{
-        appbar_pointer_script, autoload_desktop_pointer_script, build_targets, login_type_plant,
-        persist_serial, qemu_host_budget_for, qemu_job_weight, sidecar_path, FsDisk, PrimePlan,
-        QemuTest, MEMSOAK_PASS_PREFIX, SUPERVISOR_ESC_AT_PROMPT_SCRIPT, SUPERVISOR_ESC_SCRIPT,
-        SUPERVISOR_MOUNT_SCRIPT, TCPECHO_PASS_PREFIX, TCPSERVE_PASS_PREFIX, TESTS,
-        UNLOCK_PASSPHRASE_LINE, UNPROVISIONED_MACHINE_ID_MARKER, VALUE_OPERAND_PHYSICAL_LINE,
+        appbar_pointer_script, autoload_desktop_pointer_script, build_targets,
+        desktop_hover_pointer_script, login_type_plant, persist_serial, qemu_host_budget_for,
+        qemu_job_weight, sidecar_path, FsDisk, PrimePlan, QemuTest, MEMSOAK_PASS_PREFIX,
+        SUPERVISOR_ESC_AT_PROMPT_SCRIPT, SUPERVISOR_ESC_SCRIPT, SUPERVISOR_MOUNT_SCRIPT,
+        TCPECHO_PASS_PREFIX, TCPSERVE_PASS_PREFIX, TESTS, UNLOCK_PASSPHRASE_LINE,
+        UNPROVISIONED_MACHINE_ID_MARKER, VALUE_OPERAND_PHYSICAL_LINE,
         VALUE_OPERAND_PHYSICAL_MARKER, VALUE_PIPE_PHYSICAL_LINE, VALUE_PIPE_PHYSICAL_MARKER,
         VALUE_PIPE_WRITE_REFUSED_MARKER,
     };
@@ -10203,6 +10458,7 @@ mod tests {
         for (label, script) in [
             ("icon bar", appbar_pointer_script()),
             ("autoload desktop", autoload_desktop_pointer_script()),
+            ("desktop hover", desktop_hover_pointer_script()),
         ] {
             let steps = script.unwrap_or_else(|e| panic!("{label} script builds: {e}"));
             for (index, step) in steps.iter().enumerate() {
