@@ -524,44 +524,44 @@ when M7 has landed **and** this section is empty.
   pass in paced chunks. Fix in **M2** (the recommendation is already computed;
   the inline call is deleted).
 - **D-M3 — discard eligibility is silently and permanently lost, so TRIM can
-  never be made correct by driving it.** The pending-discard queue is a
-  `Vec<u64>` of individual block numbers, capped at a fixed
-  `MAX_PENDING_DISCARD` of 65536 entries, and `enqueue_discard` **drops** a
-  block once the cap is reached. Its rustdoc says a dropped entry "stays
+  never be made correct by driving it.** The pending-discard queue is an
+  in-memory set of coalesced runs capped at a fixed
+  `MAX_PENDING_DISCARD_RUNS` of 65536 runs, and `enqueue_discard_run` **drops**
+  a run once the cap is reached. Its rustdoc says a dropped run "stays
   un-discarded (still free) until a future free, trim pass, or mount rebuild
   requeues it" — and no such requeue exists. Nothing walks the free map to find
   never-discarded free blocks; the mount-time free-space rebuild rebuilds the
   *allocation map*, not the queue, and only runs when the map cannot be adopted.
-  So a block freed once, dropped, and never reallocated is never discarded again
-  for the life of the volume. There are three loss paths:
-  1. **The cap.** One operation that frees more than 65536 blocks — deleting or
-     truncating a file larger than 256 MiB on a 4 KiB volume, 32 MiB on a
-     512-byte one — silently loses the excess at enqueue time.
+  So a run freed once, dropped, and never reallocated is never discarded again
+  for the life of the volume. Two loss paths remain:
+  1. **The cap.** A transaction that leaves more than 65536 *distinct,
+     non-adjacent* free runs silently loses the excess at enqueue time. (D28
+     removed the far easier path: the queue held one entry per *block*, so
+     deleting a file larger than 256 MiB on a 4 KiB volume overflowed it. A
+     contiguous free of any length is now one entry.)
   2. **A fault mid-pass.** `trim` empties the queue with `mem::take` before it
      starts, then returns on the first `discard` error, dropping every
      not-yet-processed run. One transient device fault permanently forfeits a
-     whole pass's eligibility.
-  3. **The deferred remainder.** `requeue_range` re-enqueues block by block
-     through the same capped path, so a batch-limited or granularity-trimmed
-     remainder is subject to loss path 1 again.
+     whole pass's eligibility. The batch-limited and granularity-trimmed
+     remainders `requeue_range` puts back are subject to the cap again, though
+     as runs rather than as blocks.
   A perfect runner over this queue would therefore *look* like it was working
   while the device never learned about most of the freed space — the worst
   possible failure mode for a plan whose point is that TRIM issues.
   **Fix in M2**, before the runner exists, and structurally: delete the
-  per-block queue and sweep the **allocation map**, which is already the
+  in-memory queue and sweep the **allocation map**, which is already the
   authoritative record of what is free. A persisted discard cursor advances
-  through the map in bounded chunks, coalescing runs of free blocks and
-  discarding them, exactly as the scrub cursor advances through the inode tree —
-  same resumable-pass shape, same reserved-owner progress block, O(1) memory,
-  and eligibility that cannot be lost because it is derived from the map rather
-  than remembered beside it. A small bounded in-memory hint of recently-freed
-  runs lets the sweep visit them first; losing the hint costs latency only,
-  never eligibility. This also deletes trim's `sort_unstable`, `dedup`, and
-  runs vector, each of which is sized by the queue it no longer has. The cursor
-  is rebuildable state like the scrub cursor, so a lost cursor costs one
-  re-sweep and never correctness. If the sweep cannot be given a home without
-  changing the transaction-root layout, **stop and ask** rather than guessing an
-  on-disk change.
+  through the map in bounded chunks, taking free runs through the shared
+  `map_first_free_run` primitive and discarding them, exactly as the scrub
+  cursor advances through the inode tree — same resumable-pass shape, same
+  reserved-owner progress block, O(1) memory, and eligibility that cannot be
+  lost because it is derived from the map rather than remembered beside it. A
+  small bounded in-memory hint of recently-freed runs lets the sweep visit them
+  first; losing the hint costs latency only, never eligibility. The cursor is
+  rebuildable state like the scrub cursor, so a lost cursor costs one re-sweep
+  and never correctness. If the sweep cannot be given a home without changing
+  the transaction-root layout, **stop and ask** rather than guessing an on-disk
+  change.
 - **D-M5 — `scrub` and `check` held whole-volume state in RAM — fixed.** Both
   passes now put the truth they derive in transient on-disk scratch arrays
   (`drivers/filesystem/arxfs/src/scratch.rs`), paged through the same bounded
@@ -784,9 +784,11 @@ mounted-trim rules and §18's "Discard and health (10, 11)" summary — because 
 changes that mechanism; every invariant they state (discard only when
 unreachable, batched, granularity-aligned, rate-limited, a crash costs nothing)
 still holds and is restated as a property of the sweep.
-*Acceptance:* tests 5, 6, 7a, 8a; the inline `Unlimited` call, the
-`MAX_PENDING_DISCARD` cap, and trim's sort/dedup/runs vectors are deleted rather
-than left beside the new path.
+*Acceptance:* tests 5, 6, 7a, 8a; the inline `Unlimited` call and the
+`MAX_PENDING_DISCARD_RUNS` cap are deleted rather than left beside the new path.
+(Trim's sort/dedup/coalesce vectors are already gone: D28 made the queue a set
+of coalesced runs and trim split each against the map through
+`map_first_free_run`.)
 
 ### M3 — the scheduler. **planned**
 `maintain.rs`: `VolumeMaintenance`, the action set, the priority order, the

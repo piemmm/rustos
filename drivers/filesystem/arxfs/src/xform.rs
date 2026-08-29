@@ -23,8 +23,8 @@
 //! The driver keys entries by the cluster's first stored physical block
 //! and upholds precise invalidation:
 //!
-//! * every block free funnels through the driver's `free_block`, which
-//!   calls [`invalidate`](ClusterCache::invalidate) for the freed block
+//! * every block free funnels through the driver's `free_run`, which
+//!   calls [`invalidate_run`](ClusterCache::invalidate_run) for the freed run
 //!   — a freed run can only be rewritten after passing through there,
 //!   so no entry outlives the bytes it was derived from;
 //! * a transaction rollback returns this transaction's allocations to
@@ -69,9 +69,10 @@ pub trait ClusterCache: Send {
     /// under pressure, allocation failure) and the driver keeps serving.
     fn put(&mut self, phys: u64, stored: u64, plaintext: &[u8]);
 
-    /// The stored block at `phys` was freed: drop (and zero) any entry
-    /// whose run covers it.
-    fn invalidate(&mut self, phys: u64);
+    /// The stored run `phys..phys + len` was freed: drop (and zero) every
+    /// entry whose own run overlaps it. Takes a run rather than a block so a
+    /// large release costs the entries it touches and not the blocks it spans.
+    fn invalidate_run(&mut self, phys: u64, len: u64);
 
     /// Drop (and zero) every entry: the fail-closed response to a
     /// transaction rollback.

@@ -347,6 +347,17 @@ impl Descent {
     }
 }
 
+/// The first of a leaf's `count` entries whose key is `>= key`, as
+/// `(key, value)`. Leaf keys ascend, so the first match is the ceiling.
+fn leaf_ceil(buf: &[u8], count: usize, key: u64, spec: TreeSpec) -> Option<(u64, Vec<u8>)> {
+    let stride = spec.leaf_stride();
+    (0..count).find_map(|i| {
+        let base = N_ENTRIES + i * stride;
+        let k = rd_u64(buf, base);
+        (k >= key).then(|| (k, buf[base + 8..base + stride].to_vec()))
+    })
+}
+
 /// Index of the last of `count` entries whose key is `<= key`, or `0` when
 /// `key` precedes them all: the child an internal node's search descends into.
 /// `key_at` reads the key of one entry, so a descent and the mutation path's
@@ -583,6 +594,39 @@ impl<B: Block> ARXFS<B> {
             }
         }
         Ok(found)
+    }
+
+    /// Look up the entry with the smallest key `>= key` (a "ceiling" query),
+    /// returning `(key, value)`.
+    ///
+    /// The mirror of [`Self::btree_get_floor`], and the primitive a range
+    /// release steps on: "is anything in this physical run a shared chunk, and
+    /// where?" costs one descent when the answer lies in the leaf `key` belongs
+    /// to and two when it lies in the next subtree the descent recorded — never
+    /// one per block of the run.
+    pub(crate) fn btree_get_ceil(
+        &mut self,
+        root: u64,
+        key: u64,
+        spec: TreeSpec,
+    ) -> Result<Option<(u64, Vec<u8>)>, DriverError> {
+        if root == 0 {
+            return Ok(None);
+        }
+        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        let mut trace = Descent::new();
+        let count = self.btree_descend(root, key, spec, &mut buf, Some(&mut trace))?;
+        if let Some(found) = leaf_ceil(&buf, count, key, spec) {
+            return Ok(Some(found));
+        }
+        // Every key in this leaf is below `key`, so the answer — if there is
+        // one — begins the next subtree, and a separator is the smallest key in
+        // its child.
+        let Some(next) = trace.next_subtree else {
+            return Ok(None);
+        };
+        let count = self.btree_descend(root, next, spec, &mut buf, None)?;
+        Ok(leaf_ceil(&buf, count, next, spec))
     }
 
     /// Borrow the mount's mutation scratch.

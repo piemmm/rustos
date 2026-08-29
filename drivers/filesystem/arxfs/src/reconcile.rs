@@ -234,7 +234,7 @@ impl<B: Block> ARXFS<B> {
         walk.restart();
         while self.btree_next_leaf(inode.extent_root, spec, walk)? {
             for (_, value) in walk.entries() {
-                let ext = Extent::decode(value)?;
+                let ext = Extent::decode(value, self.total_blocks)?;
                 // A compressed cluster is shared as a unit, so it is one
                 // claim on its first physical block.
                 let (lo, hi) = if ext.compressed {
@@ -492,7 +492,7 @@ impl<B: Block> ARXFS<B> {
         else {
             return Ok(false);
         };
-        let ext = Extent::decode(&ev)?;
+        let ext = Extent::decode(&ev, self.total_blocks)?;
         if ext.compressed {
             // A cluster's referrer names the cluster's own logical start.
             return Ok(start == logical && ext.phys == phys);
@@ -551,7 +551,7 @@ impl<B: Block> ARXFS<B> {
         walk.restart();
         while self.btree_next_leaf(inode.extent_root, spec, walk)? {
             for (start, value) in walk.entries() {
-                let ext = Extent::decode(value)?;
+                let ext = Extent::decode(value, self.total_blocks)?;
                 let (lo, hi) = if ext.compressed {
                     (ext.phys, ext.phys.saturating_add(1))
                 } else {

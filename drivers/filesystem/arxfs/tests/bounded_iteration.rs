@@ -18,12 +18,13 @@
 //!
 //! Scope: the read paths whose own work *is* the walk, a single-record insert
 //! and remove — the mutation path edits nodes in place through one borrowed
-//! scratch, so it too costs the same at any depth — and a whole-volume scrub
-//! and check, whose derived truth streams through on-disk scratch arrays rather
-//! than RAM. What is still not bounded is the transaction's own freed-block set
-//! and the dirty blocks it stages until its commit drains them: a pass that
-//! frees or dirties *many* records holds one entry per block, which is the
-//! write-back plan's ceiling to derive (`plans/ARXFS-WRITEBACK.md` WB5).
+//! scratch, so it too costs the same at any depth — a whole-volume scrub and
+//! check, whose derived truth streams through on-disk scratch arrays rather
+//! than RAM, and a delete, whose freed-block bookkeeping is a set of *runs*, so
+//! it follows the file's extents and never its block count. What a transaction
+//! still holds proportionally is the pinned dirty blocks it stages until its
+//! commit drains them, which the write-back bound governs
+//! (`plans/ARXFS-WRITEBACK.md` WB5).
 
 use std::alloc::System;
 use std::collections::BTreeMap;
@@ -241,6 +242,120 @@ fn every_measured_walk_stays_bounded() {
     a_map_rebuild_walks_every_tree_within_a_fixed_budget();
     a_single_record_edit_allocates_the_same_at_any_depth();
     a_whole_volume_verification_holds_no_per_record_state();
+    a_delete_holds_its_runs_not_its_blocks();
+}
+
+/// A volume holding one file of `blocks` sequentially written, incompressible,
+/// non-repeating blocks: one physical run, so the number of *runs* releasing it
+/// touches is fixed while the number of blocks is not. Each write commits, so
+/// the fixture returns with no open transaction.
+fn contiguous_volume(blocks: u64) -> (ARXFS<SparseBlock>, u64) {
+    let device = SparseBlock {
+        blocks: BTreeMap::new(),
+        block_count: DEVICE_BLOCKS,
+    };
+    let mut fs = ARXFS::format(device, 64, &TEST_KEY, &mut TestEntropy(0xB2))
+        .expect("format the fixture volume");
+    let root = fs.root();
+    fs.create(root, b"big", NodeKind::RegularFile)
+        .expect("create");
+    // Incompressible and never repeating, so the write neither clusters nor
+    // dedupes and every logical block gets its own physical one.
+    let mut state = 0x2545_F491_4F6C_DD1Du64;
+    let body: Vec<u8> = (0..blocks * u64::from(BLOCK_SIZE))
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state.to_le_bytes()[3]
+        })
+        .collect();
+    let mut done = 0usize;
+    while done < body.len() {
+        let wrote = fs
+            .write_at(root, b"big", done as u64, &body[done..])
+            .expect("write the fixture file");
+        assert!(wrote > 0, "the write must make progress");
+        done += wrote;
+    }
+    let node = fs.lookup(root, b"big").expect("lookup");
+    let allocated = fs.node_info(node).expect("stat").allocated;
+    (fs, allocated)
+}
+
+/// Releasing a file's blocks — by `remove` and by `truncate` to zero — holds
+/// the same bytes and makes the same number of allocations at four times the
+/// file size.
+///
+/// This is the measurement extent-based deferred freeing was built for. The set
+/// it replaced held one `u64` per released block, and the release asked the
+/// chunk tree about every block one at a time, so an `rm` of a large file
+/// allocated memory proportional to its byte size — reached by an ordinary
+/// delete, not by anything exotic, and hopeless against a hundred-terabyte
+/// file on a small machine.
+fn a_delete_holds_its_runs_not_its_blocks() {
+    // Fixed by the geometry: the walk's node buffers, the transaction's run
+    // bookkeeping, the sparse device double's own storage for the metadata
+    // blocks the commit rewrote, and the commit drain's gather window.
+    // Measured: 10 352 bytes over 35 allocations to truncate and 11 376 over
+    // 52 to remove, at either size. The per-block set and its per-block chunk
+    // lookups scaled both with the file.
+    const PEAK_BUDGET: usize = 16 * 1024;
+    const ALLOC_BUDGET: usize = 128;
+    const SMALL: u64 = 400;
+
+    let mut measured = Vec::new();
+    let mut mapped = Vec::new();
+    for blocks in [SMALL, SMALL * 4] {
+        let (mut fs, allocated) = contiguous_volume(blocks);
+        let root = fs.root();
+        assert!(
+            allocated >= blocks * u64::from(BLOCK_SIZE),
+            "the fixture must map a physical block per logical block, so the \
+             write neither clustered nor deduped (mapped {allocated} bytes)"
+        );
+        mapped.push(allocated);
+
+        // Truncate to zero first: the tail-freeing path, then the whole-file
+        // path over the same fixture rebuilt.
+        let (cut, cut_peak, cut_allocs) = measure(|| fs.truncate(root, b"big", 0));
+        assert_eq!(cut, Ok(()));
+
+        let (mut fs, _) = contiguous_volume(blocks);
+        let root = fs.root();
+        let (gone, peak, allocs) = measure(|| fs.remove(root, b"big"));
+        assert_eq!(gone, Ok(()));
+
+        for (what, peak, allocs) in [
+            ("a truncate to zero", cut_peak, cut_allocs),
+            ("a remove", peak, allocs),
+        ] {
+            assert!(
+                peak <= PEAK_BUDGET && allocs <= ALLOC_BUDGET,
+                "{what} of a {blocks}-block file held {peak} bytes and                  allocated {allocs} times, past the {PEAK_BUDGET} /                  {ALLOC_BUDGET} budgets"
+            );
+        }
+        measured.push((cut_allocs, allocs));
+    }
+    assert!(
+        mapped[1] > mapped[0] * 3,
+        "the larger fixture must really hold about four times the blocks \
+         ({} against {} bytes)",
+        mapped[1],
+        mapped[0]
+    );
+
+    // Sharper than the budget: four times the blocks is the *same* number of
+    // allocations, because the runs released did not change.
+    let ((small_cut, small_rm), (large_cut, large_rm)) = (measured[0], measured[1]);
+    assert_eq!(
+        small_cut, large_cut,
+        "a truncate to zero allocated {large_cut} times over four times the          blocks against {small_cut}: the bookkeeping is tracking blocks"
+    );
+    assert_eq!(
+        small_rm, large_rm,
+        "a remove allocated {large_rm} times over four times the blocks          against {small_rm}: the bookkeeping is tracking blocks"
+    );
 }
 
 /// A scrub and an offline check over sixteen times the records hold the same

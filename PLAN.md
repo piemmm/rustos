@@ -2934,10 +2934,13 @@ memory that can only be written out is not headroom.
 **Status: WB0–WB5 and WB-D1 done** — measurement, the dirty set and commit
 barrier (closing D63), run coalescing (closing C3), allocation-map integration,
 the commit scheduler (closing C2), the host's write-back expiry timer, and the
-RAM-derived bound with its back-pressure. WB6 is the last item and remains
-planned; `plans/OPEN-DEFECTS.md` D28 — the allocator's per-transaction
-deferred-free set, the other half of a transaction's memory — is scheduled ahead
-of it.
+RAM-derived bound with its back-pressure. The other half of a transaction's
+memory is closed too: `plans/OPEN-DEFECTS.md` D28 made every per-transaction
+block set a coalescing run set, and the map and the chunk-tree release run-wise
+with it, so a delete costs the runs it releases rather than the blocks. WB6 is
+the last item and remains planned; `plans/OPEN-DEFECTS.md` D67 — freeing
+incrementally across commits, so a maximally fragmented very large file is
+bounded too — is scheduled ahead of it.
 
 ---
 
@@ -5186,7 +5189,7 @@ and fail-closed (§24.4) — this work must not loosen them.
   volume such as `/System` costs a handful of block reads rather than a
   volume-contents walk. The dedupe index is no longer pre-seeded at mount
   either; it warms from the writes that use it. The transient pending-discard
-  queue stays capped at a fixed, volume-independent `MAX_PENDING_DISCARD`.
+  queue stays capped at a fixed, volume-independent `MAX_PENDING_DISCARD_RUNS`.
   Spec: `docs/src/filesystem/arxfs-spec.md` §4.
 - Kernel heap arena — `lib/kalloc` `FreeListAllocator` / `HEAP_BYTES` — **done**
   (the §24.1 fix for the `stress --vm` kernel OOM panic): the heap was a fixed

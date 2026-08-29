@@ -16,11 +16,11 @@
 //!   A block that was freed and then reallocated is *used* again by
 //!   trim time and is skipped. Discard therefore never destroys data
 //!   reachable from any retained root.
-//! * **Batched, aligned, rate-limited.** Still-free blocks are
-//!   coalesced into contiguous runs, each run is aligned **inward** to
-//!   the device's discard granularity, and at most [`TRIM_BATCH_RANGES`]
-//!   runs are issued per [`crate::ARXFS::trim`] call; the remainder
-//!   stays queued for the next call.
+//! * **Batched, aligned, rate-limited.** The queue holds coalesced runs,
+//!   each is split into the parts still free, each of those is aligned
+//!   **inward** to the device's discard granularity, and at most
+//!   [`TRIM_BATCH_RANGES`] runs are issued per [`crate::ARXFS::trim`]
+//!   call; the remainder stays queued for the next call.
 //! * **No zero-readback assumption.** `ARXFS` never reads a discarded
 //!   block expecting zeroes; discarded blocks are free and are fully
 //!   rewritten (header + integrity + crypto) before they are ever read
@@ -32,14 +32,12 @@
 //! The queue is rebuildable, transient state: a crash mid-trim
 //! leaves a mountable volume and never loses live data.
 
-use alloc::vec::Vec;
-
 use tairix_abi::driver::block::Block;
 use tairix_abi::{CapabilityId, CapabilityQuery, DriverError};
 use tairix_log::{log, Event, EventId, Level, Sink};
 
 use crate::scrub::{ARXFS_RANGE_END, ARXFS_RANGE_START};
-use crate::{ARXFS, RING_BLOCKS};
+use crate::ARXFS;
 
 /// A trim pass found nothing to discard (the queue held no still-free
 /// block).
@@ -136,9 +134,9 @@ impl<B: Block> ARXFS<B> {
     /// Only blocks that are **still free** at call time are discarded, so a
     /// block that was freed and then reallocated is skipped, never discarded:
     /// discard can never destroy data reachable from a retained root,
-    /// snapshot, reflink, or deduped extent. Still-free blocks are
-    /// coalesced into contiguous runs, aligned inward to the device's discard
-    /// granularity, and at most [`TRIM_BATCH_RANGES`] runs are issued before
+    /// snapshot, reflink, or deduped extent. Each queued run is split into the
+    /// parts still free, aligned inward to the device's discard granularity,
+    /// and at most [`TRIM_BATCH_RANGES`] runs are issued before
     /// the call returns, leaving any remainder queued. A device without
     /// discard support is recorded in the returned [`TrimReport`] and the
     /// queue drained — recorded, not failed. The closing outcome is
@@ -190,78 +188,69 @@ impl<B: Block> ARXFS<B> {
         report.supported = true;
         let gran = cap.granularity_blocks.max(1);
 
-        // Keep only blocks that are still free; a reallocated block is now
-        // reachable from the committed root and must not be discarded.
+        // Keep only the parts of each queued run that are still free; a
+        // reallocated block is now reachable from the committed root and must
+        // not be discarded. The queue already holds maximal coalesced runs, so
+        // the split reads the map by page rather than by block.
+        self.map_fold_pending()?;
         let queued = core::mem::take(&mut self.allocator_mut()?.pending_discard);
-        let mut free_blocks: Vec<u64> = Vec::with_capacity(queued.len());
-        for block in queued {
-            if block < RING_BLOCKS || block >= self.total_blocks {
-                continue;
-            }
-            if self.bit_used(block)? {
-                report.blocks_skipped_in_use += 1;
-            } else {
-                free_blocks.push(block);
-            }
-        }
-        free_blocks.sort_unstable();
-        free_blocks.dedup();
-
-        // Coalesce contiguous runs of still-free blocks.
-        let mut ranges: Vec<(u64, u64)> = Vec::new();
-        for block in free_blocks {
-            match ranges.last_mut() {
-                Some(last) if last.0 + last.1 == block => last.1 += 1,
-                _ => ranges.push((block, 1)),
-            }
-        }
-
         let mut issued = 0usize;
-        for (start, len) in ranges {
-            let end = start + len;
-            if issued >= TRIM_BATCH_RANGES {
-                // Rate limit reached: requeue the whole run for next pass.
-                self.requeue_range(start, end, &mut report);
-                continue;
-            }
-            let aligned_start = align_up(start, gran);
-            let aligned_end = align_down(end, gran);
-            if aligned_start >= aligned_end {
-                // The run is shorter than one granularity window: nothing can
-                // be aligned out of it; requeue for when a neighbour extends
-                // it.
-                self.requeue_range(start, end, &mut report);
-                continue;
-            }
-            // Requeue the unaligned head and tail edges.
-            self.requeue_range(start, aligned_start, &mut report);
-            self.requeue_range(aligned_end, end, &mut report);
-
-            let mut cursor = aligned_start;
-            while cursor < aligned_end {
-                let mut chunk = aligned_end - cursor;
-                if cap.max_blocks_per_request != 0 {
-                    chunk = chunk.min(align_down(cap.max_blocks_per_request, gran).max(gran));
+        for (run_start, run_len) in queued.iter() {
+            let run_end = run_start.saturating_add(run_len);
+            let mut pos = run_start;
+            while pos < run_end {
+                let Some((start, len)) = self.map_first_free_run(pos, run_end)? else {
+                    report.blocks_skipped_in_use += run_end - pos;
+                    break;
+                };
+                report.blocks_skipped_in_use += start - pos;
+                let end = start.saturating_add(len);
+                pos = end;
+                if issued >= TRIM_BATCH_RANGES {
+                    // Rate limit reached: requeue the whole run for next pass.
+                    self.requeue_range(start, end, &mut report);
+                    continue;
                 }
-                self.block.discard(cursor, chunk)?;
-                report.ranges_discarded += 1;
-                report.blocks_discarded += chunk;
-                cursor += chunk;
+                let aligned_start = align_up(start, gran);
+                let aligned_end = align_down(end, gran);
+                if aligned_start >= aligned_end {
+                    // The run is shorter than one granularity window: nothing
+                    // can be aligned out of it; requeue for when a neighbour
+                    // extends it.
+                    self.requeue_range(start, end, &mut report);
+                    continue;
+                }
+                // Requeue the unaligned head and tail edges.
+                self.requeue_range(start, aligned_start, &mut report);
+                self.requeue_range(aligned_end, end, &mut report);
+
+                let mut cursor = aligned_start;
+                while cursor < aligned_end {
+                    let mut chunk = aligned_end - cursor;
+                    if cap.max_blocks_per_request != 0 {
+                        chunk = chunk.min(align_down(cap.max_blocks_per_request, gran).max(gran));
+                    }
+                    self.block.discard(cursor, chunk)?;
+                    report.ranges_discarded += 1;
+                    report.blocks_discarded += chunk;
+                    cursor += chunk;
+                }
+                issued += 1;
             }
-            issued += 1;
         }
         report.log_outcome(sink);
         Ok(report)
     }
 
-    /// Requeue every block in `[start, end)` for a later trim pass. Used for
-    /// run edges trimmed off by granularity alignment and for runs deferred
-    /// by the per-call batch limit.
+    /// Requeue `[start, end)` for a later trim pass. Used for run edges
+    /// trimmed off by granularity alignment and for runs deferred by the
+    /// per-call batch limit.
     fn requeue_range(&mut self, start: u64, end: u64, report: &mut TrimReport) {
-        for block in start..end {
-            self.enqueue_discard(block);
-            report.blocks_deferred += 1;
-        }
+        let Some(len) = end.checked_sub(start).filter(|&len| len > 0) else {
+            return;
+        };
+        self.enqueue_discard_run(start, len);
+        report.blocks_deferred += len;
     }
 
     /// mkfs-time full-range discard (`docs/src/filesystem/arxfs-spec.md`
@@ -291,10 +280,18 @@ impl<B: Block> ARXFS<B> {
         Ok(true)
     }
 
-    /// Number of blocks currently queued for discard. Test/inspection aid.
+    /// Blocks currently queued for discard. Test/inspection aid.
     #[cfg(test)]
-    pub(crate) fn pending_discard_count(&self) -> usize {
+    pub(crate) fn pending_discard_count(&self) -> u64 {
         self.allocator()
-            .map_or(0, |alloc| alloc.pending_discard.len())
+            .map_or(0, |alloc| alloc.pending_discard.blocks())
+    }
+
+    /// Runs currently queued for discard — the queue's memory cost, which the
+    /// cap is expressed in. Test/inspection aid.
+    #[cfg(test)]
+    pub(crate) fn pending_discard_runs(&self) -> usize {
+        self.allocator()
+            .map_or(0, |alloc| alloc.pending_discard.run_count())
     }
 }

@@ -2185,33 +2185,108 @@ on-disk structure, not an extension of the existing rebuildable cache.
 
 ---
 
-## D28 — ARXFS per-transaction deferred-free and pending-mark sets are unbounded
+## D28 — ARXFS per-transaction deferred-free and pending-mark sets were unbounded (FIXED)
 
-**State:** open, pre-existing, and **scheduled next**: it is the immediate next
-item in `plans/IMPLEMENT-OUTSTANDING-ARXFS.md`, ahead of every remaining ARXFS
-row.
+**Where.** `drivers/filesystem/arxfs/src/allocator.rs`, `lib.rs`'s free and
+transaction paths, `discard.rs`, and the new `runs.rs`.
 
-**Mechanism.** `txn_freed` (`drivers/filesystem/arxfs/src/allocator.rs`, a
-`BTreeSet<u64>`) holds every block a transaction releases until it commits,
-and the allocation map's `pending` map holds every bit change whose page or
-summary block was not resident when the change was made. Both scale with the
-size of a single transaction, so deleting a very large file allocates memory
-proportional to the file's block count. This is pre-existing shape (the
-previous free-space tracker's `Vec<u64>` had the same property) and conflicts
-with the small-RAM/large-volume floor (`AGENTS.md` §26.7).
+**Mechanism.** Every set a transaction kept about blocks was a set of
+*blocks*: `txn_freed` (a `BTreeSet<u64>`) held every block released until the
+commit, the map's `pending` (a `BTreeMap<u64, bool>`) held every bit change
+whose page or summary block was not resident, and the per-operation undo
+records (`op_claimed`, `op_released`, `op_deferred`, `txn_private`) held one
+entry per block too. So deleting a very large file allocated memory
+proportional to the file's block count — 2.5×10^10 entries for a 100 TB file at
+4 KiB — reached by an ordinary `rm`, and hopeless against the small-RAM /
+large-volume floor (`AGENTS.md` §26.7). The release path was per-block in *time*
+as well: `release_block_ref` asked the chunk tree about every block of an
+extent, one B-tree descent each, and the commit then applied one map bit change
+per block.
 
-**Why it is next.** `plans/ARXFS-WRITEBACK.md` WB5 bounded the *other* half of
-a transaction's memory — the pinned dirty block set — to a share of discovered
-RAM, with the write path yielding to that bound rather than growing. That makes
-this the one remaining way a single ARXFS operation can allocate memory
-proportional to a file's size, and it is reached by an ordinary `rm` of a large
-file rather than by anything exotic.
+**Fix (item D28 of `plans/IMPLEMENT-OUTSTANDING-ARXFS.md`).** One `RunSet` — an
+ordered set of `(start, length)` runs held maximally coalesced, with `insert` /
+`remove` / `contains` and the two walk primitives `first_overlap` /
+`first_gap` — replaces every one of those sets, so the bookkeeping costs one
+entry per contiguous run a transaction touches. An extent is contiguous by
+construction, so releasing a file costs its extent count. Three paths became
+run-wise with it:
 
-**Fix direction.** Extent-based deferred freeing (a run of contiguous blocks
-recorded as one `(start, length)` entry) rather than per-block, bounding the
-bookkeeping by the number of runs a transaction touches rather than the
-number of blocks. The same treatment applies to the map's `pending` marks and to
-the commit's free accounting, which reads the set's size.
+- **The map.** One `apply_run` walks the *pages* a run spans and sets or clears
+  whole bytes of each, moving the free count and each page summary by the bits
+  that actually changed; the infallible `mark_run_used` / `mark_run_free` change
+  every resident page and defer the remainder as runs (`pending_used` /
+  `pending_free`, disjoint, so the latest mark over a block is the only one).
+  `map_find_free_run`'s inline scan is gone: both it and `trim` now step on one
+  `map_first_free_run` primitive.
+- **The release.** `release_data_run` walks the chunk tree by *range* — the new
+  `btree_get_ceil`, the mirror of the existing floor query — so the unshared
+  part of a run is freed as a run and only a genuinely shared block costs a
+  refcount edit. `free_extent_tail` and `free_all_blocks` hand it whole runs
+  instead of looping per block, and a directory's mirrored content run is one
+  free of `len + 1` blocks.
+- **The queue and the cluster cache.** `pending_discard` holds coalesced runs
+  (capped on runs, its actual memory, as `MAX_PENDING_DISCARD_RUNS`), `trim`
+  splits each against the live map instead of sorting and coalescing a block
+  list, and the `ClusterCache` seam takes `invalidate_run(phys, len)` so one
+  extent free is one call.
+
+*Measured (`tests/bounded_iteration.rs`).* Truncating a contiguous file to zero
+holds **10 352** bytes over **35** allocations and removing it **11 376** over
+**52** — identical at 400 blocks and at 1 600, where the per-block set and its
+per-block chunk lookups scaled with the file.
+
+**Also fixed, found by the same reading.** `Extent::decode` accepted a stored
+run that could not exist on the device, so `free_extent_tail`'s `start +
+ext.len` overflowed on a corrupt-but-authentic record: in release it wrapped to
+a small end, the extent read as wholly below the cut, and the truncate left the
+tail mapped while `inode.size` said it was gone; in debug it panicked. Decode
+now refuses a run that does not fit `total_blocks` — which is also what makes
+every later `phys + offset` and every run length handed to the map total — and
+the logical end is saturating, so a run reaching the end of the address space
+cuts *less* than it names rather than more.
+
+**What remains, and is scheduled.** A single operation's memory is now
+proportional to the *runs* it releases, which is bounded for any file the
+allocator laid out contiguously and for every ordinary workload, but not for a
+maximally fragmented very large file, whose extent count is itself unbounded.
+That is D67, the next item in `plans/IMPLEMENT-OUTSTANDING-ARXFS.md`.
+
+---
+
+## D67 — an ARXFS delete is not incremental, so a maximally fragmented very large file is still unbounded
+
+**State:** open, and **scheduled next**: it is the immediate next item in
+`plans/IMPLEMENT-OUTSTANDING-ARXFS.md`, ahead of every remaining ARXFS row.
+
+**Where.** `drivers/filesystem/arxfs/src/lib.rs` `free_all_blocks`,
+`free_extent_tail`, `drop_name`, `remove_inner`, and the transaction lifecycle
+around them.
+
+**Mechanism.** D28 made a transaction's block bookkeeping proportional to the
+*runs* it releases rather than the blocks, which is what an ordinary delete
+needs. It did not make the operation *incremental*: `free_all_blocks` and
+`free_extent_tail` still run to completion inside one transaction, so the run
+count they accumulate is the extent count of what they free. A file the
+allocator laid out contiguously has one extent; a maximally fragmented one on a
+100 TB volume can have of the order of 10^10, and its extent tree of the order
+of 10^8 nodes, so a single `rm` still asks for memory the small-RAM floor
+(`AGENTS.md` §26.7) cannot give it. The same operation is also uninterruptible
+and unresumable, which §26.6 forbids for a long whole-volume operation
+regardless of its memory.
+
+**Fix direction.** Free across commits, the way btrfs and ext4 do it. An
+on-disk **pending-delete set** reached from the transaction root records an
+inode that is unreachable but not yet reclaimed, so `unlink` publishes "this
+name is gone and this inode is pending deletion" in one bounded transaction and
+then frees the inode's extents in bounded chunks, committing between them; a
+mount finds the set non-empty and finishes an interrupted delete before serving.
+`truncate` takes the same path from the high end down, publishing a shorter
+`inode.size` at each boundary it reaches, so every intermediate state is a
+lawful volume. The bound each chunk yields to is the write-back bound
+(`plans/ARXFS-WRITEBACK.md` WB5) the write path already yields to, so there is
+one ceiling and one policy, not two. This is an on-disk format addition plus a
+mount-time recovery pass plus a change to the shape of two operations — larger
+than D28 and independent of it, which is why it is its own item.
 
 ---
 

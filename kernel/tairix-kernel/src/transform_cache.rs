@@ -429,14 +429,24 @@ impl ClusterCache for TransformClusterCache {
         );
     }
 
-    fn invalidate(&mut self, phys: u64) {
+    fn invalidate_run(&mut self, phys: u64, len: u64) {
+        let Some(last) = len.checked_sub(1).map(|last| phys.saturating_add(last)) else {
+            return;
+        };
+        // An entry starting below the run can still reach into it, and every
+        // entry starting inside it overlaps by definition. Both are dropped by
+        // start address, so the walk costs the entries it touches and nothing
+        // per block of the run.
         let covering = self
             .entries
-            .range(..=phys)
+            .range(..phys)
             .next_back()
             .filter(|(start, entry)| phys - *start < entry.stored)
             .map(|(start, _)| *start);
-        if let Some(start) = covering {
+        if covering.is_some_and(|start| self.remove_start(start)) {
+            self.accounting.record_invalidation();
+        }
+        while let Some(start) = self.entries.range(phys..=last).next().map(|(&s, _)| s) {
             if self.remove_start(start) {
                 self.accounting.record_invalidation();
             }

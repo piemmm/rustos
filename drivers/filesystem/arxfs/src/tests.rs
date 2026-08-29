@@ -1052,10 +1052,11 @@ fn large_contiguous_write_collapses_to_few_extents() {
     let clusters = blocks / COMPRESS_CLUSTER_BLOCKS;
     let ino = u32::try_from(fs.lookup(root, b"zip").expect("lookup").raw()).unwrap();
     let inode = fs.read_inode(ino).expect("inode");
+    let total = fs.total_blocks;
     let entries = tree_entries(&mut fs, inode.extent_root, extent_spec(ino));
     let compressed = entries
         .iter()
-        .filter(|(_, v)| Extent::decode(v).expect("decodes").compressed)
+        .filter(|(_, v)| Extent::decode(v, total).expect("decodes").compressed)
         .count() as u64;
     assert_eq!(
         compressed, clusters,
@@ -1806,39 +1807,67 @@ fn integrity_faults_on_a_compressed_cluster_fail_closed() {
 fn extent_codec_round_trips_and_rejects_undefined_shapes() {
     // The widened extent value decodes exactly what was encoded and refuses
     // every shape the format does not define (fail closed).
+    const DEVICE: u64 = 1 << 41;
     let raw = Extent::raw(7, 1 << 40);
-    assert_eq!(Extent::decode(&raw.encode()).expect("raw decodes"), raw);
+    assert_eq!(
+        Extent::decode(&raw.encode(), DEVICE).expect("raw decodes"),
+        raw
+    );
     let cluster = Extent::cluster(9, COMPRESS_CLUSTER_BLOCKS, 3);
     assert_eq!(
-        Extent::decode(&cluster.encode()).expect("cluster decodes"),
+        Extent::decode(&cluster.encode(), DEVICE).expect("cluster decodes"),
         cluster
     );
 
     // Unknown flag bits.
     let mut bad = cluster.encode();
     bad[20] = 0xFF;
-    assert_eq!(Extent::decode(&bad), Err(DriverError::DeviceFault));
+    assert_eq!(Extent::decode(&bad, DEVICE), Err(DriverError::DeviceFault));
     // A compressed cluster must occupy strictly fewer stored blocks.
     let full = Extent::cluster(9, COMPRESS_CLUSTER_BLOCKS, COMPRESS_CLUSTER_BLOCKS);
     assert_eq!(
-        Extent::decode(&full.encode()),
+        Extent::decode(&full.encode(), DEVICE),
         Err(DriverError::DeviceFault)
     );
     let empty = Extent::cluster(9, COMPRESS_CLUSTER_BLOCKS, 0);
     assert_eq!(
-        Extent::decode(&empty.encode()),
+        Extent::decode(&empty.encode(), DEVICE),
         Err(DriverError::DeviceFault)
     );
     // ... and never cover more than one cluster.
     let long = Extent::cluster(9, COMPRESS_CLUSTER_BLOCKS * 2, 3);
     assert_eq!(
-        Extent::decode(&long.encode()),
+        Extent::decode(&long.encode(), DEVICE),
         Err(DriverError::DeviceFault)
     );
     // A raw extent never carries a stored length.
     let mut crooked = Extent::raw(7, 4).encode();
     crooked[16] = 1;
-    assert_eq!(Extent::decode(&crooked), Err(DriverError::DeviceFault));
+    assert_eq!(
+        Extent::decode(&crooked, DEVICE),
+        Err(DriverError::DeviceFault)
+    );
+
+    // A stored run must fit inside the device. Without this the free path's
+    // `phys + offset` arithmetic wraps: a run naming the end of the address
+    // space would release blocks it never covered.
+    assert_eq!(
+        Extent::decode(&Extent::raw(DEVICE - 4, 5).encode(), DEVICE),
+        Err(DriverError::DeviceFault),
+        "a raw run past the end of the device is a device fault"
+    );
+    assert_eq!(
+        Extent::decode(&Extent::raw(u64::MAX - 1, u64::MAX).encode(), DEVICE),
+        Err(DriverError::DeviceFault),
+        "a raw run wrapping the address space is a device fault"
+    );
+    assert_eq!(
+        Extent::decode(&Extent::cluster(DEVICE - 2, 8, 3).encode(), DEVICE),
+        Err(DriverError::DeviceFault),
+        "a cluster's stored run past the end of the device is a device fault"
+    );
+    // The exact fit is lawful.
+    assert!(Extent::decode(&Extent::raw(DEVICE - 5, 5).encode(), DEVICE).is_ok());
 }
 
 #[test]
@@ -1876,9 +1905,10 @@ fn unaligned_and_sub_cluster_writes_store_per_block() {
     );
     let ino = file_ino(&mut fs, b"u");
     let inode = fs.read_inode(ino).expect("inode");
+    let total = fs.total_blocks;
     for (_, value) in tree_entries(&mut fs, inode.extent_root, extent_spec(ino)) {
         assert!(
-            !Extent::decode(&value).expect("decodes").compressed,
+            !Extent::decode(&value, total).expect("decodes").compressed,
             "an unaligned span never forms a compressed extent"
         );
     }
@@ -1915,9 +1945,10 @@ fn truncate_into_a_compressed_cluster_decomposes_and_keeps_the_prefix() {
     assert_eq!(fs.node_info(node).expect("info").size, (keep) as u64);
     let ino = file_ino(&mut fs, b"t");
     let inode = fs.read_inode(ino).expect("inode");
+    let total = fs.total_blocks;
     for (_, value) in tree_entries(&mut fs, inode.extent_root, extent_spec(ino)) {
         assert!(
-            !Extent::decode(&value).expect("decodes").compressed,
+            !Extent::decode(&value, total).expect("decodes").compressed,
             "the straddled cluster decomposed"
         );
     }
@@ -2093,7 +2124,7 @@ fn alloc_data_run_claims_contiguous_blocks_and_fails_closed_when_fragmented() {
         if fs.is_used(block) {
             block += 1;
         } else {
-            fs.claim_block(block);
+            fs.claim_run(block, 1);
             block += 2;
         }
     }
@@ -2518,16 +2549,25 @@ impl ClusterCache for TestClusterCache {
         self.entries.insert(phys, (stored, plaintext.to_vec()));
     }
 
-    fn invalidate(&mut self, phys: u64) {
+    fn invalidate_run(&mut self, phys: u64, len: u64) {
+        let Some(last) = len.checked_sub(1).map(|last| phys + last) else {
+            return;
+        };
         let covering = self
             .entries
-            .range(..=phys)
+            .range(..phys)
             .next_back()
             .filter(|(start, (stored, _))| phys < *start + *stored)
             .map(|(start, _)| *start);
-        if let Some(start) = covering {
-            self.entries.remove(&start);
-            CacheCounts::bump(&self.counts.invalidations);
+        for start in covering.into_iter().chain(
+            self.entries
+                .range(phys..=last)
+                .map(|(&start, _)| start)
+                .collect::<alloc::vec::Vec<_>>(),
+        ) {
+            if self.entries.remove(&start).is_some() {
+                CacheCounts::bump(&self.counts.invalidations);
+            }
         }
     }
 
@@ -2736,7 +2776,7 @@ fn a_wrong_sized_cache_entry_fails_closed_instead_of_stalling() {
 
         fn put(&mut self, _phys: u64, _stored: u64, _plaintext: &[u8]) {}
 
-        fn invalidate(&mut self, _phys: u64) {}
+        fn invalidate_run(&mut self, _phys: u64, _len: u64) {}
 
         fn purge(&mut self) {}
     }
@@ -4029,7 +4069,7 @@ fn check_rebuilds_a_corrupt_free_space_derivation() {
     // Wreck the derived state: release a block the trees say is live, and
     // report a free count no allocation could satisfy.
     let live = *good_used.iter().next_back().expect("a used block");
-    fs.mark_free(live);
+    fs.mark_run_free(live, 1);
     fs.free_count = 0;
 
     let report = check_full(&mut fs);
@@ -4320,7 +4360,7 @@ fn fmt_discard(
 fn enqueue_free_range(fs: &mut ARXFS<MemBlock>, start: u64, end: u64) {
     for block in start..end {
         assert!(!fs.is_used(block), "test block {block} must start free");
-        fs.enqueue_discard(block);
+        fs.enqueue_discard_run(block, 1);
     }
 }
 
@@ -4374,7 +4414,7 @@ fn trim_coalesces_contiguous_free_blocks_into_one_range() {
     let mut fs = fmt_discard(512, 1, 0);
     for block in [105u64, 100, 103, 101, 104, 102] {
         assert!(!fs.is_used(block));
-        fs.enqueue_discard(block);
+        fs.enqueue_discard_run(block, 1);
     }
     let sink = RecordingSink::new();
     let report = fs.trim(&GrantAll, &sink).expect("trim");
@@ -4440,8 +4480,8 @@ fn trim_skips_a_block_that_was_reallocated() {
     // skipped, never discarded — discard can never touch live data.
     let mut fs = fmt_discard(512, 1, 0);
     assert!(!fs.is_used(100));
-    fs.enqueue_discard(100);
-    fs.mark_used(100); // the block is handed back out before trim runs.
+    fs.enqueue_discard_run(100, 1);
+    fs.mark_run_used(100, 1); // the block is handed back out before trim runs.
     let sink = RecordingSink::new();
     let report = fs.trim(&GrantAll, &sink).expect("trim");
     assert_eq!(report.blocks_skipped_in_use, 1);
@@ -4462,7 +4502,7 @@ fn trim_rate_limits_to_the_batch_size_and_drains_over_passes() {
     for run in 0..runs as u64 {
         let block = 100 + run * 2; // gaps keep every block its own run.
         assert!(!fs.is_used(block));
-        fs.enqueue_discard(block);
+        fs.enqueue_discard_run(block, 1);
         blocks.push(block);
     }
     let sink = RecordingSink::new();
@@ -5711,16 +5751,18 @@ fn a_failed_slot_write_freezes_the_handle_and_publishes_nothing() {
             "the previously committed root was freed while it may still be \
              selected (faulted {faulted})"
         );
-        let unpublished: alloc::vec::Vec<u64> = fs
+        let unpublished: alloc::vec::Vec<(u64, u64)> = fs
             .allocator()
             .expect("allocator")
             .txn_private
             .iter()
-            .copied()
             .collect();
         assert!(!unpublished.is_empty(), "the fixture published nothing");
         assert!(
-            unpublished.iter().all(|&block| fs.is_used(block)),
+            unpublished
+                .iter()
+                .flat_map(|&(start, len)| start..start + len)
+                .all(|block| fs.is_used(block)),
             "the frozen handle released a block the unpublished root may name \
              (faulted {faulted})"
         );
@@ -6158,9 +6200,10 @@ fn confirming_map_invalidation_leaves_authoritative_blocks_staged() {
 fn mapped_block_count(fs: &mut ARXFS<MemBlock>, ino: u32) -> u64 {
     let inode = fs.read_inode(ino).expect("read inode");
     let spec = extent_spec(ino);
+    let total = fs.total_blocks;
     tree_entries(fs, inode.extent_root, spec)
         .iter()
-        .map(|(_, value)| Extent::decode(value).expect("extent decodes").len)
+        .map(|(_, value)| Extent::decode(value, total).expect("extent decodes").len)
         .sum()
 }
 
@@ -6170,10 +6213,11 @@ fn assert_extents_ordered_and_disjoint(fs: &mut ARXFS<MemBlock>, ino: u32) {
     let inode = fs.read_inode(ino).expect("read inode");
     let spec = extent_spec(ino);
     let entries = tree_entries(fs, inode.extent_root, spec);
+    let total = fs.total_blocks;
     let mut prev_end = 0u64;
     for (start, value) in entries {
         assert!(start >= prev_end, "extent at {start} overlaps prior run");
-        let ext = Extent::decode(&value).expect("extent decodes");
+        let ext = Extent::decode(&value, total).expect("extent decodes");
         prev_end = start + ext.len;
     }
 }
@@ -6928,17 +6972,33 @@ fn the_pending_discard_queue_is_capped_independent_of_volume_size() {
     // kernel heap was exhausted. A fixed cap keeps the worst-case footprint
     // constant whatever the device size.
     let mut fs = fmt_huge();
-    // Enqueue far more freed blocks than the cap allows. Every block is in
-    // range and free on this near-empty volume.
+    // Every second block, so no two runs coalesce and each enqueue really does
+    // cost an entry: the cap is on runs, which is what the queue's memory is.
     let start = RING_BLOCKS + 1;
-    for block in start..start + MAX_PENDING_DISCARD as u64 + 1000 {
-        fs.enqueue_discard(block);
+    for run in 0..MAX_PENDING_DISCARD_RUNS as u64 + 1000 {
+        fs.enqueue_discard_run(start + run * 2, 1);
     }
     assert_eq!(
-        fs.pending_discard_count(),
-        MAX_PENDING_DISCARD,
-        "the discard queue must cap at MAX_PENDING_DISCARD, never grow with the volume"
+        fs.pending_discard_runs(),
+        MAX_PENDING_DISCARD_RUNS,
+        "the discard queue must cap at MAX_PENDING_DISCARD_RUNS, never grow with the volume"
     );
+}
+
+#[test]
+fn one_freed_run_of_any_length_costs_the_discard_queue_one_entry() {
+    // The queue holds runs, so a very large free is one entry and the blocks it
+    // covers are still all accounted for. A per-block queue capped the same way
+    // would have dropped everything past the cap.
+    let mut fs = fmt_huge();
+    let start = RING_BLOCKS + 1;
+    fs.enqueue_discard_run(start, 1 << 20);
+    assert_eq!(fs.pending_discard_runs(), 1);
+    assert_eq!(fs.pending_discard_count(), 1 << 20);
+    // A neighbouring run extends the same entry rather than adding one.
+    fs.enqueue_discard_run(start + (1 << 20), 16);
+    assert_eq!(fs.pending_discard_runs(), 1);
+    assert_eq!(fs.pending_discard_count(), (1 << 20) + 16);
 }
 
 #[test]
@@ -9857,4 +9917,267 @@ fn a_commit_that_loses_nothing_reported_leaves_the_handle_writable() {
     assert!(!fs.read_only, "no reported operation was lost");
     fs.create(root, b"third", NodeKind::RegularFile)
         .expect("the handle still serves writes");
+}
+
+// ---------------------------------------------------------------------------
+// Extent-based deferred freeing: a transaction's block bookkeeping is a set of
+// runs, so what it holds follows the runs it touches and never the blocks.
+// ---------------------------------------------------------------------------
+
+/// Runs and blocks the open transaction has deferred for freeing.
+fn deferred(fs: &ARXFS<MemBlock>) -> (usize, u64) {
+    let alloc = fs.allocator().expect("writable");
+    (alloc.txn_freed.run_count(), alloc.txn_freed.blocks())
+}
+
+#[test]
+fn deleting_a_contiguous_file_defers_one_run_not_one_entry_per_block() {
+    // A file written sequentially lands in one physical run, so releasing it
+    // must cost the deferred-free set one entry. The per-block set this
+    // replaced held one `u64` per block, so an `rm` of a large file allocated
+    // memory proportional to its size.
+    let mut fs = fmt_batched(512, 4096, 64);
+    let root = fs.root();
+    let cap = as_usize(fs.data_capacity());
+    let blocks = 600usize;
+    let body = incompressible(cap * blocks);
+    fs.create(root, b"big", NodeKind::RegularFile)
+        .expect("create");
+    assert_eq!(fs.write_at(root, b"big", 0, &body), Ok(body.len()));
+    fs.flush()
+        .expect("publish the file so its blocks are committed");
+
+    let ino = file_ino(&mut fs, b"big");
+    let inode = fs.read_inode(ino).expect("inode");
+    let extents = tree_entries(&mut fs, inode.extent_root, extent_spec(ino)).len();
+    assert!(
+        extents <= 2,
+        "the fixture must really be contiguous (it holds {extents} extents)"
+    );
+
+    fs.remove(root, b"big").expect("remove");
+    let (runs, freed) = deferred(&fs);
+    assert!(
+        freed >= blocks as u64,
+        "the delete must really have released the file's blocks (freed {freed})"
+    );
+    assert!(
+        runs <= 4,
+        "releasing {freed} blocks of a contiguous file held {runs} deferred \
+         runs; the data run, its extent-tree node pair, and the inode record \
+         are all that should be in there"
+    );
+    fs.flush().expect("sync");
+    let report = fs.check(&GrantAll, &NullSink).expect("check");
+    assert_eq!(report.structure, StructureVerdict::Sound, "{report:?}");
+}
+
+#[test]
+fn a_failed_operation_undoes_only_the_deferred_runs_it_added() {
+    // Two operations of one transaction defer overlapping runs. Undoing the
+    // second must leave the first's blocks deferred: a run set records the part
+    // each operation actually added, so the overlap is not double-counted and
+    // then lost.
+    let mut fs = fmt_batched(512, 512, 32);
+    let base = RING_BLOCKS + 8;
+
+    fs.begin().expect("first operation");
+    fs.defer_free(base, 10);
+    assert_eq!(deferred(&fs), (1, 10));
+    fs.end_operation().expect("the first operation succeeds");
+
+    fs.begin().expect("second operation");
+    fs.defer_free(base + 5, 15);
+    assert_eq!(deferred(&fs), (1, 20), "the two runs coalesce");
+    assert_eq!(
+        fs.allocator().expect("writable").op_deferred.blocks(),
+        10,
+        "the second operation added only the part the first had not"
+    );
+    fs.rollback();
+
+    assert_eq!(
+        deferred(&fs),
+        (1, 10),
+        "undoing the second operation took back exactly its own runs"
+    );
+}
+
+#[test]
+fn releasing_a_run_frees_the_unshared_blocks_and_keeps_the_shared_one() {
+    // The range release walks the chunk tree instead of asking per block, so
+    // the interesting case is a run whose middle block is shared: everything
+    // around it is freed as runs, and the shared block survives with the
+    // reference the other file still holds.
+    let mut fs = fmt(512, 512, 32);
+    let root = fs.root();
+    let cap = as_usize(fs.data_capacity());
+    // A distinct, incompressible-enough pattern per block, so the four blocks
+    // neither dedupe onto one another nor cluster into a compressed extent.
+    let mut body = alloc::vec![0u8; cap * 4];
+    let mut state = 0x2545_F491_4F6C_DD1Du64;
+    for byte in &mut body {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        *byte = state.to_le_bytes()[3];
+    }
+    fs.create(root, b"a", NodeKind::RegularFile)
+        .expect("create");
+    assert_eq!(fs.write_at(root, b"a", 0, &body), Ok(body.len()));
+
+    let ino = file_ino(&mut fs, b"a");
+    let inode = fs.read_inode(ino).expect("inode");
+    let entries = tree_entries(&mut fs, inode.extent_root, extent_spec(ino));
+    assert_eq!(entries.len(), 1, "the fixture must be one run: {entries:?}");
+    let total = fs.total_blocks;
+    let ext = Extent::decode(&entries[0].1, total).expect("extent decodes");
+    assert_eq!(ext.len, 4);
+
+    // A second file holding a byte-identical copy of block 1 dedupes onto
+    // `a`'s physical block, so exactly one block of the run is shared.
+    fs.create(root, b"share", NodeKind::RegularFile)
+        .expect("create");
+    assert_eq!(fs.write_at(root, b"share", 0, &body[cap..cap * 2]), Ok(cap));
+    let shared = ext.phys + 1;
+    assert_eq!(
+        fs.data_refcount(shared).expect("refcount"),
+        2,
+        "the fixture must really share the middle block"
+    );
+
+    fs.remove(root, b"a").expect("remove");
+    fs.flush().expect("sync");
+    assert!(
+        fs.is_used(shared),
+        "the shared block was freed while another file still names it"
+    );
+    assert_eq!(
+        fs.data_refcount(shared).expect("refcount"),
+        1,
+        "the shared block returns to the implicit single reference"
+    );
+    for offset in [0u64, 2, 3] {
+        assert!(
+            !fs.is_used(ext.phys + offset),
+            "unshared block {offset} of the run was not released"
+        );
+    }
+    let node = fs.lookup(root, b"share").expect("the sharer survives");
+    let mut back = alloc::vec![0u8; cap];
+    assert_eq!(fs.read_at(node, 0, &mut back), Ok(cap));
+    assert_eq!(back, body[cap..cap * 2], "the surviving file's bytes");
+    let report = fs.check(&GrantAll, &NullSink).expect("check");
+    assert_eq!(report.structure, StructureVerdict::Sound, "{report:?}");
+}
+
+#[test]
+fn a_ceiling_query_finds_the_next_key_in_this_leaf_or_the_next_subtree() {
+    // The range release steps on the ceiling query, so it must be exact at
+    // both of its two answers: inside the leaf the descent landed in, and in
+    // the next subtree when every key of that leaf is below the query.
+    let mut fs = fmt(512, 512, 32);
+    let spec = chunk_spec();
+    let mut root = 0u64;
+    let keys: alloc::vec::Vec<u64> = (0..64u64).map(|i| 100 + i * 10).collect();
+    let record = ChunkRecord {
+        refcount: 2,
+        domain: 0,
+        length: 16,
+        logical_hash: [0x5A; LOGICAL_HASH_LEN],
+    };
+    for &key in &keys {
+        root = fs
+            .btree_insert(root, key, &record.encode(), spec)
+            .expect("insert");
+    }
+
+    for &key in &keys {
+        for probe in [key - 9, key - 1, key] {
+            let found = fs
+                .btree_get_ceil(root, probe, spec)
+                .expect("ceiling")
+                .map(|(found, _)| found);
+            assert_eq!(found, Some(key), "ceiling of {probe}");
+        }
+    }
+    assert_eq!(
+        fs.btree_get_ceil(root, 0, spec)
+            .expect("ceiling")
+            .map(|f| f.0),
+        Some(keys[0]),
+        "a key below every entry finds the smallest"
+    );
+    assert_eq!(
+        fs.btree_get_ceil(root, u64::MAX, spec).expect("ceiling"),
+        None,
+        "a key above every entry finds nothing"
+    );
+    assert_eq!(
+        fs.btree_get_ceil(0, 5, spec).expect("ceiling"),
+        None,
+        "an empty tree answers nothing"
+    );
+}
+
+#[test]
+fn trim_splits_a_queued_run_around_a_reallocated_block() {
+    // The queue holds runs, so trim must split one against the live map rather
+    // than trusting it whole: a block handed back out inside a queued run is
+    // skipped and the free parts either side are still discarded.
+    let mut fs = fmt_discard(512, 1, 0);
+    let start = RING_BLOCKS + 16;
+    fs.enqueue_discard_run(start, 12);
+    fs.mark_run_used(start + 5, 2);
+
+    let report = fs.trim(&GrantAll, &NullSink).expect("trim");
+    assert!(report.supported);
+    assert_eq!(
+        report.blocks_skipped_in_use, 2,
+        "the reallocated blocks must be skipped: {report:?}"
+    );
+    assert_eq!(
+        report.blocks_discarded, 10,
+        "both free parts of the run must still be discarded: {report:?}"
+    );
+    assert_eq!(
+        report.ranges_discarded, 2,
+        "the run splits into two device ranges: {report:?}"
+    );
+    assert_eq!(
+        fs.block.discarded,
+        alloc::vec![(start, 5), (start + 7, 5)],
+        "the device saw the two free parts, not the whole run"
+    );
+}
+
+#[test]
+fn a_deferred_mark_over_a_long_run_costs_one_pending_entry() {
+    // The map's deferred marks are runs too: a free whose bitmap pages are not
+    // resident used to record one entry per block, which is the other half of
+    // the same unbounded set.
+    let mut fs = fmt_huge();
+    // Drop every resident page, so the marks below can only be deferred.
+    fs.allocator_mut().expect("writable").cache.clear();
+    let start = RING_BLOCKS + 64;
+    fs.mark_run_free(start, 1 << 20);
+    let alloc = fs.allocator().expect("writable");
+    assert_eq!(alloc.pending_free.run_count(), 1);
+    assert_eq!(alloc.pending_free.blocks(), 1 << 20);
+    assert!(alloc.pending_used.is_empty());
+
+    // The opposite mark over part of the run displaces it rather than being
+    // held alongside it, so the latest mark over a block is the only one.
+    fs.mark_run_used(start + 16, 32);
+    let alloc = fs.allocator().expect("writable");
+    assert_eq!(alloc.pending_used.blocks(), 32);
+    assert_eq!(alloc.pending_free.blocks(), (1 << 20) - 32);
+    assert_eq!(alloc.pending_free.run_count(), 2, "the free run split");
+
+    // Folding them in leaves the map exact and the pending sets empty.
+    fs.map_fold_pending().expect("fold");
+    let alloc = fs.allocator().expect("writable");
+    assert!(alloc.pending_used.is_empty() && alloc.pending_free.is_empty());
+    assert!(fs.is_used(start + 16) && fs.is_used(start + 47));
+    assert!(!fs.is_used(start + 15) && !fs.is_used(start + 48));
 }

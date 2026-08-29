@@ -45,7 +45,8 @@ no-deferral rule), ahead of everything below it.
 | WB4 | Commit scheduler | `ARXFS-WRITEBACK.md` | 17 | WB1 | **done** |
 | WB-D1 | Host write-back expiry timer (`ARXFS-WRITEBACK.md` §10) | `ARXFS-WRITEBACK.md` | 17 | WB4 | **done** |
 | WB5 | The bound and memory pressure | `ARXFS-WRITEBACK.md` | 17 | WB1 | **done** |
-| D28 | Extent-based deferred freeing (defect `OPEN-DEFECTS.md` D28) | `OPEN-DEFECTS.md` | — | — | **next** |
+| D28 | Extent-based deferred freeing (defect `OPEN-DEFECTS.md` D28) | `OPEN-DEFECTS.md` | — | — | **done** |
+| D67 | Incremental, resumable freeing (defect `OPEN-DEFECTS.md` D67) | `OPEN-DEFECTS.md` | — | D28 | **next** |
 | WB6 | Hardware acceptance + docs | `ARXFS-WRITEBACK.md` | 17 | WB2–WB5 | planned |
 | M2 | Bounded passes: scrub, discard sweep, health (D-M2/3/4) | `ARXFS-MAINTENANCE.md` | 18 | A2, M1 | planned |
 | M3 | The maintenance scheduler | `ARXFS-MAINTENANCE.md` | 18 | M0, M2 | planned |
@@ -117,20 +118,26 @@ their reason recorded there, not here:
   of reducing it, so B1 followed WB2, which is now done: the drain gathers its
   ascending order into physical runs against the read path's transfer window, so
   a 64 KiB write costs five device commands against 158 for the same bytes.
-- **D28 comes before WB6, because WB5 bounded one half of a transaction's
-  memory and the other half is a recorded defect.** WB5 bounds the *dirty
-  block set* — the pinned sealed blocks — to a share of discovered RAM, and
-  the write path yields to that bound rather than growing. It does not bound
-  the allocator's per-transaction records: `txn_freed` holds one `u64` per
-  block a transaction releases, so deleting or truncating a very large file
-  still allocates memory proportional to the file's block count
-  (`OPEN-DEFECTS.md` D28, open and pre-existing, with its fix direction —
-  extent-based deferred freeing — already recorded). Claiming "a transaction's
-  memory is bounded" while `rm` of a 100 TB file is not would be the deferral
-  the rule below forbids, so it is the next item rather than a footnote. It is
-  genuinely too large for WB5: bounding it needs the deferred-free set keyed by
-  run rather than by block, across the allocator, the commit's free
-  accounting, and the map's pending marks.
+- **D28 came before WB6, because WB5 bounded one half of a transaction's
+  memory and the other half was a recorded defect. It is closed.** WB5 bounds
+  the *dirty block set* — the pinned sealed blocks — to a share of discovered
+  RAM, and the write path yields to that bound rather than growing. It did not
+  bound the allocator's per-transaction records, which held one `u64` per block
+  a transaction released, so an ordinary `rm` allocated memory proportional to
+  the file's block count. Every one of those sets is now a coalescing run set,
+  and the map and the chunk-tree release are run-wise with it: truncating a
+  contiguous file to zero holds 10 352 bytes over 35 allocations and removing it
+  11 376 over 52, the same at 400 blocks as at 1 600.
+- **D67 comes before WB6, because D28's own reading surfaced it and the
+  no-deferral rule puts a found defect ahead of everything planned.** A
+  transaction's memory now follows the *runs* it releases, which is what an
+  ordinary delete needs, but a free still runs to completion inside one
+  transaction — so a maximally fragmented 100 TB file, whose extent count is
+  itself of the order of 10^10, is still unbounded, and the operation is
+  uninterruptible besides. Fixing it is freeing across commits behind an
+  on-disk pending-delete set with a mount-time sweep: a format addition, a
+  recovery pass, and a change to the shape of `unlink` and `truncate` —
+  genuinely too large for D28 and independent of it.
 - **WB-D1 came before WB5, because WB4 found it and the no-deferral rule puts a
   found defect ahead of everything planned. It is closed.** WB4 made a
   transaction span operations and gave it a per-device-class dirty-age window,

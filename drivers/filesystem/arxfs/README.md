@@ -349,14 +349,15 @@ data reachable from any retained root, snapshot, reflink, deduped extent, or
 recovery root (§11), and there is no `nodiscard` / `trim=off` mode. The `Block`
 ABI gains a versioned discard surface — `discard_capability()` (support,
 granularity, per-request cap) and `discard(lba, blocks)` — and a device without
-discard support is *recorded, not failed*. Freed blocks enter a transient,
+discard support is *recorded, not failed*. Freed runs enter a transient,
 in-memory **pending-discard queue** as a committed transaction reclaims them
 (`finish_txn`), reusing the deferred-free machinery rather than a second
-free-tracking mechanism (`AGENTS.md` §2.2). `ARXFS::trim`, **capability-gated**
-on `CAP_FS_MOUNT`, discards a queued block only if it is **still free** at trim
-time (a reallocated or still-shared block — refcount ≥ 1 — is marked used by the
-free-space rebuild and is skipped, never discarded), coalesces still-free blocks
-into contiguous runs aligned **inward** to the device granularity, and
+free-tracking mechanism (`AGENTS.md` §2.2); the queue holds coalesced runs, so
+one large free is one entry. `ARXFS::trim`, **capability-gated** on
+`CAP_FS_MOUNT`, splits each queued run against the live map and discards only
+the parts **still free** at trim time (a reallocated or still-shared block —
+refcount ≥ 1 — is marked used by the free-space rebuild and is skipped, never
+discarded), aligns each part **inward** to the device granularity, and
 rate-limits to `TRIM_BATCH_RANGES` runs per call (the remainder stays queued).
 It never assumes a discarded block reads back as zero. The queue is rebuildable
 transient state (§4): a crash mid-trim drops it, the volume remounts cleanly,
@@ -398,7 +399,9 @@ Every operation is a transaction. A block reachable from the last
 committed transaction root is **never overwritten in place**: modified
 metadata and data are written copy-on-write to freshly allocated blocks,
 and superseded blocks are deferred-freed (reusable only after the
-transaction commits). The commit order (`docs/src/filesystem/arxfs-spec.md` §14,
+transaction commits) as coalesced `(start, length)` **runs**, so releasing a
+file costs one entry per extent it maps rather than one per block
+(`arxfs-spec.md` §4). The commit order (`docs/src/filesystem/arxfs-spec.md` §14,
 §22) is: stage the copy-on-write blocks and the new transaction root carrying its
 inline commit record, drain them all to the device, issue one `Block::flush()`
 barrier, then publish the next superblock-ring slot pointing at that root.

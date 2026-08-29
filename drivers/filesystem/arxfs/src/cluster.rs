@@ -60,9 +60,7 @@ impl<B: Block> ARXFS<B> {
             None => self.map_find_free_run(run, start, cursor)?,
         };
         let block = found.ok_or(DriverError::NoSpace)?;
-        for offset in 0..run {
-            self.claim_block(block + offset);
-        }
+        self.claim_run(block, run);
         self.allocator_mut()?.alloc_cursor = block + run;
         Ok(block)
     }
@@ -231,26 +229,10 @@ impl<B: Block> ARXFS<B> {
         start_bi: u64,
     ) -> Result<(), DriverError> {
         let Some(record) = self.chunk_get(ext.phys)? else {
-            for b in 0..ext.stored {
-                self.free_block(ext.phys + b);
-            }
+            self.free_run(ext.phys, ext.stored);
             return Ok(());
         };
-        let mut referrers = self.reverse_refs(ext.phys)?;
-        referrers.retain(|&(r_ino, r_bi)| !(r_ino == ino && r_bi == start_bi));
-        let remaining = record.refcount.saturating_sub(1);
-        if remaining <= 1 {
-            self.chunk_remove(ext.phys)?;
-            self.reverse_refs_remove(ext.phys)?;
-        } else {
-            let updated = ChunkRecord {
-                refcount: remaining,
-                ..record
-            };
-            self.chunk_put(ext.phys, &updated)?;
-            self.reverse_refs_put(ext.phys, &referrers)?;
-        }
-        Ok(())
+        self.release_shared_ref(ext.phys, &record, ino, start_bi)
     }
 
     /// Add a reference from the `dst` referrer (`(inode, logical start)`) to

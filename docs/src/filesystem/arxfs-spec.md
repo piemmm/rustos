@@ -272,13 +272,42 @@ several 100 TB+ volumes mount together on a 1 GiB machine. A changed page
 moves out of that cache when it enters the shared dirty set, so
 staging never retains a second page-sized copy; its drain window is bounded
 below the cache footprint. Other write-path-only structures — the map's
-allocation/metadata cursors, the
-per-transaction bookkeeping (blocks a not-yet-committed transaction has
-allocated or released), the pending-discard queue (capped at
-`MAX_PENDING_DISCARD`, a dropped entry merely stays un-discarded until a
-future free, trim pass, or rebuild requeues it), and the dedupe index (§9) —
-are grouped into one `Allocator` held as `Option<Allocator>` on the mounted
-handle, bounded the same way and never sized to the device.
+allocation/metadata cursors, the per-transaction bookkeeping, the
+pending-discard queue (capped at `MAX_PENDING_DISCARD_RUNS`, a dropped run
+merely stays un-discarded until a future free, trim pass, or rebuild requeues
+it), and the dedupe index (§9) — are grouped into one `Allocator` held as
+`Option<Allocator>` on the mounted handle, bounded the same way and never
+sized to the device.
+
+**Every block set is a set of runs.** The per-transaction bookkeeping (the
+blocks a not-yet-committed transaction has allocated or released, and the
+per-operation undo records over them), the map's deferred bit changes, and the
+pending-discard queue are all ordered sets of `(start, length)` runs held
+maximally coalesced (`RunSet`), never sets of individual blocks. A transaction
+releases *extents*, and an extent is contiguous by construction, so its
+bookkeeping costs one entry per run it touches: deleting a 100 TB file is a
+handful of entries where a per-block set asked for one per block of it. Two
+consequences follow throughout:
+
+- **The map is changed run-wise.** One apply walks the *pages* a run spans and
+  sets or clears whole bytes of each, so marking a large run costs the pages it
+  covers rather than a map read per block; the volume's free count and each
+  page summary move by the number of bits that actually changed. A mark whose
+  page or summary block is not resident defers the run — one entry, however
+  many blocks — and is folded in exactly at the next allocation or commit.
+- **Data is released run-wise.** Sharing is the exception, so a run is released
+  against the chunk tree by *range*: a ceiling query finds the next shared
+  block in the run, everything before it is freed as one run, and only a
+  genuinely shared block costs a refcount edit. A per-block release cost a tree
+  descent for every block, so freeing a file scaled with its byte size rather
+  than with its extent count.
+
+A single free operation's memory is therefore proportional to the runs it
+releases. That is bounded for any file the allocator laid out contiguously and
+for every ordinary workload, but it is *not* yet bounded for a maximally
+fragmented very large file, whose extent count is itself unbounded; making a
+release incremental and resumable across commits is recorded as open work
+(`plans/OPEN-DEFECTS.md` D67).
 
 **Read-only mounts build nothing.** A read-only handle holds `None`: it
 cannot allocate, free, dedupe, or trim by construction, and it reads no
@@ -1158,12 +1187,12 @@ too damaged to mount: read-only on the device, it scans for a self-identifying
 transaction root whose commit record validates, picks the highest generation,
 and emits only file data that passes the integrity pipeline.
 
-**Discard and health (10, 11).** Freed blocks enter a transient in-memory
-pending-discard queue as a transaction reclaims them. `trim` discards a queued
-block only if it is *still free* at trim time, so a reallocated or still-shared
-block is never discarded; runs are coalesced and aligned inward to the device's
-discard granularity, rate-limited per call, and the queue is never persisted,
-so a crash mid-trim costs nothing. A device without discard support is
+**Discard and health (10, 11).** Freed runs enter a transient in-memory
+pending-discard queue, held coalesced, as a transaction reclaims them. `trim`
+splits each queued run into the parts that are *still free* at trim time, so a
+reallocated or still-shared block is never discarded; each part is aligned
+inward to the device's discard granularity, issues are rate-limited per call,
+and the queue is never persisted, so a crash mid-trim costs nothing. A device without discard support is
 recorded, not failed. `health` reads device telemetry, classifies the volume
 against documented thresholds taking the worse of the device and
 filesystem-observed signals, triggers a scrub when the unsafe-shutdown or

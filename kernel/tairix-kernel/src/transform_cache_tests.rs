@@ -153,14 +153,43 @@ fn invalidation_covers_the_whole_stored_run_and_only_it() {
     let mut cache = cache();
     cache.put(100, 3, &payload(0x11));
     // A free outside the run leaves the entry standing.
-    cache.invalidate(99);
-    cache.invalidate(103);
+    cache.invalidate_run(99, 1);
+    cache.invalidate_run(103, 1);
     assert!(cache.get(100).is_some());
     // A free of any block inside the run drops it.
-    cache.invalidate(102);
+    cache.invalidate_run(102, 1);
     assert!(cache.get(100).is_none());
     assert_eq!(cache.accounting().invalidations(), 1);
     assert_eq!(cache.accounting().total_bytes(), 0);
+}
+
+#[test]
+fn one_freed_run_invalidates_every_entry_it_overlaps() {
+    // The driver frees a whole extent in one call, so a run must drop every
+    // entry it reaches: the one starting below it that extends into it, and
+    // every one starting inside it. A per-block seam made the driver call once
+    // per block of the run to achieve the same thing.
+    let mut cache = cache();
+    // Small entries, so all four fit the test budget and every absence below
+    // is an invalidation rather than an eviction.
+    for (phys, stored, fill) in [
+        (10u64, 4u64, 0x11u8),
+        (20, 2, 0x22),
+        (30, 1, 0x33),
+        (40, 1, 0x44),
+    ] {
+        cache.put(phys, stored, &vec![fill; 256]);
+    }
+    assert_eq!(
+        cache.accounting().insertions(),
+        4,
+        "the fixture must hold all four"
+    );
+    cache.invalidate_run(12, 20);
+    assert!(cache.get(10).is_none(), "an entry reaching into the run");
+    assert!(cache.get(20).is_none() && cache.get(30).is_none());
+    assert!(cache.get(40).is_some(), "an entry past the run stands");
+    assert_eq!(cache.accounting().invalidations(), 3);
 }
 
 #[test]
@@ -297,7 +326,7 @@ fn normal_operation_emits_no_audit_records() {
     cache.put(10, 1, &payload(1));
     assert!(cache.get(10).is_some());
     assert!(cache.get(99).is_none());
-    cache.invalidate(10);
+    cache.invalidate_run(10, 1);
     cache.purge();
     assert!(captured.snapshot().is_empty());
 }
@@ -418,9 +447,9 @@ impl tairix_drv_fs_arxfs::ClusterCache for Observed {
         self.inner.put(phys, stored, plaintext);
     }
 
-    fn invalidate(&mut self, phys: u64) {
+    fn invalidate_run(&mut self, phys: u64, len: u64) {
         let before = self.inner.accounting().invalidations();
-        self.inner.invalidate(phys);
+        self.inner.invalidate_run(phys, len);
         if self.inner.accounting().invalidations() > before {
             self.counts
                 .invalidations_or_purges

@@ -82,6 +82,7 @@ mod health;
 mod integrity;
 mod pagecache;
 mod reconcile;
+mod runs;
 mod scratch;
 mod scrub;
 mod superblock;
@@ -111,7 +112,7 @@ pub use unlock::{
 };
 pub use xform::{ClusterCache, MAX_CLUSTER_PLAINTEXT};
 
-use allocator::{Allocator, MAX_PENDING_DISCARD};
+use allocator::{Allocator, MAX_PENDING_DISCARD_RUNS};
 use allocmap::MapGeometry;
 use btree::{NodeTrail, TreeWalk};
 use dedupe::{
@@ -548,17 +549,25 @@ impl Extent {
 
     /// Decode an on-disk extent value, rejecting any shape the format does
     /// not define (fail closed): unknown flags, a raw extent carrying a
-    /// stored length, or a compressed extent whose geometry is not a bounded
-    /// cluster (`0 < stored < len <= COMPRESS_CLUSTER_BLOCKS`).
-    fn decode(value: &[u8]) -> Result<Self, DriverError> {
+    /// stored length, a compressed extent whose geometry is not a bounded
+    /// cluster (`0 < stored < len <= COMPRESS_CLUSTER_BLOCKS`), or a stored
+    /// run that does not fit inside `total_blocks`.
+    ///
+    /// The device bound is what makes every later `phys + offset` and every
+    /// run length the free and rebuild paths hand to the allocation map total:
+    /// without it a corrupt record could name a run wrapping past the end of
+    /// the address space, and the arithmetic over it would silently release
+    /// blocks the record never covered.
+    fn decode(value: &[u8], total_blocks: u64) -> Result<Self, DriverError> {
         let phys = rd_u64(value, 0);
         let len = rd_u64(value, 8);
         let stored = u64::from(rd_u32(value, 16));
         let flags = rd_u32(value, 20);
+        let fits = |run: u64| phys.checked_add(run).is_some_and(|end| end <= total_blocks);
         match flags {
-            0 if stored == 0 => Ok(Self::raw(phys, len)),
+            0 if stored == 0 && fits(len) => Ok(Self::raw(phys, len)),
             EXTENT_FLAG_COMPRESSED
-                if stored > 0 && stored < len && len <= COMPRESS_CLUSTER_BLOCKS =>
+                if stored > 0 && stored < len && len <= COMPRESS_CLUSTER_BLOCKS && fits(stored) =>
             {
                 Ok(Self::cluster(phys, len, stored))
             }
@@ -833,7 +842,7 @@ pub struct ARXFS<B: Block> {
     /// ([`ClusterCache`], `plans/SMARTRAM.md` SMART3), or `None` for a
     /// volume that serves every read through the full transform
     /// pipeline. Installed by [`ARXFS::with_cluster_cache`];
-    /// invalidated by [`ARXFS::free_block`] and purged by
+    /// invalidated by [`ARXFS::free_run`] and purged by
     /// [`ARXFS::rollback`], so it can never serve a stale cluster.
     cluster_cache: Option<Box<dyn ClusterCache>>,
     /// The mount's B-tree mutation scratch (`btree` module), lent to one
@@ -1352,58 +1361,108 @@ impl<B: Block> ARXFS<B> {
     /// transaction and may therefore be overwritten in place.
     fn is_txn_private(&self, phys: u64) -> bool {
         self.allocator()
-            .is_ok_and(|alloc| alloc.txn_private.contains(&phys))
+            .is_ok_and(|alloc| alloc.txn_private.contains(phys))
     }
 
-    /// Free a block. A block allocated **by this transaction** (still private,
-    /// never published in any committed root) is reclaimed *immediately*, so a
+    /// Free the run `start..start + len`.
+    ///
+    /// The part allocated **by this transaction** (still private, never
+    /// published in any committed root) is reclaimed *immediately*, so a
     /// transaction that repeatedly copies-on-writes the same metadata — e.g. an
     /// extent tree that splits and re-merges as a large write streams in — does
     /// not pin every superseded copy until commit. Reusing such a block within
     /// the same transaction is safe for crash consistency: nothing committed
-    /// ever referenced it. A block inherited from an earlier committed root is
+    /// ever referenced it. The part inherited from an earlier committed root is
     /// instead deferred and reclaimed only at [`Self::finish_txn`], so a block
     /// reachable from the last committed root is never reused mid-flight
     /// (`docs/src/filesystem/arxfs-spec.md` §2).
-    fn free_block(&mut self, phys: u64) {
-        if phys == 0 {
+    ///
+    /// A run at a time, never a block at a time: the deferred set records one
+    /// entry per run, so releasing a file costs its extent count rather than
+    /// its block count and a very large delete stays inside a bounded
+    /// footprint.
+    fn free_run(&mut self, start: u64, len: u64) {
+        if start == 0 || len == 0 {
             return;
         }
-        // The block's bytes are about to leave the committed tree: any
-        // cluster plaintext derived from a run covering it must go now,
-        // before the block can be reallocated and rewritten.
+        // The run's bytes are about to leave the committed tree: any cluster
+        // plaintext derived from a run covering them must go now, before a
+        // block can be reallocated and rewritten.
         if let Some(cache) = self.cluster_cache.as_mut() {
-            cache.invalidate(phys);
+            cache.invalidate_run(start, len);
         }
-        if self.is_txn_private(phys) {
-            // Anything staged for this block names a version of it that no
-            // committed or in-flight root will reference, so it never needs to
-            // reach the device; a re-use of the block within the transaction
-            // stages its new contents in the same slot. The set keeps the
-            // version it drops in the running operation's savepoint, so a
-            // block an earlier operation of this transaction staged comes back
-            // if this one is undone.
-            self.dirty.discard(phys);
-            self.mark_free(phys);
-            if let Ok(alloc) = self.allocator_mut() {
-                alloc.txn_private.remove(&phys);
-                if !alloc.op_claimed.contains(&phys) {
-                    alloc.op_released.insert(phys);
-                }
+        let end = start.saturating_add(len);
+        let mut pos = start;
+        while pos < end {
+            let private = self
+                .allocator()
+                .ok()
+                .and_then(|alloc| alloc.txn_private.first_overlap(pos, end - pos));
+            let Some((run_start, run_len)) = private else {
+                self.defer_free(pos, end - pos);
+                return;
+            };
+            if run_start > pos {
+                self.defer_free(pos, run_start - pos);
             }
-        } else if let Ok(alloc) = self.allocator_mut() {
-            if alloc.txn_freed.insert(phys) {
-                alloc.op_deferred.insert(phys);
-            }
+            self.reclaim_private(run_start, run_len);
+            pos = run_start.saturating_add(run_len);
         }
     }
 
     /// Defer-free a metadata block and its companion mirror together (they are
-    /// always allocated and freed as a unit).
+    /// always allocated and freed as a unit, so the pair is one run of two).
     fn free_meta(&mut self, phys: u64) {
-        if phys != 0 {
-            self.free_block(phys);
-            self.free_block(Self::companion(phys));
+        self.free_run(phys, 2);
+    }
+
+    /// Reclaim the transaction-private run `start..start + len` at once.
+    fn reclaim_private(&mut self, start: u64, len: u64) {
+        // Anything staged for these blocks names a version of them that no
+        // committed or in-flight root will reference, so it never needs to
+        // reach the device; a re-use of a block within the transaction stages
+        // its new contents in the same slot. The set keeps the version it drops
+        // in the running operation's savepoint, so a block an earlier operation
+        // of this transaction staged comes back if this one is undone.
+        self.dirty.discard_run(start, len);
+        self.mark_run_free(start, len);
+        let end = start.saturating_add(len);
+        let Ok(alloc) = self.allocator_mut() else {
+            return;
+        };
+        alloc.txn_private.remove(start, len);
+        // Whatever this operation did not claim itself was claimed by an
+        // earlier operation of the same transaction, which undoing this one
+        // must give back.
+        let mut pos = start;
+        while let Some((gap_start, gap_len)) = alloc.op_claimed.first_gap(pos, end - pos) {
+            alloc.op_released.insert(gap_start, gap_len);
+            pos = gap_start.saturating_add(gap_len);
+            if pos >= end {
+                break;
+            }
+        }
+    }
+
+    /// Add the part of `start..start + len` the transaction has not already
+    /// deferred to the deferred-free set, recording it as this operation's so
+    /// undoing the operation removes exactly what it added.
+    fn defer_free(&mut self, start: u64, len: u64) {
+        let end = start.saturating_add(len);
+        let mut pos = start;
+        while pos < end {
+            let fresh = self
+                .allocator()
+                .ok()
+                .and_then(|alloc| alloc.txn_freed.first_gap(pos, end - pos));
+            let Some((gap_start, gap_len)) = fresh else {
+                return;
+            };
+            if let Ok(alloc) = self.allocator_mut() {
+                alloc.txn_freed.insert(gap_start, gap_len);
+                alloc.op_deferred.insert(gap_start, gap_len);
+            }
+            pos = gap_start.saturating_add(gap_len);
         }
     }
 
@@ -1676,7 +1735,7 @@ impl<B: Block> ARXFS<B> {
         self.release_op_state();
         self.dirty.undo_operation();
         self.restore_roots(self.saved_op);
-        // The undone allocations bypassed `free_block`, so no per-block
+        // The undone allocations bypassed `free_run`, so no per-run
         // invalidation ran: drop everything rather than risk a stale
         // cluster over a recycled run (fail closed).
         if let Some(cache) = self.cluster_cache.as_mut() {
@@ -1738,33 +1797,66 @@ impl<B: Block> ARXFS<B> {
         }
         if let Ok(alloc) = self.allocator_mut() {
             let deferred = core::mem::take(&mut alloc.op_deferred);
-            for block in &deferred {
-                alloc.txn_freed.remove(block);
+            for (start, len) in deferred.iter() {
+                alloc.txn_freed.remove(start, len);
             }
         }
         let claimed = match self.allocator_mut() {
             Ok(alloc) => core::mem::take(&mut alloc.op_claimed),
             Err(_) => return,
         };
-        for block in claimed {
-            if self
-                .allocator_mut()
-                .is_ok_and(|alloc| alloc.txn_private.remove(&block))
-            {
-                self.mark_free(block);
-            }
+        for (start, len) in claimed.iter() {
+            self.unclaim_private(start, len);
         }
         let released = match self.allocator_mut() {
             Ok(alloc) => core::mem::take(&mut alloc.op_released),
             Err(_) => return,
         };
-        for block in released {
-            if self
-                .allocator_mut()
-                .is_ok_and(|alloc| alloc.txn_private.insert(block))
-            {
-                self.mark_used(block);
+        for (start, len) in released.iter() {
+            self.reclaim_released(start, len);
+        }
+    }
+
+    /// Give up the private claim on the part of `start..start + len` this
+    /// transaction still holds, freeing exactly those blocks.
+    fn unclaim_private(&mut self, start: u64, len: u64) {
+        let end = start.saturating_add(len);
+        let mut pos = start;
+        while pos < end {
+            let held = self
+                .allocator()
+                .ok()
+                .and_then(|alloc| alloc.txn_private.first_overlap(pos, end - pos));
+            let Some((run_start, run_len)) = held else {
+                return;
+            };
+            if let Ok(alloc) = self.allocator_mut() {
+                alloc.txn_private.remove(run_start, run_len);
             }
+            self.mark_run_free(run_start, run_len);
+            pos = run_start.saturating_add(run_len);
+        }
+    }
+
+    /// Take the part of `start..start + len` that is not private back, so a
+    /// block an earlier operation owned, that this one freed, ends up private to
+    /// that earlier operation exactly as it was.
+    fn reclaim_released(&mut self, start: u64, len: u64) {
+        let end = start.saturating_add(len);
+        let mut pos = start;
+        while pos < end {
+            let missing = self
+                .allocator()
+                .ok()
+                .and_then(|alloc| alloc.txn_private.first_gap(pos, end - pos));
+            let Some((gap_start, gap_len)) = missing else {
+                return;
+            };
+            if let Ok(alloc) = self.allocator_mut() {
+                alloc.txn_private.insert(gap_start, gap_len);
+            }
+            self.mark_run_used(gap_start, gap_len);
+            pos = gap_start.saturating_add(gap_len);
         }
     }
 
@@ -1789,8 +1881,8 @@ impl<B: Block> ARXFS<B> {
             Ok(alloc) => core::mem::take(&mut alloc.txn_private),
             Err(_) => return,
         };
-        for block in private {
-            self.mark_free(block);
+        for (start, len) in private.iter() {
+            self.mark_run_free(start, len);
         }
     }
 
@@ -1804,15 +1896,24 @@ impl<B: Block> ARXFS<B> {
     }
 
     /// Apply deferred frees to the map image that will follow the barrier.
+    ///
+    /// Run-wise and exactly, so the free count the transaction root records is
+    /// right without a fold afterwards, and a transaction that released a very
+    /// large file pays for its extents rather than for its blocks.
     fn prepare_deferred_frees(&mut self) -> Result<(), DriverError> {
-        let freed = {
-            let alloc = self.allocator_mut()?;
-            core::mem::take(&mut alloc.txn_freed)
-        };
-        for &block in &freed {
-            self.mark_free(block);
+        let freed = core::mem::take(&mut self.allocator_mut()?.txn_freed);
+        let result = freed
+            .iter()
+            .try_for_each(|(start, len)| self.mark_range_free(start, len));
+        // The set stays whole whatever the outcome: a failure aborts the
+        // transaction, which reserves exactly these runs again.
+        if let Ok(alloc) = self.allocator_mut() {
+            alloc.txn_freed = freed;
         }
-        self.allocator_mut()?.txn_freed = freed;
+        result?;
+        // The transaction's own claims and private frees may have been
+        // deferred, and the free count the root is about to record has to be
+        // exact.
         self.map_fold_pending()
     }
 
@@ -1826,8 +1927,8 @@ impl<B: Block> ARXFS<B> {
             Ok(alloc) => core::mem::take(&mut alloc.txn_freed),
             Err(_) => return,
         };
-        for block in freed {
-            self.mark_used(block);
+        for (start, len) in freed.iter() {
+            self.mark_run_used(start, len);
         }
     }
 
@@ -1849,7 +1950,7 @@ impl<B: Block> ARXFS<B> {
         self.free_count = self.allocator().map_or(self.free_count, |alloc| {
             self.saved_txn
                 .free_count
-                .saturating_sub(alloc.txn_private.len() as u64)
+                .saturating_sub(alloc.txn_private.blocks())
         });
         self.schedule.closed();
         self.read_only = true;
@@ -1868,28 +1969,30 @@ impl<B: Block> ARXFS<B> {
         // allocations recorded.
         alloc.txn_private.clear();
         let freed = core::mem::take(&mut alloc.txn_freed);
-        for block in freed {
-            self.enqueue_discard(block);
+        for (start, len) in freed.iter() {
+            self.enqueue_discard_run(start, len);
         }
     }
 
-    /// Queue a now-free block for a later device discard ([`Self::trim`]).
+    /// Queue a now-free run for a later device discard ([`Self::trim`]).
     ///
-    /// The queue is transient, rebuildable state: it only ever holds
-    /// blocks already marked free, [`Self::trim`] re-checks each is still free
-    /// before discarding, and a crash that drops it loses no live data. The
-    /// queue is capped at a fixed, volume-independent [`MAX_PENDING_DISCARD`]
-    /// blocks so a long-running mount that never trims cannot grow it without
-    /// bound and a huge device cannot size it into a heap-exhausting allocation;
-    /// a dropped entry merely stays un-discarded (still free) until a future
-    /// free, trim pass, or mount rebuild requeues it.
-    fn enqueue_discard(&mut self, block: u64) {
-        if block < RING_BLOCKS || block >= self.total_blocks {
+    /// The queue is transient, rebuildable state: it only ever holds blocks
+    /// already marked free, [`Self::trim`] re-checks which are still free
+    /// before discarding, and a crash that drops it loses no live data. It is
+    /// capped at a fixed, volume-independent [`MAX_PENDING_DISCARD_RUNS`] runs
+    /// so a long-running mount that never trims cannot grow it without bound
+    /// and a huge device cannot size it into a heap-exhausting allocation; a
+    /// dropped run merely stays un-discarded (still free) until a future free,
+    /// trim pass, or mount rebuild requeues it.
+    fn enqueue_discard_run(&mut self, start: u64, len: u64) {
+        let lo = start.max(RING_BLOCKS);
+        let hi = start.saturating_add(len).min(self.total_blocks);
+        if lo >= hi {
             return;
         }
         if let Ok(alloc) = self.allocator_mut() {
-            if alloc.pending_discard.len() < MAX_PENDING_DISCARD {
-                alloc.pending_discard.push(block);
+            if alloc.pending_discard.run_count() < MAX_PENDING_DISCARD_RUNS {
+                alloc.pending_discard.insert(lo, hi - lo);
             }
         }
     }
@@ -2668,13 +2771,11 @@ impl<B: Block> ARXFS<B> {
                 self.mark_meta_used_checked(node)?;
             }
             for (_, value) in walk.entries() {
-                let ext = Extent::decode(value)?;
-                for b in 0..ext.stored {
-                    if mirrored {
-                        self.mark_meta_used_checked(ext.phys + b)?;
-                    } else {
-                        self.mark_used_checked(ext.phys + b)?;
-                    }
+                let ext = Extent::decode(value, self.total_blocks)?;
+                if mirrored {
+                    self.mark_range_used(ext.phys, ext.stored.saturating_add(1))?;
+                } else {
+                    self.mark_range_used(ext.phys, ext.stored)?;
                 }
             }
         }
@@ -2704,7 +2805,7 @@ impl<B: Block> ARXFS<B> {
         let spec = extent_spec(0);
         match self.btree_get_floor(inode.extent_root, bi, spec)? {
             Some((start, value)) => {
-                let ext = Extent::decode(&value)?;
+                let ext = Extent::decode(&value, self.total_blocks)?;
                 if bi < start + ext.len {
                     Ok(Some((start, ext)))
                 } else {
@@ -2738,7 +2839,7 @@ impl<B: Block> ARXFS<B> {
         let Some((start, value)) = self.btree_get_floor(inode.extent_root, bi, spec)? else {
             return Ok(());
         };
-        let ext = Extent::decode(&value)?;
+        let ext = Extent::decode(&value, self.total_blocks)?;
         if bi >= start + ext.len {
             return Ok(());
         }
@@ -2784,7 +2885,7 @@ impl<B: Block> ARXFS<B> {
         // whose stored run never coalesces with a 1:1 block.
         if bi > 0 {
             if let Some((ls, value)) = self.btree_get_floor(inode.extent_root, bi - 1, spec)? {
-                let left = Extent::decode(&value)?;
+                let left = Extent::decode(&value, self.total_blocks)?;
                 if !left.compressed && ls + left.len == bi && left.phys + left.len == ptr {
                     inode.extent_root = self.btree_remove(inode.extent_root, ls, spec)?;
                     start = ls;
@@ -2794,7 +2895,7 @@ impl<B: Block> ARXFS<B> {
             }
         }
         if let Some((rs, value)) = self.btree_get_floor(inode.extent_root, bi + 1, spec)? {
-            let right = Extent::decode(&value)?;
+            let right = Extent::decode(&value, self.total_blocks)?;
             if !right.compressed && rs == bi + 1 && phys + len == right.phys {
                 inode.extent_root = self.btree_remove(inode.extent_root, rs, spec)?;
                 len += right.len;
@@ -2935,18 +3036,66 @@ impl<B: Block> ARXFS<B> {
         Ok(self.chunk_get(phys)?.map_or(1, |record| record.refcount))
     }
 
-    /// Drop the reference `(ino, bi)` holds on the data block at `phys`.
+    /// Drop the references the logical run starting at `(ino, logical)` holds
+    /// on the data run `phys..phys + len`.
+    ///
+    /// Sharing is the exception, not the rule, so the run is released against
+    /// the chunk tree by *range*: one ceiling query finds the next shared block
+    /// in the run, everything before it is freed as a whole run, and only a
+    /// genuinely shared block costs a record edit. Releasing block by block cost
+    /// a tree descent for every block, so freeing a file scaled with its byte
+    /// size rather than with its extent count.
     ///
     /// A block with the implicit reference count of `1` is freed outright. A
-    /// shared chunk is decremented and the `(ino, bi)` referrer struck from its
+    /// shared chunk is decremented and its referrer struck from the
     /// reverse-reference list; when only one referrer remains the chunk returns
     /// to the implicit count and keeps its (now sole) physical block
     /// (`docs/src/filesystem/arxfs-spec.md` §9).
+    fn release_data_run(
+        &mut self,
+        phys: u64,
+        len: u64,
+        ino: u32,
+        logical: u64,
+    ) -> Result<(), DriverError> {
+        let end = phys.saturating_add(len);
+        let mut pos = phys;
+        while pos < end {
+            // Each query re-descends from the current root, so striking a
+            // record between steps cannot leave the search on a superseded
+            // node.
+            let shared = match self.btree_get_ceil(self.chunk_tree_root, pos, chunk_spec())? {
+                Some((key, value)) if key < end => Some((key, value)),
+                _ => None,
+            };
+            let Some((key, value)) = shared else {
+                self.free_run(pos, end - pos);
+                return Ok(());
+            };
+            if key > pos {
+                self.free_run(pos, key - pos);
+            }
+            let record = ChunkRecord::decode(&value).ok_or(DriverError::DeviceFault)?;
+            self.release_shared_ref(key, &record, ino, logical + (key - phys))?;
+            pos = key.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    /// Drop the reference `(ino, bi)` holds on the data block at `phys`.
     fn release_block_ref(&mut self, phys: u64, ino: u32, bi: u64) -> Result<(), DriverError> {
-        let Some(record) = self.chunk_get(phys)? else {
-            self.free_block(phys);
-            return Ok(());
-        };
+        self.release_data_run(phys, 1, ino, bi)
+    }
+
+    /// Drop one referrer from the shared chunk `record` at `phys`, freeing
+    /// nothing: a shared block keeps its storage for whoever still names it.
+    fn release_shared_ref(
+        &mut self,
+        phys: u64,
+        record: &ChunkRecord,
+        ino: u32,
+        bi: u64,
+    ) -> Result<(), DriverError> {
         let mut referrers = self.reverse_refs(phys)?;
         referrers.retain(|&(r_ino, r_bi)| !(r_ino == ino && r_bi == bi));
         let remaining = record.refcount.saturating_sub(1);
@@ -2956,7 +3105,7 @@ impl<B: Block> ARXFS<B> {
         } else {
             let updated = ChunkRecord {
                 refcount: remaining,
-                ..record
+                ..*record
             };
             self.chunk_put(phys, &updated)?;
             self.reverse_refs_put(phys, &referrers)?;
@@ -3258,7 +3407,7 @@ impl<B: Block> ARXFS<B> {
     ///
     /// A directory's content blocks are metadata mirrored pairs, so they are
     /// freed with their companion ([`Self::free_meta`]); a regular file's and
-    /// a link's are single-copy data ([`Self::free_block`]).
+    /// a link's are single-copy data ([`Self::release_data_run`]).
     fn free_all_blocks(&mut self, inode: &mut Inode, ino: u32) -> Result<(), DriverError> {
         let spec = extent_spec(ino);
         let mirrored = inode.kind.content_is_metadata();
@@ -3273,17 +3422,15 @@ impl<B: Block> ARXFS<B> {
                 self.free_meta(node);
             }
             for (start, value) in walk.entries() {
-                let ext = Extent::decode(value)?;
+                let ext = Extent::decode(value, self.total_blocks)?;
                 if ext.compressed {
                     self.release_cluster(&ext, ino, start)?;
-                    continue;
-                }
-                for b in 0..ext.len {
-                    if mirrored {
-                        self.free_meta(ext.phys + b);
-                    } else {
-                        self.release_block_ref(ext.phys + b, ino, start + b)?;
-                    }
+                } else if mirrored {
+                    // Each logical block is a mirrored pair, so the run and its
+                    // companions are the blocks `phys ..= phys + len`.
+                    self.free_run(ext.phys, ext.len.saturating_add(1));
+                } else {
+                    self.release_data_run(ext.phys, ext.len, ino, start)?;
                 }
             }
         }
@@ -3615,7 +3762,7 @@ impl<B: Block> ARXFS<B> {
         let mut blocks = 0u64;
         while self.btree_next_leaf(inode.extent_root, spec, &mut walk)? {
             for (_, value) in walk.entries() {
-                let ext = Extent::decode(value)?;
+                let ext = Extent::decode(value, self.total_blocks)?;
                 blocks = blocks.saturating_add(ext.stored);
             }
         }
@@ -3771,7 +3918,9 @@ impl<B: Block> ARXFS<B> {
             let Some((start, ext)) = walk
                 .entries()
                 .next()
-                .map(|(start, value)| Extent::decode(value).map(|ext| (start, ext)))
+                .map(|(start, value)| {
+                    Extent::decode(value, self.total_blocks).map(|ext| (start, ext))
+                })
                 .transpose()?
             else {
                 break;
@@ -3781,7 +3930,10 @@ impl<B: Block> ARXFS<B> {
                 // Nothing follows the largest key a tree can hold.
                 None => walk.stop(),
             }
-            let end = start + ext.len;
+            // Saturating, so a logical run reaching the end of the address
+            // space cuts *less* than it names rather than wrapping into a
+            // shorter one and skipping the extent altogether.
+            let end = start.saturating_add(ext.len);
             if end <= keep {
                 continue;
             }
@@ -3797,9 +3949,7 @@ impl<B: Block> ARXFS<B> {
                 inode.extent_root = self.btree_remove(inode.extent_root, start, spec)?;
                 continue;
             }
-            for b in cut..end {
-                self.release_block_ref(ext.phys + (b - start), ino, b)?;
-            }
+            self.release_data_run(ext.phys + (cut - start), end - cut, ino, cut)?;
             inode.extent_root = self.btree_remove(inode.extent_root, start, spec)?;
             if cut > start {
                 let head = Extent::raw(ext.phys, cut - start).encode();
@@ -4096,7 +4246,7 @@ impl<B: Block> ARXFS<B> {
         let mut walk = TreeWalk::new(self.block_size)?;
         while self.btree_next_leaf(src.extent_root, src_spec, &mut walk)? {
             for (start, value) in walk.entries() {
-                let ext = Extent::decode(value)?;
+                let ext = Extent::decode(value, self.total_blocks)?;
                 if ext.compressed {
                     self.clone_cluster_ref(src_ino, &mut dst, dst_ino, start, &ext)?;
                     continue;

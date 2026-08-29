@@ -844,7 +844,7 @@ impl<B: Block> ARXFS<B> {
                         }
                     }
                     for (start, ev) in extent_walk.entries() {
-                        let Ok(ext) = Extent::decode(ev) else {
+                        let Ok(ext) = Extent::decode(ev, self.total_blocks) else {
                             // A malformed extent value cannot name its blocks;
                             // count one skip and keep extracting the rest of
                             // the file.

@@ -806,14 +806,29 @@ impl DirtySet {
         self.publish();
     }
 
-    /// Drop the block staged at `phys`, if any: its bytes name a block nothing
-    /// will reference, so writing them out would cost a device command for
-    /// contents no reader can reach.
-    pub(crate) fn discard(&mut self, phys: u64) {
-        self.save_prior(phys);
+    /// Drop every block of `start..start + len` the set holds: their bytes name
+    /// blocks nothing will reference, so writing them out would cost a device
+    /// command for contents no reader can reach.
+    ///
+    /// Visits the blocks it *holds*, not the run's, so releasing a very large
+    /// run costs what is staged inside it and nothing per block. A block the
+    /// set does not hold needs no savepoint entry: it is unchanged, and a later
+    /// staging in the same operation records its own.
+    pub(crate) fn discard_run(&mut self, start: u64, len: u64) {
+        let Some(last) = len.checked_sub(1).map(|last| start.saturating_add(last)) else {
+            return;
+        };
         for phase in WritePhase::ALL {
-            if let Some(mut bytes) = self.entries.remove(&(phase, phys)) {
-                bytes.zeroize();
+            while let Some(phys) = self
+                .entries
+                .range((phase, start)..=(phase, last))
+                .next()
+                .map(|(&(_, phys), _)| phys)
+            {
+                self.save_prior(phys);
+                if let Some(mut bytes) = self.entries.remove(&(phase, phys)) {
+                    bytes.zeroize();
+                }
             }
         }
         self.publish();
@@ -1462,7 +1477,7 @@ mod tests {
         set.end_operation();
 
         set.begin_operation();
-        set.discard(4);
+        set.discard_run(4, 1);
         set.stage(WritePhase::BeforeBarrier, 4, &block(0xBB))
             .expect("reuse the freed block");
         set.undo_operation();
@@ -1529,8 +1544,8 @@ mod tests {
             .expect("stage");
         set.stage(WritePhase::BeforeBarrier, 5, &block(2))
             .expect("stage");
-        set.discard(4);
-        set.discard(99);
+        set.discard_run(4, 1);
+        set.discard_run(99, 1);
         assert_eq!(
             requests(&mut set, WritePhase::BeforeBarrier, WIDE),
             alloc::vec![(5, 1, alloc::vec![2])],

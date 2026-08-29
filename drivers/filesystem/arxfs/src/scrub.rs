@@ -479,7 +479,7 @@ impl<B: Block> ARXFS<B> {
         walk.restart();
         while self.btree_next_leaf(inode.extent_root, spec, walk)? {
             for (_, value) in walk.entries() {
-                let ext = Extent::decode(value)?;
+                let ext = Extent::decode(value, self.total_blocks)?;
                 if ext.compressed {
                     if mirrored {
                         // A directory never holds a compressed extent; record

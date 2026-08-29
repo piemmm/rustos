@@ -616,23 +616,26 @@ blocks)` issues one aligned discard. A device **without** discard support is
 *recorded, not failed* — both default to "unsupported" so a backend that cannot
 trim simply reports so.
 
-**The pending-discard queue (mounted trim).** Freed blocks enter a transient,
+**The pending-discard queue (mounted trim).** Freed runs enter a transient,
 in-memory pending-discard queue as a committed transaction reclaims them
 (`finish_txn`), reusing the existing deferred-free machinery rather than a
-second free-tracking mechanism (`AGENTS.md` §2.2). `ARXFS::trim` later issues
-the discards:
+second free-tracking mechanism (`AGENTS.md` §2.2). The queue holds coalesced
+`(start, length)` runs, so one large free is one entry and its cap is on runs
+(`MAX_PENDING_DISCARD_RUNS`) — the queue's actual memory — rather than on
+blocks. `ARXFS::trim` later issues the discards:
 
 - **Safety by re-check.** A queued block is discarded only if it is **still
   free** at trim time. The allocation map marks every block reachable from the
   committed root — including every reflink target and every deduped chunk at
   refcount ≥ 1 — as *used*, so a free block is, by construction, unreachable
   from every retained root. A block freed and then reallocated is *used* again
-  by trim time and is skipped, never discarded.
-- **Batched, aligned, rate-limited.** Still-free blocks are coalesced into
-  contiguous runs, each run is aligned **inward** to the device's discard
-  granularity (the unaligned head/tail edges are requeued), and at most
-  `TRIM_BATCH_RANGES` runs are issued per call; the remainder stays queued for
-  the next call.
+  by trim time and is skipped, never discarded. Each queued run is split
+  against the live map into the parts that are still free, page-wise rather
+  than block by block.
+- **Batched, aligned, rate-limited.** Each still-free part is aligned
+  **inward** to the device's discard granularity (the unaligned head/tail edges
+  are requeued), and at most `TRIM_BATCH_RANGES` runs are issued per call; the
+  remainder stays queued for the next call.
 - **No zero-readback assumption.** `arxfs` never reads a discarded block
   expecting zeroes; discarded blocks are free and are fully rewritten (header +
   integrity + crypto) before they are ever read again.
@@ -869,7 +872,10 @@ in place**:
   itself copy-on-written to point at the new location, up to the inode
   map. Blocks superseded by the transaction are *deferred-freed* — marked
   reusable only after the transaction commits — so the previous committed
-  tree stays wholly intact until the new one is durable.
+  tree stays wholly intact until the new one is durable. The deferred set
+  records **runs**, not blocks (`arxfs-spec.md` §4), so releasing a file costs
+  one entry per extent it maps and a very large delete stays inside a bounded
+  footprint.
 - **Commit order (`docs/src/filesystem/arxfs-spec.md` §14).** Write the copy-on-write
   blocks, write the new transaction root carrying its inline commit
   record, then publish the next superblock-ring slot (round-robin)
