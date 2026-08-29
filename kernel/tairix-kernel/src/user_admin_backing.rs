@@ -247,11 +247,13 @@ where
     let tmp = fs
         .create(dir, tmp_name, NodeKind::RegularFile)
         .map_err(driver_errno)?;
-    let written = fs.write_at(dir, tmp_name, 0, data).map_err(driver_errno)?;
-    if written != data.len() {
-        // A short write never becomes the live database; drop the temp.
+    // The whole database or none of it: a driver may store less than it was
+    // handed as back-pressure, so the write resumes rather than being read as
+    // a failure — but a genuine refusal still drops the temp instead of
+    // letting a truncated database be renamed over the live one.
+    if let Err(err) = fs.write_all(dir, tmp_name, 0, data) {
         let _ = fs.remove(dir, tmp_name);
-        return Err(VfsError::Io.to_errno());
+        return Err(driver_errno(err));
     }
     fs.set_security(tmp, security).map_err(driver_errno)?;
     // Land the temp durably before it replaces the original, so the rename

@@ -83,11 +83,11 @@ fn sink() -> &'static tairix_kernel_core::test_sink::TestSink {
 }
 
 /// The test device block size: 512-byte blocks, so one cached block
-/// costs `512 + ENTRY_OVERHEAD` ledger bytes.
+/// costs `512 + MAP_ENTRY_OVERHEAD` ledger bytes.
 const BS: u32 = 512;
 
 /// One cached block's ledger cost against the 4 KiB test budget.
-const COST: usize = BS as usize + ENTRY_OVERHEAD;
+const COST: usize = BS as usize + MAP_ENTRY_OVERHEAD;
 
 /// The shared backing a test disk and its observer both hold: the byte
 /// store plus operation counters, so a test can count device reads and
@@ -740,7 +740,7 @@ fn payload_and_metadata_bytes_are_accounted_separately() {
     let acct = cache.accounting();
     let class = ReclaimClass::CleanFileData;
     assert_eq!(acct.class_payload_bytes(class), BS as usize);
-    assert_eq!(acct.class_metadata_bytes(class), ENTRY_OVERHEAD);
+    assert_eq!(acct.class_metadata_bytes(class), MAP_ENTRY_OVERHEAD);
     assert_eq!(acct.class_bytes(class), COST);
 }
 

@@ -613,6 +613,21 @@ fn open_filesystem(
             }
             .map_err(DriverError::as_errno)?;
             let identity = fs.volume_uuid();
+            // A writable volume's pinned write-back set is bounded to this
+            // machine's RAM and its unwritten bytes published; a read-only
+            // handle can never stage a block, so it needs neither. An attach
+            // the bound refuses fails closed rather than mounting unbounded.
+            let fs = if read_only {
+                fs
+            } else {
+                crate::writeback_bound::bound_volume(
+                    fs,
+                    volume_handle,
+                    wiring.pressure,
+                    wiring.audit,
+                )
+                .map_err(DriverError::as_errno)?
+            };
             Ok(OpenedVolume {
                 driver: cached(fs, volume_handle, wiring.pressure, wiring.audit),
                 identity,

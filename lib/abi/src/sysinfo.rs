@@ -3465,6 +3465,42 @@ pub const RECLAIM_CLASS_NAMES: [&str; RECLAIM_CLASS_COUNT] = [
     "reliability-assist",
 ];
 
+/// Class id a [`CacheLedgerRecord`] carries for a **pinned** pool: bytes
+/// the reclaim model accounts but can never take, because they exist
+/// nowhere else and can only be written out.
+///
+/// It sits one past the reclaim classes rather than among them. A reclaim
+/// class answers "when is this given back under pressure", and for a
+/// pinned pool the answer is "never" — so folding one into the taxonomy
+/// would make [`RECLAIM_CLASS_NAMES`]'s ordering a fiction and let a
+/// reclaim decision count unreclaimable bytes as headroom. A ledger row
+/// may name it; the per-class reclaim totals of [`ReclaimClassRecord`]
+/// never do.
+pub const CACHE_CLASS_PINNED: u8 = 9;
+
+/// Number of class ids a [`CacheLedgerRecord`] may carry: the reclaim
+/// classes plus [`CACHE_CLASS_PINNED`].
+pub const CACHE_CLASS_COUNT: usize = RECLAIM_CLASS_COUNT + 1;
+
+// The pinned id sits immediately past the last reclaim class, so adding a
+// reclaim class without moving it is a compile error rather than a silently
+// overlapping vocabulary.
+const _: () = assert!(CACHE_CLASS_PINNED as usize == RECLAIM_CLASS_COUNT);
+
+/// Stable name of a cache-ledger row's class id, or `None` for an id this
+/// build does not define (fail closed: never a guessed class).
+///
+/// Reads through [`RECLAIM_CLASS_NAMES`] rather than repeating it, so the
+/// reclaim vocabulary has one definition and the pinned row is the single
+/// name added beside it.
+#[must_use]
+pub fn cache_class_name(class: u8) -> Option<&'static str> {
+    if class == CACHE_CLASS_PINNED {
+        return Some("pinned");
+    }
+    RECLAIM_CLASS_NAMES.get(usize::from(class)).copied()
+}
+
 /// Look up a reclaim class id by its stable name. Fails closed: an
 /// unknown name is `None`, never a guessed class.
 #[must_use]
@@ -3770,8 +3806,9 @@ pub struct CacheLedgerRecord {
     pub owner_kind: CacheOwnerKind,
     /// Whether the figures are kernel-measured or self-reported.
     pub origin: CacheLedgerOrigin,
-    /// The reclaim class of every entry: an index into
-    /// [`RECLAIM_CLASS_NAMES`].
+    /// The class of every entry: a reclaim class, or
+    /// [`CACHE_CLASS_PINNED`] for a pool the model accounts but never
+    /// reclaims. Rendered through [`cache_class_name`].
     pub class: u8,
     /// The owner's numeric payload: a volume id, a task id, or a seat id
     /// depending on [`Self::owner_kind`]; zero for the kinds that carry
@@ -3838,7 +3875,7 @@ impl CacheLedgerRecord {
         if !is_printable_label(label) {
             return Err(Errno::OutOfRange);
         }
-        if usize::from(class) >= RECLAIM_CLASS_COUNT {
+        if usize::from(class) >= CACHE_CLASS_COUNT {
             return Err(Errno::OutOfRange);
         }
         let mut buf = [0u8; CACHE_LABEL_MAX];
@@ -3935,7 +3972,7 @@ impl CacheLedgerRecord {
         let owner_kind = CacheOwnerKind::from_u8(bytes[1])?;
         let origin = CacheLedgerOrigin::from_u8(bytes[2])?;
         let class = bytes[3];
-        if usize::from(class) >= RECLAIM_CLASS_COUNT {
+        if usize::from(class) >= CACHE_CLASS_COUNT {
             return Err(Errno::OutOfRange);
         }
         let label_len = bytes[0];
@@ -4121,6 +4158,11 @@ impl CacheReportRequest {
 /// A class with no cache reports a row of zeros rather than being absent:
 /// "nothing is cached in this class" is an answer, and a caller paging the
 /// nine classes gets nine records whatever the machine is doing.
+///
+/// A [`CACHE_CLASS_PINNED`] row is deliberately dropped: its bytes are
+/// never reclaimed, so adding them to a reclaim class's total would report
+/// unreclaimable memory as reclaimable. Such a row is visible as itself in
+/// the per-cache view and nowhere else.
 #[must_use]
 pub fn fold_cache_ledgers(rows: &[CacheLedgerRecord]) -> [ReclaimClassRecord; RECLAIM_CLASS_COUNT] {
     let mut totals = [ReclaimClassRecord::default(); RECLAIM_CLASS_COUNT];
@@ -7295,8 +7337,40 @@ mod tests {
     }
 
     #[test]
+    fn the_pinned_class_is_a_ledger_row_but_never_a_reclaim_class() {
+        use super::{
+            cache_class_name, reclaim_class_from_name, CacheLedgerRecord, CacheOwnerKind,
+            CACHE_CLASS_COUNT, CACHE_CLASS_PINNED, RECLAIM_CLASS_COUNT, RECLAIM_CLASS_NAMES,
+        };
+        // It sits one past the reclaim classes, so a per-class reclaim view
+        // paging `RECLAIM_CLASS_COUNT` rows can never reach it.
+        assert_eq!(usize::from(CACHE_CLASS_PINNED), RECLAIM_CLASS_COUNT);
+        assert_eq!(CACHE_CLASS_COUNT, RECLAIM_CLASS_COUNT + 1);
+        assert!(
+            CacheLedgerRecord::new(
+                b"arxfs.writeback",
+                CacheOwnerKind::FilesystemVolume,
+                7,
+                CACHE_CLASS_PINNED
+            )
+            .is_ok(),
+            "a pinned pool is a legitimate ledger row"
+        );
+        // The name vocabulary reads through the reclaim names rather than
+        // repeating them, and adds exactly one.
+        for (index, name) in RECLAIM_CLASS_NAMES.iter().enumerate() {
+            let id = u8::try_from(index).expect("a class id fits a byte");
+            assert_eq!(cache_class_name(id), Some(*name));
+        }
+        assert_eq!(cache_class_name(CACHE_CLASS_PINNED), Some("pinned"));
+        assert_eq!(cache_class_name(CACHE_CLASS_PINNED + 1), None);
+        // And it is not a reclaim class: no selector resolves to it.
+        assert_eq!(reclaim_class_from_name("pinned"), None);
+    }
+
+    #[test]
     fn cache_ledger_record_decode_fails_closed() {
-        use super::{CacheLedgerRecord, RECLAIM_CLASS_COUNT};
+        use super::{CacheLedgerRecord, CACHE_CLASS_COUNT, CACHE_CLASS_PINNED};
         let row = cache_row();
         assert_eq!(
             CacheLedgerRecord::from_bytes(&[0u8; CacheLedgerRecord::WIRE_LEN - 1]),
@@ -7325,8 +7399,16 @@ mod tests {
             CacheLedgerRecord::from_bytes(&bytes),
             Err(Errno::OutOfRange)
         );
+        // The pinned class sits one past the reclaim classes and is a real
+        // row kind, so it decodes; the id past *it* is unassigned.
         let mut bytes = row.to_le_bytes();
-        bytes[3] = u8::try_from(RECLAIM_CLASS_COUNT).unwrap();
+        bytes[3] = CACHE_CLASS_PINNED;
+        assert_eq!(
+            CacheLedgerRecord::from_bytes(&bytes).map(|decoded| decoded.class),
+            Ok(CACHE_CLASS_PINNED)
+        );
+        let mut bytes = row.to_le_bytes();
+        bytes[3] = u8::try_from(CACHE_CLASS_COUNT).unwrap();
         assert_eq!(
             CacheLedgerRecord::from_bytes(&bytes),
             Err(Errno::OutOfRange)

@@ -16,7 +16,11 @@
 //! unlock-published user database.
 //!
 //! Every registered ledger carries its cache's identity as well as its
-//! counters, so the export is one row *per cache*
+//! counters, so the export is one row *per cache* — plus one row per
+//! registered **pinned** pool ([`MemStats::register_pinned_ledger`]),
+//! memory this kernel measures but can never reclaim, kept out of the
+//! per-class reclaim totals so no reclaim decision can mistake it for
+//! headroom
 //! ([`MemStats::cache_ledger_records`]) — the whole of what this kernel
 //! publishes about reclaimable caches. Folding those rows into per-class
 //! totals for display belongs to the client that also holds the caches
@@ -45,8 +49,8 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use tairix_abi::sysinfo::{CacheLedgerOrigin, CacheLedgerRecord, RamzipStats};
 use tairix_reclaim::{
-    BandObserver, CacheLedger, FreeMemorySource, MemoryPressure, PressureBand, ReclaimClass,
-    ReclaimClassStats,
+    BandObserver, CacheLedger, FreeMemorySource, MemoryPressure, PinnedLedger, PressureBand,
+    ReclaimClass, ReclaimClassStats,
 };
 use tairix_sync::RwLock;
 
@@ -135,6 +139,15 @@ pub struct MemStats {
     /// final, zeroed books readable). Registration order is preserved, so
     /// [`Self::cache_ledger_records`] pages a stable list.
     ledgers: RwLock<Vec<CacheLedger>>,
+    /// Every registered **pinned** pool: memory the reclaim model
+    /// measures but can never take (a mounted volume's unwritten blocks).
+    /// Held apart from [`Self::ledgers`] because it must never reach
+    /// [`Self::reclaim_class_stats`] — a reclaim decision that counted
+    /// unwritable-away bytes as reclaimable headroom would stall reclaim
+    /// waiting for memory nothing can free. Growable, registration order
+    /// preserved, and appended after the cache rows so the paged list is
+    /// stable.
+    pinned: RwLock<Vec<PinnedLedger>>,
     /// The live `ramzip` tier, once one registers.
     ramzip: RwLock<Option<&'static (dyn RamzipStatsSource + 'static)>>,
 }
@@ -150,6 +163,7 @@ impl MemStats {
         Self {
             pressure: RwLock::new(None),
             ledgers: RwLock::new(Vec::new()),
+            pinned: RwLock::new(Vec::new()),
             ramzip: RwLock::new(None),
         }
     }
@@ -301,9 +315,18 @@ impl MemStats {
         total
     }
 
-    /// One [`CacheLedgerRecord`] per registered ledger, in registration
-    /// order — stable across the paged `CACHE_LEDGERS` reads, exactly as
-    /// every other list domain requires.
+    /// Register a live pinned pool's ledger for the per-pool export.
+    ///
+    /// Called by the production construction sites (a writable volume's
+    /// write-back dirty set); unit-test pools simply never register.
+    pub fn register_pinned_ledger(&self, ledger: PinnedLedger) {
+        self.pinned.write().push(ledger);
+    }
+
+    /// One [`CacheLedgerRecord`] per registered ledger — the reclaimable
+    /// caches first, then the pinned pools — in registration order, stable
+    /// across the paged `CACHE_LEDGERS` reads exactly as every other list
+    /// domain requires.
     ///
     /// Every record is stamped [`CacheLedgerOrigin::Kernel`] with
     /// `reporter_pid = 0`: everything registered here is a cache this
@@ -316,9 +339,17 @@ impl MemStats {
     /// `to_record`'s own refusal already exists to catch.
     #[must_use]
     pub fn cache_ledger_records(&self) -> Vec<CacheLedgerRecord> {
-        let ledgers = self.ledgers.read();
         let mut records = Vec::new();
-        for ledger in ledgers.iter() {
+        // One registry lock at a time: the two lists are independent, so
+        // taking both at once would create a lock order for no reason.
+        for ledger in self.ledgers.read().iter() {
+            if let Ok(mut record) = ledger.to_record() {
+                record.origin = CacheLedgerOrigin::Kernel;
+                record.reporter_pid = 0;
+                records.push(record);
+            }
+        }
+        for ledger in self.pinned.read().iter() {
             if let Ok(mut record) = ledger.to_record() {
                 record.origin = CacheLedgerOrigin::Kernel;
                 record.reporter_pid = 0;
@@ -567,6 +598,49 @@ mod tests {
         assert_eq!(records[1].reporter_pid, 0);
         assert_eq!(records[1].payload_bytes, 1024);
         assert_eq!(records[1].metadata_bytes, 32);
+    }
+
+    #[test]
+    fn a_pinned_pool_is_exported_as_its_own_row_and_never_as_reclaim_headroom() {
+        use tairix_reclaim::{PinnedAccounting, PinnedLedger};
+
+        let stats = MemStats::new();
+        let clean = Arc::new(CacheAccounting::new());
+        clean
+            .charge(ReclaimClass::CleanFileData, 1024, 32)
+            .expect("a fresh ledger accepts a charge");
+        stats.register_ledger(CacheLedger::new(
+            "arxfs.clean",
+            ReclaimOwner::FilesystemVolume { volume: 3 },
+            ReclaimClass::CleanFileData,
+            clean,
+        ));
+        let pinned = Arc::new(PinnedAccounting::new());
+        pinned.set(1 << 20, 512);
+        stats.register_pinned_ledger(PinnedLedger::new(
+            "arxfs.writeback",
+            ReclaimOwner::FilesystemVolume { volume: 3 },
+            pinned,
+        ));
+
+        let records = stats.cache_ledger_records();
+        assert_eq!(records.len(), 2, "the cache row, then the pinned one");
+        assert_eq!(records[0].label(), "arxfs.clean");
+        assert_eq!(records[1].label(), "arxfs.writeback");
+        assert_eq!(records[1].class, tairix_abi::sysinfo::CACHE_CLASS_PINNED);
+        assert_eq!(records[1].payload_bytes, 1 << 20);
+        assert_eq!(records[1].origin, CacheLedgerOrigin::Kernel);
+
+        // The reclaim decision must see only the reclaimable megabyte's worth:
+        // counting a pinned pool as headroom would stall `ramzip` waiting for
+        // memory nothing can free.
+        assert_eq!(stats.ramzip_reclaimable_residue(), 1024 + 32);
+        assert_eq!(
+            stats
+                .reclaim_class_stats(ReclaimClass::CleanFileData)
+                .payload_bytes,
+            1024
+        );
     }
 
     #[test]

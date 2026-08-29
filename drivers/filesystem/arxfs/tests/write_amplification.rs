@@ -27,6 +27,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use tairix_abi::driver::block::{Block, BlockGeometry, DiscardCapability};
 use tairix_abi::driver::filesystem::{
@@ -36,6 +37,9 @@ use tairix_abi::driver::DriverHandle;
 use tairix_abi::DriverError;
 use tairix_drv_fs_arxfs::{EntropySource, VolumeKey, ARXFS, RUN_BYTES, VOLUME_KEY_LEN};
 use tairix_fuzzseed::Lcg;
+use tairix_reclaim::{
+    PinnedAccounting, PinnedLedger, PressureBand, ReclaimOwner, ReportedPressure,
+};
 
 /// One command the driver issued to the device, in issue order.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1048,4 +1052,291 @@ fn a_batched_window_costs_what_the_same_bytes_cost_in_one_call() {
             one_call.writes
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// The bound: what the cache is allowed to pin, and what happens when a writer
+// outruns the device (`plans/ARXFS-WRITEBACK.md` §6).
+// ---------------------------------------------------------------------------
+
+/// A volume bounded as the host bounds one, plus the pinned ledger the host
+/// would register and the ledger recording what the device is issued.
+///
+/// `backing_bytes` stands in for the RAM the boot path discovered, so a test
+/// picks the ceiling by picking a machine size — the same derivation a mount
+/// uses, never a bound spelled directly.
+fn bounded_volume(
+    block_size: u32,
+    device_bytes: u64,
+    backing_bytes: usize,
+    band: PressureBand,
+) -> (
+    ARXFS<LedgerBlock>,
+    Arc<PinnedAccounting>,
+    Rc<RefCell<Ledger>>,
+) {
+    let (fs, ledger) = volume(block_size, device_bytes, Publish::Batched);
+    let pinned = Arc::new(PinnedAccounting::new());
+    let gauge: &'static ReportedPressure = Box::leak(Box::new(ReportedPressure::unknown()));
+    gauge.report(band);
+    let fs = fs
+        .with_writeback_bound(backing_bytes, gauge, Arc::clone(&pinned))
+        .expect("the test machine bounds the volume");
+    (fs, pinned, ledger)
+}
+
+/// Machine size whose per-volume share is a handful of transfer windows, so a
+/// payload larger than the ceiling is reachable without a huge test.
+const SMALL_MACHINE_BYTES: usize = 16 * (4 * RUN_BYTES);
+
+/// Machine size whose per-volume share is exactly one transfer window — the
+/// smallest a volume may be mounted on at all.
+const FLOOR_MACHINE_BYTES: usize = 16 * RUN_BYTES;
+
+/// Payload that comfortably outruns [`SMALL_MACHINE_BYTES`]'s ceiling.
+const OUTRUN_BYTES: usize = 24 * RUN_BYTES;
+
+/// Write `data` whole, looping over the short counts the bound produces, and
+/// report how many calls it took.
+///
+/// The peak the set pinned is read from the ledger's own high-water mark
+/// rather than sampled between calls: a call that fills the ceiling publishes
+/// before it returns, so anything measured from outside would see the residue
+/// and never the peak.
+fn write_whole_bounded(
+    fs: &mut ARXFS<LedgerBlock>,
+    dir: NodeId,
+    name: &[u8],
+    data: &[u8],
+) -> usize {
+    let mut done = 0usize;
+    let mut calls = 0usize;
+    while done < data.len() {
+        let at = u64::try_from(done).expect("an offset fits a u64");
+        let written = fs
+            .write_at(dir, name, at, &data[done..])
+            .expect("a bounded write still stores bytes");
+        assert!(written > 0, "the bound must never stall a writer");
+        done += written;
+        calls += 1;
+    }
+    calls
+}
+
+/// A writer that outruns the device is throttled by forced commits, not by
+/// growth: the dirty set never exceeds the ceiling by more than the one record
+/// the write was in the middle of, the transaction is published repeatedly to
+/// make room, and every byte still lands.
+#[test]
+fn a_writer_that_outruns_the_device_is_throttled_rather_than_allowed_to_grow() {
+    let (mut fs, pinned, ledger) =
+        bounded_volume(512, DEVICE_BYTES, SMALL_MACHINE_BYTES, PressureBand::Normal);
+    let root = fs.root();
+    fs.create(root, FILE, NodeKind::RegularFile)
+        .expect("create");
+    fs.flush().expect("start from a published volume");
+
+    let body = payload(OUTRUN_BYTES);
+    ledger.borrow_mut().arm();
+    let calls = write_whole_bounded(&mut fs, root, FILE, &body);
+    let peak = pinned.peak_bytes();
+    let ceiling = SMALL_MACHINE_BYTES / 16;
+
+    assert!(calls > 1, "the bound cut the write into more than one call");
+    assert!(
+        peak <= ceiling + RUN_BYTES,
+        "the set pinned {peak} bytes against a {ceiling}-byte ceiling: \
+         back-pressure must bound growth, not merely slow it"
+    );
+    assert!(
+        peak > 0,
+        "a write that pins nothing is not measuring the cache"
+    );
+    assert!(
+        pinned.released() > 1,
+        "a payload {OUTRUN_BYTES} bytes wide under a {ceiling}-byte ceiling \
+         must have been written out more than once"
+    );
+    assert!(
+        pinned.refusals() > 0,
+        "the bound cut the write short at least once"
+    );
+    assert!(
+        Cost::of(&ledger.borrow(), 512).barriers > 1,
+        "each forced commit carries its own durability barrier"
+    );
+
+    // Correctness is the point: throttling must not lose or reorder a byte.
+    fs.flush().expect("publish the tail");
+    let file = fs.lookup(root, FILE).expect("the file");
+    let mut read = vec![0u8; OUTRUN_BYTES];
+    assert_eq!(fs.read_at(file, 0, &mut read), Ok(OUTRUN_BYTES));
+    assert_eq!(read, body, "the throttled write must be byte-exact");
+    assert_eq!(pinned.bytes(), 0, "a published volume pins nothing");
+}
+
+/// The driver's own whole-write path resumes across the short counts the bound
+/// produces, so a caller that must store an indivisible value never sees one.
+#[test]
+fn the_whole_write_path_resumes_across_a_bounded_short_write() {
+    let (mut fs, _, _) =
+        bounded_volume(512, DEVICE_BYTES, SMALL_MACHINE_BYTES, PressureBand::Normal);
+    let root = fs.root();
+    let body = payload(OUTRUN_BYTES);
+    tairix_drv_fs_arxfs::plant_nested_file(&mut fs, root, &[b"deep", b"planted"], &body)
+        .expect("a planted payload is stored whole across short writes");
+    fs.flush().expect("publish");
+
+    let dir = fs.lookup(root, b"deep").expect("the directory");
+    let file = fs.lookup(dir, b"planted").expect("the planted file");
+    let mut read = vec![0u8; OUTRUN_BYTES];
+    assert_eq!(fs.read_at(file, 0, &mut read), Ok(OUTRUN_BYTES));
+    assert_eq!(read, body);
+}
+
+/// Tightening memory lowers the ceiling, so the same payload is written out
+/// more often — the response to pressure is publish sooner, never hold more.
+#[test]
+fn rising_pressure_publishes_more_often_for_the_same_payload() {
+    let body = payload(OUTRUN_BYTES);
+    let mut released = Vec::new();
+    for band in [PressureBand::Normal, PressureBand::Critical] {
+        let (mut fs, pinned, _) = bounded_volume(512, DEVICE_BYTES, SMALL_MACHINE_BYTES, band);
+        let root = fs.root();
+        fs.create(root, FILE, NodeKind::RegularFile)
+            .expect("create");
+        write_whole_bounded(&mut fs, root, FILE, &body);
+        fs.flush().expect("publish the tail");
+        released.push((band, pinned.released(), pinned.peak_bytes()));
+    }
+    let (_, calm_released, calm_peak) = released[0];
+    let (_, tight_released, tight_peak) = released[1];
+    assert!(
+        tight_released > calm_released,
+        "a critical machine published {tight_released} times against \
+         {calm_released} on an unpressured one"
+    );
+    assert!(
+        tight_peak < calm_peak,
+        "a critical machine pinned {tight_peak} bytes against {calm_peak} on \
+         an unpressured one"
+    );
+}
+
+/// The forward-progress floor: on the smallest machine a volume may be
+/// mounted on — one transfer window per volume — a write far larger than the
+/// whole ceiling still completes, byte-exact, without stalling.
+#[test]
+fn the_floor_lets_a_transaction_complete_on_the_smallest_supported_machine() {
+    let (mut fs, pinned, _) = bounded_volume(
+        512,
+        DEVICE_BYTES,
+        FLOOR_MACHINE_BYTES,
+        PressureBand::Critical,
+    );
+    let root = fs.root();
+    fs.create(root, FILE, NodeKind::RegularFile)
+        .expect("create");
+    let body = payload(OUTRUN_BYTES);
+    write_whole_bounded(&mut fs, root, FILE, &body);
+    fs.flush().expect("publish");
+    let peak = pinned.peak_bytes();
+    assert!(
+        peak <= 2 * RUN_BYTES,
+        "the floor machine pinned {peak} bytes"
+    );
+    assert!(pinned.released() > 1);
+    let file = fs.lookup(root, FILE).expect("the file");
+    let mut read = vec![0u8; OUTRUN_BYTES];
+    assert_eq!(fs.read_at(file, 0, &mut read), Ok(OUTRUN_BYTES));
+    assert_eq!(read, body);
+}
+
+/// The combined floor the charter binds every storage design to: the smallest
+/// supported machine serving a hundred tebibytes, writing more than its whole
+/// ceiling. Resident dirty bytes stay bounded, the bytes are exact, and
+/// nothing panics or spins.
+#[test]
+fn a_small_machine_bounds_its_dirty_set_on_a_hundred_tebibyte_volume() {
+    for block_size in [512_u32, 4096] {
+        let (mut fs, pinned, _) = bounded_volume(
+            block_size,
+            FLOOR_DEVICE_BYTES,
+            FLOOR_MACHINE_BYTES,
+            PressureBand::Moderate,
+        );
+        let root = fs.root();
+        fs.create(root, FILE, NodeKind::RegularFile)
+            .expect("create");
+        let body = payload(OUTRUN_BYTES);
+        write_whole_bounded(&mut fs, root, FILE, &body);
+        fs.flush().expect("publish");
+        let peak = pinned.peak_bytes();
+        assert!(
+            peak <= 2 * RUN_BYTES,
+            "a {block_size}-byte volume of {FLOOR_DEVICE_BYTES} bytes pinned \
+             {peak} bytes on the floor machine"
+        );
+        assert_eq!(pinned.bytes(), 0);
+        let file = fs.lookup(root, FILE).expect("the file");
+        let mut read = vec![0u8; OUTRUN_BYTES];
+        assert_eq!(fs.read_at(file, 0, &mut read), Ok(OUTRUN_BYTES));
+        assert_eq!(read, body);
+    }
+}
+
+/// The ledger reports the pinned bytes while they are pinned, and reports them
+/// gone once the transaction is published.
+#[test]
+fn the_ledger_reports_a_volumes_unwritten_bytes() {
+    let (mut fs, pinned, _) =
+        bounded_volume(512, DEVICE_BYTES, SMALL_MACHINE_BYTES, PressureBand::Normal);
+    let root = fs.root();
+    fs.create(root, FILE, NodeKind::RegularFile)
+        .expect("create");
+    assert!(
+        pinned.bytes() > 0,
+        "an open transaction's blocks are pinned and reported"
+    );
+    assert_eq!(pinned.bytes(), fs.writeback_pinned_bytes());
+    let row = PinnedLedger::new(
+        "arxfs.writeback",
+        ReclaimOwner::FilesystemVolume { volume: 9 },
+        Arc::clone(&pinned),
+    )
+    .to_record()
+    .expect("the row encodes");
+    assert_eq!(row.payload_bytes, pinned.bytes() as u64);
+    assert!(row.entries > 0);
+
+    fs.flush().expect("publish");
+    assert_eq!(pinned.bytes(), 0);
+    assert_eq!(fs.writeback_pinned_bytes(), 0);
+}
+
+/// A read-only mount can never stage a block, so it pins nothing and costs a
+/// bounded machine nothing.
+#[test]
+fn a_read_only_mount_pins_nothing() {
+    let (fs, _) = volume(512, DEVICE_BYTES, Publish::Batched);
+    let root = fs.root();
+    let mut fs = fs;
+    fs.create(root, FILE, NodeKind::RegularFile)
+        .expect("create");
+    fs.flush().expect("publish");
+    let device = fs.into_block().expect("hand the volume on");
+
+    let pinned = Arc::new(PinnedAccounting::new());
+    let gauge: &'static ReportedPressure = Box::leak(Box::new(ReportedPressure::unknown()));
+    gauge.report(PressureBand::Normal);
+    let mut fs = ARXFS::open_read_only(device, &TEST_KEY)
+        .expect("the volume mounts read-only")
+        .with_writeback_bound(SMALL_MACHINE_BYTES, gauge, Arc::clone(&pinned))
+        .expect("a read-only mount is bounded like any other");
+    assert_eq!(
+        fs.write_at(root, FILE, 0, b"x"),
+        Err(DriverError::PermissionDenied)
+    );
+    assert_eq!(fs.writeback_pinned_bytes(), 0);
+    assert_eq!((pinned.bytes(), pinned.entries()), (0, 0));
 }

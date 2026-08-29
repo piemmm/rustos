@@ -23,6 +23,10 @@
 //!   above: a bounded, generation-invalidated, pressure-governed,
 //!   self-poisoning LRU cache a consumer parameterises with its own
 //!   key, value, and generation.
+//! - [`pinned`] — the other side of the model: [`PinnedAccounting`] and
+//!   [`PinnedLedger`], for a bounded pool the reclaim model measures but
+//!   can never take (a filesystem's unwritten blocks), so its memory is
+//!   visible without being counted as headroom.
 //! - [`audit`] — the stable audit events a classification refusal or a
 //!   detected ledger defect emits.
 //! - [`desktop`] — the one desktop-session disposable-UI cache policy:
@@ -57,6 +61,7 @@ pub mod cache;
 pub mod desktop;
 pub mod ledger;
 pub mod model;
+pub mod pinned;
 pub mod pressure;
 
 pub use audit::{log_cache_poisoned, log_cache_refused, ReclaimAuditEvent};
@@ -68,8 +73,9 @@ pub use ledger::CacheLedger;
 pub use model::{
     AccountingError, AdmissionRefusal, CacheAccounting, CacheBudget, CacheCandidate, CachePolicy,
     InvalidationSource, RebuildCost, ReclaimClass, ReclaimClassStats, ReclaimOwner, ReclaimRule,
-    Sensitivity, UI_CACHE_RESERVE_BYTES,
+    Sensitivity, MAP_ENTRY_OVERHEAD, UI_CACHE_RESERVE_BYTES,
 };
+pub use pinned::{PinnedAccounting, PinnedLedger};
 pub use pressure::{
     shrink_target, BandObserver, FreeMemorySource, GrowthAllowance, MemoryPressure, PressureBand,
     PressureGauge, PressureThresholds, ReportedPressure, RESERVE_DIVISOR,

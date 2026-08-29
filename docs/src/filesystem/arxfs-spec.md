@@ -1519,10 +1519,11 @@ staged future work; see §18.)*
 ## 22. Write-back cache, commit batching, and the commit barrier
 
 *Stage 17 — in progress. The dirty block set, commit barrier, run coalescer,
-allocation-map integration, the commit scheduler, and the host's write-back
-expiry timer are implemented, so batching is live on a mounted volume and its
-window is bounded in time; the RAM-derived bound is not yet. The staged design
-is `plans/ARXFS-WRITEBACK.md`.*
+allocation-map integration, the commit scheduler, the host's write-back expiry
+timer, and the RAM-derived bound with its back-pressure are implemented, so
+batching is live on a mounted volume and bounded in content, in time, and in
+memory; the on-hardware acceptance measurement is not yet taken. The staged
+design is `plans/ARXFS-WRITEBACK.md`.*
 
 **Commit ordering.** A commit drains every authoritative dirty block *except*
 the superblock slot, issues one `Block::flush()` barrier, then writes the slot.
@@ -1663,17 +1664,44 @@ it was measured on. The figures live in `plans/ARXFS-WRITEBACK.md` §1.
 
 **Bounds.** The set holds one transaction's authoritative write set, or a map
 page transiently moved from the bounded page cache; a rollback discards it, and
-a read-only handle can never stage a block. The drain adds one gather buffer, reserved
-fallibly for the transaction's longest physical run and never past the transfer
-window, so a machine too short of memory to hold it writes block by block
-instead of failing the commit. The ceiling that forces a commit before it
-grows further is derived from discovered RAM, never a hand-picked constant, with
-a floor of one transaction's own working set — below that floor a transaction
-could not complete, so the floor is a correctness property. A dirty block is
-pinned memory, not reclaimable cache: it cannot be dropped, only written, so
-pressure shortens the deadline and lowers the ceiling toward the floor rather
-than evicting. The bytes are charged to the reclaim ledger as pinned so they
-stay visible in the accounting.
+a read-only handle can never stage a block. The drain adds one gather buffer,
+reserved fallibly for the transaction's longest physical run and never past the
+transfer window, so a machine too short of memory to hold it writes block by
+block instead of failing the commit.
+
+A dirty block is **pinned** memory, not reclaimable cache: it exists nowhere
+else, so it can only be written out, never dropped. It is therefore not
+admitted through the reclaim classification gate, whose contract is
+droppability, and nothing may shrink it behind the driver's back. What bounds
+it instead is a byte **ceiling** derived from the RAM the host discovered — a
+documented fraction of it per volume, never a hand-picked constant — capped by
+the machine-wide reserve floor every consumer obeys, which is what makes
+several volumes on one small machine share a bounded total rather than each
+taking a slab. Reaching the ceiling publishes the transaction, so a writer that
+outruns the device waits for real I/O instead of growing.
+
+Rising memory pressure lowers that ceiling and shortens the dirty-age window,
+band by band, down to a **floor** of one coalesced device transfer and no
+further: the answer to a tightening machine is always to publish sooner, never
+to hold more and never to drop. The floor is where the cache stops paying for
+itself — below one transfer the drain cannot form a full run — so a volume
+whose share of RAM cannot reach it is refused at mount rather than accepted and
+left committing after almost every record.
+
+Forward progress is independent of the ceiling. The only operation whose staged
+bytes scale with a caller's argument is a file write, and it is the one the
+bound cuts short: it stores at least one record whatever the ceiling, then
+stops on a record boundary and reports the count, exactly as `write(2)` may.
+The operation's close publishes, so the caller's next call proceeds against an
+empty set. A caller with an indivisible value to store (a symlink target,
+bounded by the ABI) asks for the whole of it and the bound bites at the
+operation's end instead.
+
+The pinned bytes are published through the reclaim model's pinned ledger, so a
+volume's unwritten data is visible in the System Information cache-ledger
+export — under its own class, which the per-class reclaim totals drop by
+construction, because counting memory that can only be written out as
+reclaimable headroom would stall reclaim waiting for memory nothing can free.
 
 ---
 

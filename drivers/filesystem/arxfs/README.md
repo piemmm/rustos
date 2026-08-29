@@ -480,6 +480,36 @@ gather buffer is one fallible reservation sized to the transaction's longest
 run, wiped on drop, with a machine too short of memory to hold it writing block
 by block rather than failing the commit.
 
+A staged block is **pinned** memory, not reclaimable cache: it exists nowhere
+else, so it can only be written out, never dropped. The set is therefore not
+admitted through the reclaim classification gate — that gate's contract is
+droppability — and nothing may shrink it behind the driver's back. What bounds
+it is a byte ceiling derived from the RAM the host discovered
+(`ARXFS::with_writeback_bound`), capped by the machine-wide reserve floor every
+consumer obeys, which is what keeps several volumes on one small machine to a
+bounded total rather than each taking a slab. Reaching the ceiling publishes
+the transaction, so a writer that outruns the device waits for real I/O instead
+of growing.
+
+Rising memory pressure lowers that ceiling and halves the dirty-age window band
+by band, down to one coalesced device transfer (`RUN_BYTES`) and no further:
+the answer to a tightening machine is always to publish sooner, never to hold
+more and never to drop. Below that floor the drain could not form a full run, so
+a volume whose share of RAM cannot reach it is refused at mount rather than
+accepted and left committing after almost every record.
+
+Forward progress does not depend on the ceiling. The only operation whose staged
+bytes scale with a caller's argument is a file write, and it is the one the bound
+cuts short: it stores at least one record whatever the ceiling, then stops on a
+record boundary and reports the count, exactly as `write(2)` may.
+`FilesystemWrite::write_all` is where that loop lives once for every caller that
+needs the whole value stored, and a caller with an indivisible value (a symlink
+target, bounded by the ABI) asks for the whole of it so the bound bites at the
+operation's end instead. The pinned bytes are published through the reclaim
+model's pinned ledger, so a volume's unwritten data is a row of its own in the
+System Information cache-ledger export — kept out of the per-class reclaim
+totals, because memory that can only be written out is not headroom.
+
 Free space lives in an **on-disk paged allocation map** (`allocmap`,
 `allocator`): a contiguous region of a header block, a summary recording each
 bitmap page's free count, and one bit per device block, each block sealed with
@@ -676,6 +706,16 @@ same workloads *batched*, where the calls of one window join a single
 transaction: sixteen calls then cost the same blocks and the same bytes as one
 call, behind one barrier, with nothing superseded. The same workloads on a
 100 TiB volume produce an identical command stream.
+
+The same harness holds the **bound**: a payload far wider than the ceiling a
+small machine derives is written whole through repeated short counts, the peak
+bytes the set pinned stay inside that ceiling plus the one record the write was
+in the middle of, the transaction is written out more than once, every forced
+commit carries its own barrier, and the bytes read back exactly. A critical
+band pins less and publishes more often than an unpressured one; the smallest
+machine a volume may be mounted on — one transfer window per volume — still
+completes the same write, and does so with a hundred tebibytes attached at both
+block sizes. A read-only mount pins nothing at all.
 
 The 1 GiB filesystem soak (`cargo xtask fssoak --target arxfs`) drives the
 shared cross-filesystem exerciser, and `cargo xtask fuzz` harnesses fuzz the

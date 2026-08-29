@@ -81,14 +81,9 @@ use tairix_log::Sink;
 use tairix_reclaim::{
     log_cache_poisoned, log_cache_refused, shrink_target, CacheAccounting, CacheBudget,
     CacheCandidate, CacheLedger, CachePolicy, GrowthAllowance, InvalidationSource, MemoryPressure,
-    RebuildCost, ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity,
+    RebuildCost, ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity, MAP_ENTRY_OVERHEAD,
 };
 use zeroize::Zeroize;
-
-/// Approximate per-entry bookkeeping cost (map nodes, the LRU index
-/// slot, the fixed entry fields) charged on top of a block's payload
-/// so the ledger tracks real heap footprint, not just payload bytes.
-const ENTRY_OVERHEAD: usize = 96;
 
 /// The fixed `cache` label this cache's audit records carry.
 const CACHE_LABEL: &str = "block";
@@ -212,7 +207,7 @@ impl<B: Block> BlockCache<B> {
             sensitivity: Some(Sensitivity::UserData),
             invalidation: Some(InvalidationSource::SourceMutation),
             rule: Some(ReclaimRule::Drop),
-            entry_metadata_bytes: ENTRY_OVERHEAD,
+            entry_metadata_bytes: MAP_ENTRY_OVERHEAD,
         };
         let policy = match candidate.classify() {
             Ok(policy) => Some(policy),
@@ -326,7 +321,7 @@ impl<B: Block> BlockCache<B> {
     /// The accounted `(payload, metadata)` byte cost of one cached
     /// block plus the fixed per-entry bookkeeping.
     fn cost_of(&self) -> (usize, usize) {
-        (self.block_size(), ENTRY_OVERHEAD)
+        (self.block_size(), MAP_ENTRY_OVERHEAD)
     }
 
     /// Volatilely wipe a cached buffer: the disk carries the encrypted

@@ -175,6 +175,17 @@ drawn in their own colour, so structure reads without hunting.
   reads on a monochrome serial console rather than depending on colour. An
   empty ledger says so in one line, and a refused query states the refusal
   — neither can be mistaken for "this machine holds no caches".
+
+  One row kind in that breakdown is *not* reclaimable, and says so in its
+  `class` column: `pinned` names memory the model measures but can never
+  take, because it exists nowhere else and can only be written out. A
+  mounted volume's unwritten filesystem blocks
+  (`arxfs.writeback`, `plans/ARXFS-WRITEBACK.md`) are the standing example.
+  Such a row deliberately contributes to no class total above — a class total
+  answers "how much could pressure reclaim", and the answer for these bytes
+  is none of it — and it carries no hit ratio, because nothing looks an entry
+  up. It is here because there is nowhere else to see it: without the row, a
+  machine holding tens of megabytes of unwritten filesystem data looks idle.
 - **`ramzip`** — the **compressed memory tier**, laid out in aligned
   sections. `ramzip` transparently compresses cold anonymous pages into a
   smaller in-RAM store instead of paging them out, so more fits in

@@ -275,6 +275,18 @@ that. So the API carries the figures both ways:
   repeats one. Summing the rows of a class reproduces that class's
   `ReclaimClassRecord` exactly — there is one fold, `fold_cache_ledgers`,
   and both views go through it.
+
+  A row's class is a reclaim class **or** `CACHE_CLASS_PINNED`, which names
+  a **pinned** pool: memory the model measures but can never take, because
+  it exists nowhere else and can only be written out. A mounted volume's
+  unwritten filesystem blocks are the standing example
+  (`plans/ARXFS-WRITEBACK.md`), and without a row they would be invisible —
+  TAIRiX has no `/proc/meminfo`, so this is the only channel an operator can
+  see them through. The id sits one *past* the reclaim classes rather than
+  among them, and `fold_cache_ledgers` drops it: a reclaim class answers
+  "when is this given back under pressure", the answer here is "never", and
+  counting such bytes into a class total would report unreclaimable memory
+  as headroom. `cache_class_name` renders both kinds from one lookup.
 - **`CACHE_REPORT`** is the one submission in an otherwise read-only API:
   a `CacheReportRequest` header followed by the caller's own rows, at
   most `MAX_CACHE_REPORT_ENTRIES` of them. It is ungated for the same

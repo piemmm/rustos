@@ -73,15 +73,9 @@ use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, DiscardCapab
 use tairix_abi::driver::BufferClass;
 use tairix_abi::sysinfo::MountAvailability;
 use tairix_abi::DriverError;
-use tairix_reclaim::{CacheBudget, GrowthAllowance, MemoryPressure};
+use tairix_reclaim::{CacheBudget, GrowthAllowance, MemoryPressure, MAP_ENTRY_OVERHEAD};
 use tairix_sync::SpinLock;
 use zeroize::Zeroize;
-
-/// Approximate per-entry bookkeeping cost (map node, the fixed entry
-/// fields) charged on top of a block's payload so the budget tracks real
-/// heap footprint, not just payload bytes. Mirrors the block cache's
-/// per-entry figure.
-const ENTRY_OVERHEAD: usize = 96;
 
 /// The commit watermark as a divisor of the budget's hard limit: once the
 /// journal's accounted bytes exceed `hard / COMMIT_DIVISOR`, the write
@@ -120,7 +114,7 @@ pub struct RetainedWrites {
     budget: CacheBudget,
     /// Retained block payloads, keyed by device-absolute LBA.
     blocks: BTreeMap<u64, Vec<u8>>,
-    /// Accounted bytes: payload plus [`ENTRY_OVERHEAD`] per entry.
+    /// Accounted bytes: payload plus [`MAP_ENTRY_OVERHEAD`] per entry.
     bytes: usize,
     /// Retention was abandoned since the last committed flush (budget or
     /// pressure refused growth, or a write failed leaving the medium
@@ -313,7 +307,7 @@ impl RetainedWrites {
             return;
         }
         let mut allowance: Option<GrowthAllowance> = None;
-        let cost = self.block_size + ENTRY_OVERHEAD;
+        let cost = self.block_size + MAP_ENTRY_OVERHEAD;
         let mut at = 0usize;
         let mut block = lba;
         while at < data.len() {
@@ -360,7 +354,9 @@ impl RetainedWrites {
         while let Some((&key, _)) = self.blocks.range(lba..end).next() {
             if let Some(mut entry) = self.blocks.remove(&key) {
                 Self::wipe(&mut entry);
-                self.bytes = self.bytes.saturating_sub(self.block_size + ENTRY_OVERHEAD);
+                self.bytes = self
+                    .bytes
+                    .saturating_sub(self.block_size + MAP_ENTRY_OVERHEAD);
             }
         }
     }
@@ -715,7 +711,7 @@ mod tests {
     /// A budget whose watermark admits a few blocks before demanding a
     /// commit: hard = 16 blocks' cost, watermark = 1/16 of that.
     fn small_budget() -> CacheBudget {
-        CacheBudget::from_backing((BLOCK_SIZE as usize + ENTRY_OVERHEAD) * 16 * 16)
+        CacheBudget::from_backing((BLOCK_SIZE as usize + MAP_ENTRY_OVERHEAD) * 16 * 16)
     }
 
     fn journaled(
@@ -826,7 +822,7 @@ mod tests {
     fn budget_exhaustion_degrades_to_lost() {
         // A budget whose hard limit holds two blocks; keep the watermark
         // flush from rescuing it by failing the device flush.
-        let budget = CacheBudget::from_backing((BLOCK_SIZE as usize + ENTRY_OVERHEAD) * 2 * 16);
+        let budget = CacheBudget::from_backing((BLOCK_SIZE as usize + MAP_ENTRY_OVERHEAD) * 2 * 16);
         let (mut device, journal) = journaled(64, budget);
         device.device.fail_flush = true;
         for lba in 0..3u64 {

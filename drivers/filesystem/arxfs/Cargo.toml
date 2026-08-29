@@ -38,6 +38,13 @@ tairix-fsmeta = { path = "../../../lib/fsmeta", version = "=0.0.0" }
 # online scrub reports (`docs/src/filesystem/arxfs-spec.md` §12;
 # log security decisions with a stable event ID).
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The shared reclaimable-memory model: the RAM-derived byte budget, the
+# five-band memory-pressure vocabulary, and the pinned-pool ledger the
+# write-back dirty set is bounded and reported through
+# (`plans/ARXFS-WRITEBACK.md` §6). The model is deliberately two-sided — the
+# kernel measures the band, a process is told it — so a driver reads it
+# through the same `PressureGauge` seam wherever it runs.
+tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
 # Volatile wiping of decrypted scratch and transform-cache plaintext before
 # the buffers return to the heap (`plans/SMARTRAM.md` §6.2): a plain zeroing
 # loop over a dying buffer can be optimised away, so the wipe routes through

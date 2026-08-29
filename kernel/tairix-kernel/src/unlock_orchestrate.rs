@@ -192,6 +192,21 @@ impl<B: Block + 'static> WritableRootSink for WritableStateSink<B> {
             self.pressure,
             self.audit,
         ));
+        // Bound the volume's pinned write-back set to this machine's RAM and
+        // publish its unwritten bytes, so a writer that outruns the device is
+        // throttled by forced commits rather than by growth. A refusal means
+        // the machine cannot spare one device transfer per volume, and the
+        // writable tree stays failing closed rather than mounting unbounded.
+        let Ok(fs) =
+            crate::writeback_bound::bound_volume(fs, ROOT_VOLUME_HANDLE, self.pressure, self.audit)
+        else {
+            note(
+                self.audit,
+                Level::Error,
+                "root-unlock: writable-state write-back cache unbounded",
+            );
+            return None;
+        };
         // The registered driver is the volume's single writer; the
         // `CAP_USER_ADMIN` account-administration engine shares this same
         // lock (`plans/CAPABILITY_USE.md` CU4) — `/System/Security` is

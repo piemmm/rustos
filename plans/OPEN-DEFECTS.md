@@ -2186,7 +2186,9 @@ on-disk structure, not an extension of the existing rebuildable cache.
 
 ## D28 — ARXFS per-transaction deferred-free and pending-mark sets are unbounded
 
-**State:** open, pre-existing.
+**State:** open, pre-existing, and **scheduled next**: it is the immediate next
+item in `plans/IMPLEMENT-OUTSTANDING-ARXFS.md`, ahead of every remaining ARXFS
+row.
 
 **Mechanism.** `txn_freed` (`drivers/filesystem/arxfs/src/allocator.rs`, a
 `BTreeSet<u64>`) holds every block a transaction releases until it commits,
@@ -2197,10 +2199,18 @@ proportional to the file's block count. This is pre-existing shape (the
 previous free-space tracker's `Vec<u64>` had the same property) and conflicts
 with the small-RAM/large-volume floor (`AGENTS.md` §26.7).
 
+**Why it is next.** `plans/ARXFS-WRITEBACK.md` WB5 bounded the *other* half of
+a transaction's memory — the pinned dirty block set — to a share of discovered
+RAM, with the write path yielding to that bound rather than growing. That makes
+this the one remaining way a single ARXFS operation can allocate memory
+proportional to a file's size, and it is reached by an ordinary `rm` of a large
+file rather than by anything exotic.
+
 **Fix direction.** Extent-based deferred freeing (a run of contiguous blocks
 recorded as one `(start, length)` entry) rather than per-block, bounding the
 bookkeeping by the number of runs a transaction touches rather than the
-number of blocks.
+number of blocks. The same treatment applies to the map's `pending` marks and to
+the commit's free accounting, which reads the set's size.
 
 ---
 

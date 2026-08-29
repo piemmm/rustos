@@ -1,8 +1,9 @@
 # ARXFS-WRITEBACK.md — ARXFS write-back cache, commit batching, and the commit barrier
 
-Status: **WB0–WB4 and WB-D1 done** (measurement, the dirty set and commit
-barrier, run coalescing, allocation-map integration, the commit scheduler, and
-the host's write-back expiry timer); **WB5 next**, then WB6.
+Status: **WB0–WB5 and WB-D1 done** (measurement, the dirty set and commit
+barrier, run coalescing, allocation-map integration, the commit scheduler, the
+host's write-back expiry timer, and the RAM-derived bound with its
+back-pressure); **WB6 next** and last.
 Binding under `AGENTS.md` and listed in its §15.18 jump-sheet.
 Primary code area: `drivers/filesystem/arxfs/`.
 Companion spec section: `docs/src/filesystem/arxfs-spec.md` §22.
@@ -14,10 +15,10 @@ card, one device command per 512 bytes — and unsafe on any device with a
 volatile write cache. This plan fixes both with one mechanism: a
 transaction-scoped dirty block set, a run coalescer, a commit scheduler, and the
 single barrier that becomes affordable once commits are batched. The dirty set,
-barrier, coalescer, allocation-map integration, scheduler, and the kernel timer
-that fires the window on an idle volume are present, so batching is live on a
-mounted volume and its recency bound holds in time as well as in content; the
-RAM-derived bound (WB5) remains.
+barrier, coalescer, allocation-map integration, scheduler, the kernel timer that
+fires the window on an idle volume, and the RAM-derived bound are all present,
+so batching is live on a mounted volume and bounded in content, in time, and in
+memory; the on-hardware acceptance measurement (WB6) remains.
 
 It adds **no** capability, **no** ABI surface, **no** second data path, and no
 mount option: the behaviour is the one production profile
@@ -139,9 +140,11 @@ stage 20), FEC commit witnesses (stage 21) — is now unblocked.
   never by eviction. It does not go through `tairix_reclaim::ReclaimCache`,
   whose every class is clean and whose refusal path — serve uncached — has no
   meaning for a block that exists nowhere else.
-- **Forward progress is guaranteed.** The bound has a floor of one
-  transaction's own working set. A volume that cannot hold that could not
-  commit at all, so the floor is a correctness property, not a tuning choice.
+- **Forward progress is guaranteed, and not by the floor.** A file write's
+  staged bytes scale with a caller's argument, so no fixed floor can cover "one
+  transaction's working set". The write path yields instead: it always stores at
+  least one record, then stops on a record boundary and reports a short count.
+  The floor (§6) bounds the cache's *usefulness*, not its correctness.
 - **No second anything.** One dirty set serves copy-on-write blocks and the
   allocation map; each ordinary commit and explicit sync has one barrier, one
   staging-window bound is shared with the read path, one integrity/crypto path
@@ -239,8 +242,8 @@ first of:
 
 - an explicit `FilesystemWrite::flush` (`fs_sync`) — closes and issues the
   trailing barrier;
-- the dirty set reaching its byte ceiling (§6, WB5) — back-pressure: the writer
-  waits for real I/O rather than the set growing;
+- the dirty set reaching its byte ceiling (§6) — back-pressure: the writer waits
+  for real I/O rather than the set growing;
 - the **dirty-age window** expiring, checked at the end of the operation that
   reaches it;
 - an operation that needs a barrier for its own correctness: `trim` (discard
@@ -299,24 +302,52 @@ operation's own work leaves the handle writable exactly as an unbatched commit
 failure always did.
 
 Under memory pressure the `tairix_reclaim::PressureGauge` shortens the window
-and lowers the ceiling toward the §6 floor (WB5): the response to pressure is
-*flush sooner*, never *allocate more* and never *drop*.
+and lowers the ceiling toward the §6 floor: the response to pressure is *flush
+sooner*, never *allocate more* and never *drop*. The gauge is read once per
+operation, so the band the window is aged against is the band that operation
+saw, and a deepening band re-reports the open transaction's deadline rather than
+letting it wait out a window measured when memory was plentiful.
 
-## 6. The bound
+## 6. The bound — done
 
-- **Ceiling** derived from discovered RAM (`AGENTS.md` §24.1), not a constant.
-  Reaching it forces a commit.
-- **Floor** of one transaction's own working set, so a transaction can always
-  complete. Below the floor the mount fails closed at open rather than wedging
-  later.
-- **Pressure-governed** between the two, by the same gauge every other cache
-  reads.
-- **Accounted as pinned**, charged to the reclaim ledger so the memory is
-  visible in the §16.6 accounting even though it is not reclaimable. A dirty
-  block is deliberately *not* admitted through the `ReclaimCache` classification
-  gate, because that gate's contract is droppability.
-- **Bounded per mount**, so several volumes on a 1 GiB machine share a bounded
-  total rather than each taking a slab (`AGENTS.md` §26.7).
+`WritebackBound` (`wcache.rs`), installed by `ARXFS::with_writeback_bound` and
+assembled per mount by `kernel/tairix-kernel::writeback_bound`.
+
+- **Ceiling** derived from discovered RAM (`AGENTS.md` §24.1), not a constant:
+  `CacheBudget::from_backing(cache_backing_bytes())`, the same derivation the
+  volume's clean caches use. Reaching it forces a commit.
+- **Pressure-governed** by the same gauge every other cache reads, halving the
+  ceiling per band and the dirty-age window with it. One gauge reading per
+  operation, not per staged block: in the kernel that reading is the physical
+  frame allocator, so per-block would take the global frame-allocator lock
+  hundreds of times for an answer that cannot change inside one operation.
+- **Reserve-capped**, so several volumes on a 1 GiB machine share a bounded
+  *total* rather than each taking a slab (`AGENTS.md` §26.7): each volume's own
+  budget is its slice of RAM, but the free reading they all draw against is the
+  machine's, through the same `permits_reserve` floor the retained-write journal
+  obeys.
+- **Floor** of one coalesced device transfer (`RUN_BYTES`), which the ceiling
+  never falls below. It is where the cache stops paying for itself — under one
+  transfer the drain cannot form a full run — so a volume whose share of RAM
+  cannot reach it is refused at mount rather than accepted and left committing
+  after almost every record.
+- **Forward progress does not depend on the ceiling.** The plan's original floor
+  was "one transaction's own working set", which is not a bound: a file write's
+  staged bytes scale with a caller's argument, so no fixed floor can hold one.
+  The write path is instead the thing that yields — it stores at least one record
+  whatever the ceiling, then stops on a record boundary and reports the count,
+  as `write(2)` may — and the operation's close publishes, so the next call
+  proceeds against an empty set. A caller with an indivisible value (a symlink
+  target, bounded by the ABI) asks for the whole of it and the bound bites at
+  the operation's end. `FilesystemWrite::write_all` is the one place the resume
+  loop lives for every caller that needs the whole value stored.
+- **Accounted as pinned** through `tairix_reclaim::PinnedLedger`, a row of its
+  own in the §16.6 cache-ledger export. A dirty block is deliberately *not*
+  admitted through the `ReclaimCache` classification gate, because that gate's
+  contract is droppability — and for the same reason the pinned row is a class
+  the per-class reclaim totals drop by construction: counting memory that can
+  only be written out as reclaimable headroom would stall `ramzip` waiting for
+  memory nothing can free.
 
 ## 7. Failure and hygiene
 
@@ -559,27 +590,57 @@ transaction too — safely, since the last published root stands whole, but it i
 a second loss the journal cannot replay, and the module now says so and names
 the timer and the teardown flushes that bound it.
 
-### WB5 — the bound and pressure. **planned**
+### WB5 — the bound and pressure. **done**
 
-RAM-derived ceiling, the forward-progress floor, gauge integration, pinned-
-memory accounting, and back-pressure.
+The design is §6. The set counts what it holds (staged blocks plus the
+savepoint's undo copies, which are as unavailable to the machine as the staged
+ones) and publishes it to the host's ledger as it changes, so a missed
+publication can leave the row stale but never wrong. `end_operation` publishes
+when the set has reached the operation's ceiling; `write_file` stops on a record
+boundary when it has, which is where the bound meets the one operation whose
+staged bytes scale with a caller's argument.
 
-Acceptance: a writer that outruns the device is throttled by forced commits, not
-by growth; rising pressure shortens the window and lowers the ceiling to the
-floor and no further; the floor guarantees a transaction completes on the
-smallest supported machine; the ledger reports the pinned bytes.
+Two things the item had to add outside the driver. `tairix_reclaim` gained the
+pinned side of the model (`PinnedAccounting`, `PinnedLedger`) and the ABI a
+pinned class id for the cache-ledger row, because there was no honest way to
+report unreclaimable bytes through a reclaim class — and the fold that builds
+the per-class totals already drops an unknown class, so the exclusion needed no
+new code, only the right id. And `FilesystemWrite` gained `write_all`, because
+making a short write reachable makes every caller that needs the whole value
+stored a caller that has to loop; four of them were checking the count and
+failing instead.
+
+*Measured (the WB0 harness).* A payload 24 transfer windows wide, written whole
+through repeated short counts on a machine whose per-volume share is four:
+peak pinned bytes stay inside the ceiling plus the one record the write was in
+the middle of, the transaction is written out more than once, each forced commit
+carries its own barrier, and the bytes read back exactly. A critical band pins
+less and publishes more often than an unpressured one. The smallest machine a
+volume may be mounted on — one transfer window per volume — completes the same
+write, and completes it with a hundred tebibytes attached at both block sizes.
+A read-only mount pins nothing.
+
+*Fixed with it, each with a regression test.* The per-entry bookkeeping figure
+every bounded pool charges on top of a payload was declared three times over
+(`block_cache`, `transform_cache`, `retained`) as three private copies of one
+value that is the same by construction; it is now one definition
+(`tairix_reclaim::MAP_ENTRY_OVERHEAD`). `plant_nested_file` and three
+`tools/mkimage` authoring paths turned a short write into a build failure rather
+than resuming it, and the account-database commit turned one into a spurious
+`EIO`; all now store whole through `write_all`.
 
 ### WB6 — acceptance, hardware, and docs. **planned**
 
 On-hardware Pi 4 SD measurement against the WB0 baseline; the §26.7 combined
-floor (small discovered RAM with several 100 TB volumes mounted and writing at
-once); crash-injection across the new commit shape; fuzz unchanged in surface
-but re-run; `arxfs-spec.md` §22, `docs/src/filesystem/arxfs.md`, and the driver
-`README.md` updated; this file replaced by its done-state summary.
+floor extended to *several* 100 TB volumes mounted and writing at once (WB5
+holds it for one); crash-injection across the new commit shape; fuzz unchanged
+in surface but re-run; this file replaced by its done-state summary. The spec
+§22, `docs/src/filesystem/arxfs.md`, and the driver `README.md` are current as
+of WB5 and need only the hardware figure.
 
 Acceptance: the measured Pi 4 SD write throughput improvement is recorded as a
-number, not a claim; the floor test passes with bounded resident dirty bytes, no
-panic and no busy-spin.
+number, not a claim; the multi-volume floor test passes with bounded resident
+dirty bytes, no panic and no busy-spin.
 
 ## 9. Explicit non-goals
 

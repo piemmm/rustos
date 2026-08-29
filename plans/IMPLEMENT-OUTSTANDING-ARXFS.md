@@ -44,7 +44,8 @@ no-deferral rule), ahead of everything below it.
 | D66 | One `DriverError` per filesystem conflict (defect `OPEN-DEFECTS.md` D66) | `OPEN-DEFECTS.md` | — | — | **done** |
 | WB4 | Commit scheduler | `ARXFS-WRITEBACK.md` | 17 | WB1 | **done** |
 | WB-D1 | Host write-back expiry timer (`ARXFS-WRITEBACK.md` §10) | `ARXFS-WRITEBACK.md` | 17 | WB4 | **done** |
-| WB5 | The bound and memory pressure | `ARXFS-WRITEBACK.md` | 17 | WB1 | **next** |
+| WB5 | The bound and memory pressure | `ARXFS-WRITEBACK.md` | 17 | WB1 | **done** |
+| D28 | Extent-based deferred freeing (defect `OPEN-DEFECTS.md` D28) | `OPEN-DEFECTS.md` | — | — | **next** |
 | WB6 | Hardware acceptance + docs | `ARXFS-WRITEBACK.md` | 17 | WB2–WB5 | planned |
 | M2 | Bounded passes: scrub, discard sweep, health (D-M2/3/4) | `ARXFS-MAINTENANCE.md` | 18 | A2, M1 | planned |
 | M3 | The maintenance scheduler | `ARXFS-MAINTENANCE.md` | 18 | M0, M2 | planned |
@@ -116,6 +117,20 @@ their reason recorded there, not here:
   of reducing it, so B1 followed WB2, which is now done: the drain gathers its
   ascending order into physical runs against the read path's transfer window, so
   a 64 KiB write costs five device commands against 158 for the same bytes.
+- **D28 comes before WB6, because WB5 bounded one half of a transaction's
+  memory and the other half is a recorded defect.** WB5 bounds the *dirty
+  block set* — the pinned sealed blocks — to a share of discovered RAM, and
+  the write path yields to that bound rather than growing. It does not bound
+  the allocator's per-transaction records: `txn_freed` holds one `u64` per
+  block a transaction releases, so deleting or truncating a very large file
+  still allocates memory proportional to the file's block count
+  (`OPEN-DEFECTS.md` D28, open and pre-existing, with its fix direction —
+  extent-based deferred freeing — already recorded). Claiming "a transaction's
+  memory is bounded" while `rm` of a 100 TB file is not would be the deferral
+  the rule below forbids, so it is the next item rather than a footnote. It is
+  genuinely too large for WB5: bounding it needs the deferred-free set keyed by
+  run rather than by block, across the allocator, the commit's free
+  accounting, and the map's pending marks.
 - **WB-D1 came before WB5, because WB4 found it and the no-deferral rule puts a
   found defect ahead of everything planned. It is closed.** WB4 made a
   transaction span operations and gave it a per-device-class dirty-age window,

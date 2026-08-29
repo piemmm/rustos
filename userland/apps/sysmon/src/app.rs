@@ -252,13 +252,14 @@ fn reclaim_rows(snapshot: &Snapshot) -> Vec<PanelRow> {
     rows
 }
 
-/// The name of reclaim class `class`, or `?` for an id this build does not
-/// know (a class the service invented is never rendered as a real one).
+/// The name of cache-ledger class `class`, or `?` for an id this build does
+/// not know (a class the service invented is never rendered as a real one).
+///
+/// A pinned pool's row carries its own name rather than a reclaim class:
+/// its bytes are measured but never reclaimed, and reading them under a
+/// reclaim class's name would suggest pressure could take them.
 fn class_name(class: u8) -> &'static str {
-    tairix_abi::sysinfo::RECLAIM_CLASS_NAMES
-        .get(usize::from(class))
-        .copied()
-        .unwrap_or("?")
+    tairix_abi::sysinfo::cache_class_name(class).unwrap_or("?")
 }
 
 /// The reclaim-ledger table: one row per reclaim class, leading with the

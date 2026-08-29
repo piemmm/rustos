@@ -98,7 +98,7 @@ fn a_miss_then_a_put_then_a_hit_account_correctly() {
     assert_eq!(cache.accounting().insertions(), 1);
     assert_eq!(
         cache.accounting().class_bytes(ReclaimClass::TransformCache),
-        1024 + ENTRY_OVERHEAD
+        1024 + MAP_ENTRY_OVERHEAD
     );
 
     let hit = cache.get(10).expect("retained");
@@ -170,7 +170,7 @@ fn a_replacement_at_the_same_key_keeps_the_ledger_balanced() {
     cache.put(50, 2, &vec![0x33u8; 512]);
     assert_eq!(
         cache.accounting().class_bytes(ReclaimClass::TransformCache),
-        512 + ENTRY_OVERHEAD
+        512 + MAP_ENTRY_OVERHEAD
     );
     assert_eq!(
         cache.get(50).expect("retained"),
@@ -250,8 +250,8 @@ fn payload_and_metadata_bytes_are_accounted_separately() {
     let acct = cache.accounting();
     let class = ReclaimClass::TransformCache;
     assert_eq!(acct.class_payload_bytes(class), 1024);
-    assert_eq!(acct.class_metadata_bytes(class), ENTRY_OVERHEAD);
-    assert_eq!(acct.class_bytes(class), 1024 + ENTRY_OVERHEAD);
+    assert_eq!(acct.class_metadata_bytes(class), MAP_ENTRY_OVERHEAD);
+    assert_eq!(acct.class_bytes(class), 1024 + MAP_ENTRY_OVERHEAD);
 }
 
 #[test]
@@ -641,7 +641,7 @@ fn flipping_the_transform_switch_off_purges_the_held_clusters() {
     cache.put(10, 3, &payload(0xAB));
     assert_eq!(
         cache.accounting().class_bytes(ReclaimClass::TransformCache),
-        1024 + ENTRY_OVERHEAD
+        1024 + MAP_ENTRY_OVERHEAD
     );
 
     // The operator disables the class: the next operation drops (wiping)

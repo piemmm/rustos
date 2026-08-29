@@ -2916,10 +2916,28 @@ eagerly rather than deferring against a timer that will not fire. Batching is
 live on a mounted volume from here on, and the retained-writes journal's
 statement about what a surprise removal can lose is corrected with it.
 
-**Status: WB0–WB4 and WB-D1 done** — measurement, the dirty set and commit
+WB5 bounds the memory the batching pins. A staged block exists nowhere else, so
+it can only be written out, never dropped: the set is not admitted through the
+reclaim classification gate and is bounded instead by a byte ceiling derived
+from discovered RAM, capped by the machine-wide reserve floor so several volumes
+on a small machine share a bounded total. Rising pressure halves the ceiling and
+the dirty-age window band by band, down to one coalesced device transfer and no
+further — the answer to a tightening machine is publish sooner, never hold more.
+Forward progress does not rest on that floor: the one operation whose staged
+bytes scale with a caller's argument is a file write, and it yields, storing at
+least one record and then reporting a short count as `write(2)` may, with
+`FilesystemWrite::write_all` holding the resume loop once for every caller that
+needs the whole value stored. The pinned bytes are a row of their own in the
+§16.6 cache-ledger export, excluded from the per-class reclaim totals because
+memory that can only be written out is not headroom.
+
+**Status: WB0–WB5 and WB-D1 done** — measurement, the dirty set and commit
 barrier (closing D63), run coalescing (closing C3), allocation-map integration,
-the commit scheduler (closing C2), and the host's write-back expiry timer. WB5
-is next; WB6 remains planned.
+the commit scheduler (closing C2), the host's write-back expiry timer, and the
+RAM-derived bound with its back-pressure. WB6 is the last item and remains
+planned; `plans/OPEN-DEFECTS.md` D28 — the allocator's per-transaction
+deferred-free set, the other half of a transaction's memory — is scheduled ahead
+of it.
 
 ---
 

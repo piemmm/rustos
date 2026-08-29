@@ -58,14 +58,9 @@ use tairix_log::Sink;
 use tairix_reclaim::{
     log_cache_poisoned, log_cache_refused, shrink_target, CacheAccounting, CacheBudget,
     CacheCandidate, CacheLedger, CachePolicy, InvalidationSource, MemoryPressure, RebuildCost,
-    ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity,
+    ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity, MAP_ENTRY_OVERHEAD,
 };
 use zeroize::Zeroize;
-
-/// Approximate per-entry bookkeeping cost (map nodes, the LRU index
-/// slot, the fixed entry fields) charged on top of an entry's payload
-/// so the ledger tracks real heap footprint, not just payload bytes.
-const ENTRY_OVERHEAD: usize = 96;
 
 /// The fixed `cache` label this cache's audit records carry.
 const CACHE_LABEL: &str = "transform";
@@ -135,7 +130,7 @@ impl TransformClusterCache {
             sensitivity: Some(Sensitivity::UserData),
             invalidation: Some(InvalidationSource::SourceMutation),
             rule: Some(ReclaimRule::Drop),
-            entry_metadata_bytes: ENTRY_OVERHEAD,
+            entry_metadata_bytes: MAP_ENTRY_OVERHEAD,
         };
         let policy = match candidate.classify() {
             Ok(policy) => Some(policy),
@@ -241,7 +236,7 @@ impl TransformClusterCache {
     /// holding `payload` plaintext bytes plus the fixed per-entry
     /// bookkeeping.
     const fn cost_of(payload: usize) -> (usize, usize) {
-        (payload, ENTRY_OVERHEAD)
+        (payload, MAP_ENTRY_OVERHEAD)
     }
 
     /// Volatilely wipe a plaintext buffer: decrypted user data must not

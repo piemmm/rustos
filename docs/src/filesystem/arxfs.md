@@ -954,6 +954,29 @@ in place**:
   wider undo: it abandons the whole transaction back to the last published
   root, and a handle that had reported operations into it forces itself
   read-only rather than serving writes it can no longer honour.
+- **The set is pinned, so it is bounded by back-pressure rather than by
+  eviction.** A staged block exists nowhere else: it can be written out but
+  never dropped, so it is not admitted through the reclaim classification gate
+  (whose contract is droppability) and nothing may shrink it behind the
+  driver's back. Its byte ceiling is instead derived from the RAM the host
+  discovered — a documented fraction of it per volume — and capped by the
+  machine-wide reserve floor every consumer obeys, which is what keeps several
+  volumes on one small machine to a bounded *total*. Reaching the ceiling
+  publishes the transaction, so a writer that outruns the device waits for
+  real I/O.
+- **Pressure lowers the ceiling and shortens the window, to a floor and no
+  further.** Band by band the ceiling falls and the dirty-age window halves,
+  down to one coalesced device transfer: the answer to a tightening machine is
+  always to publish sooner, never to hold more and never to drop. Below that
+  floor the drain could not form a full run, so a volume whose share of RAM
+  cannot reach it is refused at mount rather than left committing after almost
+  every record. Forward progress does not depend on the ceiling: a write
+  stores at least one record whatever it is, then stops on a record boundary
+  and reports the count, exactly as `write(2)` may — `write_all` on the driver
+  ABI is the one place that loop lives for callers that need every byte
+  stored. The pinned bytes are published as their own row in the System
+  Information cache-ledger export, kept out of the per-class reclaim totals
+  because memory that can only be written out is not headroom.
 
 ## Operations
 

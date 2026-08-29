@@ -549,6 +549,13 @@ pub trait FilesystemWrite {
     /// write whose `offset` is beyond the current length zero-fills the
     /// gap.
     ///
+    /// **The count may be short of `data`.** An implementation is free to
+    /// store fewer bytes and report how many, exactly as `write(2)` is: a
+    /// driver that bounds the memory one call may pin uses a short count as
+    /// its back-pressure, so a caller that needs every byte on the volume
+    /// loops — or calls [`write_all`](Self::write_all), which loops once for
+    /// everybody.
+    ///
     /// # Errors
     ///
     /// * [`DriverError::Unsupported`] if `name` resolves to a directory.
@@ -563,6 +570,48 @@ pub trait FilesystemWrite {
         offset: u64,
         data: &[u8],
     ) -> Result<usize, DriverError>;
+
+    /// Write the whole of `data` into the regular file `name` in directory
+    /// `dir` starting at byte `offset`, resuming across short writes.
+    ///
+    /// [`write_at`](Self::write_at) may legitimately store less than it was
+    /// handed, so every caller that needs the whole value on the volume — a
+    /// settings document, a key file, a planted image payload, an account
+    /// database — has to loop. Looping here rather than at each of those
+    /// call sites is what keeps them from disagreeing about it, and what
+    /// stops a caller mistaking back-pressure for a failure.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`write_at`](Self::write_at) reports, plus
+    /// [`DriverError::NoSpace`] if a call stores nothing while bytes remain:
+    /// an implementation that makes no progress is refusing the write, and
+    /// retrying it forever is not an answer.
+    fn write_all(
+        &mut self,
+        dir: NodeId,
+        name: &[u8],
+        offset: u64,
+        data: &[u8],
+    ) -> Result<(), DriverError> {
+        let mut done = 0usize;
+        while done < data.len() {
+            let at = offset
+                .checked_add(done as u64)
+                .ok_or(DriverError::OutOfRange)?;
+            let written = self.write_at(dir, name, at, &data[done..])?;
+            if written == 0 {
+                return Err(DriverError::NoSpace);
+            }
+            done = done.checked_add(written).ok_or(DriverError::OutOfRange)?;
+            if done > data.len() {
+                // A driver claiming more than it was handed has lost track of
+                // the write; fail closed rather than trust the count.
+                return Err(DriverError::DeviceFault);
+            }
+        }
+        Ok(())
+    }
 
     /// Set the length of the regular file `name` in directory `dir` to
     /// `size`, freeing or zero-extending its backing storage as needed.
@@ -1281,6 +1330,102 @@ mod tests {
     fn mock_read_fs_lookup_in_non_dir_is_unsupported() {
         let mut fs = MockReadFs;
         assert_eq!(fs.lookup(FILE, FILE_NAME), Err(DriverError::Unsupported));
+    }
+
+    /// A `FilesystemWrite` that stores at most `step` bytes per call, as a
+    /// driver bounding the memory one write may pin does.
+    struct ShortWriteFs {
+        step: usize,
+        body: [u8; 8],
+        len: usize,
+        calls: usize,
+    }
+
+    impl FilesystemWrite for ShortWriteFs {
+        fn create(&mut self, _: NodeId, _: &[u8], _: NodeKind) -> Result<NodeId, DriverError> {
+            Err(DriverError::Unsupported)
+        }
+
+        fn write_at(
+            &mut self,
+            _dir: NodeId,
+            _name: &[u8],
+            offset: u64,
+            data: &[u8],
+        ) -> Result<usize, DriverError> {
+            self.calls += 1;
+            let start = usize::try_from(offset).map_err(|_| DriverError::OutOfRange)?;
+            let take = data.len().min(self.step);
+            let end = start.checked_add(take).ok_or(DriverError::OutOfRange)?;
+            let slot = self
+                .body
+                .get_mut(start..end)
+                .ok_or(DriverError::DeviceFault)?;
+            slot.copy_from_slice(&data[..take]);
+            self.len = self.len.max(end);
+            Ok(take)
+        }
+
+        fn truncate(&mut self, _: NodeId, _: &[u8], _: u64) -> Result<(), DriverError> {
+            Err(DriverError::Unsupported)
+        }
+
+        fn remove(&mut self, _: NodeId, _: &[u8]) -> Result<(), DriverError> {
+            Err(DriverError::Unsupported)
+        }
+
+        fn rename(&mut self, _: NodeId, _: &[u8], _: NodeId, _: &[u8]) -> Result<(), DriverError> {
+            Err(DriverError::Unsupported)
+        }
+
+        fn flush(&mut self) -> Result<(), DriverError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn write_all_resumes_across_short_writes() {
+        let mut fs = ShortWriteFs {
+            step: 2,
+            body: [0; 8],
+            len: 0,
+            calls: 0,
+        };
+        assert_eq!(fs.write_all(W_ROOT, W_NAME, 0, b"abcdef"), Ok(()));
+        assert_eq!(&fs.body[..6], b"abcdef");
+        assert_eq!(fs.calls, 3, "two bytes a call, six bytes, three calls");
+        // Each resumed call must land at the offset the last one reached, not
+        // back at the start.
+        assert_eq!(fs.len, 6);
+    }
+
+    #[test]
+    fn write_all_refuses_a_driver_that_makes_no_progress() {
+        // A zero count with bytes left is a refusal, not back-pressure:
+        // retrying it forever is not an answer.
+        let mut fs = ShortWriteFs {
+            step: 0,
+            body: [0; 8],
+            len: 0,
+            calls: 0,
+        };
+        assert_eq!(
+            fs.write_all(W_ROOT, W_NAME, 0, b"ab"),
+            Err(DriverError::NoSpace)
+        );
+        assert_eq!(fs.calls, 1, "a stalled write is refused, never looped");
+    }
+
+    #[test]
+    fn write_all_of_nothing_touches_the_driver_not_at_all() {
+        let mut fs = ShortWriteFs {
+            step: 2,
+            body: [0; 8],
+            len: 0,
+            calls: 0,
+        };
+        assert_eq!(fs.write_all(W_ROOT, W_NAME, 0, &[]), Ok(()));
+        assert_eq!(fs.calls, 0);
     }
 
     /// A minimal `(dir, name)`-addressed `FilesystemWrite` holding one

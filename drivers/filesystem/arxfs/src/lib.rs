@@ -49,6 +49,7 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use tairix_abi::driver::block::Block;
@@ -65,6 +66,7 @@ use tairix_abi::time::Time64;
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 use tairix_crypto::{AeadKey, MacKey};
 use tairix_fsmeta::{AttrFlags, AttrKey, AttrSet};
+use tairix_reclaim::{CacheBudget, PinnedAccounting, PressureGauge};
 use zeroize::Zeroize;
 
 mod allocator;
@@ -118,7 +120,7 @@ use dedupe::{
 use header::{BlockHeader, BlockType, FORMAT_VERSION, HEADER_LEN, HEADER_MAGIC};
 use superblock::{slot_block, Superblock, RING_BLOCKS, RING_SLOTS};
 use transaction::TxnRoot;
-use wcache::{CommitScheduler, DirtySet, WritePhase};
+use wcache::{CommitScheduler, DirtySet, WritePhase, WritebackBound, WritebackReading};
 
 /// Per-driver `DriverHandle` marker returned by [`register`].
 const REGISTER_HANDLE_MARKER: u64 = 0x5275_7374_4653_0002;
@@ -157,9 +159,9 @@ pub fn register(host: &dyn DriverHost) -> Result<DriverHandle, DriverError> {
 /// # Errors
 ///
 /// Propagates any [`DriverError`] from the underlying create/write, or
-/// [`DriverError::Unsupported`] for an empty `components` path. A short write
-/// surfaces as [`DriverError::DeviceFault`] (never a
-/// truncated bundle).
+/// [`DriverError::Unsupported`] for an empty `components` path. The bytes are
+/// stored whole across any short write the write-back bound imposes, so a
+/// truncated bundle is never planted.
 pub fn plant_nested_file<B>(
     fs: &mut ARXFS<B>,
     parent: NodeId,
@@ -178,11 +180,7 @@ where
         };
     }
     fs.create(node, file_name, NodeKind::RegularFile)?;
-    let written = fs.write_at(node, file_name, 0, bytes)?;
-    if written != bytes.len() {
-        return Err(DriverError::DeviceFault);
-    }
-    Ok(())
+    fs.write_all(node, file_name, 0, bytes)
 }
 
 /// Largest block size the driver stages through its on-stack scratch
@@ -849,6 +847,14 @@ pub struct ARXFS<B: Block> {
     /// [`Self::stage_block`] refuses a read-only handle, so a read-only mount
     /// never holds one block here nor pays a byte for it.
     dirty: DirtySet,
+    /// The RAM-derived byte ceiling, pressure gauge, and pinned ledger the
+    /// dirty set is held to (`wcache` module), or `None` for a handle the
+    /// host has not bounded.
+    bound: Option<WritebackBound>,
+    /// What the gauge told the running operation: the band its window is
+    /// shortened by and the bytes the set may hold before the transaction is
+    /// published. Read once per operation, in [`Self::begin`].
+    reading: Option<WritebackReading>,
 }
 
 /// What a prepared commit will publish once its superblock slot is written.
@@ -935,6 +941,22 @@ impl DirScan {
     }
 }
 
+/// Whether a write may store fewer bytes than it was handed.
+///
+/// The write-back bound throttles a writer by cutting its write short on a
+/// record boundary and publishing, which only works for a caller that has a
+/// count to loop on. A caller storing one indivisible value has none, so it
+/// asks for the whole of it and the bound waits for the operation to end.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum WriteLength {
+    /// The caller loops on the returned count (`write_at`), so the bound may
+    /// cut the write short.
+    MayBeShort,
+    /// The value is indivisible and bounded by the ABI (a symlink target),
+    /// so it is stored whole and the bound bites at the operation's end.
+    Whole,
+}
+
 /// Value width of one extent record: physical start block, logical run
 /// length, stored physical length, and flags ([`Extent`]).
 const EXTENT_VALUE_LEN: usize = 24;
@@ -1019,6 +1041,48 @@ impl<B: Block> ARXFS<B> {
     ) -> Self {
         self.schedule.set_host(volume, host);
         self
+    }
+
+    /// Bound the volume's write-back cache: a byte ceiling derived from the
+    /// RAM `backing_bytes` the host discovered, the system pressure `gauge`
+    /// every other cache reads, and the `pinned` ledger the footprint is
+    /// published through (`plans/ARXFS-WRITEBACK.md` §6).
+    ///
+    /// A staged block is pinned memory — it exists nowhere else, so it can
+    /// only be written out, never dropped — which is why the set is bounded
+    /// by back-pressure rather than by eviction: reaching the ceiling
+    /// publishes the transaction and empties the set, so a writer that
+    /// outruns the device waits for real I/O instead of growing. Rising
+    /// pressure lowers the ceiling and shortens the dirty-age window, so the
+    /// answer to a tightening machine is always to publish sooner.
+    ///
+    /// Install at mount time, before the volume serves writes. Without a
+    /// bound the volume behaves exactly as before, holding whatever its
+    /// transaction stages; the host installs one on every writable mount it
+    /// opens.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::NoSpace`] when the volume's share of `backing_bytes`
+    /// cannot hold one coalesced device transfer. The mount is refused here
+    /// rather than accepted and left to wedge later.
+    pub fn with_writeback_bound(
+        mut self,
+        backing_bytes: usize,
+        gauge: &'static dyn PressureGauge,
+        pinned: Arc<PinnedAccounting>,
+    ) -> Result<Self, DriverError> {
+        let bound = WritebackBound::new(CacheBudget::from_backing(backing_bytes), gauge, pinned)?;
+        self.dirty.report_to(bound.pinned());
+        self.bound = Some(bound);
+        Ok(self)
+    }
+
+    /// Bytes the open transaction pins in RAM, published through the host's
+    /// ledger as they change.
+    #[must_use]
+    pub fn writeback_pinned_bytes(&self) -> usize {
+        self.dirty.pinned_bytes()
     }
 
     /// Publish anything the open transaction still holds and consume the
@@ -1466,6 +1530,19 @@ impl<B: Block> ARXFS<B> {
         if !self.read_only {
             self.ensure_allocation_map()?;
         }
+        // One gauge reading per operation, taken before the transaction is
+        // opened so the window it is aged against is the one the current
+        // band dictates. In the kernel the reading is the physical frame
+        // allocator, so asking per staged block would take the global
+        // frame-allocator lock hundreds of times for an answer that cannot
+        // change inside one operation.
+        self.reading = self
+            .bound
+            .as_ref()
+            .map(|bound| bound.reading(self.dirty.pinned_bytes()));
+        if let Some(reading) = self.reading {
+            self.schedule.set_band(reading.band);
+        }
         if !self.schedule.is_open() {
             self.saved_txn = self.roots();
             self.schedule.opened();
@@ -1495,11 +1572,27 @@ impl<B: Block> ARXFS<B> {
     /// either.
     fn end_operation(&mut self) -> Result<(), DriverError> {
         self.dirty.end_operation();
+        if self.writeback_full() {
+            // Back-pressure: the set is pinned memory, so the only way to
+            // return it is to write it out. The writer therefore pays for
+            // the device I/O here rather than being allowed to grow.
+            self.dirty.note_released();
+            return self.commit();
+        }
         if self.schedule.expired() || self.incompat != self.saved_txn.incompat {
             return self.commit();
         }
         self.schedule.joined();
         Ok(())
+    }
+
+    /// Whether the dirty set has reached the ceiling this operation read, so
+    /// the transaction must be published before another joins it.
+    ///
+    /// A handle the host has not bounded has no ceiling to reach.
+    fn writeback_full(&self) -> bool {
+        self.reading
+            .is_some_and(|reading| self.dirty.pinned_bytes() >= reading.ceiling)
     }
 
     /// Publish the open transaction, if there is one, before an operation that
@@ -1976,6 +2069,8 @@ impl<B: Block> ARXFS<B> {
             cluster_cache: None,
             tree_edit: None,
             dirty: DirtySet::new(block_size),
+            bound: None,
+            reading: None,
         };
         Ok(fs)
     }
@@ -3535,12 +3630,23 @@ impl<B: Block> ARXFS<B> {
     /// compressed cluster the write only partially covers is first
     /// decomposed back into per-block records (bounded work), then the
     /// ordinary per-block copy-on-write path proceeds.
+    ///
+    /// Under [`WriteLength::MayBeShort`] the returned count may be short of
+    /// `data`. This is the one operation whose staged bytes scale with a
+    /// caller's argument, so it is where the write-back bound has to bite:
+    /// once the dirty set has reached its ceiling the write stops on a record
+    /// boundary and reports what it stored, and the operation's close
+    /// publishes the transaction, so the caller's next call proceeds against
+    /// an empty set. Progress is unconditional — the first record of any call
+    /// is always stored, whatever the ceiling — so a caller looping on the
+    /// count cannot spin.
     fn write_file(
         &mut self,
         inode: &mut Inode,
         ino: u32,
         offset: u64,
         data: &[u8],
+        length: WriteLength,
     ) -> Result<usize, DriverError> {
         if data.is_empty() {
             return Ok(0);
@@ -3558,6 +3664,10 @@ impl<B: Block> ARXFS<B> {
         let mut pos = offset;
         let mut blk = [0u8; MAX_BLOCK_SIZE];
         while done < data.len() {
+            if length == WriteLength::MayBeShort && done > 0 && self.writeback_full() {
+                self.dirty.note_refusal();
+                break;
+            }
             let bi = pos / cap;
             let within = as_usize(pos % cap);
             if within == 0
@@ -3587,8 +3697,10 @@ impl<B: Block> ARXFS<B> {
             done += chunk;
             pos += chunk as u64;
         }
-        if end > inode.size {
-            inode.size = end;
+        // The length is what was actually stored, not what was asked for: a
+        // write cut short by the bound must not record bytes it never wrote.
+        if pos > inode.size {
+            inode.size = pos;
         }
         Ok(done)
     }
@@ -3859,7 +3971,7 @@ impl<B: Block> ARXFS<B> {
         // stored, which is also what a listing shows.
         let mut child = Inode::empty(InodeKind::Link, Security::new(0o777, 0, 0), now);
         let child_ino = self.alloc_inode(&child)?;
-        self.write_file(&mut child, child_ino, 0, target)?;
+        self.write_file(&mut child, child_ino, 0, target, WriteLength::Whole)?;
         self.write_inode(child_ino, &child)?;
         self.add_entry(&mut dir_inode, dir_ino, child_ino, name)?;
         dir_inode.times.modified = now;
@@ -4061,7 +4173,8 @@ impl<B: Block> ARXFS<B> {
             .ok_or(DriverError::NotFound)?;
         let mut child = self.read_inode(child_ino)?;
         Self::deny_non_file_content(child.kind)?;
-        let written = self.write_file(&mut child, child_ino, offset, data)?;
+        let written =
+            self.write_file(&mut child, child_ino, offset, data, WriteLength::MayBeShort)?;
         let now = (self.clock)();
         child.times.modified = now;
         child.times.changed = now;

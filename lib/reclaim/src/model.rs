@@ -255,6 +255,18 @@ pub enum ReclaimRule {
     PreserveUntilSevere,
 }
 
+/// Per-entry bookkeeping cost of a keyed, recency-indexed entry, in
+/// bytes: the map node, the recency-index slot, and the fixed entry
+/// fields charged on top of the payload so a ledger tracks real heap
+/// footprint rather than payload alone.
+///
+/// One definition because it is one figure by construction — every
+/// bounded pool in the tree keys entries in a `BTreeMap` and indexes them
+/// the same way, so a per-pool copy could only ever diverge by accident.
+/// It is an accounting estimate, not a limit; the limit is
+/// [`MAX_ENTRY_METADATA`], which this stays far below.
+pub const MAP_ENTRY_OVERHEAD: usize = 96;
+
 /// The per-entry bookkeeping ceiling, in bytes.
 ///
 /// This is a validation bound, deliberately fixed: an entry's metadata

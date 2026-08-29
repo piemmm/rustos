@@ -303,6 +303,16 @@ pub mod kernel_fs;
 // and end-to-end tests run on the CI host.
 pub mod transform_cache;
 
+// The write-back bound a writable ARXFS volume is mounted under
+// (`plans/ARXFS-WRITEBACK.md` §6): the RAM-derived byte ceiling, the shared
+// pressure gauge, and the pinned-memory row the volume's unwritten blocks
+// are reported through. A pinned pool is the opposite of the reclaimable
+// caches beside it — its bytes can only be written out, never dropped — so
+// it is bounded by back-pressure and reported separately from them.
+// Architecture-neutral (arxfs + kernel/mem seams only), so its unit tests
+// run on the CI host.
+pub mod writeback_bound;
+
 // The whole-disk block-level LRU cache (`plans/SMARTRAM.md` SMART11):
 // wraps the one brought-up boot device *below* the block-sharing layer,
 // so every window onto the disk reads through one coherent cache of

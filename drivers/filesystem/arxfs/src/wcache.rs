@@ -25,20 +25,31 @@
 //! transaction and were reported successful. The set therefore keeps a
 //! **savepoint**: each block the running operation changes is remembered as it
 //! stood before, once, and restored if that operation is undone.
+//!
+//! Because a staged block is pinned, the set must be *bounded*
+//! ([`WritebackBound`]): a writer that outruns the device is made to wait for
+//! real I/O — the transaction is published and the set emptied — rather than
+//! being allowed to grow. The ceiling comes from the RAM the host discovered
+//! and falls as memory tightens, so the response to pressure is always
+//! *publish sooner*, never *hold more* and never *drop*.
 
 use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::filesystem::WritebackHost;
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::DriverError;
+use tairix_reclaim::{
+    CacheBudget, GrowthAllowance, PinnedAccounting, PressureBand, PressureGauge, MAP_ENTRY_OVERHEAD,
+};
 use zeroize::Zeroize;
 
-use crate::RunWindow;
+use crate::{RunWindow, RUN_BYTES};
 
 /// How long a transaction may stay open before the next operation publishes
-/// it, by the class of device the volume sits on.
+/// it, by the class of device the volume sits on and how tight memory is.
 ///
 /// The window buys device commands with recency: operations that arrive inside
 /// it fold into one commit — one transaction root, one superblock slot, one
@@ -50,12 +61,117 @@ use crate::RunWindow;
 /// exposure. The values are the one policy over the class; nothing tunes them
 /// per volume.
 #[must_use]
-pub(crate) const fn writeback_window_ns(class: BlkDeviceClass) -> u64 {
-    match class {
+pub(crate) const fn writeback_window_ns(class: BlkDeviceClass, band: PressureBand) -> u64 {
+    let base = match class {
         BlkDeviceClass::Removable => 30_000_000_000,
         BlkDeviceClass::Rotational => 15_000_000_000,
         BlkDeviceClass::SolidState | BlkDeviceClass::Virtual => 5_000_000_000,
+    };
+    // Tightening memory halves the window per band, so a volume that falls
+    // quiet gives its pinned bytes back sooner. Nothing widens it: pressure
+    // only ever buys recency back, never spends more of it.
+    base >> band.depth()
+}
+
+/// The smallest ceiling worth having, in bytes: one coalesced device
+/// transfer.
+///
+/// This is a floor, not a capacity, so it is a fixed figure rather than a
+/// fraction of the machine — it says how little is too little. Below one
+/// transfer window the drain can never form a full run, so the set stops
+/// buying the device commands it exists to buy while still pinning memory.
+/// A transaction is guaranteed to complete regardless (the write path always
+/// stages at least one record before the bound can cut it short), so this
+/// bounds the cache's *usefulness*, not its correctness.
+pub(crate) const WRITEBACK_FLOOR_BYTES: usize = RUN_BYTES;
+
+/// The RAM-derived byte ceiling, the pressure gauge, and the pinned ledger a
+/// volume's dirty set is held to.
+///
+/// A staged block is pinned memory: it exists nowhere else, so it can only be
+/// written out, never dropped. That makes the set the opposite of a
+/// reclaimable cache — nothing may shrink it behind the driver's back — so it
+/// is deliberately *not* admitted through the reclaim classification gate,
+/// whose contract is droppability. What bounds it instead is a byte ceiling
+/// derived from the RAM the host discovered, the machine-wide reserve floor
+/// every consumer obeys, and the pressure band, which lowers the ceiling
+/// toward [`WRITEBACK_FLOOR_BYTES`] and no further.
+///
+/// A handle with no bound is not memory-governed, exactly as a handle with no
+/// write-back host has no window: the host installs one on every writable
+/// mount it opens, so only host tools and unit tests run without one.
+pub(crate) struct WritebackBound {
+    budget: CacheBudget,
+    gauge: &'static dyn PressureGauge,
+    pinned: Arc<PinnedAccounting>,
+}
+
+impl WritebackBound {
+    /// The bound a volume gets from `budget` (derived from discovered RAM),
+    /// the system pressure `gauge`, and the `pinned` ledger the host
+    /// publishes its footprint through.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::NoSpace`] when the volume's share of RAM cannot hold
+    /// even [`WRITEBACK_FLOOR_BYTES`]. The mount is refused rather than
+    /// accepted and left to wedge later: a machine that cannot spare one
+    /// device transfer per volume has nothing to gain from mounting one.
+    pub(crate) fn new(
+        budget: CacheBudget,
+        gauge: &'static dyn PressureGauge,
+        pinned: Arc<PinnedAccounting>,
+    ) -> Result<Self, DriverError> {
+        if budget.hard() < WRITEBACK_FLOOR_BYTES {
+            return Err(DriverError::NoSpace);
+        }
+        Ok(Self {
+            budget,
+            gauge,
+            pinned,
+        })
     }
+
+    /// The ledger handle, so the set can publish its footprint as it changes.
+    pub(crate) fn pinned(&self) -> Arc<PinnedAccounting> {
+        Arc::clone(&self.pinned)
+    }
+
+    /// One gauge reading, folded once, for the operation about to run.
+    ///
+    /// Read per operation rather than per staged block: in the kernel the
+    /// reading is the physical frame allocator, so asking per block would
+    /// take the global frame-allocator lock hundreds of times to answer a
+    /// question that cannot change inside one operation.
+    pub(crate) fn reading(&self, held_bytes: usize) -> WritebackReading {
+        let allowance = self.gauge.growth_allowance();
+        WritebackReading {
+            band: allowance.band(),
+            ceiling: self.ceiling_bytes(allowance, held_bytes),
+        }
+    }
+
+    /// The ceiling for one operation: the band's share of the volume's
+    /// RAM-derived budget, capped by what the machine-wide reserve leaves,
+    /// and never below [`WRITEBACK_FLOOR_BYTES`].
+    ///
+    /// The reserve cap is what makes several volumes on one small machine
+    /// share a bounded *total*: each volume's own budget is its slice of RAM,
+    /// but the free reading they all draw against is the machine's.
+    fn ceiling_bytes(&self, allowance: GrowthAllowance, held_bytes: usize) -> usize {
+        let banded = self.budget.hard() >> allowance.band().depth();
+        let reserved = held_bytes.saturating_add(allowance.remaining_bytes());
+        banded.min(reserved).max(WRITEBACK_FLOOR_BYTES)
+    }
+}
+
+/// What one gauge reading told the operation about to run.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) struct WritebackReading {
+    /// The band the reading folded to, which sets the dirty-age window.
+    pub(crate) band: PressureBand,
+    /// Bytes the dirty set may hold before the transaction is published.
+    pub(crate) ceiling: usize,
 }
 
 /// When the open transaction must be published.
@@ -78,7 +194,12 @@ pub(crate) struct CommitScheduler {
     /// The host's timer and the handle this mount is registered under,
     /// installed when the volume is registered.
     host: Option<(DriverHandle, &'static dyn WritebackHost)>,
-    window_ns: u64,
+    /// The class of device the volume sits on, which sets the base window.
+    class: BlkDeviceClass,
+    /// The memory-pressure band the last operation read, which shortens the
+    /// window. Normal until a bound with a gauge is installed, so a handle
+    /// that is not memory-governed keeps its device class's full window.
+    band: PressureBand,
     /// Whether a transaction is in flight. Separate from [`Self::opened_ns`],
     /// which is absent when a transaction is open but the host's clock
     /// declined to read.
@@ -97,11 +218,32 @@ impl CommitScheduler {
     pub(crate) const fn new(class: BlkDeviceClass) -> Self {
         Self {
             host: None,
-            window_ns: writeback_window_ns(class),
+            class,
+            band: PressureBand::Normal,
             open: false,
             opened_ns: None,
             acknowledged: 0,
         }
+    }
+
+    /// The window the open transaction is aged against, under the band last
+    /// read.
+    const fn window_ns(&self) -> u64 {
+        writeback_window_ns(self.class, self.band)
+    }
+
+    /// Note the memory-pressure band the running operation read.
+    ///
+    /// A deepening band shortens the window, which can bring an open
+    /// transaction's deadline forward, so the host is told the new instant:
+    /// pressure must not have to wait out a window measured when memory was
+    /// plentiful.
+    pub(crate) fn set_band(&mut self, band: PressureBand) {
+        if self.band == band {
+            return;
+        }
+        self.band = band;
+        self.report();
     }
 
     /// Install the host's write-back timer for the mount registered as
@@ -159,7 +301,7 @@ impl CommitScheduler {
             return true;
         };
         match self.now_ns() {
-            Some(now) => now.saturating_sub(opened_ns) >= self.window_ns,
+            Some(now) => now.saturating_sub(opened_ns) >= self.window_ns(),
             // The clock stopped answering mid-transaction: publish rather
             // than hold work against an age nothing can measure.
             None => true,
@@ -169,7 +311,7 @@ impl CommitScheduler {
     /// The absolute monotonic instant the open transaction is due at, or
     /// `None` when none is open or its age cannot be measured.
     fn deadline_ns(&self) -> Option<u64> {
-        self.opened_ns.map(|at| at.saturating_add(self.window_ns))
+        self.opened_ns.map(|at| at.saturating_add(self.window_ns()))
     }
 
     fn now_ns(&self) -> Option<u64> {
@@ -283,6 +425,15 @@ pub(crate) struct DirtySet {
     /// did — `None` where the set held nothing. Absent between operations.
     savepoint: Option<BTreeMap<u64, Option<Prior>>>,
     block_size: usize,
+    /// Block buffers the savepoint holds. Derived counts cannot drift from
+    /// what is held, so the staged half is [`BTreeMap::len`] and only the
+    /// savepoint — whose buffers are pinned for the running operation
+    /// exactly as staged ones are — needs a counter.
+    saved_priors: usize,
+    /// The host's pinned-memory ledger, republished whenever the count
+    /// changes so an operator can see a volume's unwritten bytes. `None` for
+    /// a handle the host has not bounded.
+    pinned: Option<Arc<PinnedAccounting>>,
 }
 
 impl DirtySet {
@@ -293,6 +444,50 @@ impl DirtySet {
             entries: BTreeMap::new(),
             savepoint: None,
             block_size,
+            saved_priors: 0,
+            pinned: None,
+        }
+    }
+
+    /// Publish this set's footprint through the host's pinned ledger.
+    pub(crate) fn report_to(&mut self, pinned: Arc<PinnedAccounting>) {
+        self.pinned = Some(pinned);
+        self.publish();
+    }
+
+    /// Block buffers the set pins: the staged ones plus the savepoint's.
+    fn held(&self) -> usize {
+        self.entries.len().saturating_add(self.saved_priors)
+    }
+
+    /// Bytes the set pins: each held block buffer plus the bookkeeping the
+    /// map node and its key cost on top of it.
+    pub(crate) fn pinned_bytes(&self) -> usize {
+        self.held()
+            .saturating_mul(self.block_size.saturating_add(MAP_ENTRY_OVERHEAD))
+    }
+
+    /// Republish the footprint after a change to what is held. Derived from
+    /// what the set actually holds, so a missed call can leave the ledger
+    /// stale but never wrong.
+    fn publish(&self) {
+        if let Some(pinned) = self.pinned.as_ref() {
+            pinned.set(self.pinned_bytes(), self.held() as u64);
+        }
+    }
+
+    /// Note one pass that wrote the set out and returned its bytes.
+    pub(crate) fn note_released(&self) {
+        if let Some(pinned) = self.pinned.as_ref() {
+            pinned.note_released();
+        }
+    }
+
+    /// Note one admission the bound cut short, so the caller had to publish
+    /// before it could stage more.
+    pub(crate) fn note_refusal(&self) {
+        if let Some(pinned) = self.pinned.as_ref() {
+            pinned.note_refusal();
         }
     }
 
@@ -313,6 +508,7 @@ impl DirtySet {
         let Some(savepoint) = self.savepoint.take() else {
             return;
         };
+        self.saved_priors = 0;
         for (phys, prior) in savepoint {
             for phase in WritePhase::ALL {
                 if let Some(mut bytes) = self.entries.remove(&(phase, phys)) {
@@ -323,6 +519,7 @@ impl DirtySet {
                 self.entries.insert((prior.phase, phys), prior.bytes);
             }
         }
+        self.publish();
     }
 
     /// Forget the savepoint, wiping the versions it held.
@@ -330,10 +527,12 @@ impl DirtySet {
         let Some(savepoint) = self.savepoint.take() else {
             return;
         };
+        self.saved_priors = 0;
         for prior in savepoint.into_values().flatten() {
             let mut bytes = prior.bytes;
             bytes.zeroize();
         }
+        self.publish();
     }
 
     /// Move `phys` as it stands into the running operation's savepoint, the
@@ -354,6 +553,9 @@ impl DirtySet {
                 .remove(&(phase, phys))
                 .map(|bytes| Prior { phase, bytes })
         });
+        if prior.is_some() {
+            self.saved_priors = self.saved_priors.saturating_add(1);
+        }
         if let Some(savepoint) = self.savepoint.as_mut() {
             savepoint.insert(phys, prior);
         }
@@ -399,6 +601,7 @@ impl DirtySet {
             .map_err(|_| DriverError::NoSpace)?;
         held.extend_from_slice(block);
         self.entries.insert((phase, phys), held);
+        self.publish();
         Ok(())
     }
 
@@ -600,6 +803,7 @@ impl DirtySet {
             }
             at = at.saturating_add(1);
         }
+        self.publish();
     }
 
     /// Drop the block staged at `phys`, if any: its bytes name a block nothing
@@ -612,6 +816,7 @@ impl DirtySet {
                 bytes.zeroize();
             }
         }
+        self.publish();
     }
 
     /// Drop and wipe every block in one ordering phase.
@@ -623,6 +828,7 @@ impl DirtySet {
                 bytes.zeroize();
             }
         }
+        self.publish();
     }
 
     /// Drop and wipe every staged block.
@@ -631,6 +837,7 @@ impl DirtySet {
         while let Some((_, mut bytes)) = self.entries.pop_first() {
             bytes.zeroize();
         }
+        self.publish();
     }
 
     /// Blocks currently staged.
@@ -884,27 +1091,230 @@ mod tests {
         // Removable media pay the most per command, a rotational disk gets
         // its metadata seeks back, and a device already cheap per command
         // keeps the smallest exposure.
+        let calm = PressureBand::Normal;
         assert_eq!(
-            writeback_window_ns(BlkDeviceClass::Removable),
+            writeback_window_ns(BlkDeviceClass::Removable, calm),
             30_000_000_000
         );
         assert_eq!(
-            writeback_window_ns(BlkDeviceClass::Rotational),
+            writeback_window_ns(BlkDeviceClass::Rotational, calm),
             15_000_000_000
         );
         assert_eq!(
-            writeback_window_ns(BlkDeviceClass::SolidState),
+            writeback_window_ns(BlkDeviceClass::SolidState, calm),
             5_000_000_000
         );
-        assert_eq!(writeback_window_ns(BlkDeviceClass::Virtual), 5_000_000_000);
-        assert!(
-            writeback_window_ns(BlkDeviceClass::Removable)
-                > writeback_window_ns(BlkDeviceClass::Rotational)
-                && writeback_window_ns(BlkDeviceClass::Rotational)
-                    > writeback_window_ns(BlkDeviceClass::SolidState)
-                && writeback_window_ns(BlkDeviceClass::SolidState) > 0,
-            "the window must widen with the cost of a command, and never vanish"
+        assert_eq!(
+            writeback_window_ns(BlkDeviceClass::Virtual, calm),
+            5_000_000_000
         );
+        assert!(
+            writeback_window_ns(BlkDeviceClass::Removable, calm)
+                > writeback_window_ns(BlkDeviceClass::Rotational, calm)
+                && writeback_window_ns(BlkDeviceClass::Rotational, calm)
+                    > writeback_window_ns(BlkDeviceClass::SolidState, calm),
+            "the window must widen with the cost of a command"
+        );
+    }
+
+    #[test]
+    fn tightening_memory_only_ever_shortens_the_window() {
+        let mut previous = u64::MAX;
+        for band in PressureBand::ALL {
+            let window = writeback_window_ns(BlkDeviceClass::Removable, band);
+            assert!(
+                window < previous,
+                "each deeper band must publish sooner than the one above it"
+            );
+            assert!(window > 0, "a window must never vanish into a busy commit");
+            previous = window;
+        }
+    }
+
+    /// A gauge parked at one band, as the driver sees it: the model's own
+    /// receiving gauge, so the tests exercise the same policy a mount does
+    /// rather than a second notion of pressure.
+    fn gauge(band: PressureBand) -> &'static tairix_reclaim::ReportedPressure {
+        let gauge = alloc::boxed::Box::leak(alloc::boxed::Box::new(
+            tairix_reclaim::ReportedPressure::unknown(),
+        ));
+        gauge.report(band);
+        gauge
+    }
+
+    /// A budget wide enough that the band ladder, not the floor, decides the
+    /// first few bands.
+    const AMPLE_BACKING: usize = 64 * WRITEBACK_FLOOR_BYTES * 16;
+
+    fn bound(band: PressureBand) -> WritebackBound {
+        WritebackBound::new(
+            CacheBudget::from_backing(AMPLE_BACKING),
+            gauge(band),
+            Arc::new(PinnedAccounting::new()),
+        )
+        .expect("an ample machine bounds a volume")
+    }
+
+    #[test]
+    fn the_ceiling_falls_with_the_band_and_stops_at_the_floor() {
+        let mut previous = usize::MAX;
+        for band in PressureBand::ALL {
+            let ceiling = bound(band).reading(0).ceiling;
+            assert!(
+                ceiling <= previous,
+                "a deeper band must never raise the ceiling"
+            );
+            assert!(
+                ceiling >= WRITEBACK_FLOOR_BYTES,
+                "pressure lowers the ceiling to the floor and no further"
+            );
+            previous = ceiling;
+        }
+        assert_eq!(
+            bound(PressureBand::Normal).reading(0).ceiling,
+            CacheBudget::from_backing(AMPLE_BACKING).hard(),
+            "an unpressured machine gives the volume its whole share"
+        );
+        assert!(
+            bound(PressureBand::Mild).reading(0).ceiling
+                < bound(PressureBand::Normal).reading(0).ceiling,
+            "the first tightening must actually bite"
+        );
+    }
+
+    #[test]
+    fn a_machine_too_small_for_one_transfer_is_refused_a_bound() {
+        // A volume whose share of RAM cannot hold one coalesced transfer would
+        // commit after almost every record: the mount is refused rather than
+        // accepted and left to wedge.
+        let short = CacheBudget::from_backing(WRITEBACK_FLOOR_BYTES * 16 - 16);
+        assert!(short.hard() < WRITEBACK_FLOOR_BYTES);
+        assert_eq!(
+            WritebackBound::new(
+                short,
+                gauge(PressureBand::Normal),
+                Arc::new(PinnedAccounting::new()),
+            )
+            .err(),
+            Some(DriverError::NoSpace)
+        );
+        let exact = CacheBudget::from_backing(WRITEBACK_FLOOR_BYTES * 16);
+        assert_eq!(exact.hard(), WRITEBACK_FLOOR_BYTES);
+        assert!(
+            WritebackBound::new(
+                exact,
+                gauge(PressureBand::Normal),
+                Arc::new(PinnedAccounting::new()),
+            )
+            .is_ok(),
+            "exactly one transfer is enough"
+        );
+    }
+
+    #[test]
+    fn the_machine_wide_reserve_caps_the_ceiling_however_large_the_budget() {
+        // Each volume's budget is its own slice of RAM, but the free reading
+        // they all draw against is the machine's — which is what makes several
+        // volumes on one small machine share a bounded total instead of each
+        // taking a slab.
+        struct Starved;
+        impl tairix_reclaim::FreeMemorySource for Starved {
+            fn free_bytes(&self) -> usize {
+                0
+            }
+            fn total_bytes(&self) -> usize {
+                AMPLE_BACKING
+            }
+        }
+        static STARVED: Starved = Starved;
+        let measured: &'static tairix_reclaim::MemoryPressure = alloc::boxed::Box::leak(
+            alloc::boxed::Box::new(tairix_reclaim::MemoryPressure::over(&STARVED)),
+        );
+        let bound = WritebackBound::new(
+            CacheBudget::from_backing(AMPLE_BACKING),
+            measured,
+            Arc::new(PinnedAccounting::new()),
+        )
+        .expect("the budget itself is ample");
+        assert_eq!(
+            bound.reading(0).ceiling,
+            WRITEBACK_FLOOR_BYTES,
+            "no headroom above the reserve leaves only the forward-progress floor"
+        );
+    }
+
+    #[test]
+    fn the_set_reports_its_pinned_bytes_through_the_hosts_ledger() {
+        let pinned = Arc::new(PinnedAccounting::new());
+        let mut set = DirtySet::new(BS);
+        set.report_to(Arc::clone(&pinned));
+        assert_eq!(pinned.bytes(), 0);
+
+        set.stage(WritePhase::BeforeBarrier, 4, &block(1))
+            .expect("stage");
+        set.stage(WritePhase::BeforeBarrier, 5, &block(2))
+            .expect("stage");
+        let per_block = BS + MAP_ENTRY_OVERHEAD;
+        assert_eq!(set.pinned_bytes(), 2 * per_block);
+        assert_eq!((pinned.bytes(), pinned.entries()), (2 * per_block, 2));
+
+        let _ = requests(&mut set, WritePhase::BeforeBarrier, WIDE);
+        assert_eq!(
+            (pinned.bytes(), pinned.entries()),
+            (0, 0),
+            "a drained set pins nothing"
+        );
+        assert_eq!(
+            pinned.peak_bytes(),
+            2 * per_block,
+            "the high-water mark survives the drain"
+        );
+    }
+
+    #[test]
+    fn a_saved_prior_version_is_pinned_like_a_staged_one() {
+        // An operation's savepoint holds the version a failure unwinds to, so
+        // its bytes are as unavailable to the machine as the staged ones and
+        // are counted with them.
+        let pinned = Arc::new(PinnedAccounting::new());
+        let mut set = DirtySet::new(BS);
+        set.report_to(Arc::clone(&pinned));
+        set.begin_operation();
+        set.stage(WritePhase::BeforeBarrier, 7, &block(1))
+            .expect("stage");
+        set.end_operation();
+
+        set.begin_operation();
+        set.stage(WritePhase::BeforeBarrier, 7, &block(2))
+            .expect("rewrite");
+        assert_eq!(
+            pinned.entries(),
+            2,
+            "the prior version and the new one are both held"
+        );
+        set.end_operation();
+        assert_eq!(pinned.entries(), 1, "the undo copy goes with the operation");
+    }
+
+    #[test]
+    fn a_deepening_band_brings_an_open_transactions_deadline_forward() {
+        let host = TestWritebackHost::leaked(0);
+        let mut schedule = CommitScheduler::new(BlkDeviceClass::Removable);
+        schedule.set_host(TestWritebackHost::volume(), host);
+        schedule.opened();
+        let calm = host.reported().expect("an open transaction is due");
+        schedule.set_band(PressureBand::Moderate);
+        let tightened = host.reported().expect("still open, and due sooner");
+        assert!(
+            tightened < calm,
+            "a tightening machine must not wait out a window measured when \
+             memory was plentiful"
+        );
+        // A band that has not moved reports nothing: pressure is sampled every
+        // operation, and a steady band must not cost a timer arm each time.
+        let reports = host.reports();
+        schedule.set_band(PressureBand::Moderate);
+        assert_eq!(host.reports(), reports);
     }
 
     #[test]
@@ -941,7 +1351,7 @@ mod tests {
 
     #[test]
     fn a_transaction_expires_when_its_window_elapses() {
-        let window = writeback_window_ns(BlkDeviceClass::SolidState);
+        let window = writeback_window_ns(BlkDeviceClass::SolidState, PressureBand::Normal);
         let host = TestWritebackHost::leaked(0);
         let mut schedule = CommitScheduler::new(BlkDeviceClass::SolidState);
         schedule.set_host(TestWritebackHost::volume(), host);
@@ -958,7 +1368,7 @@ mod tests {
 
     #[test]
     fn an_opening_transaction_reports_its_deadline_and_a_closing_one_reports_none() {
-        let window = writeback_window_ns(BlkDeviceClass::Rotational);
+        let window = writeback_window_ns(BlkDeviceClass::Rotational, PressureBand::Normal);
         let host = TestWritebackHost::leaked(700);
         let mut schedule = CommitScheduler::new(BlkDeviceClass::Rotational);
         schedule.set_host(TestWritebackHost::volume(), host);
@@ -990,7 +1400,7 @@ mod tests {
 
     #[test]
     fn a_host_installed_over_an_open_transaction_dates_it_from_now() {
-        let window = writeback_window_ns(BlkDeviceClass::Virtual);
+        let window = writeback_window_ns(BlkDeviceClass::Virtual, PressureBand::Normal);
         let mut schedule = CommitScheduler::new(BlkDeviceClass::Virtual);
         // Opened before any host existed, so its age was never measured.
         schedule.opened();

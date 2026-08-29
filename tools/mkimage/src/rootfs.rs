@@ -352,9 +352,9 @@ fn populate_system_subtree(
 
 /// Create `/System/Security/<name>`, write the non-secret machine-id `bytes`
 /// into it whole, and set it world-readable, system-user-owned
-/// ([`MACHINE_ID_MODE`]). A short write is a build failure, never a truncated
-/// id. Unlike the log-attestation key the machine-id is public identity, so it
-/// is readable by any principal (only the system user may rewrite it).
+/// ([`MACHINE_ID_MODE`]). The bytes are stored whole, never a truncated id.
+/// Unlike the log-attestation key the machine-id is public identity, so it is
+/// readable by any principal (only the system user may rewrite it).
 fn write_machine_id_file(
     fs: &mut ARXFS<MemBlock>,
     security: NodeId,
@@ -364,14 +364,8 @@ fn write_machine_id_file(
     let file = fs
         .create(security, name.as_bytes(), NodeKind::RegularFile)
         .map_err(MkimageError::RootPartition)?;
-    let written = fs
-        .write_at(security, name.as_bytes(), 0, bytes)
+    fs.write_all(security, name.as_bytes(), 0, bytes)
         .map_err(MkimageError::RootPartition)?;
-    if written != bytes.len() {
-        return Err(MkimageError::RootPartition(
-            tairix_abi::DriverError::DeviceFault,
-        ));
-    }
     fs.set_security(file, Security::new(MACHINE_ID_MODE, 0, 0))
         .map_err(MkimageError::RootPartition)?;
     Ok(())
@@ -426,15 +420,8 @@ fn write_security_file(
 ) -> Result<(), MkimageError> {
     fs.create(security, name.as_bytes(), NodeKind::RegularFile)
         .map_err(MkimageError::RootPartition)?;
-    let written = fs
-        .write_at(security, name.as_bytes(), 0, text.as_bytes())
-        .map_err(MkimageError::RootPartition)?;
-    if written != text.len() {
-        return Err(MkimageError::RootPartition(
-            tairix_abi::DriverError::DeviceFault,
-        ));
-    }
-    Ok(())
+    fs.write_all(security, name.as_bytes(), 0, text.as_bytes())
+        .map_err(MkimageError::RootPartition)
 }
 
 /// Plant the per-interface network-configuration document on the read-only
@@ -452,7 +439,8 @@ fn write_security_file(
 /// that validates it here is the same one `netstack` reads it with, so an
 /// image can never ship an addressing default its own stack would reject
 /// (fail closed at build time, not at first boot). An unparseable document is
-/// a build failure, as is a short write — never a truncated store.
+/// a build failure, and the rendered text is stored whole — never a
+/// truncated store.
 fn plant_network_config(
     fs: &mut ARXFS<MemBlock>,
     root: NodeId,
@@ -479,8 +467,8 @@ fn plant_network_config(
 /// "no catalogued applications". The file keeps the authored default
 /// security record (system-user-owned), so an ordinary account reads the
 /// catalog but only the system identity rewrites it; a user personalises
-/// through their own overlay instead. A short write is a build failure,
-/// never a truncated store.
+/// through their own overlay instead. The text is stored whole, never a
+/// truncated store.
 fn write_library_config(
     fs: &mut ARXFS<MemBlock>,
     system: NodeId,
@@ -502,25 +490,18 @@ fn write_library_config(
         NodeKind::RegularFile,
     )
     .map_err(MkimageError::RootPartition)?;
-    let written = fs
-        .write_at(
-            library,
-            tairix_proglib::LIBRARY_FILE.as_bytes(),
-            0,
-            text.as_bytes(),
-        )
-        .map_err(MkimageError::RootPartition)?;
-    if written != text.len() {
-        return Err(MkimageError::RootPartition(
-            tairix_abi::DriverError::DeviceFault,
-        ));
-    }
-    Ok(())
+    fs.write_all(
+        library,
+        tairix_proglib::LIBRARY_FILE.as_bytes(),
+        0,
+        text.as_bytes(),
+    )
+    .map_err(MkimageError::RootPartition)
 }
 
 /// Create `/System/Security/Keys/<name>`, write the secret `bytes` into it
 /// whole, and lock it down to system-user-owned, owner-read/write-only
-/// ([`LOG_ATTESTATION_KEY_MODE`]). A short write is a build failure, never a
+/// ([`LOG_ATTESTATION_KEY_MODE`]). The bytes are stored whole, never a
 /// truncated key. The restrictive security record is the only thing gating
 /// the secret until the journal/attestation principal exists (no new
 /// capability is minted ahead of that holder).
@@ -533,14 +514,8 @@ fn write_key_file(
     let file = fs
         .create(keys, name.as_bytes(), NodeKind::RegularFile)
         .map_err(MkimageError::RootPartition)?;
-    let written = fs
-        .write_at(keys, name.as_bytes(), 0, bytes)
+    fs.write_all(keys, name.as_bytes(), 0, bytes)
         .map_err(MkimageError::RootPartition)?;
-    if written != bytes.len() {
-        return Err(MkimageError::RootPartition(
-            tairix_abi::DriverError::DeviceFault,
-        ));
-    }
     // System-user-owned, owner-read/write-only: an ordinary principal cannot
     // read the key, and the read-only-`/System` policy plus this mode gate the
     // secret until the journal/attestation principal exists. The kernel refuses
