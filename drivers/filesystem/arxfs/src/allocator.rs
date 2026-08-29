@@ -211,7 +211,7 @@ impl Allocator {
         self.pending_free.clear();
     }
 
-    /// Bytes the open transaction's run bookkeeping holds.
+    /// Bytes and run entries the open transaction's run bookkeeping holds.
     ///
     /// Pinned exactly as a staged block is: only publishing the transaction
     /// returns it, so it belongs inside the same write-back ceiling. Without
@@ -219,15 +219,23 @@ impl Allocator {
     /// dirties a spine's worth of blocks whatever its extent count, while the
     /// released runs grow with it. The pending-discard queue is left out: it
     /// survives commits and carries its own [`MAX_PENDING_DISCARD_RUNS`] cap.
-    pub(crate) fn txn_pinned_bytes(&self) -> usize {
-        self.txn_freed
-            .bytes()
-            .saturating_add(self.txn_private.bytes())
-            .saturating_add(self.op_claimed.bytes())
-            .saturating_add(self.op_released.bytes())
-            .saturating_add(self.op_deferred.bytes())
-            .saturating_add(self.pending_used.bytes())
-            .saturating_add(self.pending_free.bytes())
+    pub(crate) fn txn_pinned(&self) -> (usize, u64) {
+        [
+            &self.txn_freed,
+            &self.txn_private,
+            &self.op_claimed,
+            &self.op_released,
+            &self.op_deferred,
+            &self.pending_used,
+            &self.pending_free,
+        ]
+        .into_iter()
+        .fold((0, 0), |(bytes, runs), set| {
+            (
+                bytes.saturating_add(set.bytes()),
+                runs.saturating_add(set.run_count() as u64),
+            )
+        })
     }
 
     /// A cold allocator over `geom`, with empty transaction bookkeeping.

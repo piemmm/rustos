@@ -977,22 +977,31 @@ in place**:
   never dropped, so it is not admitted through the reclaim classification gate
   (whose contract is droppability) and nothing may shrink it behind the
   driver's back. Its byte ceiling is instead derived from the RAM the host
-  discovered — a documented fraction of it per volume — and capped by the
-  machine-wide reserve floor every consumer obeys, which is what keeps several
-  volumes on one small machine to a bounded *total*. Reaching the ceiling
-  publishes the transaction, so a writer that outruns the device waits for
-  real I/O. The ceiling counts the transaction's run bookkeeping with its
+  discovered — a documented fraction of it — and it is the *machine's* ceiling,
+  which the mounted volumes share: each may hold an equal share of it, capped
+  further by what the volumes already holding leave and by the machine-wide
+  reserve floor every consumer obeys. A per-volume figure would be a multiple of
+  the machine as soon as the machine had several volumes, and pinned bytes are
+  the ones nothing can reclaim. A volume holding nothing counts for nothing, so
+  a machine whose other volumes are empty leaves the whole ceiling to the one
+  writing.
+  Reaching the ceiling publishes the transaction, so a writer that outruns the
+  device waits for real I/O. The ceiling counts the transaction's run bookkeeping with its
   staged blocks: a delete holds almost all of its memory in runs and dirties a
   spine's worth of blocks whatever the file's extent count, so a ceiling over
   the blocks alone would not bound one. Measured, deleting a maximally
   fragmented file holds 88 600 bytes at 1 200 extents and 110 368 at 4 800,
   where doing it inside one transaction holds 448 448 and grows with the file.
+  Measured across volumes, four 100 TiB volumes writing at once peak together
+  at 4 195 744 bytes against a 4 194 304-byte machine ceiling — that ceiling
+  plus a fraction of one record — where a per-volume ceiling let the same four
+  reach 8 670 016, twice the machine's.
 - **Pressure lowers the ceiling and shortens the window, to a floor and no
   further.** Band by band the ceiling falls and the dirty-age window halves,
   down to one coalesced device transfer: the answer to a tightening machine is
   always to publish sooner, never to hold more and never to drop. Below that
-  floor the drain could not form a full run, so a volume whose share of RAM
-  cannot reach it is refused at mount rather than left committing after almost
+  floor the drain could not form a full run, so a machine whose ceiling cannot
+  reach it refuses the mount rather than leaving it to commit after almost
   every record. Forward progress does not depend on the ceiling: a write
   stores at least one record whatever it is, then stops on a record boundary
   and reports the count, exactly as `write(2)` may — `write_all` on the driver

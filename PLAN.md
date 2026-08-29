@@ -2937,8 +2937,12 @@ statement about what a surprise removal can lose is corrected with it.
 WB5 bounds the memory the batching pins. A staged block exists nowhere else, so
 it can only be written out, never dropped: the set is not admitted through the
 reclaim classification gate and is bounded instead by a byte ceiling derived
-from discovered RAM, capped by the machine-wide reserve floor so several volumes
-on a small machine share a bounded total. Rising pressure halves the ceiling and
+from discovered RAM. The derived figure is the *machine's* ceiling, not a
+volume's: the mounted volumes share it (`tairix_reclaim::PinnedShare`), each
+holding an equal share capped by what the volumes already holding leave and by
+the machine-wide reserve floor, because a per-volume figure is a multiple of the
+machine as soon as the machine has several volumes and these are the bytes
+nothing can reclaim. Rising pressure halves the ceiling and
 the dirty-age window band by band, down to one coalesced device transfer and no
 further — the answer to a tightening machine is publish sooner, never hold more.
 Forward progress does not rest on that floor: the one operation whose staged
@@ -2949,16 +2953,21 @@ needs the whole value stored. The pinned bytes are a row of their own in the
 §16.6 cache-ledger export, excluded from the per-class reclaim totals because
 memory that can only be written out is not headroom.
 
-**Status: WB0–WB5 and WB-D1 done** — measurement, the dirty set and commit
-barrier (closing D63), run coalescing (closing C3), allocation-map integration,
-the commit scheduler (closing C2), the host's write-back expiry timer, and the
-RAM-derived bound with its back-pressure. The other half of a transaction's
-memory is closed too: `plans/OPEN-DEFECTS.md` D28 made every per-transaction
-block set a coalescing run set, and the map and the chunk-tree release run-wise
-with it, so a delete costs the runs it releases rather than the blocks. WB6 is
-the last item and remains planned; `plans/OPEN-DEFECTS.md` D67 — freeing
-incrementally across commits, so a maximally fragmented very large file is
-bounded too — is scheduled ahead of it.
+**Status: WB0–WB6 done, save one on-metal measurement** — measurement, the
+dirty set and commit barrier (closing D63), run coalescing (closing C3),
+allocation-map integration, the commit scheduler (closing C2), the host's
+write-back expiry timer, the bound with its back-pressure, and the acceptance
+suite. The other half of a transaction's memory is closed too:
+`plans/OPEN-DEFECTS.md` D28 made every per-transaction block set a coalescing
+run set, and the map and the chunk-tree release run-wise with it, so a delete
+costs the runs it releases rather than the blocks; D67 then spread a free across
+transactions so a maximally fragmented very large file is bounded too.
+Acceptance (WB6) found and fixed the bound's one real gap — it was derived per
+volume, so a machine's volumes could pin a multiple of the machine — and
+crash-injected the batched commit shape, which the earlier sweeps only covered
+one operation at a time. What remains is the on-metal Pi 4 SD throughput
+figure, which needs the board: its procedure is fixed in
+`plans/ARXFS-WRITEBACK.md` §8 and nothing in the tree waits on it.
 
 ---
 

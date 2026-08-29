@@ -22,6 +22,17 @@
 //! drop by construction so unreclaimable bytes can never be counted as
 //! headroom.
 //!
+//! # One machine, many pools
+//!
+//! A pool's own budget is a share of the machine's RAM, so the *sum* of the
+//! budgets of every pinned pool on a machine is a multiple of what the
+//! machine has: eight mounted volumes each entitled to a sixteenth of RAM
+//! would between them pin half of it in memory nothing can reclaim. Pools
+//! that must not do that draw on one [`PinnedShare`] instead, which carries
+//! the live total across them and how many are drawing, so each can bound
+//! itself by its share of one machine-wide ceiling rather than by its own
+//! slice of RAM.
+//!
 //! # Why a gauge and not a charge/discharge ledger
 //!
 //! [`CacheAccounting`](crate::CacheAccounting) is a running, checked
@@ -39,6 +50,110 @@ use tairix_abi::Errno;
 
 use crate::model::ReclaimOwner;
 
+/// The machine-wide total several pinned pools draw on, and how many of them
+/// are drawing.
+///
+/// It carries no ceiling: what the machine may pin in total is derived from
+/// discovered RAM by whoever owns the policy (for a filesystem's dirty set,
+/// the same [`CacheBudget`](crate::CacheBudget) derivation a reclaimable
+/// cache uses). What a shared figure has to supply is the two things a pool
+/// cannot know alone — what its siblings are holding, and how many of them
+/// there are — so one instance per machine, installed by the host on every
+/// pool that shares the ceiling.
+///
+/// Updated as a side effect of each pool's own [`PinnedAccounting::set`], so
+/// there is no second total to keep in step: a pool publishes its footprint
+/// exactly once and the share follows.
+#[derive(Debug, Default)]
+pub struct PinnedShare {
+    bytes: AtomicUsize,
+    peak_bytes: AtomicUsize,
+    drawing: AtomicUsize,
+}
+
+impl PinnedShare {
+    /// A share nothing is drawing on yet.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            bytes: AtomicUsize::new(0),
+            peak_bytes: AtomicUsize::new(0),
+            drawing: AtomicUsize::new(0),
+        }
+    }
+
+    /// Bytes pinned across every pool drawing on the share.
+    #[must_use]
+    pub fn bytes(&self) -> usize {
+        self.bytes.load(Ordering::Relaxed)
+    }
+
+    /// The most the machine has held across every pool at once.
+    ///
+    /// A sum of the pools' own high-water marks would over-count peaks they
+    /// never reached together, so the figure a machine-wide bound is judged
+    /// by has to be taken here, as the total moves.
+    #[must_use]
+    pub fn peak_bytes(&self) -> usize {
+        self.peak_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Pools currently holding pinned bytes.
+    #[must_use]
+    pub fn drawing_pools(&self) -> usize {
+        self.drawing.load(Ordering::Relaxed)
+    }
+
+    /// Fold one pool's move from `was` to `now` bytes into the share.
+    fn fold(&self, was: usize, now: usize) {
+        let total = if now >= was {
+            add(&self.bytes, now - was)
+        } else {
+            take(&self.bytes, was - now)
+        };
+        self.peak_bytes.fetch_max(total, Ordering::Relaxed);
+        match (was, now) {
+            (0, 1..) => {
+                add(&self.drawing, 1);
+            }
+            (1.., 0) => {
+                take(&self.drawing, 1);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Saturating add on a counter several pools update, returning the new value.
+/// Saturating rather than wrapping because an implausible total that wrapped
+/// into a small one would admit unbounded growth.
+fn add(counter: &AtomicUsize, by: usize) -> usize {
+    held(
+        counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |read| {
+            Some(read.saturating_add(by))
+        }),
+    )
+    .saturating_add(by)
+}
+
+/// Saturating subtract, for the same reason.
+fn take(counter: &AtomicUsize, by: usize) -> usize {
+    held(
+        counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |read| {
+            Some(read.saturating_sub(by))
+        }),
+    )
+    .saturating_sub(by)
+}
+
+/// The value an always-`Some` update read. The refusal arm cannot arise, and
+/// carries the same reading, so both are the value.
+const fn held(update: Result<usize, usize>) -> usize {
+    match update {
+        Ok(read) | Err(read) => read,
+    }
+}
+
 /// The live figures of one pinned pool.
 ///
 /// Interior-atomic so one instance can be shared
@@ -53,10 +168,14 @@ pub struct PinnedAccounting {
     peak_bytes: AtomicUsize,
     released: AtomicU64,
     refusals: AtomicU64,
+    /// The machine-wide total this pool draws on, where it shares one with
+    /// its siblings. `None` for a pool that is the only claim on its
+    /// ceiling (a host tool, a unit test).
+    share: Option<&'static PinnedShare>,
 }
 
 impl PinnedAccounting {
-    /// An idle pool.
+    /// An idle pool that shares its ceiling with nothing.
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -65,15 +184,68 @@ impl PinnedAccounting {
             peak_bytes: AtomicUsize::new(0),
             released: AtomicU64::new(0),
             refusals: AtomicU64::new(0),
+            share: None,
         }
     }
 
-    /// Publish the pool's current footprint, tracking its high-water mark.
+    /// An idle pool drawing on `share`, the machine-wide total its siblings
+    /// draw on too.
+    #[must_use]
+    pub const fn within(share: &'static PinnedShare) -> Self {
+        Self {
+            bytes: AtomicUsize::new(0),
+            entries: AtomicU64::new(0),
+            peak_bytes: AtomicUsize::new(0),
+            released: AtomicU64::new(0),
+            refusals: AtomicU64::new(0),
+            share: Some(share),
+        }
+    }
+
+    /// Publish the pool's current footprint, tracking its high-water mark and
+    /// folding the move into the machine-wide share.
     pub fn set(&self, bytes: usize, entries: u64) {
-        self.bytes.store(bytes, Ordering::Relaxed);
+        let was = self.bytes.swap(bytes, Ordering::Relaxed);
         self.entries.store(entries, Ordering::Relaxed);
         if self.peak_bytes.load(Ordering::Relaxed) < bytes {
             self.peak_bytes.store(bytes, Ordering::Relaxed);
+        }
+        if let Some(share) = self.share {
+            share.fold(was, bytes);
+        }
+    }
+
+    /// Bytes pinned by every pool *other* than this one that draws on the
+    /// same machine-wide share; zero for a pool that shares nothing.
+    ///
+    /// This is the figure a pool's own ceiling is reduced by, so that what
+    /// the machine holds in total stays inside one derived limit however
+    /// many pools there are.
+    #[must_use]
+    pub fn other_bytes(&self) -> usize {
+        self.share
+            .map_or(0, |share| share.bytes().saturating_sub(self.bytes()))
+    }
+
+    /// The divisor a pool's equal share of the machine-wide ceiling is taken
+    /// over: the pools currently holding bytes, counting this one whether it
+    /// holds any yet or not, and never zero.
+    ///
+    /// A pool about to take its first bytes has to count itself, or the last
+    /// pool to wake would compute a share the pools before it have already
+    /// spent. A pool holding nothing counts for nothing, so a machine whose
+    /// other pools are empty leaves the whole ceiling to the one that is
+    /// filling.
+    #[must_use]
+    pub fn drawing_pools(&self) -> usize {
+        let Some(share) = self.share else {
+            return 1;
+        };
+        let drawing = share.drawing_pools();
+        if self.bytes() > 0 {
+            drawing.max(1)
+        } else {
+            drawing.saturating_add(1)
         }
     }
 
@@ -284,6 +456,50 @@ mod tests {
                 .all(|total| total.payload_bytes == 0 && total.entries == 0),
             "a pinned row contributes to no reclaim class"
         );
+    }
+
+    #[test]
+    fn a_share_carries_the_total_across_its_pools_and_who_is_drawing() {
+        static SHARE: PinnedShare = PinnedShare::new();
+        let one = PinnedAccounting::within(&SHARE);
+        let two = PinnedAccounting::within(&SHARE);
+        assert_eq!((SHARE.bytes(), SHARE.drawing_pools()), (0, 0));
+
+        one.set(4096, 1);
+        two.set(1024, 1);
+        assert_eq!((SHARE.bytes(), SHARE.drawing_pools()), (5120, 2));
+        assert_eq!(one.other_bytes(), 1024, "what the sibling holds");
+        assert_eq!(two.other_bytes(), 4096);
+
+        // The peak is the machine's, taken as the total moves: a sum of the
+        // pools' own peaks would count a moment they never shared.
+        one.set(0, 0);
+        two.set(2048, 2);
+        assert_eq!((SHARE.bytes(), SHARE.drawing_pools()), (2048, 1));
+        assert_eq!(SHARE.peak_bytes(), 5120);
+        assert_eq!(one.peak_bytes(), 4096);
+
+        two.set(0, 0);
+        assert_eq!((SHARE.bytes(), SHARE.drawing_pools()), (0, 0));
+    }
+
+    #[test]
+    fn the_share_divisor_counts_a_pool_about_to_draw() {
+        // A pool taking its first bytes has to count itself, or the last pool
+        // to wake would compute a share the others have already spent.
+        static SHARE: PinnedShare = PinnedShare::new();
+        let idle = PinnedAccounting::within(&SHARE);
+        let busy = PinnedAccounting::within(&SHARE);
+        assert_eq!(idle.drawing_pools(), 1, "alone, and holding nothing");
+
+        busy.set(512, 1);
+        assert_eq!(busy.drawing_pools(), 1, "the only one holding anything");
+        assert_eq!(idle.drawing_pools(), 2, "itself and the one already there");
+
+        // A pool that shares nothing is its own whole machine.
+        let alone = PinnedAccounting::new();
+        alone.set(512, 1);
+        assert_eq!((alone.drawing_pools(), alone.other_bytes()), (1, 0));
     }
 
     #[test]

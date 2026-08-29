@@ -97,6 +97,11 @@ pub(crate) const WRITEBACK_FLOOR_BYTES: usize = RUN_BYTES;
 /// every consumer obeys, and the pressure band, which lowers the ceiling
 /// toward [`WRITEBACK_FLOOR_BYTES`] and no further.
 ///
+/// The ceiling is the **machine's**, not the volume's, and every mounted
+/// volume takes a share of it: a figure derived per volume would let a
+/// machine's volumes pin a multiple of what the machine has, which is the
+/// one thing a bound over unreclaimable memory must not do.
+///
 /// A handle with no bound is not memory-governed, exactly as a handle with no
 /// write-back host has no window: the host installs one on every writable
 /// mount it opens, so only host tools and unit tests run without one.
@@ -113,10 +118,11 @@ impl WritebackBound {
     ///
     /// # Errors
     ///
-    /// [`DriverError::NoSpace`] when the volume's share of RAM cannot hold
-    /// even [`WRITEBACK_FLOOR_BYTES`]. The mount is refused rather than
-    /// accepted and left to wedge later: a machine that cannot spare one
-    /// device transfer per volume has nothing to gain from mounting one.
+    /// [`DriverError::NoSpace`] when the machine's whole derived ceiling
+    /// cannot hold even [`WRITEBACK_FLOOR_BYTES`]. The mount is refused
+    /// rather than accepted and left to wedge later: a machine that cannot
+    /// spare one device transfer has nothing to gain from mounting a volume
+    /// that defers writes.
     pub(crate) fn new(
         budget: CacheBudget,
         gauge: &'static dyn PressureGauge,
@@ -130,11 +136,6 @@ impl WritebackBound {
             gauge,
             pinned,
         })
-    }
-
-    /// The ledger handle, so the set can publish its footprint as it changes.
-    pub(crate) fn pinned(&self) -> Arc<PinnedAccounting> {
-        Arc::clone(&self.pinned)
     }
 
     /// One gauge reading, folded once, for the operation about to run.
@@ -151,17 +152,61 @@ impl WritebackBound {
         }
     }
 
-    /// The ceiling for one operation: the band's share of the volume's
-    /// RAM-derived budget, capped by what the machine-wide reserve leaves,
-    /// and never below [`WRITEBACK_FLOOR_BYTES`].
+    /// The ceiling for one operation: this volume's share of the machine-wide
+    /// RAM-derived budget at the band last read, capped by what the volumes
+    /// already holding leave and by what the machine-wide reserve leaves, and
+    /// never below [`WRITEBACK_FLOOR_BYTES`].
     ///
-    /// The reserve cap is what makes several volumes on one small machine
-    /// share a bounded *total*: each volume's own budget is its slice of RAM,
-    /// but the free reading they all draw against is the machine's.
+    /// Three caps, because a machine's volumes have to share one total rather
+    /// than take a slab each. An equal share of the ceiling bounds the total
+    /// however many volumes write at once and whatever each of them holds —
+    /// including the run bookkeeping a delete is almost entirely made of. What
+    /// the others actually hold bounds it more tightly than an equal share
+    /// wherever they are holding less than one, so a volume writing beside
+    /// quiet ones is not throttled for company it does not have. The reserve
+    /// is the machine's own floor, which no cache may draw into.
+    ///
+    /// The floor wins over all three: a volume must be able to complete a
+    /// transaction, so a machine with more volumes than its ceiling divides
+    /// into gives each one transfer window rather than refusing them all.
     fn ceiling_bytes(&self, allowance: GrowthAllowance, held_bytes: usize) -> usize {
         let banded = self.budget.hard() >> allowance.band().depth();
+        let share = banded / self.pinned.drawing_pools();
+        let left = banded.saturating_sub(self.pinned.other_bytes());
         let reserved = held_bytes.saturating_add(allowance.remaining_bytes());
-        banded.min(reserved).max(WRITEBACK_FLOOR_BYTES)
+        share.min(left).min(reserved).max(WRITEBACK_FLOOR_BYTES)
+    }
+
+    /// Publish what the volume's transaction pins, so the operator's ledger
+    /// row and the machine-wide share its siblings decide against both carry
+    /// it.
+    ///
+    /// Derived from what the transaction actually holds, so a missed call can
+    /// leave the figure stale but never wrong.
+    pub(crate) fn publish(&self, bytes: usize, entries: u64) {
+        self.pinned.set(bytes, entries);
+    }
+
+    /// Note one pass that wrote the set out and returned its bytes.
+    pub(crate) fn note_released(&self) {
+        self.pinned.note_released();
+    }
+
+    /// Note one admission the bound cut short, so the caller had to publish
+    /// before it could stage more.
+    pub(crate) fn note_refusal(&self) {
+        self.pinned.note_refusal();
+    }
+}
+
+impl Drop for WritebackBound {
+    /// The mount is going away, so it draws on the machine-wide share no
+    /// longer. The ledger row outlives it — the host keeps a torn-down
+    /// volume's final figures readable — so the footprint is zeroed here
+    /// rather than left claiming an unmounted volume's bytes against the
+    /// volumes that are still writing.
+    fn drop(&mut self) {
+        self.publish(0, 0);
     }
 }
 
@@ -430,10 +475,6 @@ pub(crate) struct DirtySet {
     /// savepoint — whose buffers are pinned for the running operation
     /// exactly as staged ones are — needs a counter.
     saved_priors: usize,
-    /// The host's pinned-memory ledger, republished whenever the count
-    /// changes so an operator can see a volume's unwritten bytes. `None` for
-    /// a handle the host has not bounded.
-    pinned: Option<Arc<PinnedAccounting>>,
 }
 
 impl DirtySet {
@@ -445,18 +486,11 @@ impl DirtySet {
             savepoint: None,
             block_size,
             saved_priors: 0,
-            pinned: None,
         }
     }
 
-    /// Publish this set's footprint through the host's pinned ledger.
-    pub(crate) fn report_to(&mut self, pinned: Arc<PinnedAccounting>) {
-        self.pinned = Some(pinned);
-        self.publish();
-    }
-
     /// Block buffers the set pins: the staged ones plus the savepoint's.
-    fn held(&self) -> usize {
+    pub(crate) fn held(&self) -> usize {
         self.entries.len().saturating_add(self.saved_priors)
     }
 
@@ -465,30 +499,6 @@ impl DirtySet {
     pub(crate) fn pinned_bytes(&self) -> usize {
         self.held()
             .saturating_mul(self.block_size.saturating_add(MAP_ENTRY_OVERHEAD))
-    }
-
-    /// Republish the footprint after a change to what is held. Derived from
-    /// what the set actually holds, so a missed call can leave the ledger
-    /// stale but never wrong.
-    fn publish(&self) {
-        if let Some(pinned) = self.pinned.as_ref() {
-            pinned.set(self.pinned_bytes(), self.held() as u64);
-        }
-    }
-
-    /// Note one pass that wrote the set out and returned its bytes.
-    pub(crate) fn note_released(&self) {
-        if let Some(pinned) = self.pinned.as_ref() {
-            pinned.note_released();
-        }
-    }
-
-    /// Note one admission the bound cut short, so the caller had to publish
-    /// before it could stage more.
-    pub(crate) fn note_refusal(&self) {
-        if let Some(pinned) = self.pinned.as_ref() {
-            pinned.note_refusal();
-        }
     }
 
     /// Start recording an operation's changes so they can be undone alone.
@@ -519,7 +529,6 @@ impl DirtySet {
                 self.entries.insert((prior.phase, phys), prior.bytes);
             }
         }
-        self.publish();
     }
 
     /// Forget the savepoint, wiping the versions it held.
@@ -532,7 +541,6 @@ impl DirtySet {
             let mut bytes = prior.bytes;
             bytes.zeroize();
         }
-        self.publish();
     }
 
     /// Move `phys` as it stands into the running operation's savepoint, the
@@ -601,7 +609,6 @@ impl DirtySet {
             .map_err(|_| DriverError::NoSpace)?;
         held.extend_from_slice(block);
         self.entries.insert((phase, phys), held);
-        self.publish();
         Ok(())
     }
 
@@ -803,7 +810,6 @@ impl DirtySet {
             }
             at = at.saturating_add(1);
         }
-        self.publish();
     }
 
     /// Drop every block of `start..start + len` the set holds: their bytes name
@@ -831,7 +837,6 @@ impl DirtySet {
                 }
             }
         }
-        self.publish();
     }
 
     /// Drop and wipe every block in one ordering phase.
@@ -843,7 +848,6 @@ impl DirtySet {
                 bytes.zeroize();
             }
         }
-        self.publish();
     }
 
     /// Drop and wipe every staged block.
@@ -852,7 +856,6 @@ impl DirtySet {
         while let Some((_, mut bytes)) = self.entries.pop_first() {
             bytes.zeroize();
         }
-        self.publish();
     }
 
     /// Blocks currently staged.
@@ -1199,9 +1202,9 @@ mod tests {
 
     #[test]
     fn a_machine_too_small_for_one_transfer_is_refused_a_bound() {
-        // A volume whose share of RAM cannot hold one coalesced transfer would
-        // commit after almost every record: the mount is refused rather than
-        // accepted and left to wedge.
+        // A machine whose whole ceiling cannot hold one coalesced transfer
+        // would commit after almost every record: the mount is refused rather
+        // than accepted and left to wedge.
         let short = CacheBudget::from_backing(WRITEBACK_FLOOR_BYTES * 16 - 16);
         assert!(short.hard() < WRITEBACK_FLOOR_BYTES);
         assert_eq!(
@@ -1228,10 +1231,10 @@ mod tests {
 
     #[test]
     fn the_machine_wide_reserve_caps_the_ceiling_however_large_the_budget() {
-        // Each volume's budget is its own slice of RAM, but the free reading
-        // they all draw against is the machine's — which is what makes several
-        // volumes on one small machine share a bounded total instead of each
-        // taking a slab.
+        // The machine's own reserve is the last cap, below the share and below
+        // what the other volumes leave: no cache may draw into it, so a volume
+        // on a machine with no headroom left keeps only the floor it needs to
+        // finish a transaction.
         struct Starved;
         impl tairix_reclaim::FreeMemorySource for Starved {
             fn free_bytes(&self) -> usize {
@@ -1259,30 +1262,22 @@ mod tests {
     }
 
     #[test]
-    fn the_set_reports_its_pinned_bytes_through_the_hosts_ledger() {
-        let pinned = Arc::new(PinnedAccounting::new());
+    fn the_sets_pinned_figure_follows_what_it_holds() {
         let mut set = DirtySet::new(BS);
-        set.report_to(Arc::clone(&pinned));
-        assert_eq!(pinned.bytes(), 0);
+        assert_eq!((set.pinned_bytes(), set.held()), (0, 0));
 
         set.stage(WritePhase::BeforeBarrier, 4, &block(1))
             .expect("stage");
         set.stage(WritePhase::BeforeBarrier, 5, &block(2))
             .expect("stage");
         let per_block = BS + MAP_ENTRY_OVERHEAD;
-        assert_eq!(set.pinned_bytes(), 2 * per_block);
-        assert_eq!((pinned.bytes(), pinned.entries()), (2 * per_block, 2));
+        assert_eq!((set.pinned_bytes(), set.held()), (2 * per_block, 2));
 
         let _ = requests(&mut set, WritePhase::BeforeBarrier, WIDE);
         assert_eq!(
-            (pinned.bytes(), pinned.entries()),
+            (set.pinned_bytes(), set.held()),
             (0, 0),
             "a drained set pins nothing"
-        );
-        assert_eq!(
-            pinned.peak_bytes(),
-            2 * per_block,
-            "the high-water mark survives the drain"
         );
     }
 
@@ -1291,9 +1286,7 @@ mod tests {
         // An operation's savepoint holds the version a failure unwinds to, so
         // its bytes are as unavailable to the machine as the staged ones and
         // are counted with them.
-        let pinned = Arc::new(PinnedAccounting::new());
         let mut set = DirtySet::new(BS);
-        set.report_to(Arc::clone(&pinned));
         set.begin_operation();
         set.stage(WritePhase::BeforeBarrier, 7, &block(1))
             .expect("stage");
@@ -1303,12 +1296,81 @@ mod tests {
         set.stage(WritePhase::BeforeBarrier, 7, &block(2))
             .expect("rewrite");
         assert_eq!(
-            pinned.entries(),
+            set.held(),
             2,
             "the prior version and the new one are both held"
         );
         set.end_operation();
-        assert_eq!(pinned.entries(), 1, "the undo copy goes with the operation");
+        assert_eq!(set.held(), 1, "the undo copy goes with the operation");
+    }
+
+    #[test]
+    fn volumes_sharing_a_machine_divide_one_ceiling_rather_than_taking_one_each() {
+        // A per-volume ceiling would let a machine's volumes pin a multiple of
+        // what the machine has, and pinned bytes are exactly the bytes nothing
+        // can reclaim. Each volume takes a share instead.
+        let share: &'static tairix_reclaim::PinnedShare =
+            alloc::boxed::Box::leak(alloc::boxed::Box::new(tairix_reclaim::PinnedShare::new()));
+        let bound = |slot: &Arc<PinnedAccounting>| {
+            WritebackBound::new(
+                CacheBudget::from_backing(AMPLE_BACKING),
+                gauge(PressureBand::Normal),
+                Arc::clone(slot),
+            )
+            .expect("the machine bounds a volume")
+        };
+        let whole = CacheBudget::from_backing(AMPLE_BACKING).hard();
+
+        let alone = Arc::new(PinnedAccounting::within(share));
+        let alone_bound = bound(&alone);
+        assert_eq!(
+            alone_bound.reading(0).ceiling,
+            whole,
+            "one volume drawing on the machine has the whole ceiling"
+        );
+
+        // Four volumes writing at once take a quarter each, so the machine
+        // holds one ceiling however many of them there are.
+        let slots: alloc::vec::Vec<Arc<PinnedAccounting>> = (0..4)
+            .map(|_| Arc::new(PinnedAccounting::within(share)))
+            .collect();
+        let bounds: alloc::vec::Vec<WritebackBound> = slots.iter().map(bound).collect();
+        for slot in &slots {
+            slot.set(1, 1);
+        }
+        for held in &bounds {
+            assert_eq!(held.reading(1).ceiling, whole / 4);
+        }
+
+        // The mount going away gives its share back.
+        drop(bounds);
+        assert_eq!(share.bytes(), 0, "a torn-down mount draws nothing");
+        assert_eq!(alone_bound.reading(0).ceiling, whole);
+
+        // A volume holding more than an equal share leaves its sibling only
+        // what is left, which is tighter than the share itself — so a volume
+        // whose neighbour is quiet is not throttled for company it does not
+        // have, and one whose neighbour is full is.
+        let pair: &'static tairix_reclaim::PinnedShare =
+            alloc::boxed::Box::leak(alloc::boxed::Box::new(tairix_reclaim::PinnedShare::new()));
+        let hog = Arc::new(PinnedAccounting::within(pair));
+        let beside = Arc::new(PinnedAccounting::within(pair));
+        let _hog_bound = bound(&hog);
+        let beside_bound = bound(&beside);
+        beside.set(1, 1);
+        hog.set(1, 1);
+        assert_eq!(
+            beside_bound.reading(1).ceiling,
+            whole / 2,
+            "two volumes drawing, half the machine each"
+        );
+        hog.set(3 * whole / 4, 1);
+        assert_eq!(beside_bound.reading(1).ceiling, whole / 4);
+
+        // A volume holding nothing counts for nothing, so a machine whose other
+        // volumes are empty leaves the whole ceiling to the one that is writing.
+        hog.set(0, 0);
+        assert_eq!(beside_bound.reading(1).ceiling, whole);
     }
 
     #[test]

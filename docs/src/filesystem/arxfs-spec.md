@@ -1594,10 +1594,12 @@ staged future work; see §18.)*
 
 *Stage 17 — in progress. The dirty block set, commit barrier, run coalescer,
 allocation-map integration, the commit scheduler, the host's write-back expiry
-timer, and the RAM-derived bound with its back-pressure are implemented, so
-batching is live on a mounted volume and bounded in content, in time, and in
-memory; the on-hardware acceptance measurement is not yet taken. The staged
-design is `plans/ARXFS-WRITEBACK.md`.*
+timer, and the machine-wide bound with its back-pressure are implemented and
+accepted on the host, so batching is live on a mounted volume and bounded in
+content, in time, and in memory — across a machine's volumes, not per volume.
+The one item outstanding is the on-metal Pi 4 SD throughput figure, which needs
+the board; its procedure is fixed in `plans/ARXFS-WRITEBACK.md` §8. The staged
+design is that same plan.*
 
 **Commit ordering.** A commit drains every authoritative dirty block *except*
 the superblock slot, issues one `Block::flush()` barrier, then writes the slot.
@@ -1748,11 +1750,22 @@ else, so it can only be written out, never dropped. It is therefore not
 admitted through the reclaim classification gate, whose contract is
 droppability, and nothing may shrink it behind the driver's back. What bounds
 it instead is a byte **ceiling** derived from the RAM the host discovered — a
-documented fraction of it per volume, never a hand-picked constant — capped by
-the machine-wide reserve floor every consumer obeys, which is what makes
-several volumes on one small machine share a bounded total rather than each
-taking a slab. Reaching the ceiling publishes the transaction, so a writer that
-outruns the device waits for real I/O instead of growing.
+documented fraction of it, never a hand-picked constant. Reaching the ceiling
+publishes the transaction, so a writer that outruns the device waits for real
+I/O instead of growing.
+
+That ceiling is the **machine's**, and its mounted volumes share it: a figure
+derived per volume is a multiple of the machine as soon as the machine has
+several volumes, which for memory nothing can reclaim is exactly the outcome
+§26.7 forbids. A volume may hold an equal share of the ceiling, capped further
+by what the volumes already holding leave and by the machine-wide reserve floor
+every consumer obeys. A volume holding nothing counts for nothing, so a
+machine whose other volumes are empty leaves the whole ceiling to the one that
+is writing, and a single volume is bounded exactly as it would be alone. The
+forward-progress floor below wins over all three caps: a machine with more
+volumes than its ceiling divides into gives each one transfer window rather
+than refusing them all, because a volume that cannot complete a transaction is
+worse than a machine that holds a little more.
 
 The ceiling counts the transaction's **run bookkeeping** alongside its staged
 blocks, because both are pinned on the same terms — only publishing returns
@@ -1766,9 +1779,9 @@ Rising memory pressure lowers that ceiling and shortens the dirty-age window,
 band by band, down to a **floor** of one coalesced device transfer and no
 further: the answer to a tightening machine is always to publish sooner, never
 to hold more and never to drop. The floor is where the cache stops paying for
-itself — below one transfer the drain cannot form a full run — so a volume
-whose share of RAM cannot reach it is refused at mount rather than accepted and
-left committing after almost every record.
+itself — below one transfer the drain cannot form a full run — so a machine
+whose ceiling cannot reach it refuses the mount rather than accepting it and
+leaving it to commit after almost every record.
 
 Forward progress is independent of the ceiling. The only operation whose staged
 bytes scale with a caller's argument is a file write, and it is the one the
@@ -1791,6 +1804,10 @@ volume's unwritten data is visible in the System Information cache-ledger
 export — under its own class, which the per-class reclaim totals drop by
 construction, because counting memory that can only be written out as
 reclaimable headroom would stall reclaim waiting for memory nothing can free.
+The figure published is the whole of what the transaction pins, the run
+bookkeeping included, at each point a decision is taken against it: the same
+figure the ceiling governs, because it is also the figure the *other* volumes'
+share of the machine is computed against.
 
 ---
 

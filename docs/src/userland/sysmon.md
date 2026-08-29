@@ -179,8 +179,9 @@ drawn in their own colour, so structure reads without hunting.
   One row kind in that breakdown is *not* reclaimable, and says so in its
   `class` column: `pinned` names memory the model measures but can never
   take, because it exists nowhere else and can only be written out. A
-  mounted volume's unwritten filesystem blocks
-  (`arxfs.writeback`, `plans/ARXFS-WRITEBACK.md`) are the standing example.
+  mounted volume's open transaction — its unwritten filesystem blocks and the
+  run bookkeeping pinned with them (`arxfs.writeback`,
+  `plans/ARXFS-WRITEBACK.md`) — is the standing example.
   Such a row deliberately contributes to no class total above — a class total
   answers "how much could pressure reclaim", and the answer for these bytes
   is none of it — and it carries no hit ratio, because nothing looks an entry

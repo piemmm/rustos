@@ -500,11 +500,9 @@ else, so it can only be written out, never dropped. The set is therefore not
 admitted through the reclaim classification gate — that gate's contract is
 droppability — and nothing may shrink it behind the driver's back. What bounds
 it is a byte ceiling derived from the RAM the host discovered
-(`ARXFS::with_writeback_bound`), capped by the machine-wide reserve floor every
-consumer obeys, which is what keeps several volumes on one small machine to a
-bounded total rather than each taking a slab. Reaching the ceiling publishes
-the transaction, so a writer that outruns the device waits for real I/O instead
-of growing. The ceiling counts the transaction's run bookkeeping with its staged
+(`ARXFS::with_writeback_bound`). Reaching the ceiling publishes the
+transaction, so a writer that outruns the device waits for real I/O instead of
+growing. The ceiling counts the transaction's run bookkeeping with its staged
 blocks, because a free holds almost all of its memory in the runs and dirties a
 spine's worth of blocks whatever the file's extent count: over the blocks alone
 it would not bound a delete at all. Measured, deleting a maximally fragmented
@@ -512,12 +510,25 @@ file holds 88 600 bytes at 1 200 extents and 110 368 at 4 800, where freeing it
 inside one transaction holds 448 448 and grows with the file
 (`tests/bounded_iteration.rs`).
 
+The ceiling is the **machine's**, and the mounted volumes share it
+(`tairix_reclaim::PinnedShare`, one instance the host installs on every
+volume's pinned ledger): a volume may hold an equal share of it, capped further
+by what the volumes already holding leave and by the machine-wide reserve floor
+every consumer obeys. A figure derived per volume is a multiple of the machine
+as soon as the machine has several volumes, and these are the bytes nothing can
+reclaim. A volume holding nothing counts for nothing, so a machine whose other
+volumes are empty leaves the whole ceiling to the one that is writing, and one
+volume is bounded exactly as it would be alone. Measured, four 100 TiB volumes writing at
+once peak together at 4 195 744 bytes against a 4 194 304-byte machine ceiling,
+where a per-volume ceiling let the same four reach 8 670 016
+(`tests/write_amplification.rs`).
+
 Rising memory pressure lowers that ceiling and halves the dirty-age window band
 by band, down to one coalesced device transfer (`RUN_BYTES`) and no further:
 the answer to a tightening machine is always to publish sooner, never to hold
 more and never to drop. Below that floor the drain could not form a full run, so
-a volume whose share of RAM cannot reach it is refused at mount rather than
-accepted and left committing after almost every record.
+a machine whose ceiling cannot reach it refuses the mount rather than accepting
+it and leaving it to commit after almost every record.
 
 Forward progress does not depend on the ceiling. The only operation whose staged
 bytes scale with a caller's argument is a file write, and it is the one the bound
@@ -692,7 +703,18 @@ commit step across every representative transaction** (create, write, truncate,
 remove, reflink, scrub, check, trim, health) — each faulted at every
 write-budget cut-off, the re-opened volume always mounting on a whole
 transaction boundary with the effect fully present or fully absent and the
-witness file never lost; and a **corruption-injection suite** that wounds each
+witness file never lost. That sweep runs in **both commit shapes** from one
+body: a transaction per operation, and a *batch* of three operations sharing
+one, where every write count leaves either all of the batch or none (run
+unbatched, that assertion fails, so the sweep discriminates the shape rather
+than merely passing under it). Two further cases hold the batched commit: a
+power loss straight after the commit that publishes a batch, over every
+combination of the slot pair a volatile device cache may keep — the primary
+copy selects the batch and when it lands every operation in it is *readable*,
+because every block its root names crossed the one barrier first — and a batch
+the ceiling forces out mid-way, after which a crash keeps no more than the
+caller was told was written. Alongside them is a **corruption-injection suite**
+that wounds each
 on-disk structure class (superblock slot, transaction root, the inode / extent
 / chunk / reverse-reference B-trees, a directory block, the scrub-progress and
 health-baseline records, and each data-integrity layer) in **one** and in
@@ -740,6 +762,16 @@ band pins less and publishes more often than an unpressured one; the smallest
 machine a volume may be mounted on — one transfer window per volume — still
 completes the same write, and does so with a hundred tebibytes attached at both
 block sizes. A read-only mount pins nothing at all.
+
+It also holds the **combined floor**: four 100 TiB volumes mounted on one
+machine, each advancing a slice in turn so all of them are holding staged bytes
+while the others decide what they may stage. The bytes pinned across every
+volume at once stay inside the machine's one derived ceiling, each volume's
+payload reads back byte-exact, and the bound bites on every volume. The
+machine-wide peak is taken as the shared total moves rather than summed from
+per-volume peaks the volumes never reached together, and the case is run both
+on a machine whose ceiling divides into shares above one device transfer and on
+one whose shares fall to the forward-progress floor.
 
 The **pending-delete tests** hold the freeing-across-transactions contract: a
 delete of a file with more extents than one transaction may hold publishes the

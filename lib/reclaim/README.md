@@ -44,6 +44,18 @@ that enforces all of it.
   spelled differently. A sampled record deliberately leaves its origin
   unset: whoever publishes it stamps that from an attested identity, so a
   process cannot present its own figures as measured ones.
+- `pinned` — the **un**reclaimable side. A pool holding the only copy of
+  bytes the medium does not have yet (a filesystem's dirty block set) can be
+  written out but never dropped, so it is deliberately not admitted through
+  the `classify` gate, whose whole contract is droppability.
+  `PinnedAccounting` is its footprint gauge — a pool knows its total, so
+  there is nothing to keep in step and nothing to drift — and `PinnedLedger`
+  samples that into the same wire record a reclaimable cache does, under the
+  pinned class the per-class reclaim totals drop by construction.
+  `PinnedShare` is the machine-wide total several such pools draw on, so each
+  can bound itself by its share of one machine-wide ceiling rather than by its
+  own slice of RAM: a figure derived per pool is a multiple of the machine as
+  soon as the machine has several of them.
 - `audit` — the stable `2000` / `2001` audit events a classification
   refusal or a detected ledger defect emits through `lib/log`.
 

@@ -1094,7 +1094,7 @@ impl<B: Block> ARXFS<B> {
     ///
     /// # Errors
     ///
-    /// [`DriverError::NoSpace`] when the volume's share of `backing_bytes`
+    /// [`DriverError::NoSpace`] when the ceiling derived from `backing_bytes`
     /// cannot hold one coalesced device transfer. The mount is refused here
     /// rather than accepted and left to wedge later.
     pub fn with_writeback_bound(
@@ -1103,17 +1103,20 @@ impl<B: Block> ARXFS<B> {
         gauge: &'static dyn PressureGauge,
         pinned: Arc<PinnedAccounting>,
     ) -> Result<Self, DriverError> {
-        let bound = WritebackBound::new(CacheBudget::from_backing(backing_bytes), gauge, pinned)?;
-        self.dirty.report_to(bound.pinned());
-        self.bound = Some(bound);
+        self.bound = Some(WritebackBound::new(
+            CacheBudget::from_backing(backing_bytes),
+            gauge,
+            pinned,
+        )?);
+        self.sample_pinned();
         Ok(self)
     }
 
-    /// Unwritten sealed-block bytes the open transaction holds, published
-    /// through the host's ledger as they change.
+    /// Bytes the open transaction pins, published through the host's ledger
+    /// as they change.
     #[must_use]
     pub fn writeback_pinned_bytes(&self) -> usize {
-        self.dirty.pinned_bytes()
+        self.transaction_pinned().0
     }
 
     /// Publish anything the open transaction still holds and consume the
@@ -1619,7 +1622,7 @@ impl<B: Block> ARXFS<B> {
         // allocator, so asking per staged block would take the global
         // frame-allocator lock hundreds of times for an answer that cannot
         // change inside one operation.
-        let held = self.transaction_pinned_bytes();
+        let held = self.sample_pinned();
         self.reading = self.bound.as_ref().map(|bound| bound.reading(held));
         if let Some(reading) = self.reading {
             self.schedule.set_band(reading.band);
@@ -1657,7 +1660,7 @@ impl<B: Block> ARXFS<B> {
             // Back-pressure: the set is pinned memory, so the only way to
             // return it is to write it out. The writer therefore pays for
             // the device I/O here rather than being allowed to grow.
-            self.dirty.note_released();
+            self.note_released();
             return self.commit();
         }
         if self.schedule.expired() || self.incompat != self.saved_txn.incompat {
@@ -1667,27 +1670,63 @@ impl<B: Block> ARXFS<B> {
         Ok(())
     }
 
-    /// Bytes the open transaction pins: the sealed blocks it has staged plus
-    /// the run bookkeeping it holds about the blocks it claimed and released.
+    /// Bytes and entries the open transaction pins: the sealed blocks it has
+    /// staged plus the run bookkeeping it holds about the blocks it claimed
+    /// and released.
     ///
     /// Both are undroppable and both are returned only by publishing, so both
     /// are what the ceiling bounds. Counting only the blocks would let a
     /// delete slip the bound: releasing a maximally fragmented file dirties a
     /// spine's worth of blocks however many extents it has, while the runs it
     /// releases grow one per extent.
-    fn transaction_pinned_bytes(&self) -> usize {
-        self.dirty
-            .pinned_bytes()
-            .saturating_add(self.allocator().map_or(0, Allocator::txn_pinned_bytes))
+    fn transaction_pinned(&self) -> (usize, u64) {
+        let (runs_bytes, runs) = self.allocator().map_or((0, 0), Allocator::txn_pinned);
+        (
+            self.dirty.pinned_bytes().saturating_add(runs_bytes),
+            (self.dirty.held() as u64).saturating_add(runs),
+        )
+    }
+
+    /// Sample what the transaction pins, publishing the sample as it goes,
+    /// and report the byte figure.
+    ///
+    /// Publishing here rather than on every change to the set puts the figure
+    /// on the ledger at each point a decision is taken against it — which is
+    /// what the machine-wide share the *other* volumes decide against has to
+    /// be fresh for. Between two such points a volume can under-report by the
+    /// one record it is in the middle of, never by more.
+    fn sample_pinned(&self) -> usize {
+        let (bytes, entries) = self.transaction_pinned();
+        if let Some(bound) = self.bound.as_ref() {
+            bound.publish(bytes, entries);
+        }
+        bytes
+    }
+
+    /// Note one pass that wrote the transaction out and returned its bytes.
+    fn note_released(&self) {
+        if let Some(bound) = self.bound.as_ref() {
+            bound.note_released();
+        }
+    }
+
+    /// Note one admission the bound cut short, so the caller had to publish
+    /// before it could stage more.
+    fn note_refusal(&self) {
+        if let Some(bound) = self.bound.as_ref() {
+            bound.note_refusal();
+        }
     }
 
     /// Whether the open transaction has reached the ceiling this operation
     /// read, so it must be published before another joins it.
     ///
+    /// Sampling the figure publishes it, so every decision taken against the
+    /// ceiling also refreshes what the machine's other volumes decide against.
     /// A handle the host has not bounded has no ceiling to reach.
     fn writeback_full(&self) -> bool {
-        self.reading
-            .is_some_and(|reading| self.transaction_pinned_bytes() >= reading.ceiling)
+        let held = self.sample_pinned();
+        self.reading.is_some_and(|reading| held >= reading.ceiling)
     }
 
     /// Publish the open transaction, if there is one, before an operation that
@@ -1766,6 +1805,7 @@ impl<B: Block> ARXFS<B> {
             // blocks that went with it.
             self.clear_op_state();
             self.dirty.end_operation();
+            self.sample_pinned();
             return;
         }
         self.release_op_state();
@@ -1778,6 +1818,7 @@ impl<B: Block> ARXFS<B> {
             cache.purge();
         }
         self.settle_transaction();
+        self.sample_pinned();
     }
 
     /// Close the transaction's bookkeeping once nothing is left in it, so a
@@ -1813,6 +1854,7 @@ impl<B: Block> ARXFS<B> {
             cache.purge();
         }
         self.read_only |= acknowledged;
+        self.sample_pinned();
     }
 
     /// Undo the running operation's map marks and private-block bookkeeping.
@@ -2008,6 +2050,7 @@ impl<B: Block> ARXFS<B> {
         for (start, len) in freed.iter() {
             self.enqueue_discard_run(start, len);
         }
+        self.sample_pinned();
     }
 
     /// Queue a now-free run for a later device discard ([`Self::trim`]).
@@ -3498,7 +3541,7 @@ impl<B: Block> ARXFS<B> {
                 break;
             }
             if freed && self.writeback_full() {
-                self.dirty.note_refusal();
+                self.note_refusal();
                 return Ok(false);
             }
             let cut = keep.max(start);
@@ -3911,7 +3954,7 @@ impl<B: Block> ARXFS<B> {
         let mut blk = [0u8; MAX_BLOCK_SIZE];
         while done < data.len() {
             if length == WriteLength::MayBeShort && done > 0 && self.writeback_full() {
-                self.dirty.note_refusal();
+                self.note_refusal();
                 break;
             }
             let bi = pos / cap;

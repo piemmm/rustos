@@ -38,7 +38,8 @@ use tairix_abi::DriverError;
 use tairix_drv_fs_arxfs::{EntropySource, VolumeKey, ARXFS, RUN_BYTES, VOLUME_KEY_LEN};
 use tairix_fuzzseed::Lcg;
 use tairix_reclaim::{
-    PinnedAccounting, PinnedLedger, PressureBand, ReclaimOwner, ReportedPressure,
+    CacheBudget, FreeMemorySource, MemoryPressure, PinnedAccounting, PinnedLedger, PinnedShare,
+    PressureBand, ReclaimOwner, ReportedPressure,
 };
 
 /// One command the driver issued to the device, in issue order.
@@ -1339,4 +1340,122 @@ fn a_read_only_mount_pins_nothing() {
     );
     assert_eq!(fs.writeback_pinned_bytes(), 0);
     assert_eq!((pinned.bytes(), pinned.entries()), (0, 0));
+}
+
+// ---------------------------------------------------------------------------
+// The combined floor: several 100 TiB volumes mounted and writing at once on
+// one small machine — the worst case every storage design is held to.
+// ---------------------------------------------------------------------------
+
+/// Volumes the combined-floor case mounts, writes to, and holds dirty at
+/// once. Enough that a per-volume ceiling would let them pin a multiple of
+/// the machine.
+const FLOOR_VOLUMES: usize = 4;
+
+/// A machine whose free reading falls as its mounted volumes pin bytes.
+///
+/// This is the kernel's own gauge source in miniature: a staged block is a
+/// real allocation, so the frame allocator loses the free frame while the
+/// block is pinned, and every volume decides its ceiling against that one
+/// shared reading.
+struct Machine {
+    total: usize,
+    share: &'static PinnedShare,
+}
+
+impl FreeMemorySource for Machine {
+    fn free_bytes(&self) -> usize {
+        self.total.saturating_sub(self.share.bytes())
+    }
+
+    fn total_bytes(&self) -> usize {
+        self.total
+    }
+}
+
+/// Several 100 TiB volumes, mounted and writing at once, share one machine's
+/// bounded dirty total rather than each taking its own slab of it: the bytes
+/// pinned across every volume *at once* stay inside the machine's one derived
+/// ceiling, every volume's payload lands byte-exact, and nothing panics or
+/// spins.
+///
+/// The volumes advance a slice at a time in turn, so each is holding what it
+/// has staged while the others decide what they may stage — which is the state
+/// a per-volume ceiling gets wrong and the state a machine actually has to
+/// survive. Both machine sizes matter: the larger divides into shares well
+/// above one device transfer, so the shared ceiling is what bounds the total;
+/// the smaller divides into shares below one, so every volume takes the
+/// forward-progress floor and the total is the floor's — the most a machine
+/// can be asked to give up if each of its volumes is to be able to finish a
+/// transaction at all.
+#[test]
+fn several_hundred_tebibyte_volumes_share_one_machines_dirty_total() {
+    for machine_bytes in [16 * SMALL_MACHINE_BYTES, SMALL_MACHINE_BYTES] {
+        let share: &'static PinnedShare = Box::leak(Box::new(PinnedShare::new()));
+        let machine: &'static Machine = Box::leak(Box::new(Machine {
+            total: machine_bytes,
+            share,
+        }));
+        let gauge: &'static MemoryPressure = Box::leak(Box::new(MemoryPressure::over(machine)));
+
+        let slots: Vec<Arc<PinnedAccounting>> = (0..FLOOR_VOLUMES)
+            .map(|_| Arc::new(PinnedAccounting::within(share)))
+            .collect();
+        let mut mounted = Vec::new();
+        for slot in &slots {
+            let (fs, _) = volume(512, FLOOR_DEVICE_BYTES, Publish::Batched);
+            let mut fs = fs
+                .with_writeback_bound(machine_bytes, gauge, Arc::clone(slot))
+                .expect("the machine bounds every volume it mounts");
+            let root = fs.root();
+            fs.create(root, FILE, NodeKind::RegularFile)
+                .expect("create");
+            mounted.push(fs);
+        }
+
+        let body = payload(OUTRUN_BYTES);
+        let mut done = [0usize; FLOOR_VOLUMES];
+        while done.iter().any(|written| *written < body.len()) {
+            for (index, fs) in mounted.iter_mut().enumerate() {
+                let from = done[index];
+                if from >= body.len() {
+                    continue;
+                }
+                let slice = &body[from..body.len().min(from + CHUNK_BYTES)];
+                let root = fs.root();
+                let at = u64::try_from(from).expect("an offset fits a u64");
+                let written = fs
+                    .write_at(root, FILE, at, slice)
+                    .expect("a bounded write still stores bytes");
+                assert!(written > 0, "the bound must never stall a writer");
+                done[index] += written;
+            }
+        }
+
+        let peak = share.peak_bytes();
+        let ceiling = CacheBudget::from_backing(machine_bytes).hard();
+        // One record may be in flight per volume above its share: the write
+        // path always stores at least one before the bound can cut it short.
+        let each = (ceiling / FLOOR_VOLUMES).max(RUN_BYTES) + RUN_BYTES;
+        assert!(
+            peak <= FLOOR_VOLUMES * each,
+            "{FLOOR_VOLUMES} volumes pinned {peak} bytes at once against a \
+             {ceiling}-byte machine-wide ceiling on a {machine_bytes}-byte \
+             machine: a machine's volumes must share one bounded total, not \
+             take a slab each"
+        );
+        assert!(
+            slots.iter().all(|slot| slot.released() > 0),
+            "the shared bound bit on every volume and forced it to write out"
+        );
+
+        for (index, fs) in mounted.iter_mut().enumerate() {
+            fs.flush().expect("publish the tail");
+            let file = fs.lookup(fs.root(), FILE).expect("the file");
+            let mut read = vec![0u8; body.len()];
+            assert_eq!(fs.read_at(file, 0, &mut read), Ok(body.len()));
+            assert_eq!(read, body, "volume {index} lost or reordered a byte");
+        }
+        assert_eq!(share.bytes(), 0, "a published volume pins nothing");
+    }
 }

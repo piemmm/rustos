@@ -47,8 +47,8 @@ no-deferral rule), ahead of everything below it.
 | WB5 | The bound and memory pressure | `ARXFS-WRITEBACK.md` | 17 | WB1 | **done** |
 | D28 | Extent-based deferred freeing (defect `OPEN-DEFECTS.md` D28) | `OPEN-DEFECTS.md` | — | — | **done** |
 | D67 | Incremental, resumable freeing (defect `OPEN-DEFECTS.md` D67) | `OPEN-DEFECTS.md` | — | D28 | **done** |
-| WB6 | Hardware acceptance + docs | `ARXFS-WRITEBACK.md` | 17 | WB2–WB5 | **next** |
-| M2 | Bounded passes: scrub, discard sweep, health (D-M2/3/4) | `ARXFS-MAINTENANCE.md` | 18 | A2, M1 | planned |
+| WB6 | Acceptance + docs (the on-metal throughput figure alone is open) | `ARXFS-WRITEBACK.md` | 17 | WB2–WB5 | **done, on metal** |
+| M2 | Bounded passes: scrub, discard sweep, health (D-M2/3/4) | `ARXFS-MAINTENANCE.md` | 18 | A2, M1 | **next** |
 | M3 | The maintenance scheduler | `ARXFS-MAINTENANCE.md` | 18 | M0, M2 | planned |
 | M4 | The `FilesystemMaintenance` driver-ABI facet | `ARXFS-MAINTENANCE.md` | 18 | M3 | planned |
 | M5 | The maintenance runner | `ARXFS-MAINTENANCE.md` | 18 | M4, WB1 | planned |
@@ -62,6 +62,11 @@ no-deferral rule), ahead of everything below it.
 | N1 | Snapshots | `ARXFS-SNAPSHOT.md` | 20 | WB1, A0 | planned |
 | N2 | Snapshot send/receive carries the attribute set | `ARXFS-METADATA.md` §10 | 16/20 | N1, P3 | planned |
 | F1 | FEC and multi-device redundancy (FEC0–FEC20) | `ARXFS-FEC.md` | 21 | WB1, M0 | planned |
+
+`done, on metal` is `done` for everything a host gate can observe, with one
+acceptance artefact that needs the board and is recorded as an on-metal item
+in the owning plan — the convention `plans/PI.md` already uses. It blocks
+nothing: no later item depends on the figure.
 
 **Blocked, and honestly so — not in this ledger's scope.** Two items in
 `ARXFS-METADATA.md` §10 cannot be completed by ARXFS work and stay open with
@@ -163,6 +168,18 @@ their reason recorded there, not here:
   read-only mount wrote to its device through scrub's unguarded copy-repair
   (D64), and reading that code found two more read-only writes on the same
   path. Neither stage needed the barrier.
+- **WB6 found the bound's one real gap, and fixing it was the item.** The
+  ceiling was derived *per volume* — a sixteenth of discovered RAM each — so
+  four mounted volumes writing at once pinned twice the machine's own ceiling
+  and eight would pin half the machine, in the one kind of memory nothing can
+  reclaim; the machine-wide reserve the plan credited with bounding them does
+  not bite until free memory has fallen to a sixty-fourth of RAM, which is an
+  emergency floor rather than a bound. The derived figure is now the machine's
+  and its volumes share it. WB6's other half was crash injection across the
+  *batched* commit shape: the existing sweeps replayed one transaction per
+  operation, so "a batch is one transaction" — the stronger claim batching
+  makes — had never been faulted. The on-metal Pi 4 SD throughput figure is the
+  one piece a host gate cannot produce and stays open as an on-metal item.
 - **M2 before M3, because a scheduler over broken operations is worse than
   none.** M2 makes each operation a bounded, resumable, lossless pass (over the
   reconcile state A2 bounded first). Until it lands, `scrub` is one

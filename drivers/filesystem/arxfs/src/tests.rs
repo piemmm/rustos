@@ -5016,6 +5016,27 @@ fn crash_baseline() -> alloc::vec::Vec<u8> {
     fs.into_block().expect("the volume closes").bytes()
 }
 
+/// How a volume under test publishes what its operations stage.
+#[derive(Copy, Clone)]
+enum Publish {
+    /// No write-back host, so there is no window to age a transaction against
+    /// and every operation publishes its own.
+    PerOperation,
+    /// A host whose clock the test controls, so operations join one
+    /// transaction until something closes it.
+    AsOneBatch(&'static TestWritebackHost),
+}
+
+impl Publish {
+    /// Install what the mode needs on a freshly opened handle.
+    fn apply(self, fs: ARXFS<MemBlock>) -> ARXFS<MemBlock> {
+        match self {
+            Self::PerOperation => fs,
+            Self::AsOneBatch(host) => fs.with_writeback_host(TestWritebackHost::volume(), host),
+        }
+    }
+}
+
 /// Replay one representative transaction at every commit step: cut the device
 /// off after each write count, then assert the re-opened volume always mounts
 /// on a whole-transaction boundary and never loses the witness file.
@@ -5023,8 +5044,17 @@ fn crash_baseline() -> alloc::vec::Vec<u8> {
 /// `op` performs the transaction under the write budget; `check` asserts the
 /// all-or-nothing post-condition on the re-mounted volume. The shared witness
 /// assertion (`keep` reads back intact) runs for every budget before `check`.
-fn crash_replay_each_step<Op, Check>(baseline: &[u8], max_budget: u32, mut op: Op, mut check: Check)
-where
+///
+/// `publish` decides whether each of `op`'s operations publishes its own
+/// transaction or they all join one, so the same sweep prices both commit
+/// shapes rather than a second sweep pricing the batched one.
+fn crash_replay_each_step<Op, Check>(
+    baseline: &[u8],
+    max_budget: u32,
+    publish: Publish,
+    mut op: Op,
+    mut check: Check,
+) where
     Op: FnMut(&mut ARXFS<MemBlock>),
     Check: FnMut(&mut ARXFS<MemBlock>, u32),
 {
@@ -5036,11 +5066,18 @@ where
     for budget in 0..max_budget {
         let mut dev = device(baseline.to_vec());
         dev.write_budget = Some(budget);
-        let mut fs = ARXFS::open(dev, &TEST_KEY)
-            .expect("baseline opens")
-            .with_clock(fixed_clock);
+        let mut fs = publish.apply(
+            ARXFS::open(dev, &TEST_KEY)
+                .expect("baseline opens")
+                .with_clock(fixed_clock),
+        );
         op(&mut fs);
-        let bytes = fs.into_block().expect("the volume closes").bytes();
+        // The close is inside the crash window too: a batch is published by
+        // it, and a budget that runs out during it is a power loss mid-commit.
+        // The device is read from the handle rather than taken from it,
+        // because a commit that fails does not hand the volume back.
+        let _ = FilesystemWrite::flush(&mut fs);
+        let bytes = fs.block_mut().bytes();
 
         let mut fs = ARXFS::open(device(bytes), &TEST_KEY)
             .expect("post-crash mount always succeeds on a whole-txn boundary")
@@ -5077,6 +5114,7 @@ fn crash_replay_at_every_commit_step_for_create_write_truncate() {
     crash_replay_each_step(
         &baseline,
         CRASH_BUDGET,
+        Publish::PerOperation,
         |fs| {
             let root = fs.root();
             let _ = fs.create(root, b"fresh", NodeKind::RegularFile);
@@ -5091,6 +5129,7 @@ fn crash_replay_at_every_commit_step_for_create_write_truncate() {
     crash_replay_each_step(
         &baseline,
         CRASH_BUDGET,
+        Publish::PerOperation,
         |fs| {
             let root = fs.root();
             let _ = fs.write_at(root, b"target", 0, b"freshdata");
@@ -5110,6 +5149,7 @@ fn crash_replay_at_every_commit_step_for_create_write_truncate() {
     crash_replay_each_step(
         &baseline,
         CRASH_BUDGET,
+        Publish::PerOperation,
         |fs| {
             let root = fs.root();
             let _ = fs.truncate(root, b"big", u64::from(CRASH_BS));
@@ -5141,6 +5181,7 @@ fn crash_replay_at_every_commit_step_for_remove_reflink_trim() {
     crash_replay_each_step(
         &baseline,
         CRASH_BUDGET,
+        Publish::PerOperation,
         |fs| {
             let root = fs.root();
             let _ = fs.remove(root, b"victim");
@@ -5153,6 +5194,7 @@ fn crash_replay_at_every_commit_step_for_remove_reflink_trim() {
     crash_replay_each_step(
         &baseline,
         CRASH_BUDGET,
+        Publish::PerOperation,
         |fs| {
             let root = fs.root();
             let _ = fs.reflink(root, b"src", b"clone");
@@ -5180,6 +5222,7 @@ fn crash_replay_at_every_commit_step_for_remove_reflink_trim() {
     crash_replay_each_step(
         &baseline,
         CRASH_BUDGET,
+        Publish::PerOperation,
         |fs| {
             let root = fs.root();
             let _ = fs.remove(root, b"victim");
@@ -5199,6 +5242,7 @@ fn crash_replay_at_every_commit_step_for_maintenance_passes() {
     crash_replay_each_step(
         &baseline,
         CRASH_BUDGET,
+        Publish::PerOperation,
         |fs| {
             let _ = fs.scrub(&GrantAll, &NullSink, ScrubBudget::Unlimited);
         },
@@ -5207,6 +5251,7 @@ fn crash_replay_at_every_commit_step_for_maintenance_passes() {
     crash_replay_each_step(
         &baseline,
         CRASH_BUDGET,
+        Publish::PerOperation,
         |fs| {
             let _ = fs.check(&GrantAll, &NullSink);
         },
@@ -5215,10 +5260,93 @@ fn crash_replay_at_every_commit_step_for_maintenance_passes() {
     crash_replay_each_step(
         &baseline,
         CRASH_BUDGET,
+        Publish::PerOperation,
         |fs| {
             let _ = fs.health(&GrantAll, &NullSink);
         },
         |_, _| {},
+    );
+}
+
+#[test]
+fn crash_replay_at_every_step_of_a_batch_publishes_all_of_it_or_none() {
+    // The batched commit shape: three operations join one transaction, so a
+    // power loss at any write count during it leaves either every one of them
+    // or none — a subset would mean a caller was told an operation happened
+    // that the volume then forgot while keeping a later one.
+    let baseline = crash_baseline();
+    let host = TestWritebackHost::leaked(0);
+    let implies = |a: bool, b: bool| !a || b;
+    // Whether the device let all three operations through. Where it did, the
+    // batch is one transaction and the outcome is all or nothing; where an
+    // operation was refused it was reported failed and undone and the ones
+    // after it never ran, so what survives is a prefix.
+    let all_ran = core::cell::Cell::new(false);
+    let mut nothing = 0u32;
+    let mut everything = 0u32;
+    crash_replay_each_step(
+        &baseline,
+        CRASH_BUDGET,
+        Publish::AsOneBatch(host),
+        |fs| {
+            all_ran.set(false);
+            let root = fs.root();
+            if fs.create(root, b"fresh", NodeKind::RegularFile).is_err() {
+                return;
+            }
+            if fs.write_at(root, b"target", 0, b"freshdata").is_err() {
+                return;
+            }
+            if fs.remove(root, b"victim").is_err() {
+                return;
+            }
+            all_ran.set(true);
+        },
+        |fs, budget| {
+            let root = fs.root();
+            let created = fs.lookup(root, b"fresh").is_ok();
+            let written = file_size(fs, b"target") == Some(9);
+            let removed = matches!(fs.lookup(root, b"victim"), Err(DriverError::NotFound));
+            if all_ran.get() {
+                assert!(
+                    created == written && written == removed,
+                    "a batch whose three operations all succeeded was \
+                     published in part at budget {budget}: created {created}, \
+                     written {written}, removed {removed}"
+                );
+            } else {
+                assert!(
+                    implies(written, created) && implies(removed, written),
+                    "a batch published with a hole at budget {budget}: \
+                     created {created}, written {written}, removed {removed}"
+                );
+            }
+            if written {
+                let node = fs.lookup(root, b"target").expect("target");
+                assert_eq!(
+                    read_all(fs, node, 9),
+                    b"freshdata",
+                    "torn write at budget {budget}"
+                );
+            } else {
+                assert_eq!(
+                    file_size(fs, b"target"),
+                    Some(0),
+                    "torn write at budget {budget}"
+                );
+            }
+            assert_victim_whole_or_gone(fs, budget);
+            match (created, written, removed) {
+                (false, false, false) => nothing += 1,
+                (true, true, true) => everything += 1,
+                _ => {}
+            }
+        },
+    );
+    assert!(
+        nothing > 0 && everything > 0,
+        "the sweep never straddled the commit: {nothing} steps published \
+         nothing and {everything} published the whole batch"
     );
 }
 
@@ -5553,15 +5681,17 @@ fn corruption_injection_data_block_faults_are_classified_not_repaired() {
 /// A committed volume on a device with a volatile write cache: the witness
 /// `keep` holding [`CRASH_KEEP`], an empty `new` to write to, everything on
 /// media, and the ring slot the next commit will publish.
-fn volatile_volume() -> (ARXFS<MemBlock>, u64) {
-    let mut fs = ARXFS::format(
-        MemBlock::new(CRASH_BS, CRASH_BC).with_volatile_cache(),
-        64,
-        &TEST_KEY,
-        &mut TestEntropy::new(),
-    )
-    .expect("format")
-    .with_clock(fixed_clock);
+fn volatile_volume(publish: Publish) -> (ARXFS<MemBlock>, u64) {
+    let mut fs = publish.apply(
+        ARXFS::format(
+            MemBlock::new(CRASH_BS, CRASH_BC).with_volatile_cache(),
+            64,
+            &TEST_KEY,
+            &mut TestEntropy::new(),
+        )
+        .expect("format")
+        .with_clock(fixed_clock),
+    );
     let root = fs.root();
     fs.create(root, b"keep", NodeKind::RegularFile)
         .expect("create keep");
@@ -5576,9 +5706,12 @@ fn volatile_volume() -> (ARXFS<MemBlock>, u64) {
     // mount prefers — the single write that publishes a transaction; on a ring
     // whose slots have never been written, an absent primary lets the
     // companion decide instead.
+    // A commit is what advances the ring, and under a batched handle the pad
+    // writes would otherwise all join one.
     let mut at = 0u64;
     while fs.ring_pos < RING_SLOTS {
         fs.write_at(root, b"pad", at, b"x").expect("pad");
+        FilesystemWrite::flush(&mut fs).expect("pad sync");
         at += 1;
     }
     // Two syncs. The first persists the map and leaves only its clean stamp in
@@ -5605,7 +5738,7 @@ const VOLATILE_PAYLOAD: &[u8] = &[0x5A; 3 * CRASH_BS as usize + 17];
 /// the shared set and leaves only the dispensable clean stamp volatile.
 #[test]
 fn a_commit_keeps_map_pages_in_ram_until_sync() {
-    let (mut fs, slot) = volatile_volume();
+    let (mut fs, slot) = volatile_volume(Publish::PerOperation);
     let root = fs.root();
     assert_eq!(
         fs.write_at(root, b"new", 0, VOLATILE_PAYLOAD),
@@ -5638,7 +5771,7 @@ fn a_commit_keeps_map_pages_in_ram_until_sync() {
 #[test]
 fn a_power_loss_after_a_commit_leaves_prior_or_new_whatever_it_drops() {
     for kept in 0..4u8 {
-        let (mut fs, slot) = volatile_volume();
+        let (mut fs, slot) = volatile_volume(Publish::PerOperation);
         let root = fs.root();
         assert_eq!(
             fs.write_at(root, b"new", 0, VOLATILE_PAYLOAD),
@@ -5684,13 +5817,163 @@ fn a_power_loss_after_a_commit_leaves_prior_or_new_whatever_it_drops() {
     }
 }
 
+/// A power loss immediately after the commit that publishes a *batch* leaves
+/// every operation the batch carried, or none of them — and each of them
+/// readable, because every block the batch's root names crossed the one
+/// barrier before the slot that publishes them all.
+///
+/// The batch is closed by its dirty-age window rather than by a sync, because
+/// a sync's trailing barrier would commit the device cache and leave a power
+/// loss nothing to drop. That is also the close a real idle volume gets.
+#[test]
+fn a_power_loss_after_a_batchs_commit_publishes_all_of_it_or_none() {
+    for kept in 0..4u8 {
+        let host = TestWritebackHost::leaked(0);
+        let (mut fs, slot) = volatile_volume(Publish::AsOneBatch(host));
+        let root = fs.root();
+        assert_eq!(
+            fs.write_at(root, b"new", 0, VOLATILE_PAYLOAD),
+            Ok(VOLATILE_PAYLOAD.len())
+        );
+        fs.create(root, b"second", NodeKind::RegularFile)
+            .expect("create");
+        assert_eq!(
+            fs.write_at(root, b"second", 0, CRASH_KEEP),
+            Ok(CRASH_KEEP.len())
+        );
+        assert!(
+            fs.block_mut().volatile_blocks().is_empty(),
+            "the batch published before its window elapsed (kept {kept:#b})"
+        );
+        // The window elapses, so the next operation publishes the batch it
+        // joined — the whole of it, behind one barrier.
+        host.set_now(PAST_EVERY_WINDOW);
+        fs.create(root, b"tick", NodeKind::RegularFile)
+            .expect("the aged batch publishes");
+
+        let comp = ARXFS::<MemBlock>::companion(slot);
+        fs.block_mut()
+            .power_loss(|lba| (lba == slot && kept & 1 != 0) || (lba == comp && kept & 2 != 0));
+        let bytes = fs.block_mut().bytes();
+        let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, CRASH_BS, CRASH_BC), &TEST_KEY)
+            .expect("a power loss always leaves a mountable volume");
+        let root = fs.root();
+
+        let witness = fs.lookup(root, b"keep").expect("the witness survives");
+        assert_eq!(
+            read_all(&mut fs, witness, CRASH_KEEP.len()),
+            CRASH_KEEP,
+            "live data lost (kept {kept:#b})"
+        );
+
+        // The primary copy is the commit point: the batch is selected exactly
+        // when it landed, whatever became of the companion.
+        let published = kept & 1 != 0;
+        let sized = |fs: &mut ARXFS<MemBlock>, name: &[u8]| {
+            fs.lookup(fs.root(), name)
+                .and_then(|node| fs.node_info(node))
+                .map(|info| info.size)
+        };
+        if !published {
+            assert_eq!(sized(&mut fs, b"new"), Ok(0));
+            assert_eq!(sized(&mut fs, b"second"), Err(DriverError::NotFound));
+            assert_eq!(sized(&mut fs, b"tick"), Err(DriverError::NotFound));
+            continue;
+        }
+        assert_eq!(
+            sized(&mut fs, b"new"),
+            Ok(VOLATILE_PAYLOAD.len() as u64),
+            "torn batch at kept {kept:#b}"
+        );
+        assert_eq!(sized(&mut fs, b"second"), Ok(CRASH_KEEP.len() as u64));
+        assert_eq!(sized(&mut fs, b"tick"), Ok(0));
+        let new = fs.lookup(root, b"new").expect("the payload survives");
+        assert_eq!(
+            read_all(&mut fs, new, VOLATILE_PAYLOAD.len()),
+            VOLATILE_PAYLOAD,
+            "the published root names a block that never reached media \
+             (kept {kept:#b})"
+        );
+        let second = fs.lookup(root, b"second").expect("the second survives");
+        assert_eq!(read_all(&mut fs, second, CRASH_KEEP.len()), CRASH_KEEP);
+    }
+}
+
+/// A batch the write-back ceiling forces out mid-way publishes whole
+/// operations: a crash straight after keeps no more than the caller was told
+/// was written, and every published byte is exact.
+#[test]
+fn a_crash_after_a_forced_commit_keeps_no_more_than_was_reported() {
+    let host = TestWritebackHost::leaked(0);
+    let mut fs = floor_bounded(fmt(CRASH_BS, CRASH_BC, 64))
+        .with_writeback_host(TestWritebackHost::volume(), host);
+    let root = fs.root();
+    fs.create(root, b"batched", NodeKind::RegularFile)
+        .expect("create");
+    FilesystemWrite::flush(&mut fs).expect("start from a published volume");
+
+    // A quarter of the ceiling per call, so several operations join the
+    // transaction before the ceiling forces it out, and an incompressible
+    // body so the write path prices a real store rather than a codec's luck.
+    let body = incompressible(4 * RUN_BYTES);
+    let slice = RUN_BYTES / 4;
+    let mut reported = 0usize;
+    let mut published = 0u64;
+    while reported < body.len() {
+        let take = slice.min(body.len() - reported);
+        let written = fs
+            .write_at(
+                root,
+                b"batched",
+                reported as u64,
+                &body[reported..reported + take],
+            )
+            .expect("a bounded write still stores bytes");
+        assert!(written > 0, "the ceiling must never stall a writer");
+        reported += written;
+        let mut crashed = reopen_device(&mut fs, CRASH_BS, CRASH_BC);
+        let node = crashed
+            .lookup(crashed.root(), b"batched")
+            .expect("the file was published with the fixture");
+        published = crashed.node_info(node).expect("stat").size;
+        if published > 0 {
+            let at = as_usize(published);
+            assert!(
+                at <= reported,
+                "a forced commit published {at} bytes against {reported} \
+                 reported written"
+            );
+            assert_eq!(
+                read_all(&mut crashed, node, at),
+                body[..at],
+                "the published prefix is not what was written"
+            );
+            break;
+        }
+    }
+    assert!(published > 0, "the ceiling never forced a commit");
+
+    // The rest of the body lands, and the whole of it reads back.
+    while reported < body.len() {
+        let written = fs
+            .write_at(root, b"batched", reported as u64, &body[reported..])
+            .expect("a bounded write still stores bytes");
+        assert!(written > 0);
+        reported += written;
+    }
+    FilesystemWrite::flush(&mut fs).expect("publish the tail");
+    let node = fs.lookup(root, b"batched").expect("the file");
+    assert_eq!(fs.node_info(node).expect("stat").size, body.len() as u64);
+    assert_eq!(read_all(&mut fs, node, body.len()), body);
+}
+
 /// A barrier that faults is a failed barrier: the slot is never written, so the
 /// transaction did not happen. The handle rolls back and a later commit
 /// publishes only its own change — a caller told a commit failed can never have
 /// its trees published behind its back.
 #[test]
 fn a_barrier_that_faults_publishes_nothing_and_leaves_no_transaction_behind() {
-    let (mut fs, slot) = volatile_volume();
+    let (mut fs, slot) = volatile_volume(Publish::PerOperation);
     let root = fs.root();
     fs.block_mut().fail_flush = true;
     assert_eq!(
@@ -5733,10 +6016,10 @@ fn a_barrier_that_faults_publishes_nothing_and_leaves_no_transaction_behind() {
 /// commit, so a half-written pair never publishes.
 #[test]
 fn a_failed_slot_write_freezes_the_handle_and_publishes_nothing() {
-    let (probe, probe_slot) = volatile_volume();
+    let (probe, probe_slot) = volatile_volume(Publish::PerOperation);
     drop(probe);
     for faulted in [probe_slot, ARXFS::<MemBlock>::companion(probe_slot)] {
-        let (mut fs, slot) = volatile_volume();
+        let (mut fs, slot) = volatile_volume(Publish::PerOperation);
         assert_eq!(slot, probe_slot, "the fixture is deterministic");
         let root = fs.root();
         let old_root = fs.root_phys;
@@ -5817,7 +6100,7 @@ fn a_failed_slot_write_freezes_the_handle_and_publishes_nothing() {
 /// each of its call sites.
 #[test]
 fn a_failed_commit_on_a_maintenance_pass_restores_the_published_roots() {
-    let (mut fs, _slot) = volatile_volume();
+    let (mut fs, _slot) = volatile_volume(Publish::PerOperation);
     let baseline = fs.health_baseline_root;
     assert_ne!(baseline, 0, "mkfs stored a baseline to supersede");
     fs.block_mut().fail_flush = true;
@@ -5853,7 +6136,7 @@ fn a_failed_commit_on_a_maintenance_pass_restores_the_published_roots() {
 /// wrote, counted to the command by the write-amplification ledger.
 #[test]
 fn the_dirty_set_holds_nothing_between_operations() {
-    let (mut fs, _slot) = volatile_volume();
+    let (mut fs, _slot) = volatile_volume(Publish::PerOperation);
     let root = fs.root();
     assert_eq!(fs.dirty.len(), 0, "a synced volume stages nothing");
     assert_eq!(
@@ -5908,7 +6191,7 @@ fn the_dirty_set_holds_nothing_between_operations() {
 /// selects the prior tree and rebuilds its map.
 #[test]
 fn the_map_turns_its_clean_stamp_dirty_durably_before_its_first_page_write() {
-    let (mut fs, slot) = volatile_volume();
+    let (mut fs, slot) = volatile_volume(Publish::PerOperation);
     let root = fs.root();
     assert!(
         fs.map_is_stamped_clean(),
@@ -5949,7 +6232,7 @@ fn the_map_turns_its_clean_stamp_dirty_durably_before_its_first_page_write() {
 fn a_failed_sync_rebuilds_every_partially_persisted_map() {
     for publish in [false, true] {
         for map_pattern in 0..4u8 {
-            let (mut fs, slot) = volatile_volume();
+            let (mut fs, slot) = volatile_volume(Publish::PerOperation);
             let old_used = fs.used_blocks();
             let old_free = fs.free_count;
             let root = fs.root();
@@ -6021,7 +6304,7 @@ fn a_failed_sync_rebuilds_every_partially_persisted_map() {
 /// that got a bit wrong would be as bad as the rebuild it avoids.
 #[test]
 fn a_refused_operation_leaves_the_allocation_map_exact_and_trusted() {
-    let (mut fs, _slot) = volatile_volume();
+    let (mut fs, _slot) = volatile_volume(Publish::PerOperation);
     let root = fs.root();
     fs.create(root, b"taken", NodeKind::RegularFile)
         .expect("create");
@@ -6070,7 +6353,7 @@ fn a_refused_operation_leaves_the_allocation_map_exact_and_trusted() {
 /// operation was refused.
 #[test]
 fn a_failed_commit_reserves_the_blocks_it_had_already_deferred_for_freeing() {
-    let (mut fs, _slot) = volatile_volume();
+    let (mut fs, _slot) = volatile_volume(Publish::PerOperation);
     let root = fs.root();
     fs.write_at(root, b"new", 0, VOLATILE_PAYLOAD)
         .expect("write");
@@ -6117,7 +6400,7 @@ fn a_failed_commit_reserves_the_blocks_it_had_already_deferred_for_freeing() {
 
 #[test]
 fn a_failed_sync_rebuilds_before_a_same_handle_check_and_write() {
-    let (mut fs, _slot) = volatile_volume();
+    let (mut fs, _slot) = volatile_volume(Publish::PerOperation);
     let root = fs.root();
     fs.write_at(root, b"new", 0, VOLATILE_PAYLOAD)
         .expect("write");
@@ -6148,7 +6431,7 @@ fn a_failed_sync_rebuilds_before_a_same_handle_check_and_write() {
 
 #[test]
 fn a_failed_sync_rebuilds_before_same_handle_growth() {
-    let (mut fs, _slot) = volatile_volume();
+    let (mut fs, _slot) = volatile_volume(Publish::PerOperation);
     let root = fs.root();
     fs.write_at(root, b"new", 0, VOLATILE_PAYLOAD)
         .expect("write");
@@ -6177,7 +6460,7 @@ fn a_failed_sync_rebuilds_before_same_handle_growth() {
 
 #[test]
 fn confirming_map_invalidation_leaves_authoritative_blocks_staged() {
-    let (mut fs, _slot) = volatile_volume();
+    let (mut fs, _slot) = volatile_volume(Publish::PerOperation);
     assert!(fs.map_is_stamped_clean());
     let authoritative = fs.map_region_start() + fs.map_region_blocks();
     let block = [0xA5; MAX_BLOCK_SIZE];

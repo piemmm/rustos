@@ -75,7 +75,7 @@ pub use model::{
     InvalidationSource, RebuildCost, ReclaimClass, ReclaimClassStats, ReclaimOwner, ReclaimRule,
     Sensitivity, MAP_ENTRY_OVERHEAD, UI_CACHE_RESERVE_BYTES,
 };
-pub use pinned::{PinnedAccounting, PinnedLedger};
+pub use pinned::{PinnedAccounting, PinnedLedger, PinnedShare};
 pub use pressure::{
     shrink_target, BandObserver, FreeMemorySource, GrowthAllowance, MemoryPressure, PressureBand,
     PressureGauge, PressureThresholds, ReportedPressure, RESERVE_DIVISOR,

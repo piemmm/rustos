@@ -1,9 +1,11 @@
 # ARXFS-WRITEBACK.md — ARXFS write-back cache, commit batching, and the commit barrier
 
-Status: **WB0–WB5 and WB-D1 done** (measurement, the dirty set and commit
-barrier, run coalescing, allocation-map integration, the commit scheduler, the
-host's write-back expiry timer, and the RAM-derived bound with its
-back-pressure); **WB6 next** and last.
+Status: **WB0–WB6 done**, save one on-metal measurement (measurement, the
+dirty set and commit barrier, run coalescing, allocation-map integration, the
+commit scheduler, the host's write-back expiry timer, the RAM-derived bound
+with its back-pressure, and the acceptance suite). The only work left in this
+plan is the on-metal Pi 4 SD throughput figure, whose procedure is the
+checklist in §8's WB6 entry; nothing in the tree waits on it.
 Binding under `AGENTS.md` and listed in its §15.18 jump-sheet.
 Primary code area: `drivers/filesystem/arxfs/`.
 Companion spec section: `docs/src/filesystem/arxfs-spec.md` §22.
@@ -18,7 +20,9 @@ single barrier that becomes affordable once commits are batched. The dirty set,
 barrier, coalescer, allocation-map integration, scheduler, the kernel timer that
 fires the window on an idle volume, and the RAM-derived bound are all present,
 so batching is live on a mounted volume and bounded in content, in time, and in
-memory; the on-hardware acceptance measurement (WB6) remains.
+memory — and bounded across a *machine's* volumes rather than per volume, which
+the acceptance suite (WB6) found it was not. The on-metal throughput figure
+remains.
 
 It adds **no** capability, **no** ABI surface, **no** second data path, and no
 mount option: the behaviour is the one production profile
@@ -157,6 +161,11 @@ stage 20), FEC commit witnesses (stage 21) — is now unblocked.
   §24.1): the byte ceiling comes from discovered RAM, the deadline from the
   device class the block seam reports. The staging-window *bound* is a fixed
   transfer bound shared with the read path, not a capacity.
+- **The ceiling is the machine's, and its volumes share it.** A figure derived
+  per volume is a multiple of the machine as soon as the machine has several
+  volumes, and a dirty block is the one kind of memory nothing can reclaim, so
+  each mounted volume takes a share of one machine-wide total rather than a
+  slab of its own.
 - **Fails closed, never panics.** A drain that faults rolls the transaction back
   and reports a typed error; it never retries in a loop and never publishes a
   partial transaction.
@@ -321,15 +330,24 @@ assembled per mount by `kernel/tairix-kernel::writeback_bound`.
   operation, not per staged block: in the kernel that reading is the physical
   frame allocator, so per-block would take the global frame-allocator lock
   hundreds of times for an answer that cannot change inside one operation.
-- **Reserve-capped**, so several volumes on a 1 GiB machine share a bounded
-  *total* rather than each taking a slab (`AGENTS.md` §26.7): each volume's own
-  budget is its slice of RAM, but the free reading they all draw against is the
-  machine's, through the same `permits_reserve` floor the retained-write journal
-  obeys.
+- **Machine-wide, and shared**, so several volumes on a 1 GiB machine hold a
+  bounded *total* rather than each taking a slab — the combined floor every
+  storage design is held to. The
+  derived figure is the *machine's* ceiling, not a volume's, and a volume may
+  hold an equal share of it — `tairix_reclaim::PinnedShare`, one instance the
+  host installs on every volume's pinned ledger, carrying the live total across
+  them and how many are drawing — capped further by what the volumes already
+  holding leave, and by the machine-wide reserve floor every consumer obeys
+  (`permits_reserve`). A volume holding nothing counts for nothing, so a
+  machine whose other volumes are empty leaves the whole ceiling to the one that
+  is writing, and a single volume behaves exactly as it did before the share
+  existed. The equal share is what bounds a *delete*-heavy machine, whose
+  volumes hold almost all of their memory in run bookkeeping rather than in
+  blocks the siblings can see.
 - **Floor** of one coalesced device transfer (`RUN_BYTES`), which the ceiling
   never falls below. It is where the cache stops paying for itself — under one
-  transfer the drain cannot form a full run — so a volume whose share of RAM
-  cannot reach it is refused at mount rather than accepted and left committing
+  transfer the drain cannot form a full run — so a machine whose ceiling cannot
+  reach it refuses the mount rather than accepting it and leaving it to commit
   after almost every record.
 - **Forward progress does not depend on the ceiling.** The plan's original floor
   was "one transaction's own working set", which is not a bound: a file write's
@@ -349,7 +367,10 @@ assembled per mount by `kernel/tairix-kernel::writeback_bound`.
   its extent count, so a ceiling over the blocks alone would not have bounded a
   delete at all (`plans/OPEN-DEFECTS.md` D67).
 - **Accounted as pinned** through `tairix_reclaim::PinnedLedger`, a row of its
-  own in the §16.6 cache-ledger export. A dirty block is deliberately *not*
+  own in the §16.6 cache-ledger export, carrying the whole figure the ceiling
+  governs — staged blocks, undo copies, and run bookkeeping — published by the
+  driver at each point a decision is taken against it, which is what the share
+  the *other* volumes decide against has to be fresh for. A dirty block is deliberately *not*
   admitted through the `ReclaimCache` classification gate, because that gate's
   contract is droppability — and for the same reason the pinned row is a class
   the per-class reclaim totals drop by construction: counting memory that can
@@ -636,18 +657,88 @@ value that is the same by construction; it is now one definition
 than resuming it, and the account-database commit turned one into a spurious
 `EIO`; all now store whole through `write_all`.
 
-### WB6 — acceptance, hardware, and docs. **planned**
+### WB6 — acceptance and docs. **done, save the on-metal figure**
 
-On-hardware Pi 4 SD measurement against the WB0 baseline; the §26.7 combined
-floor extended to *several* 100 TB volumes mounted and writing at once (WB5
-holds it for one); crash-injection across the new commit shape; fuzz unchanged
-in surface but re-run; this file replaced by its done-state summary. The spec
-§22, `docs/src/filesystem/arxfs.md`, and the driver `README.md` are current as
-of D67 and need only the hardware figure.
+The combined floor now holds for *several* volumes, not one, and the batched
+commit shape is crash-injected as the unbatched one always was.
 
-Acceptance: the measured Pi 4 SD write throughput improvement is recorded as a
-number, not a claim; the multi-volume floor test passes with bounded resident
-dirty bytes, no panic and no busy-spin.
+**The combined floor (`AGENTS.md` §26.7).** Four 100 TiB volumes are mounted on
+one machine and advance a slice each in turn, so every volume is holding what it
+has staged while the others decide what they may stage. The gauge source is the
+kernel's own in miniature — a staged block is a real allocation, so the free
+reading falls as the volumes pin — and the figure asserted is the machine-wide
+high-water mark, taken as the shared total moves rather than summed from
+per-volume peaks the volumes never reached together
+(`tests/write_amplification.rs`).
+
+*Measured.* On a machine whose ceiling divides into shares well above one
+device transfer, the four volumes together peak at **4 195 744** bytes against
+a 4 194 304-byte ceiling — the ceiling plus a fraction of one record — where a
+per-volume ceiling let them reach **8 670 016**, twice the machine's, with four
+volumes and proportionally more with more. On the smallest machine a volume may
+be mounted on, where the share is one transfer window, they peak at **263 200**
+against 262 144. Every volume's payload reads back byte-exact and every volume
+was forced to write out by the bound it shares.
+
+*The defect the case found, and its fix.* The ceiling was derived **per
+volume** — a sixteenth of discovered RAM each — so eight mounted volumes could
+pin half the machine in memory nothing can reclaim, and the machine-wide
+reserve this plan claimed bounded them does not bite until free memory has
+already fallen to a sixty-fourth of RAM, which is an emergency floor and not a
+bound. Measured before the fix: eight volumes pinning 2.08 MiB of a 4 MiB
+machine, each at its own full ceiling. The derived figure is now the
+*machine's*, and each volume takes a share of it (§6); the published figure is
+the whole of what a transaction pins, so a delete-heavy volume is visible to its
+siblings rather than only its staged blocks being; and a mount that goes away
+gives its share back where its ledger row, which outlives it, would otherwise
+keep claiming it. `tairix_reclaim` gained `PinnedShare` for the shared total.
+
+**Crash injection across the batched shape.** The existing sweeps replayed one
+transaction per operation; a batch is one transaction spanning several, which is
+a stronger claim and was untested. The write-budget sweep now runs in both
+shapes from one body (`Publish`), and two more cases cover the batched commit
+itself:
+
+- Every write count during a batch of three operations leaves either all of
+  them or none. Where the device refused one of the three, that operation was
+  reported failed and undone and the ones after it never ran, so what survives
+  is a prefix; where all three succeeded, a partial outcome is a failure. Run
+  unbatched, the same assertion fails at budget 6 — the sweep discriminates the
+  shape rather than merely passing under it.
+- A power loss straight after the commit that publishes a batch, over every
+  combination of the slot pair the device's volatile cache may keep: the primary
+  copy selects the batch, and when it lands every operation in it is *readable*,
+  because every block the batch's root names crossed the one barrier first. The
+  batch is closed by its dirty-age window rather than by a sync, since a sync's
+  trailing barrier would commit the device cache and leave a power loss nothing
+  to drop — and that is also the close a real idle volume gets.
+- A batch the ceiling forces out mid-way publishes whole operations: a crash
+  straight after keeps no more than the caller was told was written, and every
+  published byte is exact.
+
+**Still open: the on-metal Pi 4 SD figure.** It cannot be taken from a host
+gate — it needs the board — so it is an on-metal acceptance item like the
+others in `plans/PI.md`, with the procedure fixed here so the number is
+comparable rather than anecdotal. Nothing in the tree waits on it: what the
+write path costs a device is already machine-checked as a command ledger (§1),
+and the throughput figure is what confirms the ledger's fewer commands are
+fewer seconds on real silicon.
+
+1. Build and flash the debug image at the pre-write-back revision
+   **`87b7d3e7`** (the WB0 harness, no dirty set):
+   `cargo xtask image --target aarch64-rpi --profile debug`.
+2. Boot the Pi 4 from SD, log in, and run one fixed workload:
+   `stress --hdd 1 --hdd-bytes 64m --timeout 0`. Record the elapsed seconds
+   from its completion line. Repeat three times and keep the median; the run
+   writes and verifies, so the figure is a write-then-read-back rate.
+3. Repeat both steps on the current tree.
+4. Record the two elapsed times and their ratio in this section, and mark the
+   §18 stage-17 row of the spec `✓`.
+
+Acceptance: the multi-volume floor case passes with bounded resident dirty
+bytes, no panic and no busy-spin (**done**, figures above); the crash sweeps
+pass in both commit shapes (**done**); the measured Pi 4 SD improvement is
+recorded as a number rather than a claim (**outstanding**, procedure above).
 
 ## 9. Explicit non-goals
 
