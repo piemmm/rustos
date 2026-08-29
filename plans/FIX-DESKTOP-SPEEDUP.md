@@ -2,9 +2,10 @@
 
 Status: **A done** (less A.4's QEMU hover vertical, whose observation channel
 is now in place), **B done**, **C done**, **D done** (D.5 approved, comparison
-first), **E done**, **H, I, J done**. **F** is unblocked on aarch64 (F.0
-resolved) and may not land before B–C. **G** is kernel work gated on a User
-decision (§15.7).
+first), **E done**, **H, I, J done**. **F.0 and F.1 done**, and F.1 closed
+F.3's item 5 and settled that items 4 and 6 need intrinsics rather than a
+source shape; F.2's candidates are unstarted and aarch64-only until Stage G.
+**G** is kernel work gated on a User decision (§15.7).
 
 Binding under `AGENTS.md` (§3, §15.18). This plan closes the standing
 performance defect that the desktop repaints **orders of magnitude more pixels
@@ -53,9 +54,10 @@ that should not be running is forbidden; Stage F may not land before Stages B–
 Stages A–E are done. What remains is **A.4**'s QEMU hover vertical — its
 observation channel now **exists** (the `sysinfo` query landed; what is left is
 the vertical itself, its hover script, and the counter bounds it asserts) —
-**Stage F**, whose aarch64 half is unblocked now F.0 is resolved, **D.5**'s
-approved half-resolution blur (visual comparison first), and **Stage G**, still
-behind a User decision. `plans/OPEN-DEFECTS.md` D37 is a confirmed defect fixed
+**Stage F.2**'s packed candidates, which F.1's measurements narrow to the blur
+window and the resample row filter and which are aarch64-only until Stage G,
+**D.5**'s approved half-resolution blur (visual comparison first), and **Stage
+G**, still behind a User decision. `plans/OPEN-DEFECTS.md` D37 is a confirmed defect fixed
 independently of this schedule.
 
 Independently: **every published number is taken from a `--release`/installer
@@ -881,7 +883,7 @@ does damage the screen — composite nothing until that deadline.
 
 ---
 
-## Stage F — CPU-dispatched raster kernels (`lib/cpuops`)  **[F.0 done; F.1–F.5 not started]**
+## Stage F — CPU-dispatched raster kernels (`lib/cpuops`)  **[F.0, F.1 done; F.5 partly; F.2–F.4 not started]**
 
 This is the honest answer to "can CPU feature detection help?": yes, and it is
 the *last* 20%. It may not land before B–C.
@@ -899,12 +901,108 @@ for a benchmark to decide.
 (`cpu_features()`) and `lib/cpuops` is a plain `lib/*` crate with no kernel edge,
 so selection works with no kernel mechanism and no ABI change.
 
-### F.1 Make the loops vectorisable before reaching for intrinsics
-NEON is baseline on `aarch64-unknown-none`, so a large part of the win needs no
-dispatch: operate on `chunks_exact` of packed pixels instead of a per-pixel
-`Option`-returning sample, hoist the row-constant factors, and let LLVM
-vectorise. Measure this step on its own before adding candidates — it may be most
-of the win.
+### F.1 Make the loops vectorisable before reaching for intrinsics  **[done]**
+
+It was most of the win, and **not** because anything vectorised. Two things
+stood between the per-pixel arithmetic and the optimiser, and both were in the
+source rather than in the ISA:
+
+- **A per-pixel operator that is an out-of-line call is not an operator.**
+  `lib/raster`'s leaf arithmetic (`div255_biased`, `Pixel::over_biased`,
+  `scale_alpha_biased`, `premultiply`/`unpremultiply`, `mix`,
+  `DitherRow::bias`) carried no `#[inline]`, and the desktop's userland crates
+  are built with many codegen units and no LTO in the profile the debug image
+  and `cargo xtask bench` both use. Every blended pixel therefore paid **two
+  indirect calls** — `scale_alpha_biased` then `over_biased` — with nothing
+  around them the optimiser could touch. A1's per-package `opt-level = 3` could
+  not buy this; only the attribute can.
+- **A `RangeFrom` counter in the inner loop is a panic branch.**
+  `zip(first_x..)` is an *unbounded* range, so its `Step::forward` is checked
+  and carries a panic edge through every iteration, which stops the loop being
+  vectorised or unrolled at all. The fix is invariant 4's: hoist it.
+  A crate-private `DitherRow::tile_at` resolves the eight biases of a span's
+  own first column once — eight is the pattern's period — and `blend_span`
+  walks whole eight-pixel tiles and then the remainder, deriving no surface
+  column. A
+  bounded `Range` alone would have removed the panic edge; the tile is worth a
+  further 1.28× on top of it, measured, which is why it is the shape that
+  landed. `dither_tiles` is the same walk for the paints whose source is one
+  colour rather than a second span (a translucent plate, a wash).
+
+Splitting cannot seam: a pixel takes the bias of its own surface column either
+way, and a remainder begins a whole number of periods along. The existing
+per-pixel differential oracles (`color_tests`' `pixel_by_pixel`, `tests.rs`'
+`reference_round_rect`) hold, plus every length across the tile boundary at
+every phase and `tile_at` against `bias`.
+
+**Measured** — one whole-suite `cargo xtask bench` run at the defaults either
+side of the change (Core Ultra 7 165H), because a single-family run and a
+whole-suite run do not sit at the same thermal or cache state and only like may
+be compared with like. The small cases are omitted: their spread swamps the
+effect at the default budget (A.2). The families this change does not touch are
+the **control** on that spread — `box_blur` moved −5%, `resample` −4% and
+`text_width` −5% between the two runs, so a figure below is meaningful only
+because every one of them is far outside that band.
+
+| case (ns/px) | before | after | ratio |
+|---|---|---|---|
+| `blit` opaque 1280x800 | 1.96 | **0.90** | 2.17× |
+| `blit` translucent 1280x800 | 3.87 | **3.20** | 1.21× |
+| `round-rect` 400x240 r16 | 3.66 | **2.19** | 1.67× |
+| `round-rect` 1280x64 r24 | 3.89 | **2.42** | 1.61× |
+| `text` draw proportional row | 3.11 | **2.35** | 1.32× |
+| `text` draw monospace row | 2.84 | **2.16** | 1.31× |
+| `blur` frost_region 640x360 r12 | 15.06 | **12.70** | 1.19× |
+| `composite` full screen, opaque | 0.81 | **0.52** | 1.56× |
+| `composite` full screen, translucent | 7.69 | **5.69** | 1.35× |
+| `composite` full screen, backdrop blur | 22.24 | **19.07** | 1.17× |
+| `composite` drag, translucent | 8.95 | **6.80** | 1.32× |
+| `composite` drag, backdrop blur | 12.19 | **9.76** | 1.25× |
+
+The 1.28× the tile is worth over a merely-bounded range, and the two refutations
+below, were each measured as a single-family pair against its own baseline in
+that same form, so they are self-consistent even though their absolute figures
+are a per-family run's.
+
+Two follow-on facts the measurement settled, both **measured and refuted**, so
+a later change does not re-derive them:
+
+- **The blur's window arithmetic does not vectorise, and restructuring it for
+  lanes buys nothing.** `Sum`'s four channels were rewritten as a `[u32; 4]`
+  with the divisor decision hoisted off the per-channel path — the shape a
+  packed `uqadd`/`uqsub` would need. `box_blur` did not move (11.29 → 11.28
+  ns/px at r12), and the emitted code carries **no** vector register on either
+  the host *or* `aarch64-unknown-none`: the `u32`→`u64` reciprocal multiply per
+  channel is what neither NEON nor SSE2 has an instruction for. Reverted rather
+  than kept as complexity a measurement does not support. A packed blur is F.2
+  intrinsics work, not an F.1 source shape.
+- **`resample`'s cost is the `i64` multiply-accumulate, not its divisions.**
+  An opaque fast path naming the constant divisor (the `factor == 255` idiom)
+  moved `1920x1080 -> 1280x800` from 19.45 to 18.96 ns/px — inside the noise
+  for a megapixel case — so the three variable divides are not the bottleneck.
+  The accumulators genuinely need 64 bits (four cubic taps of `weight × alpha ×
+  channel` overflow `i32`), and neither NEON nor SSE2 has a 64-bit multiply, so
+  no source shape makes this pass vectorise. Narrowing the weight scale would
+  change the output and is therefore a rendering decision (invariant 2), not an
+  optimisation. Reverted.
+
+**Also fixed here** (§2.18, noticed by reading): `lib/display`'s three
+per-pixel channel-order codecs (`encode`, `encode_straight`, `decode_straight`)
+had the same missing `#[inline]`, and the disassembly confirms Stage J's
+window-frame codec was making an out-of-line indirect call per pixel across its
+own crate's module boundary — on the path every application present takes.
+Fixed the same way; unmeasured, because no bench family covers the window-frame
+codec, and the fix is the correct expression for a four-byte shuffle rather than
+a restructure a figure would have to justify.
+
+Also, and separately: the `encode` bench family
+re-implemented the encode loop inside the harness instead of calling
+`ChannelOrder::encode_run`, against A.2's own rule that a family measures the
+production entry point. It now calls `encode_run`, which reports **0.031**
+ns/px for the matching channel order (LLVM lowers it to a bulk copy on its own,
+exactly as B.3's rustdoc predicted "would buy nothing") and 0.132 for the
+shuffled one — against the 0.92 the harness was attributing to it. F.3's item 5
+is therefore **closed with nothing to do**.
 
 ### F.2 Candidates, following `lib/pagezero` exactly
 Same shape, because it has passed review once: a `build.rs`-emitted per-ISA cfg
@@ -915,12 +1013,21 @@ self-verify against that baseline over a fixed size/alignment/alpha vector,
 
 ### F.3 Families, in order
 1. `blend_span` — one source over a span (the one span composite B.6 routed
-   every blended pixel through).
-2. `Surface::blit` — src-over-dst row zip.
-3. the WM's opaque/blended run loop (B.1).
-4. `blur_line`/`blur_span` add/sub/mean — after the D.3 reciprocal.
-5. `encode_run` — a byte-order shuffle (B.3).
-6. `resample` `filter_row`/`write_row` — icon and wallpaper scaling.
+   every blended pixel through). **F.1 landed its source shape**; a packed
+   candidate is still open.
+2. `Surface::blit` — src-over-dst row zip. Reaches `blend_span`, so F.1
+   covered it.
+3. the WM's opaque/blended run loop (B.1). Its copy-and-encode half is now
+   0.50 ns/px full screen; what is left is the strided alpha scan in
+   `WindowRow::opaque_run`/`blend_len`.
+4. `blur_line`/`blur_span` add/sub/mean — after the D.3 reciprocal. F.1
+   established this needs intrinsics: no source shape vectorises the
+   reciprocal multiply.
+5. ~~`encode_run` — a byte-order shuffle (B.3).~~ **Closed by measurement**
+   (F.1): 0.031 ns/px for the matching order, 0.132 for the shuffled one.
+6. `resample` `filter_row`/`write_row` — icon and wallpaper scaling. F.1
+   established the `i64` accumulator forbids vectorisation on both ISAs; a
+   narrower one would change the output and is a User decision.
 
 All are secret-free and bit-identical, so all are legal on the capability axis
 (`plans/FIX-HARDWARE-FEATURES.md` invariant 8). None may be benchmark-selected.
@@ -1141,7 +1248,8 @@ A–E are expected to dominate F entirely.
 
 1. ~~Amend `plans/FIX-HARDWARE-FEATURES.md` P3b~~ — **taken.** The raster
    families now select on the `ByPriority` capability axis, recorded as that
-   plan's P3c. Stage F's aarch64 half is unblocked; F.1 is the next step.
+   plan's P3c. F.1 has landed; F.2's candidates are what is left of Stage F on
+   aarch64.
 2. ~~Half-resolution blur (D.5)~~ — **approved**, conditional on the visual
    comparison being produced and judged first (invariant 2). D landed without
    it, so nothing is blocked meanwhile.

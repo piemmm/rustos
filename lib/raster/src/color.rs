@@ -8,6 +8,12 @@
 //! Premultiplication is what makes the Porter–Duff *over* operator a
 //! single multiply-add per channel and keeps filtering and per-region
 //! opacity correct.
+//!
+//! The operators are `#[inline]` because a per-pixel call is not a per-pixel
+//! operator: the desktop's crates are built with many codegen units and no
+//! link-time optimisation in the profile the debug image and the bench
+//! harness use, so without it each of these becomes an out-of-line call per
+//! pixel and nothing around it can vectorise.
 
 use crate::dither::DitherRow;
 
@@ -24,8 +30,11 @@ pub const ROUND_NEAREST: u32 = 127;
 /// value in `0..=65025`.
 ///
 /// `value` is always a product of two `u8`s (so at most `255 * 255 =
-/// 65025`), so the result is itself a valid `u8`; the `min(255)` is a
-/// defensive clamp that lets the conversion stay total without an `unwrap`.
+/// 65025`) and `bias` is always below one level, so neither the sum nor the
+/// result can leave range; the saturation and the `min(255)` are the
+/// defensive clamps that let both stay total without a panic branch in the
+/// caller's inner loop, which is where a checked add would stop it
+/// vectorising.
 ///
 /// At [`ROUND_NEAREST`] this is exactly the nearest integer. A bias that
 /// varies per pixel ([`DitherRow`]) is how a paint whose
@@ -33,12 +42,14 @@ pub const ROUND_NEAREST: u32 = 127;
 /// across the area instead of contouring; the two are the same divide, and
 /// nothing else about the arithmetic changes.
 #[must_use]
+#[inline]
 pub fn div255_biased(value: u32, bias: u32) -> u8 {
-    u8::try_from(((value + bias) / 255).min(255)).unwrap_or(u8::MAX)
+    u8::try_from((value.saturating_add(bias) / 255).min(255)).unwrap_or(u8::MAX)
 }
 
 /// Exact rounded integer division by 255 for a value in `0..=65025`.
 #[must_use]
+#[inline]
 pub fn div255(value: u32) -> u8 {
     div255_biased(value, ROUND_NEAREST)
 }
@@ -95,6 +106,7 @@ impl Color {
     /// ([`div255_biased`]). Every channel takes the *same* bias, so a colour
     /// channel can never round above the alpha it is premultiplied by.
     #[must_use]
+    #[inline]
     pub(crate) fn over_biased(self, dst: Pixel, bias: u32) -> Pixel {
         let a = u32::from(self.a);
         let inv = 255 - a;
@@ -111,6 +123,7 @@ impl Color {
 
     /// Premultiply this colour for storage in a [`Pixel`].
     #[must_use]
+    #[inline]
     pub fn premultiply(self) -> Pixel {
         let a = u32::from(self.a);
         Pixel {
@@ -156,6 +169,7 @@ impl Pixel {
     /// pixel, mirroring the `factor == 255` fast path in
     /// [`Self::scale_alpha`].
     #[must_use]
+    #[inline]
     pub fn unpremultiply(self) -> Color {
         if self.a == 0 {
             return Color::TRANSPARENT;
@@ -192,6 +206,7 @@ impl Pixel {
     /// of them — so a compositor that dithers its blend passes the same
     /// per-pixel bias in here, and the window's own gradients survive it.
     #[must_use]
+    #[inline]
     pub fn scale_alpha_biased(self, factor: u8, bias: u32) -> Self {
         if factor == 255 {
             return self;
@@ -208,6 +223,7 @@ impl Pixel {
 
     /// Scale every channel by `factor/255`, rounded to nearest.
     #[must_use]
+    #[inline]
     pub fn scale_alpha(self, factor: u8) -> Self {
         self.scale_alpha_biased(factor, ROUND_NEAREST)
     }
@@ -226,6 +242,7 @@ impl Pixel {
     /// premultiplied pixel is the premultiplied luma, and a weighted average
     /// of two values that are each `<= a` stays `<= a`.
     #[must_use]
+    #[inline]
     pub fn desaturate(self, saturation: u8) -> Self {
         if saturation == 255 {
             return self;
@@ -265,6 +282,7 @@ impl Pixel {
     /// levels, so a compositor blending over a picture varies the bias per
     /// pixel and keeps the picture's gradients instead of banding them.
     #[must_use]
+    #[inline]
     pub fn over_biased(self, dst: Self, bias: u32) -> Self {
         if self.a == 255 {
             return self;
@@ -282,6 +300,7 @@ impl Pixel {
     /// Composite `self` (source) *over* `dst` (destination), rounded to
     /// nearest.
     #[must_use]
+    #[inline]
     pub fn over(self, dst: Self) -> Self {
         self.over_biased(dst, ROUND_NEAREST)
     }
@@ -317,6 +336,14 @@ pub fn blend_span(dst: &mut [Pixel], src: &[Pixel], factor: u8, dither: DitherRo
 ///
 /// `map` may not turn a transparent source opaque: the skip above happens
 /// first, which is what keeps the mapped walk the same walk.
+///
+/// The walk is a run of whole [`DitherRow::PERIOD`]-pixel tiles and then the
+/// remainder, so the biases are resolved once for the span and the loop
+/// derives no surface column: the overflow-checked counter that used to
+/// carry a panic branch through the inner loop is what stopped it
+/// vectorising. Splitting cannot seam, because a pixel takes the bias of its
+/// own surface column either way and the remainder begins a whole number of
+/// periods along.
 pub(crate) fn blend_span_mapped(
     dst: &mut [Pixel],
     src: &[Pixel],
@@ -325,15 +352,63 @@ pub(crate) fn blend_span_mapped(
     first_x: u32,
     map: impl Fn(Pixel) -> Pixel,
 ) {
-    for ((dst, src), x) in dst.iter_mut().zip(src).zip(first_x..) {
-        if src.a == 0 {
-            continue;
+    let paired = dst.len().min(src.len());
+    let (Some(dst), Some(src)) = (dst.get_mut(..paired), src.get(..paired)) else {
+        return;
+    };
+    let tile = dither.tile_at(first_x);
+    let (dst_tiles, dst_rest) = dst.as_chunks_mut::<{ DitherRow::PERIOD }>();
+    let (src_tiles, src_rest) = src.as_chunks::<{ DitherRow::PERIOD }>();
+    // A whole tile's length is a constant, which is what the two loop headers
+    // buy: the optimiser unrolls the first into eight independent blends at
+    // eight constant biases. Both reach the one blend below.
+    for (dst, src) in dst_tiles.iter_mut().zip(src_tiles) {
+        for ((dst, src), &bias) in dst.iter_mut().zip(src).zip(&tile) {
+            blend_one(dst, *src, factor, bias, &map);
         }
-        let bias = dither.bias(x);
-        *dst = map(*src)
-            .scale_alpha_biased(factor, bias)
-            .over_biased(*dst, bias);
     }
+    for ((dst, src), &bias) in dst_rest.iter_mut().zip(src_rest).zip(&tile) {
+        blend_one(dst, *src, factor, bias, &map);
+    }
+}
+
+/// Walk `span` in whole [`DitherRow::PERIOD`]-pixel tiles from surface column
+/// `first_x`, handing `paint` each pixel and the bias its own column rounds
+/// at.
+///
+/// The unpaired counterpart of [`blend_span`], for the paints whose source is
+/// one colour rather than a second span, and tiled for the same reason: the
+/// biases are resolved once and the loop derives no column, so nothing that
+/// could overflow sits inside it.
+#[inline]
+pub(crate) fn dither_tiles(
+    span: &mut [Pixel],
+    dither: DitherRow,
+    first_x: u32,
+    mut paint: impl FnMut(&mut Pixel, u32),
+) {
+    let tile = dither.tile_at(first_x);
+    let (tiles, rest) = span.as_chunks_mut::<{ DitherRow::PERIOD }>();
+    for tiled in tiles {
+        for (dst, &bias) in tiled.iter_mut().zip(&tile) {
+            paint(dst, bias);
+        }
+    }
+    for (dst, &bias) in rest.iter_mut().zip(&tile) {
+        paint(dst, bias);
+    }
+}
+
+/// Composite one mapped, scaled source pixel over `dst` at rounding `bias` —
+/// the arithmetic both walks above share.
+#[inline]
+fn blend_one(dst: &mut Pixel, src: Pixel, factor: u8, bias: u32, map: &impl Fn(Pixel) -> Pixel) {
+    if src.a == 0 {
+        return;
+    }
+    *dst = map(src)
+        .scale_alpha_biased(factor, bias)
+        .over_biased(*dst, bias);
 }
 
 /// `weight`/255 of the way from `from` to `to`, per premultiplied channel.
@@ -349,6 +424,7 @@ pub(crate) fn blend_span_mapped(
 /// picture did, so every caller varies it per pixel from the surface's own
 /// ordered dither.
 #[must_use]
+#[inline]
 pub(crate) fn mix(from: Pixel, to: Pixel, weight: u8, bias: u32) -> Pixel {
     if weight == 255 {
         return to;

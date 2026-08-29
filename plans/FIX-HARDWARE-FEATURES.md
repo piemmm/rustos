@@ -733,10 +733,13 @@ ABI change, and no new capability — the existing self-verify, fail-closed
 baseline, pin and audit machinery applies unchanged.
 
 **Deliverables.** The families, their order, and their per-target availability
-are `plans/FIX-DESKTOP-SPEEDUP.md` Stage F (F.1–F.5), which owns the
-implementation: `blend_span` first, then `Surface::blit`, the compositor's
-opaque/blended run loop, the blur add/sub/mean spans, `encode_run`, and
-`resample`'s row filter. Each follows the `lib/pagezero` shape P3a
+are `plans/FIX-DESKTOP-SPEEDUP.md` Stage F, which owns the implementation. Its
+F.1 has landed the source-level half and narrowed what a *candidate* is still
+owed to two families — the blur's sliding-window add/sub/mean and `resample`'s
+row filter, both of which need an instruction the portable form cannot express
+— while `encode_run` is closed by measurement and `blend_span` /
+`Surface::blit` / the compositor run loop already reached their portable
+ceiling there. Each candidate follows the `lib/pagezero` shape P3a
 established — a `build.rs`-emitted per-ISA cfg (never `cfg(target_arch)` in
 source, so `cargo xtask cfg-check` stays green), a portable baseline registered
 last and always feature-legal, the mandatory self-verify against that baseline

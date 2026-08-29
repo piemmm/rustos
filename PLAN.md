@@ -8027,7 +8027,7 @@ app's menu shell, M3 the plate becomes a cached damage-reporting surface.
 
 ---
 
-## FIX-DESKTOP-SPEEDUP — desktop redraw speed without hardware acceleration (`plans/FIX-DESKTOP-SPEEDUP.md`)  **[A DONE, B DONE, C DONE, D DONE, E DONE, H DONE, I DONE, J DONE]**
+## FIX-DESKTOP-SPEEDUP — desktop redraw speed without hardware acceleration (`plans/FIX-DESKTOP-SPEEDUP.md`)  **[A DONE, B DONE, C DONE, D DONE, E DONE, F.1 DONE, H DONE, I DONE, J DONE]**
 
 **Dependencies:** Stage 7 (compositor, taskbar, controls). Independent of
 `plans/FIX-DISPLAY-ACCELERATION.md` — that is the hardware half; this is
@@ -8036,8 +8036,9 @@ the software path, which stays the mandatory fallback on every target
 
 **What is left.** Stages A–E are done: every windowed app holds its surface for
 the window's life and presents the rectangles a round reported, and the session
-composites at most once per frame period. What remains is A.4's QEMU hover
-vertical and the two gated stages — F behind decision 1 below, G behind
+composites at most once per frame period. F.1 has landed the portable half of
+the per-pixel work. What remains is A.4's QEMU hover vertical, F.2's packed
+candidates for the two families that still need an instruction, and G behind
 decision 3.
 
 **Staged (detail in the plan; do not duplicate it here, §13):**
@@ -8169,9 +8170,25 @@ decision 3.
   is admitted on the wake that produced it, so the bound costs latency only
   where a frame would have been thrown away. Real vsync off a driver's flip
   signal hangs on this seam (`plans/FIX-DISPLAY-ACCELERATION.md` Stage E).
-- **F — CPU-dispatched raster kernels.** `lib/cpuops` `ByPriority`
-  candidates on the `lib/pagezero` template, aarch64 NEON first. Gated on
-  the P3b axis correction below; may not land before B–C.
+- **F — CPU-dispatched raster kernels. [F.0, F.1 done]** F.1 was the source
+  half and was most of the win, though nothing vectorised: `lib/raster`'s
+  per-pixel operators were out-of-line calls in the profile the debug image
+  and the bench harness both use (two indirect calls per blended pixel), and
+  the span walks derived a surface column through an unbounded `RangeFrom`
+  whose checked step carried a panic edge through every iteration. The
+  operators are now `#[inline]` and a span resolves the eight biases of its
+  own first column once (`DitherRow::tile_at`, eight being the dither's
+  period) and walks whole tiles, so no loop derives a column. Full-screen
+  opaque composition fell 0.81 → 0.52 ns/px, translucent 7.69 → 5.69,
+  backdrop blur 22.24 → 19.07, an opaque blit 1.96 → 0.90 and a proportional
+  text row 3.11 → 2.35, each far outside the ±5% the untouched families drift
+  by between two whole-suite runs. Measured and refuted on the way, so a later change
+  does not re-derive them: a lane-array rewrite of the blur's sliding-window
+  sums emits no vector register on the host *or* aarch64 (nothing has an
+  instruction for its `u32`→`u64` reciprocal multiply), and `resample`'s cost
+  is its `i64` multiply-accumulate rather than its divisions. What is left of
+  F is the `lib/pagezero`-style candidates for those two families, aarch64
+  NEON first, still behind Stage G on the other targets.
 - **G — user-space FP/SSE enablement (kernel work).** Gated on a User
   decision; carries defect D37 below.
 - **I — compose on every core the machine has. [done]** The desktop

@@ -102,3 +102,28 @@ fn a_bias_moves_a_quotient_by_at_most_one_level() {
         }
     }
 }
+
+#[test]
+fn a_tile_is_the_eight_columns_from_its_own_start() {
+    // A span composite reads the tile by each pixel's position within the
+    // span instead of by its surface column, so the two must agree for every
+    // phase or a run would dither at the wrong place on the surface.
+    for y in [0u32, 1, 5, 7, 8, 4096] {
+        let row = DitherRow::at(y);
+        for first_x in 0..24u32 {
+            let tile = row.tile_at(first_x);
+            for (lane, bias) in tile.into_iter().enumerate() {
+                let column = first_x + u32::try_from(lane).expect("a lane index fits");
+                assert_eq!(bias, row.bias(column), "row {y}, column {column}");
+            }
+        }
+    }
+}
+
+#[test]
+fn the_no_dither_tile_rounds_every_lane_to_nearest() {
+    assert_eq!(
+        DitherRow::NEAREST.tile_at(3),
+        [ROUND_NEAREST; DitherRow::PERIOD]
+    );
+}

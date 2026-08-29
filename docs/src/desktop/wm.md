@@ -104,9 +104,11 @@ comes from. The order a pixel sees its layers in is unchanged and the frames
 are byte-identical; what the segment saves is the per-column dispatch around
 the arithmetic, which measurement showed was the larger half of a translucent
 composite. Full-screen opaque composition fell from 2.98 ns/px to 0.61 and the
-translucent case from 10.04 to 5.99. Rows where coverage genuinely varies per
-column — a rounded corner's arc, and the cursor — keep the column-by-column
-walk inside their own contribution.
+translucent case from 10.04 to 5.99; inlining the per-pixel operators and
+hoisting the span's column counter out of that walk took them on to 0.52 and
+5.69. Rows where coverage genuinely varies per column — a rounded corner's
+arc, and the cursor — keep the column-by-column walk inside their own
+contribution.
 
 Because the root background is forced opaque, the final screen is always
 fully opaque and its premultiplied channels equal their straight-alpha
@@ -132,8 +134,10 @@ display and unmistakable on a 1080-row screen.
 Every blended pixel therefore rounds at its own bias from
 `tairix_raster::DitherRow`: values between two levels land on the lower one
 in some pixels and the higher one in others, and the area mean carries the
-fraction. The row is resolved once per **screen** row and indexed by the
-screen column, and `WindowRow::sample` scales window opacity and
+fraction. The row is resolved once per **screen** row, and a span composite
+resolves the eight biases of its own first column once more (the pattern's
+period is eight) rather than deriving a screen column per pixel;
+`WindowRow::sample` scales window opacity and
 rounded-corner coverage at the same bias, so a translucent window's own
 gradients survive too. This is one shared definition with the rest of the
 rasteriser — the login screen's entry veil, a translucent plate, and

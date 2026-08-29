@@ -83,6 +83,28 @@ fn a_blended_run_is_exactly_the_pixels_blended_one_at_a_time() {
 }
 
 #[test]
+fn every_length_across_the_tile_boundary_matches_the_reference() {
+    // The walk composites whole eight-pixel tiles and then the remainder, so
+    // a run of any length beginning at any phase must still be the pixels
+    // blended one at a time: a remainder that read the tile from lane zero,
+    // or a tile boundary that reset the phase, would show here.
+    let mut rng = Pixels::new(0x711E_0B0D_1E5A_2C10);
+    let dither = DitherRow::at(5);
+    for len in 0..=24usize {
+        for first_x in 0..=8u32 {
+            let (before, src) = (rng.run(len), rng.run(len));
+            let mut after = before.clone();
+            blend_span(&mut after, &src, 192, dither, first_x);
+            assert_eq!(
+                after,
+                pixel_by_pixel(&before, &src, 192, dither, first_x),
+                "length {len} from column {first_x}"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_run_split_in_two_writes_what_the_whole_run_wrote() {
     // The compositor lays a row in segments whose boundaries move with the
     // windows on it. A span that read its dither from its own start would put

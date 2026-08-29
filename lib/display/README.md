@@ -41,7 +41,11 @@ and the client can never drift apart.
   (`sub_screen_damage`). Each refuses rather than guesses: an
   unencodable mode or format is `None`, and a run writes whole pixels
   only, stopping at whichever of its two slices ends first and reporting
-  the count the caller checks.
+  the count the caller checks. The three per-pixel codecs are `#[inline]`,
+  and load-bearingly so: each is reached once per pixel from another module
+  or crate, and the desktop's crates build with many codegen units and no
+  link-time optimisation in the profile the debug image uses, so without it
+  a four-byte shuffle costs an out-of-line call.
 - **Window-frame codec** (`winframe`): the same pixel/byte boundary for the
   frame a *window* channel carries, in both directions — `encode` writes an
   app's premultiplied surface out as the straight-alpha bytes the frame holds,

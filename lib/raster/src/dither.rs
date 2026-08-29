@@ -21,8 +21,8 @@
 //! surface coordinates, so a frame is reproducible, two passes over the same
 //! pixel agree, a re-composited rectangle matches the frame it replaces, and
 //! nothing has to be allocated, seeded, or carried between frames. A caller
-//! resolves one [`DitherRow`] per row and indexes it per pixel, so the whole
-//! cost on a blended pixel is one mask and one load.
+//! resolves one [`DitherRow`] per row and one tile of eight biases per span,
+//! and then pays nothing per pixel beyond the bias it composites with.
 
 use crate::color::ROUND_NEAREST;
 
@@ -54,6 +54,10 @@ pub struct DitherRow {
 }
 
 impl DitherRow {
+    /// Columns after which the pattern repeats, and therefore the width of a
+    /// [`tile_at`](Self::tile_at) run.
+    pub(crate) const PERIOD: usize = 8;
+
     /// The row that rounds every pixel to nearest — no dither.
     ///
     /// What a caller composites with when it is not laying a field over a
@@ -85,8 +89,30 @@ impl DitherRow {
     /// Never a whole level, so the bias only chooses *where* inside a level
     /// the value rounds up and can never shift it onto the next one.
     #[must_use]
+    #[inline]
     pub const fn bias(&self, x: u32) -> u32 {
         self.biases[(x & 7) as usize]
+    }
+
+    /// The biases the eight columns from surface column `first_x` round with,
+    /// in that order.
+    ///
+    /// What a span composite resolves once and then reads by each pixel's
+    /// position *within the span*. The pattern's period is [`Self::PERIOD`],
+    /// so a run walked eight pixels at a time takes a constant bias per lane
+    /// and derives no surface column at all — which is what keeps the
+    /// overflow-checked counter, and the panic branch it carries, out of the
+    /// inner loop where it stops the loop vectorising.
+    #[must_use]
+    pub(crate) const fn tile_at(&self, first_x: u32) -> [u32; Self::PERIOD] {
+        let phase = (first_x & 7) as usize;
+        let mut tile = [0u32; Self::PERIOD];
+        let mut lane = 0;
+        while lane < Self::PERIOD {
+            tile[lane] = self.biases[(phase + lane) & 7];
+            lane += 1;
+        }
+        tile
     }
 }
 

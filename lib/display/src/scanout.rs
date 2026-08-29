@@ -15,6 +15,12 @@
 //! [`ChannelOrder::encode`] — a whole run of it through
 //! [`ChannelOrder::encode_run`], which is that same encoder in bulk — and
 //! neither pretends to be the other.
+//!
+//! The three per-pixel codecs are `#[inline]`: each is reached once per pixel
+//! from another module or crate — the window-frame codec's rows, the
+//! compositor's reveal encode — and the desktop's crates are built with many
+//! codegen units and no link-time optimisation in the profile the debug image
+//! uses, so without it a four-byte shuffle costs an out-of-line call.
 
 use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode, MAX_DAMAGE_RECTS};
 use tairix_geometry::{Rect, Region};
@@ -54,6 +60,7 @@ impl ChannelOrder {
     /// The screen is opaque, so a premultiplied channel already equals its
     /// straight-alpha form and no un-premultiply is needed.
     #[must_use]
+    #[inline]
     pub const fn encode(self, pixel: Pixel) -> [u8; 4] {
         match self {
             Self::Rgba => [pixel.r, pixel.g, pixel.b, pixel.a],
@@ -70,6 +77,7 @@ impl ChannelOrder {
     /// so a translucent region has to survive the round trip. The inverse is
     /// [`decode_straight`](Self::decode_straight).
     #[must_use]
+    #[inline]
     pub fn encode_straight(self, pixel: Pixel) -> [u8; 4] {
         let colour = pixel.unpremultiply();
         match self {
@@ -84,6 +92,7 @@ impl ChannelOrder {
     /// The alpha byte is the app's own and is honoured, so a compositor can
     /// blend a translucent window region correctly.
     #[must_use]
+    #[inline]
     pub fn decode_straight(self, bytes: [u8; 4]) -> Pixel {
         let [b0, b1, b2, b3] = bytes;
         match self {

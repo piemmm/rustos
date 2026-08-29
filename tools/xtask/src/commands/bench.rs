@@ -296,7 +296,7 @@ static FAMILIES: &[Family] = &[
     },
     Family {
         name: "encode",
-        what: "ChannelOrder::encode over a scan-out row",
+        what: "ChannelOrder::encode_run over a scan-out row",
         measure: encode,
     },
     Family {
@@ -733,13 +733,9 @@ fn encode(harness: &BenchHarness<'_>) -> Result<Vec<Measurement>, String> {
         out: RefCell<Vec<u8>>,
     }
 
-    fn run(order: ChannelOrder, warm: &Warm) -> Option<u8> {
+    fn run(order: ChannelOrder, warm: &Warm) -> Option<usize> {
         let mut out = warm.out.borrow_mut();
-        let (bytes, _) = out.as_chunks_mut::<4>();
-        for (pixel, target) in warm.row.iter().zip(bytes) {
-            *target = order.encode(*pixel);
-        }
-        out.first().copied()
+        Some(order.encode_run(&warm.row, &mut out))
     }
 
     let width = SCREEN_W;

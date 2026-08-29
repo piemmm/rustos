@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 
 use tairix_reclaim::CachedBytes;
 
-use crate::color::{blend_span, blend_span_mapped, div255, mix, Color, Pixel};
+use crate::color::{blend_span, blend_span_mapped, dither_tiles, div255, mix, Color, Pixel};
 use crate::dither::DitherRow;
 use crate::paint::Paint;
 use crate::resample::{resample_pixels, Region, ResampleError};
@@ -1466,10 +1466,9 @@ fn paint_span(span: &mut [Pixel], paint: SpanPaint, source: Pixel) {
         span.fill(source);
         return;
     }
-    let dither = DitherRow::at(row);
-    for (column, dst) in (first..).zip(span.iter_mut()) {
-        *dst = source.over_biased(*dst, dither.bias(column));
-    }
+    dither_tiles(span, DitherRow::at(row), first, |dst, bias| {
+        *dst = source.over_biased(*dst, bias);
+    });
 }
 
 /// Composite `source` over every pixel of `span`, spreading the rounding
@@ -1484,12 +1483,9 @@ fn wash_span(span: &mut [Pixel], first: u32, row: u32, source: Color) {
         span.fill(source.premultiply());
         return;
     }
-    let dither = DitherRow::at(row);
-    // A span never reaches past the surface width, so the column can neither
-    // overflow nor leave the surface.
-    for (column, dst) in (first..).zip(span.iter_mut()) {
-        *dst = source.over_biased(*dst, dither.bias(column));
-    }
+    dither_tiles(span, DitherRow::at(row), first, |dst, bias| {
+        *dst = source.over_biased(*dst, bias);
+    });
 }
 
 /// The hue of `color` in degrees `0..360`, given its already-computed channel

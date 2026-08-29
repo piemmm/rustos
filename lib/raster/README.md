@@ -161,6 +161,12 @@ This crate owns:
   shorter ends the walk; the dither is read at each pixel's own *surface*
   column, so a run split anywhere writes exactly what the whole run wrote and
   a moving segment boundary can never leave a seam (`color_tests`).
+  The walk is whole eight-pixel tiles and then the remainder, because eight is
+  the dither's period: the biases are resolved once per span and the loop
+  derives no surface column, so the overflow-checked counter that used to carry
+  a panic branch through the inner loop is gone.
+  `dither_tiles` is the same walk for the paints whose source is one colour
+  rather than a second span (a translucent plate, a wash).
 - `Surface::blit` — composite one surface over another through `blend_span`,
   clipping a negative origin or an over-large source, so a
   transparent-background sprite (a rasterised cursor or icon) lays onto the
@@ -330,6 +336,19 @@ Three properties make it safe to apply everywhere:
 An *opaque* source keeps none of the destination, so it stays a slice fill with
 no dither work at all — which is also why the compositor's opaque-run copy path
 is untouched.
+
+## Why the operators are `#[inline]`
+
+The per-pixel operators (`div255_biased`, `Pixel::over_biased`,
+`scale_alpha_biased`, `premultiply`/`unpremultiply`, `mix`, `DitherRow::bias`)
+carry `#[inline]`, and it is load-bearing rather than decorative. The desktop's
+userland crates are built with many codegen units and no link-time optimisation
+in the profile the debug image and `cargo xtask bench` both use, so without it
+each of these becomes an out-of-line call **per pixel** — two of them per
+blended pixel through `blend_span` — and no loop around them can be
+specialised, let alone vectorised. Measured on the bench harness, restoring the
+inlining and hoisting the span counter took a full-screen opaque blit from 1.96
+to 0.90 ns/px and a translucent window stack from 7.69 to 5.69 ns/px.
 
 ## The resampler
 
