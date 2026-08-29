@@ -22,6 +22,7 @@ use core::ops::Range;
 use tairix_abi::driver::display::{
     AccelCaps, AccelLayer, AcceleratedDisplay, DamageRect, Display, DisplayMode, MAX_DAMAGE_RECTS,
 };
+use tairix_abi::sysinfo::DesktopFrameTotals;
 use tairix_abi::DriverError;
 use tairix_display::{damage_list, scanout_len, ChannelOrder};
 
@@ -2095,7 +2096,7 @@ impl Compositor {
     /// pointer samples pumped between two composites costs exactly two
     /// rectangles, not one per sample.
     pub fn composite(&mut self) -> Region {
-        self.stats.begin_frame();
+        self.stats.begin_frame(self.screen_px());
         self.recompose_damage()
     }
 
@@ -2340,6 +2341,25 @@ impl Compositor {
         self.stats.snapshot()
     }
 
+    /// What every frame composed against the current screen has cost, the
+    /// frame in progress included.
+    ///
+    /// The pull-side reading, for a monitor or a regression gate outside this
+    /// process: cumulative work plus the worst single frame, so a hover that
+    /// repaints one control is distinguishable from one that repaints the
+    /// screen — an average hides exactly that. A display-mode change starts a
+    /// fresh epoch, because the counts are read against the screen as their
+    /// denominator.
+    #[must_use]
+    pub fn frame_totals(&self) -> DesktopFrameTotals {
+        self.stats.totals()
+    }
+
+    /// The current screen's pixel count.
+    fn screen_px(&self) -> u64 {
+        area_px(self.mode.width_px, self.mode.height_px)
+    }
+
     /// Allow or forbid the opaque-run copy path, so a test can compose one
     /// scene both ways and compare the results.
     #[cfg(test)]
@@ -2396,7 +2416,7 @@ impl Compositor {
     /// Propagates any [`DriverError`] the display driver returns from
     /// [`Display::present`] / [`Display::present_rects`].
     pub fn present(&mut self, display: &mut dyn Display) -> Result<(), DriverError> {
-        self.stats.begin_frame();
+        self.stats.begin_frame(self.screen_px());
         let region = self.recompose_damage();
         if region.is_empty() {
             return Ok(());
@@ -2434,7 +2454,7 @@ impl Compositor {
         display: &mut dyn AcceleratedDisplay,
     ) -> Result<(), DriverError> {
         let caps = display.accel_caps()?;
-        self.stats.begin_frame();
+        self.stats.begin_frame(self.screen_px());
         // A hardware layer is composed from its own pixels alone and cannot
         // sample what is already behind it, so a backdrop blur has no layer
         // encoding at all and the whole frame goes through software.

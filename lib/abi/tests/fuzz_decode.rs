@@ -68,7 +68,8 @@ use tairix_abi::switchboard_ipc::{
 };
 use tairix_abi::sysinfo::{
     decode_reply, encode_reply_ok, fold_cache_ledgers, CacheLedgerListRequest, CacheLedgerRecord,
-    CacheReportRequest, CpuLoadRecord, CpuLoadRequest, IntrospectDomain, KernelMemoryStats,
+    CacheReportRequest, CpuLoadRecord, CpuLoadRequest, DesktopFrameRecord,
+    DesktopFrameStatsRequest, DesktopFrameTotals, IntrospectDomain, KernelMemoryStats,
     MemoryPressureStats, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord,
     RamzipStats, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord, SeatListRequest,
     SeatRecord, SysinfoRequestHeader, SystemIdentity, Uptime, SYSINFO_REPLY_STATUS_LEN,
@@ -284,6 +285,33 @@ fn exercise_sysinfo_records(bytes: &[u8]) {
         let redecoded = CpuLoadRecord::from_bytes(&rec.to_le_bytes())
             .expect("round-trip of an accepted record must succeed");
         assert_eq!(rec, redecoded);
+    }
+}
+
+/// The desktop frame-accounting decoders, split out so the sysinfo sweep above
+/// stays inside one screen.
+fn exercise_desktop_frame_records(bytes: &[u8]) {
+    if let Ok(req) = DesktopFrameStatsRequest::from_bytes(bytes) {
+        let redecoded = DesktopFrameStatsRequest::from_bytes(&req.to_le_bytes())
+            .expect("round-trip of an accepted request must succeed");
+        assert_eq!(req, redecoded);
+    }
+    if let Ok(totals) = DesktopFrameTotals::from_bytes(bytes) {
+        let redecoded = DesktopFrameTotals::from_bytes(&totals.to_le_bytes())
+            .expect("round-trip of accepted totals must succeed");
+        assert_eq!(totals, redecoded);
+        // Accepted totals are totals a reader will divide by: the bounds the
+        // decoder enforced must still hold of the value it handed back, so a
+        // consumer never has to defend against a shape twice.
+        assert!(totals.frames > 0 || totals == DesktopFrameTotals::ZERO);
+        assert!(totals.peak_damaged_px <= totals.damaged_px);
+        assert!(totals.opaque_px <= totals.damaged_px);
+    }
+    if let Ok(rec) = DesktopFrameRecord::from_bytes(bytes) {
+        let redecoded = DesktopFrameRecord::from_bytes(&rec.to_le_bytes())
+            .expect("round-trip of an accepted record must succeed");
+        assert_eq!(rec, redecoded);
+        assert_ne!(rec.reporter_pid, 0, "a served row always names a publisher");
     }
 }
 
@@ -706,6 +734,7 @@ fn exercise(bytes: &[u8]) {
     exercise_service_control(bytes);
     exercise_users_admin(bytes);
     exercise_sysinfo_records(bytes);
+    exercise_desktop_frame_records(bytes);
     exercise_seatmgr(bytes);
     exercise_display_ipc(bytes);
     exercise_font_ipc(bytes);

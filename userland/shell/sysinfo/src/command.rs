@@ -67,6 +67,13 @@ pub enum Command<'a> {
     /// whether the line is quarantined (`IRQ_LIST`, which the service gates
     /// on `CAP_SYSINFO_HW`).
     Irqs,
+    /// Read what each desktop session's composited frames have cost — the
+    /// pixels recomposed, what resolving them blended, the worst single
+    /// frame, and the furniture cache's hit tally
+    /// (`DESKTOP_FRAME_STATS`, which the service gates on
+    /// `CAP_SYSINFO_GLOBAL`: a row names another principal — the session
+    /// process — and its work).
+    Frames,
     /// List per-volume storage I/O health, one row per fault-aware
     /// block-backed volume — its durable id, the serving block-service
     /// endpoint, its current availability, and the folded outcome counters
@@ -139,6 +146,7 @@ pub enum Command<'a> {
 /// | `cpu`                 | [`Command::CpuLoad`]             |
 /// | `cpuinfo`             | [`Command::CpuInfo`]             |
 /// | `irq`, `irqs`         | [`Command::Irqs`]                |
+/// | `frames`              | [`Command::Frames`]              |
 /// | `storage`, `io`       | [`Command::Storage`]             |
 /// | `raid`, `arrays`      | [`Command::Raid`]                |
 /// | `show <ref>`          | [`Command::Show`]                |
@@ -173,6 +181,7 @@ pub fn parse<'a>(args: &[&'a str]) -> Result<Command<'a>, SysinfoError> {
         "cpu" => no_more(rest).map(|()| Command::CpuLoad),
         "cpuinfo" => no_more(rest).map(|()| Command::CpuInfo),
         "irq" | "irqs" => no_more(rest).map(|()| Command::Irqs),
+        "frames" => no_more(rest).map(|()| Command::Frames),
         "storage" | "io" => no_more(rest).map(|()| Command::Storage),
         "raid" | "arrays" => no_more(rest).map(|()| Command::Raid),
         "show" => one_operand(rest).map(|reference| Command::Show { reference }),
@@ -263,6 +272,7 @@ mod tests {
         assert_eq!(parse(&["cpuinfo"]), Ok(Command::CpuInfo));
         assert_eq!(parse(&["irq"]), Ok(Command::Irqs));
         assert_eq!(parse(&["irqs"]), Ok(Command::Irqs));
+        assert_eq!(parse(&["frames"]), Ok(Command::Frames));
         assert_eq!(parse(&["storage"]), Ok(Command::Storage));
         assert_eq!(parse(&["io"]), Ok(Command::Storage));
         assert_eq!(parse(&["raid"]), Ok(Command::Raid));
@@ -318,6 +328,7 @@ mod tests {
         assert_eq!(parse(&["pressure", "now"]), Err(SysinfoError::Usage));
         assert_eq!(parse(&["cpu", "0"]), Err(SysinfoError::Usage));
         assert_eq!(parse(&["irq", "0"]), Err(SysinfoError::Usage));
+        assert_eq!(parse(&["frames", "0"]), Err(SysinfoError::Usage));
         assert_eq!(parse(&["storage", "0"]), Err(SysinfoError::Usage));
         assert_eq!(parse(&["raid", "md0"]), Err(SysinfoError::Usage));
     }

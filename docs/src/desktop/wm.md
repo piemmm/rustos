@@ -771,6 +771,32 @@ above the damage means the frame is compositing depth the user cannot see.
 that recomposed a little, so a wake that did no work reports *idle* rather
 than a row of zeros pretending to be a frame.
 
+### And what every frame cost (`frame_totals`)
+
+One frame's counts are a live gauge; a *gesture* needs the run of them.
+`Compositor::frame_totals` returns the same accumulator's since-epoch
+`DesktopFrameTotals`: the counts above summed over every frame composed
+against the current screen, plus the worst single frame's damage and blends.
+The peaks are why the aggregate is not simply an average — a hover that
+repaints one control and one that repaints the screen have similar means and
+very different worst frames, and the worst frame is the regression the damage
+tracking exists to prevent.
+
+Each frame is folded exactly once, when the next one opens, and the frame
+still in progress is added to a *copy* on read — so reading the totals twice
+gives the same answer, which a reader on a frame path relies on. A
+display-mode change starts a fresh epoch: every pixel figure is read against
+`screen_px` as its denominator, and counts taken against a different screen
+answer a different question.
+
+`DesktopFrameTotals` is an ABI record because it leaves the process: the
+session publishes it to the System Information API, where a monitor, a shell
+(`sysinfo frames`), or a regression gate reads it under
+`CAP_SYSINFO_GLOBAL` (`docs/src/abi/sysinfo.md`). The decoder there refuses
+counts no composite pass could produce, and the compositor's own tests
+round-trip its fold through that decoder — a producer the receiver would
+reject is a defect on this side.
+
 ## Server-side window decorations
 
 Window decorations — a title bar carrying the four command controls in two

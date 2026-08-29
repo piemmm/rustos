@@ -23,11 +23,11 @@ use tairix_abi::{Errno, LimitKind};
 
 use tairix_help::{own_short_help, HelpSource};
 use tairix_procinfo::{
-    call, emit_self_scope_omission, fetch_tree, for_each_irq, for_each_process,
-    for_each_raid_array, for_each_raid_member, render_limit_bound, render_process, resolve,
-    Authorization, InfoValue, Metric, MetricKind, Output, Producer, ResetBehavior,
-    ResourceResponse, ResponsePayload, Sensitivity, Transport, Unit, ValueKind, WalkStep,
-    PROCESS_HEADER,
+    call, emit_self_scope_omission, fetch_tree, for_each_desktop_frame_report, for_each_irq,
+    for_each_process, for_each_raid_array, for_each_raid_member, format_count, format_tenths,
+    render_limit_bound, render_process, resolve, Authorization, InfoValue, Metric, MetricKind,
+    Output, Producer, ResetBehavior, ResourceResponse, ResponsePayload, Sensitivity, Transport,
+    Unit, ValueKind, WalkStep, PROCESS_HEADER,
 };
 
 use crate::command::Command;
@@ -52,6 +52,7 @@ queries:
   cpu                 per-CPU queue depth, switches, preemptions (needs CAP_SYSINFO_KERNEL)
   cpuinfo             per-CPU model, class, flags, and live/reference MHz
   irq                 IRQ table: line, owner, count, quarantine (needs CAP_SYSINFO_HW)
+  frames              what each desktop session's frames cost (needs CAP_SYSINFO_GLOBAL)
   storage             per-volume I/O health and outcome counters (needs CAP_SYSINFO_KERNEL)
   raid                composed arrays and the devices they are made of (needs CAP_SYSINFO_HW)
   show <ref>          read one info:/state:/stats: resource reference
@@ -104,6 +105,7 @@ pub fn run(
         Command::CpuLoad => run_cpu_load(transport, out),
         Command::CpuInfo => run_cpu_info(transport, out),
         Command::Irqs => run_irqs(transport, out),
+        Command::Frames => run_frames(transport, out),
         Command::Storage => run_storage(transport, out),
         Command::Raid => run_raid(transport, out),
     }
@@ -781,6 +783,86 @@ fn run_irqs(transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoEr
     .map_err(SysinfoError::from)
 }
 
+/// Fetch and render what each desktop session's frames have cost, one
+/// aligned row per publishing session.
+///
+/// The reading that matters is the first three figures together: the pixels
+/// the desktop recomposed, what resolving them blended, and the worst single
+/// frame as a share of the screen. A desktop that changes a few thousand
+/// pixels per frame but blends millions is paying for depth nobody can see,
+/// and one whose worst frame is the whole screen is repainting everything to
+/// move a cursor.
+///
+/// The figures are the desktop's own statement about itself — only the
+/// process holding a compositor can count pixels — so a row is labelled by
+/// the publisher `sysinfod` attested it to. A session that has published
+/// nothing prints no row: absent is not zero.
+///
+/// The service gates the query on `CAP_SYSINFO_GLOBAL`; a denial surfaces as
+/// the shared refusal rather than an empty table.
+fn run_frames(transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoError> {
+    emit(
+        out,
+        "pid     frames    damaged  per frame  overdraw  copied  frosted  scanned    worst frame  presents  furniture",
+    )?;
+    for_each_desktop_frame_report(transport, |record| {
+        let t = &record.totals;
+        out.write_line(&format!(
+            "{:<6}  {:>6}  {:>9}  {:>9}  {:>7}x  {:>5}%  {:>7}  {:>7}  {:>7} {:>3}%  {:>8}  {}/{}",
+            record.reporter_pid,
+            t.frames,
+            format_count(t.damaged_px),
+            per_frame(t.damaged_px, t.frames),
+            format_tenths(ratio_tenths(t.blended_px, t.damaged_px)),
+            percent(t.opaque_px, t.damaged_px),
+            format_count(t.blur_px),
+            format_count(t.encoded_px),
+            format_count(t.peak_damaged_px),
+            percent(t.peak_damaged_px, t.screen_px),
+            t.present_calls,
+            t.chrome_hits,
+            t.chrome_misses,
+        ))
+        .map(|()| WalkStep::Continue)
+    })
+    .map_err(SysinfoError::from)
+}
+
+/// What a figure with no denominator to divide by prints as: absent, never
+/// a fabricated zero.
+const UNMEASURABLE: &str = "-";
+
+/// `total` spread over `frames`, or [`UNMEASURABLE`] when there is no frame.
+///
+/// A served record's frame count is a publisher's own figure, so a reader
+/// never divides by it without asking: an unmeasurable average prints as
+/// absent rather than as a fabricated zero.
+fn per_frame(total: u64, frames: u64) -> String {
+    match total.checked_div(frames) {
+        Some(mean) => format_count(mean),
+        None => String::from(UNMEASURABLE),
+    }
+}
+
+/// `part` as a percentage of `whole`, or [`UNMEASURABLE`] when `whole` is
+/// zero.
+fn percent(part: u64, whole: u64) -> String {
+    match part.saturating_mul(100).checked_div(whole) {
+        Some(pct) => format!("{pct}"),
+        None => String::from(UNMEASURABLE),
+    }
+}
+
+/// `part` over `whole` in tenths, for a `1.0x`-style multiplier. Zero when
+/// `whole` is zero: no damage is no overdraw, not an unknown one.
+fn ratio_tenths(part: u64, whole: u64) -> u32 {
+    let tenths = part
+        .saturating_mul(10)
+        .checked_div(whole)
+        .unwrap_or_default();
+    u32::try_from(tenths).unwrap_or(u32::MAX)
+}
+
 /// The short display name of a volume's availability, for the `storage`
 /// row. A closed match so a future [`MountAvailability`] variant is a
 /// compile error here rather than a silent blank.
@@ -1017,11 +1099,11 @@ mod tests {
     };
     use tairix_abi::sysinfo::{
         CpuCoreClass, CpuInfoListRequest, CpuInfoRecord, CpuLoadRecord, CpuLoadRequest,
-        KernelMemoryStats, MemoryPressureStats, MountAvailability, ProcessListRequest,
-        ProcessRecord, ProcessState, RaidListRequest, RamzipStats, ReclaimClassRecord,
-        ReclaimListRequest, ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId,
-        SysinfoRequestHeader, SystemIdentity, Uptime, VolumeIoHealthRecord, VolumeIoHealthRequest,
-        CPU_INFO_FLAG_FREQ_MEASURED, SEAT_FLAG_OWNED,
+        DesktopFrameRecord, DesktopFrameStatsRequest, DesktopFrameTotals, KernelMemoryStats,
+        MemoryPressureStats, MountAvailability, ProcessListRequest, ProcessRecord, ProcessState,
+        RaidListRequest, RamzipStats, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord,
+        SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
+        VolumeIoHealthRecord, VolumeIoHealthRequest, CPU_INFO_FLAG_FREQ_MEASURED, SEAT_FLAG_OWNED,
     };
     use tairix_abi::time::{Duration64, Time64};
     use tairix_abi::{Errno, LimitKind, ProcId, ResourceLimit, SchedPriority, RLIMIT_INFINITY};
@@ -1182,6 +1264,7 @@ mod tests {
         reclaim: Vec<ReclaimClassRecord>,
         ramzip: RamzipStats,
         cpu_loads: Vec<CpuLoadRecord>,
+        frames: Vec<DesktopFrameRecord>,
         deny: Option<SysinfoQueryId>,
         malformed_process_list: bool,
         short_scalar: bool,
@@ -1259,6 +1342,24 @@ mod tests {
                         preemptions: 2,
                     },
                 ],
+                frames: alloc::vec![DesktopFrameRecord {
+                    reporter_pid: 91,
+                    totals: DesktopFrameTotals {
+                        screen_px: 1000 * 1000,
+                        frames: 10,
+                        damaged_px: 400_000,
+                        blended_px: 1_200_000,
+                        opaque_px: 100_000,
+                        blur_px: 30_000,
+                        encoded_px: 400_000,
+                        dirty_rects: 25,
+                        present_calls: 10,
+                        chrome_hits: 96,
+                        chrome_misses: 4,
+                        peak_damaged_px: 250_000,
+                        peak_blended_px: 500_000,
+                    },
+                }],
                 deny: None,
                 malformed_process_list: false,
                 short_scalar: false,
@@ -1332,6 +1433,18 @@ mod tests {
                 let take = core::cmp::min(self.reclaim.len() - offset, req.limit as usize);
                 let mut out = Vec::with_capacity(take * ReclaimClassRecord::WIRE_LEN);
                 for record in &self.reclaim[offset..offset + take] {
+                    out.extend_from_slice(&record.to_le_bytes());
+                }
+                Ok(out)
+            } else if header.query == SysinfoQueryId::DESKTOP_FRAME_STATS {
+                let req = DesktopFrameStatsRequest::from_bytes(payload)?;
+                let offset = req.offset as usize;
+                if offset >= self.frames.len() {
+                    return Ok(Vec::new());
+                }
+                let take = core::cmp::min(self.frames.len() - offset, req.limit as usize);
+                let mut out = Vec::with_capacity(take * DesktopFrameRecord::WIRE_LEN);
+                for record in &self.frames[offset..offset + take] {
                     out.extend_from_slice(&record.to_le_bytes());
                 }
                 Ok(out)
@@ -2291,5 +2404,66 @@ mod tests {
             run(Command::Help, &fixture, &out),
             Err(SysinfoError::Output(Errno::NotFound))
         );
+    }
+    #[test]
+    fn frames_render_the_desktop_reading_and_a_denial() {
+        let fixture = Fixture::new(Vec::new());
+        let out = Recorder::new();
+        assert_eq!(run(Command::Frames, &fixture, &out), Ok(()));
+        let lines = out.lines();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("damaged"));
+        assert!(lines[0].contains("worst frame"));
+        // The publisher, the frame count, the per-frame mean (400 000 over
+        // ten frames), the overdraw multiple (1.2 M over 400 k), the copied
+        // share (a quarter), and the worst frame as a quarter of the screen.
+        assert!(lines[1].starts_with("91"), "{}", lines[1]);
+        assert!(lines[1].contains("40000"), "{}", lines[1]);
+        assert!(lines[1].contains("3.0x"), "{}", lines[1]);
+        assert!(lines[1].contains("25%"), "{}", lines[1]);
+        assert!(lines[1].contains("96/4"), "{}", lines[1]);
+        assert_eq!(
+            fixture.seen.borrow().as_slice(),
+            &[SysinfoQueryId::DESKTOP_FRAME_STATS]
+        );
+
+        // A session that has published nothing prints the header alone:
+        // absent is not a row of zeros.
+        let mut quiet = Fixture::new(Vec::new());
+        quiet.frames = Vec::new();
+        let out = Recorder::new();
+        assert_eq!(run(Command::Frames, &quiet, &out), Ok(()));
+        assert_eq!(out.lines().len(), 1);
+
+        // The service's capability refusal surfaces as the CLI's
+        // permission-denied error, never a fabricated table.
+        let mut denied = Fixture::new(Vec::new());
+        denied.deny = Some(SysinfoQueryId::DESKTOP_FRAME_STATS);
+        let out = Recorder::new();
+        assert_eq!(
+            run(Command::Frames, &denied, &out),
+            Err(SysinfoError::PermissionDenied)
+        );
+    }
+
+    #[test]
+    fn a_frame_figure_with_no_denominator_prints_absent() {
+        // A publisher's own frame count is its figure, not the reader's, so
+        // a record that claims a screen but no frame must not make the
+        // renderer divide by zero — it prints absent instead.
+        let mut fixture = Fixture::new(Vec::new());
+        fixture.frames = alloc::vec![DesktopFrameRecord {
+            reporter_pid: 7,
+            totals: DesktopFrameTotals {
+                screen_px: 0,
+                frames: 0,
+                ..DesktopFrameTotals::ZERO
+            },
+        }];
+        let out = Recorder::new();
+        assert_eq!(run(Command::Frames, &fixture, &out), Ok(()));
+        let row = &out.lines()[1];
+        assert!(row.contains('-'), "{row}");
+        assert!(row.contains("0.0x"), "no damage is no overdraw: {row}");
     }
 }

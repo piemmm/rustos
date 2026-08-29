@@ -814,6 +814,41 @@ above:
     is the frame on screen at that moment, never the stale one it was
     holding.
 
+## Publishing frame accounting to the System Information API
+
+The report above is a **push to one reader** — the desktop's own monitor —
+and reaches nothing else. Anything else that wants to know what the desktop
+is repainting (a system monitor, `sysinfo frames`, a QEMU regression gate
+asserting that a hover repaints a control rather than the screen) has no way
+in, because the counters live in this process and the kernel every other
+`sysinfo` query reads knows nothing about pixels.
+
+So the session also publishes the compositor's cumulative
+`DesktopFrameTotals` to `sysinfod`, which retains it against this process's
+kernel-attested identity and serves it under `CAP_SYSINFO_GLOBAL`
+(`docs/src/abi/sysinfo.md`, `plans/FIX-DESKTOP-SPEEDUP.md` A.4). The
+submission is a process describing itself: it grants nothing, reads nothing,
+and needs no capability.
+
+`FrameStatsPublisher` is a separate gate from `FrameReportGate` because their
+rules differ in kind. The monitor must not be told about the frame in which
+it drew itself — measuring its own act of displaying would re-excite another
+report for ever — whereas the retained accounting is a truthful count of
+every frame the desktop composed, the monitor's own included. Nor does the
+publisher read the monitor's liveness: a reader may arrive at any time, so
+the figures are worth retaining whether or not one exists yet.
+
+What the two gates share is the shape that keeps them off the frame path's
+critical work: change detection by comparison, one attempt per
+`MIN_FRAME_PUBLISH_INTERVAL_NS` (250 ms), a refusal dropped rather than
+retried in place, and a held-back change tightening the session's own park
+(`FrameStatsPublisher::park_deadline_ns`, through the same `park_within`) so
+a desktop that goes quiet mid-gesture still publishes its final figures once
+and then arms nothing. A desktop that has composed no frame publishes
+nothing at all: the empty epoch is what the service reads as a withdrawal,
+so sending it before there is an entry to withdraw would spend a round trip
+to say nothing.
+
 ## The app-ward hold-back
 
 A refused send is **owed**, not lost. Back-pressure says the app is behind,

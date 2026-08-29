@@ -471,6 +471,36 @@ impl SysinfoQueryId {
     /// `stats:net/stack/syn-cookies`).
     pub const NET_STACK_DEFENCE: Self = Self(34);
 
+    /// Publish the calling process's **own** compositor frame accounting —
+    /// one [`DesktopFrameTotals`] — so it appears in
+    /// [`Self::DESKTOP_FRAME_STATS`].
+    ///
+    /// The second *submission* in an otherwise read-only API, and it exists
+    /// for the same reason [`Self::CACHE_REPORT`] does: only the process
+    /// that owns the compositor can count pixels, and the kernel — which
+    /// every other query reads — knows nothing about them. Without it "the
+    /// desktop repaints the screen to move a cursor" is unmeasurable from
+    /// outside the desktop's own monitor.
+    ///
+    /// Ungated and unaudited per call, exactly like [`Self::CACHE_REPORT`]:
+    /// a process describes only itself, grants nothing, and reads nothing.
+    /// The submitted totals replace that process's previous totals rather
+    /// than accumulating, the service stamps the kernel-attested identity
+    /// itself (a caller cannot name another process), and the figures are
+    /// self-reported diagnostics that no kernel decision reads.
+    pub const DESKTOP_FRAME_REPORT: Self = Self(35);
+
+    /// Read the composited-frame accounting every live desktop session has
+    /// published: one [`DesktopFrameRecord`] per publishing process, paged
+    /// by a [`DesktopFrameStatsRequest`].
+    ///
+    /// Requires `CAP_SYSINFO_GLOBAL` and is audited: the answer names
+    /// another principal — the session process — and its work, which is
+    /// cross-principal operational state exactly as
+    /// [`Self::GLOBAL_PROCESS_LIST`] and [`Self::NET_STACK_DEFENCE`] are,
+    /// not a self-scoped observer.
+    pub const DESKTOP_FRAME_STATS: Self = Self(36);
+
     /// Inclusive upper bound on the query identifier space in `sysinfo-v1`.
     ///
     /// Sized identically to the syscall table so a future query explosion
@@ -885,6 +915,18 @@ pub const SYSINFO_QUERIES: &[SysinfoQuerySpec] = &[
         required_capability: Some(CapabilityId::SYSINFO_GLOBAL),
         audit: true,
     },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::DESKTOP_FRAME_REPORT,
+        name: "desktop_frame_report",
+        required_capability: None,
+        audit: false,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::DESKTOP_FRAME_STATS,
+        name: "desktop_frame_stats",
+        required_capability: Some(CapabilityId::SYSINFO_GLOBAL),
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding in [`ENCODED_QUERY_TABLE`].
@@ -1022,6 +1064,10 @@ const _: () = assert!(SYSINFO_MAX_REQUEST <= SYSINFO_MAX_PAYLOAD_LEN as usize);
 // A full page of the widest record must fit a reply, or the breakdown query
 // could never serve even one row.
 const _: () = assert!(SYSINFO_MAX_REPLY >= SYSINFO_REPLY_STATUS_LEN + CacheLedgerRecord::WIRE_LEN);
+// Every submission must frame within the request bound the cache report
+// sizes, or a publisher could not send one.
+const _: () =
+    assert!(SYSINFO_MAX_REQUEST >= SysinfoRequestHeader::WIRE_LEN + DesktopFrameTotals::WIRE_LEN);
 
 /// Frame a `sysinfo-v1` request: the [`SysinfoRequestHeader`] envelope for
 /// `query` followed by its already-encoded `payload`, written into `out`.
@@ -4144,6 +4190,316 @@ impl CacheReportRequest {
     }
 }
 
+/// Request payload for [`SysinfoQueryId::DESKTOP_FRAME_STATS`].
+///
+/// The same paging shape as [`SeatListRequest`]: `offset` names the first
+/// [`DesktopFrameRecord`] to return and `limit` bounds the page. A machine
+/// holds one publisher per compositing session, so a page is small — but the
+/// count is a function of how many seats and switched-away sessions exist,
+/// never a fixed one, so it is paged like every other list.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub struct DesktopFrameStatsRequest {
+    /// Index of the first record to return.
+    pub offset: u32,
+    /// Maximum number of records to return.
+    pub limit: u16,
+    /// Reserved; must be zero in `sysinfo-v1`.
+    pub flags: u16,
+}
+
+impl DesktopFrameStatsRequest {
+    /// Encoded size on the wire.
+    pub const WIRE_LEN: usize = 8;
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, self.offset);
+        put_u16(&mut out, 4, self.limit);
+        put_u16(&mut out, 6, self.flags);
+        out
+    }
+
+    /// Decode from `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] if `bytes` is shorter than [`Self::WIRE_LEN`].
+    /// * [`Errno::BadMagic`] if a reserved flag bit is set (fail closed on an
+    ///   unknown request shape).
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let flags = read_u16(bytes, 6);
+        if flags != 0 {
+            return Err(Errno::BadMagic);
+        }
+        Ok(Self {
+            offset: read_u32(bytes, 0),
+            limit: read_u16(bytes, 4),
+            flags,
+        })
+    }
+}
+
+/// What a compositing session's frames have cost since it started counting:
+/// the request payload of [`SysinfoQueryId::DESKTOP_FRAME_REPORT`] and the
+/// body of a [`DesktopFrameRecord`].
+///
+/// Cumulative rather than last-frame, because the two questions asked of
+/// these counters need different things and both are answered here: a reader
+/// wants rates and ratios over a run (subtract two samples, exactly as an
+/// interface's packet counters are read), while a regression gate wants the
+/// **worst** frame in a gesture — a hover that repaints one control cannot be
+/// told from one that repaints the screen by an average. The desktop's own
+/// live per-frame gauge is a separate, push-side channel to its monitor; this
+/// is the pull-side accounting anything on the machine can ask for.
+///
+/// Every field is a count of work, never a duration, so a figure is exactly
+/// reproducible for a given sequence of frames and a test may assert it under
+/// any machine load. Every addition saturates: a saturated diagnostic is
+/// still truthful about "a very large number", where a wrapped one reads as a
+/// suspiciously small desktop.
+///
+/// `screen_px` is the denominator every pixel figure is read against, and it
+/// is a property of the whole accounting rather than of one frame: a session
+/// whose display mode changes starts a fresh epoch, because counts taken
+/// against a different screen answer a different question and would make the
+/// bounds [`from_bytes`](Self::from_bytes) enforces inexact.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct DesktopFrameTotals {
+    /// The screen's pixel count over the counted frames.
+    pub screen_px: u64,
+    /// Frames composited in this epoch. Zero means the session has composed
+    /// nothing yet, and every other counter is then zero too.
+    pub frames: u64,
+    /// Screen pixels those frames recomposed.
+    pub damaged_px: u64,
+    /// Layer contributions blended to resolve them. Counts contributions,
+    /// not positions, so a stack of windows may blend one damaged pixel many
+    /// times and this can exceed `damaged_px` — that ratio is the overdraw
+    /// reading.
+    pub blended_px: u64,
+    /// Damaged pixels resolved by copying a fully opaque run instead,
+    /// skipping every layer beneath.
+    pub opaque_px: u64,
+    /// Pixels rewritten by a *recomputed* backdrop frost. A frost served
+    /// from the retained one is copied rather than blurred and counts
+    /// nothing, so this is the blur work the frames could not avoid.
+    pub blur_px: u64,
+    /// Composed pixels converted to scan-out bytes.
+    pub encoded_px: u64,
+    /// Dirty rectangles those frames recomposed.
+    pub dirty_rects: u64,
+    /// Calls into the display driver that published them.
+    pub present_calls: u64,
+    /// Window-furniture lookups served from the retained cache.
+    pub chrome_hits: u64,
+    /// Window-furniture lookups that had to be rendered.
+    pub chrome_misses: u64,
+    /// Most pixels any single frame in this epoch recomposed.
+    pub peak_damaged_px: u64,
+    /// Most layer contributions any single frame in this epoch blended.
+    /// An independent maximum: the frame that blended most need not be the
+    /// frame that damaged most, so each bounds its own worst case.
+    pub peak_blended_px: u64,
+}
+
+impl DesktopFrameTotals {
+    /// Encoded size on the wire.
+    pub const WIRE_LEN: usize = 104;
+
+    /// An epoch that has counted no frame.
+    pub const ZERO: Self = Self {
+        screen_px: 0,
+        frames: 0,
+        damaged_px: 0,
+        blended_px: 0,
+        opaque_px: 0,
+        blur_px: 0,
+        encoded_px: 0,
+        dirty_rects: 0,
+        present_calls: 0,
+        chrome_hits: 0,
+        chrome_misses: 0,
+        peak_damaged_px: 0,
+        peak_blended_px: 0,
+    };
+
+    /// Refuse counts no compositor could have produced.
+    ///
+    /// The receiver's fail-closed gate, applied where the untrusted
+    /// submission is decoded, so nothing renders or asserts on a sender's
+    /// arithmetic. Each rule holds of every sequence of frames a compositor
+    /// can actually compose:
+    ///
+    /// * A `frames` of zero admits no work at all — a counter can only move
+    ///   in a frame.
+    /// * `dirty_rects` is zero exactly when `damaged_px` is: an empty
+    ///   rectangle is never recomposed, so each counted rectangle carries at
+    ///   least one pixel.
+    /// * `opaque_px` cannot exceed `damaged_px`, and `encoded_px` cannot
+    ///   either: a copied opaque run and an encoded scan-out byte both
+    ///   resolve a damaged pixel, never a pixel outside the damage.
+    /// * `damaged_px` cannot exceed `screen_px * frames`: one frame's
+    ///   rectangles are clipped to the screen and pairwise disjoint.
+    /// * `present_calls` cannot exceed `dirty_rects + frames`: a frame
+    ///   publishes at most one driver call per rectangle, and the
+    ///   whole-screen, bounding-box, and hardware-layer paths each publish
+    ///   exactly one.
+    /// * A peak is a maximum over the summed frames, so it cannot exceed its
+    ///   own sum, is zero exactly when that sum is, and — for damage, which
+    ///   is clipped per frame — cannot exceed one screen.
+    ///
+    /// `blended_px`, `blur_px` and the furniture counters are deliberately
+    /// unbounded: blends count layer contributions, a recomputed frost is
+    /// blurred over the whole window rectangle that caused it (and several
+    /// windows may recompute in one frame), and a furniture lookup is not a
+    /// pixel at all.
+    const fn validate(&self) -> Result<(), Errno> {
+        let no_frames = self.frames == 0;
+        let work = self.damaged_px
+            | self.blended_px
+            | self.opaque_px
+            | self.blur_px
+            | self.encoded_px
+            | self.dirty_rects
+            | self.present_calls
+            | self.chrome_hits
+            | self.chrome_misses
+            | self.peak_damaged_px
+            | self.peak_blended_px;
+        if no_frames && work != 0 {
+            return Err(Errno::OutOfRange);
+        }
+        if (self.dirty_rects == 0) != (self.damaged_px == 0)
+            || self.opaque_px > self.damaged_px
+            || self.encoded_px > self.damaged_px
+            || self.damaged_px > self.screen_px.saturating_mul(self.frames)
+            || self.present_calls > self.dirty_rects.saturating_add(self.frames)
+            || self.peak_damaged_px > self.damaged_px
+            || self.peak_damaged_px > self.screen_px
+            || (self.peak_damaged_px == 0) != (self.damaged_px == 0)
+            || self.peak_blended_px > self.blended_px
+            || (self.peak_blended_px == 0) != (self.blended_px == 0)
+        {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(())
+    }
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u64(&mut out, 0, self.screen_px);
+        put_u64(&mut out, 8, self.frames);
+        put_u64(&mut out, 16, self.damaged_px);
+        put_u64(&mut out, 24, self.blended_px);
+        put_u64(&mut out, 32, self.opaque_px);
+        put_u64(&mut out, 40, self.blur_px);
+        put_u64(&mut out, 48, self.encoded_px);
+        put_u64(&mut out, 56, self.dirty_rects);
+        put_u64(&mut out, 64, self.present_calls);
+        put_u64(&mut out, 72, self.chrome_hits);
+        put_u64(&mut out, 80, self.chrome_misses);
+        put_u64(&mut out, 88, self.peak_damaged_px);
+        put_u64(&mut out, 96, self.peak_blended_px);
+        out
+    }
+
+    /// Decode from `bytes`, refusing counts no compositor could produce.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] if `bytes` is shorter than [`Self::WIRE_LEN`].
+    /// * [`Errno::OutOfRange`] if the counts are ones no composite pass could
+    ///   have produced. The rules are stated on the private `validate` this
+    ///   calls, and catalogued for a reader in `docs/src/abi/sysinfo.md`.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let totals = Self {
+            screen_px: read_u64(bytes, 0),
+            frames: read_u64(bytes, 8),
+            damaged_px: read_u64(bytes, 16),
+            blended_px: read_u64(bytes, 24),
+            opaque_px: read_u64(bytes, 32),
+            blur_px: read_u64(bytes, 40),
+            encoded_px: read_u64(bytes, 48),
+            dirty_rects: read_u64(bytes, 56),
+            present_calls: read_u64(bytes, 64),
+            chrome_hits: read_u64(bytes, 72),
+            chrome_misses: read_u64(bytes, 80),
+            peak_damaged_px: read_u64(bytes, 88),
+            peak_blended_px: read_u64(bytes, 96),
+        };
+        totals.validate()?;
+        Ok(totals)
+    }
+}
+
+/// One response row of [`SysinfoQueryId::DESKTOP_FRAME_STATS`]: a
+/// publisher's [`DesktopFrameTotals`] and the process the service attested
+/// them to.
+///
+/// `reporter_pid` is stamped by `sysinfod` from the caller's kernel-attested
+/// identity, never carried in the submission, so a publisher can neither
+/// attribute its figures to another process nor be mistaken for one. Every
+/// figure here is self-reported: it is a diagnostic the desktop states about
+/// itself, and no kernel decision reads it.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct DesktopFrameRecord {
+    /// Numeric pid of the publishing process, stamped by the service.
+    pub reporter_pid: u64,
+    /// What that publisher's frames cost.
+    pub totals: DesktopFrameTotals,
+}
+
+impl DesktopFrameRecord {
+    /// Encoded size on the wire.
+    pub const WIRE_LEN: usize = 8 + DesktopFrameTotals::WIRE_LEN;
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u64(&mut out, 0, self.reporter_pid);
+        out[8..].copy_from_slice(&self.totals.to_le_bytes());
+        out
+    }
+
+    /// Decode from `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] if `bytes` is shorter than [`Self::WIRE_LEN`].
+    /// * [`Errno::OutOfRange`] if the totals fail the same bounds
+    ///   [`DesktopFrameTotals::from_bytes`] applies to a bare submission.
+    /// * [`Errno::BadMagic`] if the row names no publisher: a served row is
+    ///   always attributed, so a zero pid is wire corruption rather than an
+    ///   anonymous desktop.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let reporter_pid = read_u64(bytes, 0);
+        if reporter_pid == 0 {
+            return Err(Errno::BadMagic);
+        }
+        Ok(Self {
+            reporter_pid,
+            totals: DesktopFrameTotals::from_bytes(&bytes[8..])?,
+        })
+    }
+}
+
 /// Fold per-cache rows into the per-class totals of a
 /// [`SysinfoQueryId::RECLAIM_STATS`] response.
 ///
@@ -5638,6 +5994,7 @@ mod tests {
         CrashFaultBucket, CrashFaultClass, CrashNamedReg, CrashRecord, CrashRecordRequest,
         CRASH_MAX_FRAMES, CRASH_MAX_REGS, CRASH_REG_NAME_LEN,
     };
+    use super::{DesktopFrameRecord, DesktopFrameStatsRequest, DesktopFrameTotals};
     use super::{IrqListRequest, IrqRecord, IRQ_FLAG_QUARANTINED};
     use super::{VolumeIoHealthRecord, VolumeIoHealthRequest};
     use crate::blkio::{BlkDeviceClass, BlkHealthCounters, BLK_HEALTH_COUNTERS_LEN};
@@ -8067,5 +8424,168 @@ mod tests {
             CrashRecord::from_bytes(&bytes),
             Err(Errno::LengthOutOfRange)
         );
+    }
+
+    /// A sound epoch: a screenful of frames, each damaging part of it.
+    fn frame_totals() -> DesktopFrameTotals {
+        DesktopFrameTotals {
+            screen_px: 1024 * 768,
+            frames: 4,
+            damaged_px: 40_000,
+            blended_px: 120_000,
+            opaque_px: 12_000,
+            blur_px: 9_000,
+            encoded_px: 40_000,
+            dirty_rects: 9,
+            present_calls: 4,
+            chrome_hits: 31,
+            chrome_misses: 2,
+            peak_damaged_px: 20_000,
+            peak_blended_px: 60_000,
+        }
+    }
+
+    #[test]
+    fn desktop_frame_totals_round_trip() {
+        let totals = frame_totals();
+        assert_eq!(DesktopFrameTotals::WIRE_LEN, 104);
+        assert_eq!(
+            DesktopFrameTotals::from_bytes(&totals.to_le_bytes()),
+            Ok(totals)
+        );
+        // An epoch that has counted nothing is a legal report: it is what a
+        // session that has composed no frame yet would say.
+        assert_eq!(
+            DesktopFrameTotals::from_bytes(&DesktopFrameTotals::ZERO.to_le_bytes()),
+            Ok(DesktopFrameTotals::ZERO)
+        );
+        assert_eq!(
+            DesktopFrameTotals::from_bytes(&totals.to_le_bytes()[..103]),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn desktop_frame_totals_fail_closed_on_impossible_counts() {
+        // Each mutation is a count no composite pass could have produced,
+        // and each is refused where the untrusted submission is decoded.
+        let reject = |mutate: fn(&mut DesktopFrameTotals)| {
+            let mut totals = frame_totals();
+            mutate(&mut totals);
+            assert_eq!(
+                DesktopFrameTotals::from_bytes(&totals.to_le_bytes()),
+                Err(Errno::OutOfRange),
+                "{totals:?}"
+            );
+        };
+
+        // Work with no frame to do it in.
+        reject(|t| t.frames = 0);
+        // Damage without a rectangle, and a rectangle without damage.
+        reject(|t| t.dirty_rects = 0);
+        reject(|t| t.damaged_px = 0);
+        // Copies and encodes resolve damaged pixels, never others.
+        reject(|t| t.opaque_px = t.damaged_px + 1);
+        reject(|t| t.encoded_px = t.damaged_px + 1);
+        // More damage than the counted frames could clip to the screen.
+        reject(|t| t.damaged_px = t.screen_px * t.frames + 1);
+        // More driver calls than one per rectangle plus one per frame.
+        reject(|t| t.present_calls = t.dirty_rects + t.frames + 1);
+        // A maximum above its own sum, above one screen, or zero beside a
+        // non-zero sum.
+        reject(|t| t.peak_damaged_px = t.damaged_px + 1);
+        reject(|t| {
+            t.screen_px = 8;
+            t.damaged_px = 32;
+            t.peak_damaged_px = 9;
+        });
+        reject(|t| t.peak_damaged_px = 0);
+        reject(|t| t.peak_blended_px = t.blended_px + 1);
+        reject(|t| t.peak_blended_px = 0);
+    }
+
+    #[test]
+    fn desktop_frame_totals_admit_the_unbounded_counters() {
+        // Blends count layer contributions, a recomputed frost is blurred
+        // over the window rectangle that caused it, and a furniture lookup
+        // is not a pixel: none of the three is bounded by the damage.
+        let mut totals = frame_totals();
+        totals.blended_px = totals.screen_px * totals.frames * 13;
+        totals.peak_blended_px = totals.blended_px;
+        totals.blur_px = totals.screen_px * 3;
+        totals.chrome_hits = u64::MAX;
+        assert_eq!(
+            DesktopFrameTotals::from_bytes(&totals.to_le_bytes()),
+            Ok(totals)
+        );
+    }
+
+    #[test]
+    fn desktop_frame_record_round_trips_and_demands_a_publisher() {
+        let record = DesktopFrameRecord {
+            reporter_pid: 42,
+            totals: frame_totals(),
+        };
+        assert_eq!(DesktopFrameRecord::WIRE_LEN, 112);
+        assert_eq!(
+            DesktopFrameRecord::from_bytes(&record.to_le_bytes()),
+            Ok(record)
+        );
+        // A served row is always attributed; an anonymous one is corruption.
+        let mut anonymous = record;
+        anonymous.reporter_pid = 0;
+        assert_eq!(
+            DesktopFrameRecord::from_bytes(&anonymous.to_le_bytes()),
+            Err(Errno::BadMagic)
+        );
+        // The body is validated through the same gate as a bare submission.
+        let mut impossible = record;
+        impossible.totals.opaque_px = impossible.totals.damaged_px + 1;
+        assert_eq!(
+            DesktopFrameRecord::from_bytes(&impossible.to_le_bytes()),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(
+            DesktopFrameRecord::from_bytes(&record.to_le_bytes()[..111]),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn desktop_frame_stats_request_round_trips_and_refuses_reserved_flags() {
+        let request = DesktopFrameStatsRequest {
+            offset: 3,
+            limit: 8,
+            flags: 0,
+        };
+        assert_eq!(DesktopFrameStatsRequest::WIRE_LEN, 8);
+        assert_eq!(
+            DesktopFrameStatsRequest::from_bytes(&request.to_le_bytes()),
+            Ok(request)
+        );
+        let mut bytes = request.to_le_bytes();
+        bytes[6] = 1;
+        assert_eq!(
+            DesktopFrameStatsRequest::from_bytes(&bytes),
+            Err(Errno::BadMagic)
+        );
+        assert_eq!(
+            DesktopFrameStatsRequest::from_bytes(&bytes[..7]),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn desktop_frame_query_gates_are_the_submission_read_pair() {
+        // The submission describes only its own caller, so it is ungated and
+        // unaudited exactly as the cache report is; the read names another
+        // principal's work, so it carries the cross-principal gate and is
+        // audited.
+        let report = spec_for(SysinfoQueryId::DESKTOP_FRAME_REPORT).unwrap();
+        assert_eq!(report.required_capability, None);
+        assert!(!report.audit);
+        let read = spec_for(SysinfoQueryId::DESKTOP_FRAME_STATS).unwrap();
+        assert_eq!(read.required_capability, Some(CapabilityId::SYSINFO_GLOBAL));
+        assert!(read.audit);
     }
 }

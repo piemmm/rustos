@@ -12,17 +12,18 @@ use tairix_abi::raid_admin::{RaidArrayRecord, RaidMemberRecord};
 use tairix_abi::sysinfo::{
     fold_cache_ledgers, spec_for, CacheLedgerListRequest, CacheLedgerRecord, CacheReportRequest,
     CpuInfoListRequest, CpuInfoRecord, CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest,
-    CpuTimeRecord, CrashRecord, CrashRecordRequest, HardwareTreeRequest, IrqListRequest, IrqRecord,
-    MountListRequest, MountRecord, NetInterfaceListRequest, NetInterfaceRatesRequest,
-    ProcessListRequest, ProcessRecord, RaidListRequest, ReclaimClassRecord, ReclaimListRequest,
-    ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader,
-    UserDirectoryRecord, UserDirectoryRequest, VolumeIoHealthRecord, VolumeIoHealthRequest,
+    CpuTimeRecord, CrashRecord, CrashRecordRequest, DesktopFrameRecord, DesktopFrameStatsRequest,
+    DesktopFrameTotals, HardwareTreeRequest, IrqListRequest, IrqRecord, MountListRequest,
+    MountRecord, NetInterfaceListRequest, NetInterfaceRatesRequest, ProcessListRequest,
+    ProcessRecord, RaidListRequest, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord,
+    SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader, UserDirectoryRecord,
+    UserDirectoryRequest, VolumeIoHealthRecord, VolumeIoHealthRequest,
 };
 use tairix_abi::{Errno, LimitKind};
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
 
 use crate::events;
-use crate::reporters::CacheLedgerRegistry;
+use crate::reporters::SelfReports;
 use crate::source::{Caller, ProcessScope, SysinfoSource};
 
 /// Serve one System Information request.
@@ -75,7 +76,7 @@ use crate::source::{Caller, ProcessScope, SysinfoSource};
 pub fn serve(
     source: &dyn SysinfoSource,
     caller: &Caller,
-    registry: &mut CacheLedgerRegistry,
+    reports: &mut SelfReports,
     audit: &dyn Sink,
     request: &[u8],
     response: &mut [u8],
@@ -150,7 +151,7 @@ pub fn serve(
         );
     }
 
-    dispatch(source, caller, registry, header.query, payload, response)
+    dispatch(source, caller, reports, header.query, payload, response)
 }
 
 /// Route a capability-cleared request to its [`SysinfoSource`] method and
@@ -158,7 +159,7 @@ pub fn serve(
 fn dispatch(
     source: &dyn SysinfoSource,
     caller: &Caller,
-    registry: &mut CacheLedgerRegistry,
+    reports: &mut SelfReports,
     query: SysinfoQueryId,
     payload: &[u8],
     response: &mut [u8],
@@ -197,11 +198,15 @@ fn dispatch(
     } else if query == SysinfoQueryId::MEMORY_TOTAL {
         write_bytes(&source.memory_total(caller)?.to_le_bytes(), response)
     } else if query == SysinfoQueryId::RECLAIM_STATS {
-        reclaim_list(source, caller, registry, payload, response)
+        reclaim_list(source, caller, reports, payload, response)
     } else if query == SysinfoQueryId::CACHE_LEDGERS {
-        cache_ledgers_list(source, caller, registry, payload, response)
+        cache_ledgers_list(source, caller, reports, payload, response)
     } else if query == SysinfoQueryId::CACHE_REPORT {
-        cache_report(source, caller, registry, payload, response)
+        cache_report(source, caller, reports, payload, response)
+    } else if query == SysinfoQueryId::DESKTOP_FRAME_REPORT {
+        desktop_frame_report(source, caller, reports, payload)
+    } else if query == SysinfoQueryId::DESKTOP_FRAME_STATS {
+        desktop_frame_stats(reports, payload, response)
     } else if query == SysinfoQueryId::RAMZIP_STATS {
         write_bytes(&source.ramzip_stats(caller)?.to_le_bytes(), response)
     } else if query == SysinfoQueryId::CPU_LOAD {
@@ -506,11 +511,11 @@ fn net_resolver_servers_list(
 fn combined_cache_rows(
     source: &dyn SysinfoSource,
     caller: &Caller,
-    registry: &mut CacheLedgerRegistry,
+    reports: &mut SelfReports,
 ) -> Result<Vec<CacheLedgerRecord>, Errno> {
     let mut rows = source.cache_ledger_records(caller)?;
-    registry.retain_live(&source.live_process_instances()?);
-    rows.extend(registry.rows());
+    reports.retain_live(&source.live_process_instances()?);
+    rows.extend(reports.cache_rows());
     Ok(rows)
 }
 
@@ -520,12 +525,12 @@ fn combined_cache_rows(
 fn reclaim_list(
     source: &dyn SysinfoSource,
     caller: &Caller,
-    registry: &mut CacheLedgerRegistry,
+    reports: &mut SelfReports,
     payload: &[u8],
     response: &mut [u8],
 ) -> Result<usize, Errno> {
     let request = ReclaimListRequest::from_bytes(payload)?;
-    let rows = combined_cache_rows(source, caller, registry)?;
+    let rows = combined_cache_rows(source, caller, reports)?;
     let totals = fold_cache_ledgers(&rows);
     page_records(
         response,
@@ -543,12 +548,12 @@ fn reclaim_list(
 fn cache_ledgers_list(
     source: &dyn SysinfoSource,
     caller: &Caller,
-    registry: &mut CacheLedgerRegistry,
+    reports: &mut SelfReports,
     payload: &[u8],
     response: &mut [u8],
 ) -> Result<usize, Errno> {
     let request = CacheLedgerListRequest::from_bytes(payload)?;
-    let rows = combined_cache_rows(source, caller, registry)?;
+    let rows = combined_cache_rows(source, caller, reports)?;
     page_records(
         response,
         request.offset as usize,
@@ -571,7 +576,7 @@ fn cache_ledgers_list(
 fn cache_report(
     source: &dyn SysinfoSource,
     caller: &Caller,
-    registry: &mut CacheLedgerRegistry,
+    reports: &mut SelfReports,
     payload: &[u8],
     _response: &mut [u8],
 ) -> Result<usize, Errno> {
@@ -592,9 +597,62 @@ fn cache_report(
     // A full registry only refuses a genuinely *new* reporter: drop any
     // entry whose process has already exited before deciding whether
     // there is room for this one.
-    registry.retain_live(&source.live_process_instances()?);
-    registry.report(caller, rows)?;
+    reports.retain_live(&source.live_process_instances()?);
+    reports.report_cache_ledgers(caller, rows)?;
     Ok(0)
+}
+
+/// Decode a submitted [`DesktopFrameTotals`] and replace the caller's frame
+/// accounting in `reports`.
+///
+/// The reply carries no payload, so a successful call always returns
+/// `Ok(0)`. The totals are decoded — and so bounds-checked against what a
+/// composite pass can produce — before `reports` is touched, and trailing
+/// bytes are refused, so a malformed submission fails closed and leaves the
+/// retained accounting exactly as it was.
+fn desktop_frame_report(
+    source: &dyn SysinfoSource,
+    caller: &Caller,
+    reports: &mut SelfReports,
+    payload: &[u8],
+) -> Result<usize, Errno> {
+    if payload.len() != DesktopFrameTotals::WIRE_LEN {
+        return Err(Errno::BadMagic);
+    }
+    let totals = DesktopFrameTotals::from_bytes(payload)?;
+
+    // A full table only refuses a genuinely *new* publisher: drop any entry
+    // whose process has already exited before deciding whether there is room
+    // for this one.
+    reports.retain_live(&source.live_process_instances()?);
+    reports.report_frame_totals(caller, totals)?;
+    Ok(0)
+}
+
+/// Decode the [`DesktopFrameStatsRequest`], apply paging, and pack the
+/// retained [`DesktopFrameRecord`]s into `response`.
+///
+/// Reached only after the `CAP_SYSINFO_GLOBAL` gate has passed. The records
+/// are `sysinfod`'s own retained state, so this touches no
+/// [`SysinfoSource`]: liveness pruning happens where a submission is
+/// admitted, and a reader that arrives between an exit and the next
+/// submission sees the departed session's last figures rather than nothing —
+/// which is what a reader asking "what did the desktop just cost" wants.
+fn desktop_frame_stats(
+    reports: &SelfReports,
+    payload: &[u8],
+    response: &mut [u8],
+) -> Result<usize, Errno> {
+    let request = DesktopFrameStatsRequest::from_bytes(payload)?;
+    let records = reports.frame_records();
+    page_records(
+        response,
+        request.offset as usize,
+        request.limit as usize,
+        records.len(),
+        DesktopFrameRecord::WIRE_LEN,
+        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
+    )
 }
 
 /// Decode the [`CpuLoadRequest`], apply paging, and pack the selected
@@ -859,7 +917,7 @@ fn query_field(name: &'static str) -> Field<'static> {
 
 #[cfg(test)]
 mod tests {
-    use super::{serve, CacheLedgerRegistry};
+    use super::{serve, SelfReports};
     use crate::events;
     use crate::reporters::{MIN_REPORTERS, RAM_BYTES_PER_REPORTER};
     use crate::source::{Caller, ProcessScope, SysinfoSource};
@@ -882,11 +940,12 @@ mod tests {
         CacheLedgerListRequest, CacheLedgerOrigin, CacheLedgerRecord, CacheOwnerKind,
         CacheReportRequest, CpuInfoRecord, CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest,
         CpuTimeRecord, CrashFaultBucket, CrashFaultClass, CrashRecord, CrashRecordRequest,
-        HardwareTreeRequest, IrqListRequest, IrqRecord, KernelMemoryStats, LoadAverage,
-        MemoryPressureBand, MemoryPressureStats, MemoryTotal, MountAvailability, MountListRequest,
-        MountRecord, MountVolumeState, ProcessListRequest, ProcessRecord, ProcessState,
-        RaidListRequest, RamzipStats, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord,
-        SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
+        DesktopFrameRecord, DesktopFrameStatsRequest, DesktopFrameTotals, HardwareTreeRequest,
+        IrqListRequest, IrqRecord, KernelMemoryStats, LoadAverage, MemoryPressureBand,
+        MemoryPressureStats, MemoryTotal, MountAvailability, MountListRequest, MountRecord,
+        MountVolumeState, ProcessListRequest, ProcessRecord, ProcessState, RaidListRequest,
+        RamzipStats, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord, SeatListRequest,
+        SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
         UserDirectoryRecord, UserDirectoryRequest, VolumeIoHealthRecord, VolumeIoHealthRequest,
         IRQ_FLAG_QUARANTINED, LOAD_FIXED_SHIFT, MACHINE_ID_LEN, MAX_CACHE_REPORT_ENTRIES,
         RECLAIM_CLASS_COUNT, RESOURCE_LIMITS_REPORT_LEN, SEAT_FLAG_OWNED, SYSINFO_MAX_REPLY,
@@ -1536,7 +1595,7 @@ mod tests {
         request: &[u8],
         response: &mut [u8],
     ) -> Result<usize, Errno> {
-        let mut registry = CacheLedgerRegistry::new(1 << 30);
+        let mut registry = SelfReports::new(1 << 30);
         serve(source, caller, &mut registry, sink, request, response)
     }
 
@@ -3194,7 +3253,7 @@ mod tests {
     fn cache_report_row_appears_in_cache_ledgers_and_reclaim_fold() {
         let source = FixtureSource::new();
         let sink = RecordingSink::new();
-        let mut registry = CacheLedgerRegistry::new(1 << 30);
+        let mut registry = SelfReports::new(1 << 30);
         let mut resp = [0u8; 4096];
         let kernel_reader = caller(&Caps(&[CapabilityId::SYSINFO_KERNEL]));
 
@@ -3264,7 +3323,7 @@ mod tests {
     fn cache_report_refuses_row_with_preset_origin_or_reporter_pid() {
         let source = FixtureSource::new();
         let sink = RecordingSink::new();
-        let mut registry = CacheLedgerRegistry::new(1 << 30);
+        let mut registry = SelfReports::new(1 << 30);
         let mut resp = [0u8; 256];
         let reporter = user_caller(&[], 0xB2, 7);
 
@@ -3286,14 +3345,14 @@ mod tests {
             Err(Errno::BadMagic)
         );
 
-        assert!(registry.rows().is_empty());
+        assert!(registry.cache_rows().is_empty());
     }
 
     #[test]
     fn cache_report_refuses_a_row_claiming_a_kernel_subsystem_owner() {
         let source = FixtureSource::new();
         let sink = RecordingSink::new();
-        let mut registry = CacheLedgerRegistry::new(1 << 30);
+        let mut registry = SelfReports::new(1 << 30);
         let mut resp = [0u8; 256];
         let reporter = user_caller(&[], 0xB3, 11);
 
@@ -3310,14 +3369,14 @@ mod tests {
             serve(&source, &reporter, &mut registry, &sink, &req, &mut resp),
             Err(Errno::BadMagic)
         );
-        assert!(registry.rows().is_empty());
+        assert!(registry.cache_rows().is_empty());
     }
 
     #[test]
     fn cache_report_second_call_replaces_rather_than_appends() {
         let source = FixtureSource::new();
         let sink = RecordingSink::new();
-        let mut registry = CacheLedgerRegistry::new(1 << 30);
+        let mut registry = SelfReports::new(1 << 30);
         let mut resp = [0u8; 256];
         let reporter = user_caller(&[], 0xC3, 8);
 
@@ -3330,7 +3389,7 @@ mod tests {
         let req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &second);
         serve(&source, &reporter, &mut registry, &sink, &req, &mut resp).expect("second report");
 
-        let rows = registry.rows();
+        let rows = registry.cache_rows();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].label(), "cursors");
     }
@@ -3339,7 +3398,7 @@ mod tests {
     fn cache_report_empty_withdraws_the_reporter() {
         let source = FixtureSource::new();
         let sink = RecordingSink::new();
-        let mut registry = CacheLedgerRegistry::new(1 << 30);
+        let mut registry = SelfReports::new(1 << 30);
         let mut resp = [0u8; 256];
         let reporter = user_caller(&[], 0xD4, 9);
 
@@ -3351,14 +3410,14 @@ mod tests {
         let req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &empty);
         serve(&source, &reporter, &mut registry, &sink, &req, &mut resp).expect("withdrawn");
 
-        assert!(registry.rows().is_empty());
+        assert!(registry.cache_rows().is_empty());
     }
 
     #[test]
     fn dead_reporter_is_dropped_and_recycled_pid_does_not_inherit_its_rows() {
         let source = FixtureSource::new();
         let sink = RecordingSink::new();
-        let mut registry = CacheLedgerRegistry::new(1 << 30);
+        let mut registry = SelfReports::new(1 << 30);
         let mut resp = [0u8; 4096];
         let kernel_reader = caller(&Caps(&[CapabilityId::SYSINFO_KERNEL]));
         let cll = CacheLedgerListRequest {
@@ -3420,7 +3479,7 @@ mod tests {
         // Exactly the registry's own floor, read from the derivation policy
         // rather than copied, so this test cannot drift from it.
         let floor = u8::try_from(MIN_REPORTERS).expect("the reporter floor fits a fixture tag");
-        let mut registry = CacheLedgerRegistry::new(RAM_BYTES_PER_REPORTER * u64::from(floor));
+        let mut registry = SelfReports::new(RAM_BYTES_PER_REPORTER * u64::from(floor));
         let mut resp = [0u8; 256];
         let mut live = alloc::vec::Vec::new();
 
@@ -3443,14 +3502,14 @@ mod tests {
             serve(&source, &overflow, &mut registry, &sink, &req, &mut resp),
             Err(Errno::NoSpace)
         );
-        assert_eq!(registry.rows().len(), MIN_REPORTERS);
+        assert_eq!(registry.cache_rows().len(), MIN_REPORTERS);
     }
 
     #[test]
     fn cache_ledgers_requires_capability_while_cache_report_does_not() {
         let source = FixtureSource::new();
         let sink = RecordingSink::new();
-        let mut registry = CacheLedgerRegistry::new(1 << 30);
+        let mut registry = SelfReports::new(1 << 30);
         let mut resp = [0u8; 256];
 
         let cll = CacheLedgerListRequest {
@@ -3492,7 +3551,7 @@ mod tests {
     fn cache_report_from_a_kernel_domain_caller_leaves_no_rows() {
         let source = FixtureSource::new();
         let sink = RecordingSink::new();
-        let mut registry = CacheLedgerRegistry::new(1 << 30);
+        let mut registry = SelfReports::new(1 << 30);
         let mut resp = [0u8; 4096];
 
         // `CACHE_REPORT` demands no capability, so the attested instance id
@@ -3512,7 +3571,7 @@ mod tests {
             ),
             Err(Errno::PermissionDenied)
         );
-        assert!(registry.rows().is_empty());
+        assert!(registry.cache_rows().is_empty());
 
         // Claiming to be live does not help either: expiry reads the
         // kernel's live-instance list, and the reserved id is refused
@@ -3553,7 +3612,7 @@ mod tests {
     fn cache_ledgers_paging_never_skips_or_repeats_a_row() {
         let source = FixtureSource::new();
         let sink = RecordingSink::new();
-        let mut registry = CacheLedgerRegistry::new(1 << 30);
+        let mut registry = SelfReports::new(1 << 30);
         let kernel_reader = caller(&Caps(&[CapabilityId::SYSINFO_KERNEL]));
         let mut resp = [0u8; 4096];
 
@@ -3604,7 +3663,7 @@ mod tests {
     fn malformed_cache_report_fails_closed_and_leaves_registry_untouched() {
         let source = FixtureSource::new();
         let sink = RecordingSink::new();
-        let mut registry = CacheLedgerRegistry::new(1 << 30);
+        let mut registry = SelfReports::new(1 << 30);
         let reporter = user_caller(&[], 0x77, 42);
         let mut resp = [0u8; 512];
 
@@ -3619,7 +3678,7 @@ mod tests {
             serve(&source, &reporter, &mut registry, &sink, &req, &mut resp),
             Err(Errno::BadMagic)
         );
-        assert!(registry.rows().is_empty());
+        assert!(registry.cache_rows().is_empty());
 
         // Trailing bytes: declares zero rows but supplies one anyway.
         let zero_header = CacheReportRequest {
@@ -3634,7 +3693,7 @@ mod tests {
             serve(&source, &reporter, &mut registry, &sink, &req, &mut resp),
             Err(Errno::BadMagic)
         );
-        assert!(registry.rows().is_empty());
+        assert!(registry.cache_rows().is_empty());
 
         // Over-long declared count.
         let over_header = CacheReportRequest {
@@ -3647,7 +3706,7 @@ mod tests {
             serve(&source, &reporter, &mut registry, &sink, &req, &mut resp),
             Err(Errno::LengthOutOfRange)
         );
-        assert!(registry.rows().is_empty());
+        assert!(registry.cache_rows().is_empty());
 
         // Unrenderable label: corrupt the wire image directly, since the
         // safe constructor itself refuses to build such a row.
@@ -3665,6 +3724,320 @@ mod tests {
             serve(&source, &reporter, &mut registry, &sink, &req, &mut resp),
             Err(Errno::OutOfRange)
         );
-        assert!(registry.rows().is_empty());
+        assert!(registry.cache_rows().is_empty());
+    }
+
+    /// Frame accounting a compositor could have produced: a screenful of
+    /// frames of which the worst damaged a fifth of the screen.
+    fn frame_totals() -> DesktopFrameTotals {
+        DesktopFrameTotals {
+            screen_px: 1024 * 768,
+            frames: 12,
+            damaged_px: 600_000,
+            blended_px: 900_000,
+            opaque_px: 120_000,
+            blur_px: 40_000,
+            encoded_px: 600_000,
+            dirty_rects: 30,
+            present_calls: 12,
+            chrome_hits: 90,
+            chrome_misses: 4,
+            peak_damaged_px: 150_000,
+            peak_blended_px: 260_000,
+        }
+    }
+
+    /// Publish `totals` as `reporter`, keeping that reporter live so the
+    /// liveness sweep the submission runs first does not drop it.
+    fn publish_frames(
+        source: &FixtureSource,
+        reports: &mut SelfReports,
+        reporter: &Caller,
+        totals: DesktopFrameTotals,
+    ) -> Result<usize, Errno> {
+        let sink = RecordingSink::new();
+        let mut resp = [0u8; 8];
+        let req = request_bytes_vec(SysinfoQueryId::DESKTOP_FRAME_REPORT, &totals.to_le_bytes());
+        source.set_live(alloc::vec![reporter.origin().proc_id()]);
+        serve(source, reporter, reports, &sink, &req, &mut resp)
+    }
+
+    /// Read the published frame records back as an attested global observer.
+    fn read_frames(
+        source: &FixtureSource,
+        reports: &mut SelfReports,
+        caller: &Caller,
+    ) -> Result<alloc::vec::Vec<DesktopFrameRecord>, Errno> {
+        let sink = RecordingSink::new();
+        let request = DesktopFrameStatsRequest {
+            offset: 0,
+            limit: 8,
+            flags: 0,
+        };
+        let req = request_bytes(SysinfoQueryId::DESKTOP_FRAME_STATS, &request.to_le_bytes());
+        let mut resp = [0u8; 8 * DesktopFrameRecord::WIRE_LEN];
+        let n = serve(source, caller, reports, &sink, &req, &mut resp)?;
+        Ok(resp[..n]
+            .as_chunks::<{ DesktopFrameRecord::WIRE_LEN }>()
+            .0
+            .iter()
+            .map(|chunk| DesktopFrameRecord::from_bytes(chunk).expect("a served row decodes"))
+            .collect())
+    }
+
+    #[test]
+    fn a_published_frame_report_is_served_with_its_attested_publisher() {
+        let source = FixtureSource::new();
+        let mut reports = SelfReports::new(1 << 30);
+        let session = user_caller(&[], 0xF1, 77);
+
+        assert_eq!(
+            publish_frames(&source, &mut reports, &session, frame_totals()),
+            Ok(0),
+            "the submission carries no reply payload"
+        );
+
+        let observer = user_caller(&[CapabilityId::SYSINFO_GLOBAL], 0xF2, 78);
+        let records = read_frames(&source, &mut reports, &observer).expect("served");
+        assert_eq!(records.len(), 1);
+        // The pid comes from the attested origin, not from the submission:
+        // nothing a publisher sends names a process.
+        assert_eq!(records[0].reporter_pid, 77);
+        assert_eq!(records[0].totals, frame_totals());
+    }
+
+    #[test]
+    fn reading_frame_reports_needs_the_cross_principal_gate_and_is_audited() {
+        let source = FixtureSource::new();
+        let mut reports = SelfReports::new(1 << 30);
+        let session = user_caller(&[], 0xF3, 81);
+        publish_frames(&source, &mut reports, &session, frame_totals()).expect("published");
+
+        let request = DesktopFrameStatsRequest {
+            offset: 0,
+            limit: 4,
+            flags: 0,
+        };
+        let req = request_bytes(SysinfoQueryId::DESKTOP_FRAME_STATS, &request.to_le_bytes());
+        let mut resp = [0u8; 4 * DesktopFrameRecord::WIRE_LEN];
+
+        // The publishing session's own figures are not readable by a
+        // principal without the gate — reading names another principal.
+        let sink = RecordingSink::new();
+        let unprivileged = user_caller(&[], 0xF4, 82);
+        assert_eq!(
+            serve(&source, &unprivileged, &mut reports, &sink, &req, &mut resp),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            sink.events.borrow().as_slice(),
+            &[(Level::Warn, events::QUERY_DENIED)]
+        );
+
+        let sink = RecordingSink::new();
+        let observer = user_caller(&[CapabilityId::SYSINFO_GLOBAL], 0xF5, 83);
+        let n = serve(&source, &observer, &mut reports, &sink, &req, &mut resp)
+            .expect("the gate holder is served");
+        assert_eq!(n, DesktopFrameRecord::WIRE_LEN);
+        assert_eq!(
+            sink.events.borrow().as_slice(),
+            &[(Level::Debug, events::QUERY_SERVED)]
+        );
+    }
+
+    #[test]
+    fn publishing_a_frame_report_is_neither_gated_nor_audited() {
+        // A process describing itself grants nothing and reads nothing, so
+        // the submission is open to a principal with no capability at all —
+        // and must not hand that principal a way to write the security log.
+        let source = FixtureSource::new();
+        let mut reports = SelfReports::new(1 << 30);
+        let sink = RecordingSink::new();
+        let mut resp = [0u8; 8];
+        let session = user_caller(&[], 0xF6, 84);
+        let req = request_bytes_vec(
+            SysinfoQueryId::DESKTOP_FRAME_REPORT,
+            &frame_totals().to_le_bytes(),
+        );
+        source.set_live(alloc::vec![session.origin().proc_id()]);
+        assert_eq!(
+            serve(&source, &session, &mut reports, &sink, &req, &mut resp),
+            Ok(0)
+        );
+        assert_eq!(
+            sink.events.borrow().as_slice(),
+            &[],
+            "no record for a self-report"
+        );
+    }
+
+    #[test]
+    fn a_frame_report_that_no_composite_could_produce_is_refused_whole() {
+        let source = FixtureSource::new();
+        let mut reports = SelfReports::new(1 << 30);
+        let session = user_caller(&[], 0xF7, 85);
+        publish_frames(&source, &mut reports, &session, frame_totals()).expect("published");
+
+        // More damage than the counted frames could have clipped to the
+        // screen: refused by the decoder before the retained accounting is
+        // touched.
+        let mut impossible = frame_totals();
+        impossible.damaged_px = impossible.screen_px * impossible.frames + 1;
+        assert_eq!(
+            publish_frames(&source, &mut reports, &session, impossible),
+            Err(Errno::OutOfRange)
+        );
+
+        // A payload of the right length but the wrong shape, and one with
+        // trailing bytes, are both refused.
+        let sink = RecordingSink::new();
+        let mut resp = [0u8; 8];
+        let mut trailing = frame_totals().to_le_bytes().to_vec();
+        trailing.push(0);
+        let req = request_bytes_vec(SysinfoQueryId::DESKTOP_FRAME_REPORT, &trailing);
+        assert_eq!(
+            serve(&source, &session, &mut reports, &sink, &req, &mut resp),
+            Err(Errno::BadMagic)
+        );
+
+        let observer = user_caller(&[CapabilityId::SYSINFO_GLOBAL], 0xF8, 86);
+        let records = read_frames(&source, &mut reports, &observer).expect("served");
+        assert_eq!(
+            records[0].totals,
+            frame_totals(),
+            "what the session last reported truthfully still stands"
+        );
+    }
+
+    #[test]
+    fn a_zeroed_frame_report_withdraws_the_publisher() {
+        let source = FixtureSource::new();
+        let mut reports = SelfReports::new(1 << 30);
+        let session = user_caller(&[], 0xF9, 87);
+        publish_frames(&source, &mut reports, &session, frame_totals()).expect("published");
+        assert_eq!(
+            publish_frames(&source, &mut reports, &session, DesktopFrameTotals::ZERO),
+            Ok(0)
+        );
+
+        let observer = user_caller(&[CapabilityId::SYSINFO_GLOBAL], 0xFA, 88);
+        assert!(read_frames(&source, &mut reports, &observer)
+            .expect("served")
+            .is_empty());
+    }
+
+    #[test]
+    fn a_kernel_domain_principal_can_never_publish_frames() {
+        let source = FixtureSource::new();
+        let mut reports = SelfReports::new(1 << 30);
+        let sink = RecordingSink::new();
+        let mut resp = [0u8; 8];
+        source.set_live(alloc::vec![ProcId::KERNEL]);
+        let req = request_bytes_vec(
+            SysinfoQueryId::DESKTOP_FRAME_REPORT,
+            &frame_totals().to_le_bytes(),
+        );
+        assert_eq!(
+            serve(
+                &source,
+                &kernel_caller(),
+                &mut reports,
+                &sink,
+                &req,
+                &mut resp
+            ),
+            Err(Errno::PermissionDenied)
+        );
+        // And withdrawing is refused for the same reason rather than
+        // answering `Ok` to a principal that could never have an entry.
+        let req = request_bytes_vec(
+            SysinfoQueryId::DESKTOP_FRAME_REPORT,
+            &DesktopFrameTotals::ZERO.to_le_bytes(),
+        );
+        assert_eq!(
+            serve(
+                &source,
+                &kernel_caller(),
+                &mut reports,
+                &sink,
+                &req,
+                &mut resp
+            ),
+            Err(Errno::PermissionDenied)
+        );
+    }
+
+    #[test]
+    fn frame_reports_of_two_sessions_page_in_a_stable_order() {
+        let source = FixtureSource::new();
+        let mut reports = SelfReports::new(1 << 30);
+        let first = user_caller(&[], 0x11, 101);
+        let second = user_caller(&[], 0x22, 102);
+        let mut second_totals = frame_totals();
+        second_totals.frames += 1;
+        second_totals.present_calls += 1;
+
+        // Published in the opposite order to their instance ids, so the
+        // order served is a function of the table's contents and not of
+        // call history.
+        publish_frames(&source, &mut reports, &second, second_totals).expect("published");
+        source.set_live(alloc::vec![
+            first.origin().proc_id(),
+            second.origin().proc_id()
+        ]);
+        let sink = RecordingSink::new();
+        let mut resp = [0u8; 8];
+        let req = request_bytes_vec(
+            SysinfoQueryId::DESKTOP_FRAME_REPORT,
+            &frame_totals().to_le_bytes(),
+        );
+        serve(&source, &first, &mut reports, &sink, &req, &mut resp).expect("published");
+
+        let observer = user_caller(&[CapabilityId::SYSINFO_GLOBAL], 0x33, 103);
+        let records = read_frames(&source, &mut reports, &observer).expect("served");
+        assert_eq!(
+            records
+                .iter()
+                .map(|r| r.reporter_pid)
+                .collect::<alloc::vec::Vec<_>>(),
+            [101, 102]
+        );
+
+        // A page beyond the end is empty rather than an error, and a
+        // one-record page serves the first row only.
+        let sink = RecordingSink::new();
+        let mut resp = [0u8; 2 * DesktopFrameRecord::WIRE_LEN];
+        let one = DesktopFrameStatsRequest {
+            offset: 1,
+            limit: 1,
+            flags: 0,
+        };
+        let req = request_bytes(SysinfoQueryId::DESKTOP_FRAME_STATS, &one.to_le_bytes());
+        let n = serve(&source, &observer, &mut reports, &sink, &req, &mut resp).expect("served");
+        assert_eq!(n, DesktopFrameRecord::WIRE_LEN);
+        assert_eq!(
+            DesktopFrameRecord::from_bytes(&resp[..n])
+                .expect("decodes")
+                .reporter_pid,
+            102
+        );
+    }
+
+    #[test]
+    fn a_frame_publisher_that_exits_stops_being_served() {
+        let source = FixtureSource::new();
+        let mut reports = SelfReports::new(1 << 30);
+        let gone = user_caller(&[], 0x44, 111);
+        publish_frames(&source, &mut reports, &gone, frame_totals()).expect("published");
+
+        // The next submission — by anyone — sweeps the dead publisher out.
+        source.set_live(alloc::vec::Vec::new());
+        let survivor = user_caller(&[], 0x55, 112);
+        publish_frames(&source, &mut reports, &survivor, frame_totals()).expect("published");
+
+        let observer = user_caller(&[CapabilityId::SYSINFO_GLOBAL], 0x66, 113);
+        let records = read_frames(&source, &mut reports, &observer).expect("served");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].reporter_pid, 112);
     }
 }

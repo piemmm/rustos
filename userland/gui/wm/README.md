@@ -350,6 +350,18 @@ pairs its own timings with them.
 The number to read first is **damaged versus blended versus screen**: it
 turns "the desktop feels slow" into "4.2 M pixels blended to change 3 200".
 
+`Compositor::frame_totals` is the same counters summed over every frame
+composed against the current screen, plus the worst single frame's damage
+and blends — because a gesture, not a frame, is what a regression is
+measured over, and a hover that repaints one control has a similar *mean* to
+one that repaints the screen and a very different worst frame. Each frame is
+folded exactly once, when the next opens; the frame in progress is added to a
+copy on read, so reading twice gives the same answer. A display-mode change
+starts a fresh epoch, since every figure is read against the screen as its
+denominator. The aggregate is the ABI record the session publishes to the
+System Information API, where `sysinfo frames` and the desktop verticals read
+it (`docs/src/abi/sysinfo.md`).
+
 A row is served by copying rather than blending only when the segment's
 front-most window offers an **opaque run** at that column. These are the
 only conditions, and widening them is a correctness change, not a tuning

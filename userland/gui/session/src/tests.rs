@@ -497,7 +497,7 @@ fn open_library_on(shell: &mut DesktopShell, comp: &mut Compositor) {
 }
 
 /// A headless 1920×1080 RGBA compositor over an opaque black background.
-fn compositor() -> Compositor {
+pub(crate) fn compositor() -> Compositor {
     let mode = DisplayMode {
         width_px: 1920,
         height_px: 1080,

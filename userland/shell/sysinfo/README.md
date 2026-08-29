@@ -20,19 +20,17 @@ dependencies are the audited `tairix-abi` crate and the shared
 
 ```
 sysinfo <query>
-
-processes [--all]   list processes (--all: every process, needs CAP_SYSINFO_GLOBAL)
-memory              kernel memory statistics (needs CAP_SYSINFO_KERNEL)
-hardware            detected hardware tree (needs CAP_SYSINFO_HW)
-identity            machine identity and OS version
-uptime              time since boot and boot wall-clock time
-limits              your effective resource limits and live usage
-help                show the usage banner
 ```
 
-`processes` (without `--all`), `identity`/`uptime`, and `limits` require
-no capability; the privileged queries are gated by `sysinfod`, not by this
-tool. `limits` (alias `rlimits`) is self-scoped — it reports the calling
+One subcommand per `sysinfo-v1` query, from `processes` and `uptime` to
+`irq`, `storage`, `raid`, and `frames`, plus `show`/`describe` for a single
+`info:`/`state:`/`stats:` resource reference. The list is not restated here:
+`sysinfo help` renders it, and the bundle's own `Help/` tree is the single
+source both it and `man sysinfo` read (`AGENTS.md` §16.5).
+
+The self-scoped queries — `processes` without `--all`, `identity`, `uptime`,
+`limits` — require no capability; the privileged ones are gated by
+`sysinfod`, not by this tool. `limits` (alias `rlimits`) is self-scoped — it reports the calling
 process's *own* effective resource limits and live usage (`AGENTS.md`
 §24.3); the `ulimit` shell builtin is the counterpart that *changes* them.
 

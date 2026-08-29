@@ -3257,10 +3257,12 @@ added to the file-map verticals.
 
 **Status: complete.**
 - System Information API (`lib/abi/src/sysinfo.rs`, §16.6): `sysinfo-v1`
-  versioned/frozen query registry (six queries: self/global process list,
-  kernel memory stats, hardware tree, system identity, uptime), each with a
-  required capability (`CAP_SYSINFO_GLOBAL/KERNEL/HW` added) under the §9
-  hash discipline; served by `userland/system/sysinfod`.
+  versioned/frozen query registry, opened with six queries (self/global
+  process list, kernel memory stats, hardware tree, system identity, uptime)
+  and grown in place since, each row carrying its required capability
+  (`CAP_SYSINFO_GLOBAL/KERNEL/HW` added) under the §9 hash discipline; served
+  by `userland/system/sysinfod`. The live registry is `SYSINFO_QUERIES`, and
+  `docs/src/abi/sysinfo.md` catalogues it.
 - `userland/system/init` (PID 1, dependency-ordered service manager + reaper +
   manifest capability granting), `userland/shell/elsh` (POSIX-ish, job
   control), `userland/session/login` (the desktop when `os.loginType` is

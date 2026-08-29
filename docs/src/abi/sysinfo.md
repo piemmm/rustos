@@ -64,6 +64,9 @@ discipline as adding a syscall (`AGENTS.md` §9, §16.6):
 | `MEMORY_TOTAL`          | none                   | no      |
 | `CACHE_LEDGERS`         | `CAP_SYSINFO_KERNEL`   | yes     |
 | `CACHE_REPORT`          | none (self-scoped)     | no      |
+| `NET_STACK_DEFENCE`     | `CAP_SYSINFO_GLOBAL`   | yes     |
+| `DESKTOP_FRAME_REPORT`  | none (self-scoped)     | no      |
+| `DESKTOP_FRAME_STATS`   | `CAP_SYSINFO_GLOBAL`   | yes     |
 
 `CAP_SYSINFO_GLOBAL`, `CAP_SYSINFO_KERNEL`, and `CAP_SYSINFO_HW` are
 [`CapabilityId`] values 13, 14, and 15. Self-scoped observers ("list my
@@ -295,6 +298,39 @@ that. So the API carries the figures both ways:
   process's rows, which is what a process does as it tears its caches
   down.
 
+- **`DESKTOP_FRAME_REPORT` / `DESKTOP_FRAME_STATS`** are the same
+  submission/read pair for what the desktop's frames cost. A compositor is
+  the only thing on the machine that can count pixels — the kernel every
+  other query reads knows nothing about them — so a session submits a
+  `DesktopFrameTotals` and a reader asks for the retained
+  `DesktopFrameRecord`s, one per publishing session, each stamped with the
+  publisher `sysinfod` attested it to.
+
+  The totals are **cumulative plus the worst frame**, because the two
+  questions asked of these counters need different things: a monitor wants
+  rates and ratios over a run (subtract two samples), while a regression
+  gate wants the worst frame of a gesture — a hover that repaints one
+  control cannot be told from one that repaints the screen by an average.
+  A display-mode change starts a fresh epoch, since every pixel figure is
+  read against `screen_px` as its denominator.
+
+  `DesktopFrameTotals::from_bytes` refuses counts no composite pass could
+  have produced — work without a frame to do it in, damage without a
+  rectangle, more copied or scanned-out pixels than damaged ones, more
+  damage than the counted frames could clip to the screen, more driver
+  calls than one per rectangle plus one per frame, or a peak above its own
+  sum or above one screen — so nothing renders or asserts on a sender's
+  arithmetic. Blends, blur, and furniture lookups are deliberately
+  unbounded: blends count layer *contributions*, a recomputed frost is
+  blurred over the whole window rectangle that caused it, and a furniture
+  lookup is not a pixel.
+
+  The read is gated on `CAP_SYSINFO_GLOBAL` and audited because a record
+  names another principal and its work. The desktop's own monitor is
+  *pushed* the last frame's counts over the port that carries its seat
+  report; this API is the pull side, for everything else
+  (`plans/FIX-DESKTOP-SPEEDUP.md` A.3/A.4).
+
 ### What stops a lying process
 
 A reported figure is a claim, and the design treats it as one.
@@ -332,6 +368,15 @@ A reported figure is a claim, and the design treats it as one.
   and `ReclaimClassRecord::self_reported_bytes` says how much of a class
   total came from reported ledgers, so an operator can see at a glance
   what is attested and what is claimed.
+
+Both submissions obey all five, through the one `SelfReports` table:
+`sysinfod` keys either kind on the caller's unforgeable process instance,
+sizes each table's reporter count from the machine's RAM, sweeps dead
+reporters before admitting a new one, and refuses a kernel-domain
+principal outright. A frame submission carries no identity field at all,
+so there is nothing in it to refuse — the pid is stamped onto the served
+record instead — and an all-zero `DesktopFrameTotals` withdraws the
+publisher, as a zero-row cache report withdraws its rows.
 
 ### How a process reports without polling
 

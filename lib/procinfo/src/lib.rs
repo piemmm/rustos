@@ -128,10 +128,10 @@ pub use human::{
 };
 pub use hwtree::{bus_order, class_label, depth_of, fetch_tree, keep_with_ancestors, HW_TREE_PAGE};
 pub use kstats::{
-    for_each_cache_ledger, for_each_cpu_load, for_each_irq, for_each_net_bond_member,
-    for_each_net_interface, for_each_reclaim_class, memory_pressure, memory_pressure_band,
-    memory_total_bytes, net_stack_defence, ramzip_stats, CACHE_LEDGER_PAGE, CPU_LOAD_PAGE,
-    IRQ_PAGE, NET_INTERFACE_PAGE, RECLAIM_PAGE,
+    for_each_cache_ledger, for_each_cpu_load, for_each_desktop_frame_report, for_each_irq,
+    for_each_net_bond_member, for_each_net_interface, for_each_reclaim_class, memory_pressure,
+    memory_pressure_band, memory_total_bytes, net_stack_defence, ramzip_stats, CACHE_LEDGER_PAGE,
+    CPU_LOAD_PAGE, DESKTOP_FRAME_PAGE, IRQ_PAGE, NET_INTERFACE_PAGE, RECLAIM_PAGE,
 };
 pub use list::{field_lossy, walk_pages, ListError, WalkStep};
 pub use mount::{for_each_mount, render_mount, render_options, MOUNT_PAGE};

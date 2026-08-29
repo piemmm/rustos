@@ -1,9 +1,10 @@
 # FIX-DESKTOP-SPEEDUP — Software-compositor and GUI redraw performance
 
-Status: **A done** (less A.4's QEMU hover vertical), **B done**, **C done**,
-**D done** (D.5 approved, comparison first), **E done**,
-**H, I, J done**. **F** is unblocked on aarch64 (F.0 resolved) and may not land
-before B–C. **G** is kernel work gated on a User decision (§15.7).
+Status: **A done** (less A.4's QEMU hover vertical, whose observation channel
+is now in place), **B done**, **C done**, **D done** (D.5 approved, comparison
+first), **E done**, **H, I, J done**. **F** is unblocked on aarch64 (F.0
+resolved) and may not land before B–C. **G** is kernel work gated on a User
+decision (§15.7).
 
 Binding under `AGENTS.md` (§3, §15.18). This plan closes the standing
 performance defect that the desktop repaints **orders of magnitude more pixels
@@ -49,11 +50,12 @@ that should not be running is forbidden; Stage F may not land before Stages B–
 
 ## What is left
 
-Stages A–E are done. What remains is **A.4**'s QEMU hover vertical (its
-observation channel is now decided — a `sysinfo` query), **Stage F**, whose
-aarch64 half is unblocked now F.0 is resolved, **D.5**'s approved
-half-resolution blur (visual comparison first), and **Stage G**, still behind a
-User decision. `plans/OPEN-DEFECTS.md` D37 is a confirmed defect fixed
+Stages A–E are done. What remains is **A.4**'s QEMU hover vertical — its
+observation channel now **exists** (the `sysinfo` query landed; what is left is
+the vertical itself, its hover script, and the counter bounds it asserts) —
+**Stage F**, whose aarch64 half is unblocked now F.0 is resolved, **D.5**'s
+approved half-resolution blur (visual comparison first), and **Stage G**, still
+behind a User decision. `plans/OPEN-DEFECTS.md` D37 is a confirmed defect fixed
 independently of this schedule.
 
 Independently: **every published number is taken from a `--release`/installer
@@ -143,42 +145,51 @@ image.** A dev-profile timing is never quoted as evidence.
     already *is* the per-frame statement that a frost was reused, and a second
     tally would be duplication. Furniture has no equivalent pixel signal, which
     is why it has counters.
+  - **The push channel is the monitor's; the pull channel is everything
+    else's.** A.3's report is a push to one reader and reaches nothing else, so
+    the same counters are also *published* as a cumulative
+    `DesktopFrameTotals` to the System Information API (A.4 below). The two
+    gates stay separate because their rules differ in kind: the monitor must
+    not be told about the frame in which it drew itself, whereas the retained
+    accounting is a truthful count of every frame composed, the monitor's own
+    included.
 
-**Remaining — A.4 the QEMU hover vertical.** A desktop vertical that hovers
-across a control-rich window and asserts **counter bounds**, not timings. This
-is the regression gate every later stage tightens, and it does not exist yet.
-Unit counter tests (exact counts for a scripted scene, zero for an empty-damage
-frame) are in.
+**A.4's observation channel — done.** The counters are published where a guest
+can read them: `Compositor::frame_totals` folds each composited frame into a
+since-epoch `DesktopFrameTotals` (cumulative work plus the **worst** frame's
+damage and blends, on a screen-extent epoch), the session submits it to
+`sysinfod` under the ungated `DESKTOP_FRAME_REPORT`, and
+`DESKTOP_FRAME_STATS` serves the retained record per publishing session to a
+`CAP_SYSINFO_GLOBAL` holder — typed, versioned, audited, decoded through
+bounds no composite pass could exceed. `sysinfo frames` is its second
+consumer, which is what keeps it from being surface added for a test, and
+`lib/procinfo::for_each_desktop_frame_report` is the client every reader uses.
+The peaks are the load-bearing part: a hover that repaints one control and one
+that repaints the screen have similar *means*, so an average cannot express
+C.6's acceptance.
 
-**Its channel is decided (decision 5): a capability-gated `sysinfo` query for
-`FrameStats`, landing before the vertical.** The reason a query is needed at all
-is that a guest kernel observes userland through the audit trail, and the trail
-cannot carry this assertion:
+**Remaining — A.4 the QEMU hover vertical itself.** A desktop vertical that
+hovers across a control-rich window and asserts **counter bounds**, not
+timings, read back through the query above. This is the regression gate every
+later stage tightens, and it does not exist yet. Unit counter tests (exact
+counts for a scripted scene, zero for an empty-damage frame, the epoch fold
+round-tripped through the ABI decoder) are in.
 
-- **`FrameStats` reaches nothing a guest can read.** A.3 deliberately routes
-  the counters over the port that already carries the seat report, to the
-  Switchboard's own page — no syscall, no sysinfo query, no log record. There
-  is nothing for a guest sink to latch.
-- **A present is not recognisable in the trail.** `CallReplied` carries
-  `endpoint`, `ticket` and `len`, and on `DISPLAY_ENDPOINT` both `Present` and
-  `Configure` — and every error and decode-failure path on either — answer with
-  the same four-byte status word; only `Query`'s twenty-byte mode reply is
-  distinguishable. Counting presents by reply length is precisely the guess
-  that caused `plans/OPEN-DEFECTS.md` D10, and `appbar`'s own contract records
-  the same refusal for the window channel. So "presents per hover" cannot be
-  counted from the trail either.
-- **The pointer script has no hover.** `PointerPen` emits one jump-to-target
+Two things it still needs:
+
+- **A guest-side reader.** The query is userland IPC, so the freestanding test
+  kernel cannot issue it directly; the vertical needs an in-guest client
+  (an in-kernel client task, or a small userland fixture program) that reads
+  the record once the gesture has completed and latches the bounds. Nothing in
+  the audit trail can stand in: a present is not recognisable there — on
+  `DISPLAY_ENDPOINT` both `Present` and `Configure`, and every error and
+  decode-failure path on either, answer with the same four-byte status word, and
+  counting presents by reply length is precisely the guess that caused
+  `plans/OPEN-DEFECTS.md` D10.
+- **A hover in the pointer script.** `PointerPen` emits one jump-to-target
   `Move` per step, and the enrolled-script unit test asserts every script ends
   on a `Click`; a run of motion samples needs a `PointerPen` hover helper and
-  that test amended. That part *is* only effort.
-
-So the counters must be published somewhere a guest can read, and the query is
-that place: typed, versioned, capability-gated, and held to the same ABI
-discipline as every other `sysinfo` query. It is the interface a system monitor
-wants regardless, so the vertical is not its only consumer — which is what keeps
-it from being surface added for a test. The system log was the alternative and
-is refused: per-frame performance data is not what the hash-chained audit trail
-is for.
+  that test amended. That part is only effort.
 
 ---
 
@@ -1140,10 +1151,10 @@ A–E are expected to dominate F entirely.
    **fixed.** Scalar per-task floating-point state landed in the dirty-tracking
    form G.1 sketches, with its own QEMU witness. Only vector state is left, and
    that is decision 3's territory.
-5. ~~How the frame counters become observable to a guest~~ — **taken: a
-   capability-gated `sysinfo` query** for `FrameStats`, held to the same ABI
-   discipline as any other query. It is the interface a system monitor wants
-   regardless, so A.4's vertical is not its only consumer. A.4 is unblocked.
+5. ~~How the frame counters become observable to a guest~~ — **taken and
+   landed**: the `DESKTOP_FRAME_REPORT` / `DESKTOP_FRAME_STATS` submission/read
+   pair, held to the same ABI discipline as any other query, with `sysinfo
+   frames` as its second consumer. Only the vertical itself is left (A.4).
 
 ---
 

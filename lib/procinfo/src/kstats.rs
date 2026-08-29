@@ -28,9 +28,10 @@
 
 use tairix_abi::net_ipc::{NetBondMemberRecord, NetInterfaceFactsRecord, NetStackDefenceCounters};
 use tairix_abi::sysinfo::{
-    CacheLedgerListRequest, CacheLedgerRecord, CpuLoadRecord, CpuLoadRequest, IrqListRequest,
-    IrqRecord, MemoryPressureBand, MemoryPressureStats, MemoryTotal, NetInterfaceListRequest,
-    RamzipStats, ReclaimClassRecord, ReclaimListRequest, SysinfoQueryId, RECLAIM_CLASS_COUNT,
+    CacheLedgerListRequest, CacheLedgerRecord, CpuLoadRecord, CpuLoadRequest, DesktopFrameRecord,
+    DesktopFrameStatsRequest, IrqListRequest, IrqRecord, MemoryPressureBand, MemoryPressureStats,
+    MemoryTotal, NetInterfaceListRequest, RamzipStats, ReclaimClassRecord, ReclaimListRequest,
+    SysinfoQueryId, RECLAIM_CLASS_COUNT,
 };
 use tairix_abi::Errno;
 
@@ -341,6 +342,59 @@ pub fn for_each_irq(
     )
 }
 
+/// [`DesktopFrameRecord`]s requested per desktop frame-accounting page.
+///
+/// One publisher per compositing session, so a machine has a handful at
+/// most and one page is the whole list; [`for_each_desktop_frame_report`]
+/// pages regardless, because the count is a function of how many seats and
+/// switched-away sessions exist rather than a fixed number.
+pub const DESKTOP_FRAME_PAGE: u16 = 16;
+
+/// Page through the desktop frame accounting every live session has
+/// published ([`SysinfoQueryId::DESKTOP_FRAME_STATS`]) and hand each decoded
+/// [`DesktopFrameRecord`] to `sink`, in publisher order.
+///
+/// The figures are **self-reported**: only the process that owns a
+/// compositor can count pixels, so it submits them and `sysinfod` retains
+/// them against its kernel-attested identity. They are diagnostics — no
+/// kernel decision reads them — and a reader renders them as the desktop's
+/// own statement about itself.
+///
+/// Gated on `CAP_SYSINFO_GLOBAL` by `sysinfod` (a record names another
+/// principal and its work), so a denial surfaces as
+/// [`CallError::PermissionDenied`]. The walk **fails closed**: a reply that
+/// is not a whole number of records, or a record that does not decode, is
+/// rejected rather than partially delivered.
+///
+/// # Errors
+///
+/// As [`for_each_cpu_load`].
+pub fn for_each_desktop_frame_report(
+    transport: &dyn Transport,
+    mut sink: impl FnMut(&DesktopFrameRecord) -> Result<WalkStep, Errno>,
+) -> Result<(), ListError> {
+    walk_pages(
+        transport,
+        SysinfoQueryId::DESKTOP_FRAME_STATS,
+        DesktopFrameRecord::WIRE_LEN,
+        DESKTOP_FRAME_PAGE,
+        |offset, limit| {
+            DesktopFrameStatsRequest {
+                offset,
+                limit,
+                flags: 0,
+            }
+            .to_le_bytes()
+            .to_vec()
+        },
+        |chunk| {
+            let record = DesktopFrameRecord::from_bytes(chunk)
+                .map_err(|errno| ListError::Call(CallError::Service(errno)))?;
+            sink(&record).map_err(ListError::Sink)
+        },
+    )
+}
+
 /// Page through the network stack's interface table
 /// ([`SysinfoQueryId::NET_INTERFACE_FACTS`]) and hand each decoded
 /// [`NetInterfaceFactsRecord`] to `sink`, in the stack's own interface order.
@@ -435,9 +489,9 @@ fn net_list_request(offset: u32, limit: u16) -> alloc::vec::Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        for_each_cache_ledger, for_each_cpu_load, for_each_irq, for_each_reclaim_class,
-        memory_pressure, memory_total_bytes, ramzip_stats, WalkStep, CACHE_LEDGER_PAGE,
-        CPU_LOAD_PAGE, IRQ_PAGE, RECLAIM_PAGE,
+        for_each_cache_ledger, for_each_cpu_load, for_each_desktop_frame_report, for_each_irq,
+        for_each_reclaim_class, memory_pressure, memory_total_bytes, ramzip_stats, WalkStep,
+        CACHE_LEDGER_PAGE, CPU_LOAD_PAGE, IRQ_PAGE, RECLAIM_PAGE,
     };
     use crate::list::ListError;
     use crate::request::CallError;
@@ -446,7 +500,8 @@ mod tests {
     use core::cell::RefCell;
     use tairix_abi::sysinfo::{
         CacheLedgerListRequest, CacheLedgerOrigin, CacheLedgerRecord, CacheOwnerKind,
-        CpuLoadRecord, CpuLoadRequest, IrqListRequest, IrqRecord, MemoryPressureStats, MemoryTotal,
+        CpuLoadRecord, CpuLoadRequest, DesktopFrameRecord, DesktopFrameStatsRequest,
+        DesktopFrameTotals, IrqListRequest, IrqRecord, MemoryPressureStats, MemoryTotal,
         RamzipStats, ReclaimClassRecord, ReclaimListRequest, SysinfoQueryId, SysinfoRequestHeader,
         RECLAIM_CLASS_COUNT,
     };
@@ -462,6 +517,7 @@ mod tests {
         caches: Vec<CacheLedgerRecord>,
         loads: Vec<CpuLoadRecord>,
         irqs: Vec<IrqRecord>,
+        frames: Vec<DesktopFrameRecord>,
         deny: Option<SysinfoQueryId>,
         malformed: Option<SysinfoQueryId>,
         seen: RefCell<Vec<SysinfoQueryId>>,
@@ -554,6 +610,7 @@ mod tests {
                         preemptions: 2,
                     },
                 ],
+                frames: fixture_frames(),
                 deny: None,
                 malformed: None,
                 seen: RefCell::new(Vec::new()),
@@ -608,9 +665,58 @@ mod tests {
                         r.to_le_bytes().to_vec()
                     }))
                 }
+                SysinfoQueryId::DESKTOP_FRAME_STATS => {
+                    let req = DesktopFrameStatsRequest::from_bytes(payload)?;
+                    Ok(page(&self.frames, req.offset, req.limit, |r| {
+                        r.to_le_bytes().to_vec()
+                    }))
+                }
                 _ => Err(Errno::NotFound),
             }
         }
+    }
+
+    /// Two desktop sessions' published accounting: a busy one on a large
+    /// screen, and a quiet one on a smaller screen.
+    fn fixture_frames() -> Vec<DesktopFrameRecord> {
+        alloc::vec![
+            DesktopFrameRecord {
+                reporter_pid: 91,
+                totals: DesktopFrameTotals {
+                    screen_px: 1920 * 1080,
+                    frames: 40,
+                    damaged_px: 800_000,
+                    blended_px: 1_600_000,
+                    opaque_px: 200_000,
+                    blur_px: 60_000,
+                    encoded_px: 800_000,
+                    dirty_rects: 96,
+                    present_calls: 40,
+                    chrome_hits: 300,
+                    chrome_misses: 6,
+                    peak_damaged_px: 120_000,
+                    peak_blended_px: 250_000,
+                },
+            },
+            DesktopFrameRecord {
+                reporter_pid: 92,
+                totals: DesktopFrameTotals {
+                    screen_px: 1024 * 768,
+                    frames: 3,
+                    damaged_px: 9_000,
+                    blended_px: 9_000,
+                    opaque_px: 0,
+                    blur_px: 0,
+                    encoded_px: 9_000,
+                    dirty_rects: 6,
+                    present_calls: 3,
+                    chrome_hits: 4,
+                    chrome_misses: 1,
+                    peak_damaged_px: 4_000,
+                    peak_blended_px: 4_000,
+                },
+            },
+        ]
     }
 
     fn page<T>(records: &[T], offset: u32, limit: u16, encode: impl Fn(&T) -> Vec<u8>) -> Vec<u8> {
@@ -624,6 +730,44 @@ mod tests {
             out.extend_from_slice(&encode(record));
         }
         out
+    }
+
+    #[test]
+    fn desktop_frame_reports_walk_in_publisher_order_and_fail_closed() {
+        let fixture = Fixture::new();
+        let mut seen = Vec::new();
+        for_each_desktop_frame_report(&fixture, |record| {
+            seen.push((record.reporter_pid, record.totals.peak_damaged_px));
+            Ok(WalkStep::Continue)
+        })
+        .expect("the walk is served");
+        assert_eq!(seen, [(91, 120_000), (92, 4_000)]);
+        assert_eq!(
+            fixture.seen.borrow().as_slice(),
+            &[SysinfoQueryId::DESKTOP_FRAME_STATS],
+            "a page short of the limit ends the walk in one round trip"
+        );
+
+        // A denial is the caller's to render, not a panic: the query names
+        // another principal's work and is gated.
+        let mut denied = Fixture::new();
+        denied.deny = Some(SysinfoQueryId::DESKTOP_FRAME_STATS);
+        assert!(matches!(
+            for_each_desktop_frame_report(&denied, |_| Ok(WalkStep::Continue)),
+            Err(ListError::Call(CallError::PermissionDenied))
+        ));
+
+        // A reply that is not a whole number of records is rejected rather
+        // than partially delivered.
+        let mut malformed = Fixture::new();
+        malformed.malformed = Some(SysinfoQueryId::DESKTOP_FRAME_STATS);
+        let mut delivered = 0;
+        assert!(for_each_desktop_frame_report(&malformed, |_| {
+            delivered += 1;
+            Ok(WalkStep::Continue)
+        })
+        .is_err());
+        assert_eq!(delivered, 0);
     }
 
     #[test]

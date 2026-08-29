@@ -75,6 +75,9 @@ ledger registry. See [Reported cache ledgers](#reported-cache-ledgers).
 | `MEMORY_TOTAL`           | none                 | no      | `MemoryTotal`                       |
 | `CACHE_LEDGERS`          | `CAP_SYSINFO_KERNEL` | yes     | packed `CacheLedgerRecord`s         |
 | `CACHE_REPORT`           | none                 | no      | empty (a submission)                |
+| `NET_STACK_DEFENCE`      | `CAP_SYSINFO_GLOBAL` | yes     | `NetStackDefenceCounters`           |
+| `DESKTOP_FRAME_REPORT`   | none                 | no      | empty (a submission)                |
+| `DESKTOP_FRAME_STATS`    | `CAP_SYSINFO_GLOBAL` | yes     | packed `DesktopFrameRecord`s        |
 
 `MEMORY_PRESSURE_BAND` and `MEMORY_TOTAL` are the two ungated, unaudited
 self-regulation reads a process makes about its own resource use: the
@@ -149,6 +152,33 @@ The registry treats every submitted row as the claim it is:
 - The submission emits no audit record. It is ungated by its spec, and
   auditing it would hand every process a way to write the hash-chained
   journal. The gated *reads* are audited as their capability implies.
+
+## Reported desktop frame accounting
+
+A compositor's pixel counts are the second figure only the process holding
+them can see, and they arrive the same way: `DESKTOP_FRAME_REPORT` takes a
+session's own `DesktopFrameTotals`, and `DESKTOP_FRAME_STATS` serves the
+retained records to a `CAP_SYSINFO_GLOBAL` holder, one per publishing
+session, each stamped with the publisher the broker attested it to
+(`plans/FIX-DESKTOP-SPEEDUP.md` A.4).
+
+The two submissions share one table type, so there is one keying rule, one
+capacity policy, and one liveness sweep rather than a second copy of each:
+`SelfReports` holds a `ReportTable` per kind, keyed on the unforgeable
+process instance, sized from the machine's RAM, swept of dead reporters
+before a new one is admitted, and closed to a kernel-domain principal
+(which holds neither a userland cache nor a compositor). A frame submission
+carries no identity field at all, so there is nothing in it to refuse; an
+all-zero `DesktopFrameTotals` withdraws the publisher, as a zero-row cache
+report withdraws its rows.
+
+What the frame submission *is* checked against is arithmetic no composite
+pass could produce — the bounds `DesktopFrameTotals::from_bytes` enforces
+(`docs/src/abi/sysinfo.md`) — applied before the retained accounting is
+touched, so a malformed submission leaves the previous truthful one
+standing. The read touches no `SysinfoSource`: the records are the broker's
+own retained state, and a reader arriving between a session's exit and the
+next submission sees that session's last figures rather than nothing.
 
 ## Response encoding
 

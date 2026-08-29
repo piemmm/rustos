@@ -42,6 +42,17 @@ The queries:
 - `irq`, `irqs` — the kernel IRQ table: one row per bound interrupt
   line — its id, the owning driver task, the interrupt count since
   boot, and whether the line is quarantined (needs `CAP_SYSINFO_HW`).
+- `frames` — what each desktop session's composited frames have cost:
+  one row per publishing session — the pixels its frames recomposed and
+  the mean per frame, the overdraw multiple (layer contributions per
+  damaged pixel), the share resolved by copying an opaque run, the
+  pixels a recomputed backdrop frost re-blurred, the pixels converted to
+  scan-out, the worst single frame and its share of the screen, the
+  driver calls that published them, and the window-furniture cache's
+  hits and misses. These are the desktop's own figures — only a process
+  holding a compositor can count pixels — so each row names the
+  publisher the service attested it to, and a session that has published
+  nothing prints no row (needs `CAP_SYSINFO_GLOBAL`).
 - `storage`, `io` — per-volume storage I/O health: one row per
   fault-aware block-backed volume — a prefix of its durable id, the
   serving block-service endpoint, its current availability
@@ -81,6 +92,7 @@ With no query, the short help is shown.
 
 - `sysinfo identity` — print the machine identity and OS version.
 - `sysinfo ps --all` — list every process on the system.
+- `sysinfo frames` — show what the desktop's frames are costing.
 
 ## EXIT STATUS
 

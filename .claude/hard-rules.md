@@ -43,4 +43,4 @@ GENERAL
 - This is not a deployed system so it is OK to rip up things that are wrong and redo them correctly with no 'staged' migration.
 - Remember that abi-v1 is *NOT* frozen (despite what AGENTS.md and/or PLAN.md may say)
 - The work and design must be first class and able to survive a review by someone like Linus Torvalds
-
+- Do not poll when waiting for a long command or process to complete, use a monitor.

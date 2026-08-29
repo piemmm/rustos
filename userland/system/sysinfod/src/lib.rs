@@ -33,8 +33,9 @@
 //! * [`events`] — stable [`tairix_log::EventId`] constants (`8000` range).
 //! * [`source`] — the [`SysinfoSource`] data seam, the authenticated
 //!   [`Caller`], and the [`ProcessScope`] selector.
-//! * [`reporters`] — the [`CacheLedgerRegistry`], `sysinfod`'s own record of
-//!   the cache ledgers userland processes report for their own caches.
+//! * [`reporters`] — [`SelfReports`], `sysinfod`'s own record of what
+//!   processes report about themselves: the cache ledgers only they can see,
+//!   and the compositor frame accounting only a desktop can count.
 //! * [`service`] — the [`serve`] entry point and its request pipeline.
 //!
 //! # Layering
@@ -57,6 +58,6 @@ pub mod source;
 #[cfg(test)]
 mod testing;
 
-pub use reporters::CacheLedgerRegistry;
+pub use reporters::SelfReports;
 pub use service::serve;
 pub use source::{Caller, ProcessScope, SysinfoSource};

@@ -62,6 +62,13 @@ and is fully testable against an in-memory fixture.
 | `VOLUME_IO_HEALTH`       | `CAP_SYSINFO_KERNEL` | yes     | packed `VolumeIoHealthRecord`s      |
 | `MEMORY_PRESSURE_BAND`   | none                 | no      | `MemoryPressureBand`                |
 | `MEMORY_TOTAL`           | none                 | no      | `MemoryTotal`                       |
+| `RAID_ARRAYS`            | `CAP_SYSINFO_HW`     | yes     | packed `RaidArrayRecord`s           |
+| `RAID_MEMBERS`           | `CAP_SYSINFO_HW`     | yes     | packed `RaidMemberRecord`s          |
+| `CACHE_LEDGERS`          | `CAP_SYSINFO_KERNEL` | yes     | packed `CacheLedgerRecord`s         |
+| `CACHE_REPORT`           | none                 | no      | empty (a submission)                |
+| `NET_STACK_DEFENCE`      | `CAP_SYSINFO_GLOBAL` | yes     | `NetStackDefenceCounters`           |
+| `DESKTOP_FRAME_REPORT`   | none                 | no      | empty (a submission)                |
+| `DESKTOP_FRAME_STATS`    | `CAP_SYSINFO_GLOBAL` | yes     | packed `DesktopFrameRecord`s        |
 
 `MEMORY_PRESSURE_BAND` and `MEMORY_TOTAL` are the two ungated,
 unaudited self-regulation reads: the published pressure band, and the
@@ -72,6 +79,25 @@ total is the same figure `KERNEL_MEMORY_STATS` reports as
 `KernelMemoryStats::total_bytes` — the kernel derives both from one
 usable-frame census — and a zero answer means *unknown*, which admits
 nothing. The detailed `MEMORY_PRESSURE` view stays gated and audited.
+
+## The two submissions
+
+Two figures cannot be measured from outside the process that holds them: a
+userland cache's ledger, and a compositor's frame accounting. Both are
+therefore submitted rather than read — `CACHE_REPORT` and
+`DESKTOP_FRAME_REPORT` — and retained here, in `SelfReports`, never in the
+kernel: the kernel's own per-class reclaim sum gates a real decision, and
+keeping self-reported figures on this side of the syscall boundary makes it
+structurally impossible for a process to steer it.
+
+Both are ungated and unaudited, because a process describing itself grants
+nothing and reads nothing — and auditing them would hand every process a way
+to write the hash-chained journal. Both share one table type, so the keying
+(the caller's unforgeable process instance), the RAM-derived capacity, the
+liveness sweep before a new reporter is admitted, and the refusal of a
+kernel-domain principal are written once. The matching reads —
+`CACHE_LEDGERS` and `DESKTOP_FRAME_STATS` — are gated and audited as their
+capability implies. See `docs/src/userland/sysinfod.md`.
 
 ## Response encoding
 

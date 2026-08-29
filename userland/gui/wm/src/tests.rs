@@ -99,7 +99,7 @@ fn frame_pixel(comp: &Compositor, x: u32, y: u32) -> [u8; 4] {
 /// how many times each of [`Display::present`] (a whole-frame present) and
 /// [`Display::present_rects`] (naming the exact rectangles presented) were
 /// called, or always fails when `fail` is set.
-struct MockDisplay {
+pub(crate) struct MockDisplay {
     mode: DisplayMode,
     last: alloc::vec::Vec<u8>,
     fail: bool,
@@ -113,7 +113,7 @@ struct MockDisplay {
 }
 
 impl MockDisplay {
-    fn new(mode: DisplayMode) -> Self {
+    pub(crate) fn new(mode: DisplayMode) -> Self {
         Self {
             mode,
             last: alloc::vec::Vec::new(),

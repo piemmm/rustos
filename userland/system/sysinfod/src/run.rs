@@ -71,7 +71,7 @@ mod program {
     use tairix_abi::{Errno, LimitKind, Origin, ProcId, ORIGIN_WIRE_LEN, PROC_ID_LEN};
     use tairix_caps::CapabilitySet;
     use tairix_rt::LogSink;
-    use tairix_sysinfod::{serve, CacheLedgerRegistry, Caller, ProcessScope, SysinfoSource};
+    use tairix_sysinfod::{serve, Caller, ProcessScope, SelfReports, SysinfoSource};
 
     /// Outstanding-call capacity of the endpoint (a fail-closed memory bound).
     const CAPACITY: usize = 8;
@@ -653,9 +653,8 @@ mod program {
             return 1;
         }
 
-        // Size the reported-cache-ledger registry from the machine's own
-        // installed RAM (`CacheLedgerRegistry::new`'s policy) rather than a
-        // hand-picked constant. A machine that cannot even report its own
+        // Size the self-report tables from the machine's own installed RAM
+        // (`SelfReports::new`'s policy) rather than a hand-picked constant. A machine that cannot even report its own
         // RAM size is not one this service can serve correctly, so this
         // fails closed exactly like the endpoint bind above.
         let total_ram_bytes = match read_scalar(IntrospectDomain::MemoryTotalBytes)
@@ -664,7 +663,7 @@ mod program {
             Ok(total) => total.total_bytes,
             Err(_) => return 1,
         };
-        let mut registry = CacheLedgerRegistry::new(total_ram_bytes);
+        let mut reports = SelfReports::new(total_ram_bytes);
 
         let source = KernelSysinfoSource;
         let mut request = [0u8; SYSINFO_MAX_REQUEST];
@@ -704,7 +703,7 @@ mod program {
             match serve(
                 &source,
                 &caller,
-                &mut registry,
+                &mut reports,
                 &LogSink,
                 &request[..request_len],
                 &mut payload,

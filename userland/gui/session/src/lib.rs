@@ -184,6 +184,7 @@ pub mod desktop;
 pub mod device;
 pub mod elevate;
 pub mod fade;
+pub mod frames;
 pub mod holdback;
 pub mod input;
 pub mod keyboard;
@@ -246,6 +247,7 @@ pub use fade::{
     BackdropFade, ScreenFade, DESKTOP_REVEALED, DESKTOP_REVEALED_MESSAGE,
     DESKTOP_SESSION_RANGE_END, DESKTOP_SESSION_RANGE_START,
 };
+pub use frames::{FrameStatsPublisher, FrameStatsSink, MIN_FRAME_PUBLISH_INTERVAL_NS};
 pub use holdback::{Delivery, Flushed, HoldBack, HOLD_BACK_CAPACITY};
 pub use input::{SessionInputResponse, SessionInputRouter};
 pub use keyboard::{KeyInputChannel, KeyboardInputSource};

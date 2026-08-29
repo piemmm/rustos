@@ -97,6 +97,7 @@ mod program {
         SEAT_REPORT_OWNERS_MAX, SWITCHBOARD_ENDPOINT, SWITCHBOARD_MAX_REQUEST,
         SWITCHBOARD_PUBLISH_REPLY_LEN,
     };
+    use tairix_abi::sysinfo::{decode_reply, SYSINFO_ENDPOINT, SYSINFO_REPLY_STATUS_LEN};
     use tairix_abi::window_ipc::{PointerAction, WindowEvent, WINDOW_ENDPOINT, WINDOW_MAX_REQUEST};
     use tairix_abi::{
         DriverError, Errno, OpenFlags, Origin, ProcId, WaitFlags, WaitSetOp, WaitSourceKind,
@@ -119,16 +120,16 @@ mod program {
         ArtworkDesk, ArtworkFileReader, ArtworkSandbox, CliError, Command, ConcludedPick,
         ConfirmPrompt, Delivery, Desktop, DesktopAction, DesktopActivation, DesktopOutcome,
         DesktopShell, DeviceInputSource, ElevatePrompt, Elevator, FrameContent, FramePacer,
-        FrameReportGate, HangTracker, HoldBack, IconRasteriser, InputSource, KeyboardInputSource,
-        LaunchTable, ListingClient, ListingDesk, LockedDrain, OwnerWindow, PickConclusion,
-        PinboardMenu, PinboardMenuOutcome, Prepared, PresentedOwners, PromptOutcome, ScreenFade,
-        ScreenLock, SeatEventReader, SeatInputChannel, SessionClock, SessionFileReader,
-        SessionPicker, SessionWindows, ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome,
-        SwitchboardServe, WallpaperDesk, WallpaperSource, BUNDLE_RUN_SUFFIX, CONTENT_RELEASED,
-        CONTENT_RELEASED_MESSAGE, DATETIME_RUN_PATH, ELEVATE_PROMPT_SHOWN,
-        ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_CALL_REFUSED,
-        SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, USAGE, WALLPAPER_LABEL, WALLPAPER_RUN_PATH,
-        WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE,
+        FrameReportGate, FrameStatsPublisher, FrameStatsSink, HangTracker, HoldBack,
+        IconRasteriser, InputSource, KeyboardInputSource, LaunchTable, ListingClient, ListingDesk,
+        LockedDrain, OwnerWindow, PickConclusion, PinboardMenu, PinboardMenuOutcome, Prepared,
+        PresentedOwners, PromptOutcome, ScreenFade, ScreenLock, SeatEventReader, SeatInputChannel,
+        SessionClock, SessionFileReader, SessionPicker, SessionWindows, ShellWindowHost,
+        SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, WallpaperDesk, WallpaperSource,
+        BUNDLE_RUN_SUFFIX, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, DATETIME_RUN_PATH,
+        ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, FILES_RUN_PATH,
+        SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, USAGE, WALLPAPER_LABEL,
+        WALLPAPER_RUN_PATH, WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE,
     };
     use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
     use tairix_greeter::{Verdict, Verifier};
@@ -977,6 +978,30 @@ mod program {
                 );
             }
             false
+        }
+    }
+
+    /// The production [`FrameStatsSink`]: one `ipc_call` to the System
+    /// Information API, whose reply is the framed status word every
+    /// `sysinfo` answer carries.
+    ///
+    /// A refused submission is surfaced on `stderr` with the service's own
+    /// reason rather than a guess, and dropped: the accounting it carried is
+    /// cumulative, so the next attempt states a superset of it and nothing is
+    /// lost by not retrying here.
+    struct RtFrameStatsSink;
+
+    impl FrameStatsSink for RtFrameStatsSink {
+        fn submit(&mut self, request: &[u8]) -> Result<(), Errno> {
+            let mut reply = [0u8; SYSINFO_REPLY_STATUS_LEN];
+            let outcome = tairix_rt::ipc_call(SYSINFO_ENDPOINT, request, &mut reply)
+                .map_err(Errno::from_syscall)
+                .and_then(|len| decode_reply(&reply[..len]).map(|_| ()));
+            if let Err(err) = outcome {
+                let _ = writeln!(Stderr, "desktop: frame accounting not published: {err}");
+                return Err(err);
+            }
+            Ok(())
         }
     }
 
@@ -1908,6 +1933,7 @@ mod program {
         // crossing the wallpaper redamages the cursor) still reports at a
         // rate a reader can follow rather than at frame rate.
         let mut frames = FrameReportGate::new();
+        let mut frame_stats = FrameStatsPublisher::new();
         // The frame deadline. Wakes arrive as fast as a hand can move a
         // mouse, which is several times faster than any screen shows a
         // frame, so damage accumulates in the compositor between deadlines
@@ -2019,9 +2045,12 @@ mod program {
                                     now_ns,
                                     frames.park_deadline_ns(
                                         now_ns,
-                                        pacer.park_deadline_ns(
+                                        frame_stats.park_deadline_ns(
                                             now_ns,
-                                            tairix_rt::cachereport::fold_wait_deadline_ns(owed),
+                                            pacer.park_deadline_ns(
+                                                now_ns,
+                                                tairix_rt::cachereport::fold_wait_deadline_ns(owed),
+                                            ),
                                         ),
                                     ),
                                 ),
@@ -2082,6 +2111,7 @@ mod program {
                     now_ns,
                     &mut RtSwitchboardMailbox,
                 );
+                frame_stats.maybe_publish(&compositor, now_ns, &mut RtFrameStatsSink);
                 tairix_rt::cachereport::publish_if_due();
                 continue;
             }
@@ -2864,6 +2894,10 @@ mod program {
                 now_ns,
                 &mut RtSwitchboardMailbox,
             );
+            // And the same counts to the System Information API, where a
+            // reader outside this process — a monitor, a shell, a regression
+            // gate — asks for them instead of being pushed them.
+            frame_stats.maybe_publish(&compositor, now_ns, &mut RtFrameStatsSink);
             // The wake is fully handled and its frame is on screen: report
             // what the desktop's caches hold now, before parking again. A
             // change made this turn would otherwise wait for the next wake,
