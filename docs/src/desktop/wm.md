@@ -1347,7 +1347,7 @@ path.
 ## The window channel (`tairix_abi::window_ipc` + `lib/window`)
 
 Application windows reach the compositor over the **window channel**
-(`plans/APPWIN.md` AW2): a fixed-width, versioned IPC protocol on the
+(`plans/APPWIN.md` AW2): a versioned IPC protocol on the
 reserved `WINDOW_ENDPOINT` (squat-protected — binding it requires
 `CAP_IPC_BIND_PRIVILEGED`, exactly like the display service's endpoint).
 The desktop session serves it; an app's `Run` binary calls it.
@@ -1367,10 +1367,21 @@ released this window's retained content to reclaim memory and needs it
 presented again) — delivered to that endpoint, where the app **parks**
 until one arrives; it never polls.
 
+Each request is framed to **its own** operation's length
+(`WindowRequest::wire_len`), and a decode requires exactly that: a shorter
+frame is truncation, a longer one is a field smuggled past the operation's
+end, and both are refused. So the hot `Present` — one per composited frame
+per window — sends the 36 bytes it carries rather than padding out to the
+widest operation's block, and the bounded icon-bar declaration
+(`SetAppBar`) can grow without the present path paying for it.
+`WINDOW_MAX_REQUEST` is the endpoint's receive ceiling, not the shape of a
+request. Events keep their one fixed `WindowEvent` frame.
+
 An app also sets its own window's **backdrop-blur** radius over the
 channel: `WindowClient::set_backdrop_blur(window_id, radius_px)` sends
 `WindowRequest::SetBackdropBlur`, whose decode refuses a radius above
-`WINDOW_BACKDROP_BLUR_MAX_PX` and a non-zero reserved tail. The engine
+`WINDOW_BACKDROP_BLUR_MAX_PX` and a frame longer than the operation needs.
+The engine
 keys it to the attested window owner exactly as it does a present — a
 radius set on another client's window answers `NotFound` — and hands the
 validated pair to `WindowHost::backdrop_blur_set`, which the session

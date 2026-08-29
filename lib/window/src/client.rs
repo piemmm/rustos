@@ -375,10 +375,9 @@ impl<T: WindowTransport> WindowClient<T> {
             format: surface.format,
             title,
             sizing,
-        }
-        .to_le_bytes();
+        };
         let mut reply = [0u8; WINDOW_CREATE_REPLY_LEN];
-        let len = self.transport.call(&request, &mut reply)?;
+        let len = self.call(&request, &mut reply)?;
         let (window_id, server) = decode_create_reply(&reply[..len])?;
         self.session = Some(server);
         self.note_extent(window_id, surface.width_px, surface.height_px);
@@ -423,10 +422,9 @@ impl<T: WindowTransport> WindowClient<T> {
             format: spec.surface.format,
             offset_x: spec.offset_x,
             offset_y: spec.offset_y,
-        }
-        .to_le_bytes();
+        };
         let mut reply = [0u8; WINDOW_CREATE_REPLY_LEN];
-        let len = self.transport.call(&request, &mut reply)?;
+        let len = self.call(&request, &mut reply)?;
         let (window_id, server) = decode_create_reply(&reply[..len])?;
         self.note_extent(window_id, spec.surface.width_px, spec.surface.height_px);
         Ok((window_id, server))
@@ -458,9 +456,9 @@ impl<T: WindowTransport> WindowClient<T> {
     ///
     /// [`WindowEvent::DesktopChanged`]: tairix_abi::window_ipc::WindowEvent::DesktopChanged
     pub fn desktop(&mut self) -> Result<DesktopInfo, Errno> {
-        let request = WindowRequest::QueryDesktop.to_le_bytes();
+        let request = WindowRequest::QueryDesktop;
         let mut reply = [0u8; WINDOW_DESKTOP_REPLY_LEN];
-        let len = self.transport.call(&request, &mut reply)?;
+        let len = self.call(&request, &mut reply)?;
         let (desktop, server) = decode_desktop_reply(&reply[..len])?;
         self.session = Some(server);
         Ok(desktop)
@@ -495,8 +493,7 @@ impl<T: WindowTransport> WindowClient<T> {
             window_id,
             frame_index,
             damage,
-        }
-        .to_le_bytes();
+        };
         self.status_call(&request)?;
         if let Some(record) = self.record_mut(window_id) {
             record.frame_index = Some(frame_index);
@@ -511,7 +508,7 @@ impl<T: WindowTransport> WindowClient<T> {
     /// The session's typed refusal, a transport failure, or a corrupt
     /// status frame.
     pub fn close(&mut self, window_id: u64) -> Result<(), Errno> {
-        let request = WindowRequest::Close { window_id }.to_le_bytes();
+        let request = WindowRequest::Close { window_id };
         self.status_call(&request)?;
         self.presented
             .retain(|record| record.window_id != window_id);
@@ -550,8 +547,7 @@ impl<T: WindowTransport> WindowClient<T> {
             height_px: surface.height_px,
             stride_bytes: surface.stride_bytes,
             format: surface.format,
-        }
-        .to_le_bytes();
+        };
         self.status_call(&request)?;
         // The old frames describe the old extent, so the remembered
         // present is stale until the app paints the new size.
@@ -608,8 +604,7 @@ impl<T: WindowTransport> WindowClient<T> {
     /// * A transport failure, or a corrupt status frame.
     pub fn set_title(&mut self, window_id: u64, title: &str) -> Result<(), Errno> {
         let title = WindowTitle::new(title)?;
-        let request = WindowRequest::SetTitle { window_id, title }.to_le_bytes();
-        self.status_call(&request)
+        self.status_call(&WindowRequest::SetTitle { window_id, title })
     }
 
     /// Ask the session to run its trusted file picker for window
@@ -631,8 +626,7 @@ impl<T: WindowTransport> WindowClient<T> {
     /// [`WindowEvent::FilePicked`]: tairix_abi::window_ipc::WindowEvent::FilePicked
     /// [`WindowEvent::PickCancelled`]: tairix_abi::window_ipc::WindowEvent::PickCancelled
     pub fn pick_file(&mut self, window_id: u64) -> Result<(), Errno> {
-        let request = WindowRequest::PickFile { window_id }.to_le_bytes();
-        self.status_call(&request)
+        self.status_call(&WindowRequest::PickFile { window_id })
     }
 
     /// Declare this **application's** presence on the desktop's icon bar:
@@ -654,8 +648,7 @@ impl<T: WindowTransport> WindowClient<T> {
     ///   protocol before any call.
     /// * A transport failure, or a corrupt status frame.
     pub fn set_app_bar(&mut self, bar: &AppBar) -> Result<(), Errno> {
-        let request = WindowRequest::SetAppBar(*bar).to_le_bytes();
-        self.status_call(&request)
+        self.status_call(&WindowRequest::SetAppBar(*bar))
     }
 
     /// Set window `window_id`'s backdrop-blur radius to `radius_px`
@@ -674,8 +667,7 @@ impl<T: WindowTransport> WindowClient<T> {
         let request = WindowRequest::SetBackdropBlur {
             window_id,
             radius_px,
-        }
-        .to_le_bytes();
+        };
         self.status_call(&request)
     }
 
@@ -745,10 +737,21 @@ impl<T: WindowTransport> WindowClient<T> {
     }
 
     /// Issue `request` and decode the shared status reply.
-    fn status_call(&mut self, request: &[u8]) -> Result<(), Errno> {
+    fn status_call(&mut self, request: &WindowRequest) -> Result<(), Errno> {
         let mut reply = [0u8; WINDOW_CREATE_REPLY_LEN];
-        let len = self.transport.call(request, &mut reply)?;
+        let len = self.call(request, &mut reply)?;
         decode_status_reply(&reply[..len])
+    }
+
+    /// Encode `request` into a frame of its own length and issue one call,
+    /// returning the reply length.
+    ///
+    /// The single place a request is encoded, so no call site can send a
+    /// frame whose length disagrees with its operation.
+    fn call(&mut self, request: &WindowRequest, reply: &mut [u8]) -> Result<usize, Errno> {
+        let mut frame = [0u8; WindowRequest::MAX_WIRE_LEN];
+        let len = request.encode(&mut frame)?;
+        self.transport.call(&frame[..len], reply)
     }
 }
 

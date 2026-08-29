@@ -371,6 +371,15 @@ impl Loopback {
     }
 }
 
+/// One request encoded exactly as a client sends it: a frame of its own
+/// operation's length, which is what the server is given on the wire.
+fn request_frame(request: &WindowRequest) -> alloc::vec::Vec<u8> {
+    let mut out = alloc::vec![0u8; WindowRequest::MAX_WIRE_LEN];
+    let len = request.encode(&mut out).expect("the max frame fits");
+    out.truncate(len);
+    out
+}
+
 impl WindowTransport for Rc<RefCell<Loopback>> {
     fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
         let mut frame = [0u8; WINDOW_REPLY_MAX];
@@ -1302,7 +1311,7 @@ fn a_malformed_request_answers_a_typed_status_refusal() {
         &mut inner.host,
         &mut inner.identity,
         TICKET_A,
-        &[0xFFu8; WindowRequest::WIRE_LEN],
+        &[0xFFu8; WindowRequest::MAX_WIRE_LEN],
         &mut reply,
     );
     assert_eq!(decode_status_reply(&reply[..len]), Err(Errno::BadMagic));
@@ -1643,7 +1652,7 @@ fn backdrop_blur_defaults_to_an_accepted_no_op() {
     let mut identity = MockIdentity;
     let mut reply = [0u8; WINDOW_REPLY_MAX];
 
-    let create = WindowRequest::Create {
+    let create = request_frame(&WindowRequest::Create {
         shm_handle: 7,
         event_endpoint: EVENTS_A,
         frame_count: 1,
@@ -1653,18 +1662,16 @@ fn backdrop_blur_defaults_to_an_accepted_no_op() {
         format: SURFACE.format,
         title: tairix_abi::window_ipc::WindowTitle::new("a").expect("valid title"),
         sizing: WindowSizing::Fixed,
-    }
-    .to_le_bytes();
+    });
     let len = server.serve(&mut host, &mut identity, TICKET_A, &create, &mut reply);
     let (window, _) = tairix_abi::window_ipc::decode_create_reply(&reply[..len]).expect("created");
 
     // Setting the backdrop blur is infallible for an owned window: the
     // default handler has no compositor to tell.
-    let blur = WindowRequest::SetBackdropBlur {
+    let blur = request_frame(&WindowRequest::SetBackdropBlur {
         window_id: window,
         radius_px: 8,
-    }
-    .to_le_bytes();
+    });
     let len = server.serve(&mut host, &mut identity, TICKET_A, &blur, &mut reply);
     assert_eq!(decode_status_reply(&reply[..len]), Ok(()));
 }

@@ -752,8 +752,10 @@ What now stands:
   application-scoped events answer it: `WindowEvent::AppBarDefault` and
   `AppBarMenu { item }`, which is why `WindowEvent::window_id()` is now
   `Option<u64>`. The pin ops (`PinBundle`/`DragOffer`/`DragWithdraw`) and
-  `BundleRef` are **deleted**, and `WindowRequest::WIRE_LEN` is 522 — the
-  app-bar block is the widest, so the hot Present path did not grow.
+  `BundleRef` are **deleted**. The declaration is the widest operation, so it
+  sets `WindowRequest::MAX_WIRE_LEN` (522) — the endpoint's receive ceiling —
+  while each request is framed to its own length, so a declaration's width
+  costs the hot Present path nothing (`plans/NEW-MENUS.md` M1a).
 - **The menu model** is `AppMenu`: at most `APP_MENU_MAX_ROWS` (12) rows,
   each at most `APP_MENU_LABEL_MAX` (36) label bytes, one submenu level via a
   parent index, and row kinds `Item { id, label, enabled, mark }`,

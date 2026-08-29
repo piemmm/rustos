@@ -32,6 +32,7 @@ use tairix_abi::appdata_ipc::{
     APPDATA_MAX_REPLY, APPDATA_MAX_REQUEST, APPDATA_QUOTA_REPLY_LEN, APPDATA_TEMP_REPLY_LEN,
 };
 use tairix_abi::display_ipc::{decode_mode_reply, DisplayRequest};
+use tairix_abi::driver::display::{DamageRect, DisplayFormat};
 use tairix_abi::driver::net_channel::{
     decode_facts_reply, decode_service_reply, NetChannelNotify, NetChannelRequest,
 };
@@ -80,7 +81,7 @@ use tairix_abi::users_admin::{
 };
 use tairix_abi::window_ipc::{
     decode_create_reply, decode_desktop_reply, AppBar, AppMenu, AppMenuItemId, AppMenuLabel,
-    AppMenuMark, AppMenuRow, WindowEvent, WindowRequest,
+    AppMenuMark, AppMenuRow, WindowEvent, WindowRequest, WindowSizing, WindowTitle,
 };
 use tairix_abi::{
     AppInfoHeader, IpcMessageHeader, LoadImage, ManifestHeader, NeededLibrary, Origin, PortName,
@@ -508,7 +509,14 @@ fn exercise_font_ipc(bytes: &[u8]) {
 /// an app parses — must refuse a corrupt frame cleanly, never panic.
 fn exercise_window_ipc(bytes: &[u8]) {
     if let Ok(request) = WindowRequest::from_bytes(bytes) {
-        let redecoded = WindowRequest::from_bytes(&request.to_le_bytes())
+        // An accepted request is exactly as long as its own operation, so
+        // re-encoding it must reproduce the very bytes that were accepted.
+        let mut frame = [0u8; WindowRequest::MAX_WIRE_LEN];
+        let len = request
+            .encode(&mut frame)
+            .expect("the max frame holds any request");
+        assert_eq!(&frame[..len], bytes);
+        let redecoded = WindowRequest::from_bytes(&frame[..len])
             .expect("round-trip of an accepted request must succeed");
         assert_eq!(request, redecoded);
     }
@@ -1199,6 +1207,91 @@ fn structured_reply_inputs_with_corrupted_fields_never_panic() {
     }
 }
 
+/// Every window-channel operation, seeded and bit-flipped at its own frame
+/// length as well as one byte either side of it.
+///
+/// A request is framed to its operation's own length and decoded only at
+/// exactly that length, so a random-length input is refused on length before
+/// it reaches any operand. Structured seeds are therefore what actually
+/// exercises the operand decoders, and one per operation is what stops an
+/// operation from having no coverage at all.
+#[test]
+fn structured_window_requests_with_corrupted_fields_never_panic() {
+    let seeds = [
+        WindowRequest::Create {
+            shm_handle: 7,
+            event_endpoint: 0x900d,
+            frame_count: 2,
+            width_px: 640,
+            height_px: 480,
+            stride_bytes: 2560,
+            format: DisplayFormat::Bgra8888,
+            title: WindowTitle::new("Documents").expect("a valid title"),
+            sizing: WindowSizing::Resizable {
+                min_width_px: 320,
+                min_height_px: 240,
+            },
+        },
+        WindowRequest::CreatePopup {
+            parent_window_id: 3,
+            shm_handle: 7,
+            event_endpoint: 0x900d,
+            frame_count: 1,
+            width_px: 120,
+            height_px: 80,
+            stride_bytes: 480,
+            format: DisplayFormat::Bgra8888,
+            offset_x: -12,
+            offset_y: 24,
+        },
+        WindowRequest::Present {
+            window_id: 3,
+            frame_index: 1,
+            damage: DamageRect {
+                x: 4,
+                y: 8,
+                width_px: 16,
+                height_px: 32,
+            },
+        },
+        WindowRequest::Close { window_id: 3 },
+        WindowRequest::PickFile { window_id: 3 },
+        WindowRequest::Resize {
+            window_id: 3,
+            shm_handle: 11,
+            frame_count: 2,
+            width_px: 640,
+            height_px: 480,
+            stride_bytes: 2560,
+            format: DisplayFormat::Bgra8888,
+        },
+        WindowRequest::SetTitle {
+            window_id: 3,
+            title: WindowTitle::new("Inbox").expect("a valid title"),
+        },
+        WindowRequest::SetBackdropBlur {
+            window_id: 5,
+            radius_px: 8,
+        },
+        WindowRequest::QueryDesktop,
+    ];
+    let mut base = [0u8; WindowRequest::MAX_WIRE_LEN + 1];
+    for seed in seeds {
+        let len = seed
+            .encode(&mut base)
+            .expect("the max frame holds any request");
+        for byte in 0..len {
+            for bit in 0..8u32 {
+                base[byte] ^= 1 << bit;
+                exercise(&base[..len]);
+                exercise(&base[..len - 1]);
+                exercise(&base[..=len]);
+                base[byte] ^= 1 << bit;
+            }
+        }
+    }
+}
+
 #[test]
 fn structured_icon_bar_inputs_with_corrupted_fields_never_panic() {
     // Walk the accepted/rejected boundary of the icon-bar declaration and
@@ -1234,15 +1327,24 @@ fn structured_icon_bar_inputs_with_corrupted_fields_never_panic() {
         event_endpoint: 0xE117_0000_0000_0009,
         default_action: true,
         menu,
-    })
-    .to_le_bytes();
-    for mut base in [declare] {
-        for byte in 0..base.len() {
-            for bit in 0..8u32 {
-                base[byte] ^= 1 << bit;
-                exercise(&base);
-                base[byte] ^= 1 << bit;
-            }
+    });
+    // The seed is the frame a client actually sends — exactly the
+    // declaration's own length. Feeding a padded buffer instead would be
+    // refused on length alone and would never reach the row decoder these
+    // flips exist to exercise.
+    let mut base = [0u8; WindowRequest::MAX_WIRE_LEN + 1];
+    let len = declare
+        .encode(&mut base)
+        .expect("the max frame holds any request");
+    for byte in 0..len {
+        for bit in 0..8u32 {
+            base[byte] ^= 1 << bit;
+            exercise(&base[..len]);
+            // A truncated and an over-long spelling of the same flipped
+            // frame must both fail closed rather than be read short.
+            exercise(&base[..len - 1]);
+            exercise(&base[..=len]);
+            base[byte] ^= 1 << bit;
         }
     }
     let events = [

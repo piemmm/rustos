@@ -30,8 +30,11 @@
 //! [`crate::reply::decode_status_reply`]). Every decode fails closed: an
 //! unknown magic, version, operation, format, an out-of-bounds frame
 //! count, an empty damage rectangle, a malformed title, a minimum client
-//! size declared by a window that cannot be resized, or a dirty reserved
-//! field refuses rather than guessing.
+//! size declared by a window that cannot be resized, a request frame that
+//! is not exactly as long as its operation, or a dirty reserved field
+//! refuses rather than guessing.
+
+use core::cmp::Ordering;
 
 use crate::bounded_text::BoundedText;
 use crate::desktop::DesktopInfo;
@@ -75,9 +78,12 @@ pub const WINDOW_VERSION_V1: u16 = 1;
 /// diverge.
 pub const WINDOW_MAX_FRAMES: u32 = 4;
 
-/// Maximum request, in bytes, the [`WINDOW_ENDPOINT`] accepts: exactly one
-/// fixed-width [`WindowRequest`].
-pub const WINDOW_MAX_REQUEST: usize = WindowRequest::WIRE_LEN;
+/// Maximum request, in bytes, the [`WINDOW_ENDPOINT`] accepts: the longest
+/// [`WindowRequest`] any operation encodes to.
+///
+/// A ceiling for the receive buffer, not the shape of a request — each
+/// operation sends only its own [`WindowRequest::wire_len`] bytes.
+pub const WINDOW_MAX_REQUEST: usize = WindowRequest::MAX_WIRE_LEN;
 
 /// Maximum encoded length, in bytes, of a window title.
 pub const WINDOW_TITLE_MAX: usize = 64;
@@ -762,23 +768,48 @@ const OP_SET_TITLE: u16 = 12;
 /// Wire operation discriminant of [`WindowRequest::SetAppBar`].
 const OP_SET_APP_BAR: u16 = 13;
 
-/// Byte offset, within the fixed frame, of a [`WindowRequest::CreatePopup`]
-/// operand tail that follows the shared frame-layout block: the parent
-/// window id (8), then the two signed placement offsets (4 each). The
-/// popup reuses [`read_frame_layout`]'s offsets 24..=40 verbatim, so only
-/// this tail is popup-specific.
+/// Encoded size of every request's header: magic (4), version (2), op (2).
+///
+/// The operand block follows it, and each operation's block has its own
+/// length — the frame is as long as the operation needs and no longer.
+const REQUEST_HEADER_LEN: usize = 8;
+
+/// Encoded size of a [`WindowRequest::Present`]: the header, the window id,
+/// the frame index, and the four-word damage rectangle.
+///
+/// This is the hottest operation on the channel — one per composited frame
+/// per window — so it is deliberately the shortest frame that carries it.
+const PRESENT_WIRE_LEN: usize = 36;
+/// Encoded size of a request whose whole operand block is one window id
+/// ([`WindowRequest::Close`], [`WindowRequest::PickFile`]).
+const WINDOW_ID_WIRE_LEN: usize = REQUEST_HEADER_LEN + 8;
+/// Encoded size of a [`WindowRequest::Resize`]: the header, the window id,
+/// the shared-memory handle, and the shared frame-layout block.
+const RESIZE_WIRE_LEN: usize = 41;
+/// Encoded size of a [`WindowRequest::SetBackdropBlur`]: the header, the
+/// window id, and the radius.
+const SET_BACKDROP_BLUR_WIRE_LEN: usize = 18;
+/// Encoded size of a [`WindowRequest::QueryDesktop`]: the header alone —
+/// the one request that names no window and carries no operand.
+const QUERY_DESKTOP_WIRE_LEN: usize = REQUEST_HEADER_LEN;
+
+/// Byte offset of a [`WindowRequest::CreatePopup`] operand tail that
+/// follows the shared frame-layout block: the parent window id (8), then
+/// the two signed placement offsets (4 each). The popup reuses
+/// [`read_frame_layout`]'s offsets 24..=40 verbatim, so only this tail is
+/// popup-specific.
 const POPUP_PARENT_OFFSET: usize = 41;
 /// Byte offset of [`WindowRequest::CreatePopup::offset_x`].
 const POPUP_OFFSET_X: usize = POPUP_PARENT_OFFSET + 8;
 /// Byte offset of [`WindowRequest::CreatePopup::offset_y`].
 const POPUP_OFFSET_Y: usize = POPUP_OFFSET_X + 4;
-/// First reserved byte after a [`WindowRequest::CreatePopup`] operand block.
-const POPUP_RESERVED_FROM: usize = POPUP_OFFSET_Y + 4;
+/// Encoded size of a [`WindowRequest::CreatePopup`].
+const CREATE_POPUP_WIRE_LEN: usize = POPUP_OFFSET_Y + 4;
 
-/// Byte offset, within the fixed frame, of a [`WindowRequest::Create`]
-/// title length, immediately after the shared frame-layout block. The
-/// create tail runs on from here: the title text, the resizable flag, and
-/// the declared minimum client size.
+/// Byte offset of a [`WindowRequest::Create`] title length, immediately
+/// after the shared frame-layout block. The create tail runs on from here:
+/// the title text, the resizable flag, and the declared minimum client
+/// size.
 const CREATE_TITLE_LEN_OFFSET: usize = 41;
 /// Byte offset of a [`WindowRequest::Create`] title's text.
 const CREATE_TITLE_TEXT_OFFSET: usize = CREATE_TITLE_LEN_OFFSET + 1;
@@ -788,20 +819,19 @@ const CREATE_RESIZABLE_OFFSET: usize = CREATE_TITLE_TEXT_OFFSET + WINDOW_TITLE_M
 const CREATE_MIN_WIDTH_OFFSET: usize = CREATE_RESIZABLE_OFFSET + 1;
 /// Byte offset of [`WindowSizing::Resizable::min_height_px`].
 const CREATE_MIN_HEIGHT_OFFSET: usize = CREATE_MIN_WIDTH_OFFSET + 4;
-/// First reserved byte after a [`WindowRequest::Create`] operand block.
-const CREATE_RESERVED_FROM: usize = CREATE_MIN_HEIGHT_OFFSET + 4;
+/// Encoded size of a [`WindowRequest::Create`].
+const CREATE_WIRE_LEN: usize = CREATE_MIN_HEIGHT_OFFSET + 4;
 
-/// Byte offset, within the fixed frame, of a [`WindowRequest::SetTitle`]
-/// title length, immediately after the window id it retitles.
+/// Byte offset of a [`WindowRequest::SetTitle`] title length, immediately
+/// after the window id it retitles.
 const SET_TITLE_LEN_OFFSET: usize = 16;
 /// Byte offset of a [`WindowRequest::SetTitle`] title's text.
 const SET_TITLE_TEXT_OFFSET: usize = SET_TITLE_LEN_OFFSET + 1;
-/// First reserved byte after a [`WindowRequest::SetTitle`] operand block.
-const SET_TITLE_RESERVED_FROM: usize = SET_TITLE_TEXT_OFFSET + WINDOW_TITLE_MAX;
+/// Encoded size of a [`WindowRequest::SetTitle`].
+const SET_TITLE_WIRE_LEN: usize = SET_TITLE_TEXT_OFFSET + WINDOW_TITLE_MAX;
 
-/// Byte offset, within the fixed frame, of a
-/// [`WindowRequest::SetAppBar`]'s flag byte, immediately after the event
-/// endpoint it routes to.
+/// Byte offset of a [`WindowRequest::SetAppBar`]'s flag byte, immediately
+/// after the event endpoint it routes to.
 const APP_BAR_FLAGS_OFFSET: usize = 16;
 /// Byte offset of a [`WindowRequest::SetAppBar`]'s declared row count.
 const APP_BAR_ROW_COUNT_OFFSET: usize = APP_BAR_FLAGS_OFFSET + 1;
@@ -822,9 +852,20 @@ const APP_MENU_ROW_LABEL_LEN_OFFSET: usize = 3;
 const APP_MENU_ROW_ID_OFFSET: usize = 4;
 /// Byte offset, within one row record, of its fixed-width label text.
 const APP_MENU_ROW_LABEL_OFFSET: usize = APP_MENU_ROW_ID_OFFSET + 2;
-/// First reserved byte after a [`WindowRequest::SetAppBar`] operand block.
-const APP_BAR_RESERVED_FROM: usize =
-    APP_BAR_ROWS_OFFSET + APP_MENU_MAX_ROWS * APP_MENU_ROW_WIRE_LEN;
+
+/// Encoded size of a [`WindowRequest::SetAppBar`] declaring `rows` rows.
+///
+/// The only operation whose length depends on its value: a declaration
+/// carries exactly the rows it declares, so the frame does not pay for the
+/// rows a menu does not have and the row count and the frame length cannot
+/// disagree.
+const fn app_bar_wire_len(rows: usize) -> usize {
+    APP_BAR_ROWS_OFFSET + rows * APP_MENU_ROW_WIRE_LEN
+}
+
+/// Encoded size of the longest possible [`WindowRequest::SetAppBar`]: a
+/// declaration whose menu holds [`APP_MENU_MAX_ROWS`] rows.
+const APP_BAR_MAX_WIRE_LEN: usize = app_bar_wire_len(APP_MENU_MAX_ROWS);
 
 /// The only flag bit [`WindowRequest::SetAppBar`]'s flag byte defines:
 /// the application handles the primary click itself.
@@ -846,27 +887,61 @@ const APP_MENU_KIND_SUBMENU: u8 = 3;
 const APP_MENU_KIND_ABOUT: u8 = 4;
 
 impl WindowRequest {
-    /// Encoded size on the wire: magic (4), version (2), op (2), and one
-    /// operation block whose unused tail must be zero. Sized to the widest
-    /// block any operation carries — [`Self::SetAppBar`]'s icon-bar
-    /// declaration, whose bounded menu is the largest — so every operation
-    /// shares one frame shape and a short operation's tail is checked,
-    /// never trusted.
-    pub const WIRE_LEN: usize = if CREATE_RESERVED_FROM > APP_BAR_RESERVED_FROM {
-        CREATE_RESERVED_FROM
+    /// Encoded size of the longest request any operation can produce, and so
+    /// the receive bound the window endpoint is bound with
+    /// ([`WINDOW_MAX_REQUEST`]).
+    ///
+    /// It is a *ceiling*, not the frame shape: each operation encodes to its
+    /// own [`wire_len`](Self::wire_len), so a short operation sends a short
+    /// frame rather than padding out to this.
+    pub const MAX_WIRE_LEN: usize = if CREATE_WIRE_LEN > APP_BAR_MAX_WIRE_LEN {
+        CREATE_WIRE_LEN
     } else {
-        APP_BAR_RESERVED_FROM
+        APP_BAR_MAX_WIRE_LEN
     };
 
-    /// Encode `self` little-endian.
+    /// Encoded size of `self`: the header plus this operation's own operand
+    /// block.
+    ///
+    /// One length per operation, read by both the encoder and the decoder's
+    /// exact-length check, so the two cannot disagree about where a frame
+    /// ends.
     #[must_use]
-    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
-        let mut out = [0u8; Self::WIRE_LEN];
-        put_u32(&mut out, 0, WINDOW_REQUEST_MAGIC);
-        put_u16(&mut out, 4, WINDOW_VERSION_V1);
-        put_u16(&mut out, 6, self.op());
-        self.write_operands(&mut out);
-        out
+    pub const fn wire_len(&self) -> usize {
+        match *self {
+            Self::Create { .. } => CREATE_WIRE_LEN,
+            Self::CreatePopup { .. } => CREATE_POPUP_WIRE_LEN,
+            Self::Present { .. } => PRESENT_WIRE_LEN,
+            Self::Close { .. } | Self::PickFile { .. } => WINDOW_ID_WIRE_LEN,
+            Self::Resize { .. } => RESIZE_WIRE_LEN,
+            Self::SetTitle { .. } => SET_TITLE_WIRE_LEN,
+            Self::SetBackdropBlur { .. } => SET_BACKDROP_BLUR_WIRE_LEN,
+            Self::QueryDesktop => QUERY_DESKTOP_WIRE_LEN,
+            Self::SetAppBar(ref bar) => app_bar_wire_len(bar.menu.len as usize),
+        }
+    }
+
+    /// Encode `self` little-endian into the front of `out`, returning the
+    /// number of bytes written ([`wire_len`](Self::wire_len)).
+    ///
+    /// The written frame is zeroed first, so the fixed-width fields a
+    /// bounded label or title does not fill are zero however dirty the
+    /// caller's buffer was, and one value has exactly one encoding.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::BufferTooSmall`] if `out` cannot hold the whole frame.
+    pub fn encode(&self, out: &mut [u8]) -> Result<usize, Errno> {
+        let len = self.wire_len();
+        let Some(frame) = out.get_mut(..len) else {
+            return Err(Errno::BufferTooSmall);
+        };
+        frame.fill(0);
+        put_u32(frame, 0, WINDOW_REQUEST_MAGIC);
+        put_u16(frame, 4, WINDOW_VERSION_V1);
+        put_u16(frame, 6, self.op());
+        self.write_operands(frame);
+        Ok(len)
     }
 
     /// The wire operation discriminant of `self`, which
@@ -887,8 +962,8 @@ impl WindowRequest {
     }
 
     /// Write `self`'s operand block into the already-headed frame `out`,
-    /// leaving the reserved tail zero.
-    fn write_operands(&self, out: &mut [u8; Self::WIRE_LEN]) {
+    /// which is exactly [`wire_len`](Self::wire_len) bytes long.
+    fn write_operands(&self, out: &mut [u8]) {
         match *self {
             Self::Create { .. } => self.write_create_operands(out),
             Self::CreatePopup {
@@ -968,7 +1043,7 @@ impl WindowRequest {
     /// Write a [`Create`](Self::Create)'s operand block: the shared frame
     /// layout, then the title and the sizing contract that follow it.
     /// A no-op for any other request.
-    fn write_create_operands(&self, out: &mut [u8; Self::WIRE_LEN]) {
+    fn write_create_operands(&self, out: &mut [u8]) {
         let Self::Create {
             shm_handle,
             event_endpoint,
@@ -1010,11 +1085,16 @@ impl WindowRequest {
     /// session knows (which windows exist, who owns them, the configured
     /// frame count) stay server-side.
     ///
+    /// The frame must be **exactly** as long as its operation
+    /// ([`wire_len`](Self::wire_len)): a shorter frame is truncation and a
+    /// longer one is a smuggled field, and neither is tolerated.
+    ///
     /// # Errors
     ///
-    /// * [`Errno::BufferTooSmall`] — `bytes` cannot hold a whole request.
-    /// * [`Errno::BadMagic`] — wrong magic, a dirty reserved tail, or a
-    ///   dirty title tail.
+    /// * [`Errno::BufferTooSmall`] — `bytes` is shorter than the operation
+    ///   it names needs.
+    /// * [`Errno::BadMagic`] — wrong magic, a frame longer than the
+    ///   operation needs, or a dirty title tail.
     /// * [`Errno::AbiVersionUnsupported`] — not `window-v1`.
     /// * [`Errno::OutOfRange`] — an operation or pixel format outside the
     ///   closed set, a malformed title, a zero window id, or a reserved
@@ -1026,7 +1106,7 @@ impl WindowRequest {
     ///   damage rectangle, or a backdrop-blur radius above
     ///   [`WINDOW_BACKDROP_BLUR_MAX_PX`].
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
-        if bytes.len() < Self::WIRE_LEN {
+        if bytes.len() < REQUEST_HEADER_LEN {
             return Err(Errno::BufferTooSmall);
         }
         if read_u32(bytes, 0) != WINDOW_REQUEST_MAGIC {
@@ -1040,7 +1120,7 @@ impl WindowRequest {
             OP_CREATE => read_create(bytes),
             OP_CREATE_POPUP => read_create_popup(bytes),
             OP_PRESENT => {
-                reserved_zero(bytes, 36)?;
+                exact_len(bytes, PRESENT_WIRE_LEN)?;
                 let window_id = nonzero_window_id(read_u64(bytes, 8))?;
                 let frame_index = read_u32(bytes, 16);
                 let damage = DamageRect {
@@ -1059,17 +1139,17 @@ impl WindowRequest {
                 })
             }
             OP_CLOSE => {
-                reserved_zero(bytes, 16)?;
+                exact_len(bytes, WINDOW_ID_WIRE_LEN)?;
                 let window_id = nonzero_window_id(read_u64(bytes, 8))?;
                 Ok(Self::Close { window_id })
             }
             OP_PICK_FILE => {
-                reserved_zero(bytes, 16)?;
+                exact_len(bytes, WINDOW_ID_WIRE_LEN)?;
                 let window_id = nonzero_window_id(read_u64(bytes, 8))?;
                 Ok(Self::PickFile { window_id })
             }
             OP_RESIZE => {
-                reserved_zero(bytes, 41)?;
+                exact_len(bytes, RESIZE_WIRE_LEN)?;
                 let window_id = nonzero_window_id(read_u64(bytes, 8))?;
                 let shm_handle = read_u64(bytes, 16);
                 let layout = read_frame_layout(bytes)?;
@@ -1086,7 +1166,7 @@ impl WindowRequest {
             OP_SET_TITLE => read_set_title(bytes),
             OP_SET_APP_BAR => read_app_bar(bytes),
             OP_SET_BACKDROP_BLUR => {
-                reserved_zero(bytes, 18)?;
+                exact_len(bytes, SET_BACKDROP_BLUR_WIRE_LEN)?;
                 let window_id = nonzero_window_id(read_u64(bytes, 8))?;
                 let radius_px = read_u16(bytes, 16);
                 if radius_px > WINDOW_BACKDROP_BLUR_MAX_PX {
@@ -1098,7 +1178,7 @@ impl WindowRequest {
                 })
             }
             OP_QUERY_DESKTOP => {
-                reserved_zero(bytes, 8)?;
+                exact_len(bytes, QUERY_DESKTOP_WIRE_LEN)?;
                 Ok(Self::QueryDesktop)
             }
             _ => Err(Errno::OutOfRange),
@@ -1111,19 +1191,20 @@ impl WindowRequest {
 /// decode a `Create` title goes through, with the reserved tail required
 /// zero.
 fn read_set_title(bytes: &[u8]) -> Result<WindowRequest, Errno> {
-    reserved_zero(bytes, SET_TITLE_RESERVED_FROM)?;
+    exact_len(bytes, SET_TITLE_WIRE_LEN)?;
     let window_id = nonzero_window_id(read_u64(bytes, 8))?;
     let mut title_bytes = [0u8; WINDOW_TITLE_MAX];
-    title_bytes.copy_from_slice(&bytes[SET_TITLE_TEXT_OFFSET..SET_TITLE_RESERVED_FROM]);
+    title_bytes.copy_from_slice(&bytes[SET_TITLE_TEXT_OFFSET..SET_TITLE_WIRE_LEN]);
     let title = WindowTitle::from_wire(bytes[SET_TITLE_LEN_OFFSET], &title_bytes)?;
     Ok(WindowRequest::SetTitle { window_id, title })
 }
 
 /// Write an icon-bar declaration's operand block: the event route, the flag
-/// byte, the declared row count, and one fixed-width record per row
-/// (mirrors [`read_app_bar`]). Rows past the declared count stay zero, so
-/// one menu has exactly one encoding.
-fn write_app_bar(out: &mut [u8; WindowRequest::WIRE_LEN], bar: &AppBar) {
+/// byte, the declared row count, and one fixed-width record per declared
+/// row (mirrors [`read_app_bar`]). The block ends with the last row, so the
+/// count and the frame length state the same thing and one menu has exactly
+/// one encoding.
+fn write_app_bar(out: &mut [u8], bar: &AppBar) {
     put_u64(out, 8, bar.event_endpoint);
     out[APP_BAR_FLAGS_OFFSET] = if bar.default_action {
         APP_BAR_FLAG_DEFAULT_ACTION
@@ -1176,7 +1257,17 @@ fn write_app_bar(out: &mut [u8; WindowRequest::WIRE_LEN], bar: &AppBar) {
 /// application could have constructed — there is no second, weaker set of
 /// rules on the receiving side.
 fn read_app_bar(bytes: &[u8]) -> Result<WindowRequest, Errno> {
-    reserved_zero(bytes, APP_BAR_RESERVED_FROM)?;
+    if bytes.len() < APP_BAR_ROWS_OFFSET {
+        return Err(Errno::BufferTooSmall);
+    }
+    let count = usize::from(bytes[APP_BAR_ROW_COUNT_OFFSET]);
+    if count > APP_MENU_MAX_ROWS {
+        return Err(Errno::LengthOutOfRange);
+    }
+    // The count is read before the length is fixed, so a declaration whose
+    // frame does not hold exactly the rows it claims is refused rather than
+    // read short or read into a neighbouring field.
+    exact_len(bytes, app_bar_wire_len(count))?;
     let event_endpoint = read_u64(bytes, 8);
     if crate::ipc::is_reserved_endpoint(event_endpoint) {
         return Err(Errno::OutOfRange);
@@ -1184,17 +1275,6 @@ fn read_app_bar(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     let flags = bytes[APP_BAR_FLAGS_OFFSET];
     if flags & !APP_BAR_FLAG_DEFAULT_ACTION != 0 {
         return Err(Errno::OutOfRange);
-    }
-    let count = usize::from(bytes[APP_BAR_ROW_COUNT_OFFSET]);
-    if count > APP_MENU_MAX_ROWS {
-        return Err(Errno::LengthOutOfRange);
-    }
-    let rows_from = APP_BAR_ROWS_OFFSET + count * APP_MENU_ROW_WIRE_LEN;
-    if bytes[rows_from..APP_BAR_RESERVED_FROM]
-        .iter()
-        .any(|&b| b != 0)
-    {
-        return Err(Errno::BadMagic);
     }
     let mut menu = AppMenu::EMPTY;
     for index in 0..count {
@@ -1264,7 +1344,7 @@ fn encode_title(out: &mut [u8], len_at: usize, title: &WindowTitle) {
 
 /// Encode the window id + title payload of [`WindowRequest::SetTitle`]
 /// (mirrors [`read_set_title`]).
-fn encode_set_title(out: &mut [u8; WindowRequest::WIRE_LEN], window_id: u64, title: &WindowTitle) {
+fn encode_set_title(out: &mut [u8], window_id: u64, title: &WindowTitle) {
     put_u64(out, 8, window_id);
     encode_title(out, SET_TITLE_LEN_OFFSET, title);
 }
@@ -1282,7 +1362,7 @@ fn encode_set_title(out: &mut [u8; WindowRequest::WIRE_LEN], window_id: u64, tit
 /// screen), while a fixed-size window that declares one is contradicting
 /// itself and is refused.
 fn read_create(bytes: &[u8]) -> Result<WindowRequest, Errno> {
-    reserved_zero(bytes, CREATE_RESERVED_FROM)?;
+    exact_len(bytes, CREATE_WIRE_LEN)?;
     let shm_handle = read_u64(bytes, 8);
     let event_endpoint = read_u64(bytes, 16);
     if crate::ipc::is_reserved_endpoint(event_endpoint) {
@@ -1338,7 +1418,7 @@ fn read_sizing(bytes: &[u8]) -> Result<WindowSizing, Errno> {
 /// offsets are unconstrained signed values — the session clamps the popup
 /// onto the screen, so any offset is a legitimate request.
 fn read_create_popup(bytes: &[u8]) -> Result<WindowRequest, Errno> {
-    reserved_zero(bytes, POPUP_RESERVED_FROM)?;
+    exact_len(bytes, CREATE_POPUP_WIRE_LEN)?;
     let shm_handle = read_u64(bytes, 8);
     let event_endpoint = read_u64(bytes, 16);
     if crate::ipc::is_reserved_endpoint(event_endpoint) {
@@ -1376,7 +1456,7 @@ struct FrameLayout {
 impl FrameLayout {
     /// Write the block at the offsets [`read_frame_layout`] reads it from, so
     /// encoding and decoding can never disagree about where it sits.
-    fn write_to(&self, out: &mut [u8; WindowRequest::WIRE_LEN]) {
+    fn write_to(&self, out: &mut [u8]) {
         put_u32(out, 24, self.frame_count);
         put_u32(out, 28, self.width_px);
         put_u32(out, 32, self.height_px);
@@ -1415,14 +1495,17 @@ fn read_frame_layout(bytes: &[u8]) -> Result<FrameLayout, Errno> {
     })
 }
 
-/// Refuse a request whose reserved tail (from `from` to the end of the
-/// fixed frame) carries any non-zero byte — wire corruption or a smuggled
-/// field, never silently ignored.
-fn reserved_zero(bytes: &[u8], from: usize) -> Result<(), Errno> {
-    if bytes[from..WindowRequest::WIRE_LEN].iter().any(|&b| b != 0) {
-        return Err(Errno::BadMagic);
+/// Refuse a request frame that is not exactly `len` bytes long.
+///
+/// Short is truncation and long is a field smuggled past the operation's
+/// own end; both fail closed. Checking the length is what makes every
+/// operand read below it in-bounds by construction.
+fn exact_len(bytes: &[u8], len: usize) -> Result<(), Errno> {
+    match bytes.len().cmp(&len) {
+        Ordering::Less => Err(Errno::BufferTooSmall),
+        Ordering::Greater => Err(Errno::BadMagic),
+        Ordering::Equal => Ok(()),
     }
-    Ok(())
 }
 
 /// A window id is minted by the session starting at 1; zero never names a
@@ -2103,16 +2186,16 @@ fn event_reserved_zero(bytes: &[u8], from: usize) -> Result<(), Errno> {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_create_reply, decode_desktop_reply, encode_create_reply, encode_desktop_reply,
-        AppBar, AppMenu, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuRow, PointerAction,
-        WindowEvent, WindowRequest, WindowSizing, WindowTitle, APP_BAR_FLAGS_OFFSET,
-        APP_BAR_RESERVED_FROM, APP_BAR_ROWS_OFFSET, APP_BAR_ROW_COUNT_OFFSET, APP_MENU_LABEL_MAX,
-        APP_MENU_MAX_ROWS, APP_MENU_ROW_WIRE_LEN, CREATE_MIN_HEIGHT_OFFSET,
-        CREATE_MIN_WIDTH_OFFSET, CREATE_RESERVED_FROM, CREATE_RESIZABLE_OFFSET,
-        DESKTOP_REPLY_SERVER_OFFSET, SET_TITLE_LEN_OFFSET, SET_TITLE_RESERVED_FROM,
-        SET_TITLE_TEXT_OFFSET, WINDOW_BACKDROP_BLUR_MAX_PX, WINDOW_CREATE_REPLY_LEN,
-        WINDOW_DESKTOP_REPLY_LEN, WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC, WINDOW_MAX_FRAMES,
-        WINDOW_REQUEST_MAGIC, WINDOW_TITLE_MAX,
+        app_bar_wire_len, decode_create_reply, decode_desktop_reply, encode_create_reply,
+        encode_desktop_reply, AppBar, AppMenu, AppMenuItemId, AppMenuLabel, AppMenuMark,
+        AppMenuRow, PointerAction, WindowEvent, WindowRequest, WindowSizing, WindowTitle,
+        APP_BAR_FLAGS_OFFSET, APP_BAR_MAX_WIRE_LEN, APP_BAR_ROWS_OFFSET, APP_BAR_ROW_COUNT_OFFSET,
+        APP_MENU_LABEL_MAX, APP_MENU_MAX_ROWS, APP_MENU_ROW_WIRE_LEN, CREATE_MIN_HEIGHT_OFFSET,
+        CREATE_MIN_WIDTH_OFFSET, CREATE_POPUP_WIRE_LEN, CREATE_RESIZABLE_OFFSET, CREATE_WIRE_LEN,
+        DESKTOP_REPLY_SERVER_OFFSET, PRESENT_WIRE_LEN, REQUEST_HEADER_LEN, SET_TITLE_LEN_OFFSET,
+        SET_TITLE_TEXT_OFFSET, SET_TITLE_WIRE_LEN, WINDOW_BACKDROP_BLUR_MAX_PX,
+        WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN, WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC,
+        WINDOW_MAX_FRAMES, WINDOW_REQUEST_MAGIC, WINDOW_TITLE_MAX,
     };
     use crate::desktop::{Appearance, DesktopInfo};
     use crate::driver::display::{DamageRect, DisplayFormat};
@@ -2120,6 +2203,63 @@ mod tests {
     use crate::seat::SEATMGR_ENDPOINT;
     use crate::Errno;
     use crate::ProcId;
+
+    /// One encoded request exactly as a caller sends it, so a test mutates
+    /// and decodes the bytes that actually went out rather than a padded
+    /// frame the protocol no longer has.
+    ///
+    /// It derefs to its own `len` bytes, and holds room for one more so
+    /// [`over_long`](Frame::over_long) can append the byte an exact-length
+    /// decode must refuse.
+    #[derive(Copy, Clone)]
+    struct Frame {
+        bytes: [u8; WindowRequest::MAX_WIRE_LEN + 1],
+        len: usize,
+    }
+
+    impl Frame {
+        fn new(request: &WindowRequest) -> Self {
+            let mut bytes = [0u8; WindowRequest::MAX_WIRE_LEN + 1];
+            let len = request.encode(&mut bytes).expect("the max frame fits");
+            assert_eq!(len, request.wire_len());
+            Self { bytes, len }
+        }
+
+        /// The frame with `filler` appended: a byte past the operation's own
+        /// end, which is a smuggled field however innocuous its value.
+        fn over_long(mut self, filler: u8) -> Self {
+            self.bytes[self.len] = filler;
+            self.len += 1;
+            self
+        }
+
+        /// The frame one byte short: truncation.
+        fn truncated(mut self) -> Self {
+            self.len -= 1;
+            self
+        }
+    }
+
+    impl core::ops::Deref for Frame {
+        type Target = [u8];
+
+        fn deref(&self) -> &[u8] {
+            &self.bytes[..self.len]
+        }
+    }
+
+    impl core::ops::DerefMut for Frame {
+        fn deref_mut(&mut self) -> &mut [u8] {
+            &mut self.bytes[..self.len]
+        }
+    }
+
+    impl WindowRequest {
+        /// This request encoded exactly as a caller sends it.
+        fn frame(&self) -> Frame {
+            Frame::new(self)
+        }
+    }
 
     fn sample_create() -> WindowRequest {
         sample_create_sized(WindowSizing::Fixed)
@@ -2285,9 +2425,13 @@ mod tests {
         menu
     }
 
-    #[test]
-    fn requests_round_trip() {
-        for request in [
+    /// One of every operation the request codec encodes, including the
+    /// narrowest and widest form of each variable-width one.
+    ///
+    /// Both the round-trip and the framing tests walk this one list, so an
+    /// operation added without a framing test cannot slip through.
+    fn every_request() -> [WindowRequest; 14] {
+        [
             sample_create(),
             sample_create_popup(),
             sample_present(),
@@ -2329,10 +2473,102 @@ mod tests {
                 default_action: true,
                 menu: widest_menu(),
             }),
-        ] {
-            let bytes = request.to_le_bytes();
+            WindowRequest::QueryDesktop,
+        ]
+    }
+
+    #[test]
+    fn requests_round_trip() {
+        for request in every_request() {
+            let bytes = request.frame();
             assert_eq!(WindowRequest::from_bytes(&bytes), Ok(request));
         }
+    }
+
+    /// Every operation encodes to exactly its own declared length, and a
+    /// frame that is not that length is refused either way: short is
+    /// truncation, long is a field smuggled past the operation's end.
+    ///
+    /// The over-long case is checked with a zero filler as well as a set
+    /// one, because it is the *length* that refuses — a decoder that
+    /// tolerated trailing padding so long as it was zero is what this
+    /// replaces.
+    #[test]
+    fn requests_are_framed_to_their_own_length() {
+        for request in every_request() {
+            let frame = request.frame();
+            assert_eq!(frame.len(), request.wire_len());
+            assert!(frame.len() <= WindowRequest::MAX_WIRE_LEN);
+            for filler in [0, 1] {
+                assert_eq!(
+                    WindowRequest::from_bytes(&frame.over_long(filler)),
+                    Err(Errno::BadMagic),
+                    "an over-long frame must be refused: {request:?}"
+                );
+            }
+            assert_eq!(
+                WindowRequest::from_bytes(&frame.truncated()),
+                Err(Errno::BufferTooSmall),
+                "a truncated frame must be refused: {request:?}"
+            );
+
+            // No operation declares a byte it does not read: flipping the
+            // final byte must change what decodes. Were a length larger
+            // than its operand block, the tail would be unread padding —
+            // which an exact-length decode would accept and no round-trip
+            // would notice.
+            let mut last = frame;
+            let at = last.len() - 1;
+            last[at] ^= 0xFF;
+            assert_ne!(
+                WindowRequest::from_bytes(&last),
+                Ok(request),
+                "the last byte of a frame must be read: {request:?}"
+            );
+        }
+    }
+
+    /// The hot path pays for what it carries and nothing more: a present is
+    /// one short frame, not the widest operation's.
+    ///
+    /// Pinned because the cost is invisible at the call site — an operation
+    /// added with a wider block would silently re-inflate every present if
+    /// the frame were shared again.
+    #[test]
+    fn present_frames_are_short() {
+        assert_eq!(sample_present().wire_len(), PRESENT_WIRE_LEN);
+        assert_eq!(PRESENT_WIRE_LEN, 36);
+        const { assert!(PRESENT_WIRE_LEN * 4 < WindowRequest::MAX_WIRE_LEN) };
+    }
+
+    /// A declaration's length follows its row count, so the rows a menu
+    /// does not have cost nothing.
+    #[test]
+    fn app_bar_frames_grow_with_their_rows() {
+        let empty = WindowRequest::SetAppBar(AppBar {
+            event_endpoint: 0xE117_0000_0000_0009,
+            default_action: false,
+            menu: AppMenu::EMPTY,
+        });
+        let widest = WindowRequest::SetAppBar(AppBar {
+            event_endpoint: 0xE117_0000_0000_0009,
+            default_action: true,
+            menu: widest_menu(),
+        });
+        assert_eq!(empty.wire_len(), app_bar_wire_len(0));
+        assert_eq!(widest.wire_len(), app_bar_wire_len(APP_MENU_MAX_ROWS));
+        assert!(empty.wire_len() < widest.wire_len());
+        assert_eq!(widest.wire_len(), WindowRequest::MAX_WIRE_LEN);
+    }
+
+    /// Encoding into a buffer that cannot hold the frame fails closed
+    /// rather than writing a partial request.
+    #[test]
+    fn encode_refuses_a_short_buffer() {
+        let request = sample_present();
+        let mut out = [0u8; PRESENT_WIRE_LEN - 1];
+        assert_eq!(request.encode(&mut out), Err(Errno::BufferTooSmall));
+        assert!(out.iter().all(|&b| b == 0));
     }
 
     #[test]
@@ -2414,7 +2650,7 @@ mod tests {
 
     #[test]
     fn set_app_bar_refuses_every_malformed_frame() {
-        let base = WindowRequest::SetAppBar(sample_app_bar()).to_le_bytes();
+        let base = WindowRequest::SetAppBar(sample_app_bar()).frame();
 
         // The event route may not be a reserved (system-served) endpoint:
         // an application cannot ask for its bar events to be delivered to
@@ -2436,17 +2672,27 @@ mod tests {
             Err(Errno::LengthOutOfRange)
         );
 
-        // Bytes in a row record past the declared count must be zero, so a
-        // menu has exactly one encoding and nothing rides along unread.
-        let mut trailing = base;
+        // The frame ends with the last declared row, so a byte past it is a
+        // smuggled field however innocuous — and the length alone refuses,
+        // which is why a zero filler is refused too.
         let declared = usize::from(base[APP_BAR_ROW_COUNT_OFFSET]);
-        trailing[APP_BAR_ROWS_OFFSET + declared * APP_MENU_ROW_WIRE_LEN] = 1;
-        assert_eq!(WindowRequest::from_bytes(&trailing), Err(Errno::BadMagic));
+        assert_eq!(base.len(), app_bar_wire_len(declared));
+        for filler in [0, 1] {
+            assert_eq!(
+                WindowRequest::from_bytes(&base.over_long(filler)),
+                Err(Errno::BadMagic)
+            );
+        }
 
-        // The declaration is the widest operand block, so it defines the
-        // frame and has no reserved tail of its own — the zero-past-the-
-        // declared-count check above is its whole tail.
-        assert_eq!(APP_BAR_RESERVED_FROM, WindowRequest::WIRE_LEN);
+        // A count that does not match the frame's own length is refused
+        // rather than read short: dropping the count with the frame intact
+        // leaves rows the declaration no longer claims.
+        let mut miscounted = base;
+        miscounted[APP_BAR_ROW_COUNT_OFFSET] = u8::try_from(declared - 1).expect("fits");
+        assert_eq!(WindowRequest::from_bytes(&miscounted), Err(Errno::BadMagic));
+
+        // The widest declaration defines the endpoint's receive bound.
+        assert_eq!(APP_BAR_MAX_WIRE_LEN, WindowRequest::MAX_WIRE_LEN);
 
         // An unknown row kind, an undefined row flag bit, and the unused
         // mark encoding are each refused.
@@ -2496,33 +2742,35 @@ mod tests {
             format: DisplayFormat::Bgra8888,
         };
         // A zero window id is refused.
-        let mut zero_id = base.to_le_bytes();
+        let mut zero_id = base.frame();
         zero_id[8..16].copy_from_slice(&0u64.to_le_bytes());
         assert_eq!(WindowRequest::from_bytes(&zero_id), Err(Errno::OutOfRange));
         // A zero / over-large frame count.
-        let mut zero_frames = base.to_le_bytes();
+        let mut zero_frames = base.frame();
         zero_frames[24..28].copy_from_slice(&0u32.to_le_bytes());
         assert_eq!(
             WindowRequest::from_bytes(&zero_frames),
             Err(Errno::LengthOutOfRange)
         );
         // A zero extent, and a stride too small for one scanline.
-        let mut zero_w = base.to_le_bytes();
+        let mut zero_w = base.frame();
         zero_w[28..32].copy_from_slice(&0u32.to_le_bytes());
         assert_eq!(
             WindowRequest::from_bytes(&zero_w),
             Err(Errno::LengthOutOfRange)
         );
-        let mut short_stride = base.to_le_bytes();
+        let mut short_stride = base.frame();
         short_stride[36..40].copy_from_slice(&2559u32.to_le_bytes());
         assert_eq!(
             WindowRequest::from_bytes(&short_stride),
             Err(Errno::LengthOutOfRange)
         );
-        // A dirty reserved tail (past the format byte at offset 40).
-        let mut dirty = base.to_le_bytes();
-        dirty[41] = 1;
-        assert_eq!(WindowRequest::from_bytes(&dirty), Err(Errno::BadMagic));
+        // A byte past the format at offset 40 is past the operation's own
+        // end, so the frame is over-long and refused.
+        assert_eq!(
+            WindowRequest::from_bytes(&base.frame().over_long(1)),
+            Err(Errno::BadMagic)
+        );
     }
 
     #[test]
@@ -2554,22 +2802,27 @@ mod tests {
     }
 
     #[test]
-    fn pick_file_refuses_a_zero_id_and_a_dirty_tail() {
-        let mut zero_id = WindowRequest::PickFile { window_id: 9 }.to_le_bytes();
+    fn pick_file_refuses_a_zero_id_and_an_over_long_frame() {
+        let mut zero_id = WindowRequest::PickFile { window_id: 9 }.frame();
         zero_id[8..16].copy_from_slice(&0u64.to_le_bytes());
         assert_eq!(WindowRequest::from_bytes(&zero_id), Err(Errno::OutOfRange));
-        let mut dirty = WindowRequest::PickFile { window_id: 9 }.to_le_bytes();
-        dirty[16] = 1;
-        assert_eq!(WindowRequest::from_bytes(&dirty), Err(Errno::BadMagic));
+        assert_eq!(
+            WindowRequest::from_bytes(
+                &WindowRequest::PickFile { window_id: 9 }
+                    .frame()
+                    .over_long(1)
+            ),
+            Err(Errno::BadMagic)
+        );
     }
 
     #[test]
-    fn set_title_refuses_a_zero_id_a_malformed_title_and_a_dirty_tail() {
+    fn set_title_refuses_a_zero_id_a_malformed_title_and_an_over_long_frame() {
         let base = WindowRequest::SetTitle {
             window_id: 9,
             title: WindowTitle::new("Documents").expect("a valid title"),
         }
-        .to_le_bytes();
+        .frame();
         let mut zero_id = base;
         zero_id[8..16].copy_from_slice(&0u64.to_le_bytes());
         assert_eq!(WindowRequest::from_bytes(&zero_id), Err(Errno::OutOfRange));
@@ -2601,41 +2854,41 @@ mod tests {
             WindowRequest::from_bytes(&dirty_title_tail),
             Err(Errno::BadMagic)
         );
-        let mut dirty_reserved = base;
-        dirty_reserved[SET_TITLE_RESERVED_FROM] = 1;
+        assert_eq!(base.len(), SET_TITLE_WIRE_LEN);
         assert_eq!(
-            WindowRequest::from_bytes(&dirty_reserved),
+            WindowRequest::from_bytes(&base.over_long(1)),
             Err(Errno::BadMagic)
         );
     }
 
     #[test]
-    fn set_backdrop_blur_refuses_a_zero_id_an_over_large_radius_and_a_dirty_tail() {
+    fn set_backdrop_blur_refuses_a_zero_id_an_over_large_radius_and_an_over_long_frame() {
         let base = WindowRequest::SetBackdropBlur {
             window_id: 9,
             radius_px: 4,
         };
-        let mut zero_id = base.to_le_bytes();
+        let mut zero_id = base.frame();
         zero_id[8..16].copy_from_slice(&0u64.to_le_bytes());
         assert_eq!(WindowRequest::from_bytes(&zero_id), Err(Errno::OutOfRange));
-        let mut over_radius = base.to_le_bytes();
+        let mut over_radius = base.frame();
         let over = WINDOW_BACKDROP_BLUR_MAX_PX + 1;
         over_radius[16..18].copy_from_slice(&over.to_le_bytes());
         assert_eq!(
             WindowRequest::from_bytes(&over_radius),
             Err(Errno::LengthOutOfRange)
         );
-        let mut dirty = base.to_le_bytes();
-        dirty[18] = 1;
-        assert_eq!(WindowRequest::from_bytes(&dirty), Err(Errno::BadMagic));
+        assert_eq!(
+            WindowRequest::from_bytes(&base.frame().over_long(1)),
+            Err(Errno::BadMagic)
+        );
     }
 
     #[test]
     fn decode_fails_closed_on_malformed_framing() {
-        let good = sample_create().to_le_bytes();
+        let good = sample_create().frame();
 
         assert_eq!(
-            WindowRequest::from_bytes(&good[..WindowRequest::WIRE_LEN - 1]),
+            WindowRequest::from_bytes(&good.truncated()),
             Err(Errno::BufferTooSmall)
         );
         let mut bad_magic = good;
@@ -2657,22 +2910,9 @@ mod tests {
     }
 
     #[test]
-    fn decode_refuses_dirty_reserved_tails() {
-        let mut create = sample_create().to_le_bytes();
-        create[WindowRequest::WIRE_LEN - 1] = 1;
-        assert_eq!(WindowRequest::from_bytes(&create), Err(Errno::BadMagic));
-        let mut present = sample_present().to_le_bytes();
-        present[36] = 1;
-        assert_eq!(WindowRequest::from_bytes(&present), Err(Errno::BadMagic));
-        let mut close = WindowRequest::Close { window_id: 9 }.to_le_bytes();
-        close[16] = 1;
-        assert_eq!(WindowRequest::from_bytes(&close), Err(Errno::BadMagic));
-    }
-
-    #[test]
     fn create_bounds_are_enforced() {
         let encode = |frame_count: u32, width: u32, height: u32, stride: u32, format: u8| {
-            let mut bytes = sample_create().to_le_bytes();
+            let mut bytes = sample_create().frame();
             bytes[24..28].copy_from_slice(&frame_count.to_le_bytes());
             bytes[28..32].copy_from_slice(&width.to_le_bytes());
             bytes[32..36].copy_from_slice(&height.to_le_bytes());
@@ -2696,13 +2936,13 @@ mod tests {
     fn create_carries_the_resizable_flag_and_rejects_a_dirty_flag_byte() {
         // The flag round-trips both ways.
         let resizable = sample_create_min(0, 0);
-        let bytes = resizable.to_le_bytes();
+        let bytes = resizable.frame();
         assert_eq!(WindowRequest::from_bytes(&bytes), Ok(resizable));
         // The flag lives at the byte just past the title.
         assert_eq!(bytes[CREATE_RESIZABLE_OFFSET], 1);
-        assert_eq!(sample_create().to_le_bytes()[CREATE_RESIZABLE_OFFSET], 0);
+        assert_eq!(sample_create().frame()[CREATE_RESIZABLE_OFFSET], 0);
         // A flag byte outside {0, 1} is refused, never coerced.
-        let mut bad = sample_create().to_le_bytes();
+        let mut bad = sample_create().frame();
         bad[CREATE_RESIZABLE_OFFSET] = 2;
         assert_eq!(WindowRequest::from_bytes(&bad), Err(Errno::OutOfRange));
     }
@@ -2710,7 +2950,7 @@ mod tests {
     #[test]
     fn create_carries_the_declared_minimum_client_size() {
         let request = sample_create_min(240, 160);
-        let bytes = request.to_le_bytes();
+        let bytes = request.frame();
         assert_eq!(WindowRequest::from_bytes(&bytes), Ok(request));
         // The pair follows the resizable flag, in that order.
         assert_eq!(
@@ -2725,10 +2965,7 @@ mod tests {
         // widest floor an app can state survives the round trip intact.
         for (min_w, min_h) in [(0, 0), (240, 0), (0, 160), (u32::MAX, u32::MAX)] {
             let request = sample_create_min(min_w, min_h);
-            assert_eq!(
-                WindowRequest::from_bytes(&request.to_le_bytes()),
-                Ok(request)
-            );
+            assert_eq!(WindowRequest::from_bytes(&request.frame()), Ok(request));
         }
     }
 
@@ -2737,7 +2974,7 @@ mod tests {
         // A window the window manager never resizes has nothing to measure
         // a floor against, so the contradiction is refused, not ignored.
         for (min_w, min_h) in [(240u32, 160u32), (240, 0), (0, 160)] {
-            let mut bytes = sample_create().to_le_bytes();
+            let mut bytes = sample_create().frame();
             bytes[CREATE_MIN_WIDTH_OFFSET..CREATE_MIN_WIDTH_OFFSET + 4]
                 .copy_from_slice(&min_w.to_le_bytes());
             bytes[CREATE_MIN_HEIGHT_OFFSET..CREATE_MIN_HEIGHT_OFFSET + 4]
@@ -2748,7 +2985,7 @@ mod tests {
             );
         }
         // The fixed-size window that declares nothing still opens.
-        assert!(WindowRequest::from_bytes(&sample_create().to_le_bytes()).is_ok());
+        assert!(WindowRequest::from_bytes(&sample_create().frame()).is_ok());
     }
 
     #[test]
@@ -2774,7 +3011,7 @@ mod tests {
         ] {
             let request = sample_create_sized(sizing);
             assert_eq!(
-                WindowRequest::from_bytes(&request.to_le_bytes()),
+                WindowRequest::from_bytes(&request.frame()),
                 Ok(request),
                 "{sizing:?} encodes a frame the session would refuse"
             );
@@ -2786,28 +3023,28 @@ mod tests {
 
     #[test]
     fn create_refuses_a_truncated_or_dirty_minimum() {
-        let bytes = sample_create_min(240, 160).to_le_bytes();
+        let bytes = sample_create_min(240, 160).frame();
         // A frame cut short is refused whole, never decoded from the part
         // that arrived — including one cut inside the minimum itself.
-        for short in [WindowRequest::WIRE_LEN - 1, CREATE_MIN_WIDTH_OFFSET + 2] {
+        for short in [CREATE_WIRE_LEN - 1, CREATE_MIN_WIDTH_OFFSET + 2] {
             assert_eq!(
                 WindowRequest::from_bytes(&bytes[..short]),
                 Err(Errno::BufferTooSmall)
             );
         }
-        // The reserved tail now begins past the minimum; a byte smuggled
-        // into it is still refused.
-        let mut dirty = bytes;
-        dirty[CREATE_RESERVED_FROM] = 1;
-        assert_eq!(WindowRequest::from_bytes(&dirty), Err(Errno::BadMagic));
+        assert_eq!(bytes.len(), CREATE_WIRE_LEN);
+        assert_eq!(
+            WindowRequest::from_bytes(&bytes.over_long(1)),
+            Err(Errno::BadMagic)
+        );
     }
 
     #[test]
     fn create_refuses_a_reserved_event_endpoint() {
-        let mut bytes = sample_create().to_le_bytes();
+        let mut bytes = sample_create().frame();
         bytes[16..24].copy_from_slice(&SEATMGR_ENDPOINT.to_le_bytes());
         assert_eq!(WindowRequest::from_bytes(&bytes), Err(Errno::OutOfRange));
-        let mut own = sample_create().to_le_bytes();
+        let mut own = sample_create().frame();
         own[16..24].copy_from_slice(&WINDOW_ENDPOINT.to_le_bytes());
         assert_eq!(WindowRequest::from_bytes(&own), Err(Errno::OutOfRange));
     }
@@ -2816,7 +3053,7 @@ mod tests {
     fn create_popup_enforces_bounds_a_parent_id_an_endpoint_and_a_clean_tail() {
         let base = sample_create_popup();
         // A reserved event endpoint is refused, exactly as `Create`.
-        let mut reserved_endpoint = base.to_le_bytes();
+        let mut reserved_endpoint = base.frame();
         reserved_endpoint[16..24].copy_from_slice(&SEATMGR_ENDPOINT.to_le_bytes());
         assert_eq!(
             WindowRequest::from_bytes(&reserved_endpoint),
@@ -2824,19 +3061,19 @@ mod tests {
         );
         // The shared frame-layout bounds still hold: a zero/over-large
         // frame count, a zero extent, a stride too small for one scanline.
-        let mut zero_frames = base.to_le_bytes();
+        let mut zero_frames = base.frame();
         zero_frames[24..28].copy_from_slice(&0u32.to_le_bytes());
         assert_eq!(
             WindowRequest::from_bytes(&zero_frames),
             Err(Errno::LengthOutOfRange)
         );
-        let mut zero_w = base.to_le_bytes();
+        let mut zero_w = base.frame();
         zero_w[28..32].copy_from_slice(&0u32.to_le_bytes());
         assert_eq!(
             WindowRequest::from_bytes(&zero_w),
             Err(Errno::LengthOutOfRange)
         );
-        let mut short_stride = base.to_le_bytes();
+        let mut short_stride = base.frame();
         short_stride[36..40].copy_from_slice(&639u32.to_le_bytes());
         assert_eq!(
             WindowRequest::from_bytes(&short_stride),
@@ -2844,23 +3081,24 @@ mod tests {
         );
         // A zero parent window id is refused: a popup must name a real
         // window it is anchored above.
-        let mut zero_parent = base.to_le_bytes();
+        let mut zero_parent = base.frame();
         zero_parent[super::POPUP_PARENT_OFFSET..super::POPUP_PARENT_OFFSET + 8]
             .copy_from_slice(&0u64.to_le_bytes());
         assert_eq!(
             WindowRequest::from_bytes(&zero_parent),
             Err(Errno::OutOfRange)
         );
-        // The reserved tail past the last operand byte is dirty-checked.
-        let mut dirty = base.to_le_bytes();
-        dirty[super::POPUP_RESERVED_FROM] = 1;
-        assert_eq!(WindowRequest::from_bytes(&dirty), Err(Errno::BadMagic));
+        assert_eq!(base.frame().len(), CREATE_POPUP_WIRE_LEN);
+        assert_eq!(
+            WindowRequest::from_bytes(&base.frame().over_long(1)),
+            Err(Errno::BadMagic)
+        );
     }
 
     #[test]
     fn create_popup_carries_signed_offsets_including_negatives() {
         let request = sample_create_popup();
-        let bytes = request.to_le_bytes();
+        let bytes = request.frame();
         // The offsets sit just past the parent id and round-trip signed.
         assert_eq!(
             i32::from_le_bytes([
@@ -2885,18 +3123,10 @@ mod tests {
     #[test]
     fn the_desktop_query_round_trips_and_names_no_window() {
         let request = WindowRequest::QueryDesktop;
-        assert_eq!(
-            WindowRequest::from_bytes(&request.to_le_bytes()),
-            Ok(request)
-        );
-        // The one request with no operands: everything past the header is
-        // reserved, so a smuggled window id or payload is refused rather
-        // than ignored.
-        for at in 8..WindowRequest::WIRE_LEN {
-            let mut dirty = request.to_le_bytes();
-            dirty[at] = 1;
-            assert_eq!(WindowRequest::from_bytes(&dirty), Err(Errno::BadMagic));
-        }
+        assert_eq!(WindowRequest::from_bytes(&request.frame()), Ok(request));
+        // The one request with no operands at all: its frame is the header,
+        // so a smuggled window id or payload cannot ride along unread.
+        assert_eq!(request.wire_len(), REQUEST_HEADER_LEN);
     }
 
     #[test]
@@ -2952,44 +3182,44 @@ mod tests {
     #[test]
     fn create_refuses_a_malformed_title() {
         // An over-long claimed length.
-        let mut long = sample_create().to_le_bytes();
+        let mut long = sample_create().frame();
         long[41] = u8::try_from(WINDOW_TITLE_MAX + 1).expect("a small test constant");
         assert_eq!(
             WindowRequest::from_bytes(&long),
             Err(Errno::LengthOutOfRange)
         );
         // Bytes past the claimed length must be zero.
-        let mut dirty = sample_create().to_le_bytes();
+        let mut dirty = sample_create().frame();
         dirty[42 + 10] = b'x';
         assert_eq!(WindowRequest::from_bytes(&dirty), Err(Errno::BadMagic));
         // Invalid UTF-8 inside the claimed length.
-        let mut bad_utf8 = sample_create().to_le_bytes();
+        let mut bad_utf8 = sample_create().frame();
         bad_utf8[42] = 0xFF;
         assert_eq!(WindowRequest::from_bytes(&bad_utf8), Err(Errno::OutOfRange));
         // A control character inside the claimed length.
-        let mut control = sample_create().to_le_bytes();
+        let mut control = sample_create().frame();
         control[42] = 0x1B;
         assert_eq!(WindowRequest::from_bytes(&control), Err(Errno::OutOfRange));
     }
 
     #[test]
     fn present_refuses_an_empty_damage_rectangle_and_a_zero_id() {
-        let mut zero_width = sample_present().to_le_bytes();
+        let mut zero_width = sample_present().frame();
         zero_width[28..32].copy_from_slice(&0u32.to_le_bytes());
         assert_eq!(
             WindowRequest::from_bytes(&zero_width),
             Err(Errno::LengthOutOfRange)
         );
-        let mut zero_height = sample_present().to_le_bytes();
+        let mut zero_height = sample_present().frame();
         zero_height[32..36].copy_from_slice(&0u32.to_le_bytes());
         assert_eq!(
             WindowRequest::from_bytes(&zero_height),
             Err(Errno::LengthOutOfRange)
         );
-        let mut zero_id = sample_present().to_le_bytes();
+        let mut zero_id = sample_present().frame();
         zero_id[8..16].copy_from_slice(&0u64.to_le_bytes());
         assert_eq!(WindowRequest::from_bytes(&zero_id), Err(Errno::OutOfRange));
-        let mut zero_close = WindowRequest::Close { window_id: 9 }.to_le_bytes();
+        let mut zero_close = WindowRequest::Close { window_id: 9 }.frame();
         zero_close[8..16].copy_from_slice(&0u64.to_le_bytes());
         assert_eq!(
             WindowRequest::from_bytes(&zero_close),
