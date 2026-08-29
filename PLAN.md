@@ -7974,18 +7974,18 @@ app's menu shell, M3 the plate becomes a cached damage-reporting surface.
 
 ---
 
-## FIX-DESKTOP-SPEEDUP — desktop redraw speed without hardware acceleration (`plans/FIX-DESKTOP-SPEEDUP.md`)  **[A DONE, B DONE, C DONE, D DONE, E.1+E.2 DONE, H DONE, I DONE, J DONE]**
+## FIX-DESKTOP-SPEEDUP — desktop redraw speed without hardware acceleration (`plans/FIX-DESKTOP-SPEEDUP.md`)  **[A DONE, B DONE, C DONE, D DONE, E DONE, H DONE, I DONE, J DONE]**
 
 **Dependencies:** Stage 7 (compositor, taskbar, controls). Independent of
 `plans/FIX-DISPLAY-ACCELERATION.md` — that is the hardware half; this is
 the software path, which stays the mandatory fallback on every target
 (§17.3) and is what a backdrop-blur frame always takes.
 
-**What is left.** The app-side work of Stages A–E is done: every windowed app
-holds its surface for the window's life and presents the rectangles a round
-reported. What remains is E.3 (one-shot frame pacing in the session), A.4's
-QEMU hover vertical, and the two gated stages — F behind decision 1 below, G
-behind decision 3.
+**What is left.** Stages A–E are done: every windowed app holds its surface for
+the window's life and presents the rectangles a round reported, and the session
+composites at most once per frame period. What remains is A.4's QEMU hover
+vertical and the two gated stages — F behind decision 1 below, G behind
+decision 3.
 
 **Staged (detail in the plan; do not duplicate it here, §13):**
 
@@ -8005,7 +8005,11 @@ behind decision 3.
   Resources page over the port that already carries the seat report — no new
   syscall, sysinfo query or capability, and a receiver that validates every
   count and fails closed. Still open: the QEMU hover vertical that gates on
-  counter bounds.
+  counter bounds, and it is **blocked on decision 5 below**, not on effort —
+  the counters reach only the Switchboard's own page, and a present is not
+  distinguishable from a `Configure` in the audit trail (both answer with the
+  four-byte status word), so a guest sink has nothing to latch. The detail is
+  in the plan.
 - **B — stop blending the invisible. [done]** `WindowRow::opaque_run` +
   `compose_row` copy runs of genuinely opaque source pixels and skip every
   layer below them, so occlusion culling *is* the opaque-run path rather
@@ -8093,13 +8097,25 @@ behind decision 3.
   counters gate in CI. Bit-identity is proven by composing one scene twice —
   reusing frosts and blurring afresh — and by a naive `O(area·radius)` blur
   oracle.
-- **E — one present per frame. [E.1, E.2 done; pacing planned]** A frame is
+- **E — one present per frame, and a frame deadline. [done]** A frame is
   presented **once**, naming every disjoint rectangle it changed:
   `Display::present_rects` and the `DamageList` the `Present` request carries
   replaced the per-rectangle `present_region`, so the frame ring rotates once
   per frame and the driver blits the rectangles instead of the bounding box
-  spanning them. What remains is one-shot tickless frame pacing (§17.1, never
-  a periodic tick).
+  spanning them. And the session now composites at most once per frame period
+  rather than once per wake: `FramePacer`
+  (`userland/gui/session/src/pace.rs`) holds a frame the display cannot yet
+  show, damage accumulates in the compositor, and the hold shortens the loop's
+  park through the same `park_within` fold the clock, the reveal and the frame
+  report use — one shot, never a periodic tick (§17.1), and nothing armed when
+  nothing is held. The period is `tairix_theme::Timeline::FRAME_NS`, the
+  shortest gap between two frames worth drawing that every animation already
+  steps at, so there is no second frame-period constant and an animated
+  surface is never woken for a frame the pacer would refuse. A frame whose
+  period has elapsed — a click, a keystroke, anything slower than the screen —
+  is admitted on the wake that produced it, so the bound costs latency only
+  where a frame would have been thrown away. Real vsync off a driver's flip
+  signal hangs on this seam (`plans/FIX-DISPLAY-ACCELERATION.md` Stage E).
 - **F — CPU-dispatched raster kernels.** `lib/cpuops` `ByPriority`
   candidates on the `lib/pagezero` template, aarch64 NEON first. Gated on
   the P3b axis correction below; may not land before B–C.
@@ -8160,6 +8176,10 @@ behind decision 3.
    `mstatus.FS` handling, on a hard-float target whose userland uses
    `f64`). Noticed by reading (§2.18), unconfirmed; confirm and fix
    independently of any GUI work.
+5. How the frame counters become observable to a guest kernel, so A.4 can
+   assert them: a rate-limited frame-cost log record, a `sysinfo` query, or
+   dropping the counter-bound gate for something the audit trail already
+   carries. Blocks A.4 and nothing else.
 
 ---
 

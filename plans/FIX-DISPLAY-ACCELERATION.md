@@ -371,6 +371,11 @@ Stop re-uploading/retransferring unchanged planes every frame.
 - No tearing: a present that arrives while a flip is in flight returns
   `Busy` (already an ABI error) and the compositor coalesces, rather than
   scribbling a half-composited frame.
+- **The seam already exists.** The session paces frames through
+  `FramePacer` (`plans/FIX-DESKTOP-SPEEDUP.md` E.3), which today holds a
+  frame to a fixed period because no driver reports a refresh. Real vsync
+  replaces that period with the flip signal in the same place; it does not
+  add a second pacing policy (§2.2).
 
 ### E.2 Hardware scaling (`AccelCaps::hw_scaling` + source rect)
 - Add `hw_scaling` to `AccelCaps` and a destination-extent field to

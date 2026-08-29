@@ -118,13 +118,13 @@ mod program {
         window_control_alternate_event, window_control_event, Answer, AppBarBridge, AppBarService,
         ArtworkDesk, ArtworkFileReader, ArtworkSandbox, CliError, Command, ConcludedPick,
         ConfirmPrompt, Delivery, Desktop, DesktopAction, DesktopActivation, DesktopOutcome,
-        DesktopShell, DeviceInputSource, ElevatePrompt, Elevator, FrameContent, FrameReportGate,
-        HangTracker, HoldBack, IconRasteriser, InputSource, KeyboardInputSource, LaunchTable,
-        ListingClient, ListingDesk, LockedDrain, OwnerWindow, PickConclusion, PinboardMenu,
-        PinboardMenuOutcome, Prepared, PresentedOwners, PromptOutcome, ScreenFade, ScreenLock,
-        SeatEventReader, SeatInputChannel, SessionClock, SessionFileReader, SessionPicker,
-        SessionWindows, ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe,
-        WallpaperDesk, WallpaperSource, BUNDLE_RUN_SUFFIX, CONTENT_RELEASED,
+        DesktopShell, DeviceInputSource, ElevatePrompt, Elevator, FrameContent, FramePacer,
+        FrameReportGate, HangTracker, HoldBack, IconRasteriser, InputSource, KeyboardInputSource,
+        LaunchTable, ListingClient, ListingDesk, LockedDrain, OwnerWindow, PickConclusion,
+        PinboardMenu, PinboardMenuOutcome, Prepared, PresentedOwners, PromptOutcome, ScreenFade,
+        ScreenLock, SeatEventReader, SeatInputChannel, SessionClock, SessionFileReader,
+        SessionPicker, SessionWindows, ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome,
+        SwitchboardServe, WallpaperDesk, WallpaperSource, BUNDLE_RUN_SUFFIX, CONTENT_RELEASED,
         CONTENT_RELEASED_MESSAGE, DATETIME_RUN_PATH, ELEVATE_PROMPT_SHOWN,
         ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_CALL_REFUSED,
         SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, USAGE, WALLPAPER_LABEL, WALLPAPER_RUN_PATH,
@@ -1908,6 +1908,13 @@ mod program {
         // crossing the wallpaper redamages the cursor) still reports at a
         // rate a reader can follow rather than at frame rate.
         let mut frames = FrameReportGate::new();
+        // The frame deadline. Wakes arrive as fast as a hand can move a
+        // mouse, which is several times faster than any screen shows a
+        // frame, so damage accumulates in the compositor between deadlines
+        // and is composited once when one arrives. A held frame shortens the
+        // park below to the moment it comes due and nothing else; a desktop
+        // with nothing held arms nothing.
+        let mut pacer = FramePacer::new();
         // The trusted file picker (AW5/CU6): the one shared browser engine
         // over the session's own capability-checked listing call. Every
         // pick starts from a fresh listing under the session's authority;
@@ -1979,7 +1986,8 @@ mod program {
         loop {
             // The park stays indefinite: a cache-report change the runtime's
             // rate limiter is holding back, a frame report this session's own
-            // one is holding back, an animation frame the session owes, a bar
+            // one is holding back, a composited frame the pacer is holding
+            // for its deadline, an animation frame the session owes, a bar
             // gesture the clock owes an answer to, and a window thumbnail a
             // hover picker is waiting on, only ever *tighten* the wait to the
             // moment the work is due, and fold back to indefinite once it is
@@ -1987,8 +1995,9 @@ mod program {
             //
             // A background session has no deadline at all, not even those:
             // it draws nothing, so a held-back report has nothing to report,
-            // nothing it animates is on screen, and a timer would wake a core
-            // for no work.
+            // no held frame can reach a screen it does not own, nothing it
+            // animates is on screen, and a timer would wake a core for no
+            // work.
             let timeout_ns = {
                 let now_ns = tairix_rt::clock_get();
                 // A thumbnail slice is owed *now*: the wait still reports a
@@ -2010,7 +2019,10 @@ mod program {
                                     now_ns,
                                     frames.park_deadline_ns(
                                         now_ns,
-                                        tairix_rt::cachereport::fold_wait_deadline_ns(owed),
+                                        pacer.park_deadline_ns(
+                                            now_ns,
+                                            tairix_rt::cachereport::fold_wait_deadline_ns(owed),
+                                        ),
                                     ),
                                 ),
                             ),
@@ -2052,14 +2064,16 @@ mod program {
                     &mut compositor,
                     now_ns,
                 );
-                if let Err(code) = present(
-                    &mut shell,
-                    &mut compositor,
-                    &mut display,
-                    &mut fade,
-                    &mut windows,
-                ) {
-                    return code;
+                if pacer.admit(now_ns, compositor.has_damage()) {
+                    if let Err(code) = present(
+                        &mut shell,
+                        &mut compositor,
+                        &mut display,
+                        &mut fade,
+                        &mut windows,
+                    ) {
+                        return code;
+                    }
                 }
                 frames.maybe_send(
                     &compositor,
@@ -2824,17 +2838,19 @@ mod program {
                 &mut compositor,
                 now_ns,
             );
-            // One present per wake: the compositor tracks the damage the
-            // pumped events and served presents produced and the ring
-            // copies only that region.
-            if let Err(code) = present(
-                &mut shell,
-                &mut compositor,
-                &mut display,
-                &mut fade,
-                &mut windows,
-            ) {
-                return code;
+            // One present per frame deadline: the compositor accumulates the
+            // damage the pumped events and served presents produced, and the
+            // ring copies only that region once the pacer admits the frame.
+            if pacer.admit(now_ns, compositor.has_damage()) {
+                if let Err(code) = present(
+                    &mut shell,
+                    &mut compositor,
+                    &mut display,
+                    &mut fade,
+                    &mut windows,
+                ) {
+                    return code;
+                }
             }
             // What that frame cost, for the monitor's Resources page. After
             // the present, so the counts describe pixels already on screen,

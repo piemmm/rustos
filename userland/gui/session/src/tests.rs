@@ -53,9 +53,9 @@ use crate::{
     deliver_pending_open, desktop_info, drop_is_noteworthy, ensure_switchboard, load_icon_set,
     load_library, maybe_send_seat_report, open_tray, picker_cells, resolve_library_icons,
     resolve_window_identities, serve_switchboard_request, thumbnail, AppBarService,
-    ArtworkFileReader, ArtworkSandbox, DesktopSession, DesktopShell, FrameContent, FrameReportGate,
-    IconRasteriser, InputSource, LaunchTable, LockOutcome, LockedDrain, OwnerWindow,
-    PresentedOwners, ScreenFade, ScreenLock, SessionFileReader, SessionInputResponse,
+    ArtworkFileReader, ArtworkSandbox, DesktopSession, DesktopShell, FrameContent, FramePacer,
+    FrameReportGate, IconRasteriser, InputSource, LaunchTable, LockOutcome, LockedDrain,
+    OwnerWindow, PresentedOwners, ScreenFade, ScreenLock, SessionFileReader, SessionInputResponse,
     SessionInputRouter, SessionWindows, ShellOutcome, ShellWindowHost, SwitchboardMailbox,
     SwitchboardOutcome, SwitchboardRefusal, SwitchboardServe, TaskBridge, TaskbarPresenter,
     BUNDLE_RUN_SUFFIX, DESKTOP_REVEALED, DESKTOP_REVEALED_MESSAGE, DESKTOP_SESSION_RANGE_END,
@@ -9007,6 +9007,65 @@ fn hovering_an_open_popup_repaints_only_the_popup() {
         comp.frame_stats().blur_px,
         0,
         "the parent's frosted backdrop was thrown away and blurred again"
+    );
+}
+
+/// The whole point of the frame deadline, driven exactly as the serve loop
+/// drives it: a hand on the mouse delivers samples several times faster than
+/// any screen shows a frame, and each one moves the cursor and so damages the
+/// screen. Compositing per sample would spend a whole frame's blending on
+/// pixels the next sample overwrites.
+#[test]
+fn a_flood_of_pointer_samples_inside_one_period_is_one_composite() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let mut pacer = FramePacer::new();
+
+    // The bar coming up is the desktop's first frame, and a first frame is
+    // admitted at once.
+    shell.present(&mut comp);
+    assert!(pacer.admit(0, comp.has_damage()));
+    comp.composite();
+    assert!(!comp.has_damage(), "the opening frame has been drained");
+
+    // Sixteen samples crossing the bar, all inside one frame period.
+    let step = Timeline::FRAME_NS / 16;
+    let mut composites = 0u32;
+    for sample in 1..=16i32 {
+        let at = u64::try_from(sample).expect("a positive sample") * step;
+        shell
+            .pump(
+                &mut MemoryInput::new(&[moved(24 + sample * 8, 1060)]),
+                &mut comp,
+                at,
+            )
+            .expect("the in-memory source never faults");
+        assert!(comp.has_damage(), "sample {sample} changed nothing");
+        if pacer.admit(at, comp.has_damage()) {
+            comp.composite();
+            composites += 1;
+        }
+    }
+    assert_eq!(
+        composites, 0,
+        "a sample inside the period composited a frame of its own"
+    );
+
+    // What the flood accumulated reaches the screen on the deadline the pacer
+    // armed for it, not on some later unrelated wake — and the park folds back
+    // to indefinite once it has.
+    let last_ns = 16 * step;
+    let due = pacer.park_deadline_ns(last_ns, NO_DEADLINE_NS);
+    assert!(due > 0, "a deadline of nothing would be a busy poll");
+    assert!(due < Timeline::FRAME_NS, "one period at most, not {due}ns");
+    assert!(pacer.admit(last_ns + due, comp.has_damage()));
+    assert!(
+        !comp.composite().is_empty(),
+        "the held frame reached the screen having drawn nothing"
+    );
+    assert_eq!(
+        pacer.park_deadline_ns(last_ns + due, NO_DEADLINE_NS),
+        NO_DEADLINE_NS
     );
 }
 

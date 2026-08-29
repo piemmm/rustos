@@ -191,6 +191,7 @@ pub mod launch;
 pub mod library;
 pub mod listing;
 pub mod lock;
+pub mod pace;
 pub mod picker;
 pub mod pinboard;
 pub mod presenter;
@@ -254,6 +255,7 @@ pub use launch::{
 pub use library::{catalogued, load_library, LoadedLibrary};
 pub use listing::{ListingClient, ListingDesk};
 pub use lock::{LockOutcome, LockedDrain, ScreenLock};
+pub use pace::FramePacer;
 pub use picker::{
     ConcludedPick, PickConclusion, PickerSlot, SessionPicker, PICKER_ORIGIN, PICKER_TITLE,
 };

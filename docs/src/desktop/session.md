@@ -1319,6 +1319,54 @@ across the same participants a composite uses, read back from the compositor
 (`Compositor::job_runner`) so the two share one answer about how wide the
 machine is.
 
+## One composite per frame deadline
+
+The loop wakes as fast as its sources produce work, and a hand on a mouse
+produces pointer samples several times faster than any screen shows a frame.
+Compositing once per *wake* therefore spends whole frames' worth of blending on
+pixels the next sample overwrites before a scan-out ever reads them.
+`FramePacer` (`src/pace.rs`) is the frame deadline that stops it: damage
+accumulates in the compositor between deadlines, and `FramePacer::admit` lets
+the loop composite and present once a deadline arrives.
+
+- **Latency is paid only where a frame would have been wasted.** A frame whose
+  period has already elapsed — the first after an idle desktop, a click, a
+  keystroke, any interaction slower than the screen — is admitted on the very
+  wake that produced it. Only a producer outrunning the display is held, and
+  only until the frame it is racing.
+- **One shot, never a tick.** A held frame shortens the loop's park to the
+  moment it comes due, through the same `park_within` fold the clock, the
+  reveal, the lock and the frame report use. Nothing held arms nothing: an
+  idle desktop parks on exactly the deadline it would have had, and the pacer
+  costs it not one wake. `admit` holds only a frame that is *not* yet due, so
+  the deadline it arms is never zero-length and the loop cannot spin between a
+  refusal and its frame.
+- **The period is the one the desktop already animates at.**
+  `tairix_theme::Timeline::FRAME_NS` is the shortest gap between two frames
+  worth drawing, which is the same fact whether a frame carries an animation
+  step or a drag. Sharing it also keeps an animated surface from being woken
+  for a frame the pacer would then refuse.
+- **An undamaged frame is never held, and never starts the period.**
+  Presenting one moves nothing, and it is what re-reads the frame counters as
+  idle for the monitor's Resources page — so holding it would suppress that
+  reading, and starting the period would put the next real frame behind a
+  frame that changed no pixels.
+- **The compositor owns the damage; the pacer owns only the clock.**
+  `Compositor::has_damage` answers whether a composite would recompose a
+  pixel, so the two cannot disagree about whether a frame is owed. A clock
+  that jumped behind the last frame admits rather than freezing the screen for
+  the length of the jump.
+
+The fade out taken on the way to a log-out or a user switch is *not* paced: it
+runs on its own timed park with the seat still held, because it is the last
+thing the session draws and must complete before the screen is handed on
+(see [fading the desktop in and out](#fading-the-desktop-in-and-out)).
+
+Real vsync — a deadline taken from the flip a display driver signals rather
+than from a fixed period — is where `plans/FIX-DISPLAY-ACCELERATION.md` takes
+this next. No display driver reports a refresh today, so a mode field for one
+would be an ABI with no producer.
+
 ## Directory listings and the wallpaper are prepared off the loop
 
 Two things the desktop needs are reads of arbitrary length on arbitrary
@@ -1686,6 +1734,20 @@ key press from the in-memory seat reader; a drained channel yielding `None`;
 a one-shot reader fault propagating then recovering; and the fail-closed
 paths — a partial record refused as `LengthOutOfRange` and a whole-length but
 structurally invalid record surfacing `BadMagic`.
+
+`pace_tests.rs` covers the frame deadline: the first damaged frame admitted at
+once and a whole flood inside one period costing that one frame; a sustained
+flood costing no more than one composite per period while still getting its
+frames; a held frame arming exactly the time left of its period, never a
+zero-length deadline, and folding the park back to indefinite once it is
+admitted; a park already shorter left alone; an idle session and every
+undamaged frame arming nothing and not starting the period; an interaction
+slower than the period never held; an animation's cadence frames never
+deferred; and a clock jumped backwards — or a long background spell —
+admitting rather than stalling. Beside the frame-cost tests, the pacer is
+driven as the serve loop drives it: sixteen pointer samples pumped through the
+real shell and compositor inside one period, each moving the cursor and so
+really damaging the screen, composite *nothing* until the deadline it armed.
 
 `desktop_tests.rs` covers the `Desktop` model: hover feedback and
 click-on-empty-desktop clearing the selection; the shared double-click

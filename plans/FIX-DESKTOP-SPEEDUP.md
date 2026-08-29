@@ -1,10 +1,9 @@
 # FIX-DESKTOP-SPEEDUP — Software-compositor and GUI redraw performance
 
 Status: **A done** (less A.4's QEMU hover vertical), **B done**, **C done**,
-**D done** (D.5 is a User decision, D.6 an unmeasured follow-up), **E.1/E.2
-done** (E.3/E.4 frame pacing planned), **H, I, J done**. **F** is gated on the
-F.0 decision and may not land before B–C. **G** is kernel work gated on a User
-decision (§15.7).
+**D done** (D.5 is a User decision, D.6 an unmeasured follow-up), **E done**,
+**H, I, J done**. **F** is gated on the F.0 decision and may not land before
+B–C. **G** is kernel work gated on a User decision (§15.7).
 
 Binding under `AGENTS.md` (§3, §15.18). This plan closes the standing
 performance defect that the desktop repaints **orders of magnitude more pixels
@@ -50,9 +49,8 @@ that should not be running is forbidden; Stage F may not land before Stages B–
 
 ## What is left
 
-Stages A–E's app-side work is done. What remains is **E.3** (one-shot frame
-pacing in the session), **A.4**'s QEMU hover vertical, and the two gated
-stages: **F** behind the F.0 decision, **G** behind a User decision.
+Stages A–E are done. What remains is **A.4**'s QEMU hover vertical and the two
+gated stages: **F** behind the F.0 decision, **G** behind a User decision.
 
 Independently: **every published number is taken from a `--release`/installer
 image.** A dev-profile timing is never quoted as evidence.
@@ -147,6 +145,32 @@ across a control-rich window and asserts **counter bounds**, not timings. This
 is the regression gate every later stage tightens, and it does not exist yet.
 Unit counter tests (exact counts for a scripted scene, zero for an empty-damage
 frame) are in.
+
+**It is blocked on decision 5 below, and the blocker is not effort.** A guest
+kernel observes userland through the audit trail, and the trail cannot carry
+this assertion:
+
+- **`FrameStats` reaches nothing a guest can read.** A.3 deliberately routes
+  the counters over the port that already carries the seat report, to the
+  Switchboard's own page — no syscall, no sysinfo query, no log record. There
+  is nothing for a guest sink to latch.
+- **A present is not recognisable in the trail.** `CallReplied` carries
+  `endpoint`, `ticket` and `len`, and on `DISPLAY_ENDPOINT` both `Present` and
+  `Configure` — and every error and decode-failure path on either — answer with
+  the same four-byte status word; only `Query`'s twenty-byte mode reply is
+  distinguishable. Counting presents by reply length is precisely the guess
+  that caused `plans/OPEN-DEFECTS.md` D10, and `appbar`'s own contract records
+  the same refusal for the window channel. So "presents per hover" cannot be
+  counted from the trail either.
+- **The pointer script has no hover.** `PointerPen` emits one jump-to-target
+  `Move` per step, and the enrolled-script unit test asserts every script ends
+  on a `Click`; a run of motion samples needs a `PointerPen` hover helper and
+  that test amended. That part *is* only effort.
+
+So the vertical needs an observation channel that does not exist, and inventing
+one is new surface: either a rate-limited frame-cost record on the system log,
+or a `sysinfo` query for the counters. Both are decisions about what the system
+publishes, not test plumbing, so neither is taken here.
 
 ---
 
@@ -730,7 +754,7 @@ crossings used to mark a large translucent window in full and drop its frost.
 
 ---
 
-## Stage E — One present per frame, and a frame deadline
+## Stage E — One present per frame, and a frame deadline  **[done]**
 
 Touches the display wire protocol, so it must be one evolution with
 `plans/FIX-DISPLAY-ACCELERATION.md` Stage B, not a second shape (§2.2, §2.13).
@@ -768,23 +792,55 @@ must keep:
   reintroduce — a frame publishes once, so no cost model trades rectangles
   against round trips.
 
-### E.3 One-shot frame pacing in the session  **[remaining]**
-The session composites once per wake, as fast as input arrives, with no vsync and
-no cap. Arm a **one-shot** timer for the next frame deadline — folded into the
-session's existing `park_within` park, as the clock and every animated surface
-already are, so a session with nothing due arms nothing (§17.1, §2.23) — let
-damage accumulate between deadlines, and composite once per deadline. This bounds
-worst-case work under an input flood and is the seam
-`plans/FIX-DISPLAY-ACCELERATION.md` Stage E hangs real vsync off.
+### E.3 One-shot frame pacing in the session  **[done]**
+The session composites at most once per frame period however many wakes fed it.
+`FramePacer` (`userland/gui/session/src/pace.rs`) is the whole policy: the run
+loop asks `admit(now_ns, Compositor::has_damage())` at each of its two present
+sites, damage accumulates in the compositor between deadlines, and a held frame
+shortens the park through the same `park_within` fold the clock, the reveal, the
+lock and the frame report use — so a desktop with nothing held arms nothing
+(§17.1, §2.23). The invariants later work must keep:
 
-### E.4 Tests + docs
+- **Latency is paid only where a frame would have been wasted.** A frame whose
+  period has elapsed is admitted on the wake that produced it, so a click, a
+  keystroke, and every interaction slower than the display cost nothing. Only a
+  producer outrunning the screen is held.
+- **The period is the one the desktop already animates at.**
+  `tairix_theme::Timeline::FRAME_NS` is the shortest gap between two frames
+  worth drawing, which is the same fact for an animation step and a drag, so
+  there is no second frame-period constant (§2.2) and an animated surface is
+  never woken for a frame the pacer would refuse. A refresh taken from the mode
+  would be an ABI field with no producer; real vsync off the flip signal is
+  `plans/FIX-DISPLAY-ACCELERATION.md` Stage E.
+- **`admit` holds only what is not yet due**, so the deadline it arms is never
+  zero-length and the loop cannot spin between a refusal and its frame.
+- **An undamaged frame is never held and never starts the period.** Presenting
+  one moves nothing and is what re-reads the counters as idle for A.3's report;
+  holding it would suppress that reading and starting the period would put the
+  next real frame behind a frame that changed no pixels.
+- **The compositor owns the damage, the pacer only the clock**
+  (`Compositor::has_damage` is the one answer to whether a composite would
+  recompose a pixel), and a clock that jumped backwards admits rather than
+  freezing the screen for the length of the jump.
+- **The departure fade is deliberately unpaced**: it runs on its own timed park
+  with the seat still held, because it is the last thing the session draws and
+  must complete before the screen is handed on.
+
+### E.4 Tests + docs  **[done]**
 The present-side tests and docs landed with E.2 (one transport call per frame
 however scattered; a rectangle-sized catch-up copy; the existing double-buffer
-tests unchanged). **Remaining, with E.3:** a flood of M motion samples inside one
-deadline produces one composite; an idle session arms no timer and consumes no
-CPU; the deadline never busy-waits (assert on the wait call, not on timing).
+tests unchanged). E.3's are `userland/gui/session/src/pace_tests.rs`: a flood
+inside one period costing one composite and a sustained flood no more than one
+per period; an idle session and every undamaged frame arming nothing; a held
+frame arming exactly the time left and never a zero-length deadline (asserted on
+the park value, not on timing); an animation's cadence frames never deferred;
+and the clock-jump and long-background paths admitting rather than stalling.
+Beside the frame-cost tests, sixteen pointer samples pumped through the real
+shell and compositor inside one period — each moving the cursor, so each really
+does damage the screen — composite nothing until that deadline.
 
-**Acceptance:** CPU at idle unchanged from parked.
+**Acceptance:** CPU at idle unchanged from parked — the pacer folds
+`NO_DEADLINE_NS` through untouched whenever nothing is held.
 
 ---
 
@@ -1060,6 +1116,11 @@ A–E are expected to dominate F entirely.
 4. **The riscv64 float-state finding** (G.0, `plans/OPEN-DEFECTS.md` D37) must be
    confirmed and fixed independently of this plan's schedule; it is a correctness
    question, not a GUI decision.
+5. **How the frame counters become observable to a guest**, so A.4 can assert
+   them: a rate-limited frame-cost record on the system log, a `sysinfo` query,
+   or leaving A.3's Switchboard-only routing as it is and dropping A.4's
+   counter-bound gate for something the audit trail can already carry. Blocks
+   A.4 and nothing else.
 
 ---
 
