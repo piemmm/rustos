@@ -30,7 +30,7 @@ use tairix_controls::collection::IconTile;
 use tairix_controls::combo::{ComboAction, ComboBox};
 use tairix_controls::damage;
 use tairix_controls::scroll::{ScrollModel, ScrollOrientation, ScrollRange};
-use tairix_controls::scrollbar::{ScrollAction, ScrollBar};
+use tairix_controls::scrollbar::ScrollBar;
 use tairix_controls::state::ControlRole;
 use tairix_controls::tabs::{Tab, Tabs, TabsAction, TabsOrientation};
 use tairix_geometry::{Point, Rect, Region};
@@ -835,7 +835,7 @@ impl Chooser {
         }
         if let Some(TabsAction::Selected { index }) = action {
             self.focus = Focus::Categories;
-            changed |= self.select_category(index, bounds, damage);
+            changed |= self.select_category(index, layout, damage);
         }
         changed
     }
@@ -851,7 +851,7 @@ impl Chooser {
         let action = self.rail.on_key(key, bounds, damage);
         let mut changed = damage.rects().len() != before;
         if let Some(TabsAction::Selected { index }) = action {
-            changed |= self.select_category(index, bounds, damage);
+            changed |= self.select_category(index, layout, damage);
         }
         changed
     }
@@ -864,15 +864,18 @@ impl Chooser {
     /// even while a category that does not hold it is being browsed. The
     /// gallery returns to its top, because the rows it was scrolled to belong
     /// to the entry being left.
-    fn select_category(&mut self, index: usize, bounds: Rect, damage: &mut Region) -> bool {
+    fn select_category(&mut self, index: usize, layout: &Layout, damage: &mut Region) -> bool {
         if index >= self.rail.len() || index == self.active {
             return false;
         }
         self.active = index;
-        self.rail.set_selected(index, bounds, damage);
+        self.rail.set_selected(index, layout.categories(), damage);
         let category = category_at(&self.categories, index);
         self.visible = visible_indices(&self.candidates, category);
-        self.scroll_to(0);
+        self.scroll_to(0, layout, damage);
+        // Reported whether or not that moved: a gallery already at its top
+        // still shows a different candidate in every tile.
+        mark_gallery(layout, damage);
         true
     }
 
@@ -935,12 +938,14 @@ impl Chooser {
     /// reporting whether the gallery moved or the bar's own paint changed.
     ///
     /// The bar carries the gallery's scroll offset, and a wheel tick or a
-    /// thumb drag moves it as part of handling the event — the returned
-    /// request is the bar telling its owner where it has gone. Whether
-    /// anything changed is therefore decided by what the offset (and the
-    /// bar's own hover, press and held part) were *before* the event, never
-    /// by comparing the request against a model that has already followed
-    /// it.
+    /// thumb drag moves it as part of handling the event. Whether anything
+    /// changed is therefore decided by what the offset (and the bar's own
+    /// hover, press and held part) were *before* the event, never by
+    /// comparing a request against a model that has already followed it.
+    ///
+    /// The model the bar moved *is* the gallery's offset, so its request has
+    /// nothing left to adopt and means only that the tiles it scrolled need
+    /// reporting — a bar reports its own pixels alone.
     fn scroll_pointer(
         &mut self,
         event: &InputEvent,
@@ -953,7 +958,7 @@ impl Chooser {
             self.scroll.state(),
             self.scroll.held(),
         );
-        let action = match event {
+        let request = match event {
             InputEvent::PointerScrolled { dx, dy } => {
                 self.scroll.wheel(*dx, *dy, layout.scrollbar(), damage)
             }
@@ -965,8 +970,8 @@ impl Chooser {
                 damage,
             ),
         };
-        if let Some(ScrollAction::ScrollTo { offset }) = action {
-            self.scroll_to(offset);
+        if request.is_some() {
+            mark_gallery(layout, damage);
         }
         before
             != (
@@ -978,12 +983,16 @@ impl Chooser {
 
     /// Move the gallery to `offset`, reporting whether it was somewhere else
     /// before.
-    fn scroll_to(&mut self, offset: u64) -> bool {
+    ///
+    /// A move reports the viewport here rather than in each caller, because a
+    /// bar reports its own pixels alone.
+    fn scroll_to(&mut self, offset: u64, layout: &Layout, damage: &mut Region) -> bool {
         let model = self.scroll.model();
         if model.offset() == offset {
             return false;
         }
         self.scroll.set_model(model.scroll_to(offset));
+        mark_gallery(layout, damage);
         true
     }
 
@@ -1109,13 +1118,7 @@ impl Chooser {
             self.scroll.model().offset(),
             self.position_of(self.selected),
         );
-        // Scrolling to reveal the tile moves every tile on screen, so the
-        // whole gallery viewport and its bar are what a reveal redraws.
-        let moved = self.scroll_to(revealed);
-        if moved {
-            damage.add(layout.tiles());
-            damage.add(layout.scrollbar());
-        }
+        let moved = self.scroll_to(revealed, layout, damage);
         ChooserAction::changed(changed || moved)
     }
 
@@ -1208,6 +1211,14 @@ fn field(labels: &[&str], selected: usize) -> ComboBox {
 fn field_from(options: &[BackdropOption], selected: usize) -> ComboBox {
     ComboBox::new(options.iter().map(|option| option.label.clone()).collect())
         .with_selected(selected)
+}
+
+/// Report the gallery's viewport and its bar, which is what a scroll or a
+/// change of the shown set redraws: every tile shifts or becomes a different
+/// candidate, so no smaller rectangle covers it.
+fn mark_gallery(layout: &Layout, damage: &mut Region) {
+    damage.add(layout.tiles());
+    damage.add(layout.scrollbar());
 }
 
 /// Route a pointer event to a button: `(whether its paint changed, whether it

@@ -132,15 +132,26 @@ fn press(chooser: &mut Chooser, style: Style<'_>) -> ChooserAction {
     )
 }
 
-/// Release the primary button where the pointer already is.
-fn release(chooser: &mut Chooser, style: Style<'_>) -> ChooserAction {
+/// Release the primary button where the pointer already is, reporting the
+/// pixels it repainted into `damage` — for the tests that check what a click
+/// asks the window to present, rather than only what it did.
+fn release_reporting(
+    chooser: &mut Chooser,
+    style: Style<'_>,
+    damage: &mut Region,
+) -> ChooserAction {
     chooser.on_pointer(
         &InputEvent::PointerReleased {
             button: PointerButton::Primary,
         },
         style,
-        &mut damage::sink(),
+        damage,
     )
+}
+
+/// Release the primary button where the pointer already is.
+fn release(chooser: &mut Chooser, style: Style<'_>) -> ChooserAction {
+    release_reporting(chooser, style, &mut damage::sink())
 }
 
 /// A whole primary click at `at`: the move that positions the pointer, the
@@ -234,6 +245,33 @@ fn thumb_point(chooser: &Chooser, style: Style<'_>) -> Point {
         .map(|y| Point::new(x, y))
         .find(|at| bar.part_at(gutter, *at, style.scale(), style.theme()) == ScrollPart::Thumb)
         .expect("a scrollable gallery draws a thumb")
+}
+
+/// Assert that every pixel `feed` repaints on a `width` × `height` window lies
+/// inside what it reported, and that it repainted at all. `what` names the
+/// input in the failure.
+///
+/// The window presents only what a round reports, into a surface it retains,
+/// so a pixel changed outside the report is a stale pixel left on screen.
+fn every_changed_pixel_is_reported(
+    chooser: &mut Chooser,
+    style: Style<'_>,
+    width: u32,
+    height: u32,
+    what: &str,
+    feed: impl FnOnce(&mut Chooser, &mut Region),
+) {
+    let (changed, reported) = round_at(chooser, style, width, height, feed);
+    assert!(
+        !changed.is_empty(),
+        "{what} repainted nothing, so it proves nothing"
+    );
+    for point in changed {
+        assert!(
+            reported.contains(point),
+            "{what} changed {point:?}, which it did not report"
+        );
+    }
 }
 
 #[test]
@@ -574,6 +612,120 @@ fn the_wheel_scrolls_the_gallery_and_stops_at_both_ends() {
         );
     }
     assert_eq!(chooser.scroll_offset(), 0);
+}
+
+#[test]
+fn the_wheel_repaints_the_tiles_it_scrolled() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let mut chooser = Chooser::new(catalog(24), &settings_without_a_wallpaper());
+    chooser.relayout(MIN_WIN_WIDTH, MIN_WIN_HEIGHT);
+    let _ = shot_at(&mut chooser, style, MIN_WIN_WIDTH, MIN_WIN_HEIGHT);
+
+    let tiles = chooser.layout(style).tiles();
+    let mut damage = damage::sink();
+    let scrolled = chooser.on_pointer(
+        &InputEvent::PointerScrolled { dx: 0, dy: 3 },
+        style,
+        &mut damage,
+    );
+    assert_eq!(scrolled, ChooserAction::Changed);
+    assert!(chooser.scroll_offset() > 0);
+    assert_eq!(
+        damage.bounds().intersection(&tiles),
+        tiles,
+        "a wheel tick moves every tile, so the whole viewport is reported: \
+         the bar reports only its own pixels"
+    );
+}
+
+#[test]
+fn a_wheel_scroll_leaves_no_stale_tile_behind() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let mut chooser = Chooser::new(catalog(24), &settings_without_a_wallpaper());
+    chooser.relayout(MIN_WIN_WIDTH, MIN_WIN_HEIGHT);
+
+    every_changed_pixel_is_reported(
+        &mut chooser,
+        style,
+        MIN_WIN_WIDTH,
+        MIN_WIN_HEIGHT,
+        "a wheel tick",
+        |chooser, reported| {
+            let _ = chooser.on_pointer(
+                &InputEvent::PointerScrolled { dx: 0, dy: 3 },
+                style,
+                reported,
+            );
+        },
+    );
+    assert!(chooser.scroll_offset() > 0, "the wheel moved the gallery");
+}
+
+#[test]
+fn a_keyboard_reveal_leaves_no_stale_tile_behind() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let mut chooser = Chooser::new(catalog(24), &settings_without_a_wallpaper());
+    chooser.relayout(MIN_WIN_WIDTH, MIN_WIN_HEIGHT);
+    let _ = shot_at(&mut chooser, style, MIN_WIN_WIDTH, MIN_WIN_HEIGHT);
+    assert_eq!(
+        chooser.focus(),
+        Focus::Gallery,
+        "a fresh chooser gives the gallery the keyboard"
+    );
+
+    // End selects the last tile, which is past the bottom of the viewport, so
+    // revealing it scrolls the gallery.
+    every_changed_pixel_is_reported(
+        &mut chooser,
+        style,
+        MIN_WIN_WIDTH,
+        MIN_WIN_HEIGHT,
+        "End in the gallery",
+        |chooser, reported| {
+            let _ = chooser.on_key(
+                Key::Named(NamedKey::End),
+                Modifiers::default(),
+                style,
+                reported,
+            );
+        },
+    );
+    assert!(chooser.scroll_offset() > 0, "End revealed the last tile");
+}
+
+#[test]
+fn dragging_the_thumb_leaves_no_stale_tile_behind() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let mut chooser = Chooser::new(catalog(24), &settings_without_a_wallpaper());
+    chooser.relayout(MIN_WIN_WIDTH, MIN_WIN_HEIGHT);
+    let _ = shot_at(&mut chooser, style, MIN_WIN_WIDTH, MIN_WIN_HEIGHT);
+
+    let gutter = chooser.layout(style).scrollbar();
+    let grab = thumb_point(&chooser, style);
+    let _ = move_to(&mut chooser, grab, style);
+    let _ = press(&mut chooser, style);
+
+    every_changed_pixel_is_reported(
+        &mut chooser,
+        style,
+        MIN_WIN_WIDTH,
+        MIN_WIN_HEIGHT,
+        "a thumb drag",
+        |chooser, reported| {
+            let _ = chooser.on_pointer(
+                &InputEvent::PointerMoved {
+                    to: Point::new(grab.x, gutter.top() + to_i32(gutter.height)),
+                },
+                style,
+                reported,
+            );
+        },
+    );
+    assert!(chooser.scroll_offset() > 0, "the drag moved the gallery");
 }
 
 #[test]
@@ -1107,6 +1259,63 @@ fn clicking_a_category_narrows_the_gallery_to_it() {
 }
 
 #[test]
+fn narrowing_the_gallery_repaints_the_tiles_it_replaced() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let mut chooser = categorised_chooser();
+
+    // Rail entry 3 is `Space`; entry 0 is `All`. Both changes happen with the
+    // gallery already at its top, which is the case a scroll-driven repaint
+    // would miss: nothing moves, and every tile is still a different
+    // candidate afterwards.
+    for entry in [3, 0] {
+        let _ = shot(&mut chooser, style);
+        let tiles = chooser.layout(style).tiles();
+        let at = centre(rail_rect(&chooser, entry, style));
+        let _ = move_to(&mut chooser, at, style);
+        let _ = press(&mut chooser, style);
+
+        let mut damage = damage::sink();
+        assert_eq!(
+            release_reporting(&mut chooser, style, &mut damage),
+            ChooserAction::Changed
+        );
+        assert_eq!(chooser.scroll_offset(), 0);
+        assert_eq!(
+            damage.bounds().intersection(&tiles),
+            tiles,
+            "rail entry {entry} shows a different set of candidates, so the \
+             whole viewport is reported"
+        );
+    }
+}
+
+#[test]
+fn a_category_change_leaves_no_stale_tile_behind() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let mut chooser = categorised_chooser();
+
+    // The release is the event that selects, so it is the one round whose
+    // report has to cover the tiles the narrowing replaced.
+    for entry in [3, 0] {
+        let at = centre(rail_rect(&chooser, entry, style));
+        let _ = move_to(&mut chooser, at, style);
+        let _ = press(&mut chooser, style);
+        every_changed_pixel_is_reported(
+            &mut chooser,
+            style,
+            WIN_WIDTH,
+            WIN_HEIGHT,
+            "a rail click",
+            |chooser, reported| {
+                let _ = release_reporting(chooser, style, reported);
+            },
+        );
+    }
+}
+
+#[test]
 fn the_no_wallpaper_entry_stays_offered_in_every_category() {
     let registry = ThemeRegistry::with_builtins();
     let style = style_for(registry.active());
@@ -1431,10 +1640,31 @@ fn round(
     event: &InputEvent,
     style: Style<'_>,
 ) -> (alloc::vec::Vec<Point>, Region) {
-    let before = shot(chooser, style);
+    round_at(
+        chooser,
+        style,
+        WIN_WIDTH,
+        WIN_HEIGHT,
+        |chooser, reported| {
+            let _ = chooser.on_pointer(event, style, reported);
+        },
+    )
+}
+
+/// [`round`] for any input on a `width` × `height` window: the tests that
+/// scroll need a window its tiles outrun, and the keyboard reaches the same
+/// viewport the pointer does.
+fn round_at(
+    chooser: &mut Chooser,
+    style: Style<'_>,
+    width: u32,
+    height: u32,
+    feed: impl FnOnce(&mut Chooser, &mut Region),
+) -> (alloc::vec::Vec<Point>, Region) {
+    let before = shot_at(chooser, style, width, height);
     let mut reported = damage::sink();
-    let _ = chooser.on_pointer(event, style, &mut reported);
-    let after = shot(chooser, style);
+    feed(chooser, &mut reported);
+    let after = shot_at(chooser, style, width, height);
     (changed_pixels(&before, &after), reported)
 }
 

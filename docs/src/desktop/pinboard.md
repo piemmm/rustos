@@ -281,6 +281,13 @@ caption, and a thumbnail arriving from the sandbox redraws its own square
 rather than the window. A re-theme and a resize still redraw everything,
 because no report could describe either.
 
+Moving the gallery is the one round that reports the whole viewport, and it
+is the chooser's to report rather than the scrollbar's: a bar reports its own
+pixels alone, so a wheel tick, a thumb drag, a track or end-button step, and
+a keyboard reveal each add the tile area and the gutter beside it. Narrowing
+by category reports them too, whether or not the offset moved — a gallery
+already at its top still shows a different candidate in every tile.
+
 ## Headless
 
 The pinboard is part of `userland/gui/*` and is therefore optional in
