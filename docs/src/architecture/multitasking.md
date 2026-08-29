@@ -77,6 +77,48 @@ guarantee enforceable: freeing the stack rotates the slot tag, so a stale
 handle into a reclaimed kernel stack is rejected as a tag mismatch
 (`AGENTS.md` §19.10).
 
+## Per-task floating-point state (riscv64)
+
+`riscv64gc` is a hard-float ABI, so user code may use `f0`–`f31` and `fcsr`
+at any time, and OpenSBI hands S-mode `sstatus.FS = Dirty` — floating point
+already enabled — before the kernel runs. Left alone, that makes the register
+file shared state: each task reads whatever the last one left in it, which is
+cross-task disclosure as much as corruption.
+
+The port therefore owns the `FS` field rather than inheriting it
+(`kernel/arch/riscv64/src/fpstate.rs`), and the policy is lazy so that a task
+which never computes in floating point pays nothing:
+
+- A task starts with FP **off**, owning no state. It cannot read the file, so
+  it cannot see a predecessor's residue, and there is nothing to save or
+  restore on its behalf.
+- Its first floating-point instruction therefore traps. The handler confirms
+  the faulting encoding really does reach the FP unit — an opcode test the port
+  keeps itself, because `lib/disasm` renders instructions as text and so
+  allocates, and linking it here would force a global allocator on every
+  consumer of the arch crate — reading the instruction through the guarded-copy
+  window so an unreadable page fails closed. It then zeroes the file, gives the
+  task `Initial`, and retries. A task that already owns state is refused, so a
+  genuinely illegal encoding cannot retry forever.
+- The hardware promotes `Initial`/`Clean` to `Dirty` on the first write, so a
+  trap saves the file only when the task actually changed it.
+- The kernel itself runs with FP **off**, which turns "the kernel uses no
+  floating point" from an assumption into a fault.
+
+The save area rides the task's own trap anchor at the top of its kernel stack,
+so it needs no allocation and no per-CPU publication: switching stacks switches
+floating-point state. Setting `FS = Off` is permitted to discard the register
+file, which is why an area marked as owned always holds a valid saved copy.
+
+`aarch64` reaches the same guarantee eagerly — its vector saves the whole
+`q0`–`q31` file plus `FPCR`/`FPSR` on every user trap. `x86_64` and `wasm32`
+have no user-visible floating-point state to switch: both are soft-float
+targets in the current build.
+
+The regression witness is `tests/integration/fp_isolation_qemu_riscv64`: two
+U-mode tasks fill the whole register file with different patterns and timeshare
+one hart, and the run passes only if neither observes the other's values.
+
 ## Aliasing discipline across the switch
 
 The shim (dispatcher side) and the trampoline / `Yielder` (task side) both

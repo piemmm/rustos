@@ -1,9 +1,9 @@
 # FIX-DESKTOP-SPEEDUP — Software-compositor and GUI redraw performance
 
 Status: **A done** (less A.4's QEMU hover vertical), **B done**, **C done**,
-**D done** (D.5 is a User decision, D.6 an unmeasured follow-up), **E done**,
-**H, I, J done**. **F** is gated on the F.0 decision and may not land before
-B–C. **G** is kernel work gated on a User decision (§15.7).
+**D done** (D.5 approved, comparison first), **E done**,
+**H, I, J done**. **F** is unblocked on aarch64 (F.0 resolved) and may not land
+before B–C. **G** is kernel work gated on a User decision (§15.7).
 
 Binding under `AGENTS.md` (§3, §15.18). This plan closes the standing
 performance defect that the desktop repaints **orders of magnitude more pixels
@@ -49,8 +49,12 @@ that should not be running is forbidden; Stage F may not land before Stages B–
 
 ## What is left
 
-Stages A–E are done. What remains is **A.4**'s QEMU hover vertical and the two
-gated stages: **F** behind the F.0 decision, **G** behind a User decision.
+Stages A–E are done. What remains is **A.4**'s QEMU hover vertical (its
+observation channel is now decided — a `sysinfo` query), **Stage F**, whose
+aarch64 half is unblocked now F.0 is resolved, **D.5**'s approved
+half-resolution blur (visual comparison first), and **Stage G**, still behind a
+User decision. `plans/OPEN-DEFECTS.md` D37 is a confirmed defect fixed
+independently of this schedule.
 
 Independently: **every published number is taken from a `--release`/installer
 image.** A dev-profile timing is never quoted as evidence.
@@ -146,9 +150,10 @@ is the regression gate every later stage tightens, and it does not exist yet.
 Unit counter tests (exact counts for a scripted scene, zero for an empty-damage
 frame) are in.
 
-**It is blocked on decision 5 below, and the blocker is not effort.** A guest
-kernel observes userland through the audit trail, and the trail cannot carry
-this assertion:
+**Its channel is decided (decision 5): a capability-gated `sysinfo` query for
+`FrameStats`, landing before the vertical.** The reason a query is needed at all
+is that a guest kernel observes userland through the audit trail, and the trail
+cannot carry this assertion:
 
 - **`FrameStats` reaches nothing a guest can read.** A.3 deliberately routes
   the counters over the port that already carries the seat report, to the
@@ -167,10 +172,13 @@ this assertion:
   on a `Click`; a run of motion samples needs a `PointerPen` hover helper and
   that test amended. That part *is* only effort.
 
-So the vertical needs an observation channel that does not exist, and inventing
-one is new surface: either a rate-limited frame-cost record on the system log,
-or a `sysinfo` query for the counters. Both are decisions about what the system
-publishes, not test plumbing, so neither is taken here.
+So the counters must be published somewhere a guest can read, and the query is
+that place: typed, versioned, capability-gated, and held to the same ABI
+discipline as every other `sysinfo` query. It is the interface a system monitor
+wants regardless, so the vertical is not its only consumer — which is what keeps
+it from being surface added for a test. The system log was the alternative and
+is refused: per-frame performance data is not what the hash-chained audit trail
+is for.
 
 ---
 
@@ -510,7 +518,7 @@ unchanged.
 
 ---
 
-## Stage D — Make blur cost what it changes  **[done; D.5 is a User decision, D.6 an unmeasured follow-up]**
+## Stage D — Make blur cost what it changes  **[done; D.5 is a User decision]**
 
 ### D.1 Three damage funnels, because the kind of change decides which frosts survive
 There is no bare `damage.add` in the compositor. A mutation uses the **narrowest
@@ -592,15 +600,33 @@ Blurring at half resolution and upsampling is ~4× less area but **changes the
 output**. It is therefore a rendering decision for the User, with a visual
 comparison, not an optimisation to slip in. Left out of D unless approved.
 
-### D.6 Follow-up — the vertical pass may be streaming cache, unquantified
-The vertical pass walks columns with `stride = width`, so for a wide region every
-sample sits on its own cache line and the whole buffer is re-streamed once per
-column; a cache-blocked column pass (several columns' running sums carried at
-once) would fix it. No committed measurement exists, so there is **no evidence**
-yet. Stage F must add the equal-area wide/narrow case to `cargo xtask bench` and
-measure it before acting — that framework is the right home for a blocked
-variant anyway, and blocking must reproduce the identical bytes like every other
-candidate.
+### D.6 The vertical pass is not width-sensitive — measured, refuted, closed
+The vertical pass walks columns with `stride = width`, which suggested a wide
+region re-streams its whole buffer once per column and would want a cache-blocked
+column pass. **Measurement says it does not.** The equal-area aspect sweep in
+`cargo xtask bench --filter blur` is what settles it: at a constant area,
+flipping the aspect ratio 25:1 changes nothing outside run-to-run noise, and at
+screen size the *widest* shape is consistently the *fastest* of the three.
+
+| shape | px | ns/px |
+|---|---|---|
+| 2400x96 | 230 400 | 11.66 |
+| 640x360 | 230 400 | 11.31 |
+| 96x2400 | 230 400 | 11.62 |
+| 7680x270 | 2 073 600 | 12.82 |
+| 1920x1080 | 2 073 600 | 13.02 |
+| 270x7680 | 2 073 600 | 12.15 |
+
+(`--iters 32 --rounds 9`, `tairix-raster` at `opt-level = 3` per A.1, Core Ultra
+7 165H, ~2 MiB L2 per core and 24 MiB L3. The ordering held over four runs.)
+
+Sixteen pixels share a 64-byte cache line, so the pass traverses the buffer
+`width / 16` times in address order rather than once per column, and a hardware
+prefetcher absorbs that; the ~13% step from the small area to the large one is
+the working set outgrowing L2 and falls on all three shapes alike. A
+cache-blocked column variant is therefore **not** Stage F work — it would be
+complexity for no measurable gain (§2.3). Reopen only against a contrary
+measurement on a target with materially less cache.
 
 ### D.7 A mutation that changes nothing marks nothing
 `mutate_frame` — which all nine frame mutations run through — hands the mutation
@@ -844,27 +870,23 @@ does damage the screen — composite nothing until that deadline.
 
 ---
 
-## Stage F — CPU-dispatched raster kernels (`lib/cpuops`)  **[not started]**
+## Stage F — CPU-dispatched raster kernels (`lib/cpuops`)  **[F.0 done; F.1–F.5 not started]**
 
 This is the honest answer to "can CPU feature detection help?": yes, and it is
 the *last* 20%. It may not land before B–C.
 
-### F.0 Prerequisite — correct the `ByBenchmark` axis (decision, §15.7)
-`plans/FIX-HARDWARE-FEATURES.md` P3b lists `lib/raster` blit/blend/fill under
-`ByBenchmark` and marks it **blocked**, because the bounded microbenchmark
-measures over the kernel-only `CpuCycles` counter and raster is userland. That
-classification is wrong for the same reason the plan already corrected page-zero
-in P3a: a packed-SIMD premultiplied `over` is *unconditionally* faster than four
-scalar `div255`s and is bit-identical when the vector form implements the same
-rounding — so it is a **capability** decision (`ByPriority`), never a performance
-measurement.
+### F.0 The axis is the capability one  **[done]**
+The raster families select on the **capability** axis (`ByPriority`), never by
+measurement, and are therefore not waiting on the userland-measurement design
+that blocks `ByBenchmark`. The reasoning and the per-target state live in
+`plans/FIX-HARDWARE-FEATURES.md` P3c, which is where that plan now records them;
+a packed-SIMD premultiplied `over` is unconditionally faster and bit-identical
+when the vector form rounds identically, so nothing varies by microarchitecture
+for a benchmark to decide.
 
-The capability axis is already wired to userland: `lib/rt`'s startup delivers the
-kernel-folded common `CpuFeatureSet` (`cpu_features()`), and `lib/cpuops` is a
-plain `lib/*` crate with no kernel edge. So `ByPriority` selection in
-`lib/raster` works **today** — no new kernel mechanism, no ABI change, with the
-existing self-verify + fail-closed baseline + pin + audit machinery. **Amend P3b
-in place (§2.13)**, confirming with the User before editing that plan.
+`lib/rt`'s startup already delivers the kernel-folded common `CpuFeatureSet`
+(`cpu_features()`) and `lib/cpuops` is a plain `lib/*` crate with no kernel edge,
+so selection works with no kernel mechanism and no ABI change.
 
 ### F.1 Make the loops vectorisable before reaching for intrinsics
 NEON is baseline on `aarch64-unknown-none`, so a large part of the win needs no
@@ -885,8 +907,7 @@ self-verify against that baseline over a fixed size/alignment/alpha vector,
    every blended pixel through).
 2. `Surface::blit` — src-over-dst row zip.
 3. the WM's opaque/blended run loop (B.1).
-4. `blur_line`/`blur_span` add/sub/mean — after the D.3 reciprocal, and the home
-   for D.6's cache-blocked column variant.
+4. `blur_line`/`blur_span` add/sub/mean — after the D.3 reciprocal.
 5. `encode_run` — a byte-order shuffle (B.3).
 6. `resample` `filter_row`/`write_row` — icon and wallpaper scaling.
 
@@ -899,7 +920,7 @@ All are secret-free and bit-identical, so all are legal on the capability axis
 |---|---|---|
 | `aarch64` | full `q0`–`q31` + `FPCR`/`FPSR` saved on user trap entry/exit; `d8`–`d15` in the kernel switch | **Green today.** NEON candidates are a pure userland change. |
 | `x86_64` | none — no `fxsave`/`xsave` in `kernel/`; the target is a soft-float, SSE-disabled kernel target reused for user PIE bundles | **Blocked on Stage G.** |
-| `riscv64` | none found — no `fsd`/`fld` in `trap.s`/`context.s`, no `mstatus.FS` handling | **Blocked on Stage G**, and see G.0 — a suspected defect. |
+| `riscv64` | scalar `f0`–`f31`/`fcsr` switched per task (D37); no vector state | **Green for scalar float.** Vector candidates still need Stage G. |
 | `wasm32` | `simd128` not in the baseline | Baseline only. |
 
 ### F.5 Tests + docs
@@ -927,16 +948,17 @@ Not started, and not startable without a decision (§15.7).
   Enabling it needs `fxsave`/`xrstor` (or `xsave`) in the x86_64 trap/switch path
   plus `CR0`/`CR4` setup, then a user-space target feature set. Real kernel work,
   and a decision — not something to slip into a GUI change.
-- **riscv64 appears to save no float state at all** — no `fsd`/`fld` in
-  `kernel/arch/riscv64/src/trap.s` or `context.s`, and no `mstatus.FS` handling
-  found — while `riscv64gc` mandates the D extension and `lib/raster`'s gradient
-  path uses `f64`. Either FP traps, or two tasks corrupt each other's float
-  registers. **This is a defect noticed by reading (§2.18) and must be confirmed
-  and then fixed or explicitly ruled out, regardless of any GUI work**; it is
-  tracked as `plans/OPEN-DEFECTS.md` D37 and carries a regression test when the
-  fix lands (§7).
+- **riscv64 scalar float state is now switched per task — D37 is closed.** The
+  port owns `sstatus.FS` instead of inheriting the firmware's `Dirty`, and each
+  task's `f0`–`f31`/`fcsr` ride its own trap anchor: FP starts off so a task
+  that never computes in floating point pays nothing, its first use traps and
+  adopts a zeroed file, and a trap saves only a file the task dirtied. The
+  kernel itself runs FP-off, so its own floating-point use faults rather than
+  clobbering a task's live registers. What remains for Stage F on riscv64 is
+  *vector* state, which the `V` extension would add on top of this and which
+  this scalar work deliberately does not cover.
 
-### G.1 If approved
+### G.1 If approved (vector state)
 Per-port lazy-or-eager FP/vector context save/restore behind the Arch HAL
 context-switch slice (§17.2), the user-space target feature floor raised in
 `tools/xtask`'s per-image floor (`plans/FIX-HARDWARE-FEATURES.md` P0), Arch-HAL
@@ -1094,7 +1116,7 @@ Stated so a later change cannot quietly take a shortcut:
 | C | region hoist, control damage, hover routing, per-app damage, text memo, batch shell work | A | no | no |
 | D | damage funnels, frost cache/reuse, blur reciprocal, family restack, desktop cells | A, B | no | no |
 | E | disjoint region, one present per frame, one-shot pacing | B, C, D | `Present` rect list (with FIX-DISPLAY-ACCELERATION Stage B) | no |
-| F | `lib/cpuops` `ByPriority` raster candidates (aarch64 first) | B, C, (D, E), F.0 decision | no | no |
+| F | `lib/cpuops` `ByPriority` raster candidates (aarch64 first) | B, C, (D, E) | no | no |
 | G | user-space FP/SSE enablement | User decision | target floor | yes |
 | H | publish a region's own pages instead of re-freezing the space | — | no | yes |
 | I | compose a dirty rectangle's rows in bands across a worker pool | A, B, D | no | no |
@@ -1106,21 +1128,22 @@ A–E are expected to dominate F entirely.
 
 ## Decisions required (§15.7)
 
-1. **Amend `plans/FIX-HARDWARE-FEATURES.md` P3b** to move the raster families
-   from the blocked `ByBenchmark` axis to the unblocked `ByPriority` capability
-   axis (F.0). Blocks Stage F.
-2. **Half-resolution blur** (D.5): approve or refuse the output change. Blocks
-   nothing; D landed without it.
+1. ~~Amend `plans/FIX-HARDWARE-FEATURES.md` P3b~~ — **taken.** The raster
+   families now select on the `ByPriority` capability axis, recorded as that
+   plan's P3c. Stage F's aarch64 half is unblocked; F.1 is the next step.
+2. ~~Half-resolution blur (D.5)~~ — **approved**, conditional on the visual
+   comparison being produced and judged first (invariant 2). D landed without
+   it, so nothing is blocked meanwhile.
 3. **Stage G**: whether to do the x86_64 user-space FPU/SSE kernel work at all,
    and when. Blocks Stage F on x86_64 and riscv64 only.
-4. **The riscv64 float-state finding** (G.0, `plans/OPEN-DEFECTS.md` D37) must be
-   confirmed and fixed independently of this plan's schedule; it is a correctness
-   question, not a GUI decision.
-5. **How the frame counters become observable to a guest**, so A.4 can assert
-   them: a rate-limited frame-cost record on the system log, a `sysinfo` query,
-   or leaving A.3's Switchboard-only routing as it is and dropping A.4's
-   counter-bound gate for something the audit trail can already carry. Blocks
-   A.4 and nothing else.
+4. ~~The riscv64 float-state finding~~ (G.0, `plans/OPEN-DEFECTS.md` D37) —
+   **fixed.** Scalar per-task floating-point state landed in the dirty-tracking
+   form G.1 sketches, with its own QEMU witness. Only vector state is left, and
+   that is decision 3's territory.
+5. ~~How the frame counters become observable to a guest~~ — **taken: a
+   capability-gated `sysinfo` query** for `FrameStats`, held to the same ABI
+   discipline as any other query. It is the interface a system monitor wants
+   regardless, so A.4's vertical is not its only consumer. A.4 is unblocked.
 
 ---
 

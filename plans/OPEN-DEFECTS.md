@@ -699,14 +699,14 @@ The open items, in priority order:
   a regression test asserts the per-thread independence directly (it fails
   against a shared counter). Not a load artifact and not retried away: six
   consecutive whole-crate runs are green.
-- **D37 — riscv64 appears to save no floating-point state (OPEN,
-  unconfirmed).** Noticed by reading the port while scoping
-  `plans/FIX-DESKTOP-SPEEDUP.md`: `riscv64gc-unknown-none-elf` is a
-  hard-float ABI and `lib/raster`'s gradient path uses `f64`, yet neither
-  `trap.s` nor `context.s` carries an `fsd`/`fld` and no `mstatus.FS`
-  handling was found. Either FP faults or two tasks corrupt each other's
-  float registers. Confirm first, then fix behind the Arch HAL
-  context-switch slice — the same slice x86_64 needs for user-space SSE.
+- **D37 — riscv64 saved no floating-point state, and FP was enabled — DONE.**
+  Noticed by reading the port, confirmed by measurement (`sstatus.FS = Dirty`
+  from OpenSBI with no `fsd`/`fld` anywhere), and fixed with lazy per-task state
+  carried in the task's own trap anchor: FP starts off so a non-FP task pays
+  nothing, the first use traps and adopts a zeroed file, a trap saves only a
+  dirty one, and the kernel itself runs FP-off so its own floating-point use
+  faults. Witness: `fp_isolation_qemu_riscv64`, two tasks whose patterns must
+  not mix.
 
 - **D38 — the nightly soak killed every filesystem soak, and a memtest
   sweep mid-progress — DONE.** Three wall-clock defects in the soak
@@ -800,9 +800,10 @@ missing in-kernel preemption boundary — a fairness defect, not a wedge — tha
 let a burst of never-waiting device operations withhold a core (fixed), D25
 was a process-wide test clock that made a host suite's exact-instant assertions
 order-dependent (fixed), D36 is a panic-path self-deadlock in the console
-write path (open, needs a lock-abandon primitive), D37 is a suspected
-per-port context-switch gap found by reading, not by a failure (open, confirm
-before fixing), and D43 was a privilege-boundary defect of the same
+write path (open, needs a lock-abandon primitive), D37 was a
+per-port context-switch gap found by reading rather than by a failure — the
+riscv64 floating-point file was never switched while firmware left it enabled
+(fixed), and D43 was a privilege-boundary defect of the same
 found-by-reading kind as D42 — a user-writable register the kernel trusted for
 its own per-CPU identity (fixed), D47 was a dropped argv[0] in the desktop's
 launch path that started a core component in the wrong role, behind a harness
@@ -2702,43 +2703,63 @@ and it confirms that a userland spin is reachable in practice. It is not
 D32 itself: the desktop and the other cores stayed live here, because a
 user-mode spinner is preemptible and only the wedged process is lost.
 
-## D37 — riscv64 appears to save no floating-point state (OPEN, unconfirmed)
+## D37 — riscv64 saved no floating-point state, and FP was enabled — DONE
 
-**Symptom.** None observed yet. This is a defect noticed by reading the
-code (§2.18), recorded rather than left silent; it is not a field report.
+**Cause.** `riscv64gc` is a hard-float ABI and OpenSBI hands S-mode
+`sstatus.FS = Dirty`, so floating point ran freely, while the port carried no
+`fsd`/`fld`/`fcsr` access and no `FS` handling anywhere. The register file was
+therefore shared state: two tasks corrupted — and *read* — each other's
+`f0`–`f31`/`fcsr`. Measured at `kernel_main` over the gdbstub before the fix:
+`sstatus = 0x8000000200006000` (FS = 3) with `misa` carrying both `F` and `D`.
+It was latent only because no FP instruction existed in the riscv64 kernel or
+in any riscv64 user binary; the compiler needed no permission to emit one.
 
-**Suspected cause.** `riscv64gc-unknown-none-elf` mandates the `D`
-extension and is a hard-float ABI, so both kernel and user code may emit
-`f`/`d` instructions — and `lib/raster`'s gradient sampling (`paint.rs`)
-uses `f64`, so a graphical riscv64 task does. But neither
-`kernel/arch/riscv64/src/trap.s` nor `kernel/arch/riscv64/src/context.s`
-contains a single `fsd`/`fld`, and no `mstatus.FS` handling was found
-anywhere in the port. Exactly one of two things must therefore be true,
-and both are defects:
+**Fixed** with per-task state the task's own trap anchor carries
+(`kernel/arch/riscv64/src/fpstate.rs`), lazily, so a task that never computes
+in floating point still pays nothing:
 
-- `mstatus.FS` is `Off`, so the first FP instruction faults with an
-  illegal instruction — a user task drawing a gradient is killed; or
-- `mstatus.FS` is on, and two tasks silently corrupt each other's
-  `f0`–`f31`/`fcsr` across every context switch (§4 isolation).
+- A task starts FP-**off** owning no state, so it cannot read the file and has
+  nothing to save or restore. Its first floating-point instruction traps; the
+  handler confirms the encoding really reaches the FP unit (an opcode test the
+  port keeps itself, reading the instruction through the guarded-copy window so
+  an unreadable page fails closed), zeroes the file, gives the task `Initial`,
+  and retries. A task that already owns state is refused, so a genuinely illegal
+  encoding cannot retry forever.
+- A trap saves the file only on a `Dirty` reading, and the return path reloads
+  it — eagerly, because lazy *restore* is the disclosure pattern this defect
+  already was.
+- The kernel runs FP-off, so a kernel floating-point instruction now faults
+  instead of silently clobbering a task's live registers, and `init_traps`
+  *initialises* `FS` rather than inheriting the firmware's `Dirty`.
+- The area rides the trap anchor at the top of the task's kernel stack, so it
+  needs no allocation and no per-CPU publication: switching stacks switches FP
+  state. `TRAP_ANCHOR_BYTES` is pinned against `trap.s` by the existing layout
+  test, so the assembly and the Rust view cannot drift.
 
-**Confirmation procedure (do this first; do not guess).** Read the
-riscv64 boot path for any `mstatus.FS` write; then a QEMU vertical that
-(a) executes an `f64` computation in one user task and asserts the result
-rather than a fault, and (b) runs two user tasks whose interleaved `f64`
-state must not mix. The outcome names which of the two branches above is
-real.
+**Regression cover.** `tests/integration/fp_isolation_qemu_riscv64` runs two
+U-mode tasks that fill the whole register file with different patterns and
+timeshare one hart; its fixture (`tests/integration/fp_probe_program`) holds the
+load, the trap, and the read-back in **one** asm block, because half the FP
+registers are caller-saved and a Rust call between them would let the compiler
+treat the values as dead. It is the only riscv64 user binary in the tree that
+emits floating-point instructions, which is what makes the defect observable at
+all. Verified to fail before the fix and pass after: neutering just the reload
+reports finisher 12 (`FAIL_FP_CLOBBERED`), and the property is asserted ahead of
+the yield count so a clobbered file names the cause rather than the short count
+it also produces. The `FS` accessors, the two trap decisions, and the first-use
+opcode test are host-tested beside them.
 
-**Fix (once confirmed).** Per-port FP/vector context save/restore behind
-the Arch HAL context-switch slice (§17.2), with `mstatus.FS` dirty
-tracking so a task that never touches FP pays nothing, and an Arch HAL
-conformance case proving two tasks cannot observe each other's FP state.
-The same slice is what x86_64 needs before user space can have SSE
-(`plans/FIX-DESKTOP-SPEEDUP.md` Stage G); do it once for both ports
-rather than twice (§2.21).
+**A dependency deliberately not taken.** The opcode test first lived in
+`lib/disasm`, which already dispatches on those groups. That was wrong: the
+crate renders instructions as text and so pulls in `alloc`, which forced a
+global allocator on every consumer of the arch crate and broke six minimal
+riscv64 test kernels that rightly have none. Ten lines of opcode test in the
+port is the cheaper side of that trade.
 
-**Regression cover (lands with the fix, §7).** The two QEMU cases above
-plus the Arch HAL conformance case, on every port that reports FP
-support — never closed on inspection alone.
+**Not closed by this.** x86_64 and riscv64 user space still have no *vector*
+enablement, which is a separate decision (`plans/FIX-DESKTOP-SPEEDUP.md` Stage
+G): x86_64 remains a soft-float, SSE-disabled target in both privilege levels,
+so it has no FP state to lose.
 
 ## D38 — the nightly soak killed every filesystem soak, and a memtest sweep mid-progress — DONE
 

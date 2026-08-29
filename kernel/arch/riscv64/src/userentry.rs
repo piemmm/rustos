@@ -103,7 +103,11 @@ const USER_ENTRY_SSTATUS_SET: u64 = SSTATUS_SUM;
 /// The mask never reaches the entered task: `sret` restores U-mode's
 /// interrupt state from `SPIE`, and U-mode is preemptible regardless
 /// because the hart runs below S-mode (see the module docs).
-const USER_ENTRY_SSTATUS_CLEAR: u64 = SSTATUS_SPP | SSTATUS_SPIE | SSTATUS_SIE;
+/// `FS` is cleared with them: a task starts owning no floating-point state and
+/// unable to read the register file, so it cannot see what the last task left
+/// there and costs nothing to switch until it first computes in floating point.
+const USER_ENTRY_SSTATUS_CLEAR: u64 =
+    SSTATUS_SPP | SSTATUS_SPIE | SSTATUS_SIE | crate::fpstate::FS_MASK;
 
 // Masking `SIE` is load-bearing, and the two masks must not fight: a bit in
 // both would leave the order of the `csrs`/`csrc` pair deciding the outcome.
@@ -120,7 +124,7 @@ const _: () = assert!(USER_ENTRY_SSTATUS_SET & USER_ENTRY_SSTATUS_CLEAR == 0);
 /// top, and the trap vector must be installed. Diverges via `sret`.
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 unsafe fn enter_user_mode(entry: u64, sp: u64, a0: u64, tls_base: u64) -> ! {
-    use crate::trap::{TRAP_ANCHOR_BYTES, TRAP_ANCHOR_KTP_OFFSET};
+    use crate::trap::{TRAP_ANCHOR_BYTES, TRAP_ANCHOR_FP_OWNED_OFFSET, TRAP_ANCHOR_KTP_OFFSET};
 
     // SAFETY: the-sanctioned assembly carve-out (no Rust spelling for
     // `sret` or the `sstatus` CSR edits). `csrs`/`csrc` set/clear exactly
@@ -145,6 +149,7 @@ unsafe fn enter_user_mode(entry: u64, sp: u64, a0: u64, tls_base: u64) -> ! {
             "csrc sstatus, {clr}",
             "addi sp, sp, -{anchor_bytes}",
             "sd tp, {ktp_off}(sp)",
+            "sd zero, {fp_owned_off}(sp)",
             "csrw sscratch, sp",
             "csrw sepc, {entry}",
             "mv sp, {sp}",
@@ -154,6 +159,7 @@ unsafe fn enter_user_mode(entry: u64, sp: u64, a0: u64, tls_base: u64) -> ! {
             clr = in(reg) USER_ENTRY_SSTATUS_CLEAR,
             anchor_bytes = const TRAP_ANCHOR_BYTES,
             ktp_off = const TRAP_ANCHOR_KTP_OFFSET,
+            fp_owned_off = const TRAP_ANCHOR_FP_OWNED_OFFSET,
             entry = in(reg) entry,
             sp = in(reg) sp,
             tls = in(reg) tls_base,

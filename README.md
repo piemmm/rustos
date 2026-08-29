@@ -139,6 +139,7 @@ no ambient root, signed code) are designed in from the kernel up.
 | Hardware process isolation (§4) | Cross-process memory disclosure / tampering | ✓ MMU | ✓ MMU | ✓ MMU | ✓ host |
 | Per-call capability + input checks, fail-closed (§5.4) | Unauthorised syscall/IPC/driver access | ✓ | ✓ | ✓ | ✓ |
 | Kernel per-CPU identity re-established at every trap entry (§4, §5.4) | A user-writable register steering the kernel onto another CPU's per-CPU state | ✓ GS base | ✓ `TPIDR_EL1` | ✓ `tp` anchor | — |
+| Per-task floating-point register state (§4) | One task reading the float registers another task left behind | — soft-float | ✓ eager | ✓ lazy `FS` | ✓ host |
 | W^X + position-independent executables (§19.2) | Code injection, writable-executable memory | ✓ | ✓ | ✓ | ✓ |
 | Load-time CFI tag vs syscall-hash (§19.2) | Control-flow hijacking across ABI/IPC | ✓ | ✓ | ✓ | ✓ |
 | Software memory tagging (§19.10) | Use-after-free (software floor) | ✓ | ✓ | ✓ | ✓ |

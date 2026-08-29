@@ -448,7 +448,11 @@ cargo xtask bench --iters 64 --rounds 9 # a longer, steadier budget
 It reports **ns per pixel** and **ns per frame** for `Surface::blit` (opaque
 and translucent sources), `fill_round_rect`, `box_blur` and `frost_region`
 over several radii, `resample`, the scan-out channel encode, and the window
-manager's whole-frame composite. The per-pixel figure divides by the pixels
+manager's whole-frame composite. The blur family also sweeps *aspect ratio at
+constant area*, at two areas either side of L2, because the vertical pass
+strides by `width` and that is what separates its memory traffic from its
+per-pixel arithmetic — it measures flat, so the pass is not width-sensitive
+(`plans/FIX-DESKTOP-SPEEDUP.md` D.6). The per-pixel figure divides by the pixels
 the case genuinely touches — for `resample`, the *destination* pixels; for a
 composited frame, the damage actually recomposited, which is why a 64×24
 change behind a blurred window reports the several hundred thousand pixels

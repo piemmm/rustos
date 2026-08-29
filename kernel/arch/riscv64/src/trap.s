@@ -96,10 +96,12 @@
 .equ OFF_UTP,     248
 
 # Byte width of the per-task trap anchor `sscratch` points at while the task
-# runs in U-mode, and the offset within it of the hart's kernel `tp`. Sixteen
-# bytes (one word plus ABI alignment padding) keeps the frame built below it
-# 16-byte aligned.
-.equ TRAP_ANCHOR_BYTES, 16
+# runs in U-mode, and the offset within it of the hart's kernel `tp`. The
+# anchor holds that word followed by the task's floating-point register file,
+# so the file switches with the stack; `trap_layout_tests.rs` pins this width
+# against `fpstate::TrapAnchor`, whose 16-byte alignment keeps the frame built
+# below it aligned.
+.equ TRAP_ANCHOR_BYTES, 288
 .equ OFF_ANCHOR_KTP, 0
 
 # Offset of the frame's `tp` slot relative to the *pre-adjustment* `sp` (the

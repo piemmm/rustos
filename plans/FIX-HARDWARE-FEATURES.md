@@ -45,12 +45,13 @@ Remaining: that aarch64 hardware-crypto backend; the genuine **`ByBenchmark`**
 demonstration (below); and P4 (matrix + burn-down). Design fixed below.
 
 **Open design question for the `ByBenchmark` axis (must be resolved before its
-consumers land, §15.7).** The families where a benchmark genuinely decides
-(the raid6/xor case: best SIMD width varies by microarch) are the framebuffer
-blit/blend/fill (`lib/raster`) and the RFC-1071 IP checksum (`lib/net`) — both
-**userland**. But the bounded microbenchmark measures over the Arch HAL
-`CpuCycles` counter, which is **kernel-only**: there is no mechanism today for
-a user-space process to obtain a per-core-type "fastest routine" decision.
+consumers land, §15.7).** The family where a benchmark genuinely decides (the
+raid6/xor case: best SIMD width varies by microarch) is the RFC-1071 IP
+checksum (`lib/net`) — **userland**, while the bounded microbenchmark measures
+over the Arch HAL `CpuCycles` counter, which is **kernel-only**: there is no
+mechanism today for a user-space process to obtain a per-core-type "fastest
+routine" decision. The framebuffer blit/blend/fill families select on the
+capability axis instead (P3c), so they are not waiting on this.
 Resolving this needs a deliberate design (e.g. `lib/rt` benchmarks its own
 candidates at startup keyed by the delivered feature set over a cycle-counter
 access path, or the kernel measures per core type and delivers the winners),
@@ -104,7 +105,7 @@ so the system never traps on a missing instruction and never panics.
   (`-C target-cpu`/`target-feature`), which this plan **layers under**, not
   replaces.
 - `lib/crypto`, `lib/net` (RFC-1071 checksum), the ARXFS record-checksum
-  path, `lib/raster` (blit/blend/fill) — the first consumers.
+  path, `lib/raster` (blit/blend/fill, P3c) — the first consumers.
 
 ## The defect (why the status quo is unacceptable)
 
@@ -674,10 +675,6 @@ type.
 **Deliverables — `ByBenchmark` consumers (secret-free, bit-identical only —
 invariant 8; all pending the userland-measurement design above):**
 
-- Framebuffer blit/blend/fill: `lib/raster/src/surface.rs`
-  (`fill_rect`, `fill_round_rect`, `blit`) — route the inner fill/blend loop
-  through an ops-table fn pointer; NEON/AVX candidates gated on the feature
-  bit, portable baseline unchanged. **Userland** — needs the measurement path.
 - RFC-1071 IP checksum: `lib/net/src/checksum.rs`
   (`internet_checksum` / `Checksum::push`/`finish`) — a SIMD folding
   candidate vs the portable ones'-complement baseline. **Userland** — needs
@@ -709,9 +706,53 @@ reproducible-build validation).
   test hook that forces a reduced `CpuFeatureSet`); heterogeneous-core keying
   exercised where the emulator models it (e.g. QEMU `-cpu` big.LITTLE combos).
 
-**Acceptance:** the four families route through `ByBenchmark`; measurement is
-bounded and never busy-waits; pin makes selection deterministic; whole-project
-gate green.
+**Acceptance:** the RFC-1071 IP checksum — the one family left where a
+benchmark genuinely decides — routes through `ByBenchmark` over an agreed
+userland-measurement path; measurement is bounded and never busy-waits; the pin
+makes selection deterministic; whole-project gate green.
+
+### P3c — Capability-gated raster kernels (`ByPriority`) — the Stage F home
+
+**Scope in one line:** the `lib/raster` per-pixel families select their
+candidate on the **capability** axis, not by measurement, so they are not
+blocked on P3b.
+
+**Why `ByPriority`, not `ByBenchmark`.** A packed-SIMD premultiplied `over` is
+unconditionally faster than four scalar `div255`s, and it is bit-identical when
+the vector form implements the same rounding. Nothing about that varies by
+microarchitecture, so there is no decision for a benchmark to make — it is a
+pure capability question, exactly as P3a argued for page-zero. Classifying
+these families as `ByBenchmark` made them wait on a userland-measurement
+mechanism they never needed.
+
+**Why it works today, with no new mechanism.** `lib/rt`'s startup already
+delivers the kernel-folded common `CpuFeatureSet` to user space
+(`cpu_features()`), and `lib/cpuops` is a plain `lib/*` crate with no kernel
+edge, so `ByPriority` selection inside `lib/raster` needs no kernel work, no
+ABI change, and no new capability — the existing self-verify, fail-closed
+baseline, pin and audit machinery applies unchanged.
+
+**Deliverables.** The families, their order, and their per-target availability
+are `plans/FIX-DESKTOP-SPEEDUP.md` Stage F (F.1–F.5), which owns the
+implementation: `blend_span` first, then `Surface::blit`, the compositor's
+opaque/blended run loop, the blur add/sub/mean spans, `encode_run`, and
+`resample`'s row filter. Each follows the `lib/pagezero` shape P3a
+established — a `build.rs`-emitted per-ISA cfg (never `cfg(target_arch)` in
+source, so `cargo xtask cfg-check` stays green), a portable baseline registered
+last and always feature-legal, the mandatory self-verify against that baseline
+over a fixed size/alignment/alpha vector, host fuzzing, and the pin for
+determinism.
+
+**Per-target state.** aarch64 is unblocked today (NEON is baseline on
+`aarch64-unknown-none`). x86_64 and riscv64 user space have no vector or float
+state saved across a context switch, so their candidates wait on that
+enablement — `plans/FIX-DESKTOP-SPEEDUP.md` Stage G and
+`plans/OPEN-DEFECTS.md` D37. wasm32 stays baseline-only (`simd128` is not in
+the target's baseline).
+
+**Acceptance:** the raster families route through `ByPriority`; every candidate
+is bit-identical to the baseline; the baseline is chosen when the feature bits
+are masked off; the improvement is quoted from `cargo xtask bench`.
 
 ### P4 — Fuzzing, docs, and burn-down
 

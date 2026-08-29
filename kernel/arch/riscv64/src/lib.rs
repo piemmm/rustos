@@ -140,6 +140,7 @@ pub mod cpuname;
 pub mod entropy;
 pub mod fault;
 pub mod fdt;
+pub mod fpstate;
 pub mod irqmask;
 pub mod kernel_arch;
 /// riscv64 implementation of the Arch HAL memory-tagging surface

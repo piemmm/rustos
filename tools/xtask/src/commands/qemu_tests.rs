@@ -3661,6 +3661,33 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
+    // The `plans/OPEN-DEFECTS.md` D37 regression witness: two U-mode tasks fill
+    // the whole floating-point register file with different patterns and
+    // timeshare one hart, and neither may see the other's values. The fixture
+    // is the only riscv64 user binary in the tree that emits floating-point
+    // instructions, which is what makes the defect observable: before the
+    // per-task state landed, firmware left `sstatus.FS = Dirty` and the port
+    // saved none of `f0`-`f31`/`fcsr`, so the two patterns mixed. A mismatch,
+    // a short yield count, or a stall flips `qemu_exit::exit_failure` or times
+    // out (fail-loud). Single CPU and the same 60-second budget as its
+    // timeshare sibling above.
+    QemuTest {
+        package: "tairix-test-fp-isolation-qemu-riscv64",
+        binary: "tairix-test-fp-isolation-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[],
+    },
     // PI Stage RV-X3 (`plans/PI.md` §X tail): the riscv64 runtime-`spawn`
     // concurrent-producer vertical — the cross-port sibling of
     // `spawn_session_qemu_aarch64` / `_x86_64`, proving a parent task's

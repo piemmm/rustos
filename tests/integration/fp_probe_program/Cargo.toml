@@ -1,0 +1,24 @@
+[package]
+name = "tairix-test-fp-probe"
+description = "riscv64 fixture: a separately-linked pure-Rust U-mode program that fills every floating-point register with a per-task pattern, traps into the kernel, and checks each register came back, so the fp_isolation vertical can prove two tasks never share the physical register file. Built PIE for the freestanding riscv64 target and converted to an rxe blob by the consuming test's build script."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tairix-test-fp-probe"
+path = "src/main.rs"
+
+# A pure-Rust TAIRiX program, so it links the pure-Rust userland runtime
+# `tairix-rt` — never the C ABI (`crt0` + `abi-sys`), which exists solely for
+# non-Rust programs. Only on a bare-metal target; on the host it is an inert
+# stub so `cargo build --workspace` / clippy still cover the crate.
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }

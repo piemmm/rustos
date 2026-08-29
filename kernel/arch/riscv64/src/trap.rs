@@ -154,21 +154,36 @@ pub const TRAP_FRAME_BYTES: u64 = 256;
 /// Byte width of the per-task **trap anchor** `sscratch` points at while a
 /// task runs in U-mode — the value of `trap.s`'s `TRAP_ANCHOR_BYTES` `.equ`.
 ///
-/// The anchor is a kernel-only region at the top of a task's kernel-stack
-/// window whose first word ([`TRAP_ANCHOR_KTP_OFFSET`]) holds the kernel `tp`
-/// of the hart the task is running on; the trap frame is built immediately
-/// below it, so the width is the ABI's 16-byte stack alignment rather than
-/// the single word it stores.
+/// The anchor is the kernel-only region at the top of a task's kernel-stack
+/// window: the kernel `tp` of the hart the task is running on
+/// ([`TRAP_ANCHOR_KTP_OFFSET`]) followed by the task's floating-point state
+/// ([`crate::fpstate::TrapAnchor`]). The trap frame is built immediately
+/// below it. Keeping the register file here rather than in a separately
+/// allocated per-task block is what lets it switch with the stack: no
+/// allocation, and no per-CPU publication for the trap path to consult.
 ///
 /// Both arming sites — [`crate::userentry`]'s entry sequence and the
 /// vector's U-return path — publish the running hart's kernel `tp` into the
 /// anchor before arming `sscratch`, which is what stops a U-mode-written `tp`
 /// from ever reaching the kernel's per-CPU resolution.
-pub const TRAP_ANCHOR_BYTES: u64 = 16;
+pub const TRAP_ANCHOR_BYTES: u64 = size_of::<crate::fpstate::TrapAnchor>() as u64;
 
 /// Offset within the trap anchor of the hart's kernel `tp` — the value of
 /// `trap.s`'s `OFF_ANCHOR_KTP` `.equ`.
-pub const TRAP_ANCHOR_KTP_OFFSET: u64 = 0;
+pub const TRAP_ANCHOR_KTP_OFFSET: u64 =
+    core::mem::offset_of!(crate::fpstate::TrapAnchor, kernel_tp) as u64;
+
+/// Offset within the trap anchor of the word recording whether the task owns
+/// floating-point state.
+///
+/// The anchor is carved out of raw kernel stack, so the entry sequence must
+/// zero this before the first trap can read it — an uninitialised non-zero
+/// value would have the return path reload the register file from garbage.
+pub const TRAP_ANCHOR_FP_OWNED_OFFSET: u64 =
+    TRAP_ANCHOR_FP_OFFSET + crate::fpstate::FP_OWNED_OFFSET;
+
+/// Offset within the trap anchor of the floating-point area.
+const TRAP_ANCHOR_FP_OFFSET: u64 = core::mem::offset_of!(crate::fpstate::TrapAnchor, fp) as u64;
 
 /// The riscv64 ABI stack alignment every frame and anchor bound respects.
 const STACK_ALIGN: u64 = 16;
@@ -188,6 +203,12 @@ pub const SCAUSE_INTERRUPT_BIT: u64 = 1 << 63;
 /// `scause` cause code for a Supervisor External Interrupt (the cause
 /// the PLIC raises). Privileged-spec table 4.2.
 pub const SCAUSE_SUPERVISOR_EXTERNAL: u64 = 9;
+
+/// `scause` cause code for an illegal instruction. Privileged-spec table 4.2.
+///
+/// Also raised for a floating-point access while `sstatus.FS` is `Off`, which
+/// is how a task's first use of the unit is detected.
+pub const SCAUSE_ILLEGAL_INSTRUCTION: u64 = 2;
 
 /// `sie.SEIE` — supervisor external interrupt enable (bit 9).
 pub const SIE_SEIE: u64 = 1 << 9;
@@ -341,6 +362,12 @@ pub unsafe fn init_traps() {
     unsafe {
         install_trap_vector();
     }
+    // Firmware hands S-mode `FS = Dirty`, so the kernel would otherwise
+    // inherit a floating-point unit it has no per-task place to save. Turning
+    // it off makes "the kernel uses no floating point" a fault rather than an
+    // assumption, and each task's own `FS` comes from its trap frame.
+    // SAFETY: changes only S-mode floating-point enablement on this hart.
+    unsafe { crate::fpstate::set_live_fs(crate::fpstate::Fs::Off) };
     // SAFETY: setting `sie.SEIE` and `sstatus.SIE` is the documented
     // S-mode interrupt-enable sequence; neither has memory side effects
     // beyond the named CSRs, and the caller asserts the dispatcher is
@@ -510,6 +537,73 @@ unsafe fn user_register_frame(
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 #[no_mangle]
 unsafe extern "C" fn tairix_riscv64_trap_handler(frame: *mut TrapFrame) {
+    // Bracket the whole body so every one of its return paths — including a
+    // cooperative park that runs another task in between — hands the task back
+    // its own floating-point registers. A body that diverges (the task is
+    // killed) skips the return half, which is correct: there is no task left
+    // to hand anything to.
+    // SAFETY: `frame` is the live saved-register frame the vector passed; the
+    // anchor sits immediately above it, which is where the vector swapped
+    // `sscratch` from.
+    let from_user = trap_came_from_user(unsafe { (*frame).sstatus });
+    let anchor = unsafe { anchor_of(frame) };
+    if from_user {
+        // SAFETY: the interrupted task's live anchor and its frame's saved
+        // `sstatus`, with the trap confirmed to have come from U-mode.
+        unsafe { crate::fpstate::on_trap_from_user(anchor, &mut (*frame).sstatus) };
+    }
+    // SAFETY: as the outer contract: `frame` is valid for this trap.
+    unsafe { trap_body(frame, from_user, anchor) };
+    if from_user {
+        // SAFETY: as above.
+        unsafe { crate::fpstate::on_return_to_user(anchor, &mut (*frame).sstatus) };
+    }
+}
+
+/// The task's trap anchor, which the vector placed immediately above the frame.
+///
+/// # Safety
+///
+/// `frame` must be a live U-mode trap frame the vector built.
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+unsafe fn anchor_of(frame: *mut TrapFrame) -> *mut crate::fpstate::TrapAnchor {
+    frame.wrapping_add(1).cast()
+}
+
+/// Whether the illegal instruction at `pc` reaches the floating-point unit.
+///
+/// Read through the guarded copy window, so an unreadable page answers `false`
+/// and leaves the fault fatal. The 32-bit read is tried first and a 16-bit
+/// parcel second, because a compressed instruction can sit in the last two
+/// bytes of a mapped page.
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+fn illegal_instruction_needs_fp(pc: u64) -> bool {
+    let Some(copy) = tairix_arch_api::uaccess::guarded_copy() else {
+        return false;
+    };
+    let mut parcel = [0u8; 4];
+    for len in [4usize, 2] {
+        // SAFETY: `parcel` is valid for four writable bytes and cannot overlap
+        // a user address; the window absorbs a fault reading `pc` and reports
+        // it as a non-zero return, whose destination bytes we discard.
+        if unsafe { copy(parcel.as_mut_ptr(), pc as *const u8, len) } == 0 {
+            return crate::fpstate::touches_fp_state(&parcel[..len]);
+        }
+    }
+    false
+}
+
+/// The trap handler proper.
+///
+/// # Safety
+///
+/// As [`tairix_riscv64_trap_handler`]; `anchor` must be that frame's anchor.
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+unsafe fn trap_body(
+    frame: *mut TrapFrame,
+    from_user_entry: bool,
+    anchor: *mut crate::fpstate::TrapAnchor,
+) {
     let scause: u64;
     // SAFETY: reading `scause` has no side effects.
     unsafe {
@@ -646,6 +740,23 @@ unsafe extern "C" fn tairix_riscv64_trap_handler(frame: *mut TrapFrame) {
                 unsafe {
                     (*frame).sepc = fixup;
                 }
+                return;
+            }
+        }
+
+        // A task's first floating-point instruction: it runs with FP off and
+        // owning no register state, so the access traps here. Give it a zeroed
+        // file and return without advancing the saved `sepc`, so the epilogue
+        // retries the instruction. `adopt_on_first_use` refuses a task that
+        // already owns state, which is what stops a genuinely illegal FP
+        // encoding from retrying forever.
+        if scause == SCAUSE_ILLEGAL_INSTRUCTION && from_user_entry {
+            // SAFETY: reading the frame's saved `sepc` is a plain field load.
+            let pc = unsafe { (*frame).sepc };
+            // SAFETY: `anchor` is this frame's anchor, per the contract.
+            if illegal_instruction_needs_fp(pc)
+                && unsafe { crate::fpstate::adopt_on_first_use(anchor) }
+            {
                 return;
             }
         }

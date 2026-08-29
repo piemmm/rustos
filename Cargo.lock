@@ -3168,6 +3168,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-fp-isolation-qemu-riscv64"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-arch-api",
+ "tairix-arch-riscv64",
+ "tairix-itest-finisher",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel-core",
+ "tairix-kernel-mem",
+ "tairix-kernel-sched-eevdf",
+ "tairix-kernel-syscall",
+ "tairix-log",
+]
+
+[[package]]
+name = "tairix-test-fp-probe"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-rt",
+]
+
+[[package]]
 name = "tairix-test-framebuffer-display-qemu-aarch64"
 version = "0.0.0"
 dependencies = [

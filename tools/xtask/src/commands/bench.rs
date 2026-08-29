@@ -509,6 +509,10 @@ fn warm_font_client() {
 /// How many pieces the "split" rows below divide a pass into.
 const BAND_WIDTH: usize = 8;
 
+/// The blur radius a desktop backdrop is actually drawn at, so the aspect-ratio
+/// rows and the composited-frame rows describe the same blur.
+const BACKDROP_RADIUS: u16 = 12;
+
 /// A runner that reports a width it does not have and runs every piece on the
 /// calling thread.
 ///
@@ -580,16 +584,20 @@ fn blur(harness: &BenchHarness<'_>) -> Result<Vec<Measurement>, String> {
         surface.get(0, 0)
     }
 
+    fn box_warm_of(width: u32, height: u32) -> BoxWarm {
+        let count = count_of(width).saturating_mul(count_of(height));
+        BoxWarm {
+            region: RefCell::new(vec![Color::rgb(70, 90, 140).premultiply(); count]),
+            aux: RefCell::new(vec![Pixel::TRANSPARENT; count]),
+            width: count_of(width),
+            height: count_of(height),
+        }
+    }
+
     // A window-backdrop-sized rectangle: what a frosted panel actually costs.
     let (width, height) = (640u32, 360u32);
     let pixels = u64::from(width) * u64::from(height);
-    let count = count_of(width).saturating_mul(count_of(height));
-    let box_warm = BoxWarm {
-        region: RefCell::new(vec![Color::rgb(70, 90, 140).premultiply(); count]),
-        aux: RefCell::new(vec![Pixel::TRANSPARENT; count]),
-        width: count_of(width),
-        height: count_of(height),
-    };
+    let box_warm = box_warm_of(width, height);
     let frost_warm = FrostWarm {
         surface: RefCell::new(surface(width, height, Color::rgb(70, 90, 140))?),
         scratch: RefCell::new(BlurScratch::new()),
@@ -620,6 +628,29 @@ fn blur(harness: &BenchHarness<'_>) -> Result<Vec<Measurement>, String> {
             format!("frost_region {width}x{height} r{radius} split x{BAND_WIDTH}"),
             pixels,
             harness.median_cycles((radius, BANDED_RUNNER), run_frost, &frost_warm),
+        ));
+    }
+    // The vertical pass walks columns with `stride = width`, so its memory
+    // traffic grows with the region's width while its per-pixel arithmetic does
+    // not. Shapes of *identical* area separate the two: a slower wide row is the
+    // striding, not the work. Two areas, because the effect can only appear once
+    // the buffer outgrows cache — the small triple's middle shape is the
+    // 640x360 row above, and the large triple is a screen-sized backdrop.
+    for (wide, tall) in [
+        (2400u32, 96u32),
+        (96, 2400),
+        (7680, 270),
+        (1920, 1080),
+        (270, 7680),
+    ] {
+        rows.push(Measurement::new(
+            format!("box_blur {wide}x{tall} r{BACKDROP_RADIUS}"),
+            u64::from(wide) * u64::from(tall),
+            harness.median_cycles(
+                usize::from(BACKDROP_RADIUS),
+                run_box,
+                &box_warm_of(wide, tall),
+            ),
         ));
     }
     Ok(rows)
@@ -891,7 +922,7 @@ fn scene(stack: Stack, runner: &'static dyn JobRunner) -> Result<CompositeWarm, 
             }
             Stack::BackdropBlur => {
                 compositor.set_opacity(id, 200);
-                compositor.set_backdrop_blur(id, 12);
+                compositor.set_backdrop_blur(id, BACKDROP_RADIUS);
             }
         }
         top = Some((id, origin, width, height));
