@@ -281,7 +281,7 @@ fn exercise(image: &[u8]) {
         // device contents.
         let _ = fs.health(&AllCaps, &NullSink);
         // A volume that mounts must mount again from its own bytes.
-        let bytes = fs.into_block().store;
+        let bytes = fs.into_block().expect("the volume closes").store;
         let _ = ARXFS::open(MemBlock { store: bytes }, &FUZZ_KEY);
     }
     // Drive the Stage-9 rescue decode path on the raw image, which does not
@@ -352,7 +352,7 @@ fn formatted_image() -> Vec<u8> {
     // scrub-progress record (Stage 8): the sweep then hammers that on-disk
     // decode path too. Best-effort on the tiny fuzz device.
     let _ = fs.scrub(&AllCaps, &NullSink, ScrubBudget::Inodes(1));
-    fs.into_block().store
+    fs.into_block().expect("the volume closes").store
 }
 
 #[test]

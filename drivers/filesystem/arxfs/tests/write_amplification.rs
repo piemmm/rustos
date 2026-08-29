@@ -266,12 +266,37 @@ fn payload(len: usize) -> Vec<u8> {
     bytes
 }
 
+/// How the volume under measurement publishes what it writes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Publish {
+    /// No monotonic clock, so there is no window to age a transaction against
+    /// and every operation publishes its own.
+    PerOperation,
+    /// A frozen clock, so the window never elapses and the operations of a
+    /// measured window all join one transaction.
+    Batched,
+}
+
+/// A monotonic clock that never advances, so a measured burst is never split
+/// by its window and the measurement prices the batch itself.
+fn frozen_monotonic() -> u64 {
+    0
+}
+
 /// A freshly formatted `device_bytes` volume of `block_size`-byte blocks, and
 /// the ledger recording what its driver issues.
-fn volume(block_size: u32, device_bytes: u64) -> (ARXFS<LedgerBlock>, Rc<RefCell<Ledger>>) {
+fn volume(
+    block_size: u32,
+    device_bytes: u64,
+    publish: Publish,
+) -> (ARXFS<LedgerBlock>, Rc<RefCell<Ledger>>) {
     let ledger = Rc::new(RefCell::new(Ledger::default()));
     let device = LedgerBlock::new(block_size, device_bytes / u64::from(block_size), &ledger);
     let fs = ARXFS::format(device, 64, &TEST_KEY, &mut TestEntropy(0x2f)).expect("format");
+    let fs = match publish {
+        Publish::PerOperation => fs,
+        Publish::Batched => fs.with_monotonic(frozen_monotonic),
+    };
     (fs, ledger)
 }
 
@@ -349,11 +374,28 @@ impl Workload {
 
     /// Run this workload on a fresh volume of that geometry, and total what the
     /// measured window cost the device.
-    fn measure(self, block_size: u32, device_bytes: u64) -> (Cost, BTreeMap<u64, usize>) {
-        let (mut fs, ledger) = volume(block_size, device_bytes);
+    ///
+    /// A batched volume is brought to a published state before the window is
+    /// armed and handed on at its end, so the window prices the workload's own
+    /// writes and the one commit that publishes them — never the fixture's.
+    fn measure(
+        self,
+        block_size: u32,
+        device_bytes: u64,
+        publish: Publish,
+    ) -> (Cost, BTreeMap<u64, usize>) {
+        let (mut fs, ledger) = volume(block_size, device_bytes, publish);
         self.prepare(&mut fs);
+        if publish == Publish::Batched {
+            fs.flush()
+                .expect("the fixture starts from a published volume");
+        }
         ledger.borrow_mut().arm();
         self.run(&mut fs);
+        if publish == Publish::Batched {
+            fs.into_block()
+                .expect("handing the volume on publishes the batch");
+        }
         let held = ledger.borrow();
         (Cost::of(&held, block_size), held.run_lengths())
     }
@@ -495,7 +537,9 @@ impl Row {
 #[test]
 fn the_write_path_costs_its_measured_baseline() {
     for row in BASELINE {
-        let (cost, runs) = row.workload.measure(row.block_size, DEVICE_BYTES);
+        let (cost, runs) =
+            row.workload
+                .measure(row.block_size, DEVICE_BYTES, Publish::PerOperation);
         assert_eq!(
             cost, row.cost,
             "{:?} at a {}-byte block size now costs {cost:?}",
@@ -535,7 +579,9 @@ fn the_write_path_costs_its_measured_baseline() {
 #[test]
 fn the_drain_issues_one_request_per_physical_run() {
     for row in BASELINE {
-        let (cost, runs) = row.workload.measure(row.block_size, DEVICE_BYTES);
+        let (cost, runs) =
+            row.workload
+                .measure(row.block_size, DEVICE_BYTES, Publish::PerOperation);
         let bound = u64::try_from(RUN_BYTES).expect("a transfer bound fits a u64")
             / u64::from(row.block_size);
         for (&blocks, &commands) in &runs {
@@ -583,7 +629,7 @@ fn a_run_reaching_the_end_of_the_device_is_written_whole() {
     for block_size in [512_u32, 4096] {
         // Not armed: the window under measurement is the format itself, which
         // is what puts a mirrored pair on the last two blocks.
-        let (_fs, ledger) = volume(block_size, DEVICE_BYTES);
+        let (_fs, ledger) = volume(block_size, DEVICE_BYTES, Publish::PerOperation);
         let blocks = DEVICE_BYTES / u64::from(block_size);
         let held = ledger.borrow();
         let ends: Vec<u64> = held
@@ -625,7 +671,7 @@ fn a_transaction_writes_each_block_it_touches_exactly_once() {
     /// block size, cross-checked below against the driver's own accounting.
     const DATA_BLOCKS: u64 = 148;
 
-    let (mut fs, ledger) = volume(512, DEVICE_BYTES);
+    let (mut fs, ledger) = volume(512, DEVICE_BYTES, Publish::PerOperation);
     Workload::OneCall.prepare(&mut fs);
     ledger.borrow_mut().arm();
     Workload::OneCall.run(&mut fs);
@@ -670,7 +716,7 @@ fn a_transaction_writes_each_block_it_touches_exactly_once() {
 #[test]
 fn a_commit_barriers_once_with_only_the_publishing_slot_after_it() {
     for row in BASELINE {
-        let (mut fs, ledger) = volume(row.block_size, DEVICE_BYTES);
+        let (mut fs, ledger) = volume(row.block_size, DEVICE_BYTES, Publish::PerOperation);
         row.workload.prepare(&mut fs);
         ledger.borrow_mut().arm();
         row.workload.run(&mut fs);
@@ -743,8 +789,10 @@ fn a_commit_barriers_once_with_only_the_publishing_slot_after_it() {
 #[test]
 fn chunking_one_payload_into_many_calls_costs_far_more_than_one_call() {
     for block_size in [512_u32, 4096] {
-        let (one_call, _) = Workload::OneCall.measure(block_size, DEVICE_BYTES);
-        let (chunked, _) = Workload::Chunked.measure(block_size, DEVICE_BYTES);
+        let (one_call, _) =
+            Workload::OneCall.measure(block_size, DEVICE_BYTES, Publish::PerOperation);
+        let (chunked, _) =
+            Workload::Chunked.measure(block_size, DEVICE_BYTES, Publish::PerOperation);
         assert!(
             chunked.writes > one_call.writes * 3 / 2,
             "at a {block_size}-byte block size, {} chunked commands against \
@@ -781,7 +829,7 @@ const REFUSAL_DEVICE_BYTES: u64 = 256 << 20;
 /// so what varies between fixture sizes is the volume's total metadata and not
 /// the size of the directory being written.
 fn refusal_fixture(dirs: usize) -> (ARXFS<LedgerBlock>, NodeId, Rc<RefCell<Ledger>>) {
-    let (mut fs, ledger) = volume(4096, REFUSAL_DEVICE_BYTES);
+    let (mut fs, ledger) = volume(4096, REFUSAL_DEVICE_BYTES, Publish::PerOperation);
     let root = fs.root();
     for index in 0..dirs {
         let name = format!("d{index:05}");
@@ -852,13 +900,136 @@ fn the_cost_of_a_write_does_not_grow_with_the_volume() {
         Workload::SmallAppend,
         Workload::CreateFile,
     ] {
-        let (small, small_runs) = workload.measure(4096, DEVICE_BYTES);
-        let (huge, huge_runs) = workload.measure(4096, FLOOR_DEVICE_BYTES);
+        let (small, small_runs) = workload.measure(4096, DEVICE_BYTES, Publish::PerOperation);
+        let (huge, huge_runs) = workload.measure(4096, FLOOR_DEVICE_BYTES, Publish::PerOperation);
         assert_eq!(
             huge, small,
             "{workload:?} costs {huge:?} on a {FLOOR_DEVICE_BYTES}-byte volume \
              against {small:?} on a {DEVICE_BYTES}-byte one"
         );
         assert_eq!(huge_runs, small_runs, "{workload:?} run lengths moved");
+    }
+}
+
+/// What a *batched* window costs, where the operations inside it join one
+/// transaction rather than publishing one each.
+///
+/// The fixture is published before the window is armed and handed on at its
+/// end, so each row prices the workload's own writes plus the single commit
+/// that publishes them — including the map invalidation the published fixture
+/// makes the window pay, which is why a row here costs one command more than
+/// its per-operation counterpart in [`BASELINE`].
+const BATCHED: &[Row] = &[
+    Row {
+        workload: Workload::OneCall,
+        block_size: 512,
+        amplification: Some(124),
+        cost: Cost {
+            writes: 6,
+            blocks: 159,
+            distinct_blocks: 159,
+            bytes: 81_408,
+            barriers: 1,
+        },
+        runs: &[(1, 3), (8, 1), (20, 1), (128, 1)],
+    },
+    // Sixteen calls, one transaction: the same blocks, the same bytes, and
+    // nothing superseded. The one extra command is the metadata run splitting
+    // in two, because the chunked path takes its tree blocks in a different
+    // order.
+    Row {
+        workload: Workload::Chunked,
+        block_size: 512,
+        amplification: Some(124),
+        cost: Cost {
+            writes: 7,
+            blocks: 159,
+            distinct_blocks: 159,
+            bytes: 81_408,
+            barriers: 1,
+        },
+        runs: &[(1, 3), (4, 2), (20, 1), (128, 1)],
+    },
+    Row {
+        workload: Workload::OneCall,
+        block_size: 4096,
+        amplification: Some(162),
+        cost: Cost {
+            writes: 6,
+            blocks: 26,
+            distinct_blocks: 26,
+            bytes: 106_496,
+            barriers: 1,
+        },
+        runs: &[(1, 4), (6, 1), (16, 1)],
+    },
+    Row {
+        workload: Workload::Chunked,
+        block_size: 4096,
+        amplification: Some(162),
+        cost: Cost {
+            writes: 7,
+            blocks: 26,
+            distinct_blocks: 26,
+            bytes: 106_496,
+            barriers: 1,
+        },
+        runs: &[(1, 4), (2, 1), (4, 1), (16, 1)],
+    },
+];
+
+/// Chunking a payload into many calls costs what one call costs, once the
+/// calls join one transaction.
+///
+/// This is what the commit scheduler is for. Per operation, the same 64 KiB
+/// in sixteen calls costs sixteen transaction roots, sixteen ring slots,
+/// sixteen barriers, and sixteen rewrites of the spine — 64 commands against
+/// five, and 24 superseded blocks. Joined, it is the same blocks and the same
+/// bytes as the single call, with nothing superseded and one barrier.
+#[test]
+fn a_batched_window_costs_what_the_same_bytes_cost_in_one_call() {
+    for row in BATCHED {
+        let (cost, runs) = row
+            .workload
+            .measure(row.block_size, DEVICE_BYTES, Publish::Batched);
+        assert_eq!(
+            cost, row.cost,
+            "{:?} batched at a {}-byte block size now costs {cost:?}",
+            row.workload, row.block_size
+        );
+        assert_eq!(
+            runs,
+            row.run_lengths(),
+            "{:?} batched at a {}-byte block size issued runs {runs:?}",
+            row.workload,
+            row.block_size
+        );
+        assert_eq!(
+            cost.amplification_hundredths(row.workload.payload_bytes()),
+            row.amplification
+        );
+        assert_eq!(
+            cost.superseded(),
+            0,
+            "a joined transaction writes each block it touches exactly once"
+        );
+    }
+
+    for block_size in [512_u32, 4096] {
+        let (one_call, _) = Workload::OneCall.measure(block_size, DEVICE_BYTES, Publish::Batched);
+        let (chunked, _) = Workload::Chunked.measure(block_size, DEVICE_BYTES, Publish::Batched);
+        assert_eq!(
+            (chunked.blocks, chunked.bytes, chunked.barriers),
+            (one_call.blocks, one_call.bytes, one_call.barriers),
+            "at a {block_size}-byte block size the chunked window must put the \
+             same bytes on the device, behind one barrier, as the single call"
+        );
+        assert!(
+            chunked.writes <= one_call.writes + 1,
+            "at a {block_size}-byte block size, {} chunked commands against {} \
+             for one call",
+            chunked.writes,
+            one_call.writes
+        );
     }
 }

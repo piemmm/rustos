@@ -84,7 +84,7 @@ impl SoakFs for ARXFS<RamBlock> {
     }
 
     fn remount(self) -> Result<Self, DriverError> {
-        ARXFS::open(self.into_block(), &ARXFS_SOAK_KEY)
+        ARXFS::open(self.into_block()?, &ARXFS_SOAK_KEY)
     }
 }
 

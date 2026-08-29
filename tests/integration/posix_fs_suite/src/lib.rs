@@ -262,7 +262,10 @@ pub fn arxfs_backed_vfs(read_only: bool) -> (Vfs, LiveFs) {
 /// defect the vertical is there to catch, not a runtime condition.
 #[must_use]
 pub fn remount(fs: LiveFs) -> LiveFs {
-    ARXFS::open(fs.into_block(), &SUITE_KEY).expect("re-open the volume just written")
+    let block = fs
+        .into_block()
+        .expect("the volume closes before it is remounted");
+    ARXFS::open(block, &SUITE_KEY).expect("re-open the volume just written")
 }
 
 /// A default-layout [`Vfs`] (owner `(ROOT_UID, ROOT_GID)`) with no driver

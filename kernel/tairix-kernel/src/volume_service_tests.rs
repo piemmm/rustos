@@ -1377,7 +1377,7 @@ fn arxfs_image(payload: &[u8]) -> (RamBlock, [u8; 16]) {
         .expect("file security");
     fs.flush().expect("commit the fixture");
     let identity = fs.volume_uuid();
-    (fs.into_block(), identity)
+    (fs.into_block().expect("the volume closes"), identity)
 }
 
 /// Both link kinds, created and read back through the **real** global

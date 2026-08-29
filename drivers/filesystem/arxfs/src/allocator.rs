@@ -113,8 +113,15 @@ pub(crate) struct Allocator {
     /// Blocks this transaction allocated and has not published, so it may
     /// reuse or reclaim them immediately.
     pub(crate) txn_private: BTreeSet<u64>,
-    /// Every block this transaction allocated, for rollback.
-    pub(crate) txn_allocated: Vec<u64>,
+    /// Blocks the **running operation** claimed, so undoing that operation
+    /// alone releases exactly them and leaves the rest of the transaction it
+    /// joined intact.
+    pub(crate) op_claimed: BTreeSet<u64>,
+    /// Private blocks the running operation freed that an *earlier* operation
+    /// of the same transaction had claimed; undoing it reclaims them.
+    pub(crate) op_released: BTreeSet<u64>,
+    /// Blocks the running operation added to [`Self::txn_freed`].
+    pub(crate) op_deferred: BTreeSet<u64>,
     /// Blocks inherited from a committed root that this transaction released;
     /// reclaimed only once the transaction commits. A set, not a list, so a
     /// block released twice by different paths counts once — the commit reads
@@ -150,7 +157,9 @@ impl Allocator {
             alloc_cursor: RING_BLOCKS,
             meta_cursor: total_blocks.saturating_sub(1),
             txn_private: BTreeSet::new(),
-            txn_allocated: Vec::new(),
+            op_claimed: BTreeSet::new(),
+            op_released: BTreeSet::new(),
+            op_deferred: BTreeSet::new(),
             txn_freed: BTreeSet::new(),
             pending_discard: Vec::new(),
             dedupe_index: DedupeIndex::new(),
@@ -357,16 +366,23 @@ impl<B: Block> ARXFS<B> {
     /// Discard untrusted map staging and require derivation from the trees.
     ///
     /// For a device fault only — a write, drain, or barrier that leaves the
-    /// map's device image ambiguous. An ordinary failed transaction undoes its
+    /// map's device image ambiguous. An ordinary failed operation undoes its
     /// own marks instead, which costs its own size rather than a walk of the
     /// volume.
+    ///
+    /// The staged blocks this drops include the open transaction's, which its
+    /// unpublished roots still name, so the transaction goes with them: what
+    /// survives is the last published root, and a handle that had already
+    /// reported operations into that transaction freezes rather than serving
+    /// writes it can no longer honour.
     pub(crate) fn require_map_rebuild(&mut self) {
-        self.dirty.clear();
         if let Ok(alloc) = self.allocator_mut() {
             alloc.cache.clear();
             alloc.pending.clear();
             alloc.needs_rebuild = true;
         }
+        self.abort_transaction();
+        self.dirty.clear();
     }
 
     /// Write every changed region block out, force the device cache, and stamp
@@ -849,15 +865,15 @@ impl<B: Block> ARXFS<B> {
         }
     }
 
-    /// Mark `block` used, private to this transaction, and recorded for
-    /// rollback.
+    /// Mark `block` used, private to this transaction, and recorded so the
+    /// running operation can be undone on its own.
     pub(crate) fn claim_block(&mut self, block: u64) {
         self.mark_used(block);
         let Ok(alloc) = self.allocator_mut() else {
             return;
         };
         alloc.txn_private.insert(block);
-        alloc.txn_allocated.push(block);
+        alloc.op_claimed.insert(block);
     }
 
     /// Allocate one data block, scanning **upward** from the low end.

@@ -1,7 +1,8 @@
 # ARXFS-WRITEBACK.md — ARXFS write-back cache, commit batching, and the commit barrier
 
-Status: **WB0–WB3 done** (measurement, the dirty set and commit barrier, run
-coalescing, and allocation-map integration); **WB4 next**, WB5–WB6 planned.
+Status: **WB0–WB4 done** (measurement, the dirty set and commit barrier, run
+coalescing, allocation-map integration, and the commit scheduler);
+**WB-D1 next** (the defect WB4 surfaced — see §10), then WB5–WB6.
 Binding under `AGENTS.md` and listed in its §15.18 jump-sheet.
 Primary code area: `drivers/filesystem/arxfs/`.
 Companion spec section: `docs/src/filesystem/arxfs-spec.md` §22.
@@ -13,8 +14,10 @@ card, one device command per 512 bytes — and unsafe on any device with a
 volatile write cache. This plan fixes both with one mechanism: a
 transaction-scoped dirty block set, a run coalescer, a commit scheduler, and the
 single barrier that becomes affordable once commits are batched. The dirty set,
-barrier, coalescer, and allocation-map integration are present; the scheduler
-and RAM-derived bound remain.
+barrier, coalescer, allocation-map integration, and scheduler are present; the
+RAM-derived bound remains, as does the host-side timer that fires the scheduler's
+window on an idle volume (§10) — until that lands, no host installs the
+monotonic clock and a live volume publishes at every operation.
 
 It adds **no** capability, **no** ABI surface, **no** second data path, and no
 mount option: the behaviour is the one production profile
@@ -50,9 +53,27 @@ thirteen million times the size, to the command — and it holds the same
 independence for the operation *after a refused one*, which a rollback that
 discarded the map instead made scale with the volume's metadata.
 
+The same harness prices a **batched** window, where the calls inside it join one
+transaction. The fixture is published before the window is armed and handed on
+at its end, so a row here costs one command more than its per-operation
+counterpart above — the map invalidation the published fixture makes the window
+pay — and the comparison between the two rows of a pair is exact:
+
+| Workload | fs block size | device commands | blocks sent | superseded | bytes to device | byte amplification |
+|---|---|---|---|---|---|---|
+| 64 KiB in one `write_at` | 512 | 6 | 159 | 0 | 79.5 KiB | 1.24× |
+| 64 KiB as 16 × 4 KiB `write_at` | 512 | 7 | 159 | 0 | 79.5 KiB | 1.24× |
+| 64 KiB in one `write_at` | 4096 | 6 | 26 | 0 | 104 KiB | 1.62× |
+| 64 KiB as 16 × 4 KiB `write_at` | 4096 | 7 | 26 | 0 | 104 KiB | 1.62× |
+
+Sixteen calls put exactly the blocks and bytes on the device that one call does,
+behind one barrier, with nothing superseded. The single extra command is the
+metadata run splitting in two, because the chunked path takes its tree blocks in
+a different order.
+
 Amplification is structural, not granular. It had four separate causes, one
-stage each so each win is separately measurable. **C1 and C4 are closed by WB1
-and C3 by WB2**; C2 remains.
+stage each so each win is separately measurable. All four are closed: C1 and C4
+by WB1, C3 by WB2, C2 by WB4.
 
 **C1 — intra-transaction rewrite churn. Closed.** Every `store_block` ended in
 `extent_assign`, a B-tree insert that copy-on-wrote the covering leaf and wrote
@@ -66,13 +87,15 @@ ARMv8 crypto extensions is a CPU cost as well as an I/O one. Staging the sealed
 bytes and draining at the commit point leaves **ten** metadata writes for that
 case: five mirrored blocks, each written once.
 
-**C2 — one transaction per operation.** Every mutating operation ends in
-`commit()`: a fresh transaction root (2 writes, 1 seal) plus a superblock slot
-(2 writes, 1 seal), now with a barrier between them. Pure per-operation overhead
-however small the operation, and it forces each transaction's churn out to the
-device at every operation boundary — which is why the chunked 4 KiB case still
-costs 2.1× the single-call command count at a 512-byte block size and 6.4× at
-4096, for identical bytes, and is the only case left that supersedes anything.
+**C2 — one transaction per operation. Closed.** Every mutating operation ended
+in `commit()`: a fresh transaction root (2 writes, 1 seal) plus a superblock slot
+(2 writes, 1 seal) and a barrier between them — pure per-operation overhead
+however small the operation, and it forced each transaction's churn out to the
+device at every operation boundary. WB4's scheduler keeps the transaction open
+for the next operation to join, so the chunked 4 KiB case costs what the single
+call costs: the same 159 blocks and 81 KiB on a 512-byte volume against 335 and
+167.5 KiB, the same 26 blocks at 4096 against 160, nothing superseded either
+way, and one barrier rather than sixteen.
 
 **C3 — single-block device I/O. Closed.** The drain issued one `write_blocks`
 per staged block, so on the Pi's SD card every 512-byte write was a separate
@@ -105,7 +128,8 @@ stage 20), FEC commit witnesses (stage 21) — is now unblocked.
   superblock slot is written, so every crash leaves the prior committed state or
   the new one, never a torn one — the existing copy-on-write guarantee
   (`arxfs-spec.md` §14) is unchanged. What the cache trades is *how recent* the
-  surviving state is, bounded by §5's deadline.
+  surviving state is, bounded by §5's window — which is why §10, the one thing
+  that can leave a window unenforced, is the next item rather than a note.
 - **One barrier per commit, and it is mandatory.** Every dirty block except the
   superblock slot reaches the device, then `flush()`, then the slot. A commit
   that cannot barrier does not publish.
@@ -207,42 +231,73 @@ write leaves publication unknown, because the device may have taken one: the
 handle forces itself read-only and frees nothing, so whichever root the device
 holds survives for the next mount.
 
-## 5. The commit scheduler
+## 5. The commit scheduler — done
 
 A transaction stays open and the next operation joins it. It closes on the
 first of:
 
 - an explicit `FilesystemWrite::flush` (`fs_sync`) — closes and issues the
   trailing barrier;
-- the dirty set reaching its byte ceiling (§6) — back-pressure: the writer waits
-  for real I/O rather than the set growing;
-- the **dirty-age deadline** expiring;
+- the dirty set reaching its byte ceiling (§6, WB5) — back-pressure: the writer
+  waits for real I/O rather than the set growing;
+- the **dirty-age window** expiring, checked at the end of the operation that
+  reaches it;
 - an operation that needs a barrier for its own correctness: `trim` (discard
   eligibility reads the *committed* allocation map, so a block an open
   transaction reallocated must not be discardable), `grow`, `scrub`, `check`,
-  `health`, `rescue`, `unmount`, and any operation that widens the
-  incompatible-feature word;
-- the handle being dropped or the volume handed on.
+  `health`, and any operation that widens the incompatible-feature word (the
+  word and the structures it names publish together, and a reader must not wait
+  on an unrelated operation to learn of them);
+- the volume being handed on (`into_block`, which therefore reports the closing
+  commit's failure rather than returning a silently older image).
 
-The deadline is a function of `Block::device_class()`, which the seam already
-reports and the driver currently ignores:
+The offline `rescue` opens its own read-only handle, so it has no transaction to
+close. **Drop is not a close point**: it cannot report a failure, and a commit
+that failed silently in a destructor is worse than one that never happened, so
+the teardown paths close explicitly instead — the kernel's volume detach flushes
+the filesystem before it retires the driver (`commit_for_detach`), and a handle
+dropped with a transaction still open loses it whole, leaving the last published
+root. Every teardown reaching an explicit close is part of §10's scope, since
+until that item lands no handle can hold an open transaction at all.
+
+The window is one policy function over `Block::device_class()`, which the seam
+already reported and the driver ignored:
 
 | Declared class | Rationale | Window |
 |---|---|---|
-| `Removable` (SD, eMMC, USB) | highest per-command cost, the measured bottleneck, and the class that gains most | longest |
-| `Rotational` | seek-bound; batching converts scattered metadata into sequential runs | middle |
-| `SolidState`, `Virtual` | already cheap per command; a long window buys little and risks more | shortest |
+| `Removable` (SD, eMMC, USB) | highest per-command cost, the measured bottleneck, and the class that gains most | 30 s |
+| `Rotational` | seek-bound; batching converts scattered metadata into sequential runs | 15 s |
+| `SolidState`, `Virtual` | already cheap per command; a long window buys little and risks more | 5 s |
 
-Concrete values are fixed in WB4 against measurement, expressed as one policy
-function over the class — never a global constant, and never a per-volume knob.
+Ageing a transaction needs a **monotonic clock**, which only the host has
+(`ARXFS::with_monotonic`). A handle without one has no window to measure and
+publishes at every operation: a host that cannot say how much time has passed
+does not get to defer durability. That is also why the driver-only landing of
+this stage changes nothing on a live volume — see §10.
+
 `close()` does **not** sync: POSIX semantics, and the write-then-close workloads
 (image builds, bundle extraction, `cp` of many small files) are exactly the ones
 the batching exists for. A program needing durability calls `fs_sync`, as it
 must on any other system.
 
-Under memory pressure the `tairix_reclaim::PressureGauge` shortens the deadline
-and lowers the ceiling toward the §6 floor: the response to pressure is *flush
-sooner*, never *allocate more* and never *drop*.
+**Two undo scopes**, because a transaction that spans operations can fail at two
+granularities. A failed *operation* is undone alone: the dirty set keeps a
+savepoint of every block that operation stages over or discards, and the
+allocator keeps the blocks it claimed, the private blocks it released, and the
+frees it deferred, so replaying those backwards leaves the operations that
+already joined the transaction exactly as they were. This is what lets one
+metadata block be rewritten in place across a whole batch — the entire batching
+win — without a late failure destroying an early operation's work. A failed
+*commit*, and a device fault that leaves the allocation map's image ambiguous,
+abandon the whole transaction back to the last published root; a handle that had
+already reported operations into it forces itself read-only rather than serving
+writes it can no longer honour, while a transaction carrying only the failing
+operation's own work leaves the handle writable exactly as an unbatched commit
+failure always did.
+
+Under memory pressure the `tairix_reclaim::PressureGauge` shortens the window
+and lowers the ceiling toward the §6 floor (WB5): the response to pressure is
+*flush sooner*, never *allocate more* and never *drop*.
 
 ## 6. The bound
 
@@ -428,16 +483,27 @@ union of both candidate roots — the frees the commit had already applied are
 reserved back, its own blocks stay reserved — and freezes the handle read-only,
 so nothing can erode that reservation before a remount reads it.
 
-### WB4 — commit scheduler. **next**
+### WB4 — commit scheduler. **done**
 
-Multi-operation transactions, the device-class deadline policy, the
-barrier-requiring operation list, and `fs_sync` semantics. Fixes C2.
+`CommitScheduler` (`wcache.rs`) holds the open transaction's start reading, the
+class window, and the count of operations already reported into it. `begin`
+joins or opens; `end_operation` publishes when the window has expired, when the
+operation widened the incompatible-feature word, or when there is no clock to
+age against; the barrier-requiring operations publish before they run; `fs_sync`
+publishes and then persists the map behind its own barrier. The dirty set gained
+the per-operation savepoint the multi-operation transaction needs, and the
+allocator's rollback record moved from "everything this transaction allocated"
+to the two scopes §5 states.
 
-Acceptance: the chunked-4 KiB case converges on the single-call cost; each
-barrier-requiring operation demonstrably closes the transaction first; `fs_sync`
-makes prior operations durable and issues the trailing barrier; `close()` does
-not sync; the deadline is a pure function of the declared class, with a test per
-class.
+*Measured (the WB0 harness, asserted row by row with the run-length
+histograms).* The chunked case converges exactly: 64 KiB in sixteen 4 KiB calls
+puts 159 blocks and 79.5 KiB on a 512-byte volume, as one call does, in 7
+commands against 6, with nothing superseded and one barrier — where per
+operation it cost 64 commands, 335 blocks, 24 of them superseded, and 16
+barriers. At 4096 it is 26 blocks and 104 KiB either way, 7 commands against 6.
+
+*Surfaced by it, and now the next item:* nothing fires the window on a volume
+that goes idle (§10).
 
 ### WB5 — the bound and pressure. **planned**
 
@@ -476,7 +542,54 @@ panic and no busy-spin.
 - A device-side write-cache-disable. ARXFS assumes a volatile cache exists and
   barriers correctly; it does not ask the device to be slow.
 
-## 10. Adjacent findings this plan does not own
+## 10. Open defect
+
+### WB-D1 — nothing fires the dirty-age window on an idle volume
+
+**Found by WB4, and the reason WB4 landed driver-only.** The scheduler closes a
+transaction at the end of the operation that reaches the window. Between
+operations nothing in the system observes the window at all: ARXFS is a
+synchronous driver with no thread of its own, so a volume whose last write is
+followed by silence holds that transaction until the next operation, an
+`fs_sync`, or the volume being handed on. The exposure is bounded in *content*
+(one window's worth of operations) and unbounded in *time*, which contradicts
+§2's own invariant that recency is bounded by the window — and it is worse than
+Linux, whose flusher expires dirty pages on a timer.
+
+Because of that, **no host installs the monotonic clock**, so a live volume
+still publishes at every operation and nothing has regressed. Wiring the kernel
+mounts before the timer exists would trade a bounded exposure for an unbounded
+one, which is the trade `AGENTS.md` §2.17 forbids.
+
+**The fix, and why it is not in WB4.** Writeback expiry belongs above the
+driver, where Linux puts it: a kernel task that parks on a one-shot timer for
+the earliest due volume and calls the existing `FilesystemWrite::flush` on it.
+That is kernel work — a task, its wake seam, mount-registry bookkeeping, and its
+own tests — not a change to `drivers/filesystem/arxfs/`, and it must be
+event-driven rather than a periodic sweep of every mount (`AGENTS.md` §2.23):
+an idle system must take no wakeups and no device flushes at all.
+
+It needs no driver-ABI addition. Every mutating VFS operation already passes
+through the kernel's mount layer, so the kernel knows which volume was last
+written and when; the window it arms against is the one policy this plan states,
+which moves to the shared home beside `BlkDeviceClass::budget` and
+`maintenance_budget` in `lib/abi/src/blkio.rs` when that second consumer
+arrives — one definition, so the driver's close and the kernel's timer can never
+pace to two different windows.
+
+**Done when** a volume that goes idle with an open transaction is published
+within its class window without the driver being called again; an idle system
+with no dirty volume takes no wakeup; the kernel mounts install the monotonic
+clock, so batching is live; every teardown path closes the transaction
+explicitly rather than dropping the handle on one; the §26.7 floor still holds
+with several volumes dirty at once; and the uncommitted-write retention
+journal's statement that a
+surprise removal can only lose what the *device* has not committed
+(`kernel/core/src/fs/retained.rs`) is corrected, because from then on an open
+transaction is a second thing such a removal loses. Tracked as the next item in
+`plans/IMPLEMENT-OUTSTANDING-ARXFS.md`.
+
+## 11. Adjacent findings this plan does not own
 
 Recorded here because the measurement surfaced them, each to be raised on its
 own rather than folded in silently (`AGENTS.md` §2.18):

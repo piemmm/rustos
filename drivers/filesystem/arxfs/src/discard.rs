@@ -174,6 +174,9 @@ impl<B: Block> ARXFS<B> {
         // Discard rewrites the device, so a read-only handle refuses before it
         // asks the device anything.
         self.deny_if_read_only()?;
+        // Eligibility is read from the committed allocation map, so a block an
+        // open transaction has taken again must not still read as free.
+        self.close_transaction()?;
         let cap = self.block.discard_capability()?;
         let mut report = TrimReport::default();
         if !cap.supported {

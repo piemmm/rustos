@@ -337,7 +337,7 @@ fn try_build_system_partition(
         root_image::plant_nested_file(&mut fs, root, components, bytes)?;
     }
     fs.flush()?;
-    Ok(fs.into_block().store)
+    Ok(fs.into_block()?.store)
 }
 
 /// Build the whole-disk encrypted-root image described in the module docs.

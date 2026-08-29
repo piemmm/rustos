@@ -483,7 +483,7 @@ fn fmt(block_size: u32, block_count: u64, inodes: u32) -> ARXFS<MemBlock> {
 #[test]
 fn format_then_open_round_trips() {
     let fs = fmt(512, 256, 32);
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let reopened = ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("reopen");
     assert_eq!(reopened.root(), NodeId::from_raw(1));
 }
@@ -498,7 +498,7 @@ fn open_read_only_reads_back_committed_content() {
         .expect("create");
     let body = alloc::vec![0x5Cu8; 1500];
     assert_eq!(fs.write_at(root, b"file", 0, &body), Ok(1500));
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
 
     let mut ro = ARXFS::open_read_only(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY)
         .expect("read-only mount");
@@ -518,7 +518,7 @@ fn a_read_only_mount_refuses_every_mutation_fail_closed() {
     fs.create(root, b"file", NodeKind::RegularFile)
         .expect("create");
     assert_eq!(fs.write_at(root, b"file", 0, b"original"), Ok(8));
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
 
     let mut ro = ARXFS::open_read_only(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY)
         .expect("read-only mount");
@@ -571,7 +571,7 @@ fn a_read_only_mount_never_writes_the_device() {
         .create(authored_root, b"x", NodeKind::RegularFile)
         .expect("create");
     assert_eq!(authored.write_at(authored_root, b"x", 0, b"payload"), Ok(7));
-    let bytes = authored.into_block().bytes();
+    let bytes = authored.into_block().expect("the volume closes").bytes();
     let before = bytes.clone();
     let mut ro = ARXFS::open_read_only(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY)
         .expect("read-only mount");
@@ -585,7 +585,7 @@ fn a_read_only_mount_never_writes_the_device() {
     let _ = ro.create(root, b"z", NodeKind::RegularFile);
     let _ = ro.reflink(root, b"x", b"y");
     let _ = ro.set_security(node, Security::new(0o600, 0, 0));
-    let after = ro.into_block().bytes();
+    let after = ro.into_block().expect("the volume closes").bytes();
     assert_eq!(
         after, before,
         "the read-only handle left the device untouched"
@@ -626,7 +626,7 @@ fn create_write_read_back_and_survive_remount() {
     assert_eq!(back, body);
 
     // Survive a remount.
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("reopen");
     let node = fs.lookup(fs.root(), b"file").expect("lookup after remount");
     let mut back2 = alloc::vec![0u8; 9000];
@@ -799,7 +799,7 @@ fn timestamps_round_trip_extreme_values() {
     sec.required_cap = Some(CapabilityId::AUDIT_READ);
     fs = fs.with_clock(future);
     fs.set_security(node, sec).expect("set_security");
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("reopen");
     let node = fs.lookup(fs.root(), b"t").unwrap();
     assert_eq!(fs.security(node).unwrap(), sec);
@@ -820,7 +820,7 @@ fn superblock_ring_selects_the_highest_committed_generation() {
         fs.create(root, name.as_bytes(), NodeKind::RegularFile)
             .expect("create");
     }
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("reopen");
     for i in 0..8 {
         let name = alloc::format!("g{i}");
@@ -842,7 +842,7 @@ fn crash_at_every_write_count_during_commit_never_tears() {
         .expect("write keep");
     base.create(root, b"new", NodeKind::RegularFile)
         .expect("create new");
-    let baseline = base.into_block().bytes();
+    let baseline = base.into_block().expect("the volume closes").bytes();
 
     for budget in 0..64u32 {
         let mut dev = MemBlock::from_bytes(baseline.clone(), 512, 256);
@@ -851,7 +851,7 @@ fn crash_at_every_write_count_during_commit_never_tears() {
         let root = fs.root();
         // The single transaction may be cut short at `budget` writes.
         let _ = fs.write_at(root, b"new", 0, b"freshdata");
-        let bytes = fs.into_block().bytes();
+        let bytes = fs.into_block().expect("the volume closes").bytes();
 
         // Re-open from the (possibly torn) image: it must mount, and the
         // pre-existing files must always be intact.
@@ -943,7 +943,7 @@ fn inode_tree_grows_and_shrinks_across_many_inodes() {
 
     // Survive a remount: every inode is reachable and the free-space rebuild
     // matched (open would have failed otherwise).
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 4096, 4096), &TEST_KEY).expect("reopen");
     let root = fs.root();
     for i in 0..count {
@@ -963,7 +963,7 @@ fn inode_tree_grows_and_shrinks_across_many_inodes() {
     }
 
     // The survivors persist across another remount.
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 4096, 4096), &TEST_KEY).expect("reopen2");
     let root = fs.root();
     for i in (1..count).step_by(2) {
@@ -1018,7 +1018,7 @@ fn file_with_many_noncontiguous_extents_round_trips() {
         }
     };
     check(&mut fs);
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 512, 4096), &TEST_KEY).expect("reopen");
     check(&mut fs);
 }
@@ -1092,7 +1092,7 @@ fn free_space_rebuild_matches_authoritative_extents() {
     }
     let live = fs.used_blocks();
 
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let mut rebuilt =
         ARXFS::open(MemBlock::from_bytes(bytes, 4096, 2048), &TEST_KEY).expect("reopen");
     assert_eq!(
@@ -1121,7 +1121,7 @@ fn metadata_bit_flip_is_detected_and_repaired_from_the_companion() {
     assert_ne!(target, 0, "the volume has an inode tree");
 
     let bs = 512usize;
-    let mut bytes = fs.into_block().bytes();
+    let mut bytes = fs.into_block().expect("the volume closes").bytes();
     let off = as_usize(target) * bs + HEADER_LEN; // first payload byte
     let original = bytes[off];
     bytes[off] ^= 0xff; // wound only the primary copy
@@ -1134,7 +1134,7 @@ fn metadata_bit_flip_is_detected_and_repaired_from_the_companion() {
     assert_eq!(&buf[..n], b"hello");
 
     // The primary copy was repaired in place from the good companion.
-    let healed = fs.into_block().bytes();
+    let healed = fs.into_block().expect("the volume closes").bytes();
     let p = as_usize(target) * bs;
     let c = as_usize(target + 1) * bs;
     assert_eq!(
@@ -1159,7 +1159,7 @@ fn both_metadata_copies_corrupted_fails_closed() {
     assert_ne!(target, 0);
 
     let bs = 512usize;
-    let mut bytes = fs.into_block().bytes();
+    let mut bytes = fs.into_block().expect("the volume closes").bytes();
     bytes[as_usize(target) * bs + HEADER_LEN] ^= 0xff;
     bytes[as_usize(target + 1) * bs + HEADER_LEN] ^= 0xff;
 
@@ -1179,7 +1179,7 @@ fn corrupting_one_superblock_copy_still_mounts_via_the_mirror() {
     fs.create(root, b"keep", NodeKind::RegularFile)
         .expect("create");
     let bs = 512usize;
-    let mut bytes = fs.into_block().bytes();
+    let mut bytes = fs.into_block().expect("the volume closes").bytes();
     // Every ring primary lives at an even block in `0..RING_BLOCKS`; corrupt
     // the keyed tag of every primary slot, leaving each companion intact.
     for slot in 0..superblock::RING_SLOTS {
@@ -1202,7 +1202,7 @@ fn crash_during_multiblock_extent_write_never_tears() {
         .expect("create");
     let old = alloc::vec![0xAAu8; 512 * 24];
     base.write_at(root, b"f", 0, &old).expect("seed write");
-    let baseline = base.into_block().bytes();
+    let baseline = base.into_block().expect("the volume closes").bytes();
     let new = alloc::vec![0x55u8; 512 * 24];
 
     for budget in 0..160u32 {
@@ -1211,7 +1211,7 @@ fn crash_during_multiblock_extent_write_never_tears() {
         let mut fs = ARXFS::open(dev, &TEST_KEY).expect("baseline opens");
         let root = fs.root();
         let _ = fs.write_at(root, b"f", 0, &new);
-        let bytes = fs.into_block().bytes();
+        let bytes = fs.into_block().expect("the volume closes").bytes();
 
         let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 512, 512), &TEST_KEY)
             .expect("post-crash mount always succeeds");
@@ -1250,7 +1250,7 @@ fn wrong_volume_key_refuses_the_mount() {
     let mut fs = fmt(512, 256, 32);
     fs.create(fs.root(), b"f", NodeKind::RegularFile)
         .expect("create");
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
 
     let mut wrong = TEST_KEY;
     wrong[0] ^= 0x01;
@@ -1278,7 +1278,7 @@ fn passphrase_derived_key_unlocks_the_volume() {
 
     let fs = ARXFS::format(MemBlock::new(512, 256), 32, &key, &mut TestEntropy::new())
         .expect("format under the passphrase-derived key");
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
 
     // The same passphrase + descriptor re-derive the identical key and mount.
     let rederived = desc.derive_volume_key(passphrase);
@@ -1310,7 +1310,7 @@ fn no_plaintext_filename_or_data_at_rest() {
     fs.create(root, name, NodeKind::RegularFile)
         .expect("create");
     assert_eq!(fs.write_at(root, name, 0, &payload), Ok(payload.len()));
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
 
     assert!(
         !contains(&bytes, name),
@@ -1333,7 +1333,7 @@ fn filename_and_data_round_trip_through_encryption_across_remount() {
     fs.create(root, name, NodeKind::RegularFile)
         .expect("create");
     assert_eq!(fs.write_at(root, name, 0, &payload), Ok(payload.len()));
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
 
     let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("remount");
     // The name decrypts: lookup by the cleartext name succeeds.
@@ -1368,7 +1368,7 @@ fn bit_flip_in_encrypted_data_is_detected() {
     assert_ne!(phys, 0, "the file has a data block");
 
     let bs = 512usize;
-    let mut bytes = fs.into_block().bytes();
+    let mut bytes = fs.into_block().expect("the volume closes").bytes();
     bytes[as_usize(phys) * bs] ^= 0xff; // wound the ciphertext
 
     let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("remount");
@@ -1426,7 +1426,7 @@ fn data_block_integrity_layers_are_distinct_and_fail_closed() {
     let hash_off = fs.logical_hash_offset();
     let bs = 512usize;
     let base = as_usize(phys) * bs;
-    let baseline = fs.into_block().bytes();
+    let baseline = fs.into_block().expect("the volume closes").bytes();
 
     let reopen = |bytes: alloc::vec::Vec<u8>| {
         ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("remount")
@@ -1560,7 +1560,7 @@ fn integrity_survives_remount_and_a_cow_rewrite() {
         .expect("create");
     let mut expected = alloc::vec![0x33u8; 1500];
     assert_eq!(fs.write_at(root, b"f", 0, &expected), Ok(expected.len()));
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
 
     let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("remount");
     let node = fs.lookup(fs.root(), b"f").expect("file survives");
@@ -1569,7 +1569,7 @@ fn integrity_survives_remount_and_a_cow_rewrite() {
     let patch = alloc::vec![0x99u8; 600];
     assert_eq!(fs.write_at(fs.root(), b"f", 100, &patch), Ok(patch.len()));
     expected[100..700].copy_from_slice(&patch);
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
 
     let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("remount2");
     let node = fs.lookup(fs.root(), b"f").expect("file still there");
@@ -1710,7 +1710,7 @@ fn compressible_cluster_frees_blocks_and_round_trips_across_remount_and_cow() {
         info.size
     );
 
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("remount");
     let node = fs.lookup(fs.root(), b"c").expect("file survives");
     assert_eq!(
@@ -1731,7 +1731,7 @@ fn compressible_cluster_frees_blocks_and_round_trips_across_remount_and_cow() {
         !ext.compressed,
         "a partially overwritten cluster decomposes to per-block records"
     );
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
 
     let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("remount2");
     let node = fs.lookup(fs.root(), b"c").expect("file still there");
@@ -1761,7 +1761,7 @@ fn integrity_faults_on_a_compressed_cluster_fail_closed() {
     let hash_off = fs.logical_hash_offset();
     let bs = 512usize;
     let base = as_usize(ext.phys) * bs;
-    let baseline = fs.into_block().bytes();
+    let baseline = fs.into_block().expect("the volume closes").bytes();
 
     let reopen = |bytes: alloc::vec::Vec<u8>| {
         ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("remount")
@@ -1976,7 +1976,7 @@ fn overwriting_and_removing_a_compressed_cluster_returns_its_space() {
     // The mount-time rebuild reproduces the same used set, so nothing was
     // double-freed either.
     let live = fs.used_blocks();
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("reopen");
     assert_eq!(
         fs.used_blocks(),
@@ -2050,7 +2050,7 @@ fn rebuild_scrub_and_check_agree_on_a_compressed_volume() {
         .expect("extend with a hole");
     let live = fs.used_blocks();
 
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 512, 512), &TEST_KEY).expect("reopen");
     assert_eq!(
         fs.used_blocks(),
@@ -2289,7 +2289,7 @@ fn refcount_to_zero_frees_the_chunk_and_the_rebuild_agrees() {
 
     // The remount rebuilds free space from the trees; the chunk tree is empty
     // and the volume mounts cleanly, so the freed block is accounted for.
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 4096, 256), &TEST_KEY).expect("remount");
     assert_eq!(chunk_count(&mut fs), 0);
     assert!(
@@ -2320,7 +2320,7 @@ fn the_dedupe_cache_warms_from_writes_rather_than_a_mount_time_walk() {
     let shared = data_block_phys(&mut fs, b"a", 0);
     assert_eq!(fs.data_refcount(shared).expect("refcount"), 2);
 
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 4096, 256), &TEST_KEY).expect("remount");
     let root = fs.root();
     assert_eq!(chunk_count(&mut fs), 1, "the shared chunk survives");
@@ -2422,7 +2422,7 @@ fn integrity_and_compression_hold_on_a_shared_chunk() {
     );
 
     // Round-trips across a remount.
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 4096, 256), &TEST_KEY).expect("remount");
     let root = fs.root();
     let node_a = fs.lookup(root, b"a").expect("lookup a");
@@ -2433,7 +2433,7 @@ fn integrity_and_compression_hold_on_a_shared_chunk() {
     // Corrupting the shared at-rest block is caught for both sharers (the fast
     // physical checksum covers the at-rest bytes).
     let base = as_usize(shared) * 4096;
-    let mut bytes = fs.into_block().bytes();
+    let mut bytes = fs.into_block().expect("the volume closes").bytes();
     bytes[base] ^= 0x01;
     let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 4096, 256), &TEST_KEY).expect("remount2");
     let root = fs.root();
@@ -2880,7 +2880,7 @@ fn clean_scrub_finds_nothing_and_is_idempotent() {
     // repairs, and changes nothing on disk — running it again is identical
     // (`docs/src/filesystem/arxfs-spec.md` §12; the report is the only output,
     // never a silent mutation).
-    let before = populated().into_block().bytes();
+    let before = populated().into_block().expect("the volume closes").bytes();
     let mut fs =
         ARXFS::open(MemBlock::from_bytes(before.clone(), 4096, 512), &TEST_KEY).expect("reopen");
 
@@ -2900,7 +2900,7 @@ fn clean_scrub_finds_nothing_and_is_idempotent() {
     assert_committed_state_unchanged(&before, &mut fs, &used_before, free_before);
 
     // Idempotent: a second scrub agrees.
-    let after = fs.into_block().bytes();
+    let after = fs.into_block().expect("the volume closes").bytes();
     let mut fs = ARXFS::open(MemBlock::from_bytes(after, 4096, 512), &TEST_KEY).expect("reopen2");
     let again = scrub_full(&mut fs);
     assert_eq!(again, report, "scrub is idempotent on a clean volume");
@@ -2933,7 +2933,7 @@ fn scrub_repairs_a_single_copy_metadata_corruption_from_the_companion() {
     let target = fs.block_ptr(&root_inode, 0).expect("root dir block");
     assert_ne!(target, 0);
     let bs = 4096usize;
-    let mut bytes = fs.into_block().bytes();
+    let mut bytes = fs.into_block().expect("the volume closes").bytes();
     let off = as_usize(target) * bs + HEADER_LEN;
     let original = bytes[off];
     bytes[off] ^= 0xff; // wound only the primary copy
@@ -2946,7 +2946,7 @@ fn scrub_repairs_a_single_copy_metadata_corruption_from_the_companion() {
     assert_eq!(report.metadata_unrepairable, 0);
 
     // The primary copy is healed back to match its companion.
-    let healed = fs.into_block().bytes();
+    let healed = fs.into_block().expect("the volume closes").bytes();
     let p = as_usize(target) * bs;
     let c = as_usize(target + 1) * bs;
     assert_eq!(healed[p..p + bs], healed[c..c + bs], "primary repaired");
@@ -2970,7 +2970,7 @@ fn scrub_classifies_data_block_physical_and_logical_faults() {
         let body = alloc::vec![0x33u8; 400];
         fs.write_at(root, b"f", 0, &body).expect("write");
         let phys = data_block_phys(&mut fs, b"f", 0);
-        let mut bytes = fs.into_block().bytes();
+        let mut bytes = fs.into_block().expect("the volume closes").bytes();
         bytes[as_usize(phys) * bs] ^= 0x01;
         let mut fs =
             ARXFS::open(MemBlock::from_bytes(bytes, 4096, 256), &TEST_KEY).expect("reopen");
@@ -2993,7 +2993,7 @@ fn scrub_classifies_data_block_physical_and_logical_faults() {
         let csum_off = fs.phys_checksum_offset();
         let hash_off = fs.logical_hash_offset();
         let base = as_usize(phys) * bs;
-        let mut bytes = fs.into_block().bytes();
+        let mut bytes = fs.into_block().expect("the volume closes").bytes();
         bytes[base + hash_off] ^= 0x01;
         let fixed = physical_checksum(&bytes[base..base + csum_off]);
         bytes[base + csum_off..base + csum_off + PHYS_CHECKSUM_LEN].copy_from_slice(&fixed);
@@ -3046,7 +3046,7 @@ fn scrub_detects_and_corrects_a_refcount_divergence() {
     );
 
     // The correction holds across a remount and a re-scrub is clean.
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 4096, 256), &TEST_KEY).expect("reopen");
     assert_eq!(fs.data_refcount(shared).expect("refcount"), 2);
     let again = scrub_full(&mut fs);
@@ -3336,7 +3336,7 @@ fn a_windowed_reconcile_reaches_the_same_report_as_a_single_window() {
     )
     .expect("put");
     fs.commit().expect("commit the tampered refcount");
-    let tampered = fs.into_block().bytes();
+    let tampered = fs.into_block().expect("the volume closes").bytes();
 
     let mut single =
         ARXFS::open(MemBlock::from_bytes(tampered.clone(), 512, 2400), &TEST_KEY).expect("open");
@@ -3444,7 +3444,7 @@ fn a_volume_with_no_room_for_a_scratch_array_says_so() {
 /// nothing — and still writes not one block.
 #[test]
 fn a_read_only_scrub_counts_no_claims_and_writes_nothing() {
-    let bytes = populated().into_block().bytes();
+    let bytes = populated().into_block().expect("the volume closes").bytes();
     let mut fs = ARXFS::open_read_only(MemBlock::from_bytes(bytes.clone(), 4096, 512), &TEST_KEY)
         .expect("read-only mount");
     let report = scrub_full(&mut fs);
@@ -3455,7 +3455,7 @@ fn a_read_only_scrub_counts_no_claims_and_writes_nothing() {
     );
     assert_eq!(report.divergences_corrected, 0, "{report:?}");
     assert!(!report.found_faults(), "{report:?}");
-    let after = fs.into_block();
+    let after = fs.into_block().expect("the volume closes");
     assert_eq!(after.writes, 0, "a read-only scrub issues no write");
     assert_eq!(after.bytes(), bytes, "the device is untouched");
 }
@@ -3493,7 +3493,7 @@ fn a_pass_that_counted_no_claims_reports_a_divergence_without_writing() {
     // it, so this proves the uncounted one leaves even that alone.
     fs.chunk_put(fs.total_blocks + 8, &record).expect("put");
     fs.commit().expect("commit the tampered records");
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
 
     let mut fs = ARXFS::open_read_only(MemBlock::from_bytes(bytes.clone(), 4096, 256), &TEST_KEY)
         .expect("read-only mount");
@@ -3507,7 +3507,7 @@ fn a_pass_that_counted_no_claims_reports_a_divergence_without_writing() {
         report.divergences_corrected, 0,
         "and nothing is corrected from a truth the pass does not have"
     );
-    let after = fs.into_block();
+    let after = fs.into_block().expect("the volume closes");
     assert_eq!(after.writes, 0, "no write is even attempted");
     assert_eq!(after.bytes(), bytes, "the device is untouched");
 }
@@ -3527,7 +3527,7 @@ fn a_read_only_scrub_reports_a_damaged_mirror_without_repairing_it() {
     let target = fs.block_ptr(&root_inode, 0).expect("root dir block");
     assert_ne!(target, 0);
     let bs = 4096usize;
-    let mut bytes = fs.into_block().bytes();
+    let mut bytes = fs.into_block().expect("the volume closes").bytes();
     bytes[as_usize(target) * bs + HEADER_LEN] ^= 0xff;
 
     let mut fs = ARXFS::open_read_only(MemBlock::from_bytes(bytes.clone(), 4096, 512), &TEST_KEY)
@@ -3545,7 +3545,7 @@ fn a_read_only_scrub_reports_a_damaged_mirror_without_repairing_it() {
     assert_eq!(report.metadata_unrepairable, 0, "{report:?}");
     assert!(report.found_faults(), "a damaged mirror is a finding");
 
-    let after = fs.into_block();
+    let after = fs.into_block().expect("the volume closes");
     assert_eq!(after.writes, 0, "a read-only scrub issues no write");
     assert_eq!(after.bytes(), bytes, "the wounded copy is left as it is");
 }
@@ -3559,7 +3559,7 @@ fn a_read_only_scrub_reports_a_damaged_mirror_without_repairing_it() {
 /// from one that will be resumed: repeating it never reaches past its budget.
 #[test]
 fn a_read_only_bounded_scrub_reports_progress_without_persisting_a_cursor() {
-    let bytes = populated().into_block().bytes();
+    let bytes = populated().into_block().expect("the volume closes").bytes();
     let mut fs = ARXFS::open_read_only(MemBlock::from_bytes(bytes.clone(), 4096, 512), &TEST_KEY)
         .expect("read-only mount");
     let sink = RecordingSink::new();
@@ -3581,7 +3581,7 @@ fn a_read_only_bounded_scrub_reports_progress_without_persisting_a_cursor() {
         !sink.saw(scrub::SCRUB_PAUSED),
         "never as a pause a later call resumes"
     );
-    let after = fs.into_block();
+    let after = fs.into_block().expect("the volume closes");
     assert_eq!(after.writes, 0, "and no write was issued");
     assert_eq!(after.bytes(), bytes, "the device is untouched");
 }
@@ -3599,7 +3599,7 @@ fn a_read_only_scrub_leaves_a_paused_cursor_the_volume_still_names() {
         .expect("pause a scrub");
     let paused_at = fs.scrub_progress_root;
     assert_ne!(paused_at, 0, "a read-write pass persisted its cursor");
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
 
     let mut fs = ARXFS::open_read_only(MemBlock::from_bytes(bytes.clone(), 4096, 512), &TEST_KEY)
         .expect("read-only mount");
@@ -3614,7 +3614,7 @@ fn a_read_only_scrub_leaves_a_paused_cursor_the_volume_still_names() {
         fs.scrub_progress_root, paused_at,
         "and left the record the committed root still names"
     );
-    let after = fs.into_block();
+    let after = fs.into_block().expect("the volume closes");
     assert_eq!(after.writes, 0, "no write was issued");
     assert_eq!(after.bytes(), bytes, "the device is untouched");
 }
@@ -3628,14 +3628,14 @@ fn a_read_only_scrub_leaves_a_paused_cursor_the_volume_still_names() {
 /// part-way through a repair it cannot finish.
 #[test]
 fn a_read_only_mount_refuses_check_before_touching_the_device() {
-    let bytes = populated().into_block().bytes();
+    let bytes = populated().into_block().expect("the volume closes").bytes();
     let mut fs = ARXFS::open_read_only(MemBlock::from_bytes(bytes.clone(), 4096, 512), &TEST_KEY)
         .expect("read-only mount");
     assert_eq!(
         fs.check(&GrantAll, &NullSink),
         Err(DriverError::PermissionDenied)
     );
-    let after = fs.into_block();
+    let after = fs.into_block().expect("the volume closes");
     assert_eq!(after.writes, 0, "no write was issued");
     assert_eq!(after.bytes(), bytes, "the device is untouched");
 }
@@ -3645,7 +3645,7 @@ fn a_read_only_mount_refuses_check_before_touching_the_device() {
 /// never receives one.
 #[test]
 fn a_read_only_mount_never_trims() {
-    let bytes = populated().into_block().bytes();
+    let bytes = populated().into_block().expect("the volume closes").bytes();
     let mut fs = ARXFS::open_read_only(
         MemBlock::from_bytes(bytes.clone(), 4096, 512).with_discard(1, 0),
         &TEST_KEY,
@@ -3655,7 +3655,7 @@ fn a_read_only_mount_never_trims() {
         fs.trim(&GrantAll, &NullSink),
         Err(DriverError::PermissionDenied)
     );
-    let after = fs.into_block();
+    let after = fs.into_block().expect("the volume closes");
     assert!(
         after.discarded.is_empty(),
         "not one range was discarded: {:?}",
@@ -3825,7 +3825,7 @@ fn scrub_is_resumable_and_matches_an_uninterrupted_pass() {
     // resumes; the accumulated report of the resumed scrub equals one
     // uninterrupted pass, and the cursor is cleared on completion
     // (`docs/src/filesystem/arxfs-spec.md` §12).
-    let base = populated().into_block().bytes();
+    let base = populated().into_block().expect("the volume closes").bytes();
 
     // Uninterrupted reference pass.
     let mut whole = ARXFS::open(MemBlock::from_bytes(base.clone(), 4096, 512), &TEST_KEY)
@@ -3876,7 +3876,7 @@ fn a_crash_mid_scrub_leaves_a_mountable_volume() {
     assert_ne!(fs.scrub_progress_root, 0);
 
     // Simulate a crash: drop the in-memory state and reopen from disk.
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 4096, 512), &TEST_KEY)
         .expect("a volume with a scrub in progress still mounts");
     assert_ne!(fs.scrub_progress_root, 0, "the cursor survived the crash");
@@ -3913,7 +3913,7 @@ fn invariants_hold_across_scrub_remount_and_cow_rewrite() {
     assert!(!report.found_faults(), "{report:?}");
 
     // Remount, then rewrite one sharer (copy-on-write off the shared chunk).
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 4096, 512), &TEST_KEY).expect("reopen");
     let replacement = alloc::vec![0xA5u8; cap];
     fs.write_at(root, b"a", 0, &replacement).expect("rewrite a");
@@ -3981,7 +3981,7 @@ fn check_on_a_clean_volume_is_sound_and_rebuilds_nothing() {
     // the derived state (always), repairs nothing, and changes nothing on disk
     // — running it again is identical (`docs/src/filesystem/arxfs-spec.md`
     // §12).
-    let before = populated().into_block().bytes();
+    let before = populated().into_block().expect("the volume closes").bytes();
     let mut fs =
         ARXFS::open(MemBlock::from_bytes(before.clone(), 4096, 512), &TEST_KEY).expect("reopen");
 
@@ -4006,7 +4006,7 @@ fn check_on_a_clean_volume_is_sound_and_rebuilds_nothing() {
     assert_committed_state_unchanged(&before, &mut fs, &used_before, free_before);
 
     // Idempotent: a second check agrees.
-    let after = fs.into_block().bytes();
+    let after = fs.into_block().expect("the volume closes").bytes();
     let mut fs = ARXFS::open(MemBlock::from_bytes(after, 4096, 512), &TEST_KEY).expect("reopen2");
     let again = check_full(&mut fs);
     assert_eq!(again, report, "check is idempotent on a clean volume");
@@ -4018,7 +4018,7 @@ fn check_rebuilds_a_corrupt_free_space_derivation() {
     // corrupt derivation must never keep a sound volume unmountable: check
     // rebuilds it from the authoritative trees, and the result matches a
     // freshly mounted reference.
-    let bytes = populated().into_block().bytes();
+    let bytes = populated().into_block().expect("the volume closes").bytes();
     let mut reference =
         ARXFS::open(MemBlock::from_bytes(bytes.clone(), 4096, 512), &TEST_KEY).expect("reference");
     let good_used = reference.used_blocks();
@@ -4042,7 +4042,7 @@ fn check_rebuilds_a_corrupt_free_space_derivation() {
     assert_eq!(fs.free_count, good_count, "the free count was rebuilt");
     // The volume is mountable and the structure is sound.
     assert_eq!(report.structure, StructureVerdict::Sound, "{report:?}");
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     assert!(ARXFS::open(MemBlock::from_bytes(bytes, 4096, 512), &TEST_KEY).is_ok());
 }
 
@@ -4144,7 +4144,7 @@ fn check_reports_an_unrepairable_data_block_it_cannot_fix() {
         .expect("write");
     let phys = data_block_phys(&mut fs, b"f", 0);
     let bs = 4096usize;
-    let mut bytes = fs.into_block().bytes();
+    let mut bytes = fs.into_block().expect("the volume closes").bytes();
     bytes[as_usize(phys) * bs] ^= 0x01; // wound the ciphertext (physical fault)
 
     let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 4096, 256), &TEST_KEY).expect("reopen");
@@ -4174,7 +4174,7 @@ fn damage_superblock_ring(bytes: &mut [u8], bs: usize) {
 
 #[test]
 fn rescue_requires_the_fs_mount_capability() {
-    let bytes = populated().into_block().bytes();
+    let bytes = populated().into_block().expect("the volume closes").bytes();
     let sink = RecordingSink::new();
     let mut out = CollectSink::new();
     assert_eq!(
@@ -4206,7 +4206,7 @@ fn rescue_discovers_a_root_and_extracts_files_from_a_damaged_ring() {
     fs.write_at(root, b"doc", 0, &body).expect("write");
     let doc_node = fs.lookup(root, b"doc").expect("lookup");
     let doc_ino = u32::try_from(doc_node.raw()).unwrap();
-    let mut bytes = fs.into_block().bytes();
+    let mut bytes = fs.into_block().expect("the volume closes").bytes();
 
     // The wounded ring makes an ordinary mount fail closed.
     damage_superblock_ring(&mut bytes, bs);
@@ -4264,7 +4264,7 @@ fn rescue_never_emits_a_block_that_fails_integrity() {
     let doc_node = fs.lookup(root, b"doc").expect("lookup");
     let doc_ino = u32::try_from(doc_node.raw()).unwrap();
     let bad_phys = data_block_phys(&mut fs, b"doc", 1);
-    let mut bytes = fs.into_block().bytes();
+    let mut bytes = fs.into_block().expect("the volume closes").bytes();
 
     // Wound the second block's ciphertext (a physical-checksum fault) and the
     // ring (so rescue is the recovery path).
@@ -4490,7 +4490,7 @@ fn mkfs_discards_the_whole_volume_on_a_capable_device() {
     let block = MemBlock::new(512, 512).with_discard(1, 0);
     let fs = ARXFS::format(block, 32, &TEST_KEY, &mut TestEntropy::new()).expect("format");
     assert_eq!(
-        fs.into_block().discarded,
+        fs.into_block().expect("the volume closes").discarded,
         alloc::vec![(0, 512)],
         "the full block range is discarded once at mkfs time"
     );
@@ -4507,7 +4507,11 @@ fn mkfs_on_a_device_without_discard_still_formats() {
         &mut TestEntropy::new(),
     )
     .expect("format");
-    assert!(fs.into_block().discarded.is_empty());
+    assert!(fs
+        .into_block()
+        .expect("the volume closes")
+        .discarded
+        .is_empty());
 }
 
 #[test]
@@ -4573,7 +4577,7 @@ fn the_discard_queue_is_transient_across_a_remount() {
     );
 
     // Simulate a crash before trim: the in-memory queue never reaches disk.
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 512, 512), &TEST_KEY).expect("remount");
     assert_eq!(
         fs.pending_discard_count(),
@@ -4670,7 +4674,7 @@ fn health_on_a_device_without_telemetry_still_classifies_and_persists() {
     assert!(!report.read_only_recommended);
 
     // The baseline persists across a remount (it is reached from the root).
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let mut fs = open_health(bytes, 256, DeviceHealth::Unavailable);
     assert_ne!(
         fs.health_baseline_root, 0,
@@ -4690,7 +4694,7 @@ fn health_classifies_healthy_degraded_then_failing_as_signals_accumulate() {
     let mut fs = fmt_health(256, DeviceHealth::Available(healthy_snapshot(0, 0)));
     let report = fs.health(&GrantAll, &NullSink).expect("health clean");
     assert_eq!(report.state, HealthState::Healthy, "{report:?}");
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
 
     // Media errors at the degraded threshold but below failing.
     let degraded_errors = t.degraded_media_errors;
@@ -4705,7 +4709,7 @@ fn health_classifies_healthy_degraded_then_failing_as_signals_accumulate() {
         report.deep_scrub_recommended,
         "a media-error delta is a deep scrub"
     );
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
 
     // Media errors at the failing threshold.
     let mut fs = open_health(
@@ -4728,7 +4732,7 @@ fn health_triggers_a_scrub_when_the_device_reports_new_unsafe_shutdowns() {
     // further delta does not re-scrub.
     let mut fs = fmt_health(256, DeviceHealth::Available(healthy_snapshot(0, 0)));
     fs.health(&GrantAll, &NullSink).expect("establish baseline");
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
 
     let mut fs = open_health(bytes, 256, DeviceHealth::Available(healthy_snapshot(3, 0)));
     let sink = RecordingSink::new();
@@ -4748,7 +4752,7 @@ fn health_triggers_a_scrub_when_the_device_reports_new_unsafe_shutdowns() {
 
     // The baseline has advanced to the new snapshot, so a second pass with the
     // same telemetry sees no delta and triggers no scrub.
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let mut fs = open_health(bytes, 256, DeviceHealth::Available(healthy_snapshot(3, 0)));
     let report = fs.health(&GrantAll, &NullSink).expect("health 2");
     assert_eq!(report.unsafe_shutdown_delta, 0);
@@ -4779,7 +4783,7 @@ fn a_read_only_health_pass_returns_its_reading_and_stores_no_baseline() {
     let mut fs = fmt_health(256, DeviceHealth::Available(healthy_snapshot(0, 0)));
     fs.health(&GrantAll, &NullSink)
         .expect("establish a baseline");
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
 
     let mut fs = open_health_read_only(
         bytes.clone(),
@@ -4800,7 +4804,7 @@ fn a_read_only_health_pass_returns_its_reading_and_stores_no_baseline() {
         fs.health_baseline_root, baseline_at,
         "the stored baseline is untouched"
     );
-    let after = fs.into_block();
+    let after = fs.into_block().expect("the volume closes");
     assert_eq!(after.writes, 0, "a read-only health pass issues no write");
     assert_eq!(after.bytes(), bytes, "the device is untouched");
 }
@@ -4823,7 +4827,7 @@ fn a_read_only_volume_with_a_damaged_mirror_classifies_degraded() {
     let root_inode = fs.read_inode(ROOT_INO).expect("root inode");
     let target = fs.block_ptr(&root_inode, 0).expect("root dir block");
     let bs = 4096usize;
-    let mut bytes = fs.into_block().bytes();
+    let mut bytes = fs.into_block().expect("the volume closes").bytes();
     bytes[as_usize(target) * bs + HEADER_LEN] ^= 0xff;
 
     let mut fs = open_health_read_only(
@@ -4845,7 +4849,7 @@ fn a_read_only_volume_with_a_damaged_mirror_classifies_degraded() {
         "a mirror that went bad is a watch-level signal whether or not it \
          could be rewritten: {report:?}"
     );
-    let after = fs.into_block();
+    let after = fs.into_block().expect("the volume closes");
     assert_eq!(after.writes, 0, "and the pass wrote nothing");
     assert_eq!(after.bytes(), bytes, "the device is untouched");
 }
@@ -4864,7 +4868,7 @@ fn health_baseline_survives_a_crash_during_its_update() {
         .expect("write keep");
     base.health(&GrantAll, &NullSink)
         .expect("establish baseline");
-    let baseline = base.into_block().bytes();
+    let baseline = base.into_block().expect("the volume closes").bytes();
 
     for budget in 0..96u32 {
         let mut dev = MemBlock::from_bytes(baseline.clone(), 4096, 256)
@@ -4873,7 +4877,7 @@ fn health_baseline_survives_a_crash_during_its_update() {
         let mut fs = ARXFS::open(dev, &TEST_KEY).expect("baseline opens");
         // The health pass (a scrub plus a baseline commit) may be cut short.
         let _ = fs.health(&GrantAll, &NullSink);
-        let bytes = fs.into_block().bytes();
+        let bytes = fs.into_block().expect("the volume closes").bytes();
 
         // Re-open from the (possibly torn) image: it must mount, the file must
         // be intact, and a fresh health pass must still succeed.
@@ -4953,7 +4957,7 @@ fn crash_baseline() -> alloc::vec::Vec<u8> {
         .expect("create target");
     fs.create(root, b"dir", NodeKind::Directory)
         .expect("create dir");
-    fs.into_block().bytes()
+    fs.into_block().expect("the volume closes").bytes()
 }
 
 /// Replay one representative transaction at every commit step: cut the device
@@ -4980,7 +4984,7 @@ where
             .expect("baseline opens")
             .with_clock(fixed_clock);
         op(&mut fs);
-        let bytes = fs.into_block().bytes();
+        let bytes = fs.into_block().expect("the volume closes").bytes();
 
         let mut fs = ARXFS::open(device(bytes), &TEST_KEY)
             .expect("post-crash mount always succeeds on a whole-txn boundary")
@@ -5263,7 +5267,11 @@ fn corruption_baseline() -> (alloc::vec::Vec<u8>, CorruptionTargets, alloc::vec:
         "a health-baseline record exists"
     );
 
-    (fs.into_block().bytes(), targets, keep_body)
+    (
+        fs.into_block().expect("the volume closes").bytes(),
+        targets,
+        keep_body,
+    )
 }
 
 /// Flip the first payload byte of the block at `block`, breaking its keyed
@@ -5458,7 +5466,7 @@ fn corruption_injection_data_block_faults_are_classified_not_repaired() {
     let phys = data_block_phys(&mut fs, b"f", 0);
     let bs = 512usize;
     let base = as_usize(phys) * bs;
-    let mut bytes = fs.into_block().bytes();
+    let mut bytes = fs.into_block().expect("the volume closes").bytes();
     bytes[base] ^= 0x01; // wound the at-rest ciphertext
 
     let mut fs =
@@ -5583,7 +5591,7 @@ fn a_power_loss_after_a_commit_leaves_prior_or_new_whatever_it_drops() {
         let comp = ARXFS::<MemBlock>::companion(slot);
         fs.block_mut()
             .power_loss(|lba| (lba == slot && kept & 1 != 0) || (lba == comp && kept & 2 != 0));
-        let bytes = fs.into_block().bytes();
+        let bytes = fs.into_block().expect("the volume closes").bytes();
         let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, CRASH_BS, CRASH_BC), &TEST_KEY)
             .expect("a power loss always leaves a mountable volume");
 
@@ -5643,7 +5651,7 @@ fn a_barrier_that_faults_publishes_nothing_and_leaves_no_transaction_behind() {
     fs.block_mut().fail_flush = false;
     fs.write_at(root, b"new", 0, b"second").expect("write");
     FilesystemWrite::flush(&mut fs).expect("sync");
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let mut fs =
         ARXFS::open(MemBlock::from_bytes(bytes, CRASH_BS, CRASH_BC), &TEST_KEY).expect("reopen");
     let node = fs.lookup(fs.root(), b"new").expect("target");
@@ -5692,7 +5700,7 @@ fn a_failed_slot_write_freezes_the_handle_and_publishes_nothing() {
             "a frozen handle accepts no further mutation"
         );
         assert_eq!(
-            fs.inode_tree_root, fs.saved_inode_tree_root,
+            fs.inode_tree_root, fs.saved_txn.inode_tree_root,
             "the frozen handle exposed unpublished tree state"
         );
         // Both candidate roots stay reserved: the prior one because a mount may
@@ -5726,7 +5734,7 @@ fn a_failed_slot_write_freezes_the_handle_and_publishes_nothing() {
         assert_eq!(fs.read_at(witness, 0, &mut out), Ok(CRASH_KEEP.len()));
         assert_eq!(out, CRASH_KEEP);
 
-        let mut device = fs.into_block();
+        let mut device = fs.into_block().expect("the volume closes");
         device.write_faults.clear();
         device.power_loss(|_| true);
         let bytes = device.bytes();
@@ -5767,7 +5775,7 @@ fn a_failed_commit_on_a_maintenance_pass_restores_the_published_roots() {
     let root = fs.root();
     fs.write_at(root, b"new", 0, b"after").expect("write");
     FilesystemWrite::flush(&mut fs).expect("sync");
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let fs =
         ARXFS::open(MemBlock::from_bytes(bytes, CRASH_BS, CRASH_BC), &TEST_KEY).expect("reopen");
     assert_eq!(
@@ -5862,7 +5870,7 @@ fn the_map_turns_its_clean_stamp_dirty_durably_before_its_first_page_write() {
     );
     let held = fs.block_mut().volatile_blocks();
     assert!(held.contains(&slot));
-    let mut device = fs.into_block();
+    let mut device = fs.into_block().expect("the volume closes");
     device.write_faults.clear();
     device.power_loss(|_| false);
     let bytes = device.bytes();
@@ -5907,7 +5915,7 @@ fn a_failed_sync_rebuilds_every_partially_persisted_map() {
             );
 
             let companion = ARXFS::<MemBlock>::companion(slot);
-            let mut device = fs.into_block();
+            let mut device = fs.into_block().expect("the volume closes");
             device.fail_flush = false;
             device.power_loss(|block| {
                 if block == slot || block == companion {
@@ -5992,7 +6000,7 @@ fn a_refused_operation_leaves_the_allocation_map_exact_and_trusted() {
         .expect("create after a refusal");
     FilesystemWrite::flush(&mut fs).expect("sync");
     let expected_used = fs.used_blocks();
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let mut reopened =
         ARXFS::open(MemBlock::from_bytes(bytes, CRASH_BS, CRASH_BC), &TEST_KEY).expect("reopen");
     assert_eq!(reopened.used_blocks(), expected_used);
@@ -6073,7 +6081,7 @@ fn a_failed_sync_rebuilds_before_a_same_handle_check_and_write() {
     let expected_free = fs.free_count;
     FilesystemWrite::flush(&mut fs).expect("sync recovered mount");
 
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let mut reopened =
         ARXFS::open(MemBlock::from_bytes(bytes, CRASH_BS, CRASH_BC), &TEST_KEY).expect("reopen");
     assert_eq!(reopened.used_blocks(), expected_used);
@@ -6099,7 +6107,7 @@ fn a_failed_sync_rebuilds_before_same_handle_growth() {
     let expected_free = fs.free_count;
     FilesystemWrite::flush(&mut fs).expect("sync grown volume");
 
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let mut reopened = ARXFS::open(
         MemBlock::from_bytes(bytes, CRASH_BS, grown_blocks),
         &TEST_KEY,
@@ -6210,7 +6218,7 @@ fn sparse_ten_mib_zero_file_allocates_no_data_payload() {
     assert_reads_all_zero(&mut fs, b"zero", size);
 
     // Survives a remount unchanged: still all-zero, still no data payload.
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 4096, 4096), &TEST_KEY).expect("reopen");
     let ino = file_ino(&mut fs, b"zero");
     assert_eq!(
@@ -6509,7 +6517,7 @@ fn names_up_to_255_bytes_round_trip() {
     assert_eq!(entry.name_len, NAME_MAX);
     assert_eq!(&name_out[..entry.name_len], &name[..]);
 
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let mut reopened =
         ARXFS::open(MemBlock::from_bytes(bytes, 4096, 256), &TEST_KEY).expect("reopen");
     let node = reopened
@@ -6668,7 +6676,7 @@ fn grow_extends_a_mounted_volume_online() {
     // Original data is intact and the larger size survives a remount.
     let node = fs.lookup(root, b"keep").expect("keep lookup");
     assert_eq!(read_all(&mut fs, node, 4096), body);
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let mut reopened =
         ARXFS::open(MemBlock::from_bytes(bytes, 512, 1024), &TEST_KEY).expect("reopen");
     assert_eq!(reopened.total_blocks, 1024, "the grown size is durable");
@@ -6701,7 +6709,7 @@ fn open_rejects_a_committed_size_larger_than_the_device() {
     // A volume formatted for 256 blocks presented on a device that now claims
     // only 200 blocks (a truncated device) refuses to mount.
     let fs = fmt(512, 256, 32);
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let truncated = MemBlock::from_bytes(bytes, 512, 200);
     assert!(matches!(
         ARXFS::open(truncated, &TEST_KEY),
@@ -6787,7 +6795,7 @@ fn a_volume_smaller_than_the_device_mounts_and_leaves_the_tail_unused() {
     // (1024-block) device. It mounts at its committed size; the surplus tail is
     // simply unused until a grow.
     let fs = fmt(512, 256, 32);
-    let mut bytes = fs.into_block().bytes();
+    let mut bytes = fs.into_block().expect("the volume closes").bytes();
     bytes.resize(512 * 1024, 0);
     let mut reopened =
         ARXFS::open(MemBlock::from_bytes(bytes, 512, 1024), &TEST_KEY).expect("reopen larger");
@@ -6862,7 +6870,7 @@ fn a_100_tib_volume_formats_mounts_and_serves_with_working_set_bounded_memory() 
     // The device itself stored only the working set — proof the test models a
     // 100 TiB volume without a 100 TiB backing allocation, and that the driver
     // never touched a volume-proportional span of blocks.
-    let device = fs.into_block();
+    let device = fs.into_block().expect("the volume closes");
     assert!(
         device.stored_blocks() < 4000,
         "format + serve touched only the working set of blocks (stored {})",
@@ -6894,7 +6902,7 @@ fn metadata_allocates_at_the_high_end_of_a_huge_volume_without_a_whole_volume_sc
     // scale.
     let fs = fmt_huge();
     let top = HUGE_BLOCK_COUNT - 1;
-    let device = fs.into_block();
+    let device = fs.into_block().expect("the volume closes");
     // Some block in the top few of the device was written (the committed root
     // pair), confirming the downward metadata cursor reached the high end.
     let highest_written = device
@@ -7157,7 +7165,7 @@ fn attributes_round_trip_across_namespaces_and_remount() {
     );
 
     // Attributes survive a remount (they are committed metadata).
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 4096, 512), &TEST_KEY).expect("reopen");
     let root = fs.root();
     let node = fs.lookup(root, b"file").expect("lookup after remount");
@@ -7286,7 +7294,7 @@ fn attributes_are_encrypted_at_rest() {
     let marker_key = b"user.secretmarkerkey";
     let marker_value = b"PLAINTEXT-ATTR-MARKER-9F3A";
     fs.set_attr(node, marker_key, marker_value).expect("set");
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     // Neither the key nor the value appears in cleartext on the raw device.
     assert!(
         !contains_subsequence(&bytes, marker_value),
@@ -7306,7 +7314,7 @@ fn a_read_only_mount_refuses_attribute_mutation() {
         .expect("create");
     let node = fs.lookup(root, b"f").expect("lookup");
     fs.set_attr(node, b"user.k", b"v").expect("set");
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
 
     let mut ro = ARXFS::open_read_only(MemBlock::from_bytes(bytes, 4096, 512), &TEST_KEY)
         .expect("read-only mount");
@@ -7339,7 +7347,7 @@ fn setting_an_attribute_is_one_transaction_and_crash_replay_never_tears() {
         .expect("create");
     let node = base.lookup(root, b"f").expect("lookup");
     base.set_attr(node, b"user.a", b"aaa").expect("set a");
-    let baseline = base.into_block().bytes();
+    let baseline = base.into_block().expect("the volume closes").bytes();
 
     for budget in 0..48u32 {
         let mut dev = MemBlock::from_bytes(baseline.clone(), 512, 256);
@@ -7347,7 +7355,7 @@ fn setting_an_attribute_is_one_transaction_and_crash_replay_never_tears() {
         let mut fs = ARXFS::open(dev, &TEST_KEY).expect("baseline opens");
         let node = fs.lookup(fs.root(), b"f").expect("lookup");
         let _ = fs.set_attr(node, b"user.b", b"bbb");
-        let bytes = fs.into_block().bytes();
+        let bytes = fs.into_block().expect("the volume closes").bytes();
 
         let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY)
             .expect("post-crash mount always succeeds");
@@ -7388,7 +7396,7 @@ fn removing_a_file_frees_its_attribute_block() {
         fs.remove(root, name.as_bytes()).expect("remove");
     }
 
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let free_before = fs_free_count_after_reopen(bytes.clone());
     // A second identical cycle must return to the same free-block count: no
     // slow leak of attribute blocks.
@@ -7399,7 +7407,7 @@ fn removing_a_file_frees_its_attribute_block() {
     let n = fs.lookup(root, b"again").expect("lookup");
     fs.set_attr(n, b"user.a", b"value").expect("set");
     fs.remove(root, b"again").expect("remove");
-    let after = fs_free_count_after_reopen(fs.into_block().bytes());
+    let after = fs_free_count_after_reopen(fs.into_block().expect("the volume closes").bytes());
     assert_eq!(
         free_before, after,
         "attribute blocks leaked across a create/remove cycle"
@@ -7447,7 +7455,7 @@ fn reflink_copies_attributes_independently() {
         get_attr_vec(&mut fs, dst, b"user.tag").as_deref(),
         Some(&b"clone"[..])
     );
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 4096, 512), &TEST_KEY).expect("reopen");
     let dst = fs.lookup(fs.root(), b"copy").expect("copy survives");
     assert_eq!(
@@ -7593,7 +7601,7 @@ fn counted_dir_fixture(files: u32) -> (ARXFS<CountingBlock>, NodeId) {
         fs.write_at(dir, &name, 0, b"hello world").expect("write");
     }
     fs.flush().expect("flush");
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let counting = CountingBlock {
         inner: MemBlock::from_bytes(bytes, 4096, 8192),
         reads: 0,
@@ -7692,8 +7700,15 @@ fn counted_file_fixture() -> (ARXFS<CountingBlock>, NodeId, alloc::vec::Vec<u8>)
         .expect("create");
     assert_eq!(fs.write_at(root, b"f", 0, &body), Ok(body.len()));
     FilesystemWrite::flush(&mut fs).expect("sync");
-    let mut fs =
-        ARXFS::open(counting(fs.into_block().bytes(), 4096, 4096), &TEST_KEY).expect("reopen");
+    let mut fs = ARXFS::open(
+        counting(
+            fs.into_block().expect("the volume closes").bytes(),
+            4096,
+            4096,
+        ),
+        &TEST_KEY,
+    )
+    .expect("reopen");
     let node = fs.lookup(fs.root(), b"f").expect("lookup");
     fs.block_mut().reads = 0;
     (fs, node, body)
@@ -7777,7 +7792,7 @@ fn a_wounded_block_inside_a_coalesced_run_fails_the_read_closed() {
         "the wounded block must sit inside the first run, not start it"
     );
     let phys = data_block_phys(&mut fs, b"f", interior);
-    let mut bytes = fs.into_block().bytes();
+    let mut bytes = fs.into_block().expect("the volume closes").bytes();
     bytes[as_usize(phys) * 4096] ^= 0x01;
 
     let mut fs =
@@ -7821,8 +7836,15 @@ fn a_compressed_cluster_read_asks_the_device_once_for_its_stored_run() {
         ext.stored
     );
 
-    let mut fs =
-        ARXFS::open(counting(fs.into_block().bytes(), 4096, 4096), &TEST_KEY).expect("reopen");
+    let mut fs = ARXFS::open(
+        counting(
+            fs.into_block().expect("the volume closes").bytes(),
+            4096,
+            4096,
+        ),
+        &TEST_KEY,
+    )
+    .expect("reopen");
     fs.block_mut().reads = 0;
     let plain = fs.read_data_cluster(&ext).expect("cluster reads");
     assert_eq!(plain, payload, "the cluster decompresses exactly");
@@ -7899,7 +7921,7 @@ fn a_clean_check_costs_no_barrier_and_its_following_sync_the_transition() {
 #[test]
 fn a_read_only_mount_flush_issues_no_device_flush() {
     let (fs, _dir) = counted_dir_fixture(1);
-    let bytes = fs.into_block().inner.bytes();
+    let bytes = fs.into_block().expect("the volume closes").inner.bytes();
     let counting = CountingBlock {
         inner: MemBlock::from_bytes(bytes, 4096, 8192),
         reads: 0,
@@ -7933,7 +7955,11 @@ fn synced_volume(files: u8) -> (alloc::vec::Vec<u8>, BTreeSet<u64>, u64) {
     FilesystemWrite::flush(&mut fs).expect("sync");
     let used = fs.used_blocks();
     let free = fs.free_count;
-    (fs.into_block().bytes(), used, free)
+    (
+        fs.into_block().expect("the volume closes").bytes(),
+        used,
+        free,
+    )
 }
 
 fn counting(bytes: alloc::vec::Vec<u8>, block_size: u32, blocks: u64) -> CountingBlock {
@@ -7989,7 +8015,7 @@ fn a_volume_that_was_not_synced_rebuilds_its_map_at_the_next_mount() {
         .expect("write");
     let live = fs.used_blocks();
     let free = fs.free_count;
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
 
     let mut reopened = ARXFS::open(counting(bytes, 4096, 2048), &TEST_KEY).expect("reopen");
     assert!(
@@ -8079,7 +8105,7 @@ fn the_allocation_map_region_stays_reserved_under_churn() {
     // The map on the device is still readable, which it would not be had a
     // write landed on it.
     FilesystemWrite::flush(&mut fs).expect("sync");
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let reopened = ARXFS::open(MemBlock::from_bytes(bytes, 512, 1024), &TEST_KEY).expect("open");
     assert!(
         reopened.map_is_stamped_clean(),
@@ -8102,7 +8128,7 @@ fn growing_past_the_region_relays_the_map_and_keeps_the_volume_sound() {
     FilesystemWrite::flush(&mut fs).expect("sync");
     let small_region = fs.map_region_blocks();
 
-    let mut bytes = fs.into_block().bytes();
+    let mut bytes = fs.into_block().expect("the volume closes").bytes();
     bytes.resize(512 * 12000, 0);
     let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 512, 12000), &TEST_KEY).expect("reopen");
     assert_eq!(fs.grow().expect("grow"), 12000 - 3000);
@@ -8125,7 +8151,7 @@ fn growing_past_the_region_relays_the_map_and_keeps_the_volume_sound() {
     let live = fs.used_blocks();
 
     FilesystemWrite::flush(&mut fs).expect("sync");
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let mut reopened =
         ARXFS::open(MemBlock::from_bytes(bytes, 512, 12000), &TEST_KEY).expect("reopen grown");
     assert!(reopened.map_is_stamped_clean(), "the relaid map is adopted");
@@ -8165,7 +8191,7 @@ fn a_links_target_survives_a_remount() {
     let target = b"../relative/with/../dots";
     fs.create_link(root, b"alias", target)
         .expect("create the link");
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
 
     let mut re = ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("reopen");
     let node = re.lookup(re.root(), b"alias").expect("lookup the link");
@@ -8293,7 +8319,7 @@ fn a_link_is_listed_as_a_link_and_its_blocks_are_accounted_as_data() {
     // accounts a link's target blocks as the single-copy data records they
     // are, rather than as a directory's mirrored metadata pairs.
     let live = fs.stats().expect("stats").free_blocks;
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let mut re = ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("reopen");
     assert_eq!(re.stats().expect("stats").free_blocks, live);
 
@@ -8347,7 +8373,7 @@ fn a_volume_declares_the_symlink_feature_only_once_it_holds_a_link() {
     assert_eq!(fs.incompat, superblock::INCOMPAT_SYMLINKS);
 
     // And the declaration is committed, not merely in memory.
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let re = ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("reopen");
     assert_eq!(re.incompat, superblock::INCOMPAT_SYMLINKS);
 }
@@ -8378,7 +8404,7 @@ fn an_unknown_declared_feature_refuses_the_mount_with_its_reason() {
     let generation = fs.generation;
     let root_phys = fs.root_phys;
     let crypto_header = fs.crypto_header;
-    let mut bytes = fs.into_block().bytes();
+    let mut bytes = fs.into_block().expect("the volume closes").bytes();
 
     // Re-seal every ring slot claiming a feature beyond this build's set.
     let sb = Superblock {
@@ -8461,7 +8487,7 @@ fn rescue_counts_a_link_rather_than_extracting_its_target_as_file_bytes() {
     assert_eq!(fs.write_at(root, b"file", 0, b"payload"), Ok(7));
     fs.create_link(root, b"alias", b"/target")
         .expect("create the link");
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
 
     let mut sink = CollectSink::new();
     let report = ARXFS::rescue(
@@ -8496,7 +8522,7 @@ fn an_unreadable_primary_superblock_slot_mounts_from_its_companion() {
     let root = fs.root();
     fs.create(root, b"witness", NodeKind::RegularFile)
         .expect("create");
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     // The committed slot's primary block cannot be read at all.
     let dev = MemBlock::from_bytes(bytes, 512, 256).fail_reads_of(slot_block(1));
 
@@ -8512,7 +8538,7 @@ fn an_unreadable_primary_transaction_root_mounts_from_its_companion() {
     fs.create(root, b"witness", NodeKind::RegularFile)
         .expect("create");
     let root_phys = fs.root_phys;
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let dev = MemBlock::from_bytes(bytes, 512, 256).fail_reads_of(root_phys);
 
     let mut re = ARXFS::open(dev, &TEST_KEY).expect("mount from the companion");
@@ -8527,7 +8553,7 @@ fn an_unreadable_primary_metadata_block_reads_from_its_companion() {
     fs.create(root, b"witness", NodeKind::RegularFile)
         .expect("create");
     let inode_tree_root = fs.inode_tree_root;
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     // A tree node's primary copy is unreadable; the lookup must still work.
     let dev = MemBlock::from_bytes(bytes, 512, 256).fail_reads_of(inode_tree_root);
 
@@ -8616,7 +8642,7 @@ fn the_link_count_survives_a_remount_and_the_rebuilt_free_map_agrees() {
     fs.link(root, b"second", node).expect("add a second name");
 
     let live = fs.stats().expect("stats").free_blocks;
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let mut re = ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("reopen");
     assert_eq!(
         re.stats().expect("stats").free_blocks,
@@ -8692,7 +8718,7 @@ fn a_volume_declares_the_hardlink_feature_only_once_it_holds_one() {
     fs.link(root, b"second", node).expect("add a second name");
     assert_eq!(fs.incompat, superblock::INCOMPAT_HARDLINKS);
 
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let re = ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("reopen");
     assert_eq!(re.incompat, superblock::INCOMPAT_HARDLINKS);
 }
@@ -8821,7 +8847,7 @@ fn rescue_extracts_a_twice_named_inode_once() {
     fs.link(root, b"second", node).expect("add a second name");
     let ino = u32::try_from(node.raw()).expect("inode number");
 
-    let bytes = fs.into_block().bytes();
+    let bytes = fs.into_block().expect("the volume closes").bytes();
     let mut sink = CollectSink::new();
     let report = ARXFS::rescue(
         MemBlock::from_bytes(bytes, 512, 256),
@@ -9398,4 +9424,432 @@ fn rebuilding_free_space_over_a_deep_tree_reproduces_the_live_map() {
         "the rebuild left a bounded map cache (cached {})",
         fs.map_cached_blocks()
     );
+}
+
+// --- the commit scheduler ------------------------------------------------
+//
+// A transaction stays open and the next operation joins it, so the tests
+// below drive a volume whose monotonic clock never advances (the window never
+// elapses) and close the transaction deliberately, or swap in a clock past
+// every class's window to prove the age closes it.
+
+/// A monotonic clock frozen at the mount, so no window ever elapses and every
+/// operation joins the transaction before it.
+fn frozen_monotonic() -> u64 {
+    0
+}
+
+/// A monotonic reading past the widest window any device class is served
+/// with, so swapping to it ages the open transaction out.
+fn monotonic_past_every_window() -> u64 {
+    60_000_000_000
+}
+
+/// A volume whose operations batch: the default `MemBlock` declares the
+/// paravirtual class, so its window is the shortest, and the frozen clock
+/// keeps it open regardless.
+fn fmt_batched(block_size: u32, block_count: u64, inodes: u32) -> ARXFS<MemBlock> {
+    fmt(block_size, block_count, inodes).with_monotonic(frozen_monotonic)
+}
+
+/// Reopen a mid-flight snapshot of the device, exactly as a power loss and a
+/// remount would see it — the driver's staged blocks are not in it.
+fn reopen_device(fs: &mut ARXFS<MemBlock>, block_size: u32, block_count: u64) -> ARXFS<MemBlock> {
+    let bytes = fs.block_mut().bytes();
+    ARXFS::open(
+        MemBlock::from_bytes(bytes, block_size, block_count),
+        &TEST_KEY,
+    )
+    .expect("the committed state remounts")
+}
+
+#[test]
+fn operations_join_one_transaction_until_something_closes_it() {
+    let mut fs = fmt_batched(512, 512, 32);
+    let root = fs.root();
+    for name in [b"one".as_slice(), b"two", b"three"] {
+        fs.create(root, name, NodeKind::RegularFile)
+            .expect("create");
+    }
+    // Nothing has published: a remount of the device as it stands finds the
+    // freshly formatted volume.
+    let mut before = reopen_device(&mut fs, 512, 512);
+    let before_root = before.root();
+    assert_eq!(
+        before.lookup(before_root, b"one"),
+        Err(DriverError::NotFound),
+        "an open transaction must not be visible on the device"
+    );
+
+    fs.flush().expect("sync publishes the batch");
+    let mut after = reopen_device(&mut fs, 512, 512);
+    let after_root = after.root();
+    for name in [b"one".as_slice(), b"two", b"three"] {
+        after
+            .lookup(after_root, name)
+            .expect("every name published");
+    }
+}
+
+#[test]
+fn one_batch_costs_one_commit_where_three_operations_cost_three() {
+    let mut batched = fmt_batched(512, 512, 32);
+    let root = batched.root();
+    let start = batched.generation;
+    for name in [b"one".as_slice(), b"two", b"three"] {
+        batched
+            .create(root, name, NodeKind::RegularFile)
+            .expect("create");
+    }
+    batched.flush().expect("sync");
+    assert_eq!(
+        batched.generation - start,
+        1,
+        "three operations inside the window publish one transaction root"
+    );
+
+    let mut per_op = fmt(512, 512, 32);
+    let root = per_op.root();
+    let start = per_op.generation;
+    for name in [b"one".as_slice(), b"two", b"three"] {
+        per_op
+            .create(root, name, NodeKind::RegularFile)
+            .expect("create");
+    }
+    assert_eq!(
+        per_op.generation - start,
+        3,
+        "with no monotonic clock every operation publishes its own"
+    );
+}
+
+#[test]
+fn an_operation_after_the_window_publishes_the_transaction_it_would_have_joined() {
+    let mut fs = fmt_batched(512, 512, 32);
+    let root = fs.root();
+    fs.create(root, b"early", NodeKind::RegularFile)
+        .expect("create");
+    let published = fs.generation;
+    // Time passes past the window; the next operation must not extend the
+    // transaction it joins.
+    fs = fs.with_monotonic(monotonic_past_every_window);
+    fs.create(root, b"late", NodeKind::RegularFile)
+        .expect("create");
+    assert_eq!(
+        fs.generation,
+        published + 1,
+        "an aged-out transaction publishes at the end of the operation"
+    );
+    let mut disk = reopen_device(&mut fs, 512, 512);
+    let disk_root = disk.root();
+    disk.lookup(disk_root, b"early").expect("early published");
+    disk.lookup(disk_root, b"late").expect("late published");
+}
+
+#[test]
+fn a_refused_operation_leaves_the_batch_it_joined_intact() {
+    let mut fs = fmt_batched(512, 512, 32);
+    let root = fs.root();
+    fs.create(root, b"kept", NodeKind::RegularFile)
+        .expect("create");
+    assert_eq!(fs.write_at(root, b"kept", 0, b"payload"), Ok(7));
+    // An ordinary refusal part-way through a joined operation.
+    assert_eq!(
+        fs.create(root, b"kept", NodeKind::RegularFile),
+        Err(DriverError::AlreadyExists)
+    );
+    assert_eq!(
+        fs.write_at(root, b"absent", 0, b"nothing"),
+        Err(DriverError::NotFound)
+    );
+    fs.flush().expect("sync");
+
+    let mut disk = reopen_device(&mut fs, 512, 512);
+    let disk_root = disk.root();
+    let node = disk.lookup(disk_root, b"kept").expect("the kept name");
+    let mut back = [0u8; 7];
+    assert_eq!(disk.read_at(node, 0, &mut back), Ok(7));
+    assert_eq!(&back, b"payload");
+    assert_eq!(
+        disk.lookup(disk_root, b"absent"),
+        Err(DriverError::NotFound)
+    );
+    assert_eq!(
+        disk.check(&GrantAll, &NullSink).expect("check").structure,
+        StructureVerdict::Sound,
+        "a refused operation inside a batch must leave the volume sound"
+    );
+}
+
+#[test]
+fn an_operation_that_runs_out_of_space_leaves_the_batch_it_joined_readable() {
+    // The failure that mutates before it fails: a write that allocates its
+    // way to the end of the volume. Everything the batch already reported
+    // successful must survive it, byte for byte.
+    let mut fs = fmt_batched(512, 512, 32);
+    let root = fs.root();
+    fs.create(root, b"kept", NodeKind::RegularFile)
+        .expect("create");
+    let body = incompressible(4096);
+    assert_eq!(fs.write_at(root, b"kept", 0, &body), Ok(4096));
+    fs.create(root, b"greedy", NodeKind::RegularFile)
+        .expect("create");
+    // Fill the volume until one write runs out of space part-way through,
+    // after it has already allocated and rewritten tree blocks the batch's
+    // earlier operations also touched.
+    let chunk = incompressible(8192);
+    let mut at = 0u64;
+    let mut refused = false;
+    for _ in 0..64 {
+        match fs.write_at(root, b"greedy", at, &chunk) {
+            Ok(written) => at += written as u64,
+            Err(DriverError::NoSpace) => {
+                refused = true;
+                break;
+            }
+            Err(other) => panic!("unexpected refusal {other:?}"),
+        }
+    }
+    assert!(refused, "the volume must run out of space");
+    fs.flush().expect("sync what survived");
+
+    let mut disk = reopen_device(&mut fs, 512, 512);
+    let disk_root = disk.root();
+    let node = disk.lookup(disk_root, b"kept").expect("the kept name");
+    let mut back = alloc::vec![0u8; 4096];
+    assert_eq!(disk.read_at(node, 0, &mut back), Ok(4096));
+    assert_eq!(back, body);
+    disk.lookup(disk_root, b"greedy").expect("the greedy name");
+    assert_eq!(
+        disk.check(&GrantAll, &NullSink).expect("check").structure,
+        StructureVerdict::Sound
+    );
+}
+
+#[test]
+fn an_unsynced_batch_is_lost_whole_and_leaves_the_prior_state_sound() {
+    let mut fs = fmt_batched(512, 512, 32);
+    let root = fs.root();
+    fs.create(root, b"durable", NodeKind::RegularFile)
+        .expect("create");
+    assert_eq!(fs.write_at(root, b"durable", 0, b"safe"), Ok(4));
+    fs.flush().expect("sync");
+    // A second batch that never closes.
+    fs.create(root, b"volatile", NodeKind::RegularFile)
+        .expect("create");
+    assert_eq!(fs.write_at(root, b"durable", 0, b"lost"), Ok(4));
+
+    let mut disk = reopen_device(&mut fs, 512, 512);
+    let disk_root = disk.root();
+    let node = disk
+        .lookup(disk_root, b"durable")
+        .expect("the durable name");
+    let mut back = [0u8; 4];
+    assert_eq!(disk.read_at(node, 0, &mut back), Ok(4));
+    assert_eq!(&back, b"safe", "consistency is never traded, only recency");
+    assert_eq!(
+        disk.lookup(disk_root, b"volatile"),
+        Err(DriverError::NotFound)
+    );
+    assert_eq!(
+        disk.check(&GrantAll, &NullSink).expect("check").structure,
+        StructureVerdict::Sound
+    );
+}
+
+#[test]
+fn every_barrier_requiring_operation_publishes_the_open_transaction_first() {
+    // Each of these reads or rewrites the committed volume, so none may run
+    // over a volume half of whose state is still staged in RAM.
+    let mut fs = ARXFS::format(
+        MemBlock::new(512, 512).with_discard(1, 0),
+        32,
+        &TEST_KEY,
+        &mut TestEntropy::new(),
+    )
+    .expect("format")
+    .with_clock(fixed_clock)
+    .with_monotonic(frozen_monotonic);
+    let root = fs.root();
+
+    let mut ran = 0;
+    for (name, run) in [
+        (
+            b"a".as_slice(),
+            &(|fs: &mut ARXFS<MemBlock>| fs.trim(&GrantAll, &NullSink).map(|_| ()))
+                as &dyn Fn(&mut ARXFS<MemBlock>) -> Result<(), DriverError>,
+        ),
+        (b"b", &|fs| {
+            fs.scrub(&GrantAll, &NullSink, ScrubBudget::Unlimited)
+                .map(|_| ())
+        }),
+        (b"c", &|fs| fs.check(&GrantAll, &NullSink).map(|_| ())),
+        (b"d", &|fs| fs.health(&GrantAll, &NullSink).map(|_| ())),
+    ] {
+        fs.create(root, name, NodeKind::RegularFile)
+            .expect("create joins the open transaction");
+        assert!(fs.schedule.is_open(), "the transaction stayed open");
+        run(&mut fs).expect("the maintenance pass runs");
+        assert!(
+            !fs.schedule.is_open(),
+            "a barrier-requiring operation must close the transaction first"
+        );
+        let mut disk = reopen_device(&mut fs, 512, 512);
+        let disk_root = disk.root();
+        disk.lookup(disk_root, name)
+            .expect("the joined operation was published before the pass ran");
+        ran += 1;
+    }
+    assert_eq!(ran, 4);
+}
+
+#[test]
+fn growing_a_volume_publishes_the_open_transaction_first() {
+    let mut fs = fmt_batched(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"before", NodeKind::RegularFile)
+        .expect("create");
+    assert!(fs.schedule.is_open());
+    fs.block_mut().enlarge_to(512);
+    assert_eq!(fs.grow(), Ok(256));
+    assert!(!fs.schedule.is_open());
+    let mut disk = reopen_device(&mut fs, 512, 512);
+    let disk_root = disk.root();
+    disk.lookup(disk_root, b"before")
+        .expect("the joined operation was published before the region moved");
+}
+
+#[test]
+fn handing_the_volume_on_publishes_the_open_transaction() {
+    let mut fs = fmt_batched(512, 512, 32);
+    let root = fs.root();
+    fs.create(root, b"handed", NodeKind::RegularFile)
+        .expect("create");
+    let bytes = fs.into_block().expect("the volume closes").bytes();
+    let mut disk = ARXFS::open(MemBlock::from_bytes(bytes, 512, 512), &TEST_KEY).expect("remount");
+    let disk_root = disk.root();
+    disk.lookup(disk_root, b"handed")
+        .expect("handing the volume on published the batch");
+}
+
+#[test]
+fn a_commit_that_loses_reported_operations_freezes_the_handle() {
+    let mut fs = fmt_batched(512, 512, 32);
+    let root = fs.root();
+    fs.create(root, b"reported", NodeKind::RegularFile)
+        .expect("create");
+    assert_eq!(fs.schedule.acknowledged(), 1);
+    // The device stops taking writes before the batch can be published.
+    fs.block_mut().write_fault_after = Some(0);
+    assert!(fs.flush().is_err(), "the sync must fail closed");
+    assert!(
+        fs.read_only,
+        "a handle that can no longer honour an operation it reported must stop \
+         accepting writes"
+    );
+    assert_eq!(
+        fs.create(root, b"more", NodeKind::RegularFile),
+        Err(DriverError::PermissionDenied)
+    );
+    // The volume itself is untouched: the abandoned batch published nothing.
+    fs.block_mut().write_fault_after = None;
+    let mut disk = reopen_device(&mut fs, 512, 512);
+    let disk_root = disk.root();
+    assert_eq!(
+        disk.lookup(disk_root, b"reported"),
+        Err(DriverError::NotFound)
+    );
+    assert_eq!(
+        disk.check(&GrantAll, &NullSink).expect("check").structure,
+        StructureVerdict::Sound
+    );
+}
+
+#[test]
+fn no_operation_leaves_its_savepoint_installed_behind_it() {
+    // A savepoint outliving the operation that took it would record the next
+    // caller's changes against a snapshot nothing will unwind to.
+    let mut fs = fmt_batched(512, 512, 32);
+    let root = fs.root();
+    fs.create(root, b"one", NodeKind::RegularFile)
+        .expect("a successful operation");
+    assert!(!fs.dirty.operation_running());
+    assert_eq!(
+        fs.create(root, b"one", NodeKind::RegularFile),
+        Err(DriverError::AlreadyExists),
+        "a refused operation"
+    );
+    assert!(!fs.dirty.operation_running());
+    fs.rename(root, b"one", root, b"one")
+        .expect("a rename onto the same entry changes nothing");
+    assert!(!fs.dirty.operation_running());
+    fs.flush().expect("sync");
+    assert!(!fs.dirty.operation_running());
+}
+
+#[test]
+fn a_long_batch_of_mixed_operations_and_refusals_publishes_a_sound_volume() {
+    // The interleaving that exercises the savepoint hardest: operations that
+    // free and reuse blocks earlier operations of the same transaction
+    // claimed, with refusals scattered through them, all inside one
+    // transaction.
+    let mut fs = fmt_batched(512, 2048, 64);
+    let root = fs.root();
+    let body = incompressible(3000);
+    for round in 0..8u8 {
+        let name = [b'f', b'0' + round];
+        fs.create(root, &name, NodeKind::RegularFile)
+            .expect("create");
+        assert_eq!(fs.write_at(root, &name, 0, &body), Ok(body.len()));
+        assert_eq!(
+            fs.create(root, &name, NodeKind::RegularFile),
+            Err(DriverError::AlreadyExists),
+            "a refusal part-way through the batch"
+        );
+        fs.truncate(root, &name, 512).expect("truncate");
+        assert_eq!(
+            fs.remove(root, b"absent"),
+            Err(DriverError::NotFound),
+            "another refusal"
+        );
+        if round.is_multiple_of(3) {
+            fs.remove(root, &name).expect("remove");
+        }
+    }
+    assert!(fs.schedule.is_open(), "the whole run was one transaction");
+    fs.flush().expect("sync");
+
+    let mut disk = reopen_device(&mut fs, 512, 2048);
+    let disk_root = disk.root();
+    for round in 0..8u8 {
+        let name = [b'f', b'0' + round];
+        let found = disk.lookup(disk_root, &name);
+        if round.is_multiple_of(3) {
+            assert_eq!(found, Err(DriverError::NotFound), "round {round} removed");
+        } else {
+            let node = found.expect("round survived");
+            let mut back = alloc::vec![0u8; 512];
+            assert_eq!(disk.read_at(node, 0, &mut back), Ok(512));
+            assert_eq!(back, body[..512], "round {round} kept its truncated bytes");
+        }
+    }
+    let report = disk.check(&GrantAll, &NullSink).expect("check");
+    assert_eq!(report.structure, StructureVerdict::Sound, "{report:?}");
+    assert_eq!(report.unrecoverable_findings, 0, "{report:?}");
+}
+
+#[test]
+fn a_commit_that_loses_nothing_reported_leaves_the_handle_writable() {
+    // The single-operation case must behave exactly as it always has: the
+    // caller is told its operation failed, and the volume carries on.
+    let mut fs = fmt(512, 512, 32);
+    let root = fs.root();
+    fs.create(root, b"first", NodeKind::RegularFile)
+        .expect("create");
+    fs.block_mut().write_fault_after = Some(0);
+    assert!(fs.create(root, b"second", NodeKind::RegularFile).is_err());
+    fs.block_mut().write_fault_after = None;
+    assert!(!fs.read_only, "no reported operation was lost");
+    fs.create(root, b"third", NodeKind::RegularFile)
+        .expect("the handle still serves writes");
 }

@@ -42,7 +42,8 @@ no-deferral rule), ahead of everything below it.
 | WB2 | Run coalescer | `ARXFS-WRITEBACK.md` | 17 | WB1 | **done** |
 | WB3 | Fold in the allocation map's dirty pages | `ARXFS-WRITEBACK.md` | 17 | WB1 | **done** |
 | D66 | One `DriverError` per filesystem conflict (defect `OPEN-DEFECTS.md` D66) | `OPEN-DEFECTS.md` | — | — | **done** |
-| WB4 | Commit scheduler | `ARXFS-WRITEBACK.md` | 17 | WB1 | **next** |
+| WB4 | Commit scheduler | `ARXFS-WRITEBACK.md` | 17 | WB1 | **done** |
+| WB-D1 | Kernel write-back expiry timer (defect `ARXFS-WRITEBACK.md` §10) | `ARXFS-WRITEBACK.md` | 17 | WB4 | **next** |
 | WB5 | The bound and memory pressure | `ARXFS-WRITEBACK.md` | 17 | WB1 | planned |
 | WB6 | Hardware acceptance + docs | `ARXFS-WRITEBACK.md` | 17 | WB2–WB5 | planned |
 | M2 | Bounded passes: scrub, discard sweep, health (D-M2/3/4) | `ARXFS-MAINTENANCE.md` | 18 | A2, M1 | planned |
@@ -115,6 +116,18 @@ their reason recorded there, not here:
   of reducing it, so B1 followed WB2, which is now done: the drain gathers its
   ascending order into physical runs against the read path's transfer window, so
   a 64 KiB write costs five device commands against 158 for the same bytes.
+- **WB-D1 is next, because WB4 found it and the no-deferral rule puts a found
+  defect ahead of everything planned.** WB4 made a transaction span operations
+  and gave it a per-device-class dirty-age window, and the chunked case now
+  costs what a single call does. But nothing in the system fires that window on
+  a volume that goes idle: ARXFS has no thread, so between operations no one
+  observes it. Writeback expiry belongs above the driver — a kernel task on a
+  one-shot timer calling the existing `fs_sync`, which is where Linux puts it —
+  and that is kernel work rather than a change to the driver, so it is its own
+  item. Until it lands no host installs the monotonic clock the window is aged
+  against, so a live volume still publishes at every operation and nothing has
+  regressed; wiring the mounts first would trade a bounded exposure for an
+  unbounded one.
 - **M0 and M1 went first, and both are done.** M0 was a hoist plus one
   default-provided query, and it also closed a live reporting defect: a mount
   over a degraded composed array read as `Available`, because a degraded array

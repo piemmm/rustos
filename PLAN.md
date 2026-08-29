@@ -2821,14 +2821,16 @@ four commands. Every commit issues exactly one barrier, save the map's
 once-per-sync-period clean-to-dirty transition, and the figures are identical on
 a 100 TiB volume — as is the cost of the operation *after a refused one*, which a
 rollback that discarded the allocation map instead made scale with the volume's
-metadata (fixed, with the regression test that catches it). Of the
-four causes, one remains: every VFS operation still commits its own transaction
-root and superblock slot (C2, WB4). Closed by WB1: the intra-transaction rewrite
-churn that made 598 of the original 746 writes metadata, 294 of them superseded
-before the commit, is ten writes. Closed by WB2: the drain issued one
-`write_blocks` per staged block where the read path already gathered 64 KiB runs
-and `emmc2` stages 128 blocks per transfer; it now gathers adjacent staged
-blocks the same way, to the same shared bound (C3).
+metadata (fixed, with the regression test that catches it). All four causes are
+closed. WB1: the intra-transaction rewrite churn that made 598 of the original
+746 writes metadata, 294 of them superseded before the commit, is ten writes.
+WB2: the drain issued one `write_blocks` per staged block where the read path
+already gathered 64 KiB runs and `emmc2` stages 128 blocks per transfer; it now
+gathers adjacent staged blocks the same way, to the same shared bound (C3).
+WB4: every VFS operation committed its own transaction root and superblock slot
+(C2); a transaction now spans operations, so the chunked case puts the same 159
+blocks and 79.5 KiB on a 512-byte volume that one call does — 7 commands against
+6, one barrier against sixteen, nothing superseded.
 
 **Durability defect this fixed (`plans/OPEN-DEFECTS.md` D63).** `commit()` wrote
 the copy-on-write blocks, the transaction root, then the superblock slot with
@@ -2863,23 +2865,31 @@ write.
   then restores the clean generation stamp.
 - Discarding the map and re-deriving it from the trees is a **device-fault
   answer only** — a failed stage, page write, or barrier. Every other failure
-  undoes its own marks: an unpublished transaction reserves its deferred frees
-  again and releases its still-private allocations, so a rollback costs the
-  transaction and never the volume. Otherwise a `create` over a taken name — a
-  call that changes nothing, available to anyone who may create a name — makes
-  the next operation walk every tree on the volume, and each repetition does it
-  again.
+  undoes its own marks: a failed operation reserves the frees it deferred,
+  releases the blocks it claimed, and reclaims the private blocks it released,
+  so a rollback costs the operation and never the volume. Otherwise a `create`
+  over a taken name — a call that changes nothing, available to anyone who may
+  create a name — makes the next operation walk every tree on the volume, and
+  each repetition does it again.
+- A transaction **spans operations**, so there are two undo scopes. A failed
+  operation is undone alone, against a savepoint of every block it staged over
+  or discarded, leaving the operations that already joined the transaction as
+  they were — which is what lets one metadata block be rewritten in place across
+  a whole batch. A failed commit abandons the whole transaction back to the last
+  published root, and a handle that had reported operations into it forces
+  itself read-only rather than serving writes it can no longer honour.
 - A dirty block is **pinned memory, not reclaimable cache**: it cannot be
   dropped, only written, so it does not go through
   `tairix_reclaim::ReclaimCache` (whose every class is clean and whose refusal
   path — serve uncached — is meaningless for a block that exists nowhere else).
   It is bounded by back-pressure with a floor of one transaction's working set,
   and pressure shortens the deadline rather than evicting.
-- The dirty-age deadline is a pure function of `Block::device_class()`, which
-  the seam already reports and the driver currently ignores: longest for
+- The dirty-age window is a pure function of `Block::device_class()`: 30 s for
   `Removable` (SD/eMMC — highest per-command cost and the measured bottleneck),
-  middle for `Rotational`, shortest for `SolidState`/`Virtual`. One policy
-  function, never a global constant, never a per-volume knob.
+  15 s for `Rotational`, 5 s for `SolidState`/`Virtual`. One policy function,
+  never a global constant, never a per-volume knob. Ageing it needs a monotonic
+  clock the host installs; a handle without one publishes at every operation
+  rather than deferring durability it cannot measure.
 - `close()` does not sync — POSIX semantics, and write-then-close is exactly the
   workload the batching exists for. `fs_sync` forces a commit and the trailing
   map-page barrier.
@@ -2887,9 +2897,18 @@ write.
   in the stack and it is this one. `plans/SMARTRAM.md` §6.1 already reserves
   dirty data for the filesystem's own write policy.
 
-**Status: WB0–WB3 done** — measurement, the dirty set and commit barrier
-(closing D63), run coalescing (closing C3), and allocation-map integration.
-WB4 is next; WB5–WB6 remain planned.
+**Open defect (WB-D1, `plans/ARXFS-WRITEBACK.md` §10), the next item.** Nothing
+fires the dirty-age window on a volume that goes idle: ARXFS is a synchronous
+driver with no thread, so between operations no one observes the window and the
+exposure is bounded in content but not in time. Writeback expiry belongs above
+the driver — a kernel task on a one-shot timer calling the existing `fs_sync`,
+event-driven so an idle system takes no wakeups — and that is kernel work, not a
+change to the driver. Until it lands no host installs the monotonic clock, so a
+live volume still publishes at every operation and nothing has regressed.
+
+**Status: WB0–WB4 done** — measurement, the dirty set and commit barrier
+(closing D63), run coalescing (closing C3), allocation-map integration, and the
+commit scheduler (closing C2). WB-D1 is next; WB5–WB6 remain planned.
 
 ---
 

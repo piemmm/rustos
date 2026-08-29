@@ -849,13 +849,13 @@ written until invalidation is durable. A failed page write or barrier — under 
 sync or under an eviction — invalidates the in-memory derivation; the next
 allocating operation rebuilds it from the committed trees before proceeding.
 
-A device fault is the *only* thing that provokes that rebuild. An unpublished
-transaction instead undoes its own marks — reserving its deferred frees again and
-releasing its still-private allocations — so a failure costs the transaction and
-never the volume. Otherwise an operation refused for an ordinary reason, such as
-a `create` over a name already taken, would make the next one walk every tree on
-the volume, which is unbounded read amplification from a call that changes
-nothing.
+A device fault is the *only* thing that provokes that rebuild. A failed
+operation instead undoes its own marks — reserving the frees it deferred,
+releasing the blocks it claimed, and reclaiming the private blocks it released —
+so a failure costs the operation and never the volume. Otherwise an operation
+refused for an ordinary reason, such as a `create` over a name already taken,
+would make the next one walk every tree on the volume, which is unbounded read
+amplification from a call that changes nothing.
 
 ## Copy-on-write and the superblock ring
 
@@ -925,6 +925,26 @@ in place**:
   end of the device. The gather buffer is one fallible reservation sized to
   the transaction's longest run, wiped on drop, and a machine too short of
   memory to hold it writes block by block rather than failing the commit.
+- **A transaction spans operations.** It stays open and the next operation
+  joins it, so a burst of small writes costs one transaction root, one ring
+  slot, one barrier, and one write of each metadata block they all rewrite,
+  rather than one of each per call — the same 64 KiB in sixteen calls then puts
+  exactly the blocks and bytes on the device that one call does. It closes on
+  an explicit `fs_sync`, on the dirty-age window expiring, on an operation that
+  needs the committed state to be the whole truth (`trim`, `grow`, `scrub`,
+  `check`, `health`, or widening the incompatible-feature word), or on the
+  volume being handed on. The window is one policy over the device class the
+  block seam reports — widest for removable flash, smallest for a device
+  already cheap per command — and ageing it needs a monotonic clock from the
+  host: a handle without one publishes at every operation rather than deferring
+  durability it cannot measure.
+- **A failed operation is undone alone.** Everything it changes in the staged
+  set and the private-block bookkeeping is recorded as it changes and replayed
+  backwards, so the operations that already joined the transaction — and were
+  reported successful — are left exactly as they were. A failed *commit* is the
+  wider undo: it abandons the whole transaction back to the last published
+  root, and a handle that had reported operations into it forces itself
+  read-only rather than serving writes it can no longer honour.
 
 ## Operations
 
@@ -1145,12 +1165,13 @@ many of those a later write supersedes, the bytes, and the write amplification.
 It also holds the write-back cache's contract — a transaction writes each
 authoritative block once, the shared dirty set drains one request per physical
 run, each ordinary commit and sync issues one barrier, and map pages are ordered
-behind durable invalidation. One assertion
-records the present rather than a goal, and it is the acceptance hook of a later
-stage: sixteen calls still cost far more than one, which the commit scheduler
-converges. The same workloads on a 100 TiB
-volume produce an identical command stream, so the figures are properties of
-the write path and not of the device measured on.
+behind durable invalidation. A second baseline prices the same workloads
+*batched*, where the calls of one window join a single transaction, and asserts
+what the commit scheduler is for: sixteen calls then put the same blocks and the
+same bytes on the device as one call does, behind one barrier, with nothing
+superseded. The same workloads on a 100 TiB volume produce an identical command
+stream, so the figures are properties of the write path and not of the device
+measured on.
 
 The `pjdfstest`-equivalent POSIX suite remains tracked in
 `plans/WIRING.md`.

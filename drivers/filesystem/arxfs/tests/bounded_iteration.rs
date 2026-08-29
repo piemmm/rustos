@@ -373,7 +373,7 @@ fn a_map_rebuild_walks_every_tree_within_a_fixed_budget() {
 
     for (files, runs) in [(20u32, 20u64), (80, 80)] {
         let fs = fragmented_volume(files, runs);
-        let mut device = fs.into_block();
+        let mut device = fs.into_block().expect("the volume closes");
         device.block_count = DEVICE_BLOCKS * 4;
         let mut fs = ARXFS::open(device, &TEST_KEY).expect("reopen on a larger device");
         let (added, peak, allocs) = measure(|| fs.grow());

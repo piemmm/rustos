@@ -280,7 +280,7 @@ pub fn build_image() -> Result<Vec<u8>, DriverError> {
         return Err(DriverError::DeviceFault);
     }
     fs.flush()?;
-    Ok(fs.into_block().into_bytes())
+    Ok(fs.into_block()?.into_bytes())
 }
 
 /// Build the users-root volume: a arxfs image carrying the top-level directories with `/System/Security/Users` holding the
@@ -423,7 +423,7 @@ pub fn build_users_root_image_with_key(
         plant_nested_file(&mut fs, root, components, bytes)?;
     }
     fs.flush()?;
-    Ok(fs.into_block().into_bytes())
+    Ok(fs.into_block()?.into_bytes())
 }
 
 /// Re-export of the single store-planting helper. The

@@ -19,14 +19,128 @@
 //! else, so it can only be written, never dropped. The set performs no I/O —
 //! the owning filesystem does, exactly as [`crate::pagecache`] — so it stays
 //! free of the block device and unit-testable on the host.
+//!
+//! A transaction spans operations ([`CommitScheduler`]), so a failed operation
+//! must undo itself without disturbing the operations that already joined the
+//! transaction and were reported successful. The set therefore keeps a
+//! **savepoint**: each block the running operation changes is remembered as it
+//! stood before, once, and restored if that operation is undone.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
+use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::DriverError;
 use zeroize::Zeroize;
 
 use crate::RunWindow;
+
+/// How long a transaction may stay open before the next operation publishes
+/// it, by the class of device the volume sits on.
+///
+/// The window buys device commands with recency: operations that arrive inside
+/// it fold into one commit — one transaction root, one superblock slot, one
+/// barrier, and one write of each metadata block they all rewrite — and a crash
+/// costs the operations it folded. So the window is widest where a command is
+/// dearest. Removable media pay the most per command and gain the most,
+/// a rotational disk gets its metadata seeks back as sequential runs, and a
+/// device already cheap per command gains little, so it keeps the smallest
+/// exposure. The values are the one policy over the class; nothing tunes them
+/// per volume.
+#[must_use]
+pub(crate) const fn writeback_window_ns(class: BlkDeviceClass) -> u64 {
+    match class {
+        BlkDeviceClass::Removable => 30_000_000_000,
+        BlkDeviceClass::Rotational => 15_000_000_000,
+        BlkDeviceClass::SolidState | BlkDeviceClass::Virtual => 5_000_000_000,
+    }
+}
+
+/// When the open transaction must be published.
+///
+/// A transaction stays open and the next operation joins it, so the commits
+/// — and the barriers, transaction roots, and superblock slots that go with
+/// them — cost one per burst of operations rather than one per operation. It
+/// closes on the first of the dirty-age window expiring, an operation that
+/// needs a barrier for its own correctness, an explicit sync, or the volume
+/// being handed on.
+///
+/// Ageing needs a monotonic clock, and the driver is given one by its host.
+/// Without one there is no window to measure, so every operation publishes:
+/// a host that cannot say how much time has passed does not get to defer
+/// durability.
+pub(crate) struct CommitScheduler {
+    clock: Option<fn() -> u64>,
+    window_ns: u64,
+    /// Monotonic reading at which the open transaction started, or `None`
+    /// when none is open.
+    opened_ns: Option<u64>,
+    /// Operations already reported successful into the open transaction. A
+    /// commit failure loses them, which is what makes the failure more than
+    /// the calling operation's own.
+    acknowledged: u32,
+}
+
+impl CommitScheduler {
+    /// A scheduler for a volume on a device of `class`, with no clock yet.
+    pub(crate) const fn new(class: BlkDeviceClass) -> Self {
+        Self {
+            clock: None,
+            window_ns: writeback_window_ns(class),
+            opened_ns: None,
+            acknowledged: 0,
+        }
+    }
+
+    /// Install the host's monotonic nanosecond clock.
+    pub(crate) const fn set_clock(&mut self, clock: fn() -> u64) {
+        self.clock = Some(clock);
+    }
+
+    /// Note that a transaction is now open, if one was not already.
+    pub(crate) fn opened(&mut self) {
+        if self.opened_ns.is_none() {
+            self.opened_ns = Some(self.clock.map_or(0, |now| now()));
+        }
+    }
+
+    /// Whether a transaction is in flight.
+    pub(crate) const fn is_open(&self) -> bool {
+        self.opened_ns.is_some()
+    }
+
+    /// Note one more operation reported successful into the open transaction.
+    pub(crate) const fn joined(&mut self) {
+        self.acknowledged = self.acknowledged.saturating_add(1);
+    }
+
+    /// Operations reported successful whose work the open transaction still
+    /// holds.
+    pub(crate) const fn acknowledged(&self) -> u32 {
+        self.acknowledged
+    }
+
+    /// The transaction has been published or abandoned.
+    pub(crate) const fn closed(&mut self) {
+        self.opened_ns = None;
+        self.acknowledged = 0;
+    }
+
+    /// Whether the open transaction has reached its window and the operation
+    /// that just finished must publish it.
+    pub(crate) fn expired(&self) -> bool {
+        let (Some(clock), Some(opened_ns)) = (self.clock, self.opened_ns) else {
+            return true;
+        };
+        clock().saturating_sub(opened_ns) >= self.window_ns
+    }
+}
+
+/// One block's staged state before the running operation first changed it.
+struct Prior {
+    phase: WritePhase,
+    bytes: Vec<u8>,
+}
 
 /// Which side of the commit barrier may issue a staged block.
 #[derive(Copy, Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -51,6 +165,9 @@ impl WritePhase {
 /// Sealed blocks waiting for their ordered device drain.
 pub(crate) struct DirtySet {
     entries: BTreeMap<(WritePhase, u64), Vec<u8>>,
+    /// Each block the running operation has changed, as it stood before it
+    /// did — `None` where the set held nothing. Absent between operations.
+    savepoint: Option<BTreeMap<u64, Option<Prior>>>,
     block_size: usize,
 }
 
@@ -60,7 +177,71 @@ impl DirtySet {
     pub(crate) const fn new(block_size: usize) -> Self {
         Self {
             entries: BTreeMap::new(),
+            savepoint: None,
             block_size,
+        }
+    }
+
+    /// Start recording an operation's changes so they can be undone alone.
+    pub(crate) fn begin_operation(&mut self) {
+        self.drop_savepoint();
+        self.savepoint = Some(BTreeMap::new());
+    }
+
+    /// The operation succeeded: its changes are the transaction's now.
+    pub(crate) fn end_operation(&mut self) {
+        self.drop_savepoint();
+    }
+
+    /// Undo the running operation's changes, leaving every block the rest of
+    /// the transaction staged exactly as it was.
+    pub(crate) fn undo_operation(&mut self) {
+        let Some(savepoint) = self.savepoint.take() else {
+            return;
+        };
+        for (phys, prior) in savepoint {
+            for phase in WritePhase::ALL {
+                if let Some(mut bytes) = self.entries.remove(&(phase, phys)) {
+                    bytes.zeroize();
+                }
+            }
+            if let Some(prior) = prior {
+                self.entries.insert((prior.phase, phys), prior.bytes);
+            }
+        }
+    }
+
+    /// Forget the savepoint, wiping the versions it held.
+    fn drop_savepoint(&mut self) {
+        let Some(savepoint) = self.savepoint.take() else {
+            return;
+        };
+        for prior in savepoint.into_values().flatten() {
+            let mut bytes = prior.bytes;
+            bytes.zeroize();
+        }
+    }
+
+    /// Move `phys` as it stands into the running operation's savepoint, the
+    /// first time that operation changes it.
+    ///
+    /// A block the set does not hold is recorded as absent, so undoing the
+    /// operation removes whatever it staged there.
+    fn save_prior(&mut self, phys: u64) {
+        if self
+            .savepoint
+            .as_ref()
+            .is_none_or(|savepoint| savepoint.contains_key(&phys))
+        {
+            return;
+        }
+        let prior = WritePhase::ALL.into_iter().find_map(|phase| {
+            self.entries
+                .remove(&(phase, phys))
+                .map(|bytes| Prior { phase, bytes })
+        });
+        if let Some(savepoint) = self.savepoint.as_mut() {
+            savepoint.insert(phys, prior);
         }
     }
 
@@ -79,6 +260,17 @@ impl DirtySet {
         let block = bytes
             .get(..self.block_size)
             .ok_or(DriverError::BufferTooSmall)?;
+        // An allocation-map page is rebuildable and is written straight out,
+        // so its staging is not undone: dropping its only copy would lose bits
+        // the resident map no longer holds either. Everything that touches the
+        // pre-barrier phase is.
+        if phase == WritePhase::BeforeBarrier
+            || self
+                .entries
+                .contains_key(&(WritePhase::BeforeBarrier, phys))
+        {
+            self.save_prior(phys);
+        }
         if let Some(held) = self.entries.get_mut(&(phase, phys)) {
             held.copy_from_slice(block);
             return Ok(());
@@ -202,6 +394,13 @@ impl DirtySet {
         Ok(())
     }
 
+    /// Whether the running operation has changed anything the set holds.
+    pub(crate) fn operation_changed(&self) -> bool {
+        self.savepoint
+            .as_ref()
+            .is_some_and(|savepoint| !savepoint.is_empty())
+    }
+
     /// Whether `phase` currently holds at least one block.
     pub(crate) fn has(&self, phase: WritePhase) -> bool {
         self.entries
@@ -293,6 +492,7 @@ impl DirtySet {
     /// will reference, so writing them out would cost a device command for
     /// contents no reader can reach.
     pub(crate) fn discard(&mut self, phys: u64) {
+        self.save_prior(phys);
         for phase in WritePhase::ALL {
             if let Some(mut bytes) = self.entries.remove(&(phase, phys)) {
                 bytes.zeroize();
@@ -302,6 +502,7 @@ impl DirtySet {
 
     /// Drop and wipe every block in one ordering phase.
     pub(crate) fn clear_phase(&mut self, phase: WritePhase) {
+        self.drop_savepoint();
         while let Some((&(_, phys), _)) = self.entries.range((phase, 0)..=(phase, u64::MAX)).next()
         {
             if let Some(mut bytes) = self.entries.remove(&(phase, phys)) {
@@ -312,6 +513,7 @@ impl DirtySet {
 
     /// Drop and wipe every staged block.
     pub(crate) fn clear(&mut self) {
+        self.drop_savepoint();
         while let Some((_, mut bytes)) = self.entries.pop_first() {
             bytes.zeroize();
         }
@@ -321,6 +523,14 @@ impl DirtySet {
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    /// Whether an operation's savepoint is installed. Between operations it
+    /// must not be: a stale one would record the next caller's changes against
+    /// a snapshot nothing will unwind to.
+    #[cfg(test)]
+    pub(crate) const fn operation_running(&self) -> bool {
+        self.savepoint.is_some()
     }
 }
 
@@ -335,6 +545,20 @@ mod tests {
     use super::*;
 
     const BS: usize = 512;
+
+    /// Monotonic readings a test walks a transaction across its window with,
+    /// by swapping the clock rather than waiting for one.
+    fn at_zero() -> u64 {
+        0
+    }
+
+    fn just_inside_a_solid_state_window() -> u64 {
+        writeback_window_ns(BlkDeviceClass::SolidState) - 1
+    }
+
+    fn at_a_solid_state_window() -> u64 {
+        writeback_window_ns(BlkDeviceClass::SolidState)
+    }
 
     /// Gather bound wide enough that a test's runs are never window-bounded,
     /// so a test that means to measure adjacency does not measure the bound.
@@ -553,6 +777,164 @@ mod tests {
             set.overlay(0, &mut [0u8; BS + 1]),
             Err(DriverError::BufferTooSmall)
         );
+    }
+
+    #[test]
+    fn each_device_class_is_served_its_own_window() {
+        // Removable media pay the most per command, a rotational disk gets
+        // its metadata seeks back, and a device already cheap per command
+        // keeps the smallest exposure.
+        assert_eq!(
+            writeback_window_ns(BlkDeviceClass::Removable),
+            30_000_000_000
+        );
+        assert_eq!(
+            writeback_window_ns(BlkDeviceClass::Rotational),
+            15_000_000_000
+        );
+        assert_eq!(
+            writeback_window_ns(BlkDeviceClass::SolidState),
+            5_000_000_000
+        );
+        assert_eq!(writeback_window_ns(BlkDeviceClass::Virtual), 5_000_000_000);
+        assert!(
+            writeback_window_ns(BlkDeviceClass::Removable)
+                > writeback_window_ns(BlkDeviceClass::Rotational)
+                && writeback_window_ns(BlkDeviceClass::Rotational)
+                    > writeback_window_ns(BlkDeviceClass::SolidState)
+                && writeback_window_ns(BlkDeviceClass::SolidState) > 0,
+            "the window must widen with the cost of a command, and never vanish"
+        );
+    }
+
+    #[test]
+    fn a_scheduler_with_no_clock_publishes_every_operation() {
+        let mut schedule = CommitScheduler::new(BlkDeviceClass::Removable);
+        schedule.opened();
+        assert!(
+            schedule.expired(),
+            "a window cannot be measured without a clock, so nothing is deferred"
+        );
+    }
+
+    #[test]
+    fn a_transaction_expires_when_its_window_elapses() {
+        let mut schedule = CommitScheduler::new(BlkDeviceClass::SolidState);
+        schedule.set_clock(at_zero);
+        schedule.opened();
+        assert!(schedule.is_open());
+        assert!(!schedule.expired());
+        schedule.set_clock(just_inside_a_solid_state_window);
+        assert!(!schedule.expired());
+        schedule.set_clock(at_a_solid_state_window);
+        assert!(schedule.expired());
+        schedule.closed();
+        assert!(!schedule.is_open());
+    }
+
+    #[test]
+    fn a_closed_transaction_forgets_the_operations_it_carried() {
+        let mut schedule = CommitScheduler::new(BlkDeviceClass::Virtual);
+        schedule.set_clock(at_zero);
+        schedule.opened();
+        schedule.joined();
+        schedule.joined();
+        assert_eq!(schedule.acknowledged(), 2);
+        schedule.closed();
+        assert_eq!(schedule.acknowledged(), 0);
+    }
+
+    #[test]
+    fn undoing_an_operation_restores_what_an_earlier_one_staged() {
+        let mut set = DirtySet::new(BS);
+        set.begin_operation();
+        set.stage(WritePhase::BeforeBarrier, 7, &block(0xAA))
+            .expect("first operation stages");
+        set.end_operation();
+
+        set.begin_operation();
+        set.stage(WritePhase::BeforeBarrier, 7, &block(0xBB))
+            .expect("second operation rewrites it");
+        set.stage(WritePhase::BeforeBarrier, 9, &block(0xCC))
+            .expect("and stages one of its own");
+        set.undo_operation();
+
+        assert_eq!(
+            requests(&mut set, WritePhase::BeforeBarrier, WIDE),
+            alloc::vec![(7, 1, alloc::vec![0xAA])],
+            "the earlier operation's block must survive with its own bytes"
+        );
+    }
+
+    #[test]
+    fn undoing_an_operation_restores_a_block_it_discarded_and_took_again() {
+        // The hard case: a block an earlier operation staged, that this one
+        // frees and immediately reuses for something else.
+        let mut set = DirtySet::new(BS);
+        set.begin_operation();
+        set.stage(WritePhase::BeforeBarrier, 4, &block(0xAA))
+            .expect("first operation stages");
+        set.end_operation();
+
+        set.begin_operation();
+        set.discard(4);
+        set.stage(WritePhase::BeforeBarrier, 4, &block(0xBB))
+            .expect("reuse the freed block");
+        set.undo_operation();
+
+        assert_eq!(
+            requests(&mut set, WritePhase::BeforeBarrier, WIDE),
+            alloc::vec![(4, 1, alloc::vec![0xAA])]
+        );
+    }
+
+    #[test]
+    fn ending_an_operation_keeps_its_changes() {
+        let mut set = DirtySet::new(BS);
+        set.begin_operation();
+        set.stage(WritePhase::BeforeBarrier, 7, &block(0xAA))
+            .expect("stage");
+        set.end_operation();
+        set.begin_operation();
+        set.stage(WritePhase::BeforeBarrier, 7, &block(0xBB))
+            .expect("restage");
+        set.end_operation();
+        set.undo_operation();
+        assert_eq!(
+            requests(&mut set, WritePhase::BeforeBarrier, WIDE),
+            alloc::vec![(7, 1, alloc::vec![0xBB])],
+            "an ended operation has nothing left to undo"
+        );
+    }
+
+    #[test]
+    fn undoing_an_operation_leaves_an_allocation_map_page_staged() {
+        // A map page is written straight out and is rebuildable, so its only
+        // copy must not be dropped by an unrelated operation's failure.
+        let mut set = DirtySet::new(BS);
+        set.begin_operation();
+        set.stage(WritePhase::AfterBarrier, 12, &block(0xDD))
+            .expect("stage a map page");
+        set.undo_operation();
+        assert_eq!(
+            requests(&mut set, WritePhase::AfterBarrier, WIDE),
+            alloc::vec![(12, 1, alloc::vec![0xDD])]
+        );
+    }
+
+    #[test]
+    fn a_savepoint_records_a_block_once_however_often_it_is_rewritten() {
+        let mut set = DirtySet::new(BS);
+        set.begin_operation();
+        set.stage(WritePhase::BeforeBarrier, 7, &block(1))
+            .expect("stage");
+        assert!(set.operation_changed());
+        for fill in 2..8_u8 {
+            set.stage(WritePhase::BeforeBarrier, 7, &block(fill))
+                .expect("rewrite");
+        }
+        set.undo_operation();
+        assert_eq!(set.len(), 0);
     }
 
     #[test]

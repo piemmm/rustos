@@ -1007,7 +1007,16 @@ Minimum acceptance tests:
   run lengths, and barriers — is asserted against a recorded baseline for a
   single-call write, the same bytes in many calls, a small append, and a
   metadata-only create, at both block sizes, and is identical on a 100 TiB
-  volume.
+  volume; a second baseline prices the same workloads batched, where the calls
+  of one window join a single transaction, and requires many calls to cost the
+  blocks, bytes, and single barrier one call costs, with nothing superseded;
+- a transaction spanning operations survives a failure inside one of them: an
+  operation refused before it mutates, and one that runs out of space after it
+  has allocated, each leave every operation already reported into the batch
+  readable byte for byte and the volume sound; an unsynced batch is lost whole
+  and leaves the prior published state sound; each barrier-requiring operation
+  publishes the batch before it runs; and a commit failure that would lose an
+  operation already reported freezes the handle read-only.
 
 Stage 17 (§22) adds, and stage 20 (§23) will add, the remaining tests their
 owning plans enumerate.
@@ -1510,8 +1519,10 @@ staged future work; see §18.)*
 ## 22. Write-back cache, commit batching, and the commit barrier
 
 *Stage 17 — in progress. The dirty block set, commit barrier, run coalescer,
-and allocation-map integration are implemented; the commit scheduler and
-RAM-derived bound are not. The staged design is `plans/ARXFS-WRITEBACK.md`.*
+allocation-map integration, and the commit scheduler are implemented; the
+RAM-derived bound is not, and no host yet installs the monotonic clock the
+dirty-age window is measured against, so a live volume still publishes at every
+operation. The staged design is `plans/ARXFS-WRITEBACK.md`.*
 
 **Commit ordering.** A commit drains every authoritative dirty block *except*
 the superblock slot, issues one `Block::flush()` barrier, then writes the slot.
@@ -1544,16 +1555,32 @@ deferred frees the commit had already applied to the map are reserved back, its
 own blocks stay reserved — and forces itself read-only rather than guessing, so
 whichever of the two roots the device holds stays intact for the next mount.
 
-**A rollback costs the transaction, never the volume.** Undoing an unpublished
-transaction is its own bookkeeping run backwards: the blocks it staged are
-dropped, its deferred frees are reserved again, and its still-private
-allocations are released. Both marks are no-ops where the change they undo never
-reached the map, so the free count is exact either way. This bound is a
-requirement, not an optimisation: an operation refused for an ordinary reason —
-a name already taken, a name not found — changes nothing, and a caller who may
-create a name must not be able to make each refusal walk every tree on the
-volume (§26.2, §26.6). Only a device fault that leaves the map's image genuinely
-ambiguous discards it and re-derives from the committed trees.
+**Two undo scopes, and a rollback costs its own scope, never the volume.** A
+transaction spans operations, so a failed operation and a failed commit undo
+different amounts.
+
+An **operation** that fails is undone alone, leaving the operations that already
+joined the transaction and were reported successful exactly as they were. Every
+change it made to the transaction's staged set and private-block bookkeeping is
+recorded as it is made — the previous version of each block it staged over or
+discarded, the blocks it claimed, the private blocks it released, and the frees
+it deferred — and replayed backwards. This is what lets a transaction rewrite the
+same metadata block across many operations, which is the whole of the batching
+win, without a failure in the last one destroying the first one's work. The
+recorded set is the operation's own working set: an operation refused for an
+ordinary reason — a name already taken, a name not found — changes nothing, and a
+caller who may create a name must not be able to make each refusal walk every
+tree on the volume (§26.2, §26.6). Both map marks are no-ops where the change
+they undo never reached the map, so the free count is exact either way.
+
+A failed **commit**, and a device fault that leaves the map's image genuinely
+ambiguous, abandon the whole transaction back to the last published root. That
+loses the work of every operation already reported successful into it, so a
+handle that made such a report forces itself read-only rather than serving
+writes it can no longer honour; a transaction carrying only the failing
+operation's own work leaves the handle writable, exactly as an unbatched commit
+failure always did. A map image discarded this way is re-derived from the
+committed trees.
 
 **The allocation map's clean stamp is invalidated durably.** The map is adopted
 only when it is stamped clean at the generation the mount selected. Its
@@ -1577,12 +1604,31 @@ mirrors still write directly because neither participates in publication.
 
 **Batching.** A transaction stays open and the next operation joins it, closing
 on the first of: an explicit `fs_sync`; the dirty byte ceiling (back-pressure —
-the writer waits for I/O, the set never grows past it); a dirty-age deadline
-derived from the device class the block seam reports, longest for removable
-flash and shortest for solid-state; an operation that needs a barrier for its
-own correctness (`trim`, `grow`, `scrub`, `check`, `health`, `rescue`,
-`unmount`, or widening the incompatible-feature word); or the handle being
-dropped. `close()` does not sync — POSIX semantics.
+the writer waits for I/O, the set never grows past it); the dirty-age window
+expiring; an operation that needs a barrier for its own correctness (`trim`,
+`grow`, `scrub`, `check`, `health`, or widening the incompatible-feature word);
+or the volume being handed on. `close()` does not sync — POSIX semantics, and
+the write-then-close workloads are exactly the ones batching exists for. The
+offline `rescue` opens its own read-only handle, so it has no transaction to
+close.
+
+The **window** is one policy function over the device class the block seam
+reports: 30 s removable, 15 s rotational, 5 s solid-state and paravirtual. It
+buys device commands with recency — operations inside it fold into one commit,
+one transaction root, one superblock slot, one barrier, and one write of each
+metadata block they all rewrite — so it is widest where a command is dearest and
+smallest where one is already cheap. Nothing tunes it per volume.
+
+Ageing a transaction needs a **monotonic clock**, which only the host can
+supply. A handle given one batches; a handle without one has no window to
+measure and publishes at every operation, so a host that cannot say how much
+time has passed never defers durability.
+
+Measured, on the §16 device-command ledger: the same 64 KiB written in sixteen
+4 KiB calls costs, joined, the same blocks and the same bytes as one call — 159
+blocks and 7 commands against 159 and 6 on a 512-byte volume, 26 and 7 against
+26 and 6 at 4096 — where per operation it cost 64 commands, 335 blocks, and 24
+of them superseded. Nothing in a joined transaction is written twice.
 
 **What is not traded.** Consistency. Nothing is published until the slot, so
 every crash still leaves the prior committed state or the new one, never a torn

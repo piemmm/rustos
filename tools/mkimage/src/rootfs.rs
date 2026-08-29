@@ -176,7 +176,10 @@ pub fn build_root_partition(
     }
 
     fs.flush().map_err(MkimageError::RootPartition)?;
-    Ok(fs.into_block().into_bytes())
+    Ok(fs
+        .into_block()
+        .map_err(MkimageError::RootPartition)?
+        .into_bytes())
 }
 
 /// Create `/Users/<username>` owned by `(uid, gid)`, owner-only
@@ -301,7 +304,10 @@ pub fn build_system_partition(
     }
     plant_network_config(&mut fs, root, network_conf)?;
     fs.flush().map_err(MkimageError::SystemPartition)?;
-    Ok(fs.into_block().into_bytes())
+    Ok(fs
+        .into_block()
+        .map_err(MkimageError::SystemPartition)?
+        .into_bytes())
 }
 
 /// Lay the **writable-state** `/System` subtree under `system` on the

@@ -417,13 +417,33 @@ reserves both candidate roots and forces itself read-only rather than freeing a
 root the device may have published. An explicit `fs_sync` drains rebuildable map
 pages and issues one further barrier before returning.
 
-A rollback is the transaction's own bookkeeping run backwards — its deferred
-frees reserved again, its still-private allocations released — so it costs the
-transaction's size and never the volume's. That bound is what keeps an
-*ordinary* refusal cheap: a create over a name already taken, or a remove of one
-that is not there, changes nothing and must not be able to provoke a walk of
-every tree on the volume, however full it is. Only a device fault that leaves
-the map's image genuinely ambiguous demands the rebuild.
+A transaction **spans operations**: it stays open and the next operation joins
+it, so a burst of small writes costs one transaction root, one ring slot, one
+barrier, and one write of each metadata block they all rewrite — the same
+64 KiB in sixteen calls puts exactly the blocks and bytes on the device that one
+call does. It closes on an explicit `fs_sync`, on the dirty-age window expiring,
+on an operation that needs the committed state to be the whole truth (`trim`,
+`grow`, `scrub`, `check`, `health`, or one that widens the incompatible-feature
+word), or on the volume being handed on. The window is one policy over the
+device class the block seam reports — 30 s removable, 15 s rotational, 5 s
+solid-state and paravirtual, widest where a command is dearest — and ageing it
+needs a monotonic clock the host installs (`ARXFS::with_monotonic`); a handle
+without one publishes at every operation rather than deferring durability it
+cannot measure.
+
+A **failed operation** is undone alone: everything it changed in the staged set
+and the private-block bookkeeping is recorded as it changed and replayed
+backwards, so the operations that already joined the transaction — and were
+reported successful — stand. It costs the operation's own size and never the
+volume's, which is what keeps an *ordinary* refusal cheap: a create over a name
+already taken, or a remove of one that is not there, changes nothing and must
+not be able to provoke a walk of every tree on the volume, however full it is.
+
+A **failed commit** is the wider undo: it abandons the whole transaction back to
+the last published root, and a handle that had reported operations into it
+forces itself read-only rather than serving writes it can no longer honour. A
+device fault that leaves the map's image genuinely ambiguous does the same and
+demands the rebuild; nothing else does.
 
 The blocks and allocation-map pages use the one dirty layer beneath the
 driver's device-write seam (`wcache`): a physical-block-keyed set of sealed
@@ -643,10 +663,11 @@ cost at both block sizes (commands, blocks, blocks superseded, bytes,
 amplification). It also holds the write-back cache's contract: a transaction
 writes each authoritative block once, every ordinary commit and sync issues one
 barrier, map pages share the same bounded run drain, and the drain issues one
-request per physical run rather than one per block. One figure
-is recorded as the present rather than a goal, the acceptance hook of a later
-write-back stage: sixteen calls still cost far more than one. The same workloads
-on a 100 TiB volume produce an identical command stream.
+request per physical run rather than one per block. A second baseline prices the
+same workloads *batched*, where the calls of one window join a single
+transaction: sixteen calls then cost the same blocks and the same bytes as one
+call, behind one barrier, with nothing superseded. The same workloads on a
+100 TiB volume produce an identical command stream.
 
 The 1 GiB filesystem soak (`cargo xtask fssoak --target arxfs`) drives the
 shared cross-filesystem exerciser, and `cargo xtask fuzz` harnesses fuzz the

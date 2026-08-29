@@ -118,7 +118,7 @@ use dedupe::{
 use header::{BlockHeader, BlockType, FORMAT_VERSION, HEADER_LEN, HEADER_MAGIC};
 use superblock::{slot_block, Superblock, RING_BLOCKS, RING_SLOTS};
 use transaction::TxnRoot;
-use wcache::{DirtySet, WritePhase};
+use wcache::{CommitScheduler, DirtySet, WritePhase};
 
 /// Per-driver `DriverHandle` marker returned by [`register`].
 const REGISTER_HANDLE_MARKER: u64 = 0x5275_7374_4653_0002;
@@ -813,14 +813,15 @@ pub struct ARXFS<B: Block> {
     /// structure that bit names, so a volume that never uses one stays
     /// readable by a build that does not know it.
     incompat: u64,
-    saved_inode_tree_root: u64,
-    saved_next_ino: u64,
-    saved_chunk_tree_root: u64,
-    saved_reverse_ref_tree_root: u64,
-    saved_scrub_progress_root: u64,
-    saved_health_baseline_root: u64,
-    saved_incompat: u64,
-    saved_free_count: u64,
+    /// The published state the running operation started from, restored when
+    /// it fails so the transaction it joined is left as the operations before
+    /// it made it.
+    saved_op: Roots,
+    /// The published state the open transaction started from, restored when a
+    /// commit fails and the whole transaction is abandoned.
+    saved_txn: Roots,
+    /// When the open transaction must be published (`wcache` module).
+    schedule: CommitScheduler,
     clock: fn() -> Time64,
     /// When `true`, the handle never mutates the backing device: the
     /// repair-on-read paths (`read_meta`, `read_sb_slot`, `read_txn_root`) skip
@@ -843,10 +844,10 @@ pub struct ARXFS<B: Block> {
     /// the first mutation, so a read-only handle never pays for one.
     tree_edit: Option<btree::TreeEdit>,
     /// Sealed blocks the open transaction has written but not yet sent to the
-    /// device (`wcache` module). Empty between operations: [`Self::commit`]
-    /// drains it and [`Self::rollback`] discards it, and [`Self::stage_block`]
-    /// refuses a read-only handle, so a read-only mount never holds one block
-    /// here nor pays a byte for it.
+    /// device (`wcache` module). [`Self::commit`] drains it,
+    /// [`Self::rollback`] undoes the running operation's share of it, and
+    /// [`Self::stage_block`] refuses a read-only handle, so a read-only mount
+    /// never holds one block here nor pays a byte for it.
     dirty: DirtySet,
 }
 
@@ -855,6 +856,20 @@ struct Published {
     generation: u64,
     root_phys: u64,
     slot: u64,
+}
+
+/// The volume state a transaction publishes, snapshotted so a failed
+/// operation or a failed commit can be put back exactly where it began.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+struct Roots {
+    inode_tree_root: u64,
+    next_ino: u64,
+    chunk_tree_root: u64,
+    reverse_ref_tree_root: u64,
+    scrub_progress_root: u64,
+    health_baseline_root: u64,
+    incompat: u64,
+    free_count: u64,
 }
 
 /// A bounded cursor over one directory's entries.
@@ -988,9 +1003,35 @@ impl<B: Block> ARXFS<B> {
         self
     }
 
-    /// Consume the filesystem and return the backing block device.
-    pub fn into_block(self) -> B {
-        self.block
+    /// Install the host's monotonic nanosecond clock, which is what lets a
+    /// transaction stay open across operations (`wcache` module).
+    ///
+    /// The window a transaction may stay open for is a property of the
+    /// device's class, but ageing it needs a clock that only the host has.
+    /// Without one every operation publishes, so a host that cannot say how
+    /// much time has passed never defers durability.
+    #[must_use]
+    pub fn with_monotonic(mut self, monotonic_ns: fn() -> u64) -> Self {
+        self.schedule.set_clock(monotonic_ns);
+        self
+    }
+
+    /// Publish anything the open transaction still holds and consume the
+    /// filesystem, returning the backing block device.
+    ///
+    /// Handing the volume on is one of the points a transaction closes at: the
+    /// device is about to be read, written, or captured by something that will
+    /// not see the driver's staged blocks, so they go to it first.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the closing commit reports. The device is not returned, because
+    /// a commit that failed leaves the handle holding the only record of what
+    /// happened to the volume and the caller must see that rather than a
+    /// silently older image.
+    pub fn into_block(mut self) -> Result<B, DriverError> {
+        self.close_transaction()?;
+        Ok(self.block)
     }
 
     /// Mutable access to the backing block device, for tests that need to
@@ -1269,14 +1310,22 @@ impl<B: Block> ARXFS<B> {
             // Anything staged for this block names a version of it that no
             // committed or in-flight root will reference, so it never needs to
             // reach the device; a re-use of the block within the transaction
-            // stages its new contents in the same slot.
+            // stages its new contents in the same slot. The set keeps the
+            // version it drops in the running operation's savepoint, so a
+            // block an earlier operation of this transaction staged comes back
+            // if this one is undone.
             self.dirty.discard(phys);
             self.mark_free(phys);
             if let Ok(alloc) = self.allocator_mut() {
                 alloc.txn_private.remove(&phys);
+                if !alloc.op_claimed.contains(&phys) {
+                    alloc.op_released.insert(phys);
+                }
             }
         } else if let Ok(alloc) = self.allocator_mut() {
-            alloc.txn_freed.insert(phys);
+            if alloc.txn_freed.insert(phys) {
+                alloc.op_deferred.insert(phys);
+            }
         }
     }
 
@@ -1373,25 +1422,95 @@ impl<B: Block> ARXFS<B> {
         Ok(())
     }
 
-    /// Reset the per-transaction bookkeeping at the start of an operation and
-    /// snapshot the published tree state so a failed operation can roll back.
+    /// The volume state a commit would publish right now.
+    fn roots(&self) -> Roots {
+        Roots {
+            inode_tree_root: self.inode_tree_root,
+            next_ino: self.next_ino,
+            chunk_tree_root: self.chunk_tree_root,
+            reverse_ref_tree_root: self.reverse_ref_tree_root,
+            scrub_progress_root: self.scrub_progress_root,
+            health_baseline_root: self.health_baseline_root,
+            incompat: self.incompat,
+            free_count: self.free_count,
+        }
+    }
+
+    /// Put the published state back to `roots`. The free count is not restored
+    /// here: it is moved back a block at a time by the undone map marks, so
+    /// that it stays exact when only part of a transaction is undone.
+    fn restore_roots(&mut self, roots: Roots) {
+        self.inode_tree_root = roots.inode_tree_root;
+        self.next_ino = roots.next_ino;
+        self.chunk_tree_root = roots.chunk_tree_root;
+        self.reverse_ref_tree_root = roots.reverse_ref_tree_root;
+        self.scrub_progress_root = roots.scrub_progress_root;
+        self.health_baseline_root = roots.health_baseline_root;
+        self.incompat = roots.incompat;
+    }
+
+    /// Open an operation: join the transaction already in flight, or start
+    /// one, and take the savepoint a failure of *this* operation unwinds to.
+    ///
+    /// Two snapshots, because there are two things that can be undone. An
+    /// operation that fails goes back to where it began, leaving the
+    /// operations that already joined the transaction exactly as they were; a
+    /// commit that fails abandons the whole transaction, so it goes back to
+    /// the last published root.
     fn begin(&mut self) -> Result<(), DriverError> {
         if !self.read_only {
             self.ensure_allocation_map()?;
         }
-        if let Ok(alloc) = self.allocator_mut() {
-            alloc.txn_allocated.clear();
-            alloc.txn_freed.clear();
+        if !self.schedule.is_open() {
+            self.saved_txn = self.roots();
+            self.schedule.opened();
         }
-        self.saved_inode_tree_root = self.inode_tree_root;
-        self.saved_next_ino = self.next_ino;
-        self.saved_chunk_tree_root = self.chunk_tree_root;
-        self.saved_reverse_ref_tree_root = self.reverse_ref_tree_root;
-        self.saved_scrub_progress_root = self.scrub_progress_root;
-        self.saved_health_baseline_root = self.health_baseline_root;
-        self.saved_incompat = self.incompat;
-        self.saved_free_count = self.free_count;
+        self.saved_op = self.roots();
+        if let Ok(alloc) = self.allocator_mut() {
+            alloc.op_claimed.clear();
+            alloc.op_released.clear();
+            alloc.op_deferred.clear();
+        }
+        self.dirty.begin_operation();
         Ok(())
+    }
+
+    /// Close a successful operation: its work belongs to the transaction, and
+    /// the transaction is published when it must be.
+    ///
+    /// It must be when the dirty-age window has expired, when the operation
+    /// widened the incompatible-feature word (the word and the structures it
+    /// names are published together, and a reader must not have to wait for an
+    /// unrelated operation to learn of them), or when the handle has no
+    /// monotonic clock and therefore no window to age against. Otherwise the
+    /// work stays staged and the next operation joins it.
+    ///
+    /// A commit failure here rolls the whole transaction back and is reported
+    /// as this operation's, which is honest: this operation did not happen
+    /// either.
+    fn end_operation(&mut self) -> Result<(), DriverError> {
+        self.dirty.end_operation();
+        if self.schedule.expired() || self.incompat != self.saved_txn.incompat {
+            return self.commit();
+        }
+        self.schedule.joined();
+        Ok(())
+    }
+
+    /// Publish the open transaction, if there is one, before an operation that
+    /// needs the committed state to be the whole truth.
+    ///
+    /// `trim` reads the committed allocation map to decide what may be
+    /// discarded, `grow` moves the map region, and `scrub`, `check`, and
+    /// `health` verify or account for what is on the device — each would
+    /// otherwise read a volume half of whose current state is still in RAM.
+    /// An explicit sync and handing the volume on close it for their own
+    /// reasons.
+    fn close_transaction(&mut self) -> Result<(), DriverError> {
+        if !self.schedule.is_open() || self.read_only {
+            return Ok(());
+        }
+        self.commit()
     }
 
     /// End a pass that changed no authoritative tree state.
@@ -1400,45 +1519,43 @@ impl<B: Block> ARXFS<B> {
     /// array reserved and released again — stay resident: nothing was written,
     /// so nothing needs the invalidation marker until a page actually reaches
     /// the device, and every path that writes one makes the marker durable
-    /// first. A pass that did stage or reserve something after all has a
-    /// transaction to undo like any other.
+    /// first. A pass that did stage or reserve something after all has an
+    /// operation to undo like any other.
     fn finish_unpublished(&mut self) {
         if self.read_only {
             return;
         }
-        let uncommitted = self
-            .allocator()
-            .is_ok_and(|alloc| !alloc.txn_private.is_empty() || !alloc.txn_freed.is_empty())
-            || self.dirty.has(WritePhase::BeforeBarrier);
-        if uncommitted {
+        if self.operation_changed() {
             self.rollback();
             return;
         }
+        self.dirty.end_operation();
         if let Ok(alloc) = self.allocator_mut() {
-            alloc.txn_allocated.clear();
+            alloc.op_claimed.clear();
         }
+        self.settle_transaction();
     }
 
-    fn restore_saved_roots(&mut self) {
-        self.inode_tree_root = self.saved_inode_tree_root;
-        self.next_ino = self.saved_next_ino;
-        self.chunk_tree_root = self.saved_chunk_tree_root;
-        self.reverse_ref_tree_root = self.saved_reverse_ref_tree_root;
-        self.scrub_progress_root = self.saved_scrub_progress_root;
-        self.health_baseline_root = self.saved_health_baseline_root;
-        self.incompat = self.saved_incompat;
+    /// Whether the running operation has claimed, released, or staged
+    /// anything the transaction would carry.
+    fn operation_changed(&self) -> bool {
+        self.allocator().is_ok_and(|alloc| {
+            !alloc.op_claimed.is_empty()
+                || !alloc.op_released.is_empty()
+                || !alloc.op_deferred.is_empty()
+        }) || self.dirty.operation_changed()
     }
 
-    /// Discard an operation that failed before committing: drop every block it
-    /// staged, restore the published tree roots, and put the allocation map
-    /// back as the committed root has it. Nothing was published, so the
-    /// committed on-disk root is untouched.
+    /// Discard an operation that failed: put back the blocks it staged over,
+    /// release the ones it claimed, and restore the published roots to where
+    /// it found them.
     ///
-    /// The pre-barrier phase is this transaction's alone — copy-on-write means
-    /// none of its blocks overwrote one the committed root reaches — so dropping
-    /// them unwritten loses nothing and spares the device the writes. Only that
-    /// phase is dropped: allocation-map bytes are staged in the other one and
-    /// belong to committed state this transaction never owned.
+    /// The transaction it joined is untouched. Operations before it were
+    /// reported successful, so their work stays staged and their roots stand;
+    /// only this operation's changes are unwound, one recorded change at a
+    /// time, so the cost is the operation's own and never the volume's — an
+    /// operation refused for an ordinary reason, like a name already taken,
+    /// must not be able to provoke a walk of every tree on the volume.
     fn rollback(&mut self) {
         // A read-only handle has no transaction to undo, and one that turned
         // itself read-only because a commit's publication is unknown must free
@@ -1447,56 +1564,144 @@ impl<B: Block> ARXFS<B> {
         if self.read_only {
             return;
         }
-        self.dirty.clear_phase(WritePhase::BeforeBarrier);
-        self.restore_saved_roots();
-        self.release_txn_state();
+        if !self.schedule.is_open() {
+            // The transaction this operation was part of has already been
+            // abandoned whole — a failed commit, or a device fault that left
+            // the allocation map's image ambiguous — and the last published
+            // root restored with it. There is nothing left to undo on top of
+            // that, and re-applying this operation's own snapshot would name
+            // blocks that went with it.
+            self.clear_op_state();
+            self.dirty.end_operation();
+            return;
+        }
+        self.release_op_state();
+        self.dirty.undo_operation();
+        self.restore_roots(self.saved_op);
         // The undone allocations bypassed `free_block`, so no per-block
         // invalidation ran: drop everything rather than risk a stale
         // cluster over a recycled run (fail closed).
         if let Some(cache) = self.cluster_cache.as_mut() {
             cache.purge();
         }
+        self.settle_transaction();
     }
 
-    /// Undo the map marks of a transaction that never published, and clear its
-    /// bookkeeping.
+    /// Close the transaction's bookkeeping once nothing is left in it, so a
+    /// pass that published nothing does not leave one nominally open — and the
+    /// next operation dates its window from its own work rather than from a
+    /// transaction that never had any.
+    fn settle_transaction(&mut self) {
+        if self.schedule.acknowledged() == 0 && !self.dirty.has(WritePhase::BeforeBarrier) {
+            self.schedule.closed();
+        }
+    }
+
+    /// Abandon the whole open transaction, published state and all, back to
+    /// the last committed root.
     ///
-    /// This is the transaction's own bookkeeping run backwards, so it costs the
-    /// transaction's size and never the volume's: an unpublished operation —
-    /// including one refused for an ordinary reason like a name already taken —
-    /// must not be able to provoke a walk of every tree on the volume. Both
-    /// marks are no-ops when the change they undo never reached the map, so the
-    /// free count they move is exact either way, becoming so again at the next
-    /// fold where a mark had to be deferred.
-    fn release_txn_state(&mut self) {
-        if self.allocator().is_ok_and(|alloc| alloc.needs_rebuild) {
-            // A device fault already demanded the map be re-derived, so there
-            // is no image left for a per-block undo to correct. Nothing was
-            // published, so the count the committed volume has is the one this
-            // transaction started from.
-            self.free_count = self.saved_free_count;
-            if let Ok(alloc) = self.allocator_mut() {
-                alloc.txn_allocated.clear();
-                alloc.txn_freed.clear();
-                alloc.txn_private.clear();
-            }
+    /// For a failed commit or a device fault that leaves the allocation map's
+    /// image ambiguous — the two cases where what the transaction staged can
+    /// no longer be trusted to reach the device. Operations already reported
+    /// successful into it lose their work, so a handle that made such a report
+    /// freezes read-only rather than carrying on as though it had not: the
+    /// caller was told those operations happened, and this handle can no
+    /// longer make that true.
+    fn abort_transaction(&mut self) {
+        if self.read_only || !self.schedule.is_open() {
             return;
         }
-        self.reserve_deferred_frees();
-        let allocated = match self.allocator_mut() {
-            Ok(alloc) => core::mem::take(&mut alloc.txn_allocated),
+        let acknowledged = self.schedule.acknowledged() > 0;
+        self.release_txn_state();
+        self.dirty.clear_phase(WritePhase::BeforeBarrier);
+        self.restore_roots(self.saved_txn);
+        self.schedule.closed();
+        if let Some(cache) = self.cluster_cache.as_mut() {
+            cache.purge();
+        }
+        self.read_only |= acknowledged;
+    }
+
+    /// Undo the running operation's map marks and private-block bookkeeping.
+    ///
+    /// Released blocks are reclaimed before claimed ones are let go, so a
+    /// block an earlier operation owned, that this one freed and then took
+    /// again, ends up private to that earlier operation exactly as it was.
+    /// Both marks are no-ops when the change they undo never reached the map,
+    /// so the free count they move is exact either way, becoming so again at
+    /// the next fold where a mark had to be deferred.
+    fn release_op_state(&mut self) {
+        if self.allocator().is_ok_and(|alloc| alloc.needs_rebuild) {
+            // A device fault already demanded the map be re-derived, and it
+            // abandoned the transaction with it, so there is nothing left for
+            // a per-block undo to correct.
+            self.clear_op_state();
+            return;
+        }
+        if let Ok(alloc) = self.allocator_mut() {
+            let deferred = core::mem::take(&mut alloc.op_deferred);
+            for block in &deferred {
+                alloc.txn_freed.remove(block);
+            }
+        }
+        let claimed = match self.allocator_mut() {
+            Ok(alloc) => core::mem::take(&mut alloc.op_claimed),
             Err(_) => return,
         };
-        for block in allocated {
-            // A block this transaction allocated and then released again is
-            // already back in the pool; only one that is still private has an
-            // allocation left to undo.
+        for block in claimed {
             if self
                 .allocator_mut()
                 .is_ok_and(|alloc| alloc.txn_private.remove(&block))
             {
                 self.mark_free(block);
             }
+        }
+        let released = match self.allocator_mut() {
+            Ok(alloc) => core::mem::take(&mut alloc.op_released),
+            Err(_) => return,
+        };
+        for block in released {
+            if self
+                .allocator_mut()
+                .is_ok_and(|alloc| alloc.txn_private.insert(block))
+            {
+                self.mark_used(block);
+            }
+        }
+    }
+
+    /// Undo the whole open transaction's map marks and clear its bookkeeping.
+    fn release_txn_state(&mut self) {
+        if self.allocator().is_ok_and(|alloc| alloc.needs_rebuild) {
+            // A device fault already demanded the map be re-derived, so there
+            // is no image left for a per-block undo to correct. Nothing was
+            // published, so the count the committed volume has is the one this
+            // transaction started from.
+            self.free_count = self.saved_txn.free_count;
+            self.clear_op_state();
+            if let Ok(alloc) = self.allocator_mut() {
+                alloc.txn_freed.clear();
+                alloc.txn_private.clear();
+            }
+            return;
+        }
+        self.reserve_deferred_frees();
+        self.clear_op_state();
+        let private = match self.allocator_mut() {
+            Ok(alloc) => core::mem::take(&mut alloc.txn_private),
+            Err(_) => return,
+        };
+        for block in private {
+            self.mark_free(block);
+        }
+    }
+
+    /// Forget the running operation's undo record without applying it.
+    fn clear_op_state(&mut self) {
+        if let Ok(alloc) = self.allocator_mut() {
+            alloc.op_claimed.clear();
+            alloc.op_released.clear();
+            alloc.op_deferred.clear();
         }
     }
 
@@ -1539,26 +1744,30 @@ impl<B: Block> ARXFS<B> {
     /// erode.
     fn freeze_unknown_publication(&mut self) {
         self.reserve_deferred_frees();
-        self.restore_saved_roots();
+        self.restore_roots(self.saved_txn);
         // No allocation will fold a deferred mark on a frozen handle, so state
         // the union's count outright: what the transaction started from, less
         // the blocks it still holds.
         self.free_count = self.allocator().map_or(self.free_count, |alloc| {
-            self.saved_free_count
+            self.saved_txn
+                .free_count
                 .saturating_sub(alloc.txn_private.len() as u64)
         });
+        self.schedule.closed();
         self.read_only = true;
     }
 
     /// Finalize a committed transaction's allocation bookkeeping.
     fn finish_txn(&mut self) {
+        self.schedule.closed();
+        self.dirty.end_operation();
+        self.clear_op_state();
         let Ok(alloc) = self.allocator_mut() else {
             return;
         };
         // Every transaction-private block came from this transaction's
-        // allocations, so clearing both sets releases exactly the same
-        // markers the pair recorded.
-        alloc.txn_allocated.clear();
+        // allocations, so clearing the set releases exactly the markers those
+        // allocations recorded.
         alloc.txn_private.clear();
         let freed = core::mem::take(&mut alloc.txn_freed);
         for block in freed {
@@ -1618,11 +1827,19 @@ impl<B: Block> ARXFS<B> {
         if self.read_only {
             return Err(DriverError::PermissionDenied);
         }
+        // A commit reached without an operation — an internal publish of state
+        // built outside one — is a transaction of its own, so the snapshot a
+        // failure restores is the state this commit started from and not one
+        // an earlier transaction left behind.
+        if !self.schedule.is_open() {
+            self.saved_txn = self.roots();
+            self.schedule.opened();
+        }
         let mut buf = [0u8; MAX_BLOCK_SIZE];
         let published = match self.commit_prepare(&mut buf) {
             Ok(published) => published,
             Err(err) => {
-                self.rollback();
+                self.abort_transaction();
                 return Err(err);
             }
         };
@@ -1708,6 +1925,7 @@ impl<B: Block> ARXFS<B> {
 
     /// Validate device geometry and build a zeroed in-memory volume state.
     fn bootstrap(block: B) -> Result<Self, DriverError> {
+        let class = block.device_class();
         let geo = block.geometry()?;
         let block_size = geo.block_size as usize;
         if !(MIN_BLOCK_SIZE..=MAX_BLOCK_SIZE).contains(&block_size) || !block_size.is_power_of_two()
@@ -1745,14 +1963,9 @@ impl<B: Block> ARXFS<B> {
             // at mount and a feature bit is set by the first use of the
             // structure it names.
             incompat: 0,
-            saved_inode_tree_root: 0,
-            saved_next_ino: 0,
-            saved_chunk_tree_root: 0,
-            saved_reverse_ref_tree_root: 0,
-            saved_scrub_progress_root: 0,
-            saved_health_baseline_root: 0,
-            saved_incompat: 0,
-            saved_free_count: total_blocks,
+            saved_op: Roots::default(),
+            saved_txn: Roots::default(),
+            schedule: CommitScheduler::new(class),
             clock: epoch_clock,
             read_only: false,
             cluster_cache: None,
@@ -2059,6 +2272,9 @@ impl<B: Block> ARXFS<B> {
         if new_total == self.total_blocks {
             return Ok(0);
         }
+        // The map region is about to move, so nothing may still be staged
+        // against where it was.
+        self.close_transaction()?;
         self.ensure_allocation_map()?;
         let old_total = self.total_blocks;
         let old_start = self.alloc_map_start;
@@ -3536,7 +3752,7 @@ impl<B: Block> ARXFS<B> {
         inode.sec = sec;
         inode.times.changed = (self.clock)();
         self.write_inode(ino, &inode)?;
-        self.commit()
+        self.end_operation()
     }
 
     fn create_inner(
@@ -3580,7 +3796,7 @@ impl<B: Block> ARXFS<B> {
         dir_inode.times.modified = now;
         dir_inode.times.changed = now;
         self.write_inode(dir_ino, &dir_inode)?;
-        self.commit()?;
+        self.end_operation()?;
         Ok(NodeId::from_raw(u64::from(child_ino)))
     }
 
@@ -3644,7 +3860,7 @@ impl<B: Block> ARXFS<B> {
         dir_inode.times.modified = now;
         dir_inode.times.changed = now;
         self.write_inode(dir_ino, &dir_inode)?;
-        self.commit()?;
+        self.end_operation()?;
         Ok(NodeId::from_raw(u64::from(child_ino)))
     }
 
@@ -3698,7 +3914,7 @@ impl<B: Block> ARXFS<B> {
         dir_inode.times.modified = now;
         dir_inode.times.changed = now;
         self.write_inode(dir_ino, &dir_inode)?;
-        self.commit()
+        self.end_operation()
     }
 
     /// Drop one name from `child` (inode `child_ino`), freeing its blocks and
@@ -3784,7 +4000,7 @@ impl<B: Block> ARXFS<B> {
         dir_inode.times.modified = now;
         dir_inode.times.changed = now;
         self.write_inode(dir_ino, &dir_inode)?;
-        self.commit()?;
+        self.end_operation()?;
         Ok(NodeId::from_raw(u64::from(dst_ino)))
     }
 
@@ -3845,7 +4061,7 @@ impl<B: Block> ARXFS<B> {
         child.times.modified = now;
         child.times.changed = now;
         self.write_inode(child_ino, &child)?;
-        self.commit()?;
+        self.end_operation()?;
         Ok(written)
     }
 
@@ -3865,7 +4081,7 @@ impl<B: Block> ARXFS<B> {
         child.times.modified = now;
         child.times.changed = now;
         self.write_inode(child_ino, &child)?;
-        self.commit()
+        self.end_operation()
     }
 
     fn remove_inner(&mut self, dir: NodeId, name: &[u8]) -> Result<(), DriverError> {
@@ -3893,7 +4109,7 @@ impl<B: Block> ARXFS<B> {
         dir_inode.times.modified = now;
         dir_inode.times.changed = now;
         self.write_inode(dir_ino, &dir_inode)?;
-        self.commit()
+        self.end_operation()
     }
 
     /// Whether directory `candidate` is `ancestor` itself or lives anywhere
@@ -3942,6 +4158,7 @@ impl<B: Block> ARXFS<B> {
 
         // A rename onto the same entry changes nothing.
         if same_dir && src_name == dst_name {
+            self.finish_unpublished();
             return Ok(());
         }
 
@@ -3973,6 +4190,7 @@ impl<B: Block> ARXFS<B> {
         if let Some(dst_ino) = dst_existing {
             if dst_ino == src_ino {
                 // Source and destination resolve to the same node already.
+                self.finish_unpublished();
                 return Ok(());
             }
             let mut dst_child = self.read_inode(dst_ino)?;
@@ -4033,7 +4251,7 @@ impl<B: Block> ARXFS<B> {
             d.times.changed = now;
             self.write_inode(dst_dir_ino, &d)?;
         }
-        self.commit()
+        self.end_operation()
     }
 
     /// Bytes available for an encoded attribute set inside one metadata block:
@@ -4116,7 +4334,7 @@ impl<B: Block> ARXFS<B> {
         self.write_attrs(&mut inode, ino, &set)?;
         inode.times.changed = (self.clock)();
         self.write_inode(ino, &inode)?;
-        self.commit()
+        self.end_operation()
     }
 
     /// Remove attribute `key` from `node` in one copy-on-write transaction,
@@ -4132,7 +4350,7 @@ impl<B: Block> ARXFS<B> {
         self.write_attrs(&mut inode, ino, &set)?;
         inode.times.changed = (self.clock)();
         self.write_inode(ino, &inode)?;
-        self.commit()
+        self.end_operation()
     }
 }
 
@@ -4345,16 +4563,15 @@ impl<B: Block> FilesystemWrite for ARXFS<B> {
     }
 
     fn flush(&mut self) -> Result<(), DriverError> {
-        // Every mutating operation already copy-on-writes its data and
-        // metadata to the device and publishes the transaction atomically
-        // through the superblock ring, so there is nothing buffered *here*
-        // to write out. What is not yet guaranteed durable is the device's
-        // own volatile write cache: force it to stable media so a caller's
-        // `fs_sync` is a real durability barrier, not a no-op. A read-only
-        // handle never wrote, so it has nothing to commit.
+        // A read-only handle never wrote, so it has nothing to commit.
         if self.read_only {
             return Ok(());
         }
+        // Publish whatever operations have joined the open transaction: this
+        // is the point their callers asked for durability, and the only one
+        // that promises it. The commit's own barrier orders every block the
+        // new root names ahead of the slot that publishes it.
+        self.close_transaction()?;
         // The allocation map is rebuildable, so ordinary commits leave it
         // dirty on the device and exact only in RAM. An explicit sync is the
         // point at which it is worth writing out and stamping clean, so the

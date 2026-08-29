@@ -303,6 +303,8 @@ impl<B: Block> ARXFS<B> {
             );
             return Err(DriverError::PermissionDenied);
         }
+        // Account for what the device holds, not what is still staged for it.
+        self.close_transaction()?;
         self.begin()?;
         match self.check_run() {
             Ok((report, mutated)) => {

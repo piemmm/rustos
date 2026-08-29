@@ -471,6 +471,9 @@ impl<B: Block> ARXFS<B> {
             );
             return Err(DriverError::PermissionDenied);
         }
+        // The pass may scrub, and it stores a baseline of its own, so the
+        // volume it measures must be the committed one.
+        self.close_transaction()?;
         let thresholds = HealthThresholds::DEFAULT;
         let current = self.block.device_health()?;
         let baseline = self.load_health_baseline().unwrap_or(Baseline {
