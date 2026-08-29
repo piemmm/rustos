@@ -1391,6 +1391,60 @@ of row text in total. Each row's text is taken from the block strictly in row
 order and the block must be consumed exactly, so there is no offset to point
 anywhere, no two rows can share bytes, and no text can ride along unread.
 
+### Menus: the declaration, and the per-gesture open
+
+Two operations carry a menu, and they differ in kind. `SetAppBar` is a
+standing, **application**-scoped declaration the caller re-issues to replace
+its whole icon-bar presence. `OpenMenu` is **per gesture** and window-scoped:
+it asks the desktop to bring a chain up now, once, for a window the caller
+owns (`plans/NEW-MENUS.md`). Both share one menu block, so a row record
+cannot be laid out one way by a declaration and another by an open.
+
+The **anchor** is window-local — physical pixels from the requesting window's
+own client origin, exactly the space `WindowEvent::Pointer` reports in, so an
+app anchoring a context menu at the press it just received passes back the
+numbers it was given. It is never seat-global: an app is not told where its
+window sits on screen, and never learns a pointer position inside a menu. It
+is a *region* rather than a point, because that is what the placement rule
+reads — a plate hangs clear of the control that opened it and flips to the
+region's other side at a screen edge — and a zero extent is the point case,
+so a context gesture and a menu-bar button share one rule. Any origin is
+legitimate (the session clamps); only the far edge must be a representable
+coordinate.
+
+A **title** crosses the wire on an open and structurally cannot on a
+declaration: the icon-bar menu is titled from the bundle's signed manifest,
+so an application cannot title system chrome as something it is not, and a
+titled declaration is refused at encode. An open's title is the app's own,
+bounded and content-checked by the very validator a row label goes through.
+An open carrying no rows is refused at both ends — there would be nothing to
+open — where a declaration legitimately offers no menu at all.
+
+The reply is only the **acceptance**, and it carries the session-minted,
+never-reused **open id** (the shared status-plus-minted-id reply frame a
+`Create` also begins with). The whole answer arrives later as exactly one
+`WindowEvent::MenuClosed` naming that id: `Chosen(item)`, `Dismissed`, or
+`Refused(reason)` over a closed reason vocabulary (`NoDisplay`, `SeatBusy`,
+`NoResources`) whose unknown discriminant fails closed. It fits the existing
+fixed `WindowEvent` frame, so an outcome costs every other event nothing.
+
+The id is what makes the answer unmistakable. The engine keys the open to the
+attested window owner, allows one unanswered open per window (a second is
+`AlreadyExists`, which a well-behaved app cannot reach — its chain holds the
+seat's grab, so the press that would open another is consumed there), and
+requires an outcome to name that window's own unanswered open before it is
+delivered, clearing it once the sink accepts. A second outcome for one open
+is therefore refused rather than delivered, and an app that asked again while
+a previous answer was still in its mailbox can tell the two apart instead of
+reading one gesture's dismissal as the next one's. `WindowHost::menu_open_requested`
+defaults to refusing, so a desktop that composes no menu service says so
+rather than accepting a chain nothing will answer — and a refused menu is an
+answer the app reports and carries on from, never a reason to draw one
+itself.
+
+The renderer, the chain's placement, the grab and the dismissal rules are the
+session's menu service; the contract above is what an app sees of them.
+
 An app also sets its own window's **backdrop-blur** radius over the
 channel: `WindowClient::set_backdrop_blur(window_id, radius_px)` sends
 `WindowRequest::SetBackdropBlur`, whose decode refuses a radius above

@@ -8606,6 +8606,11 @@ const DESKTOP_PRESSURE_UNTOUCHED_SLOT: usize = 0;
 /// from the top left and never reach the bar. So the bytes are the same bytes
 /// — unless the desktop drew something else there, which under pressure means
 /// it gave up the decoded artwork and fell back to a built-in glyph.
+///
+/// It is the right bound for the bands `plans/ICONS.md` promises the artwork
+/// through — mild and moderate leave the cache alone — and it is asserted only
+/// for a run that stayed within them
+/// ([`PRESSURE_DEEPENED_MARKER`](tairix_test_desktop_pressure_qemu_aarch64::PRESSURE_DEEPENED_MARKER)).
 const MAX_UNDER_PRESSURE_SLOT_DRIFT: f64 = 0.0;
 
 /// [`ScreendumpPlan`] assertion for the desktop-under-pressure vertical's
@@ -8620,11 +8625,61 @@ fn assert_icons_drawn_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), S
     assert_desktop_wallpaper(t, path, &image, &theme, &[])
 }
 
+/// Whether the run that produced `path` reported its published pressure band
+/// deepening past moderate.
+///
+/// Read from the persisted transcript, which the runner writes before it judges
+/// a pass's dumps. A missing transcript is not treated as "stayed shallow": the
+/// strict assertion would then be applied to a run whose bands are unknown, so
+/// an unreadable log fails closed.
+fn pressure_deepened_past_moderate(t: &QemuTest, path: &Path) -> Result<bool, String> {
+    let log = sibling_serial_log(t, path)?;
+    let text = std::fs::read_to_string(&log).map_err(|e| {
+        format!(
+            "test --qemu ({}): read the transcript {} to scope the artwork assertion: {e}",
+            t.package,
+            log.display(),
+        )
+    })?;
+    Ok(text.contains(tairix_test_desktop_pressure_qemu_aarch64::PRESSURE_DEEPENED_MARKER))
+}
+
+/// The `serial.log` sidecar beside the screendump `path`.
+fn sibling_serial_log(t: &QemuTest, path: &Path) -> Result<PathBuf, String> {
+    let name = path.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
+        format!(
+            "test --qemu ({}): screendump {} has no readable file name",
+            t.package,
+            path.display(),
+        )
+    })?;
+    let stem = name
+        .split_once(&format!(".{DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP}."))
+        .map(|(head, _)| head)
+        .ok_or_else(|| {
+            format!(
+                "test --qemu ({}): screendump {} is not the under-pressure frame, so its                  transcript cannot be named",
+                t.package,
+                path.display(),
+            )
+        })?;
+    Ok(path.with_file_name(format!("{stem}.serial.log")))
+}
+
 /// [`ScreendumpPlan`] assertion for the desktop-under-pressure vertical's
 /// **second** dump, taken once every window is open and the guest has
 /// witnessed the machine leave the normal pressure band: the icon bar still
 /// draws exactly the artwork it drew before.
 fn assert_bar_artwork_survived_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
+    // At severe and critical pressure the desktop gives the decoded artwork up
+    // and the built-in glyph is the honest answer (`plans/ICONS.md`), so the
+    // slot legitimately differs and there is nothing here to assert. The band
+    // is not steerable, and how deep a run goes turns on how much retained
+    // content it accumulated — which is why asserting across every band failed
+    // a busy host and held an idle one.
+    if pressure_deepened_past_moderate(t, path)? {
+        return Ok(());
+    }
     let theme = tairix_theme::Theme::dark();
     let image = read_screendump(t, path)?;
     let drawn = read_screendump(
@@ -10432,13 +10487,14 @@ fn persist_serial(package: &str, path: &Path, serial: &str) -> Result<(), String
 mod tests {
     use super::{
         appbar_pointer_script, autoload_desktop_pointer_script, build_targets,
-        desktop_hover_pointer_script, login_type_plant, persist_serial, qemu_host_budget_for,
-        qemu_job_weight, sidecar_path, FsDisk, PrimePlan, QemuTest, MEMSOAK_PASS_PREFIX,
-        SUPERVISOR_ESC_AT_PROMPT_SCRIPT, SUPERVISOR_ESC_SCRIPT, SUPERVISOR_MOUNT_SCRIPT,
-        TCPECHO_PASS_PREFIX, TCPSERVE_PASS_PREFIX, TESTS, UNLOCK_PASSPHRASE_LINE,
-        UNPROVISIONED_MACHINE_ID_MARKER, VALUE_OPERAND_PHYSICAL_LINE,
-        VALUE_OPERAND_PHYSICAL_MARKER, VALUE_PIPE_PHYSICAL_LINE, VALUE_PIPE_PHYSICAL_MARKER,
-        VALUE_PIPE_WRITE_REFUSED_MARKER,
+        desktop_hover_pointer_script, login_type_plant, persist_serial,
+        pressure_deepened_past_moderate, qemu_host_budget_for, qemu_job_weight, sibling_serial_log,
+        sidecar_path, FsDisk, PrimePlan, QemuTest, DESKTOP_PRESSURE_ICONS_DRAWN_DUMP,
+        DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP, MEMSOAK_PASS_PREFIX, SUPERVISOR_ESC_AT_PROMPT_SCRIPT,
+        SUPERVISOR_ESC_SCRIPT, SUPERVISOR_MOUNT_SCRIPT, TCPECHO_PASS_PREFIX, TCPSERVE_PASS_PREFIX,
+        TESTS, UNLOCK_PASSPHRASE_LINE, UNPROVISIONED_MACHINE_ID_MARKER,
+        VALUE_OPERAND_PHYSICAL_LINE, VALUE_OPERAND_PHYSICAL_MARKER, VALUE_PIPE_PHYSICAL_LINE,
+        VALUE_PIPE_PHYSICAL_MARKER, VALUE_PIPE_WRITE_REFUSED_MARKER,
     };
     use std::time::Duration;
 
@@ -10801,6 +10857,61 @@ mod tests {
     /// both are per-run outputs. Replica zero of a singly-enrolled binary
     /// keeps the plain `<binary>.<ext>` name, so the pull-request matrix's
     /// paths are unchanged.
+    /// The artwork assertion's band scoping resolves the transcript beside the
+    /// frame it is judging, and reads the marker out of it.
+    ///
+    /// The derivation is what decides whether a deep-pressure run is scoped
+    /// out, and it only ever runs on a busy host — so it is pinned here rather
+    /// than left to be exercised by the load that first needed it.
+    #[test]
+    fn the_artwork_assertion_scopes_itself_by_the_transcripts_band_marker() {
+        let pressure = TESTS
+            .iter()
+            .find(|t| t.package == "tairix-test-desktop-pressure-qemu-aarch64")
+            .expect("the pressure vertical is enrolled");
+        let dir = std::env::temp_dir().join("tairix-pressure-band-scope");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let dump = dir.join(format!(
+            "{}.{DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP}.screendump.ppm",
+            pressure.binary
+        ));
+        let log = dir.join(format!("{}.serial.log", pressure.binary));
+        assert_eq!(
+            sibling_serial_log(pressure, &dump).expect("the transcript is named"),
+            log,
+            "the transcript is the frame's own sibling"
+        );
+
+        // A run that stayed within the bands the artwork is promised through.
+        std::fs::write(&log, "boot\ndesktop revealed\n").expect("write");
+        assert!(!pressure_deepened_past_moderate(pressure, &dump).expect("read"));
+
+        // A run that went deeper, where the glyph tier is the honest answer.
+        std::fs::write(
+            &log,
+            format!(
+                "boot\n{}\n",
+                tairix_test_desktop_pressure_qemu_aarch64::PRESSURE_DEEPENED_MARKER
+            ),
+        )
+        .expect("write");
+        assert!(pressure_deepened_past_moderate(pressure, &dump).expect("read"));
+
+        // No transcript at all fails closed rather than reading as shallow,
+        // which would apply the strict bound to a run whose bands are unknown.
+        std::fs::remove_file(&log).expect("remove");
+        assert!(pressure_deepened_past_moderate(pressure, &dump).is_err());
+
+        // A frame that is not the under-pressure one cannot name a transcript.
+        let other = dir.join(format!(
+            "{}.{DESKTOP_PRESSURE_ICONS_DRAWN_DUMP}.screendump.ppm",
+            pressure.binary
+        ));
+        assert!(sibling_serial_log(pressure, &other).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn sidecar_paths_never_collide_across_enrolments_or_replicas() {
         use std::collections::{HashMap, HashSet};

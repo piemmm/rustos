@@ -55,9 +55,11 @@ mod kernel {
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
     use tairix_kernel_core::memstats::MEM_STATS;
-    use tairix_log::{Event, Sink};
+    use tairix_log::{Event, EventId, Level, Sink};
     use tairix_reclaim::PressureBand;
-    use tairix_test_desktop_pressure_qemu_aarch64::{BAR_APP_NAME, WINDOWS_OPENED};
+    use tairix_test_desktop_pressure_qemu_aarch64::{
+        BAR_APP_NAME, PRESSURE_DEEPENED_EVENT, PRESSURE_DEEPENED_MARKER, WINDOWS_OPENED,
+    };
     use tairix_util::fmt::format_hex_u64;
 
     // The canonical QEMU `virt` device tree, dumped and embedded at build
@@ -89,6 +91,9 @@ mod kernel {
         windows_opened: AtomicU32,
         /// The system pressure gauge has published a band above normal.
         left_normal_band: AtomicBool,
+        /// The published band has reached severe or critical, where the
+        /// desktop legitimately gives its decoded artwork up.
+        deepened_past_moderate: AtomicBool,
     }
 
     impl DesktopPressureSink {
@@ -98,6 +103,7 @@ mod kernel {
                 app_launched: AtomicBool::new(false),
                 windows_opened: AtomicU32::new(0),
                 left_normal_band: AtomicBool::new(false),
+                deepened_past_moderate: AtomicBool::new(false),
             }
         }
 
@@ -156,8 +162,24 @@ mod kernel {
         /// spend the frame-allocator lock inside an audit callback, and the
         /// band is refreshed by whoever actually spends the memory.
         fn note_pressure(&self) {
-            if MEM_STATS.published_band() != PressureBand::Normal {
+            let band = MEM_STATS.published_band();
+            if band != PressureBand::Normal {
                 self.left_normal_band.store(true, Ordering::Release);
+            }
+            if !matches!(
+                band,
+                PressureBand::Normal | PressureBand::Mild | PressureBand::Moderate
+            ) && !self.deepened_past_moderate.swap(true, Ordering::AcqRel)
+            {
+                // Straight to the serial sink rather than through the log
+                // macros: this runs inside an audit callback, and emitting an
+                // event there would re-enter the sink that called it.
+                SerialSink::new().write_event(&Event {
+                    level: Level::Info,
+                    id: EventId(PRESSURE_DEEPENED_EVENT),
+                    message: PRESSURE_DEEPENED_MARKER,
+                    fields: &[],
+                });
             }
         }
 

@@ -9,8 +9,8 @@ Binding under `AGENTS.md` (§3, §15.18).
 | M0 | Row model (`AppMenu`) + the icon-bar declaration carrying it | **landed** |
 | M1a | Variable-length request framing: per-op wire length, exact-length decode | **landed** |
 | M1b | Model: per-plate rows, submenu depth, titles, shortcuts, `About`→`Info` | **landed** |
-| M1c | The per-gesture open: anchor in, `Chosen`/`Dismissed`/`Refused` out | next |
-| M1d | Attached-window row kind + its present/arrive/refuse events | planned |
+| M1c | The per-gesture open: anchor in, `Chosen`/`Dismissed`/`Refused` out | **landed** |
+| M1d | Attached-window row kind + its present/arrive/refuse events | next |
 | M2 | The service: bands, drag, arrival-open, attach/detach, grab, lifetime | planned |
 | M3.1 | Migrate `userland/apps/terminal`, delete its shell | planned |
 | M3.2 | Migrate the pinboard backdrop menu, delete its shell | planned |
@@ -32,7 +32,7 @@ stage that closes it carries its regression test (§2.18, §7).
 | D1 | `WindowRequest::from_bytes` accepted a frame longer than the op needs, checking only that the tail was zero. Exact-length framing refuses any trailing byte instead. | **closed in M1a** |
 | D2 | The per-op operand-block end offsets were spelled twice — once implicitly by the encoder, once as a literal in the decoder's `reserved_zero(bytes, 36)` call. One named length per op now serves both (§2.2). | **closed in M1a** |
 | D3 | Exact-length decoding refuses a random-length input before it reaches any operand, so the request decoders' fuzz coverage came to rest on the seeded frames — and only `SetAppBar` had one. `fuzz_decode` now seeds and bit-flips one frame per operation, at its length and one byte either side. | **closed in M1a** |
-| D4 | Menu-child placement exists twice with two rules: `lib/controls`' `Menu::anchored_rect` slides a plate onto the screen, while the bar's own `child_rect` flips a child to its parent's other side. A root at a pointer and a child beside its parent legitimately differ, but the two rules must end up as one owner's (§2.2) rather than one shared and one private to the bar. | M2 |
+| D4 | Menu-child placement exists twice with two rules: `lib/controls`' `Menu::anchored_rect` slides a plate onto the screen, while the bar's own `child_rect` flips a child to its parent's other side. A root at a pointer and a child beside its parent legitimately differ, but the two rules must end up as one owner's (§2.2) rather than one shared and one private to the bar. M1c's wire anchor is a *region* precisely so one rule can serve both: a slot-anchored bar menu and an app's context menu differ only in whether that region has an extent. | M2 |
 | D5 | `AppMenu::push_under` refused a submenu inside a submenu, so the model could not express a chain at all — the one-level bound was load-bearing in the builder, not only in the renderer. Nesting is now bounded by `APP_MENU_MAX_DEPTH` instead, and a submenu on the deepest plate is refused rather than drawn opening nothing. | **closed in M1b** |
 | D6 | A row's text was a widest-case buffer per row, so the three fields `MenuItem` draws (label, accelerator caption, disabled-row reason) would have multiplied by the row bound — and `WindowRequest` carries a menu inline, so the hot `Present` path's own frame would have grown with them. A menu now holds its rows' text in one bounded block (`APP_MENU_TEXT_BYTES`) and the wire carries lengths, not offsets, in row order. | **closed in M1b** |
 | D7 | `lib/window`'s client encoded every request into a fresh `MAX_WIRE_LEN` stack array and the session's serve loop received into one, so both cleared the widest operation's width on every call — including the hot `Present`. M1a made the *frame* per-operation but left these two buffers at the ceiling. Each is now held once for the life of the connection. | **closed in M1b** |
@@ -296,11 +296,12 @@ special case the general chain generalises.
 - ~~Submenu depth, per-plate rows, a root title, accelerator text, and
   `About` → `Info`~~ — landed as M1b, along with the disabled-row reason and
   the role the same control draws.
+- ~~The per-gesture open: an anchor, and the three-way outcome
+  `Chosen(id)` / `Dismissed` / `Refused(reason)` delivered **once** to the
+  requesting window~~ — landed as M1c, with the outcome keyed to a
+  session-minted open id so one gesture's answer cannot read as another's.
 - **A row kind for an app-provided attached window**, plus the present
   request and the arrival/refusal events §1.4 needs.
-- **The per-gesture open**: an anchor, and the three-way outcome
-  `Chosen(id)` / `Dismissed` / `Refused(reason)` delivered **once** to the
-  requesting window.
 
 **And that re-opened M0's transport decision**, settled as decision 1 and
 landed as M1a. M1b then found the same cost in a second place the framing
@@ -366,9 +367,66 @@ is refused at encode rather than being encoded and quietly retitled — an
 application cannot title system chrome as something it is not. M1c's open
 request is where a title crosses the wire.
 
-**M1c — the open.** The per-gesture request carrying an anchor, and the
-three-way outcome `Chosen(id)` / `Dismissed` / `Refused(reason)` delivered
-**once** to the requesting window.
+**M1c — the open (landed).** `WindowRequest::OpenMenu { window_id, anchor,
+menu }` (op 14) is the per-gesture ask: window-scoped rather than
+process-scoped, and not idempotent-replace. It adds no capability — the window
+the caller already owns is the scope, and ownership is the kernel-attested
+identity of the in-flight caller.
+
+The **anchor is window-local** (`MenuAnchor`, physical pixels from the
+requesting window's own client origin), because that is the only space an
+application can speak truthfully: it is never told where its window is, and
+never learns a pointer position inside a menu, so a seat-global anchor would
+have to be fabricated. It is exactly what `WindowEvent::Pointer` already
+reports, so an app anchors a context menu at the press it was handed. It is a
+**region, not a point** — that is what §1's placement rule reads, and a
+zero extent is the point case — so the bar's slot-anchored menus and an app's
+context menu resolve through *one* placement rule rather than the two D4
+already flags. Any origin is legitimate (the session clamps, as
+`CreatePopup`'s offsets already do); only the far edge must be representable,
+which is what leaves the placement arithmetic no unrepresentable input.
+
+The **title crosses here**, carried by the menu itself (`AppMenu::titled`),
+length-prefixed after the rows' text rather than in a widest-case field. A
+declaration still structurally cannot carry one and is refused at encode, so
+§1.1's rule stands: system chrome is titled from the signed manifest. An open
+carrying no rows is refused at both ends, where a declaration legitimately
+offers none. Both operations share **one** menu block codec
+(`write_menu_block`/`read_menu_block`), so a row cannot be laid out one way by
+a declaration and another by an open.
+
+**The outcome is one event, and the open id is what makes it unmistakable.**
+The reply is only the acceptance and carries the session-minted, never-reused
+open id — the shared `WINDOW_MINTED_ID_REPLY_LEN` frame a `Create` reply now
+also begins with, rather than a second near-identical shape. The answer is
+exactly one `WindowEvent::MenuClosed { window_id, open_id, outcome }` with
+`MenuOutcome::{Chosen, Dismissed, Refused}`. **One** kind, not three, so an
+app's handling is a total `match` and the engine's "this event answers an
+open" rule is one variant that cannot drift. It fits the existing fixed
+40-byte event frame (14 of its 24-byte block), so an outcome costs no other
+event a byte — a deliberate choice, since widening that block would have taxed
+every event on the channel.
+
+The id is load-bearing, not decoration: without it an app that asked again
+while a previous answer was still in its mailbox would read one gesture's
+`Dismissed` as the next one's outcome — reachable with no app bug, since a
+keyboard-driven open races a delivered answer. `MenuRefusal` is closed
+(`NoDisplay`, `SeatBusy`, `NoResources`) and an unknown discriminant fails
+closed; a refusal is an answer the app reports and carries on from.
+
+**Exactly-once is enforced, not hoped for.** The engine keys the open to the
+attested owner, holds one unanswered open per window, and requires an outcome
+to name *that window's own* open before delivering it, clearing it when the
+sink accepts. A second outcome for one open is refused; so is an outcome for
+another window's open, or for one already answered. Per *window* rather than
+per seat is what lets M2's singleton close one chain and answer **it** while
+another window's open stands — no engine change, no second slot, and no sink
+threaded through the request path. A second open on a window whose open is
+unanswered is refused (`AlreadyExists`), which a well-behaved app cannot reach:
+while its chain is up the seat's grab consumes the press that would open
+another. `WindowHost::menu_open_requested` defaults to refusing, so a desktop
+composing no menu service fails closed, and a refused open records nothing and
+spends no id.
 
 **M1d — attached windows.** The row kind, the present request §1.4 needs,
 and the arrival/refusal events, including the refusal of a window that
@@ -392,8 +450,10 @@ arrives after the pointer has left its row.
   descendants but not its ancestors; attach/detach and that a submenu cannot
   detach; outside press consumed; Escape closing deepest-first; owner death,
   seat loss, and scale/theme change each answering `Dismissed`; a late
-  attached window refused; and that moving a highlight damages only the two
-  rows that changed.
+  attached window refused; each `MenuRefusal` reason answered where its seat
+  condition arises (a lock screen holding the seat is `SeatBusy`, and an app
+  menu must never appear over one); and that moving a highlight damages only
+  the two rows that changed.
 
 ### M3 — migrate, and delete
 

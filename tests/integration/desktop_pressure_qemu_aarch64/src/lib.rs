@@ -56,3 +56,18 @@ pub const WINDOWS_OPENED: u32 = 32;
 /// runner holds the click that opens the last window until the dump has been
 /// read back and parsed, and that click is what completes the PASS.
 pub const WINDOWS_SHOWN_AT_DUMP: u32 = WINDOWS_OPENED - 1;
+
+/// Serial marker the guest emits, once, when the published pressure band first
+/// deepens past moderate.
+///
+/// The artwork assertion is scoped by it. `plans/ICONS.md` keeps the decoded
+/// artwork through mild and moderate pressure and **gives it up at severe and
+/// critical**, where the built-in glyph is the honest answer — so "the slot is
+/// byte-identical" is a true statement about the shallower bands only, and the
+/// host needs to know which bands a run actually reached. The band is not
+/// steerable (there is no test hook in the pressure path), so the guest reports
+/// what it observed rather than the run asserting against the policy.
+pub const PRESSURE_DEEPENED_MARKER: &str = "desktop pressure band deepened past moderate";
+
+/// Stable log id of the [`PRESSURE_DEEPENED_MARKER`] record.
+pub const PRESSURE_DEEPENED_EVENT: u32 = 4520;

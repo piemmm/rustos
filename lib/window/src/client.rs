@@ -22,8 +22,9 @@ use tairix_abi::input::{
 };
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::window_ipc::{
-    decode_create_reply, decode_desktop_reply, AppBar, PointerAction, WindowEvent, WindowRequest,
-    WindowTitle, WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN,
+    decode_create_reply, decode_desktop_reply, decode_minted_id_reply, AppBar, AppMenu, MenuAnchor,
+    PointerAction, WindowEvent, WindowRequest, WindowTitle, WINDOW_CREATE_REPLY_LEN,
+    WINDOW_DESKTOP_REPLY_LEN, WINDOW_MINTED_ID_REPLY_LEN,
 };
 use tairix_abi::{Errno, ProcId};
 use tairix_geometry::{Point, Rect, Region};
@@ -634,6 +635,53 @@ impl<T: WindowTransport> WindowClient<T> {
     /// [`WindowEvent::PickCancelled`]: tairix_abi::window_ipc::WindowEvent::PickCancelled
     pub fn pick_file(&mut self, window_id: u64) -> Result<(), Errno> {
         self.status_call(&WindowRequest::PickFile { window_id })
+    }
+
+    /// Ask the desktop to open `menu` as a menu chain for this app's window
+    /// `window_id`, anchored at `anchor` in that window's own client pixels
+    /// (`plans/NEW-MENUS.md`).
+    ///
+    /// The app describes and the desktop decides: it supplies the rows, the
+    /// root plate's title ([`AppMenu::titled`]) and the anchor, and the
+    /// session titles, places, draws, grabs, routes, dismisses — and
+    /// answers. Returns the session-minted **open id**: a success is only
+    /// the acceptance, and the whole answer arrives asynchronously as
+    /// exactly one [`WindowEvent::MenuClosed`] naming that id, so the app
+    /// keeps parking on its ordinary event wait.
+    ///
+    /// Match the open id rather than assuming the next outcome is this
+    /// open's: an answer to a previous gesture may still be in the app's
+    /// mailbox when this one is accepted.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::NotSupported`] — the desktop composes no menu service.
+    ///   A menu is incidental to the app's purpose, so the caller reports
+    ///   the refusal and carries on rather than ending, and never draws a
+    ///   menu of its own instead.
+    /// * [`Errno::AlreadyExists`] — an open on this window is still
+    ///   unanswered.
+    /// * [`Errno::NotFound`] — `window_id` is not one of the caller's own
+    ///   windows.
+    /// * [`Errno::OutOfRange`] — an empty menu, which would open nothing;
+    ///   caught by the protocol before any call.
+    /// * A transport failure, or a corrupt reply frame.
+    ///
+    /// [`WindowEvent::MenuClosed`]: tairix_abi::window_ipc::WindowEvent::MenuClosed
+    pub fn open_menu(
+        &mut self,
+        window_id: u64,
+        anchor: MenuAnchor,
+        menu: &AppMenu,
+    ) -> Result<u64, Errno> {
+        let request = WindowRequest::OpenMenu {
+            window_id,
+            anchor,
+            menu: *menu,
+        };
+        let mut reply = [0u8; WINDOW_MINTED_ID_REPLY_LEN];
+        let len = self.call(&request, &mut reply)?;
+        decode_minted_id_reply(&reply[..len])
     }
 
     /// Declare this **application's** presence on the desktop's icon bar:

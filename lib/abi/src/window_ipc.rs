@@ -793,6 +793,173 @@ const PARENT_NONE: u8 = u8::MAX;
 /// so the row bound has to leave it a value of its own.
 const _: () = assert!(APP_MENU_MAX_TOTAL_ROWS < PARENT_NONE as usize);
 
+/// Where a per-gesture menu chain's root plate is anchored, in the
+/// requesting window's own client pixels ([`WindowRequest::OpenMenu`]).
+///
+/// **Window-local, never seat-global.** An application is never told where
+/// its window sits on screen, and never learns a pointer position inside a
+/// menu, so window-local is the only anchor it can state truthfully — and it
+/// is exactly the coordinate space [`WindowEvent::Pointer`] already hands it,
+/// so an application anchoring a context menu at the press it just received
+/// passes back the very numbers it was given. The session resolves the point
+/// against the window's live position and places the chain itself.
+///
+/// It is a **region**, not a point, because that is what the placement rule
+/// reads: a plate hangs clear of the control that opened it and flips to the
+/// region's other side when the screen edge leaves no room. A zero-extent
+/// anchor is the point case — the region is one pixel position — so a
+/// context gesture and a menu-bar button share one placement rule rather
+/// than needing two.
+///
+/// The origin is deliberately unconstrained: any signed offset is a
+/// legitimate ask about a control that is partly scrolled out of view, and
+/// the session clamps the chain onto the screen. Only the far edge is
+/// checked, so the placement arithmetic has no unrepresentable input.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct MenuAnchor {
+    x: i32,
+    y: i32,
+    width_px: u32,
+    height_px: u32,
+}
+
+impl MenuAnchor {
+    /// An anchor region whose top-left is `x`/`y` client pixels from the
+    /// window's own origin. A zero extent anchors at that single point.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] if either far edge is not a representable
+    /// window-local coordinate.
+    pub const fn new(x: i32, y: i32, width_px: u32, height_px: u32) -> Result<Self, Errno> {
+        if x.checked_add_unsigned(width_px).is_none() || y.checked_add_unsigned(height_px).is_none()
+        {
+            return Err(Errno::LengthOutOfRange);
+        }
+        Ok(Self {
+            x,
+            y,
+            width_px,
+            height_px,
+        })
+    }
+
+    /// Client pixels from the window's left edge.
+    #[must_use]
+    pub const fn x(self) -> i32 {
+        self.x
+    }
+
+    /// Client pixels from the window's top edge.
+    #[must_use]
+    pub const fn y(self) -> i32 {
+        self.y
+    }
+
+    /// Width of the anchored region; `0` anchors at a point.
+    #[must_use]
+    pub const fn width_px(self) -> u32 {
+        self.width_px
+    }
+
+    /// Height of the anchored region; `0` anchors at a point.
+    #[must_use]
+    pub const fn height_px(self) -> u32 {
+        self.height_px
+    }
+
+    /// Write the anchor at `at`, in the offsets [`Self::read_at`] reads it
+    /// from, so the two cannot disagree about where it sits.
+    fn write_to(self, out: &mut [u8], at: usize) {
+        put_i32(out, at, self.x);
+        put_i32(out, at + 4, self.y);
+        put_u32(out, at + 8, self.width_px);
+        put_u32(out, at + 12, self.height_px);
+    }
+
+    /// Decode and validate the anchor at `at`, refusing an unrepresentable
+    /// far edge through the very constructor a builder goes through.
+    fn read_at(bytes: &[u8], at: usize) -> Result<Self, Errno> {
+        Self::new(
+            read_i32(bytes, at),
+            read_i32(bytes, at + 4),
+            read_u32(bytes, at + 8),
+            read_u32(bytes, at + 12),
+        )
+    }
+}
+
+/// Why an accepted menu open never brought a chain up
+/// ([`MenuOutcome::Refused`]).
+///
+/// Closed, and an unknown discriminant on decode fails closed rather than
+/// being guessed at. Every reason is a fact about the **seat**, not about the
+/// request — a malformed or unauthorised request is refused by the open
+/// call itself and mints no open at all — so each one tells the application
+/// whether asking again could ever help.
+#[repr(u16)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum MenuRefusal {
+    /// The desktop has no seat output to place a chain on, or is tearing its
+    /// session down. Asking again will not help.
+    NoDisplay = 1,
+    /// A surface a menu may not displace holds the seat's input — a lock
+    /// screen, a system-modal prompt. The application may ask again later;
+    /// it must never be able to draw over one itself.
+    SeatBusy = 2,
+    /// The desktop could not compose the chain's own surfaces. Transient
+    /// under memory pressure, so the application may ask again.
+    NoResources = 3,
+}
+
+impl MenuRefusal {
+    /// Recover a refusal reason from its wire discriminant.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for an unknown value (fail closed — never
+    /// guess why the desktop refused).
+    const fn from_u16(raw: u16) -> Result<Self, Errno> {
+        match raw {
+            1 => Ok(Self::NoDisplay),
+            2 => Ok(Self::SeatBusy),
+            3 => Ok(Self::NoResources),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+
+    /// The wire discriminant of this reason.
+    const fn as_u16(self) -> u16 {
+        self as u16
+    }
+}
+
+/// What became of one accepted menu open: the whole answer, delivered
+/// exactly once ([`WindowEvent::MenuClosed`]).
+///
+/// One type rather than three events, so an application's handling is a
+/// total `match` the compiler checks and the engine's "this event answers an
+/// open" rule is one variant that cannot drift as the cases grow.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum MenuOutcome {
+    /// The user chose the row carrying this id. The session never
+    /// interprets an id, and never sends one the opened menu did not carry.
+    Chosen(AppMenuItemId),
+    /// The chain closed without a choice: pressed outside, dismissed with
+    /// Escape, displaced by another open, or ended with the seat or the
+    /// owning window.
+    Dismissed,
+    /// The chain never came up, for the stated reason.
+    Refused(MenuRefusal),
+}
+
+/// Wire discriminant of [`MenuOutcome::Chosen`].
+const MENU_OUTCOME_CHOSEN: u16 = 1;
+/// Wire discriminant of [`MenuOutcome::Dismissed`].
+const MENU_OUTCOME_DISMISSED: u16 = 2;
+/// Wire discriminant of [`MenuOutcome::Refused`].
+const MENU_OUTCOME_REFUSED: u16 = 3;
+
 /// A validated window title: bounded UTF-8 with no control characters.
 ///
 /// The title crosses a trust boundary into the session's taskbar and
@@ -1148,6 +1315,41 @@ pub enum WindowRequest {
     /// from the bundle the kernel attested owns the caller — never from
     /// anything the caller claims.
     SetAppBar(AppBar),
+    /// Open a menu chain for the caller's own window `window_id`, anchored
+    /// at `anchor` in that window's client pixels.
+    ///
+    /// **Per gesture, not a standing declaration.** Unlike
+    /// [`Self::SetAppBar`] — which the caller re-issues to replace an
+    /// application's whole icon-bar presence — this one asks for a chain to
+    /// come up *now*, once, for a window the caller owns. The reply is only
+    /// the acceptance: it carries the session-minted, never-reused **open
+    /// id**, and the chain's whole answer arrives later as exactly one
+    /// [`WindowEvent::MenuClosed`] naming that id.
+    ///
+    /// The application describes and the desktop decides: it sends the row
+    /// model, the plate's title (carried by the menu itself,
+    /// [`AppMenu::titled`]) and the anchor, and the session titles, places,
+    /// draws, grabs, routes, dismisses, and answers. Nothing here can pin a
+    /// chain open, and an empty menu is refused — there would be nothing to
+    /// open.
+    ///
+    /// It carries no capability: asking is scoped by the window the caller
+    /// already owns, and ownership is the kernel-attested identity of the
+    /// in-flight caller, never the named id. One open may be accepted per
+    /// window; while one is unanswered a second is refused
+    /// (`AlreadyExists`), which an application cannot legitimately reach —
+    /// while its chain is up the seat's grab consumes the press that would
+    /// have opened another.
+    OpenMenu {
+        /// The caller's own window the chain belongs to and its outcome is
+        /// delivered to (from the `Create` reply).
+        window_id: u64,
+        /// Where the root plate is anchored, in that window's client
+        /// pixels.
+        anchor: MenuAnchor,
+        /// The rows to open, and the title of the root plate's band.
+        menu: AppMenu,
+    },
 }
 
 /// Wire operation discriminant of [`WindowRequest::Create`].
@@ -1170,6 +1372,8 @@ const OP_CREATE_POPUP: u16 = 11;
 const OP_SET_TITLE: u16 = 12;
 /// Wire operation discriminant of [`WindowRequest::SetAppBar`].
 const OP_SET_APP_BAR: u16 = 13;
+/// Wire operation discriminant of [`WindowRequest::OpenMenu`].
+const OP_OPEN_MENU: u16 = 14;
 
 /// Encoded size of every request's header: magic (4), version (2), op (2).
 ///
@@ -1265,21 +1469,72 @@ const APP_MENU_ROW_REASON_LEN_OFFSET: usize = 5;
 /// Byte offset, within one row record, of its item id.
 const APP_MENU_ROW_ID_OFFSET: usize = 6;
 
+/// Encoded size of the menu block a request carries: one fixed-width record
+/// per declared row, then those rows' text in row order.
+///
+/// The one operand block whose length depends on the value it carries, and
+/// the reason two operations are variable-length: a menu costs exactly the
+/// rows it declares and exactly the text they say, so a frame never pays for
+/// what a menu does not have and the counts and the frame length cannot
+/// disagree.
+const fn menu_block_len(rows: usize, text: usize) -> usize {
+    rows * APP_MENU_ROW_WIRE_LEN + text
+}
+
 /// Encoded size of a [`WindowRequest::SetAppBar`] declaring `rows` rows
 /// whose text runs to `text` bytes.
-///
-/// The only operation whose length depends on its value: a declaration
-/// carries exactly the rows it declares and exactly the text they say, so
-/// the frame does not pay for what a menu does not have and the counts and
-/// the frame length cannot disagree.
 const fn app_bar_wire_len(rows: usize, text: usize) -> usize {
-    APP_BAR_ROWS_OFFSET + rows * APP_MENU_ROW_WIRE_LEN + text
+    APP_BAR_ROWS_OFFSET + menu_block_len(rows, text)
 }
 
 /// Encoded size of the longest possible [`WindowRequest::SetAppBar`]: a
 /// declaration holding [`APP_MENU_MAX_TOTAL_ROWS`] rows and the whole of
 /// [`APP_MENU_TEXT_BYTES`].
 const APP_BAR_MAX_WIRE_LEN: usize = app_bar_wire_len(APP_MENU_MAX_TOTAL_ROWS, APP_MENU_TEXT_BYTES);
+
+/// Encoded size of a [`MenuAnchor`]: the signed origin then the extent, as
+/// [`MenuAnchor::write_to`] lays them out.
+const MENU_ANCHOR_WIRE_LEN: usize = 16;
+
+/// Byte offset of a [`WindowRequest::OpenMenu`]'s anchor, immediately after
+/// the window the chain belongs to.
+const OPEN_MENU_ANCHOR_OFFSET: usize = 16;
+/// Byte offset of the length of an open's root-plate title.
+const OPEN_MENU_TITLE_LEN_OFFSET: usize = OPEN_MENU_ANCHOR_OFFSET + MENU_ANCHOR_WIRE_LEN;
+/// Byte offset of an open's declared row count.
+const OPEN_MENU_ROW_COUNT_OFFSET: usize = OPEN_MENU_TITLE_LEN_OFFSET + 1;
+/// Byte offset of the length of an open's rows' text block.
+const OPEN_MENU_TEXT_LEN_OFFSET: usize = OPEN_MENU_ROW_COUNT_OFFSET + 1;
+/// Byte offset of the first of an open's fixed-width row records. The rows'
+/// text follows the last of them, and the title's text follows that.
+const OPEN_MENU_ROWS_OFFSET: usize = OPEN_MENU_TEXT_LEN_OFFSET + 2;
+
+/// Encoded size of a [`WindowRequest::OpenMenu`] carrying `rows` rows whose
+/// text runs to `text` bytes, under a `title` of that many bytes.
+///
+/// The title is length-prefixed and trails the rows' text rather than
+/// occupying a widest-case field, for the same reason a row's own text does:
+/// a menu costs what it says.
+const fn open_menu_wire_len(rows: usize, text: usize, title: usize) -> usize {
+    OPEN_MENU_ROWS_OFFSET + menu_block_len(rows, text) + title
+}
+
+/// Encoded size of the longest possible [`WindowRequest::OpenMenu`]: the
+/// widest menu under the widest title.
+const OPEN_MENU_MAX_WIRE_LEN: usize = open_menu_wire_len(
+    APP_MENU_MAX_TOTAL_ROWS,
+    APP_MENU_TEXT_BYTES,
+    APP_MENU_LABEL_MAX,
+);
+
+/// The larger of two encoded lengths.
+const fn longer(a: usize, b: usize) -> usize {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
 
 /// The only flag bit [`WindowRequest::SetAppBar`]'s flag byte defines:
 /// the application handles the primary click itself.
@@ -1313,11 +1568,10 @@ impl WindowRequest {
     /// It is a *ceiling*, not the frame shape: each operation encodes to its
     /// own [`wire_len`](Self::wire_len), so a short operation sends a short
     /// frame rather than padding out to this.
-    pub const MAX_WIRE_LEN: usize = if CREATE_WIRE_LEN > APP_BAR_MAX_WIRE_LEN {
-        CREATE_WIRE_LEN
-    } else {
-        APP_BAR_MAX_WIRE_LEN
-    };
+    pub const MAX_WIRE_LEN: usize = longer(
+        CREATE_WIRE_LEN,
+        longer(APP_BAR_MAX_WIRE_LEN, OPEN_MENU_MAX_WIRE_LEN),
+    );
 
     /// Encoded size of `self`: the header plus this operation's own operand
     /// block.
@@ -1339,6 +1593,11 @@ impl WindowRequest {
             Self::SetAppBar(ref bar) => {
                 app_bar_wire_len(bar.menu.len(), bar.menu.text_len as usize)
             }
+            Self::OpenMenu { ref menu, .. } => open_menu_wire_len(
+                menu.len(),
+                menu.text_len as usize,
+                menu.title.len_byte() as usize,
+            ),
         }
     }
 
@@ -1354,16 +1613,10 @@ impl WindowRequest {
     /// * [`Errno::BufferTooSmall`] — `out` cannot hold the whole frame.
     /// * [`Errno::OutOfRange`] — a [`SetAppBar`](Self::SetAppBar) whose menu
     ///   states a title of its own, which an icon-bar menu never does
-    ///   ([`AppMenu::titled`]).
+    ///   ([`AppMenu::titled`]), or an [`OpenMenu`](Self::OpenMenu) carrying
+    ///   no rows, which would open nothing.
     pub fn encode(&self, out: &mut [u8]) -> Result<usize, Errno> {
-        // An icon-bar menu is titled from the bundle's signed manifest, so
-        // the declaration has no title field to carry one and a menu that
-        // states its own is refused rather than silently retitled.
-        if let Self::SetAppBar(bar) = self {
-            if !bar.menu.title().is_empty() {
-                return Err(Errno::OutOfRange);
-            }
-        }
+        self.encodable()?;
         let len = self.wire_len();
         let Some(frame) = out.get_mut(..len) else {
             return Err(Errno::BufferTooSmall);
@@ -1374,6 +1627,22 @@ impl WindowRequest {
         put_u16(frame, 6, self.op());
         self.write_operands(frame);
         Ok(len)
+    }
+
+    /// Whether `self` holds a value the wire carries at all, checked before
+    /// a byte is written so a refusal leaves `out` untouched.
+    ///
+    /// Both cases are shapes the decoder refuses too, so a client cannot
+    /// send a frame the session would only reject.
+    fn encodable(&self) -> Result<(), Errno> {
+        match *self {
+            // An icon-bar menu is titled from the bundle's signed manifest,
+            // so the declaration has no title field to carry one and a menu
+            // that states its own is refused rather than silently retitled.
+            Self::SetAppBar(ref bar) if !bar.menu.title.is_empty() => Err(Errno::OutOfRange),
+            Self::OpenMenu { ref menu, .. } if menu.is_empty() => Err(Errno::OutOfRange),
+            _ => Ok(()),
+        }
     }
 
     /// The wire operation discriminant of `self`, which
@@ -1390,6 +1659,7 @@ impl WindowRequest {
             Self::SetBackdropBlur { .. } => OP_SET_BACKDROP_BLUR,
             Self::QueryDesktop => OP_QUERY_DESKTOP,
             Self::SetAppBar(_) => OP_SET_APP_BAR,
+            Self::OpenMenu { .. } => OP_OPEN_MENU,
         }
     }
 
@@ -1469,6 +1739,11 @@ impl WindowRequest {
             }
             Self::QueryDesktop => {}
             Self::SetAppBar(ref bar) => write_app_bar(out, bar),
+            Self::OpenMenu {
+                window_id,
+                anchor,
+                ref menu,
+            } => write_open_menu(out, window_id, anchor, menu),
         }
     }
 
@@ -1529,14 +1804,15 @@ impl WindowRequest {
     ///   operation needs, or a dirty title tail.
     /// * [`Errno::AbiVersionUnsupported`] — not `window-v1`.
     /// * [`Errno::OutOfRange`] — an operation or pixel format outside the
-    ///   closed set, a malformed title, a zero window id, or a reserved
-    ///   event endpoint.
+    ///   closed set, a malformed title, a zero window id, a reserved
+    ///   event endpoint, or a menu open carrying no rows.
     /// * [`Errno::LengthOutOfRange`] — a frame count outside
     ///   `1..=WINDOW_MAX_FRAMES`, a zero-extent geometry, a stride too
     ///   small for one scanline, an over-long title length, a minimum
     ///   client size declared by a window that is not resizable, an empty
-    ///   damage rectangle, or a backdrop-blur radius above
-    ///   [`WINDOW_BACKDROP_BLUR_MAX_PX`].
+    ///   damage rectangle, a backdrop-blur radius above
+    ///   [`WINDOW_BACKDROP_BLUR_MAX_PX`], or a menu anchor whose far edge
+    ///   is not a representable window-local coordinate.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() < REQUEST_HEADER_LEN {
             return Err(Errno::BufferTooSmall);
@@ -1553,7 +1829,7 @@ impl WindowRequest {
             OP_CREATE_POPUP => read_create_popup(bytes),
             OP_PRESENT => {
                 exact_len(bytes, PRESENT_WIRE_LEN)?;
-                let window_id = nonzero_window_id(read_u64(bytes, 8))?;
+                let window_id = nonzero_id(read_u64(bytes, 8))?;
                 let frame_index = read_u32(bytes, 16);
                 let damage = DamageRect {
                     x: read_u32(bytes, 20),
@@ -1572,17 +1848,17 @@ impl WindowRequest {
             }
             OP_CLOSE => {
                 exact_len(bytes, WINDOW_ID_WIRE_LEN)?;
-                let window_id = nonzero_window_id(read_u64(bytes, 8))?;
+                let window_id = nonzero_id(read_u64(bytes, 8))?;
                 Ok(Self::Close { window_id })
             }
             OP_PICK_FILE => {
                 exact_len(bytes, WINDOW_ID_WIRE_LEN)?;
-                let window_id = nonzero_window_id(read_u64(bytes, 8))?;
+                let window_id = nonzero_id(read_u64(bytes, 8))?;
                 Ok(Self::PickFile { window_id })
             }
             OP_RESIZE => {
                 exact_len(bytes, RESIZE_WIRE_LEN)?;
-                let window_id = nonzero_window_id(read_u64(bytes, 8))?;
+                let window_id = nonzero_id(read_u64(bytes, 8))?;
                 let shm_handle = read_u64(bytes, 16);
                 let layout = read_frame_layout(bytes)?;
                 Ok(Self::Resize {
@@ -1597,9 +1873,10 @@ impl WindowRequest {
             }
             OP_SET_TITLE => read_set_title(bytes),
             OP_SET_APP_BAR => read_app_bar(bytes),
+            OP_OPEN_MENU => read_open_menu(bytes),
             OP_SET_BACKDROP_BLUR => {
                 exact_len(bytes, SET_BACKDROP_BLUR_WIRE_LEN)?;
-                let window_id = nonzero_window_id(read_u64(bytes, 8))?;
+                let window_id = nonzero_id(read_u64(bytes, 8))?;
                 let radius_px = read_u16(bytes, 16);
                 if radius_px > WINDOW_BACKDROP_BLUR_MAX_PX {
                     return Err(Errno::LengthOutOfRange);
@@ -1624,16 +1901,84 @@ impl WindowRequest {
 /// zero.
 fn read_set_title(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     exact_len(bytes, SET_TITLE_WIRE_LEN)?;
-    let window_id = nonzero_window_id(read_u64(bytes, 8))?;
+    let window_id = nonzero_id(read_u64(bytes, 8))?;
     let mut title_bytes = [0u8; WINDOW_TITLE_MAX];
     title_bytes.copy_from_slice(&bytes[SET_TITLE_TEXT_OFFSET..SET_TITLE_WIRE_LEN]);
     let title = WindowTitle::from_wire(bytes[SET_TITLE_LEN_OFFSET], &title_bytes)?;
     Ok(WindowRequest::SetTitle { window_id, title })
 }
 
+/// Write `menu`'s rows into `out` at `at`: one fixed-width record per
+/// declared row, then those rows' text in row order. Returns the offset just
+/// past the block.
+///
+/// The one definition both variable-length operations share
+/// ([`WindowRequest::SetAppBar`], [`WindowRequest::OpenMenu`]), so a row
+/// record cannot be laid out one way by a declaration and another by an
+/// open (mirrors [`read_menu_block`]).
+fn write_menu_block(out: &mut [u8], at: usize, menu: &AppMenu) -> usize {
+    let text = at + menu.len() * APP_MENU_ROW_WIRE_LEN;
+    for (index, record) in menu.rows[..menu.len()].iter().enumerate() {
+        let record_at = at + index * APP_MENU_ROW_WIRE_LEN;
+        out[record_at] = record.kind.wire();
+        out[record_at + APP_MENU_ROW_FLAGS_OFFSET] = (u8::from(record.enabled)
+            * APP_MENU_ROW_FLAG_ENABLED)
+            | ((record.mark as u8) << APP_MENU_ROW_MARK_SHIFT)
+            | (u8::from(record.role == AppMenuRole::Destructive) * APP_MENU_ROW_FLAG_DESTRUCTIVE);
+        out[record_at + APP_MENU_ROW_PARENT_OFFSET] = record.parent;
+        out[record_at + APP_MENU_ROW_LABEL_LEN_OFFSET] = record.label_len;
+        out[record_at + APP_MENU_ROW_SHORTCUT_LEN_OFFSET] = record.shortcut_len;
+        out[record_at + APP_MENU_ROW_REASON_LEN_OFFSET] = record.reason_len;
+        put_u16(
+            out,
+            record_at + APP_MENU_ROW_ID_OFFSET,
+            record.kind.wire_id(),
+        );
+    }
+    let len = usize::from(menu.text_len);
+    out[text..text + len].copy_from_slice(&menu.text[..len]);
+    text + len
+}
+
+/// Decode `count` row records at `at` in `bytes`, and the `text_len` bytes of
+/// row text that follow them, into `menu` — refusing anything a builder could
+/// not have produced (mirrors [`write_menu_block`], offset for offset).
+///
+/// Every row goes through the same [`AppMenu::push_row`] shape rule the
+/// builder applies, so a menu that crossed the wire is exactly a menu an
+/// application could have constructed — there is no second, weaker set of
+/// rules on the receiving side. Each row's text is taken strictly in row
+/// order and the text block must be consumed exactly, so there is no offset
+/// to point anywhere, no two rows can share bytes, and no text can ride along
+/// unread.
+///
+/// The caller has already fixed the frame's length against these very counts
+/// ([`exact_len`]), which is what makes every read here in bounds.
+fn read_menu_block(
+    menu: &mut AppMenu,
+    bytes: &[u8],
+    at: usize,
+    count: usize,
+    text_len: usize,
+) -> Result<(), Errno> {
+    let text_at = at + count * APP_MENU_ROW_WIRE_LEN;
+    let text = &bytes[text_at..text_at + text_len];
+    let mut cursor = 0usize;
+    for index in 0..count {
+        let record_at = at + index * APP_MENU_ROW_WIRE_LEN;
+        let record = &bytes[record_at..record_at + APP_MENU_ROW_WIRE_LEN];
+        let (row, parent) = read_app_menu_row(record, text, &mut cursor)?;
+        menu.push_row(row, parent)?;
+    }
+    if cursor != text_len {
+        return Err(Errno::LengthOutOfRange);
+    }
+    Ok(())
+}
+
 /// Write an icon-bar declaration's operand block: the event route, the flag
-/// byte, the declared row count and text length, one fixed-width record per
-/// declared row, and the rows' text (mirrors [`read_app_bar`]).
+/// byte, the declared row count and text length, then the shared menu block
+/// (mirrors [`read_app_bar`]).
 ///
 /// The block ends with the last text byte, so the counts and the frame
 /// length state the same thing and one menu has exactly one encoding.
@@ -1646,34 +1991,10 @@ fn write_app_bar(out: &mut [u8], bar: &AppBar) {
     };
     out[APP_BAR_ROW_COUNT_OFFSET] = bar.menu.len;
     put_u16(out, APP_BAR_TEXT_LEN_OFFSET, bar.menu.text_len);
-    let text = APP_BAR_ROWS_OFFSET + bar.menu.len() * APP_MENU_ROW_WIRE_LEN;
-    for (index, record) in bar.menu.rows[..bar.menu.len()].iter().enumerate() {
-        let at = APP_BAR_ROWS_OFFSET + index * APP_MENU_ROW_WIRE_LEN;
-        out[at] = record.kind.wire();
-        out[at + APP_MENU_ROW_FLAGS_OFFSET] = (u8::from(record.enabled)
-            * APP_MENU_ROW_FLAG_ENABLED)
-            | ((record.mark as u8) << APP_MENU_ROW_MARK_SHIFT)
-            | (u8::from(record.role == AppMenuRole::Destructive) * APP_MENU_ROW_FLAG_DESTRUCTIVE);
-        out[at + APP_MENU_ROW_PARENT_OFFSET] = record.parent;
-        out[at + APP_MENU_ROW_LABEL_LEN_OFFSET] = record.label_len;
-        out[at + APP_MENU_ROW_SHORTCUT_LEN_OFFSET] = record.shortcut_len;
-        out[at + APP_MENU_ROW_REASON_LEN_OFFSET] = record.reason_len;
-        put_u16(out, at + APP_MENU_ROW_ID_OFFSET, record.kind.wire_id());
-    }
-    let len = usize::from(bar.menu.text_len);
-    out[text..text + len].copy_from_slice(&bar.menu.text[..len]);
+    write_menu_block(out, APP_BAR_ROWS_OFFSET, &bar.menu);
 }
 
-/// Decode an icon-bar declaration, refusing anything a builder could not
-/// have produced (mirrors [`write_app_bar`]).
-///
-/// Every row goes through the same [`AppMenu::push_row`] shape rule the
-/// builder applies, so a menu that crossed the wire is exactly a menu an
-/// application could have constructed — there is no second, weaker set of
-/// rules on the receiving side. Each row's text is taken from the trailing
-/// block strictly in row order and the block must be consumed exactly, so
-/// there is no offset to point anywhere, no two rows can share bytes, and no
-/// text can ride along unread.
+/// Decode an icon-bar declaration (mirrors [`write_app_bar`]).
 fn read_app_bar(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     if bytes.len() < APP_BAR_ROWS_OFFSET {
         return Err(Errno::BufferTooSmall);
@@ -1695,23 +2016,77 @@ fn read_app_bar(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     if flags & !APP_BAR_FLAG_DEFAULT_ACTION != 0 {
         return Err(Errno::OutOfRange);
     }
-    let text = &bytes[APP_BAR_ROWS_OFFSET + count * APP_MENU_ROW_WIRE_LEN..];
     let mut menu = AppMenu::EMPTY;
-    let mut cursor = 0usize;
-    for index in 0..count {
-        let at = APP_BAR_ROWS_OFFSET + index * APP_MENU_ROW_WIRE_LEN;
-        let record = &bytes[at..at + APP_MENU_ROW_WIRE_LEN];
-        let (row, parent) = read_app_menu_row(record, text, &mut cursor)?;
-        menu.push_row(row, parent)?;
-    }
-    if cursor != text_len {
-        return Err(Errno::LengthOutOfRange);
-    }
+    read_menu_block(&mut menu, bytes, APP_BAR_ROWS_OFFSET, count, text_len)?;
     Ok(WindowRequest::SetAppBar(AppBar {
         event_endpoint,
         default_action: flags & APP_BAR_FLAG_DEFAULT_ACTION != 0,
         menu,
     }))
+}
+
+/// Write a menu open's operand block: the window the chain belongs to, the
+/// anchor, the three lengths, the shared menu block, and the root plate's
+/// title (mirrors [`read_open_menu`]).
+///
+/// The title trails the rows' text so the shared block keeps one layout;
+/// where a declaration's block simply ends, an open's carries the title
+/// after it.
+fn write_open_menu(out: &mut [u8], window_id: u64, anchor: MenuAnchor, menu: &AppMenu) {
+    put_u64(out, 8, window_id);
+    anchor.write_to(out, OPEN_MENU_ANCHOR_OFFSET);
+    out[OPEN_MENU_TITLE_LEN_OFFSET] = menu.title.len_byte();
+    out[OPEN_MENU_ROW_COUNT_OFFSET] = menu.len;
+    put_u16(out, OPEN_MENU_TEXT_LEN_OFFSET, menu.text_len);
+    let title_at = write_menu_block(out, OPEN_MENU_ROWS_OFFSET, menu);
+    let title = &menu.title.raw_bytes()[..usize::from(menu.title.len_byte())];
+    out[title_at..title_at + title.len()].copy_from_slice(title);
+}
+
+/// Decode a menu open (mirrors [`write_open_menu`]).
+///
+/// The title is bounded and content-checked by the very validator a row
+/// label goes through, because that is exactly what it is: a name the
+/// desktop draws in its own chrome, never a credential. A menu with no rows
+/// is refused — there would be nothing to open — and the anchor's far edge
+/// must be a representable window-local coordinate, so the session's
+/// placement arithmetic has no unrepresentable input.
+fn read_open_menu(bytes: &[u8]) -> Result<WindowRequest, Errno> {
+    if bytes.len() < OPEN_MENU_ROWS_OFFSET {
+        return Err(Errno::BufferTooSmall);
+    }
+    let title_len = usize::from(bytes[OPEN_MENU_TITLE_LEN_OFFSET]);
+    let count = usize::from(bytes[OPEN_MENU_ROW_COUNT_OFFSET]);
+    let text_len = usize::from(read_u16(bytes, OPEN_MENU_TEXT_LEN_OFFSET));
+    if count > APP_MENU_MAX_TOTAL_ROWS
+        || text_len > APP_MENU_TEXT_BYTES
+        || title_len > APP_MENU_LABEL_MAX
+    {
+        return Err(Errno::LengthOutOfRange);
+    }
+    if count == 0 {
+        return Err(Errno::OutOfRange);
+    }
+    exact_len(bytes, open_menu_wire_len(count, text_len, title_len))?;
+    let window_id = nonzero_id(read_u64(bytes, 8))?;
+    let anchor = MenuAnchor::read_at(bytes, OPEN_MENU_ANCHOR_OFFSET)?;
+    // The title trails the whole menu block, whose length the counts above
+    // already state, so it is read before the rows the menu is then filled
+    // with rather than needing a second pass to find.
+    let title_at = OPEN_MENU_ROWS_OFFSET + menu_block_len(count, text_len);
+    let mut cursor = 0usize;
+    let title = read_app_menu_text::<0, APP_MENU_LABEL_MAX>(
+        &bytes[title_at..],
+        &mut cursor,
+        bytes[OPEN_MENU_TITLE_LEN_OFFSET],
+    )?;
+    let mut menu = AppMenu::titled(title);
+    read_menu_block(&mut menu, bytes, OPEN_MENU_ROWS_OFFSET, count, text_len)?;
+    Ok(WindowRequest::OpenMenu {
+        window_id,
+        anchor,
+        menu,
+    })
 }
 
 /// Decode one fixed-width menu row record, taking its text from `text` at
@@ -1905,7 +2280,7 @@ fn read_create_popup(bytes: &[u8]) -> Result<WindowRequest, Errno> {
         return Err(Errno::OutOfRange);
     }
     let layout = read_frame_layout(bytes)?;
-    let parent_window_id = nonzero_window_id(read_u64(bytes, POPUP_PARENT_OFFSET))?;
+    let parent_window_id = nonzero_id(read_u64(bytes, POPUP_PARENT_OFFSET))?;
     let offset_x = read_i32(bytes, POPUP_OFFSET_X);
     let offset_y = read_i32(bytes, POPUP_OFFSET_Y);
     Ok(WindowRequest::CreatePopup {
@@ -1988,18 +2363,56 @@ fn exact_len(bytes: &[u8], len: usize) -> Result<(), Errno> {
     }
 }
 
-/// A window id is minted by the session starting at 1; zero never names a
-/// window and is refused rather than looked up.
-fn nonzero_window_id(id: u64) -> Result<u64, Errno> {
+/// A session-minted id — a window's, or one menu open's — starts at 1 and is
+/// never reused; zero names nothing and is refused rather than looked up.
+fn nonzero_id(id: u64) -> Result<u64, Errno> {
     if id == 0 {
         return Err(Errno::OutOfRange);
     }
     Ok(id)
 }
 
-/// Reply length, in bytes, of a `Create`: the status word, the assigned
-/// window id, and the serving session's [`ProcId`].
-pub const WINDOW_CREATE_REPLY_LEN: usize = 12 + crate::PROC_ID_LEN;
+/// Reply length, in bytes, of a request that mints an id: the shared status
+/// word then, on success, the id the session assigned.
+///
+/// [`WindowRequest::OpenMenu`] answers with exactly this; a `Create` answers
+/// with it plus the serving session's identity
+/// ([`WINDOW_CREATE_REPLY_LEN`]).
+pub const WINDOW_MINTED_ID_REPLY_LEN: usize = 12;
+
+/// Encode a minted-id outcome: on success the non-zero id after a zero
+/// status word; on refusal the shared status frame (a negative [`Errno`]
+/// discriminant) zero-padded to the same length, so a client always issues
+/// one fixed-size receive.
+#[must_use]
+pub fn encode_minted_id_reply(result: Result<u64, Errno>) -> [u8; WINDOW_MINTED_ID_REPLY_LEN] {
+    let mut out = [0u8; WINDOW_MINTED_ID_REPLY_LEN];
+    match result {
+        Ok(id) => put_u64(&mut out, 4, id),
+        Err(err) => out[..4].copy_from_slice(&crate::reply::encode_status_reply(Err(err))),
+    }
+    out
+}
+
+/// Decode a minted-id reply frame.
+///
+/// # Errors
+///
+/// * [`Errno::BufferTooSmall`] — `bytes` cannot hold a whole reply.
+/// * [`Errno::OutOfRange`] — a corrupt status word, or a successful reply
+///   carrying the never-minted zero id.
+/// * The decoded [`Errno`] itself, when the session refused the request.
+pub fn decode_minted_id_reply(bytes: &[u8]) -> Result<u64, Errno> {
+    let frame = bytes
+        .get(..WINDOW_MINTED_ID_REPLY_LEN)
+        .ok_or(Errno::BufferTooSmall)?;
+    crate::reply::decode_status_reply(&frame[..4])?;
+    nonzero_id(read_u64(frame, 4))
+}
+
+/// Reply length, in bytes, of a `Create`: the minted-id reply, then the
+/// serving session's [`ProcId`].
+pub const WINDOW_CREATE_REPLY_LEN: usize = WINDOW_MINTED_ID_REPLY_LEN + crate::PROC_ID_LEN;
 
 /// Encode a `Create` outcome: on success the assigned (non-zero) window
 /// id followed by the serving session's own [`ProcId`] — the identity an
@@ -2015,14 +2428,9 @@ pub fn encode_create_reply(
     server: ProcId,
 ) -> [u8; WINDOW_CREATE_REPLY_LEN] {
     let mut out = [0u8; WINDOW_CREATE_REPLY_LEN];
-    match result {
-        Ok(window_id) => {
-            put_u64(&mut out, 4, window_id);
-            out[12..].copy_from_slice(server.as_bytes());
-        }
-        Err(err) => {
-            out[..4].copy_from_slice(&crate::reply::encode_status_reply(Err(err)));
-        }
+    out[..WINDOW_MINTED_ID_REPLY_LEN].copy_from_slice(&encode_minted_id_reply(result));
+    if result.is_ok() {
+        out[WINDOW_MINTED_ID_REPLY_LEN..].copy_from_slice(server.as_bytes());
     }
     out
 }
@@ -2103,9 +2511,8 @@ pub fn decode_create_reply(bytes: &[u8]) -> Result<(u64, ProcId), Errno> {
     if bytes.len() < WINDOW_CREATE_REPLY_LEN {
         return Err(Errno::BufferTooSmall);
     }
-    crate::reply::decode_status_reply(&bytes[..4])?;
-    let window_id = nonzero_window_id(read_u64(bytes, 4))?;
-    let server = ProcId::from_bytes(&bytes[12..WINDOW_CREATE_REPLY_LEN])?;
+    let window_id = decode_minted_id_reply(bytes)?;
+    let server = ProcId::from_bytes(&bytes[WINDOW_MINTED_ID_REPLY_LEN..WINDOW_CREATE_REPLY_LEN])?;
     if server.is_kernel() {
         return Err(Errno::OutOfRange);
     }
@@ -2143,6 +2550,8 @@ const EV_APP_BAR_MENU: u16 = 14;
 
 /// Wire event discriminant of [`WindowEvent::ContentReleased`].
 const EV_CONTENT_RELEASED: u16 = 15;
+/// Wire event discriminant of [`WindowEvent::MenuClosed`].
+const EV_MENU_CLOSED: u16 = 16;
 
 /// Wire pointer-action discriminant of [`PointerAction::Moved`].
 const PTR_MOVED: u16 = 0;
@@ -2369,6 +2778,26 @@ pub enum WindowEvent {
         /// The chosen row's application-chosen id.
         item: AppMenuItemId,
     },
+    /// The whole answer to one accepted [`WindowRequest::OpenMenu`],
+    /// delivered **exactly once**.
+    ///
+    /// `open_id` is the id that open's reply carried. It is what makes an
+    /// answer unmistakable: ids are minted per open and never reused, so an
+    /// application that asked again while a previous answer was still in its
+    /// mailbox can tell the two apart instead of reading one gesture's
+    /// dismissal as the next one's.
+    ///
+    /// A `Refused` outcome is not a failure to handle — it says the desktop
+    /// could not bring a chain up, and the application reports it and
+    /// carries on. It never draws a menu of its own instead.
+    MenuClosed {
+        /// The window the chain belonged to.
+        window_id: u64,
+        /// The open this answers, from its reply; never zero.
+        open_id: u64,
+        /// What became of the chain.
+        outcome: MenuOutcome,
+    },
 }
 
 impl WindowEvent {
@@ -2396,7 +2825,8 @@ impl WindowEvent {
             | Self::RedrawRequested { window_id }
             | Self::ContentReleased { window_id }
             | Self::Scrolled { window_id, .. }
-            | Self::DesktopChanged { window_id, .. } => Some(window_id),
+            | Self::DesktopChanged { window_id, .. }
+            | Self::MenuClosed { window_id, .. } => Some(window_id),
             Self::AppBarDefault | Self::AppBarMenu { .. } => None,
         }
     }
@@ -2483,6 +2913,20 @@ impl WindowEvent {
                 put_u16(&mut out, 6, EV_APP_BAR_MENU);
                 put_u16(&mut out, 16, item.get());
             }
+            Self::MenuClosed {
+                open_id, outcome, ..
+            } => {
+                put_u16(&mut out, 6, EV_MENU_CLOSED);
+                put_u64(&mut out, 16, open_id);
+                let (kind, item, refusal) = match outcome {
+                    MenuOutcome::Chosen(item) => (MENU_OUTCOME_CHOSEN, item.get(), 0),
+                    MenuOutcome::Dismissed => (MENU_OUTCOME_DISMISSED, 0, 0),
+                    MenuOutcome::Refused(refusal) => (MENU_OUTCOME_REFUSED, 0, refusal.as_u16()),
+                };
+                put_u16(&mut out, MENU_CLOSED_OUTCOME_OFFSET, kind);
+                put_u16(&mut out, MENU_CLOSED_ITEM_OFFSET, item);
+                put_u16(&mut out, MENU_CLOSED_REFUSAL_OFFSET, refusal);
+            }
         }
         out
     }
@@ -2496,9 +2940,10 @@ impl WindowEvent {
     ///   malformed embedded key record.
     /// * [`Errno::AbiVersionUnsupported`] — not `window-v1`.
     /// * [`Errno::OutOfRange`] — an event kind, focus flag, pointer
-    ///   action, or button outside the closed set, a zero window id on a
-    ///   window-scoped event, a non-zero one on an application-scoped
-    ///   event, or a zero icon-bar menu item id.
+    ///   action, button, menu outcome, or refusal reason outside the closed
+    ///   set, a zero window id on a window-scoped event, a non-zero one on
+    ///   an application-scoped event, a zero menu item or open id, or a
+    ///   menu outcome stating a field its own case does not carry.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() < Self::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
@@ -2516,7 +2961,7 @@ impl WindowEvent {
         if let Some(event) = read_app_scoped_event(kind, bytes) {
             return event;
         }
-        let window_id = nonzero_window_id(read_u64(bytes, 8))?;
+        let window_id = nonzero_id(read_u64(bytes, 8))?;
         if let Some(event) = read_id_only_event(kind, window_id, bytes) {
             return event;
         }
@@ -2596,6 +3041,14 @@ impl WindowEvent {
                 let desktop = DesktopInfo::from_bytes_at(bytes, 16)?;
                 Ok(Self::DesktopChanged { window_id, desktop })
             }
+            EV_MENU_CLOSED => {
+                event_reserved_zero(bytes, MENU_CLOSED_WIRE_END)?;
+                Ok(Self::MenuClosed {
+                    window_id,
+                    open_id: nonzero_id(read_u64(bytes, 16))?,
+                    outcome: read_menu_outcome(bytes)?,
+                })
+            }
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -2654,6 +3107,37 @@ fn read_id_only_event(
     Some(event_reserved_zero(bytes, 16).map(|()| event))
 }
 
+/// Byte offset, within a [`WindowEvent::MenuClosed`] frame, of the outcome
+/// discriminant that follows the open id.
+const MENU_CLOSED_OUTCOME_OFFSET: usize = 24;
+/// Byte offset of the chosen row's id, zero unless the outcome is
+/// [`MenuOutcome::Chosen`].
+const MENU_CLOSED_ITEM_OFFSET: usize = MENU_CLOSED_OUTCOME_OFFSET + 2;
+/// Byte offset of the refusal reason, zero unless the outcome is
+/// [`MenuOutcome::Refused`].
+const MENU_CLOSED_REFUSAL_OFFSET: usize = MENU_CLOSED_ITEM_OFFSET + 2;
+/// End of a [`WindowEvent::MenuClosed`]'s own block; the rest of the fixed
+/// event frame is reserved and required zero.
+const MENU_CLOSED_WIRE_END: usize = MENU_CLOSED_REFUSAL_OFFSET + 2;
+
+/// The three-way outcome a [`WindowEvent::MenuClosed`] frame carries.
+///
+/// Each case reads exactly one of the two payload fields, and the other must
+/// be zero, so an outcome has one encoding and a session cannot state a
+/// chosen row *and* a refusal in the same answer.
+fn read_menu_outcome(bytes: &[u8]) -> Result<MenuOutcome, Errno> {
+    let item = read_u16(bytes, MENU_CLOSED_ITEM_OFFSET);
+    let refusal = read_u16(bytes, MENU_CLOSED_REFUSAL_OFFSET);
+    match read_u16(bytes, MENU_CLOSED_OUTCOME_OFFSET) {
+        MENU_OUTCOME_CHOSEN if refusal == 0 => Ok(MenuOutcome::Chosen(AppMenuItemId::new(item)?)),
+        MENU_OUTCOME_DISMISSED if item == 0 && refusal == 0 => Ok(MenuOutcome::Dismissed),
+        MENU_OUTCOME_REFUSED if item == 0 => {
+            Ok(MenuOutcome::Refused(MenuRefusal::from_u16(refusal)?))
+        }
+        _ => Err(Errno::OutOfRange),
+    }
+}
+
 /// Refuse an event whose reserved tail (from `from` to the end of the
 /// fixed frame) carries any non-zero byte.
 fn event_reserved_zero(bytes: &[u8], from: usize) -> Result<(), Errno> {
@@ -2666,22 +3150,26 @@ fn event_reserved_zero(bytes: &[u8], from: usize) -> Result<(), Errno> {
 #[cfg(test)]
 mod tests {
     use super::{
-        app_bar_wire_len, decode_create_reply, decode_desktop_reply, encode_create_reply,
-        encode_desktop_reply, put_u16, read_u16, AppBar, AppMenu, AppMenuItem, AppMenuItemId,
+        app_bar_wire_len, decode_create_reply, decode_desktop_reply, decode_minted_id_reply,
+        encode_create_reply, encode_desktop_reply, encode_minted_id_reply, open_menu_wire_len,
+        put_i32, put_u16, put_u64, read_u16, AppBar, AppMenu, AppMenuItem, AppMenuItemId,
         AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole, AppMenuRow, AppMenuRowView,
-        AppMenuShortcut, PointerAction, WindowEvent, WindowRequest, WindowSizing, WindowTitle,
-        APP_BAR_FLAGS_OFFSET, APP_BAR_MAX_WIRE_LEN, APP_BAR_ROWS_OFFSET, APP_BAR_ROW_COUNT_OFFSET,
-        APP_BAR_TEXT_LEN_OFFSET, APP_MENU_KIND_SEPARATOR, APP_MENU_KIND_SUBMENU,
-        APP_MENU_LABEL_MAX, APP_MENU_MAX_DEPTH, APP_MENU_MAX_ROWS, APP_MENU_MAX_TOTAL_ROWS,
-        APP_MENU_REASON_MAX, APP_MENU_ROW_FLAGS_OFFSET, APP_MENU_ROW_FLAG_ENABLED,
-        APP_MENU_ROW_ID_OFFSET, APP_MENU_ROW_LABEL_LEN_OFFSET, APP_MENU_ROW_PARENT_OFFSET,
-        APP_MENU_ROW_SHORTCUT_LEN_OFFSET, APP_MENU_ROW_WIRE_LEN, APP_MENU_SHORTCUT_MAX,
-        APP_MENU_TEXT_BYTES, CREATE_MIN_HEIGHT_OFFSET, CREATE_MIN_WIDTH_OFFSET,
-        CREATE_POPUP_WIRE_LEN, CREATE_RESIZABLE_OFFSET, CREATE_WIRE_LEN,
-        DESKTOP_REPLY_SERVER_OFFSET, PRESENT_WIRE_LEN, REQUEST_HEADER_LEN, SET_TITLE_LEN_OFFSET,
+        AppMenuShortcut, MenuAnchor, MenuOutcome, MenuRefusal, PointerAction, WindowEvent,
+        WindowRequest, WindowSizing, WindowTitle, APP_BAR_FLAGS_OFFSET, APP_BAR_MAX_WIRE_LEN,
+        APP_BAR_ROWS_OFFSET, APP_BAR_ROW_COUNT_OFFSET, APP_BAR_TEXT_LEN_OFFSET,
+        APP_MENU_KIND_SEPARATOR, APP_MENU_KIND_SUBMENU, APP_MENU_LABEL_MAX, APP_MENU_MAX_DEPTH,
+        APP_MENU_MAX_ROWS, APP_MENU_MAX_TOTAL_ROWS, APP_MENU_REASON_MAX, APP_MENU_ROW_FLAGS_OFFSET,
+        APP_MENU_ROW_FLAG_ENABLED, APP_MENU_ROW_ID_OFFSET, APP_MENU_ROW_LABEL_LEN_OFFSET,
+        APP_MENU_ROW_PARENT_OFFSET, APP_MENU_ROW_SHORTCUT_LEN_OFFSET, APP_MENU_ROW_WIRE_LEN,
+        APP_MENU_SHORTCUT_MAX, APP_MENU_TEXT_BYTES, CREATE_MIN_HEIGHT_OFFSET,
+        CREATE_MIN_WIDTH_OFFSET, CREATE_POPUP_WIRE_LEN, CREATE_RESIZABLE_OFFSET, CREATE_WIRE_LEN,
+        DESKTOP_REPLY_SERVER_OFFSET, MENU_CLOSED_ITEM_OFFSET, MENU_CLOSED_OUTCOME_OFFSET,
+        MENU_CLOSED_REFUSAL_OFFSET, MENU_CLOSED_WIRE_END, OPEN_MENU_ANCHOR_OFFSET,
+        OPEN_MENU_MAX_WIRE_LEN, OPEN_MENU_ROW_COUNT_OFFSET, OPEN_MENU_TEXT_LEN_OFFSET,
+        OPEN_MENU_TITLE_LEN_OFFSET, PRESENT_WIRE_LEN, REQUEST_HEADER_LEN, SET_TITLE_LEN_OFFSET,
         SET_TITLE_TEXT_OFFSET, SET_TITLE_WIRE_LEN, WINDOW_BACKDROP_BLUR_MAX_PX,
         WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN, WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC,
-        WINDOW_MAX_FRAMES, WINDOW_REQUEST_MAGIC, WINDOW_TITLE_MAX,
+        WINDOW_MAX_FRAMES, WINDOW_MINTED_ID_REPLY_LEN, WINDOW_REQUEST_MAGIC, WINDOW_TITLE_MAX,
     };
     use crate::desktop::{Appearance, DesktopInfo};
     use crate::driver::display::{DamageRect, DisplayFormat};
@@ -2851,7 +3339,12 @@ mod tests {
     /// A menu with one row of every kind, a chain of submenus at the depth
     /// bound, and every marking — the shape the wire tests exercise.
     fn sample_menu() -> AppMenu {
-        let mut menu = AppMenu::EMPTY;
+        sample_menu_into(AppMenu::EMPTY)
+    }
+
+    /// Those same rows appended to `menu`, so one builder serves the untitled
+    /// menu a declaration carries and the titled one an open does.
+    fn sample_menu_into(mut menu: AppMenu) -> AppMenu {
         menu.push(AppMenuRow::Item(
             AppMenuItem::new(
                 AppMenuItemId::new(1).expect("a valid id"),
@@ -2933,7 +3426,12 @@ mod tests {
     /// leaving every later row a label, so the widest declaration is
     /// genuinely the widest.
     fn widest_menu() -> AppMenu {
-        let mut menu = AppMenu::EMPTY;
+        widest_menu_into(AppMenu::EMPTY)
+    }
+
+    /// Those same rows appended to `menu`, on the same terms as
+    /// [`sample_menu_into`].
+    fn widest_menu_into(mut menu: AppMenu) -> AppMenu {
         let wide = "l".repeat(APP_MENU_LABEL_MAX);
         menu.push(AppMenuRow::Submenu {
             label: label(&wide),
@@ -2958,6 +3456,33 @@ mod tests {
         assert_eq!(menu.len(), APP_MENU_MAX_TOTAL_ROWS);
         assert_eq!(used, APP_MENU_TEXT_BYTES, "the text block fills exactly");
         menu
+    }
+
+    /// The sample menu under a title of its own — the shape only an open
+    /// carries, since a declaration is titled from the signed manifest.
+    fn sample_titled_menu() -> AppMenu {
+        sample_menu_into(AppMenu::titled(label("Edit")))
+    }
+
+    /// The widest open: the widest menu the model holds, under the widest
+    /// title a plate band can state.
+    fn widest_open_menu() -> AppMenu {
+        widest_menu_into(AppMenu::titled(label(&"t".repeat(APP_MENU_LABEL_MAX))))
+    }
+
+    /// The anchor the open tests use: a region, so the placement rule has an
+    /// extent to hang a plate clear of.
+    fn sample_anchor() -> MenuAnchor {
+        MenuAnchor::new(-8, 24, 96, 20).expect("a representable anchor")
+    }
+
+    /// An open of `menu` for a window the caller owns, at [`sample_anchor`].
+    fn opening(menu: &AppMenu) -> WindowRequest {
+        WindowRequest::OpenMenu {
+            window_id: 3,
+            anchor: sample_anchor(),
+            menu: *menu,
+        }
     }
 
     /// Visit one of every operation the request codec encodes, including the
@@ -3002,6 +3527,9 @@ mod tests {
         visit(WindowRequest::SetAppBar(sample_app_bar()));
         visit(declaring(&one_of_each_bare_row()));
         visit(declaring(&widest_menu()));
+        visit(opening(&sample_titled_menu()));
+        visit(opening(&one_of_each_bare_row()));
+        visit(opening(&widest_open_menu()));
         visit(WindowRequest::QueryDesktop);
     }
 
@@ -3095,10 +3623,12 @@ mod tests {
         // block does, and `WindowRequest` carries a menu inline.
         const { assert!(core::mem::size_of::<AppMenu>() < ROWS * WIDEST_ROW_TEXT / 2) };
         const { assert!(core::mem::size_of::<WindowRequest>() < 4096) };
-        assert_eq!(
-            core::mem::size_of::<WindowRequest>(),
-            core::mem::size_of::<AppBar>(),
-            "the declaration is still the widest variant"
+        // The widest variant carries a menu plus a handful of words — the
+        // window it belongs to and its anchor — so the enum's size is one
+        // menu's. Fixed-width row text would have dwarfed the lot.
+        assert!(
+            core::mem::size_of::<WindowRequest>() < core::mem::size_of::<AppMenu>() + 64,
+            "a request is one inline menu wide, not the product of the row bounds"
         );
 
         // A row's text costs its bytes, not its bounds.
@@ -3110,6 +3640,282 @@ mod tests {
         assert_eq!(
             declaring(&menu).wire_len(),
             one + APP_MENU_ROW_WIRE_LEN + "Copy".len()
+        );
+    }
+
+    /// An anchor is window-local geometry the session clamps, so any origin
+    /// is legitimate — but its far edge must be a coordinate that exists, so
+    /// the placement arithmetic has no unrepresentable input.
+    #[test]
+    fn menu_anchors_admit_any_origin_and_refuse_an_unrepresentable_edge() {
+        let point = MenuAnchor::new(-4096, -1, 0, 0).expect("a point off the client origin");
+        assert_eq!((point.x(), point.y()), (-4096, -1));
+        assert_eq!((point.width_px(), point.height_px()), (0, 0));
+        let region = MenuAnchor::new(i32::MIN, 0, u32::MAX, 0).expect("a region that fits");
+        assert_eq!(region.width_px(), u32::MAX);
+
+        for (x, y, width_px, height_px) in [
+            (i32::MAX, 0, 1, 0),
+            (0, i32::MAX, 0, 1),
+            (1, 1, u32::MAX, 0),
+            (1, 1, 0, u32::MAX),
+        ] {
+            assert_eq!(
+                MenuAnchor::new(x, y, width_px, height_px).unwrap_err(),
+                Errno::LengthOutOfRange,
+                "an unrepresentable far edge must be refused: {x},{y} {width_px}x{height_px}"
+            );
+        }
+    }
+
+    /// A menu's own title crosses the wire on an **open** and cannot cross on
+    /// a declaration: the icon-bar menu is titled from the bundle's signed
+    /// manifest, so an application titling one is refused rather than encoded
+    /// and quietly retitled.
+    #[test]
+    fn a_menu_title_crosses_the_wire_only_on_an_open() {
+        let titled = sample_titled_menu();
+        assert_eq!(titled.title(), "Edit");
+        let request = opening(&titled);
+        let Ok(WindowRequest::OpenMenu { menu, anchor, .. }) =
+            WindowRequest::from_bytes(&request.frame())
+        else {
+            panic!("an open round-trips");
+        };
+        assert_eq!(menu.title(), "Edit");
+        assert_eq!(anchor, sample_anchor());
+
+        // Untitled is admissible: the plate's band then states nothing.
+        let plain = opening(&sample_menu());
+        let Ok(WindowRequest::OpenMenu { menu, .. }) = WindowRequest::from_bytes(&plain.frame())
+        else {
+            panic!("an untitled open round-trips");
+        };
+        assert_eq!(menu.title(), "");
+
+        // The same titled menu has no field to travel in on a declaration.
+        let mut out = [0u8; WindowRequest::MAX_WIRE_LEN];
+        assert_eq!(
+            declaring(&titled).encode(&mut out),
+            Err(Errno::OutOfRange),
+            "a declaration cannot carry a title"
+        );
+    }
+
+    /// An open with no rows would open nothing, so it is refused at both
+    /// ends: a client cannot send one and a session cannot be made to
+    /// receive one.
+    #[test]
+    fn an_open_with_no_rows_is_refused_at_both_ends() {
+        let mut out = [0u8; WindowRequest::MAX_WIRE_LEN];
+        assert_eq!(
+            opening(&AppMenu::EMPTY).encode(&mut out),
+            Err(Errno::OutOfRange)
+        );
+        // A declaration, by contrast, legitimately offers no menu at all.
+        assert!(declaring(&AppMenu::EMPTY).encode(&mut out).is_ok());
+
+        let mut rowless = opening(&sample_menu()).frame();
+        rowless[OPEN_MENU_ROW_COUNT_OFFSET] = 0;
+        assert_eq!(
+            WindowRequest::from_bytes(&rowless),
+            Err(Errno::OutOfRange),
+            "and the decoder refuses one however it was framed"
+        );
+    }
+
+    /// An open's length follows its rows, their text, and its title, and the
+    /// widest of them is what the endpoint's receive bound is sized to.
+    #[test]
+    fn open_menu_frames_grow_with_their_menu_and_title() {
+        let one_row = {
+            let mut menu = AppMenu::EMPTY;
+            menu.push(item(1, "Cut")).expect("room");
+            opening(&menu).wire_len()
+        };
+        assert_eq!(one_row, open_menu_wire_len(1, "Cut".len(), 0));
+
+        let titled = {
+            let mut menu = AppMenu::titled(label("Edit"));
+            menu.push(item(1, "Cut")).expect("room");
+            opening(&menu).wire_len()
+        };
+        assert_eq!(titled, one_row + "Edit".len(), "a title costs its bytes");
+
+        let widest = opening(&widest_open_menu());
+        assert_eq!(widest.wire_len(), OPEN_MENU_MAX_WIRE_LEN);
+        assert_eq!(
+            OPEN_MENU_MAX_WIRE_LEN,
+            WindowRequest::MAX_WIRE_LEN,
+            "the widest open defines the endpoint's receive bound"
+        );
+        // And the hot path is untouched by carrying it.
+        assert_eq!(sample_present().wire_len(), PRESENT_WIRE_LEN);
+    }
+
+    /// Every field an open states is bounded and checked, and a frame whose
+    /// counts do not match its length is refused rather than read short.
+    #[test]
+    fn open_menu_refuses_every_malformed_frame() {
+        let base = opening(&sample_titled_menu()).frame();
+        assert!(WindowRequest::from_bytes(&base).is_ok());
+
+        // Zero names no window.
+        let mut nameless = base;
+        put_u64(&mut nameless, 8, 0);
+        assert_eq!(WindowRequest::from_bytes(&nameless), Err(Errno::OutOfRange));
+
+        // An anchor whose far edge does not exist.
+        let mut unplaceable = base;
+        put_i32(&mut unplaceable, OPEN_MENU_ANCHOR_OFFSET, i32::MAX);
+        assert_eq!(
+            WindowRequest::from_bytes(&unplaceable),
+            Err(Errno::LengthOutOfRange)
+        );
+
+        // Each of the three lengths is bounded before the frame's own length
+        // is fixed against them, so an over-long count cannot be read into a
+        // neighbouring field.
+        for (at, over) in [
+            (OPEN_MENU_TITLE_LEN_OFFSET, APP_MENU_LABEL_MAX + 1),
+            (OPEN_MENU_ROW_COUNT_OFFSET, APP_MENU_MAX_TOTAL_ROWS + 1),
+        ] {
+            let mut greedy = base;
+            greedy[at] = u8::try_from(over).expect("the bound fits a byte");
+            assert_eq!(
+                WindowRequest::from_bytes(&greedy),
+                Err(Errno::LengthOutOfRange)
+            );
+        }
+        let mut greedy = base;
+        put_u16(
+            &mut greedy,
+            OPEN_MENU_TEXT_LEN_OFFSET,
+            u16::try_from(APP_MENU_TEXT_BYTES + 1).expect("the bound fits"),
+        );
+        assert_eq!(
+            WindowRequest::from_bytes(&greedy),
+            Err(Errno::LengthOutOfRange)
+        );
+
+        // A count the frame's length contradicts.
+        let mut miscounted = base;
+        let text_len = read_u16(&miscounted, OPEN_MENU_TEXT_LEN_OFFSET);
+        put_u16(&mut miscounted, OPEN_MENU_TEXT_LEN_OFFSET, text_len - 1);
+        assert_eq!(WindowRequest::from_bytes(&miscounted), Err(Errno::BadMagic));
+
+        // The title is held to the very validator a row label is: it lands in
+        // session-drawn chrome, so an escape sequence in it is refused, never
+        // sanitised.
+        let mut escaped = base;
+        let last = escaped.len() - 1;
+        escaped[last] = 0x1b;
+        assert_eq!(WindowRequest::from_bytes(&escaped), Err(Errno::OutOfRange));
+    }
+
+    /// An outcome is one of exactly three answers, each stating only the
+    /// field its own case carries, so a session cannot name a chosen row and
+    /// a refusal in the same breath.
+    #[test]
+    fn menu_outcomes_round_trip_and_fail_closed() {
+        let outcomes = [
+            MenuOutcome::Chosen(AppMenuItemId::new(7).expect("a valid id")),
+            MenuOutcome::Dismissed,
+            MenuOutcome::Refused(MenuRefusal::NoDisplay),
+            MenuOutcome::Refused(MenuRefusal::SeatBusy),
+            MenuOutcome::Refused(MenuRefusal::NoResources),
+        ];
+        for outcome in outcomes {
+            let event = WindowEvent::MenuClosed {
+                window_id: 4,
+                open_id: 11,
+                outcome,
+            };
+            let bytes = event.to_le_bytes();
+            assert_eq!(WindowEvent::from_bytes(&bytes), Ok(event));
+            assert_eq!(event.window_id(), Some(4));
+            // The one fixed event frame still holds it: an outcome costs no
+            // other event a byte.
+            assert_eq!(bytes.len(), WindowEvent::WIRE_LEN);
+        }
+
+        let base = WindowEvent::MenuClosed {
+            window_id: 4,
+            open_id: 11,
+            outcome: MenuOutcome::Chosen(AppMenuItemId::new(7).expect("a valid id")),
+        }
+        .to_le_bytes();
+
+        // An open id of zero answers no open.
+        let mut nameless = base;
+        put_u64(&mut nameless, 16, 0);
+        assert_eq!(WindowEvent::from_bytes(&nameless), Err(Errno::OutOfRange));
+
+        // An outcome discriminant outside the closed set, and a refusal
+        // reason outside its own, are refused rather than guessed at.
+        for kind in [0, 4, u16::MAX] {
+            let mut unknown = base;
+            put_u16(&mut unknown, MENU_CLOSED_OUTCOME_OFFSET, kind);
+            assert_eq!(WindowEvent::from_bytes(&unknown), Err(Errno::OutOfRange));
+        }
+        for reason in [0, 4, u16::MAX] {
+            let mut refused = base;
+            put_u16(&mut refused, MENU_CLOSED_OUTCOME_OFFSET, 3);
+            put_u16(&mut refused, MENU_CLOSED_ITEM_OFFSET, 0);
+            put_u16(&mut refused, MENU_CLOSED_REFUSAL_OFFSET, reason);
+            assert_eq!(WindowEvent::from_bytes(&refused), Err(Errno::OutOfRange));
+        }
+
+        // A chosen row with no id, and a case stating a field it does not
+        // carry, are each refused.
+        let mut idless = base;
+        put_u16(&mut idless, MENU_CLOSED_ITEM_OFFSET, 0);
+        assert_eq!(WindowEvent::from_bytes(&idless), Err(Errno::OutOfRange));
+        for (kind, item, refusal) in [(1, 7, 1), (2, 7, 0), (2, 0, 1), (3, 7, 1)] {
+            let mut crossed = base;
+            put_u16(&mut crossed, MENU_CLOSED_OUTCOME_OFFSET, kind);
+            put_u16(&mut crossed, MENU_CLOSED_ITEM_OFFSET, item);
+            put_u16(&mut crossed, MENU_CLOSED_REFUSAL_OFFSET, refusal);
+            assert_eq!(
+                WindowEvent::from_bytes(&crossed),
+                Err(Errno::OutOfRange),
+                "kind {kind} may not state item {item} and refusal {refusal}"
+            );
+        }
+
+        // The reserved tail past the outcome's own block stays zero.
+        let mut dirty = base;
+        dirty[MENU_CLOSED_WIRE_END] = 1;
+        assert_eq!(WindowEvent::from_bytes(&dirty), Err(Errno::BadMagic));
+    }
+
+    /// The reply that carries a session-minted id — a window's or one menu
+    /// open's — refuses a corrupt frame and the never-minted zero.
+    #[test]
+    fn a_minted_id_reply_round_trips_and_fails_closed() {
+        assert_eq!(
+            decode_minted_id_reply(&encode_minted_id_reply(Ok(9))),
+            Ok(9)
+        );
+        assert_eq!(
+            decode_minted_id_reply(&encode_minted_id_reply(Ok(0))),
+            Err(Errno::OutOfRange),
+            "zero names no open"
+        );
+        assert_eq!(
+            decode_minted_id_reply(&encode_minted_id_reply(Err(Errno::NotSupported))),
+            Err(Errno::NotSupported)
+        );
+        assert_eq!(
+            decode_minted_id_reply(&[0u8; WINDOW_MINTED_ID_REPLY_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+        // The create reply is this frame plus the serving session's identity,
+        // so the two cannot disagree about where the id sits.
+        let create = encode_create_reply(Ok(9), server());
+        assert_eq!(
+            decode_minted_id_reply(&create[..WINDOW_MINTED_ID_REPLY_LEN]),
+            Ok(9)
         );
     }
 
@@ -3126,7 +3932,7 @@ mod tests {
             "the widest menu fills both bounds"
         );
         assert!(empty.wire_len() < widest.wire_len());
-        assert_eq!(widest.wire_len(), WindowRequest::MAX_WIRE_LEN);
+        assert!(widest.wire_len() <= WindowRequest::MAX_WIRE_LEN);
     }
 
     /// Encoding into a buffer that cannot hold the frame fails closed
@@ -3486,8 +4292,9 @@ mod tests {
             Err(Errno::LengthOutOfRange)
         );
 
-        // The widest declaration defines the endpoint's receive bound.
-        assert_eq!(APP_BAR_MAX_WIRE_LEN, WindowRequest::MAX_WIRE_LEN);
+        // The widest declaration is not quite the endpoint's receive bound:
+        // a menu open carries the same menu under a title.
+        const { assert!(APP_BAR_MAX_WIRE_LEN < WindowRequest::MAX_WIRE_LEN) };
     }
 
     /// A decoded row is exactly a row the builder could have made: an

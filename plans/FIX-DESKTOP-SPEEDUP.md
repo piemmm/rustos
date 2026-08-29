@@ -60,6 +60,22 @@ half-resolution blur (visual comparison first), and **Stage G**, still behind a
 User decision. `plans/OPEN-DEFECTS.md` D37 is a confirmed defect fixed
 independently of this schedule.
 
+Closed: **the A.4 hover gate's frost bound is now normalised against the
+damage it serves.** `judge` normalises every other bound against what varies —
+damage against `frames`, blends and now frost against `damaged_px`, presents
+against dirty rects — but compared cumulative `blur_px` against an absolute
+`screen_px / 4`. The bracketed epoch's length is not fixed, so the same desktop
+was judged differently by how many frames the host let it compose: the measured
+recomputed frost per frame was identical either side (1932 px/frame over 119
+frames, failing; 2069 px/frame over 61, holding), and blur ran at 11–16% of
+damage in both. Re-frosting in proportion to damage is what D.1/D.2 design for,
+so the bound now reads `blur_px <= damaged_px` — a newly-shown frosted surface
+is damaged and frosted over the same area, and a frost rebuilt while nothing
+beneath it changed exceeds it by the surface's whole area (a bar-sized rebuild
+over that epoch is 5.8M blur against 1.4M damage). Not a widened divisor
+(§2.17): the shape was wrong, and a test pins the verdict as constant across
+40–590 frames for the measured rates.
+
 Independently: **every published number is taken from a `--release`/installer
 image.** A dev-profile timing is never quoted as evidence.
 

@@ -43,8 +43,9 @@ use tairix_abi::origin::ProcId;
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 pub use tairix_abi::window_ipc::WindowSizing;
 use tairix_abi::window_ipc::{
-    encode_create_reply, encode_desktop_reply, AppBar, WindowEvent, WindowRequest, WindowTitle,
-    WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN,
+    encode_create_reply, encode_desktop_reply, encode_minted_id_reply, AppBar, AppMenu, MenuAnchor,
+    WindowEvent, WindowRequest, WindowTitle, WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN,
+    WINDOW_MINTED_ID_REPLY_LEN,
 };
 use tairix_abi::Errno;
 use tairix_display::{FrameRegion, ShmMapper};
@@ -57,6 +58,10 @@ pub const WINDOW_REPLY_MAX: usize = if WINDOW_CREATE_REPLY_LEN > WINDOW_DESKTOP_
 } else {
     WINDOW_DESKTOP_REPLY_LEN
 };
+
+/// The minted-id reply a menu open answers with is the shortest of the three,
+/// so the one buffer above already holds it.
+const _: () = assert!(WINDOW_MINTED_ID_REPLY_LEN <= WINDOW_REPLY_MAX);
 
 /// The share of the machine's RAM one attested client may hold mapped in the
 /// session as window frames: a quarter of it.
@@ -257,6 +262,41 @@ pub trait WindowHost {
     /// to the client and no pick is recorded.
     fn pick_requested(&mut self, window_id: u64) -> Result<(), Errno>;
 
+    /// A validated `OpenMenu`: the attested owner of live window
+    /// `window_id` (which has no open unanswered) asked for a menu chain,
+    /// anchored at `anchor` in that window's own client pixels, over
+    /// `menu`'s rows — already bounded and shape-checked by the engine's
+    /// ABI decode, and carrying its root plate's title.
+    ///
+    /// The host places, draws, grabs and routes the chain, and when it
+    /// closes routes the answer back through
+    /// [`WindowServer::deliver_event`] as a `MenuClosed` naming `open_id`
+    /// — the engine tracks the open and enforces that exactly one outcome
+    /// follows each acceptance.
+    ///
+    /// Accepting must not depend on the requesting application: nothing
+    /// about bringing a chain up may wait on a client.
+    ///
+    /// The default refuses: a host that composes no menu service cannot
+    /// honour a chain, and telling the application so is more honest than
+    /// accepting an open nothing will ever answer.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the host cannot open a chain for; the refusal is
+    /// relayed to the client, which reports it and carries on, and no open
+    /// is recorded.
+    fn menu_open_requested(
+        &mut self,
+        window_id: u64,
+        open_id: u64,
+        anchor: MenuAnchor,
+        menu: &AppMenu,
+    ) -> Result<(), Errno> {
+        let _ = (window_id, open_id, anchor, menu);
+        Err(Errno::NotSupported)
+    }
+
     /// A validated `SetAppBar`: the attested `owner` declared (or
     /// re-declared) its presence on the desktop's icon bar — its event
     /// route, whether it handles the primary click, and its menu, all
@@ -418,6 +458,13 @@ struct WindowRecord<R> {
     /// clears it when the conclusion is delivered, so the protocol's
     /// one-conclusion-per-acceptance shape is enforced in one place.
     pick_pending: bool,
+    /// The id of an accepted `OpenMenu` whose outcome has not been
+    /// delivered yet, or `None`. At most one open is unanswered per window;
+    /// the engine mints the id on acceptance and clears it when the
+    /// outcome is delivered, so the protocol's one-outcome-per-acceptance
+    /// shape is enforced in one place and an application can tell one
+    /// gesture's answer from the next's.
+    menu_open: Option<u64>,
     /// The parent top-level window this record is a popup of, or `None`
     /// for an ordinary top-level window. A popup is closed when its
     /// parent closes, so the link lives beside the window it binds.
@@ -452,6 +499,11 @@ pub struct WindowServer<M: ShmMapper> {
     /// engine keeps only the route, so an application-scoped event can be
     /// delivered without asking the host where it goes.
     app_bars: BTreeMap<ProcId, u64>,
+    /// The next menu-open id to mint. Its own sequence rather than the
+    /// window ids': an open names a gesture, not a window, and the two are
+    /// never interchangeable. Ids start at 1 and are never reused, so an
+    /// outcome can only ever answer the open it names.
+    next_menu_open: u64,
     /// Bytes of window frame one client may hold mapped here at once
     /// ([`client_frame_budget_bytes`]).
     client_frame_max: u64,
@@ -468,6 +520,7 @@ impl<M: ShmMapper> WindowServer<M> {
             server,
             windows: BTreeMap::new(),
             next_id: 1,
+            next_menu_open: 1,
             app_bars: BTreeMap::new(),
             client_frame_max,
         }
@@ -534,11 +587,12 @@ impl<M: ShmMapper> WindowServer<M> {
             Ok(caller) => caller,
             Err(err) => {
                 return match decoded {
-                    // Both create requests answer with the create-reply
-                    // frame, so an attestation failure must too.
+                    // A request that mints an id answers with the frame that
+                    // carries it, so an attestation failure must too.
                     WindowRequest::Create { .. } | WindowRequest::CreatePopup { .. } => {
                         create_reply(reply, Err(err), self.server)
                     }
+                    WindowRequest::OpenMenu { .. } => minted_id_reply(reply, Err(err)),
                     _ => status(reply, Err(err)),
                 };
             }
@@ -600,6 +654,11 @@ impl<M: ShmMapper> WindowServer<M> {
                 };
                 create_reply(reply, self.create_popup(host, caller, spec), self.server)
             }
+            WindowRequest::OpenMenu {
+                window_id,
+                anchor,
+                ref menu,
+            } => minted_id_reply(reply, self.open_menu(host, caller, window_id, anchor, menu)),
             ref other => self.dispatch_status_op(host, caller, other, reply),
         }
     }
@@ -669,6 +728,8 @@ impl<M: ShmMapper> WindowServer<M> {
             WindowRequest::Create { .. } | WindowRequest::CreatePopup { .. } => {
                 create_reply(reply, Err(Errno::NotSupported), self.server)
             }
+            // Likewise a menu open, which mints an open id.
+            WindowRequest::OpenMenu { .. } => minted_id_reply(reply, Err(Errno::NotSupported)),
         }
     }
 
@@ -731,6 +792,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 frame_len,
                 region: Some(region),
                 pick_pending: false,
+                menu_open: None,
                 parent: None,
             },
         );
@@ -794,6 +856,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 frame_len,
                 region: Some(region),
                 pick_pending: false,
+                menu_open: None,
                 parent: Some(spec.parent_window_id),
             },
         );
@@ -898,6 +961,42 @@ impl<M: ShmMapper> WindowServer<M> {
         host.pick_requested(window_id)?;
         record.pick_pending = true;
         Ok(())
+    }
+
+    /// Accept a menu open for `caller`'s window `window_id`, returning the
+    /// minted open id its one outcome will name.
+    ///
+    /// At most one open is unanswered per window: while one is, a second is
+    /// refused, which a well-behaved application cannot reach — its chain
+    /// holds the seat's grab, so the press that would open another is
+    /// consumed there. The host must accept before anything is recorded, so
+    /// a refused open leaves no state and no spent id.
+    fn open_menu(
+        &mut self,
+        host: &mut dyn WindowHost,
+        caller: ProcId,
+        window_id: u64,
+        anchor: MenuAnchor,
+        menu: &AppMenu,
+    ) -> Result<u64, Errno> {
+        let open_id = self.next_menu_open;
+        // Minting never wraps in practice; refuse rather than reuse an id
+        // that an outcome could then answer twice.
+        let next = open_id.checked_add(1).ok_or(Errno::NoSpace)?;
+        // Owned-window check first: a window the caller does not own
+        // answers exactly like one that never existed.
+        let record = self
+            .windows
+            .get_mut(&window_id)
+            .filter(|record| record.owner == caller)
+            .ok_or(Errno::NotFound)?;
+        if record.menu_open.is_some() {
+            return Err(Errno::AlreadyExists);
+        }
+        host.menu_open_requested(window_id, open_id, anchor, menu)?;
+        record.menu_open = Some(open_id);
+        self.next_menu_open = next;
+        Ok(open_id)
     }
 
     /// Retitle `caller`'s window `window_id` to `title`.
@@ -1069,17 +1168,26 @@ impl<M: ShmMapper> WindowServer<M> {
     /// and a session bug (a conclusion no one asked for) is refused, not
     /// delivered.
     ///
+    /// A `MenuClosed` outcome is held to the same rule and, additionally,
+    /// must name the window's *own* unanswered open: an outcome for an open
+    /// that was never accepted, for one already answered, or for a
+    /// different one, is refused. That is what makes exactly-once a
+    /// property rather than a convention — a second outcome for one open
+    /// cannot be delivered, and one gesture's dismissal can never arrive
+    /// as another's answer.
+    ///
     /// # Errors
     ///
     /// * [`Errno::NotFound`] — no such window (it was closed, or never
     ///   existed); the session drops the event.
     /// * [`Errno::OutOfRange`] — a pointer event outside the window's
-    ///   surface, a pick conclusion with no pick pending (a routing bug,
-    ///   refused rather than delivered), or an application-scoped event
-    ///   (those go through [`Self::deliver_app_event`]).
+    ///   surface, a pick conclusion with no pick pending, a menu outcome
+    ///   naming anything but the window's unanswered open (both routing
+    ///   bugs, refused rather than delivered), or an application-scoped
+    ///   event (those go through [`Self::deliver_app_event`]).
     /// * Any [`Errno`] the sink surfaces; a refused delivery leaves a
-    ///   pending pick pending (the session decides whether to retry or
-    ///   tear the client down). A sink that *accepts* the conclusion is
+    ///   pending pick or open still owed (the session decides whether to
+    ///   retry or tear the client down). A sink that *accepts* it is
     ///   answering for it, whether it goes out now or from a hold-back.
     pub fn deliver_event(
         &mut self,
@@ -1102,9 +1210,19 @@ impl<M: ShmMapper> WindowServer<M> {
         if concludes_pick && !record.pick_pending {
             return Err(Errno::OutOfRange);
         }
+        let concludes_open = match *event {
+            WindowEvent::MenuClosed { open_id, .. } => Some(open_id),
+            _ => None,
+        };
+        if concludes_open.is_some() && concludes_open != record.menu_open {
+            return Err(Errno::OutOfRange);
+        }
         sink.deliver(record.event_endpoint, event)?;
         if concludes_pick {
             record.pick_pending = false;
+        }
+        if concludes_open.is_some() {
+            record.menu_open = None;
         }
         Ok(())
     }
@@ -1137,6 +1255,12 @@ fn frame_bytes(surface: &DisplayMode) -> Result<usize, Errno> {
 fn status(reply: &mut [u8; WINDOW_REPLY_MAX], result: Result<(), Errno>) -> usize {
     reply[..STATUS_REPLY_LEN].copy_from_slice(&encode_status_reply(result));
     STATUS_REPLY_LEN
+}
+
+/// Write a minted-id reply into `reply`, returning its length.
+fn minted_id_reply(reply: &mut [u8; WINDOW_REPLY_MAX], result: Result<u64, Errno>) -> usize {
+    reply[..WINDOW_MINTED_ID_REPLY_LEN].copy_from_slice(&encode_minted_id_reply(result));
+    WINDOW_MINTED_ID_REPLY_LEN
 }
 
 /// Write a create reply into `reply`, returning its length.

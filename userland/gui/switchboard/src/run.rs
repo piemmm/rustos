@@ -785,11 +785,13 @@ mod program {
             // showing; the overview has nothing to leave but itself, and a
             // primary press already closes it. The monitor declares no
             // icon-bar presence — it is a service whose window the bar's own
-            // capsule opens — so a bar click or menu outcome names nothing of
-            // its and is ignored.
+            // capsule opens — so a bar click or menu row names nothing of its.
+            // Nor does a chain outcome: it answers an open the overview never
+            // asks for.
             WindowEvent::AlternateCloseRequested { .. }
             | WindowEvent::AppBarDefault
             | WindowEvent::AppBarMenu { .. }
+            | WindowEvent::MenuClosed { .. }
             | WindowEvent::Key { .. }
             | WindowEvent::Focus { .. }
             | WindowEvent::Minimized { .. }

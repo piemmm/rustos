@@ -957,10 +957,12 @@ mod program {
                 // raises its window on a click rather than telling it — an
                 // `AppBarDefault` therefore cannot arrive, and an
                 // `AppBarMenu` naming any other row names no command of the
-                // chooser's.
+                // chooser's, and a chain outcome answers an open the chooser
+                // never asks for.
                 WindowEvent::AlternateCloseRequested { .. }
                 | WindowEvent::AppBarDefault
                 | WindowEvent::AppBarMenu { .. }
+                | WindowEvent::MenuClosed { .. }
                 | WindowEvent::Key { .. }
                 | WindowEvent::Focus { .. }
                 | WindowEvent::Minimized { .. }

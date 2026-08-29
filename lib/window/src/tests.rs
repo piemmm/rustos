@@ -17,8 +17,8 @@ use tairix_abi::input::{KeyInput, KeyValue, Modifiers, PointerButtonCode};
 use tairix_abi::origin::{ProcId, PROC_ID_LEN};
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::window_ipc::{
-    AppBar, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow, PointerAction,
-    WindowEvent, WindowRequest, WINDOW_TITLE_MAX,
+    AppBar, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow, MenuAnchor, MenuOutcome,
+    MenuRefusal, PointerAction, WindowEvent, WindowRequest, WINDOW_TITLE_MAX,
 };
 use tairix_abi::Errno;
 use tairix_display::{FrameRegion, ShmMapper};
@@ -141,6 +141,7 @@ struct RecordingHost {
     resized: Vec<(u64, DisplayMode)>,
     closed: Vec<u64>,
     picks: Vec<u64>,
+    menu_opens: Vec<(u64, u64, MenuAnchor, AppMenu)>,
     blur_sets: Vec<(u64, u16)>,
     retitled: Vec<(u64, String)>,
     app_bars: Vec<(ProcId, AppBar)>,
@@ -151,6 +152,7 @@ struct RecordingHost {
     refuse_resize: Option<Errno>,
     refuse_retitle: Option<Errno>,
     refuse_pick: Option<Errno>,
+    refuse_menu_open: Option<Errno>,
     /// The desktop this host composites, or the refusal a host with no
     /// screen to describe answers with.
     desktop: Result<DesktopInfo, Errno>,
@@ -165,6 +167,7 @@ impl Default for RecordingHost {
             resized: Vec::new(),
             closed: Vec::new(),
             picks: Vec::new(),
+            menu_opens: Vec::new(),
             blur_sets: Vec::new(),
             retitled: Vec::new(),
             app_bars: Vec::new(),
@@ -175,6 +178,7 @@ impl Default for RecordingHost {
             refuse_resize: None,
             refuse_retitle: None,
             refuse_pick: None,
+            refuse_menu_open: None,
             desktop: Ok(sample_desktop()),
         }
     }
@@ -258,6 +262,20 @@ impl WindowHost for RecordingHost {
             return Err(err);
         }
         self.picks.push(window_id);
+        Ok(())
+    }
+
+    fn menu_open_requested(
+        &mut self,
+        window_id: u64,
+        open_id: u64,
+        anchor: MenuAnchor,
+        menu: &AppMenu,
+    ) -> Result<(), Errno> {
+        if let Some(err) = self.refuse_menu_open {
+            return Err(err);
+        }
+        self.menu_opens.push((window_id, open_id, anchor, *menu));
         Ok(())
     }
 
@@ -1678,6 +1696,321 @@ fn backdrop_blur_defaults_to_an_accepted_no_op() {
     });
     let len = server.serve(&mut host, &mut identity, TICKET_A, &blur, &mut reply);
     assert_eq!(decode_status_reply(&reply[..len]), Ok(()));
+}
+
+/// The menu a test application opens for one of its windows: a titled root
+/// plate with one chooseable row.
+fn sample_open_menu() -> AppMenu {
+    let mut menu = AppMenu::titled(AppMenuLabel::new("Edit").expect("a valid title"));
+    menu.push(AppMenuRow::Item(AppMenuItem::new(
+        AppMenuItemId::new(1).expect("a valid id"),
+        AppMenuLabel::new("Copy").expect("a valid label"),
+    )))
+    .expect("room");
+    menu
+}
+
+/// The anchor a right-click hands back: the window-local point the app was
+/// given, with no extent.
+fn sample_menu_anchor() -> MenuAnchor {
+    MenuAnchor::new(12, 30, 0, 0).expect("a representable anchor")
+}
+
+/// One accepted open is answered exactly once, and its answer names the open
+/// it belongs to.
+///
+/// The open id is what makes that a property rather than a hope: an
+/// application that asked again while a previous answer was still in its
+/// mailbox would otherwise read one gesture's dismissal as the next one's.
+#[test]
+fn a_menu_open_is_owner_bound_single_pending_and_answered_exactly_once() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let menu = sample_open_menu();
+    let anchor = sample_menu_anchor();
+
+    // A window the caller does not own answers exactly like one that never
+    // existed, and the host is never told.
+    loopback.borrow_mut().ticket = TICKET_B;
+    assert_eq!(
+        client.open_menu(window, anchor, &menu),
+        Err(Errno::NotFound)
+    );
+    assert!(loopback.borrow().host.menu_opens.is_empty());
+    loopback.borrow_mut().ticket = TICKET_A;
+
+    // The owner's open reaches the host with the anchor and the whole menu
+    // — title included — and mints an id.
+    let open = client
+        .open_menu(window, anchor, &menu)
+        .expect("the open is accepted");
+    assert_ne!(open, 0, "an open id is never zero");
+    {
+        let host = &loopback.borrow().host;
+        assert_eq!(host.menu_opens.len(), 1);
+        let (told_window, told_open, told_anchor, told_menu) = &host.menu_opens[0];
+        assert_eq!((*told_window, *told_open), (window, open));
+        assert_eq!(*told_anchor, anchor);
+        assert_eq!(told_menu.title(), "Edit");
+        assert_eq!(told_menu.len(), 1);
+    }
+
+    // While it is unanswered a second open is refused without troubling the
+    // host: the chain holds the seat's grab, so a well-behaved application
+    // never reaches here.
+    assert_eq!(
+        client.open_menu(window, anchor, &menu),
+        Err(Errno::AlreadyExists)
+    );
+    assert_eq!(loopback.borrow().host.menu_opens.len(), 1);
+
+    // An outcome for some other open answers nothing and is refused rather
+    // than delivered.
+    let mut sink = QueueSink::default();
+    assert_eq!(
+        loopback.borrow_mut().server.deliver_event(
+            &mut sink,
+            &WindowEvent::MenuClosed {
+                window_id: window,
+                open_id: open + 1,
+                outcome: MenuOutcome::Dismissed,
+            }
+        ),
+        Err(Errno::OutOfRange)
+    );
+    assert!(sink.delivered.is_empty());
+
+    // The outcome that names it delivers to the owner's endpoint, once.
+    let chosen = WindowEvent::MenuClosed {
+        window_id: window,
+        open_id: open,
+        outcome: MenuOutcome::Chosen(AppMenuItemId::new(1).expect("a valid id")),
+    };
+    loopback
+        .borrow_mut()
+        .server
+        .deliver_event(&mut sink, &chosen)
+        .expect("the outcome delivers");
+    assert_eq!(sink.delivered.len(), 1);
+    assert_eq!(sink.delivered[0].0, EVENTS_A);
+    assert_eq!(sink.delivered[0].1, chosen.to_le_bytes());
+
+    // A second outcome for the same open — the same one replayed, or a
+    // contradicting dismissal — cannot be delivered.
+    for outcome in [
+        MenuOutcome::Chosen(AppMenuItemId::new(1).expect("a valid id")),
+        MenuOutcome::Dismissed,
+    ] {
+        assert_eq!(
+            loopback.borrow_mut().server.deliver_event(
+                &mut sink,
+                &WindowEvent::MenuClosed {
+                    window_id: window,
+                    open_id: open,
+                    outcome,
+                }
+            ),
+            Err(Errno::OutOfRange),
+            "exactly one outcome follows an acceptance"
+        );
+    }
+    assert_eq!(sink.delivered.len(), 1);
+
+    // Answered, the window may open again — under a fresh id, so the two
+    // gestures' answers can never be confused.
+    let again = client
+        .open_menu(window, anchor, &menu)
+        .expect("a fresh open is accepted");
+    assert_ne!(again, open, "an open id is never reused");
+}
+
+/// Two windows each hold their own open, and each answer reaches only its
+/// own — which is what lets the seat's singleton close one chain and answer
+/// *it* while another window's open stands.
+#[test]
+fn each_windows_open_is_answered_on_its_own() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let first = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let second = create_id(&mut client, 8, EVENTS_A, 1, "b").expect("b");
+    let menu = sample_open_menu();
+    let anchor = sample_menu_anchor();
+
+    let first_open = client
+        .open_menu(first, anchor, &menu)
+        .expect("the first open");
+    let second_open = client
+        .open_menu(second, anchor, &menu)
+        .expect("the second open");
+    assert_ne!(first_open, second_open);
+
+    // The first window's open is answered by its own id and no other.
+    let mut sink = QueueSink::default();
+    assert_eq!(
+        loopback.borrow_mut().server.deliver_event(
+            &mut sink,
+            &WindowEvent::MenuClosed {
+                window_id: first,
+                open_id: second_open,
+                outcome: MenuOutcome::Dismissed,
+            }
+        ),
+        Err(Errno::OutOfRange),
+        "an open id belongs to the window that asked"
+    );
+    loopback
+        .borrow_mut()
+        .server
+        .deliver_event(
+            &mut sink,
+            &WindowEvent::MenuClosed {
+                window_id: first,
+                open_id: first_open,
+                outcome: MenuOutcome::Dismissed,
+            },
+        )
+        .expect("the displaced chain's own requester is answered");
+
+    // The second window's open still stands and is answered in its turn.
+    loopback
+        .borrow_mut()
+        .server
+        .deliver_event(
+            &mut sink,
+            &WindowEvent::MenuClosed {
+                window_id: second,
+                open_id: second_open,
+                outcome: MenuOutcome::Chosen(AppMenuItemId::new(1).expect("a valid id")),
+            },
+        )
+        .expect("and the standing chain answers separately");
+    assert_eq!(sink.delivered.len(), 2);
+}
+
+/// A refused open records nothing, spends no id, and leaves no outcome owed.
+#[test]
+fn a_refused_menu_open_records_nothing_and_spends_no_id() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let menu = sample_open_menu();
+    let anchor = sample_menu_anchor();
+
+    // The host cannot bring a chain up (its seat is held by a lock screen,
+    // it is tearing down): the refusal is relayed verbatim.
+    loopback.borrow_mut().host.refuse_menu_open = Some(Errno::NotSupported);
+    assert_eq!(
+        client.open_menu(window, anchor, &menu),
+        Err(Errno::NotSupported)
+    );
+
+    // No open pends, so no outcome can be delivered for one.
+    let mut sink = QueueSink::default();
+    assert_eq!(
+        loopback.borrow_mut().server.deliver_event(
+            &mut sink,
+            &WindowEvent::MenuClosed {
+                window_id: window,
+                open_id: 1,
+                outcome: MenuOutcome::Dismissed,
+            }
+        ),
+        Err(Errno::OutOfRange)
+    );
+
+    // And the refusal spent no id: the first accepted open is still the
+    // first one minted.
+    loopback.borrow_mut().host.refuse_menu_open = None;
+    assert_eq!(
+        client.open_menu(window, anchor, &menu),
+        Ok(1),
+        "a refused open consumes nothing"
+    );
+}
+
+/// An outcome the sink refuses leaves the open owed, so the window can still
+/// be told later — and cannot start a second chain in the meantime.
+#[test]
+fn an_outcome_the_sink_refuses_stays_owed_until_one_is_accepted() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let menu = sample_open_menu();
+    let anchor = sample_menu_anchor();
+    let open = client
+        .open_menu(window, anchor, &menu)
+        .expect("the open is accepted");
+
+    let refused = WindowEvent::MenuClosed {
+        window_id: window,
+        open_id: open,
+        outcome: MenuOutcome::Refused(MenuRefusal::NoResources),
+    };
+    assert_eq!(
+        loopback
+            .borrow_mut()
+            .server
+            .deliver_event(&mut FullSink, &refused),
+        Err(Errno::WouldBlock),
+        "a full mailbox is relayed, not swallowed"
+    );
+    assert_eq!(
+        client.open_menu(window, anchor, &menu),
+        Err(Errno::AlreadyExists),
+        "the open is still owed, so no second chain starts"
+    );
+
+    let mut sink = QueueSink::default();
+    loopback
+        .borrow_mut()
+        .server
+        .deliver_event(&mut sink, &refused)
+        .expect("an accepted outcome answers it");
+    assert_eq!(sink.delivered.len(), 1);
+    client
+        .open_menu(window, anchor, &menu)
+        .expect("the window may open again");
+}
+
+/// A desktop that composes no menu service refuses an open rather than
+/// accepting one nothing will ever answer.
+///
+/// This is the trait's own default, exercised through a host implementing
+/// only the mandatory bridge methods: a refused menu is an answer the
+/// application reports and carries on from, never a chain left owed.
+#[test]
+fn a_host_with_no_menu_service_refuses_an_open() {
+    let mapper = MockMapper::with_regions(&[(7, FRAME_LEN)]);
+    let mut server = WindowServer::new(mapper, SERVER, CLIENT_FRAME_MAX);
+    let mut host = MinimalHost;
+    let mut identity = MockIdentity;
+    let mut reply = [0u8; WINDOW_REPLY_MAX];
+
+    let create = request_frame(&WindowRequest::Create {
+        shm_handle: 7,
+        event_endpoint: EVENTS_A,
+        frame_count: 1,
+        width_px: SURFACE.width_px,
+        height_px: SURFACE.height_px,
+        stride_bytes: SURFACE.stride_bytes,
+        format: SURFACE.format,
+        title: tairix_abi::window_ipc::WindowTitle::new("a").expect("valid title"),
+        sizing: WindowSizing::Fixed,
+    });
+    let len = server.serve(&mut host, &mut identity, TICKET_A, &create, &mut reply);
+    let (window, _) = tairix_abi::window_ipc::decode_create_reply(&reply[..len]).expect("created");
+
+    let open = request_frame(&WindowRequest::OpenMenu {
+        window_id: window,
+        anchor: sample_menu_anchor(),
+        menu: sample_open_menu(),
+    });
+    let len = server.serve(&mut host, &mut identity, TICKET_A, &open, &mut reply);
+    assert_eq!(
+        tairix_abi::window_ipc::decode_minted_id_reply(&reply[..len]),
+        Err(Errno::NotSupported)
+    );
 }
 
 /// The declaration a test application makes: it handles the click and

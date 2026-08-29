@@ -78,17 +78,26 @@ pub const MIN_SWEEP_FRAMES: u64 = 8;
 /// as it stands, and the plan states the far tighter one the fix admits.
 pub const SWEEP_DAMAGE_DIVISOR: u64 = 8;
 
-/// Reciprocal of the screen fraction the bracketed window may spend
-/// recomputing backdrop frosts.
+/// Recomputed frost pixels one damaged pixel in the bracketed window may
+/// cost.
 ///
-/// Not zero, and the difference matters: a frosted surface that newly appears
-/// inside the window has to compute its frost once, and the second sample is
-/// launched from a frosted popup. What must never happen is a frost recomputed
-/// *per frame* — a hover changes no window's backdrop, so every frost already
-/// on screen must be served from the retained one. A quarter of the screen
-/// admits a handful of one-off frosts and refuses a per-frame recompute by a
-/// wide margin.
-pub const SWEEP_BLUR_DIVISOR: u64 = 4;
+/// A hover changes no window's backdrop, so every frost already on screen must
+/// be served from the retained one; what a frame may legitimately re-frost is
+/// what it *damaged* — a newly-shown frosted surface (the second sample's own
+/// launch popup) is damaged over its whole area and frosted over it, and a
+/// pointer crossing a frosted surface invalidates the strip it uncovers. So
+/// one recomputed frost pixel per damaged pixel is the honest ceiling, and a
+/// frost recomputed while nothing beneath it changed breaks it by the whole
+/// area of the surface.
+///
+/// Bounded against the damage rather than against the screen because the
+/// bracketed epoch's length is not fixed: an absolute share of one screen is
+/// met or missed by how many frames the host let the desktop compose, so it
+/// failed a sweep that recomputed no frost per frame and held one that did
+/// (measured: an identical ~2000 recomputed frost px per frame passed at 61
+/// frames and failed at 119). Every other bound here is normalised against
+/// what varies; this one now is too.
+pub const MAX_BLUR_PX_PER_DAMAGED_PX: u64 = 1;
 
 /// Layer contributions one damaged pixel in the bracketed window may cost, on
 /// average.
@@ -129,8 +138,8 @@ pub enum Verdict {
     /// The average damaged pixel cost more layer contributions than the
     /// bound.
     Overdraw,
-    /// More frost work than a handful of newly-shown surfaces can account
-    /// for — the signature of a frost recomputed per frame rather than served
+    /// More frost recomputed than the frame damaged — the signature of a
+    /// frost rebuilt while nothing beneath it changed, rather than served
     /// from the retained one.
     FrostWork,
     /// Window furniture was re-rendered. A hover mutates no window, so every
@@ -195,7 +204,7 @@ pub fn judge(delta: &Delta) -> Verdict {
     if delta.blended_px > delta.damaged_px.saturating_mul(MAX_BLENDS_PER_DAMAGED_PX) {
         return Verdict::Overdraw;
     }
-    if delta.blur_px > delta.screen_px / SWEEP_BLUR_DIVISOR {
+    if delta.blur_px > delta.damaged_px.saturating_mul(MAX_BLUR_PX_PER_DAMAGED_PX) {
         return Verdict::FrostWork;
     }
     if delta.chrome_misses != 0 {
@@ -210,8 +219,8 @@ pub fn judge(delta: &Delta) -> Verdict {
 #[cfg(test)]
 mod tests {
     use super::{
-        assess, judge, Verdict, EXPECTED_SCREEN_PX, MAX_BLENDS_PER_DAMAGED_PX, MIN_SWEEP_FRAMES,
-        SWEEP_BLUR_DIVISOR, SWEEP_DAMAGE_DIVISOR, SWEEP_MOVES,
+        assess, judge, Verdict, EXPECTED_SCREEN_PX, MAX_BLENDS_PER_DAMAGED_PX,
+        MAX_BLUR_PX_PER_DAMAGED_PX, MIN_SWEEP_FRAMES, SWEEP_DAMAGE_DIVISOR, SWEEP_MOVES,
     };
     use tairix_test_framestats::{Delta, Sample};
 
@@ -287,16 +296,48 @@ mod tests {
     }
 
     #[test]
-    fn one_off_frost_work_passes_and_a_frost_per_frame_does_not() {
-        let share = EXPECTED_SCREEN_PX / SWEEP_BLUR_DIVISOR;
+    fn frost_work_is_bounded_by_the_damage_it_serves() {
         let mut at_bound = hovering();
-        at_bound.blur_px = share;
+        at_bound.blur_px = at_bound.damaged_px * MAX_BLUR_PX_PER_DAMAGED_PX;
         assert_eq!(judge(&at_bound), Verdict::Held, "the bound itself passes");
+        at_bound.blur_px += 1;
+        assert_eq!(judge(&at_bound), Verdict::FrostWork);
 
         let mut per_frame = hovering();
-        // A bar-sized frost recomputed on every frame of the sweep.
+        // A bar-sized frost recomputed on every frame of the sweep, while the
+        // sweep damaged only what the pointer moved over.
         per_frame.blur_px = per_frame.frames * 40_560;
         assert_eq!(judge(&per_frame), Verdict::FrostWork);
+    }
+
+    /// The bound holds whatever the host let the desktop compose: the same
+    /// per-frame frost cost must judge the same at any epoch length.
+    ///
+    /// This is the flake it replaces — an absolute share of one screen was met
+    /// at 61 frames and missed at 119 with the recomputed frost per frame
+    /// unchanged, so a busy host failed a desktop that had done nothing wrong.
+    #[test]
+    fn the_frost_bound_does_not_move_with_the_epochs_length() {
+        for frames in [40u64, 61, 119, 296, 590] {
+            let mut epoch = hovering();
+            epoch.frames = frames;
+            // The rates the failing and passing runs both measured.
+            epoch.damaged_px = frames * 12_000;
+            epoch.blur_px = frames * 2_000;
+            assert_eq!(
+                judge(&epoch),
+                Verdict::Held,
+                "a damage-proportional frost must hold at {frames} frames"
+            );
+
+            let mut rebuilt = epoch;
+            rebuilt.blur_px = frames * 40_560;
+            assert_eq!(
+                judge(&rebuilt),
+                Verdict::FrostWork,
+                "a per-frame rebuild must fail at {frames} frames"
+            );
+        }
     }
 
     #[test]

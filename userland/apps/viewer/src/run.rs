@@ -699,10 +699,13 @@ mod program {
             // The viewer declares no default action, so the session raises
             // its window on a click rather than telling it — an
             // `AppBarDefault` therefore cannot arrive, and an `AppBarMenu`
-            // naming any other row names no command of the viewer's.
+            // naming any other row names no command of the viewer's. No menu
+            // outcome can arrive either: it answers an open the viewer never
+            // asks for.
             WindowEvent::AlternateCloseRequested { .. }
             | WindowEvent::AppBarDefault
             | WindowEvent::AppBarMenu { .. }
+            | WindowEvent::MenuClosed { .. }
             | WindowEvent::DesktopChanged { .. }
             | WindowEvent::Key { .. }
             | WindowEvent::Focus { .. }

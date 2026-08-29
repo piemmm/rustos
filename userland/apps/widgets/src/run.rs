@@ -283,10 +283,13 @@ mod program {
             // The gallery declares no default action, so the session raises
             // its one window on a click rather than telling it — an
             // `AppBarDefault` therefore cannot arrive, and an `AppBarMenu`
-            // naming any other row names no command of the gallery's.
+            // naming any other row names no command of the gallery's. The
+            // gallery draws a `Menu` as a sample, never asking the desktop to
+            // open a chain, so no outcome can arrive.
             WindowEvent::AlternateCloseRequested { .. }
             | WindowEvent::AppBarDefault
             | WindowEvent::AppBarMenu { .. }
+            | WindowEvent::MenuClosed { .. }
             | WindowEvent::Key { .. }
             | WindowEvent::Focus { .. }
             | WindowEvent::Minimized { .. }

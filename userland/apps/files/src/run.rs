@@ -1961,11 +1961,13 @@ mod program {
             // it a second time.
             // The file manager declares no default action, so the session
             // raises its window on a click rather than telling it — an
-            // `AppBarDefault` therefore cannot arrive, and a menu outcome was
-            // resolved before this dispatch.
+            // `AppBarDefault` therefore cannot arrive, a bar menu row was
+            // resolved before this dispatch, and a chain outcome answers an
+            // open the file manager does not yet ask for.
             WindowEvent::Key { .. }
             | WindowEvent::AppBarDefault
             | WindowEvent::AppBarMenu { .. }
+            | WindowEvent::MenuClosed { .. }
             | WindowEvent::CloseRequested { .. }
             | WindowEvent::Focus { .. }
             | WindowEvent::Minimized { .. }

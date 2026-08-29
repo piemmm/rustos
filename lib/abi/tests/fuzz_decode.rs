@@ -80,9 +80,10 @@ use tairix_abi::users_admin::{
     decode_group_list, decode_user_list, UsersAdminRequest, USERS_ADMIN_MAX_REQUEST,
 };
 use tairix_abi::window_ipc::{
-    decode_create_reply, decode_desktop_reply, AppBar, AppMenu, AppMenuItem, AppMenuItemId,
-    AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole, AppMenuRow, AppMenuShortcut,
-    WindowEvent, WindowRequest, WindowSizing, WindowTitle,
+    decode_create_reply, decode_desktop_reply, decode_minted_id_reply, AppBar, AppMenu,
+    AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole, AppMenuRow,
+    AppMenuShortcut, MenuAnchor, MenuOutcome, MenuRefusal, WindowEvent, WindowRequest,
+    WindowSizing, WindowTitle,
 };
 use tairix_abi::{
     AppInfoHeader, IpcMessageHeader, LoadImage, ManifestHeader, NeededLibrary, Origin, PortName,
@@ -528,6 +529,7 @@ fn exercise_window_ipc(bytes: &[u8]) {
     }
     let _ = decode_create_reply(bytes);
     let _ = decode_desktop_reply(bytes);
+    let _ = decode_minted_id_reply(bytes);
 }
 
 /// Drive the notification-channel decoder on `bytes` (one arm of
@@ -1276,6 +1278,13 @@ fn structured_window_requests_with_corrupted_fields_never_panic() {
             window_id: 5,
             radius_px: 8,
         },
+        WindowRequest::OpenMenu {
+            window_id: 3,
+            anchor: MenuAnchor::new(-12, 40, 96, 20).expect("a representable anchor"),
+            menu: fuzz_menu(AppMenu::titled(
+                AppMenuLabel::new("Edit").expect("a valid title"),
+            )),
+        },
         WindowRequest::QueryDesktop,
     ];
     let mut base = std::vec![0u8; WindowRequest::MAX_WIRE_LEN + 1];
@@ -1295,14 +1304,12 @@ fn structured_window_requests_with_corrupted_fields_never_panic() {
     }
 }
 
-#[test]
-fn structured_icon_bar_inputs_with_corrupted_fields_never_panic() {
-    // Walk the accepted/rejected boundary of the icon-bar declaration and
-    // its two outcome events from well-formed frames. A bit-flip lands as
-    // readily on a row's kind, flag byte, parent index, one of its three
-    // text lengths, its item id, the declaration's text length, or the text
-    // block itself as on the header, and every one of them must fail closed.
-    let mut menu = AppMenu::EMPTY;
+/// The rich menu both structured menu seeds carry, appended to `menu`: every
+/// row kind, a chain nested two deep, and every marking a row states.
+///
+/// One builder for the declaration and the open, so a bit-flip lands on the
+/// same shapes whichever operation carries them.
+fn fuzz_menu(mut menu: AppMenu) -> AppMenu {
     menu.push(AppMenuRow::Submenu {
         label: AppMenuLabel::new("Display").expect("a valid label"),
         enabled: true,
@@ -1352,10 +1359,20 @@ fn structured_icon_bar_inputs_with_corrupted_fields_never_panic() {
         .with_role(AppMenuRole::Destructive),
     ))
     .expect("room for Quit");
+    menu
+}
+
+#[test]
+fn structured_icon_bar_inputs_with_corrupted_fields_never_panic() {
+    // Walk the accepted/rejected boundary of the icon-bar declaration and
+    // its two outcome events from well-formed frames. A bit-flip lands as
+    // readily on a row's kind, flag byte, parent index, one of its three
+    // text lengths, its item id, the declaration's text length, or the text
+    // block itself as on the header, and every one of them must fail closed.
     let declare = WindowRequest::SetAppBar(AppBar {
         event_endpoint: 0xE117_0000_0000_0009,
         default_action: true,
-        menu,
+        menu: fuzz_menu(AppMenu::EMPTY),
     });
     // The seed is the frame a client actually sends — exactly the
     // declaration's own length. Feeding a padded buffer instead would be
@@ -1384,6 +1401,38 @@ fn structured_icon_bar_inputs_with_corrupted_fields_never_panic() {
         .to_le_bytes(),
     ];
     for mut base in events {
+        for byte in 0..base.len() {
+            for bit in 0..8u32 {
+                base[byte] ^= 1 << bit;
+                exercise(&base);
+                base[byte] ^= 1 << bit;
+            }
+        }
+    }
+}
+
+/// Every menu-open outcome, seeded and bit-flipped.
+///
+/// The three answers share one event frame, so a flip lands as readily on the
+/// outcome discriminant, the open id, the chosen row's id, or the refusal
+/// reason as on the header — and an outcome stating a field its own case does
+/// not carry must fail closed rather than be read as another answer.
+#[test]
+fn structured_menu_outcome_inputs_with_corrupted_fields_never_panic() {
+    let outcomes = [
+        MenuOutcome::Chosen(AppMenuItemId::new(7).expect("a valid id")),
+        MenuOutcome::Dismissed,
+        MenuOutcome::Refused(MenuRefusal::NoDisplay),
+        MenuOutcome::Refused(MenuRefusal::SeatBusy),
+        MenuOutcome::Refused(MenuRefusal::NoResources),
+    ];
+    for outcome in outcomes {
+        let mut base = WindowEvent::MenuClosed {
+            window_id: 4,
+            open_id: 11,
+            outcome,
+        }
+        .to_le_bytes();
         for byte in 0..base.len() {
             for bit in 0..8u32 {
                 base[byte] ^= 1 << bit;

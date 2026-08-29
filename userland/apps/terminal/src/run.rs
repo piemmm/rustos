@@ -2082,10 +2082,13 @@ mod program {
                         // A secondary press on Close asks to leave what the
                         // window is showing; the terminal has nothing to leave
                         // but the window itself, and a primary press already
-                        // closes it.
+                        // closes it. Its own menus are still popup windows it
+                        // draws, so it asks for no chain and receives no
+                        // outcome.
                         WindowEvent::AlternateCloseRequested { .. }
                         | WindowEvent::AppBarDefault
                         | WindowEvent::AppBarMenu { .. }
+                        | WindowEvent::MenuClosed { .. }
                         | WindowEvent::Focus { .. }
                         | WindowEvent::Scrolled { .. }
                         | WindowEvent::Minimized { .. }
