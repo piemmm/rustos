@@ -1,4 +1,10 @@
-//! Shared host-test fixtures for the boot-path filesystem readers.
+//! Shared host-test fixtures for the boot-path filesystem readers and the
+//! mounted-volume paths above them.
+//!
+//! [`RamBlock`] is the `Vec`-backed 512-byte-block device every host test
+//! that needs a real on-disk image formats over — the runtime volume
+//! attach/detach scenarios and the write-back flusher alike — so there is one
+//! definition rather than a copy per test module.
 //!
 //! [`MockRootFs`] is a minimal in-memory root-volume filesystem driver
 //! serving a directory tree plus file contents — exactly the
@@ -13,11 +19,122 @@ use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use alloc::sync::Arc;
+
+use tairix_abi::blkio::BlkDeviceClass;
+use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::filesystem::{
     DirEntry, FilesystemRead, FilesystemSecurity, NodeId, NodeInfo, NodeKind, NodeSecurity,
     NodeTimes,
 };
 use tairix_abi::driver::DriverError;
+use tairix_sync::SpinLock;
+
+/// Block size every [`RamBlock`] fixture serves.
+pub const BLOCK_SIZE: usize = 512;
+
+/// [`BLOCK_SIZE`] as the geometry reply's field type.
+pub const BLOCK_SIZE_U32: u32 = 512;
+
+/// A `Vec`-backed 512-byte-block device.
+///
+/// It declares the removable medium: the scenarios that use it attach a
+/// stick, and the write-back window a mounted volume takes is a property of
+/// that class, so a test that reports one can only have learned it here.
+pub struct RamBlock {
+    /// The image bytes, so a test can seed or inspect them directly.
+    pub data: Vec<u8>,
+}
+
+impl RamBlock {
+    /// A zeroed device of `sectors` [`BLOCK_SIZE`]-byte blocks.
+    #[must_use]
+    pub fn new(sectors: u64) -> Self {
+        Self {
+            data: alloc::vec![0u8; usize::try_from(sectors).expect("fits") * BLOCK_SIZE],
+        }
+    }
+}
+
+/// A handle onto one shared [`RamBlock`], so a test can read the image back
+/// while a live driver still holds the device.
+///
+/// Pure forwarding over the one device definition: the point is the shared
+/// ownership, not a second block backing.
+pub struct SharedRamBlock(Arc<SpinLock<RamBlock>>);
+
+impl SharedRamBlock {
+    /// A zeroed device of `sectors` blocks, and a second handle on the same
+    /// image for the test to read.
+    #[must_use]
+    pub fn new(sectors: u64) -> (Self, Arc<SpinLock<RamBlock>>) {
+        let shared = Arc::new(SpinLock::new(RamBlock::new(sectors)));
+        (Self(Arc::clone(&shared)), shared)
+    }
+}
+
+impl Block for SharedRamBlock {
+    fn device_class(&self) -> BlkDeviceClass {
+        self.0.lock().device_class()
+    }
+
+    fn geometry(&self) -> Result<BlockGeometry, DriverError> {
+        self.0.lock().geometry()
+    }
+
+    fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
+        self.0.lock().read_blocks(lba, buf)
+    }
+
+    fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
+        self.0.lock().write_blocks(lba, buf)
+    }
+
+    fn flush(&mut self) -> Result<(), DriverError> {
+        self.0.lock().flush()
+    }
+}
+
+impl Block for RamBlock {
+    fn device_class(&self) -> BlkDeviceClass {
+        BlkDeviceClass::Removable
+    }
+
+    fn geometry(&self) -> Result<BlockGeometry, DriverError> {
+        Ok(BlockGeometry {
+            block_size: BLOCK_SIZE_U32,
+            block_count: (self.data.len() / BLOCK_SIZE) as u64,
+        })
+    }
+
+    fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
+        let start = usize::try_from(lba).map_err(|_| DriverError::LengthOutOfRange)? * BLOCK_SIZE;
+        let end = start
+            .checked_add(buf.len())
+            .filter(|&end| {
+                end <= self.data.len() && !buf.is_empty() && buf.len().is_multiple_of(BLOCK_SIZE)
+            })
+            .ok_or(DriverError::LengthOutOfRange)?;
+        buf.copy_from_slice(&self.data[start..end]);
+        Ok(())
+    }
+
+    fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
+        let start = usize::try_from(lba).map_err(|_| DriverError::LengthOutOfRange)? * BLOCK_SIZE;
+        let end = start
+            .checked_add(buf.len())
+            .filter(|&end| {
+                end <= self.data.len() && !buf.is_empty() && buf.len().is_multiple_of(BLOCK_SIZE)
+            })
+            .ok_or(DriverError::LengthOutOfRange)?;
+        self.data[start..end].copy_from_slice(buf);
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), DriverError> {
+        Ok(())
+    }
+}
 
 /// Fixed node id of the mock volume's root directory.
 const ROOT_ID: u64 = 1;

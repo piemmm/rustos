@@ -10,7 +10,7 @@
 //! [`block::Block`](crate::driver::block::Block) trait; this module
 //! does not duplicate it.
 
-use super::DriverError;
+use super::{DriverError, DriverHandle};
 use crate::time::Time64;
 use crate::CapabilityId;
 
@@ -90,7 +90,7 @@ pub trait Filesystem {
     /// Attach a backing image and bring the filesystem online.
     ///
     /// `source_block_handle` is the kernel-issued
-    /// [`DriverHandle`](crate::driver::DriverHandle) for the
+    /// [`DriverHandle`] for the
     /// underlying [`block::Block`](crate::driver::block::Block) device,
     /// not a path — path resolution belongs to the VFS, not to this
     /// trait.
@@ -293,7 +293,7 @@ pub struct DirEntry {
 /// # Capabilities
 ///
 /// Calls are reached only through the kernel-issued
-/// [`DriverHandle`](crate::driver::DriverHandle) the host minted at
+/// [`DriverHandle`] the host minted at
 /// load time ([`CapabilityId::DRV_LOAD`](crate::CapabilityId::DRV_LOAD)).
 pub trait FilesystemRead {
     /// The identifier of the filesystem's root directory.
@@ -389,6 +389,31 @@ pub trait FilesystemRead {
     ) -> Result<Option<DirEntry>, DriverError>;
 }
 
+/// The host's write-back timer, as a driver that defers durability sees it.
+///
+/// A filesystem may keep one transaction open across several operations, so
+/// that the commit — its barrier, its root, and the metadata blocks every
+/// operation in it rewrote — costs once per burst rather than once per
+/// operation. That trades recency, which is only bounded if something
+/// publishes the transaction when the volume falls quiet. The driver cannot:
+/// it owns no thread and runs only inside a caller's operation. So the host
+/// runs the timer and the driver names the instant — the only direction that
+/// cannot lose a transaction, since the driver alone knows one is open.
+pub trait WritebackHost: Send + Sync {
+    /// Monotonic nanoseconds, or [`None`] where the host has no monotonic
+    /// clock. A driver that cannot measure elapsed time publishes every
+    /// operation instead of deferring against a clock it does not have.
+    fn now_ns(&self) -> Option<u64>;
+
+    /// The volume registered as `volume` holds an open transaction due at
+    /// absolute monotonic `deadline_ns`, or holds none (`None`).
+    ///
+    /// Called from inside the driver, under whatever lock serialises it, so
+    /// an implementation records the deadline and returns: it must not park,
+    /// perform I/O, or take a lock its caller may already hold.
+    fn writeback_due(&self, volume: DriverHandle, deadline_ns: Option<u64>);
+}
+
 /// Mutating structural access to a mounted filesystem.
 ///
 /// This is the **versioned `abi-v1` extension** the VFS uses to delegate
@@ -418,7 +443,7 @@ pub trait FilesystemRead {
 /// # Capabilities
 ///
 /// Calls are reached only through the kernel-issued
-/// [`DriverHandle`](crate::driver::DriverHandle) the host minted at load
+/// [`DriverHandle`] the host minted at load
 /// time, and the VFS additionally requires the mount to be writable (a
 /// mount carrying [`MountFlags::READ_ONLY`] is never delegated a write).
 pub trait FilesystemWrite {
@@ -639,6 +664,23 @@ pub trait FilesystemWrite {
     ///   data is on stable media; the caller fails the sync closed rather
     ///   than reporting durability it cannot vouch for.
     fn flush(&mut self) -> Result<(), DriverError>;
+
+    /// Install the host's write-back timer for this mount, registered under
+    /// `volume`.
+    ///
+    /// Called once, by the host, as the mount is registered — so a driver
+    /// that defers durability can only ever do so with a timer that will
+    /// publish it. A driver that publishes at every operation has no
+    /// deadline to report and leaves this defaulted; one that *does* defer
+    /// overrides it and, from then on, reports each transaction's deadline
+    /// through [`WritebackHost::writeback_due`] as the transaction opens and
+    /// reports `None` as it closes.
+    ///
+    /// A driver never given a host must publish eagerly rather than hold a
+    /// transaction nothing will close.
+    fn set_writeback_host(&mut self, volume: DriverHandle, host: &'static dyn WritebackHost) {
+        let _ = (volume, host);
+    }
 }
 
 /// Maximum number of inline ACL entries a [`NodeSecurity`] record carries.
@@ -755,7 +797,7 @@ impl NodeSecurity {
 /// # Capabilities
 ///
 /// Calls are reached only through the kernel-issued
-/// [`DriverHandle`](crate::driver::DriverHandle) the host minted at load
+/// [`DriverHandle`] the host minted at load
 /// time ([`CapabilityId::DRV_LOAD`](crate::CapabilityId::DRV_LOAD)).
 pub trait FilesystemSecurity {
     /// Report the security record stored for `node`.
@@ -844,7 +886,7 @@ pub struct NodeTimes {
 /// # Capabilities
 ///
 /// Calls are reached only through the kernel-issued
-/// [`DriverHandle`](crate::driver::DriverHandle) the host minted at load
+/// [`DriverHandle`] the host minted at load
 /// time ([`CapabilityId::DRV_LOAD`](crate::CapabilityId::DRV_LOAD)), and the
 /// VFS additionally requires the mount to be writable for
 /// [`set_attr`](FilesystemAttrs::set_attr) /
@@ -996,7 +1038,7 @@ pub struct VolumeStats {
 /// # Capabilities
 ///
 /// Calls are reached only through the kernel-issued
-/// [`DriverHandle`](crate::driver::DriverHandle) the host minted at load
+/// [`DriverHandle`] the host minted at load
 /// time ([`CapabilityId::DRV_LOAD`](crate::CapabilityId::DRV_LOAD)).
 pub trait FilesystemStats {
     /// Report the volume's current space accounting.

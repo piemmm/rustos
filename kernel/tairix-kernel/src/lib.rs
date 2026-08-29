@@ -383,6 +383,14 @@ pub mod driver_store_server;
 #[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64", kernel_isa = "riscv64"))]
 pub mod unlock_orchestrate;
 
+// The write-back flusher kthread: the one task above the filesystem drivers
+// that publishes a volume whose batched transaction has aged out
+// (`plans/ARXFS-WRITEBACK.md` §10). Admitted from `unlock_orchestrate`'s
+// shared tail, so it is gated on the same three instruction sets that reach
+// it — a port with no storage floor registers no volume to publish.
+#[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64", kernel_isa = "riscv64"))]
+pub mod writeback_service;
+
 // The binding kernel's `SupervisorHost` — the consumer wiring the arch-neutral
 // pre-boot Supervisor engine (`lib/supervisor`) to the real bootstrap-floor
 // state (`plans/NEW-SUPERVISOR.md`): each command reaches its one existing

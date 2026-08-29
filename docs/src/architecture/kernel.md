@@ -242,6 +242,7 @@ audit trail, and is compiled in only under the `watchdog-diagnostics` feature:
 | 4131 | Warn  | `VOLUME_RECOVERING`         | audit  |
 | 4132 | Info  | `VOLUME_RECOVERED`          | audit  |
 | 4133 | Info  | `SYSTEM_POWER`              | audit  |
+| 4134 | Error | `VOLUME_WRITEBACK_FAILED`   | audit  |
 | 4140 | Info  | `HW_NODE_REMOVED`           | audit  |
 | 4141 | Warn  | `HW_NODE_REMOVE_REFUSED`    | audit  |
 

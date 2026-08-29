@@ -60,6 +60,7 @@ pub mod volsvc;
 pub mod volumes;
 #[cfg(any(test, feature = "fs-conformance"))]
 pub mod wrapper_conformance;
+pub mod writeback;
 
 pub use blkclient::BlkClient;
 pub use delegate::{

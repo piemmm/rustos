@@ -22,7 +22,9 @@ use alloc::boxed::Box;
 use tairix_abi::driver::filesystem::{
     DirEntry, FilesystemAttrsFs, FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity,
     FilesystemStats, FilesystemWrite, NodeId, NodeInfo, NodeKind, NodeSecurity, VolumeStats,
+    WritebackHost,
 };
+use tairix_abi::driver::DriverHandle;
 use tairix_abi::DriverError;
 
 /// The mounted-volume filesystem driver, type-erased. See the module
@@ -126,6 +128,10 @@ impl FilesystemWrite for Box<dyn KernelFs> {
 
     fn flush(&mut self) -> Result<(), DriverError> {
         (**self).flush()
+    }
+
+    fn set_writeback_host(&mut self, volume: DriverHandle, host: &'static dyn WritebackHost) {
+        (**self).set_writeback_host(volume, host);
     }
 }
 

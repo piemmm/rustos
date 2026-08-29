@@ -28,8 +28,9 @@
 use tairix_abi::driver::filesystem::{
     DirEntry, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider, FilesystemRead,
     FilesystemSecurity, FilesystemStats, FilesystemWrite, NodeId, NodeInfo, NodeKind, NodeSecurity,
-    VolumeStats,
+    VolumeStats, WritebackHost,
 };
+use tairix_abi::driver::DriverHandle;
 use tairix_abi::DriverError;
 use tairix_kernel_sec::GroupId;
 use tairix_sync::OnceCell;
@@ -188,6 +189,10 @@ impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for GroupMappedFs<F> {
 
     fn flush(&mut self) -> Result<(), DriverError> {
         self.inner.flush()
+    }
+
+    fn set_writeback_host(&mut self, volume: DriverHandle, host: &'static dyn WritebackHost) {
+        self.inner.set_writeback_host(volume, host);
     }
 }
 

@@ -736,6 +736,46 @@ pub fn pressure_wake() {
     PRESSURE_WAITQ.request_wake();
 }
 
+/// The wait-queue holding the write-back flusher kthread — the one task that
+/// publishes a volume whose open filesystem transaction has aged out
+/// (`crate::fs::writeback`).
+///
+/// A filesystem that batches commits keeps a transaction open for the next
+/// operation to join, and between operations nothing in the driver runs, so
+/// the age bound is only real if something above it publishes a volume that
+/// falls quiet. The flusher registers here with the soonest deadline any
+/// mounted volume has published and parks off the run queue; the timed
+/// [`WaitQueue::sweep`] releases it when that deadline arrives, and
+/// [`writeback_wake`] releases it early when a volume takes on a *sooner*
+/// one. A machine with no dirty volume registers [`NO_DEADLINE`], so it arms
+/// nothing and takes no wakeup at all.
+pub static WRITEBACK_WAITQ: WaitQueue = WaitQueue::new();
+
+/// Request a wake of the write-back flusher because a volume published a
+/// write-back deadline **sooner** than the one the flusher is parked on.
+///
+/// A later deadline needs no wake: the flusher recomputes the soonest
+/// deadline every time it runs, so an already-armed earlier wake will pick
+/// the new volume up. That is what keeps a sync-heavy workload — which opens
+/// and closes a transaction per barrier — from costing a task switch per
+/// commit.
+///
+/// Called from inside a filesystem driver, under the mount lock that
+/// serialises it, so it is **lock-free** past the queue's own deadline read:
+/// it only flags the queue ([`WaitQueue::request_wake`]) and the real
+/// `unpark` runs at the next dispatcher-context [`drain_pending_wakes`].
+pub fn writeback_wake(deadline_ns: Option<u64>) {
+    let Some(deadline) = deadline_ns else {
+        // Nothing to publish: whatever the flusher is armed for still
+        // covers it, and it will re-park on `NO_DEADLINE` when it next runs.
+        return;
+    };
+    match WRITEBACK_WAITQ.earliest_deadline() {
+        Some(armed) if armed <= deadline => {}
+        _ => WRITEBACK_WAITQ.request_wake(),
+    }
+}
+
 /// The wait-queue holding `hw_tree_wait` callers (Design D P-2). Woken by
 /// the [`crate::HwTreeSource`] store on every change to the discovered
 /// hardware tree and by the timed sweep below.
@@ -937,6 +977,10 @@ fn run_timed_sweep(arch: &dyn WaitQueueArch) {
     // caller whose device wedged so its `call_reap` observes the timeout,
     // rather than parking it forever.
     CALL_WAITQ.sweep(arch, now);
+    // The write-back flusher's deadline is the soonest a mounted volume's
+    // open transaction ages out, so the sweep is what turns the batching
+    // window into a real bound on how stale a quiet volume may be.
+    WRITEBACK_WAITQ.sweep(arch, now);
     // The futex queues are per-key and created on demand, so they are swept
     // through their own module rather than named here (`plans/THREADS.md`
     // decision 5): a timed `futex_wait` is released exactly like any other
@@ -984,6 +1028,12 @@ pub fn drain_pending_wakes() -> bool {
         PRESSURE_WAITQ.wake_all(arch);
         woke = true;
     }
+    // A volume took on a sooner write-back deadline than the flusher is
+    // armed for, flagged from inside the driver under its mount lock.
+    if WRITEBACK_WAITQ.take_wake_pending() {
+        WRITEBACK_WAITQ.wake_all(arch);
+        woke = true;
+    }
     // Deadline sweep flagged by the timer one-shot.
     if TIMED_SWEEP_PENDING.swap(false, Ordering::AcqRel) {
         run_timed_sweep(arch);
@@ -1015,6 +1065,7 @@ pub fn has_pending_deferred_wake() -> bool {
     CONSOLE_WAITQ.wake_is_pending()
         || IRQ_WAITQ.wake_is_pending()
         || PRESSURE_WAITQ.wake_is_pending()
+        || WRITEBACK_WAITQ.wake_is_pending()
 }
 
 /// Whether a timed waiter's finite deadline has already elapsed, so the
@@ -1072,10 +1123,10 @@ pub fn console_deregister(task: TaskId, deadline_ns: u64) {
 
 /// The soonest finite deadline pending across **every** timed wait-queue
 /// (`HW_TREE_WAITQ`, `IRQ_WAITQ`, `CONSOLE_WAITQ`, `USERS_DB_WAITQ`,
-/// `STREAM_WAITQ`, `CALL_WAITQ`, and the per-key futex queues), or
-/// [`None`] if none has one. A park site arms the one-shot to this so
-/// registering a *later* deadline never delays an already-pending earlier
-/// wake.
+/// `STREAM_WAITQ`, `CALL_WAITQ`, `WRITEBACK_WAITQ`, and the per-key futex
+/// queues), or [`None`] if none has one. A park site arms the one-shot to
+/// this so registering a *later* deadline never delays an already-pending
+/// earlier wake.
 #[must_use]
 pub fn nearest_timed_deadline() -> Option<u64> {
     [
@@ -1090,6 +1141,8 @@ pub fn nearest_timed_deadline() -> Option<u64> {
         // A timed `futex_wait` — a condition variable's bounded wait — over
         // the per-key queues created on demand.
         crate::futex::earliest_deadline(),
+        // The soonest write-back deadline any mounted volume published.
+        WRITEBACK_WAITQ.earliest_deadline(),
     ]
     .into_iter()
     .flatten()

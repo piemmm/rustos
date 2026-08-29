@@ -29,7 +29,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use tairix_abi::driver::block::{Block, BlockGeometry, DiscardCapability};
-use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeId, NodeKind};
+use tairix_abi::driver::filesystem::{
+    FilesystemRead, FilesystemWrite, NodeId, NodeKind, WritebackHost,
+};
+use tairix_abi::driver::DriverHandle;
 use tairix_abi::DriverError;
 use tairix_drv_fs_arxfs::{EntropySource, VolumeKey, ARXFS, RUN_BYTES, VOLUME_KEY_LEN};
 use tairix_fuzzseed::Lcg;
@@ -269,19 +272,29 @@ fn payload(len: usize) -> Vec<u8> {
 /// How the volume under measurement publishes what it writes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Publish {
-    /// No monotonic clock, so there is no window to age a transaction against
-    /// and every operation publishes its own.
+    /// No write-back timer, so there is no window to age a transaction
+    /// against and every operation publishes its own.
     PerOperation,
-    /// A frozen clock, so the window never elapses and the operations of a
-    /// measured window all join one transaction.
+    /// A timer whose clock never advances, so the window never elapses and
+    /// the operations of a measured window all join one transaction.
     Batched,
 }
 
-/// A monotonic clock that never advances, so a measured burst is never split
-/// by its window and the measurement prices the batch itself.
-fn frozen_monotonic() -> u64 {
-    0
+/// A write-back timer whose clock never advances, so a measured burst is
+/// never split by its window and the measurement prices the batch itself.
+/// It records nothing: what is being measured is the device traffic, and the
+/// deadline the driver reports has no consumer here.
+struct FrozenTimer;
+
+impl WritebackHost for FrozenTimer {
+    fn now_ns(&self) -> Option<u64> {
+        Some(0)
+    }
+
+    fn writeback_due(&self, _volume: DriverHandle, _deadline_ns: Option<u64>) {}
 }
+
+static FROZEN_TIMER: FrozenTimer = FrozenTimer;
 
 /// A freshly formatted `device_bytes` volume of `block_size`-byte blocks, and
 /// the ledger recording what its driver issues.
@@ -295,7 +308,10 @@ fn volume(
     let fs = ARXFS::format(device, 64, &TEST_KEY, &mut TestEntropy(0x2f)).expect("format");
     let fs = match publish {
         Publish::PerOperation => fs,
-        Publish::Batched => fs.with_monotonic(frozen_monotonic),
+        Publish::Batched => fs.with_writeback_host(
+            DriverHandle::from_raw(1).expect("a non-zero test handle"),
+            &FROZEN_TIMER,
+        ),
     };
     (fs, ledger)
 }

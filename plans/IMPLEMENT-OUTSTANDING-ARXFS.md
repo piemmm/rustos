@@ -27,13 +27,13 @@ spec), and the owning plan of the item you are about to implement.
 Order is top to bottom. An item may start when every item it depends on is
 `done`; items at the same depth with no edge between them may proceed in
 parallel across sessions. The table **gains rows**: a defect too large for the
-item that found it is inserted as the next item to be taken (§6, the
+item that found it is inserted as the next item to be taken (§7, the
 no-deferral rule), ahead of everything below it.
 
 | # | Item | Owner | Spec stage | Depends on | Status |
 |---|---|---|---|---|---|
 | A0 | Bounded, resumable tree iteration | §3 here | — | — | **done** |
-| A1 | Bounded-stack B-tree mutation path (defect `OPEN-DEFECTS.md` D65) | §7 here | — | A0 | **done** |
+| A1 | Bounded-stack B-tree mutation path (defect `OPEN-DEFECTS.md` D65) | §8 here | — | A0 | **done** |
 | A2 | Bounded whole-volume reconcile and reachability state (defect D-M5) | `ARXFS-MAINTENANCE.md` | 18 | A1 | **done** |
 | M0 | Shared background pacer + cross-layer availability query | `ARXFS-MAINTENANCE.md` | 18 | — | **done** |
 | M1 | The read-only repair rule (defect D64) | `ARXFS-MAINTENANCE.md` | 18 | — | **done** |
@@ -43,8 +43,8 @@ no-deferral rule), ahead of everything below it.
 | WB3 | Fold in the allocation map's dirty pages | `ARXFS-WRITEBACK.md` | 17 | WB1 | **done** |
 | D66 | One `DriverError` per filesystem conflict (defect `OPEN-DEFECTS.md` D66) | `OPEN-DEFECTS.md` | — | — | **done** |
 | WB4 | Commit scheduler | `ARXFS-WRITEBACK.md` | 17 | WB1 | **done** |
-| WB-D1 | Kernel write-back expiry timer (defect `ARXFS-WRITEBACK.md` §10) | `ARXFS-WRITEBACK.md` | 17 | WB4 | **next** |
-| WB5 | The bound and memory pressure | `ARXFS-WRITEBACK.md` | 17 | WB1 | planned |
+| WB-D1 | Host write-back expiry timer (`ARXFS-WRITEBACK.md` §10) | `ARXFS-WRITEBACK.md` | 17 | WB4 | **done** |
+| WB5 | The bound and memory pressure | `ARXFS-WRITEBACK.md` | 17 | WB1 | **next** |
 | WB6 | Hardware acceptance + docs | `ARXFS-WRITEBACK.md` | 17 | WB2–WB5 | planned |
 | M2 | Bounded passes: scrub, discard sweep, health (D-M2/3/4) | `ARXFS-MAINTENANCE.md` | 18 | A2, M1 | planned |
 | M3 | The maintenance scheduler | `ARXFS-MAINTENANCE.md` | 18 | M0, M2 | planned |
@@ -74,7 +74,7 @@ their reason recorded there, not here:
 
 ## 2. Why this order
 
-- **D66 came before the rest, because the no-deferral rule (§6) puts a found
+- **D66 came before the rest, because the no-deferral rule (§7) puts a found
   defect ahead of everything planned, and it is closed.** Reviewing WB3 found
   filesystem drivers spelling four unrelated refusals — name taken, directory
   not empty, a move that would make a directory its own descendant, and the
@@ -92,7 +92,7 @@ their reason recorded there, not here:
   any stage, and it makes a "bounded" maintenance chunk unbounded in memory
   before it does any work. Fixing it once, first, was also the difference
   between one change and six that each work around it.
-- **A1 and A2 came next, because A0's work surfaced them (§7) and the
+- **A1 and A2 came next, because A0's work surfaced them (§8) and the
   no-deferral rule puts a found defect ahead of everything planned.** Both are
   closed. A1 was a reachable kernel-stack overflow on the write path: the
   mutation path is iterative like the read paths A0 converted, where it had
@@ -116,18 +116,18 @@ their reason recorded there, not here:
   of reducing it, so B1 followed WB2, which is now done: the drain gathers its
   ascending order into physical runs against the read path's transfer window, so
   a 64 KiB write costs five device commands against 158 for the same bytes.
-- **WB-D1 is next, because WB4 found it and the no-deferral rule puts a found
-  defect ahead of everything planned.** WB4 made a transaction span operations
-  and gave it a per-device-class dirty-age window, and the chunked case now
-  costs what a single call does. But nothing in the system fires that window on
-  a volume that goes idle: ARXFS has no thread, so between operations no one
-  observes it. Writeback expiry belongs above the driver — a kernel task on a
-  one-shot timer calling the existing `fs_sync`, which is where Linux puts it —
-  and that is kernel work rather than a change to the driver, so it is its own
-  item. Until it lands no host installs the monotonic clock the window is aged
-  against, so a live volume still publishes at every operation and nothing has
-  regressed; wiring the mounts first would trade a bounded exposure for an
-  unbounded one.
+- **WB-D1 came before WB5, because WB4 found it and the no-deferral rule puts a
+  found defect ahead of everything planned. It is closed.** WB4 made a
+  transaction span operations and gave it a per-device-class dirty-age window,
+  but nothing in the system fired that window on a volume that went idle: ARXFS
+  owns no thread, so between operations no one observed it. The expiry now lives
+  above the driver, where Linux puts it — one kernel task parking on the soonest
+  deadline any mounted volume published, calling the existing `fs_sync` on each
+  that is due. The driver *names* each deadline rather than the kernel inferring
+  one, so the window policy has one definition and the notification sits at the
+  one place a transaction opens or closes; and deferral is armed by that task and
+  disarmed with it, so no volume can ever hold work against a timer that will
+  not fire. Batching is live on a mounted volume from this item on.
 - **M0 and M1 went first, and both are done.** M0 was a hoist plus one
   default-provided query, and it also closed a live reporting defect: a mount
   over a degraded composed array read as `Available`, because a degraded array
@@ -263,7 +263,56 @@ corruption-injection, and fuzz suites pass on the new geometry.
 If the record/inline design turns out to need decisions this section does not
 fix, **stop and ask** — do not guess an on-disk layout.
 
-## 6. What every session does
+## 6. Asynchrony and threads are allowed where they make the better system
+
+ARXFS is a synchronous driver today, and every item in this ledger may change
+that where being asynchronous is genuinely the better and more correct design.
+This is a standing allowance, not a preference either way.
+
+- **Asynchrony is permitted.** An operation may return before its I/O has
+  completed, a driver may keep work in flight and reap completions later, and a
+  path may be restructured around completion rather than around a blocking
+  call — where that is what makes the system correct or fast, and not merely
+  different. Overlapping device requests within a volume, a submission/
+  completion split beneath the block seam, and a bounded pipeline over a
+  multi-queue device are all in scope.
+- **Threads are permitted.** A piece of work may be given its own kernel task
+  where owning one is the honest shape of the work — a long, cancellable,
+  resumable pass; a producer the rest of the system waits on; a timer nobody
+  else can hold. WB-D1's write-back flusher is the worked example: the expiry
+  belongs to a task above the driver, and pretending otherwise is what left the
+  window unenforced.
+- **What the allowance does not relax.** Everything else in `AGENTS.md` binds
+  unchanged, and asynchrony is exactly where these are easiest to break:
+  - **Event-driven, never a busy-poll** (§2.23). A task with nothing to do
+    parks on the event; it does not spin, yield-loop, or re-poll on a fixed
+    tick. A completion-driven design must have a real wake source before it is
+    written, not after.
+  - **The commit barrier and the publication order are untouchable** (§22 of
+    the spec). Asynchrony may reorder *submission*; it may never let a
+    superblock slot reach the medium before the blocks its root names, and a
+    commit that cannot barrier still does not publish.
+  - **One of everything** (§2.2). One dirty layer, one seal path, one B-tree,
+    one background pacer. An async path is not licence for a second copy of a
+    synchronous one, and a "fast path" that duplicates logic is the defect the
+    charter names.
+  - **SMP-correct and bounded** (§4, §24, §26.7). Shared state takes `lib/sync`
+    primitives with a stated ordering discipline; a lock that an interrupt
+    handler shares with a task-context path is interrupt-safe; in-flight work is
+    a derived, bounded capacity, not a hand-picked constant, and it stays
+    bounded on a ~1 GiB machine serving several 100 TB volumes at once.
+  - **Fails closed, never panics** (§2.9, §5.4). A completion that faults
+    reports a typed error and unwinds; it never retries in a loop and never
+    publishes a partial transaction.
+  - **A thread is not a way to defer a defect** (§2.19). "A background task
+    will fix it up later" is still deferral if the synchronous path is wrong.
+
+If a genuinely asynchronous or threaded design conflicts with something else —
+another plan, an in-flight interface, two requirements that contradict — stop
+and ask (§15.7). The allowance decides *whether* async is permitted, never
+which of two conflicting requirements wins.
+
+## 7. What every session does
 
 1. **Read** `AGENTS.md`, the spec, and the owning plan of the item — plus, for
    the write-back and maintenance items, `plans/OPEN-DEFECTS.md` D63 and
@@ -318,10 +367,10 @@ fix.** This binds every item in this ledger and every plan it names.
   ARXFS is not done while any plan's defect section is non-empty. "All items
   planned → done" and "every defect section empty" are the same finish line.
 
-## 7. A1 and A2 — the two defects A0 surfaced
+## 8. A1 and A2 — the two defects A0 surfaced
 
 A0's own scope is closed. Reading the code it converted surfaced two defects too
-large to fold into it, so under §6 they took precedence over every row below
+large to fold into it, so under §7 they took precedence over every row below
 them. Both are done and neither blocks the ledger any longer.
 
 ### A1 — bounded-stack B-tree mutation path — done
@@ -443,7 +492,7 @@ M2 owns (`ARXFS-MAINTENANCE.md` §12: the budget must count verified blocks and
 the cursor must be `(inode, logical offset)`), and doing it now would collide
 with that design. The scratch machinery A2 lands is what M2 needs to do it.
 
-## 8. The implementation prompt
+## 9. The implementation prompt
 
 Paste this, naming the item:
 
@@ -451,8 +500,9 @@ Paste this, naming the item:
 Implement item <ID> from `plans/IMPLEMENT-OUTSTANDING-ARXFS.md`.
 
 Read `AGENTS.md`, `docs/src/filesystem/arxfs-spec.md`,
-`docs/src/filesystem/arxfs.md`, `plans/IMPLEMENT-OUTSTANDING-ARXFS.md`, and
-that item's owning plan in full before writing code. For a write-back item also
+`docs/src/filesystem/arxfs.md`, `plans/IMPLEMENT-OUTSTANDING-ARXFS.md`
+(including §6, the asynchrony and threads allowance), and that item's owning
+plan in full before writing code. For a write-back item also
 read `plans/OPEN-DEFECTS.md` D63; for a maintenance item also read
 `plans/FIX-IO.md` and `lib/raid/src/maintenance.rs`; for a snapshot or FEC item
 also read `plans/ARXFS-WRITEBACK.md`. Then read the ARXFS driver code the item
@@ -477,6 +527,9 @@ Implement the item completely, as a production change:
 - allocation failure and every `Result` handled as a value, never
   `unwrap`/`expect`/`panic!` on a production path;
 - event-driven, never a busy-poll, a yield loop, or a fixed-frequency tick;
+- asynchronous, or owning its own kernel task, wherever that is genuinely the
+  better and more correct design — §6 states the allowance and everything it
+  does not relax;
 - every capacity derived from discovered hardware or grown on demand, and every
   long operation bounded, resumable, cancellable, and correct on a ~1 GiB
   machine serving several 100 TB volumes at once;
@@ -512,7 +565,7 @@ For FEC (item F1) use the stage prompt in `plans/ARXFS-FEC.md` §30 instead of
 the body above; it carries that plan's mandatory design constraints. The reading
 list, the ledger check, and the closing gate still apply.
 
-## 9. Non-goals
+## 10. Non-goals
 
 - **Not a redesign.** Every item's design lives in its owning plan; this file
   changes none of it.

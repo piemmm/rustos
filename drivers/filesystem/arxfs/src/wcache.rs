@@ -30,6 +30,8 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use tairix_abi::blkio::BlkDeviceClass;
+use tairix_abi::driver::filesystem::WritebackHost;
+use tairix_abi::driver::DriverHandle;
 use tairix_abi::DriverError;
 use zeroize::Zeroize;
 
@@ -65,15 +67,24 @@ pub(crate) const fn writeback_window_ns(class: BlkDeviceClass) -> u64 {
 /// needs a barrier for its own correctness, an explicit sync, or the volume
 /// being handed on.
 ///
-/// Ageing needs a monotonic clock, and the driver is given one by its host.
-/// Without one there is no window to measure, so every operation publishes:
-/// a host that cannot say how much time has passed does not get to defer
-/// durability.
+/// Between operations nothing here runs, so the window is enforced by the
+/// host's write-back timer: each transaction reports its deadline as it opens
+/// and reports its absence as it closes, and the host publishes a volume that
+/// falls quiet by calling `flush`. A handle with no host has neither a clock
+/// to age against nor anything to wake it, so every operation publishes — a
+/// host that cannot say how much time has passed, or cannot be told when to
+/// come back, does not get to defer durability.
 pub(crate) struct CommitScheduler {
-    clock: Option<fn() -> u64>,
+    /// The host's timer and the handle this mount is registered under,
+    /// installed when the volume is registered.
+    host: Option<(DriverHandle, &'static dyn WritebackHost)>,
     window_ns: u64,
-    /// Monotonic reading at which the open transaction started, or `None`
-    /// when none is open.
+    /// Whether a transaction is in flight. Separate from [`Self::opened_ns`],
+    /// which is absent when a transaction is open but the host's clock
+    /// declined to read.
+    open: bool,
+    /// Monotonic reading at which the open transaction started, when the
+    /// host's clock answered.
     opened_ns: Option<u64>,
     /// Operations already reported successful into the open transaction. A
     /// commit failure loses them, which is what makes the failure more than
@@ -82,31 +93,44 @@ pub(crate) struct CommitScheduler {
 }
 
 impl CommitScheduler {
-    /// A scheduler for a volume on a device of `class`, with no clock yet.
+    /// A scheduler for a volume on a device of `class`, with no host yet.
     pub(crate) const fn new(class: BlkDeviceClass) -> Self {
         Self {
-            clock: None,
+            host: None,
             window_ns: writeback_window_ns(class),
+            open: false,
             opened_ns: None,
             acknowledged: 0,
         }
     }
 
-    /// Install the host's monotonic nanosecond clock.
-    pub(crate) const fn set_clock(&mut self, clock: fn() -> u64) {
-        self.clock = Some(clock);
+    /// Install the host's write-back timer for the mount registered as
+    /// `volume`, and report the current state to it.
+    ///
+    /// A transaction already open when the host arrives is adopted as
+    /// starting now: it has been open for an unmeasured time, so dating it
+    /// from here bounds it by one window rather than leaving it unreported.
+    pub(crate) fn set_host(&mut self, volume: DriverHandle, host: &'static dyn WritebackHost) {
+        self.host = Some((volume, host));
+        if self.open && self.opened_ns.is_none() {
+            self.opened_ns = host.now_ns();
+        }
+        self.report();
     }
 
     /// Note that a transaction is now open, if one was not already.
     pub(crate) fn opened(&mut self) {
-        if self.opened_ns.is_none() {
-            self.opened_ns = Some(self.clock.map_or(0, |now| now()));
+        if self.open {
+            return;
         }
+        self.open = true;
+        self.opened_ns = self.now_ns();
+        self.report();
     }
 
     /// Whether a transaction is in flight.
     pub(crate) const fn is_open(&self) -> bool {
-        self.opened_ns.is_some()
+        self.open
     }
 
     /// Note one more operation reported successful into the open transaction.
@@ -121,18 +145,108 @@ impl CommitScheduler {
     }
 
     /// The transaction has been published or abandoned.
-    pub(crate) const fn closed(&mut self) {
+    pub(crate) fn closed(&mut self) {
+        self.open = false;
         self.opened_ns = None;
         self.acknowledged = 0;
+        self.report();
     }
 
     /// Whether the open transaction has reached its window and the operation
     /// that just finished must publish it.
     pub(crate) fn expired(&self) -> bool {
-        let (Some(clock), Some(opened_ns)) = (self.clock, self.opened_ns) else {
+        let Some(opened_ns) = self.opened_ns else {
             return true;
         };
-        clock().saturating_sub(opened_ns) >= self.window_ns
+        match self.now_ns() {
+            Some(now) => now.saturating_sub(opened_ns) >= self.window_ns,
+            // The clock stopped answering mid-transaction: publish rather
+            // than hold work against an age nothing can measure.
+            None => true,
+        }
+    }
+
+    /// The absolute monotonic instant the open transaction is due at, or
+    /// `None` when none is open or its age cannot be measured.
+    fn deadline_ns(&self) -> Option<u64> {
+        self.opened_ns.map(|at| at.saturating_add(self.window_ns))
+    }
+
+    fn now_ns(&self) -> Option<u64> {
+        self.host.and_then(|(_, host)| host.now_ns())
+    }
+
+    /// Tell the host when this volume next needs publishing.
+    fn report(&self) {
+        if let Some((volume, host)) = self.host {
+            host.writeback_due(volume, self.deadline_ns());
+        }
+    }
+}
+
+/// The host half of the write-back timer, for tests: a settable monotonic
+/// clock and a record of the last deadline the driver reported.
+///
+/// One definition for the whole crate — the scheduler's own tests and the
+/// mounted-volume tests both drive a transaction across its window through
+/// this, by moving the clock rather than waiting for one.
+#[cfg(test)]
+pub(crate) struct TestWritebackHost {
+    now_ns: core::sync::atomic::AtomicU64,
+    /// The last reported deadline, with `u64::MAX` for "nothing open".
+    due_ns: core::sync::atomic::AtomicU64,
+    reports: core::sync::atomic::AtomicU32,
+}
+
+#[cfg(test)]
+impl TestWritebackHost {
+    /// A leaked host reading `now_ns`, as the driver needs it: `&'static`.
+    pub(crate) fn leaked(now_ns: u64) -> &'static Self {
+        alloc::boxed::Box::leak(alloc::boxed::Box::new(Self {
+            now_ns: core::sync::atomic::AtomicU64::new(now_ns),
+            due_ns: core::sync::atomic::AtomicU64::new(u64::MAX),
+            reports: core::sync::atomic::AtomicU32::new(0),
+        }))
+    }
+
+    /// Move the clock to `now_ns`.
+    pub(crate) fn set_now(&self, now_ns: u64) {
+        self.now_ns
+            .store(now_ns, core::sync::atomic::Ordering::Release);
+    }
+
+    /// The deadline the driver last reported, or `None` for "nothing open".
+    pub(crate) fn reported(&self) -> Option<u64> {
+        match self.due_ns.load(core::sync::atomic::Ordering::Acquire) {
+            u64::MAX => None,
+            deadline => Some(deadline),
+        }
+    }
+
+    /// How many times the driver has reported.
+    pub(crate) fn reports(&self) -> u32 {
+        self.reports.load(core::sync::atomic::Ordering::Acquire)
+    }
+
+    /// The handle a test registers its one volume under.
+    pub(crate) fn volume() -> DriverHandle {
+        DriverHandle::from_raw(1).expect("a non-zero test handle")
+    }
+}
+
+#[cfg(test)]
+impl WritebackHost for TestWritebackHost {
+    fn now_ns(&self) -> Option<u64> {
+        Some(self.now_ns.load(core::sync::atomic::Ordering::Acquire))
+    }
+
+    fn writeback_due(&self, _volume: DriverHandle, deadline_ns: Option<u64>) {
+        self.due_ns.store(
+            deadline_ns.unwrap_or(u64::MAX),
+            core::sync::atomic::Ordering::Release,
+        );
+        self.reports
+            .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
     }
 }
 
@@ -546,20 +660,6 @@ mod tests {
 
     const BS: usize = 512;
 
-    /// Monotonic readings a test walks a transaction across its window with,
-    /// by swapping the clock rather than waiting for one.
-    fn at_zero() -> u64 {
-        0
-    }
-
-    fn just_inside_a_solid_state_window() -> u64 {
-        writeback_window_ns(BlkDeviceClass::SolidState) - 1
-    }
-
-    fn at_a_solid_state_window() -> u64 {
-        writeback_window_ns(BlkDeviceClass::SolidState)
-    }
-
     /// Gather bound wide enough that a test's runs are never window-bounded,
     /// so a test that means to measure adjacency does not measure the bound.
     const WIDE: usize = 64 * BS;
@@ -808,34 +908,109 @@ mod tests {
     }
 
     #[test]
-    fn a_scheduler_with_no_clock_publishes_every_operation() {
+    fn a_scheduler_with_no_host_publishes_every_operation() {
         let mut schedule = CommitScheduler::new(BlkDeviceClass::Removable);
         schedule.opened();
         assert!(
             schedule.expired(),
-            "a window cannot be measured without a clock, so nothing is deferred"
+            "with no timer above it there is no window to measure, so nothing \
+             is deferred"
+        );
+    }
+
+    #[test]
+    fn a_host_that_reads_no_clock_publishes_every_operation() {
+        struct Clockless;
+        impl WritebackHost for Clockless {
+            fn now_ns(&self) -> Option<u64> {
+                None
+            }
+            fn writeback_due(&self, _volume: DriverHandle, _deadline_ns: Option<u64>) {}
+        }
+        static CLOCKLESS: Clockless = Clockless;
+
+        let mut schedule = CommitScheduler::new(BlkDeviceClass::Removable);
+        schedule.set_host(TestWritebackHost::volume(), &CLOCKLESS);
+        schedule.opened();
+        assert!(
+            schedule.expired(),
+            "a host that will not say how much time has passed does not get \
+             to defer durability"
         );
     }
 
     #[test]
     fn a_transaction_expires_when_its_window_elapses() {
+        let window = writeback_window_ns(BlkDeviceClass::SolidState);
+        let host = TestWritebackHost::leaked(0);
         let mut schedule = CommitScheduler::new(BlkDeviceClass::SolidState);
-        schedule.set_clock(at_zero);
+        schedule.set_host(TestWritebackHost::volume(), host);
         schedule.opened();
         assert!(schedule.is_open());
         assert!(!schedule.expired());
-        schedule.set_clock(just_inside_a_solid_state_window);
+        host.set_now(window - 1);
         assert!(!schedule.expired());
-        schedule.set_clock(at_a_solid_state_window);
+        host.set_now(window);
         assert!(schedule.expired());
         schedule.closed();
         assert!(!schedule.is_open());
     }
 
     #[test]
-    fn a_closed_transaction_forgets_the_operations_it_carried() {
+    fn an_opening_transaction_reports_its_deadline_and_a_closing_one_reports_none() {
+        let window = writeback_window_ns(BlkDeviceClass::Rotational);
+        let host = TestWritebackHost::leaked(700);
+        let mut schedule = CommitScheduler::new(BlkDeviceClass::Rotational);
+        schedule.set_host(TestWritebackHost::volume(), host);
+        assert_eq!(
+            host.reported(),
+            None,
+            "installing the timer over an idle volume reports nothing to fire"
+        );
+        schedule.opened();
+        assert_eq!(
+            host.reported(),
+            Some(700 + window),
+            "the host is told exactly when this transaction must be published"
+        );
+        let reports = host.reports();
+        schedule.opened();
+        assert_eq!(
+            host.reports(),
+            reports,
+            "an operation joining the open transaction moves no deadline"
+        );
+        schedule.closed();
+        assert_eq!(
+            host.reported(),
+            None,
+            "a published transaction leaves the timer nothing to fire"
+        );
+    }
+
+    #[test]
+    fn a_host_installed_over_an_open_transaction_dates_it_from_now() {
+        let window = writeback_window_ns(BlkDeviceClass::Virtual);
         let mut schedule = CommitScheduler::new(BlkDeviceClass::Virtual);
-        schedule.set_clock(at_zero);
+        // Opened before any host existed, so its age was never measured.
+        schedule.opened();
+        assert!(schedule.expired());
+        let host = TestWritebackHost::leaked(5_000);
+        schedule.set_host(TestWritebackHost::volume(), host);
+        assert_eq!(
+            host.reported(),
+            Some(5_000 + window),
+            "an already-open transaction is bounded by one window from the \
+             moment the timer arrives, never left unreported"
+        );
+        assert!(!schedule.expired());
+    }
+
+    #[test]
+    fn a_closed_transaction_forgets_the_operations_it_carried() {
+        let host = TestWritebackHost::leaked(0);
+        let mut schedule = CommitScheduler::new(BlkDeviceClass::Virtual);
+        schedule.set_host(TestWritebackHost::volume(), host);
         schedule.opened();
         schedule.joined();
         schedule.joined();

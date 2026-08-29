@@ -577,6 +577,16 @@ pub enum AuditEvent {
     /// operator must be able to see. It carries no secret or capability
     /// token.
     HwNodeRemoveRefused,
+    /// The write-back flusher could not publish a volume whose batched
+    /// filesystem transaction had aged out (`plans/ARXFS-WRITEBACK.md` §10).
+    ///
+    /// The `volume` field names the mount handle and `error` the driver's
+    /// refusal. No caller is waiting on a background publish, so this record
+    /// is the only place the failure can be seen: the driver has abandoned
+    /// the transaction back to its last published root and, having reported
+    /// operations into it, serves no further writes — so the volume is now
+    /// read-only and behind. It carries no secret or capability token.
+    VolumeWritebackFailed,
 }
 
 impl AuditEvent {
@@ -641,6 +651,7 @@ impl AuditEvent {
             Self::SystemPower => 4133,
             Self::HwNodeRemoved => 4140,
             Self::HwNodeRemoveRefused => 4141,
+            Self::VolumeWritebackFailed => 4134,
         })
     }
 
@@ -707,6 +718,7 @@ impl AuditEvent {
             Self::SystemPower => "system power transition admitted",
             Self::HwNodeRemoved => "hardware-tree node removed",
             Self::HwNodeRemoveRefused => "hardware-tree node removal refused (busy)",
+            Self::VolumeWritebackFailed => "volume write-back publish failed",
         }
     }
 }

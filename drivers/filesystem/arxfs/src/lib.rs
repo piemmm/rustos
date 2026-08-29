@@ -55,7 +55,7 @@ use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
     DirEntry, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider, FilesystemRead,
     FilesystemSecurity, FilesystemStats, FilesystemWrite, NodeId, NodeInfo, NodeKind, NodeTimes,
-    VolumeStats,
+    VolumeStats, WritebackHost,
 };
 pub use tairix_abi::driver::filesystem::{
     NodeSecurity as Security, SecurityAcl as AclEntry, SecuritySubject as AclSubject,
@@ -1003,16 +1003,21 @@ impl<B: Block> ARXFS<B> {
         self
     }
 
-    /// Install the host's monotonic nanosecond clock, which is what lets a
-    /// transaction stay open across operations (`wcache` module).
+    /// Install the host's write-back timer for the mount registered as
+    /// `volume`, which is what lets a transaction stay open across operations
+    /// (`wcache` module).
     ///
-    /// The window a transaction may stay open for is a property of the
-    /// device's class, but ageing it needs a clock that only the host has.
-    /// Without one every operation publishes, so a host that cannot say how
-    /// much time has passed never defers durability.
+    /// The builder form of [`FilesystemWrite::set_writeback_host`], for a
+    /// caller holding the driver before it is boxed behind the trait. Both
+    /// reach the one setter, so a volume can never be given a clock without
+    /// the timer that publishes what it defers.
     #[must_use]
-    pub fn with_monotonic(mut self, monotonic_ns: fn() -> u64) -> Self {
-        self.schedule.set_clock(monotonic_ns);
+    pub fn with_writeback_host(
+        mut self,
+        volume: DriverHandle,
+        host: &'static dyn WritebackHost,
+    ) -> Self {
+        self.schedule.set_host(volume, host);
         self
     }
 
@@ -4579,6 +4584,10 @@ impl<B: Block> FilesystemWrite for ARXFS<B> {
         // between syncs simply costs that walk. The map's own persist forces
         // the device cache, which is this sync's durability barrier too.
         self.map_persist()
+    }
+
+    fn set_writeback_host(&mut self, volume: DriverHandle, host: &'static dyn WritebackHost) {
+        self.schedule.set_host(volume, host);
     }
 }
 

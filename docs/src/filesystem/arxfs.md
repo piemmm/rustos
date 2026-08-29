@@ -935,9 +935,18 @@ in place**:
   `check`, `health`, or widening the incompatible-feature word), or on the
   volume being handed on. The window is one policy over the device class the
   block seam reports — widest for removable flash, smallest for a device
-  already cheap per command — and ageing it needs a monotonic clock from the
-  host: a handle without one publishes at every operation rather than deferring
-  durability it cannot measure.
+  already cheap per command.
+- **The host publishes a volume that falls quiet.** Nothing in the driver runs
+  between operations, so the driver names each transaction's deadline to the
+  host's write-back timer as the transaction opens and names its absence as it
+  closes; the kernel parks until the soonest deadline any mounted volume
+  published and then calls the ordinary `fs_sync` on each that is due
+  (`kernel/core::fs::writeback`). That is what makes the recency bound a bound
+  in *time*, not merely in content. Nothing polls, the timer is armed once per
+  batch, and a machine with no dirty volume takes no wakeup. A handle given
+  neither clock nor timer — a boot-time reader, a port with no storage floor —
+  publishes at every operation rather than deferring durability it can neither
+  measure nor have fired.
 - **A failed operation is undone alone.** Everything it changes in the staged
   set and the private-block bookkeeping is recorded as it changes and replayed
   backwards, so the operations that already joined the transaction — and were

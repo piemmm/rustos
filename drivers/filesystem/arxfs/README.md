@@ -426,10 +426,18 @@ on an operation that needs the committed state to be the whole truth (`trim`,
 `grow`, `scrub`, `check`, `health`, or one that widens the incompatible-feature
 word), or on the volume being handed on. The window is one policy over the
 device class the block seam reports — 30 s removable, 15 s rotational, 5 s
-solid-state and paravirtual, widest where a command is dearest — and ageing it
-needs a monotonic clock the host installs (`ARXFS::with_monotonic`); a handle
-without one publishes at every operation rather than deferring durability it
-cannot measure.
+solid-state and paravirtual, widest where a command is dearest.
+
+Between operations nothing in the driver runs, so the **host** enforces that
+window: the driver names each transaction's deadline through the
+`FilesystemWrite::set_writeback_host` seam as the transaction opens and names
+its absence as it closes, and the kernel's write-back flusher parks until the
+soonest deadline any mounted volume published, then calls the ordinary
+`fs_sync` on each volume that is due. Nothing polls, and a machine with no
+dirty volume arms nothing. The clock and the timer arrive together
+(`ARXFS::with_writeback_host`), so a handle can never defer against a window
+nothing will fire; a handle given neither publishes at every operation rather
+than deferring durability it can neither measure nor have published for it.
 
 A **failed operation** is undone alone: everything it changed in the staged set
 and the private-block bookkeeping is recorded as it changed and replayed

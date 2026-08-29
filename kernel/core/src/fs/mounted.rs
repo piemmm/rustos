@@ -39,10 +39,11 @@
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use tairix_abi::driver::filesystem::{
     FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
-    NodeInfo, NodeKind as DriverNodeKind, VolumeStats,
+    NodeInfo, NodeKind as DriverNodeKind, VolumeStats, WritebackHost,
 };
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::sysinfo::{MountAvailability, MountRecord, MountVolumeState, VolumeIoHealthRecord};
@@ -64,6 +65,7 @@ use super::delegate::FinalLink;
 use super::path::Path;
 use super::perm::Credentials;
 use super::service::{FilesystemService, ReaddirEntry};
+use super::writeback::WritebackDue;
 use super::{Vfs, VfsError};
 
 /// One backing filesystem driver registered in a [`LateFilesystem`],
@@ -117,6 +119,11 @@ struct DriverEntry<F: 'static> {
     /// block client folds, so the `sysinfo` volume-health query can report a
     /// device's live health and tallies (`plans/FIX-IO.md` IO5).
     health: Option<VolumeHealthSource>,
+    /// When this volume's batched filesystem transaction must be published,
+    /// as the driver last reported it ([`super::writeback`]). Empty for a
+    /// driver that publishes at every operation, and for one that holds
+    /// nothing open.
+    writeback: WritebackDue,
 }
 
 /// One registered volume's snapshot facts, as [`LateFilesystem::entry`]
@@ -185,6 +192,16 @@ pub struct LateFilesystem<F: 'static> {
     /// filesystem operation (the `&'static SleepLock` reference is copied
     /// out first), so it never spins on a parked holder.
     drivers: SpinLock<Vec<DriverEntry<F>>>,
+    /// The write-back timer every registered driver is handed, once the boot
+    /// path has one to give ([`Self::install_writeback_host`]). Until then a
+    /// driver is registered with no host and publishes at every operation, so
+    /// no transaction is ever deferred without a timer to fire it.
+    writeback_host: OnceCell<&'static dyn WritebackHost>,
+    /// Whether the flusher is live and will publish what a driver defers
+    /// ([`Self::set_writeback_armed`]). While it is `false` the host declines
+    /// to read its clock, so every driver publishes at each operation: the
+    /// batching window exists only for as long as something can fire it.
+    writeback_armed: AtomicBool,
 }
 
 /// An install/registration was refused because the target is already set.
@@ -196,7 +213,7 @@ pub struct LateFilesystem<F: 'static> {
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
 pub struct FilesystemAlreadyInstalled;
 
-impl<F: 'static> LateFilesystem<F> {
+impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
     /// Construct an empty cell. `const` so a boot path can place it in a
     /// `static` and hand `&LATE_FILESYSTEM` to the handler builder.
     #[must_use]
@@ -204,6 +221,8 @@ impl<F: 'static> LateFilesystem<F> {
         Self {
             vfs: OnceCell::new(),
             drivers: SpinLock::new(Vec::new()),
+            writeback_host: OnceCell::new(),
+            writeback_armed: AtomicBool::new(false),
         }
     }
 
@@ -252,22 +271,135 @@ impl<F: 'static> LateFilesystem<F> {
         fstype: &str,
         volume_id: [u8; 16],
     ) -> Result<Arc<SleepLock<F>>, FilesystemAlreadyInstalled> {
-        let handle = handle.as_u64();
-        let mut drivers = self.drivers.lock();
-        if drivers.iter().any(|e| e.handle == handle) {
-            return Err(FilesystemAlreadyInstalled);
+        let raw = handle.as_u64();
+        let shared = {
+            let mut drivers = self.drivers.lock();
+            if drivers.iter().any(|e| e.handle == raw) {
+                return Err(FilesystemAlreadyInstalled);
+            }
+            let shared = Arc::new(SleepLock::new(driver));
+            drivers.push(DriverEntry {
+                handle: raw,
+                driver: Arc::clone(&shared),
+                source: String::from(source),
+                fstype: String::from(fstype),
+                volume_id,
+                availability: MountAvailability::Available,
+                health: None,
+                writeback: WritebackDue::empty(),
+            });
+            shared
+        };
+        // The entry is in place before the driver learns of the timer, so a
+        // driver that reports a deadline from inside this call has a slot to
+        // report it into. This acquire cannot park and cannot spin: the lock
+        // was created above and its handle has not left this function, so the
+        // fast path takes it — which matters because the surprise-removal path
+        // re-registers a stand-in from a context that must not park, and
+        // because the registry's own spin lock is released first either way.
+        if let Ok(Some(host)) = self.writeback_host.get() {
+            shared.lock().set_writeback_host(handle, *host);
         }
-        let driver = Arc::new(SleepLock::new(driver));
-        drivers.push(DriverEntry {
-            handle,
-            driver: Arc::clone(&driver),
-            source: String::from(source),
-            fstype: String::from(fstype),
-            volume_id,
-            availability: MountAvailability::Available,
-            health: None,
-        });
-        Ok(driver)
+        Ok(shared)
+    }
+
+    /// Publish the write-back timer every driver registered from now on is
+    /// handed, so a filesystem that batches commits has something above it to
+    /// publish a volume that falls quiet ([`super::writeback`]).
+    ///
+    /// Set-once per boot, and installed before any writable volume is
+    /// registered: a driver registered without a host publishes at every
+    /// operation, which is slower but never defers durability with no timer
+    /// to fire it (fail closed).
+    ///
+    /// # Errors
+    ///
+    /// [`FilesystemAlreadyInstalled`] if a host is already installed — the
+    /// live timer is never re-pointed.
+    pub fn install_writeback_host(
+        &self,
+        host: &'static dyn WritebackHost,
+    ) -> Result<(), FilesystemAlreadyInstalled> {
+        self.writeback_host
+            .set(host)
+            .map_err(|_| FilesystemAlreadyInstalled)
+    }
+
+    /// Record whether the write-back flusher is live and will publish what a
+    /// driver defers.
+    ///
+    /// Set once the flusher has proved it can park and be woken, and cleared
+    /// if it ever stops. Clearing it is the fail-closed lever: from that
+    /// moment the host reads no clock, so every driver's next operation
+    /// publishes rather than deferring against a timer that will not fire.
+    pub fn set_writeback_armed(&self, armed: bool) {
+        self.writeback_armed.store(armed, Ordering::Release);
+    }
+
+    /// Record the write-back deadline volume `handle` just published, and ask
+    /// for the flusher to be woken when it is sooner than the deadline the
+    /// flusher is already armed for.
+    ///
+    /// Called from inside the driver, under the mount lock, so it takes only
+    /// the registry's short lookup lock and performs one atomic store — never
+    /// a park, an allocation, or any I/O. An unknown handle records nothing:
+    /// a driver reporting against a handle this registry does not hold has no
+    /// mount here to publish.
+    pub fn note_writeback_due(&self, handle: DriverHandle, deadline_ns: Option<u64>) {
+        let raw = handle.as_u64();
+        let recorded = match self.drivers.lock().iter().find(|e| e.handle == raw) {
+            Some(entry) => {
+                entry.writeback.store(deadline_ns);
+                true
+            }
+            None => false,
+        };
+        // Outside the registry lock: the wake reads the write-back queue's
+        // own lock, and no lock is held across another.
+        if recorded {
+            crate::waitq::writeback_wake(deadline_ns);
+        }
+    }
+
+    /// The soonest write-back deadline any registered volume has published,
+    /// or `None` when no volume holds an open transaction — the deadline the
+    /// flusher parks until. A linear read of a handful of mounts, off every
+    /// hot path.
+    #[must_use]
+    pub fn earliest_writeback_due(&self) -> Option<u64> {
+        self.drivers
+            .lock()
+            .iter()
+            .filter_map(|e| e.writeback.load())
+            .min()
+    }
+
+    /// Every registered volume whose write-back deadline has arrived by
+    /// `now_ns`, in deadline order, each with its deadline **consumed**.
+    ///
+    /// Consuming under the registry lock is what keeps two flusher passes
+    /// from publishing one volume twice, and what stops a fired deadline
+    /// re-arming the timer in the past. The drivers are returned as shared
+    /// handles so the caller flushes them with the registry lock released
+    /// (the flush parks on device I/O).
+    pub fn take_writeback_due(&self, now_ns: u64) -> Vec<(DriverHandle, Arc<SleepLock<F>>)> {
+        let mut due: Vec<(u64, u64, Arc<SleepLock<F>>)> = self
+            .drivers
+            .lock()
+            .iter()
+            .filter_map(|e| {
+                let deadline = e.writeback.take_if_due(now_ns)?;
+                Some((deadline, e.handle, Arc::clone(&e.driver)))
+            })
+            .collect();
+        due.sort_unstable_by_key(|&(deadline, handle, _)| (deadline, handle));
+        due.into_iter()
+            .filter_map(|(_, handle, driver)| {
+                DriverHandle::from_raw(handle)
+                    .ok()
+                    .map(|handle| (handle, driver))
+            })
+            .collect()
     }
 
     /// Record the availability of the volume registered for `handle`, so
@@ -477,9 +609,28 @@ impl<F: 'static> LateFilesystem<F> {
     }
 }
 
-impl<F: 'static> Default for LateFilesystem<F> {
+impl<F: FilesystemWrite + Send + 'static> Default for LateFilesystem<F> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// The registry *is* the write-back timer's bookkeeping: it already keys
+/// every mounted volume by the handle a driver reports against, so the
+/// deadline lives beside the driver it belongs to rather than in a second
+/// table that could drift out of step with the mounts.
+impl<F: FilesystemWrite + Send + 'static> WritebackHost for LateFilesystem<F> {
+    fn now_ns(&self) -> Option<u64> {
+        // One atomic load on the driver's per-operation path. A driver may
+        // only measure a window while the flusher that will fire it is live.
+        if !self.writeback_armed.load(Ordering::Acquire) {
+            return None;
+        }
+        crate::waitq::wait_now_ns()
+    }
+
+    fn writeback_due(&self, volume: DriverHandle, deadline_ns: Option<u64>) {
+        self.note_writeback_due(volume, deadline_ns);
     }
 }
 

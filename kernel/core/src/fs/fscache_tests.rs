@@ -129,6 +129,15 @@ impl<F: FilesystemWrite> FilesystemWrite for Counting<F> {
         self.calls += 1;
         self.inner.flush()
     }
+
+    fn set_writeback_host(
+        &mut self,
+        volume: DriverHandle,
+        host: &'static dyn tairix_abi::driver::filesystem::WritebackHost,
+    ) {
+        self.calls += 1;
+        self.inner.set_writeback_host(volume, host);
+    }
 }
 
 impl<F: FilesystemSecurity> FilesystemSecurity for Counting<F> {

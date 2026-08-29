@@ -90,8 +90,9 @@ use core::mem::size_of;
 use tairix_abi::driver::filesystem::{
     DirEntry, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider, FilesystemRead,
     FilesystemSecurity, FilesystemStats, FilesystemWrite, NodeId, NodeInfo, NodeKind, NodeSecurity,
-    VolumeStats,
+    VolumeStats, WritebackHost,
 };
+use tairix_abi::driver::DriverHandle;
 use tairix_abi::DriverError;
 use tairix_kernel_mem::PAGE_SIZE;
 use tairix_log::Sink;
@@ -1219,6 +1220,12 @@ impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for CachedFs<F> {
     fn flush(&mut self) -> Result<(), DriverError> {
         // Write-through: the cache holds no dirty state to flush.
         self.inner.flush()
+    }
+
+    fn set_writeback_host(&mut self, volume: DriverHandle, host: &'static dyn WritebackHost) {
+        // The cache defers nothing of its own; the timer belongs to the
+        // driver that actually holds an open transaction.
+        self.inner.set_writeback_host(volume, host);
     }
 }
 

@@ -247,6 +247,13 @@ pub fn finish_unlock<B: Block + 'static>(
         pressure,
     } = env;
 
+    // The write-back flusher, before any volume can be registered: a
+    // filesystem may only batch commits while the task that publishes an
+    // aged-out transaction is live, so it is admitted first and arms deferral
+    // itself once it can park. This is the one place every port with a
+    // storage floor passes through.
+    crate::writeback_service::start(ctx, audit);
+
     // The one brought-up disk, boot-leaked to `'static` behind the
     // block-sharing layer so two independent preemptive tasks drive it through
     // their own serialised windows: *this* task is the driver-store serve loop

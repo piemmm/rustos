@@ -393,6 +393,19 @@ confined to a partition still reaches the real device. The fd only proves the
 caller holds a live handle on the mounted volume; the flush itself is
 volume-wide, so a resource-backed descriptor fails closed (`OutOfRange`).
 
+A program that never calls it is not left unbounded. A filesystem that batches
+commits keeps one transaction open for the next operation to join, and the
+kernel's **write-back flusher** (`kernel/core::fs::writeback`) publishes a
+volume that falls quiet within its device class's window — 30 s removable, 15 s
+rotational, 5 s solid-state and paravirtual — by making the same call the driver
+sees for an `fs_sync`. It is event-driven rather than a sweep: each driver names
+its transaction's deadline as the transaction opens and names its absence as it
+closes, so one task parks until the soonest deadline any mounted volume
+published and a machine with no dirty volume takes no wakeup at all. Every
+orderly teardown flushes ahead of it — `system_power` (no. 105) syncs every
+mounted volume before the platform stops, and a volume detach flushes the
+filesystem before the device — so the timer bounds only the *unattended* case.
+
 ### Capability matrix
 
 The dispatcher consults `kernel/sec`'s `TaskCapabilities::has` against

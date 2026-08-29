@@ -1519,10 +1519,10 @@ staged future work; see §18.)*
 ## 22. Write-back cache, commit batching, and the commit barrier
 
 *Stage 17 — in progress. The dirty block set, commit barrier, run coalescer,
-allocation-map integration, and the commit scheduler are implemented; the
-RAM-derived bound is not, and no host yet installs the monotonic clock the
-dirty-age window is measured against, so a live volume still publishes at every
-operation. The staged design is `plans/ARXFS-WRITEBACK.md`.*
+allocation-map integration, the commit scheduler, and the host's write-back
+expiry timer are implemented, so batching is live on a mounted volume and its
+window is bounded in time; the RAM-derived bound is not yet. The staged design
+is `plans/ARXFS-WRITEBACK.md`.*
 
 **Commit ordering.** A commit drains every authoritative dirty block *except*
 the superblock slot, issues one `Block::flush()` barrier, then writes the slot.
@@ -1619,10 +1619,23 @@ one transaction root, one superblock slot, one barrier, and one write of each
 metadata block they all rewrite — so it is widest where a command is dearest and
 smallest where one is already cheap. Nothing tunes it per volume.
 
-Ageing a transaction needs a **monotonic clock**, which only the host can
-supply. A handle given one batches; a handle without one has no window to
-measure and publishes at every operation, so a host that cannot say how much
-time has passed never defers durability.
+**The window is enforced from above, and that is what bounds it in time.**
+Between operations nothing in the driver runs, so a volume whose last write is
+followed by silence would hold its transaction until the next operation — a
+recency loss bounded in content but not in time. The driver therefore *names*
+each transaction's deadline to a host write-back timer as the transaction
+opens, and names its absence as the transaction closes; the host parks until
+the soonest deadline any mounted volume published and then calls the ordinary
+`fs_sync` on each volume that is due. Nothing polls: the timer is armed once
+per batch, a machine with no dirty volume arms nothing and takes no wakeup, and
+a fired deadline is consumed so it cannot re-arm in the past.
+
+Ageing a transaction therefore needs both a **monotonic clock** and that timer,
+and the host supplies them together — a handle is never given a clock without
+something that will publish what it defers. A handle with neither has no window
+to measure and publishes at every operation, so a host that cannot say how much
+time has passed, or cannot come back, never defers durability. The kernel side
+is `kernel/core::fs::writeback`.
 
 Measured, on the §16 device-command ledger: the same 64 KiB written in sixteen
 4 KiB calls costs, joined, the same blocks and the same bytes as one call — 159
@@ -1633,8 +1646,11 @@ of them superseded. Nothing in a joined transaction is written twice.
 **What is not traded.** Consistency. Nothing is published until the slot, so
 every crash still leaves the prior committed state or the new one, never a torn
 one (§14). What batching trades is how *recent* the surviving state is, bounded
-by the deadline. There is no mount option and no knob (§1): the behaviour is
-derived from the device, not configured.
+by the deadline in content *and* in time — the host timer above is what makes
+the second half true. A surprise removal therefore loses the open transaction
+as well as whatever the device had not committed, and loses it safely: the last
+published root stands whole. There is no mount option and no knob (§1): the
+behaviour is derived from the device, not configured.
 
 **Measured, not asserted.** What a write costs a device is a number, so it is
 recorded and machine-checked rather than described: one in-RAM device logs every

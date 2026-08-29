@@ -9,6 +9,7 @@ use alloc::collections::BTreeSet;
 
 use super::*;
 use crate::pagecache::MAX_CACHED_PAGES;
+use crate::wcache::TestWritebackHost;
 use tairix_abi::driver::block::{DeviceHealth, DiscardCapability, HealthSnapshot};
 use tairix_abi::driver::filesystem::{
     FilesystemAttrs, FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeKind,
@@ -9429,27 +9430,31 @@ fn rebuilding_free_space_over_a_deep_tree_reproduces_the_live_map() {
 // --- the commit scheduler ------------------------------------------------
 //
 // A transaction stays open and the next operation joins it, so the tests
-// below drive a volume whose monotonic clock never advances (the window never
-// elapses) and close the transaction deliberately, or swap in a clock past
+// below drive a volume whose host clock stays at the mount (the window never
+// elapses) and close the transaction deliberately, or move that clock past
 // every class's window to prove the age closes it.
 
-/// A monotonic clock frozen at the mount, so no window ever elapses and every
-/// operation joins the transaction before it.
-fn frozen_monotonic() -> u64 {
-    0
-}
-
 /// A monotonic reading past the widest window any device class is served
-/// with, so swapping to it ages the open transaction out.
-fn monotonic_past_every_window() -> u64 {
-    60_000_000_000
+/// with, so moving the host clock to it ages the open transaction out.
+const PAST_EVERY_WINDOW: u64 = 60_000_000_000;
+
+/// A volume whose operations batch, and the timer it reports to: the default
+/// `MemBlock` declares the paravirtual class, so its window is the shortest,
+/// and a clock held at the mount keeps the transaction open regardless.
+fn fmt_batched_with_host(
+    block_size: u32,
+    block_count: u64,
+    inodes: u32,
+) -> (ARXFS<MemBlock>, &'static TestWritebackHost) {
+    let host = TestWritebackHost::leaked(0);
+    let fs =
+        fmt(block_size, block_count, inodes).with_writeback_host(TestWritebackHost::volume(), host);
+    (fs, host)
 }
 
-/// A volume whose operations batch: the default `MemBlock` declares the
-/// paravirtual class, so its window is the shortest, and the frozen clock
-/// keeps it open regardless.
+/// The batching volume alone, for a test that does not inspect the timer.
 fn fmt_batched(block_size: u32, block_count: u64, inodes: u32) -> ARXFS<MemBlock> {
-    fmt(block_size, block_count, inodes).with_monotonic(frozen_monotonic)
+    fmt_batched_with_host(block_size, block_count, inodes).0
 }
 
 /// Reopen a mid-flight snapshot of the device, exactly as a power loss and a
@@ -9525,14 +9530,14 @@ fn one_batch_costs_one_commit_where_three_operations_cost_three() {
 
 #[test]
 fn an_operation_after_the_window_publishes_the_transaction_it_would_have_joined() {
-    let mut fs = fmt_batched(512, 512, 32);
+    let (mut fs, host) = fmt_batched_with_host(512, 512, 32);
     let root = fs.root();
     fs.create(root, b"early", NodeKind::RegularFile)
         .expect("create");
     let published = fs.generation;
     // Time passes past the window; the next operation must not extend the
     // transaction it joins.
-    fs = fs.with_monotonic(monotonic_past_every_window);
+    host.set_now(PAST_EVERY_WINDOW);
     fs.create(root, b"late", NodeKind::RegularFile)
         .expect("create");
     assert_eq!(
@@ -9669,7 +9674,7 @@ fn every_barrier_requiring_operation_publishes_the_open_transaction_first() {
     )
     .expect("format")
     .with_clock(fixed_clock)
-    .with_monotonic(frozen_monotonic);
+    .with_writeback_host(TestWritebackHost::volume(), TestWritebackHost::leaked(0));
     let root = fs.root();
 
     let mut ran = 0;

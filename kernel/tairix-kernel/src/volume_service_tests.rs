@@ -32,7 +32,7 @@ use tairix_abi::blkio::{
     encode_error_completion, BlkCompletion, BlkDeviceClass, BlkOp, BlkRequest, BLK_COMPLETION_LEN,
     BLK_DATA_LEN, BLK_REQUEST_LEN,
 };
-use tairix_abi::driver::block::{Block, BlockGeometry};
+use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind, NodeSecurity};
 use tairix_abi::sysinfo::{MountAvailability, MountRecord};
 use tairix_abi::volume::{VolumeAttachRequest, VolumeDetachRequest, VolumeFsType};
@@ -53,6 +53,7 @@ use tairix_reclaim::{FreeMemorySource, MemoryPressure};
 
 use crate::root_mount::LATE_IDENTITY;
 use crate::system_mount::{FS_SERVICE, LATE_FILESYSTEM, VOLUME_FOREST};
+use crate::test_support::{RamBlock, BLOCK_SIZE};
 use crate::volume_policy::LATE_STORAGE_GID;
 use crate::volume_service::{RuntimeVolumeService, VOLUME_SERVICE};
 use tairix_kernel_core::VolumeService as _;
@@ -103,9 +104,6 @@ const STORAGE_GID: u32 = 100;
 const MEMBER_UID: u32 = 1000;
 const OUTSIDER_UID: u32 = 2000;
 
-const BLOCK_SIZE: usize = 512;
-/// `BLOCK_SIZE` as the wire-width type the geometry carries.
-const BLOCK_SIZE_U32: u32 = 512;
 /// 64 MiB — comfortably past the FAT32 minimum cluster count.
 const SECTORS_64MIB: u64 = (64 << 20) / 512;
 
@@ -150,63 +148,6 @@ impl SharedMemFacility for TestFacility {
         } else {
             None
         }
-    }
-}
-
-/// A `Vec`-backed 512-byte-block device.
-struct RamBlock {
-    data: Vec<u8>,
-}
-
-impl RamBlock {
-    fn new(sectors: u64) -> Self {
-        Self {
-            data: vec![0u8; usize::try_from(sectors).expect("fits") * BLOCK_SIZE],
-        }
-    }
-}
-
-impl Block for RamBlock {
-    fn device_class(&self) -> BlkDeviceClass {
-        // These scenarios attach a removable stick, so the fixture declares
-        // that medium rather than leaving the trait's paravirtual default:
-        // a mount that reports it can only have learned it from here.
-        BlkDeviceClass::Removable
-    }
-
-    fn geometry(&self) -> Result<BlockGeometry, DriverError> {
-        Ok(BlockGeometry {
-            block_size: BLOCK_SIZE_U32,
-            block_count: (self.data.len() / BLOCK_SIZE) as u64,
-        })
-    }
-
-    fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
-        let start = usize::try_from(lba).map_err(|_| DriverError::LengthOutOfRange)? * BLOCK_SIZE;
-        let end = start
-            .checked_add(buf.len())
-            .filter(|&end| {
-                end <= self.data.len() && !buf.is_empty() && buf.len().is_multiple_of(BLOCK_SIZE)
-            })
-            .ok_or(DriverError::LengthOutOfRange)?;
-        buf.copy_from_slice(&self.data[start..end]);
-        Ok(())
-    }
-
-    fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
-        let start = usize::try_from(lba).map_err(|_| DriverError::LengthOutOfRange)? * BLOCK_SIZE;
-        let end = start
-            .checked_add(buf.len())
-            .filter(|&end| {
-                end <= self.data.len() && !buf.is_empty() && buf.len().is_multiple_of(BLOCK_SIZE)
-            })
-            .ok_or(DriverError::LengthOutOfRange)?;
-        self.data[start..end].copy_from_slice(buf);
-        Ok(())
-    }
-
-    fn flush(&mut self) -> Result<(), DriverError> {
-        Ok(())
     }
 }
 

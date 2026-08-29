@@ -19,9 +19,9 @@ use alloc::vec::Vec;
 use tairix_abi::driver::filesystem::{
     DirEntry, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider, FilesystemRead,
     FilesystemSecurity, FilesystemStats, FilesystemWrite, NodeId, NodeInfo, NodeKind, NodeSecurity,
-    NodeTimes, VolumeStats,
+    NodeTimes, VolumeStats, WritebackHost,
 };
-use tairix_abi::driver::DriverError;
+use tairix_abi::driver::{DriverError, DriverHandle};
 use tairix_fsmeta::{AttrFlags, AttrSet};
 
 /// Default owner uid baked into a freshly created node's security record.
@@ -466,6 +466,14 @@ impl FilesystemWrite for RwMockFs {
 
     fn flush(&mut self) -> Result<(), DriverError> {
         Ok(())
+    }
+
+    /// Report the mount's state to the host the moment the timer arrives,
+    /// exactly as a driver that defers durability does — which is what makes
+    /// the forwarding of this method observable through the host alone
+    /// ([`super::wrapper_conformance::assert_writeback_host_forwards`]).
+    fn set_writeback_host(&mut self, volume: DriverHandle, host: &'static dyn WritebackHost) {
+        host.writeback_due(volume, None);
     }
 }
 

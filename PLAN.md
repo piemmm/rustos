@@ -2897,18 +2897,29 @@ write.
   in the stack and it is this one. `plans/SMARTRAM.md` §6.1 already reserves
   dirty data for the filesystem's own write policy.
 
-**Open defect (WB-D1, `plans/ARXFS-WRITEBACK.md` §10), the next item.** Nothing
-fires the dirty-age window on a volume that goes idle: ARXFS is a synchronous
-driver with no thread, so between operations no one observes the window and the
-exposure is bounded in content but not in time. Writeback expiry belongs above
-the driver — a kernel task on a one-shot timer calling the existing `fs_sync`,
-event-driven so an idle system takes no wakeups — and that is kernel work, not a
-change to the driver. Until it lands no host installs the monotonic clock, so a
-live volume still publishes at every operation and nothing has regressed.
+**The window is enforced from above (WB-D1).** ARXFS owns no thread, so it can
+check its dirty-age window only from inside an operation and a volume that fell
+quiet held its transaction indefinitely — bounded in content, not in time. The
+expiry now lives where Linux puts it: `kernel/core::fs::writeback` plus the
+`writeback_service` kthread, one task parking on the soonest deadline any
+mounted volume published and calling the existing `fs_sync` on each that is due.
+The driver *names* each deadline through `FilesystemWrite::set_writeback_host`
+as its transaction opens and names its absence as it closes, so the window
+policy keeps one definition and the report sits at the one place the state
+changes; the mount registry is the bookkeeping (one `u64` slot per entry, read
+lock-free by the flusher), and `register` installs the timer on every driver, so
+every port and every mount kind is covered by one choke point. Event-driven: one
+arm per batch, a fired deadline consumed so it cannot re-arm in the past, and an
+idle machine takes no wakeup. Deferral is armed by the flusher and disarmed with
+it, so a port with no storage floor or a service that was not admitted publishes
+eagerly rather than deferring against a timer that will not fire. Batching is
+live on a mounted volume from here on, and the retained-writes journal's
+statement about what a surprise removal can lose is corrected with it.
 
-**Status: WB0–WB4 done** — measurement, the dirty set and commit barrier
-(closing D63), run coalescing (closing C3), allocation-map integration, and the
-commit scheduler (closing C2). WB-D1 is next; WB5–WB6 remain planned.
+**Status: WB0–WB4 and WB-D1 done** — measurement, the dirty set and commit
+barrier (closing D63), run coalescing (closing C3), allocation-map integration,
+the commit scheduler (closing C2), and the host's write-back expiry timer. WB5
+is next; WB6 remains planned.
 
 ---
 

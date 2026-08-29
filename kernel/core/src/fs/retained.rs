@@ -1,15 +1,26 @@
 //! Uncommitted-write retention for removable volumes
 //! (`plans/DEVICES.md` D4).
 //!
-//! Every filesystem driver in this tree writes straight through to its
-//! block device, so the only bytes a surprise removal can lose are the
-//! writes the *device* has accepted but not yet committed to its medium —
-//! everything written since the last successful device flush
-//! (SCSI `SYNCHRONIZE CACHE` on the USB path). [`RetainedWrites`] is the
-//! kernel's bounded, in-RAM record of exactly that set: each device block
-//! written since the last committed flush, coalesced per LBA, so a volume
-//! yanked mid-write still has its uncommitted data held for the verified
-//! re-insert replay or an explicit, audited force-discard.
+//! A surprise removal can lose bytes at two levels, and this journal holds
+//! exactly one of them. At the **device** level, writes the medium accepted
+//! but has not committed to its platters or cells — everything written since
+//! the last successful device flush (SCSI `SYNCHRONIZE CACHE` on the USB
+//! path). [`RetainedWrites`] is the kernel's bounded, in-RAM record of that
+//! set: each device block written since the last committed flush, coalesced
+//! per LBA, so a volume yanked mid-write still has its uncommitted data held
+//! for the verified re-insert replay or an explicit, audited force-discard.
+//!
+//! At the **filesystem** level, a driver that batches commits may hold an
+//! open transaction whose blocks have not been sent at all
+//! (`plans/ARXFS-WRITEBACK.md`). Nothing here can replay that: the journal
+//! records device writes, and those blocks were never written. Losing it is
+//! safe rather than merely tolerable — a copy-on-write volume's last
+//! published root stands, whole, so the medium is consistent and only *less
+//! recent* — but it is a second loss, and the kernel bounds it in time
+//! rather than leaving it to the next operation: the write-back flusher
+//! ([`super::writeback`]) publishes a volume that falls quiet within its
+//! device class's window, and every orderly teardown flushes the filesystem
+//! before the device (`commit_for_detach`, `system_power`).
 //!
 //! [`JournaledBlock`] is the [`Block`] wrapper the runtime volume attach
 //! path slips between the kernel blkio client and the partition window:
