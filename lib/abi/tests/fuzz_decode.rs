@@ -80,8 +80,9 @@ use tairix_abi::users_admin::{
     decode_group_list, decode_user_list, UsersAdminRequest, USERS_ADMIN_MAX_REQUEST,
 };
 use tairix_abi::window_ipc::{
-    decode_create_reply, decode_desktop_reply, AppBar, AppMenu, AppMenuItemId, AppMenuLabel,
-    AppMenuMark, AppMenuRow, WindowEvent, WindowRequest, WindowSizing, WindowTitle,
+    decode_create_reply, decode_desktop_reply, AppBar, AppMenu, AppMenuItem, AppMenuItemId,
+    AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole, AppMenuRow, AppMenuShortcut,
+    WindowEvent, WindowRequest, WindowSizing, WindowTitle,
 };
 use tairix_abi::{
     AppInfoHeader, IpcMessageHeader, LoadImage, ManifestHeader, NeededLibrary, Origin, PortName,
@@ -1217,7 +1218,9 @@ fn structured_reply_inputs_with_corrupted_fields_never_panic() {
 /// operation from having no coverage at all.
 #[test]
 fn structured_window_requests_with_corrupted_fields_never_panic() {
-    let seeds = [
+    // A `Vec` rather than an array: a `WindowRequest` carries a whole menu
+    // inline, so nine of them is more than belongs on a stack frame.
+    let seeds = std::vec![
         WindowRequest::Create {
             shm_handle: 7,
             event_endpoint: 0x900d,
@@ -1275,7 +1278,7 @@ fn structured_window_requests_with_corrupted_fields_never_panic() {
         },
         WindowRequest::QueryDesktop,
     ];
-    let mut base = [0u8; WindowRequest::MAX_WIRE_LEN + 1];
+    let mut base = std::vec![0u8; WindowRequest::MAX_WIRE_LEN + 1];
     for seed in seeds {
         let len = seed
             .encode(&mut base)
@@ -1296,8 +1299,9 @@ fn structured_window_requests_with_corrupted_fields_never_panic() {
 fn structured_icon_bar_inputs_with_corrupted_fields_never_panic() {
     // Walk the accepted/rejected boundary of the icon-bar declaration and
     // its two outcome events from well-formed frames. A bit-flip lands as
-    // readily on a row's kind, flag byte, parent index, label length, or
-    // item id as on the header, and every one of them must fail closed.
+    // readily on a row's kind, flag byte, parent index, one of its three
+    // text lengths, its item id, the declaration's text length, or the text
+    // block itself as on the header, and every one of them must fail closed.
     let mut menu = AppMenu::EMPTY;
     menu.push(AppMenuRow::Submenu {
         label: AppMenuLabel::new("Display").expect("a valid label"),
@@ -1305,23 +1309,48 @@ fn structured_icon_bar_inputs_with_corrupted_fields_never_panic() {
     })
     .expect("room for a submenu");
     menu.push_under(
-        AppMenuRow::Item {
-            id: AppMenuItemId::new(1).expect("a valid id"),
-            label: AppMenuLabel::new("Full screen").expect("a valid label"),
-            enabled: true,
-            mark: AppMenuMark::Check,
-        },
+        AppMenuRow::Item(
+            AppMenuItem::new(
+                AppMenuItemId::new(1).expect("a valid id"),
+                AppMenuLabel::new("Full screen").expect("a valid label"),
+            )
+            .with_mark(AppMenuMark::Check)
+            .with_shortcut(AppMenuShortcut::new("Ctrl F").expect("a valid caption")),
+        ),
         0,
     )
     .expect("room inside it");
+    // A submenu inside a submenu, so a flip lands on a parent index that
+    // names a plate two deep as readily as on one that names the root.
+    menu.push_under(
+        AppMenuRow::Submenu {
+            label: AppMenuLabel::new("Colour").expect("a valid label"),
+            enabled: true,
+        },
+        0,
+    )
+    .expect("room for a nested submenu");
+    menu.push_under(
+        AppMenuRow::Item(
+            AppMenuItem::new(
+                AppMenuItemId::new(3).expect("a valid id"),
+                AppMenuLabel::new("Green").expect("a valid label"),
+            )
+            .disabled()
+            .with_reason(AppMenuReason::new("No colour profile").expect("a valid reason")),
+        ),
+        2,
+    )
+    .expect("room inside the nested submenu");
     menu.push(AppMenuRow::Separator).expect("a separator");
-    menu.push(AppMenuRow::About).expect("an About row");
-    menu.push(AppMenuRow::Item {
-        id: AppMenuItemId::new(2).expect("a valid id"),
-        label: AppMenuLabel::new("Quit").expect("a valid label"),
-        enabled: true,
-        mark: AppMenuMark::None,
-    })
+    menu.push(AppMenuRow::Info).expect("an Info row");
+    menu.push(AppMenuRow::Item(
+        AppMenuItem::new(
+            AppMenuItemId::new(2).expect("a valid id"),
+            AppMenuLabel::new("Quit").expect("a valid label"),
+        )
+        .with_role(AppMenuRole::Destructive),
+    ))
     .expect("room for Quit");
     let declare = WindowRequest::SetAppBar(AppBar {
         event_endpoint: 0xE117_0000_0000_0009,
@@ -1332,7 +1361,7 @@ fn structured_icon_bar_inputs_with_corrupted_fields_never_panic() {
     // declaration's own length. Feeding a padded buffer instead would be
     // refused on length alone and would never reach the row decoder these
     // flips exist to exercise.
-    let mut base = [0u8; WindowRequest::MAX_WIRE_LEN + 1];
+    let mut base = std::vec![0u8; WindowRequest::MAX_WIRE_LEN + 1];
     let len = declare
         .encode(&mut base)
         .expect("the max frame holds any request");

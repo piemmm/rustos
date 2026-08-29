@@ -17,8 +17,8 @@ use tairix_abi::input::{KeyInput, KeyValue, Modifiers, PointerButtonCode};
 use tairix_abi::origin::{ProcId, PROC_ID_LEN};
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::window_ipc::{
-    AppBar, AppMenu, AppMenuItemId, AppMenuLabel, AppMenuRow, PointerAction, WindowEvent,
-    WindowRequest, WINDOW_TITLE_MAX,
+    AppBar, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow, PointerAction,
+    WindowEvent, WindowRequest, WINDOW_TITLE_MAX,
 };
 use tairix_abi::Errno;
 use tairix_display::{FrameRegion, ShmMapper};
@@ -358,6 +358,8 @@ struct Loopback {
     identity: MockIdentity,
     /// The ticket the "kernel" attaches to the next in-flight call.
     ticket: u64,
+    /// Every frame the client put on the wire, in order.
+    sent: alloc::vec::Vec<alloc::vec::Vec<u8>>,
 }
 
 impl Loopback {
@@ -367,6 +369,7 @@ impl Loopback {
             host: RecordingHost::default(),
             identity: MockIdentity,
             ticket: TICKET_A,
+            sent: alloc::vec::Vec::new(),
         }))
     }
 }
@@ -384,6 +387,7 @@ impl WindowTransport for Rc<RefCell<Loopback>> {
     fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
         let mut frame = [0u8; WINDOW_REPLY_MAX];
         let inner = &mut *self.borrow_mut();
+        inner.sent.push(request.to_vec());
         let len = inner.server.serve(
             &mut inner.host,
             &mut inner.identity,
@@ -1677,22 +1681,74 @@ fn backdrop_blur_defaults_to_an_accepted_no_op() {
 }
 
 /// The declaration a test application makes: it handles the click and
-/// offers one chooseable row plus the session-rendered About row.
+/// offers one chooseable row plus the session-rendered information row.
 fn sample_app_bar(endpoint: u64) -> AppBar {
     let mut menu = AppMenu::EMPTY;
-    menu.push(AppMenuRow::Item {
-        id: AppMenuItemId::new(1).expect("a valid id"),
-        label: AppMenuLabel::new("New window").expect("a valid label"),
-        enabled: true,
-        mark: tairix_abi::window_ipc::AppMenuMark::None,
-    })
+    menu.push(AppMenuRow::Item(AppMenuItem::new(
+        AppMenuItemId::new(1).expect("a valid id"),
+        AppMenuLabel::new("New window").expect("a valid label"),
+    )))
     .expect("room");
-    menu.push(AppMenuRow::About).expect("room");
+    menu.push(AppMenuRow::Info).expect("room");
     AppBar {
         event_endpoint: endpoint,
         default_action: true,
         menu,
     }
+}
+
+/// A client encodes every request into one buffer it holds for its own
+/// lifetime, so a short request issued after a wide one is byte-for-byte the
+/// request it would have been on its own.
+///
+/// The buffer is sized to the widest operation the channel has, which is why
+/// it is not taken per call — a present, the hottest operation and one of the
+/// shortest, would otherwise clear the whole of a declaration's width every
+/// composited frame. Reuse is only safe because a frame is written and sent
+/// at its own operation's length, and this is what holds that.
+#[test]
+fn reusing_the_encode_buffer_leaks_nothing_into_a_later_frame() {
+    let fresh = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut first = WindowClient::new(Rc::clone(&fresh));
+    let (window, _) = first
+        .create(7, EVENTS_A, 1, &SURFACE, "Files", WindowSizing::Fixed)
+        .expect("a window");
+    first
+        .present(window, 0, full_damage())
+        .expect("the first present");
+    let alone = fresh
+        .borrow()
+        .sent
+        .last()
+        .cloned()
+        .expect("a present frame");
+
+    // The same present, on a client that has since sent the widest operation
+    // the channel has.
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let (window, _) = client
+        .create(7, EVENTS_A, 1, &SURFACE, "Files", WindowSizing::Fixed)
+        .expect("a window");
+    client
+        .set_app_bar(&sample_app_bar(EVENTS_A))
+        .expect("declared");
+    let widest = loopback
+        .borrow()
+        .sent
+        .last()
+        .cloned()
+        .expect("a declaration frame");
+    client
+        .present(window, 0, full_damage())
+        .expect("the second present");
+    let after = loopback.borrow().sent.last().cloned().expect("a frame");
+
+    assert!(
+        widest.len() > alone.len(),
+        "the declaration is the wider operation, or this proves nothing"
+    );
+    assert_eq!(after, alone, "a present carries only its own bytes");
 }
 
 #[test]

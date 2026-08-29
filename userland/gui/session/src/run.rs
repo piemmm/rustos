@@ -2009,6 +2009,11 @@ mod program {
         );
 
         let mut token = 0u64;
+        // Held for the life of the loop rather than taken per request: it is
+        // sized to the widest operation the channel has, so a per-request
+        // array would cost every present — the hottest and one of the
+        // shortest — the whole of the widest one's clearing.
+        let mut request = [0u8; WINDOW_MAX_REQUEST];
         loop {
             // The park stays indefinite: a cache-report change the runtime's
             // rate limiter is holding back, a frame report this session's own
@@ -2143,7 +2148,6 @@ mod program {
                 // malformed request — is a well-formed typed reply, so no
                 // caller is ever left parked; a transient recv error drops
                 // the wake and re-parks.
-                let mut request = [0u8; WINDOW_MAX_REQUEST];
                 let mut ticket = 0u64;
                 if let Ok(len) = tairix_rt::call_recv(WINDOW_ENDPOINT, &mut request, &mut ticket) {
                     let mut reply = [0u8; WINDOW_REPLY_MAX];

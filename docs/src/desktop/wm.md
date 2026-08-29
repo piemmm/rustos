@@ -1375,7 +1375,21 @@ per window — sends the 36 bytes it carries rather than padding out to the
 widest operation's block, and the bounded icon-bar declaration
 (`SetAppBar`) can grow without the present path paying for it.
 `WINDOW_MAX_REQUEST` is the endpoint's receive ceiling, not the shape of a
-request. Events keep their one fixed `WindowEvent` frame.
+request — the client and the session each hold one buffer of it for the life
+of the connection rather than taking one per call, so the ceiling's width
+costs a present nothing. Events keep their one fixed `WindowEvent` frame.
+
+A declaration's own length follows the menu it carries in two dimensions: one
+fixed-width record per declared row, then the rows' text in one trailing
+block. A menu holds every row's label, accelerator caption and disabled-row
+reason in that one block rather than a widest-case buffer per row, so both
+the frame and the model in memory cost what the rows actually say. The bounds
+are format bounds a hostile client cannot widen: `APP_MENU_MAX_ROWS` (32)
+rows per plate, `APP_MENU_MAX_TOTAL_ROWS` (64) across the whole menu,
+`APP_MENU_MAX_DEPTH` (4) plates in a chain, and `APP_MENU_TEXT_BYTES` (1536)
+of row text in total. Each row's text is taken from the block strictly in row
+order and the block must be consumed exactly, so there is no offset to point
+anywhere, no two rows can share bytes, and no text can ride along unread.
 
 An app also sets its own window's **backdrop-blur** radius over the
 channel: `WindowClient::set_backdrop_blur(window_id, radius_px)` sends

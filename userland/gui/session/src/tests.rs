@@ -15,7 +15,7 @@ use tairix_abi::switchboard_ipc::{
 };
 use tairix_abi::sysinfo::CACHE_LABEL_MAX;
 use tairix_abi::window_ipc::{
-    AppBar, AppMenu, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuRow,
+    AppBar, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow,
 };
 use tairix_abi::{
     AppInfoHeader, DriverError, Errno, ProcId, ABI_VERSION_CURRENT, APPINFO_MAGIC, BUNDLE_ID_MAX,
@@ -186,12 +186,10 @@ fn window_owner_wide(index: usize) -> ProcId {
 /// An icon-bar declaration offering *Quit*, with `default_action` as given.
 fn app_bar(default_action: bool) -> AppBar {
     let mut menu = AppMenu::EMPTY;
-    menu.push(AppMenuRow::Item {
-        id: AppMenuItemId::new(1).expect("non-zero"),
-        label: AppMenuLabel::new("Quit").expect("short"),
-        enabled: true,
-        mark: AppMenuMark::None,
-    })
+    menu.push(AppMenuRow::Item(AppMenuItem::new(
+        AppMenuItemId::new(1).expect("non-zero"),
+        AppMenuLabel::new("Quit").expect("short"),
+    )))
     .expect("fits");
     AppBar {
         event_endpoint: 4,
@@ -3707,7 +3705,7 @@ fn a_declaration_holds_a_slot_with_no_windows_and_leaves_on_withdrawal() {
 
     // Re-declaring replaces the declaration whole rather than adding a slot.
     let mut menu = AppMenu::EMPTY;
-    menu.push(AppMenuRow::About).expect("fits");
+    menu.push(AppMenuRow::Info).expect("fits");
     service
         .declare(
             owner,
@@ -3983,12 +3981,10 @@ fn secondary_press_over_an_app_slot_opens_the_menu_it_declared() {
     let mut shell = shell();
     let mut comp = compositor();
     let mut menu = AppMenu::EMPTY;
-    menu.push(AppMenuRow::Item {
-        id: AppMenuItemId::new(1).expect("non-zero"),
-        label: AppMenuLabel::new("Quit").expect("short"),
-        enabled: true,
-        mark: AppMenuMark::None,
-    })
+    menu.push(AppMenuRow::Item(AppMenuItem::new(
+        AppMenuItemId::new(1).expect("non-zero"),
+        AppMenuLabel::new("Quit").expect("short"),
+    )))
     .expect("fits");
     shell.set_apps(
         &mut comp,

@@ -18,7 +18,7 @@
 //! reconstructs the menu to know where to click. Naming them once is what
 //! stops the two from drifting.
 
-use tairix_abi::window_ipc::{AppBar, AppMenuItemId, AppMenuLabel, AppMenuRow};
+use tairix_abi::window_ipc::{AppBar, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow};
 use tairix_abi::Errno;
 use tairix_window::QUIT_ROW;
 
@@ -70,35 +70,35 @@ impl BarCommand {
 /// the caller reports it and runs without a bar rather than showing one it
 /// could not describe.
 pub fn declaration(endpoint: u64) -> Result<AppBar, Errno> {
-    let new_window = AppMenuRow::Item {
-        id: AppMenuItemId::new(ROW_NEW_WINDOW)?,
-        label: AppMenuLabel::new("New window")?,
-        enabled: true,
-        mark: tairix_abi::window_ipc::AppMenuMark::None,
-    };
+    let new_window = AppMenuRow::Item(AppMenuItem::new(
+        AppMenuItemId::new(ROW_NEW_WINDOW)?,
+        AppMenuLabel::new("New window")?,
+    ));
     tairix_window::declaration(endpoint, DEFAULT_ACTION, &[new_window])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tairix_abi::window_ipc::AppMenuRowView;
 
     #[test]
     fn the_declaration_reads_information_new_window_then_quit() {
         let bar = declaration(42).expect("the fixed rows fit");
         assert_eq!(bar.event_endpoint, 42);
         assert!(bar.default_action);
-        let rows: alloc::vec::Vec<AppMenuRow> = bar.menu.rows().map(|(row, _)| row).collect();
+        let rows: alloc::vec::Vec<AppMenuRowView<'_>> =
+            bar.menu.rows().map(|(row, _)| row).collect();
         assert_eq!(rows.len(), 4);
-        assert_eq!(rows[0], AppMenuRow::About);
+        assert_eq!(rows[0], AppMenuRowView::Info);
         assert!(matches!(
             rows[1],
-            AppMenuRow::Item { id, .. } if id.get() == ROW_NEW_WINDOW
+            AppMenuRowView::Item(item) if item.id.get() == ROW_NEW_WINDOW
         ));
-        assert_eq!(rows[2], AppMenuRow::Separator);
+        assert_eq!(rows[2], AppMenuRowView::Separator);
         assert!(matches!(
             rows[3],
-            AppMenuRow::Item { id, .. } if id.get() == QUIT_ROW
+            AppMenuRowView::Item(item) if item.id.get() == QUIT_ROW
         ));
         assert!(
             bar.menu.rows().all(|(_, parent)| parent.is_none()),

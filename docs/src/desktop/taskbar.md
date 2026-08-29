@@ -627,17 +627,21 @@ choice to offer.
 - **A running application's slot**, showing the menu that *application*
   declared over the window channel — and nothing at all when it declared
   none, so the bar never invents one on an application's behalf. Every
-  top-level declared row draws in declaration order with the enablement and
-  mark it asked for; a declared separator opens the group its next row begins
-  rather than becoming a choosable row; a declared `Submenu` row opens its
-  children beside the plate (one level deep, flipped to the leading side when
-  the trailing side would leave the screen); and choosing a row reports
-  `AppMenuChosen { app, item }`, which the session relays back to the
-  declaring process. The bar never interprets an id.
+  top-level declared row draws in declaration order with the enablement, mark,
+  accelerator caption, disabled-row reason and role it asked for; a declared
+  separator opens the group its next row begins rather than becoming a
+  choosable row; a declared `Submenu` row opens its children beside the plate
+  (flipped to the leading side when the trailing side would leave the screen);
+  and choosing a row reports `AppMenuChosen { app, item }`, which the session
+  relays back to the declaring process. The bar never interprets an id.
 
-  The one row inside such a menu that is the bar's own is **About**: its
-  submenu is the application's information panel, a `FactList` of the
-  bundle's *signed* manifest — name, version, and its purpose and author when
+  The model describes a chain up to `APP_MENU_MAX_DEPTH` plates deep; this bar
+  renders one level of it, and the session-owned menu service that renders the
+  whole chain is staged in `plans/NEW-MENUS.md`.
+
+  The one row inside such a menu that is the bar's own is the **information**
+  row (`AppMenuRow::Info`, drawn as *Info*): its child is the application's
+  information panel, a `FactList` of the bundle's *signed* manifest — name, version, and its purpose and author when
   the manifest states them. An application declares only that the row exists,
   so it cannot state an identity that is not its own inside system-drawn
   chrome, and an omitted field is absent rather than a blank row. The panel is
@@ -905,8 +909,9 @@ launcher's at more than one scale, degenerate fail-closed clipping, the
 accessors the session pushes through, a stale hover clamped away by a fresh
 strip, and the absence of any presence or focus mark. The declared-menu tests
 cover the exact rows an application's declaration draws (order, marks,
-disabled rows, the separator folded into the next row's group break, the
-submenu's own child excluded from the top level, the bar's own *About* row),
+accelerator captions, disabled rows and the reason each states, a destructive
+row's role, the separator folded into the next row's group break, the
+submenu's own child excluded from the top level, the bar's own *Info* row),
 a menu at the format row cap, a disabled row that cannot be chosen, the
 relayed row ids (including from inside a one-level submenu), `Escape` stepping
 out of an open child before dismissing, an application that declared no menu

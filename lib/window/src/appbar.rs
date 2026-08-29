@@ -29,7 +29,7 @@
 //! the one thing that tells them apart.
 
 use tairix_abi::window_ipc::{
-    AppBar, AppMenu, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuRow,
+    AppBar, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow,
 };
 use tairix_abi::Errno;
 
@@ -86,17 +86,15 @@ pub fn declaration(
         return Err(Errno::OutOfRange);
     }
     let mut menu = AppMenu::EMPTY;
-    menu.push(AppMenuRow::About)?;
+    menu.push(AppMenuRow::Info)?;
     for &row in rows {
         menu.push(row)?;
     }
     menu.push(AppMenuRow::Separator)?;
-    menu.push(AppMenuRow::Item {
-        id: AppMenuItemId::new(QUIT_ROW)?,
-        label: AppMenuLabel::new(QUIT_LABEL)?,
-        enabled: true,
-        mark: AppMenuMark::None,
-    })?;
+    menu.push(AppMenuRow::Item(AppMenuItem::new(
+        AppMenuItemId::new(QUIT_ROW)?,
+        AppMenuLabel::new(QUIT_LABEL)?,
+    )))?;
     Ok(AppBar {
         event_endpoint: endpoint,
         default_action,
@@ -131,15 +129,14 @@ pub fn is_quit(item: AppMenuItemId) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tairix_abi::window_ipc::AppMenuRowView;
 
     /// An enabled, unmarked row, for the declarations under test.
     fn row(id: u16, label: &str) -> AppMenuRow {
-        AppMenuRow::Item {
-            id: AppMenuItemId::new(id).expect("non-zero"),
-            label: AppMenuLabel::new(label).expect("within bounds"),
-            enabled: true,
-            mark: AppMenuMark::None,
-        }
+        AppMenuRow::Item(AppMenuItem::new(
+            AppMenuItemId::new(id).expect("non-zero"),
+            AppMenuLabel::new(label).expect("within bounds"),
+        ))
     }
 
     #[test]
@@ -150,13 +147,14 @@ mod tests {
             !bar.default_action,
             "the session raises the application's window rather than telling it about the click"
         );
-        let rows: alloc::vec::Vec<AppMenuRow> = bar.menu.rows().map(|(row, _)| row).collect();
+        let rows: alloc::vec::Vec<AppMenuRowView<'_>> =
+            bar.menu.rows().map(|(row, _)| row).collect();
         assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0], AppMenuRow::About);
-        assert_eq!(rows[1], AppMenuRow::Separator);
+        assert_eq!(rows[0], AppMenuRowView::Info);
+        assert_eq!(rows[1], AppMenuRowView::Separator);
         assert!(matches!(
             rows[2],
-            AppMenuRow::Item { id, enabled: true, .. } if id.get() == QUIT_ROW
+            AppMenuRowView::Item(item) if item.id.get() == QUIT_ROW && item.enabled
         ));
     }
 
@@ -165,17 +163,18 @@ mod tests {
         let bar = declaration(9, true, &[row(QUIT_ROW + 1, "New window")])
             .expect("the declared rows fit");
         assert!(bar.default_action);
-        let rows: alloc::vec::Vec<AppMenuRow> = bar.menu.rows().map(|(row, _)| row).collect();
+        let rows: alloc::vec::Vec<AppMenuRowView<'_>> =
+            bar.menu.rows().map(|(row, _)| row).collect();
         assert_eq!(rows.len(), 4);
-        assert_eq!(rows[0], AppMenuRow::About);
+        assert_eq!(rows[0], AppMenuRowView::Info);
         assert!(matches!(
             rows[1],
-            AppMenuRow::Item { id, .. } if id.get() == QUIT_ROW + 1
+            AppMenuRowView::Item(item) if item.id.get() == QUIT_ROW + 1
         ));
-        assert_eq!(rows[2], AppMenuRow::Separator);
+        assert_eq!(rows[2], AppMenuRowView::Separator);
         assert!(matches!(
             rows[3],
-            AppMenuRow::Item { id, .. } if id.get() == QUIT_ROW
+            AppMenuRowView::Item(item) if item.id.get() == QUIT_ROW
         ));
     }
 

@@ -13,7 +13,7 @@
 //! An application's own menu is the one subject whose *rows* are not the
 //! bar's: the application declared them over the window channel, and the bar
 //! draws exactly what it declared. The one row the bar owns inside such a
-//! menu is [`AppMenuRow::About`] — its submenu is the application's
+//! menu is [`AppMenuRowView::Info`] — its child is the application's
 //! information panel, drawn from the bundle's **signed** manifest, so an
 //! application cannot state an identity that is not its own. While open the menu is
 //! modal exactly like the library popup: every event routes here first, a
@@ -24,8 +24,10 @@
 
 use alloc::vec::Vec;
 
-use tairix_abi::window_ipc::{AppMenu, AppMenuItemId, AppMenuMark, AppMenuRow};
-use tairix_controls::{ControlState, Fact, FactList, Menu, MenuAction, MenuItem, MenuMark};
+use tairix_abi::window_ipc::{AppMenu, AppMenuItemId, AppMenuMark, AppMenuRole, AppMenuRowView};
+use tairix_controls::{
+    ControlRole, ControlState, Fact, FactList, Menu, MenuAction, MenuItem, MenuMark,
+};
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_proglib::EntryId;
@@ -535,7 +537,8 @@ impl BarMenu {
 
     /// Open whatever the top-level row at `index` hangs off itself: the
     /// application's rows for a declared submenu, its information panel for
-    /// the *About* row. A row that hangs nothing off itself opens nothing.
+    /// the information row. A row that hangs nothing off itself opens
+    /// nothing.
     fn open_child(&mut self, index: usize) {
         let Some(MenuSubject::App { menu, identity, .. }) = self.subject.as_ref() else {
             return;
@@ -543,30 +546,22 @@ impl BarMenu {
         let Some(&declared_parent) = self.declared.get(index) else {
             return;
         };
-        let rows: Vec<(usize, AppMenuRow)> = menu
-            .rows()
-            .enumerate()
-            .filter_map(|(row, (kind, parent))| (parent? == declared_parent).then_some((row, kind)))
-            .collect();
-        let Some((_, parent_row)) = menu
-            .rows()
-            .nth(declared_parent)
-            .map(|r| (declared_parent, r.0))
-        else {
-            return;
-        };
-        self.child = match parent_row {
-            AppMenuRow::About => Some(OpenChild::Info {
+        let child = match menu.rows().nth(declared_parent).map(|(row, _)| row) {
+            Some(AppMenuRowView::Info) => Some(OpenChild::Info {
                 parent: index,
                 facts: info_facts(identity),
             }),
-            AppMenuRow::Submenu { .. } if !rows.is_empty() => Some(OpenChild::Rows {
-                parent: index,
-                menu: Menu::new(rows.iter().map(|&(_, kind)| declared_item(kind)).collect()),
-                declared: rows.iter().map(|&(row, _)| row).collect(),
-            }),
+            Some(AppMenuRowView::Submenu { .. }) => {
+                let (items, declared) = plate_rows(menu, Some(declared_parent));
+                (!items.is_empty()).then(|| OpenChild::Rows {
+                    parent: index,
+                    menu: Menu::new(items),
+                    declared,
+                })
+            }
             _ => None,
         };
+        self.child = child;
     }
 
     /// Report the choice a declared row names, closing the whole menu.
@@ -582,7 +577,7 @@ impl BarMenu {
         let item = row
             .and_then(|row| menu.rows().nth(row))
             .and_then(|(kind, _)| match kind {
-                AppMenuRow::Item { id, .. } => Some(id),
+                AppMenuRowView::Item(item) => Some(item.id),
                 _ => None,
             });
         self.close();
@@ -641,27 +636,7 @@ impl BarMenu {
 /// rows are the bar's own and map back to nothing.
 fn rows_for(subject: &MenuSubject) -> (Vec<MenuItem>, Vec<usize>) {
     match subject {
-        MenuSubject::App { menu, .. } => {
-            let mut items = Vec::new();
-            let mut declared = Vec::new();
-            let mut group_break = false;
-            for (row, (kind, parent)) in menu.rows().enumerate() {
-                if parent.is_some() {
-                    continue;
-                }
-                // A separator is not a row of its own: it opens the group
-                // the next row begins, which is how the shared control keeps
-                // every reported index a real command.
-                if matches!(kind, AppMenuRow::Separator) {
-                    group_break = true;
-                    continue;
-                }
-                items.push(declared_item(kind).with_group_break(group_break));
-                declared.push(row);
-                group_break = false;
-            }
-            (items, declared)
-        }
+        MenuSubject::App { menu, .. } => plate_rows(menu, None),
         MenuSubject::Entry { .. } => (
             ENTRY_ROWS
                 .iter()
@@ -674,43 +649,78 @@ fn rows_for(subject: &MenuSubject) -> (Vec<MenuItem>, Vec<usize>) {
     }
 }
 
+/// The rows of one plate of `menu`: those whose parent is `parent`, in
+/// declaration order, with the declared-row index each maps back to.
+///
+/// One builder for the root plate and for a declared submenu's, so a
+/// separator opens a group on both rather than drawing as a blank row on one
+/// of them.
+fn plate_rows(menu: &AppMenu, parent: Option<usize>) -> (Vec<MenuItem>, Vec<usize>) {
+    let mut items = Vec::new();
+    let mut declared = Vec::new();
+    let mut group_break = false;
+    for (row, (kind, held)) in menu.rows().enumerate() {
+        if held != parent {
+            continue;
+        }
+        // A separator is not a row of its own: it opens the group the next
+        // row begins, which is how the shared control keeps every reported
+        // index a real command.
+        if matches!(kind, AppMenuRowView::Separator) {
+            group_break = true;
+            continue;
+        }
+        items.push(declared_item(kind).with_group_break(group_break));
+        declared.push(row);
+        group_break = false;
+    }
+    (items, declared)
+}
+
 /// The shared control row one declared application row draws as.
 ///
 /// The information row's label is the bar's, not the application's: the panel
 /// it opens is system chrome stating an attested identity, so every
 /// application reaches it by the same name ([`INFO_ROW_LABEL`]).
-fn declared_item(row: AppMenuRow) -> MenuItem {
+fn declared_item(row: AppMenuRowView<'_>) -> MenuItem {
     match row {
-        AppMenuRow::Item {
-            label,
-            enabled,
-            mark,
-            ..
-        } => {
-            let item = MenuItem::new(label.as_str()).with_mark(match mark {
-                AppMenuMark::None => MenuMark::None,
-                AppMenuMark::Check => MenuMark::Check,
-                AppMenuMark::Radio => MenuMark::Radio,
-            });
+        AppMenuRowView::Item(item) => {
+            let mut drawn = MenuItem::new(item.label)
+                .with_mark(match item.mark {
+                    AppMenuMark::None => MenuMark::None,
+                    AppMenuMark::Check => MenuMark::Check,
+                    AppMenuMark::Radio => MenuMark::Radio,
+                })
+                .with_role(match item.role {
+                    AppMenuRole::Neutral => ControlRole::Neutral,
+                    AppMenuRole::Destructive => ControlRole::Destructive,
+                });
+            // An absent caption or reason is absent, not empty text: the row
+            // states nothing there rather than an empty trailing column.
+            if !item.shortcut.is_empty() {
+                drawn = drawn.with_shortcut(item.shortcut);
+            }
+            if !item.reason.is_empty() {
+                drawn = drawn.with_reason(item.reason);
+            }
+            if !item.enabled {
+                drawn = drawn.with_state(ControlState::disabled());
+            }
+            drawn
+        }
+        AppMenuRowView::Submenu { label, enabled } => {
+            let drawn = MenuItem::new(label).with_submenu(true);
             if enabled {
-                item
+                drawn
             } else {
-                item.with_state(ControlState::disabled())
+                drawn.with_state(ControlState::disabled())
             }
         }
-        AppMenuRow::Submenu { label, enabled } => {
-            let item = MenuItem::new(label.as_str()).with_submenu(true);
-            if enabled {
-                item
-            } else {
-                item.with_state(ControlState::disabled())
-            }
-        }
-        AppMenuRow::About => MenuItem::new(INFO_ROW_LABEL).with_submenu(true),
-        // A separator never becomes a row (`rows_for` folds it into the next
-        // row's group break); an unreachable one draws as a spacer rather
-        // than as something choosable.
-        AppMenuRow::Separator => MenuItem::new("").with_state(ControlState::disabled()),
+        AppMenuRowView::Info => MenuItem::new(INFO_ROW_LABEL).with_submenu(true),
+        // A separator never becomes a row (`plate_rows` folds it into the
+        // next row's group break); an unreachable one draws as a spacer
+        // rather than as something choosable.
+        AppMenuRowView::Separator => MenuItem::new("").with_state(ControlState::disabled()),
     }
 }
 

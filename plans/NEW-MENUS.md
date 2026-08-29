@@ -8,8 +8,8 @@ Binding under `AGENTS.md` (§3, §15.18).
 |---|---|---|
 | M0 | Row model (`AppMenu`) + the icon-bar declaration carrying it | **landed** |
 | M1a | Variable-length request framing: per-op wire length, exact-length decode | **landed** |
-| M1b | Model: per-plate rows, submenu depth, titles, shortcuts, `About`→`Info` | next |
-| M1c | The per-gesture open: anchor in, `Chosen`/`Dismissed`/`Refused` out | planned |
+| M1b | Model: per-plate rows, submenu depth, titles, shortcuts, `About`→`Info` | **landed** |
+| M1c | The per-gesture open: anchor in, `Chosen`/`Dismissed`/`Refused` out | next |
 | M1d | Attached-window row kind + its present/arrive/refuse events | planned |
 | M2 | The service: bands, drag, arrival-open, attach/detach, grab, lifetime | planned |
 | M3.1 | Migrate `userland/apps/terminal`, delete its shell | planned |
@@ -33,7 +33,12 @@ stage that closes it carries its regression test (§2.18, §7).
 | D2 | The per-op operand-block end offsets were spelled twice — once implicitly by the encoder, once as a literal in the decoder's `reserved_zero(bytes, 36)` call. One named length per op now serves both (§2.2). | **closed in M1a** |
 | D3 | Exact-length decoding refuses a random-length input before it reaches any operand, so the request decoders' fuzz coverage came to rest on the seeded frames — and only `SetAppBar` had one. `fuzz_decode` now seeds and bit-flips one frame per operation, at its length and one byte either side. | **closed in M1a** |
 | D4 | Menu-child placement exists twice with two rules: `lib/controls`' `Menu::anchored_rect` slides a plate onto the screen, while the bar's own `child_rect` flips a child to its parent's other side. A root at a pointer and a child beside its parent legitimately differ, but the two rules must end up as one owner's (§2.2) rather than one shared and one private to the bar. | M2 |
-| D5 | `AppMenu::push_under` refuses a submenu inside a submenu, so the model cannot express a chain at all — the one-level bound is load-bearing in the builder, not only in the renderer. | M1b |
+| D5 | `AppMenu::push_under` refused a submenu inside a submenu, so the model could not express a chain at all — the one-level bound was load-bearing in the builder, not only in the renderer. Nesting is now bounded by `APP_MENU_MAX_DEPTH` instead, and a submenu on the deepest plate is refused rather than drawn opening nothing. | **closed in M1b** |
+| D6 | A row's text was a widest-case buffer per row, so the three fields `MenuItem` draws (label, accelerator caption, disabled-row reason) would have multiplied by the row bound — and `WindowRequest` carries a menu inline, so the hot `Present` path's own frame would have grown with them. A menu now holds its rows' text in one bounded block (`APP_MENU_TEXT_BYTES`) and the wire carries lengths, not offsets, in row order. | **closed in M1b** |
+| D7 | `lib/window`'s client encoded every request into a fresh `MAX_WIRE_LEN` stack array and the session's serve loop received into one, so both cleared the widest operation's width on every call — including the hot `Present`. M1a made the *frame* per-operation but left these two buffers at the ceiling. Each is now held once for the life of the connection. | **closed in M1b** |
+| D8 | The bar built a child plate's rows without folding a declared separator into the next row's group break, so a separator inside a declared submenu drew as a blank disabled row where the same separator on the root plate drew a divider. One `plate_rows` builder now serves both. | **closed in M1b** |
+| D9 | The model describes a chain `APP_MENU_MAX_DEPTH` plates deep; the bar renders one level, so a submenu declared *inside* a submenu draws its chevron and opens nothing. Nothing in the tree declares one (`appbar::declaration` refuses a submenu outright), and the chain renderer is what M2 is. | M2 |
+| D10 | The bar's own menus state two things the model cannot carry: a row denied for want of a capability (`AuthorityState::NeedsCapability`, which draws an Authority Mark rather than merely greying) and a row whose setting is already in effect (`ActivityState::Complete`). `taskbar/src/system.rs` and `clock_menu.rs` both use them, so M3.4 would lose them. Whether the *service-facing* model carries them is a design question with a security edge: an application must not be able to claim the *system* lacks authority for its own row, so the answer may be that they are in-process-only — which is what §1.6's "the wire model is a bounded subset" has to be made precise about. | M2 (§15.7 — needs a decision) |
 
 **This is an architecture change, not a performance one.** The ~300 ms
 context-menu stall that first prompted it was a kernel defect and is closed
@@ -273,8 +278,8 @@ never a second model with a second set of behaviours (§2.2).
 ## 4. What stands, and what of it has to change
 
 **Built and kept:** the `AppMenu` row model in `lib/abi/src/window_ipc.rs` —
-an ordered bounded list of `Item { id, label, enabled, mark }`, `Separator`,
-`Submenu { label, enabled }` and the manifest-attested info row, with
+an ordered bounded list of `Item(AppMenuItem)`, `Separator`,
+`Submenu { label, enabled }` and the manifest-attested `Info` row, with
 non-zero item ids unique within a menu, a decoder held to the **same**
 shape rule as the builder, and both fuzzed in `lib/abi/tests/fuzz_decode.rs`.
 It is carried by the caller-scoped `WindowRequest::SetAppBar` and answered by
@@ -288,28 +293,19 @@ special case the general chain generalises.
 
 **Has to change (M1):**
 
-- **Submenu depth**: one level → a fixed `APP_MENU_MAX_DEPTH`. Nesting is
-  already expressed as a parent index, so depth is a shape check, not a new
-  encoding. Propose **4**.
-- **Rows**: `APP_MENU_MAX_ROWS` (12) is a whole-menu total sized for the
-  icon bar. A general menu needs it per plate and needs more of them.
-- **Titles**: a root title for a per-window menu (a submenu's is derived,
-  §1.1).
-- **Accelerator text**: `MenuItem` already renders a shortcut column and
-  every migrating surface has shortcuts to state; the wire model carries
-  none.
+- ~~Submenu depth, per-plate rows, a root title, accelerator text, and
+  `About` → `Info`~~ — landed as M1b, along with the disabled-row reason and
+  the role the same control draws.
 - **A row kind for an app-provided attached window**, plus the present
   request and the arrival/refusal events §1.4 needs.
-- **`AppMenuRow::About` → `AppMenuRow::Info`**, matching the label the
-  desktop already draws and the vocabulary this plan uses.
 - **The per-gesture open**: an anchor, and the three-way outcome
   `Chosen(id)` / `Dismissed` / `Refused(reason)` delivered **once** to the
   requesting window.
 
-**And that re-opens M0's transport decision.** Inline bounded rows was
-settled because the icon-bar model was small; `WindowRequest` is one fixed
-frame sized to its widest op, so every one of those additions widens the
-frame that the hot `Present` path also pays for. See decision 1.
+**And that re-opened M0's transport decision**, settled as decision 1 and
+landed as M1a. M1b then found the same cost in a second place the framing
+decision did not reach — the model held *in memory*, which rides inside every
+decoded `WindowRequest` — and answered it the same way (D6).
 
 ---
 
@@ -336,11 +332,39 @@ Its point is that the menu model can grow through M1b–M1d without the hot
 path paying for it: `Present` was one 522-byte frame and is now 36 bytes,
 which is the whole of what it needs.
 
-**M1b — the model.** `APP_MENU_MAX_ROWS` becomes a per-plate bound; submenu
-nesting gains `APP_MENU_MAX_DEPTH` (propose 4) as a shape check over the
-existing parent index; a root title joins the model (a submenu's is derived,
-§1.1); rows gain the accelerator text `MenuItem` already renders; and
-`AppMenuRow::About` becomes `AppMenuRow::Info`.
+**M1b — the model (landed).** `APP_MENU_MAX_ROWS` (32) now bounds one
+*plate*, with `APP_MENU_MAX_TOTAL_ROWS` (64) bounding the whole menu — its
+own bound rather than the product of the others, because it is what holds the
+one frame a menu crosses in. Nesting is bounded by `APP_MENU_MAX_DEPTH` (4)
+as a shape check over the existing parent index, so a chain is expressible at
+last (D5) and a submenu on the deepest plate is refused rather than drawn
+opening nothing.
+
+A row now states everything the shared `MenuItem` control draws: its
+accelerator caption (`APP_MENU_SHORTCUT_MAX`, 24), the reason it is disabled
+(`APP_MENU_REASON_MAX`, 64), and its role (`AppMenuRole::{Neutral,
+Destructive}`) beside the label and mark it already had. `AppMenuRow::Item`
+carries an `AppMenuItem` built through `new` + `with_*` rather than seven
+spelled fields, and `AppMenuRow::About` is `AppMenuRow::Info`.
+
+Those three text fields per row would have multiplied by the row bound had a
+row kept a widest-case buffer each, and `WindowRequest` carries a menu inline,
+so the hot `Present` path's own frame would have grown with them (D6). A menu
+therefore holds every row's text in **one** bounded block
+(`APP_MENU_TEXT_BYTES`, 1536) — the "total model bytes" bound invariant 5
+names — and reports rows back as `AppMenuRowView`, borrowing that block. The
+wire matches: one 8-byte record per row carrying *lengths*, then the text in
+row order, consumed exactly. There are no offsets, so nothing can point
+anywhere, no two rows can share bytes, and no text can ride along unread.
+The model is 2344 bytes where fixed-width row text would have been ~8.6 KiB,
+and a pinned test keeps it that way.
+
+A root title joins the model (`AppMenu::titled`; a submenu's plate takes its
+parent row's label, §1.1). The **declaration has no title field at all**: the
+icon-bar menu is titled from the bundle's signed manifest, so a titled menu
+is refused at encode rather than being encoded and quietly retitled — an
+application cannot title system chrome as something it is not. M1c's open
+request is where a title crosses the wire.
 
 **M1c — the open.** The per-gesture request carrying an anchor, and the
 three-way outcome `Chosen(id)` / `Dismissed` / `Refused(reason)` delivered

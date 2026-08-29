@@ -304,6 +304,12 @@ struct LastPresent {
 pub struct WindowClient<T: WindowTransport> {
     transport: T,
     presented: Vec<LastPresent>,
+    /// The scratch every request is encoded into, held once for the life of
+    /// the client rather than taken per call: it is sized to the widest
+    /// operation the channel has, so a per-call array would cost a present
+    /// — the hottest operation and one of the shortest — the whole of the
+    /// widest one's clearing.
+    frame: [u8; WindowRequest::MAX_WIRE_LEN],
     /// The serving session's attested identity, as the last reply that
     /// carried it stated. `None` until one has.
     session: Option<ProcId>,
@@ -315,6 +321,7 @@ impl<T: WindowTransport> WindowClient<T> {
         Self {
             transport,
             presented: Vec::new(),
+            frame: [0; WindowRequest::MAX_WIRE_LEN],
             session: None,
         }
     }
@@ -749,9 +756,11 @@ impl<T: WindowTransport> WindowClient<T> {
     /// The single place a request is encoded, so no call site can send a
     /// frame whose length disagrees with its operation.
     fn call(&mut self, request: &WindowRequest, reply: &mut [u8]) -> Result<usize, Errno> {
-        let mut frame = [0u8; WindowRequest::MAX_WIRE_LEN];
-        let len = request.encode(&mut frame)?;
-        self.transport.call(&frame[..len], reply)
+        let Self {
+            transport, frame, ..
+        } = self;
+        let len = request.encode(frame)?;
+        transport.call(&frame[..len], reply)
     }
 }
 

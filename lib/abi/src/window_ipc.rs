@@ -99,30 +99,83 @@ pub const WINDOW_TITLE_MAX: usize = 64;
 /// scale is applied, so a client cannot ask for an unbounded one.
 pub const WINDOW_BACKDROP_BLUR_MAX_PX: u16 = 64;
 
-/// Most rows one application's icon-bar menu may declare
+/// Most rows one **plate** of a menu may hold ([`AppMenu`]).
+///
+/// A **format** bound, not a capacity: a plate is one column the desktop
+/// draws in full, and the longest column a real menu offers runs to around
+/// twenty rows, so thirty-two is generous for what a plate *is* while staying
+/// a bound a hostile client cannot widen. The whole menu has its own bound
+/// ([`APP_MENU_MAX_TOTAL_ROWS`]).
+pub const APP_MENU_MAX_ROWS: usize = 32;
+
+/// Most rows one whole menu may hold, across every plate of its chain
 /// ([`AppMenu`]).
 ///
-/// A **format** bound, not a capacity: an icon-bar menu names an
-/// application's few whole-application verbs (a *New window*, its options
-/// submenu, *About*, *Quit*), so a dozen rows is generous for what the
-/// surface is *for* — and the frame every window request shares stays the
-/// size it already was. A hostile client cannot widen it, and a legitimate
-/// one has no use for more.
-pub const APP_MENU_MAX_ROWS: usize = 12;
+/// A **format** bound. It is its own bound rather than the product of
+/// [`APP_MENU_MAX_ROWS`] and [`APP_MENU_MAX_DEPTH`], which is not a bound at
+/// all: it is what holds the one frame a whole menu crosses in, and so the
+/// receive ceiling every window client's buffer is sized to
+/// ([`WINDOW_MAX_REQUEST`]). Twice the per-plate bound, so a plate can be
+/// filled without exhausting the menu and the per-plate bound still bites.
+pub const APP_MENU_MAX_TOTAL_ROWS: usize = 64;
 
-/// Maximum encoded length, in bytes, of one icon-bar menu row's label.
+/// Deepest chain of plates a menu may describe: the root plate is depth 1,
+/// so four permits a root and three levels of submenu beneath it.
+///
+/// A **format** bound on the shape the parent index already expresses, so
+/// nesting costs no encoding. A submenu on the deepest plate is refused
+/// rather than drawn opening nothing.
+pub const APP_MENU_MAX_DEPTH: usize = 4;
+
+/// Bytes of row text one whole menu may carry, across every row and every
+/// text field ([`AppMenu`]).
+///
+/// A **format** bound on the total size of the model, which is what keeps a
+/// menu's frame — and the model held in memory — bounded without paying the
+/// widest label, shortcut and reason for every row a menu does not have.
+/// Enough for every row of a full menu to carry a twenty-four byte label, or
+/// for fewer rows to carry the widest of all three fields.
+pub const APP_MENU_TEXT_BYTES: usize = 1536;
+
+/// Maximum encoded length, in bytes, of one menu row's label.
 pub const APP_MENU_LABEL_MAX: usize = 36;
 
-/// A validated icon-bar menu row label: bounded UTF-8 with no control
-/// characters, over the shared [`BoundedText`] validator.
+/// Maximum encoded length, in bytes, of one menu row's accelerator caption
+/// (`"Ctrl Shift K"`).
+///
+/// A caption naming a key combination, not a sentence: the longest the
+/// desktop states runs to a dozen bytes.
+pub const APP_MENU_SHORTCUT_MAX: usize = 24;
+
+/// Maximum encoded length, in bytes, of the reason a disabled menu row
+/// states.
+///
+/// Shown in place of the row's accelerator while it is disabled and current,
+/// so the bound is a clause rather than a sentence.
+pub const APP_MENU_REASON_MAX: usize = 64;
+
+/// A validated menu row label: bounded UTF-8 with no control characters,
+/// over the shared [`BoundedText`] validator.
 ///
 /// A label crosses a trust boundary into session-drawn chrome and carries
 /// no authority — it is a name, not a credential. An empty label is
 /// admissible in the type and refused per row kind: only a row that draws
-/// text requires one ([`AppMenuRow`]).
+/// text requires one ([`AppMenuRow`]). A menu's own title
+/// ([`AppMenu::titled`]) is bounded and validated identically, for the same
+/// reason.
 pub type AppMenuLabel = BoundedText<0, APP_MENU_LABEL_MAX>;
 
-/// The mark an [`AppMenuRow::Item`] draws beside its label.
+/// A validated menu row accelerator caption, over the shared validator.
+///
+/// Display text like a label: the desktop draws it and never acts on it, so a
+/// caption naming a key the application does not handle is that application's
+/// own cosmetic defect, never an input path.
+pub type AppMenuShortcut = BoundedText<0, APP_MENU_SHORTCUT_MAX>;
+
+/// A validated disabled-row reason, over the shared validator.
+pub type AppMenuReason = BoundedText<0, APP_MENU_REASON_MAX>;
+
+/// The mark an [`AppMenuItem`] draws beside its label.
 ///
 /// Closed, and an unknown discriminant on decode fails closed rather than
 /// being guessed at.
@@ -155,54 +208,23 @@ impl AppMenuMark {
     }
 }
 
-/// One row of an application's icon-bar menu.
+/// How prominently an [`AppMenuItem`] draws: the emphasis the desktop gives
+/// the row, not an authority it grants.
 ///
-/// The row kinds are exactly what an icon-bar menu is made of, so a row
-/// that cannot mean anything is unrepresentable: only an
-/// [`Item`](Self::Item) carries an id, and only the session-rendered
-/// [`About`](Self::About) row has content the application does not
-/// describe.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum AppMenuRow {
-    /// A chooseable row. Choosing it delivers
-    /// [`WindowEvent::AppBarMenu`] carrying `id` to the declaring
-    /// application, which decides what it means — the session never
-    /// interprets an id.
-    Item {
-        /// The application's own id for this row; never zero, and unique
-        /// within one menu, so an outcome names exactly one row.
-        id: AppMenuItemId,
-        /// The row's label.
-        label: AppMenuLabel,
-        /// Whether the row may be chosen. A disabled row draws greyed and
-        /// never acts (fail closed).
-        enabled: bool,
-        /// The mark drawn beside the label.
-        mark: AppMenuMark,
-    },
-    /// A horizontal rule grouping the rows around it. Never chooseable.
-    Separator,
-    /// A row that opens a submenu holding the rows that name it as their
-    /// parent. Never chooseable itself, and never nested inside another
-    /// submenu — an icon-bar menu is one level deep.
-    Submenu {
-        /// The row's label.
-        label: AppMenuLabel,
-        /// Whether the submenu opens. A disabled submenu draws greyed and
-        /// never opens.
-        enabled: bool,
-    },
-    /// The application-information row: an *About* row whose submenu is the
-    /// session's own info panel, drawn from the **signed manifest** of the
-    /// bundle the kernel attested owns the declaring process.
-    ///
-    /// The application declares only that the row exists; it supplies none
-    /// of the panel's text, so it cannot state an identity that is not its
-    /// own. At most one such row per menu, always at the top level.
-    About,
+/// A destructive row wears a danger rail so an action that is hard to undo
+/// reads as one before it is chosen. The emphasis is cosmetic — marking a
+/// row destructive neither adds nor withholds any authority — and the set is
+/// deliberately the two a menu row actually distinguishes.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum AppMenuRole {
+    /// An ordinary action with no special emphasis.
+    #[default]
+    Neutral,
+    /// An action that destroys data or is otherwise hard to undo.
+    Destructive,
 }
 
-/// An [`AppMenuRow::Item`]'s application-chosen id: any non-zero `u16`.
+/// An [`AppMenuItem`]'s application-chosen id: any non-zero `u16`.
 ///
 /// Zero is reserved so a decoded outcome can never be confused with an
 /// absent id.
@@ -229,69 +251,328 @@ impl AppMenuItemId {
     }
 }
 
-/// An application's icon-bar menu: an ordered, bounded list of rows, each
-/// either at the top level or inside an earlier [`AppMenuRow::Submenu`].
+/// A chooseable menu row, as an application builds it.
 ///
-/// Nesting is one level by construction: a row's `parent` names an earlier
-/// row that is a submenu, and a submenu row itself has no parent. Building
-/// a menu therefore cannot produce a shape the session would have to
-/// re-reject.
+/// Built rather than spelled field by field, because a row states one
+/// mandatory thing — the id an outcome names and the label the user reads —
+/// and everything else is emphasis the desktop draws. Read a built row back
+/// through [`AppMenuItemView`].
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct AppMenuItem {
+    id: AppMenuItemId,
+    label: AppMenuLabel,
+    enabled: bool,
+    mark: AppMenuMark,
+    shortcut: AppMenuShortcut,
+    reason: AppMenuReason,
+    role: AppMenuRole,
+}
+
+impl AppMenuItem {
+    /// An enabled, unmarked, neutral row with no accelerator.
+    #[must_use]
+    pub const fn new(id: AppMenuItemId, label: AppMenuLabel) -> Self {
+        Self {
+            id,
+            label,
+            enabled: true,
+            mark: AppMenuMark::None,
+            shortcut: AppMenuShortcut::EMPTY,
+            reason: AppMenuReason::EMPTY,
+            role: AppMenuRole::Neutral,
+        }
+    }
+
+    /// This row greyed and unchooseable. A disabled row never acts.
+    #[must_use]
+    pub const fn disabled(mut self) -> Self {
+        self.enabled = false;
+        self
+    }
+
+    /// This row drawing `mark` beside its label.
+    #[must_use]
+    pub const fn with_mark(mut self, mark: AppMenuMark) -> Self {
+        self.mark = mark;
+        self
+    }
+
+    /// This row stating `shortcut` as its accelerator caption.
+    #[must_use]
+    pub const fn with_shortcut(mut self, shortcut: AppMenuShortcut) -> Self {
+        self.shortcut = shortcut;
+        self
+    }
+
+    /// This row stating why it cannot be chosen, shown while it is disabled
+    /// and current.
+    #[must_use]
+    pub const fn with_reason(mut self, reason: AppMenuReason) -> Self {
+        self.reason = reason;
+        self
+    }
+
+    /// This row drawn with `role`'s emphasis.
+    #[must_use]
+    pub const fn with_role(mut self, role: AppMenuRole) -> Self {
+        self.role = role;
+        self
+    }
+}
+
+/// One row of a menu, as an application builds it.
+///
+/// The row kinds are exactly what a menu is made of, so a row that cannot
+/// mean anything is unrepresentable: only an [`Item`](Self::Item) carries an
+/// id, and only the session-rendered [`Info`](Self::Info) row has content
+/// the application does not describe.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum AppMenuRow {
+    /// A chooseable row. Choosing it delivers
+    /// [`WindowEvent::AppBarMenu`] carrying its id to the declaring
+    /// application, which decides what it means — the session never
+    /// interprets an id.
+    Item(AppMenuItem),
+    /// A horizontal rule grouping the rows around it. Never chooseable.
+    Separator,
+    /// A row that opens a plate holding the rows that name it as their
+    /// parent. Never chooseable itself.
+    Submenu {
+        /// The row's label, which is also the plate's title.
+        label: AppMenuLabel,
+        /// Whether the submenu opens. A disabled submenu draws greyed and
+        /// never opens.
+        enabled: bool,
+    },
+    /// The application-information row, whose child is the session's own
+    /// info panel, drawn from the **signed manifest** of the bundle the
+    /// kernel attested owns the declaring process.
+    ///
+    /// The application declares only that the row exists; it supplies none
+    /// of the panel's text, so it cannot state an identity that is not its
+    /// own. At most one such row per menu, always at the top level.
+    Info,
+}
+
+/// A chooseable row as a built menu reports it: the row's own text borrowed
+/// from the menu that holds it, so reading a menu copies nothing.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct AppMenuItemView<'a> {
+    /// The application's own id for this row.
+    pub id: AppMenuItemId,
+    /// The row's label.
+    pub label: &'a str,
+    /// Whether the row may be chosen.
+    pub enabled: bool,
+    /// The mark drawn beside the label.
+    pub mark: AppMenuMark,
+    /// The accelerator caption, empty when the row states none.
+    pub shortcut: &'a str,
+    /// Why the row cannot be chosen, empty when it states no reason.
+    pub reason: &'a str,
+    /// The emphasis the row draws with.
+    pub role: AppMenuRole,
+}
+
+/// One row of a built menu, with its text borrowed from the menu
+/// ([`AppMenu::rows`]).
+///
+/// The reading half of [`AppMenuRow`]: the same four kinds, holding `&str`
+/// where the built row holds a validated bounded field, because a menu keeps
+/// every row's text in one block rather than a widest-case buffer per row.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum AppMenuRowView<'a> {
+    /// A chooseable row.
+    Item(AppMenuItemView<'a>),
+    /// A horizontal rule grouping the rows around it.
+    Separator,
+    /// A row that opens the plate holding its children.
+    Submenu {
+        /// The row's label, which is also the plate's title.
+        label: &'a str,
+        /// Whether the submenu opens.
+        enabled: bool,
+    },
+    /// The application-information row.
+    Info,
+}
+
+/// Which of the four kinds a stored row is, carrying the id only the
+/// chooseable one has.
+///
+/// Held as this closed kind rather than the wire byte, so reporting a stored
+/// row back is total: there is no kind whose id has to be reconstructed, and
+/// no impossible discriminant to guess at.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum RowKind {
+    Item(AppMenuItemId),
+    Separator,
+    Submenu,
+    Info,
+}
+
+impl RowKind {
+    /// The wire discriminant of this kind.
+    const fn wire(self) -> u8 {
+        match self {
+            Self::Item(_) => APP_MENU_KIND_ITEM,
+            Self::Separator => APP_MENU_KIND_SEPARATOR,
+            Self::Submenu => APP_MENU_KIND_SUBMENU,
+            Self::Info => APP_MENU_KIND_INFO,
+        }
+    }
+
+    /// The item id this kind states, zero for the kinds that state none.
+    const fn wire_id(self) -> u16 {
+        match self {
+            Self::Item(id) => id.get(),
+            Self::Separator | Self::Submenu | Self::Info => 0,
+        }
+    }
+}
+
+/// One row as a menu stores it: everything about the row but its text,
+/// which lies in the menu's own text block.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct RowRecord {
+    kind: RowKind,
+    enabled: bool,
+    mark: AppMenuMark,
+    role: AppMenuRole,
+    parent: u8,
+    /// Where this row's label, shortcut and reason lie, in that order,
+    /// within the menu's text block. Follows from the rows before it, so it
+    /// is stored but never encoded.
+    text_at: u16,
+    label_len: u8,
+    shortcut_len: u8,
+    reason_len: u8,
+}
+
+impl RowRecord {
+    /// The record an unfilled slot holds.
+    const VACANT: Self = Self {
+        kind: RowKind::Separator,
+        enabled: false,
+        mark: AppMenuMark::None,
+        role: AppMenuRole::Neutral,
+        parent: PARENT_NONE,
+        text_at: 0,
+        label_len: 0,
+        shortcut_len: 0,
+        reason_len: 0,
+    };
+}
+
+/// An application's menu: an ordered, bounded list of rows, each either on
+/// the root plate or inside the plate an earlier [`AppMenuRow::Submenu`]
+/// opens.
+///
+/// Every row's text — label, accelerator caption and disabled-row reason —
+/// lives in one bounded text block rather than a widest-case buffer per row,
+/// so the model's size is what its rows actually say
+/// ([`APP_MENU_TEXT_BYTES`]) and not the product of its bounds. Build with
+/// [`push`](Self::push) / [`push_under`](Self::push_under) and read back
+/// with [`rows`](Self::rows).
+///
+/// A menu's shape is checked as it is built, so building one cannot produce
+/// a shape the session would have to re-reject: a row's parent names an
+/// earlier submenu row, a plate holds at most [`APP_MENU_MAX_ROWS`] rows,
+/// and a chain runs at most [`APP_MENU_MAX_DEPTH`] plates deep.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct AppMenu {
-    rows: [(AppMenuRow, u8); APP_MENU_MAX_ROWS],
+    rows: [RowRecord; APP_MENU_MAX_TOTAL_ROWS],
+    text: [u8; APP_MENU_TEXT_BYTES],
+    title: AppMenuLabel,
+    text_len: u16,
     len: u8,
 }
 
 impl AppMenu {
-    /// The empty menu: an application on the icon bar that offers no menu
-    /// at all, which is a legitimate declaration (a secondary press on its
+    /// The empty, untitled menu: an application that offers no menu at all,
+    /// which is a legitimate declaration (a secondary press on its icon-bar
     /// slot then opens nothing).
     pub const EMPTY: Self = Self {
-        rows: [(AppMenuRow::Separator, 0); APP_MENU_MAX_ROWS],
+        rows: [RowRecord::VACANT; APP_MENU_MAX_TOTAL_ROWS],
+        text: [0; APP_MENU_TEXT_BYTES],
+        title: AppMenuLabel::EMPTY,
+        text_len: 0,
         len: 0,
     };
 
-    /// Append `row` at the top level.
+    /// The empty menu with `title` on its root plate's band.
+    ///
+    /// A title is the application's own name for *this* menu, bounded and
+    /// validated exactly as a row label is. It is not how the icon-bar menu
+    /// is titled: that one is titled from the bundle's signed manifest, so a
+    /// menu can never be titled as an application it is not, and a titled
+    /// menu is refused where a declaration carries it
+    /// ([`WindowRequest::SetAppBar`]). A plate opened by a submenu row takes
+    /// its title from that row's label and states none of its own.
+    #[must_use]
+    pub const fn titled(title: AppMenuLabel) -> Self {
+        Self {
+            rows: [RowRecord::VACANT; APP_MENU_MAX_TOTAL_ROWS],
+            text: [0; APP_MENU_TEXT_BYTES],
+            title,
+            text_len: 0,
+            len: 0,
+        }
+    }
+
+    /// The menu's own title, empty when the surface that draws it supplies
+    /// one.
+    #[must_use]
+    pub fn title(&self) -> &str {
+        self.title.as_str()
+    }
+
+    /// Append `row` to the root plate.
     ///
     /// # Errors
     ///
     /// * [`Errno::NoSpace`] — the menu already holds
-    ///   [`APP_MENU_MAX_ROWS`] rows.
+    ///   [`APP_MENU_MAX_TOTAL_ROWS`] rows, the root plate already holds
+    ///   [`APP_MENU_MAX_ROWS`], or the row's text does not fit
+    ///   [`APP_MENU_TEXT_BYTES`].
     /// * [`Errno::OutOfRange`] — the row cannot stand at the top level, or
     ///   duplicates something the menu already holds (a second
-    ///   [`AppMenuRow::About`], a repeated item id, a labelled row with no
-    ///   label, a separator or About row carrying a label).
+    ///   [`AppMenuRow::Info`], a repeated item id, a labelled row with no
+    ///   label).
     pub fn push(&mut self, row: AppMenuRow) -> Result<(), Errno> {
         self.push_row(row, None)
     }
 
-    /// Append `row` inside the submenu opened by the row at `parent`
-    /// (0-based, as [`Self::rows`] reports it).
+    /// Append `row` inside the plate opened by the row at `parent` (0-based,
+    /// as [`Self::rows`] reports it).
     ///
     /// # Errors
     ///
     /// As [`Self::push`], plus [`Errno::OutOfRange`] when `parent` does not
-    /// name an earlier [`AppMenuRow::Submenu`], or when `row` is itself a
-    /// submenu or an About row (neither nests).
+    /// name an earlier [`AppMenuRow::Submenu`], when `row` is an
+    /// [`AppMenuRow::Info`] row (which is always top-level), or when `row`
+    /// is a submenu that would open a plate past
+    /// [`APP_MENU_MAX_DEPTH`].
     pub fn push_under(&mut self, row: AppMenuRow, parent: usize) -> Result<(), Errno> {
         let parent = u8::try_from(parent).map_err(|_| Errno::OutOfRange)?;
+        if parent == PARENT_NONE {
+            return Err(Errno::OutOfRange);
+        }
         self.push_row(row, Some(parent))
     }
 
     /// The rows in declaration order, each with the 0-based index of the
-    /// submenu row that owns it, or `None` at the top level.
-    pub fn rows(&self) -> impl Iterator<Item = (AppMenuRow, Option<usize>)> + '_ {
-        self.rows[..usize::from(self.len)]
-            .iter()
-            .map(|&(row, parent)| {
-                (
-                    (row),
-                    (parent != PARENT_NONE).then_some(usize::from(parent)),
-                )
-            })
+    /// submenu row whose plate it is on, or `None` on the root plate.
+    pub fn rows(&self) -> impl Iterator<Item = (AppMenuRowView<'_>, Option<usize>)> + '_ {
+        self.rows[..usize::from(self.len)].iter().map(|record| {
+            (
+                self.view(record),
+                (record.parent != PARENT_NONE).then_some(usize::from(record.parent)),
+            )
+        })
     }
 
-    /// The number of declared rows.
+    /// The number of declared rows, across every plate.
     #[must_use]
     pub const fn len(&self) -> usize {
         self.len as usize
@@ -303,15 +584,108 @@ impl AppMenu {
         self.len == 0
     }
 
-    /// The shared append: validate `row` against the rows already held and
-    /// record it with its parent.
+    /// The stored row at `record` as a borrowed view.
+    fn view(&self, record: &RowRecord) -> AppMenuRowView<'_> {
+        let at = usize::from(record.text_at);
+        let label = self.text_field(at, record.label_len);
+        let shortcut_at = at.saturating_add(usize::from(record.label_len));
+        let shortcut = self.text_field(shortcut_at, record.shortcut_len);
+        let reason_at = shortcut_at.saturating_add(usize::from(record.shortcut_len));
+        match record.kind {
+            RowKind::Item(id) => AppMenuRowView::Item(AppMenuItemView {
+                id,
+                label,
+                enabled: record.enabled,
+                mark: record.mark,
+                shortcut,
+                reason: self.text_field(reason_at, record.reason_len),
+                role: record.role,
+            }),
+            RowKind::Separator => AppMenuRowView::Separator,
+            RowKind::Submenu => AppMenuRowView::Submenu {
+                label,
+                enabled: record.enabled,
+            },
+            RowKind::Info => AppMenuRowView::Info,
+        }
+    }
+
+    /// `len` bytes of the text block from `at`.
+    fn text_field(&self, at: usize, len: u8) -> &str {
+        let end = at.saturating_add(usize::from(len));
+        // The block holds only text a validated field wrote, sliced back at
+        // the length that field reported; an impossible failure yields the
+        // empty string, never a panic.
+        self.text
+            .get(at..end)
+            .and_then(|bytes| core::str::from_utf8(bytes).ok())
+            .unwrap_or("")
+    }
+
+    /// The shared append: validate `row` against the rows already held,
+    /// intern its text, and record it with its parent.
     fn push_row(&mut self, row: AppMenuRow, parent: Option<u8>) -> Result<(), Errno> {
         let at = usize::from(self.len);
-        if at == APP_MENU_MAX_ROWS {
+        if at == APP_MENU_MAX_TOTAL_ROWS {
             return Err(Errno::NoSpace);
         }
-        self.check_shape(row, parent, at)?;
-        self.rows[at] = (row, parent.unwrap_or(PARENT_NONE));
+        self.check_shape(&row, parent, at)?;
+        let mut record = RowRecord {
+            parent: parent.unwrap_or(PARENT_NONE),
+            ..RowRecord::VACANT
+        };
+        let (label, shortcut, reason) = match row {
+            AppMenuRow::Item(item) => {
+                record.enabled = item.enabled;
+                record.mark = item.mark;
+                record.kind = RowKind::Item(item.id);
+                record.role = item.role;
+                (item.label, item.shortcut, item.reason)
+            }
+            AppMenuRow::Separator => (
+                AppMenuLabel::EMPTY,
+                AppMenuShortcut::EMPTY,
+                AppMenuReason::EMPTY,
+            ),
+            AppMenuRow::Submenu { label, enabled } => {
+                record.kind = RowKind::Submenu;
+                record.enabled = enabled;
+                (label, AppMenuShortcut::EMPTY, AppMenuReason::EMPTY)
+            }
+            AppMenuRow::Info => {
+                record.kind = RowKind::Info;
+                (
+                    AppMenuLabel::EMPTY,
+                    AppMenuShortcut::EMPTY,
+                    AppMenuReason::EMPTY,
+                )
+            }
+        };
+        // The whole row's text is admitted or none of it is, so a refusal
+        // leaves the text block exactly as it was.
+        let text_at = usize::from(self.text_len);
+        let needed = usize::from(label.len_byte())
+            + usize::from(shortcut.len_byte())
+            + usize::from(reason.len_byte());
+        let end = text_at.saturating_add(needed);
+        if end > APP_MENU_TEXT_BYTES {
+            return Err(Errno::NoSpace);
+        }
+        let mut cursor = text_at;
+        for field in [
+            &label.raw_bytes()[..usize::from(label.len_byte())],
+            &shortcut.raw_bytes()[..usize::from(shortcut.len_byte())],
+            &reason.raw_bytes()[..usize::from(reason.len_byte())],
+        ] {
+            self.text[cursor..cursor + field.len()].copy_from_slice(field);
+            cursor += field.len();
+        }
+        record.text_at = u16::try_from(text_at).map_err(|_| Errno::NoSpace)?;
+        record.label_len = label.len_byte();
+        record.shortcut_len = shortcut.len_byte();
+        record.reason_len = reason.len_byte();
+        self.rows[at] = record;
+        self.text_len = u16::try_from(end).map_err(|_| Errno::NoSpace)?;
         self.len = self.len.saturating_add(1);
         Ok(())
     }
@@ -319,46 +693,71 @@ impl AppMenu {
     /// Whether `row` may be appended at index `at` under `parent`: the one
     /// rule the builder and the wire decoder both apply, so a menu that
     /// crossed the wire is exactly a menu that could have been built.
-    fn check_shape(&self, row: AppMenuRow, parent: Option<u8>, at: usize) -> Result<(), Errno> {
-        if let Some(parent) = parent {
-            let parent = usize::from(parent);
-            if parent >= at {
-                return Err(Errno::OutOfRange);
-            }
-            if !matches!(self.rows[parent].0, AppMenuRow::Submenu { .. })
-                || self.rows[parent].1 != PARENT_NONE
-            {
-                return Err(Errno::OutOfRange);
-            }
-        }
-        match row {
-            AppMenuRow::Item { id, label, .. } => {
-                if label.is_empty() {
+    fn check_shape(&self, row: &AppMenuRow, parent: Option<u8>, at: usize) -> Result<(), Errno> {
+        let depth = match parent {
+            None => 1,
+            Some(parent) => {
+                let parent = usize::from(parent);
+                if parent >= at || self.rows[parent].kind != RowKind::Submenu {
                     return Err(Errno::OutOfRange);
                 }
-                if self.rows[..at].iter().any(
-                    |&(held, _)| matches!(held, AppMenuRow::Item { id: held, .. } if held == id),
-                ) {
+                self.depth_of(parent).saturating_add(1)
+            }
+        };
+        let plate = parent.unwrap_or(PARENT_NONE);
+        if self.rows[..at]
+            .iter()
+            .filter(|held| held.parent == plate)
+            .count()
+            >= APP_MENU_MAX_ROWS
+        {
+            return Err(Errno::NoSpace);
+        }
+        match row {
+            AppMenuRow::Item(item) => {
+                if item.label.is_empty() {
+                    return Err(Errno::OutOfRange);
+                }
+                if self.rows[..at]
+                    .iter()
+                    .any(|held| held.kind == RowKind::Item(item.id))
+                {
                     return Err(Errno::OutOfRange);
                 }
             }
             AppMenuRow::Separator => {}
             AppMenuRow::Submenu { label, .. } => {
-                if label.is_empty() || parent.is_some() {
+                // A submenu on the deepest plate could only open a plate
+                // past the bound, so it would draw a parent that opens
+                // nothing.
+                if label.is_empty() || depth >= APP_MENU_MAX_DEPTH {
                     return Err(Errno::OutOfRange);
                 }
             }
-            AppMenuRow::About => {
+            AppMenuRow::Info => {
                 if parent.is_some()
                     || self.rows[..at]
                         .iter()
-                        .any(|&(held, _)| matches!(held, AppMenuRow::About))
+                        .any(|held| held.kind == RowKind::Info)
                 {
                     return Err(Errno::OutOfRange);
                 }
             }
         }
         Ok(())
+    }
+
+    /// How many plates deep the already-validated row at `index` sits.
+    ///
+    /// The walk terminates because a parent always names an earlier row.
+    fn depth_of(&self, index: usize) -> usize {
+        let mut depth = 1;
+        let mut at = index;
+        while self.rows[at].parent != PARENT_NONE {
+            at = usize::from(self.rows[at].parent);
+            depth += 1;
+        }
+        depth
     }
 }
 
@@ -389,6 +788,10 @@ pub struct AppBar {
 /// `u8::MAX` rather than zero, so a parent index needs no bias: row 0 is a
 /// legitimate submenu parent and spells itself.
 const PARENT_NONE: u8 = u8::MAX;
+
+/// The parent index is one byte, and [`PARENT_NONE`] is spent on "no parent",
+/// so the row bound has to leave it a value of its own.
+const _: () = assert!(APP_MENU_MAX_TOTAL_ROWS < PARENT_NONE as usize);
 
 /// A validated window title: bounded UTF-8 with no control characters.
 ///
@@ -835,47 +1238,63 @@ const SET_TITLE_WIRE_LEN: usize = SET_TITLE_TEXT_OFFSET + WINDOW_TITLE_MAX;
 const APP_BAR_FLAGS_OFFSET: usize = 16;
 /// Byte offset of a [`WindowRequest::SetAppBar`]'s declared row count.
 const APP_BAR_ROW_COUNT_OFFSET: usize = APP_BAR_FLAGS_OFFSET + 1;
-/// Byte offset of the first of a [`WindowRequest::SetAppBar`]'s
-/// [`APP_MENU_MAX_ROWS`] fixed-width row records.
-const APP_BAR_ROWS_OFFSET: usize = APP_BAR_ROW_COUNT_OFFSET + 1;
-/// Encoded size, in bytes, of one icon-bar menu row: its kind, flag byte,
-/// parent, label length, and item id, then its fixed-width label field.
-const APP_MENU_ROW_WIRE_LEN: usize = APP_MENU_ROW_LABEL_OFFSET + APP_MENU_LABEL_MAX;
-/// Byte offset, within one icon-bar menu row record, of its flag byte.
+/// Byte offset of the length of a declaration's trailing text block.
+const APP_BAR_TEXT_LEN_OFFSET: usize = APP_BAR_ROW_COUNT_OFFSET + 1;
+/// Byte offset of the first of a [`WindowRequest::SetAppBar`]'s fixed-width
+/// row records. The text block follows the last of them.
+const APP_BAR_ROWS_OFFSET: usize = APP_BAR_TEXT_LEN_OFFSET + 2;
+
+/// Encoded size, in bytes, of one menu row record: its kind, flag byte,
+/// parent, the lengths of its three text fields, and its item id.
+///
+/// The text itself is not here — it lies in the declaration's one trailing
+/// text block, in row order — so a row costs what it says rather than the
+/// widest label, caption and reason it could have said.
+const APP_MENU_ROW_WIRE_LEN: usize = APP_MENU_ROW_ID_OFFSET + 2;
+/// Byte offset, within one row record, of its flag byte.
 const APP_MENU_ROW_FLAGS_OFFSET: usize = 1;
 /// Byte offset, within one row record, of the 0-based index of the submenu
-/// row that owns it ([`PARENT_NONE`] at the top level).
+/// row whose plate it is on ([`PARENT_NONE`] on the root plate).
 const APP_MENU_ROW_PARENT_OFFSET: usize = 2;
-/// Byte offset, within one row record, of its label's length prefix.
+/// Byte offset, within one row record, of its label's length.
 const APP_MENU_ROW_LABEL_LEN_OFFSET: usize = 3;
+/// Byte offset, within one row record, of its accelerator caption's length.
+const APP_MENU_ROW_SHORTCUT_LEN_OFFSET: usize = 4;
+/// Byte offset, within one row record, of its disabled-row reason's length.
+const APP_MENU_ROW_REASON_LEN_OFFSET: usize = 5;
 /// Byte offset, within one row record, of its item id.
-const APP_MENU_ROW_ID_OFFSET: usize = 4;
-/// Byte offset, within one row record, of its fixed-width label text.
-const APP_MENU_ROW_LABEL_OFFSET: usize = APP_MENU_ROW_ID_OFFSET + 2;
+const APP_MENU_ROW_ID_OFFSET: usize = 6;
 
-/// Encoded size of a [`WindowRequest::SetAppBar`] declaring `rows` rows.
+/// Encoded size of a [`WindowRequest::SetAppBar`] declaring `rows` rows
+/// whose text runs to `text` bytes.
 ///
 /// The only operation whose length depends on its value: a declaration
-/// carries exactly the rows it declares, so the frame does not pay for the
-/// rows a menu does not have and the row count and the frame length cannot
-/// disagree.
-const fn app_bar_wire_len(rows: usize) -> usize {
-    APP_BAR_ROWS_OFFSET + rows * APP_MENU_ROW_WIRE_LEN
+/// carries exactly the rows it declares and exactly the text they say, so
+/// the frame does not pay for what a menu does not have and the counts and
+/// the frame length cannot disagree.
+const fn app_bar_wire_len(rows: usize, text: usize) -> usize {
+    APP_BAR_ROWS_OFFSET + rows * APP_MENU_ROW_WIRE_LEN + text
 }
 
 /// Encoded size of the longest possible [`WindowRequest::SetAppBar`]: a
-/// declaration whose menu holds [`APP_MENU_MAX_ROWS`] rows.
-const APP_BAR_MAX_WIRE_LEN: usize = app_bar_wire_len(APP_MENU_MAX_ROWS);
+/// declaration holding [`APP_MENU_MAX_TOTAL_ROWS`] rows and the whole of
+/// [`APP_MENU_TEXT_BYTES`].
+const APP_BAR_MAX_WIRE_LEN: usize = app_bar_wire_len(APP_MENU_MAX_TOTAL_ROWS, APP_MENU_TEXT_BYTES);
 
 /// The only flag bit [`WindowRequest::SetAppBar`]'s flag byte defines:
 /// the application handles the primary click itself.
 const APP_BAR_FLAG_DEFAULT_ACTION: u8 = 1 << 0;
-/// Bit of an icon-bar menu row's flag byte meaning "this row is enabled".
+/// Bit of a menu row's flag byte meaning "this row is enabled".
 const APP_MENU_ROW_FLAG_ENABLED: u8 = 1 << 0;
-/// Bits of an icon-bar menu row's flag byte holding its [`AppMenuMark`].
+/// Bits of a menu row's flag byte holding its [`AppMenuMark`].
 const APP_MENU_ROW_MARK_MASK: u8 = 0b110;
 /// Bit position of [`APP_MENU_ROW_MARK_MASK`] within the flag byte.
 const APP_MENU_ROW_MARK_SHIFT: u32 = 1;
+/// Bit of a menu row's flag byte meaning [`AppMenuRole::Destructive`].
+const APP_MENU_ROW_FLAG_DESTRUCTIVE: u8 = 1 << 3;
+/// Every flag bit a menu row defines; anything else is refused.
+const APP_MENU_ROW_FLAG_MASK: u8 =
+    APP_MENU_ROW_FLAG_ENABLED | APP_MENU_ROW_MARK_MASK | APP_MENU_ROW_FLAG_DESTRUCTIVE;
 
 /// Wire kind of [`AppMenuRow::Item`].
 const APP_MENU_KIND_ITEM: u8 = 1;
@@ -883,8 +1302,8 @@ const APP_MENU_KIND_ITEM: u8 = 1;
 const APP_MENU_KIND_SEPARATOR: u8 = 2;
 /// Wire kind of [`AppMenuRow::Submenu`].
 const APP_MENU_KIND_SUBMENU: u8 = 3;
-/// Wire kind of [`AppMenuRow::About`].
-const APP_MENU_KIND_ABOUT: u8 = 4;
+/// Wire kind of [`AppMenuRow::Info`].
+const APP_MENU_KIND_INFO: u8 = 4;
 
 impl WindowRequest {
     /// Encoded size of the longest request any operation can produce, and so
@@ -917,7 +1336,9 @@ impl WindowRequest {
             Self::SetTitle { .. } => SET_TITLE_WIRE_LEN,
             Self::SetBackdropBlur { .. } => SET_BACKDROP_BLUR_WIRE_LEN,
             Self::QueryDesktop => QUERY_DESKTOP_WIRE_LEN,
-            Self::SetAppBar(ref bar) => app_bar_wire_len(bar.menu.len as usize),
+            Self::SetAppBar(ref bar) => {
+                app_bar_wire_len(bar.menu.len(), bar.menu.text_len as usize)
+            }
         }
     }
 
@@ -930,8 +1351,19 @@ impl WindowRequest {
     ///
     /// # Errors
     ///
-    /// [`Errno::BufferTooSmall`] if `out` cannot hold the whole frame.
+    /// * [`Errno::BufferTooSmall`] — `out` cannot hold the whole frame.
+    /// * [`Errno::OutOfRange`] — a [`SetAppBar`](Self::SetAppBar) whose menu
+    ///   states a title of its own, which an icon-bar menu never does
+    ///   ([`AppMenu::titled`]).
     pub fn encode(&self, out: &mut [u8]) -> Result<usize, Errno> {
+        // An icon-bar menu is titled from the bundle's signed manifest, so
+        // the declaration has no title field to carry one and a menu that
+        // states its own is refused rather than silently retitled.
+        if let Self::SetAppBar(bar) = self {
+            if !bar.menu.title().is_empty() {
+                return Err(Errno::OutOfRange);
+            }
+        }
         let len = self.wire_len();
         let Some(frame) = out.get_mut(..len) else {
             return Err(Errno::BufferTooSmall);
@@ -1200,10 +1632,11 @@ fn read_set_title(bytes: &[u8]) -> Result<WindowRequest, Errno> {
 }
 
 /// Write an icon-bar declaration's operand block: the event route, the flag
-/// byte, the declared row count, and one fixed-width record per declared
-/// row (mirrors [`read_app_bar`]). The block ends with the last row, so the
-/// count and the frame length state the same thing and one menu has exactly
-/// one encoding.
+/// byte, the declared row count and text length, one fixed-width record per
+/// declared row, and the rows' text (mirrors [`read_app_bar`]).
+///
+/// The block ends with the last text byte, so the counts and the frame
+/// length state the same thing and one menu has exactly one encoding.
 fn write_app_bar(out: &mut [u8], bar: &AppBar) {
     put_u64(out, 8, bar.event_endpoint);
     out[APP_BAR_FLAGS_OFFSET] = if bar.default_action {
@@ -1212,41 +1645,23 @@ fn write_app_bar(out: &mut [u8], bar: &AppBar) {
         0
     };
     out[APP_BAR_ROW_COUNT_OFFSET] = bar.menu.len;
-    for (index, (row, parent)) in bar.menu.rows().enumerate() {
+    put_u16(out, APP_BAR_TEXT_LEN_OFFSET, bar.menu.text_len);
+    let text = APP_BAR_ROWS_OFFSET + bar.menu.len() * APP_MENU_ROW_WIRE_LEN;
+    for (index, record) in bar.menu.rows[..bar.menu.len()].iter().enumerate() {
         let at = APP_BAR_ROWS_OFFSET + index * APP_MENU_ROW_WIRE_LEN;
-        let (kind, enabled, mark, id, label) = match row {
-            AppMenuRow::Item {
-                id,
-                label,
-                enabled,
-                mark,
-            } => (APP_MENU_KIND_ITEM, enabled, mark, id.get(), Some(label)),
-            AppMenuRow::Separator => (APP_MENU_KIND_SEPARATOR, false, AppMenuMark::None, 0, None),
-            AppMenuRow::Submenu { label, enabled } => (
-                APP_MENU_KIND_SUBMENU,
-                enabled,
-                AppMenuMark::None,
-                0,
-                Some(label),
-            ),
-            AppMenuRow::About => (APP_MENU_KIND_ABOUT, false, AppMenuMark::None, 0, None),
-        };
-        out[at] = kind;
-        out[at + APP_MENU_ROW_FLAGS_OFFSET] = (u8::from(enabled) * APP_MENU_ROW_FLAG_ENABLED)
-            | ((mark as u8) << APP_MENU_ROW_MARK_SHIFT);
-        // A parent index names an earlier row of a menu bounded to
-        // `APP_MENU_MAX_ROWS`, so it always fits a byte; the builder refused
-        // anything wider before it reached the array.
-        out[at + APP_MENU_ROW_PARENT_OFFSET] = parent
-            .and_then(|parent| u8::try_from(parent).ok())
-            .unwrap_or(PARENT_NONE);
-        put_u16(out, at + APP_MENU_ROW_ID_OFFSET, id);
-        if let Some(label) = label {
-            out[at + APP_MENU_ROW_LABEL_LEN_OFFSET] = label.len_byte();
-            let text = at + APP_MENU_ROW_LABEL_OFFSET;
-            out[text..text + APP_MENU_LABEL_MAX].copy_from_slice(label.raw_bytes());
-        }
+        out[at] = record.kind.wire();
+        out[at + APP_MENU_ROW_FLAGS_OFFSET] = (u8::from(record.enabled)
+            * APP_MENU_ROW_FLAG_ENABLED)
+            | ((record.mark as u8) << APP_MENU_ROW_MARK_SHIFT)
+            | (u8::from(record.role == AppMenuRole::Destructive) * APP_MENU_ROW_FLAG_DESTRUCTIVE);
+        out[at + APP_MENU_ROW_PARENT_OFFSET] = record.parent;
+        out[at + APP_MENU_ROW_LABEL_LEN_OFFSET] = record.label_len;
+        out[at + APP_MENU_ROW_SHORTCUT_LEN_OFFSET] = record.shortcut_len;
+        out[at + APP_MENU_ROW_REASON_LEN_OFFSET] = record.reason_len;
+        put_u16(out, at + APP_MENU_ROW_ID_OFFSET, record.kind.wire_id());
     }
+    let len = usize::from(bar.menu.text_len);
+    out[text..text + len].copy_from_slice(&bar.menu.text[..len]);
 }
 
 /// Decode an icon-bar declaration, refusing anything a builder could not
@@ -1255,19 +1670,23 @@ fn write_app_bar(out: &mut [u8], bar: &AppBar) {
 /// Every row goes through the same [`AppMenu::push_row`] shape rule the
 /// builder applies, so a menu that crossed the wire is exactly a menu an
 /// application could have constructed — there is no second, weaker set of
-/// rules on the receiving side.
+/// rules on the receiving side. Each row's text is taken from the trailing
+/// block strictly in row order and the block must be consumed exactly, so
+/// there is no offset to point anywhere, no two rows can share bytes, and no
+/// text can ride along unread.
 fn read_app_bar(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     if bytes.len() < APP_BAR_ROWS_OFFSET {
         return Err(Errno::BufferTooSmall);
     }
     let count = usize::from(bytes[APP_BAR_ROW_COUNT_OFFSET]);
-    if count > APP_MENU_MAX_ROWS {
+    let text_len = usize::from(read_u16(bytes, APP_BAR_TEXT_LEN_OFFSET));
+    if count > APP_MENU_MAX_TOTAL_ROWS || text_len > APP_MENU_TEXT_BYTES {
         return Err(Errno::LengthOutOfRange);
     }
-    // The count is read before the length is fixed, so a declaration whose
-    // frame does not hold exactly the rows it claims is refused rather than
-    // read short or read into a neighbouring field.
-    exact_len(bytes, app_bar_wire_len(count))?;
+    // The counts are read before the length is fixed, so a declaration whose
+    // frame does not hold exactly the rows and text it claims is refused
+    // rather than read short or read into a neighbouring field.
+    exact_len(bytes, app_bar_wire_len(count, text_len))?;
     let event_endpoint = read_u64(bytes, 8);
     if crate::ipc::is_reserved_endpoint(event_endpoint) {
         return Err(Errno::OutOfRange);
@@ -1276,11 +1695,17 @@ fn read_app_bar(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     if flags & !APP_BAR_FLAG_DEFAULT_ACTION != 0 {
         return Err(Errno::OutOfRange);
     }
+    let text = &bytes[APP_BAR_ROWS_OFFSET + count * APP_MENU_ROW_WIRE_LEN..];
     let mut menu = AppMenu::EMPTY;
+    let mut cursor = 0usize;
     for index in 0..count {
         let at = APP_BAR_ROWS_OFFSET + index * APP_MENU_ROW_WIRE_LEN;
-        let (row, parent) = read_app_menu_row(&bytes[at..at + APP_MENU_ROW_WIRE_LEN])?;
+        let record = &bytes[at..at + APP_MENU_ROW_WIRE_LEN];
+        let (row, parent) = read_app_menu_row(record, text, &mut cursor)?;
         menu.push_row(row, parent)?;
+    }
+    if cursor != text_len {
+        return Err(Errno::LengthOutOfRange);
     }
     Ok(WindowRequest::SetAppBar(AppBar {
         event_endpoint,
@@ -1289,46 +1714,101 @@ fn read_app_bar(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     }))
 }
 
-/// Decode one fixed-width icon-bar menu row record and the parent it names.
+/// Decode one fixed-width menu row record, taking its text from `text` at
+/// `cursor` and advancing it past what the row claimed.
 ///
 /// A field a row's kind does not use must be zero, so a row has exactly one
 /// encoding and a client cannot smuggle bytes through an ignored field.
-fn read_app_menu_row(record: &[u8]) -> Result<(AppMenuRow, Option<u8>), Errno> {
+fn read_app_menu_row(
+    record: &[u8],
+    text: &[u8],
+    cursor: &mut usize,
+) -> Result<(AppMenuRow, Option<u8>), Errno> {
     let flags = record[APP_MENU_ROW_FLAGS_OFFSET];
-    if flags & !(APP_MENU_ROW_FLAG_ENABLED | APP_MENU_ROW_MARK_MASK) != 0 {
+    if flags & !APP_MENU_ROW_FLAG_MASK != 0 {
         return Err(Errno::OutOfRange);
     }
     let enabled = flags & APP_MENU_ROW_FLAG_ENABLED != 0;
     let mark = AppMenuMark::from_u8((flags & APP_MENU_ROW_MARK_MASK) >> APP_MENU_ROW_MARK_SHIFT)?;
+    let role = if flags & APP_MENU_ROW_FLAG_DESTRUCTIVE == 0 {
+        AppMenuRole::Neutral
+    } else {
+        AppMenuRole::Destructive
+    };
     let parent = match record[APP_MENU_ROW_PARENT_OFFSET] {
         PARENT_NONE => None,
         parent => Some(parent),
     };
     let id = read_u16(record, APP_MENU_ROW_ID_OFFSET);
-    let mut label_bytes = [0u8; APP_MENU_LABEL_MAX];
-    label_bytes.copy_from_slice(
-        &record[APP_MENU_ROW_LABEL_OFFSET..APP_MENU_ROW_LABEL_OFFSET + APP_MENU_LABEL_MAX],
-    );
-    let label = AppMenuLabel::from_wire(record[APP_MENU_ROW_LABEL_LEN_OFFSET], &label_bytes)?;
-    let unlabelled = label.is_empty() && !enabled && mark == AppMenuMark::None && id == 0;
+    let label = read_app_menu_text::<0, APP_MENU_LABEL_MAX>(
+        text,
+        cursor,
+        record[APP_MENU_ROW_LABEL_LEN_OFFSET],
+    )?;
+    let shortcut = read_app_menu_text::<0, APP_MENU_SHORTCUT_MAX>(
+        text,
+        cursor,
+        record[APP_MENU_ROW_SHORTCUT_LEN_OFFSET],
+    )?;
+    let reason = read_app_menu_text::<0, APP_MENU_REASON_MAX>(
+        text,
+        cursor,
+        record[APP_MENU_ROW_REASON_LEN_OFFSET],
+    )?;
+    let bare = label.is_empty()
+        && shortcut.is_empty()
+        && reason.is_empty()
+        && !enabled
+        && mark == AppMenuMark::None
+        && role == AppMenuRole::Neutral
+        && id == 0;
     let row = match record[0] {
-        APP_MENU_KIND_ITEM => AppMenuRow::Item {
-            id: AppMenuItemId::new(id)?,
-            label,
-            enabled,
-            mark,
-        },
-        APP_MENU_KIND_SEPARATOR if unlabelled => AppMenuRow::Separator,
-        APP_MENU_KIND_SUBMENU if mark == AppMenuMark::None && id == 0 => {
+        APP_MENU_KIND_ITEM => {
+            let item = AppMenuItem::new(AppMenuItemId::new(id)?, label)
+                .with_mark(mark)
+                .with_shortcut(shortcut)
+                .with_reason(reason)
+                .with_role(role);
+            AppMenuRow::Item(if enabled { item } else { item.disabled() })
+        }
+        // A submenu draws a chevron where an item draws its caption, and
+        // opens rather than acting, so it states neither and has no id.
+        APP_MENU_KIND_SUBMENU
+            if shortcut.is_empty()
+                && reason.is_empty()
+                && mark == AppMenuMark::None
+                && role == AppMenuRole::Neutral
+                && id == 0 =>
+        {
             AppMenuRow::Submenu { label, enabled }
         }
-        APP_MENU_KIND_ABOUT if unlabelled => AppMenuRow::About,
-        APP_MENU_KIND_SEPARATOR | APP_MENU_KIND_SUBMENU | APP_MENU_KIND_ABOUT => {
+        APP_MENU_KIND_SEPARATOR if bare => AppMenuRow::Separator,
+        APP_MENU_KIND_INFO if bare => AppMenuRow::Info,
+        APP_MENU_KIND_SEPARATOR | APP_MENU_KIND_SUBMENU | APP_MENU_KIND_INFO => {
             return Err(Errno::OutOfRange)
         }
         _ => return Err(Errno::OutOfRange),
     };
     Ok((row, parent))
+}
+
+/// Take `len` bytes of validated text from `text` at `cursor`, advancing it.
+///
+/// One reader for all three of a row's fields, so each is bounded and
+/// content-checked by its own type's validator rather than by a per-field
+/// copy of the same rule.
+fn read_app_menu_text<const MIN: usize, const MAX: usize>(
+    text: &[u8],
+    cursor: &mut usize,
+    len: u8,
+) -> Result<BoundedText<MIN, MAX>, Errno> {
+    let end = usize::from(len)
+        .checked_add(*cursor)
+        .ok_or(Errno::LengthOutOfRange)?;
+    let bytes = text.get(*cursor..end).ok_or(Errno::LengthOutOfRange)?;
+    let field = BoundedText::new(core::str::from_utf8(bytes).map_err(|_| Errno::OutOfRange)?)?;
+    *cursor = end;
+    Ok(field)
 }
 
 /// Write `title` into the fixed-width title field whose length byte sits at
@@ -2187,11 +2667,17 @@ fn event_reserved_zero(bytes: &[u8], from: usize) -> Result<(), Errno> {
 mod tests {
     use super::{
         app_bar_wire_len, decode_create_reply, decode_desktop_reply, encode_create_reply,
-        encode_desktop_reply, AppBar, AppMenu, AppMenuItemId, AppMenuLabel, AppMenuMark,
-        AppMenuRow, PointerAction, WindowEvent, WindowRequest, WindowSizing, WindowTitle,
+        encode_desktop_reply, put_u16, read_u16, AppBar, AppMenu, AppMenuItem, AppMenuItemId,
+        AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole, AppMenuRow, AppMenuRowView,
+        AppMenuShortcut, PointerAction, WindowEvent, WindowRequest, WindowSizing, WindowTitle,
         APP_BAR_FLAGS_OFFSET, APP_BAR_MAX_WIRE_LEN, APP_BAR_ROWS_OFFSET, APP_BAR_ROW_COUNT_OFFSET,
-        APP_MENU_LABEL_MAX, APP_MENU_MAX_ROWS, APP_MENU_ROW_WIRE_LEN, CREATE_MIN_HEIGHT_OFFSET,
-        CREATE_MIN_WIDTH_OFFSET, CREATE_POPUP_WIRE_LEN, CREATE_RESIZABLE_OFFSET, CREATE_WIRE_LEN,
+        APP_BAR_TEXT_LEN_OFFSET, APP_MENU_KIND_SEPARATOR, APP_MENU_KIND_SUBMENU,
+        APP_MENU_LABEL_MAX, APP_MENU_MAX_DEPTH, APP_MENU_MAX_ROWS, APP_MENU_MAX_TOTAL_ROWS,
+        APP_MENU_REASON_MAX, APP_MENU_ROW_FLAGS_OFFSET, APP_MENU_ROW_FLAG_ENABLED,
+        APP_MENU_ROW_ID_OFFSET, APP_MENU_ROW_LABEL_LEN_OFFSET, APP_MENU_ROW_PARENT_OFFSET,
+        APP_MENU_ROW_SHORTCUT_LEN_OFFSET, APP_MENU_ROW_WIRE_LEN, APP_MENU_SHORTCUT_MAX,
+        APP_MENU_TEXT_BYTES, CREATE_MIN_HEIGHT_OFFSET, CREATE_MIN_WIDTH_OFFSET,
+        CREATE_POPUP_WIRE_LEN, CREATE_RESIZABLE_OFFSET, CREATE_WIRE_LEN,
         DESKTOP_REPLY_SERVER_OFFSET, PRESENT_WIRE_LEN, REQUEST_HEADER_LEN, SET_TITLE_LEN_OFFSET,
         SET_TITLE_TEXT_OFFSET, SET_TITLE_WIRE_LEN, WINDOW_BACKDROP_BLUR_MAX_PX,
         WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN, WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC,
@@ -2349,52 +2835,73 @@ mod tests {
         );
     }
 
-    /// A menu with one row of every kind, a submenu holding two of them,
-    /// and every marking — the shape the wire tests exercise.
+    /// A bounded label, for the rows under test.
+    fn label(text: &str) -> AppMenuLabel {
+        AppMenuLabel::new(text).expect("a valid label")
+    }
+
+    /// An enabled, unmarked, neutral row.
+    fn item(id: u16, text: &str) -> AppMenuRow {
+        AppMenuRow::Item(AppMenuItem::new(
+            AppMenuItemId::new(id).expect("a valid id"),
+            label(text),
+        ))
+    }
+
+    /// A menu with one row of every kind, a chain of submenus at the depth
+    /// bound, and every marking — the shape the wire tests exercise.
     fn sample_menu() -> AppMenu {
         let mut menu = AppMenu::EMPTY;
-        menu.push(AppMenuRow::Item {
-            id: AppMenuItemId::new(1).expect("a valid id"),
-            label: AppMenuLabel::new("New window").expect("a valid label"),
-            enabled: true,
-            mark: AppMenuMark::None,
-        })
+        menu.push(AppMenuRow::Item(
+            AppMenuItem::new(
+                AppMenuItemId::new(1).expect("a valid id"),
+                label("New window"),
+            )
+            .with_shortcut(AppMenuShortcut::new("Ctrl Shift N").expect("a valid caption")),
+        ))
         .expect("room for the first row");
         menu.push(AppMenuRow::Submenu {
-            label: AppMenuLabel::new("Display").expect("a valid label"),
+            label: label("Display"),
             enabled: true,
         })
         .expect("room for a submenu");
         menu.push_under(
-            AppMenuRow::Item {
-                id: AppMenuItemId::new(2).expect("a valid id"),
-                label: AppMenuLabel::new("Full screen").expect("a valid label"),
-                enabled: true,
-                mark: AppMenuMark::Check,
-            },
+            AppMenuRow::Item(
+                AppMenuItem::new(
+                    AppMenuItemId::new(2).expect("a valid id"),
+                    label("Full screen"),
+                )
+                .with_mark(AppMenuMark::Check),
+            ),
             1,
         )
         .expect("room inside the submenu");
-        menu.push_under(AppMenuRow::Separator, 1)
-            .expect("a separator inside a submenu");
+        // A submenu inside a submenu, to the depth bound: the whole point of
+        // a chain, and what the one-level model could not express.
         menu.push_under(
-            AppMenuRow::Item {
-                id: AppMenuItemId::new(3).expect("a valid id"),
-                label: AppMenuLabel::new("Green").expect("a valid label"),
-                enabled: false,
-                mark: AppMenuMark::Radio,
+            AppMenuRow::Submenu {
+                label: label("Colour"),
+                enabled: true,
             },
             1,
         )
-        .expect("room inside the submenu");
+        .expect("a nested submenu");
+        menu.push_under(
+            AppMenuRow::Item(
+                AppMenuItem::new(AppMenuItemId::new(3).expect("a valid id"), label("Green"))
+                    .with_mark(AppMenuMark::Radio)
+                    .disabled()
+                    .with_reason(AppMenuReason::new("No colour profile").expect("a valid reason")),
+            ),
+            3,
+        )
+        .expect("room inside the nested submenu");
         menu.push(AppMenuRow::Separator).expect("a separator");
-        menu.push(AppMenuRow::About).expect("an About row");
-        menu.push(AppMenuRow::Item {
-            id: AppMenuItemId::new(4).expect("a valid id"),
-            label: AppMenuLabel::new("Quit").expect("a valid label"),
-            enabled: true,
-            mark: AppMenuMark::None,
-        })
+        menu.push(AppMenuRow::Info).expect("an Info row");
+        menu.push(AppMenuRow::Item(
+            AppMenuItem::new(AppMenuItemId::new(4).expect("a valid id"), label("Quit"))
+                .with_role(AppMenuRole::Destructive),
+        ))
         .expect("room for Quit");
         menu
     }
@@ -2409,80 +2916,110 @@ mod tests {
         }
     }
 
-    /// A full menu of widest-label rows — the frame's own upper bound.
+    /// The declaration around `menu`, to the same plain endpoint.
+    fn declaring(menu: &AppMenu) -> WindowRequest {
+        WindowRequest::SetAppBar(AppBar {
+            event_endpoint: 0xE117_0000_0000_0009,
+            default_action: true,
+            menu: *menu,
+        })
+    }
+
+    /// A menu filled to the frame's own upper bound: every row the model
+    /// holds, and the text block full to the byte.
+    ///
+    /// The rows spread over two plates because a plate holds fewer rows than
+    /// the menu does, and each row takes as much text as it can while
+    /// leaving every later row a label, so the widest declaration is
+    /// genuinely the widest.
     fn widest_menu() -> AppMenu {
         let mut menu = AppMenu::EMPTY;
-        let label = AppMenuLabel::new(&"l".repeat(APP_MENU_LABEL_MAX)).expect("the widest label");
-        for id in 1..=APP_MENU_MAX_ROWS {
-            menu.push(AppMenuRow::Item {
-                id: AppMenuItemId::new(u16::try_from(id).expect("fits")).expect("a valid id"),
-                label,
-                enabled: true,
-                mark: AppMenuMark::None,
-            })
-            .expect("room for every row");
+        let wide = "l".repeat(APP_MENU_LABEL_MAX);
+        menu.push(AppMenuRow::Submenu {
+            label: label(&wide),
+            enabled: true,
+        })
+        .expect("room for a second plate");
+        let mut used = APP_MENU_LABEL_MAX;
+        for id in 1..APP_MENU_MAX_TOTAL_ROWS {
+            let left = APP_MENU_MAX_TOTAL_ROWS - menu.len();
+            let text = APP_MENU_TEXT_BYTES
+                .saturating_sub(used)
+                .saturating_sub(left - 1)
+                .clamp(1, APP_MENU_LABEL_MAX);
+            let row = item(u16::try_from(id).expect("fits"), &wide[..text]);
+            if menu.len() < APP_MENU_MAX_ROWS {
+                menu.push(row).expect("room on the root plate");
+            } else {
+                menu.push_under(row, 0).expect("room on the second plate");
+            }
+            used += text;
         }
+        assert_eq!(menu.len(), APP_MENU_MAX_TOTAL_ROWS);
+        assert_eq!(used, APP_MENU_TEXT_BYTES, "the text block fills exactly");
         menu
     }
 
-    /// One of every operation the request codec encodes, including the
+    /// Visit one of every operation the request codec encodes, including the
     /// narrowest and widest form of each variable-width one.
     ///
     /// Both the round-trip and the framing tests walk this one list, so an
-    /// operation added without a framing test cannot slip through.
-    fn every_request() -> [WindowRequest; 14] {
-        [
-            sample_create(),
-            sample_create_popup(),
-            sample_present(),
-            WindowRequest::Close { window_id: 9 },
-            WindowRequest::PickFile { window_id: 9 },
-            WindowRequest::Resize {
-                window_id: 3,
-                shm_handle: 11,
-                frame_count: 2,
-                width_px: 640,
-                height_px: 480,
-                stride_bytes: 2560,
-                format: DisplayFormat::Bgra8888,
-            },
-            WindowRequest::SetTitle {
-                window_id: 3,
-                title: WindowTitle::new("").expect("an empty title"),
-            },
-            WindowRequest::SetTitle {
-                window_id: 3,
-                title: WindowTitle::new(&"t".repeat(WINDOW_TITLE_MAX)).expect("the widest title"),
-            },
-            WindowRequest::SetBackdropBlur {
-                window_id: 5,
-                radius_px: 0,
-            },
-            WindowRequest::SetBackdropBlur {
-                window_id: 5,
-                radius_px: WINDOW_BACKDROP_BLUR_MAX_PX,
-            },
-            WindowRequest::SetAppBar(AppBar {
-                event_endpoint: 0xE117_0000_0000_0009,
-                default_action: false,
-                menu: AppMenu::EMPTY,
-            }),
-            WindowRequest::SetAppBar(sample_app_bar()),
-            WindowRequest::SetAppBar(AppBar {
-                event_endpoint: 0xE117_0000_0000_0009,
-                default_action: true,
-                menu: widest_menu(),
-            }),
-            WindowRequest::QueryDesktop,
-        ]
+    /// operation added without a framing test cannot slip through. Visited
+    /// one at a time rather than collected: a request carries a whole menu
+    /// inline, so a list of them is more than belongs on a stack frame.
+    fn each_request(mut visit: impl FnMut(WindowRequest)) {
+        visit(sample_create());
+        visit(sample_create_popup());
+        visit(sample_present());
+        visit(WindowRequest::Close { window_id: 9 });
+        visit(WindowRequest::PickFile { window_id: 9 });
+        visit(WindowRequest::Resize {
+            window_id: 3,
+            shm_handle: 11,
+            frame_count: 2,
+            width_px: 640,
+            height_px: 480,
+            stride_bytes: 2560,
+            format: DisplayFormat::Bgra8888,
+        });
+        visit(WindowRequest::SetTitle {
+            window_id: 3,
+            title: WindowTitle::new("").expect("an empty title"),
+        });
+        visit(WindowRequest::SetTitle {
+            window_id: 3,
+            title: WindowTitle::new(&"t".repeat(WINDOW_TITLE_MAX)).expect("the widest title"),
+        });
+        visit(WindowRequest::SetBackdropBlur {
+            window_id: 5,
+            radius_px: 0,
+        });
+        visit(WindowRequest::SetBackdropBlur {
+            window_id: 5,
+            radius_px: WINDOW_BACKDROP_BLUR_MAX_PX,
+        });
+        visit(declaring(&AppMenu::EMPTY));
+        visit(WindowRequest::SetAppBar(sample_app_bar()));
+        visit(declaring(&one_of_each_bare_row()));
+        visit(declaring(&widest_menu()));
+        visit(WindowRequest::QueryDesktop);
+    }
+
+    /// A menu whose rows carry no text at all: the narrowest each kind gets,
+    /// so the framing tests see a declaration with an empty text block.
+    fn one_of_each_bare_row() -> AppMenu {
+        let mut menu = AppMenu::EMPTY;
+        menu.push(AppMenuRow::Separator).expect("a separator");
+        menu.push(AppMenuRow::Info).expect("an Info row");
+        menu
     }
 
     #[test]
     fn requests_round_trip() {
-        for request in every_request() {
+        each_request(|request| {
             let bytes = request.frame();
             assert_eq!(WindowRequest::from_bytes(&bytes), Ok(request));
-        }
+        });
     }
 
     /// Every operation encodes to exactly its own declared length, and a
@@ -2495,7 +3032,7 @@ mod tests {
     /// replaces.
     #[test]
     fn requests_are_framed_to_their_own_length() {
-        for request in every_request() {
+        each_request(|request| {
             let frame = request.frame();
             assert_eq!(frame.len(), request.wire_len());
             assert!(frame.len() <= WindowRequest::MAX_WIRE_LEN);
@@ -2525,7 +3062,7 @@ mod tests {
                 Ok(request),
                 "the last byte of a frame must be read: {request:?}"
             );
-        }
+        });
     }
 
     /// The hot path pays for what it carries and nothing more: a present is
@@ -2541,22 +3078,53 @@ mod tests {
         const { assert!(PRESENT_WIRE_LEN * 4 < WindowRequest::MAX_WIRE_LEN) };
     }
 
-    /// A declaration's length follows its row count, so the rows a menu
-    /// does not have cost nothing.
+    /// A menu holds its rows' text in one block, so neither the model nor
+    /// the frame pays the widest label, caption and reason for every row a
+    /// menu does not have.
+    ///
+    /// Pinned in bytes because the cost is invisible at the call site: the
+    /// model rides inside every decoded `WindowRequest`, so a row that grew
+    /// a fixed-width text field would multiply itself by the row bound and
+    /// inflate the hot path's frame with it.
+    #[test]
+    fn a_menus_size_is_what_its_rows_say() {
+        const ROWS: usize = APP_MENU_MAX_TOTAL_ROWS;
+        const WIDEST_ROW_TEXT: usize =
+            APP_MENU_LABEL_MAX + APP_MENU_SHORTCUT_MAX + APP_MENU_REASON_MAX;
+        // Fixed-width row text would cost this much more than the shared
+        // block does, and `WindowRequest` carries a menu inline.
+        const { assert!(core::mem::size_of::<AppMenu>() < ROWS * WIDEST_ROW_TEXT / 2) };
+        const { assert!(core::mem::size_of::<WindowRequest>() < 4096) };
+        assert_eq!(
+            core::mem::size_of::<WindowRequest>(),
+            core::mem::size_of::<AppBar>(),
+            "the declaration is still the widest variant"
+        );
+
+        // A row's text costs its bytes, not its bounds.
+        let mut menu = AppMenu::EMPTY;
+        menu.push(item(1, "Cut")).expect("room");
+        let one = declaring(&menu).wire_len();
+        assert_eq!(one, app_bar_wire_len(1, "Cut".len()));
+        menu.push(item(2, "Copy")).expect("room");
+        assert_eq!(
+            declaring(&menu).wire_len(),
+            one + APP_MENU_ROW_WIRE_LEN + "Copy".len()
+        );
+    }
+
+    /// A declaration's length follows its rows and their text, so the rows a
+    /// menu does not have and the text they do not say cost nothing.
     #[test]
     fn app_bar_frames_grow_with_their_rows() {
-        let empty = WindowRequest::SetAppBar(AppBar {
-            event_endpoint: 0xE117_0000_0000_0009,
-            default_action: false,
-            menu: AppMenu::EMPTY,
-        });
-        let widest = WindowRequest::SetAppBar(AppBar {
-            event_endpoint: 0xE117_0000_0000_0009,
-            default_action: true,
-            menu: widest_menu(),
-        });
-        assert_eq!(empty.wire_len(), app_bar_wire_len(0));
-        assert_eq!(widest.wire_len(), app_bar_wire_len(APP_MENU_MAX_ROWS));
+        let empty = declaring(&AppMenu::EMPTY);
+        let widest = declaring(&widest_menu());
+        assert_eq!(empty.wire_len(), app_bar_wire_len(0, 0));
+        assert_eq!(
+            widest.wire_len(),
+            app_bar_wire_len(APP_MENU_MAX_TOTAL_ROWS, APP_MENU_TEXT_BYTES),
+            "the widest menu fills both bounds"
+        );
         assert!(empty.wire_len() < widest.wire_len());
         assert_eq!(widest.wire_len(), WindowRequest::MAX_WIRE_LEN);
     }
@@ -2571,81 +3139,277 @@ mod tests {
         assert!(out.iter().all(|&b| b == 0));
     }
 
+    /// A menu's own title is the application's name for that menu, and a
+    /// submenu's plate takes its parent row's label instead of stating one.
+    ///
+    /// The icon-bar declaration cannot carry a title at all: that menu is
+    /// titled from the bundle's signed manifest, so a titled menu handed to
+    /// it is refused rather than encoded and quietly retitled — an
+    /// application must not be able to title system chrome as something it
+    /// is not.
+    #[test]
+    fn a_menus_title_is_its_own_and_never_the_bars() {
+        assert!(AppMenu::EMPTY.title().is_empty());
+        let mut titled = AppMenu::titled(label("Edit"));
+        assert_eq!(titled.title(), "Edit");
+        titled.push(item(1, "Cut")).expect("room");
+        assert_eq!(titled.title(), "Edit", "rows do not disturb the title");
+
+        let mut out = [0u8; WindowRequest::MAX_WIRE_LEN];
+        assert_eq!(
+            declaring(&titled).encode(&mut out),
+            Err(Errno::OutOfRange),
+            "a declaration may not carry a title"
+        );
+        assert!(out.iter().all(|&b| b == 0), "and writes nothing");
+
+        // The submenu row's label is the plate's title, so no decoded menu
+        // has a title of its own.
+        let decoded = WindowRequest::from_bytes(&declaring(&sample_menu()).frame());
+        let Ok(WindowRequest::SetAppBar(bar)) = decoded else {
+            panic!("the sample declaration decodes");
+        };
+        assert!(bar.menu.title().is_empty());
+    }
+
+    /// The rows a menu reports back are exactly the rows it was given, text
+    /// and marking and depth included.
+    #[test]
+    fn a_menu_reports_the_rows_it_was_given() {
+        let menu = sample_menu();
+        assert_eq!(menu.rows().count(), menu.len());
+        let row = |at: usize| menu.rows().nth(at).expect("a declared row");
+        let AppMenuRowView::Item(first) = row(0).0 else {
+            panic!("the first row is an item");
+        };
+        assert_eq!(first.label, "New window");
+        assert_eq!(first.shortcut, "Ctrl Shift N");
+        assert_eq!(first.reason, "");
+        assert!(first.enabled);
+        assert_eq!(first.role, AppMenuRole::Neutral);
+        assert_eq!(row(0).1, None);
+
+        let AppMenuRowView::Item(deep) = row(4).0 else {
+            panic!("the nested row is an item");
+        };
+        assert_eq!(deep.label, "Green");
+        assert_eq!(deep.reason, "No colour profile");
+        assert_eq!(deep.mark, AppMenuMark::Radio);
+        assert!(!deep.enabled);
+        // The chain the parents spell: row 4 is on row 3's plate, row 3 on
+        // row 1's, and row 1 on the root — three plates deep.
+        assert_eq!(row(4).1, Some(3));
+        assert_eq!(row(3).1, Some(1));
+        assert_eq!(row(1).1, None);
+
+        let AppMenuRowView::Item(last) = row(menu.len() - 1).0 else {
+            panic!("the last row is an item");
+        };
+        assert_eq!(last.role, AppMenuRole::Destructive);
+        assert!(matches!(row(5).0, AppMenuRowView::Separator));
+        assert!(matches!(row(6).0, AppMenuRowView::Info));
+
+        // Every field a menu reports is still a value its own validator
+        // would accept, because the block holds only what one wrote.
+        for (row, _) in menu.rows() {
+            if let AppMenuRowView::Item(item) = row {
+                assert!(AppMenuLabel::new(item.label).is_ok());
+                assert!(AppMenuShortcut::new(item.shortcut).is_ok());
+                assert!(AppMenuReason::new(item.reason).is_ok());
+            }
+        }
+    }
+
+    /// A submenu may hold a submenu, down to the depth bound and no further.
+    ///
+    /// The one-level model refused a nested submenu outright, so a chain
+    /// could not be expressed at all — the bound was load-bearing in the
+    /// builder rather than only in what the desktop chose to draw.
+    #[test]
+    fn submenus_nest_to_the_depth_bound() {
+        let mut menu = AppMenu::EMPTY;
+        menu.push(AppMenuRow::Submenu {
+            label: label("Root"),
+            enabled: true,
+        })
+        .expect("the root plate's submenu");
+        let mut parent = 0;
+        // A submenu opens the plate one deeper, so the deepest plate a
+        // submenu may open is the last one within the bound.
+        for depth in 2..APP_MENU_MAX_DEPTH {
+            menu.push_under(
+                AppMenuRow::Submenu {
+                    label: label("Deeper"),
+                    enabled: true,
+                },
+                parent,
+            )
+            .unwrap_or_else(|error| panic!("a submenu at depth {depth}: {error:?}"));
+            parent = menu.len() - 1;
+        }
+        // One more plate would run past the bound, so the row that would
+        // open it is refused rather than drawn opening nothing.
+        assert_eq!(
+            menu.push_under(
+                AppMenuRow::Submenu {
+                    label: label("Too deep"),
+                    enabled: true,
+                },
+                parent
+            ),
+            Err(Errno::OutOfRange)
+        );
+        // Ordinary rows still fill the deepest plate, and the chain of
+        // parents above the row runs the full depth.
+        menu.push_under(item(1, "Deepest"), parent)
+            .expect("a row on the deepest plate");
+        let mut plates = 1;
+        let mut at = menu.len() - 1;
+        while let Some(above) = menu.rows().nth(at).and_then(|(_, parent)| parent) {
+            at = above;
+            plates += 1;
+        }
+        assert_eq!(plates, APP_MENU_MAX_DEPTH, "the chain runs the full depth");
+    }
+
     #[test]
     fn app_menus_refuse_a_shape_no_menu_can_have() {
-        let label = AppMenuLabel::new("Row").expect("a valid label");
-        let item = |id| AppMenuRow::Item {
-            id: AppMenuItemId::new(id).expect("a valid id"),
-            label,
-            enabled: true,
-            mark: AppMenuMark::None,
-        };
-
         // A zero item id names no row.
         assert_eq!(AppMenuItemId::new(0), Err(Errno::OutOfRange));
 
-        // A labelled row must carry a label; a separator and an About row
+        // A labelled row must carry a label; a separator and an Info row
         // must not (their text is not the application's to write).
         let mut menu = AppMenu::EMPTY;
-        assert_eq!(
-            menu.push(AppMenuRow::Item {
-                id: AppMenuItemId::new(1).expect("a valid id"),
-                label: AppMenuLabel::new("").expect("the empty label"),
-                enabled: true,
-                mark: AppMenuMark::None,
-            }),
-            Err(Errno::OutOfRange)
-        );
+        assert_eq!(menu.push(item(1, "")), Err(Errno::OutOfRange));
         assert_eq!(
             menu.push(AppMenuRow::Submenu {
-                label: AppMenuLabel::new("").expect("the empty label"),
+                label: label(""),
                 enabled: true,
             }),
             Err(Errno::OutOfRange)
         );
 
         // A duplicate item id would make an outcome ambiguous.
-        menu.push(item(1)).expect("the first row");
-        assert_eq!(menu.push(item(1)), Err(Errno::OutOfRange));
+        menu.push(item(1, "Row")).expect("the first row");
+        assert_eq!(menu.push(item(1, "Again")), Err(Errno::OutOfRange));
 
-        // At most one About row: two info panels mean nothing.
-        menu.push(AppMenuRow::About).expect("the About row");
-        assert_eq!(menu.push(AppMenuRow::About), Err(Errno::OutOfRange));
+        // At most one Info row: two info panels mean nothing.
+        menu.push(AppMenuRow::Info).expect("the Info row");
+        assert_eq!(menu.push(AppMenuRow::Info), Err(Errno::OutOfRange));
 
-        // A parent must name an earlier submenu row, and nesting is one
-        // level: neither a submenu nor an About row goes inside one.
-        assert_eq!(menu.push_under(item(2), 0), Err(Errno::OutOfRange));
-        assert_eq!(menu.push_under(item(2), 9), Err(Errno::OutOfRange));
+        // A parent must name an earlier submenu row, and the Info row is
+        // always top-level.
+        assert_eq!(menu.push_under(item(2, "Row"), 0), Err(Errno::OutOfRange));
+        assert_eq!(menu.push_under(item(2, "Row"), 9), Err(Errno::OutOfRange));
         menu.push(AppMenuRow::Submenu {
-            label,
+            label: label("Plate"),
             enabled: true,
         })
         .expect("a submenu");
         let submenu = menu.len() - 1;
         assert_eq!(
-            menu.push_under(
-                AppMenuRow::Submenu {
-                    label,
-                    enabled: true
-                },
-                submenu
-            ),
+            menu.push_under(AppMenuRow::Info, submenu),
             Err(Errno::OutOfRange)
         );
-        assert_eq!(
-            menu.push_under(AppMenuRow::About, submenu),
-            Err(Errno::OutOfRange)
-        );
-        menu.push_under(item(2), submenu).expect("a row inside it");
+        menu.push_under(item(2, "Row"), submenu)
+            .expect("a row inside it");
 
-        // The row bound is a format bound: the menu fills and refuses.
-        let mut full = AppMenu::EMPTY;
-        for id in 1..=APP_MENU_MAX_ROWS {
-            full.push(item(u16::try_from(id).expect("fits")))
-                .expect("room");
+        // A plate fills and refuses independently of the menu's own total:
+        // the root plate cannot outgrow one column even though the menu
+        // holds more rows than a plate does.
+        const { assert!(APP_MENU_MAX_ROWS < APP_MENU_MAX_TOTAL_ROWS) };
+        let mut plates = AppMenu::EMPTY;
+        plates
+            .push(AppMenuRow::Submenu {
+                label: label("Plate"),
+                enabled: true,
+            })
+            .expect("a submenu to spill into");
+        let mut id = 1u16;
+        while plates.len() < APP_MENU_MAX_ROWS {
+            plates
+                .push(item(id, "Row"))
+                .expect("room on the root plate");
+            id += 1;
         }
-        assert_eq!(full.len(), APP_MENU_MAX_ROWS);
-        assert_eq!(full.push(item(u16::MAX)), Err(Errno::NoSpace));
+        assert_eq!(plates.push(item(id, "Row")), Err(Errno::NoSpace));
+        // The refused row fits the *other* plate, so it was the plate that
+        // filled and not the menu.
+        plates
+            .push_under(item(id, "Row"), 0)
+            .expect("room on the second plate");
+
+        // The menu's own total is its own bound: spread over three plates
+        // none of which is full, the only thing left to refuse is the menu.
+        let mut full = AppMenu::EMPTY;
+        for plate in 0..2 {
+            full.push(AppMenuRow::Submenu {
+                label: label("Plate"),
+                enabled: true,
+            })
+            .unwrap_or_else(|error| panic!("plate {plate}: {error:?}"));
+        }
+        let mut id = 1u16;
+        while full.len() < APP_MENU_MAX_TOTAL_ROWS {
+            let row = item(id, "Row");
+            match id % 3 {
+                0 => full.push_under(row, 0),
+                1 => full.push_under(row, 1),
+                _ => full.push(row),
+            }
+            .unwrap_or_else(|error| panic!("room for row {id}: {error:?}"));
+            id += 1;
+        }
+        assert_eq!(full.len(), APP_MENU_MAX_TOTAL_ROWS);
+        for plate in [None, Some(0), Some(1)] {
+            let row = item(u16::MAX, "Row");
+            let refused = match plate {
+                None => full.push(row),
+                Some(parent) => full.push_under(row, parent),
+            };
+            assert_eq!(
+                refused,
+                Err(Errno::NoSpace),
+                "the menu is full whichever plate the row would join"
+            );
+        }
+    }
+
+    /// A menu's text is bounded in total, so a hostile client cannot make a
+    /// declaration arbitrarily wide by loading every row's fields.
+    ///
+    /// The refusal leaves the menu exactly as it was: a row is admitted with
+    /// all of its text or none of it.
+    #[test]
+    fn a_menus_text_is_bounded_in_total() {
+        let mut menu = AppMenu::EMPTY;
+        let wide = label(&"l".repeat(APP_MENU_LABEL_MAX));
+        let reason = AppMenuReason::new(&"r".repeat(APP_MENU_REASON_MAX)).expect("a wide reason");
+        let mut id = 1u16;
+        let mut refused = false;
+        while menu.len() < APP_MENU_MAX_ROWS {
+            let row = AppMenuRow::Item(
+                AppMenuItem::new(AppMenuItemId::new(id).expect("a valid id"), wide)
+                    .disabled()
+                    .with_reason(reason),
+            );
+            if menu.push(row) == Err(Errno::NoSpace) {
+                refused = true;
+                break;
+            }
+            id += 1;
+        }
+        assert!(refused, "the text block fills before the row bound");
+        let held = menu.rows().count();
+        // The refused row left nothing behind: a shorter one still fits the
+        // bytes the wide one could not.
+        let before = declaring(&menu).wire_len();
+        menu.push(item(id, "x")).expect("a row that fits");
+        assert_eq!(
+            declaring(&menu).wire_len(),
+            before + APP_MENU_ROW_WIRE_LEN + 1
+        );
+        assert_eq!(menu.rows().count(), held + 1);
     }
 
     #[test]
@@ -2664,19 +3428,31 @@ mod tests {
         flags[APP_BAR_FLAGS_OFFSET] |= 0b10;
         assert_eq!(WindowRequest::from_bytes(&flags), Err(Errno::OutOfRange));
 
-        // A row count past the bound is refused.
+        // A row count or a text length past its bound is refused.
         let mut over = base;
-        over[APP_BAR_ROW_COUNT_OFFSET] = u8::try_from(APP_MENU_MAX_ROWS + 1).expect("fits");
+        over[APP_BAR_ROW_COUNT_OFFSET] =
+            u8::try_from(APP_MENU_MAX_TOTAL_ROWS + 1).expect("fits a byte");
         assert_eq!(
             WindowRequest::from_bytes(&over),
             Err(Errno::LengthOutOfRange)
         );
+        let mut wide = base;
+        put_u16(
+            &mut wide,
+            APP_BAR_TEXT_LEN_OFFSET,
+            u16::try_from(APP_MENU_TEXT_BYTES + 1).expect("fits"),
+        );
+        assert_eq!(
+            WindowRequest::from_bytes(&wide),
+            Err(Errno::LengthOutOfRange)
+        );
 
-        // The frame ends with the last declared row, so a byte past it is a
+        // The frame ends with the last text byte, so a byte past it is a
         // smuggled field however innocuous — and the length alone refuses,
         // which is why a zero filler is refused too.
         let declared = usize::from(base[APP_BAR_ROW_COUNT_OFFSET]);
-        assert_eq!(base.len(), app_bar_wire_len(declared));
+        let text = usize::from(read_u16(&base, APP_BAR_TEXT_LEN_OFFSET));
+        assert_eq!(base.len(), app_bar_wire_len(declared, text));
         for filler in [0, 1] {
             assert_eq!(
                 WindowRequest::from_bytes(&base.over_long(filler)),
@@ -2691,8 +3467,43 @@ mod tests {
         miscounted[APP_BAR_ROW_COUNT_OFFSET] = u8::try_from(declared - 1).expect("fits");
         assert_eq!(WindowRequest::from_bytes(&miscounted), Err(Errno::BadMagic));
 
+        // Text the rows do not claim cannot ride along: the block must be
+        // consumed exactly, so shortening one row's label leaves a byte
+        // over and is refused rather than ignored.
+        let mut slack = base;
+        slack[APP_BAR_ROWS_OFFSET + APP_MENU_ROW_LABEL_LEN_OFFSET] -= 1;
+        assert_eq!(
+            WindowRequest::from_bytes(&slack),
+            Err(Errno::LengthOutOfRange)
+        );
+
+        // A row claiming more text than the block holds is refused rather
+        // than read into the next row's.
+        let mut greedy = base;
+        greedy[APP_BAR_ROWS_OFFSET + APP_MENU_ROW_LABEL_LEN_OFFSET] = u8::MAX;
+        assert_eq!(
+            WindowRequest::from_bytes(&greedy),
+            Err(Errno::LengthOutOfRange)
+        );
+
         // The widest declaration defines the endpoint's receive bound.
         assert_eq!(APP_BAR_MAX_WIRE_LEN, WindowRequest::MAX_WIRE_LEN);
+    }
+
+    /// A decoded row is exactly a row the builder could have made: an
+    /// unknown kind, an undefined flag bit, a field the row's kind does not
+    /// use, and a shape the builder refuses are each refused here too.
+    #[test]
+    fn set_app_bar_refuses_a_row_no_builder_could_have_made() {
+        let base = WindowRequest::SetAppBar(sample_app_bar()).frame();
+        let record_at = |kind: u8| {
+            (0..usize::from(base[APP_BAR_ROW_COUNT_OFFSET]))
+                .map(|row| APP_BAR_ROWS_OFFSET + row * APP_MENU_ROW_WIRE_LEN)
+                .find(|&at| base[at] == kind)
+                .expect("the sample menu holds a row of this kind")
+        };
+        let separator = record_at(APP_MENU_KIND_SEPARATOR);
+        let submenu = record_at(APP_MENU_KIND_SUBMENU);
 
         // An unknown row kind, an undefined row flag bit, and the unused
         // mark encoding are each refused.
@@ -2700,33 +3511,104 @@ mod tests {
         kind[APP_BAR_ROWS_OFFSET] = 0;
         assert_eq!(WindowRequest::from_bytes(&kind), Err(Errno::OutOfRange));
         let mut row_flags = base;
-        row_flags[APP_BAR_ROWS_OFFSET + 1] |= 0b1000;
+        row_flags[APP_BAR_ROWS_OFFSET + APP_MENU_ROW_FLAGS_OFFSET] |= 0b1_0000;
         assert_eq!(
             WindowRequest::from_bytes(&row_flags),
             Err(Errno::OutOfRange)
         );
         let mut mark = base;
-        mark[APP_BAR_ROWS_OFFSET + 1] |= 0b110;
+        mark[APP_BAR_ROWS_OFFSET + APP_MENU_ROW_FLAGS_OFFSET] |= 0b110;
         assert_eq!(WindowRequest::from_bytes(&mark), Err(Errno::OutOfRange));
 
-        // A field the row's kind does not use must be zero: the separator
-        // at index 5 of the sample menu carries no label, id, or mark.
-        let separator = APP_BAR_ROWS_OFFSET + 5 * APP_MENU_ROW_WIRE_LEN;
-        let mut labelled_separator = base;
-        labelled_separator[separator + 3] = 1;
-        labelled_separator[separator + 6] = b'x';
+        // A field the row's kind does not use must be zero: the separator of
+        // the sample menu carries no id, mark, role, or text of any kind.
+        let mut marked_separator = base;
+        marked_separator[separator + APP_MENU_ROW_FLAGS_OFFSET] |= APP_MENU_ROW_FLAG_ENABLED;
         assert_eq!(
-            WindowRequest::from_bytes(&labelled_separator),
+            WindowRequest::from_bytes(&marked_separator),
+            Err(Errno::OutOfRange)
+        );
+        let mut identified_separator = base;
+        put_u16(
+            &mut identified_separator,
+            separator + APP_MENU_ROW_ID_OFFSET,
+            7,
+        );
+        assert_eq!(
+            WindowRequest::from_bytes(&identified_separator),
+            Err(Errno::OutOfRange)
+        );
+
+        // A submenu row states no accelerator: the trailing column is its
+        // chevron, so a caption there could only be a field smuggled past a
+        // kind that does not use it.
+        let mut captioned_submenu = base;
+        captioned_submenu[submenu + APP_MENU_ROW_LABEL_LEN_OFFSET] -= 1;
+        captioned_submenu[submenu + APP_MENU_ROW_SHORTCUT_LEN_OFFSET] = 1;
+        assert_eq!(
+            WindowRequest::from_bytes(&captioned_submenu),
             Err(Errno::OutOfRange)
         );
 
         // And a decoded menu obeys exactly the builder's shape rule: a row
-        // claiming a parent that is not an earlier submenu is refused.
+        // claiming a parent that is not an earlier submenu is refused, and
+        // so is a submenu past the depth bound.
         let mut bad_parent = base;
-        bad_parent[APP_BAR_ROWS_OFFSET + 2] = 0;
+        bad_parent[APP_BAR_ROWS_OFFSET + APP_MENU_ROW_PARENT_OFFSET] = 0;
         assert_eq!(
             WindowRequest::from_bytes(&bad_parent),
             Err(Errno::OutOfRange)
+        );
+        let mut too_deep = base;
+        too_deep[submenu + APP_MENU_ROW_WIRE_LEN * 2 + APP_MENU_ROW_PARENT_OFFSET] =
+            u8::try_from(3).expect("fits");
+        assert_ne!(
+            WindowRequest::from_bytes(&too_deep),
+            Ok(WindowRequest::SetAppBar(sample_app_bar())),
+            "a re-parented submenu is not the sample declaration"
+        );
+    }
+
+    /// Each of a row's three text fields is bounded by its own type on the
+    /// way in, not merely by the block holding enough bytes.
+    ///
+    /// Checked with the block's total left intact — the length moved from one
+    /// field to another — so it is the field's own bound that refuses and not
+    /// the block running short.
+    #[test]
+    fn a_rows_text_field_is_bounded_by_its_own_type() {
+        let mut menu = AppMenu::EMPTY;
+        menu.push(AppMenuRow::Item(
+            AppMenuItem::new(
+                AppMenuItemId::new(1).expect("a valid id"),
+                label(&"l".repeat(APP_MENU_LABEL_MAX)),
+            )
+            .with_shortcut(
+                AppMenuShortcut::new(&"s".repeat(APP_MENU_SHORTCUT_MAX)).expect("the widest"),
+            ),
+        ))
+        .expect("room");
+        let base = declaring(&menu).frame();
+        let row = APP_BAR_ROWS_OFFSET;
+
+        // One byte of the caption re-labelled as label text: the block still
+        // holds exactly what the rows claim, and the label is one past its
+        // own bound.
+        let mut over_label = base;
+        over_label[row + APP_MENU_ROW_LABEL_LEN_OFFSET] += 1;
+        over_label[row + APP_MENU_ROW_SHORTCUT_LEN_OFFSET] -= 1;
+        assert_eq!(
+            WindowRequest::from_bytes(&over_label),
+            Err(Errno::LengthOutOfRange)
+        );
+
+        // And the other way about, so the caption's own bound refuses too.
+        let mut over_shortcut = base;
+        over_shortcut[row + APP_MENU_ROW_LABEL_LEN_OFFSET] -= 1;
+        over_shortcut[row + APP_MENU_ROW_SHORTCUT_LEN_OFFSET] += 1;
+        assert_eq!(
+            WindowRequest::from_bytes(&over_shortcut),
+            Err(Errno::LengthOutOfRange)
         );
     }
 

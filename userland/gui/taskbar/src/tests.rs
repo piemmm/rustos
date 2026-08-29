@@ -9,11 +9,13 @@ use tairix_abi::switchboard_ipc::{
     TrayTask, TrayTaskName,
 };
 use tairix_abi::window_ipc::{
-    AppMenu, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuRow, APP_MENU_MAX_ROWS,
+    AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole,
+    AppMenuRow, AppMenuShortcut, APP_MENU_MAX_ROWS,
 };
 use tairix_controls::{
-    damage, ground_fill, plate_border, ActivityState, ChromeLayer, ControlState, MenuItem,
-    MenuMark, PressureKind, PressureState, RecoveryState, TrayBadgeContent, TrayBadgeTone,
+    damage, ground_fill, plate_border, ActivityState, ChromeLayer, ControlRole, ControlState,
+    MenuItem, MenuMark, PressureKind, PressureState, RecoveryState, TrayBadgeContent,
+    TrayBadgeTone,
 };
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::{IconArtwork, IconKind, IconPicture, IconRequest, IconSet, NoArtwork};
@@ -126,22 +128,25 @@ fn menu_label(text: &str) -> AppMenuLabel {
 
 /// An enabled, unmarked chooseable row.
 fn item(id: u16, label: &str) -> AppMenuRow {
-    AppMenuRow::Item {
-        id: AppMenuItemId::new(id).expect("a non-zero id"),
-        label: menu_label(label),
-        enabled: true,
-        mark: AppMenuMark::None,
-    }
+    AppMenuRow::Item(menu_item(id, label))
+}
+
+/// The same row, before its markings are applied.
+fn menu_item(id: u16, label: &str) -> AppMenuItem {
+    AppMenuItem::new(
+        AppMenuItemId::new(id).expect("a non-zero id"),
+        menu_label(label),
+    )
 }
 
 /// The menu a well-behaved application declares: an action, a rule, *Quit*,
-/// and the session-drawn *About* row.
+/// and the session-drawn information row.
 fn declared_menu() -> AppMenu {
     let mut menu = AppMenu::EMPTY;
     menu.push(item(1, "New window")).expect("fits");
     menu.push(AppMenuRow::Separator).expect("fits");
     menu.push(item(2, "Quit")).expect("fits");
-    menu.push(AppMenuRow::About).expect("fits");
+    menu.push(AppMenuRow::Info).expect("fits");
     menu
 }
 
@@ -1540,26 +1545,25 @@ fn an_application_that_declared_no_menu_opens_nothing() {
 fn the_menu_draws_exactly_the_rows_the_application_declared() {
     let mut menu = AppMenu::EMPTY;
     menu.push(item(1, "New window")).expect("fits");
-    menu.push(AppMenuRow::Item {
-        id: AppMenuItemId::new(2).expect("non-zero"),
-        label: menu_label("Wrap lines"),
-        enabled: true,
-        mark: AppMenuMark::Check,
-    })
+    menu.push(AppMenuRow::Item(
+        menu_item(2, "Wrap lines").with_mark(AppMenuMark::Check),
+    ))
     .expect("fits");
-    menu.push(AppMenuRow::Item {
-        id: AppMenuItemId::new(3).expect("non-zero"),
-        label: menu_label("Green screen"),
-        enabled: true,
-        mark: AppMenuMark::Radio,
-    })
+    menu.push(AppMenuRow::Item(
+        menu_item(3, "Green screen").with_mark(AppMenuMark::Radio),
+    ))
     .expect("fits");
-    menu.push(AppMenuRow::Item {
-        id: AppMenuItemId::new(4).expect("non-zero"),
-        label: menu_label("Paste"),
-        enabled: false,
-        mark: AppMenuMark::None,
-    })
+    menu.push(AppMenuRow::Item(
+        menu_item(4, "Paste")
+            .disabled()
+            .with_reason(AppMenuReason::new("The clipboard is empty").expect("a short reason")),
+    ))
+    .expect("fits");
+    menu.push(AppMenuRow::Item(
+        menu_item(6, "Close all")
+            .with_shortcut(AppMenuShortcut::new("Ctrl Shift Q").expect("a short caption"))
+            .with_role(AppMenuRole::Destructive),
+    ))
     .expect("fits");
     menu.push(AppMenuRow::Separator).expect("fits");
     menu.push(AppMenuRow::Submenu {
@@ -1567,8 +1571,8 @@ fn the_menu_draws_exactly_the_rows_the_application_declared() {
         enabled: true,
     })
     .expect("fits");
-    menu.push_under(item(5, "Amber"), 5).expect("fits");
-    menu.push(AppMenuRow::About).expect("fits");
+    menu.push_under(item(5, "Amber"), 6).expect("fits");
+    menu.push(AppMenuRow::Info).expect("fits");
 
     let mut bar = bottom_bar();
     bar.set_apps(alloc::vec![app("Terminal")
@@ -1578,17 +1582,23 @@ fn the_menu_draws_exactly_the_rows_the_application_declared() {
     open_app_menu(&mut input, &mut bar);
 
     // Every top-level declared row draws, in declaration order, with the
-    // enablement and mark the application asked for; the declared separator
-    // opens the group its next row begins rather than becoming a row; the
-    // submenu's own child is not a top-level row; and the About row is the
-    // one row whose label and submenu are the bar's.
+    // enablement, mark, accelerator caption, disabled-row reason and role
+    // the application asked for; the declared separator opens the group its
+    // next row begins rather than becoming a row; the submenu's own child is
+    // not a top-level row; and the information row is the one row whose
+    // label and submenu are the bar's.
     assert_eq!(
         bar.menu().control().items(),
         &[
             MenuItem::new("New window"),
             MenuItem::new("Wrap lines").with_mark(MenuMark::Check),
             MenuItem::new("Green screen").with_mark(MenuMark::Radio),
-            MenuItem::new("Paste").with_state(ControlState::disabled()),
+            MenuItem::new("Paste")
+                .with_reason("The clipboard is empty")
+                .with_state(ControlState::disabled()),
+            MenuItem::new("Close all")
+                .with_shortcut("Ctrl Shift Q")
+                .with_role(ControlRole::Destructive),
             MenuItem::new("Profile")
                 .with_submenu(true)
                 .with_group_break(true),
@@ -1632,13 +1642,8 @@ fn a_menu_at_the_row_cap_draws_every_row_it_declared() {
 #[test]
 fn a_disabled_declared_row_cannot_be_chosen() {
     let mut menu = AppMenu::EMPTY;
-    menu.push(AppMenuRow::Item {
-        id: AppMenuItemId::new(9).expect("non-zero"),
-        label: menu_label("Paste"),
-        enabled: false,
-        mark: AppMenuMark::None,
-    })
-    .expect("fits");
+    menu.push(AppMenuRow::Item(menu_item(9, "Paste").disabled()))
+        .expect("fits");
     let mut bar = bottom_bar();
     bar.set_apps(alloc::vec![app("Terminal")
         .with_declaration(menu, true)
@@ -1730,6 +1735,54 @@ fn a_declared_submenu_opens_and_its_rows_report_their_own_ids() {
         }
     );
     assert!(!bar.menu().is_open());
+}
+
+/// A separator inside a declared submenu opens the group its next row
+/// begins, exactly as one on the root plate does.
+///
+/// The child plate used to be built without that folding, so a declared
+/// separator drew there as a blank unchooseable row while the very same
+/// separator on the root plate drew a divider.
+#[test]
+fn a_separator_inside_a_declared_submenu_opens_a_group_rather_than_a_blank_row() {
+    let mut menu = AppMenu::EMPTY;
+    menu.push(AppMenuRow::Submenu {
+        label: menu_label("Profile"),
+        enabled: true,
+    })
+    .expect("fits");
+    menu.push_under(item(7, "Amber"), 0).expect("fits");
+    menu.push_under(AppMenuRow::Separator, 0).expect("fits");
+    menu.push_under(item(8, "Green"), 0).expect("fits");
+    let mut bar = bottom_bar();
+    bar.set_apps(alloc::vec![app("Terminal")
+        .with_declaration(menu, true)
+        .with_identity(identity("Terminal"))]);
+    let mut input = TaskbarInput::new();
+    open_app_menu(&mut input, &mut bar);
+    press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
+    press_key(&mut input, &mut bar, Key::Named(NamedKey::Right));
+
+    let submenu = bar.menu().submenu().expect("the submenu is open");
+    assert_eq!(
+        submenu.items(),
+        &[
+            MenuItem::new("Amber"),
+            MenuItem::new("Green").with_group_break(true),
+        ],
+        "the separator is a group break, not a row"
+    );
+
+    // And the row after it is still chooseable by its own id, which a blank
+    // row standing between them would have shifted.
+    press_key(&mut input, &mut bar, Key::Named(NamedKey::End));
+    assert_eq!(
+        press_key(&mut input, &mut bar, Key::Named(NamedKey::Enter)),
+        TaskbarResponse::AppMenuChosen {
+            app: 0,
+            item: AppMenuItemId::new(8).expect("non-zero"),
+        }
+    );
 }
 
 #[test]

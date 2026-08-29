@@ -8,7 +8,9 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use tairix_abi::window_ipc::{AppMenuItemId, AppMenuRow, APP_MENU_LABEL_MAX, APP_MENU_MAX_ROWS};
+use tairix_abi::window_ipc::{
+    AppBar, AppMenuItemId, AppMenuRowView, APP_MENU_LABEL_MAX, APP_MENU_MAX_ROWS,
+};
 use tairix_browse::{Places, Volume};
 
 use super::{component_declaration, place_of, DESKTOP_DEFAULT_ACTION};
@@ -28,21 +30,51 @@ fn volume(label: &str) -> Volume {
     }
 }
 
-/// The rows a declaration carried, in order.
-fn rows(places: &Places) -> Vec<AppMenuRow> {
+/// The kinds a declaration's rows carried, in order.
+fn kinds(places: &Places) -> Vec<AppMenuRowKind> {
     let (bar, _) = component_declaration(7, places).expect("the rows fit");
-    bar.menu.rows().map(|(row, _)| row).collect()
+    bar.menu
+        .rows()
+        .map(|(row, _)| AppMenuRowKind::of(row))
+        .collect()
 }
 
 /// The labels of a declaration's item rows, in order.
 fn labels(places: &Places) -> Vec<String> {
-    rows(places)
-        .iter()
-        .filter_map(|row| match row {
-            AppMenuRow::Item { label, .. } => Some(label.as_str().to_string()),
+    let (bar, _) = component_declaration(7, places).expect("the rows fit");
+    item_labels(&bar)
+}
+
+/// The labels of `bar`'s item rows, in order.
+fn item_labels(bar: &AppBar) -> Vec<String> {
+    bar.menu
+        .rows()
+        .filter_map(|(row, _)| match row {
+            AppMenuRowView::Item(item) => Some(item.label.to_string()),
             _ => None,
         })
         .collect()
+}
+
+/// Which kind a row is, so a test can assert over kinds without holding a
+/// borrow of the menu that reported them.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum AppMenuRowKind {
+    Item,
+    Separator,
+    Submenu,
+    Info,
+}
+
+impl AppMenuRowKind {
+    fn of(row: AppMenuRowView<'_>) -> Self {
+        match row {
+            AppMenuRowView::Item(_) => Self::Item,
+            AppMenuRowView::Separator => Self::Separator,
+            AppMenuRowView::Submenu { .. } => Self::Submenu,
+            AppMenuRowView::Info => Self::Info,
+        }
+    }
 }
 
 #[test]
@@ -57,9 +89,8 @@ fn the_component_offers_the_places_and_neither_of_the_conventions_rows() {
     assert_eq!(skipped, 0);
     // A component states no identity panel of its own and is not the user's to
     // quit, so neither convention row is declared.
-    let rows: Vec<AppMenuRow> = bar.menu.rows().map(|(row, _)| row).collect();
     assert!(
-        !rows.contains(&AppMenuRow::About),
+        !kinds(&places).contains(&AppMenuRowKind::Info),
         "a component declares no information row"
     );
     assert!(
@@ -88,17 +119,17 @@ fn a_rule_opens_the_mounted_volumes_and_only_when_there_are_some() {
     // Nothing mounted: no divider, because there is nothing to divide.
     let bare = Places::new(&home(), &[]);
     assert!(
-        !rows(&bare).contains(&AppMenuRow::Separator),
+        !kinds(&bare).contains(&AppMenuRowKind::Separator),
         "no volumes, no rule"
     );
 
     // Mounted: the rule falls exactly where the volume rows begin, and the
     // volumes follow the user's own places.
     let mounted = Places::new(&home(), &[volume("Backup"), volume("Stick")]);
-    let declared = rows(&mounted);
+    let declared = kinds(&mounted);
     let rule = declared
         .iter()
-        .position(|row| *row == AppMenuRow::Separator)
+        .position(|kind| *kind == AppMenuRowKind::Separator)
         .expect("the rule is declared");
     let volume_start = mounted.volume_start().expect("a volume row exists");
     assert_eq!(
@@ -108,7 +139,7 @@ fn a_rule_opens_the_mounted_volumes_and_only_when_there_are_some() {
     assert_eq!(
         declared
             .iter()
-            .filter(|row| **row == AppMenuRow::Separator)
+            .filter(|kind| **kind == AppMenuRowKind::Separator)
             .count(),
         1,
         "one rule, not one per volume"
@@ -125,13 +156,13 @@ fn a_chosen_row_names_the_place_the_user_saw() {
     let places = Places::new(&home(), &[volume("Backup")]);
     let (bar, _) = component_declaration(7, &places).expect("the rows fit");
     for (row, _) in bar.menu.rows() {
-        let AppMenuRow::Item { id, label, .. } = row else {
+        let AppMenuRowView::Item(item) = row else {
             continue;
         };
-        let index = place_of(id).expect("a declared id names a place");
+        let index = place_of(item.id).expect("a declared id names a place");
         assert_eq!(
             places.rows()[index].label(),
-            label.as_str(),
+            item.label,
             "the row resolves to the place whose label it drew"
         );
     }
@@ -154,23 +185,18 @@ fn a_label_the_menus_bounds_refuse_is_skipped_and_counted() {
     let places = Places::new(&home(), &[volume(&long), volume("Stick")]);
     let (bar, skipped) = component_declaration(7, &places).expect("the rows fit");
     assert_eq!(skipped, 1);
-    let shown: Vec<String> = bar
-        .menu
-        .rows()
-        .filter_map(|(row, _)| match row {
-            AppMenuRow::Item { label, .. } => Some(label.as_str().to_string()),
-            _ => None,
-        })
-        .collect();
+    let shown = item_labels(&bar);
     assert!(!shown.iter().any(|label| label.starts_with("vv")));
     assert!(shown.contains(&"Stick".to_string()));
 }
 
 #[test]
 fn the_row_cap_drops_the_tail_and_reports_how_many() {
-    // Five fixed places, a rule, and as many volumes as the cap allows; the
-    // rest are dropped rather than silently overflowing the declaration.
-    let volumes: Vec<Volume> = (0..12)
+    // More volumes than a plate holds however many fixed places precede
+    // them, so the tail is dropped rather than silently overflowing the
+    // declaration. The count follows the shared bound rather than restating
+    // it, so raising the bound does not quietly stop testing the cap.
+    let volumes: Vec<Volume> = (0..APP_MENU_MAX_ROWS)
         .map(|n| volume(&alloc::format!("v{n:02}")))
         .collect();
     let places = Places::new(&home(), &volumes);

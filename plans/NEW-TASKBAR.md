@@ -15,7 +15,7 @@ Binding under `AGENTS.md`. This plan records the completed Stage 7 taskbar
   that declared none, raises its most recently used window); hovering a slot
   whose application owns more than one window opens the window picker; and a
   secondary press opens the menu that **the application itself** declared,
-  whose *About* row shows a session-drawn information panel of its bundle's
+  whose *Info* row shows a session-drawn information panel of its bundle's
   **signed** manifest. There is no pinning: applications are launched from
   the program library or from a desktop shortcut;
 - on the right, the **notification area**;
@@ -753,19 +753,29 @@ What now stands:
   `AppBarMenu { item }`, which is why `WindowEvent::window_id()` is now
   `Option<u64>`. The pin ops (`PinBundle`/`DragOffer`/`DragWithdraw`) and
   `BundleRef` are **deleted**. The declaration is the widest operation, so it
-  sets `WindowRequest::MAX_WIRE_LEN` (522) — the endpoint's receive ceiling —
-  while each request is framed to its own length, so a declaration's width
-  costs the hot Present path nothing (`plans/NEW-MENUS.md` M1a).
-- **The menu model** is `AppMenu`: at most `APP_MENU_MAX_ROWS` (12) rows,
-  each at most `APP_MENU_LABEL_MAX` (36) label bytes, one submenu level via a
-  parent index, and row kinds `Item { id, label, enabled, mark }`,
-  `Separator`, `Submenu { label, enabled }`, and `About`. Item ids are
-  non-zero and unique within a menu, so an outcome names exactly one row. The
-  wire decoder is held to the **same** `check_shape` rule as the builder, so
-  a menu that crossed the wire is exactly a menu that could have been built;
-  both are fuzzed in `lib/abi/tests/fuzz_decode.rs`.
+  sets `WindowRequest::MAX_WIRE_LEN` — the endpoint's receive ceiling — while
+  each request is framed to its own length, so a declaration's width costs
+  the hot Present path nothing (`plans/NEW-MENUS.md` M1a), and the client and
+  the session each hold one receive/encode buffer for the life of the
+  connection rather than one per call.
+- **The menu model** is `AppMenu`: row kinds `Item(AppMenuItem)`,
+  `Separator`, `Submenu { label, enabled }`, and `Info`, nested through a
+  parent index, bounded by `APP_MENU_MAX_ROWS` (32) rows a plate,
+  `APP_MENU_MAX_TOTAL_ROWS` (64) in all, `APP_MENU_MAX_DEPTH` (4) plates of
+  chain, and `APP_MENU_TEXT_BYTES` (1536) of row text held in one block
+  rather than a widest-case buffer per row. An item states a label
+  (`APP_MENU_LABEL_MAX`, 36), an accelerator caption
+  (`APP_MENU_SHORTCUT_MAX`, 24), the reason it is disabled
+  (`APP_MENU_REASON_MAX`, 64), a mark, and a role — everything the shared
+  `MenuItem` control draws. Item ids are non-zero and unique within a menu,
+  so an outcome names exactly one row. The wire decoder is held to the
+  **same** `check_shape` rule as the builder, so a menu that crossed the wire
+  is exactly a menu that could have been built; both are fuzzed in
+  `lib/abi/tests/fuzz_decode.rs`. A menu's own title is the application's for
+  a per-window menu and is **unrepresentable** on the declaration, whose
+  title is the manifest's (`plans/NEW-MENUS.md` M1b).
 - **The information panel is manifest-attested.** The application declares
-  only that an `About` row exists; the panel is the session's own `FactList`
+  only that an `Info` row exists; the panel is the session's own `FactList`
   of the bundle's **signed** `AppInfo` — name, version, and the new optional
   `purpose` and `author` fields (`BUNDLE_PURPOSE_MAX = 96`,
   `BUNDLE_AUTHOR_MAX = 64`; `AppInfoHeader::WIRE_LEN` 408 → 568). An
@@ -789,7 +799,7 @@ What now stands:
   rather than anything the event carries. Each delivery path refuses the
   other's events. `WindowClient::set_app_bar` is the client half, and
   `lib/window`'s `appbar::declaration` is the one definition of the desktop's
-  **menu convention**: the `About` row first, the application's own rows next,
+  **menu convention**: the `Info` row first, the application's own rows next,
   then a rule and *Quit* last. An application supplies only the middle, so it
   cannot place the two ends and cannot get them wrong; `appbar::info_and_quit`
   names the commonest case (the convention's two rows, no default action)
@@ -802,7 +812,7 @@ What now stands:
   mark; a declared separator opens the group its next row begins rather than
   becoming a choosable row; a declared submenu's children open beside the
   plate (one level, flipped when the trailing side would leave the screen);
-  and the `About` row's child is the information panel. That row is the one
+  and the `Info` row's child is the information panel. That row is the one
   whose *label* is the bar's rather than the application's: it draws as
   `INFO_ROW_LABEL` ("Info", with the submenu arrow), so every application
   reaches its panel by the same name. Choosing a row reports
@@ -845,7 +855,7 @@ What now stands:
   shell-output and child member per window. It declares `default_action: true`
   and its own *New window* row through the shared convention
   (`tairix_terminal::appbar` over `appbar::declaration`), so the menu reads
-  `About`, *New window*, a rule, *Quit* — its slot opens a fresh window on a
+  *Info*, *New window*, a rule, *Quit* — its slot opens a fresh window on a
   click and its menu can close them all. The terminal keeps no window count of
   its own: what a window costs is bounded by the session's per-client frame
   budget and by the process's own stream, process, and address-space limits,

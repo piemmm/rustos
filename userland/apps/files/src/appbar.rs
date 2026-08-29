@@ -37,7 +37,7 @@
 //! short one that admits it.
 
 use tairix_abi::window_ipc::{
-    AppBar, AppMenu, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuRow, APP_MENU_MAX_ROWS,
+    AppBar, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow, APP_MENU_MAX_ROWS,
 };
 use tairix_abi::Errno;
 use tairix_browse::{PlaceKind, Places};
@@ -98,12 +98,12 @@ pub fn component_declaration(endpoint: u64, places: &Places) -> Result<(AppBar, 
             menu.push(AppMenuRow::Separator)?;
             ruled = true;
         }
-        menu.push(AppMenuRow::Item {
-            id,
-            label,
-            enabled: place.is_available(),
-            mark: AppMenuMark::None,
-        })?;
+        let row = AppMenuItem::new(id, label);
+        menu.push(AppMenuRow::Item(if place.is_available() {
+            row
+        } else {
+            row.disabled()
+        }))?;
         shown += 1;
     }
     Ok((

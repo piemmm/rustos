@@ -129,8 +129,9 @@ speculative:
   names no window, because an application's presence on the desktop's icon
   bar belongs to the process rather than to any one of its windows. It
   carries the event route, whether the application handles its slot's primary
-  click, and a bounded `AppMenu` (≤ 12 rows, ≤ 36 label bytes, one submenu
-  level, a session-rendered `About` row), and it is idempotent-replace. Its
+  click, and a bounded `AppMenu` (≤ 32 rows a plate, ≤ 64 in all, ≤ 4 plates
+  deep, ≤ 36 label bytes, a session-rendered `Info` row), and it is
+  idempotent-replace. Its
   two answers — `WindowEvent::AppBarDefault` and `AppBarMenu { item }` — are
   likewise **application-scoped**, which is why `WindowEvent::window_id()`
   returns `Option<u64>` and why `WindowServer` has two delivery paths that
