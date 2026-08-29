@@ -21,10 +21,11 @@
 //! scratch, so it too costs the same at any depth — a whole-volume scrub and
 //! check, whose derived truth streams through on-disk scratch arrays rather
 //! than RAM, and a delete, whose freed-block bookkeeping is a set of *runs*, so
-//! it follows the file's extents and never its block count. What a transaction
-//! still holds proportionally is the pinned dirty blocks it stages until its
-//! commit drains them, which the write-back bound governs
-//! (`plans/ARXFS-WRITEBACK.md` WB5).
+//! it follows the file's extents and never its block count — and which stops on
+//! an extent boundary at the write-back ceiling and publishes, so even a
+//! maximally fragmented file's extents do not accumulate in one transaction.
+//! What a transaction holds is therefore always the ceiling the write-back bound
+//! sets (`plans/ARXFS-WRITEBACK.md` WB5), never the file.
 
 use std::alloc::System;
 use std::collections::BTreeMap;
@@ -39,6 +40,7 @@ use tairix_drv_fs_arxfs::{
     EntropySource, PassVerdict, ScrubBudget, VolumeKey, ARXFS, RUN_BYTES, VOLUME_KEY_LEN,
 };
 use tairix_log::{Event, Sink};
+use tairix_reclaim::{PinnedAccounting, PressureBand, ReportedPressure};
 
 /// A pass-through allocator that tracks live bytes and their high-water mark
 /// while counting is armed, so a measured window can be asserted to hold a
@@ -129,6 +131,25 @@ struct SparseBlock {
     block_count: u64,
 }
 
+impl SparseBlock {
+    /// A device of `block_count` blocks with storage for every one of them
+    /// already in hand, so no write inside a measured window allocates and the
+    /// peak reported is the driver's own rather than the double's.
+    ///
+    /// Only for a device small enough to hold densely; the huge-volume
+    /// fixtures stay sparse.
+    fn primed(block_count: u64) -> Self {
+        let mut blocks = BTreeMap::new();
+        for lba in 0..block_count {
+            blocks.insert(lba, vec![0u8; BLOCK_SIZE as usize]);
+        }
+        Self {
+            blocks,
+            block_count,
+        }
+    }
+}
+
 impl Block for SparseBlock {
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {
         Ok(BlockGeometry {
@@ -165,7 +186,15 @@ impl Block for SparseBlock {
             return Err(DriverError::LengthOutOfRange);
         }
         for (i, chunk) in buf.chunks(bs).enumerate() {
-            self.blocks.insert(lba + i as u64, chunk.to_vec());
+            // Rewriting a block the device already holds reuses its storage, as
+            // a device does: allocating afresh would charge a measured window
+            // for the double rather than for the driver.
+            match self.blocks.get_mut(&(lba + i as u64)) {
+                Some(stored) => stored.copy_from_slice(chunk),
+                None => {
+                    self.blocks.insert(lba + i as u64, chunk.to_vec());
+                }
+            }
         }
         Ok(())
     }
@@ -243,6 +272,7 @@ fn every_measured_walk_stays_bounded() {
     a_single_record_edit_allocates_the_same_at_any_depth();
     a_whole_volume_verification_holds_no_per_record_state();
     a_delete_holds_its_runs_not_its_blocks();
+    a_fragmented_delete_holds_its_ceiling_not_its_extents();
 }
 
 /// A volume holding one file of `blocks` sequentially written, incompressible,
@@ -557,4 +587,90 @@ fn a_single_record_edit_allocates_the_same_at_any_depth() {
              {PEAK_BUDGET} budgets"
         );
     }
+}
+
+/// Blocks of the densely-primed device the delete measurement runs on: enough
+/// for the largest fixture's data and the metadata each of its transactions
+/// rewrites, and small enough to hold every block up front.
+const PRIMED_DEVICE_BLOCKS: u64 = 1 << 15;
+
+/// Machine size whose per-volume write-back share is exactly one transfer
+/// window — the smallest a volume may be mounted on, and so the tightest
+/// ceiling a delete can be made to yield to. Derived from backing bytes exactly
+/// as a mount derives it, never spelled as a ceiling.
+const FLOOR_MACHINE_BYTES: usize = 16 * RUN_BYTES;
+
+/// A bounded volume holding one file of `extents` single-block extents, each
+/// with a gap after it so no two merge. Committed, so the fixture returns with
+/// no open transaction.
+fn bounded_fragmented_volume(extents: u64) -> ARXFS<SparseBlock> {
+    let device = SparseBlock::primed(PRIMED_DEVICE_BLOCKS);
+    let gauge: &'static ReportedPressure = Box::leak(Box::new(ReportedPressure::unknown()));
+    gauge.report(PressureBand::Normal);
+    let mut fs = ARXFS::format(device, 64, &TEST_KEY, &mut TestEntropy(0xC3))
+        .expect("format the fixture volume")
+        .with_writeback_bound(
+            FLOOR_MACHINE_BYTES,
+            gauge,
+            std::sync::Arc::new(PinnedAccounting::new()),
+        )
+        .expect("the floor machine bounds the volume");
+    let root = fs.root();
+    fs.create(root, b"frag", NodeKind::RegularFile)
+        .expect("create");
+    for run in 0..extents {
+        let at = run * 2 * u64::from(BLOCK_SIZE);
+        assert_eq!(fs.write_at(root, b"frag", at, &[0x5A]), Ok(1));
+    }
+    fs.flush().expect("publish the fixture");
+    fs
+}
+
+/// Deleting a maximally fragmented file holds the write-back ceiling, not its
+/// extent count: four times the extents is the same peak footprint.
+///
+/// This is the measurement freeing-across-commits was built for. Extent-based
+/// bookkeeping made a transaction's memory follow the *runs* it released, which
+/// is what an ordinary delete needs; it left the run count of a fragmented file
+/// inside one transaction, and that count is unbounded — of the order of 10^10
+/// for a maximally fragmented 100 TB file. The delete now stops on an extent
+/// boundary at the ceiling and publishes, so the peak is the ceiling's and it is
+/// the number of transactions that grows with the file.
+fn a_fragmented_delete_holds_its_ceiling_not_its_extents() {
+    const SMALL: u64 = 1_200;
+    // Fixed by the ceiling and the block geometry: the transaction's run
+    // bookkeeping and staged blocks inside one transfer window, the commit
+    // drain's gather window, the allocation map's bounded page cache, and the
+    // walk and edit node buffers. Measured: 88 600 bytes to delete 1 200
+    // extents and 110 368 to delete 4 800. Freeing the same file inside one
+    // transaction — the shape before this — holds 448 448 at 1 200 extents and
+    // 626 312 at 2 400, growing with the file and past this budget at either
+    // size.
+    const PEAK_BUDGET: usize = 4 * RUN_BYTES;
+
+    let mut peaks = Vec::new();
+    for extents in [SMALL, SMALL * 4] {
+        let mut fs = bounded_fragmented_volume(extents);
+        let root = fs.root();
+        let (gone, peak, allocs) = measure(|| fs.remove(root, b"frag"));
+        assert_eq!(gone, Ok(()));
+        assert!(
+            peak <= PEAK_BUDGET,
+            "deleting a {extents}-extent file held {peak} bytes over {allocs} \
+             allocations, past the {PEAK_BUDGET} budget"
+        );
+        peaks.push(peak);
+    }
+
+    // Sharper than the budget: four times the extents is the same peak within
+    // one transfer window, because what a transaction may hold is the ceiling
+    // and not the file. The allocation *count* does grow — four times the
+    // extents is four times the freeing work, over four times the transactions
+    // — which is the difference between bounded memory and less work.
+    let (small, large) = (peaks[0], peaks[1]);
+    assert!(
+        large <= small + RUN_BYTES,
+        "deleting four times the extents held {large} bytes against {small}: \
+         the transaction is tracking the file, not its ceiling"
+    );
 }

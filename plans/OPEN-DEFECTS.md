@@ -2221,9 +2221,8 @@ run-wise with it:
 - **The release.** `release_data_run` walks the chunk tree by *range* — the new
   `btree_get_ceil`, the mirror of the existing floor query — so the unshared
   part of a run is freed as a run and only a genuinely shared block costs a
-  refcount edit. `free_extent_tail` and `free_all_blocks` hand it whole runs
-  instead of looping per block, and a directory's mirrored content run is one
-  free of `len + 1` blocks.
+  refcount edit. The tail free hands it whole runs instead of looping per block,
+  and a directory's mirrored content run is one free of `len + 1` blocks.
 - **The queue and the cluster cache.** `pending_discard` holds coalesced runs
   (capped on runs, its actual memory, as `MAX_PENDING_DISCARD_RUNS`), `trim`
   splits each against the live map instead of sorting and coalescing a block
@@ -2236,59 +2235,90 @@ holds **10 352** bytes over **35** allocations and removing it **11 376** over
 per-block chunk lookups scaled with the file.
 
 **Also fixed, found by the same reading.** `Extent::decode` accepted a stored
-run that could not exist on the device, so `free_extent_tail`'s `start +
-ext.len` overflowed on a corrupt-but-authentic record: in release it wrapped to
-a small end, the extent read as wholly below the cut, and the truncate left the
-tail mapped while `inode.size` said it was gone; in debug it panicked. Decode
+run that could not exist on the device, so the tail free's `start + ext.len`
+overflowed on a corrupt-but-authentic record: in release it wrapped to a small
+end, the extent read as wholly below the cut, and the truncate left the tail
+mapped while `inode.size` said it was gone; in debug it panicked. Decode
 now refuses a run that does not fit `total_blocks` — which is also what makes
 every later `phys + offset` and every run length handed to the map total — and
 the logical end is saturating, so a run reaching the end of the address space
 cuts *less* than it names rather than more.
 
-**What remains, and is scheduled.** A single operation's memory is now
-proportional to the *runs* it releases, which is bounded for any file the
-allocator laid out contiguously and for every ordinary workload, but not for a
-maximally fragmented very large file, whose extent count is itself unbounded.
-That is D67, the next item in `plans/IMPLEMENT-OUTSTANDING-ARXFS.md`.
+**What remained** — a maximally fragmented very large file, whose extent count
+is itself unbounded, still accumulated one run per extent inside one
+transaction — is D67 below, and is fixed.
 
 ---
 
-## D67 — an ARXFS delete is not incremental, so a maximally fragmented very large file is still unbounded
+## D67 — an ARXFS delete was not incremental, so a maximally fragmented very large file was unbounded (FIXED)
 
-**State:** open, and **scheduled next**: it is the immediate next item in
-`plans/IMPLEMENT-OUTSTANDING-ARXFS.md`, ahead of every remaining ARXFS row.
-
-**Where.** `drivers/filesystem/arxfs/src/lib.rs` `free_all_blocks`,
-`free_extent_tail`, `drop_name`, `remove_inner`, and the transaction lifecycle
-around them.
+**Where.** `drivers/filesystem/arxfs/src/lib.rs` (`shrink_tail_step`,
+`drop_name`, `drain_pending_deletes`, `truncate_file`, the transaction
+lifecycle), `src/transaction.rs`, `src/runs.rs`, `src/allocator.rs`,
+`src/check.rs`.
 
 **Mechanism.** D28 made a transaction's block bookkeeping proportional to the
 *runs* it releases rather than the blocks, which is what an ordinary delete
-needs. It did not make the operation *incremental*: `free_all_blocks` and
-`free_extent_tail` still run to completion inside one transaction, so the run
-count they accumulate is the extent count of what they free. A file the
-allocator laid out contiguously has one extent; a maximally fragmented one on a
-100 TB volume can have of the order of 10^10, and its extent tree of the order
-of 10^8 nodes, so a single `rm` still asks for memory the small-RAM floor
-(`AGENTS.md` §26.7) cannot give it. The same operation is also uninterruptible
-and unresumable, which §26.6 forbids for a long whole-volume operation
-regardless of its memory.
+needs. It did not make the operation *incremental*: the whole-inode and tail
+frees ran to completion inside one transaction, so the run count they
+accumulated was the extent count of what they freed. A file the allocator
+laid out contiguously has one extent; a maximally fragmented one on a 100 TB
+volume can have of the order of 10^10, so a single `rm` still asked for memory
+the small-RAM floor (`AGENTS.md` §26.7) cannot give it, and the operation was
+uninterruptible besides (§26.6).
 
-**Fix direction.** Free across commits, the way btrfs and ext4 do it. An
-on-disk **pending-delete set** reached from the transaction root records an
-inode that is unreachable but not yet reclaimed, so `unlink` publishes "this
-name is gone and this inode is pending deletion" in one bounded transaction and
-then frees the inode's extents in bounded chunks, committing between them; a
-mount finds the set non-empty and finishes an interrupted delete before serving.
-`truncate` takes the same path from the high end down, publishing a shorter
-`inode.size` at each boundary it reaches, so every intermediate state is a
-lawful volume. The bound each chunk yields to is the write-back bound
-(`plans/ARXFS-WRITEBACK.md` WB5) the write path already yields to, so there is
-one ceiling and one policy, not two. This is an on-disk format addition plus a
-mount-time recovery pass plus a change to the shape of two operations — larger
-than D28 and independent of it, which is why it is its own item.
+**Fix (item D67 of `plans/IMPLEMENT-OUTSTANDING-ARXFS.md`).** Freeing spans
+transactions, behind on-disk state:
 
----
+- **The pending-delete set.** The transaction root names a tree keyed by inode
+  number — a *set*, its record the key alone — holding every inode whose last
+  name has gone and whose blocks are not all freed. `unlink` removes the name
+  and names the inode in the set in **one** bounded transaction; the freeing
+  continues in further ones. A writable mount finishes the set before it serves
+  a request, a read-only mount leaves it alone, and `check` reclaims an orphan
+  by the same route rather than freeing it inside its own pass. The set is
+  authoritative metadata: the free-space rebuild walks its nodes and scrub
+  verifies them. It needs no incompatible-feature bit, because a reader that did
+  not understand it would leave the inodes it names unreachable and allocated —
+  exactly the orphan `check` reclaims — and could never misread live data.
+- **Freeing descends.** One `shrink_tail_step` replaces both old paths and takes
+  the highest extent first, lowering `inode.size` to the boundary each freed
+  extent exposes. That is what makes a step publishable: every intermediate
+  state on the medium is a *shorter file*, never one of the original length with
+  holes where its data had been, which is what freeing upward from the cut would
+  have left after a crash. So `truncate` needs no set entry at all — an
+  interrupted one is consistent, merely unfinished.
+- **One ceiling.** A step stops on an extent boundary once the transaction has
+  reached the write-back ceiling (WB5), the same ceiling the write path yields
+  to. For that to bound a *free*, the ceiling had to count the transaction's run
+  bookkeeping alongside its staged blocks: freeing a fragmented file dirties a
+  spine's worth of blocks whatever its extent count while the runs grow one per
+  extent, so a ceiling over the blocks alone would not have bitten at all. At
+  least one extent goes before the ceiling is consulted, so progress is
+  unconditional and no caller can spin. An ordinary delete is still exactly one
+  transaction, because the operation that detaches the name takes the first step
+  itself.
+
+*Measured (`tests/bounded_iteration.rs`).* Deleting a maximally fragmented file
+holds **88 600** bytes at 1 200 extents and **110 368** at 4 800 — the ceiling,
+not the file. Freeing the same file inside one transaction holds **448 448** at
+1 200 extents and **626 312** at 2 400, growing with it.
+
+**Also fixed, found by the same work.** A stale handle could hard-link a node
+whose last name had gone, putting a live name on blocks the reclaim was about to
+free; `link` now refuses a node with no names left, and the reclaim itself drops
+a set entry whose inode still has names rather than freeing under one — a
+contradiction only a damaged volume can produce, and the reclaim loses the space
+rather than the data. `Extent::decode` accepted a zero-length run, which no
+write path produces and on which the downward tail free would have stopped,
+reporting a tree it had emptied while the record still stood and leaving its
+nodes allocated once the inode went; it is refused, and the reclaim additionally
+refuses to free an inode whose extent root survived. A directory's intermediate
+size was computed from the data capacity rather than the whole metadata block,
+so one stride is now derived per kind in one place and `dir_block_count` reads
+it. `inode_spec` carried a hand-written copy of the inode tree's owner sentinel
+where the reserved-owner enum already defines it. `NodeTrail`'s subtree-closing
+half lost its last consumer with the bulk tree free and is deleted.
 
 ## D29 — a CPU-bound user task was never sampled, so a healthy core was reported hard-locked
 

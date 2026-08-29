@@ -15,6 +15,17 @@
 
 use alloc::collections::BTreeMap;
 
+use tairix_reclaim::MAP_ENTRY_OVERHEAD;
+
+/// Bytes one run costs: its start and its length, plus the per-entry map
+/// bookkeeping every bounded pool in the tree charges on top of a payload.
+///
+/// This is what makes a set's `run_count` a *byte* figure the write-back
+/// ceiling can be compared against, so a transaction that dirties almost
+/// nothing while releasing millions of runs still meets the same bound as one
+/// that stages blocks.
+const RUN_ENTRY_BYTES: usize = 2 * size_of::<u64>() + MAP_ENTRY_OVERHEAD;
+
 /// An ordered set of `[start, start + len)` block runs, kept disjoint and
 /// non-adjacent.
 ///
@@ -54,6 +65,11 @@ impl RunSet {
     /// Blocks the set holds, across every run.
     pub(crate) fn blocks(&self) -> u64 {
         self.blocks
+    }
+
+    /// Bytes the set occupies.
+    pub(crate) fn bytes(&self) -> usize {
+        self.runs.len().saturating_mul(RUN_ENTRY_BYTES)
     }
 
     /// Whether `block` lies in one of the runs.

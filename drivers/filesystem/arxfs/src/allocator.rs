@@ -211,6 +211,25 @@ impl Allocator {
         self.pending_free.clear();
     }
 
+    /// Bytes the open transaction's run bookkeeping holds.
+    ///
+    /// Pinned exactly as a staged block is: only publishing the transaction
+    /// returns it, so it belongs inside the same write-back ceiling. Without
+    /// it a delete would escape the bound entirely — freeing a fragmented file
+    /// dirties a spine's worth of blocks whatever its extent count, while the
+    /// released runs grow with it. The pending-discard queue is left out: it
+    /// survives commits and carries its own [`MAX_PENDING_DISCARD_RUNS`] cap.
+    pub(crate) fn txn_pinned_bytes(&self) -> usize {
+        self.txn_freed
+            .bytes()
+            .saturating_add(self.txn_private.bytes())
+            .saturating_add(self.op_claimed.bytes())
+            .saturating_add(self.op_released.bytes())
+            .saturating_add(self.op_deferred.bytes())
+            .saturating_add(self.pending_used.bytes())
+            .saturating_add(self.pending_free.bytes())
+    }
+
     /// A cold allocator over `geom`, with empty transaction bookkeeping.
     pub(crate) fn new(geom: MapGeometry, block_size: usize, total_blocks: u64) -> Self {
         Self {
@@ -1020,9 +1039,9 @@ impl<B: Block> ARXFS<B> {
     /// Rebuild the allocation map from scratch by walking the live trees: the
     /// superblock ring (always reserved), the map region itself, the published
     /// transaction root, the scrub-progress and health-baseline records, every
-    /// chunk / reverse-reference and inode-tree node, and, for each inode, its
-    /// extent-tree nodes plus the physical runs they map. Every metadata block
-    /// accounts for both its physical copies
+    /// chunk, reverse-reference, pending-delete, and inode-tree node, and, for
+    /// each inode, its extent-tree nodes plus the physical runs they map. Every
+    /// metadata block accounts for both its physical copies
     /// (`docs/src/filesystem/arxfs-spec.md` §4, §5).
     ///
     /// Free space is rebuildable derived state, never authoritative, so this

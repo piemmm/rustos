@@ -149,6 +149,7 @@ superblock ring
       -> extent tree
       -> chunk/refcount tree
       -> reverse-reference tree
+      -> pending-delete set
       -> allocation map (in place, not a COW child)
       -> device-health tree
       -> rebuildable secondary indexes
@@ -170,7 +171,8 @@ Authoritative metadata:
 - extent tree;
 - chunk table;
 - refcount tree;
-- reverse-reference tree.
+- reverse-reference tree;
+- pending-delete set (§14).
 
 Rebuildable metadata:
 
@@ -934,6 +936,49 @@ SCSI `SYNCHRONIZE CACHE`) and fails closed if the device cannot confirm them.
 The clean map stamp follows; losing only that stamp costs a rebuild.
 
 Discard may never destroy data reachable from retained roots.
+
+### Freeing spans transactions: the pending-delete set
+
+A single transaction's memory is bounded (§22), so an operation that frees an
+unbounded amount of space cannot be one transaction. Unlinking a maximally
+fragmented very large file would be exactly that: its extent count is of the
+order of 10^10, and the bookkeeping is one run per extent.
+
+So freeing is **incremental, from the high end down**, and what makes it
+resumable is on-disk state:
+
+- The transaction root names a **pending-delete set**: a tree, keyed by inode
+  number, holding every inode that has lost its last name and whose blocks are
+  not yet all freed. It is authoritative metadata, walked by the free-space
+  rebuild and verified by scrub like any other tree, and it carries no value
+  beside the key — it is a set, not a map.
+- `unlink` removes the name **and** names the inode in the set in one bounded
+  transaction, then frees the inode's mappings in bounded steps, publishing
+  between them. A step stops on an extent boundary once the transaction has
+  reached its write-back ceiling (§22), so the ceiling is the one bound over a
+  transaction's memory and there is not a second policy for freeing. An
+  ordinary delete still fits one transaction, because the operation that
+  detaches the name takes the first step itself.
+- A **writable mount finishes the set before it serves a request**. Every state
+  that reaches the medium is therefore lawful: the inode is unreachable by name
+  and named by the set, so an interrupted delete is something the next mount
+  completes rather than an orphan holding blocks for the life of the volume. A
+  read-only mount leaves the set alone.
+- A node the set names has no names left (`nlink == 0`), and no operation may
+  give it one: a stale handle asking to hard-link it is refused, because a live
+  name over blocks the reclaim is about to free would lose data.
+- `truncate` needs no set entry, because it frees **downward** and publishes the
+  shorter size at each boundary it reaches. Every intermediate state is a
+  shorter version of the same file, never one of the original length with holes
+  where its data had been, so an interrupted truncate needs no resumption to be
+  consistent — only to be finished, which the caller may simply ask for again.
+- `check` reclaims an orphan the same way, by naming it in the set, for the same
+  reason: an orphan may be arbitrarily large.
+
+The set needs no incompatible-feature bit. A reader that did not understand it
+would leave the inodes it names unreachable and allocated — recoverable by
+`check`, which reclaims exactly such an orphan — and could never misread live
+data, which is the harm a feature bit exists to prevent (§4).
 
 ---
 
@@ -1709,6 +1754,14 @@ several volumes on one small machine share a bounded total rather than each
 taking a slab. Reaching the ceiling publishes the transaction, so a writer that
 outruns the device waits for real I/O instead of growing.
 
+The ceiling counts the transaction's **run bookkeeping** alongside its staged
+blocks, because both are pinned on the same terms — only publishing returns
+either — and because an operation that frees space holds almost all of its
+memory in the runs. Freeing a maximally fragmented file dirties a spine's worth
+of blocks however many extents it has, while the runs it releases grow one per
+extent, so a ceiling over the blocks alone would not bound a delete at all
+(§14).
+
 Rising memory pressure lowers that ceiling and shortens the dirty-age window,
 band by band, down to a **floor** of one coalesced device transfer and no
 further: the answer to a tightening machine is always to publish sooner, never
@@ -1725,6 +1778,13 @@ The operation's close publishes, so the caller's next call proceeds against an
 empty set. A caller with an indivisible value to store (a symlink target,
 bounded by the ABI) asks for the whole of it and the bound bites at the
 operation's end instead.
+
+An unlink or a truncate scales with the *volume's* state rather than a caller's
+argument, so it yields to the same ceiling from the other side: a step frees
+extents from the high end down and stops on an extent boundary once the
+transaction is full, after which the operation publishes and takes another step
+(§14). At least one extent goes before the ceiling is consulted, so progress is
+unconditional there too.
 
 The pinned bytes are published through the reclaim model's pinned ledger, so a
 volume's unwritten data is visible in the System Information cache-ledger

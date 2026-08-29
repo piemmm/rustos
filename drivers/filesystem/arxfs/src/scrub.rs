@@ -437,9 +437,9 @@ impl<B: Block> ARXFS<B> {
 
     /// Verify the volume-wide metadata that is not reached through an inode:
     /// the committed superblock slot, the transaction root, the inode tree,
-    /// and the chunk and reverse-reference trees. Done once per scrub, at the
-    /// fresh start, so an interrupted and an uninterrupted pass count it
-    /// identically.
+    /// and the chunk, reverse-reference, and pending-delete trees. Done once
+    /// per scrub, at the fresh start, so an interrupted and an uninterrupted
+    /// pass count it identically.
     fn scrub_global_metadata(&mut self, report: &mut ScrubReport) -> Result<(), DriverError> {
         let committed_slot = crate::superblock::slot_block(
             self.ring_pos.wrapping_sub(1) % crate::superblock::RING_SLOTS,
@@ -451,6 +451,7 @@ impl<B: Block> ARXFS<B> {
         self.scrub_btree(self.inode_tree_root, report)?;
         self.scrub_btree(self.chunk_tree_root, report)?;
         self.scrub_btree(self.reverse_ref_tree_root, report)?;
+        self.scrub_btree(self.pending_delete_root, report)?;
         Ok(())
     }
 

@@ -34,8 +34,8 @@
 //! position is a single key, so a walk both survives mutation of the tree
 //! between steps and can be persisted and resumed in a later call.
 //! [`NodeTrail`] turns that key-order walk into the node enumeration the
-//! free-space rebuild and whole-tree freeing need, holding one path instead of
-//! a node list.
+//! free-space rebuild and the scrub need, holding one path instead of a node
+//! list.
 //!
 //! [`ARXFS::btree_insert`] and [`ARXFS::btree_remove`] descend once recording
 //! the path, edit the leaf, then walk back up rewriting each ancestor in turn
@@ -1217,22 +1217,19 @@ impl TreeWalk {
     }
 }
 
-/// Which nodes a key-order walk has entered and finished with.
+/// Which nodes a key-order walk has newly entered.
 ///
-/// A walk visits paths in key order, so the moment a level of the path
-/// changes, the node that stood there has no keys left beneath it and every
-/// deeper level of the new path is a node just entered. That turns the leaf
-/// walk into a node enumeration for the callers that need one — the
-/// free-space rebuild marking every node used, freeing a whole tree — with a
-/// single path's worth of state instead of the tree's node list, and without a
-/// second traversal to maintain.
+/// A walk visits paths in key order, so every level of the new path below the
+/// prefix it shares with the last one is a node just entered. That turns the
+/// leaf walk into a node enumeration for the callers that need one — the
+/// free-space rebuild marking every node used, the scrub verifying every node —
+/// with a single path's worth of state instead of the tree's node list, and
+/// without a second traversal to maintain.
 pub(crate) struct NodeTrail {
     open: [u64; PATH_SLOTS],
     open_depth: usize,
     entered: [u64; PATH_SLOTS],
     entered_len: usize,
-    closed: [u64; PATH_SLOTS],
-    closed_len: usize,
 }
 
 impl NodeTrail {
@@ -1242,13 +1239,10 @@ impl NodeTrail {
             open_depth: 0,
             entered: [0; PATH_SLOTS],
             entered_len: 0,
-            closed: [0; PATH_SLOTS],
-            closed_len: 0,
         }
     }
 
-    /// Move the trail onto `path`, recomputing [`Self::entered`] and
-    /// [`Self::closed`].
+    /// Move the trail onto `path`, recomputing [`Self::entered`].
     pub(crate) fn advance(&mut self, path: &[u64]) {
         let path = &path[..path.len().min(PATH_SLOTS)];
         let common = path
@@ -1256,10 +1250,6 @@ impl NodeTrail {
             .zip(&self.open[..self.open_depth])
             .take_while(|(new, open)| new == open)
             .count();
-        self.closed_len = self.open_depth - common;
-        for (slot, node) in self.open[common..self.open_depth].iter().rev().enumerate() {
-            self.closed[slot] = *node;
-        }
         self.entered_len = path.len() - common;
         self.entered[..self.entered_len].copy_from_slice(&path[common..]);
         self.open[..path.len()].copy_from_slice(path);
@@ -1269,17 +1259,5 @@ impl NodeTrail {
     /// Nodes the last [`Self::advance`] entered, shallowest first.
     pub(crate) fn entered(&self) -> &[u64] {
         &self.entered[..self.entered_len]
-    }
-
-    /// Nodes whose subtree the last [`Self::advance`] finished, deepest first.
-    pub(crate) fn closed(&self) -> &[u64] {
-        &self.closed[..self.closed_len]
-    }
-
-    /// The nodes still open, deepest first, leaving the trail empty: what a
-    /// caller freeing a tree has left to free once the walk ends.
-    pub(crate) fn close(&mut self) -> &[u64] {
-        self.advance(&[]);
-        self.closed()
     }
 }

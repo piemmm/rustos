@@ -94,7 +94,8 @@ pub struct CheckReport {
     pub dangling_entries: u64,
     /// Live inodes not reachable from the root through any directory: orphans.
     pub orphaned_inodes: u64,
-    /// Orphaned inodes `check` reclaimed (freeing their blocks and inode slot).
+    /// Orphaned inodes `check` reclaimed: published in the pending-delete set
+    /// and then freed, blocks and inode slot, in bounded steps.
     pub orphans_reclaimed: u64,
     /// `true` once the rebuildable derived state — the free-space bitmap
     /// and the in-memory dedupe index — was rebuilt from the
@@ -313,6 +314,10 @@ impl<B: Block> ARXFS<B> {
                 } else {
                     self.finish_unpublished();
                 }
+                // The pass published each orphan it found rather than freeing
+                // it inline, so the freeing happens here, in bounded steps
+                // behind the committed set — the same route an unlink takes.
+                self.drain_pending_deletes()?;
                 report.log_outcome(sink);
                 Ok(report)
             }
@@ -634,10 +639,18 @@ impl<B: Block> ARXFS<B> {
         self.reclaim_orphans(reachable, report)
     }
 
-    /// Reclaim every live inode the directory walk did not reach.
+    /// Reclaim every live inode the directory walk did not reach, by
+    /// publishing it in the pending-delete set.
     ///
-    /// Reclaiming one removes it from the tree being walked, so a step
-    /// reclaims at most one and then resumes past it.
+    /// The set is the same route an ordinary unlink takes, and for the same
+    /// reason: a maximally fragmented very large orphan cannot be freed inside
+    /// one transaction, so what happens here is bounded (a name count set to
+    /// zero and a set entry) and the freeing happens in bounded steps once the
+    /// pass has committed. The count is only ever read by a caller the drain
+    /// returned successfully to, so "reclaimed" stays true.
+    ///
+    /// Publishing one rewrites the inode in the tree being walked, so a step
+    /// takes at most one and then resumes past it.
     fn reclaim_orphans(
         &mut self,
         reachable: &mut ScratchArray,
@@ -672,8 +685,11 @@ impl<B: Block> ARXFS<B> {
             };
             report.orphaned_inodes += 1;
             let mut inode = self.read_inode(ino)?;
-            self.free_all_blocks(&mut inode, ino)?;
-            self.free_inode(ino)?;
+            // A stored count on an inode no entry names has drifted whatever it
+            // says, and the reclaim reads zero as "unreachable".
+            inode.nlink = 0;
+            self.publish_pending_delete(ino)?;
+            self.write_inode(ino, &inode)?;
             report.orphans_reclaimed += 1;
             match key.checked_add(1) {
                 Some(next) => walk.seek(next),
@@ -758,6 +774,7 @@ impl<B: Block> ARXFS<B> {
         fs.next_ino = root.next_ino;
         fs.chunk_tree_root = root.chunk_tree_root;
         fs.reverse_ref_tree_root = root.reverse_ref_tree_root;
+        fs.pending_delete_root = root.pending_delete_root;
         fs.generation = root.generation;
         fs.rescue_extract(out, &mut report)?;
         report.log_outcome(sink);

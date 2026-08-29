@@ -341,6 +341,13 @@ assembled per mount by `kernel/tairix-kernel::writeback_bound`.
   target, bounded by the ABI) asks for the whole of it and the bound bites at
   the operation's end. `FilesystemWrite::write_all` is the one place the resume
   loop lives for every caller that needs the whole value stored.
+- **Over the transaction, not only its blocks.** The ceiling counts the
+  transaction's run bookkeeping (`RunSet::bytes`, `Allocator::txn_pinned_bytes`)
+  with its staged blocks, because both are pinned on the same terms and an
+  operation that *frees* space holds almost all of its memory in the runs:
+  freeing a maximally fragmented file dirties a spine's worth of blocks whatever
+  its extent count, so a ceiling over the blocks alone would not have bounded a
+  delete at all (`plans/OPEN-DEFECTS.md` D67).
 - **Accounted as pinned** through `tairix_reclaim::PinnedLedger`, a row of its
   own in the §16.6 cache-ledger export. A dirty block is deliberately *not*
   admitted through the `ReclaimCache` classification gate, because that gate's
@@ -636,7 +643,7 @@ floor extended to *several* 100 TB volumes mounted and writing at once (WB5
 holds it for one); crash-injection across the new commit shape; fuzz unchanged
 in surface but re-run; this file replaced by its done-state summary. The spec
 §22, `docs/src/filesystem/arxfs.md`, and the driver `README.md` are current as
-of WB5 and need only the hardware figure.
+of D67 and need only the hardware figure.
 
 Acceptance: the measured Pi 4 SD write throughput improvement is recorded as a
 number, not a claim; the multi-volume floor test passes with bounded resident

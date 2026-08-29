@@ -46,8 +46,8 @@ no-deferral rule), ahead of everything below it.
 | WB-D1 | Host write-back expiry timer (`ARXFS-WRITEBACK.md` §10) | `ARXFS-WRITEBACK.md` | 17 | WB4 | **done** |
 | WB5 | The bound and memory pressure | `ARXFS-WRITEBACK.md` | 17 | WB1 | **done** |
 | D28 | Extent-based deferred freeing (defect `OPEN-DEFECTS.md` D28) | `OPEN-DEFECTS.md` | — | — | **done** |
-| D67 | Incremental, resumable freeing (defect `OPEN-DEFECTS.md` D67) | `OPEN-DEFECTS.md` | — | D28 | **next** |
-| WB6 | Hardware acceptance + docs | `ARXFS-WRITEBACK.md` | 17 | WB2–WB5 | planned |
+| D67 | Incremental, resumable freeing (defect `OPEN-DEFECTS.md` D67) | `OPEN-DEFECTS.md` | — | D28 | **done** |
+| WB6 | Hardware acceptance + docs | `ARXFS-WRITEBACK.md` | 17 | WB2–WB5 | **next** |
 | M2 | Bounded passes: scrub, discard sweep, health (D-M2/3/4) | `ARXFS-MAINTENANCE.md` | 18 | A2, M1 | planned |
 | M3 | The maintenance scheduler | `ARXFS-MAINTENANCE.md` | 18 | M0, M2 | planned |
 | M4 | The `FilesystemMaintenance` driver-ABI facet | `ARXFS-MAINTENANCE.md` | 18 | M3 | planned |
@@ -128,16 +128,21 @@ their reason recorded there, not here:
   and the map and the chunk-tree release are run-wise with it: truncating a
   contiguous file to zero holds 10 352 bytes over 35 allocations and removing it
   11 376 over 52, the same at 400 blocks as at 1 600.
-- **D67 comes before WB6, because D28's own reading surfaced it and the
-  no-deferral rule puts a found defect ahead of everything planned.** A
-  transaction's memory now follows the *runs* it releases, which is what an
-  ordinary delete needs, but a free still runs to completion inside one
+- **D67 came before WB6, because D28's own reading surfaced it and the
+  no-deferral rule puts a found defect ahead of everything planned. It is
+  closed.** A transaction's memory followed the *runs* it released, which is
+  what an ordinary delete needs, but a free ran to completion inside one
   transaction — so a maximally fragmented 100 TB file, whose extent count is
-  itself of the order of 10^10, is still unbounded, and the operation is
-  uninterruptible besides. Fixing it is freeing across commits behind an
-  on-disk pending-delete set with a mount-time sweep: a format addition, a
-  recovery pass, and a change to the shape of `unlink` and `truncate` —
-  genuinely too large for D28 and independent of it.
+  itself of the order of 10^10, was unbounded and uninterruptible besides.
+  Freeing now spans transactions behind an on-disk pending-delete set the
+  transaction root names, finished by the next writable mount; the tail is freed
+  from the high end down, so an interrupted truncate is a shorter file rather
+  than a holed one and needs no set entry; and the step yields to the write-back
+  ceiling, which now counts a transaction's run bookkeeping — without that a
+  free, which dirties a spine's worth of blocks whatever the extent count, would
+  not have met the bound at all. Deleting a maximally fragmented file holds
+  88 600 bytes at 1 200 extents and 110 368 at 4 800, against 448 448 and
+  626 312 for the same file freed inside one transaction.
 - **WB-D1 came before WB5, because WB4 found it and the no-deferral rule puts a
   found defect ahead of everything planned. It is closed.** WB4 made a
   transaction span operations and gave it a per-device-class dirty-age window,
@@ -183,11 +188,8 @@ nothing is allocated per record. The position is a single key, so a caller may
 mutate the tree between steps — truncation frees run by run, seeking straight to
 the run covering the cut — and a bounded pass may stop, persist that key, and
 resume with the sequence an uninterrupted walk would have yielded. `NodeTrail`
-turns the same walk into the node enumeration the free-space rebuild and
-whole-tree freeing need, reporting each node as the walk enters it and again
-when it leaves the last key beneath it; freeing on the second is what stops a
-later step descending through a block already back in the allocator. The
-collecting forms (`btree_collect_entries`, `btree_collect_nodes`,
+turns the same walk into the node enumeration the free-space rebuild and the
+scrub need, reporting each node as the walk enters it. The collecting forms (`btree_collect_entries`, `btree_collect_nodes`,
 `btree_collect_tree`) are deleted, and `scrub`'s verifying node walk is a
 bounded frame stack rather than recursion, so no read path recurses per tree
 level.

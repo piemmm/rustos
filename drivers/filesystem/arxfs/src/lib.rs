@@ -118,7 +118,7 @@ use btree::{NodeTrail, TreeWalk};
 use dedupe::{
     chunk_spec, dedupe_key, reverse_ref_spec, ChunkRecord, DedupeCandidate, REVERSE_REF_CAP,
 };
-use header::{BlockHeader, BlockType, FORMAT_VERSION, HEADER_LEN, HEADER_MAGIC};
+use header::{BlockHeader, BlockType, ReservedOwner, FORMAT_VERSION, HEADER_LEN, HEADER_MAGIC};
 use superblock::{slot_block, Superblock, RING_BLOCKS, RING_SLOTS};
 use transaction::TxnRoot;
 use wcache::{CommitScheduler, DirtySet, WritePhase, WritebackBound, WritebackReading};
@@ -564,6 +564,12 @@ impl Extent {
         let stored = u64::from(rd_u32(value, 16));
         let flags = rd_u32(value, 20);
         let fits = |run: u64| phys.checked_add(run).is_some_and(|end| end <= total_blocks);
+        // A zero-length run maps nothing, so no write path produces one, and a
+        // tail free walking downward would stop on it and report a tree it had
+        // emptied while the record still stood.
+        if len == 0 {
+            return Err(DriverError::DeviceFault);
+        }
         match flags {
             0 if stored == 0 && fits(len) => Ok(Self::raw(phys, len)),
             EXTENT_FLAG_COMPRESSED
@@ -795,6 +801,12 @@ pub struct ARXFS<B: Block> {
     /// filesystem-observed fault counters, reached from the transaction root
     /// (`health` module, `docs/src/filesystem/arxfs-spec.md` §4, §11).
     health_baseline_root: u64,
+    /// Root of the pending-delete set, `0` when no inode awaits reclaim. It
+    /// names every inode detached from its last name whose blocks are not yet
+    /// freed, so a delete may span transactions and an interrupted one is
+    /// finished by the next writable mount
+    /// (`docs/src/filesystem/arxfs-spec.md` §4, §14).
+    pending_delete_root: u64,
     /// The volume's deduplication domain (`crypto` module). Dedupe never
     /// crosses it.
     dedupe_domain: u64,
@@ -883,6 +895,7 @@ struct Roots {
     reverse_ref_tree_root: u64,
     scrub_progress_root: u64,
     health_baseline_root: u64,
+    pending_delete_root: u64,
     incompat: u64,
     free_count: u64,
 }
@@ -987,7 +1000,16 @@ const METADATA_RESERVE: u64 = 16;
 fn inode_spec() -> btree::TreeSpec {
     btree::TreeSpec {
         value_len: INODE_SIZE,
-        owner: u64::MAX,
+        owner: ReservedOwner::InodeTree.sentinel(),
+    }
+}
+
+/// The pending-delete set's record shape: a **set** of inode numbers, so the
+/// key is the whole record and a leaf entry carries no value at all.
+fn pending_delete_spec() -> btree::TreeSpec {
+    btree::TreeSpec {
+        value_len: 0,
+        owner: ReservedOwner::PendingDeleteTree.sentinel(),
     }
 }
 
@@ -1087,8 +1109,8 @@ impl<B: Block> ARXFS<B> {
         Ok(self)
     }
 
-    /// Bytes the open transaction pins in RAM, published through the host's
-    /// ledger as they change.
+    /// Unwritten sealed-block bytes the open transaction holds, published
+    /// through the host's ledger as they change.
     #[must_use]
     pub fn writeback_pinned_bytes(&self) -> usize {
         self.dirty.pinned_bytes()
@@ -1559,6 +1581,7 @@ impl<B: Block> ARXFS<B> {
             reverse_ref_tree_root: self.reverse_ref_tree_root,
             scrub_progress_root: self.scrub_progress_root,
             health_baseline_root: self.health_baseline_root,
+            pending_delete_root: self.pending_delete_root,
             incompat: self.incompat,
             free_count: self.free_count,
         }
@@ -1574,6 +1597,7 @@ impl<B: Block> ARXFS<B> {
         self.reverse_ref_tree_root = roots.reverse_ref_tree_root;
         self.scrub_progress_root = roots.scrub_progress_root;
         self.health_baseline_root = roots.health_baseline_root;
+        self.pending_delete_root = roots.pending_delete_root;
         self.incompat = roots.incompat;
     }
 
@@ -1595,10 +1619,8 @@ impl<B: Block> ARXFS<B> {
         // allocator, so asking per staged block would take the global
         // frame-allocator lock hundreds of times for an answer that cannot
         // change inside one operation.
-        self.reading = self
-            .bound
-            .as_ref()
-            .map(|bound| bound.reading(self.dirty.pinned_bytes()));
+        let held = self.transaction_pinned_bytes();
+        self.reading = self.bound.as_ref().map(|bound| bound.reading(held));
         if let Some(reading) = self.reading {
             self.schedule.set_band(reading.band);
         }
@@ -1645,13 +1667,27 @@ impl<B: Block> ARXFS<B> {
         Ok(())
     }
 
-    /// Whether the dirty set has reached the ceiling this operation read, so
-    /// the transaction must be published before another joins it.
+    /// Bytes the open transaction pins: the sealed blocks it has staged plus
+    /// the run bookkeeping it holds about the blocks it claimed and released.
+    ///
+    /// Both are undroppable and both are returned only by publishing, so both
+    /// are what the ceiling bounds. Counting only the blocks would let a
+    /// delete slip the bound: releasing a maximally fragmented file dirties a
+    /// spine's worth of blocks however many extents it has, while the runs it
+    /// releases grow one per extent.
+    fn transaction_pinned_bytes(&self) -> usize {
+        self.dirty
+            .pinned_bytes()
+            .saturating_add(self.allocator().map_or(0, Allocator::txn_pinned_bytes))
+    }
+
+    /// Whether the open transaction has reached the ceiling this operation
+    /// read, so it must be published before another joins it.
     ///
     /// A handle the host has not bounded has no ceiling to reach.
     fn writeback_full(&self) -> bool {
         self.reading
-            .is_some_and(|reading| self.dirty.pinned_bytes() >= reading.ceiling)
+            .is_some_and(|reading| self.transaction_pinned_bytes() >= reading.ceiling)
     }
 
     /// Publish the open transaction, if there is one, before an operation that
@@ -2082,6 +2118,7 @@ impl<B: Block> ARXFS<B> {
             reverse_ref_tree_root: self.reverse_ref_tree_root,
             scrub_progress_root: self.scrub_progress_root,
             health_baseline_root: self.health_baseline_root,
+            pending_delete_root: self.pending_delete_root,
             alloc_map_start,
             alloc_map_covered: self.total_blocks,
             free_count: self.free_count,
@@ -2155,6 +2192,7 @@ impl<B: Block> ARXFS<B> {
             reverse_ref_tree_root: 0,
             scrub_progress_root: 0,
             health_baseline_root: 0,
+            pending_delete_root: 0,
             dedupe_domain: 0,
             root_phys: 0,
             free_count: total_blocks,
@@ -2386,6 +2424,7 @@ impl<B: Block> ARXFS<B> {
         fs.reverse_ref_tree_root = root.reverse_ref_tree_root;
         fs.scrub_progress_root = root.scrub_progress_root;
         fs.health_baseline_root = root.health_baseline_root;
+        fs.pending_delete_root = root.pending_delete_root;
 
         fs.free_count = root.free_count;
         // A read-only handle builds no allocation state at all: it cannot
@@ -2394,6 +2433,11 @@ impl<B: Block> ARXFS<B> {
         if !read_only {
             fs.adopt_or_rebuild_alloc_map(root.alloc_map_start, root.alloc_map_covered)?;
         }
+        // Finish any delete a previous mount published and did not complete,
+        // before the volume serves a request. A read-only handle has nothing to
+        // finish it with and leaves the set alone: the blocks stay allocated
+        // and reachable from nothing, which is what read-only means here.
+        fs.drain_pending_deletes()?;
         Ok(fs)
     }
 
@@ -2702,15 +2746,17 @@ impl<B: Block> ARXFS<B> {
     }
 
     /// Mark every block reachable from the committed trees used while the
-    /// allocation map is being rebuilt: every chunk / reverse-reference and
-    /// inode-tree node, and, for each inode, its extent-tree nodes plus the
-    /// physical runs they map. Every metadata block accounts for both its
-    /// physical copies (`docs/src/filesystem/arxfs-spec.md` §4, §5).
+    /// allocation map is being rebuilt: every chunk, reverse-reference,
+    /// pending-delete, and inode-tree node, and, for each inode, its
+    /// extent-tree nodes plus the physical runs they map. Every metadata block
+    /// accounts for both its physical copies
+    /// (`docs/src/filesystem/arxfs-spec.md` §4, §5).
     pub(crate) fn mark_reachable_metadata(&mut self) -> Result<(), DriverError> {
         let mut walk = TreeWalk::new(self.block_size)?;
         let mut extent_walk = TreeWalk::new(self.block_size)?;
         self.mark_tree_nodes(self.chunk_tree_root, chunk_spec(), &mut walk)?;
         self.mark_tree_nodes(self.reverse_ref_tree_root, reverse_ref_spec(), &mut walk)?;
+        self.mark_tree_nodes(self.pending_delete_root, pending_delete_spec(), &mut walk)?;
 
         let spec = inode_spec();
         let mut trail = NodeTrail::new();
@@ -3402,48 +3448,90 @@ impl<B: Block> ARXFS<B> {
         self.seal_data_block(phys, buf, StoredForm::Raw)
     }
 
-    /// Free every physical run backing `inode` (number `ino`) and every node
-    /// of its extent tree, leaving an empty zero-length file.
+    /// One bounded step of freeing `inode`'s (number `ino`) mappings at or
+    /// above logical block `keep`, taking them from the **high end down**.
+    /// Returns `true` when nothing at or above `keep` is mapped any more.
+    ///
+    /// Descending is what makes the step publishable. Each extent it drops
+    /// lowers `inode.size` to the boundary that extent exposed, so the caller
+    /// may write the inode and commit between steps and every intermediate
+    /// state on the medium is a *shorter file* — never one with holes where its
+    /// data used to be, which is what freeing upward from the cut would leave
+    /// after a crash. The extent tree shrinks by removal, so it is a valid tree
+    /// at each of those points too.
+    ///
+    /// The step stops on an extent boundary once the transaction has reached
+    /// its write-back ceiling, so a delete or a truncate costs the ceiling
+    /// whatever the file's extent count. Progress is unconditional: at least
+    /// one extent goes before the ceiling is consulted, so a caller looping on
+    /// the result cannot spin.
     ///
     /// A directory's content blocks are metadata mirrored pairs, so they are
-    /// freed with their companion ([`Self::free_meta`]); a regular file's and
-    /// a link's are single-copy data ([`Self::release_data_run`]).
-    fn free_all_blocks(&mut self, inode: &mut Inode, ino: u32) -> Result<(), DriverError> {
+    /// freed with their companion; a regular file's and a link's are
+    /// single-copy data ([`Self::release_data_run`]).
+    fn shrink_tail_step(
+        &mut self,
+        inode: &mut Inode,
+        ino: u32,
+        keep: u64,
+    ) -> Result<bool, DriverError> {
         let spec = extent_spec(ino);
         let mirrored = inode.kind.content_is_metadata();
-        let mut walk = TreeWalk::new(self.block_size)?;
-        let mut trail = NodeTrail::new();
-        // One walk frees both the runs and the tree that maps them: a node is
-        // freed as the walk leaves it, so no later step descends through a
-        // block that has already gone back to the allocator.
-        while self.btree_next_leaf(inode.extent_root, spec, &mut walk)? {
-            trail.advance(walk.path());
-            for &node in trail.closed() {
-                self.free_meta(node);
+        let stride = self.content_block_bytes(inode.kind);
+        // No extent can map at or above the volume's block count, so the first
+        // floor query finds the genuinely highest mapping whatever the inode's
+        // recorded size claims. The bound then only ever descends, which is
+        // what stops a corrupt overlapping pair being freed twice.
+        let mut top = self.max_file_blocks();
+        let mut freed = false;
+        loop {
+            if top <= keep {
+                break;
             }
-            for (start, value) in walk.entries() {
-                let ext = Extent::decode(value, self.total_blocks)?;
-                if ext.compressed {
-                    self.release_cluster(&ext, ino, start)?;
-                } else if mirrored {
-                    // Each logical block is a mirrored pair, so the run and its
-                    // companions are the blocks `phys ..= phys + len`.
-                    self.free_run(ext.phys, ext.len.saturating_add(1));
-                } else {
-                    self.release_data_run(ext.phys, ext.len, ino, start)?;
+            let Some((start, value)) = self.btree_get_floor(inode.extent_root, top - 1, spec)?
+            else {
+                break;
+            };
+            let ext = Extent::decode(&value, self.total_blocks)?;
+            let end = start.saturating_add(ext.len).min(top);
+            if end <= keep {
+                break;
+            }
+            if freed && self.writeback_full() {
+                self.dirty.note_refusal();
+                return Ok(false);
+            }
+            let cut = keep.max(start);
+            if ext.compressed {
+                // A cluster is a sealed unit: cutting one part-way would orphan
+                // stored blocks, so the caller decomposes a straddled cluster
+                // before it asks for the tail. Fail closed.
+                if cut > start {
+                    return Err(DriverError::DeviceFault);
                 }
+                self.release_cluster(&ext, ino, start)?;
+            } else if mirrored {
+                // Each logical block is a mirrored pair, so a whole extent's
+                // blocks are `phys ..= phys + len`; a part-way cut would leave
+                // a companion behind, and only a file is ever truncated.
+                if cut > start {
+                    return Err(DriverError::DeviceFault);
+                }
+                self.free_run(ext.phys, ext.len.saturating_add(1));
+            } else {
+                self.release_data_run(ext.phys + (cut - start), end - cut, ino, cut)?;
             }
+            inode.extent_root = self.btree_remove(inode.extent_root, start, spec)?;
+            if cut > start {
+                let head = Extent::raw(ext.phys, cut - start).encode();
+                inode.extent_root = self.btree_insert(inode.extent_root, start, &head, spec)?;
+            }
+            top = cut;
+            inode.size = inode.size.min(cut.saturating_mul(stride));
+            freed = true;
         }
-        for &node in trail.close() {
-            self.free_meta(node);
-        }
-        if inode.attr_root != 0 {
-            self.free_meta(inode.attr_root);
-            inode.attr_root = 0;
-        }
-        inode.extent_root = 0;
-        inode.size = 0;
-        Ok(())
+        inode.size = inode.size.min(keep.saturating_mul(stride));
+        Ok(true)
     }
 
     /// The structural [`NodeInfo`] of `inode` (number `ino`).
@@ -3469,8 +3557,19 @@ impl<B: Block> ARXFS<B> {
         })
     }
 
+    /// Bytes one logical content block holds for `kind`: a directory's block is
+    /// a whole metadata block, a file's or a link's is what the per-block
+    /// integrity trailer leaves.
+    fn content_block_bytes(&self, kind: InodeKind) -> u64 {
+        if kind.content_is_metadata() {
+            self.block_size as u64
+        } else {
+            self.data_capacity()
+        }
+    }
+
     fn dir_block_count(&self, dir: &Inode) -> u64 {
-        dir.size / self.block_size as u64
+        dir.size / self.content_block_bytes(dir.kind)
     }
 
     /// Advance `scan` to the next occupied entry of directory `dir`, returning
@@ -3852,111 +3951,63 @@ impl<B: Block> ARXFS<B> {
         Ok(done)
     }
 
-    /// Shrink or grow file `inode` (number `ino`) to `size`, freeing whole
-    /// truncated runs and copy-on-writing the partial tail block.
-    fn truncate_file(&mut self, inode: &mut Inode, ino: u32, size: u64) -> Result<(), DriverError> {
+    /// One bounded step of shrinking or growing file `inode` (number `ino`) to
+    /// `size`. Returns `true` once the file has reached it.
+    ///
+    /// A shrink frees the tail from the high end down
+    /// ([`Self::shrink_tail_step`]) and stops on an extent boundary at the
+    /// transaction's write-back ceiling, leaving `inode.size` at the boundary
+    /// it reached; the caller publishes that and calls again. The partial tail
+    /// block is copy-on-written only on the step that finishes, so the file is
+    /// never left both shortened and holding stale bytes past its end.
+    fn truncate_file(
+        &mut self,
+        inode: &mut Inode,
+        ino: u32,
+        size: u64,
+    ) -> Result<bool, DriverError> {
         let cap = self.data_capacity();
         if size.div_ceil(cap) > self.max_file_blocks() {
             return Err(DriverError::LengthOutOfRange);
         }
-        if size < inode.size {
-            let keep = size.div_ceil(cap);
-            // A compressed cluster straddling the cut cannot be trimmed per
-            // block: decompose it first, then trim its raw remainder.
-            if let Some((start, ext)) = self.extent_lookup(inode, keep)? {
-                if ext.compressed && start < keep {
+        if size >= inode.size {
+            inode.size = size;
+            return Ok(true);
+        }
+        let keep = size.div_ceil(cap);
+        // A compressed cluster straddling the cut cannot be trimmed per
+        // block: decompose it first, then trim its raw remainder.
+        if let Some((start, ext)) = self.extent_lookup(inode, keep)? {
+            if ext.compressed && start < keep {
+                self.decompose_cluster(inode, ino, start, &ext)?;
+            }
+        }
+        if !self.shrink_tail_step(inode, ino, keep)? {
+            return Ok(false);
+        }
+        let tail = as_usize(size % cap);
+        if tail != 0 {
+            let bi = size / cap;
+            // A fully kept cluster whose last block holds the partial
+            // tail must also be decomposed before that block is
+            // rewritten per block.
+            if let Some((start, ext)) = self.extent_lookup(inode, bi)? {
+                if ext.compressed {
                     self.decompose_cluster(inode, ino, start, &ext)?;
                 }
             }
-            self.free_extent_tail(inode, ino, keep)?;
-            let tail = as_usize(size % cap);
-            if tail != 0 {
-                let bi = size / cap;
-                // A fully kept cluster whose last block holds the partial
-                // tail must also be decomposed before that block is
-                // rewritten per block.
-                if let Some((start, ext)) = self.extent_lookup(inode, bi)? {
-                    if ext.compressed {
-                        self.decompose_cluster(inode, ino, start, &ext)?;
-                    }
+            let old_ptr = self.block_ptr(inode, bi)?;
+            if old_ptr != 0 {
+                let mut blk = [0u8; MAX_BLOCK_SIZE];
+                self.read_data_block(old_ptr, &mut blk)?;
+                for byte in &mut blk[tail..as_usize(cap)] {
+                    *byte = 0;
                 }
-                let old_ptr = self.block_ptr(inode, bi)?;
-                if old_ptr != 0 {
-                    let mut blk = [0u8; MAX_BLOCK_SIZE];
-                    self.read_data_block(old_ptr, &mut blk)?;
-                    for byte in &mut blk[tail..as_usize(cap)] {
-                        *byte = 0;
-                    }
-                    self.store_block(inode, ino, bi, old_ptr, &mut blk)?;
-                }
+                self.store_block(inode, ino, bi, old_ptr, &mut blk)?;
             }
         }
         inode.size = size;
-        Ok(())
-    }
-
-    /// Free every block at or beyond logical block `keep` of `inode` (number
-    /// `ino`), trimming each extent run-wise rather than block-by-block.
-    fn free_extent_tail(
-        &mut self,
-        inode: &mut Inode,
-        ino: u32,
-        keep: u64,
-    ) -> Result<(), DriverError> {
-        let spec = extent_spec(ino);
-        // The run covering `keep` is where the tail starts, so the walk skips
-        // straight to it instead of reading the map from block zero.
-        let begin = self
-            .btree_get_floor(inode.extent_root, keep, spec)?
-            .map_or(keep, |(start, _)| start);
-        let mut walk = TreeWalk::new(self.block_size)?;
-        walk.seek(begin);
-        // Each step re-descends from the current root, so removing and
-        // reinserting a run mid-walk cannot leave the walk on a superseded
-        // node. Taking one entry per step is what keeps that true.
-        while self.btree_next_leaf(inode.extent_root, spec, &mut walk)? {
-            let Some((start, ext)) = walk
-                .entries()
-                .next()
-                .map(|(start, value)| {
-                    Extent::decode(value, self.total_blocks).map(|ext| (start, ext))
-                })
-                .transpose()?
-            else {
-                break;
-            };
-            match start.checked_add(1) {
-                Some(next) => walk.seek(next),
-                // Nothing follows the largest key a tree can hold.
-                None => walk.stop(),
-            }
-            // Saturating, so a logical run reaching the end of the address
-            // space cuts *less* than it names rather than wrapping into a
-            // shorter one and skipping the extent altogether.
-            let end = start.saturating_add(ext.len);
-            if end <= keep {
-                continue;
-            }
-            let cut = keep.max(start);
-            if ext.compressed {
-                // The caller decomposes a straddled cluster before freeing
-                // the tail, so a compressed extent here is cut whole; a
-                // partial cut would orphan stored blocks. Fail closed.
-                if cut > start {
-                    return Err(DriverError::DeviceFault);
-                }
-                self.release_cluster(&ext, ino, start)?;
-                inode.extent_root = self.btree_remove(inode.extent_root, start, spec)?;
-                continue;
-            }
-            self.release_data_run(ext.phys + (cut - start), end - cut, ino, cut)?;
-            inode.extent_root = self.btree_remove(inode.extent_root, start, spec)?;
-            if cut > start {
-                let head = Extent::raw(ext.phys, cut - start).encode();
-                inode.extent_root = self.btree_insert(inode.extent_root, start, &head, spec)?;
-            }
-        }
-        Ok(())
+        Ok(true)
     }
 
     /// Map a [`NodeId`] to a validated inode index.
@@ -4154,6 +4205,12 @@ impl<B: Block> ARXFS<B> {
             InodeKind::File | InodeKind::Link => {}
             InodeKind::Dir => return Err(DriverError::Unsupported),
         }
+        // A node with no names left is being reclaimed. A stale handle must not
+        // be able to give it a new one: the reclaim would then free the blocks
+        // under a live name.
+        if target.nlink == 0 {
+            return Err(DriverError::NotFound);
+        }
         let now = (self.clock)();
         let dir_ino = self.ino_of(dir)?;
         let mut dir_inode = self.read_inode(dir_ino)?;
@@ -4184,13 +4241,24 @@ impl<B: Block> ARXFS<B> {
         self.end_operation()
     }
 
-    /// Drop one name from `child` (inode `child_ino`), freeing its blocks and
-    /// its inode slot only when the name that just went was the last.
+    /// Drop one name from `child` (inode `child_ino`), publishing it as
+    /// pending deletion when the name that just went was the last.
     ///
     /// This is the whole hard-link lifecycle. A node with names left keeps
     /// every block it maps — freeing them because *a* name went would destroy
     /// data the remaining names still reach — and records the drop as a
     /// metadata change.
+    ///
+    /// The last name is a different matter, and it is why the pending-delete
+    /// set exists. Freeing the node's blocks here would put the whole file's
+    /// extent count inside the transaction that removes its name, which a
+    /// maximally fragmented very large file has no bound on. Instead the name's
+    /// removal and the set entry are published *together*, in one bounded
+    /// transaction, and [`Self::drain_pending_deletes`] then frees the blocks in
+    /// bounded steps with a commit between them. Every state that reaches the
+    /// medium is lawful: the node is unreachable by name and named by the set,
+    /// so a crash leaves a delete the next writable mount finishes rather than
+    /// an orphan holding blocks for the life of the volume.
     fn drop_name(
         &mut self,
         child: &mut Inode,
@@ -4198,12 +4266,136 @@ impl<B: Block> ARXFS<B> {
         now: Time64,
     ) -> Result<(), DriverError> {
         child.nlink = child.nlink.saturating_sub(1);
-        if child.nlink > 0 {
-            child.times.changed = now;
-            return self.write_inode(child_ino, child);
+        child.times.changed = now;
+        if child.nlink == 0 {
+            self.publish_pending_delete(child_ino)?;
         }
-        self.free_all_blocks(child, child_ino)?;
-        self.free_inode(child_ino)
+        self.write_inode(child_ino, child)
+    }
+
+    /// Name `ino` in the pending-delete set, so a mount finds it even if this
+    /// transaction is the last one to reach the medium.
+    pub(crate) fn publish_pending_delete(&mut self, ino: u32) -> Result<(), DriverError> {
+        self.pending_delete_root = self.btree_insert(
+            self.pending_delete_root,
+            u64::from(ino),
+            &[],
+            pending_delete_spec(),
+        )?;
+        Ok(())
+    }
+
+    /// The lowest inode number at or above `from` the pending-delete set
+    /// holds, or `None` when it holds none.
+    fn next_pending_delete(&mut self, from: u64) -> Result<Option<u32>, DriverError> {
+        let Some((key, _)) =
+            self.btree_get_ceil(self.pending_delete_root, from, pending_delete_spec())?
+        else {
+            return Ok(None);
+        };
+        u32::try_from(key)
+            .map(Some)
+            .map_err(|_| DriverError::DeviceFault)
+    }
+
+    /// Finish every delete the volume has published as pending, in bounded
+    /// steps, publishing between them.
+    ///
+    /// Called at mount before the volume serves a request, and at the end of
+    /// every operation that detached a node from its last name. The ceiling a
+    /// step yields to is the write-back ceiling the write path already yields
+    /// to, so there is one bound and one policy over a transaction's memory
+    /// rather than a second for freeing.
+    ///
+    /// The cursor only ever moves forward over *finished* inodes, so the loop
+    /// terminates on either the extent count of the inode being freed or the
+    /// inode space, never on a tree the device is lying about.
+    ///
+    /// # Errors
+    ///
+    /// Whatever a step's transaction reports. A failed step leaves the node
+    /// still named by the set, so the reclaim resumes rather than leaking.
+    pub(crate) fn drain_pending_deletes(&mut self) -> Result<(), DriverError> {
+        if self.read_only {
+            return Ok(());
+        }
+        let mut from = 0u64;
+        while let Some(ino) = self.next_pending_delete(from)? {
+            if self.reclaim_step(ino)? {
+                from = u64::from(ino).saturating_add(1);
+            }
+        }
+        Ok(())
+    }
+
+    /// One transaction of reclaiming pending inode `ino`. Returns `true` once
+    /// the inode is gone from the volume.
+    fn reclaim_step(&mut self, ino: u32) -> Result<bool, DriverError> {
+        self.begin()?;
+        let result = self
+            .reclaim_pending_step(ino)
+            .and_then(|done| self.end_operation().map(|()| done));
+        if result.is_err() {
+            self.rollback();
+        }
+        result
+    }
+
+    /// One bounded step of reclaiming pending inode `ino`, inside the caller's
+    /// operation. Returns `true` once the inode is gone from the volume.
+    ///
+    /// The operation that detached the last name takes the first step itself,
+    /// so a delete that fits its transaction is still exactly one transaction —
+    /// the ordinary case, and the one the write path's batching is tuned for.
+    /// Only a file whose tail outruns the ceiling needs the further steps
+    /// [`Self::drain_pending_deletes`] takes.
+    fn reclaim_pending_step(&mut self, ino: u32) -> Result<bool, DriverError> {
+        let mut inode = match self.read_inode(ino) {
+            Ok(inode) => inode,
+            // The set names an inode the inode tree does not hold, so there is
+            // nothing left to free: drop the entry rather than refuse every
+            // future mount over it. Any block it did hold is unreachable and
+            // `check` reclaims it.
+            Err(DriverError::NotFound) => {
+                self.forget_pending_delete(ino)?;
+                return Ok(true);
+            }
+            Err(err) => return Err(err),
+        };
+        // The set naming a node that still has names is a contradiction, and
+        // only a damaged volume can produce it. A name reaches the blocks the
+        // reclaim would free, so the name wins and the record goes: the reclaim
+        // never chooses to destroy data over losing space.
+        if inode.nlink != 0 {
+            self.forget_pending_delete(ino)?;
+            return Ok(true);
+        }
+        if !self.shrink_tail_step(&mut inode, ino, 0)? {
+            self.write_inode(ino, &inode)?;
+            return Ok(false);
+        }
+        // Every mapping is gone, so the tree that held them is gone with the
+        // last removal. A root that survived would leave its nodes allocated
+        // and reachable from nothing once the inode record goes.
+        if inode.extent_root != 0 {
+            return Err(DriverError::DeviceFault);
+        }
+        if inode.attr_root != 0 {
+            self.free_meta(inode.attr_root);
+        }
+        self.forget_pending_delete(ino)?;
+        self.free_inode(ino)?;
+        Ok(true)
+    }
+
+    /// Remove `ino` from the pending-delete set.
+    fn forget_pending_delete(&mut self, ino: u32) -> Result<(), DriverError> {
+        self.pending_delete_root = self.btree_remove(
+            self.pending_delete_root,
+            u64::from(ino),
+            pending_delete_spec(),
+        )?;
+        Ok(())
     }
 
     /// Create `dst_name` in `dir` as a reflink of the existing regular file
@@ -4313,16 +4505,7 @@ impl<B: Block> ARXFS<B> {
         offset: u64,
         data: &[u8],
     ) -> Result<usize, DriverError> {
-        let dir_ino = self.ino_of(dir)?;
-        let dir_inode = self.read_inode(dir_ino)?;
-        if !dir_inode.is_dir() {
-            return Err(DriverError::Unsupported);
-        }
-        let child_ino = self
-            .dir_lookup(&dir_inode, name)?
-            .ok_or(DriverError::NotFound)?;
-        let mut child = self.read_inode(child_ino)?;
-        Self::deny_non_file_content(child.kind)?;
+        let (child_ino, mut child) = self.resolve_file(dir, name)?;
         let written =
             self.write_file(&mut child, child_ino, offset, data, WriteLength::MayBeShort)?;
         let now = (self.clock)();
@@ -4333,7 +4516,10 @@ impl<B: Block> ARXFS<B> {
         Ok(written)
     }
 
-    fn truncate_inner(&mut self, dir: NodeId, name: &[u8], size: u64) -> Result<(), DriverError> {
+    /// Resolve `name` in `dir` to the regular file it must name, refusing a
+    /// non-directory parent, an absent name, and a kind whose content is not a
+    /// byte stream.
+    fn resolve_file(&mut self, dir: NodeId, name: &[u8]) -> Result<(u32, Inode), DriverError> {
         let dir_ino = self.ino_of(dir)?;
         let dir_inode = self.read_inode(dir_ino)?;
         if !dir_inode.is_dir() {
@@ -4342,14 +4528,26 @@ impl<B: Block> ARXFS<B> {
         let child_ino = self
             .dir_lookup(&dir_inode, name)?
             .ok_or(DriverError::NotFound)?;
-        let mut child = self.read_inode(child_ino)?;
+        let child = self.read_inode(child_ino)?;
         Self::deny_non_file_content(child.kind)?;
-        self.truncate_file(&mut child, child_ino, size)?;
+        Ok((child_ino, child))
+    }
+
+    /// One transaction of truncating file `ino` to `size`, returning `true`
+    /// once the file has reached it.
+    ///
+    /// A shrink over a very large file is many of these: each publishes the
+    /// shorter size its step reached, so the operation is bounded, resumable,
+    /// and lawful at every point on the medium.
+    fn truncate_step(&mut self, ino: u32, size: u64) -> Result<bool, DriverError> {
+        let mut child = self.read_inode(ino)?;
+        let done = self.truncate_file(&mut child, ino, size)?;
         let now = (self.clock)();
         child.times.modified = now;
         child.times.changed = now;
-        self.write_inode(child_ino, &child)?;
-        self.end_operation()
+        self.write_inode(ino, &child)?;
+        self.end_operation()?;
+        Ok(done)
     }
 
     fn remove_inner(&mut self, dir: NodeId, name: &[u8]) -> Result<(), DriverError> {
@@ -4377,6 +4575,9 @@ impl<B: Block> ARXFS<B> {
         dir_inode.times.modified = now;
         dir_inode.times.changed = now;
         self.write_inode(dir_ino, &dir_inode)?;
+        if child.nlink == 0 {
+            self.reclaim_pending_step(child_ino)?;
+        }
         self.end_operation()
     }
 
@@ -4451,6 +4652,7 @@ impl<B: Block> ARXFS<B> {
         }
 
         // Replace an existing destination, subject to kind compatibility.
+        let mut replaced = None;
         let dst_existing = {
             let dst_ref = dst_dir_inode.as_ref().unwrap_or(&src_dir_inode);
             self.dir_lookup(dst_ref, dst_name)?
@@ -4483,6 +4685,9 @@ impl<B: Block> ARXFS<B> {
                     Some(d) => d.nlink = d.nlink.saturating_sub(1),
                     None => src_dir_inode.nlink = src_dir_inode.nlink.saturating_sub(1),
                 }
+            }
+            if dst_child.nlink == 0 {
+                replaced = Some(dst_ino);
             }
         }
 
@@ -4518,6 +4723,11 @@ impl<B: Block> ARXFS<B> {
             d.times.modified = now;
             d.times.changed = now;
             self.write_inode(dst_dir_ino, &d)?;
+        }
+        // The node the rename displaced lost its last name, so free what fits
+        // this transaction; the caller finishes any remainder behind the set.
+        if let Some(dst_ino) = replaced {
+            self.reclaim_pending_step(dst_ino)?;
         }
         self.end_operation()
     }
@@ -4794,26 +5004,60 @@ impl<B: Block> FilesystemWrite for ARXFS<B> {
         result
     }
 
+    /// Shrinking a very large file cannot fit one transaction, so a truncate
+    /// is a *sequence* of them: each frees a bounded part of the tail from the
+    /// high end down and publishes the shorter size it reached, so the file on
+    /// the medium is only ever a shorter version of itself.
+    ///
+    /// A failure part-way therefore leaves the file at the last boundary the
+    /// steps reached — shorter than it was, longer than asked for — and reports
+    /// it. That is the honest outcome: the bytes below that boundary were never
+    /// touched, and the caller may simply ask again.
     fn truncate(&mut self, dir: NodeId, name: &[u8], size: u64) -> Result<(), DriverError> {
         self.deny_if_read_only()?;
         self.begin()?;
-        let result = self.truncate_inner(dir, name, size);
-        if result.is_err() {
-            self.rollback();
+        let ino = match self.resolve_file(dir, name) {
+            Ok((ino, _)) => ino,
+            Err(err) => {
+                self.rollback();
+                return Err(err);
+            }
+        };
+        loop {
+            match self.truncate_step(ino, size) {
+                Ok(true) => return Ok(()),
+                Ok(false) => self.begin()?,
+                Err(err) => {
+                    self.rollback();
+                    return Err(err);
+                }
+            }
         }
-        result
     }
 
+    /// The name goes in one bounded transaction, together with the first
+    /// bounded step of freeing the node — so an ordinary delete is still
+    /// exactly one transaction. A node whose tail outruns that transaction is
+    /// finished in further ones, behind the pending-delete set.
+    ///
+    /// A failure once the name has gone is reported, and the name stays gone:
+    /// what it says is that the space was not all reclaimed. The node is named
+    /// by the pending-delete set, so the next unlink or the next mount finishes
+    /// it — nothing is leaked and nothing is unreachable-and-forgotten.
     fn remove(&mut self, dir: NodeId, name: &[u8]) -> Result<(), DriverError> {
         self.deny_if_read_only()?;
         self.begin()?;
         let result = self.remove_inner(dir, name);
         if result.is_err() {
             self.rollback();
+            return result;
         }
-        result
+        self.drain_pending_deletes()
     }
 
+    /// A rename that replaces an existing destination drops that node's last
+    /// name, so it too ends by finishing the reclaim it published, on the same
+    /// terms as [`FilesystemWrite::remove`].
     fn rename(
         &mut self,
         src_dir: NodeId,
@@ -4826,8 +5070,9 @@ impl<B: Block> FilesystemWrite for ARXFS<B> {
         let result = self.rename_inner(src_dir, src_name, dst_dir, dst_name);
         if result.is_err() {
             self.rollback();
+            return result;
         }
-        result
+        self.drain_pending_deletes()
     }
 
     fn flush(&mut self) -> Result<(), DriverError> {

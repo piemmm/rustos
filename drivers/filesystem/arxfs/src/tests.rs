@@ -15,6 +15,7 @@ use tairix_abi::driver::filesystem::{
     FilesystemAttrs, FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeKind,
 };
 use tairix_fsmeta::preset;
+use tairix_reclaim::{PressureBand, ReportedPressure};
 
 /// In-memory block device. Optionally drops writes once a budget is reached,
 /// modelling a power loss mid-commit: a dropped write simply never reaches the
@@ -1839,6 +1840,20 @@ fn extent_codec_round_trips_and_rejects_undefined_shapes() {
     assert_eq!(
         Extent::decode(&long.encode(), DEVICE),
         Err(DriverError::DeviceFault)
+    );
+    // A zero-length run maps nothing. No write path produces one, and the
+    // downward tail free would stop on it and report a tree it had emptied
+    // while the record still stood — leaving its nodes allocated and reachable
+    // from nothing once the inode went.
+    assert_eq!(
+        Extent::decode(&Extent::raw(7, 0).encode(), DEVICE),
+        Err(DriverError::DeviceFault),
+        "a zero-length raw run is a device fault"
+    );
+    assert_eq!(
+        Extent::decode(&Extent::cluster(9, 0, 0).encode(), DEVICE),
+        Err(DriverError::DeviceFault),
+        "a zero-length cluster is a device fault"
     );
     // A raw extent never carries a stored length.
     let mut crooked = Extent::raw(7, 4).encode();
@@ -10180,4 +10195,327 @@ fn a_deferred_mark_over_a_long_run_costs_one_pending_entry() {
     assert!(alloc.pending_used.is_empty() && alloc.pending_free.is_empty());
     assert!(fs.is_used(start + 16) && fs.is_used(start + 47));
     assert!(!fs.is_used(start + 15) && !fs.is_used(start + 48));
+}
+
+// ---------------------------------------------------------------------------
+// The pending-delete set: freeing across transactions
+// (`docs/src/filesystem/arxfs-spec.md` §14; `plans/OPEN-DEFECTS.md` D67).
+// ---------------------------------------------------------------------------
+
+/// Machine size whose per-volume write-back share is exactly one transfer
+/// window — the smallest a volume may be mounted on, and the ceiling the tests
+/// below make a delete yield to. Derived from the backing bytes exactly as a
+/// mount derives it, never spelled as a ceiling.
+const FLOOR_MACHINE_BYTES: usize = 16 * RUN_BYTES;
+
+/// Extents a fragmented fixture holds: comfortably more run bookkeeping than
+/// the floor ceiling admits, so a delete of it cannot fit one transaction.
+const SPANNING_EXTENTS: u64 = 1200;
+
+/// Bound `fs` as a host bounds a mount on the smallest machine a volume may be
+/// mounted on, so the write-back ceiling is one transfer window.
+fn floor_bounded(fs: ARXFS<MemBlock>) -> ARXFS<MemBlock> {
+    let gauge: &'static ReportedPressure = Box::leak(Box::new(ReportedPressure::unknown()));
+    gauge.report(PressureBand::Normal);
+    fs.with_writeback_bound(
+        FLOOR_MACHINE_BYTES,
+        gauge,
+        Arc::new(PinnedAccounting::new()),
+    )
+    .expect("the floor machine bounds the volume")
+}
+
+/// Every inode the pending-delete set names.
+fn pending_deletes(fs: &mut ARXFS<MemBlock>) -> Vec<u64> {
+    tree_entries(fs, fs.pending_delete_root, pending_delete_spec())
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect()
+}
+
+/// A bounded volume holding a witness file and a fragmented file of
+/// [`SPANNING_EXTENTS`] single-block extents, committed.
+fn spanning_delete_volume() -> ARXFS<MemBlock> {
+    let mut fs = floor_bounded(fmt(512, 1 << 14, 64));
+    let root = fs.root();
+    fs.create(root, b"keep", NodeKind::RegularFile)
+        .expect("create the witness");
+    fs.write_at(root, b"keep", 0, b"witness")
+        .expect("write the witness");
+    fs.create(root, b"frag", NodeKind::RegularFile)
+        .expect("create");
+    fragment(&mut fs, b"frag", SPANNING_EXTENTS);
+    fs.flush().expect("publish the fixture");
+    fs
+}
+
+#[test]
+fn a_delete_that_outruns_its_transaction_is_published_as_pending() {
+    // The point of the set: the operation that detaches the last name commits
+    // in bounded time whatever the file's extent count, naming the inode so
+    // the freeing can continue afterwards.
+    let mut fs = spanning_delete_volume();
+    let root = fs.root();
+    let ino = u64::from(file_ino(&mut fs, b"frag"));
+    let free_before = fs.free_count;
+
+    fs.begin().expect("begin");
+    fs.remove_inner(root, b"frag").expect("detach the name");
+    assert_eq!(
+        pending_deletes(&mut fs),
+        alloc::vec![ino],
+        "the first transaction could not free {SPANNING_EXTENTS} extents, so it \
+         must have published the inode instead"
+    );
+    assert_eq!(
+        fs.lookup(root, b"frag"),
+        Err(DriverError::NotFound),
+        "the name is gone in that same transaction"
+    );
+    assert!(
+        fs.free_count > free_before,
+        "the first step still freed part of the tail"
+    );
+
+    // Draining finishes it, and the inode itself goes with the last step.
+    fs.drain_pending_deletes().expect("drain");
+    assert!(pending_deletes(&mut fs).is_empty());
+    assert_eq!(
+        fs.read_inode(u32::try_from(ino).unwrap()),
+        Err(DriverError::NotFound)
+    );
+}
+
+#[test]
+fn an_interrupted_delete_is_finished_by_the_next_mount() {
+    // A delete that spans transactions can be cut off between them. What
+    // reaches the medium is then a volume with an unreachable inode the set
+    // names, and the next writable mount must finish it before serving —
+    // otherwise the blocks are leaked for the life of the volume.
+    let mut fs = spanning_delete_volume();
+    let root = fs.root();
+    let ino = u64::from(file_ino(&mut fs, b"frag"));
+    let empty = {
+        // What the volume's free count is once the file is entirely gone,
+        // measured on a second identical fixture.
+        let mut whole = spanning_delete_volume();
+        let root = whole.root();
+        whole.remove(root, b"frag").expect("remove");
+        whole.flush().expect("publish");
+        whole.free_count
+    };
+
+    fs.begin().expect("begin");
+    fs.remove_inner(root, b"frag").expect("detach the name");
+    fs.flush().expect("publish the interrupted state");
+    assert_eq!(pending_deletes(&mut fs), alloc::vec![ino]);
+    let bytes = fs.into_block().expect("the volume closes").bytes();
+
+    let mut fs = floor_bounded(
+        ARXFS::open(MemBlock::from_bytes(bytes, 512, 1 << 14), &TEST_KEY)
+            .expect("the interrupted volume mounts")
+            .with_clock(fixed_clock),
+    );
+    assert!(
+        pending_deletes(&mut fs).is_empty(),
+        "the mount must finish the delete before it serves"
+    );
+    assert_eq!(
+        fs.read_inode(u32::try_from(ino).unwrap()),
+        Err(DriverError::NotFound)
+    );
+    assert_eq!(
+        fs.free_count, empty,
+        "the resumed delete returned exactly the blocks an uninterrupted one does"
+    );
+    // The witness is untouched and the map agrees with the trees.
+    let keep = fs.lookup(fs.root(), b"keep").expect("the witness survives");
+    assert_eq!(read_all(&mut fs, keep, 7), b"witness");
+    let live = fs.used_blocks();
+    fs.rebuild_free_space().expect("rebuild");
+    assert_eq!(
+        fs.used_blocks(),
+        live,
+        "no block was leaked or double-freed"
+    );
+}
+
+#[test]
+fn a_read_only_mount_leaves_a_pending_delete_alone() {
+    // Read-only means read-only, including for recovery: the set stays, the
+    // blocks stay, and nothing is written to the device.
+    let mut fs = spanning_delete_volume();
+    let root = fs.root();
+    fs.begin().expect("begin");
+    fs.remove_inner(root, b"frag").expect("detach the name");
+    fs.flush().expect("publish the interrupted state");
+    let bytes = fs.into_block().expect("the volume closes").bytes();
+
+    let before = bytes.clone();
+    let fs = ARXFS::open_read_only(MemBlock::from_bytes(bytes, 512, 1 << 14), &TEST_KEY)
+        .expect("the interrupted volume mounts read-only");
+    assert_ne!(fs.pending_delete_root, 0, "the set is left as it was found");
+    let after = fs.into_block().expect("the volume closes").bytes();
+    assert_eq!(after, before, "a read-only mount wrote nothing");
+}
+
+#[test]
+fn a_stale_handle_cannot_give_a_pending_node_a_new_name() {
+    // A node the set names is being reclaimed. Hard-linking it would put a live
+    // name on blocks the reclaim is about to free, so the link is refused —
+    // the one operation on a pending node that could lose data.
+    let mut fs = spanning_delete_volume();
+    let root = fs.root();
+    let ino = file_ino(&mut fs, b"frag");
+    let stale = NodeId::from_raw(u64::from(ino));
+
+    fs.begin().expect("begin");
+    fs.remove_inner(root, b"frag").expect("detach the name");
+    assert_eq!(pending_deletes(&mut fs), alloc::vec![u64::from(ino)]);
+    assert_eq!(
+        fs.link(root, b"resurrected", stale),
+        Err(DriverError::NotFound),
+        "a node with no names left is not linkable"
+    );
+    fs.drain_pending_deletes().expect("drain");
+    assert_eq!(fs.lookup(root, b"resurrected"), Err(DriverError::NotFound));
+}
+
+#[test]
+fn a_truncate_that_outruns_its_transaction_is_only_ever_a_shorter_file() {
+    // Freeing a tail upward from the cut would leave, after a crash, a file of
+    // its original length with holes where its data had been. Freeing downward
+    // leaves a *shorter* file: every byte below the published size is the byte
+    // that was always there.
+    let mut fs = floor_bounded(fmt(512, 1 << 14, 64));
+    let root = fs.root();
+    let cap = as_usize(fs.data_capacity());
+    // Two files written a block at a time in turn, so each block of "a" has a
+    // physical neighbour belonging to "b" and no two extents of "a" merge.
+    fs.create(root, b"a", NodeKind::RegularFile)
+        .expect("create");
+    fs.create(root, b"b", NodeKind::RegularFile)
+        .expect("create");
+    let body = read_all_pattern(cap * as_usize(SPANNING_EXTENTS));
+    for blk in 0..as_usize(SPANNING_EXTENTS) {
+        let at = (blk * cap) as u64;
+        for name in [b"a".as_slice(), b"b".as_slice()] {
+            let mut done = 0usize;
+            while done < cap {
+                let n = fs
+                    .write_at(
+                        root,
+                        name,
+                        at + done as u64,
+                        &body[blk * cap + done..(blk + 1) * cap],
+                    )
+                    .expect("write");
+                assert!(n > 0);
+                done += n;
+            }
+        }
+    }
+    fs.flush().expect("publish the fixture");
+    let node = fs.lookup(root, b"a").expect("lookup");
+    let whole = fs.node_info(node).expect("stat").size;
+    assert_eq!(whole, (cap * as_usize(SPANNING_EXTENTS)) as u64);
+
+    // Step the truncate by hand so the intermediate states are observable.
+    let ino = file_ino(&mut fs, b"a");
+    let mut steps = 0u32;
+    let mut last = whole;
+    loop {
+        fs.begin().expect("begin");
+        let done = fs.truncate_step(ino, 0).expect("a truncate step");
+        let size = fs.node_info(node).expect("stat").size;
+        assert!(
+            size <= last,
+            "the size only ever falls: {size} after {last}"
+        );
+        assert_eq!(
+            read_all(&mut fs, node, as_usize(size)),
+            body[..as_usize(size)],
+            "the file that is left is the prefix of the one that was there"
+        );
+        last = size;
+        steps += 1;
+        if done {
+            break;
+        }
+    }
+    assert!(
+        steps > 1,
+        "the fixture must outrun one transaction, or nothing was measured"
+    );
+    assert_eq!(fs.node_info(node).expect("stat").size, 0);
+    // The other file is untouched, and the map still agrees with the trees.
+    let other = fs.lookup(root, b"b").expect("lookup");
+    assert_eq!(read_all(&mut fs, other, body.len()), body);
+    let live = fs.used_blocks();
+    fs.rebuild_free_space().expect("rebuild");
+    assert_eq!(fs.used_blocks(), live);
+}
+
+#[test]
+fn a_check_reclaims_an_orphan_through_the_pending_set() {
+    // `check` publishes each orphan it finds and lets the bounded drain free
+    // it, for the same reason an unlink does: a very large orphan cannot be
+    // freed inside the check's own transaction.
+    let mut fs = floor_bounded(fmt(512, 1 << 14, 64));
+    let root = fs.root();
+    fs.create(root, b"keep", NodeKind::RegularFile)
+        .expect("create the witness");
+    fs.create(root, b"orphan", NodeKind::RegularFile)
+        .expect("create");
+    fragment(&mut fs, b"orphan", SPANNING_EXTENTS);
+    fs.flush().expect("publish");
+    let free_with_orphan = fs.free_count;
+
+    // Detach the name without touching the inode, which is exactly the state a
+    // damaged directory leaves behind.
+    let mut dir = fs.read_inode(ROOT_INO).expect("root inode");
+    fs.begin().expect("begin");
+    fs.remove_entry(&mut dir, ROOT_INO, b"orphan")
+        .expect("drop the entry");
+    fs.write_inode(ROOT_INO, &dir).expect("write the root");
+    fs.end_operation().expect("publish");
+
+    let report = fs.check(&GrantAll, &NullSink).expect("check");
+    assert_eq!((report.orphaned_inodes, report.orphans_reclaimed), (1, 1));
+    assert!(pending_deletes(&mut fs).is_empty(), "the drain finished it");
+    assert!(
+        fs.free_count > free_with_orphan,
+        "the orphan's blocks came back"
+    );
+    let live = fs.used_blocks();
+    fs.rebuild_free_space().expect("rebuild");
+    assert_eq!(fs.used_blocks(), live);
+}
+
+#[test]
+fn the_reclaim_never_frees_a_node_a_name_still_reaches() {
+    // Only a damaged volume can name a live node in the set — the name's
+    // removal and the entry are one transaction — but if one does, the reclaim
+    // must lose the space rather than the data.
+    let mut fs = fmt(512, 8192, 64);
+    let root = fs.root();
+    fs.create(root, b"live", NodeKind::RegularFile)
+        .expect("create");
+    let body = read_all_pattern(2000);
+    fs.write_at(root, b"live", 0, &body).expect("write");
+    fs.commit().expect("commit");
+    let ino = file_ino(&mut fs, b"live");
+
+    fs.begin().expect("begin");
+    fs.publish_pending_delete(ino).expect("plant the record");
+    fs.end_operation().expect("publish");
+    assert_eq!(pending_deletes(&mut fs), alloc::vec![u64::from(ino)]);
+
+    fs.drain_pending_deletes().expect("drain");
+    assert!(pending_deletes(&mut fs).is_empty(), "the record is dropped");
+    let node = fs.lookup(root, b"live").expect("the name still resolves");
+    assert_eq!(read_all(&mut fs, node, body.len()), body, "and its content");
+    let live = fs.used_blocks();
+    fs.rebuild_free_space().expect("rebuild");
+    assert_eq!(fs.used_blocks(), live);
 }

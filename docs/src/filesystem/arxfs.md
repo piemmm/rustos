@@ -39,7 +39,8 @@ validates the geometry from the selected superblock slot.
 |                 | each pointing at a committed root.                        |
 | Pool            | Everything else, allocated copy-on-write: the transaction |
 |                 | root, the inode-tree nodes, the per-file extent-tree      |
-|                 | nodes, directory blocks, and raw file-data blocks.        |
+|                 | nodes, the pending-delete set, directory blocks, and raw  |
+|                 | file-data blocks.                                        |
 
 The superblock also carries an **incompatible-feature word**: a plaintext
 bitmap of on-disk structures a reader must implement to mount at all, covered
@@ -799,11 +800,9 @@ Its position is a single key, which is what lets a caller mutate the tree
 between steps — truncation frees run by run as it goes — and lets a long pass
 stop, persist that key, and resume in a later call with the sequence an
 uninterrupted walk would have produced. A caller that must reach every *node*
-rather than every record — the allocation-map rebuild marking them used, freeing
-a whole extent tree — takes them from the walk's path as it moves (`NodeTrail`),
-which reports each node when the walk enters it and again when it leaves the
-last key beneath it; freeing on the second is what keeps a later step from
-descending through a block already returned to the allocator. Nothing
+rather than every record — the allocation-map rebuild marking them used, the
+scrub verifying them — takes them from the walk's path as it moves
+(`NodeTrail`), which reports each node as the walk enters it. Nothing
 materialises a tree's records or its node list, so a stat, a truncate, a delete,
 a scrub step, or a mount-time rebuild costs the same resident bytes on a
 100 TB volume as on a small one (`arxfs-spec.md` §4). A tree whose shape is
@@ -874,8 +873,21 @@ in place**:
   reusable only after the transaction commits — so the previous committed
   tree stays wholly intact until the new one is durable. The deferred set
   records **runs**, not blocks (`arxfs-spec.md` §4), so releasing a file costs
-  one entry per extent it maps and a very large delete stays inside a bounded
-  footprint.
+  one entry per extent it maps rather than one per block.
+- **Freeing spans transactions** (`arxfs-spec.md` §14). A file's extent count is
+  itself unbounded, so an unlink stops on an extent boundary once its
+  transaction has reached the write-back ceiling and publishes before taking
+  another step. What makes that resumable is the **pending-delete set** a
+  transaction root names: a tree of the inode numbers whose last name has gone
+  and whose blocks are not all freed. The name's removal and the set entry are
+  published together, so a crash mid-delete leaves an unreachable inode the set
+  names — and the next writable mount finishes it before it serves. An ordinary
+  delete is still one transaction, because the operation that detaches the name
+  takes the first step itself; a hard-linked node with names left is not in the
+  set at all, and a node the set names can never be given a new name. A
+  `truncate` needs no set entry: it frees downward and publishes the shorter
+  size at each boundary, so an interrupted one is a shorter file rather than one
+  of its original length with holes where its data was.
 - **Commit order (`docs/src/filesystem/arxfs-spec.md` §14).** Write the copy-on-write
   blocks, write the new transaction root carrying its inline commit
   record, then publish the next superblock-ring slot (round-robin)
@@ -969,7 +981,12 @@ in place**:
   machine-wide reserve floor every consumer obeys, which is what keeps several
   volumes on one small machine to a bounded *total*. Reaching the ceiling
   publishes the transaction, so a writer that outruns the device waits for
-  real I/O.
+  real I/O. The ceiling counts the transaction's run bookkeeping with its
+  staged blocks: a delete holds almost all of its memory in runs and dirties a
+  spine's worth of blocks whatever the file's extent count, so a ceiling over
+  the blocks alone would not bound one. Measured, deleting a maximally
+  fragmented file holds 88 600 bytes at 1 200 extents and 110 368 at 4 800,
+  where doing it inside one transaction holds 448 448 and grows with the file.
 - **Pressure lowers the ceiling and shortens the window, to a floor and no
   further.** Band by band the ceiling falls and the dirty-age window halves,
   down to one coalesced device transfer: the answer to a tightening machine is
@@ -989,9 +1006,13 @@ in place**:
 `FilesystemRead` provides `root`/`node_info`/`lookup`/`read_at`/`read_dir`;
 `FilesystemWrite` provides `create`/`write_at`/`truncate`/`remove`/`flush`,
 addressing a target as a `(dir, name)` pair. `write_at` extends files
-(zero-filling sparse gaps), `truncate` shrinks (freeing the tail and
-copy-on-write zeroing the partial last block) or grows, and `remove`
-refuses a non-empty directory with `DirectoryNotEmpty`. A `NodeId` is the
+(zero-filling sparse gaps), `truncate` shrinks (freeing the tail from the high
+end down and copy-on-write zeroing the partial last block) or grows, and
+`remove` refuses a non-empty directory with `DirectoryNotEmpty`. Both may take
+several transactions over a very large file and report a failure part-way: a
+`truncate` then leaves the file at the last boundary it reached, and a `remove`
+leaves the name gone and the node named by the pending-delete set for the next
+unlink or mount to finish. A `NodeId` is the
 inode index;
 node identity is stable across a remount. The driver additionally exposes
 `ARXFS::reflink(dir, src, dst)` — a copy-on-write clone that shares the

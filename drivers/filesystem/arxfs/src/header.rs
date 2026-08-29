@@ -158,6 +158,8 @@ pub enum ReservedOwner {
     ScratchFrontier,
     /// A check pass's per-inode name-count array (`crate::scratch`).
     ScratchNames,
+    /// The pending-delete set's tree nodes.
+    PendingDeleteTree,
 }
 
 impl ReservedOwner {
@@ -174,7 +176,7 @@ impl ReservedOwner {
 /// distinct from each other by construction.
 const _: () = {
     assert!(ReservedOwner::InodeTree.sentinel() == u64::MAX);
-    assert!(ReservedOwner::ScratchNames.sentinel() > u32::MAX as u64);
+    assert!(ReservedOwner::PendingDeleteTree.sentinel() > u32::MAX as u64);
 };
 
 /// The identity a metadata block carries, independent of its payload.

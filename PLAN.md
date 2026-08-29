@@ -2721,6 +2721,24 @@ ledger of every outstanding ARXFS item, with its owner and dependencies, is
   found two further read-only writes that failed the whole call rather than
   reporting — the cursor a bounded pass may not persist, and the progress record
   a completing pass may not clear (`plans/OPEN-DEFECTS.md` D64 closed).
+- **Freeing spans transactions (item D67, done).** A file's extent count is
+  itself unbounded, so an unlink can no longer free inside the transaction that
+  removes the name: the transaction root names a **pending-delete set** — a tree
+  of the inode numbers whose last name has gone and whose blocks are not all
+  freed — the name's removal and the set entry are published together, and the
+  freeing continues in further transactions, each stopping on an extent boundary
+  at the write-back ceiling. A writable mount finishes the set before it serves;
+  a read-only one leaves it alone; `check` reclaims an orphan the same way. The
+  tail is freed from the **high end down**, so every intermediate state is a
+  shorter file rather than one of the original length with holes where its data
+  was, which is why `truncate` needs no set entry. For the ceiling to bound a
+  free at all it now counts a transaction's run bookkeeping alongside its staged
+  blocks: freeing a fragmented file dirties a spine's worth of blocks whatever
+  its extent count. Measured, deleting a maximally fragmented file holds 88 600
+  bytes at 1 200 extents and 110 368 at 4 800, against 448 448 and 626 312 for
+  the same file freed inside one transaction; an ordinary delete is still exactly
+  one transaction, and a stale handle can no longer hard-link a node the set
+  names (`plans/OPEN-DEFECTS.md` D67 closed).
 - **The §5 fixed-constant targets are not met.** The spec's 16 KiB metadata
   block, 128 KiB / 256 KiB data-record targets, and inline/packed small-file
   storage are unimplemented: a metadata block and a data record are each one

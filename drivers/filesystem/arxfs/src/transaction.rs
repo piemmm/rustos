@@ -4,9 +4,10 @@
 //! A transaction root is the single block a committed transaction publishes
 //! through the superblock ring (`superblock` module). It is a self-identifying
 //! block ([`BlockType::TxnRoot`]) whose payload names the roots of the
-//! copy-on-write metadata the transaction produced — the inode-tree root and
-//! the next free inode number — and ends with a **commit record**: a commit
-//! magic plus a second copy of the generation.
+//! copy-on-write metadata the transaction produced — the inode-tree root, the
+//! next free inode number, and the pending-delete set naming every inode still
+//! to be reclaimed — and ends with a **commit record**: a commit magic plus a
+//! second copy of the generation.
 //!
 //! Co-locating the commit record in the same sealed block makes commit atomic
 //! against a torn write: the block's checksum (`header`) and the commit
@@ -36,10 +37,11 @@ const P_HEALTH_BASELINE_ROOT: usize = HEADER_LEN + 48;
 const P_ALLOC_MAP_START: usize = HEADER_LEN + 56;
 const P_ALLOC_MAP_COVERED: usize = HEADER_LEN + 64;
 const P_FREE_COUNT: usize = HEADER_LEN + 72;
-const P_COMMIT_MAGIC: usize = HEADER_LEN + 80;
-const P_COMMIT_GENERATION: usize = HEADER_LEN + 88;
+const P_PENDING_DELETE_ROOT: usize = HEADER_LEN + 80;
+const P_COMMIT_MAGIC: usize = HEADER_LEN + 88;
+const P_COMMIT_GENERATION: usize = HEADER_LEN + 96;
 /// Bytes of meaningful transaction-root payload following the header.
-const PAYLOAD_LEN: u32 = 96;
+const PAYLOAD_LEN: u32 = 104;
 
 fn rd_u64(buf: &[u8], off: usize) -> u64 {
     let mut bytes = [0u8; 8];
@@ -80,6 +82,13 @@ pub struct TxnRoot {
     /// mid-update leaves the previous baseline (or none) selected and never
     /// blocks an ordinary mount.
     pub health_baseline_root: u64,
+    /// Physical block of the pending-delete set's tree root, or `0` when no
+    /// inode awaits reclaim. The set names every inode the volume has detached
+    /// from its last name and not yet finished freeing, so an interrupted
+    /// delete is something the next mount finds and completes rather than an
+    /// unreachable inode holding blocks for the life of the volume
+    /// (`docs/src/filesystem/arxfs-spec.md` §4, §14).
+    pub pending_delete_root: u64,
     /// First block of the allocation-map region (`allocmap`), or `0` when the
     /// volume has none. Free space is rebuildable, so the region is updated in
     /// place rather than copy-on-written; the root only records where it lives
@@ -126,6 +135,7 @@ impl TxnRoot {
         wr_u64(block, P_ALLOC_MAP_START, self.alloc_map_start);
         wr_u64(block, P_ALLOC_MAP_COVERED, self.alloc_map_covered);
         wr_u64(block, P_FREE_COUNT, self.free_count);
+        wr_u64(block, P_PENDING_DELETE_ROOT, self.pending_delete_root);
         wr_u64(block, P_COMMIT_MAGIC, COMMIT_MAGIC);
         wr_u64(block, P_COMMIT_GENERATION, self.generation);
         let header = BlockHeader {
@@ -176,6 +186,7 @@ impl TxnRoot {
             reverse_ref_tree_root: rd_u64(block, P_REVERSE_REF_TREE_ROOT),
             scrub_progress_root: rd_u64(block, P_SCRUB_PROGRESS_ROOT),
             health_baseline_root: rd_u64(block, P_HEALTH_BASELINE_ROOT),
+            pending_delete_root: rd_u64(block, P_PENDING_DELETE_ROOT),
         })
     }
 
@@ -212,6 +223,7 @@ impl TxnRoot {
             reverse_ref_tree_root: rd_u64(block, P_REVERSE_REF_TREE_ROOT),
             scrub_progress_root: rd_u64(block, P_SCRUB_PROGRESS_ROOT),
             health_baseline_root: rd_u64(block, P_HEALTH_BASELINE_ROOT),
+            pending_delete_root: rd_u64(block, P_PENDING_DELETE_ROOT),
         })
     }
 }

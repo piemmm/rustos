@@ -23,9 +23,9 @@ Fixed-size blocks (the device logical block size, 512–4096 bytes, a power
 of two). The device opens at a **superblock ring** of four logical slots,
 each a **mirrored pair** of adjacent blocks (eight blocks in all) at the
 start of the device; everything else — the transaction root, the
-copy-on-write inode-tree nodes, the per-file extent-tree nodes, directory
-blocks, and raw file-data blocks — is allocated copy-on-write from the pool
-that follows.
+copy-on-write inode-tree nodes, the per-file extent-tree nodes, the
+pending-delete set, directory blocks, and raw file-data blocks — is allocated
+copy-on-write from the pool that follows.
 
 Every **metadata** block is self-identifying (`AGENTS.md` §8 block
 identity): its first 128 bytes carry a magic, block type, format version,
@@ -401,7 +401,19 @@ metadata and data are written copy-on-write to freshly allocated blocks,
 and superseded blocks are deferred-freed (reusable only after the
 transaction commits) as coalesced `(start, length)` **runs**, so releasing a
 file costs one entry per extent it maps rather than one per block
-(`arxfs-spec.md` §4). The commit order (`docs/src/filesystem/arxfs-spec.md` §14,
+(`arxfs-spec.md` §4). A file's extent count is itself unbounded, so **freeing
+spans transactions**: an unlink stops on an extent boundary once the
+transaction has reached the write-back ceiling and publishes before taking
+another step, and the **pending-delete set** the transaction root names — a
+tree of the inode numbers whose last name has gone and whose blocks are not all
+freed — is what makes that resumable. The name's removal and the set entry are
+published together, so a crash mid-delete leaves an inode the set names and the
+next writable mount finishes it before serving; an ordinary delete is still one
+transaction, because the operation that detaches the name takes the first step
+itself. A `truncate` needs no entry, freeing downward and publishing the shorter
+size at each boundary, so an interrupted one is a shorter file and never one of
+its original length with holes where its data was (`arxfs-spec.md` §14). The
+commit order (`docs/src/filesystem/arxfs-spec.md` §14,
 §22) is: stage the copy-on-write blocks and the new transaction root carrying its
 inline commit record, drain them all to the device, issue one `Block::flush()`
 barrier, then publish the next superblock-ring slot pointing at that root.
@@ -492,7 +504,13 @@ it is a byte ceiling derived from the RAM the host discovered
 consumer obeys, which is what keeps several volumes on one small machine to a
 bounded total rather than each taking a slab. Reaching the ceiling publishes
 the transaction, so a writer that outruns the device waits for real I/O instead
-of growing.
+of growing. The ceiling counts the transaction's run bookkeeping with its staged
+blocks, because a free holds almost all of its memory in the runs and dirties a
+spine's worth of blocks whatever the file's extent count: over the blocks alone
+it would not bound a delete at all. Measured, deleting a maximally fragmented
+file holds 88 600 bytes at 1 200 extents and 110 368 at 4 800, where freeing it
+inside one transaction holds 448 448 and grows with the file
+(`tests/bounded_iteration.rs`).
 
 Rising memory pressure lowers that ceiling and halves the dirty-age window band
 by band, down to one coalesced device transfer (`RUN_BYTES`) and no further:
@@ -504,7 +522,10 @@ accepted and left committing after almost every record.
 Forward progress does not depend on the ceiling. The only operation whose staged
 bytes scale with a caller's argument is a file write, and it is the one the bound
 cuts short: it stores at least one record whatever the ceiling, then stops on a
-record boundary and reports the count, exactly as `write(2)` may.
+record boundary and reports the count, exactly as `write(2)` may. An unlink or a
+truncate scales with the volume's own state instead, and yields to the same
+ceiling from the other side: it frees at least one extent, then stops on an
+extent boundary and the operation publishes before the next step.
 `FilesystemWrite::write_all` is where that loop lives once for every caller that
 needs the whole value stored, and a caller with an indivisible value (a symlink
 target, bounded by the ABI) asks for the whole of it so the bound bites at the
@@ -719,6 +740,17 @@ band pins less and publishes more often than an unpressured one; the smallest
 machine a volume may be mounted on — one transfer window per volume — still
 completes the same write, and does so with a hundred tebibytes attached at both
 block sizes. A read-only mount pins nothing at all.
+
+The **pending-delete tests** hold the freeing-across-transactions contract: a
+delete of a file with more extents than one transaction may hold publishes the
+inode in the set and finishes it in further transactions, an interrupted one is
+completed by the next writable mount and returns exactly the blocks an
+uninterrupted one does, a read-only mount leaves the set and the device
+untouched, a stale handle cannot hard-link a node the set names, an interrupted
+truncate is only ever a prefix of the file that was there, and `check` reclaims
+an orphan by the same route. The bounded-iteration harness prices it: deleting
+four times the extents holds the same peak footprint, where doing it inside one
+transaction grows with the file.
 
 The 1 GiB filesystem soak (`cargo xtask fssoak --target arxfs`) drives the
 shared cross-filesystem exerciser, and `cargo xtask fuzz` harnesses fuzz the
