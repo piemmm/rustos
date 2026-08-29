@@ -212,8 +212,8 @@ pub use sysinfo::{
 };
 pub use terminal::{InputMode, TerminalSize, TERMINAL_SIZE_WIRE_LEN};
 pub use time::{
-    coarsen_clock_ns, Duration64, Time64, WallClockReading, WallTimeState,
-    COARSE_CLOCK_GRANULARITY_NS, NANOS_PER_SEC,
+    coarsen_clock_ns, is_plausible_wall_time, Duration64, Time64, WallClockReading, WallTimeState,
+    COARSE_CLOCK_GRANULARITY_NS, NANOS_PER_SEC, PLAUSIBLE_FUTURE_SECS, RELEASE_EPOCH_SECS,
 };
 pub use volume::{
     validate_volume_name, VolumeAttachRequest, VolumeDetachRequest, VolumeFsType,

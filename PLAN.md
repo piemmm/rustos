@@ -3490,6 +3490,57 @@ See `plans/IO.md` (binding under `AGENTS.md`).
 
 ---
 
+### Stage 6 follow-up — setting the clock (`plans/TIMESYNC.md`)
+
+**Status: planned.** Nothing in the workspace calls `wall_time_set` outside
+tests, so every boot starts `Unset`: the desktop clock shows its unset label,
+the Date & Time app shows empty fields, and audit-log hash chains and ARXFS
+`Time64` metadata rest on a clock a human sets by hand. A Raspberry Pi 3/4 has
+no RTC at all. `plans/TIMESYNC.md` is the binding design and carries the
+deliverable list (TS-1–TS-6) and its current state; it is not repeated here.
+
+Load-bearing decisions a future contributor needs:
+
+- **Two sources, one arbiter.** An RTC gives a boot-time reading with no
+  network; NTP corrects and maintains it. Arbitration is the wall clock's
+  existing provenance ladder (`WallTimeState`: `Unset` → `Firmware` →
+  `Trusted`/`Adjusted`) — an RTC read never overwrites a validated network
+  sync.
+- **`lib/timesync`** (new `lib/*` crate) is the one engine: a pure,
+  allocation-free, fuzzed `no_std` RFC 5905 client codec plus the
+  politeness policy and the sync-decision matrix, driven by injected
+  monotonic time and **caller-supplied** CSPRNG values (the
+  `lib/net::dhcp`/`dns` precedent — the engine generates no randomness).
+- **The decision is not "sync every boot".** A plausible clock is trusted
+  until there is reason to doubt it: sync immediately only when the clock is
+  `Unset`, outside the fixed plausibility window
+  (`tairix_abi::time::RELEASE_EPOCH` … +100 years), or when the persisted
+  `/System/Settings/Time/state` last-seen instant is more than 5 days behind;
+  otherwise refresh on an *uptime*-gated cadence (default one day).
+- **Politeness is policy, not a sleep loop** (RFC 8633): a hard minimum poll
+  floor, one request in flight per server with the list rotated, bounded
+  exponential backoff with CSPRNG jitter, a randomised first-query delay so a
+  fleet of identical images cannot stampede one server, and Kiss-o'-Death
+  obeyed (`RATE` widens, `DENY`/`RSTR` retire the server).
+- **`CAP_TIME_SET` never shares an address space with the NTP decode**
+  (§19.5): the decode runs in a `lib/sandbox` worker holding only its pipe,
+  and `timed` re-validates the nonce echo and plausibility window on the reply
+  before applying anything.
+- **RTC drivers are ordinary discovered drivers** (§18.3) in a new
+  `drivers/rtc/` class, with the shared BCD civil codec defined once in the
+  `lib/abi` RTC class module. Three tiers: the QEMU-emulable reference set
+  (`pl031`/`mc146818`/`goldfish`, one per hardware target), the Pi 5's
+  firmware-mediated RTC over the VideoCore mailbox, and the Pi 3/4 I²C HAT
+  chips behind a new `lib/i2c` + `drivers/bus/i2c/bcm2835` path. A driver that
+  cannot vouch for its reading reports it unavailable rather than fabricating
+  one.
+- **Enable/disable is service enrolment, not a second switch.** Both the
+  `servicectl` command line and the taskbar clock's toggle drive the one
+  control path, which is why TS-5 lands `plans/NEW-SERVICEMANAGER.md` SVC-8's
+  remaining control transport as a genuine prerequisite.
+
+---
+
 ## Stage 7 — Graphics, Window Manager, Taskbar
 
 **Dependencies:** Stage 6 + a display driver from Stage 4.

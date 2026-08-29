@@ -45,6 +45,48 @@ pub const NANOS_PER_SEC: u32 = 1_000_000_000;
 /// `clock_get` ABI signature (security by default).
 pub const COARSE_CLOCK_GRANULARITY_NS: u64 = 1_000;
 
+/// The epoch of this TAIRiX release, in whole seconds since the Unix epoch
+/// (`2026-01-01T00:00:00Z`).
+///
+/// No running TAIRiX system can legitimately believe the current time is
+/// *before* the release it was built from, so this is the floor of the
+/// plausibility window a time source's reading is checked against
+/// (`plans/TIMESYNC.md`): a reading below it means the clock is wildly
+/// wrong, not merely stale. It is a fixed validation bound, never a
+/// capacity — widening it to admit an implausible reading would defeat the
+/// check — and it is bumped at each release like any other version
+/// constant.
+///
+/// Deliberately coarser than the exact build timestamp: a compile-time
+/// build stamp would make the value vary per build and cost the
+/// reproducible-build guarantee that a pinned toolchain and locked
+/// dependency tree produce a bit-identical image.
+pub const RELEASE_EPOCH_SECS: i64 = 1_767_225_600;
+
+/// Width of the plausibility window above [`RELEASE_EPOCH_SECS`], in whole
+/// seconds (100 Julian years).
+///
+/// A reading at or beyond `RELEASE_EPOCH_SECS + PLAUSIBLE_FUTURE_SECS` is
+/// nonsense from a clock that has lost its mind (a stopped oscillator
+/// reading as all-ones, a hostile time source) rather than a machine that
+/// has genuinely been running for a century. Like the floor, a fixed
+/// validation bound.
+pub const PLAUSIBLE_FUTURE_SECS: i64 = 3_155_760_000;
+
+/// Whether `time` falls inside the plausibility window
+/// `RELEASE_EPOCH_SECS ..= RELEASE_EPOCH_SECS + PLAUSIBLE_FUTURE_SECS`.
+///
+/// The one definition of the window test, so a time source, the kernel, and
+/// any tool that reports on the clock cannot drift apart on what
+/// "implausible" means. It is a *plausibility* judgement, not an
+/// authorisation one: a principal holding `CAP_TIME_SET` may still set a
+/// deliberately odd time, and this never becomes an ambient veto on that.
+#[must_use]
+pub const fn is_plausible_wall_time(time: Time64) -> bool {
+    let secs = time.secs();
+    secs >= RELEASE_EPOCH_SECS && secs <= RELEASE_EPOCH_SECS + PLAUSIBLE_FUTURE_SECS
+}
+
 /// Floor `ns` to [`COARSE_CLOCK_GRANULARITY_NS`].
 ///
 /// Returns the largest multiple of [`COARSE_CLOCK_GRANULARITY_NS`] that
@@ -447,8 +489,61 @@ impl Duration64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{coarsen_clock_ns, Duration64, Time64, COARSE_CLOCK_GRANULARITY_NS, NANOS_PER_SEC};
+    use super::{
+        coarsen_clock_ns, is_plausible_wall_time, Duration64, Time64, COARSE_CLOCK_GRANULARITY_NS,
+        NANOS_PER_SEC, PLAUSIBLE_FUTURE_SECS, RELEASE_EPOCH_SECS,
+    };
     use crate::Errno;
+
+    #[test]
+    fn plausibility_window_admits_the_release_epoch_and_its_ceiling() {
+        assert!(is_plausible_wall_time(Time64::from_secs(
+            RELEASE_EPOCH_SECS
+        )));
+        assert!(is_plausible_wall_time(Time64::from_secs(
+            RELEASE_EPOCH_SECS + PLAUSIBLE_FUTURE_SECS
+        )));
+        // Well inside: a decade past the release.
+        assert!(is_plausible_wall_time(Time64::from_secs(
+            RELEASE_EPOCH_SECS + 315_576_000
+        )));
+    }
+
+    #[test]
+    fn plausibility_window_refuses_readings_outside_it() {
+        // The Unix epoch itself: the placeholder an unset clock reports.
+        assert!(!is_plausible_wall_time(Time64::UNIX_EPOCH));
+        // One second before the release cannot be the current time.
+        assert!(!is_plausible_wall_time(Time64::from_secs(
+            RELEASE_EPOCH_SECS - 1
+        )));
+        // Pre-1970 and the far future are both nonsense from a clock.
+        assert!(!is_plausible_wall_time(Time64::from_secs(-1)));
+        assert!(!is_plausible_wall_time(Time64::from_secs(
+            RELEASE_EPOCH_SECS + PLAUSIBLE_FUTURE_SECS + 1
+        )));
+        assert!(!is_plausible_wall_time(Time64::from_secs(i64::MAX)));
+        assert!(!is_plausible_wall_time(Time64::from_secs(i64::MIN)));
+    }
+
+    #[test]
+    fn plausibility_window_ignores_the_subsecond_field() {
+        // The floor is a whole-second bound, so nanoseconds never decide it.
+        let at_floor = Time64::new(RELEASE_EPOCH_SECS, NANOS_PER_SEC - 1).expect("canonical");
+        assert!(is_plausible_wall_time(at_floor));
+        let below = Time64::new(RELEASE_EPOCH_SECS - 1, NANOS_PER_SEC - 1).expect("canonical");
+        assert!(!is_plausible_wall_time(below));
+    }
+
+    #[test]
+    fn plausible_future_is_a_century_and_the_ceiling_cannot_overflow() {
+        // 100 Julian years, so the window is documented in the same unit the
+        // constant claims.
+        assert_eq!(PLAUSIBLE_FUTURE_SECS, 100 * 365 * 86_400 + 25 * 86_400);
+        assert!(RELEASE_EPOCH_SECS
+            .checked_add(PLAUSIBLE_FUTURE_SECS)
+            .is_some());
+    }
 
     #[test]
     fn coarsen_floors_to_granularity_and_never_exceeds_input() {

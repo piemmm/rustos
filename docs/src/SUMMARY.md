@@ -88,6 +88,7 @@
   - [`tairix-supervisor`](./lib/supervisor.md)
   - [`tairix-sysconfig`](./lib/sysconfig.md)
   - [`tairix-termcap`](./lib/termcap.md)
+  - [`tairix-timesync`](./lib/timesync.md)
   - [`tairix-usb`](./lib/usb.md)
   - [`tairix-users`](./lib/users.md)
   - [`tairix-util`](./lib/util.md)

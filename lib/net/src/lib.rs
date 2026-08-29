@@ -111,6 +111,12 @@
 //!   stateless RFC 4987 **SYN cookies** over an injected keyed-MAC seam, so a
 //!   flood of spoofed SYNs consumes no per-connection memory (at the
 //!   documented cost of the connection's options).
+//! - [`ntp`] — the `NTPv4` / SNTP **client** (RFC 5905, RFC 4330): the header
+//!   codec, the response validation whose load-bearing rule is the CSPRNG
+//!   origin-nonce echo, the sample computation, and the RFC 8633 polling
+//!   discipline (poll floor, one request in flight, rotation, backoff,
+//!   Kiss-o'-Death). The clock *policy* that drives it — whether a machine
+//!   should sync at all — is `lib/timesync`, not here.
 //!
 //! # Security
 //!
@@ -145,6 +151,7 @@ pub mod mcast;
 pub mod mld;
 pub mod nd;
 pub mod neigh;
+pub mod ntp;
 pub mod rate;
 pub mod route;
 pub mod rxfilter;

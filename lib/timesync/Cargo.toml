@@ -1,0 +1,21 @@
+[package]
+name = "tairix-timesync"
+description = "TAIRiX time-synchronisation client: the sync-decision policy (unset / implausible / clock-went-backwards / stale-boot / uptime-gated refresh), the persisted last-seen record, and the orchestration that drives the pure `tairix-net` NTP engine over an injected transport (`plans/TIMESYNC.md`)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The audited time vocabulary: `Time64`, `Duration64`, `WallClockReading`, the
+# provenance ladder, and the one plausibility window every time source is
+# checked against.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The one NTP implementation: the RFC 5905 codec, the response validation, and
+# the poll/backoff/rotation state machine. Never a second copy of any of it.
+tairix-net = { path = "../net", version = "=0.0.0" }

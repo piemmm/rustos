@@ -640,6 +640,7 @@ tairix/
 │   ├── sysconfig/       # Boot-time system-configuration store engine.
 │   ├── termcap/         # Compiled-in TERM->capability database.
 │   ├── theme/           # Shared desktop theme definition (dark/light).
+│   ├── timesync/        # Clock-setting policy: when to sync, what provenance.
 │   ├── tty/             # Shared tty line discipline (echo/ONLCR/^C).
 │   ├── tz/              # Civil time zones: compiled IANA rule store reader.
 │   ├── usb/             # Bus-agnostic xHCI USB host-controller protocol.
@@ -1473,6 +1474,7 @@ You are not exempt from any rule above. In addition:
     | Display / GPU acceleration: hardware layer compositing, the `AcceleratedDisplay`/`AccelLayer` ABI, virtio-gpu, HVS, zero-copy layers, damage, vsync flips | `plans/FIX-DISPLAY-ACCELERATION.md` |
     | Desktop redraw speed without hardware acceleration: compositor occlusion/opaque runs, per-control damage, the frosted-backdrop cache, present batching, frame pacing, and CPU-dispatched raster kernels | `plans/FIX-DESKTOP-SPEEDUP.md` |
     | Civil time zones: the vendored IANA rules, the compiled zone store, the `lib/tz` engine, the `TZ`/machine-setting/UTC resolution order, and local rendering | `plans/TIMEZONES.md` |
+    | Setting the clock: the NTP client service, the sync-decision policy (unset/implausible/stale-boot/refresh cadence), NTP-server politeness, RTC drivers and the wall clock's provenance ladder, and the enable/disable surfaces | `plans/TIMESYNC.md` |
     | Storage namespace: drives, volumes, aliases, paths, resource references | `docs/src/filesystem/drives.md` (binding spec); `plans/ALIAS.md`; `plans/DRIVES.md` |
     | Links, symbolic and hard, and path canonicalisation: the `FileKind`/`NodeKind` kind, `NO_FOLLOW`, `fs_symlink`/`fs_readlink`/`fs_link`/`fs_realpath`, VFS per-component resolution with its hop bound and mount-projection floor, `RealpathMode`, the per-format on-disk spellings, the link-count lifecycle, `ln`/`ls`/`readlink`, desktop shortcuts | `plans/SYMLINKS.md` |
     | ARXFS | `docs/src/filesystem/arxfs-spec.md` (binding spec); `plans/IMPLEMENT-OUTSTANDING-ARXFS.md` (the ordered ledger of what is left); `plans/SPARSE.md`; `plans/ARXFS-METADATA.md`; `plans/ARXFS-WRITEBACK.md`; `plans/ARXFS-MAINTENANCE.md`; `plans/ARXFS-SNAPSHOT.md`; `plans/ARXFS-FEC.md` |

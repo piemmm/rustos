@@ -5213,6 +5213,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-timesync"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-net",
+]
+
+[[package]]
 name = "tairix-top"
 version = "0.0.0"
 dependencies = [

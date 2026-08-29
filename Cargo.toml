@@ -105,6 +105,7 @@ members = [
     "lib/sysconfig",
     "lib/termcap",
     "lib/theme",
+    "lib/timesync",
     "lib/tty",
     "lib/usb",
     "lib/users",

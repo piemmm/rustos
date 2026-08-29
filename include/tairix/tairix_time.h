@@ -24,6 +24,11 @@
 /* Packed little-endian wire size of each time value, in bytes. */
 #define TAIRIX_TIME64_WIRE_LEN 12u
 #define TAIRIX_DURATION64_WIRE_LEN 12u
+/* Plausibility window a time source's reading is checked against:
+ * this release's epoch, and the width of the window above it.
+ * Fixed validation bounds, not capacities. */
+#define TAIRIX_RELEASE_EPOCH_SECS INT64_C(1767225600)
+#define TAIRIX_PLAUSIBLE_FUTURE_SECS INT64_C(3155760000)
 
 /* Absolute instant: signed seconds since the Unix epoch + canonical nanos. */
 typedef struct tairix_time64 {
