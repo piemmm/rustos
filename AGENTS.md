@@ -198,7 +198,8 @@ These are absolute. They override any local convenience.
     the **entire** workspace and seeing it pass before it is reported,
     submitted, merged, or marked complete. This is not optional and has no
     "trivial change" exemption. It has exactly **one** exemption, stated below
-    and nowhere else: a change confined to `plans/*.md`, which no pipeline
+    and nowhere else: a change confined to the planning and charter documents
+    (`plans/*.md`, `PLAN.md`, `AGENTS.md`, `CLAUDE.md`), which no pipeline
     stage can observe.
     - The gate is the §7 "Definition of done" sequence, run from the
       repository root and never scoped to a single crate with `-p`:
@@ -213,22 +214,27 @@ These are absolute. They override any local convenience.
       "Pre-existing" and "out of scope" are not exits (§2.5, §7).
     - Skipping, deferring ("CI will catch it"), faking, or partially running
       the gate is a §2.1 hack and a review blocker (§15.3, §15.6).
-    - **The one exemption: a change confined to `plans/*.md`.** When *every*
-      path the change adds, modifies, or deletes is a `.md` file under
-      `plans/`, the gate is **not** run — there is nothing for it to observe.
-      No pipeline stage reads that directory: `charter-cite` scans only
+    - **The one exemption: a change confined to the planning and charter
+      documents no pipeline stage can observe** — `plans/*.md`, `PLAN.md`,
+      `AGENTS.md`, and `CLAUDE.md`. When *every* path the change adds,
+      modifies, or deletes is one of those, the gate is **not** run: there is
+      nothing for it to observe. `charter-cite` scans only
       `.rs`/`.s`/`.toml`/`.sh`/`.yml`/`.yaml`, `spec-review` only `.rs`,
       `help-lint` only the `userland/` bundles, and `docs-check` (rustdoc,
       mdBook, the link and stale-symbol checks) only `docs/` — and nothing in
-      the workspace compiles, includes, or tests a plan. A fifteen-minute run
-      that cannot see the change proves nothing, so starting one is waste, not
-      diligence.
-      - **One path outside `plans/` and the full gate applies to the whole
-        change.** `AGENTS.md`, `PLAN.md`, `README.md`, `docs/`, `include/`,
-        and every source tree are outside it. `AGENTS.md` in particular is
-        *read by the pipeline* — `charter-cite` derives its valid
-        section-label set from this file — so a charter edit changes gate
-        behaviour and is never exempt.
+      the workspace compiles, includes, or tests a plan or this charter. A
+      fifteen-minute run that cannot see the change proves nothing, so
+      starting one is waste, not diligence.
+      - **One path outside that set and the full gate applies to the whole
+        change.** `README.md`, `docs/`, `include/`, and every source tree are
+        outside it.
+      - **The one charter edit that is *not* exempt: changing the section-label
+        set.** `charter-cite` derives the labels it recognises (`2.11`,
+        `19.10`, …) from this file, so *adding, removing, or renumbering a
+        numbered section* changes which `§N` in a source comment the check
+        flags — it can turn an unchanged source file from passing to failing
+        or back. Run the gate for that. Editing prose *within* an existing
+        section leaves the label set identical and stays exempt.
       - **Everything else still binds.** The §13 content rules for plan
         files (state the plan, not a changelog; no waffle), the §15.18
         jump-sheet obligation for a new or deleted plan, the §23
@@ -863,8 +869,8 @@ an update to this section.
 - **Definition of done — the whole project, not just the touched crate.**
   A change is not "done" until the **entire** workspace test suite has been
   run and is green. This is non-negotiable, subject to the single §2.15
-  exemption (a change confined to `plans/*.md`, which no stage below can
-  observe). Before reporting any task complete you MUST run, over the whole
+  exemption (a change confined to `plans/*.md`, `PLAN.md`, `AGENTS.md`, or
+  `CLAUDE.md`, which no stage below can observe). Before reporting any task complete you MUST run, over the whole
   project (never scoped to a single crate with `-p`):
   1. `cargo fmt --all` (and verify with `cargo fmt --all --check`).
   2. `cargo xtask ci` — the full pull-request pipeline (clippy, deps-check,
@@ -1325,8 +1331,8 @@ You are not exempt from any rule above. In addition:
    independent places and documented.
 6. **Run the full test suite over the *entire* project** before reporting a
    task complete — never a per-crate (`-p`) subset, and never skipped except
-   under the single §2.15 exemption (a change confined to `plans/*.md`). At
-   minimum this means
+   under the single §2.15 exemption (a change confined to `plans/*.md`,
+   `PLAN.md`, `AGENTS.md`, or `CLAUDE.md`). At minimum this means
    `cargo fmt --all`, the complete `cargo xtask ci` pipeline run **exactly
    once** (it is internally idempotent — a second consecutive `cargo xtask ci`
    is pure waste and is forbidden), and a fuzzing run of at least 5 seconds
@@ -3004,9 +3010,9 @@ Trace, do not assume. For every entry point the change adds or touches
   *beyond* `cargo xtask ci` itself — the `tools/ci/soak.sh` soak, not a second
   `cargo xtask ci`) were executed over the **entire** workspace — never a `-p`
   subset — and the actual output is quoted in the completion report. The
-  coverage targets (§7) still hold. A change confined to `plans/*.md` is the
-  one exemption (§2.15) and is not failed for having no gate output; every
-  other item of this gate still applies to it.
+  coverage targets (§7) still hold. A change confined to the planning and
+  charter documents is the one exemption (§2.15) and is not failed for having
+  no gate output; every other item of this gate still applies to it.
 - **Docs updated in the same change (§2.8, §13).** Rustdoc on every public
   item, the relevant `docs/src/` page, and any affected `README.md` stability
   tier (§6) are current. No stale symbol references remain.

@@ -363,7 +363,7 @@ Each stage leaves the whole-project §7 gate green before it is reported done.
   encoding, the `time.*` configuration keys, and the sandboxed decode all
   belong with the service that owns the I/O.
 
-### TS-2 — `timed`: the service — code complete, gate not yet green
+### TS-2 — `timed`: the service — DONE
 - `lib/net::ntp` gains `NtpClient::on_reply` and `lib/timesync` gains
   `TimeSync::on_reply` / `TimeSync::outstanding`: the transaction machine is
   reachable from an *already-evaluated* verdict, so a caller holding

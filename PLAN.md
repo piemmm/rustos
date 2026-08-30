@@ -3492,9 +3492,8 @@ See `plans/IO.md` (binding under `AGENTS.md`).
 
 ### Stage 6 follow-up — setting the clock (`plans/TIMESYNC.md`)
 
-**Status: in progress.** TS-1 (the engine and the clock policy) is done and
-TS-2 (the `timed` service) is code-complete with three QEMU verticals still
-failing (see `plans/TIMESYNC.md` TS-2): the machine now establishes its clock from a
+**Status: in progress.** TS-1 (the engine and the clock policy) and TS-2 (the
+`timed` service) are done: the machine now establishes its clock from a
 configured network time server, with the NTP decode contained in a
 capability-empty sandbox worker. TS-3 (the RTC driver class and the
 QEMU-emulable chips) is next; TS-4–TS-6 follow. `plans/TIMESYNC.md` is the
@@ -7447,6 +7446,19 @@ of how much code was produced.
 
 Amendments to `AGENTS.md` (the binding charter) are logged here so an agent
 can see *why* a rule exists without diffing the charter's history.
+
+- **2026-08-30 — The gate exemption covers the planning and charter documents,
+  not just `plans/`.** Amended §2.15's exemption block and its §7 / §15.6 /
+  §23.4 restatements, plus `CLAUDE.md` (owner decision). The reason for the
+  exemption was always "no pipeline stage can observe the change"; `PLAN.md`
+  and `CLAUDE.md` satisfy that as fully as `plans/*.md` does, and listing them
+  as non-exempt cost a fifteen-minute run that could only confirm two prose
+  status lines. `AGENTS.md` had been excluded because `charter-cite` derives
+  its section-label set from it — true, but the coupling is only to the *label
+  set*, so the amendment exempts prose within a section and keeps the gate for
+  adding, removing, or renumbering a numbered section, which really can flip an
+  unchanged source file's verdict. `README.md`, `docs/`, and `include/` stay
+  outside: `docs-check` reads them.
 
 - **2026-08-25 — The gate rule is "watch it to completion", not "run it in
   the foreground".** Amended §7's gate-running bullet and its §15.6 agent
