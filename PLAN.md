@@ -8617,3 +8617,39 @@ future contributor needs from this file:
   a hardware-shaped bound, not a capacity anything derives a limit from. The
   `BUNDLE_FILE_MAX` ↔ `MAX_ORDER` assertion is deleted and
   `BUNDLE_FILE_MAX` is a standalone untrusted-input bound.
+
+---
+
+## NEW-NAMESPACE — boot namespace assembly from signed policy (`plans/NEW-NAMESPACE.md`)  **[PLANNED, NOT STARTED]**
+
+**Dependencies:** Stage 5 (filesystem, mount table), Stage 4.HW (discovery,
+`volmgr`, `volume_attach`). Touches `plans/BOOTLOADER.md` (the handover gains
+the `/System` volume identity) and `plans/NEW-SUPERVISOR.md` (the recovery
+`mount` becomes an explicitly justified floor carve-out). Completes the target
+state `docs/src/filesystem/drives.md` §21 already names.
+
+**The defect it closes.** `system_mount.rs::system_vfs()` builds the entire
+boot topology from two compiled-in `const`s and picks the volume behind each
+path with a positional `first_of_type` scan of GPT type bytes. Three separate
+decisions — which volumes exist, what each is for, and what the namespace
+looks like — are fused into kernel code, so a multi-volume install, a recovery
+boot, or any layout change needs a kernel edit, and an attacker-writable
+partition-type byte is load-bearing.
+
+It also fuses **attachment** (a driver bound to a storage object, with
+capacity and identity) with **projection** (a view path onto an attachment's
+subtree with narrowed flags). That is why `MOUNT_LIST` reports seven records
+for two volumes, why `df` carries a duplicate-source heuristic to guess which
+are real, and why `sysmon`'s storage panel shows one volume six times. It is
+also why `CAP_FS_MOUNT_RELAX` has no enforcement point anywhere in the tree:
+flags are written directly, so there is no operation to gate.
+
+**Staged (detail in the plan; do not duplicate it here, §13):** NS-1 split
+attachment from projection and mint `CAP_FS_MOUNT_RELAX` with its enforcement
+point, NS-2 bind by superblock identity with the loader carrying the `/System`
+UUID, NS-3 the signed namespace policy on `/System`, NS-4 the `nsmgr` service
+that applies it, NS-5 the root-volume unlock and its ARXFS driver move to user
+space so no passphrase reaches ring 0, NS-6 delete the hardcode.
+
+NS-1 is independent of the rest and closes the duplicate-mount reporting on
+its own.
