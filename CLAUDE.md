@@ -36,10 +36,13 @@ Each of these names a general default that has actually produced a violation.
 
 ## Running the validation gate under the 10-minute tool cap
 
-First check whether you need to run it at all: a change confined to
-`plans/*.md` is exempt (§2.15) — no pipeline stage reads that directory, so
-the run would prove nothing. Anything else, including an `AGENTS.md`,
-`PLAN.md`, `README.md`, or `docs/` edit, runs the whole gate.
+First check whether you need to run it at all: a change confined to the
+planning and charter documents — `plans/*.md`, `PLAN.md`, `AGENTS.md`,
+`CLAUDE.md` — is exempt (§2.15), because no pipeline stage reads them and the
+run would prove nothing. A `README.md`, `docs/`, `include/`, or source edit
+runs the whole gate. The one charter edit that is *not* exempt is adding,
+removing, or renumbering a numbered section, which changes the label set
+`charter-cite` derives from `AGENTS.md`; prose within a section is exempt.
 
 §7's gate rule is "watch it to completion and report the status it actually
 produced", and it names this case: `cargo xtask ci` is ~15 min warm, so it does
