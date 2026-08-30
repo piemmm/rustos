@@ -2402,9 +2402,11 @@ impl Compositor {
 
     /// Composite any pending damage and present it to `display`.
     ///
-    /// No damage means nothing changed since the last present, so this
-    /// does nothing at all and does not call `display` — a wake that
-    /// changed nothing must not cost a scan-out copy or a driver blit.
+    /// No damage means nothing changed since the last present, so this does
+    /// nothing at all: no scan-out copy, no driver blit, and no frame in the
+    /// accounting ([`frame_totals`](Self::frame_totals)). A run loop may
+    /// therefore call this on every wake, and a reader watching those totals
+    /// for change still settles while the screen is idle.
     ///
     /// **A frame is presented once, naming everything it changed.** Damage
     /// that covers the screen takes the full [`Display::present`] path;
@@ -2422,6 +2424,13 @@ impl Compositor {
     /// Propagates any [`DriverError`] the display driver returns from
     /// [`Display::present`] / [`Display::present_rects`].
     pub fn present(&mut self, display: &mut dyn Display) -> Result<(), DriverError> {
+        // A wake with nothing pending is not a frame, and must not open one:
+        // the counters are what a reader watches for change, so counting the
+        // wakes themselves would make the totals move for ever on an idle
+        // desktop and never let such a reader settle.
+        if !self.has_damage() {
+            return Ok(());
+        }
         self.stats.begin_frame(self.screen_px());
         let region = self.recompose_damage();
         if region.is_empty() {

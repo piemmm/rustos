@@ -760,21 +760,36 @@ mod program {
         }
     }
 
-    /// Read the wall clock and, when the minute has turned, put the new label
-    /// on the bar.
+    /// Read the wall clock when the label it produced has gone stale, and put
+    /// the new one on the bar.
     ///
-    /// The read is one `wall_time` per tick — a minute apart, and only on the
-    /// paths this loop already passes through — so an idle desktop reads the
-    /// clock once a minute and does nothing else. A refused read (a machine
-    /// with no wall clock wired at all) leaves the bar exactly as it was
-    /// rather than blanking it: the label already shown is the last thing that
-    /// was true.
+    /// This runs on every wake, but the clock owns the cadence: it is read
+    /// only once the minute its label was right for has turned, which is the
+    /// same deadline the park is shortened to. An idle desktop therefore
+    /// reads it once a minute however often something else wakes the loop —
+    /// and something else does, roughly every couple of seconds, so reading
+    /// unconditionally here would put a syscall on a path that had nothing to
+    /// ask about.
+    ///
+    /// The cost is that a wall clock *stepped* while the desktop is up (an
+    /// NTP correction) reaches the bar at the next minute rather than the
+    /// next wake. There is no step notification to subscribe to — `wall_time`
+    /// is a plain read — and the bar shows whole minutes, so waiting for the
+    /// boundary it already wakes on beats polling for a correction that
+    /// almost never comes.
+    ///
+    /// A refused read (a machine with no wall clock wired at all) leaves the
+    /// bar exactly as it was rather than blanking it: the label already shown
+    /// is the last thing that was true.
     fn tick_clock(
         clock: &mut SessionClock,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
         now_ns: u64,
     ) {
+        if !clock.is_due(now_ns) {
+            return;
+        }
         let Ok(reading) = tairix_rt::wall_time() else {
             return;
         };

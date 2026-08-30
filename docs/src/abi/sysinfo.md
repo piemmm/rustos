@@ -373,7 +373,21 @@ Both submissions obey all five, through the one `SelfReports` table:
 `sysinfod` keys either kind on the caller's unforgeable process instance,
 sizes each table's reporter count from the machine's RAM, sweeps dead
 reporters before admitting a new one, and refuses a kernel-domain
-principal outright. A frame submission carries no identity field at all,
+principal outright.
+
+That sweep needs the machine's live process set, which means enumerating the
+whole process table — so it is paid only where it buys something. A
+submission triggers it **only** when the table is full *and* the caller is
+not already a reporter, which is the sole case where a dead reporter's slot
+is what is missing; an established reporter restating its figures, which is
+what these tables see by orders of magnitude, costs the replacement and
+nothing else. The *reads* resolve liveness instead, so a departed reporter is
+never served: a read is rare and asked for by a person, and each served row
+is attributed by the **reusable** numeric pid, so serving a dead reporter's
+figures would risk pinning them on whatever unrelated process has since
+recycled that pid.
+
+A frame submission carries no identity field at all,
 so there is nothing in it to refuse — the pid is stamped onto the served
 record instead — and an all-zero `DesktopFrameTotals` withdraws the
 publisher, as a zero-row cache report withdraws its rows.

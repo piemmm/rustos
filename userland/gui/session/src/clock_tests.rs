@@ -117,3 +117,54 @@ fn the_clock_never_lengthens_a_park_another_surface_already_shortened() {
     clock.adopt(at(1_709_214_367, 0), 0);
     assert_eq!(clock.park_deadline_ns(0, SEC / 2), SEC / 2);
 }
+
+#[test]
+fn a_clock_that_has_read_nothing_is_due() {
+    // The first reading is owed unconditionally: there is no label yet, and
+    // no deadline that could say when one falls due.
+    assert!(SessionClock::new().is_due(0));
+    assert!(SessionClock::new().is_due(u64::MAX));
+}
+
+/// The gate the run loop reads the wall clock behind, pinned against the
+/// deadline it folds into the park.
+///
+/// Something wakes the desktop every couple of seconds whatever the clock is
+/// doing, so `is_due` is what keeps a minute-granular label from costing a
+/// syscall on each of those wakes. The two views must agree exactly: a wake
+/// the park was *not* shortened for has nothing to ask the clock about, and
+/// one it *was* shortened for is owed a reading.
+#[test]
+fn the_read_is_due_exactly_when_the_park_it_armed_has_elapsed() {
+    let mut clock = SessionClock::new();
+    // 53 seconds short of the next minute boundary.
+    clock.adopt(at(1_709_214_367, 0), 0);
+
+    for now in [0, SEC, 52 * SEC, 53 * SEC - 1] {
+        assert!(!clock.is_due(now), "read early at {now}");
+        assert!(
+            clock.park_deadline_ns(now, NO_DEADLINE_NS) > 0,
+            "parked for nothing at {now}"
+        );
+    }
+    for now in [53 * SEC, 53 * SEC + 1, 600 * SEC] {
+        assert!(clock.is_due(now), "read owed but not due at {now}");
+        assert_eq!(
+            clock.park_deadline_ns(now, NO_DEADLINE_NS),
+            0,
+            "owed a tick but still parking at {now}"
+        );
+    }
+}
+
+#[test]
+fn adopting_a_reading_clears_the_debt_until_the_next_minute() {
+    let mut clock = SessionClock::new();
+    clock.adopt(at(1_709_214_367, 0), 0);
+    assert!(clock.is_due(53 * SEC));
+    // The tick is paid at the boundary, which arms the following whole minute.
+    clock.adopt(at(1_709_214_420, 0), 53 * SEC);
+    assert!(!clock.is_due(53 * SEC));
+    assert!(!clock.is_due(112 * SEC));
+    assert!(clock.is_due(113 * SEC));
+}

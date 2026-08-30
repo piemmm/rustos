@@ -65,6 +65,18 @@ emits a typed action for the owning service to authorise. Two control values com
 they would draw the same pixels, so a host can skip a repaint by comparing
 what it is about to draw against what it drew last.
 
+One control is drawn on *two* surfaces, and they draw different parts of it:
+`TraySignal`'s compact capsule sits on the bar permanently, while its
+instrument readout exists only while expanded. Whole-value equality therefore
+over-reports for the capsule — a live value line the readout alone shows moves
+it on every reading its owner publishes. `TraySignal::draws_same_capsule` is
+the capsule's own gate, and it is exact rather than a hand-kept field list:
+the glyph, composed state, and badge live in an inner value the bar paint is
+the *only* reader of, so a field the capsule draws has to be added there to be
+drawn at all. Byte-for-byte drift guards assert both directions — the label,
+value, and action never move the capsule's pixels, and everything it does draw
+always does.
+
 `Menu::anchored_rect` is the one placement rule for a popup menu opened at a
 pointer: it sizes the menu from its own preferred width and height clamped to
 the viewport, then places its top-left at the anchor, shifting left or up only

@@ -45,6 +45,8 @@ use tairix_icon::IconKind;
 use tairix_input::InputEvent;
 use tairix_theme::Theme;
 
+use crate::repaint::TaskbarRepaint;
+
 /// The Switchboard tray capsule: the shared [`TraySignal`] control plus the
 /// facts it is derived from — the latest published [`TraySummary`] and the
 /// session's count of unresponsive applications.
@@ -73,26 +75,24 @@ impl SwitchboardTray {
     }
 
     /// Adopt the latest published summary — or its absence, when the
-    /// Switchboard service is gone — rebuilding the capsule. Returns whether
-    /// anything changed.
-    pub fn set_summary(&mut self, summary: Option<TraySummary>) -> bool {
+    /// Switchboard service is gone — rebuilding the capsule. Returns the
+    /// surfaces whose pixels the new reading actually moved.
+    pub fn set_summary(&mut self, summary: Option<TraySummary>) -> TaskbarRepaint {
         if self.summary == summary {
-            return false;
+            return TaskbarRepaint::NONE;
         }
         self.summary = summary;
-        self.rebuild();
-        true
+        self.rebuild()
     }
 
     /// Adopt the session's count of unresponsive applications, rebuilding
-    /// the capsule. Returns whether anything changed.
-    pub fn set_unresponsive(&mut self, count: u16) -> bool {
+    /// the capsule. Returns the surfaces whose pixels the new count moved.
+    pub fn set_unresponsive(&mut self, count: u16) -> TaskbarRepaint {
         if self.unresponsive == count {
-            return false;
+            return TaskbarRepaint::NONE;
         }
         self.unresponsive = count;
-        self.rebuild();
-        true
+        self.rebuild()
     }
 
     /// The capsule control, for painting and readout sizing.
@@ -187,11 +187,28 @@ impl SwitchboardTray {
 
     /// Re-derive the capsule from the current facts, carrying over the
     /// pointer and focus interaction state so a live update never drops an
-    /// open hover readout.
-    fn rebuild(&mut self) {
-        let previous = self.signal.state();
-        self.signal = derive_signal(self.summary.as_ref(), self.unresponsive)
-            .into_signal(previous.pointer, previous.focus);
+    /// open hover readout, and report which surfaces the new derive actually
+    /// redraws.
+    ///
+    /// The two surfaces draw different parts of one signal, so they are
+    /// latched separately. The bar's capsule is the glyph, the composed
+    /// state, and the badge; the readout adds the label, the value line, and
+    /// the action. A calm desktop republishes a fresh CPU reading every
+    /// couple of seconds and *only* the value line moves — so gating the bar
+    /// on the whole signal would repaint the full-width bar, on a cadence, to
+    /// redraw pixels nobody can tell apart. The readout is latched only while
+    /// it is expanded, because that is the only time it is on screen at all.
+    fn rebuild(&mut self) -> TaskbarRepaint {
+        let interaction = self.signal.state();
+        let next = derive_signal(self.summary.as_ref(), self.unresponsive)
+            .into_signal(interaction.pointer, interaction.focus);
+        let parts = TaskbarRepaint {
+            bar: !self.signal.draws_same_capsule(&next),
+            readout: next.is_expanded() && self.signal != next,
+            ..TaskbarRepaint::NONE
+        };
+        self.signal = next;
+        parts
     }
 }
 

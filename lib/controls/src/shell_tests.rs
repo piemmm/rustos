@@ -846,6 +846,66 @@ fn tray_signal_without_badge_keeps_prior_rendering() {
     assert_eq!(baseline.pixels(), after_clear.pixels());
 }
 
+/// The drift guard behind `draws_same_capsule`: the readout's own fields
+/// must not reach the capsule's pixels. A live value line moves on every
+/// reading the owner publishes, and a taskbar that repainted its whole bar
+/// for one is what this split exists to stop.
+#[test]
+fn tray_signal_capsule_ignores_the_readout_only_fields() {
+    for theme in [Theme::dark(), Theme::light(), high_contrast()] {
+        let base = TraySignal::new(IconKind::Switchboard, "System normal")
+            .with_value("CPU 7%")
+            .with_action(Button::labelled("Open Switchboard"));
+        for other in [
+            // A different value line — the every-sample case.
+            TraySignal::new(IconKind::Switchboard, "System normal")
+                .with_value("sysmon — 31% CPU")
+                .with_action(Button::labelled("Open Switchboard")),
+            // A different state name.
+            TraySignal::new(IconKind::Switchboard, "Background work")
+                .with_value("CPU 7%")
+                .with_action(Button::labelled("Open Switchboard")),
+            // No value and no action at all.
+            TraySignal::new(IconKind::Switchboard, "System normal"),
+        ] {
+            assert!(base.draws_same_capsule(&other));
+            assert_eq!(
+                tray_surface(&base, &theme).pixels(),
+                tray_surface(&other, &theme).pixels()
+            );
+        }
+    }
+}
+
+/// The other direction, and the one whose failure would leave stale pixels
+/// on screen: every field the capsule *does* draw moves both its rendering
+/// and `draws_same_capsule`.
+#[test]
+fn tray_signal_capsule_tracks_every_field_it_draws() {
+    let theme = Theme::dark();
+    let base = TraySignal::new(IconKind::Switchboard, "System normal");
+    for other in [
+        TraySignal::new(IconKind::Battery, "System normal"),
+        TraySignal::new(IconKind::Switchboard, "System normal")
+            .with_state(ControlState::idle().with_activity(ActivityState::Working)),
+        TraySignal::new(IconKind::Switchboard, "System normal").with_state(
+            ControlState::idle().with_pressure(PressureState::Under(PressureKind::Memory)),
+        ),
+        TraySignal::new(IconKind::Switchboard, "System normal")
+            .with_state(ControlState::idle().with_recovery(RecoveryState::Hung)),
+        TraySignal::new(IconKind::Switchboard, "System normal").with_badge(TrayBadge::new(
+            TrayBadgeContent::Alert,
+            TrayBadgeTone::Danger,
+        )),
+    ] {
+        assert!(!base.draws_same_capsule(&other));
+        assert_ne!(
+            tray_surface(&base, &theme).pixels(),
+            tray_surface(&other, &theme).pixels()
+        );
+    }
+}
+
 #[test]
 fn tray_signal_badge_on_degenerate_bounds_does_not_panic() {
     let theme = Theme::dark();

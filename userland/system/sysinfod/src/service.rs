@@ -206,7 +206,7 @@ fn dispatch(
     } else if query == SysinfoQueryId::DESKTOP_FRAME_REPORT {
         desktop_frame_report(source, caller, reports, payload)
     } else if query == SysinfoQueryId::DESKTOP_FRAME_STATS {
-        desktop_frame_stats(reports, payload, response)
+        desktop_frame_stats(source, reports, payload, response)
     } else if query == SysinfoQueryId::RAMZIP_STATS {
         write_bytes(&source.ramzip_stats(caller)?.to_le_bytes(), response)
     } else if query == SysinfoQueryId::CPU_LOAD {
@@ -594,11 +594,7 @@ fn cache_report(
         rows.push(CacheLedgerRecord::from_bytes(record)?);
     }
 
-    // A full registry only refuses a genuinely *new* reporter: drop any
-    // entry whose process has already exited before deciding whether
-    // there is room for this one.
-    reports.retain_live(&source.live_process_instances()?);
-    reports.report_cache_ledgers(caller, rows)?;
+    reports.report_cache_ledgers(caller, rows, || source.live_process_instances())?;
     Ok(0)
 }
 
@@ -621,29 +617,30 @@ fn desktop_frame_report(
     }
     let totals = DesktopFrameTotals::from_bytes(payload)?;
 
-    // A full table only refuses a genuinely *new* publisher: drop any entry
-    // whose process has already exited before deciding whether there is room
-    // for this one.
-    reports.retain_live(&source.live_process_instances()?);
-    reports.report_frame_totals(caller, totals)?;
+    reports.report_frame_totals(caller, totals, || source.live_process_instances())?;
     Ok(0)
 }
 
 /// Decode the [`DesktopFrameStatsRequest`], apply paging, and pack the
 /// retained [`DesktopFrameRecord`]s into `response`.
 ///
-/// Reached only after the `CAP_SYSINFO_GLOBAL` gate has passed. The records
-/// are `sysinfod`'s own retained state, so this touches no
-/// [`SysinfoSource`]: liveness pruning happens where a submission is
-/// admitted, and a reader that arrives between an exit and the next
-/// submission sees the departed session's last figures rather than nothing —
-/// which is what a reader asking "what did the desktop just cost" wants.
+/// Reached only after the `CAP_SYSINFO_GLOBAL` gate has passed.
+///
+/// A departed publisher's entry is dropped here rather than served: each
+/// record is attributed by the *reusable* numeric pid, so serving a dead
+/// session's figures risks pinning them on whatever unrelated process the
+/// kernel has since recycled that pid to. Liveness is resolved on this path,
+/// as it is for the cache rows ([`combined_cache_rows`]), because a read is
+/// what a person asked for and is rare, while a submission is a service
+/// restating a figure on a cadence.
 fn desktop_frame_stats(
-    reports: &SelfReports,
+    source: &dyn SysinfoSource,
+    reports: &mut SelfReports,
     payload: &[u8],
     response: &mut [u8],
 ) -> Result<usize, Errno> {
     let request = DesktopFrameStatsRequest::from_bytes(payload)?;
+    reports.retain_live(&source.live_process_instances()?);
     let records = reports.frame_records();
     page_records(
         response,
@@ -1216,12 +1213,21 @@ mod tests {
         /// default, since most tests never report a cache and so never
         /// need a reporter kept alive across a query.
         live: RefCell<alloc::vec::Vec<ProcId>>,
+        /// How many times `live_process_instances` has been consulted, so a
+        /// test can assert a submission does not enumerate the machine's
+        /// process table.
+        live_calls: RefCell<usize>,
     }
     impl FixtureSource {
         /// Declare which process instances `live_process_instances` should
         /// report as live, for tests that exercise reporter expiry.
         fn set_live(&self, live: alloc::vec::Vec<ProcId>) {
             *self.live.borrow_mut() = live;
+        }
+
+        /// How many times the process table has been enumerated so far.
+        fn live_calls(&self) -> usize {
+            *self.live_calls.borrow()
         }
 
         fn new() -> Self {
@@ -1285,6 +1291,7 @@ mod tests {
                 ],
                 cache_ledgers: fixture_cache_ledgers(),
                 live: RefCell::new(alloc::vec::Vec::new()),
+                live_calls: RefCell::new(0),
             }
         }
     }
@@ -1383,6 +1390,7 @@ mod tests {
             Ok(self.cache_ledgers.clone())
         }
         fn live_process_instances(&self) -> Result<alloc::vec::Vec<ProcId>, Errno> {
+            *self.live_calls.borrow_mut() += 1;
             Ok(self.live.borrow().clone())
         }
         fn ramzip_stats(&self, _caller: &Caller) -> Result<RamzipStats, Errno> {
@@ -3783,6 +3791,37 @@ mod tests {
             .iter()
             .map(|chunk| DesktopFrameRecord::from_bytes(chunk).expect("a served row decodes"))
             .collect())
+    }
+
+    /// A submission must not enumerate the machine's process table.
+    ///
+    /// The desktop restates its frame accounting on a cadence, so a walk of
+    /// every live process per submission scales the desktop's own idle cost
+    /// with how many processes the machine is running. The sweep that walk
+    /// serves only ever frees room, and an established publisher needs none.
+    #[test]
+    fn republishing_frames_never_enumerates_the_process_table() {
+        let source = FixtureSource::new();
+        let mut reports = SelfReports::new(1 << 30);
+        let session = user_caller(&[], 0xF1, 77);
+
+        for _ in 0..16 {
+            assert_eq!(
+                publish_frames(&source, &mut reports, &session, frame_totals()),
+                Ok(0)
+            );
+        }
+        assert_eq!(
+            source.live_calls(),
+            0,
+            "an established publisher's submissions swept the process table"
+        );
+
+        // A read is what a person asked for, and is where liveness is
+        // resolved, so it does consult it.
+        let observer = user_caller(&[CapabilityId::SYSINFO_GLOBAL], 0xF2, 78);
+        read_frames(&source, &mut reports, &observer).expect("served");
+        assert_eq!(source.live_calls(), 1);
     }
 
     #[test]

@@ -607,6 +607,13 @@ every other chrome surface (popup, menu, picker, notifications, readout). With
 it, A.4's damage bound should drop to about `screen/64`, and the drop is the
 acceptance evidence.
 
+What remains here is **input-driven** only. The one repaint that fired on a
+cadence rather than on a gesture — the Switchboard tray republishing a reading
+every couple of seconds, of which a calm desktop's only moving part is a value
+line the bar does not draw — no longer latches `bar` at all: the capsule is
+gated on `TraySignal::draws_same_capsule` (`docs/src/desktop/taskbar.md`), so
+measuring this stage no longer has a 0.5 Hz whole-bar repaint underneath it.
+
 ---
 
 ## Stage D — Make blur cost what it changes  **[done; D.5 is a User decision]**
@@ -1341,6 +1348,17 @@ A–E are expected to dominate F entirely.
    landed**: the `DESKTOP_FRAME_REPORT` / `DESKTOP_FRAME_STATS` submission/read
    pair, held to the same ABI discipline as any other query, with `sysinfo
    frames` as its second consumer. The vertical (A.4) has landed on top of it.
+6. ~~`DESKTOP_FRAME_REPORT` enumerates the whole process table per
+   submission~~ — **taken and fixed.** The liveness sweep moved off the
+   submission path: a table consults the live set only when it is full *and*
+   the caller is not already a reporter, which is the only case where a dead
+   reporter's slot is what is missing, and the *reads* resolve liveness so a
+   departed reporter is never served (`docs/src/abi/sysinfo.md`).
+7. ~~`tick_clock` reads the wall clock on every wake~~ — **taken and fixed.**
+   The read is gated on `SessionClock::is_due`, the same deadline the park is
+   shortened to. A wall-clock step therefore reaches the bar at the next
+   minute rather than the next wake; there is no step notification to
+   subscribe to, and the bar shows whole minutes.
 
 ---
 

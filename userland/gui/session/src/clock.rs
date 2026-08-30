@@ -34,6 +34,12 @@
 //! poll, and nothing like the busy-wait the desktop forbids elsewhere. A
 //! background session folds no deadlines at all, so its clock ticks not at
 //! all: there is nothing on screen for it to be wrong on.
+//!
+//! The same deadline is also the *read* gate ([`SessionClock::is_due`]).
+//! Plenty else wakes the session — a tray reading arrives every couple of
+//! seconds — and reading the wall clock on each of those would put a syscall
+//! on a path with nothing to ask about. The clock is read on the wakes it
+//! shortened the park for, and on no others.
 
 use alloc::string::String;
 use core::fmt::Write as _;
@@ -77,6 +83,18 @@ impl SessionClock {
     #[must_use]
     pub fn label(&self) -> &str {
         &self.label
+    }
+
+    /// Whether the wall clock is worth reading again: nothing has been read
+    /// yet, or the minute the current label was right for has turned.
+    ///
+    /// The same deadline [`park_deadline_ns`](Self::park_deadline_ns) folds
+    /// into the park, asked the other way round — so the loop reads the clock
+    /// exactly on the wakes it shortened the park *for*, and not on the many
+    /// it did not.
+    #[must_use]
+    pub fn is_due(&self, now_ns: u64) -> bool {
+        self.stale_at_ns.is_none_or(|stale| now_ns >= stale)
     }
 
     /// Adopt `reading` as of monotonic instant `now_ns`, answering whether the

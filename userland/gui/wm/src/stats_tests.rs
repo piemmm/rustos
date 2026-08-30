@@ -438,3 +438,35 @@ fn a_mode_change_starts_a_fresh_epoch() {
     );
     assert_eq!(decoded(after), Ok(after));
 }
+
+/// A wake that composed nothing is not a frame.
+///
+/// The desktop's run loop calls `present` on every wake, damaged or not, and
+/// a reader watching these totals for change settles only while they hold
+/// still. Counting the wakes themselves left the desktop's own frame
+/// accounting climbing for ever on a idle screen, so that reader never
+/// settled and paid a round trip on a cadence to republish it.
+#[test]
+fn an_undamaged_present_is_not_a_frame() {
+    let mut comp = compositor();
+    let mut display = MockDisplay::new(mode(64, 48));
+    add(&mut comp, 0, 0, 10, 8, Color::rgb(9, 9, 9));
+    assert!(comp.present(&mut display).is_ok());
+    let settled = comp.frame_totals();
+    assert_eq!(settled.frames, 1, "the damaged wake is the one frame");
+
+    for wake in 0..8 {
+        assert!(comp.present(&mut display).is_ok());
+        assert_eq!(
+            comp.frame_totals(),
+            settled,
+            "undamaged wake {wake} moved the totals"
+        );
+    }
+
+    // And a wake that *does* change something still counts, so the guard
+    // cannot be satisfied by never counting at all.
+    assert!(comp.set_background(Color::rgb(1, 2, 3)));
+    assert!(comp.present(&mut display).is_ok());
+    assert_eq!(comp.frame_totals().frames, settled.frames + 1);
+}

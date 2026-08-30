@@ -1436,8 +1436,9 @@ impl DesktopShell {
     /// embedder attests the producer on the endpoint before this call, so
     /// the model only ever renders what the desktop's own service published.
     pub fn set_tray_summary(&mut self, compositor: &mut Compositor, summary: Option<TraySummary>) {
-        self.session.taskbar_mut().set_tray_summary(summary);
-        self.present(compositor);
+        if self.session.taskbar_mut().set_tray_summary(summary) {
+            self.present(compositor);
+        }
     }
 
     /// Adopt the session's own count of unresponsive applications into the
@@ -1448,8 +1449,9 @@ impl DesktopShell {
     /// service — the session is the one component that observes whether an
     /// app drains its window events.
     pub fn set_tray_unresponsive(&mut self, compositor: &mut Compositor, count: u16) {
-        self.session.taskbar_mut().set_tray_unresponsive(count);
-        self.present(compositor);
+        if self.session.taskbar_mut().set_tray_unresponsive(count) {
+            self.present(compositor);
+        }
     }
 
     /// Attest to the taskbar whether this session's console has a

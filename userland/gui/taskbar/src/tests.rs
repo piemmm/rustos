@@ -5980,6 +5980,36 @@ fn tray_feeds_latch_repaint_only_on_change() {
     );
 }
 
+/// The regression this per-surface latch exists for. The Switchboard service
+/// publishes a fresh reading every couple of seconds; on a calm desktop the
+/// only thing that moves is the readout's value line, which the bar does not
+/// draw. Latching the bar for it repainted the full-width strip on a cadence,
+/// for pixels nobody could tell apart.
+#[test]
+fn a_calm_reading_that_moves_only_the_value_line_leaves_the_bar_alone() {
+    let mut bar = bottom_bar();
+    bar.set_tray_summary(Some(tray_summary(0, 0, 100)));
+    let _ = bar.take_repaint();
+
+    assert!(
+        !bar.set_tray_summary(Some(tray_summary(0, 0, 400))),
+        "a figure the collapsed capsule never draws is not a repaint"
+    );
+    assert!(!bar.take_repaint().any());
+
+    // Hovering opens the readout, which *does* draw the figure — so from
+    // here the same reading repaints that surface, and only that surface.
+    let mut input = TaskbarInput::new();
+    hover_switchboard(&mut input, &mut bar);
+    let _ = bar.take_repaint();
+    assert!(bar.set_tray_summary(Some(tray_summary(0, 0, 700))));
+    assert_eq!(
+        bar.take_repaint(),
+        TaskbarRepaint::READOUT,
+        "the open readout shows the figure; the bar's capsule is unchanged"
+    );
+}
+
 #[test]
 fn tray_update_keeps_the_hovered_readout_open() {
     let mut bar = bottom_bar();

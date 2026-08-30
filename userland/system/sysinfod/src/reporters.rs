@@ -88,12 +88,17 @@ struct Entry<T> {
 /// A process's entry is replaced wholesale on every [`put`](Self::put) call
 /// rather than merged, so a process's footprint never grows however often it
 /// reports. Admission is capacity-bounded and never displaces a live
-/// reporter's truthful value to make room for an unknown one: a caller
-/// filling a submission pipeline is expected to call
-/// [`retain_live`](Self::retain_live) immediately beforehand (as
-/// `crate::service::serve` does), so a dead reporter's slot is already free
-/// by the time a new one is admitted, and a table that is still full after
-/// that refuses the new reporter with [`Errno::NoSpace`].
+/// reporter's truthful value to make room for an unknown one: a full table
+/// sweeps its dead reporters and, if that frees nothing, refuses the new one
+/// with [`Errno::NoSpace`].
+///
+/// The sweep is what makes room, so it is paid only when room is what is
+/// missing. Establishing the live set means enumerating the machine's whole
+/// process table, and the submissions that dominate this table by orders of
+/// magnitude — a desktop restating its frame accounting, a runtime restating
+/// its cache ledger — are from reporters already admitted, who need no room
+/// at all. Sweeping on each of those would scale a re-submission with the
+/// machine's process count.
 struct ReportTable<T> {
     entries: Vec<Entry<T>>,
     capacity: usize,
@@ -108,14 +113,22 @@ impl<T> ReportTable<T> {
         }
     }
 
-    /// Replace `caller`'s entry with `value`.
+    /// Replace `caller`'s entry with `value`, sweeping dead reporters to
+    /// admit a new one only if the table is full.
+    ///
+    /// `live` is consulted at most once, and only on that path.
     ///
     /// # Errors
     ///
     /// * [`Errno::PermissionDenied`] as [`reporter_id`] raises it.
-    /// * [`Errno::NoSpace`] if the table is full and `caller` is not already
-    ///   a reporter.
-    fn put(&mut self, caller: &Caller, value: T) -> Result<(), Errno> {
+    /// * Whatever `live` raises, when the table is full enough to need it.
+    /// * [`Errno::NoSpace`] if the table is still full of live reporters.
+    fn put(
+        &mut self,
+        caller: &Caller,
+        value: T,
+        live: impl FnOnce() -> Result<Vec<ProcId>, Errno>,
+    ) -> Result<(), Errno> {
         let proc_id = reporter_id(caller)?;
         let pid = caller.origin().pid();
         if let Some(entry) = self.entries.iter_mut().find(|e| e.proc_id == proc_id) {
@@ -124,7 +137,10 @@ impl<T> ReportTable<T> {
             return Ok(());
         }
         if self.entries.len() >= self.capacity {
-            return Err(Errno::NoSpace);
+            self.retain_live(&live()?);
+            if self.entries.len() >= self.capacity {
+                return Err(Errno::NoSpace);
+            }
         }
         self.entries.push(Entry {
             proc_id,
@@ -233,14 +249,17 @@ impl SelfReports {
     /// * [`Errno::PermissionDenied`] if `caller`'s attested process instance
     ///   is [`ProcId::KERNEL`] — a kernel-domain principal is never a real
     ///   user process and holds no userland cache.
-    /// * [`Errno::NoSpace`] if the table is full and `caller` is not already
-    ///   a reporter. Call [`retain_live`](Self::retain_live) first to make
-    ///   room for a genuinely new reporter; a live reporter's own rows are
-    ///   never evicted to admit one.
+    /// * Whatever `live` raises, on the sole path that consults it.
+    /// * [`Errno::NoSpace`] if the table is full of *live* reporters; a live
+    ///   reporter's own rows are never evicted to admit a new one.
+    ///
+    /// `live` yields the machine's live process instances and is called at
+    /// most once, only to make room for a reporter not already admitted.
     pub fn report_cache_ledgers(
         &mut self,
         caller: &Caller,
         rows: Vec<CacheLedgerRecord>,
+        live: impl FnOnce() -> Result<Vec<ProcId>, Errno>,
     ) -> Result<(), Errno> {
         if rows.iter().any(|row| {
             row.origin != CacheLedgerOrigin::Unset
@@ -264,7 +283,7 @@ impl SelfReports {
                 row
             })
             .collect();
-        self.caches.put(caller, stamped)
+        self.caches.put(caller, stamped, live)
     }
 
     /// Every retained cache row, in a stable order: by reporter (its
@@ -299,18 +318,19 @@ impl SelfReports {
     ///
     /// * [`Errno::PermissionDenied`] if `caller`'s attested process instance
     ///   is [`ProcId::KERNEL`] — a kernel-domain principal never composites.
-    /// * [`Errno::NoSpace`] if the table is full and `caller` is not already
-    ///   a publisher, as [`report_cache_ledgers`](Self::report_cache_ledgers)
-    ///   describes.
+    /// * Whatever `live` raises, and [`Errno::NoSpace`] if the table is full
+    ///   of live publishers, both as
+    ///   [`report_cache_ledgers`](Self::report_cache_ledgers) describes.
     pub fn report_frame_totals(
         &mut self,
         caller: &Caller,
         totals: DesktopFrameTotals,
+        live: impl FnOnce() -> Result<Vec<ProcId>, Errno>,
     ) -> Result<(), Errno> {
         if totals == DesktopFrameTotals::ZERO {
             return self.frames.withdraw(caller);
         }
-        self.frames.put(caller, totals)
+        self.frames.put(caller, totals, live)
     }
 
     /// Every retained frame report, ordered by reporter, each attributed to
@@ -336,7 +356,17 @@ mod tests {
     use crate::testing::{kernel_caller, user_caller};
     use alloc::vec;
     use tairix_abi::sysinfo::{CacheLedgerOrigin, CacheLedgerRecord, CacheOwnerKind};
-    use tairix_abi::Errno;
+    use tairix_abi::{Errno, ProcId};
+
+    /// A live-set source that must never be consulted.
+    ///
+    /// Establishing it enumerates the machine's whole process table, so a
+    /// submission that needs no room must never ask for it. Every test below
+    /// passes this, which is what pins a re-submission's cost off the process
+    /// count rather than merely asserting it once.
+    fn never_swept() -> Result<alloc::vec::Vec<ProcId>, Errno> {
+        panic!("an admitted reporter's submission must not enumerate the process table")
+    }
 
     fn row(label: &str) -> CacheLedgerRecord {
         owned_row(label, CacheOwnerKind::UserlandProcess)
@@ -358,7 +388,7 @@ mod tests {
         let mut registry = SelfReports::new(1 << 30);
         let caller = user_caller(&[], 1, 42);
         registry
-            .report_cache_ledgers(&caller, vec![row("glyphs")])
+            .report_cache_ledgers(&caller, vec![row("glyphs")], never_swept)
             .expect("admits a fresh reporter");
         let rows = registry.cache_rows();
         assert_eq!(rows.len(), 1);
@@ -373,7 +403,7 @@ mod tests {
         let mut malicious = row("glyphs");
         malicious.origin = CacheLedgerOrigin::Kernel;
         assert_eq!(
-            registry.report_cache_ledgers(&caller, vec![malicious]),
+            registry.report_cache_ledgers(&caller, vec![malicious], never_swept),
             Err(Errno::BadMagic)
         );
         assert!(registry.cache_rows().is_empty());
@@ -386,7 +416,7 @@ mod tests {
         let mut malicious = row("glyphs");
         malicious.reporter_pid = 7;
         assert_eq!(
-            registry.report_cache_ledgers(&caller, vec![malicious]),
+            registry.report_cache_ledgers(&caller, vec![malicious], never_swept),
             Err(Errno::BadMagic)
         );
         assert!(registry.cache_rows().is_empty());
@@ -397,7 +427,7 @@ mod tests {
         let mut registry = SelfReports::new(1 << 30);
         let caller = user_caller(&[], 1, 42);
         registry
-            .report_cache_ledgers(&caller, vec![row("glyphs")])
+            .report_cache_ledgers(&caller, vec![row("glyphs")], never_swept)
             .expect("a truthful report is admitted");
 
         assert_eq!(
@@ -406,7 +436,8 @@ mod tests {
                 vec![
                     row("artwork"),
                     owned_row("pretender", CacheOwnerKind::KernelSubsystem),
-                ]
+                ],
+                never_swept,
             ),
             Err(Errno::BadMagic)
         );
@@ -432,6 +463,7 @@ mod tests {
                     owned_row("seat", CacheOwnerKind::DesktopSession),
                     owned_row("process", CacheOwnerKind::UserlandProcess),
                 ],
+                never_swept,
             )
             .expect("a userland cache can be owned by a volume, task, seat, or process");
 
@@ -455,7 +487,7 @@ mod tests {
         let caller = user_caller(&[], 1, 42);
         let rows = vec![row("a"); super::MAX_CACHE_REPORT_ENTRIES + 1];
         assert_eq!(
-            registry.report_cache_ledgers(&caller, rows),
+            registry.report_cache_ledgers(&caller, rows, never_swept),
             Err(Errno::LengthOutOfRange)
         );
         assert!(registry.cache_rows().is_empty());
@@ -465,7 +497,7 @@ mod tests {
     fn report_refuses_kernel_domain_caller() {
         let mut registry = SelfReports::new(1 << 30);
         assert_eq!(
-            registry.report_cache_ledgers(&kernel_caller(), vec![row("glyphs")]),
+            registry.report_cache_ledgers(&kernel_caller(), vec![row("glyphs")], never_swept),
             Err(Errno::PermissionDenied)
         );
         assert!(registry.cache_rows().is_empty());
@@ -476,10 +508,10 @@ mod tests {
         let mut registry = SelfReports::new(1 << 30);
         let caller = user_caller(&[], 1, 42);
         registry
-            .report_cache_ledgers(&caller, vec![row("glyphs"), row("artwork")])
+            .report_cache_ledgers(&caller, vec![row("glyphs"), row("artwork")], never_swept)
             .expect("first report admitted");
         registry
-            .report_cache_ledgers(&caller, vec![row("cursors")])
+            .report_cache_ledgers(&caller, vec![row("cursors")], never_swept)
             .expect("second report admitted");
         let rows = registry.cache_rows();
         assert_eq!(rows.len(), 1);
@@ -491,10 +523,10 @@ mod tests {
         let mut registry = SelfReports::new(1 << 30);
         let caller = user_caller(&[], 1, 42);
         registry
-            .report_cache_ledgers(&caller, vec![row("glyphs")])
+            .report_cache_ledgers(&caller, vec![row("glyphs")], never_swept)
             .expect("first report admitted");
         registry
-            .report_cache_ledgers(&caller, vec![])
+            .report_cache_ledgers(&caller, vec![], never_swept)
             .expect("empty report withdraws");
         assert!(registry.cache_rows().is_empty());
     }
@@ -505,10 +537,10 @@ mod tests {
         let gone = user_caller(&[], 1, 42);
         let staying = user_caller(&[], 2, 43);
         registry
-            .report_cache_ledgers(&gone, vec![row("glyphs")])
+            .report_cache_ledgers(&gone, vec![row("glyphs")], never_swept)
             .expect("admitted");
         registry
-            .report_cache_ledgers(&staying, vec![row("artwork")])
+            .report_cache_ledgers(&staying, vec![row("artwork")], never_swept)
             .expect("admitted");
 
         registry.retain_live(&[staying.origin().proc_id()]);
@@ -523,7 +555,7 @@ mod tests {
         let mut registry = SelfReports::new(1 << 30);
         let original = user_caller(&[], 1, 99);
         registry
-            .report_cache_ledgers(&original, vec![row("glyphs")])
+            .report_cache_ledgers(&original, vec![row("glyphs")], never_swept)
             .expect("admitted");
 
         // The instance is gone; its pid 99 is recycled to an unrelated
@@ -531,7 +563,7 @@ mod tests {
         registry.retain_live(&[]);
         let recycled = user_caller(&[], 9, 99);
         registry
-            .report_cache_ledgers(&recycled, vec![row("cursors")])
+            .report_cache_ledgers(&recycled, vec![row("cursors")], never_swept)
             .expect("admitted as a new reporter");
 
         let rows = registry.cache_rows();
@@ -539,22 +571,59 @@ mod tests {
         assert_eq!(rows[0].label(), "cursors");
     }
 
-    #[test]
-    fn full_registry_refuses_a_new_reporter_without_evicting_live_ones() {
+    /// Fill a registry to exactly its capacity, answering the callers that
+    /// hold it so a test can state which of them is still alive.
+    fn filled_to_capacity() -> (SelfReports, alloc::vec::Vec<ProcId>) {
         let floor = u8::try_from(MIN_REPORTERS).expect("the reporter floor fits a fixture tag");
         let mut registry = SelfReports::new(RAM_BYTES_PER_REPORTER * u64::from(floor));
+        let mut admitted = alloc::vec::Vec::new();
         for tag in 0..floor {
             let caller = user_caller(&[], tag, u64::from(tag));
             registry
-                .report_cache_ledgers(&caller, vec![row("glyphs")])
+                .report_cache_ledgers(&caller, vec![row("glyphs")], never_swept)
                 .expect("admitted within capacity");
+            admitted.push(caller.origin().proc_id());
         }
+        (registry, admitted)
+    }
+
+    #[test]
+    fn full_registry_refuses_a_new_reporter_without_evicting_live_ones() {
+        let (mut registry, admitted) = filled_to_capacity();
         let overflow = user_caller(&[], 200, 200);
         assert_eq!(
-            registry.report_cache_ledgers(&overflow, vec![row("glyphs")]),
+            registry.report_cache_ledgers(&overflow, vec![row("glyphs")], || Ok(admitted.clone())),
             Err(Errno::NoSpace)
         );
         assert_eq!(registry.cache_rows().len(), MIN_REPORTERS);
+    }
+
+    /// The sweep's whole purpose, and the only path that pays for it: a full
+    /// table whose reporters have since exited admits a new one.
+    #[test]
+    fn a_full_registry_sweeps_its_dead_reporters_to_admit_a_new_one() {
+        let (mut registry, admitted) = filled_to_capacity();
+        let survivor = admitted[0];
+        let newcomer = user_caller(&[], 200, 200);
+        registry
+            .report_cache_ledgers(&newcomer, vec![row("cursors")], || Ok(vec![survivor]))
+            .expect("the dead reporters' slots are freed for it");
+
+        let rows = registry.cache_rows();
+        let labels: alloc::vec::Vec<&str> = rows.iter().map(CacheLedgerRecord::label).collect();
+        assert_eq!(labels, ["glyphs", "cursors"], "only the live one survived");
+    }
+
+    /// An already-admitted reporter restating its figures is the submission
+    /// this table sees most, and it must cost nothing beyond the replacement
+    /// — `never_swept` panics if the process table is enumerated.
+    #[test]
+    fn a_resubmission_into_a_full_registry_never_sweeps() {
+        let (mut registry, _) = filled_to_capacity();
+        let established = user_caller(&[], 0, 0);
+        registry
+            .report_cache_ledgers(&established, vec![row("artwork")], never_swept)
+            .expect("an established reporter needs no room");
     }
 
     #[test]
@@ -563,10 +632,10 @@ mod tests {
         let first = user_caller(&[], 1, 1);
         let second = user_caller(&[], 2, 2);
         registry
-            .report_cache_ledgers(&second, vec![row("zeta"), row("alpha")])
+            .report_cache_ledgers(&second, vec![row("zeta"), row("alpha")], never_swept)
             .expect("admitted");
         registry
-            .report_cache_ledgers(&first, vec![row("beta")])
+            .report_cache_ledgers(&first, vec![row("beta")], never_swept)
             .expect("admitted");
 
         let rows = registry.cache_rows();

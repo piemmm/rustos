@@ -209,8 +209,9 @@ surface, and a change touching several latches all of them:
   reads as visually held open);
 - raising or dismissing a notification → `notifications` **and** `bar` (the
   notification-area icon);
-- a Switchboard tray summary change → `bar`, plus `readout` while the readout
-  is expanded;
+- a Switchboard tray summary change → `bar` when it moves the capsule's own
+  glyph, state, or badge, plus `readout` while the readout is expanded and the
+  reading moves anything it draws;
 - a theme swap, or an edge or resize through `Taskbar::set_config` → `ALL`,
   since every surface draws from the palette and anchors off the bar's
   geometry.
@@ -220,6 +221,17 @@ latch costs one redundant repaint, while a missing one leaves stale pixels on
 screen, which is a correctness bug. Because the contract holds at every
 mutator, the embedder may present *strictly* from the drained latch — and
 present nothing at all when it is empty.
+
+The tray is the one place that latch is drawn *tight* rather than generous,
+and only because the tightness is proven rather than assumed. The Switchboard
+service publishes a reading every couple of seconds whether or not anything
+visible moved, and on a calm desktop the only thing that does move is the
+readout's value line — so a generous latch repainted the full-width bar, on a
+cadence, for pixels indistinguishable from the ones already there. The capsule
+is gated on `TraySignal::draws_same_capsule` instead, which is exact by
+construction and drift-guarded byte for byte (see
+[the controls library](../lib/controls.md)); the bar is not repainted for a
+figure only the expanded readout draws.
 
 The contract holds even for a borrow the bar cannot see into. Each `&mut`
 sub-model accessor latches the moment it hands the borrow out, whether or not

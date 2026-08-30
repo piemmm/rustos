@@ -845,16 +845,37 @@ impl TrayBadge {
 /// state — including the hover that expands the readout — all compare. The
 /// pointer coordinate does not: it decides *which* region a press lands on,
 /// and the hover it implies is already in `state`.
+///
+/// A signal is drawn on *two* surfaces, though, and they draw different parts
+/// of it: the bar always shows the capsule, while the readout exists only
+/// while expanded. A whole-signal `==` therefore over-reports for the bar — a
+/// live value line the readout alone shows moves it on every reading. An owner
+/// repainting the two surfaces separately gates the capsule on
+/// [`draws_same_capsule`](Self::draws_same_capsule) instead.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TraySignal {
-    icon: IconKind,
+    capsule: TrayCapsule,
     label: String,
     value: Option<String>,
-    state: ControlState,
-    badge: Option<TrayBadge>,
     action: Option<Button>,
     /// The last pointer position — hit-testing input, never drawn.
     pointer: RenderInvariant<Point>,
+}
+
+/// Everything the bar capsule draws, and nothing else.
+///
+/// [`TraySignal::render`] paints the capsule from this alone, so equality here
+/// *is* "the capsule draws the same pixels" — and stays so as the control
+/// grows, because the paint physically cannot reach the readout-only fields
+/// and a new drawn field has to be added here to be drawn at all. That is the
+/// same reasoning as [`RenderInvariant`], put the other way round: rather than
+/// exempting one field from a whole-struct comparison, this names the subset
+/// one of the two surfaces is a pure function of.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TrayCapsule {
+    icon: IconKind,
+    state: ControlState,
+    badge: Option<TrayBadge>,
 }
 
 impl TraySignal {
@@ -862,14 +883,29 @@ impl TraySignal {
     #[must_use]
     pub fn new(icon: IconKind, label: impl Into<String>) -> Self {
         Self {
-            icon,
+            capsule: TrayCapsule {
+                icon,
+                state: ControlState::idle(),
+                badge: None,
+            },
             label: label.into(),
             value: None,
-            state: ControlState::idle(),
-            badge: None,
             action: None,
             pointer: RenderInvariant::new(Point::ORIGIN),
         }
+    }
+
+    /// Whether `self` and `other` would paint the identical bar capsule
+    /// ([`render`](Self::render)).
+    ///
+    /// The capsule draws the glyph, the composed state, and the badge; the
+    /// label, value, and action belong to the readout. An owner that presents
+    /// the bar and the readout as separate surfaces gates the bar on this, so
+    /// a reading that only moves the readout's value line does not repaint a
+    /// capsule whose pixels are unchanged.
+    #[must_use]
+    pub fn draws_same_capsule(&self, other: &Self) -> bool {
+        self.capsule == other.capsule
     }
 
     /// This signal with a readout count/value (e.g. a throughput or a count).
@@ -882,14 +918,14 @@ impl TraySignal {
     /// This signal with the given composed state (drives seam/rail/beads).
     #[must_use]
     pub fn with_state(mut self, state: ControlState) -> Self {
-        self.state = state;
+        self.capsule.state = state;
         self
     }
 
     /// This signal with a live-state badge on its top-trailing corner.
     #[must_use]
     pub fn with_badge(mut self, badge: TrayBadge) -> Self {
-        self.badge = Some(badge);
+        self.capsule.badge = Some(badge);
         self
     }
 
@@ -906,7 +942,7 @@ impl TraySignal {
     /// capsule actually draws, rather than naming that kind a second time.
     #[must_use]
     pub fn icon(&self) -> IconKind {
-        self.icon
+        self.capsule.icon
     }
 
     /// The signal's state-name label.
@@ -918,36 +954,38 @@ impl TraySignal {
     /// The signal's composed state.
     #[must_use]
     pub fn state(&self) -> ControlState {
-        self.state
+        self.capsule.state
     }
 
     /// Replace the signal's composed state.
     pub fn set_state(&mut self, state: ControlState) {
-        self.state = state;
+        self.capsule.state = state;
     }
 
     /// The signal's live-state badge, if any.
     #[must_use]
     pub fn badge(&self) -> Option<TrayBadge> {
-        self.badge
+        self.capsule.badge
     }
 
     /// Replace the signal's live-state badge.
     pub fn set_badge(&mut self, badge: Option<TrayBadge>) {
-        self.badge = badge;
+        self.capsule.badge = badge;
     }
 
     /// Set the signal's keyboard focus (focus also expands the readout).
     pub fn set_focused(&mut self, focused: bool) {
-        self.state.focus.focused = focused;
+        self.capsule.state.focus.focused = focused;
     }
 
     /// Whether the readout is expanded — on hover or keyboard focus.
     #[must_use]
     pub fn is_expanded(&self) -> bool {
-        self.state.pointer == PointerState::Hover || self.state.focus.focused
+        self.capsule.state.pointer == PointerState::Hover || self.capsule.state.focus.focused
     }
+}
 
+impl TrayCapsule {
     /// The severity-ordered alert beads the capsule stacks, highest severity
     /// first: an authority denial, then a recovery/failed-closed state, then a
     /// validation warning, then a completion. Several states stack; none hides
@@ -1010,14 +1048,9 @@ impl TraySignal {
         Some((badge.tone.fill(theme), text, w, h))
     }
 
-    /// The pixel side the capsule's icon paints at inside `bounds`.
-    ///
-    /// This is the render geometry itself, exposed so an owner rasterising the
-    /// shipped artwork produces it at exactly the size [`Self::render`] will
-    /// place — the two can never disagree. `0` when the bounds are off-surface
-    /// or leave no room inside the plate border.
-    #[must_use]
-    pub fn icon_side(&self, bounds: Rect, scale: Scale, theme: &Theme) -> u32 {
+    /// The pixel side the capsule's icon paints at inside `bounds`, `0` when
+    /// the bounds are off-surface or leave no room inside the plate border.
+    fn icon_side(bounds: Rect, scale: Scale, theme: &Theme) -> u32 {
         let Some((_, _, w, h)) = surface_rect(bounds) else {
             return 0;
         };
@@ -1029,13 +1062,7 @@ impl TraySignal {
     }
 
     /// Paint the compact capsule into `surface` at `bounds`.
-    ///
-    /// `artwork` is the shipped icon for [`Self::icon`], pre-rasterised by the
-    /// owner at [`Self::icon_side`] (through its cache); `None` falls back to
-    /// the built-in class glyph. The artwork is decoded and rasterised long
-    /// before it reaches this call — a control never parses image bytes. Both
-    /// go through the one shared icon slot every other bar control draws with.
-    pub fn render(
+    fn render(
         &self,
         surface: &mut Surface,
         bounds: Rect,
@@ -1085,7 +1112,7 @@ impl TraySignal {
         }
 
         // The calm icon, centred.
-        let side = self.icon_side(bounds, scale, theme);
+        let side = Self::icon_side(bounds, scale, theme);
         if side > 0 {
             let ix = inner_x + (inner_w.saturating_sub(side)) / 2;
             let iy = inner_y + (inner_h.saturating_sub(side)) / 2;
@@ -1152,6 +1179,37 @@ impl TraySignal {
                 bx = bx.saturating_sub(gap);
             }
         }
+    }
+}
+
+impl TraySignal {
+    /// The pixel side the capsule's icon paints at inside `bounds`.
+    ///
+    /// This is the render geometry itself, exposed so an owner rasterising the
+    /// shipped artwork produces it at exactly the size [`Self::render`] will
+    /// place — the two can never disagree. `0` when the bounds are off-surface
+    /// or leave no room inside the plate border.
+    #[must_use]
+    pub fn icon_side(&self, bounds: Rect, scale: Scale, theme: &Theme) -> u32 {
+        TrayCapsule::icon_side(bounds, scale, theme)
+    }
+
+    /// Paint the compact capsule into `surface` at `bounds`.
+    ///
+    /// `artwork` is the shipped icon for [`Self::icon`], pre-rasterised by the
+    /// owner at [`Self::icon_side`] (through its cache); `None` falls back to
+    /// the built-in class glyph. The artwork is decoded and rasterised long
+    /// before it reaches this call — a control never parses image bytes. Both
+    /// go through the one shared icon slot every other bar control draws with.
+    pub fn render(
+        &self,
+        surface: &mut Surface,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        artwork: Option<IconPicture<'_>>,
+    ) {
+        self.capsule.render(surface, bounds, scale, theme, artwork);
     }
 
     /// The readout popup's preferred `(width, height)` in surface pixels — a
@@ -1230,7 +1288,7 @@ impl TraySignal {
                 text_x,
                 text_y,
                 fitted,
-                foreground(theme, self.state.disposition()),
+                foreground(theme, self.capsule.state.disposition()),
             );
             if let Some(value) = &self.value {
                 text_y += to_i32(font.line_height());
@@ -1277,7 +1335,12 @@ impl TraySignal {
         } else {
             PointerState::None
         };
-        damage::set(&mut self.state.pointer, hover, capsule_bounds, damage);
+        damage::set(
+            &mut self.capsule.state.pointer,
+            hover,
+            capsule_bounds,
+            damage,
+        );
         if self.is_expanded() != expanded_before {
             damage.add(readout_bounds);
         }
@@ -1311,7 +1374,7 @@ impl TraySignal {
         damage: &mut Region,
     ) -> bool {
         let expanded_before = self.is_expanded();
-        let mut state = self.state;
+        let mut state = self.capsule.state;
         if !damage::set(
             &mut state.pointer,
             PointerState::None,
@@ -1320,7 +1383,7 @@ impl TraySignal {
         ) {
             return false;
         }
-        self.state = state;
+        self.capsule.state = state;
         if self.is_expanded() != expanded_before {
             damage.add(readout_bounds);
         }
@@ -1330,7 +1393,7 @@ impl TraySignal {
     /// Feed a key event; when focused (readout expanded) Space/Enter activates
     /// the primary action, reporting [`TraySignalAction::Activated`].
     pub fn on_key(&mut self, key: Key) -> Option<TraySignalAction> {
-        if self.action.is_some() && key_activation(self.state, key) {
+        if self.action.is_some() && key_activation(self.capsule.state, key) {
             return Some(TraySignalAction::Activated);
         }
         None

@@ -409,24 +409,26 @@ impl Taskbar {
     }
 
     /// Adopt the latest Switchboard tray summary — or its absence, when the
-    /// service is gone — latching a repaint when the capsule changed. This is
-    /// how the session relays the summary the Switchboard service publishes.
-    /// The capsule's badge and label live on the bar; while its readout is
-    /// open the same derived state feeds the readout's value line too, so
-    /// the readout latches alongside the bar exactly then.
-    pub fn set_tray_summary(&mut self, summary: Option<TraySummary>) {
-        if self.tray.set_summary(summary) {
-            self.latch_tray();
-        }
+    /// service is gone — latching whichever of the capsule's two surfaces the
+    /// new reading actually redraws. This is how the session relays the
+    /// summary the Switchboard service publishes.
+    ///
+    /// Returns whether anything latched, so an embedder re-presents only when
+    /// there is something new to show: the service publishes on a cadence,
+    /// and most readings move nothing the bar draws.
+    pub fn set_tray_summary(&mut self, summary: Option<TraySummary>) -> bool {
+        let parts = self.tray.set_summary(summary);
+        self.repaint |= parts;
+        parts.any()
     }
 
     /// Adopt the session's count of unresponsive applications, latching a
-    /// repaint when the capsule changed. See
-    /// [`set_tray_summary`](Self::set_tray_summary) for which surfaces latch.
-    pub fn set_tray_unresponsive(&mut self, count: u16) {
-        if self.tray.set_unresponsive(count) {
-            self.latch_tray();
-        }
+    /// repaint on the surfaces it redraws. See
+    /// [`set_tray_summary`](Self::set_tray_summary) for what is returned.
+    pub fn set_tray_unresponsive(&mut self, count: u16) -> bool {
+        let parts = self.tray.set_unresponsive(count);
+        self.repaint |= parts;
+        parts.any()
     }
 
     /// Adopt the session's attestation that its console has a
@@ -463,17 +465,6 @@ impl Taskbar {
         if self.switch_user_available != available {
             self.switch_user_available = available;
             self.repaint |= TaskbarRepaint::MENU;
-        }
-    }
-
-    /// Latch the surfaces a tray-capsule change alters: the bar always (the
-    /// capsule's badge, label, and furniture live there), and the readout
-    /// too while it is currently expanded, since it renders the same derived
-    /// state.
-    fn latch_tray(&mut self) {
-        self.repaint |= TaskbarRepaint::BAR;
-        if self.tray.is_expanded() {
-            self.repaint |= TaskbarRepaint::READOUT;
         }
     }
 

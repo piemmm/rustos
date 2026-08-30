@@ -793,6 +793,13 @@ display-mode change starts a fresh epoch: every pixel figure is read against
 `screen_px` as its denominator, and counts taken against a different screen
 answer a different question.
 
+**A wake is not a frame.** `Compositor::present` opens one only when there is
+damage pending, so a run loop calling it on every wake — which the session's
+does — leaves the totals untouched while the screen is idle. That is what lets
+a reader use them as a change signal: the session's own publisher (below)
+republishes exactly while they move, and counting idle wakes as frames would
+have left it doing so for ever on a desktop nobody was touching.
+
 `DesktopFrameTotals` is an ABI record because it leaves the process: the
 session publishes it to the System Information API, where a monitor, a shell
 (`sysinfo frames`), or a regression gate reads it under

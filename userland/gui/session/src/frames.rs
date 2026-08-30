@@ -186,10 +186,11 @@ impl FrameStatsPublisher {
 mod tests {
     use super::{FrameStatsPublisher, FrameStatsSink, MIN_FRAME_PUBLISH_INTERVAL_NS};
     use alloc::vec::Vec;
+    use tairix_abi::driver::display::{DamageRect, Display, DisplayMode};
     use tairix_abi::sysinfo::{
         DesktopFrameTotals, SysinfoQueryId, SysinfoRequestHeader, SYSINFO_MAX_REQUEST,
     };
-    use tairix_abi::Errno;
+    use tairix_abi::{DriverError, Errno};
     use tairix_geometry::Point;
     use tairix_wm::{Compositor, Surface};
 
@@ -236,6 +237,69 @@ mod tests {
         let mut surface = Surface::new(40, 30).expect("a small surface allocates");
         surface.fill(tairix_wm::Color::rgb(200, 0, 0));
         comp.add_window(Point::new(x, y), surface);
+    }
+
+    /// A display that accepts everything, so a test can drive the run loop's
+    /// own `present` rather than `composite` — which is the pairing that
+    /// decides whether an idle desktop keeps publishing.
+    struct AcceptingDisplay {
+        mode: DisplayMode,
+    }
+
+    impl Display for AcceptingDisplay {
+        fn mode_info(&self) -> Result<DisplayMode, DriverError> {
+            Ok(self.mode)
+        }
+
+        fn present(&mut self, _frame: &[u8]) -> Result<(), DriverError> {
+            Ok(())
+        }
+
+        fn present_rects(
+            &mut self,
+            _frame: &[u8],
+            _damage: &[DamageRect],
+        ) -> Result<(), DriverError> {
+            Ok(())
+        }
+    }
+
+    /// The regression the counters exist to make impossible: an idle desktop
+    /// publishes once and then goes quiet.
+    ///
+    /// The run loop presents on *every* wake, damaged or not. While an
+    /// undamaged present still counted a frame, the totals never compared
+    /// equal, so the gate stayed pending and spent a blocking round trip —
+    /// whose service side walks the whole process table — on every wake a
+    /// rate-limiting interval apart, for ever. The sibling tests drive the
+    /// counters with `composite`, which is an explicit frame and cannot
+    /// observe this; only `present` can.
+    #[test]
+    fn an_idle_desktop_stops_publishing() {
+        let mut comp = crate::tests::compositor();
+        let mut display = AcceptingDisplay { mode: comp.mode() };
+        window(&mut comp, 10, 10);
+        assert!(comp.present(&mut display).is_ok());
+
+        let mut sink = Recorder::new();
+        let mut gate = FrameStatsPublisher::new();
+        gate.maybe_publish(&comp, 0, &mut sink);
+        assert_eq!(sink.submissions.len(), 1, "the real frame is published");
+
+        for wake in 1..=8u64 {
+            assert!(comp.present(&mut display).is_ok());
+            gate.maybe_publish(&comp, wake * 10 * MIN_FRAME_PUBLISH_INTERVAL_NS, &mut sink);
+        }
+        assert_eq!(
+            sink.submissions.len(),
+            1,
+            "wakes that composed nothing must cost no round trip"
+        );
+        assert_eq!(
+            gate.park_deadline_ns(100 * MIN_FRAME_PUBLISH_INTERVAL_NS, u64::MAX),
+            u64::MAX,
+            "and nothing is left pending to wake the loop for"
+        );
     }
 
     #[test]
