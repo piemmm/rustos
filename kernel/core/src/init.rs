@@ -3268,7 +3268,7 @@ mod tests {
         struct Dummy;
         impl DispatchHook for Dummy {
             fn dispatch(&self, _raw_number: u64, _args: RawArgs) -> DispatchOutcome {
-                DispatchOutcome::NoCallerContext
+                DispatchOutcome::NoCallerContext { cpu: 0 }
             }
         }
 

@@ -74,7 +74,7 @@
 //! validated [`CallerContext`] — there is no `uid == 0` shortcut.
 
 use crate::sched::{
-    level_of_priority, priority_of_level, CpuId, SchedClass, SchedError, Scheduler, SchedulerArch,
+    level_of_priority, priority_of_level, CpuId, SchedClass, Scheduler, SchedulerArch,
 };
 use tairix_abi::hwtree::{HwResource, HwResourceKind};
 use tairix_abi::input::{KeyInput, PointerInput};
@@ -5010,7 +5010,6 @@ where
         let cpu = SchedulerArch::current_cpu(self.arch);
         let task = caller.task_id.0;
         let waiter = SyscallIrqWaiter {
-            sched: self.sched,
             arch: self.arch,
             task: caller.task_id,
             // Re-arm the bound line through the wired controller before each
@@ -5054,21 +5053,12 @@ where
                 self.emit_irq_quarantined(waiter.line, task);
                 Err(Errno::DeviceFault)
             }
-            // A forged / released handle and a vanished task both map
-            // to `Errno::NotFound`: `NoSuchTask` cannot happen here
-            // (`CallerContext` is built from the live scheduler
-            // current-task slot) but is mapped for symmetry with
-            // the park seam.
-            WaitOutcome::NotFound | WaitOutcome::Aborted(IrqWaitAbort::TaskVanished) => {
-                Err(Errno::NotFound)
-            }
+            // A forged or released handle.
+            WaitOutcome::NotFound => Err(Errno::NotFound),
             // A termination deferred against the waiter unwound the wait;
             // the kill lands at the syscall boundary and this errno never
             // reaches user space.
             WaitOutcome::Aborted(IrqWaitAbort::Interrupted) => Err(Errno::Interrupted),
-            // Any other scheduler error fails closed to
-            // `Errno::OutOfRange`.
-            WaitOutcome::Aborted(IrqWaitAbort::SchedulerError) => Err(Errno::OutOfRange),
         }
     }
 
@@ -7243,11 +7233,7 @@ where
             // task occupies right now (`park_current_task` reads it live, so
             // a mid-wait migration is handled); the fallback yield covers a
             // caller with no live dispatch loop so it never busy-spins.
-            match park_current_task(self.sched, self.arch, task) {
-                ParkStep::Parked => {}
-                ParkStep::TaskVanished => break Err(Errno::NotFound),
-                ParkStep::SchedulerError => break Err(Errno::OutOfRange),
-            }
+            park_current_task(self.arch);
             // A doomed waiter never re-parks: a termination deferred against
             // this task unwinds the wait so the kill lands at the syscall
             // boundary (the errno never reaches user space).
@@ -7328,11 +7314,7 @@ where
             // task occupies right now (`park_current_task` reads it live, so
             // a mid-wait migration is handled); the fallback yield covers a
             // caller with no live dispatch loop so it never busy-spins.
-            match park_current_task(self.sched, self.arch, task) {
-                ParkStep::Parked => {}
-                ParkStep::TaskVanished => break Err(Errno::NotFound),
-                ParkStep::SchedulerError => break Err(Errno::OutOfRange),
-            }
+            park_current_task(self.arch);
             // A doomed waiter never re-parks: a termination deferred against
             // this task unwinds the wait so the kill lands at the syscall
             // boundary (the errno never reaches user space).
@@ -7473,11 +7455,7 @@ where
                     // it live, so a mid-wait migration is handled); the
                     // fallback yield covers a caller with no live dispatch
                     // loop so it never busy-spins.
-                    match park_current_task(self.sched, self.arch, sched_task) {
-                        ParkStep::Parked => {}
-                        ParkStep::TaskVanished => break Err(Errno::NotFound),
-                        ParkStep::SchedulerError => break Err(Errno::OutOfRange),
-                    }
+                    park_current_task(self.arch);
                     // A doomed waiter never re-parks: a termination deferred
                     // against this task unwinds the wait so the kill lands at
                     // the syscall boundary (the errno never reaches user
@@ -7847,11 +7825,7 @@ where
                     // migration is handled); the fallback yield covers a
                     // caller with no live dispatch loop so it never
                     // busy-spins.
-                    match park_current_task(self.sched, self.arch, sched_task) {
-                        ParkStep::Parked => {}
-                        ParkStep::TaskVanished => break Err(Errno::NotFound),
-                        ParkStep::SchedulerError => break Err(Errno::OutOfRange),
-                    }
+                    park_current_task(self.arch);
                     // A doomed waiter never re-parks: a termination deferred
                     // against this task unwinds the wait so the kill lands at
                     // the syscall boundary (the errno never reaches user
@@ -9128,11 +9102,7 @@ where
             // (`park_current_task` reads it live, so a mid-wait migration is
             // handled); the fallback yield covers a caller with no live
             // dispatch loop so it never busy-spins.
-            match park_current_task(self.sched, self.arch, sched_task) {
-                ParkStep::Parked => {}
-                ParkStep::TaskVanished => break Err(Errno::NotFound),
-                ParkStep::SchedulerError => break Err(Errno::OutOfRange),
-            }
+            park_current_task(self.arch);
             // A doomed waiter never re-parks: a termination deferred against
             // this task unwinds the wait so the kill lands at the syscall
             // boundary (the errno never reaches user space).
@@ -11269,41 +11239,30 @@ where
     }
 }
 
-/// Outcome of one [`park_current_task`] step.
-enum ParkStep {
-    /// The task suspended off the run queue (or, for a caller with no live
-    /// dispatch loop, cooperatively yielded); re-poll the wait condition.
-    Parked,
-    /// The task can no longer be scheduled — torn down between two polls.
-    TaskVanished,
-    /// The yield seam refused for any other reason (defensive).
-    SchedulerError,
-}
-
 /// Park the calling task off the run queue for one wait iteration,
 /// suspending it on the CPU it is running on **right now** — which
 /// [`crate::kthread::reschedule_current`] resolves itself, so a wait loop
 /// that migrates across a park cannot suspend the wrong core's task.
 ///
-/// `reschedule_current` returns `false` only for a caller that is not a
-/// resumable user kthread (a host test with no live dispatch loop); the
-/// `yield_current` fallback keeps such a degenerate caller from
-/// busy-spinning while the wait's own deadline still bounds it.
-fn park_current_task<A: KernelArch>(sched: &Scheduler<A>, arch: &A, task: u64) -> ParkStep {
+/// The scheduler is never touched here. Re-enqueuing the caller through
+/// `Scheduler::yield_current` would clear its per-CPU current-task slot
+/// while suspending nothing, so the task would carry on in user mode as a
+/// caller the next syscall could not attribute — and an unattributable
+/// syscall used to halt the CPU outright.
+///
+/// A caller with no published resume handle simply is not suspended and
+/// its loop re-polls under its own deadline. `dispatch_step` publishes the
+/// handle before switching a user task in and clears it only once that
+/// task has switched back, so every EL0 caller has one throughout its
+/// syscall; the no-handle case is a host harness driving these paths with
+/// no dispatch loop behind them.
+fn park_current_task<A: KernelArch>(arch: &A) {
     let cpu = SchedulerArch::current_cpu(arch);
-    if crate::kthread::reschedule_current(cpu, RescheduleAction::Park) {
-        return ParkStep::Parked;
-    }
-    match sched.yield_current(task) {
-        Ok(()) | Err(SchedError::InvalidState) => ParkStep::Parked,
-        Err(SchedError::NoSuchTask) => ParkStep::TaskVanished,
-        Err(_) => ParkStep::SchedulerError,
-    }
+    let _ = crate::kthread::reschedule_current(cpu, RescheduleAction::Park);
 }
 
 /// [`IrqWaiter`] adapter wiring the `irq_wait` syscall handler's
-/// scheduler + architecture borrows into the shared
-/// [`block_until_ready`] loop.
+/// architecture borrow into the shared [`block_until_ready`] loop.
 ///
 /// Holds only borrows; constructed fresh per `irq_wait` call. The CPU is
 /// read live on each `now_ns` / `yield_now` (never captured), so a task
@@ -11313,7 +11272,6 @@ struct SyscallIrqWaiter<'a, A>
 where
     A: KernelArch + 'static,
 {
-    sched: &'a Scheduler<A>,
     arch: &'a A,
     task: SecTaskId,
     /// The controller the bound line is re-armed through before each park.
@@ -11364,13 +11322,8 @@ where
         self.arch.set_wakeup(crate::waitq::nearest_timed_deadline());
         // Park off the run queue, keyed to the CPU this task occupies right
         // now (`park_current_task` reads it live, so a mid-wait migration is
-        // handled); the fallback yield covers a caller with no live dispatch
-        // loop so the wait still terminates on its deadline.
-        match park_current_task(self.sched, self.arch, self.task.0) {
-            ParkStep::Parked => {}
-            ParkStep::TaskVanished => return Err(IrqWaitAbort::TaskVanished),
-            ParkStep::SchedulerError => return Err(IrqWaitAbort::SchedulerError),
-        }
+        // handled).
+        park_current_task(self.arch);
         // A doomed waiter never re-parks: a termination deferred against
         // this task aborts the wait so the kill lands at the syscall
         // boundary (the errno never reaches user space).
@@ -11412,7 +11365,11 @@ where
 /// Either failure emits one [`AuditEvent::SyscallNoCallerContext`]
 /// record (carrying a stable `cause` field naming which lookup
 /// failed) and returns [`DispatchOutcome::NoCallerContext`]; the
-/// bin-crate callback halts the CPU forever in response.
+/// bin-crate callback kills the unattributable EL0 context and leaves
+/// the CPU running. Nothing was read, mutated, or granted before the
+/// identification failed, so refusing the call is the whole
+/// fail-closed obligation — taking the CPU down with it would strand
+/// the locks and device interrupts it owns.
 pub struct KernelDispatchHook<'a, A>
 where
     A: KernelArch + 'static,
@@ -11835,7 +11792,7 @@ where
         );
         let Some(sched_task_id) = self.sched.current_task(cpu) else {
             self.audit_no_caller_context(cpu, "no_current_task");
-            return DispatchOutcome::NoCallerContext;
+            return DispatchOutcome::NoCallerContext { cpu };
         };
 
         // Snapshot the caller's capability record under a *briefly* held
@@ -11860,7 +11817,7 @@ where
             } else {
                 drop(guard);
                 self.audit_no_caller_context(cpu, "no_capability_record");
-                return DispatchOutcome::NoCallerContext;
+                return DispatchOutcome::NoCallerContext { cpu };
             }
         };
 
@@ -12286,46 +12243,6 @@ mod tests {
     fn make_sched(arch: Arc<TestArch>) -> Scheduler<TestArch> {
         let cfg = SchedulerConfig::defaults_for(1);
         Scheduler::new(cfg, arch).expect("scheduler builds")
-    }
-
-    /// `park_current_task` reads the arch's *current* CPU on every call and
-    /// fails the park closed when the task can no longer be scheduled.
-    ///
-    /// Setting the arch's current CPU past the per-CPU resume table forces
-    /// `reschedule_current` to find no published handle and fall to the
-    /// `yield_current` seam — the degenerate "no live dispatch loop" path a
-    /// host test exercises. An unknown task id must map to `TaskVanished`
-    /// rather than pretending to suspend a task that does not exist.
-    #[test]
-    fn park_current_task_fails_closed_for_a_vanished_task() {
-        let past_resume_table =
-            u32::try_from(crate::cpu_state::TEST_CPUS).expect("test CPU count fits u32");
-        let arch = Arc::new(TestArch::with_cpus(past_resume_table + 1));
-        arch.set_current_cpu(past_resume_table);
-        let sched = make_sched(Arc::clone(&arch));
-        assert!(matches!(
-            park_current_task(&sched, &arch, 0xDEAD_BEEF),
-            ParkStep::TaskVanished
-        ));
-    }
-
-    /// A freshly spawned task is `Ready`, not `Running`, so the
-    /// `yield_current` fallback reports `InvalidState`; the helper maps that
-    /// to `Parked` so the wait loop re-polls rather than aborting.
-    #[test]
-    fn park_current_task_parks_a_ready_task_via_yield_fallback() {
-        let past_resume_table =
-            u32::try_from(crate::cpu_state::TEST_CPUS).expect("test CPU count fits u32");
-        let arch = Arc::new(TestArch::with_cpus(past_resume_table + 1));
-        arch.set_current_cpu(past_resume_table);
-        let sched = make_sched(Arc::clone(&arch));
-        let id = sched
-            .spawn(0, Priority::Normal, |_ctx| TaskAction::Exit)
-            .expect("spawn a task");
-        assert!(matches!(
-            park_current_task(&sched, &arch, id),
-            ParkStep::Parked
-        ));
     }
 
     /// The completion path acts on the CPU it is handed and **only** that

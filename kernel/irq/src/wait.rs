@@ -17,8 +17,8 @@
 //!
 //! `kernel/irq` stays free of any scheduler or architecture
 //! dependency: the trait is the inversion point, and each caller
-//! supplies its own implementation (the syscall handler wraps
-//! `Scheduler::yield_current` + `KernelArch::monotonic_ns`; the
+//! supplies its own implementation (the syscall handler parks the
+//! caller off the run queue and reads `KernelArch::monotonic_ns`; the
 //! virtio host wraps the kernel-binary's equivalent seam).
 
 use tairix_abi::IrqHandle;
@@ -82,22 +82,14 @@ pub trait IrqWaiter {
 ///
 /// The blocking loop has no scheduler vocabulary of its own; each
 /// caller maps these reasons onto its own error surface (the syscall
-/// handler maps [`Self::TaskVanished`] to `Errno::NotFound`,
-/// [`Self::Interrupted`] to `Errno::Interrupted`, and
-/// [`Self::SchedulerError`] to `Errno::OutOfRange`).
+/// handler maps [`Self::Interrupted`] to `Errno::Interrupted`).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum IrqWaitAbort {
-    /// The waiting task can no longer be scheduled — it has been torn
-    /// down between two polls. Fail closed.
-    TaskVanished,
     /// The waiting task has a termination pending against it: the wait
     /// unwinds so the task can exit at its syscall boundary instead of
     /// sleeping on as an unkillable waiter. The aborted result never
     /// reaches user space — the kernel lands the pending kill first.
     Interrupted,
-    /// The yield seam refused for any other reason. Defensive; not
-    /// expected during normal operation.
-    SchedulerError,
 }
 
 /// Terminal outcome of [`block_until_ready`].
@@ -321,10 +313,10 @@ mod tests {
         // The abort ends this wait after its first park (an unbounded wait
         // whose line never fires has no other terminal step, which is the
         // whole reason a *request* wait must never ask for one).
-        let unbounded = TestWaiter::aborting(1, IrqWaitAbort::TaskVanished);
+        let unbounded = TestWaiter::aborting(1, IrqWaitAbort::Interrupted);
         assert_eq!(
             block_until_ready(&table, out.handle, ProcessId(1), u64::MAX, &unbounded),
-            WaitOutcome::Aborted(IrqWaitAbort::TaskVanished)
+            WaitOutcome::Aborted(IrqWaitAbort::Interrupted)
         );
         assert_eq!(unbounded.parked_until.get(), u64::MAX);
     }
@@ -349,10 +341,10 @@ mod tests {
     fn propagates_yield_abort() {
         let table = IrqTable::new(31);
         let out = table.bind(7, ProcessId(1)).unwrap();
-        let waiter = TestWaiter::aborting(1, IrqWaitAbort::TaskVanished);
+        let waiter = TestWaiter::aborting(1, IrqWaitAbort::Interrupted);
         assert_eq!(
             block_until_ready(&table, out.handle, ProcessId(1), u64::MAX, &waiter),
-            WaitOutcome::Aborted(IrqWaitAbort::TaskVanished)
+            WaitOutcome::Aborted(IrqWaitAbort::Interrupted)
         );
     }
 

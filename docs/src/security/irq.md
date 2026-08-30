@@ -314,13 +314,13 @@ Three implementations exist:
   bound line after every wake and deregisters when the wait ends. The
   register-before-poll order plus the scheduler wake-pending token
   closes the park/unpark race, exactly as `hw_tree_wait` does
-  (`AGENTS.md` §2.2). In host-side tests (no live dispatch loop)
-  `reschedule_current` returns `false` and it falls back to
-  `Scheduler::yield_current`, tolerating `SchedError::InvalidState`,
-  mapping `NoSuchTask` to `Errno::NotFound`, and failing closed to
-  `Errno::OutOfRange` on any other scheduler error; the loop still
-  terminates because the per-CPU monotonic clock is strictly
-  monotonic.
+  (`AGENTS.md` §2.2). A caller with no published resume handle is not a
+  resumable user task: `reschedule_current` returns `false` and the wait
+  fails closed with `Errno::NotImplemented`, the same answer the futex
+  wait gives the same condition. It must not fall back to
+  `Scheduler::yield_current` — that clears the caller's per-CPU
+  current-task slot without suspending anything, leaving the task
+  running as a caller the next syscall cannot attribute.
 * **`KthreadIrqWaiter`** (`kernel/core::kthread_irq`): the waiter an
   in-kernel **service kthread** drives — it has no syscall frame or
   `Scheduler` borrow, so it suspends through the object-safe

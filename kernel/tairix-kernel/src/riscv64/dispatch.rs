@@ -16,7 +16,7 @@
 //! [`crate::dispatch_core`] and is unit-tested there once; this module
 //! supplies only the two riscv64-specific facts — the
 //! `SyscallDispatchFn` coercion and the bottom-typed
-//! [`tairix_arch_riscv64::halt_current_hart`] fail-closed halt.
+//! [`tairix_arch_riscv64::halt_current_hart`] empty-slot halt.
 
 use tairix_abi::SYSCALL_MAX_ARGS;
 use tairix_arch_riscv64::syscall_entry::SyscallDispatchFn;
@@ -37,8 +37,11 @@ pub static DISPATCH_SLOT: DispatchCallbackSlot = DispatchCallbackSlot::new();
 /// Production dispatch callback installed before user space is entered.
 ///
 /// Reads the argument frame, looks up the resident `DispatchHook`
-/// through [`DISPATCH_SLOT`], and forwards. The two fail-closed branches
-/// (empty slot; `NoCallerContext`) halt the hart forever.
+/// through [`DISPATCH_SLOT`], and forwards.
+/// Only an empty slot halts the hart — a boot-ordering failure that
+/// cannot occur once user space runs, because the dispatcher is
+/// installed before the first `ecall` is possible. An unattributable
+/// *caller* kills its own U-mode context and leaves the hart running.
 ///
 /// The `extern "C"` signature is locked at compile time by
 /// [`_DISPATCH_SIGNATURE_PINNED`] below.

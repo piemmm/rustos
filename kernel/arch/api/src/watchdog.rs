@@ -90,9 +90,16 @@ pub enum RecoveryOutcome {
     /// A reschedule was forced on the target (a soft lockup: the offending
     /// CPU will re-enter the scheduler at its next safe point).
     Rescheduled,
-    /// A directed non-maskable attention interrupt was raised on the
-    /// target (a hard lockup: the port asked the wedged core to dump its
-    /// live state and, where possible, abandon the offending task).
+    /// A directed attention interrupt was raised on the target (a hard
+    /// lockup: the port asked the wedged core to dump its live state and,
+    /// where possible, abandon the offending task).
+    ///
+    /// Only as forceful as the port's interrupt controller allows, and
+    /// never a claim that the target recovered. A port with a genuine
+    /// non-maskable channel can reach a core that has masked interrupts;
+    /// one without — GICv2 non-secure, where the vector is an ordinary
+    /// maskable Group-1 SGI — cannot, and there the loud cross-CPU report
+    /// is the whole answer.
     AttentionRaised,
     /// The target could not be recovered; the failure has been made loud
     /// and the caller must treat the CPU as lost.

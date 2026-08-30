@@ -423,17 +423,35 @@ impl<A: SchedulerArch> Scheduler<A> {
             match task.load_state() {
                 TaskState::Exited => return Err(SchedError::InvalidState),
                 TaskState::Parked => {
-                    self.clear_current_matching(id);
+                    self.release_current_slot(&task, id);
                     return Ok(());
                 }
                 cur @ (TaskState::Ready | TaskState::Running) => {
                     if task.cas_state(cur, TaskState::Parked).is_ok() {
                         self.remove_weight_on_home(&task);
-                        self.clear_current_matching(id);
+                        self.release_current_slot(&task, id);
                         return Ok(());
                     }
                 }
             }
+        }
+    }
+
+    /// Release `id`'s per-CPU current-task slot, but only once no CPU is
+    /// executing its body.
+    ///
+    /// That slot is the identity every syscall from the task is attributed
+    /// through, so clearing it while the task still runs in user mode would
+    /// leave its next trap unattributable. Holding the body lock across the
+    /// clear proves no dispatch owns the task; failing to take it means one
+    /// does, and that CPU clears its own slot when the body returns — the
+    /// IPI only makes it prompt, so a victim alone on a quiet core is not
+    /// left running until its next tick.
+    fn release_current_slot(&self, task: &Arc<TaskInner>, id: TaskId) {
+        if let Some(_dispatch_owns_nothing) = task.body.try_lock() {
+            self.clear_current_matching(id);
+        } else if let Some(cpu) = self.running_cpu_of(id) {
+            self.arch.send_ipi(cpu);
         }
     }
 
@@ -1649,6 +1667,55 @@ mod tests {
         assert_eq!(sched.current_task(2), Some(id));
         assert_ne!(sched.state_of(id), TaskState::Exited, "not yet exited");
         drop(body_guard);
+    }
+
+    /// Parking a task that is still executing must leave its per-CPU
+    /// current-task slot alone.
+    ///
+    /// That slot is how the syscall dispatcher attributes the task's next
+    /// trap. Clearing it from a remote CPU while the victim still runs in
+    /// user mode left the following trap unattributable — which used to
+    /// halt the CPU outright. The running CPU clears its own slot when the
+    /// body returns; the killer only nudges it.
+    #[test]
+    fn park_of_an_executing_task_leaves_its_current_slot_intact() {
+        let (arch, sched) = mk(4);
+        let id = sched
+            .spawn(0, Priority::Normal, |_| TaskAction::Exit)
+            .expect("spawn");
+        let task = sched.lookup(id).expect("task present");
+        let body_guard = task.body.lock();
+        sched.set_current(2, id);
+        let before = arch.ipi_count(2);
+
+        sched.park(id).expect("park");
+
+        assert_eq!(
+            sched.current_task(2),
+            Some(id),
+            "the caller-identity slot must outlive a remote park of a running task"
+        );
+        assert_eq!(
+            arch.ipi_count(2),
+            before + 1,
+            "park must nudge the CPU running the victim"
+        );
+        drop(body_guard);
+    }
+
+    /// The same park on a task no dispatch owns clears the slot at once:
+    /// the body lock is free, which proves no CPU can trap as this task.
+    #[test]
+    fn park_of_a_quiescent_task_clears_its_current_slot() {
+        let (_arch, sched) = mk(4);
+        let id = sched
+            .spawn(0, Priority::Normal, |_| TaskAction::Exit)
+            .expect("spawn");
+        sched.set_current(2, id);
+
+        sched.park(id).expect("park");
+
+        assert_eq!(sched.current_task(2), None);
     }
 
     /// Killing a task that is **not executing** quiesces it immediately:

@@ -4,7 +4,7 @@
 //!
 //! The per-architecture modules differ only in two arch-specific facts:
 //! the `SyscallDispatchFn` typedef the arch port's syscall trampoline
-//! expects, and the bottom-typed halt the fail-closed branch jumps to.
+//! expects, and the bottom-typed halt the empty-slot branch jumps to.
 //! Everything else — reading the kernel-stack `[u64; SYSCALL_MAX_ARGS]`
 //! frame into a [`RawArgs`], encoding a [`tairix_kernel_syscall::SyscallResult`]
 //! into the syscall-return register, and forwarding one syscall through
@@ -16,7 +16,7 @@
 //! coercion and the halt, while the substantive logic is unit-tested
 //! here once.
 
-use tairix_abi::SYSCALL_MAX_ARGS;
+use tairix_abi::{Errno, SYSCALL_MAX_ARGS};
 use tairix_arch_api::backtrace::UserRegisterFrame;
 use tairix_kernel_core::{
     reschedule_current, DispatchCallbackSlot, DispatchOutcome, RescheduleAction, UserFaultOutcome,
@@ -88,8 +88,9 @@ pub const fn encode_result(result: tairix_kernel_syscall::SyscallResult) -> u64 
 /// Forward one syscall through a slot's resident hook.
 ///
 /// Returns `Some(value)` for the encoded syscall-return register, or
-/// `None` if the dispatcher cannot complete (empty slot or
-/// `NoCallerContext`) and the caller must halt.
+/// `None` only when the slot holds no hook at all — a boot-ordering
+/// failure the caller answers with a halt. An unattributable *caller*
+/// never reaches that halt: it kills its own EL0 context instead.
 ///
 /// Shared by every architecture's `production_dispatch` callback so
 /// the lookup → forward → encode sequence has one definition.
@@ -101,7 +102,20 @@ pub fn dispatch_via_slot(slot: &DispatchCallbackSlot, number: u64, args: RawArgs
     // would map a reserved-bit probe onto a real syscall.
     match hook.dispatch(number, args) {
         DispatchOutcome::Returned(result) => Some(encode_result(result)),
-        DispatchOutcome::NoCallerContext => None,
+        DispatchOutcome::NoCallerContext { cpu } => {
+            // The hook could not attribute this trap, so the EL0 context on
+            // this CPU is one the kernel no longer owns. Kill it the way a
+            // wild user fault is killed — the resume handle is keyed on the
+            // CPU, so it still reaches the task when the scheduler's
+            // current-task slot is the very thing that is missing — and the
+            // suspend never returns. Halting instead would take the CPU
+            // down holding whatever lock and device IRQ it owns.
+            let _ = reschedule_current(cpu, RescheduleAction::Exit);
+            // No resume handle: the trap came from something that is not a
+            // dispatched user task. The call read, mutated, and granted
+            // nothing, so refusing it is the whole fail-closed obligation.
+            Some(encode_result(Err(Errno::PermissionDenied)))
+        }
         DispatchOutcome::Reschedule {
             result,
             action,
@@ -376,17 +390,33 @@ mod tests {
         assert_eq!(recovered, Errno::PermissionDenied.as_i32());
     }
 
+    /// An unattributable syscall must never take the CPU down.
+    ///
+    /// Regression: `NoCallerContext` used to return `None`, which every
+    /// arch callback answers with a permanent halt. On a Pi 4B that let one
+    /// `svc` from a task whose current-task slot had been cleared kill CPU 0
+    /// forever — holding the scheduler's task-body lock and the console UART
+    /// IRQ, with the watchdog's own recovery masked out.
     #[test]
-    fn dispatch_via_slot_returns_none_on_no_caller_context() {
+    fn dispatch_via_slot_never_halts_on_no_caller_context() {
         let slot = DispatchCallbackSlot::new();
         let hook: &'static StaticHook = Box::leak(Box::new(StaticHook {
-            outcome: DispatchOutcome::NoCallerContext,
+            outcome: DispatchOutcome::NoCallerContext { cpu: 0 },
             fault_outcome: UserFaultOutcome::Unhandled,
         }));
         slot.install_dispatcher(hook as &'static dyn DispatchHook)
             .expect("install");
         let got = dispatch_via_slot(&slot, 0, RawArgs::ZERO);
-        assert!(got.is_none(), "NoCallerContext must signal halt");
+        // The host publishes no resume handle, so the kill finds nothing to
+        // suspend and the call is refused instead — never a halt.
+        let encoded = got.expect("an unattributable caller must not signal halt");
+        #[allow(clippy::cast_possible_wrap)]
+        // The encoding is the userland negative-errno convention.
+        let signed = encoded as i64;
+        #[allow(clippy::cast_possible_truncation)]
+        // An `Errno` discriminant fits an `i32` by construction.
+        let recovered = (-signed) as i32;
+        assert_eq!(recovered, Errno::PermissionDenied.as_i32());
     }
 
     #[test]
@@ -412,7 +442,7 @@ mod tests {
     fn resolve_user_fault_via_slot_reports_a_resolved_fault() {
         let slot = DispatchCallbackSlot::new();
         let hook: &'static StaticHook = Box::leak(Box::new(StaticHook {
-            outcome: DispatchOutcome::NoCallerContext,
+            outcome: DispatchOutcome::NoCallerContext { cpu: 0 },
             fault_outcome: UserFaultOutcome::Resolved,
         }));
         slot.install_dispatcher(hook as &'static dyn DispatchHook)
@@ -440,7 +470,7 @@ mod tests {
 
         let slot = DispatchCallbackSlot::new();
         let hook: &'static StaticHook = Box::leak(Box::new(StaticHook {
-            outcome: DispatchOutcome::NoCallerContext,
+            outcome: DispatchOutcome::NoCallerContext { cpu: 0 },
             fault_outcome: UserFaultOutcome::Unhandled,
         }));
         slot.install_dispatcher(hook as &'static dyn DispatchHook)
@@ -458,7 +488,7 @@ mod tests {
         // the helper reports unresolved so the arch port halts.
         let slot = DispatchCallbackSlot::new();
         let hook: &'static StaticHook = Box::leak(Box::new(StaticHook {
-            outcome: DispatchOutcome::NoCallerContext,
+            outcome: DispatchOutcome::NoCallerContext { cpu: 0 },
             fault_outcome: UserFaultOutcome::Terminated { cpu: 51 },
         }));
         slot.install_dispatcher(hook as &'static dyn DispatchHook)
@@ -479,7 +509,7 @@ mod tests {
         // but the disposition it acted on was the task-fatal one.
         let slot = DispatchCallbackSlot::new();
         let hook: &'static StaticHook = Box::leak(Box::new(StaticHook {
-            outcome: DispatchOutcome::NoCallerContext,
+            outcome: DispatchOutcome::NoCallerContext { cpu: 0 },
             fault_outcome: UserFaultOutcome::Terminated { cpu: 52 },
         }));
         slot.install_dispatcher(hook as &'static dyn DispatchHook)
@@ -515,7 +545,7 @@ mod tests {
         // halted while a task could have been killed instead.
         let slot = DispatchCallbackSlot::new();
         let hook: &'static StaticHook = Box::leak(Box::new(StaticHook {
-            outcome: DispatchOutcome::NoCallerContext,
+            outcome: DispatchOutcome::NoCallerContext { cpu: 0 },
             fault_outcome: UserFaultOutcome::Terminated { cpu: 53 },
         }));
         slot.install_dispatcher(hook as &'static dyn DispatchHook)
@@ -534,7 +564,7 @@ mod tests {
         for outcome in [UserFaultOutcome::Resolved, UserFaultOutcome::Unhandled] {
             let slot = DispatchCallbackSlot::new();
             let hook: &'static StaticHook = Box::leak(Box::new(StaticHook {
-                outcome: DispatchOutcome::NoCallerContext,
+                outcome: DispatchOutcome::NoCallerContext { cpu: 0 },
                 fault_outcome: outcome,
             }));
             slot.install_dispatcher(hook as &'static dyn DispatchHook)

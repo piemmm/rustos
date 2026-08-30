@@ -32,7 +32,7 @@ pub mod serve;
 mod testutil;
 pub mod uas;
 
-use tairix_abi::{DriverBindKey, HwMatchKey};
+use tairix_abi::{CapabilityId, DriverBindKey, HwMatchKey};
 
 /// SCSI-transparent Bulk-Only Transport (class `0x08`, sub-class `0x06`,
 /// protocol `0x50`) — the ubiquitous USB disk/stick.
@@ -71,3 +71,61 @@ pub const BIND_KEYS: &[DriverBindKey] = &[
     DriverBindKey::new(BIND_PRIORITY, HwMatchKey::usb(0, 0, MSD_CBI_UFI_CLASS)),
     DriverBindKey::new(BIND_PRIORITY, HwMatchKey::usb(0, 0, MSD_UAS_CLASS)),
 ];
+
+/// The least-privilege capability set this class driver runs under.
+///
+/// Like [`BIND_KEYS`], the single source of truth: the image builder
+/// authors the signed manifest from it and the program requests exactly
+/// it, so the granted set and the requested set cannot drift. It holds no
+/// MMIO, DMA, or IRQ authority.
+///
+/// - `SHM` maps the shared URB buffer and creates the per-LUN data windows.
+/// - `IPC_ENDPOINT` submits URBs on its interface's transport endpoint.
+/// - `IPC_BIND_PRIVILEGED` binds the per-LUN block-service endpoints.
+/// - `HW_EMIT` publishes and retracts the per-LUN storage nodes.
+/// - `LOG_EMIT` emits diagnostics.
+/// - `SYSINFO_HW` reads the hardware-tree snapshot on the recovery path
+///   only, to attribute a stalled transfer to a resetting hub or
+///   controller rather than blaming the disk.
+pub const REQUIRED_CAPS: &[CapabilityId] = &[
+    CapabilityId::SHM,
+    CapabilityId::IPC_ENDPOINT,
+    CapabilityId::IPC_BIND_PRIVILEGED,
+    CapabilityId::HW_EMIT,
+    CapabilityId::LOG_EMIT,
+    CapabilityId::SYSINFO_HW,
+];
+
+#[cfg(test)]
+mod caps_tests {
+    use super::{CapabilityId, REQUIRED_CAPS};
+
+    /// The recovery path's hardware-tree read must stay granted.
+    ///
+    /// `ancestor_status` reads the tree snapshot to blame a resetting hub
+    /// or controller instead of the disk. Without this capability every
+    /// such read is refused, the attribution silently degrades to "no
+    /// ancestor imposes anything", and each refusal emits an ERROR audit
+    /// record — a storm of which saturated the console during a
+    /// ten-drive surprise removal.
+    #[test]
+    fn the_recovery_path_can_read_the_hardware_tree() {
+        assert!(REQUIRED_CAPS.contains(&CapabilityId::SYSINFO_HW));
+    }
+
+    /// A class driver touches no register and owns no line: the set must
+    /// never grow MMIO, DMA, or IRQ authority.
+    #[test]
+    fn the_set_holds_no_device_authority() {
+        for denied in [
+            CapabilityId::MMIO_MAP,
+            CapabilityId::MEM_DMA,
+            CapabilityId::IRQ_BIND,
+        ] {
+            assert!(
+                !REQUIRED_CAPS.contains(&denied),
+                "{denied:?} must not be requested"
+            );
+        }
+    }
+}

@@ -67,10 +67,12 @@
 //! the observer, how long it has been silent, the last-known interrupted
 //! PC and processor state, and the running task — then asks the port to
 //! break it out best-effort ([`tairix_arch_api::WatchdogArch`]): a
-//! reschedule for a soft lockup, a directed non-maskable attention
-//! interrupt for a hard one. The recovery attempt and its honest outcome
-//! are themselves on the audit trail; a genuinely wedged core is reported
-//! `Unrecoverable`, never silently.
+//! reschedule for a soft lockup, a directed attention interrupt for a
+//! hard one — as forceful as the port's controller allows, which on
+//! GICv2 non-secure is a maskable SGI a wedged core may never take. The
+//! recovery attempt and its honest outcome are themselves on the audit
+//! trail; a genuinely wedged core is reported `Unrecoverable`, never
+//! silently.
 //!
 //! # Cost and safety
 //!

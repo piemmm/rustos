@@ -365,15 +365,11 @@ pub fn build_usb_mouse_bundle(
 
 /// Build and sign the USB mass-storage **class**-driver bundle.
 ///
-/// A pure BOT/SCSI class driver: it maps the shared URB buffer its
-/// host-controller driver forwarded and creates the per-LUN data windows
-/// (`CAP_SHM`), submits URBs on its one interface's transport endpoint
-/// (`CAP_IPC_ENDPOINT`), binds the per-LUN block-service endpoints it
-/// serves (`CAP_IPC_BIND_PRIVILEGED`), publishes/retracts the per-LUN
-/// storage nodes (`CAP_HW_EMIT`), and emits diagnostics (`CAP_LOG_EMIT`) —
-/// and nothing more. It holds **no** MMIO, DMA, or IRQ authority. Carries
-/// `tairix_drv_storage_usb_msd::BIND_KEYS`, so it autoloads against the
-/// mass-storage interface node the HCD emitted (`plans/DEVICES.md` D2).
+/// A pure BOT/SCSI class driver: it holds **no** MMIO, DMA, or IRQ
+/// authority. Its manifest is authored from the driver crate's own
+/// `REQUIRED_CAPS` and `BIND_KEYS`, so the granted set matches the set the
+/// program requests and it autoloads against the mass-storage interface
+/// node the HCD emitted (`plans/DEVICES.md` D2).
 ///
 /// # Errors
 ///
@@ -387,13 +383,7 @@ pub fn build_usb_msd_bundle(
         ctx,
         arch,
         "tairix-drv-storage-usb-msd",
-        &[
-            CapabilityId::SHM,
-            CapabilityId::IPC_ENDPOINT,
-            CapabilityId::IPC_BIND_PRIVILEGED,
-            CapabilityId::HW_EMIT,
-            CapabilityId::LOG_EMIT,
-        ],
+        tairix_drv_storage_usb_msd::REQUIRED_CAPS,
         tairix_drv_storage_usb_msd::BIND_KEYS,
         profile,
     )

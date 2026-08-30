@@ -61,24 +61,34 @@ use tairix_sync::OnceCell;
 ///   syscall-return register and returns to user space.
 /// * [`Self::NoCallerContext`] — the hook could not identify the
 ///   caller (no task currently running on this CPU; no capability
-///   record for the running task). The charter mandates the
-///   bin crate **fail closed** here, exactly the way the
-///   `fail_closed_dispatch` callback did before (f5): emit a
-///   security record and halt the CPU forever. The hook has already
-///   emitted the audit record before returning this variant, so the
-///   bin crate only needs to perform the halt.
+///   record for the running task). The syscall ran nothing and granted
+///   nothing, so the fail-closed action is to kill the *offending EL0
+///   context* and hand the CPU back to the scheduler — the same
+///   disposition a wild user fault gets. Halting the CPU instead would
+///   let an unattributable trap strand whatever lock and device IRQ that
+///   CPU held, permanently and unrecoverably. The hook has already
+///   emitted the audit record, so the bin crate only performs the kill.
 ///
 /// The split exists because the audit-record emission belongs in
 /// `kernel/core` (which owns the audit-event catalogue) while the
-/// `halt` belongs in the arch-coupled bin crate — neither side can
+/// arch-coupled suspend belongs in the bin crate — neither side can
 /// own both responsibilities without bloating its dependency surface.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum DispatchOutcome {
     /// The hook ran to completion and produced a normal
     /// [`SyscallResult`].
     Returned(SyscallResult),
-    /// Caller identification failed; the bin crate must halt the CPU.
-    NoCallerContext,
+    /// Caller identification failed; the bin crate must kill this CPU's
+    /// EL0 context and return the CPU to the scheduler.
+    ///
+    /// `cpu` keys the per-CPU resume handle, which is published against
+    /// the *CPU* rather than the scheduler's current-task slot — so the
+    /// kill still reaches the running task precisely when that slot is
+    /// the thing that has gone missing.
+    NoCallerContext {
+        /// The CPU whose EL0 context could not be attributed.
+        cpu: u32,
+    },
     /// The syscall rescheduled its caller (a resumable EL0 task that
     /// yielded, parked, or exited; `plans/SPAWN.md` SP2).
     ///
@@ -174,8 +184,9 @@ pub trait DispatchHook: Sync {
     /// 1. Emit a stable, security-relevant audit record naming the
     ///    failure (the production implementation uses
     ///    [`crate::AuditEvent::SyscallNoCallerContext`]).
-    /// 2. Return [`DispatchOutcome::NoCallerContext`], so the
-    ///    bin-crate callback halts the CPU forever (fail closed).
+    /// 2. Return [`DispatchOutcome::NoCallerContext`], so the bin-crate
+    ///    callback kills the unattributable EL0 context (fail closed)
+    ///    and leaves the CPU running.
     ///
     /// Never panic, never silently succeed.
     fn dispatch(&self, raw_number: u64, args: RawArgs) -> DispatchOutcome;

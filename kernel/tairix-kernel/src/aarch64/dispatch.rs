@@ -15,7 +15,7 @@
 //! [`crate::dispatch_core`] and is unit-tested there once; this module
 //! supplies only the two aarch64-specific facts — the
 //! `SyscallDispatchFn` coercion and the bottom-typed
-//! [`tairix_arch_aarch64::halt_current_cpu`] fail-closed halt.
+//! [`tairix_arch_aarch64::halt_current_cpu`] empty-slot halt.
 
 use tairix_abi::SYSCALL_MAX_ARGS;
 use tairix_arch_aarch64::syscall_entry::SyscallDispatchFn;
@@ -36,9 +36,11 @@ pub static DISPATCH_SLOT: DispatchCallbackSlot = DispatchCallbackSlot::new();
 /// Production dispatch callback installed before user space is entered.
 ///
 /// Reads the per-CPU argument frame, looks up the resident
-/// `DispatchHook` through [`DISPATCH_SLOT`], and forwards. The two
-/// fail-closed branches (empty slot; `NoCallerContext`) halt the CPU
-/// forever.
+/// `DispatchHook` through [`DISPATCH_SLOT`], and forwards. Only an
+/// empty slot halts the CPU — a boot-ordering failure that cannot
+/// occur once user space runs, because the dispatcher is installed
+/// before the first `svc` is possible. An unattributable *caller* kills
+/// its own EL0 context and leaves the CPU running.
 ///
 /// The `extern "C"` signature is locked at compile time by
 /// `_DISPATCH_SIGNATURE_PINNED` below.

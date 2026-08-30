@@ -28,25 +28,24 @@
 //!
 //! # Fail-closed branches
 //!
-//! Two branches halt the CPU forever via
-//! [`tairix_arch_x86_64::kernel_arch::halt`], matching the
-//! pre-(f5) behaviour:
+//! 1. The slot is empty — a syscall fired before `kernel_main`
+//!    published the hook. That cannot happen once user space runs (the
+//!    dispatcher is installed first), but the callback must not assume
+//!    so, and there is no hook to route a kill through, so it halts the
+//!    CPU via [`tairix_arch_x86_64::kernel_arch::halt`].
+//! 2. The hook returned [`DispatchOutcome::NoCallerContext`](tairix_kernel_core::DispatchOutcome::NoCallerContext) —
+//!    `Scheduler::current_task` returned `None` (no task is running on
+//!    the issuing CPU) or the running task has no `TaskCapabilities`
+//!    record. The unattributable ring-3 context is killed and the CPU
+//!    keeps running; `KernelDispatchHook` has already emitted an
+//!    `AuditEvent::SyscallNoCallerContext` record, so the security
+//!    signal is durable on the audit channel. Halting here instead
+//!    would let a ring-3 trap strand the locks and device interrupts
+//!    that CPU holds.
 //!
-//! 1. The slot is empty. This means a syscall fired before
-//!    `kernel_main` published the hook — impossible if the BSP boot
-//!    ordering is correct, but the callback must not assume so.
-//! 2. The hook returned [`DispatchOutcome::NoCallerContext`](tairix_kernel_core::DispatchOutcome::NoCallerContext). This
-//!    means `Scheduler::current_task` returned `None` (no task is
-//!    running on the issuing CPU) or no `TaskCapabilities` record
-//!    exists for the running task — the fail-closed posture.
-//!    `KernelDispatchHook` has already emitted an
-//!    `AuditEvent::SyscallNoCallerContext` record by the time we
-//!    halt, so the security signal is durable on the audit channel.
-//!
-//! Both halts are unconditional; production never returns an
-//! unspecified value to user space (no
+//! Production never returns an unspecified value to user space (no
 //! `unwrap`/`expect`/`panic!` in production paths; the bottom-typed
-//! halt is the documented contract).
+//! halt is the documented contract for the empty slot).
 //!
 //! [`set_dispatch_callback`]: tairix_arch_x86_64::syscall_entry::set_dispatch_callback
 
@@ -73,9 +72,9 @@ pub static DISPATCH_SLOT: DispatchCallbackSlot = DispatchCallbackSlot::new();
 /// enabled on any CPU.
 ///
 /// Reads the per-CPU [`RawArgs`](tairix_kernel_syscall::RawArgs) frame, looks up the resident
-/// `DispatchHook` through [`DISPATCH_SLOT`], and forwards. The two
-/// halt branches (empty slot; `NoCallerContext`) match the pre-(f5)
-/// fail-closed posture exactly.
+/// `DispatchHook` through [`DISPATCH_SLOT`], and forwards. Only an
+/// empty slot halts the CPU; an unattributable caller kills its own
+/// ring-3 context.
 ///
 /// The `extern "C"` signature is locked at compile time by
 /// `_DISPATCH_SIGNATURE_PINNED` below.

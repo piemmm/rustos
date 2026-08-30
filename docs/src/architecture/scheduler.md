@@ -851,9 +851,9 @@ not caller-supplied).
 | -------------------------------- | ---------------------------------------- |
 | `Scheduler::dispatch` (entry)    | publishes the about-to-run task's id     |
 | `Scheduler::dispatch` (exit)     | clears the slot, every branch            |
-| `Scheduler::park(id)`            | clears every CPU's slot whose entry == id|
-| `Scheduler::exit(id)`            | clears every CPU's slot whose entry == id|
-| `Scheduler::yield_current(id)`   | re-enqueues `id` Ready, then clears slot |
+| `Scheduler::park(id)`            | clears the slot **only** once the body lock proves no CPU is running `id`; otherwise IPIs the running CPU, which clears its own slot on dispatch exit |
+| `Scheduler::exit(id)`            | same proof, same fallback: clears the slot only when it holds the body lock, else defers and IPIs |
+| `Scheduler::yield_current(id)`   | re-enqueues `id` Ready, then clears slot. **No production caller** — the `yield` syscall reaches the scheduler through `TaskAction::Yield` at dispatch exit instead |
 
 The slot is exposed read-only through
 `Scheduler::current_task(cpu) -> Option<TaskId>`. The setter and
@@ -872,6 +872,14 @@ ground truth.
   `yield_current` is a per-slot compare-exchange; a concurrent
   `dispatch` of a *different* task on a sibling CPU is therefore
   untouched.
+* **A slot outlives any remote request to clear it while its task is
+  still executing.** The slot is the identity every syscall from that
+  task is attributed through, so clearing it from another CPU while the
+  task runs in user mode would leave its next trap unattributable.
+  `park` and `exit` therefore clear it only while holding the task's
+  body lock — which no CPU can hold while dispatching that task — and
+  otherwise leave the clear to the running CPU's own dispatch exit,
+  sending an IPI so it gets there promptly.
 * `current_task(cpu)` returns `None` for an out-of-range `cpu`,
   not an error. This matches the policy that an unknown CPU has,
   by definition, no current task — and lets the syscall entry
@@ -945,10 +953,18 @@ conformance suite pins the behaviour
 ### `yield_current` vs body-returned `TaskAction::Yield`
 
 `Scheduler::yield_current(task_id)` models a **voluntary syscall
-yield**: the task is currently in `TaskState::Running` on its
-CPU, the syscall handler wants to relinquish the rest of its
-quantum, and the scheduler must re-Ready the task and clear the
-slot before the syscall returns to user space.
+yield**: the task is `TaskState::Running` on its CPU, the caller wants
+to relinquish the rest of its quantum, and the scheduler re-Readies the
+task and clears the slot.
+
+It has **no production caller**, and adding one needs care. It clears
+the current-task slot but suspends nothing, so it is only ever sound
+when the caller suspends immediately afterwards. A blocking wait that
+called it as a fallback and then returned to user space left the task
+running as a caller the next syscall could not attribute — which halted
+the CPU outright. The `yield` syscall does not use it: the dispatch hook
+returns `Reschedule { action: Yield }` and the scheduler re-enqueues
+from the `TaskAction::Yield` the kthread reports at dispatch exit.
 
 `TaskAction::Yield` returned by a task body is the
 **body-loop yield**: it is processed by `dispatch` along with

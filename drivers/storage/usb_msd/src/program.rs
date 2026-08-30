@@ -124,15 +124,17 @@ const READY_ATTEMPTS: usize = 8;
 const WAIT_FOREVER_NS: u64 = u64::MAX;
 
 /// The capability set the driver host re-checks up front; the kernel is
-/// the authority and re-checks every trap. It is the least-privilege set
-/// this class driver needs — no MMIO, DMA, or IRQ.
+/// the authority and re-checks every trap.
+///
+/// Built from the driver crate's one
+/// [`REQUIRED_CAPS`](tairix_drv_storage_usb_msd::REQUIRED_CAPS) list, which
+/// the image builder also authors the signed manifest from, so a capability
+/// the program requests can never be one the manifest forgot to ask for.
 fn driver_caps() -> CapabilitySet {
     let mut caps = CapabilitySet::empty();
-    caps.insert(CapabilityId::SHM);
-    caps.insert(CapabilityId::IPC_ENDPOINT);
-    caps.insert(CapabilityId::IPC_BIND_PRIVILEGED);
-    caps.insert(CapabilityId::HW_EMIT);
-    caps.insert(CapabilityId::LOG_EMIT);
+    for &cap in tairix_drv_storage_usb_msd::REQUIRED_CAPS {
+        caps.insert(cap);
+    }
     caps
 }
 
