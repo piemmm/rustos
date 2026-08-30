@@ -168,6 +168,15 @@ budget, so it cannot silently shorten one, and a malformed value is rejected
 rather than quietly ignored. The QEMU verticals keep their own per-guest
 budgets — this is an outer backstop, not a replacement for them.
 
+A guest killed for falling silent, or for reaching its runtime ceiling, is
+interrogated over its QEMU monitor first: every vCPU's registers are read and
+the addresses named against the kernel ELF's symbol table, then reported inline
+and kept beside the transcript as `<binary>.hang.txt`. That is what separates a
+machine whose cores are all halted in a wait-for-interrupt — nothing runnable,
+so a wake-up was lost — from one still executing inside an interrupt-masked
+section. Without it a hang can only be diagnosed by re-running it, which
+[§7][test] forbids as a diagnosis.
+
 Other subcommands (`build`, `clean`, `prune`, `coverage`) exist for
 development and release flows; they are documented by `cargo xtask --help`.
 

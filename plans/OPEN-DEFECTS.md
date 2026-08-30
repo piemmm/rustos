@@ -97,6 +97,10 @@ The open items, in priority order:
   mapping turned one of them into an I/O error — DONE.** Every distinguishable
   filesystem conflict now has its own driver value, so the VFS no longer
   disambiguates by which mapper the call site picked.
+- **D67 — the sleeping mutex released the lock word after deciding nobody was
+  waiting, so a contender that published in that window slept for ever —
+  DONE.** The `stress_qemu_aarch64` early-boot silence recorded under D13 as a
+  masked-section wedge. It is not one: every core is idle. Detail below.
 - **D54 — a desktop worker thread issues ~2500 file opens at session start,
   starving every concurrent reader — OPEN.** It is the measured whole of the
   read-throughput gap `plans/FIX-KHEAP.md` reported: bundle load rate tracks
@@ -1599,22 +1603,11 @@ probe, never guessed (§2.1/§2.16/§2.19).
   real-Pi masked-section hard lockup is therefore a *separate* defect (below)
   that this fix does not claim to close.
 
-**A second QEMU manifestation, cheaper than `stress --cpu 20` and not the B4
-cause.** `stress_qemu_aarch64` (4 vCPUs, UART-only console, no `ramfb`) wedges
-**during early boot**, before the login prompt, when the CI QEMU matrix runs it
-concurrently with six other guests. The transcript's last line is
-`id=4139 root-unlock: users database installed; login can authenticate`; in a
-healthy run the next line is `comm=login sc=users_db_read` **1 ms of guest time
-later**, and in the wedge no core emits anything again — the kernel's own
-per-syscall DEBUG stream included — for the harness's whole 300 s inactivity
-budget. Total silence across every core rules out a merely-starved guest and
-places it in the same IRQ-masked section as the reports above. It is *not* the
-B4 GIC priority inversion, which was `ramfb`-only and is fixed. It reproduces
-only under host contention, so it is probabilistic rather than deterministic,
-but it needs no 20-worker load and no display: the interleaving of early
-multi-core spawn during root-mount is enough. Anyone driving the FIQ or EDPCSR
-samplers at this defect should try this guest first — it reaches the wedge in
-seconds of guest time.
+**The `stress_qemu_aarch64` early-boot silence was a separate defect, now
+found and fixed — see D40.** It was recorded here as a second manifestation of
+the masked-section wedge because it shares the "total silence across every
+core" signature. It is not one: every core is *idle*, not wedged, and the cause
+is a lost wake-up in the sleeping mutex, not an IRQ-masked section.
 
 The Pi-4B armstub FIQ-routing dependency remains a hardware-capability concern
 for `plans/FIX-HARDWARE-FEATURES.md`.
@@ -1740,7 +1733,8 @@ registry knows about is interrupt-safe too.
 
 **Done when:** the near-every-boot Pi 4 boot wedge no longer reproduces on
 metal with the interrupt-safe allocator lock, and `stress --cpu 20` no longer
-wedges on metal + the QEMU stress vertical. (The FIQ and EDPCSR samplers remain
+wedges on metal. (The QEMU stress vertical's own early-boot silence was D67,
+a different defect entirely, and is fixed. The FIQ and EDPCSR samplers remain
 the standing masked-section observers for any *future* wedge.)
 
 ---
@@ -3870,6 +3864,62 @@ the wrong width would have panicked rather than been refused.
 budget, and now guarded by a test — but it is sized by `MAX_BLOCK_SIZE`, so item
 **B1**, which widens the filesystem block size, must move that staging off the
 stack in the same change; recorded in that item.
+
+## D67 — the sleeping mutex lost a contender that published after its release scanned the queue — DONE
+
+**Symptom.** `stress_qemu_aarch64` fell silent for its whole 300 s inactivity
+budget, its transcript ending at `id=4139 root-unlock: users database
+installed; login can authenticate`, a few per cent of the time under host
+contention. Recorded under D13 as a second manifestation of the masked-section
+hard lockup because of the "total silence across every core" signature.
+
+**It is not a wedge — every core is idle.** The QEMU runner now reads each
+vCPU's registers off the monitor before it kills a hung guest and names the
+addresses against the kernel ELF (`tools/qemu`); on this stall all four cores
+sit at `exceptions::wait_for_interrupt` inside `init::run_dispatch_loop`.
+Nothing spins, nothing holds an interrupt-masked section: the machine has
+genuinely run out of runnable work, so the ~1 Hz watchdog cadence wakes each
+core, finds nothing, and idles again — for ever, and silently, because a
+quiescent system has nothing to report.
+
+**Where it stops.** The transcript carries no `id=11001 application bundle
+loaded` at all, so no boot service ever read its image off the volume. Guest
+instrumentation placed all seven loading children past the application-store
+readiness latch and inside the bundle read, blocked on the `/System` mount's
+`SleepLock`; the head of that queue was blocked one layer down on the shared
+boot disk's device `SleepLock`, with the lock word **free**. The in-kernel
+unlock kthread reads the same disk through its own window and is unaffected
+because it does not go through the VFS mount — which is why the unlock
+completes and only then does everything stop.
+
+**Mechanism.** `SleepLock`'s contended release decided "nobody is waiting"
+from a wait-queue scan and *then* cleared the whole lock word. A contender
+that registered in that window had already read `LOCKED` as set — so it
+committed to park — and had published `CONTENDED` into the very word the
+clear wiped. Every later release then matched the one-compare-exchange fast
+path (`LOCKED -> 0`, no contention bit) and never consulted the queue again,
+so the contender slept on a free lock with no wake owed to it by anyone. The
+module's own no-fence argument ("flag and lock bit share one location, so
+their modification order is total") is sound for the fast path, which is
+itself a read-modify-write of that word; it does not extend to a blind store
+of the word issued after a separate structure was read.
+
+**Fix.** The slow path releases before it decides
+(`SleepLock::release_and_recheck`): it clears `LOCKED` only — keeping any
+`CONTENDED` a late contender set — and then reads the queue a second time.
+That is the mirror of the contender's register-then-test, so whichever of the
+two read-modify-writes on the word runs second observes the first and the two
+orders cannot both miss. A contender the second look finds has the lock
+retaken for it, so the FIFO handoff is unchanged; only a second look that is
+also empty drops `CONTENDED`, keeping the uncontended release one
+compare-exchange. Regression guard (host, `kernel/core`):
+`a_contender_publishing_after_the_queue_scan_is_still_woken` drives the two
+halves of the release with the contender placed in the window between them,
+and fails against the pre-fix tail.
+
+**Arch-neutral**: `kernel/core/src/sleeplock.rs` is shared by every port.
+
+---
 
 ## D66 — one `DriverError` spoke for three filesystem conflicts at once (FIXED)
 

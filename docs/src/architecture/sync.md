@@ -61,6 +61,19 @@ learn that nobody was. The bit may linger over a handoff or over a contender
 that found the lock free; that costs one release which looks at the queue,
 finds it empty, and clears the word.
 
+That reasoning holds for the fast path, which is itself a read-modify-write
+of the word and so cannot miss a bit set before it. It does **not** extend to
+the slow path deciding "the queue is empty, so drop the word", and treating it
+as if it did cost a silent boot hang: a contender registering after that queue
+scan set `CONTENDED` in the word the scan's release then wiped, having already
+read `LOCKED` as set and committed to park, after which every release took the
+fast path and never looked at the queue again. The slow path therefore
+releases `LOCKED` *first*, keeping `CONTENDED`, and reads the queue once more
+afterwards — the mirror of the contender's register-then-test, so whichever of
+the two read-modify-writes runs second observes the first. A contender found
+by that second look has the lock retaken for it, so the FIFO handoff below is
+unaffected; only when the second look is also empty is `CONTENDED` dropped.
+
 Release keeps its FIFO discipline: ownership is published directly to the
 oldest waiter with `LOCKED` still set, so a fresh contender cannot barge ahead
 of it. A waiter that has vanished between observation and wake is passed over

@@ -130,23 +130,32 @@ fn report(result: std::io::Result<Outcome>) -> ExitCode {
             eprint!("{serial}");
             ExitCode::from(1)
         }
-        Ok(Outcome::Timeout { budget, serial }) => {
+        Ok(Outcome::Timeout {
+            budget,
+            serial,
+            cpu_state,
+        }) => {
             eprintln!(
                 "tairix-qemu-run: HUNG: the guest fell silent for its whole {budget:?} inactivity budget; the transcript's last line is the stall point"
             );
             eprint!("{serial}");
+            eprintln!("--- guest cpu state at the kill ---");
+            eprint!("{cpu_state}");
             ExitCode::from(2)
         }
         Ok(Outcome::RuntimeCeilingExceeded {
             ceiling,
             silent_for,
             serial,
+            cpu_state,
         }) => {
             eprintln!(
                 "tairix-qemu-run: UNFINISHED at the {ceiling:?} runtime ceiling \
                  (guest still alive, silent for {silent_for:?})"
             );
             eprint!("{serial}");
+            eprintln!("--- guest cpu state at the kill ---");
+            eprint!("{cpu_state}");
             ExitCode::from(2)
         }
         Err(e) => {

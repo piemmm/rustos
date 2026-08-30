@@ -44,3 +44,18 @@ GENERAL
 - Remember that abi-v1 is *NOT* frozen (despite what AGENTS.md and/or PLAN.md may say)
 - The work and design must be first class and able to survive a review by someone like Linus Torvalds
 - Do not poll when waiting for a long command or process to complete, use a monitor.
+
+TRAPS THAT WILL COST YOU AN HOUR EACH
+- **`target/debug/xtask` does not rebuild.** `cargo xtask …` is an alias for
+  `cargo run -p tairix-xtask --`; invoking the binary directly runs whatever
+  was last compiled, so edits to the QEMU enrolment table silently do not
+  apply — while guest-side crates *are* rebuilt by the image build, which makes
+  the result look plausible. Use `cargo xtask`, or `cargo build -p tairix-xtask`
+  first. Sanity check: inject a step delay and confirm the wall-clock runtime
+  actually moves.
+- **Kill stray `qemu-system-*` before re-running.** An abandoned run keeps a
+  per-test disk image's write lock and makes unrelated verticals fail fast.
+- **The gate outlives a single tool call.** Run it as
+  `{ cargo xtask ci > /tmp/ci.log 2>&1; echo "CI-RC=$?" >> /tmp/ci.log; }`,
+  read the recorded `CI-RC=` back (a harness exit code is the `echo`'s), arm
+  exactly one waiter, and do no other work while it runs.

@@ -10548,9 +10548,14 @@ fn finish_run(t: &QemuTest, kernel: &Path, replica: usize, spec: Spec) -> Result
                 serial_log.display()
             ))
         }
-        Outcome::Timeout { budget, serial } => {
+        Outcome::Timeout {
+            budget,
+            serial,
+            cpu_state,
+        } => {
+            let hang = persist_hang_state(t.package, &sidecar_path(kernel, t, replica, "hang.txt"), &cpu_state)?;
             Err(format!(
-                "test --qemu ({}) HUNG: the guest fell silent for its whole {budget:?} inactivity budget; the transcript's last line is the stall point (no retries per AGENTS.md §7; full serial: {})\n--- serial ---\n{serial}\n--- end ---",
+                "test --qemu ({}) HUNG: the guest fell silent for its whole {budget:?} inactivity budget; the transcript's last line is the stall point (no retries per AGENTS.md §7; full serial: {}; guest cpu state: {hang})\n--- serial ---\n{serial}\n--- guest cpu state at the kill ---\n{cpu_state}\n--- end ---",
                 t.package,
                 serial_log.display()
             ))
@@ -10559,6 +10564,7 @@ fn finish_run(t: &QemuTest, kernel: &Path, replica: usize, spec: Spec) -> Result
             ceiling,
             silent_for,
             serial,
+            cpu_state,
         } => {
             // The silence at the kill is the first thing a reader needs: near
             // zero means the guest was alive and working but never finished
@@ -10566,13 +10572,32 @@ fn finish_run(t: &QemuTest, kernel: &Path, replica: usize, spec: Spec) -> Result
             // service retrying on a timer), while a silence close to the
             // ceiling means the guest went quiet early and stalled — the
             // transcript's last line is then the stall point.
+            let hang = persist_hang_state(t.package, &sidecar_path(kernel, t, replica, "hang.txt"), &cpu_state)?;
             Err(format!(
-                "test --qemu ({}) UNFINISHED at the {ceiling:?} runtime ceiling: the guest was still alive and never completed; silent for {silent_for:?} at the kill (no retries per AGENTS.md §7; full serial: {})\n--- serial ---\n{serial}\n--- end ---",
+                "test --qemu ({}) UNFINISHED at the {ceiling:?} runtime ceiling: the guest was still alive and never completed; silent for {silent_for:?} at the kill (no retries per AGENTS.md §7; full serial: {}; guest cpu state: {hang})\n--- serial ---\n{serial}\n--- guest cpu state at the kill ---\n{cpu_state}\n--- end ---",
                 t.package,
                 serial_log.display()
             ))
         }
     }
+}
+
+/// Persist the per-vCPU state a killed guest was interrogated for beside its
+/// transcript, and return the path.
+///
+/// The transcript of a hang ends where the guest stopped talking, which is
+/// the one thing about a hang that is never in doubt. What the cores were
+/// actually doing at the kill — every one halted (nothing runnable, so a wake
+/// was lost) versus one still executing with interrupts masked (a spin) — is
+/// what decides where to look, and it exists only for as long as QEMU does.
+fn persist_hang_state(package: &str, path: &Path, cpu_state: &str) -> Result<String, String> {
+    std::fs::write(path, cpu_state).map_err(|e| {
+        format!(
+            "test --qemu ({package}): persist guest cpu state {}: {e}",
+            path.display()
+        )
+    })?;
+    Ok(path.display().to_string())
 }
 
 /// Persist a guest's complete serial transcript beside its kernel, whatever

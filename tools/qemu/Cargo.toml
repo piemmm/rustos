@@ -21,3 +21,10 @@ path = "src/bin/run.rs"
 # The library is host-only (`std`). It is invoked by `cargo xtask test --qemu`
 # to build, launch, and reap QEMU instances. Keeping it as a workspace member
 # means the same code path runs in CI and locally.
+
+[dependencies]
+# A killed guest's register dump is a page of addresses. Resolving them
+# against the kernel ELF's own symbol table is what turns it into a stall
+# site, and the workspace already owns exactly one ELF64 symbol-table
+# decoder — the one a TAIRiX disassembler view reads. Host-only build glue.
+tairix-binfmt = { path = "../../lib/binfmt", version = "=0.0.0" }

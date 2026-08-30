@@ -67,6 +67,15 @@
 //! "is anyone waiting?" answer in a separate structure would have needed the
 //! wait-queue lock (and a `BTreeMap` lookup) on every release to learn that
 //! nobody was.
+//!
+//! That holds for the fast path, which is itself a read-modify-write of the
+//! word and so cannot miss a bit set before it. It does **not** extend to the
+//! slow path's "the queue was empty, so drop the word" tail: a contender
+//! registering after that scan set `CONTENDED` in the word the release then
+//! wiped, having already read `LOCKED` as set and committed to park, and no
+//! later release consulted the queue again — a silent boot hang. The slow
+//! path therefore releases *before* it decides nobody is waiting, and reads
+//! the queue once more afterwards (`release_and_recheck`).
 
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
@@ -83,11 +92,12 @@ const LOCKED: u32 = 1 << 0;
 /// was held, so the release owes it a wake.
 ///
 /// Set by the contender *before* it parks and cleared only by a release
-/// that finds the queue genuinely empty. It may therefore linger over a
-/// handoff, or over a contender that found the lock free after publishing
-/// it — each costs one release that consults the wait queue and finds
-/// nothing, and clears the bit. Clearing it speculatively instead would
-/// race a second contender's flag and lose its wake.
+/// that has already dropped [`LOCKED`] and then found the queue empty. It
+/// may therefore linger over a handoff, or over a contender that found the
+/// lock free after publishing it — each costs one release that consults the
+/// wait queue and finds nothing, and clears the bit. Clearing it while
+/// [`LOCKED`] is still set would erase a contender's publication and lose
+/// its wake.
 const CONTENDED: u32 = 1 << 1;
 
 /// A mutual-exclusion lock whose contenders **park** off the run queue
@@ -299,31 +309,83 @@ impl<T: ?Sized> SleepLock<T> {
     /// host tests can drive the direct handoff state machine without
     /// installing the process-global boot hook.
     ///
-    /// A stale flag (a handoff's successor, or a contender that found the lock
-    /// already free) reaches here with an empty queue and simply clears the
-    /// word, which is what stops the bit lingering.
+    /// Hand off to the oldest waiter if there is one; otherwise release the
+    /// word and look again, retaking the lock when a contender turned up in
+    /// that window ([`Self::release_and_recheck`]).
     fn release_contended(&self, hook: Option<&dyn crate::waitq::WaitQueueArch>) {
-        if let Some(hook) = hook {
-            // A waiter that vanished between observation and wake is passed
-            // over for the next-oldest, never taken as licence to unlock with
-            // the queue still occupied: that would strand every remaining
-            // contender, since the word is cleared with it and no later
-            // release would owe them a wake. Each pass-over removes a
-            // candidate that is already absent, so this ends at the first
-            // live waiter or an empty queue.
-            while let Some(task) = self.waiters.oldest_task() {
-                // Keep `LOCKED` set while ownership is in flight, preventing a
-                // fresh contender from barging ahead of the FIFO waiter. The
-                // waiter's Acquire claim publishes the prior holder's
-                // critical-section writes before it receives the guard.
-                self.handoff.store(task, Ordering::Release);
-                if self.waiters.wake_task(hook, task) {
-                    return;
-                }
-                self.handoff.store(0, Ordering::Relaxed);
+        let Some(hook) = hook else {
+            // No scheduler hook: nothing can be parked, so no wake is owed
+            // and nobody can arrive to be stranded.
+            self.state.store(0, Ordering::Release);
+            return;
+        };
+        while !self.hand_off_oldest(hook) {
+            if !self.release_and_recheck() {
+                return;
             }
         }
-        self.state.store(0, Ordering::Release);
+    }
+
+    /// Publish ownership to the oldest live waiter and wake it, returning
+    /// whether one took it. [`LOCKED`] is left **set** on success: ownership
+    /// is in flight, so a fresh contender cannot barge ahead of the FIFO
+    /// waiter, and the waiter's Acquire claim observes the prior holder's
+    /// critical-section writes.
+    ///
+    /// A waiter that vanished between observation and wake is passed over for
+    /// the next-oldest, never taken as licence to unlock with the queue still
+    /// occupied. Each pass-over removes a candidate that is already absent, so
+    /// this ends at the first live waiter or an empty queue.
+    fn hand_off_oldest(&self, hook: &dyn crate::waitq::WaitQueueArch) -> bool {
+        while let Some(task) = self.waiters.oldest_task() {
+            self.handoff.store(task, Ordering::Release);
+            if self.waiters.wake_task(hook, task) {
+                return true;
+            }
+            self.handoff.store(0, Ordering::Relaxed);
+        }
+        false
+    }
+
+    /// Release a lock no waiter wanted, then look at the queue once more.
+    /// Returns whether the lock was retaken because a contender appeared in
+    /// the window, so the caller owes another handoff.
+    ///
+    /// The second look is what makes the queue scan safe. A contender that
+    /// registers after the scan publishes [`CONTENDED`] into this very word,
+    /// having already read [`LOCKED`] as set and committed to park; clearing
+    /// the word outright would erase that publication, and every later
+    /// release would then take the one-compare-exchange fast path without
+    /// consulting the queue, leaving it parked for ever on a free lock.
+    /// Clearing only [`LOCKED`] keeps the bit, and reading the queue *after*
+    /// the release mirrors the contender's register-then-test: whichever of
+    /// the two read-modify-writes on the word runs second observes the first,
+    /// so the two orders cannot both miss.
+    fn release_and_recheck(&self) -> bool {
+        self.state.fetch_and(!LOCKED, Ordering::AcqRel);
+        if self.waiters.oldest_task().is_none() {
+            // Genuinely nobody. Drop the contention bit too, so the next
+            // release is one compare-exchange again. A contender arriving
+            // after the look above reads the cleared lock bit in its own
+            // test and never parks, so this cannot strand one. The bit
+            // carries no data, hence the relaxed ordering.
+            let _ = self
+                .state
+                .compare_exchange(CONTENDED, 0, Ordering::Relaxed, Ordering::Relaxed);
+            return false;
+        }
+        // One appeared. Retake the lock so the handoff keeps its FIFO order.
+        // If another contender claimed it first, that one owns the release
+        // obligation — the contention bit is still set, so its own release
+        // consults the queue — and nothing more is owed here.
+        self.state
+            .compare_exchange(
+                CONTENDED,
+                CONTENDED | LOCKED,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            )
+            .is_ok()
     }
 }
 
@@ -565,5 +627,58 @@ mod tests {
         lock.release_contended(Some(&wake));
         assert_eq!(lock.state.load(Ordering::Acquire), 0);
         assert!(lock.try_lock().is_some());
+    }
+
+    #[test]
+    fn a_contender_publishing_after_the_queue_scan_is_still_woken() {
+        // A release that clears the word after scanning the queue erases the
+        // `CONTENDED` a contender published in that window, and every later
+        // release then matches the fast path and never looks at the queue
+        // again — the contender sleeps for ever on a free lock (the silent
+        // boot hang). The two halves of the release are driven directly
+        // because nothing else can place a contender in the window between
+        // them deterministically.
+        let lock = SleepLock::new(());
+        let wake = RecordingWake::new();
+        lock.state.store(LOCKED | CONTENDED, Ordering::Relaxed);
+
+        // The holder looks for a successor and finds none.
+        assert!(!lock.hand_off_oldest(&wake), "the queue is empty");
+
+        // A contender arrives now: it registers, publishes `CONTENDED`, sees
+        // `LOCKED` still set, and parks (exactly `park_until_released`).
+        lock.waiters.register(77, NO_DEADLINE);
+        assert_ne!(
+            lock.state.fetch_or(CONTENDED, Ordering::AcqRel) & LOCKED,
+            0,
+            "the contender observed a held lock, so it parks"
+        );
+
+        // The holder finishes its release. It must see the contender.
+        assert!(
+            lock.release_and_recheck(),
+            "a contender appeared, so the lock is retaken to hand it over"
+        );
+        assert!(
+            lock.hand_off_oldest(&wake),
+            "the contender is the successor"
+        );
+        assert_eq!(
+            wake.tasks.lock().as_slice(),
+            &[77],
+            "the contender that published after the scan must be woken"
+        );
+        assert_eq!(lock.handoff.load(Ordering::Acquire), 77);
+    }
+
+    #[test]
+    fn a_release_with_no_contender_clears_the_whole_word() {
+        // The other side of the recheck: when nobody did turn up, the
+        // contention bit goes too, so the next release is one
+        // compare-exchange again rather than a wait-queue lookup for ever.
+        let lock = SleepLock::new(());
+        lock.state.store(LOCKED | CONTENDED, Ordering::Relaxed);
+        assert!(!lock.release_and_recheck(), "nobody appeared");
+        assert_eq!(lock.state.load(Ordering::Acquire), 0);
     }
 }

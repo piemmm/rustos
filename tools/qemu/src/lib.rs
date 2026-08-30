@@ -69,7 +69,9 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
+use std::fmt::Write as _;
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -77,6 +79,8 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+use tairix_binfmt::elf::{ElfView, SHT_SYMTAB};
 
 pub mod aarch64;
 pub mod disk;
@@ -138,6 +142,10 @@ pub enum Outcome {
         budget: Duration,
         /// Captured QEMU stdout up to the kill, best-effort.
         serial: String,
+        /// Every vCPU's register file, read off the QEMU monitor at the
+        /// moment the guest was declared hung, with the kernel-text
+        /// addresses it names resolved against the kernel ELF.
+        cpu_state: String,
     },
     /// The run reached its absolute wall-clock ceiling
     /// ([`Spec::runtime_ceiling`]) while the guest was still alive and had
@@ -165,6 +173,10 @@ pub enum Outcome {
         silent_for: Duration,
         /// Captured QEMU stdout up to the kill, best-effort.
         serial: String,
+        /// Every vCPU's register file, read off the QEMU monitor at the
+        /// moment the run was killed, with the kernel-text addresses it
+        /// names resolved against the kernel ELF.
+        cpu_state: String,
     },
 }
 
@@ -1202,19 +1214,18 @@ impl Runner {
             cmd.arg(a);
         }
 
-        // When the spec asks for key or pointer injection, attach a QEMU
-        // monitor on a private unix socket so the runner can drive
-        // `sendkey` / `mouse_move` once the guest is ready. The socket is
-        // server-side in QEMU (created at startup, well before the guest's
-        // readiness marker) and the runner connects as a client.
-        let monitor = (spec.input_keyboard.is_some()
-            || !spec.input_typing.is_empty()
-            || !spec.pointer_script.is_empty()
-            || !spec.screendumps.is_empty()
-            || !spec.monitor_commands.is_empty())
-        .then(|| ReservedSocket::reserve("mon"))
-        .transpose()
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        // Attach a QEMU monitor on a private unix socket for *every* run.
+        // Verticals that inject keys or take screendumps drive it during the
+        // run; the rest need it only once, at the end, and only if things go
+        // wrong — a guest that has to be killed as hung is interrogated over
+        // it first, and a hang whose report
+        // cannot say what the CPUs were doing can only be diagnosed by
+        // re-running it, which is not a diagnosis. The socket is server-side
+        // in QEMU (created at startup, well before any guest output) and the
+        // runner connects as a client.
+        let monitor = ReservedSocket::reserve("mon")
+            .map(Some)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
         if let Some(mon) = &monitor {
             cmd.arg("-chardev");
             let mut chardev = OsString::from("socket,id=tairix-mon,server=on,wait=off,path=");
@@ -1572,19 +1583,27 @@ fn run_wait_loop(cx: WaitLoop<'_>) -> io::Result<DoneReason> {
         // stalled and went quiet.
         if run_start.elapsed() >= spec.runtime_ceiling() {
             let silent_for = heartbeat.idle_for(Instant::now());
+            // Interrogate the guest *before* killing it: once QEMU is gone
+            // the only evidence left is the transcript, which is exactly the
+            // evidence that has already run out.
+            let cpu_state = injections.hang_report(monitor, &spec.kernel);
             let _ = child.kill();
             let _ = child.wait();
-            return Ok(DoneReason::CeilingExceeded { silent_for });
+            return Ok(DoneReason::CeilingExceeded {
+                silent_for,
+                cpu_state,
+            });
         }
         if heartbeat.idle_for(Instant::now()) >= spec.timeout {
-            // Strict, no-retry kill. `wait` afterwards is best
-            // effort so we don't leave a zombie behind.
+            // Strict, no-retry kill, with the guest's own CPU state read off
+            // the monitor first so one occurrence is diagnosable.
+            let cpu_state = injections.hang_report(monitor, &spec.kernel);
             let _ = child.kill();
             let _ = child.wait();
             return Ok(if serial_closed {
                 DoneReason::DrainFailed(String::from("serial output closed before QEMU exited"))
             } else {
-                DoneReason::TimedOut
+                DoneReason::TimedOut { cpu_state }
             });
         }
         std::thread::sleep(tick);
@@ -1661,14 +1680,19 @@ fn outcome_from_done(done: DoneReason, spec: &Spec, mut serial: String) -> Outco
             spec.arch.outcome_from_status(code, serial)
         }
         DoneReason::CompletedByGate => Outcome::Pass { serial },
-        DoneReason::TimedOut => Outcome::Timeout {
+        DoneReason::TimedOut { cpu_state } => Outcome::Timeout {
             budget: spec.timeout,
             serial,
+            cpu_state,
         },
-        DoneReason::CeilingExceeded { silent_for } => Outcome::RuntimeCeilingExceeded {
+        DoneReason::CeilingExceeded {
+            silent_for,
+            cpu_state,
+        } => Outcome::RuntimeCeilingExceeded {
             ceiling: spec.runtime_ceiling(),
             silent_for,
             serial,
+            cpu_state,
         },
         DoneReason::InjectionFailed(reason) | DoneReason::DrainFailed(reason) => {
             // The failure message rides the serial log so the report
@@ -1797,8 +1821,13 @@ enum DoneReason {
     /// The child exited with this status code.
     Exited(i32),
     /// The guest fell silent for the whole inactivity budget; the child was
-    /// killed.
-    TimedOut,
+    /// killed. Carries the per-vCPU state read off the monitor before the
+    /// kill.
+    TimedOut {
+        /// Every vCPU's register file at the kill, with kernel-text
+        /// addresses resolved.
+        cpu_state: String,
+    },
     /// The run hit its absolute wall-clock ceiling while still alive; the
     /// child was killed. Carries how long the guest had been silent, which
     /// separates a live-but-never-completing guest from one stalled at a
@@ -1806,6 +1835,9 @@ enum DoneReason {
     CeilingExceeded {
         /// How long the guest had produced no serial output at the kill.
         silent_for: Duration,
+        /// Every vCPU's register file at the kill, with kernel-text
+        /// addresses resolved.
+        cpu_state: String,
     },
     /// The [`Spec::completion_gate`] tripped: the out-of-guest observer
     /// (the `netpeer` link peer) confirmed success, so the child was
@@ -1817,6 +1849,159 @@ enum DoneReason {
     /// A QEMU output drain failed, panicked, or closed before the child;
     /// the child was killed. The message identifies the failed channel.
     DrainFailed(String),
+}
+
+/// Longest a single monitor read may block while the hang report is being
+/// collected. A reply that has stopped arriving for this long has ended: the
+/// human monitor sends nothing further until it is asked again.
+const MONITOR_READ_QUIET: Duration = Duration::from_millis(250);
+
+/// Total wall clock the hang report may spend reading the monitor.
+///
+/// The report is taken at the one moment the run has already concluded
+/// something is wrong, so it must never itself become a second thing that
+/// hangs. A whole register file for a handful of vCPUs arrives in
+/// milliseconds; this is orders of magnitude more than that.
+const MONITOR_READ_BUDGET: Duration = Duration::from_secs(3);
+
+/// Bytes of monitor reply the hang report will hold. A register dump is a
+/// few kilobytes per vCPU; this bounds a monitor that will not stop talking.
+const MONITOR_READ_MAX_BYTES: usize = 256 * 1024;
+
+/// Most kernel-text addresses one hang report names. A register dump for a
+/// handful of vCPUs mentions a few dozen distinct ones; this bounds a report
+/// that somehow mentions far more.
+const LEGEND_MAX_ENTRIES: usize = 256;
+
+/// `st_info` symbol type for a function (`STT_FUNC`).
+const STT_FUNC: u8 = 2;
+
+/// Resolve the kernel-text addresses a monitor register dump mentions, so a
+/// hang report names code instead of numbers.
+///
+/// Deliberately arch-neutral: rather than parse each target's register
+/// format, it takes every address-width hexadecimal word in `report` and
+/// keeps the ones landing inside a function the kernel ELF defines. That
+/// resolves the program counter, but also the link register and any return
+/// address the dump happens to show — usually what says *how* a core reached
+/// where it stopped.
+///
+/// Best effort: an unreadable or symbol-less ELF yields no legend rather than
+/// an error. The verdict belongs to the hang, never to this.
+fn symbol_legend(kernel: &Path, report: &str) -> String {
+    let Ok(bytes) = std::fs::read(kernel) else {
+        return String::new();
+    };
+    let functions = kernel_functions(&bytes);
+    if functions.is_empty() {
+        return String::new();
+    }
+    let mut resolved: BTreeMap<u64, String> = BTreeMap::new();
+    for addr in hex_words(report) {
+        if resolved.len() >= LEGEND_MAX_ENTRIES {
+            break;
+        }
+        if resolved.contains_key(&addr) {
+            continue;
+        }
+        if let Some(named) = resolve_addr(&functions, addr) {
+            resolved.insert(addr, named);
+        }
+    }
+    if resolved.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("--- kernel text addresses named above ---\n");
+    for (addr, name) in resolved {
+        let _ = writeln!(out, "0x{addr:016x}  {name}");
+    }
+    out
+}
+
+/// Name `addr` as an offset into the function containing it, or [`None`]
+/// when it lands in no function's extent.
+///
+/// `functions` must be sorted by start address ([`kernel_functions`]).
+fn resolve_addr(functions: &[(u64, u64, String)], addr: u64) -> Option<String> {
+    let index = match functions.binary_search_by_key(&addr, |(start, _, _)| *start) {
+        Ok(exact) => exact,
+        Err(0) => return None,
+        Err(after) => after - 1,
+    };
+    let (start, size, name) = functions.get(index)?;
+    (addr < start.saturating_add(*size)).then(|| format!("{name}+0x{:x}", addr - start))
+}
+
+/// Every sized function the kernel ELF defines, sorted by address.
+///
+/// Sized, because a nearest-preceding-symbol guess would put a name on an
+/// address past the last function; a report that invents a call site is worse
+/// than one that leaves the number alone.
+fn kernel_functions(bytes: &[u8]) -> Vec<(u64, u64, String)> {
+    let Ok(view) = ElfView::parse(bytes) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(u64, u64, String)> = Vec::new();
+    for index in 0..view.header().shnum {
+        let Ok(section) = view.section(index) else {
+            continue;
+        };
+        if section.sh_type != SHT_SYMTAB {
+            continue;
+        }
+        let Ok(table) = view.symbol_table(index) else {
+            continue;
+        };
+        for i in 0..table.len() {
+            let Ok(symbol) = table.symbol(i) else {
+                continue;
+            };
+            if symbol.info & 0x0f != STT_FUNC || symbol.value == 0 || symbol.size == 0 {
+                continue;
+            }
+            let Ok(name) = table.name(&symbol) else {
+                continue;
+            };
+            out.push((symbol.value, symbol.size, name.to_string()));
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
+/// Every address-width hexadecimal word in `text`, as a value.
+///
+/// A QEMU register dump writes them bare (`PC=0000000040444cd4`), so this
+/// takes runs of 8 to 16 hex digits delimited by anything else — wide enough
+/// to skip a field index or a small immediate, narrow enough to catch every
+/// 32- and 64-bit register value.
+fn hex_words(text: &str) -> Vec<u64> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut run_start: Option<usize> = None;
+    for (i, b) in bytes.iter().enumerate() {
+        if b.is_ascii_hexdigit() {
+            let _ = run_start.get_or_insert(i);
+        } else if let Some(start) = run_start.take() {
+            push_hex_word(&mut out, &bytes[start..i]);
+        }
+    }
+    if let Some(start) = run_start {
+        push_hex_word(&mut out, &bytes[start..]);
+    }
+    out
+}
+
+/// Decode one delimited run of hex digits, keeping only address-width ones.
+fn push_hex_word(out: &mut Vec<u64>, word: &[u8]) {
+    if !(8..=16).contains(&word.len()) {
+        return;
+    }
+    if let Ok(text) = core::str::from_utf8(word) {
+        if let Ok(value) = u64::from_str_radix(text, 16) {
+            out.push(value);
+        }
+    }
 }
 
 /// The longest unix-socket path this host can bind, including its
@@ -2482,7 +2667,9 @@ impl InjectionState {
     ) -> Result<(), String> {
         let fail = |e: io::Error| format!("{what} injection failed: {e}");
         if self.conn.is_none() {
-            let mon = monitor.expect("monitor present for injection");
+            // Every run attaches a monitor, so this is unreachable in a real
+            // run; refuse rather than panic if one ever is not.
+            let mon = monitor.ok_or_else(|| fail(io::Error::other("no monitor attached")))?;
             self.conn = Some(UnixStream::connect(mon.path()).map_err(fail)?);
         }
         let Some(stream) = self.conn.as_mut() else {
@@ -2493,6 +2680,63 @@ impl InjectionState {
             .write_all(format!("{command}\n").as_bytes())
             .and_then(|()| stream.flush())
             .map_err(fail)
+    }
+
+    /// Read every vCPU's register file off the QEMU monitor, for a run that
+    /// is about to be killed as hung.
+    ///
+    /// A hang report that cannot say what the guest's CPUs were doing forces
+    /// a re-run to learn anything, and a re-run is precisely how a hang must
+    /// *not* be diagnosed. `info registers -a` gives each core's program
+    /// counter, link register and interrupt mask, which
+    /// [`symbol_legend`] then names: every core sitting in the idle
+    /// wait-for-interrupt means nothing was runnable (a lost wake-up),
+    /// whereas a core inside a loop with interrupts masked is a spin.
+    /// `info cpus` enumerates the vCPUs the dump then walks.
+    ///
+    /// Best effort by construction: it reuses this run's single monitor
+    /// connection (a socket chardev serves one client), and a monitor that
+    /// cannot be reached, or a QEMU already gone, yields the reason *as* the
+    /// report. The verdict is the hang's, never this call's.
+    fn hang_report(&mut self, monitor: Option<&ReservedSocket>, kernel: &Path) -> String {
+        let mut report = self.read_monitor_state(monitor);
+        report.push_str(&symbol_legend(kernel, &report));
+        report
+    }
+
+    /// The raw monitor answer [`Self::hang_report`] names addresses from.
+    fn read_monitor_state(&mut self, monitor: Option<&ReservedSocket>) -> String {
+        if let Err(e) = self.send(monitor, "hang diagnosis", "info cpus") {
+            return format!("unavailable: {e}\n");
+        }
+        if let Err(e) = self.send(monitor, "hang diagnosis", "info registers -a") {
+            return format!("unavailable: {e}\n");
+        }
+        let Some(stream) = self.conn.as_mut() else {
+            return String::from("unavailable: monitor connection vanished\n");
+        };
+        // Bounded twice over — per-read and in total — because the monitor is
+        // being read at the one moment the run has already decided something
+        // is wrong, so it must never become a second thing that hangs.
+        if let Err(e) = stream.set_read_timeout(Some(MONITOR_READ_QUIET)) {
+            return format!("unavailable: {e}\n");
+        }
+        let deadline = Instant::now() + MONITOR_READ_BUDGET;
+        let mut raw: Vec<u8> = Vec::new();
+        let mut chunk = [0u8; 4096];
+        while Instant::now() < deadline && raw.len() < MONITOR_READ_MAX_BYTES {
+            // A closed socket and a read that times out both mean the reply
+            // has ended: the monitor sends nothing further until it is asked
+            // again, so neither is a failure.
+            match stream.read(&mut chunk) {
+                Ok(n) if n > 0 => raw.extend_from_slice(&chunk[..n]),
+                _ => break,
+            }
+        }
+        if raw.is_empty() {
+            return String::from("unavailable: the monitor answered nothing\n");
+        }
+        String::from_utf8_lossy(&raw).into_owned()
     }
 }
 
@@ -2576,6 +2820,57 @@ mod tests {
     }
 
     #[test]
+    fn a_hang_report_names_only_addresses_inside_a_function() {
+        // The `size` guard is what stops the legend inventing a call site:
+        // an address past the last function's extent (a stack value, a small
+        // constant) resolves to nothing rather than to whatever symbol
+        // happens to precede it.
+        let functions = vec![
+            (0x1000_u64, 0x10_u64, String::from("first")),
+            (0x2000, 0x20, String::from("second")),
+        ];
+        assert_eq!(
+            resolve_addr(&functions, 0x1000).as_deref(),
+            Some("first+0x0")
+        );
+        assert_eq!(
+            resolve_addr(&functions, 0x100c).as_deref(),
+            Some("first+0xc")
+        );
+        // In the gap between the two functions, and past the last one.
+        assert_eq!(resolve_addr(&functions, 0x1010), None);
+        assert_eq!(resolve_addr(&functions, 0x2100), None);
+        // Below the first function.
+        assert_eq!(resolve_addr(&functions, 0x0fff), None);
+        assert_eq!(
+            resolve_addr(&functions, 0x2004).as_deref(),
+            Some("second+0x4")
+        );
+    }
+
+    #[test]
+    fn the_hang_report_scan_takes_register_values_and_nothing_else() {
+        // A QEMU register dump writes addresses bare and everything else
+        // around them: the scan must pick up the 32- and 64-bit register
+        // values and skip the register indices, small decimal fields, and
+        // the PSTATE mnemonics that are themselves hex letters.
+        let dump = "CPU#0\n PC=0000000040444cd4 X00=0000000000000002\n                    PSTATE=600003c5 -ZC- EL1h\n* CPU #0: thread_id=2669729\n";
+        assert_eq!(
+            hex_words(dump),
+            vec![0x0000_0000_4044_4cd4, 0x0000_0000_0000_0002, 0x6000_03c5]
+        );
+    }
+
+    #[test]
+    fn a_hang_report_without_a_readable_kernel_yields_no_legend() {
+        // Best effort: the verdict belongs to the hang, so an ELF that
+        // cannot be read costs the legend, never the report.
+        assert!(
+            symbol_legend(Path::new("/nonexistent/kernel.elf"), "PC=0000000040444cd4").is_empty()
+        );
+    }
+
+    #[test]
     fn every_outcome_surfaces_its_transcript() {
         // The runner persists the transcript once per run, off this accessor,
         // so a variant that hid its own log would silently leave that run's
@@ -2591,11 +2886,13 @@ mod tests {
             Outcome::Timeout {
                 budget: Duration::from_secs(1),
                 serial: "pass log".into(),
+                cpu_state: String::new(),
             },
             Outcome::RuntimeCeilingExceeded {
                 ceiling: Duration::from_secs(2),
                 silent_for: Duration::ZERO,
                 serial: "pass log".into(),
+                cpu_state: String::new(),
             },
         ] {
             assert_eq!(outcome.serial(), "pass log");
@@ -2712,6 +3009,7 @@ mod tests {
         let live_but_unfinished = outcome_from_done(
             DoneReason::CeilingExceeded {
                 silent_for: Duration::from_millis(20),
+                cpu_state: String::new(),
             },
             &spec,
             "campaign log".into(),
@@ -2721,6 +3019,7 @@ mod tests {
                 ceiling,
                 silent_for,
                 serial,
+                ..
             } => {
                 assert_eq!(ceiling, spec.runtime_ceiling());
                 assert_eq!(silent_for, Duration::from_millis(20));
@@ -2734,6 +3033,7 @@ mod tests {
         let stalled = outcome_from_done(
             DoneReason::CeilingExceeded {
                 silent_for: Duration::from_secs(355),
+                cpu_state: String::new(),
             },
             &spec,
             "boot log".into(),
@@ -2750,7 +3050,13 @@ mod tests {
         // talking reads as a timeout rather than as an unfinished run.
         let spec = Spec::for_riscv64_kernel("/tmp/k").with_timeout(Duration::from_secs(60));
         assert!(matches!(
-            outcome_from_done(DoneReason::TimedOut, &spec, "boot log".into()),
+            outcome_from_done(
+                DoneReason::TimedOut {
+                    cpu_state: String::new()
+                },
+                &spec,
+                "boot log".into()
+            ),
             Outcome::Timeout { budget, .. } if budget == Duration::from_secs(60)
         ));
     }
