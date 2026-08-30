@@ -340,6 +340,14 @@ pub fn autoload_caps() -> CapabilitySet {
     // does not request it receives nothing extra (the per-driver manifest
     // intersection still binds, so no ambient authority).
     caps.insert(CapabilityId::FS_MOUNT);
+    // The `usb_msd` storage class driver reads the hardware-tree snapshot on
+    // its recovery path to attribute a stalled transfer to a resetting hub or
+    // controller rather than to the disk, which the kernel gates on
+    // `CAP_SYSINFO_HW`. The delegatable set carries it so such a signed driver
+    // can be granted it; a driver that does not request it receives nothing
+    // extra (the per-driver manifest intersection still binds, so no ambient
+    // authority).
+    caps.insert(CapabilityId::SYSINFO_HW);
     caps
 }
 
@@ -1038,6 +1046,14 @@ mod tests {
             // to a signed manifest that requests it, never held by the
             // kthread itself (no ambient authority).
             CapabilityId::FS_MOUNT,
+            // The `usb_msd` storage class driver reads the hardware-tree
+            // snapshot on its recovery path to blame a resetting hub or
+            // controller instead of the disk (`CAP_SYSINFO_HW`) — delegatable
+            // to a signed manifest that requests it, never held by the
+            // kthread itself (no ambient authority). A driver whose manifest
+            // requests a capability this set lacks is refused outright as an
+            // escalation, so every mass-storage node fails to bind.
+            CapabilityId::SYSINFO_HW,
         ] {
             assert!(!service.contains(cap));
             assert!(autoload.contains(cap));

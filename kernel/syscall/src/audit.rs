@@ -17,6 +17,7 @@
 //! | 5004 | Error | `SYSCALL_HANDLER_REJECTED`    | The owning subsystem rejected the call after the dispatcher checks passed. |
 //! | 5005 | Debug | `SYSCALL_HANDLER_WOULD_BLOCK` | The owning subsystem had nothing to return yet and the caller may retry (`Errno::WouldBlock`). Not a rejection: recorded at `Debug` so a routine poll-while-pending cannot flood the log. |
 //! | 5006 | Debug | `SYSCALL_HANDLER_NOT_FOUND`   | The owning subsystem answered that the named object does not exist (`Errno::NotFound`). An ordinary answer, not a security decision (a genuine authorisation refusal is `PermissionDenied` and stays at `Error`): recorded at `Debug` so a routine existence probe of an optional file or endpoint cannot flood the log. |
+//! | 5007 | Debug | `SYSCALL_HANDLER_UNAVAILABLE` | The owning subsystem is not present on this build or not up yet (`Errno::NotImplemented`). No security decision was taken: recorded at `Debug` so a layered lookup that tries an optional source before its fallback — a settings override on the not-yet-mounted encrypted root, say — cannot flood the boot log. |
 //!
 //! Adding a new event takes the next free identifier in this file and a
 //! row in `docs/src/architecture/syscalls.md`.
@@ -78,6 +79,21 @@ pub enum AuditEvent {
     ///
     /// [`Errno::NotFound`]: tairix_abi::Errno::NotFound
     SyscallHandlerNotFound,
+    /// The owning subsystem is absent from this build, or not up yet
+    /// ([`Errno::NotImplemented`]).
+    ///
+    /// Every dispatcher check passed and no security decision was taken:
+    /// the handler simply has nothing behind it to answer with. A layered
+    /// lookup that tries an optional source before falling back — the
+    /// device manager reading a settings override from the encrypted root
+    /// before it is mounted, then taking the shipped default — takes this
+    /// answer on every boot, and on every system where nobody overrode
+    /// anything, so it is recorded at [`Level::Debug`] rather than
+    /// flooding the boot log with errors. A genuine authorisation refusal
+    /// is `PermissionDenied` and stays at [`Level::Error`].
+    ///
+    /// [`Errno::NotImplemented`]: tairix_abi::Errno::NotImplemented
+    SyscallHandlerUnavailable,
 }
 
 impl AuditEvent {
@@ -92,6 +108,7 @@ impl AuditEvent {
             Self::SyscallHandlerRejected => 5004,
             Self::SyscallHandlerWouldBlock => 5005,
             Self::SyscallHandlerNotFound => 5006,
+            Self::SyscallHandlerUnavailable => 5007,
         })
     }
 
@@ -113,7 +130,8 @@ impl AuditEvent {
             // console filter.
             Self::SyscallInvoked
             | Self::SyscallHandlerWouldBlock
-            | Self::SyscallHandlerNotFound => Level::Debug,
+            | Self::SyscallHandlerNotFound
+            | Self::SyscallHandlerUnavailable => Level::Debug,
             Self::SyscallPermissionDenied
             | Self::SyscallUnknown
             | Self::SyscallBadArguments
@@ -132,6 +150,7 @@ impl AuditEvent {
             Self::SyscallHandlerRejected => "syscall rejected by handler",
             Self::SyscallHandlerWouldBlock => "syscall pending; caller may retry",
             Self::SyscallHandlerNotFound => "syscall target absent",
+            Self::SyscallHandlerUnavailable => "syscall subsystem unavailable",
         }
     }
 }

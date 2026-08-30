@@ -169,6 +169,12 @@ pub struct Timed<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink, K
     /// The configured servers, held only so an audit record can name the one
     /// a decision was about; the engine itself addresses them by index.
     servers: Vec<String>,
+    /// Whether the "every server has refused" state has already been
+    /// reported. Exhaustion is a *state* the engine can sit in for the rest
+    /// of the boot, so the record is edge-triggered: announcing it on every
+    /// poll would repeat the same warning indefinitely. Cleared when a
+    /// server becomes usable again, so a later exhaustion is reported afresh.
+    exhaustion_reported: bool,
 }
 
 /// Everything [`Timed::new`] needs, so the constructor does not grow a
@@ -247,6 +253,7 @@ impl<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink + Clone, K: Rt
             record,
             rtc_retry,
             servers,
+            exhaustion_reported: false,
         };
         service.audit_startup();
         service
@@ -286,15 +293,23 @@ impl<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink + Clone, K: Rt
         self.poll_rtc(now);
         let Some(Query { server, packet }) = self.sync.poll(now, entropy) else {
             if self.sync.is_exhausted() {
-                self.record_event(
-                    events::SERVERS_EXHAUSTED,
-                    Level::Warn,
-                    "timed: every configured time server has refused further queries",
-                    &[],
-                );
+                if !self.exhaustion_reported {
+                    self.exhaustion_reported = true;
+                    self.record_event(
+                        events::SERVERS_EXHAUSTED,
+                        Level::Warn,
+                        "timed: every configured time server has refused further queries",
+                        &[],
+                    );
+                }
+            } else {
+                self.exhaustion_reported = false;
             }
             return Step::Idle;
         };
+        // A query is due, so the engine is not exhausted: a later exhaustion
+        // is a fresh transition and is reported again.
+        self.exhaustion_reported = false;
         match self.transport.send(server, &packet) {
             Ok(()) => Step::Queried(server),
             Err(err) => {

@@ -2900,6 +2900,14 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             // (e.g. `login` opening the optional system-configuration store
             // and the desktop bundle each round) cannot flood the log.
             Err(Errno::NotFound) if spec.audit => self.audit_not_found(caller, spec),
+            // `NotImplemented` says the subsystem is absent from this build or
+            // not up yet — again every check passed and no security decision
+            // was taken. A layered lookup that tries an optional source before
+            // its fallback (the device manager reading a settings override off
+            // the not-yet-mounted encrypted root, then taking the shipped
+            // default) takes this answer on every boot, so record it below the
+            // error level rather than flooding the boot log.
+            Err(Errno::NotImplemented) if spec.audit => self.audit_unavailable(caller, spec),
             Err(_) if spec.audit => self.audit_rejected(caller, spec, outcome.as_ref().err()),
             _ => {}
         }
@@ -3821,6 +3829,17 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
     fn audit_not_found(&self, caller: &CallerContext<'_>, spec: &SyscallSpec) {
         self.audit_with_identity(
             AuditEvent::SyscallHandlerNotFound,
+            caller,
+            &[Field {
+                key: "sc",
+                value: tairix_log::FieldValue::Str(spec.name),
+            }],
+        );
+    }
+
+    fn audit_unavailable(&self, caller: &CallerContext<'_>, spec: &SyscallSpec) {
+        self.audit_with_identity(
+            AuditEvent::SyscallHandlerUnavailable,
             caller,
             &[Field {
                 key: "sc",
@@ -5812,6 +5831,38 @@ mod tests {
             Err(Errno::NotFound)
         );
         assert_eq!(sink.ids(), [AuditEvent::SyscallHandlerNotFound.id().0]);
+    }
+
+    #[test]
+    fn a_not_implemented_outcome_is_audited_as_unavailable_not_rejected() {
+        // `NotImplemented` says the subsystem is absent or not up yet, not
+        // that the call was refused: it must emit the benign, below-error
+        // `SyscallHandlerUnavailable` (id 5007) rather than the ERROR-level
+        // `SyscallHandlerRejected` (id 5004). The device manager's layered
+        // config read takes this answer on every boot — it tries the
+        // settings override on the not-yet-mounted encrypted root before
+        // falling back to the shipped default — so at ERROR it fills the
+        // boot log with failures that are the design working correctly.
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[], &sink);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers {
+            force_err: Some(Errno::NotImplemented),
+            ..Default::default()
+        };
+        let d = Dispatcher::new(&h, &sink);
+        let mut args = RawArgs::ZERO;
+        args.0[0] = 1;
+        args.0[1] = 0x2000;
+        args.0[2] = 4;
+        assert_eq!(
+            d.dispatch(&ctx, u64::from(SyscallNumber::IPC_SEND.as_u16()), args),
+            Err(Errno::NotImplemented)
+        );
+        assert_eq!(sink.ids(), [AuditEvent::SyscallHandlerUnavailable.id().0]);
     }
 
     #[test]

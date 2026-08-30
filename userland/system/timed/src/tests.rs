@@ -489,6 +489,33 @@ fn a_machine_with_no_configured_servers_never_queries_and_says_so() {
     assert!(transport.sent.borrow().is_empty());
 }
 
+/// Exhaustion is a state the engine can sit in for the rest of the boot, so
+/// the warning is edge-triggered.
+///
+/// It used to be re-emitted on every poll while the state held, which filled
+/// the console with the same line indefinitely — a real Pi boot log showed it
+/// repeating from 3 s to past 65 s.
+#[test]
+fn the_exhaustion_warning_is_reported_once_not_on_every_poll() {
+    let sink = RecordingSink::default();
+    let mut svc = service(
+        FakeClock::unset(),
+        FakeStore::default(),
+        FakeTransport::default(),
+        SystemConfig::default(),
+        sink.clone(),
+    );
+    assert!(svc.is_exhausted(), "no server is configured");
+    for secs in [1_i64, 2, 5, 30, 60] {
+        assert_eq!(svc.poll(Duration64::from_secs(secs), 1), Step::Idle);
+    }
+    assert_eq!(
+        sink.count(events::SERVERS_EXHAUSTED),
+        1,
+        "the state must be announced on entry, never re-announced per poll"
+    );
+}
+
 #[test]
 fn a_refused_send_is_audited_and_left_to_the_engines_own_backoff() {
     // No packet left the machine, so the request must not be retried on the
