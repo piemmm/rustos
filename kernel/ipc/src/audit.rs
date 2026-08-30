@@ -42,7 +42,8 @@
 //! | 3046 | Error | `CALL_POST_TO_CLOSED_ENDPOINT`| A post raced with destruction and lost. |
 //! | 3047 | Debug | `CALL_QUEUE_FULL`             | A post was refused because the endpoint's outstanding-call queue was full. `Debug` for the same reason as `MAILBOX_FULL` (3014): a busy server is a routine resource condition, not an authorisation decision. |
 //! | 3048 | Debug | `CALL_REPLIED`                | A server delivered a reply to an in-flight call. Recorded at `Debug` for the same reason as `CALL_POSTED` (3043): routine high-throughput RPC completion. Its denial (3049) stays at `Error`. |
-//! | 3049 | Error | `CALL_REPLY_DENIED`           | A reply was refused (unknown ticket, or reply exceeded `max_reply`). |
+//! | 3049 | Error | `CALL_REPLY_DENIED`           | A reply was refused. The `reason` field discriminates: `oversize_reply` (the server exceeded `max_reply`) or `unknown_ticket` (no such in-flight call — it timed out, was cancelled, or the ticket is forged). |
+//! | 3053 | Warn  | `CALL_TIMED_OUT`              | An in-flight call's deadline elapsed before the server replied; the ticket is retired and a late reply is refused. Recorded because the caller's own failure may be handled silently — for an in-kernel caller (the filesystem's block path) this is the only trace that a device missed its budget. |
 //! | 3050 | Error | `CALL_ENDPOINT_REGISTER_DENIED` | A registry bind was refused because the `EndpointId` was already bound (the created endpoint is dropped; mirrors `PORT_REGISTER_DENIED`, 3004). |
 //! | 3051 | Info  | `CALL_POSTER_VANISHED`        | A caller task exited with calls still in flight on this endpoint; the kernel cancelled them (queued requests dropped before service, in-service tickets retired so the server's reply fails closed, unclaimed replies discarded). |
 //!
@@ -158,6 +159,15 @@ pub enum AuditEvent {
     /// the endpoint withdraws every holder's authority over that id in the
     /// same step, and this records how much authority the teardown withdrew.
     CallEndpointGrantsRevoked,
+    /// An in-flight call's deadline elapsed before the server replied.
+    ///
+    /// The ticket is retired, so the caller fails closed and a late reply is
+    /// refused. Worth a record of its own: the caller may handle the timeout
+    /// silently, and an in-kernel caller takes no path through the syscall
+    /// dispatcher's audit at all, so without this a device that stopped
+    /// answering leaves no trace but the puzzling refusal of its own late
+    /// reply.
+    CallTimedOut,
 }
 
 impl AuditEvent {
@@ -199,6 +209,7 @@ impl AuditEvent {
             Self::CallEndpointRegisterDenied => 3050,
             Self::CallPosterVanished => 3051,
             Self::CallEndpointGrantsRevoked => 3052,
+            Self::CallTimedOut => 3053,
             Self::PayloadAllocFailed => 3060,
         })
     }
@@ -245,6 +256,9 @@ impl AuditEvent {
             | Self::CallEndpointDestroyed
             | Self::CallPosterVanished
             | Self::CallEndpointGrantsRevoked => Level::Info,
+            // A missed deadline is an anomaly the operator must see above the
+            // default filter, but it is handled: the caller fails closed.
+            Self::CallTimedOut => Level::Warn,
             Self::MessageDelivered
             | Self::CallPosted
             | Self::CallReplied
@@ -309,6 +323,7 @@ impl AuditEvent {
             Self::CallEndpointRegisterDenied => "ipc call endpoint registration denied",
             Self::CallPosterVanished => "ipc calls cancelled, poster exited",
             Self::CallEndpointGrantsRevoked => "ipc call endpoint grants revoked",
+            Self::CallTimedOut => "ipc call timed out",
             Self::PayloadAllocFailed => "ipc payload allocation failed",
         }
     }

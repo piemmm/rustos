@@ -52,6 +52,20 @@ use tairix_log::{Field, Sink};
 use tairix_util::fmt::{format_hex_u64, format_usize};
 
 use crate::audit::{record, AuditEvent};
+
+/// Why a reply was refused: the server's payload exceeded `max_reply`.
+const REPLY_DENIED_OVERSIZE: Field<'static> = Field {
+    key: "reason",
+    value: tairix_log::FieldValue::Str("oversize_reply"),
+};
+
+/// Why a reply was refused: no such in-flight call. The ticket timed out,
+/// was cancelled, or is forged — a late reply after a missed deadline is the
+/// common case and is preceded by its own `CallTimedOut` record.
+const REPLY_DENIED_UNKNOWN_TICKET: Field<'static> = Field {
+    key: "reason",
+    value: tairix_log::FieldValue::Str("unknown_ticket"),
+};
 use crate::loom_compat::{AtomicU32, AtomicU64, Ordering};
 use crate::port::EndpointId;
 
@@ -849,7 +863,7 @@ impl CallEndpoint {
             record(
                 audit,
                 AuditEvent::CallReplyDenied,
-                &[id_field, ticket_field, len_field],
+                &[id_field, ticket_field, len_field, REPLY_DENIED_OVERSIZE],
             );
             return Err(Errno::MessageTooLarge);
         }
@@ -876,7 +890,7 @@ impl CallEndpoint {
             record(
                 audit,
                 AuditEvent::CallReplyDenied,
-                &[id_field, ticket_field],
+                &[id_field, ticket_field, REPLY_DENIED_UNKNOWN_TICKET],
             );
             return Err(Errno::NotFound);
         };
@@ -910,7 +924,13 @@ impl CallEndpoint {
     /// * [`ReplyOutcome::Cancelled`] — the endpoint was destroyed; abandon.
     /// * [`ReplyOutcome::Unknown`] — no such ticket for `claimant`.
     #[must_use]
-    pub fn take_reply(&self, claimant: u64, ticket: CallTicket, now: u64) -> ReplyOutcome {
+    pub fn take_reply<S: Sink + ?Sized>(
+        &self,
+        claimant: u64,
+        ticket: CallTicket,
+        now: u64,
+        audit: &S,
+    ) -> ReplyOutcome {
         let mut g = self.inner.lock();
         match g.completed.remove(&ticket.0) {
             // A ready reply, but only its poster may claim it.
@@ -946,6 +966,34 @@ impl CallEndpoint {
                 // reply for it is refused fail-closed and the slot is freed.
                 g.in_service.remove(&ticket.0);
                 g.pending.retain(|c| c.ticket != ticket.0);
+                drop(g);
+                // Recorded here rather than at each caller: an in-kernel
+                // caller never reaches the syscall dispatcher's audit, so
+                // this is the only trace that the server missed its budget.
+                // Retiring the ticket makes it edge-triggered — a later poll
+                // finds nothing and answers `Unknown`.
+                let mut id_buf = [0u8; 16];
+                let mut ticket_buf = [0u8; 16];
+                record(
+                    audit,
+                    AuditEvent::CallTimedOut,
+                    &[
+                        Field {
+                            key: "endpoint",
+                            value: tairix_log::FieldValue::Str(format_hex_u64(
+                                self.id.0,
+                                &mut id_buf,
+                            )),
+                        },
+                        Field {
+                            key: "ticket",
+                            value: tairix_log::FieldValue::Str(format_hex_u64(
+                                ticket.0,
+                                &mut ticket_buf,
+                            )),
+                        },
+                    ],
+                );
                 ReplyOutcome::TimedOut
             }
             Some(_) => ReplyOutcome::Pending,
@@ -1403,22 +1451,31 @@ mod tests {
             .post(&caller, POSTER_SCHED, b"ping", u64::MAX, &sink)
             .expect("posted");
         // Before the server receives it, the caller sees Pending.
-        assert!(matches!(ep.take_reply(7, ticket, 0), ReplyOutcome::Pending));
+        assert!(matches!(
+            ep.take_reply(7, ticket, 0, &sink),
+            ReplyOutcome::Pending
+        ));
 
         let received = recv_one(&ep).expect("a pending call");
         assert_eq!(received.ticket, ticket);
         assert_eq!(received.sender, 7);
         assert_eq!(received.request.as_bytes(), b"ping");
         // Received but unreplied is still Pending for the caller.
-        assert!(matches!(ep.take_reply(7, ticket, 0), ReplyOutcome::Pending));
+        assert!(matches!(
+            ep.take_reply(7, ticket, 0, &sink),
+            ReplyOutcome::Pending
+        ));
 
         ep.reply(ticket, b"pong", &sink).expect("replied");
         assert!(sink.ids().contains(&AuditEvent::CallReplied.id().0));
 
         // The caller claims the reply exactly once.
-        assert_eq!(ready_bytes(ep.take_reply(7, ticket, 0)), b"pong");
+        assert_eq!(ready_bytes(ep.take_reply(7, ticket, 0, &sink)), b"pong");
         // A second claim finds nothing.
-        assert!(matches!(ep.take_reply(7, ticket, 0), ReplyOutcome::Unknown));
+        assert!(matches!(
+            ep.take_reply(7, ticket, 0, &sink),
+            ReplyOutcome::Unknown
+        ));
         assert_eq!(ep.outstanding(), 0);
     }
 
@@ -1527,7 +1584,7 @@ mod tests {
         let sink = RecordingSink::new();
         let ep = open_endpoint(&sink);
         assert!(matches!(
-            ep.take_reply(7, CallTicket(999), 0),
+            ep.take_reply(7, CallTicket(999), 0, &sink),
             ReplyOutcome::Unknown
         ));
     }
@@ -1544,9 +1601,12 @@ mod tests {
         ep.reply(ticket, b"r", &sink).expect("replied");
 
         // A different task may not claim it, and learns nothing.
-        assert!(matches!(ep.take_reply(8, ticket, 0), ReplyOutcome::Unknown));
+        assert!(matches!(
+            ep.take_reply(8, ticket, 0, &sink),
+            ReplyOutcome::Unknown
+        ));
         // The reply is preserved for its rightful owner.
-        assert_eq!(ready_bytes(ep.take_reply(7, ticket, 0)), b"r");
+        assert_eq!(ready_bytes(ep.take_reply(7, ticket, 0, &sink)), b"r");
     }
 
     #[test]
@@ -1558,9 +1618,15 @@ mod tests {
             .post(&caller, POSTER_SCHED, b"q", u64::MAX, &sink)
             .expect("posted");
         // A non-poster polling the ticket while it is pending learns nothing.
-        assert!(matches!(ep.take_reply(8, ticket, 0), ReplyOutcome::Unknown));
+        assert!(matches!(
+            ep.take_reply(8, ticket, 0, &sink),
+            ReplyOutcome::Unknown
+        ));
         recv_one(&ep).expect("received");
-        assert!(matches!(ep.take_reply(8, ticket, 0), ReplyOutcome::Unknown));
+        assert!(matches!(
+            ep.take_reply(8, ticket, 0, &sink),
+            ReplyOutcome::Unknown
+        ));
     }
 
     #[test]
@@ -1572,6 +1638,63 @@ mod tests {
             .expect_err("unknown ticket");
         assert_eq!(err, Errno::NotFound);
         assert!(sink.ids().contains(&AuditEvent::CallReplyDenied.id().0));
+    }
+
+    /// A stalled server that misses its deadline leaves a record of its own.
+    ///
+    /// Retiring the ticket is what makes the server's eventual reply bounce,
+    /// and that bounce used to be the *only* trace of the whole episode — an
+    /// ERROR reading "reply denied" that named neither a timeout nor a
+    /// device. An in-kernel caller (the filesystem's block path) takes no
+    /// route through the syscall dispatcher's audit, so without this record
+    /// a disk that stopped answering was invisible.
+    #[test]
+    fn an_elapsed_deadline_is_recorded_before_the_late_reply_bounces() {
+        let sink = RecordingSink::new();
+        let ep = open_endpoint(&sink);
+        let caller = task_with(7, &[]);
+        let ticket = ep
+            .post(&caller, POSTER_SCHED, b"q", 100, &sink)
+            .expect("posted");
+        recv_one(&ep).expect("server took the request");
+
+        // The deadline elapses before the server answers.
+        assert!(matches!(
+            ep.take_reply(7, ticket, 100, &sink),
+            ReplyOutcome::TimedOut
+        ));
+        assert!(
+            sink.ids().contains(&AuditEvent::CallTimedOut.id().0),
+            "the missed deadline must be recorded, not just its aftermath"
+        );
+
+        // The stalled server finally replies; the ticket is gone.
+        let err = ep.reply(ticket, b"r", &sink).expect_err("ticket retired");
+        assert_eq!(err, Errno::NotFound);
+        assert!(sink.ids().contains(&AuditEvent::CallReplyDenied.id().0));
+    }
+
+    /// Retiring the ticket makes the timeout edge-triggered: a wait loop that
+    /// polls again after the deadline must not re-record it.
+    #[test]
+    fn a_timed_out_call_is_recorded_once_however_often_it_is_polled() {
+        let sink = RecordingSink::new();
+        let ep = open_endpoint(&sink);
+        let caller = task_with(7, &[]);
+        let ticket = ep
+            .post(&caller, POSTER_SCHED, b"q", 100, &sink)
+            .expect("posted");
+        recv_one(&ep).expect("server took the request");
+        for now in [100_u64, 101, 200] {
+            let _ = ep.take_reply(7, ticket, now, &sink);
+        }
+        assert_eq!(
+            sink.ids()
+                .iter()
+                .filter(|id| **id == AuditEvent::CallTimedOut.id().0)
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -1618,7 +1741,7 @@ mod tests {
         assert!(sink.ids().contains(&AuditEvent::CallReplyDenied.id().0));
         // The call is still in service: a correctly-sized reply still works.
         ep.reply(ticket, b"ok", &sink).expect("retry");
-        assert_eq!(ready_bytes(ep.take_reply(7, ticket, 0)), b"ok");
+        assert_eq!(ready_bytes(ep.take_reply(7, ticket, 0, &sink)), b"ok");
     }
 
     #[test]
@@ -1683,7 +1806,10 @@ mod tests {
         ep.destroy(&sink);
 
         for t in [t_pending, t_in_service, t_done] {
-            assert!(matches!(ep.take_reply(7, t, 0), ReplyOutcome::Cancelled));
+            assert!(matches!(
+                ep.take_reply(7, t, 0, &sink),
+                ReplyOutcome::Cancelled
+            ));
         }
         assert_eq!(ep.outstanding(), 0);
         assert!(sink
@@ -1736,10 +1862,13 @@ mod tests {
         );
         // ...and the unclaimed completed reply is discarded.
         assert!(matches!(
-            ep.take_reply(7, t_pending, 0),
+            ep.take_reply(7, t_pending, 0, &sink),
             ReplyOutcome::Unknown
         ));
-        assert!(matches!(ep.take_reply(7, t_done, 0), ReplyOutcome::Unknown));
+        assert!(matches!(
+            ep.take_reply(7, t_done, 0, &sink),
+            ReplyOutcome::Unknown
+        ));
         assert_eq!(ep.outstanding(), 0);
         assert!(sink.ids().contains(&AuditEvent::CallPosterVanished.id().0));
     }
@@ -1763,7 +1892,7 @@ mod tests {
         assert_eq!(got.ticket, t_live);
         assert_eq!(got.sender, 8);
         ep.reply(t_live, b"r", &sink).expect("replied");
-        assert_eq!(ready_bytes(ep.take_reply(8, t_live, 0)), b"r");
+        assert_eq!(ready_bytes(ep.take_reply(8, t_live, 0, &sink)), b"r");
     }
 
     #[test]
@@ -1787,18 +1916,18 @@ mod tests {
             .expect("posted");
         // Before the deadline the caller is still pending, even received.
         assert!(matches!(
-            ep.take_reply(7, ticket, 50),
+            ep.take_reply(7, ticket, 50, &sink),
             ReplyOutcome::Pending
         ));
         recv_one(&ep).expect("received");
         assert!(matches!(
-            ep.take_reply(7, ticket, 99),
+            ep.take_reply(7, ticket, 99, &sink),
             ReplyOutcome::Pending
         ));
         // At/after the deadline with no reply, it fails closed and the ticket
         // is retired so the endpoint slot is freed.
         assert!(matches!(
-            ep.take_reply(7, ticket, 100),
+            ep.take_reply(7, ticket, 100, &sink),
             ReplyOutcome::TimedOut
         ));
         assert_eq!(ep.outstanding(), 0);
@@ -1821,7 +1950,10 @@ mod tests {
         ep.reply(ticket, b"r", &sink).expect("replied");
         // Even well past the deadline, a delivered reply is returned, never a
         // spurious timeout that would discard a completed answer.
-        assert_eq!(ready_bytes(ep.take_reply(7, ticket, 1_000_000)), b"r");
+        assert_eq!(
+            ready_bytes(ep.take_reply(7, ticket, 1_000_000, &sink)),
+            b"r"
+        );
     }
 
     #[test]

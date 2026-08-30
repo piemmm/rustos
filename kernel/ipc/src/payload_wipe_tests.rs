@@ -188,7 +188,7 @@ fn call_round_trip_leaves_no_plaintext_in_freed_heap() {
             .expect("replied");
         // Releases the kernel-owned copy of the request the server was handed.
         drop(call);
-        let outcome = ep.take_reply(7, ticket, 0);
+        let outcome = ep.take_reply(7, ticket, 0, &sink);
         assert!(matches!(outcome, ReplyOutcome::Ready(_)));
         // Releases the kernel-owned copy of the reply.
         drop(outcome);
@@ -215,7 +215,10 @@ fn abandoned_calls_leave_no_plaintext_in_freed_heap() {
             .post(&caller, 0x51, secret().as_bytes(), u64::MAX, &sink)
             .expect("posted");
         assert_eq!(ep.cancel_posted_by(7, &sink), 1);
-        assert!(matches!(ep.take_reply(7, ticket, 0), ReplyOutcome::Unknown));
+        assert!(matches!(
+            ep.take_reply(7, ticket, 0, &sink),
+            ReplyOutcome::Unknown
+        ));
 
         // An unclaimed reply discarded with its poster.
         let ticket = ep
@@ -228,7 +231,10 @@ fn abandoned_calls_leave_no_plaintext_in_freed_heap() {
             .expect("replied");
         drop(call);
         assert_eq!(ep.cancel_posted_by(7, &sink), 1);
-        assert!(matches!(ep.take_reply(7, ticket, 0), ReplyOutcome::Unknown));
+        assert!(matches!(
+            ep.take_reply(7, ticket, 0, &sink),
+            ReplyOutcome::Unknown
+        ));
 
         // A request and a reply cancelled by endpoint teardown.
         ep.post(&caller, 0x51, secret().as_bytes(), u64::MAX, &sink)

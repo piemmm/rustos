@@ -515,7 +515,7 @@ impl BlkClient {
         let claimant = self.caps.process().0;
         let outcome = loop {
             let now = wait_arch().map_or(0, WaitQueueArch::now_ns);
-            match self.endpoint.take_reply(claimant, ticket, now) {
+            match self.endpoint.take_reply(claimant, ticket, now, self.audit) {
                 ReplyOutcome::Ready(bytes) => break Ok(bytes),
                 // The device did not answer within its budget: fail closed so
                 // the filesystem path is never wedged behind a dead disk.

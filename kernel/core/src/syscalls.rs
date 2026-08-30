@@ -7530,7 +7530,7 @@ where
             // `now` is dead input here: this call posted with a `u64::MAX`
             // deadline, so `take_reply` never yields `TimedOut` — the timeout
             // path is the async `call_reap` handler's, not `ipc_call`'s.
-            match ep.take_reply(claimant, ticket, 0) {
+            match ep.take_reply(claimant, ticket, 0, self.audit) {
                 ReplyOutcome::Ready(bytes) => break Ok(bytes),
                 // The endpoint was torn down, or the ticket is no longer
                 // ours: abandon the call fail-closed.
@@ -7673,7 +7673,7 @@ where
         let claimant = caller.caps.process().0;
         let cpu = SchedulerArch::current_cpu(self.arch);
         let now = self.arch.monotonic_ns(cpu);
-        match ep.take_reply(claimant, CallTicket(ticket), now) {
+        match ep.take_reply(claimant, CallTicket(ticket), now, self.audit) {
             ReplyOutcome::Ready(bytes) => {
                 // Refuse to truncate: the reply was claimed and the ticket
                 // retired, so the caller re-issues with a larger buffer — each
@@ -33777,7 +33777,7 @@ mod tests {
         // `call_reply` sends page 3's payload back and completes the ticket.
         assert_eq!(h.call_reply(&ctx, id, recv_ticket, 0x3000, 4), Ok(0));
         // The client claims its reply exactly once.
-        match ep.take_reply(7, CallTicket(recv_ticket), 0) {
+        match ep.take_reply(7, CallTicket(recv_ticket), 0, sink) {
             ReplyOutcome::Ready(bytes) => assert_eq!(bytes.as_bytes(), b"pong"),
             other => panic!("expected a ready reply, got {other:?}"),
         }

@@ -312,7 +312,8 @@ Audit events live in the `kernel/ipc` reserved range `3_000..4_000`
 | 3046 | Error | `CALL_POST_TO_CLOSED_ENDPOINT`| A post raced with destruction and lost. |
 | 3047 | Debug | `CALL_QUEUE_FULL`             | The endpoint's outstanding-call queue was full. |
 | 3048 | Debug | `CALL_REPLIED`                | A server delivered a reply to an in-flight call. `Debug` for the same reason as `CALL_POSTED` (3043): routine high-throughput RPC completion. Its denial (3049) stays at `Error`. |
-| 3049 | Error | `CALL_REPLY_DENIED`           | Unknown ticket, or reply exceeded `max_reply`. |
+| 3049 | Error | `CALL_REPLY_DENIED`           | A reply was refused. `reason` discriminates: `oversize_reply` (exceeded `max_reply`) or `unknown_ticket` (no such in-flight call — timed out, cancelled, or forged). A late reply after a missed deadline is preceded by its own `CALL_TIMED_OUT` (3053). |
+| 3053 | Warn  | `CALL_TIMED_OUT`              | An in-flight call's deadline elapsed before the server replied; the ticket is retired and a late reply is refused. Recorded at the IPC layer because an in-kernel caller (the filesystem's block path) never reaches the syscall dispatcher's audit — without it, a device that stopped answering leaves no trace but the puzzling refusal of its own late reply. Edge-triggered: retiring the ticket means a later poll finds nothing. |
 | 3050 | Error | `CALL_ENDPOINT_REGISTER_DENIED` | A registry bind was refused because the `EndpointId` was already bound; the freshly created endpoint is dropped (mirrors `PORT_REGISTER_DENIED`, 3004). |
 | 3051 | Info  | `CALL_POSTER_VANISHED`        | A caller task exited with calls still in flight on this endpoint; the kernel cancelled them (queued requests dropped before service, in-service tickets retired so the server's reply fails closed, unclaimed replies discarded). |
 | 3052 | Info  | `CALL_ENDPOINT_GRANTS_REVOKED` | A destroyed endpoint's delegated per-endpoint grants were revoked. |
