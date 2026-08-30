@@ -89,6 +89,10 @@ pub struct AppBarService {
     order: Vec<ProcId>,
     /// Manifest-attested identity per bundle directory, resolved once.
     identities: BTreeMap<String, AppIdentity>,
+    /// Which bundle each process on the strip was launched from, so an
+    /// identity already resolved can be found by the process that owns a
+    /// window without a second manifest read.
+    bundles: BTreeMap<ProcId, String>,
     dirty: bool,
 }
 
@@ -188,7 +192,23 @@ impl AppBarService {
             .collect();
         self.identities
             .retain(|bundle, _| named.contains(bundle.as_str()));
+        self.bundles = groups
+            .iter()
+            .filter_map(|group| group.bundle.clone().map(|bundle| (group.owner, bundle)))
+            .collect();
         groups
+    }
+
+    /// The identity `owner`'s bundle attests, if one has already been read.
+    ///
+    /// Cache-only, and deliberately: this answers on the menu-open path,
+    /// where reading a manifest would make bringing a chain up wait on the
+    /// filesystem. A process whose identity is not yet resolved simply has
+    /// none to state, which is honest — a panel may state a name it read but
+    /// never one it did not.
+    #[must_use]
+    pub fn attested_identity(&self, owner: ProcId) -> Option<&AppIdentity> {
+        self.identities.get(self.bundles.get(&owner)?)
     }
 
     /// Build the taskbar's slots from `groups`, resolving each
@@ -576,6 +596,11 @@ pub trait AppBarBridge {
 
     /// The attested `owner` is gone; drop the presence it declared.
     fn app_bar_withdrawn(&mut self, owner: ProcId);
+
+    /// The identity `owner`'s bundle attests, if the session has already read
+    /// it. Never reads one here: bringing a menu chain up may not wait on the
+    /// filesystem.
+    fn attested_identity(&self, owner: ProcId) -> Option<AppIdentity>;
 }
 
 impl AppBarBridge for AppBarService {
@@ -585,5 +610,9 @@ impl AppBarBridge for AppBarService {
 
     fn app_bar_withdrawn(&mut self, owner: ProcId) {
         self.withdraw(owner);
+    }
+
+    fn attested_identity(&self, owner: ProcId) -> Option<AppIdentity> {
+        Self::attested_identity(self, owner).cloned()
     }
 }

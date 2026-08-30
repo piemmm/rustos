@@ -98,7 +98,9 @@ mod program {
         SWITCHBOARD_PUBLISH_REPLY_LEN,
     };
     use tairix_abi::sysinfo::{decode_reply, SYSINFO_ENDPOINT, SYSINFO_REPLY_STATUS_LEN};
-    use tairix_abi::window_ipc::{PointerAction, WindowEvent, WINDOW_ENDPOINT, WINDOW_MAX_REQUEST};
+    use tairix_abi::window_ipc::{
+        MenuOutcome, PointerAction, WindowEvent, WINDOW_ENDPOINT, WINDOW_MAX_REQUEST,
+    };
     use tairix_abi::{
         DriverError, Errno, OpenFlags, Origin, ProcId, WaitFlags, WaitSetOp, WaitSourceKind,
         WaitStatus, CONSOLE_INHERIT, ORIGIN_WIRE_LEN, SPAWN_UID_INHERIT, WAIT_PID_ANY,
@@ -108,28 +110,32 @@ mod program {
         association_from_appinfo, AppAssociation, DirectorySource, Entry, GridView, Listing,
     };
     use tairix_caps::CapabilitySet;
+    use tairix_desktop_session::menu::{
+        ChainAction, ChainOutcome, ChainOwner, MenuChain, SurfaceKind,
+    };
     use tairix_desktop_session::switchuser::{
         SeatPresentation, SessionAuthority, SwitchUser, NO_DEADLINE_NS,
     };
     use tairix_desktop_session::{
-        admitted_pid, catalogued, deliver_pending_open, desktop_info, drop_is_noteworthy,
-        ensure_switchboard, launch_argv, load_library, load_pinboard as read_pinboard_store,
-        maybe_send_seat_report, open_tray, parse, persist_pinboard, reap_launched, relay_power,
-        resolve_window_identities, serve_pinboard_apply, serve_switchboard_request,
-        window_control_alternate_event, window_control_event, Answer, AppBarBridge, AppBarService,
-        ArtworkDesk, ArtworkFileReader, ArtworkSandbox, CliError, Command, ConcludedPick,
-        ConfirmPrompt, Delivery, Desktop, DesktopAction, DesktopActivation, DesktopOutcome,
-        DesktopShell, DeviceInputSource, ElevatePrompt, Elevator, FrameContent, FramePacer,
-        FrameReportGate, FrameStatsPublisher, FrameStatsSink, HangTracker, HoldBack,
-        IconRasteriser, InputSource, KeyboardInputSource, LaunchTable, ListingClient, ListingDesk,
-        LockedDrain, OwnerWindow, PickConclusion, PinboardMenu, PinboardMenuOutcome, Prepared,
-        PresentedOwners, PromptOutcome, ScreenFade, ScreenLock, SeatEventReader, SeatInputChannel,
-        SessionClock, SessionFileReader, SessionPicker, SessionWindows, ShellWindowHost,
-        SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, WallpaperDesk, WallpaperSource,
-        BUNDLE_RUN_SUFFIX, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, DATETIME_RUN_PATH,
-        ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, FILES_RUN_PATH,
-        SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, USAGE, WALLPAPER_LABEL,
-        WALLPAPER_RUN_PATH, WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE,
+        admitted_pid, catalogued, chain_geometry, deliver_pending_open, desktop_info,
+        drop_is_noteworthy, ensure_switchboard, launch_argv, load_library,
+        load_pinboard as read_pinboard_store, maybe_send_seat_report, open_tray, parse,
+        persist_pinboard, reap_launched, relay_power, resolve_window_identities,
+        serve_pinboard_apply, serve_switchboard_request, window_control_alternate_event,
+        window_control_event, Answer, AppBarBridge, AppBarService, ArtworkDesk, ArtworkFileReader,
+        ArtworkSandbox, CliError, Command, ConcludedPick, ConfirmPrompt, Delivery, Desktop,
+        DesktopAction, DesktopActivation, DesktopOutcome, DesktopShell, DeviceInputSource,
+        ElevatePrompt, Elevator, FrameContent, FramePacer, FrameReportGate, FrameStatsPublisher,
+        FrameStatsSink, HangTracker, HoldBack, IconRasteriser, InputSource, KeyboardInputSource,
+        LaunchTable, ListingClient, ListingDesk, LockedDrain, OwnerWindow, PickConclusion,
+        PinboardMenu, PinboardMenuOutcome, Prepared, PresentedOwners, PromptOutcome, ScreenFade,
+        ScreenLock, SeatEventReader, SeatInputChannel, SessionClock, SessionFileReader,
+        SessionPicker, SessionWindows, ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome,
+        SwitchboardServe, WallpaperDesk, WallpaperSource, BUNDLE_RUN_SUFFIX, CONTENT_RELEASED,
+        CONTENT_RELEASED_MESSAGE, DATETIME_RUN_PATH, ELEVATE_PROMPT_SHOWN,
+        ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_CALL_REFUSED,
+        SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, USAGE, WALLPAPER_LABEL, WALLPAPER_RUN_PATH,
+        WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE,
     };
     use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
     use tairix_greeter::{Verdict, Verifier};
@@ -1663,6 +1669,9 @@ mod program {
         // frame has just put on screen, and bring-up presents before any
         // application can have opened one.
         let mut windows = SessionWindows::new();
+        // The seat's one menu chain. Every menu on the desktop — an
+        // application's and the desktop's own — is this one service's.
+        let mut menu = MenuChain::new();
         // First frame: place the bar, paint the desktop's icons beneath
         // every window, install the pointer cursor at the seat's initial
         // pointer position, and push the whole surface once;
@@ -2151,6 +2160,10 @@ mod program {
                 let mut ticket = 0u64;
                 if let Ok(len) = tairix_rt::call_recv(WINDOW_ENDPOINT, &mut request, &mut ticket) {
                     let mut reply = [0u8; WINDOW_REPLY_MAX];
+                    // Read before the bridge borrows the picker: a menu may
+                    // not be drawn over a lock screen or the trusted picker,
+                    // and an accepted open is answered `SeatBusy` instead.
+                    let seat_held = lock.is_locked() || picker.wm_id().is_some();
                     let n = {
                         let mut bridge = ShellWindowHost {
                             shell: &mut shell,
@@ -2158,6 +2171,8 @@ mod program {
                             windows: &mut windows,
                             picker: &mut picker,
                             apps: &mut apps.service,
+                            menu: &mut menu,
+                            seat_held,
                         };
                         server.serve(
                             &mut bridge,
@@ -2180,6 +2195,21 @@ mod program {
                         |owner| identity.pid_of(owner),
                     );
                     let _ = tairix_rt::call_reply(WINDOW_ENDPOINT, ticket, &reply[..n]);
+                    // A chain this pass brought up has to reach the screen,
+                    // and one it displaced has to be answered. Both run here
+                    // rather than in the bridge, for the reason the identity
+                    // pass above does: the engine holds the borrow the
+                    // delivery needs while a request is being served.
+                    answer_menu_chain(
+                        &mut menu,
+                        &mut shell,
+                        &mut compositor,
+                        &mut windows,
+                        &mut server,
+                        &mut sink,
+                        &mut picker,
+                        &mut apps.service,
+                    );
                 }
             } else if token == NOTIFY_TOKEN {
                 // Serve a pending notification request: attest the producer
@@ -2305,6 +2335,8 @@ mod program {
                             windows: &mut windows,
                             picker: &mut picker,
                             apps: &mut apps.service,
+                            menu: &mut menu,
+                            seat_held: true,
                         };
                         server.client_exited(&mut bridge, client);
                         if focused.is_some_and(|id| server.owner_of(id).is_none()) {
@@ -2379,6 +2411,7 @@ mod program {
                         &identity,
                         &mut picker,
                         &mut apps,
+                        &mut menu,
                     );
                 }
             } else if token == PRESSURE_TOKEN {
@@ -2415,6 +2448,7 @@ mod program {
                         &mut windows,
                         &mut picker,
                         &mut apps.service,
+                        &mut menu,
                     );
                     // A band that refused to keep a decode may now allow it,
                     // and a band that has just tightened will refuse it once
@@ -2430,6 +2464,7 @@ mod program {
                         &mut windows,
                         &mut picker,
                         &mut apps.service,
+                        &mut menu,
                     );
                 }
             } else if token == CHILD_TOKEN {
@@ -2469,6 +2504,8 @@ mod program {
                                 windows: &mut windows,
                                 picker: &mut picker,
                                 apps: &mut apps.service,
+                                menu: &mut menu,
+                                seat_held: true,
                             };
                             server.client_exited(&mut bridge, client);
                             if focused.is_some_and(|id| server.owner_of(id).is_none()) {
@@ -2596,6 +2633,26 @@ mod program {
                 {
                     return drain_fault(&mut shell, &mut compositor, Errno::DeviceFault);
                 }
+            } else if token == SEAT_TOKEN && menu.is_open() {
+                // A chain holds the seat: every pointer and key event routes
+                // into it and none reaches what is behind, which is what
+                // makes a press outside a dismissal rather than a click on
+                // the window the menu was covering.
+                if drain_menu_chain(
+                    &mut menu,
+                    &mut pointer,
+                    &mut keyboard,
+                    &mut shell,
+                    &mut compositor,
+                    &mut windows,
+                    &mut server,
+                    &mut sink,
+                    &mut picker,
+                    &mut apps.service,
+                ) == Drained::Faulted
+                {
+                    return drain_fault(&mut shell, &mut compositor, Errno::DeviceFault);
+                }
             } else if token == SEAT_TOKEN && pinboard.menu.is_open() {
                 // The backdrop menu is up, so it is modal: the seat's
                 // events are drained straight into it here — not through
@@ -2665,6 +2722,7 @@ mod program {
                         &mut confirm,
                         &mut elevate,
                         &mut lock,
+                        &mut menu,
                         account,
                         &mut launched,
                         &mut apps,
@@ -2735,6 +2793,7 @@ mod program {
                                 &mut confirm,
                                 &mut elevate,
                                 &mut lock,
+                                &mut menu,
                                 account,
                                 &mut launched,
                                 &mut apps,
@@ -2789,6 +2848,7 @@ mod program {
                     &mut windows,
                     &mut picker,
                     &mut apps.service,
+                    &mut menu,
                 );
                 // A window restored from the taskbar (or otherwise shown
                 // again) whose content was released while it was hidden
@@ -2802,6 +2862,7 @@ mod program {
                     &mut windows,
                     &mut picker,
                     &mut apps.service,
+                    &mut menu,
                 );
             }
             // Fold this wake's delivery evidence into the capsule and the
@@ -3552,6 +3613,211 @@ mod program {
         }
     }
 
+    /// Drain the seat straight into the open menu chain, which holds it.
+    ///
+    /// The routing half of the grab: nothing behind a chain is reachable
+    /// while it is up, a press with none of the chain under it dismisses and
+    /// is consumed, and every answer the chain settles on leaves through the
+    /// one delivery point below.
+    #[allow(clippy::too_many_arguments)] // The chain's whole mutable surround, threaded explicitly.
+    fn drain_menu_chain<S: DirectorySource, F: FnMut() -> S>(
+        menu: &mut MenuChain,
+        pointer: &mut DeviceInputSource<SeatInputChannel<PointerReader>>,
+        keyboard: &mut KeyboardInputSource<SeatInputChannel<KeyboardReader>>,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        windows: &mut SessionWindows,
+        server: &mut WindowServer<RtShmMapper>,
+        sink: &mut RtEventSink,
+        picker: &mut SessionPicker<S, F>,
+        apps: &mut dyn AppBarBridge,
+    ) -> Drained {
+        // The chain is taking the stream, so the shell gives the pointer up
+        // for the reason the lock's drain does: no gesture of its own can be
+        // completed from here, and nothing behind the plates may be left
+        // showing a hover.
+        shell.yield_pointer(compositor);
+        let mut moved = false;
+        loop {
+            match pointer.poll() {
+                Ok(None) => break,
+                Ok(Some(event)) => {
+                    // Motion alone still reaches the shell so the tracked
+                    // pointer and the on-screen cursor stay in step; its
+                    // outcome is discarded and no press ever reaches it.
+                    if matches!(event, tairix_wm::InputEvent::PointerMoved { .. }) {
+                        let _ = shell.apply(event, compositor, tairix_rt::clock_get());
+                        moved = true;
+                    }
+                    let at = shell.router().pointer();
+                    let acted = {
+                        let geom = chain_geometry(shell, compositor);
+                        menu.handle(&event, at, &geom)
+                    };
+                    settle_menu_chain(
+                        &acted, menu, shell, compositor, windows, server, sink, picker, apps,
+                    );
+                    if !menu.is_open() {
+                        break;
+                    }
+                }
+                Err(_) => return Drained::Faulted,
+            }
+        }
+        if moved {
+            shell.settle(compositor);
+        }
+        loop {
+            match keyboard.poll_record() {
+                Ok(None) => break,
+                Ok(Some((event @ tairix_wm::InputEvent::KeyPressed { .. }, _))) => {
+                    let at = shell.router().pointer();
+                    let acted = {
+                        let geom = chain_geometry(shell, compositor);
+                        menu.handle(&event, at, &geom)
+                    };
+                    settle_menu_chain(
+                        &acted, menu, shell, compositor, windows, server, sink, picker, apps,
+                    );
+                    if !menu.is_open() {
+                        break;
+                    }
+                }
+                Ok(Some(_)) => {}
+                Err(_) => return Drained::Faulted,
+            }
+        }
+        Drained::Empty
+    }
+
+    /// Apply one chain outcome: repaint what moved, ask an owner for a
+    /// surface, or take the chain's own surfaces down and answer it.
+    #[allow(clippy::too_many_arguments)] // The chain's whole mutable surround, threaded explicitly.
+    fn settle_menu_chain<S: DirectorySource, F: FnMut() -> S>(
+        acted: &ChainAction,
+        menu: &mut MenuChain,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        windows: &mut SessionWindows,
+        server: &mut WindowServer<RtShmMapper>,
+        sink: &mut RtEventSink,
+        picker: &mut SessionPicker<S, F>,
+        apps: &mut dyn AppBarBridge,
+    ) {
+        match acted {
+            ChainAction::Consumed => {}
+            ChainAction::Redraw | ChainAction::Closed => {
+                present_menu_chain(menu, shell, compositor, windows);
+            }
+            ChainAction::RequestPanel(row) => {
+                // The arrival goes out and the chain carries on: nothing
+                // about it waits for the application to answer.
+                present_menu_chain(menu, shell, compositor, windows);
+                if let Some(ChainOwner::Window { window_id, open_id }) = menu.owner() {
+                    deliver(
+                        server,
+                        sink,
+                        shell,
+                        compositor,
+                        windows,
+                        picker,
+                        apps,
+                        menu,
+                        &WindowEvent::MenuPanelRequested {
+                            window_id,
+                            open_id,
+                            row: *row,
+                        },
+                    );
+                }
+            }
+        }
+        answer_menu_chain(menu, shell, compositor, windows, server, sink, picker, apps);
+    }
+
+    /// Deliver every answer the chain owes, and bring the screen into line
+    /// with what it now has.
+    ///
+    /// The session's **one** delivery point. Every close — a chosen row, a
+    /// dismissal, a chain displaced by the next open, an owner's death, a
+    /// mode change — queues its answer here rather than sending its own, so
+    /// no chain can be answered twice and none can be left unanswered.
+    #[allow(clippy::too_many_arguments)] // The chain's whole mutable surround, threaded explicitly.
+    fn answer_menu_chain<S: DirectorySource, F: FnMut() -> S>(
+        menu: &mut MenuChain,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        windows: &mut SessionWindows,
+        server: &mut WindowServer<RtShmMapper>,
+        sink: &mut RtEventSink,
+        picker: &mut SessionPicker<S, F>,
+        apps: &mut dyn AppBarBridge,
+    ) {
+        // Before the drain, not after: a chain the mode has moved under owes
+        // an answer of its own, and settling once the queue is empty would
+        // leave it sitting there until the next event.
+        {
+            let geom = chain_geometry(shell, compositor);
+            menu.settle_mode(&geom);
+        }
+        for (owner, outcome) in menu.take_answers() {
+            let ChainOwner::Window { window_id, open_id } = owner else {
+                continue;
+            };
+            let outcome = match outcome {
+                ChainOutcome::Chosen(item) => MenuOutcome::Chosen(item),
+                ChainOutcome::Dismissed => MenuOutcome::Dismissed,
+                ChainOutcome::Refused(reason) => MenuOutcome::Refused(reason),
+            };
+            // The engine settles whatever the chain had attached against this
+            // very answer, so the session never tears an attached window down
+            // itself.
+            deliver(
+                server,
+                sink,
+                shell,
+                compositor,
+                windows,
+                picker,
+                apps,
+                menu,
+                &WindowEvent::MenuClosed {
+                    window_id,
+                    open_id,
+                    outcome,
+                },
+            );
+        }
+        present_menu_chain(menu, shell, compositor, windows);
+    }
+
+    /// Reconcile the compositor against the chain, resolving the owner's and
+    /// the attached window's compositor windows the session holds.
+    fn present_menu_chain(
+        menu: &mut MenuChain,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        windows: &SessionWindows,
+    ) {
+        let owner = match menu.owner() {
+            Some(ChainOwner::Window { window_id, .. }) => windows.wm_id(window_id),
+            Some(ChainOwner::Session) | None => None,
+        };
+        let attached = menu
+            .surfaces()
+            .into_iter()
+            .find_map(|surface| match surface.kind {
+                SurfaceKind::Attached(id) => windows.wm_id(id),
+                SurfaceKind::Plate(_) | SurfaceKind::Info => None,
+            });
+        if !shell.present_menu_chain(compositor, menu, owner, attached) && menu.exhausted() {
+            // The chain could not be drawn, so it is refused rather than left
+            // half on the screen; taking it down needs the reconcile to run
+            // once more, now over an empty list.
+            let _ = shell.present_menu_chain(compositor, menu, owner, attached);
+        }
+    }
+
     /// Drain the seat's pointer and keyboard straight into the open backdrop
     /// menu, routing nothing anywhere else.
     ///
@@ -3909,6 +4175,7 @@ mod program {
         confirm: &mut ConfirmPrompt,
         elevate: &mut ElevatePrompt,
         lock: &mut ScreenLock,
+        menu: &mut MenuChain,
         account: &str,
         launched: &mut LaunchTable,
         apps: &mut AppBarPanel,
@@ -3934,6 +4201,7 @@ mod program {
                                 windows,
                                 picker,
                                 &mut apps.service,
+                                menu,
                                 &WindowEvent::Focus {
                                     window_id: old,
                                     focused: false,
@@ -3949,6 +4217,7 @@ mod program {
                                 windows,
                                 picker,
                                 &mut apps.service,
+                                menu,
                                 &WindowEvent::Focus {
                                     window_id: id,
                                     focused: true,
@@ -3971,6 +4240,7 @@ mod program {
                             windows,
                             picker,
                             &mut apps.service,
+                            menu,
                             &WindowEvent::Pointer {
                                 window_id: id,
                                 x,
@@ -3990,7 +4260,7 @@ mod program {
                         if let Some(concluded) = picker.handle_click(local, shell, compositor) {
                             conclude_pick(
                                 concluded, server, sink, shell, compositor, windows, identity,
-                                picker, apps,
+                                picker, apps, menu,
                             );
                         }
                     }
@@ -4030,6 +4300,7 @@ mod program {
                                 windows,
                                 picker,
                                 &mut apps.service,
+                                menu,
                                 &WindowEvent::Focus {
                                     window_id: old,
                                     focused: false,
@@ -4045,6 +4316,7 @@ mod program {
                                 windows,
                                 picker,
                                 &mut apps.service,
+                                menu,
                                 &WindowEvent::Focus {
                                     window_id: id,
                                     focused: true,
@@ -4064,6 +4336,7 @@ mod program {
                             windows,
                             picker,
                             &mut apps.service,
+                            menu,
                             &WindowEvent::Pointer {
                                 window_id: id,
                                 x,
@@ -4090,6 +4363,7 @@ mod program {
                             windows,
                             picker,
                             &mut apps.service,
+                            menu,
                             &WindowEvent::Focus {
                                 window_id: old,
                                 focused: false,
@@ -4106,7 +4380,7 @@ mod program {
                             if let Some(concluded) = picker.handle_key(&record, shell, compositor) {
                                 conclude_pick(
                                     concluded, server, sink, shell, compositor, windows, identity,
-                                    picker, apps,
+                                    picker, apps, menu,
                                 );
                             }
                         }
@@ -4137,6 +4411,7 @@ mod program {
                             windows,
                             picker,
                             &mut apps.service,
+                            menu,
                             &WindowEvent::Key {
                                 window_id: id,
                                 key: record,
@@ -4161,6 +4436,7 @@ mod program {
                                 windows,
                                 picker,
                                 &mut apps.service,
+                                menu,
                                 &WindowEvent::Scrolled { window_id, dx, dy },
                             );
                         }
@@ -4186,6 +4462,7 @@ mod program {
                             windows,
                             picker,
                             &mut apps.service,
+                            menu,
                             &event,
                         );
                     }
@@ -4205,6 +4482,7 @@ mod program {
                             windows,
                             picker,
                             &mut apps.service,
+                            menu,
                             &event,
                         );
                     }
@@ -4228,6 +4506,7 @@ mod program {
                             windows,
                             picker,
                             &mut apps.service,
+                            menu,
                             &WindowEvent::Resized {
                                 window_id,
                                 width_px: client.width,
@@ -4255,6 +4534,7 @@ mod program {
                             windows,
                             picker,
                             &mut apps.service,
+                            menu,
                             &WindowEvent::Pointer {
                                 window_id: id,
                                 x,
@@ -4282,6 +4562,7 @@ mod program {
                             windows,
                             picker,
                             &mut apps.service,
+                            menu,
                             &WindowEvent::Pointer {
                                 window_id: id,
                                 x,
@@ -4339,6 +4620,7 @@ mod program {
                     sink,
                     windows,
                     picker,
+                    menu,
                     &WindowEvent::AppBarDefault,
                 );
             }
@@ -4365,6 +4647,7 @@ mod program {
                     sink,
                     windows,
                     picker,
+                    menu,
                     &WindowEvent::AppBarMenu { item },
                 );
             }
@@ -4408,6 +4691,7 @@ mod program {
                     windows,
                     picker,
                     &mut apps.service,
+                    menu,
                 );
             }
             ShellOutcome::Taskbar(TaskbarResponse::LockSession) => {
@@ -4579,6 +4863,7 @@ mod program {
         sink: &mut RtEventSink,
         windows: &mut SessionWindows,
         picker: &mut SessionPicker<S, F>,
+        menu: &mut MenuChain,
         event: &WindowEvent,
     ) {
         let Some(owner) = apps.strip.get(app).map(|group| group.owner) else {
@@ -4593,6 +4878,10 @@ mod program {
                 windows,
                 picker,
                 apps: &mut apps.service,
+                menu,
+                // This bridge tears windows down and never serves an
+                // `OpenMenu`, so it cannot vouch for the seat and says so.
+                seat_held: true,
             };
             server.client_exited(&mut bridge, owner);
         }
@@ -5095,6 +5384,7 @@ mod program {
         identity: &RtWindowIdentity,
         picker: &mut SessionPicker<S, F>,
         apps: &mut AppBarPanel,
+        menu: &mut MenuChain,
     ) {
         let window_id = concluded.for_window;
         let event = match concluded.conclusion {
@@ -5116,6 +5406,7 @@ mod program {
             windows,
             picker,
             &mut apps.service,
+            menu,
             &event,
         );
     }
@@ -5162,6 +5453,7 @@ mod program {
         windows: &mut SessionWindows,
         picker: &mut SessionPicker<S, F>,
         apps: &mut dyn AppBarBridge,
+        menu: &mut MenuChain,
     ) {
         for wm in compositor.pending_redraws() {
             let Some(window_id) = windows.ipc_id(wm) else {
@@ -5175,6 +5467,7 @@ mod program {
                 windows,
                 picker,
                 apps,
+                menu,
                 &WindowEvent::RedrawRequested { window_id },
             );
         }
@@ -5200,6 +5493,7 @@ mod program {
         windows: &mut SessionWindows,
         picker: &mut SessionPicker<S, F>,
         apps: &mut dyn AppBarBridge,
+        menu: &mut MenuChain,
     ) {
         for wm in compositor.take_released_notices() {
             let Some(window_id) = windows.ipc_id(wm) else {
@@ -5236,6 +5530,7 @@ mod program {
                 windows,
                 picker,
                 apps,
+                menu,
                 &WindowEvent::ContentReleased { window_id },
             );
         }
@@ -5263,6 +5558,7 @@ mod program {
         windows: &mut SessionWindows,
         picker: &mut SessionPicker<S, F>,
         apps: &mut dyn AppBarBridge,
+        menu: &mut MenuChain,
     ) {
         let desktop = match desktop_info(compositor) {
             Ok(desktop) => desktop,
@@ -5283,6 +5579,7 @@ mod program {
                 windows,
                 picker,
                 apps,
+                menu,
                 &WindowEvent::DesktopChanged { window_id, desktop },
             );
         }
@@ -5310,6 +5607,7 @@ mod program {
         windows: &mut SessionWindows,
         picker: &mut SessionPicker<S, F>,
         apps: &mut dyn AppBarBridge,
+        menu: &mut MenuChain,
         event: &WindowEvent,
     ) {
         // Window-scoped only: an icon-bar event names no window and goes
@@ -5324,6 +5622,10 @@ mod program {
             windows,
             picker,
             apps,
+            menu,
+            // Delivery never serves an `OpenMenu`, so this bridge cannot
+            // vouch for the seat and says so rather than claiming it free.
+            seat_held: true,
         };
         if let Err(Errno::NotFound) = server.deliver_event(&mut bridge, sink, event) {
             // `owner_of` proved the window exists, so the `NotFound` is

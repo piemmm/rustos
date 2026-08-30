@@ -26,7 +26,8 @@ use alloc::vec::Vec;
 
 use tairix_abi::window_ipc::{AppMenu, AppMenuItemId, AppMenuMark, AppMenuRole, AppMenuRowView};
 use tairix_controls::{
-    ControlRole, ControlState, Fact, FactList, Menu, MenuAction, MenuItem, MenuMark,
+    plate_rect, ControlRole, ControlState, Fact, FactList, Menu, MenuAction, MenuItem, MenuMark,
+    PlateSide,
 };
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
@@ -317,23 +318,20 @@ impl BarMenu {
         theme: &Theme,
     ) -> Option<MenuLayout> {
         self.subject.as_ref()?;
-        let width = self.menu.preferred_width(scale, theme).max(1);
-        let height = self.menu.preferred_height(scale, theme).max(1);
-        let gap = scale.scale_length(theme.metrics().control_gap);
-        let (x, y) = match edge {
-            Edge::Bottom => (
-                self.anchor.left(),
-                self.anchor.top() - to_i32(height) - to_i32(gap),
-            ),
-            Edge::Top => (self.anchor.left(), self.anchor.bottom() + to_i32(gap)),
-            Edge::Left => (self.anchor.right() + to_i32(gap), self.anchor.top()),
-            Edge::Right => (
-                self.anchor.left() - to_i32(width) - to_i32(gap),
-                self.anchor.top(),
-            ),
-        };
         let screen = Rect::new(0, 0, screen_width, screen_height);
-        let panel = Rect::new(x, y, width, height).clamped_onto(screen);
+        let panel = plate_rect(
+            self.menu.preferred_width(scale, theme),
+            self.menu.preferred_height(scale, theme),
+            self.anchor,
+            match edge {
+                Edge::Bottom => PlateSide::Above,
+                Edge::Top => PlateSide::Below,
+                Edge::Left => PlateSide::Trailing,
+                Edge::Right => PlateSide::Leading,
+            },
+            scale.scale_length(theme.metrics().control_gap),
+            screen,
+        );
         let child = self.child_rect(&panel, screen, scale, theme);
         Some(MenuLayout {
             panel,
@@ -345,35 +343,36 @@ impl BarMenu {
     /// The rectangle whatever is open beside the menu occupies, or
     /// [`Rect::EMPTY`] when nothing is.
     ///
-    /// A child opens to the trailing side of its parent row and flips to the
-    /// leading side when that would leave the screen, so it is never clipped
-    /// — the same rule the shared control applies to its own submenu anchor,
-    /// which is why the anchor comes from [`Menu::row_rect`] rather than
-    /// being re-derived from the row height here.
+    /// The shared placement rule ([`plate_rect`]), anchored to the parent
+    /// plate's horizontal span at its parent row's height and edge-adjacent to
+    /// it, so the pointer crosses no dead gap on its way in. Which side it
+    /// lands on, when it flips, and how it slides are that rule's answers, not
+    /// a second set of them here.
     fn child_rect(&self, panel: &Rect, screen: Rect, scale: Scale, theme: &Theme) -> Rect {
         let (parent, width, height) = match self.child.as_ref() {
             None => return Rect::EMPTY,
             Some(OpenChild::Rows { parent, menu, .. }) => (
                 *parent,
-                menu.preferred_width(scale, theme).max(1),
-                menu.preferred_height(scale, theme).max(1),
+                menu.preferred_width(scale, theme),
+                menu.preferred_height(scale, theme),
             ),
             Some(OpenChild::Info { parent, facts }) => (
                 *parent,
                 info_panel_width(scale, theme),
-                facts.measured_height(scale, theme).max(1),
+                facts.measured_height(scale, theme),
             ),
         };
         let Some(row) = self.menu.row_rect(parent, *panel, scale, theme) else {
             return Rect::EMPTY;
         };
-        let trailing = Rect::new(panel.right(), row.top(), width, height);
-        let candidate = if trailing.right() <= screen.right() {
-            trailing
-        } else {
-            Rect::new(panel.left() - to_i32(width), row.top(), width, height)
-        };
-        candidate.clamped_onto(screen)
+        plate_rect(
+            width,
+            height,
+            Rect::new(panel.left(), row.top(), panel.width, row.height),
+            PlateSide::Trailing,
+            0,
+            screen,
+        )
     }
 
     /// Route a pointer event into the open menu (which is modal): events
@@ -743,7 +742,8 @@ pub const INFO_ROW_LABEL: &str = "Info";
 const INFO_PANEL_WIDTH: u32 = 260;
 
 /// The information panel's width in physical pixels at `scale`.
-fn info_panel_width(scale: Scale, _theme: &Theme) -> u32 {
+#[must_use]
+pub fn info_panel_width(scale: Scale, _theme: &Theme) -> u32 {
     scale.scale_length(INFO_PANEL_WIDTH).max(1)
 }
 
@@ -752,7 +752,8 @@ fn info_panel_width(scale: Scale, _theme: &Theme) -> u32 {
 /// Name and version are always present (a signed manifest carries both), so
 /// the panel can never be empty; purpose and author appear only when the
 /// manifest states them, rather than as blank rows.
-fn info_facts(identity: &AppIdentity) -> FactList {
+#[must_use]
+pub fn info_facts(identity: &AppIdentity) -> FactList {
     let mut facts = alloc::vec![
         Fact::new("Name", identity.name.clone()),
         Fact::new("Version", identity.version.clone()),
@@ -764,9 +765,4 @@ fn info_facts(identity: &AppIdentity) -> FactList {
         facts.push(Fact::new("Author", author.clone()));
     }
     FactList::new(facts).with_separators(true)
-}
-
-/// Saturating `u32` → `i32`, clamping rather than wrapping.
-fn to_i32(value: u32) -> i32 {
-    i32::try_from(value).unwrap_or(i32::MAX)
 }

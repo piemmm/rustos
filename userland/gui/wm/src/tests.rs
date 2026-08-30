@@ -4050,7 +4050,7 @@ fn a_resize_grab_clamps_where_the_title_bar_still_works_and_escape_restores() {
     // side by side, inside the window, with a drag surface left between them.
     let layout = title_layout(&c, id);
     let mut previous = shrunk.left();
-    for (kind, rect) in layout.controls {
+    for (kind, rect) in layout.controls().iter().copied() {
         assert!(
             rect.width > 0 && rect.left() >= previous && rect.right() <= shrunk.right(),
             "{kind:?} is seated inside the window and clear of the command before it"
@@ -4994,7 +4994,7 @@ fn title_layout(c: &Compositor, id: WindowId) -> tairix_controls::TitleBarLayout
 /// resolved through the same layout the frame paints and hit-tests with.
 fn command_rect(c: &Compositor, id: WindowId, kind: WindowControlKind) -> Rect {
     title_layout(c, id)
-        .controls
+        .controls()
         .iter()
         .find(|(k, _)| *k == kind)
         .map(|(_, rect)| *rect)

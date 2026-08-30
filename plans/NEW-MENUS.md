@@ -11,8 +11,8 @@ Binding under `AGENTS.md` (§3, §15.18).
 | M1b | Model: per-plate rows, submenu depth, titles, shortcuts, `About`→`Info` | **landed** |
 | M1c | The per-gesture open: anchor in, `Chosen`/`Dismissed`/`Refused` out | **landed** |
 | M1d | Attached-window row kind + its present/arrive/refuse events | **landed** |
-| M2 | The service: bands, drag, arrival-open, attach/detach, grab, lifetime | next |
-| M3.1 | Migrate `userland/apps/terminal`, delete its shell | planned |
+| M2 | The service: bands, drag, arrival-open, attach/detach, grab, lifetime | **landed** |
+| M3.1 | Migrate `userland/apps/terminal`, delete its shell | next |
 | M3.2 | Migrate the pinboard backdrop menu, delete its shell | planned |
 | M3.3 | Migrate `userland/apps/files`, delete its shell | planned (decision 2) |
 | M3.4 | Migrate the bar's `menu.rs`/`clock_menu.rs`/`system.rs` | planned |
@@ -32,16 +32,17 @@ stage that closes it carries its regression test (§2.18, §7).
 | D1 | `WindowRequest::from_bytes` accepted a frame longer than the op needs, checking only that the tail was zero. Exact-length framing refuses any trailing byte instead. | **closed in M1a** |
 | D2 | The per-op operand-block end offsets were spelled twice — once implicitly by the encoder, once as a literal in the decoder's `reserved_zero(bytes, 36)` call. One named length per op now serves both (§2.2). | **closed in M1a** |
 | D3 | Exact-length decoding refuses a random-length input before it reaches any operand, so the request decoders' fuzz coverage came to rest on the seeded frames — and only `SetAppBar` had one. `fuzz_decode` now seeds and bit-flips one frame per operation, at its length and one byte either side. | **closed in M1a** |
-| D4 | Menu-child placement exists twice with two rules: `lib/controls`' `Menu::anchored_rect` slides a plate onto the screen, while the bar's own `child_rect` flips a child to its parent's other side. A root at a pointer and a child beside its parent legitimately differ, but the two rules must end up as one owner's (§2.2) rather than one shared and one private to the bar. M1c's wire anchor is a *region* precisely so one rule can serve both: a slot-anchored bar menu and an app's context menu differ only in whether that region has an extent. | M2 |
+| D4 | Menu-child placement existed twice with two rules: `lib/controls`' `Menu::anchored_rect` slides a plate onto the screen, while the bar's own `child_rect` flips a child to its parent's other side. A root at a pointer and a child beside its parent legitimately differ, but the two rules must end up as one owner's (§2.2) rather than one shared and one private to the bar. M1c's wire anchor is a *region* precisely so one rule can serve both: a slot-anchored bar menu and an app's context menu differ only in whether that region has an extent. **One rule now**: `plate_rect(size, anchor, side, gap, viewport)` bounds the plate to the viewport, opens edge-adjacent on the asked-for side, flips when that side has no room (roomier side when neither does), then slides the cross axis and clamps. `Menu::anchored_rect` is its point case and the bar's `child_rect` is deleted. Placement is now *flip*-then-slide where a context menu used to slide only, which also keeps the press point at a corner of the plate rather than inside it. | **closed in M2** |
 | D5 | `AppMenu::push_under` refused a submenu inside a submenu, so the model could not express a chain at all — the one-level bound was load-bearing in the builder, not only in the renderer. Nesting is now bounded by `APP_MENU_MAX_DEPTH` instead, and a submenu on the deepest plate is refused rather than drawn opening nothing. | **closed in M1b** |
 | D6 | A row's text was a widest-case buffer per row, so the three fields `MenuItem` draws (label, accelerator caption, disabled-row reason) would have multiplied by the row bound — and `WindowRequest` carries a menu inline, so the hot `Present` path's own frame would have grown with them. A menu now holds its rows' text in one bounded block (`APP_MENU_TEXT_BYTES`) and the wire carries lengths, not offsets, in row order. | **closed in M1b** |
 | D7 | `lib/window`'s client encoded every request into a fresh `MAX_WIRE_LEN` stack array and the session's serve loop received into one, so both cleared the widest operation's width on every call — including the hot `Present`. M1a made the *frame* per-operation but left these two buffers at the ceiling. Each is now held once for the life of the connection. | **closed in M1b** |
 | D8 | The bar built a child plate's rows without folding a declared separator into the next row's group break, so a separator inside a declared submenu drew as a blank disabled row where the same separator on the root plate drew a divider. One `plate_rows` builder now serves both. | **closed in M1b** |
-| D9 | The model describes a chain `APP_MENU_MAX_DEPTH` plates deep; the bar renders one level, so a submenu declared *inside* a submenu draws its chevron and opens nothing. Nothing in the tree declares one (`appbar::declaration` refuses a submenu outright), and the chain renderer is what M2 is. | M2 |
+| D9 | The model describes a chain `APP_MENU_MAX_DEPTH` plates deep; the bar renders one level, so a submenu declared *inside* a submenu draws its chevron and opens nothing. Nothing in the tree declares one (`appbar::declaration` refuses a submenu outright), and the chain renderer is what M2 is. **Closed**: the chain opens a plate per level to `APP_MENU_MAX_DEPTH`, each placed against its own parent. | **closed in M2** |
 | D11 | The frame-layout block every surface-opening request shares ended at the literal `41`, spelled three times over (`RESIZE_WIRE_LEN`, `POPUP_PARENT_OFFSET`, `CREATE_TITLE_LEN_OFFSET`) with its field offsets spelled again inside the codec — D2's shape a second time, and a fourth operation was about to join it. One `FRAME_LAYOUT_AT`/`FRAME_LAYOUT_END` now says where the block is and how wide, and every operation that puts operands after it derives its own offsets. | **closed in M1d** |
 | D12 | Three requests open a surface and each wrote the same prologue longhand — the granted region, the event route, the frame layout. One `write_surface_operands` now writes it for all of them (§2.2). | **closed in M1d** |
 | D13 | `WindowClient` remembers each window's extent and last presented frame to answer a redraw, and pruned that record only in its own `close`. The **session** ends an attached window with its chain, so a client using panels would have kept one record per gesture — unbounded growth on a list every `present` linearly scans. The client now settles its records on a chain's outcome, by the one shared `MenuOutcome::detaches` rule the desktop settles by, and `close` forgets a window even when the session no longer knows it. | **closed in M1d** |
-| D10 | The bar's own menus state two things the model cannot carry: a row denied for want of a capability (`AuthorityState::NeedsCapability`, which draws an Authority Mark rather than merely greying) and a row whose setting is already in effect (`ActivityState::Complete`). `taskbar/src/system.rs` and `clock_menu.rs` both use them, so M3.4 would lose them. Whether the *service-facing* model carries them is a design question with a security edge: an application must not be able to claim the *system* lacks authority for its own row, so the answer may be that they are in-process-only — which is what §1.6's "the wire model is a bounded subset" has to be made precise about. | M2 (§15.7 — needs a decision) |
+| D14 | The shared `Menu` maps *any* chevroned row's activation to `OpenSubmenu`, so it cannot tell a panel row's click — which detaches its window — from a submenu row's, which opens a plate. Resolved by layer rather than by widening the control: `Menu` owns rows and chevrons, and the chain owns panel semantics, so it reads the row kind itself (pointer release on a panel row detaches; keyboard Right enters, Enter/Space detaches). | **closed in M2** |
+| D10 | The bar's own menus state two things the model cannot carry: a row denied for want of a capability (`AuthorityState::NeedsCapability`, which draws an Authority Mark rather than merely greying) and a row whose setting is already in effect (`ActivityState::Complete`). **Answered.** The Authority Mark says *the system* refused a command, and only the system may say it, so it is in-process-only — and structurally, not by a check: the wire model has no field for an authority state, so a decoded row is always `Allowed` and an application cannot paint the mark on its own row. §1.6's "bounded subset" means an absent field, never a validated one. `ActivityState::Complete` ("work finished successfully") is a *misuse* on an appearance row and is deleted rather than carried: the alternatives are a radio group, which the wire already spells `AppMenuMark::Radio` plus disabled plus a reason. The bar's own rows keep `NeedsCapability` through M3.4, because they are the session's. | **answered in M2** |
 
 **This is an architecture change, not a performance one.** The ~300 ms
 context-menu stall that first prompted it was a kernel defect and is closed
@@ -491,28 +492,67 @@ Until the bar migrates (M3.4) it hangs no attached windows of its own, so it
 draws a declared panel row's chevron **greyed** rather than as a row that opens
 something it cannot open. Nothing in the tree declares one yet.
 
-### M2 — the service
+### M2 — the service (landed)
 
-- One `Option<OpenChain>` per seat: the owner window, the model, the plates
-  with their placements and pinned-by-drag flags, and any attached window.
-- `lib/controls::window`'s `TitleBar` gains the empty command set §1.1 needs
-  — today it always seats four controls and justifies its title against the
-  leading cluster. It is extended, not copied: the drag gesture and the
-  untrusted-label bounding have one implementation.
-- Everything in section 1: bands and their drag, arrival-driven submenus,
-  attached-window attach/detach, the grab, traversal, dismissal, lifetime.
-- The desktop's own surfaces become its first clients (§1.6).
-- Tests: the singleton rule (a second request closes the first and answers
-  it `Dismissed`); placement and flip against all four screen edges at more
-  than one depth; arrival-open with no timer, including travel from a parent
-  row into its own child and onto a sibling row; drag moving a plate and its
-  descendants but not its ancestors; attach/detach and that a submenu cannot
-  detach; outside press consumed; Escape closing deepest-first; owner death,
-  seat loss, and scale/theme change each answering `Dismissed`; a late
-  attached window refused; each `MenuRefusal` reason answered where its seat
-  condition arises (a lock screen holding the seat is `SeatBusy`, and an app
-  menu must never appear over one); and that moving a highlight damages only
-  the two rows that changed.
+`userland/gui/session/src/menu.rs` is the chain: one `Option<OpenChain>` per
+seat holding the owner, the model, the plates with their placements and
+pinned-by-drag flags, and whatever hangs off the deepest one. It owns model,
+state and geometry and touches **no** compositor — the session presents the
+surfaces it lists and takes down what it no longer has — which is what lets
+every rule of section 1 be tested without a screen.
+
+What it guarantees, beyond section 1 itself:
+
+- **One answer, one delivery point.** Every close — a chosen row, a dismissal,
+  a chain displaced by the next open, an owner's death, a mode change — queues
+  its answer through `MenuChain::take_answers`, drained in one place. No path
+  can answer a chain twice and none can leave one unanswered. A chain very
+  often ends inside the window engine's own serve pass, which already holds
+  the borrow `deliver_event` needs, so queueing *all* of them rather than only
+  those is what keeps the point single.
+- **The mode change is the chain's own rule**, not a dismissal every
+  mode-changing call site must remember: the chain records the screen and the
+  output epoch it was placed against and ends itself when either moves.
+- **The service-facing model is a superset of the wire one, structurally.** A
+  `ChainRow` carries the whole of `ControlState`, because the desktop's own
+  rows may state that the *system* lacks authority for a command; the wire has
+  no field for that, so a decoded application row cannot claim it (D10).
+- **The host validates the panel row and the lateness**, because the engine
+  retains neither the model nor the pointer. `ShellWindowHost::menu_open_requested`
+  resolves the window-local anchor against the owner's live client origin and
+  never reads a file; `menu_panel_opened` asks the chain where a surface hangs
+  and composes it as a transient of the owner, or relays the refusal.
+- **`lib/controls::window`'s `TitleBar` seats an empty command set**
+  (`TitleBarCommands::Empty`, `TitleBar::plate()`), extended rather than
+  copied: one drag gesture, one untrusted-label bounding. The whole-band drag
+  span and the centred title follow from the emptiness, not from new knobs.
+
+**`MenuRefusal` has its producers, one per seat condition.** `NoDisplay` when
+there is no output to place on and `SeatBusy` when a surface a menu may not
+displace holds the seat (the lock screen, the trusted picker) are decided as
+the open is served — the open is *accepted*, so the application is owed its one
+answer and gets the reason rather than a chain. `NoResources` is answered where
+it is honest: when the session actually cannot give a plate its surface, which
+is at draw time, not at ask time. A refusal never takes down a chain the user
+is already using.
+
+Two things the stage's own test list named that the tree answers differently,
+rather than leaving untested:
+
+- **Seat loss** has no per-chain answer. Losing the lease ends the *session*
+  (`drain_fault`), and the window channel goes with it, so there is no
+  surviving path on which a `MenuClosed` could be delivered. The chain's
+  lifetime rules cover owner death and the mode change; seat loss is the
+  session's own end.
+- **Damage confinement** is M4's, not this stage's: a plate is not yet a
+  cached damage-reporting surface. What M2 does guarantee, and tests, is that
+  a pointer travelling *within* a row costs no repaint at all, and that moving
+  a highlight on one plate opens, closes and moves nothing else.
+
+The desktop's own surfaces are **not** clients yet: the pinboard's backdrop
+menu is M3.2 and the bar's four subjects are M3.4, which is where those
+migrations already lived. The service's production client today is the wire
+path — any application's `OpenMenu`, implemented end to end.
 
 ### M3 — migrate, and delete
 

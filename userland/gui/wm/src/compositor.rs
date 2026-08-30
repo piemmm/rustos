@@ -514,9 +514,15 @@ impl Compositor {
         }
     }
 
-    /// The generation every retained [`WindowChrome`] is valid for: this
-    /// output's scale and the theme it was painted under.
-    fn chrome_epoch(&self) -> ChromeEpoch {
+    /// The mode everything drawn on this output is valid for: its scale and
+    /// the generation of the theme it was painted under.
+    ///
+    /// Retained furniture keys on it, and so does anything else the desktop
+    /// placed against the mode rather than re-derived per frame — a menu
+    /// chain dismisses when it moves on, because re-placing a plate the user
+    /// has dragged is not defined.
+    #[must_use]
+    pub fn chrome_epoch(&self) -> ChromeEpoch {
         (self.scale.percent(), self.theme_generation)
     }
 

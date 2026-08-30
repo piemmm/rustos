@@ -152,6 +152,7 @@
 - [Compositing window manager](./desktop/wm.md)
 - [Seat ownership](./desktop/seat.md)
 - [Traditional desktop taskbar](./desktop/taskbar.md)
+- [Menus](./desktop/menus.md)
 - [Desktop session glue](./desktop/session.md)
 - [The desktop pinboard](./desktop/pinboard.md)
 - [Switchboard monitor service](./desktop/switchboard.md)

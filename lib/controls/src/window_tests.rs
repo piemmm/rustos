@@ -28,8 +28,8 @@ use crate::state::{
 use crate::testkit::high_contrast;
 use crate::window::{
     BandCorner, FrameInsets, FrameRim, FurniturePart, GrabReach, ResizeEdge, ResizeEvent,
-    ResizeGrabber, ScrollCorner, TitleBar, TitleBarEvent, TitleHit, WindowControl,
-    WindowControlAction, WindowFrame, CONTROL_ORDER, IDENTITY_SATURATION_ACTIVE,
+    ResizeGrabber, ScrollCorner, TitleBar, TitleBarCommands, TitleBarEvent, TitleHit,
+    WindowControl, WindowControlAction, WindowFrame, CONTROL_ORDER, IDENTITY_SATURATION_ACTIVE,
     IDENTITY_SATURATION_INACTIVE,
 };
 
@@ -73,6 +73,12 @@ const SECONDARY_PRESS: InputEvent = InputEvent::PointerPressed {
 const SECONDARY_RELEASE: InputEvent = InputEvent::PointerReleased {
     button: PointerButton::Secondary,
 };
+
+/// The control a window band seats for `kind`.
+fn seated(bar: &TitleBar, kind: WindowControlKind) -> &WindowControl {
+    bar.control(kind)
+        .expect("a window band seats every command")
+}
 
 fn furniture() -> WindowFurnitureState {
     WindowFurnitureState {
@@ -452,7 +458,10 @@ fn drag_point(bar: &TitleBar, theme: &Theme) -> Point {
     let bounds = title_bounds();
     let layout = bar.layout(bounds, Scale::ONE, theme);
     Point::new(
-        i32::midpoint(layout.controls[1].1.right(), layout.controls[2].1.left()),
+        i32::midpoint(
+            layout.controls()[1].1.right(),
+            layout.controls()[2].1.left(),
+        ),
         i32::midpoint(bounds.top(), bounds.bottom()),
     )
 }
@@ -490,18 +499,23 @@ fn title_bar_pointer_left_unlights_the_command_under_the_pointer() {
     let bounds = title_bounds();
     let mut bar = TitleBar::new(furniture());
     let layout = bar.layout(bounds, Scale::ONE, &theme);
-    let (hovered, rect) = layout.controls[0];
+    let (hovered, rect) = layout.controls()[0];
     let at = Point::new(
         rect.left() + half(rect.width),
         rect.top() + half(rect.height),
     );
     let _ = bar.on_pointer(&moved(at.x, at.y), bounds, Scale::ONE, &theme, &mut sink());
-    assert_eq!(bar.control(hovered).state().pointer, PointerState::Hover);
+    assert_eq!(seated(&bar, hovered).state().pointer, PointerState::Hover);
 
     bar.pointer_left(bounds, Scale::ONE, &theme, &mut sink());
-    for (kind, _) in bar.layout(bounds, Scale::ONE, &theme).controls {
+    for (kind, _) in bar
+        .layout(bounds, Scale::ONE, &theme)
+        .controls()
+        .iter()
+        .copied()
+    {
         assert_eq!(
-            bar.control(kind).state().pointer,
+            seated(&bar, kind).state().pointer,
             PointerState::None,
             "{kind:?} kept a hover the pointer had left"
         );
@@ -517,7 +531,11 @@ fn the_commands_seat_two_in_each_corner_in_reading_order() {
     let gap = metric(theme.metrics().control_gap);
 
     assert_eq!(
-        layout.controls.map(|(kind, _)| kind),
+        layout
+            .controls()
+            .iter()
+            .map(|(kind, _)| *kind)
+            .collect::<alloc::vec::Vec<_>>(),
         [
             WindowControlKind::PutToBack,
             WindowControlKind::Close,
@@ -526,24 +544,24 @@ fn the_commands_seat_two_in_each_corner_in_reading_order() {
         ],
         "put-to-back and close lead, minimize and size-toggle trail"
     );
-    for pair in layout.controls.windows(2) {
+    for pair in layout.controls().windows(2) {
         assert!(
             pair[0].1.right() <= pair[1].1.left(),
             "the commands are laid out in that same reading order"
         );
     }
     assert_eq!(
-        layout.controls[0].1.left(),
+        layout.controls()[0].1.left(),
         bounds.left(),
         "the leading cluster is hard against the band's leading end"
     );
     assert_eq!(
-        layout.controls[3].1.right(),
+        layout.controls()[3].1.right(),
         bounds.right(),
         "and the trailing cluster against its trailing one"
     );
     assert!(
-        layout.controls[2].1.left() > layout.controls[1].1.right() + gap,
+        layout.controls()[2].1.left() > layout.controls()[1].1.right() + gap,
         "the identity span lies between the two clusters"
     );
 }
@@ -558,10 +576,15 @@ fn a_command_cell_carries_no_margin_of_its_own() {
     let theme = Theme::dark();
     let bar = TitleBar::new(furniture());
     for scale in [Scale::ONE, Scale::from_percent(200).expect("scale")] {
-        for width in [TitleBar::min_band_width(scale, &theme), 200, 640, 1920] {
+        for width in [
+            TitleBar::min_band_width(TitleBarCommands::Window, scale, &theme),
+            200,
+            640,
+            1920,
+        ] {
             let bounds = Rect::new(0, 0, width, 28);
             let layout = bar.layout(bounds, scale, &theme);
-            for (kind, rect) in layout.controls {
+            for (kind, rect) in layout.controls() {
                 assert_eq!(
                     (rect.top(), rect.height),
                     (bounds.top(), bounds.height),
@@ -571,13 +594,13 @@ fn a_command_cell_carries_no_margin_of_its_own() {
             // Within a cluster the cells butt together; the pair that faces the
             // identity span is the only place a gap belongs.
             assert_eq!(
-                layout.controls[1].1.left(),
-                layout.controls[0].1.right(),
+                layout.controls()[1].1.left(),
+                layout.controls()[0].1.right(),
                 "the leading cluster has a seam in it at {width}px"
             );
             assert_eq!(
-                layout.controls[3].1.left(),
-                layout.controls[2].1.right(),
+                layout.controls()[3].1.left(),
+                layout.controls()[2].1.right(),
                 "the trailing cluster has a seam in it at {width}px"
             );
         }
@@ -598,7 +621,7 @@ fn a_command_cell_is_square() {
         ] {
             for height in [16, 24, 28, 40] {
                 let bounds = Rect::new(0, 0, 640, height);
-                for (kind, cell) in bar.layout(bounds, scale, &theme).controls {
+                for (kind, cell) in bar.layout(bounds, scale, &theme).controls() {
                     assert_eq!(
                         (cell.width, cell.height),
                         (height, height),
@@ -652,7 +675,7 @@ fn the_identity_group_is_left_justified_against_the_leading_commands() {
 
     assert_eq!(
         layout.icon.left(),
-        layout.controls[1].1.right() + gap,
+        layout.controls()[1].1.right() + gap,
         "the icon starts one gap past the last leading command"
     );
     assert_eq!(
@@ -661,7 +684,7 @@ fn the_identity_group_is_left_justified_against_the_leading_commands() {
         "and the text follows the slot by the identity gap"
     );
     assert!(
-        layout.title.right() < layout.controls[2].1.left(),
+        layout.title.right() < layout.controls()[2].1.left(),
         "a title this short leaves the rest of the span empty"
     );
 
@@ -702,12 +725,12 @@ fn a_title_wider_than_the_span_fills_it_and_elides_on_the_right() {
 
     assert_eq!(
         layout.icon.left(),
-        layout.controls[1].1.right() + gap,
+        layout.controls()[1].1.right() + gap,
         "the group still starts at the span's leading edge"
     );
     assert_eq!(
         layout.title.right(),
-        layout.controls[2].1.left() - gap,
+        layout.controls()[2].1.left() - gap,
         "and runs to its trailing one"
     );
     assert!(
@@ -728,13 +751,13 @@ fn the_identity_group_never_reaches_a_command() {
     for width in [40, 80, 120, 200, 300, 640, 1920] {
         let bounds = Rect::new(0, 0, width, 28);
         let layout = bar.layout(bounds, Scale::ONE, &theme);
-        for (kind, rect) in layout.controls {
+        for (kind, rect) in layout.controls() {
             assert!(
-                layout.icon.intersection(&rect).is_empty(),
+                layout.icon.intersection(rect).is_empty(),
                 "the icon reaches {kind:?} at {width}px"
             );
             assert!(
-                layout.title.intersection(&rect).is_empty(),
+                layout.title.intersection(rect).is_empty(),
                 "the title reaches {kind:?} at {width}px"
             );
         }
@@ -751,9 +774,9 @@ fn a_band_too_narrow_for_both_clusters_abuts_them_rather_than_stacking_them() {
     let bounds = Rect::new(0, 0, 60, 28);
     let layout = bar.layout(bounds, Scale::ONE, &theme);
 
-    assert_eq!(layout.controls[0].1.left(), bounds.left());
-    for (i, (kind, rect)) in layout.controls.iter().enumerate() {
-        for (other_kind, other) in &layout.controls[i + 1..] {
+    assert_eq!(layout.controls()[0].1.left(), bounds.left());
+    for (i, (kind, rect)) in layout.controls().iter().enumerate() {
+        for (other_kind, other) in &layout.controls()[i + 1..] {
             assert!(
                 rect.intersection(other).is_empty(),
                 "{kind:?} is drawn over {other_kind:?}"
@@ -778,15 +801,15 @@ fn the_minimum_band_is_the_narrowest_that_still_leaves_a_drag_surface() {
             // width — the drag surface the floor reserves is one of them.
             let band_h = scale.scale_length(theme.metrics().title_bar_height);
             let extent = band_h.max(1);
-            let min = TitleBar::min_band_width(scale, &theme);
+            let min = TitleBar::min_band_width(TitleBarCommands::Window, scale, &theme);
             let at = bar.layout(Rect::new(0, 0, min, band_h), scale, &theme);
             assert_eq!(
                 at.drag.width, extent,
                 "the floor reserves exactly one command's worth of drag surface"
             );
-            for (i, (kind, rect)) in at.controls.iter().enumerate() {
+            for (i, (kind, rect)) in at.controls().iter().enumerate() {
                 assert!(rect.width > 0, "{kind:?} is seated");
-                for (other_kind, other) in &at.controls[i + 1..] {
+                for (other_kind, other) in &at.controls()[i + 1..] {
                     assert!(
                         rect.intersection(other).is_empty(),
                         "{kind:?} is drawn over {other_kind:?}"
@@ -815,15 +838,15 @@ fn the_drag_span_is_the_band_between_the_clusters_and_touches_no_command() {
     let gap = metric(theme.metrics().control_gap);
     for width in [60, 152, 200, 300, 1920] {
         let layout = bar.layout(Rect::new(0, 0, width, 28), Scale::ONE, &theme);
-        for (kind, rect) in layout.controls {
+        for (kind, rect) in layout.controls() {
             assert!(
-                layout.drag.intersection(&rect).is_empty(),
+                layout.drag.intersection(rect).is_empty(),
                 "the drag span reaches {kind:?} at {width}px"
             );
         }
         if layout.drag.width > 0 {
-            assert_eq!(layout.drag.left(), layout.controls[1].1.right() + gap);
-            assert_eq!(layout.drag.right(), layout.controls[2].1.left() - gap);
+            assert_eq!(layout.drag.left(), layout.controls()[1].1.right() + gap);
+            assert_eq!(layout.drag.right(), layout.controls()[2].1.left() - gap);
             assert!(
                 layout.drag.intersection(&layout.title) == layout.title || layout.title.width == 0,
                 "the title is drawn inside the span at {width}px"
@@ -841,7 +864,8 @@ fn the_minimum_outer_size_leaves_a_usable_band_and_a_real_client() {
             let (w, h) = frame.min_outer_size(scale, &theme);
             let layout = frame.layout(Rect::new(0, 0, w, h), scale, &theme);
             assert!(
-                layout.title_bar.width >= TitleBar::min_band_width(scale, &theme),
+                layout.title_bar.width
+                    >= TitleBar::min_band_width(TitleBarCommands::Window, scale, &theme),
                 "the band the title bar is given is at least the band it needs"
             );
             assert!(
@@ -1148,7 +1172,7 @@ fn a_hovered_command_lights_its_cell_corner_to_corner() {
     let bounds = Rect::new(0, 0, 240, 28);
     let layout = bar.layout(bounds, Scale::ONE, &theme);
     // Close is an inner cell, so every corner of it is square and lit.
-    let cell = layout.controls[1].1;
+    let cell = layout.controls()[1].1;
     let mut control = WindowControl::new(WindowControlKind::Close);
     control.on_pointer(&moved(cell.left() + 1, cell.top() + 1), cell, &mut sink());
 
@@ -1174,7 +1198,7 @@ fn the_hit_map_answers_for_every_pixel_of_a_cell() {
     let bar = TitleBar::new(furniture());
     let bounds = Rect::new(0, 0, 240, 28);
     let layout = bar.layout(bounds, Scale::ONE, &theme);
-    for (kind, cell) in layout.controls {
+    for (kind, cell) in layout.controls().iter().copied() {
         for (x, y) in [
             (cell.left(), cell.top()),
             (cell.right() - 1, cell.top()),
@@ -1315,7 +1339,7 @@ fn a_secondary_press_over_a_control_reports_the_alternate_and_leaves_the_bar_alo
     let bounds = title_bounds();
     let close_rect = bar
         .layout(bounds, Scale::ONE, &theme)
-        .controls
+        .controls()
         .iter()
         .find(|(k, _)| *k == WindowControlKind::Close)
         .expect("close")
@@ -1407,7 +1431,7 @@ fn press_over_control_routes_to_control_not_drag() {
     let bounds = title_bounds();
     let close_rect = bar
         .layout(bounds, Scale::ONE, &theme)
-        .controls
+        .controls()
         .iter()
         .find(|(k, _)| *k == WindowControlKind::Close)
         .expect("close")
@@ -1436,7 +1460,7 @@ fn hit_distinguishes_control_from_drag() {
     let bounds = title_bounds();
     let close_rect = bar
         .layout(bounds, Scale::ONE, &theme)
-        .controls
+        .controls()
         .iter()
         .find(|(k, _)| *k == WindowControlKind::Close)
         .expect("close")
@@ -1461,11 +1485,12 @@ fn size_toggle_disabled_when_not_resizable() {
     let mut bar = TitleBar::new(furn);
     assert!(!bar
         .control(WindowControlKind::SizeToggle)
+        .expect("a window band seats every command")
         .state()
         .is_actionable());
     let rect = bar
         .layout(title_bounds(), Scale::ONE, &theme)
-        .controls
+        .controls()
         .iter()
         .find(|(k, _)| *k == WindowControlKind::SizeToggle)
         .expect("size toggle")
@@ -1488,6 +1513,7 @@ fn size_toggle_returns_when_the_window_becomes_resizable_again() {
     let mut bar = TitleBar::new(furn);
     assert!(!bar
         .control(WindowControlKind::SizeToggle)
+        .expect("a window band seats every command")
         .state()
         .is_actionable());
 
@@ -1496,6 +1522,7 @@ fn size_toggle_returns_when_the_window_becomes_resizable_again() {
 
     assert!(
         bar.control(WindowControlKind::SizeToggle)
+            .expect("a window band seats every command")
             .state()
             .is_actionable(),
         "a resizable window must get its size toggle back"
@@ -1508,7 +1535,7 @@ fn size_toggle_shows_restore_when_maximized() {
     furn.size = WindowSizeState::Maximized;
     let bar = TitleBar::new(furn);
     assert_eq!(
-        bar.control(WindowControlKind::SizeToggle).accessible_name(),
+        seated(&bar, WindowControlKind::SizeToggle).accessible_name(),
         "Restore"
     );
 }
@@ -1529,6 +1556,7 @@ fn keyboard_focus_navigates_and_activates() {
     );
     assert!(
         bar.control(WindowControlKind::PutToBack)
+            .expect("a window band seats every command")
             .state()
             .focus
             .focused
@@ -1555,7 +1583,7 @@ fn a_focus_move_reports_the_two_controls_it_touches() {
     let layout = bar.layout(TITLE_BOUNDS, Scale::ONE, &theme);
     let rect_of = |kind: WindowControlKind| {
         layout
-            .controls
+            .controls()
             .iter()
             .find(|(k, _)| *k == kind)
             .map(|(_, r)| *r)
@@ -1608,12 +1636,14 @@ fn a_focus_move_reports_every_ring_it_clears() {
     let theme = Theme::dark();
     let mut bar = TitleBar::new(furniture());
     for kind in [WindowControlKind::Close, WindowControlKind::SizeToggle] {
-        bar.control_mut(kind).set_focused(true);
+        bar.control_mut(kind)
+            .expect("a window band seats every command")
+            .set_focused(true);
     }
     let layout = bar.layout(TITLE_BOUNDS, Scale::ONE, &theme);
     let rect_of = |kind: WindowControlKind| {
         layout
-            .controls
+            .controls()
             .iter()
             .find(|(k, _)| *k == kind)
             .map(|(_, r)| *r)
@@ -1700,7 +1730,7 @@ fn a_bar_without_an_identity_leads_with_its_title_alone() {
     assert_eq!(layout.title.height, bounds.height);
     assert_eq!(
         layout.title.left(),
-        layout.controls[1].1.right() + gap,
+        layout.controls()[1].1.right() + gap,
         "the text takes the leading edge the slot would have had"
     );
 }
@@ -1742,8 +1772,8 @@ fn an_identity_leads_the_group_and_the_title_follows_it() {
         "and pushes the text along by the slot and its gap"
     );
     // The slot never reaches a control.
-    for (_, rect) in with.controls {
-        assert!(with.icon.intersection(&rect).is_empty());
+    for (_, rect) in with.controls() {
+        assert!(with.icon.intersection(rect).is_empty());
     }
     // The icon is inert: the point over it still drags the window.
     let over = Point::new(with.icon.left() + 1, with.icon.top() + 1);
@@ -1943,7 +1973,7 @@ fn hit_map_finds_window_control() {
     let close_rect = frame
         .title_bar()
         .layout(title_bar, Scale::ONE, &theme)
-        .controls
+        .controls()
         .iter()
         .find(|(k, _)| *k == WindowControlKind::Close)
         .expect("close")
@@ -2638,4 +2668,143 @@ fn pointer_position_alone_never_changes_a_grabber_render() {
         paint(&b),
         "…and the two must therefore paint identically"
     );
+}
+
+// --- a band that seats no commands --------------------------------------
+
+#[test]
+fn a_plate_band_seats_no_commands_and_reports_none() {
+    let bar = TitleBar::plate();
+    assert_eq!(bar.commands(), TitleBarCommands::Empty);
+    assert!(bar
+        .layout(TITLE_BOUNDS, Scale::ONE, &Theme::dark())
+        .controls()
+        .is_empty());
+    for kind in CONTROL_ORDER {
+        assert!(
+            bar.control(kind).is_none(),
+            "{kind:?} is not seated, so there is no state to report for it"
+        );
+    }
+}
+
+#[test]
+fn a_plate_bands_whole_span_drags() {
+    let theme = Theme::dark();
+    let bar = TitleBar::plate();
+    let layout = bar.layout(TITLE_BOUNDS, Scale::ONE, &theme);
+    assert_eq!(
+        layout.drag, TITLE_BOUNDS,
+        "with no clusters to hold it off, the drag span is the whole band"
+    );
+    for x in [
+        TITLE_BOUNDS.left(),
+        TITLE_BOUNDS.left() + 1,
+        TITLE_BOUNDS.right() - 1,
+    ] {
+        assert_eq!(
+            bar.hit(
+                TITLE_BOUNDS,
+                Scale::ONE,
+                &theme,
+                Point::new(x, TITLE_BOUNDS.top() + 2)
+            ),
+            TitleHit::Drag,
+            "a plate band has nothing but drag surface"
+        );
+    }
+}
+
+#[test]
+fn a_plate_bands_title_centres_and_a_windows_does_not() {
+    let theme = Theme::dark();
+    let mut plate = TitleBar::plate();
+    plate.set_title("Edit");
+    let laid = plate.layout(TITLE_BOUNDS, Scale::ONE, &theme);
+    let leading = laid.title.left() - TITLE_BOUNDS.left();
+    let trailing = TITLE_BOUNDS.right() - laid.title.right();
+    assert!(
+        (leading - trailing).abs() <= 1,
+        "with no leading cluster to justify against, the title centres: \
+         {leading} vs {trailing}"
+    );
+
+    let mut window = TitleBar::new(furniture());
+    window.set_title("Edit");
+    let laid = window.layout(TITLE_BOUNDS, Scale::ONE, &theme);
+    assert_eq!(
+        laid.title.left(),
+        laid.drag.left(),
+        "a window's title stays justified against its leading cluster"
+    );
+}
+
+#[test]
+fn a_plate_band_drags_by_the_one_gesture_a_window_band_uses() {
+    let theme = Theme::dark();
+    let mut bar = TitleBar::plate();
+    let at = Point::new(TITLE_BOUNDS.left() + 4, TITLE_BOUNDS.top() + 2);
+    assert_eq!(
+        bar.on_pointer(
+            &moved(at.x, at.y),
+            TITLE_BOUNDS,
+            Scale::ONE,
+            &theme,
+            &mut sink()
+        ),
+        None
+    );
+    assert_eq!(
+        bar.on_pointer(&PRESS, TITLE_BOUNDS, Scale::ONE, &theme, &mut sink()),
+        Some(TitleBarEvent::Activate),
+        "the press takes the gesture, exactly as on a window band"
+    );
+    let far = Point::new(at.x + 40, at.y + 20);
+    assert_eq!(
+        bar.on_pointer(
+            &moved(far.x, far.y),
+            TITLE_BOUNDS,
+            Scale::ONE,
+            &theme,
+            &mut sink()
+        ),
+        Some(TitleBarEvent::DragBegin)
+    );
+    assert_eq!(
+        bar.on_pointer(&RELEASE, TITLE_BOUNDS, Scale::ONE, &theme, &mut sink()),
+        Some(TitleBarEvent::DragEnd)
+    );
+}
+
+#[test]
+fn a_plate_bands_title_is_bounded_like_a_windows() {
+    let mut plate = TitleBar::plate();
+    let mut window = TitleBar::new(furniture());
+    let hostile = "a\u{1b}[2Jb\nc";
+    plate.set_title(hostile);
+    window.set_title(hostile);
+    assert_eq!(
+        plate.title(),
+        window.title(),
+        "one untrusted-label bounding, not two"
+    );
+    assert!(!plate.title().contains('\u{1b}'));
+}
+
+#[test]
+fn a_plate_band_takes_no_keyboard_focus_it_has_nothing_to_focus() {
+    let theme = Theme::dark();
+    let mut bar = TitleBar::plate();
+    for key in [NamedKey::Right, NamedKey::Left, NamedKey::Enter] {
+        assert_eq!(
+            bar.on_key(
+                Key::Named(key),
+                TITLE_BOUNDS,
+                Scale::ONE,
+                &theme,
+                &mut sink()
+            ),
+            None
+        );
+    }
 }

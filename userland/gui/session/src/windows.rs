@@ -21,16 +21,21 @@ use alloc::vec::Vec;
 
 use tairix_abi::desktop::DesktopInfo;
 use tairix_abi::driver::display::{DamageRect, DisplayMode};
-use tairix_abi::window_ipc::{AppBar, WindowEvent};
+use tairix_abi::window_ipc::{
+    AppBar, AppMenu, AppMenuItemId, MenuAnchor, MenuRefusal, WindowEvent,
+};
 use tairix_abi::{Errno, ProcId};
+use tairix_controls::PlateSide;
 use tairix_display::winframe;
 use tairix_icon::{ArtworkOutcome, IconKind, IconRequest};
 use tairix_log::EventId;
+use tairix_taskbar::menu::info_facts;
 use tairix_window::WindowSizing;
 use tairix_wm::{Color, Compositor, Point, Rect, Surface, WindowControlKind, WindowId};
 
 use crate::apps::{AppBarBridge, BUNDLE_RUN_SUFFIX};
 use crate::launch::LaunchTable;
+use crate::menu::{ChainGeometry, ChainModel, ChainOwner, MenuChain, ModelRefused, PanelRefused};
 use crate::picker::PickerSlot;
 use crate::shell::DesktopShell;
 
@@ -116,6 +121,10 @@ struct WindowRecord {
     parent: Option<WindowId>,
     /// How far this window has got towards being seen.
     first_frame: FirstFrame,
+    /// The process the kernel attested opened this window (a popup inherits
+    /// its parent's). What a menu chain's information row resolves its
+    /// attested identity from.
+    owner: ProcId,
 }
 
 /// The session's bookkeeping for every live served window.
@@ -252,16 +261,22 @@ impl SessionWindows {
 
     /// Record the freshly opened window `ipc`, shown as `wm` and owned by
     /// `parent` when it is a popup.
-    fn insert(&mut self, ipc: u64, wm: WindowId, parent: Option<WindowId>) {
+    fn insert(&mut self, ipc: u64, wm: WindowId, parent: Option<WindowId>, owner: ProcId) {
         self.records.insert(
             ipc,
             WindowRecord {
                 wm,
                 parent,
                 first_frame: FirstFrame::Awaited,
+                owner,
             },
         );
         self.by_wm.insert(wm, ipc);
+    }
+
+    /// The process the kernel attested owns the served window `ipc`.
+    fn owner_of(&self, ipc: u64) -> Option<ProcId> {
+        self.records.get(&ipc).map(|record| record.owner)
     }
 
     /// Forget the window `ipc`, returning its record when it was live.
@@ -475,6 +490,49 @@ pub struct ShellWindowHost<'a> {
     /// ([`AppBarService`](crate::apps::AppBarService) in production): a
     /// validated icon-bar declaration lands here.
     pub apps: &'a mut dyn AppBarBridge,
+    /// The seat's one menu chain: a validated `OpenMenu` brings it up and a
+    /// validated `CreateMenuPanel` hangs a surface on it.
+    pub menu: &'a mut MenuChain,
+    /// Whether a surface a menu may not displace holds the seat — the screen
+    /// lock, the trusted picker, or a system-modal prompt. An accepted open is
+    /// answered `SeatBusy` rather than drawing over one.
+    ///
+    /// Resolved by the session, which owns all of them; the host is handed the
+    /// answer rather than reaching for each in turn.
+    pub seat_held: bool,
+}
+
+impl ShellWindowHost<'_> {
+    /// Why the seat cannot carry a chain right now, if it cannot.
+    fn seat_refusal(&self) -> Option<MenuRefusal> {
+        if self.compositor.screen_rect().is_empty() {
+            return Some(MenuRefusal::NoDisplay);
+        }
+        // A menu must never appear over a lock screen, the trusted picker, or
+        // a system-modal prompt: those hold the seat's input, and drawing over
+        // one would let an application put its own rows in front of a
+        // password field.
+        if self.seat_held {
+            return Some(MenuRefusal::SeatBusy);
+        }
+        None
+    }
+}
+
+/// The scale, theme and screen every menu-chain geometry answer resolves at.
+///
+/// Taken from the shell and the compositor rather than a copy of its own, so
+/// a chain is placed at exactly the density and theme the desktop is drawn at.
+/// A free function rather than a method, because the caller holds the chain
+/// mutably while it reads these.
+#[must_use]
+pub fn chain_geometry<'a>(shell: &'a DesktopShell, compositor: &Compositor) -> ChainGeometry<'a> {
+    ChainGeometry {
+        screen: compositor.screen_rect(),
+        scale: compositor.scale(),
+        theme: shell.session().active_theme(),
+        epoch: compositor.chrome_epoch(),
+    }
 }
 
 impl tairix_window::WindowHost for ShellWindowHost<'_> {
@@ -529,7 +587,7 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         // and so are never released: there would be no client to ask.
         self.compositor.set_app_presented(wm, true);
         self.windows.opened += 1;
-        self.windows.insert(window_id, wm, None);
+        self.windows.insert(window_id, wm, None, owner);
         // Who owns this window is the kernel's answer, kept for the
         // identification pass that runs once this request is served.
         self.windows.opened_owners.push((wm, owner));
@@ -550,6 +608,9 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         // has no window for refuses the popup rather than placing it
         // somewhere invented.
         let Some(parent) = self.windows.wm_id(parent_window_id) else {
+            return Err(Errno::NotFound);
+        };
+        let Some(owner) = self.windows.owner_of(parent_window_id) else {
             return Err(Errno::NotFound);
         };
         let Some(client) = self.compositor.window_client_rect(parent) else {
@@ -578,7 +639,7 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
             return Err(Errno::NotFound);
         };
         self.compositor.set_app_presented(wm, true);
-        self.windows.insert(window_id, wm, Some(parent));
+        self.windows.insert(window_id, wm, Some(parent), owner);
         Ok(())
     }
 
@@ -685,6 +746,10 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
     }
 
     fn window_closed(&mut self, window_id: u64) {
+        // A chain is scoped by the window that asked for it, so the window
+        // going means the chain goes; its answer is queued for the session's
+        // one delivery point.
+        self.menu.dismiss_owner(window_id);
         // A window that dies mid-pick takes its picker down with it: the
         // engine already dropped the pending pick with the record, so no
         // conclusion is (or could be) delivered.
@@ -700,6 +765,106 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
                 self.shell.close_window(self.compositor, record.wm)
             };
         }
+    }
+
+    fn menu_open_requested(
+        &mut self,
+        window_id: u64,
+        open_id: u64,
+        anchor: MenuAnchor,
+        menu: &AppMenu,
+    ) -> Result<(), Errno> {
+        // An application is never told where its window sits, so the anchor it
+        // states is window-local and resolving it against the live client
+        // origin is the session's job. A window the session cannot place
+        // refuses the chain rather than anchoring it somewhere invented.
+        let Some(wm) = self.windows.wm_id(window_id) else {
+            return Err(Errno::NotFound);
+        };
+        let Some(client) = self.compositor.window_client_rect(wm) else {
+            return Err(Errno::NotFound);
+        };
+        let anchor = Rect::new(
+            client.left().saturating_add(anchor.x()),
+            client.top().saturating_add(anchor.y()),
+            anchor.width_px(),
+            anchor.height_px(),
+        );
+        // A seat condition is not a bad request: the open is accepted, so the
+        // application is owed its one answer, and it gets the reason instead
+        // of a chain. Refusing the call would spend no id and leave the
+        // application unable to tell "the desktop cannot" from "I asked
+        // wrongly".
+        let owner = ChainOwner::Window { window_id, open_id };
+        if let Some(reason) = self.seat_refusal() {
+            self.menu.refuse(owner, reason);
+            return Ok(());
+        }
+        // The information row's text is the session's, from the bundle's
+        // signed manifest, so an application cannot state an identity that is
+        // not its own — and a process with nothing attesting one gets no
+        // information row at all rather than a fabricated panel.
+        let facts = self
+            .windows
+            .owner_of(window_id)
+            .and_then(|owner| self.apps.attested_identity(owner))
+            .map(|identity| info_facts(&identity));
+        let model = ChainModel::from_app_menu(menu.title(), menu, facts.as_ref());
+        let geom = chain_geometry(self.shell, self.compositor);
+        self.menu
+            .open(owner, model, anchor, PlateSide::Trailing, 0, &geom)
+            .map_err(|ModelRefused::NoRows| Errno::OutOfRange)
+    }
+
+    fn menu_panel_opened(
+        &mut self,
+        window_id: u64,
+        owner_window_id: u64,
+        open_id: u64,
+        row: AppMenuItemId,
+        surface: &DisplayMode,
+    ) -> Result<(), Errno> {
+        let Some(parent) = self.windows.wm_id(owner_window_id) else {
+            return Err(Errno::NotFound);
+        };
+        let Some(owner) = self.windows.owner_of(owner_window_id) else {
+            return Err(Errno::NotFound);
+        };
+        // The chain decides whether the row is real and whether the pointer
+        // has moved on since the arrival went out; the engine retains neither
+        // the model nor the pointer, so only this can refuse a late surface.
+        let geom = chain_geometry(self.shell, self.compositor);
+        let placed = self
+            .menu
+            .place_panel(
+                window_id,
+                open_id,
+                row,
+                surface.width_px,
+                surface.height_px,
+                &geom,
+            )
+            .map_err(|refused| match refused {
+                PanelRefused::NoExtent => Errno::LengthOutOfRange,
+                PanelRefused::NoChain | PanelRefused::TooLate => Errno::NotFound,
+            })?;
+        let Some(content) =
+            Surface::filled(surface.width_px, surface.height_px, OPEN_FILL.premultiply())
+        else {
+            return Err(Errno::LengthOutOfRange);
+        };
+        // Undecorated and transient like a popup: an attached window wears the
+        // plate band the chain draws, not the window manager's furniture, and
+        // it rides its owner's stacking.
+        let Some(wm) =
+            self.shell
+                .open_popup_window(self.compositor, parent, placed.origin, content)
+        else {
+            return Err(Errno::NotFound);
+        };
+        self.compositor.set_app_presented(wm, true);
+        self.windows.insert(window_id, wm, Some(parent), owner);
+        Ok(())
     }
 
     fn pick_requested(&mut self, window_id: u64) -> Result<(), Errno> {
@@ -851,6 +1016,10 @@ mod tests {
             Ok(())
         }
 
+        fn attested_identity(&self, _owner: ProcId) -> Option<tairix_taskbar::AppIdentity> {
+            None
+        }
+
         fn app_bar_withdrawn(&mut self, owner: ProcId) {
             self.withdrawn.push(owner);
         }
@@ -870,6 +1039,8 @@ mod tests {
                 windows: &mut windows,
                 picker: &mut picker,
                 apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
             };
             host.window_opened(
                 window_owner(1),
@@ -925,6 +1096,8 @@ mod tests {
                     windows: &mut windows,
                     picker: &mut picker,
                     apps: &mut RecordingBar::default(),
+                    menu: &mut MenuChain::new(),
+                    seat_held: false,
                 };
                 host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                     .expect("opens");
@@ -974,6 +1147,8 @@ mod tests {
                 windows: &mut windows,
                 picker: &mut picker,
                 apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
             };
             host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
@@ -988,6 +1163,8 @@ mod tests {
                 windows: &mut windows,
                 picker: &mut picker,
                 apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
             };
             host.window_presented(1, &m, &[0u8; 4 * 4 * 4], whole(&m))
                 .expect("presents");
@@ -1003,6 +1180,8 @@ mod tests {
                 windows: &mut windows,
                 picker: &mut picker,
                 apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
             };
             host.window_presented(1, &m, &[0u8; 4 * 4 * 4], whole(&m))
                 .expect("presents again");
@@ -1022,6 +1201,8 @@ mod tests {
                 windows: &mut windows,
                 picker: &mut picker,
                 apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
             };
             host.window_presented(1, &m, &[0u8; 4 * 4 * 4], whole(&m))
                 .expect("re-attached and presents");
@@ -1050,6 +1231,8 @@ mod tests {
                 windows: &mut windows,
                 picker: &mut picker,
                 apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
             };
             host.window_opened(owner, 1, &m, "one", WindowSizing::default())
                 .expect("opens");
@@ -1067,6 +1250,8 @@ mod tests {
                 windows: &mut windows,
                 picker: &mut picker,
                 apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
             };
             host.window_presented(2, &m, &[0u8; 4 * 4 * 4], whole(&m))
                 .expect("presents");
@@ -1090,6 +1275,8 @@ mod tests {
                 windows: &mut windows,
                 picker: &mut picker,
                 apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
             };
             host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
@@ -1130,6 +1317,8 @@ mod tests {
             windows: &mut windows,
             picker: &mut picker,
             apps: &mut RecordingBar::default(),
+            menu: &mut MenuChain::new(),
+            seat_held: false,
         };
         let m = mode(4, 4, DisplayFormat::Rgba8888);
         host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
@@ -1198,6 +1387,8 @@ mod tests {
                 windows: &mut windows,
                 picker: &mut picker,
                 apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
             };
             host.window_opened(window_owner(1), 1, &m, "w", RESIZABLE)
                 .expect("opens");
@@ -1228,6 +1419,8 @@ mod tests {
             windows: &mut windows,
             picker: &mut picker,
             apps: &mut RecordingBar::default(),
+            menu: &mut MenuChain::new(),
+            seat_held: false,
         };
         let mut next = frame;
         next[0..4].copy_from_slice(&[0xFF, 0x00, 0x00, 0xFF]);
@@ -1273,6 +1466,8 @@ mod tests {
                 windows: &mut windows,
                 picker: &mut picker,
                 apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
             };
             host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
@@ -1289,6 +1484,8 @@ mod tests {
                 windows: &mut windows,
                 picker: &mut picker,
                 apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
             };
             host.window_presented(1, &m, &frame, full)
                 .expect("the repeat present is accepted");
@@ -1322,6 +1519,8 @@ mod tests {
                 windows: &mut windows,
                 picker: &mut picker,
                 apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
             };
             host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
@@ -1341,6 +1540,8 @@ mod tests {
                 windows: &mut windows,
                 picker: &mut picker,
                 apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
             };
             host.window_presented(1, &m, &frame, full)
                 .expect("the second present lands");
@@ -1370,6 +1571,8 @@ mod tests {
                 windows: &mut windows,
                 picker: &mut picker,
                 apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
             };
             host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
@@ -1414,6 +1617,8 @@ mod tests {
             windows: &mut windows,
             picker: &mut picker,
             apps: &mut RecordingBar::default(),
+            menu: &mut MenuChain::new(),
+            seat_held: false,
         };
         let m = mode(8, 8, DisplayFormat::Rgba8888);
         host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
@@ -1439,6 +1644,8 @@ mod tests {
                 windows: &mut windows,
                 picker: &mut picker,
                 apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
             };
             host.window_opened(
                 window_owner(1),
@@ -1481,6 +1688,8 @@ mod tests {
                 windows: &mut windows,
                 picker: &mut picker,
                 apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
             };
             open_one_sized(&mut host, 3, RESIZABLE)
         };
@@ -1531,6 +1740,8 @@ mod tests {
                 windows: &mut windows,
                 picker: &mut picker,
                 apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
             };
             host.window_opened(
                 window_owner(1),
@@ -1555,7 +1766,7 @@ mod tests {
                 .title_bar()
                 .layout(title_rect, scale, compositor.theme());
             let rect = layout
-                .controls
+                .controls()
                 .iter()
                 .find(|(k, _)| *k == kind)
                 .expect("the control has a slot")
@@ -1731,6 +1942,8 @@ mod tests {
                 windows: &mut windows,
                 picker: &mut picker,
                 apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
             };
             (
                 open_one_sized(
@@ -1781,6 +1994,8 @@ mod tests {
                 windows: &mut windows,
                 picker: &mut picker,
                 apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
             };
             let wm = open_one(&mut host, 7);
             // A compositor window the session does not track (e.g. the taskbar
@@ -1828,6 +2043,8 @@ mod tests {
                 windows: &mut windows,
                 picker: &mut picker,
                 apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
             };
             open_one(&mut host, 7)
         };
@@ -1883,6 +2100,8 @@ mod tests {
             windows: &mut windows,
             picker: &mut picker,
             apps: &mut RecordingBar::default(),
+            menu: &mut MenuChain::new(),
+            seat_held: false,
         };
         let first = open_one(&mut host, 7);
         let second = open_one(&mut host, 8);
@@ -1937,6 +2156,8 @@ mod tests {
                 windows: &mut windows,
                 picker: &mut picker,
                 apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
             };
             open_one(&mut host, 7)
         };
@@ -1970,6 +2191,8 @@ mod tests {
                 windows: &mut windows,
                 picker: &mut picker,
                 apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
             };
             let back = open_one(&mut host, 7);
             let front = open_one(&mut host, 9);
@@ -2010,6 +2233,8 @@ mod tests {
                 windows: &mut windows,
                 picker: &mut picker,
                 apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
             };
             open_one(&mut host, 7)
         };
@@ -2078,6 +2303,8 @@ mod tests {
             windows: &mut windows,
             picker: &mut picker,
             apps: &mut RecordingBar::default(),
+            menu: &mut MenuChain::new(),
+            seat_held: false,
         };
         let wm = open_one(&mut host, 7);
         // A resize moves the client geometry the compositor draws and lays
@@ -2105,6 +2332,8 @@ mod tests {
                 windows: &mut windows,
                 picker: &mut picker,
                 apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
             };
             let wm = open_one(&mut host, 7);
             host.window_retitled(7, "Files - Documents")
@@ -2145,6 +2374,8 @@ mod tests {
             windows: &mut windows,
             picker: &mut picker,
             apps: &mut RecordingBar::default(),
+            menu: &mut MenuChain::new(),
+            seat_held: false,
         };
         let m = mode(8, 8, DisplayFormat::Rgba8888);
         host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
@@ -2181,6 +2412,8 @@ mod tests {
                 windows: &mut windows,
                 picker: &mut picker,
                 apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
             };
             (
                 open_one_sized(&mut host, 1, WindowSizing::default()),
@@ -2292,6 +2525,8 @@ mod tests {
                 windows: &mut windows,
                 picker: &mut picker,
                 apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
             };
             open_one_sized(&mut host, 1, WindowSizing::default())
         };
@@ -2345,6 +2580,8 @@ mod tests {
                 windows: &mut windows,
                 picker: &mut picker,
                 apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
             };
             open_one_sized(&mut host, 1, WindowSizing::default())
         };

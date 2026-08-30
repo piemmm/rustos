@@ -48,6 +48,7 @@ use tairix_wm::{
 };
 
 use crate::artwork::ArtworkDesk;
+use crate::menu::MenuChain;
 use crate::shell::SettleWork;
 use crate::{
     deliver_pending_open, desktop_info, drop_is_noteworthy, ensure_switchboard, load_icon_set,
@@ -3953,6 +3954,8 @@ fn the_window_host_relays_a_declaration_and_its_withdrawal() {
             windows: &mut windows,
             picker: &mut picker,
             apps: &mut apps,
+            menu: &mut MenuChain::new(),
+            seat_held: false,
         };
         tairix_window::WindowHost::app_bar_declared(&mut host, owner, &app_bar(true))
             .expect("the session lists it");
@@ -3970,6 +3973,8 @@ fn the_window_host_relays_a_declaration_and_its_withdrawal() {
             windows: &mut windows,
             picker: &mut picker,
             apps: &mut apps,
+            menu: &mut MenuChain::new(),
+            seat_held: false,
         };
         tairix_window::WindowHost::app_bar_withdrawn(&mut host, owner);
     }
@@ -4410,6 +4415,7 @@ fn close_command_pointer(comp: &Compositor, window: WindowId) -> PointerState {
         .expect("the window is decorated")
         .title_bar()
         .control(WindowControlKind::Close)
+        .expect("a window band seats every command")
         .state()
         .pointer
 }
@@ -4433,10 +4439,10 @@ fn moving_the_pointer_onto_the_bar_unlights_a_windows_title_bar() {
     let cell = frame
         .title_bar()
         .layout(band, comp.scale(), &theme)
-        .controls
-        .into_iter()
+        .controls()
+        .iter()
         .find(|(kind, _)| *kind == WindowControlKind::Close)
-        .map(|(_, rect)| rect)
+        .map(|(_, rect)| *rect)
         .expect("the frame seats a Close command");
     let on_close = centre(cell);
 
@@ -8720,6 +8726,8 @@ fn desktop_info_reports_compositor_state() {
         windows: &mut windows,
         picker: &mut picker,
         apps: &mut apps,
+        menu: &mut MenuChain::new(),
+        seat_held: false,
     };
 
     // What an application is actually handed, whole: the record is one
@@ -8766,6 +8774,8 @@ fn with_window_host<R>(
         windows,
         picker: &mut picker,
         apps: &mut apps,
+        menu: &mut MenuChain::new(),
+        seat_held: false,
     };
     body(&mut host)
 }

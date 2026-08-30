@@ -47,6 +47,135 @@ pub enum MenuAction {
     Dismissed,
 }
 
+/// Which side of an anchor region a plate opens on, before any flip.
+///
+/// Named for the plate's position relative to the anchor: a submenu opens
+/// [`Trailing`](Self::Trailing) of its parent plate, a menu above a
+/// bottom-edge icon bar opens [`Above`](Self::Above) its slot.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum PlateSide {
+    /// Above the anchor, growing upward.
+    Above,
+    /// Below the anchor, growing downward.
+    Below,
+    /// Before the anchor, growing leftward.
+    Leading,
+    /// After the anchor, growing rightward.
+    Trailing,
+}
+
+impl PlateSide {
+    /// Whether this side displaces the plate horizontally.
+    const fn horizontal(self) -> bool {
+        matches!(self, Self::Leading | Self::Trailing)
+    }
+
+    /// Whether this side puts the plate past the anchor's far edge rather
+    /// than before its near one.
+    const fn grows_forward(self) -> bool {
+        matches!(self, Self::Below | Self::Trailing)
+    }
+}
+
+/// Where a plate `width` × `height` sits when it opens against `anchor`.
+///
+/// The one placement rule every menu plate and every surface hanging where a
+/// plate would goes through: a root plate at a press point, a slot-anchored
+/// icon-bar menu, a submenu beside its parent, and an attached window all
+/// differ only in the anchor region, the side, and the clearance — never in
+/// the arithmetic. Two rules would drift, and did.
+///
+/// The plate is first bounded to `viewport` — a plate larger than the screen
+/// is drawn smaller, never off the edge — then opens on `side` with `gap`
+/// pixels of clearance from the anchor's far edge, flips to the opposite side
+/// when that would leave `viewport` (and the opposite side would not), and is
+/// finally slid along the cross axis and clamped inside `viewport` by the
+/// shared [`Rect::clamped_onto`]. Its near edge on the cross axis aligns with
+/// the anchor's, so a submenu hangs at its parent row's top. A zero-extent
+/// anchor is the point case, and a `gap` of zero is the edge-adjacency a chain
+/// needs so travelling from a parent row into its own child crosses no dead
+/// space.
+///
+/// When neither side has room the roomier one wins, so an oversized plate is
+/// placed beside its anchor rather than over it. A degenerate (zero-sized)
+/// viewport still yields a drawable, if clipped, rectangle.
+#[must_use]
+pub fn plate_rect(
+    width: u32,
+    height: u32,
+    anchor: Rect,
+    side: PlateSide,
+    gap: u32,
+    viewport: Rect,
+) -> Rect {
+    let width = width.clamp(1, viewport.width.max(1));
+    let height = height.clamp(1, viewport.height.max(1));
+    let (extent, span) = if side.horizontal() {
+        (
+            width,
+            AxisSpan {
+                near: anchor.left(),
+                far: anchor.right(),
+                low: viewport.left(),
+                high: viewport.right(),
+            },
+        )
+    } else {
+        (
+            height,
+            AxisSpan {
+                near: anchor.top(),
+                far: anchor.bottom(),
+                low: viewport.top(),
+                high: viewport.bottom(),
+            },
+        )
+    };
+    let placed = span.place(extent, gap, side.grows_forward());
+    let rect = if side.horizontal() {
+        Rect::new(placed, anchor.top(), width, height)
+    } else {
+        Rect::new(anchor.left(), placed, width, height)
+    };
+    rect.clamped_onto(viewport)
+}
+
+/// The anchor and viewport edges [`plate_rect`] resolves one axis against.
+struct AxisSpan {
+    /// The anchor's low edge on this axis.
+    near: i32,
+    /// The anchor's high edge on this axis.
+    far: i32,
+    /// The viewport's low edge.
+    low: i32,
+    /// The viewport's high edge.
+    high: i32,
+}
+
+impl AxisSpan {
+    /// Where a plate of `extent` starts on this axis, preferring the side
+    /// `forward` names and flipping when only the other has room.
+    fn place(&self, extent: u32, gap: u32, forward: bool) -> i32 {
+        let ahead = self.far.saturating_add_unsigned(gap);
+        let behind = self
+            .near
+            .saturating_sub_unsigned(gap)
+            .saturating_sub_unsigned(extent);
+        let ahead_room = i64::from(self.high) - i64::from(ahead) - i64::from(extent);
+        let behind_room = i64::from(behind) - i64::from(self.low);
+        let (preferred, preferred_room, other, other_room) = if forward {
+            (ahead, ahead_room, behind, behind_room)
+        } else {
+            (behind, behind_room, ahead, ahead_room)
+        };
+        if preferred_room >= 0 || (other_room < 0 && preferred_room >= other_room) {
+            preferred
+        } else {
+            other
+        }
+    }
+}
+
 /// The mark a [`MenuItem`] draws in its leading icon column to state a
 /// setting the row carries.
 ///
@@ -657,16 +786,14 @@ impl Menu {
     }
 
     /// The bounds this menu occupies when opened at `anchor` (e.g. a
-    /// right-click point), clamped so the whole menu stays inside `viewport`.
+    /// right-click point), placed by the one shared rule
+    /// ([`plate_rect`]) and clamped inside `viewport`.
     ///
-    /// A popup menu is opened by more than one owner — the directory browser's
-    /// right-click menu and a terminal's are both plain [`Menu`]s — and every
-    /// one of them needs the same answer to "where does the menu go", so the
-    /// rule lives once, here, rather than being re-derived by each caller.
-    /// The size comes from [`preferred_width`](Self::preferred_width) and
-    /// [`preferred_height`](Self::preferred_height) clamped to the viewport;
-    /// the top-left starts at `anchor` and shifts left/up only as far as
-    /// needed to fit, never past the viewport's own origin. A degenerate
+    /// The point case of that rule: a zero-extent anchor region opening on
+    /// its trailing side, so the plate's top-left starts at the point and
+    /// flips leftward when the screen edge leaves no room. The size comes
+    /// from [`preferred_width`](Self::preferred_width) and
+    /// [`preferred_height`](Self::preferred_height). A degenerate
     /// (zero-sized) viewport still yields a drawable, if clipped, rectangle
     /// rather than panicking.
     #[must_use]
@@ -677,19 +804,14 @@ impl Menu {
         scale: Scale,
         theme: &Theme,
     ) -> Rect {
-        let width = self
-            .preferred_width(scale, theme)
-            .clamp(1, viewport.width.max(1));
-        let height = self
-            .preferred_height(scale, theme)
-            .clamp(1, viewport.height.max(1));
-        let origin_x = viewport.origin.x;
-        let origin_y = viewport.origin.y;
-        let max_x = origin_x.saturating_add(to_i32(viewport.width.saturating_sub(width)));
-        let max_y = origin_y.saturating_add(to_i32(viewport.height.saturating_sub(height)));
-        let x = anchor.x.clamp(origin_x, max_x.max(origin_x));
-        let y = anchor.y.clamp(origin_y, max_y.max(origin_y));
-        Rect::new(x, y, width, height)
+        plate_rect(
+            self.preferred_width(scale, theme),
+            self.preferred_height(scale, theme),
+            Rect::new(anchor.x, anchor.y, 0, 0),
+            PlateSide::Trailing,
+            0,
+            viewport,
+        )
     }
 
     /// The inner content rectangle (inside the plate rim) as surface pixels.

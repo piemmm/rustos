@@ -40,7 +40,7 @@ use crate::paint::{
 };
 use crate::state::{
     ControlDisposition, ControlState, PlateSeating, PointerState, RenderInvariant, SizeAction,
-    WindowActivationState, WindowControlKind, WindowFurnitureState,
+    WindowActivationState, WindowControlKind, WindowFurnitureState, WindowSizeState,
 };
 
 // --- command glyphs -------------------------------------------------------
@@ -396,7 +396,7 @@ impl WindowControl {
     /// Set the size action a [`WindowControlKind::SizeToggle`] should show.
     ///
     /// Ignored by the other kinds. The window manager sets this from the
-    /// window's [`WindowSizeState`](crate::WindowSizeState) so the glyph and
+    /// window's [`WindowSizeState`] so the glyph and
     /// accessible name describe the *next* action (spec §11.22).
     pub fn set_size_action(&mut self, next: SizeAction) {
         self.next_size = next;
@@ -651,6 +651,40 @@ pub(crate) const CONTROL_ORDER: [WindowControlKind; 4] = [
 /// between them is the same whichever end of the bar it is measured from.
 const CLUSTER_COUNT: u32 = 2;
 
+/// Which commands a title band seats.
+///
+/// A window's band seats the four window commands; a menu plate's seats
+/// none. Two
+/// properties of a plate's band follow from that emptiness rather than from
+/// knobs of their own: with no clusters the drag span is the whole band, and
+/// with no leading cluster to justify against the title centres.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum TitleBarCommands {
+    /// The four window commands, in their two corner clusters.
+    #[default]
+    Window,
+    /// None: a handle and an identification, nothing to press.
+    Empty,
+}
+
+impl TitleBarCommands {
+    /// How many of the stored controls this set actually seats.
+    const fn seated(self) -> usize {
+        match self {
+            Self::Window => CONTROL_ORDER.len(),
+            Self::Empty => 0,
+        }
+    }
+
+    /// How many controls each corner cluster holds.
+    const fn per_cluster(self) -> u32 {
+        match self {
+            Self::Window => CLUSTER_COUNT,
+            Self::Empty => 0,
+        }
+    }
+}
+
 /// The scaled lengths a title bar's command clusters are built from, so
 /// laying a bar out and asking for the narrowest band it fits in read the
 /// same arithmetic.
@@ -676,15 +710,18 @@ struct ClusterMetrics {
 }
 
 impl ClusterMetrics {
-    /// The cluster lengths for a band `side` pixels tall.
-    fn of(scale: Scale, theme: &Theme, side: u32) -> Self {
+    /// The cluster lengths for a band `side` pixels tall seating `commands`.
+    ///
+    /// A band that seats none has no cluster width at all, which is what
+    /// leaves its whole span draggable.
+    fn of(scale: Scale, theme: &Theme, side: u32, commands: TitleBarCommands) -> Self {
         let metrics = theme.metrics();
         let extent = side.max(1);
         Self {
             extent,
             span_gap: scale.scale_length(metrics.control_gap),
             identity_gap: scale.scale_length(metrics.control_inset),
-            cluster_w: extent.saturating_mul(CLUSTER_COUNT),
+            cluster_w: extent.saturating_mul(commands.per_cluster()),
         }
     }
 }
@@ -771,9 +808,11 @@ pub(crate) const HUE_SATURATION_INACTIVE: u8 = 150;
 /// testing over one shared geometry (so they cannot diverge).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TitleBarLayout {
-    /// The control rects in the canonical command order, each paired with its
-    /// command: the leading cluster first, then the trailing one.
-    pub controls: [(WindowControlKind, Rect); 4],
+    /// Storage for the control rects; only the first
+    /// [`seated`](Self::seated) of them are laid out.
+    slots: [(WindowControlKind, Rect); CONTROL_ORDER.len()],
+    /// How many of `slots` this band seats.
+    seated: usize,
     /// The identity icon's square slot, leading the identity group.
     /// [`Rect::EMPTY`] when the bar carries no identity, or when the span
     /// between the clusters leaves no room for the slot.
@@ -795,6 +834,16 @@ pub struct TitleBarLayout {
     /// grabbable patch of the bar on screen wants the part it can be sure of.
     /// Empty when the band is too narrow to leave a span at all.
     pub drag: Rect,
+}
+
+impl TitleBarLayout {
+    /// The laid-out control rects in canonical command order, each paired
+    /// with its command: the leading cluster first, then the trailing one.
+    /// Empty for a band that seats no commands.
+    #[must_use]
+    pub fn controls(&self) -> &[(WindowControlKind, Rect)] {
+        &self.slots[..self.seated]
+    }
 }
 
 /// Bound an untrusted window title/identity string: cap its length and replace
@@ -842,7 +891,8 @@ fn sanitize_label(text: &str) -> String {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TitleBar {
     furniture: WindowFurnitureState,
-    controls: [WindowControl; 4],
+    commands: TitleBarCommands,
+    controls: [WindowControl; CONTROL_ORDER.len()],
     identity: Option<IconKind>,
     /// The hue the band washes with, taken from the identity artwork's dominant
     /// colour by whoever installed it. `None` leaves the band plain.
@@ -865,6 +915,31 @@ impl TitleBar {
     /// commands seated in the two corner clusters.
     #[must_use]
     pub fn new(furniture: WindowFurnitureState) -> Self {
+        Self::seating(furniture, TitleBarCommands::Window)
+    }
+
+    /// A title band that seats no commands: a centred title over a band that
+    /// drags end to end.
+    ///
+    /// A menu plate's band. It is this same bar rather than a second control,
+    /// so the drag gesture and the untrusted-label bounding have one
+    /// implementation. A plate is never inactive, never maximized, and is
+    /// moved only by its own band, which is what its furniture state says.
+    #[must_use]
+    pub fn plate() -> Self {
+        Self::seating(
+            WindowFurnitureState {
+                activation: WindowActivationState::Active,
+                size: WindowSizeState::Restored,
+                movable: true,
+                resizable: false,
+            },
+            TitleBarCommands::Empty,
+        )
+    }
+
+    /// A title bar in `furniture` seating `commands`.
+    fn seating(furniture: WindowFurnitureState, commands: TitleBarCommands) -> Self {
         let controls = [
             WindowControl::new(CONTROL_ORDER[0]),
             WindowControl::new(CONTROL_ORDER[1]),
@@ -873,6 +948,7 @@ impl TitleBar {
         ];
         let mut bar = Self {
             furniture,
+            commands,
             controls,
             identity: None,
             identity_hue: None,
@@ -897,7 +973,8 @@ impl TitleBar {
     fn apply_furniture(&mut self) {
         let active = self.furniture.activation != WindowActivationState::Inactive;
         let next = self.furniture.size_action();
-        for control in &mut self.controls {
+        let seated = self.commands.seated();
+        for control in &mut self.controls[..seated] {
             control.set_active_frame(active);
             if control.kind() == WindowControlKind::SizeToggle {
                 control.set_size_action(next);
@@ -1001,6 +1078,15 @@ impl TitleBar {
         &self.app_name
     }
 
+    /// A title band's height at this scale and theme, in physical pixels.
+    ///
+    /// The one reading of the metric, so a band drawn by the window frame and
+    /// one drawn as a menu plate's are the same depth.
+    #[must_use]
+    pub fn band_height(scale: Scale, theme: &Theme) -> u32 {
+        scale.scale_length(theme.metrics().title_bar_height)
+    }
+
     /// The narrowest band that seats both command clusters and still leaves a
     /// drag surface between them, in physical pixels.
     ///
@@ -1015,24 +1101,46 @@ impl TitleBar {
     /// [`layout`](Self::layout), taken from the same frame metrics rather than
     /// re-scaled here, so the floor and the layout at it cannot disagree.
     #[must_use]
-    pub fn min_band_width(scale: Scale, theme: &Theme) -> u32 {
+    pub fn min_band_width(commands: TitleBarCommands, scale: Scale, theme: &Theme) -> u32 {
         let (_, band_h, _) = WindowFrame::edges(scale, theme);
-        let m = ClusterMetrics::of(scale, theme, band_h);
+        let m = ClusterMetrics::of(scale, theme, band_h, commands);
         m.cluster_w
             .saturating_mul(2)
             .saturating_add(m.span_gap.saturating_mul(2))
             .saturating_add(m.extent)
     }
 
-    /// A shared reference to the control for `kind`.
+    /// Which commands this band seats.
     #[must_use]
-    pub fn control(&self, kind: WindowControlKind) -> &WindowControl {
-        &self.controls[control_index(kind)]
+    pub const fn commands(&self) -> TitleBarCommands {
+        self.commands
+    }
+
+    /// A shared reference to the control for `kind`, or `None` on a band that
+    /// seats no commands — where there is no such control to report a state
+    /// for, and answering with an unseated one would be a lie.
+    #[must_use]
+    pub fn control(&self, kind: WindowControlKind) -> Option<&WindowControl> {
+        self.seated().get(control_index(kind))
     }
 
     /// A mutable reference to the control for `kind`, so the window manager can
-    /// set its authority/enabled/recovery state.
-    pub fn control_mut(&mut self, kind: WindowControlKind) -> &mut WindowControl {
+    /// set its authority/enabled/recovery state. `None` on a band that seats
+    /// no commands.
+    pub fn control_mut(&mut self, kind: WindowControlKind) -> Option<&mut WindowControl> {
+        let seated = self.commands.seated();
+        self.controls[..seated].get_mut(control_index(kind))
+    }
+
+    /// The controls this band actually seats, in canonical command order.
+    fn seated(&self) -> &[WindowControl] {
+        &self.controls[..self.commands.seated()]
+    }
+
+    /// The stored control for `kind`, seated or not.
+    ///
+    /// For the band's own laid-out slots, which name only seated commands.
+    fn stored_mut(&mut self, kind: WindowControlKind) -> &mut WindowControl {
         &mut self.controls[control_index(kind)]
     }
 
@@ -1046,7 +1154,7 @@ impl TitleBar {
             span_gap: g,
             identity_gap,
             cluster_w,
-        } = ClusterMetrics::of(scale, theme, bounds.height);
+        } = ClusterMetrics::of(scale, theme, bounds.height, self.commands);
 
         let leading_left = bounds.left();
         // A band too narrow for both clusters abuts them instead of stacking
@@ -1056,13 +1164,13 @@ impl TitleBar {
             (bounds.right() - to_i32(cluster_w)).max(leading_left + to_i32(cluster_w));
 
         let cell = Rect::new(0, 0, e, bounds.height);
-        let mut controls = [
+        let mut slots = [
             (CONTROL_ORDER[0], cell),
             (CONTROL_ORDER[1], cell),
             (CONTROL_ORDER[2], cell),
             (CONTROL_ORDER[3], cell),
         ];
-        for (i, slot) in controls.iter_mut().enumerate() {
+        for (i, slot) in slots.iter_mut().enumerate() {
             let i = u32::try_from(i).unwrap_or(0);
             let (cluster_left, within) = if i < CLUSTER_COUNT {
                 (leading_left, i)
@@ -1073,39 +1181,55 @@ impl TitleBar {
             slot.1 = Rect::new(x, bounds.top(), e, bounds.height);
         }
 
-        let span_left = leading_left + to_i32(cluster_w) + to_i32(g);
+        // With no clusters there is nothing to hold the span off, so it is the
+        // whole band and the identity group centres in it.
+        let bare = cluster_w == 0;
+        let inset = if bare { 0 } else { to_i32(g) };
+        let span_left = leading_left + to_i32(cluster_w) + inset;
         let span = Rect::new(
             span_left,
             bounds.top(),
-            to_u32(trailing_left - to_i32(g) - span_left),
+            to_u32(trailing_left - inset - span_left),
             bounds.height,
         );
-        let (icon, title) = self.seat_identity(span, scale, theme, identity_gap);
+        let (icon, title) = self.seat_identity(span, scale, theme, identity_gap, bare);
 
         TitleBarLayout {
-            controls,
+            slots,
+            seated: self.commands.seated(),
             icon,
             title,
             drag: span,
         }
     }
 
-    /// Seat the identity slot and the title text as one group at the leading
-    /// edge of `span`, the two separated by `gap` pixels.
+    /// Seat the identity slot and the title text as one group within `span`,
+    /// the two separated by `gap` pixels — left-justified against the leading
+    /// cluster, or `centred` in the span when there is no cluster to justify
+    /// against.
     ///
-    /// Left-justified, so the title starts in the same place whatever it says
-    /// and however wide the window is: the eye finds it without hunting, and a
-    /// squeezed bar elides the tail on the right rather than sliding the whole
-    /// line out from under the reader. A bar with no identity, or a span too
-    /// narrow to seat the slot, reserves nothing — a window without an
-    /// identifiable owner reads exactly as it did before one existed.
+    /// Left-justification is what makes a window's title start in the same
+    /// place whatever it says and however wide the window is: the eye finds it
+    /// without hunting, and a squeezed bar elides the tail on the right rather
+    /// than sliding the whole line out from under the reader. A band with
+    /// nothing at either end has no such edge to find, so its title reads from
+    /// the middle. A bar with no identity, or a span too narrow to seat the
+    /// slot, reserves nothing — a window without an identifiable owner reads
+    /// exactly as it did before one existed.
     ///
     /// The text box is exactly as wide as the line drawn in it, so it measures
     /// the very line that is drawn: the font layer memoises a measurement by
     /// whole string, so laying out and then painting the same title measure it
     /// once between them, and no piecewise total can disagree with what
     /// appears.
-    fn seat_identity(&self, span: Rect, scale: Scale, theme: &Theme, gap: u32) -> (Rect, Rect) {
+    fn seat_identity(
+        &self,
+        span: Rect,
+        scale: Scale,
+        theme: &Theme,
+        gap: u32,
+        centred: bool,
+    ) -> (Rect, Rect) {
         let font = role_font(theme, scale, TextRole::WindowTitle);
         let side = icon_slot_side(font, span.height);
         let show_icon = self.identity.is_some() && side > 0 && span.width >= side;
@@ -1117,7 +1241,12 @@ impl TitleBar {
         let text = font
             .text_width(&self.display_text())
             .min(span.width.saturating_sub(reserved));
-        let left = span.left();
+        let group = reserved.saturating_add(text);
+        let left = if centred {
+            span.left() + (to_i32(span.width) - to_i32(group)).max(0) / 2
+        } else {
+            span.left()
+        };
         let icon = if show_icon {
             let iy = span.top() + (to_i32(span.height) - to_i32(side)).max(0) / 2;
             Rect::new(left, iy, side, side)
@@ -1205,9 +1334,14 @@ impl TitleBar {
         }
 
         let plate_radius = FrameRim::of(scale, theme).plate().1;
-        for (slot, (kind, rect)) in layout.controls.into_iter().enumerate() {
-            self.control(kind)
-                .render(surface, rect, scale, theme, band_corner(slot, plate_radius));
+        for (slot, (kind, rect)) in layout.controls().iter().copied().enumerate() {
+            self.controls[control_index(kind)].render(
+                surface,
+                rect,
+                scale,
+                theme,
+                band_corner(slot, plate_radius),
+            );
         }
     }
 
@@ -1316,7 +1450,7 @@ impl TitleBar {
     #[must_use]
     pub fn hit(&self, bounds: Rect, scale: Scale, theme: &Theme, point: Point) -> TitleHit {
         let layout = self.layout(bounds, scale, theme);
-        for (kind, rect) in layout.controls {
+        for (kind, rect) in layout.controls().iter().copied() {
             if rect.contains(point) {
                 return TitleHit::Control(kind);
             }
@@ -1347,8 +1481,8 @@ impl TitleBar {
         // Route to every control so hover stays current and an armed control
         // keeps its latch even as the pointer moves off it.
         let mut fired = None;
-        for (kind, rect) in layout.controls {
-            if let Some(action) = self.control_mut(kind).on_pointer(event, rect, damage) {
+        for (kind, rect) in layout.controls().iter().copied() {
+            if let Some(action) = self.stored_mut(kind).on_pointer(event, rect, damage) {
                 fired = Some(action);
             }
         }
@@ -1362,10 +1496,10 @@ impl TitleBar {
         }
 
         let over_control = layout
-            .controls
+            .controls()
             .iter()
             .any(|(_, r)| r.contains(*self.pointer));
-        let any_armed = self.controls.iter().any(WindowControl::armed);
+        let any_armed = self.seated().iter().any(WindowControl::armed);
 
         match event {
             InputEvent::PointerPressed {
@@ -1421,8 +1555,8 @@ impl TitleBar {
     /// and a held button holds the pointer.
     pub fn pointer_left(&mut self, bounds: Rect, scale: Scale, theme: &Theme, damage: &mut Region) {
         let layout = self.layout(bounds, scale, theme);
-        for (kind, rect) in layout.controls {
-            self.control_mut(kind).pointer_left(rect, damage);
+        for (kind, rect) in layout.controls().iter().copied() {
+            self.stored_mut(kind).pointer_left(rect, damage);
         }
     }
 
@@ -1444,9 +1578,9 @@ impl TitleBar {
         damage: &mut Region,
     ) -> Option<TitleBarEvent> {
         let layout = self.layout(bounds, scale, theme);
-        for (kind, rect) in layout.controls {
+        for (kind, rect) in layout.controls().iter().copied() {
             if let Some(WindowControlAction::Invoked(invoked)) =
-                self.control_mut(kind).on_key(key, rect, damage)
+                self.stored_mut(kind).on_key(key, rect, damage)
             {
                 return Some(TitleBarEvent::Control(invoked));
             }
@@ -1475,8 +1609,11 @@ impl TitleBar {
     /// invariant predicts costs a comparison each and cannot under-report if a
     /// caller had lit two of them.
     fn move_focus(&mut self, forward: bool, layout: &TitleBarLayout, damage: &mut Region) {
-        let count = self.controls.len();
-        let current = self.controls.iter().position(|c| c.state().focus.focused);
+        let count = self.commands.seated();
+        if count == 0 {
+            return;
+        }
+        let current = self.seated().iter().position(|c| c.state().focus.focused);
         let mut idx = match current {
             Some(i) => i,
             None if forward => count - 1,
@@ -1510,7 +1647,7 @@ impl TitleBar {
     /// covers nothing).
     fn control_rect(layout: &TitleBarLayout, slot: usize) -> Rect {
         layout
-            .controls
+            .controls()
             .iter()
             .find(|(kind, _)| control_index(*kind) == slot)
             .map_or(Rect::EMPTY, |(_, rect)| *rect)
@@ -1775,8 +1912,7 @@ impl WindowFrame {
         let metrics = theme.metrics();
         let border = scale.scale_length(metrics.border_thickness).max(1);
         let inset_amt = scale.scale_length(metrics.frame_inset).max(border);
-        let title_h = scale.scale_length(metrics.title_bar_height);
-        (border, title_h, inset_amt)
+        (border, TitleBar::band_height(scale, theme), inset_amt)
     }
 
     /// The left/right/bottom furniture-band thickness around the client.
@@ -1841,7 +1977,8 @@ impl WindowFrame {
         let insets = self.insets(scale, theme);
         let client = scale.scale_length(theme.metrics().control_height).max(1);
         let sides = insets.left.saturating_add(insets.right);
-        let band = TitleBar::min_band_width(scale, theme).saturating_add(border.saturating_mul(2));
+        let band = TitleBar::min_band_width(TitleBarCommands::Window, scale, theme)
+            .saturating_add(border.saturating_mul(2));
         (
             band.max(sides.saturating_add(client)),
             insets

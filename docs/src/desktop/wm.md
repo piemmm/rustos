@@ -1518,6 +1518,24 @@ mid-chain with `WindowServer::close_menu_panel(host, open_id)` when the
 pointer settles on another row. `WindowHost::menu_panel_opened` defaults to
 refusing, so a host whose chains hang no application surfaces says so.
 
+### The service that answers both
+
+The desktop session implements both host seams. `menu_open_requested`
+resolves the window-local anchor against the owner's live client origin,
+builds the chain's model from the wire menu, and brings the chain up;
+`menu_panel_opened` asks the chain where the surface hangs and composes it
+as a transient of the owner, or relays the chain's refusal. Neither reads a
+file or waits on a client: the information row's attested facts come from the
+identity the icon-bar service has already resolved, and a process with none
+gets no information row rather than a fabricated panel.
+
+The chain itself — placement, bands and their drag, arrival-driven children,
+the grab, traversal, dismissal and lifetime — is
+`userland/gui/session/src/menu.rs`, and is described in
+[Menus](./menus.md). It touches no compositor: the session presents the
+surfaces it lists and takes down what it no longer has, so a plate cannot
+outlive the state that placed it.
+
 The renderer, the chain's placement, the grab and the dismissal rules are the
 session's menu service; the contract above is what an app sees of them.
 

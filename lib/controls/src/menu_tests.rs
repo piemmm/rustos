@@ -15,7 +15,7 @@ use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Rgba, Theme};
 
 use crate::damage::sink;
-use crate::menu::{Menu, MenuAction, MenuItem};
+use crate::menu::{plate_rect, Menu, MenuAction, MenuItem, PlateSide};
 use crate::state::{AuthorityState, ControlRole, ControlState};
 use crate::testkit::{control_font, high_contrast, text_ladder};
 
@@ -1037,4 +1037,124 @@ fn adopting_a_highlight_reports_nothing_and_admits_what_setting_admits() {
             "a rebuild must not admit a highlight the interactive path refuses"
         );
     }
+}
+
+// --- the one plate placement rule ---------------------------------------
+
+/// The viewport every placement case is resolved against.
+const VIEW: Rect = Rect::new(0, 0, 800, 600);
+
+#[test]
+fn plate_rect_opens_edge_adjacent_on_the_side_it_is_asked_for() {
+    let anchor = Rect::new(300, 200, 40, 20);
+    let trailing = plate_rect(100, 60, anchor, PlateSide::Trailing, 0, VIEW);
+    assert_eq!(trailing.left(), anchor.right());
+    assert_eq!(trailing.top(), anchor.top(), "aligned on the cross axis");
+
+    let leading = plate_rect(100, 60, anchor, PlateSide::Leading, 0, VIEW);
+    assert_eq!(leading.right(), anchor.left());
+
+    let below = plate_rect(100, 60, anchor, PlateSide::Below, 0, VIEW);
+    assert_eq!(below.top(), anchor.bottom());
+    assert_eq!(below.left(), anchor.left());
+
+    let above = plate_rect(100, 60, anchor, PlateSide::Above, 0, VIEW);
+    assert_eq!(above.bottom(), anchor.top());
+}
+
+#[test]
+fn plate_rect_holds_the_plate_off_by_the_gap_it_is_given() {
+    let anchor = Rect::new(300, 200, 40, 20);
+    let flush = plate_rect(100, 60, anchor, PlateSide::Above, 0, VIEW);
+    let held = plate_rect(100, 60, anchor, PlateSide::Above, 12, VIEW);
+    assert_eq!(
+        flush.top() - held.top(),
+        12,
+        "a chain needs no gap; an icon bar's own menu asks for one"
+    );
+}
+
+#[test]
+fn plate_rect_flips_rather_than_sliding_when_the_preferred_side_has_no_room() {
+    // Hard against the trailing edge: opening trailing would leave the
+    // viewport, so the plate takes the other side and the anchor stays at a
+    // corner of it rather than somewhere inside.
+    let anchor = Rect::new(790, 100, 0, 0);
+    let placed = plate_rect(100, 60, anchor, PlateSide::Trailing, 0, VIEW);
+    assert_eq!(placed.right(), anchor.left(), "flipped, not slid");
+    assert!(placed.right() <= VIEW.right());
+}
+
+#[test]
+fn plate_rect_keeps_the_preferred_side_when_it_fits() {
+    let anchor = Rect::new(10, 100, 0, 0);
+    let placed = plate_rect(100, 60, anchor, PlateSide::Trailing, 0, VIEW);
+    assert_eq!(placed.left(), anchor.left(), "room trailing, so no flip");
+}
+
+#[test]
+fn plate_rect_slides_the_cross_axis_to_stay_on_screen() {
+    let anchor = Rect::new(100, 580, 0, 0);
+    let placed = plate_rect(100, 60, anchor, PlateSide::Trailing, 0, VIEW);
+    assert!(placed.bottom() <= VIEW.bottom(), "slid up rather than off");
+    assert!(placed.top() < anchor.top());
+}
+
+#[test]
+fn plate_rect_takes_the_roomier_side_when_neither_fits() {
+    // An anchor spanning nearly the whole viewport leaves neither side room;
+    // the roomier one keeps the plate beside its anchor rather than over it.
+    let anchor = Rect::new(200, 100, 560, 20);
+    let placed = plate_rect(300, 60, anchor, PlateSide::Trailing, 0, VIEW);
+    assert!(
+        placed.right() <= anchor.left() + i32::try_from(placed.width).unwrap_or(0),
+        "placed on the leading side, which has the room: {placed:?}"
+    );
+}
+
+#[test]
+fn plate_rect_bounds_a_plate_larger_than_the_viewport() {
+    let placed = plate_rect(
+        4000,
+        4000,
+        Rect::new(10, 10, 0, 0),
+        PlateSide::Trailing,
+        0,
+        VIEW,
+    );
+    assert_eq!((placed.width, placed.height), (VIEW.width, VIEW.height));
+    assert_eq!(placed.origin, VIEW.origin);
+}
+
+#[test]
+fn plate_rect_answers_a_degenerate_viewport_with_a_drawable_rectangle() {
+    let placed = plate_rect(
+        100,
+        60,
+        Rect::new(0, 0, 0, 0),
+        PlateSide::Trailing,
+        0,
+        Rect::EMPTY,
+    );
+    assert!(placed.width >= 1 && placed.height >= 1);
+}
+
+#[test]
+fn a_zero_extent_anchor_is_the_point_case_of_the_same_rule() {
+    let theme = Theme::dark();
+    let menu = three_item_menu();
+    let at = Point::new(120, 90);
+    let through_menu = menu.anchored_rect(at, VIEW, Scale::ONE, &theme);
+    let through_rule = plate_rect(
+        menu.preferred_width(Scale::ONE, &theme),
+        menu.preferred_height(Scale::ONE, &theme),
+        Rect::new(at.x, at.y, 0, 0),
+        PlateSide::Trailing,
+        0,
+        VIEW,
+    );
+    assert_eq!(
+        through_menu, through_rule,
+        "one rule serves the point anchor and the region alike"
+    );
 }

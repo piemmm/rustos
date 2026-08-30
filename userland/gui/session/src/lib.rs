@@ -192,6 +192,7 @@ pub mod launch;
 pub mod library;
 pub mod listing;
 pub mod lock;
+pub mod menu;
 pub mod pace;
 pub mod picker;
 pub mod pinboard;
@@ -214,6 +215,8 @@ mod desktop_tests;
 mod fade_tests;
 #[cfg(test)]
 mod holdback_tests;
+#[cfg(test)]
+mod menu_tests;
 #[cfg(test)]
 mod switchuser_tests;
 #[cfg(test)]
@@ -284,7 +287,7 @@ pub use thumbs::WindowThumbnails;
 pub use vigil::{HangTracker, UNRESPONSIVE_AFTER_NS};
 pub use wallpaper::{Prepared, WallpaperDesk, WallpaperSource};
 pub use windows::{
-    desktop_info, resolve_window_identities, window_control_alternate_event, window_control_event,
-    SessionWindows, ShellWindowHost, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, WINDOW_SHOWN,
-    WINDOW_SHOWN_MESSAGE,
+    chain_geometry, desktop_info, resolve_window_identities, window_control_alternate_event,
+    window_control_event, SessionWindows, ShellWindowHost, CONTENT_RELEASED,
+    CONTENT_RELEASED_MESSAGE, WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE,
 };

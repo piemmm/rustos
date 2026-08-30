@@ -67,6 +67,7 @@ use crate::apps::{picker_cells, prefetch_bar_icons, resolve_library_icons, thumb
 use crate::desktop::Desktop;
 use crate::fade::BackdropFade;
 use crate::input::{SessionInputResponse, SessionInputRouter};
+use crate::menu::{ChainGeometry, MenuChain, SurfaceKind};
 use crate::pinboard::PinboardMenu;
 use crate::presenter::{place, TaskbarPresenter};
 use crate::session::DesktopSession;
@@ -163,6 +164,12 @@ pub struct DesktopShell {
     /// The compositor window the pinboard's open context menu is shown in, if
     /// one is placed.
     pinboard_window: Option<WindowId>,
+    /// The compositor window each surface of the open menu chain is drawn in.
+    ///
+    /// Reconciled against the chain's own list on every present, so a plate
+    /// the chain no longer has cannot be left on the screen and none has to
+    /// be taken down by a second path.
+    menu_windows: Vec<(SurfaceKind, WindowId)>,
     /// The hover window picker's thumbnails, scaled a window at a time while
     /// the pointer rests out the picker's opening dwell.
     thumbs: WindowThumbnails,
@@ -294,6 +301,7 @@ impl DesktopShell {
             wallpaper: None,
             backdrop_fade: BackdropFade::default(),
             pinboard_window: None,
+            menu_windows: Vec::new(),
             thumbs: WindowThumbnails::new(),
             #[cfg(test)]
             settled: SettleWork::default(),
@@ -1005,6 +1013,130 @@ impl DesktopShell {
     /// plate is painted with, so the window and its pixels cannot disagree
     /// about where the rounding is.
     ///
+    /// Bring the compositor's windows into line with the open menu chain:
+    /// draw every plate and the information panel it lists, move the attached
+    /// window it placed, and take down everything it no longer has.
+    ///
+    /// Reconciliation rather than a set of add/remove calls, so a surface can
+    /// never outlive the state that placed it and no path has to remember to
+    /// take one down. A closed chain lists nothing, which is what clears the
+    /// screen.
+    ///
+    /// Plates are composited as **transients of the owner window** when the
+    /// chain has one, so they ride its stacking rather than re-asserting an
+    /// arrangement per frame. A chain the desktop opened for itself has no
+    /// owner and its plates are ordinary session surfaces.
+    ///
+    /// Fails closed: a plate surface the heap will not give back leaves what
+    /// is on screen untouched rather than showing an empty window.
+    /// Returns `false` when a plate could not be given a surface, which the
+    /// caller answers the chain's owner `NoResources` for: a chain the desktop
+    /// cannot draw is refused honestly rather than left half on the screen.
+    pub fn present_menu_chain(
+        &mut self,
+        compositor: &mut Compositor,
+        chain: &MenuChain,
+        owner: Option<WindowId>,
+        attached: Option<WindowId>,
+    ) -> bool {
+        let scale = compositor.scale();
+        let theme = self.session.active_theme().clone();
+        let geom = ChainGeometry {
+            screen: compositor.screen_rect(),
+            scale,
+            theme: &theme,
+            epoch: compositor.chrome_epoch(),
+        };
+        let corners = Corners::from_radius(scale.scale_length(theme.metrics().popup_corner_radius));
+        let mut kept: Vec<(SurfaceKind, WindowId)> = Vec::new();
+        let mut drawn = true;
+        for placed in chain.surfaces() {
+            let existing = self
+                .menu_windows
+                .iter()
+                .find(|(kind, _)| *kind == placed.kind)
+                .map(|(_, id)| *id);
+            let pixels = match placed.kind {
+                SurfaceKind::Plate(depth) => {
+                    let Some(mut pixels) = Surface::new(placed.rect.width, placed.rect.height)
+                    else {
+                        drawn = false;
+                        continue;
+                    };
+                    chain.render_plate(depth, &mut pixels, &geom);
+                    pixels
+                }
+                SurfaceKind::Info => {
+                    let Some((facts, _)) = chain.info_panel() else {
+                        continue;
+                    };
+                    let Some(mut pixels) = Surface::new(placed.rect.width, placed.rect.height)
+                    else {
+                        drawn = false;
+                        continue;
+                    };
+                    let local = Rect::new(0, 0, placed.rect.width, placed.rect.height);
+                    // A panel of facts is not a menu, so it wears the shared
+                    // floating-surface recipe and states its facts on it.
+                    let _ = tairix_controls::paint_surface_plate(
+                        &mut pixels,
+                        (0, 0, local.width, local.height),
+                        (
+                            scale.scale_length(theme.metrics().popup_corner_radius),
+                            tairix_controls::plate_border(&theme, scale),
+                        ),
+                        &theme,
+                        (
+                            theme.palette().surface_raised,
+                            tairix_controls::ChromeLayer::Ground,
+                        ),
+                    );
+                    facts.render(&mut pixels, local, scale, &theme);
+                    pixels
+                }
+                // The application drew this one and the session already holds
+                // its window; only where it sits is the chain's to say.
+                SurfaceKind::Attached(_) => {
+                    if let Some(id) = attached {
+                        compositor.move_window(id, placed.rect.origin);
+                    }
+                    continue;
+                }
+            };
+            let id = match (existing, owner) {
+                (Some(id), _) if compositor.window(id).is_some() => {
+                    compositor.set_surface(id, pixels);
+                    compositor.move_window(id, placed.rect.origin);
+                    compositor.set_corners(id, corners);
+                    id
+                }
+                (_, Some(parent)) => {
+                    let Some(id) =
+                        compositor.add_transient_window(parent, placed.rect.origin, pixels)
+                    else {
+                        drawn = false;
+                        continue;
+                    };
+                    compositor.set_corners(id, corners);
+                    id
+                }
+                (_, None) => place(compositor, None, placed.rect.origin, pixels, (corners, 0)),
+            };
+            kept.push((placed.kind, id));
+        }
+        for (kind, id) in core::mem::take(&mut self.menu_windows) {
+            if !kept.iter().any(|(live, _)| *live == kind) {
+                compositor.remove(id);
+                if self.router.focused() == Some(id) {
+                    self.router.unfocus();
+                }
+            }
+        }
+        self.menu_windows = kept;
+        self.sync_active_frame(compositor);
+        drawn
+    }
+
     /// Fails closed: a plate surface the heap will not give back leaves what is
     /// on screen untouched rather than showing an empty window.
     pub fn present_pinboard_menu(&mut self, compositor: &mut Compositor, menu: &PinboardMenu) {

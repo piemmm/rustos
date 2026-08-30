@@ -283,7 +283,7 @@ pub use collection::{
 };
 pub use combo::{ComboAction, ComboBox};
 pub use decision::{Dialog, DialogAction, HelpTip, HelpTipAction, Tooltip};
-pub use menu::{Menu, MenuAction, MenuItem, MenuMark};
+pub use menu::{plate_rect, Menu, MenuAction, MenuItem, MenuMark, PlateSide};
 pub use metric::{MetricInstrument, MetricLayout, MetricTile, StatusPill};
 pub use nav::{Breadcrumb, BreadcrumbAction, Crumb};
 pub use paint::{ground_fill, paint_surface_plate, plate_border, ChromeLayer};
@@ -310,8 +310,8 @@ pub use toolbar::{ToolActivation, Toolbar, ToolbarAction};
 pub use value::{Progress, Slider, SliderAction};
 pub use window::{
     BandCorner, FrameInsets, FrameLayout, FrameRim, FurniturePart, GrabReach, ResizeEdge,
-    ResizeEvent, ResizeGrabber, ScrollCorner, TitleBar, TitleBarEvent, TitleBarLayout, TitleHit,
-    WindowControl, WindowControlAction, WindowFrame,
+    ResizeEvent, ResizeGrabber, ScrollCorner, TitleBar, TitleBarCommands, TitleBarEvent,
+    TitleBarLayout, TitleHit, WindowControl, WindowControlAction, WindowFrame,
 };
 
 #[cfg(test)]
