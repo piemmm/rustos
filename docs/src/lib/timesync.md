@@ -71,6 +71,25 @@ The kernel wall clock is set-and-project, with no frequency-correcting
 primitive, so a gradual slew is out of scope and is not implied by any state
 this crate reports.
 
+## The persisted document
+
+`SyncRecord::to_bytes` / `from_bytes` encode
+`/System/Settings/Time/state` (`RECORD_PATH`): a fixed-length, magicked,
+CRC-32C-checksummed record. A wrong length or magic, a torn rewrite, an
+undefined flag bit, an instant outside the plausibility window, or a `last_seen`
+earlier than its `last_sync` all resolve to `SyncRecord::EMPTY` rather than an
+error — "we do not know when time was last seen" is exactly what a lost record
+means, and it makes the stale-boot and went-backwards rules silent instead of
+wrong. The checksum guards corruption, not tampering.
+
+## Two ways in, one policy
+
+`TimeSync::on_datagram` decodes in the caller's address space. A caller holding
+`CAP_TIME_SET` must not, so it evaluates the bytes in a capability-empty sandbox
+worker ([the sandbox seam](../security/sandbox.md)) and feeds the verdict to
+`TimeSync::on_reply`. Both reach the same clock policy, so the containment split
+cannot change what a sample means.
+
 ## Purity
 
 `no_std`, `#![forbid(unsafe_code)]`, allocation-free, with monotonic time, the

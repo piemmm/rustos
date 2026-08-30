@@ -42,6 +42,9 @@ tairix-log = { path = "../../lib/log", version = "=0.0.0" }
 tairix-syshelp = { path = "../syshelp", version = "=0.0.0" }
 tairix-partition = { path = "../../lib/partition", version = "=0.0.0" }
 tairix-users = { path = "../../lib/users", version = "=0.0.0" }
+# The one definition of the time service's state-directory name, so the image
+# authors it exactly where the service looks for it.
+tairix-timesync = { path = "../../lib/timesync", version = "=0.0.0" }
 # The per-interface network-configuration store is authored through the one
 # `tairix_netconfig` engine, so the image skeleton's `network.conf` and the
 # `netstack`/`configure`/`devmgr` readers of it cannot drift (the empty default

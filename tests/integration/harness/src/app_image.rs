@@ -873,6 +873,7 @@ mod tests {
                 "tee",
                 "telnet",
                 "terminal",
+                "timed",
                 "top",
                 "true",
                 "unlink",
@@ -892,6 +893,16 @@ mod tests {
             assert!(app.crate_dir.join("Cargo.toml").is_file());
             assert!(!app.package.is_empty());
         }
+    }
+
+    #[test]
+    fn discovery_pins_the_service_subset_of_the_real_tree() {
+        // Which bundles install into `/System/Services` is decided by each
+        // manifest's own declared kind, so pin the resulting set separately
+        // from the whole inventory: a bundle that silently changed kind would
+        // move store, and that is a different defect from a missing manifest.
+        let userland = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../userland");
+        let found = discover_app_manifests(&userland).expect("discovery walks");
         let services: Vec<&str> = found
             .iter()
             .filter(|d| d.manifest.kind == ProgramKind::Service)
@@ -908,7 +919,8 @@ mod tests {
                 "netstack",
                 "seatmgr",
                 "switchboard",
-                "sysinfod"
+                "sysinfod",
+                "timed"
             ]
         );
     }

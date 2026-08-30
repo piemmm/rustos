@@ -207,6 +207,26 @@ impl NetPeer {
         Self::spawn_with(qemu_sock, peer_sock, run_dhcp_peer)
     }
 
+    /// Bind `peer_sock` and start the **NTP-server** peer thread (the
+    /// `plans/TIMESYNC.md` TS-2 vertical): the peer takes its own
+    /// [`wire::PEER_STATIC_V6`] on the guest's on-link `/64` and answers each
+    /// of the guest's NTP client requests **twice, spoof first** — a
+    /// well-formed reply whose origin timestamp does not echo the request's
+    /// nonce and which reports [`wire::NTP_SPOOF_SECS`], then the truthful
+    /// reply echoing the nonce and reporting [`wire::NTP_FIXTURE_SECS`].
+    ///
+    /// That ordering is the discriminator: a guest that accepted the spoof
+    /// would set its clock to the wrong instant, and a guest that let the
+    /// spoof cancel its outstanding transaction would ignore the truthful
+    /// reply and never set the clock. Its verdict
+    /// ([`Self::stop_and_join`]) is `Ok` once it has served a request with
+    /// both replies; the guest's own audit witness (the applied
+    /// `wall_secs=`) is what proves which one it believed, so neither side
+    /// passes alone.
+    pub fn spawn_ntp(qemu_sock: &Path, peer_sock: &Path) -> Result<Self, String> {
+        Self::spawn_with(qemu_sock, peer_sock, run_ntp_peer)
+    }
+
     /// Bind `peer_sock` and start the **DHCPv6-server** peer thread (the
     /// DHCP D4c vertical): the peer answers the guest's DHCPv6 `Solicit`
     /// with an `Advertise` and its `Request` with a `Reply`, leasing it
@@ -1843,6 +1863,213 @@ fn send_frames(socket: &UnixDatagram, qemu_sock: &PathBuf, frames: &[TxFrame]) {
         // The host peer speaks the raw wire; a live device would consume
         // the transmit-offload metadata, so it is ignored here.
         let _ = socket.send_to(&frame.bytes, qemu_sock);
+    }
+}
+
+// --- NTP-server peer (plans/TIMESYNC.md TS-2 vertical) -----------------
+
+/// Seconds from the NTP epoch (1900-01-01) to the Unix epoch (1970-01-01).
+const NTP_UNIX_DELTA_SECS: i64 = 2_208_988_800;
+
+/// Encoded length of the NTP header (RFC 5905 §7.3).
+const NTP_PACKET_LEN: usize = 48;
+
+/// Byte offset of the origin timestamp within the NTP header — the field a
+/// reply must echo the request's nonce in (RFC 5905 §7.3).
+const NTP_ORIGIN_TS_AT: usize = 24;
+
+/// Byte offset of the receive timestamp within the NTP header.
+const NTP_RECEIVE_TS_AT: usize = 32;
+
+/// Byte offset of the transmit timestamp within the NTP header.
+const NTP_TRANSMIT_TS_AT: usize = 40;
+
+/// The UDP port NTP is served on (RFC 5905 §7.2).
+const NTP_PORT: u16 = 123;
+
+/// The parts of a client request the fixture server acts on.
+struct NtpRequest {
+    /// The client's CSPRNG nonce, carried in its transmit timestamp — the
+    /// value a genuine reply must echo as its origin timestamp.
+    nonce: u64,
+    /// The client's source address; the reply's destination.
+    client_addr: Ipv6Addr,
+    /// The client's source port; the reply's destination port.
+    client_port: u16,
+    /// The client's source MAC — the reply frame's link-layer destination.
+    client_mac: MacAddress,
+}
+
+/// Decode the NTP client request an Ethernet frame carries, or `None` if the
+/// frame is not one (fail closed). Every layer is parsed with the production
+/// `lib/net` decoders, so the server accepts exactly the frames a real client
+/// emits.
+fn parse_ntp_frame(frame: &[u8]) -> Option<NtpRequest> {
+    let eth_frame = eth::EthernetFrame::parse(frame)?;
+    if eth_frame.ethertype != ETHERTYPE_IPV6 {
+        return None;
+    }
+    let (ip, payload) = Ipv6Header::parse(eth_frame.payload)?;
+    if ip.next_header != PROTOCOL_UDP {
+        return None;
+    }
+    let datagram = udp::UdpDatagram::parse(
+        Pseudo::V6 {
+            source: ip.source,
+            destination: ip.destination,
+        },
+        payload,
+    )?;
+    if datagram.destination_port != NTP_PORT {
+        return None;
+    }
+    let header = datagram.payload.get(..NTP_PACKET_LEN)?;
+    // Mode 3 is a client request; anything else is not ours to answer.
+    if header[0] & 0b111 != 3 {
+        return None;
+    }
+    let mut nonce = [0u8; 8];
+    nonce.copy_from_slice(&header[NTP_TRANSMIT_TS_AT..NTP_TRANSMIT_TS_AT + 8]);
+    Some(NtpRequest {
+        nonce: u64::from_be_bytes(nonce),
+        client_addr: ip.source,
+        client_port: datagram.source_port,
+        client_mac: eth_frame.source,
+    })
+}
+
+/// The 64-bit NTP timestamp denoting `unix_secs`, wrapping into whatever era
+/// that lands in exactly as a server on the wire would.
+fn ntp_timestamp(unix_secs: i64) -> u64 {
+    let field = u32::try_from((unix_secs + NTP_UNIX_DELTA_SECS).rem_euclid(1 << 32))
+        .expect("reduced modulo 2^32");
+    u64::from(field) << 32
+}
+
+/// Build the full Ethernet frame carrying one server reply.
+///
+/// `origin` is the origin timestamp the reply claims (the request's nonce for
+/// the truthful reply, a different value for the spoof) and `unix_secs` the
+/// instant it reports. Framed as UDP(123→client)/IPv6(peer→client)/Ethernet
+/// with the production `lib/net` writers, so the guest decodes it exactly as
+/// it would a real server's.
+fn build_ntp_reply(request: &NtpRequest, origin: u64, unix_secs: i64) -> Vec<u8> {
+    let mut message = [0u8; NTP_PACKET_LEN];
+    // Leap 0 (no warning), version 4, mode 4 (server), stratum 2.
+    message[0] = (4 << 3) | 4;
+    message[1] = 2;
+    // Poll and precision the client does not read; a plausible reference id.
+    message[2] = 6;
+    message[3] = 0xEC;
+    message[12..16].copy_from_slice(b"FIXT");
+    let stamp = ntp_timestamp(unix_secs);
+    message[NTP_ORIGIN_TS_AT..NTP_ORIGIN_TS_AT + 8].copy_from_slice(&origin.to_be_bytes());
+    message[NTP_RECEIVE_TS_AT..NTP_RECEIVE_TS_AT + 8].copy_from_slice(&stamp.to_be_bytes());
+    message[NTP_TRANSMIT_TS_AT..NTP_TRANSMIT_TS_AT + 8].copy_from_slice(&stamp.to_be_bytes());
+
+    let source = wire::PEER_STATIC_V6;
+    let destination = request.client_addr;
+    let mut datagram = vec![0u8; udp::UDP_HEADER_LEN + message.len()];
+    udp::write(
+        Pseudo::V6 {
+            source,
+            destination,
+        },
+        NTP_PORT,
+        request.client_port,
+        &message,
+        &mut datagram,
+    )
+    .expect("the UDP buffer is sized for the NTP header");
+
+    let mut header = Ipv6Header::new(source, destination, PROTOCOL_UDP);
+    header.hop_limit = ND_HOP_LIMIT;
+    let mut packet = vec![0u8; IPV6_HEADER_LEN + datagram.len()];
+    header
+        .write(&mut packet, datagram.len())
+        .expect("the IPv6 header fits the sized packet");
+    packet[IPV6_HEADER_LEN..].copy_from_slice(&datagram);
+
+    let mut frame = vec![0u8; ETHERNET_HEADER_LEN + packet.len()];
+    eth::write_header(
+        &mut frame,
+        request.client_mac,
+        MacAddress(wire::PEER_MAC),
+        ETHERTYPE_IPV6,
+    )
+    .expect("the Ethernet header fits the sized frame");
+    frame[ETHERNET_HEADER_LEN..].copy_from_slice(&packet);
+    frame
+}
+
+/// The NTP-server peer loop: answer the guest's time queries spoof-first.
+///
+/// The peer assigns itself [`wire::PEER_STATIC_V6`] on the guest's on-link
+/// `/64` (DAD runs first) and feeds every non-NTP frame to its own `lib/net`
+/// engine, which answers the guest's neighbour discovery. An NTP client
+/// request is answered by this server and never fed to the engine: the engine
+/// holds no NTP server, and a datagram to an unbound port would draw a
+/// spurious port-unreachable back at the guest.
+///
+/// Each request draws **two** replies, spoof first — see [`NetPeer::spawn_ntp`]
+/// for why that ordering is the discriminator. Its verdict is `Ok` once a
+/// request has been served with both.
+fn run_ntp_peer(
+    socket: &UnixDatagram,
+    qemu_sock: &PathBuf,
+    stop: &AtomicBool,
+    succeeded: &AtomicBool,
+) -> Result<(), String> {
+    let start = Instant::now();
+    let now = |t0: Instant| {
+        Duration64::from_nanos(u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX))
+    };
+    let (mut stack, _guest_ll) = peer_stack(start)?;
+    stack
+        .add_ipv6_static(wire::PEER_STATIC_V6, wire::STATIC_PREFIX_LEN, now(start))
+        .map_err(|e| format!("netstack peer: static address assignment: {e:?}"))?;
+
+    let mut served = 0u32;
+    let mut buf = [0u8; MAX_FRAME];
+
+    while !stop.load(Ordering::Acquire) {
+        // Timer-due engine output (DAD probes, neighbour retransmits).
+        let mut out = StackOutput::default();
+        stack.advance(now(start), &mut out);
+        send_frames(socket, qemu_sock, &out.frames);
+
+        match socket.recv(&mut buf) {
+            Ok(len) => {
+                if let Some(request) = parse_ntp_frame(&buf[..len]) {
+                    // The spoof first: a well-formed reply whose origin
+                    // timestamp does not echo the nonce, reporting a plainly
+                    // different instant. A guest whose nonce gate works drops
+                    // it *without* ending the transaction, so the truthful
+                    // reply that follows still lands.
+                    let spoof =
+                        build_ntp_reply(&request, request.nonce ^ u64::MAX, wire::NTP_SPOOF_SECS);
+                    let _ = socket.send_to(&spoof, qemu_sock);
+                    let truth = build_ntp_reply(&request, request.nonce, wire::NTP_FIXTURE_SECS);
+                    let _ = socket.send_to(&truth, qemu_sock);
+                    served = served.saturating_add(1);
+                    succeeded.store(true, Ordering::Release);
+                } else {
+                    let mut out = StackOutput::default();
+                    stack.on_frame(&buf[..len], now(start), &mut out);
+                    send_frames(socket, qemu_sock, &out.frames);
+                }
+            }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(e) => return Err(format!("netstack peer: socket receive: {e}")),
+        }
+    }
+
+    if served > 0 {
+        Ok(())
+    } else {
+        Err("netstack peer: the guest sent no NTP request".to_string())
     }
 }
 

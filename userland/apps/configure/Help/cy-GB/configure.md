@@ -73,6 +73,16 @@ dan sylw yn arafach — nid yw byth yn newid canlyniad.
   cysylltiadau'n Not-ECT; mae `true` yn cynnig ECN yn yr ysgwyd llaw ac
   yna'n trin marc tagfa fel arwydd i arafu yn hytrach na gorfodi colli
   pecyn.
+- `time.servers` — `none` neu restr o weinyddion amser rhwydwaith wedi
+  eu gwahanu â choma, pob un yn enw gwesteiwr neu'n gyfeiriad. Mae `none`
+  (y diofyn) yn golygu na chaiff y cloc ei osod o'r rhwydwaith erioed:
+  nid oes gan TAIRiX gronfa weinyddion amser ei hun, felly dewis y
+  gweithredwr yw enwi gweinydd.
+- `time.refresh` — `6h`, `12h`, `1d`, `2d` neu `7d`: faint o amser rhedeg
+  sy'n mynd heibio rhwng ymholiadau cloc unwaith y gwyddys yr amser. `1d`
+  yw'r diofyn. Caiff cloc heb ei osod, cloc annhebygol, neu gloc hen iawn
+  ei gywiro cyn gynted ag y bydd y rhwydwaith yn caniatáu, beth bynnag
+  ddywed hyn.
 
 Mae'r pentwr rhwydwaith yn darllen y gosodiadau `net.*`; daw newid i
 rym pan fydd y pentwr yn cymhwyso'i ffurfweddiad y tro nesaf.

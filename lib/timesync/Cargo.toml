@@ -19,3 +19,8 @@ tairix-abi = { path = "../abi", version = "=0.0.0" }
 # The one NTP implementation: the RFC 5905 codec, the response validation, and
 # the poll/backoff/rotation state machine. Never a second copy of any of it.
 tairix-net = { path = "../net", version = "=0.0.0" }
+# The block-integrity checksum on the persisted last-seen record, so a torn
+# rewrite resolves to "time was never seen" instead of a garbage instant.
+tairix-crc32c = { path = "../crc32c", version = "=0.0.0" }
+# The `EventId` type the published `events` range is expressed in.
+tairix-log = { path = "../log", version = "=0.0.0" }

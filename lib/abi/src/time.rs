@@ -73,6 +73,17 @@ pub const RELEASE_EPOCH_SECS: i64 = 1_767_225_600;
 /// validation bound.
 pub const PLAUSIBLE_FUTURE_SECS: i64 = 3_155_760_000;
 
+/// Most network time servers a machine may be configured with.
+///
+/// One definition, shared by the configuration store that validates the list
+/// and the NTP client engine whose state holds it, so a configured server can
+/// never be silently past the engine's reach. A fixed validation bound on
+/// configuration input, not a capacity that should scale with the machine: a
+/// client needs a handful of servers to be robust, and a longer list would
+/// only spread queries thinner while enlarging the state a hostile server set
+/// can occupy.
+pub const MAX_TIME_SERVERS: usize = 8;
+
 /// Whether `time` falls inside the plausibility window
 /// `RELEASE_EPOCH_SECS ..= RELEASE_EPOCH_SECS + PLAUSIBLE_FUTURE_SECS`.
 ///

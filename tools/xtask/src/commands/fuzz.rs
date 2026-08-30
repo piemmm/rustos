@@ -433,7 +433,7 @@ pub const TARGETS: &[Target] = &[
     Target {
         package: "tairix-sandbox",
         test: "fuzz_sandbox",
-        description: "lib/sandbox decode seam (hostile input files through the sandboxed decode service, and hostile worker replies into the fail-closed client decoders)",
+        description: "lib/sandbox decode seam (hostile input files and NTP replies through the sandboxed decode/timesync services, and hostile worker replies into the fail-closed client decoders)",
     },
     Target {
         package: "tairix-supervisor",

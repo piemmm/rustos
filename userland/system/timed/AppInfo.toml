@@ -1,0 +1,23 @@
+# Signed-AppInfo manifest source for the `timed` time-synchronisation service
+# (a service is an app; plans/TIMESYNC.md TS-2). Discovered by the build's
+# app-bundle composer and planted under /System/Services/.
+#
+# The capability list is the bundle's request and is deliberately minimal:
+# CAP_TIME_SET (this service is the system's only holder — setting the machine
+# clock is the whole authority it has), CAP_NET (the UDP datagram socket it
+# queries the configured time servers over, plus the one the stub resolver
+# looks a server name up with), CAP_SANDBOX_SPAWN (every response is evaluated
+# in a capability-empty worker, never in the address space holding
+# CAP_TIME_SET), CAP_FS_ACCESS (reading the boot-time configuration store and
+# rewriting its own last-seen record, still authorised per-inode under the
+# service's own attested identity), and CAP_LOG_EMIT (its audit records).
+#
+# It binds no endpoint (it is only ever a client), holds no CAP_NET_RAW or
+# CAP_NET_ADMIN, cannot spawn anything but the canonical parser worker, and
+# holds no chown or users-database authority. Compromising it yields the
+# machine clock — which is why the packet parsing is not in it.
+id = "os.tairix.timed"
+name = "timed"
+version = "0.1.0"
+kind = "service"
+capabilities = ["CAP_TIME_SET", "CAP_NET", "CAP_SANDBOX_SPAWN", "CAP_FS_ACCESS", "CAP_LOG_EMIT"]

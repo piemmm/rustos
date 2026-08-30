@@ -70,6 +70,13 @@ pub const FONTD_PATH: &[u8] = b"/System/Services/fontd.app/Run";
 /// identical on every target.
 pub const CONFD_PATH: &[u8] = b"/System/Services/confd.app/Run";
 
+/// Absolute path the time service program is registered under
+/// (`plans/TIMESYNC.md`): the service store's `<name>.app` bundle. It must
+/// match exactly the `timed` path PID 1 `init` hands to the `spawn` syscall at
+/// startup (`userland/system/init/src/startup.rs`). One OS-wide path contract,
+/// identical on every target.
+pub const TIMED_PATH: &[u8] = b"/System/Services/timed.app/Run";
+
 /// Absolute path the `ps` tool program is registered under: the system
 /// command store's command-named bundle, so the shell resolves the bare word `ps`
 /// to it (`plans/APPS.md` §8). One OS-wide path contract, identical on
@@ -142,7 +149,7 @@ mod tests {
     use super::{
         CAT_PATH, CLEAR_PATH, CONFD_PATH, DEVMGR_PATH, FONTD_PATH, LOGIN_PATH, LS_PATH, MAN_PATH,
         NETSTACK_PATH, PS_PATH, RESET_PATH, SEATMGR_PATH, SHELL_PATH, STRESS_PATH, SYSINFOD_PATH,
-        SYSINFO_PATH, SYSMON_PATH, TOP_PATH, USERS_CLI_PATH,
+        SYSINFO_PATH, SYSMON_PATH, TIMED_PATH, TOP_PATH, USERS_CLI_PATH,
     };
     use tairix_abi::{BundleEntry, BUNDLE_SUFFIX, SYSTEM_COMMAND_STORE, SYSTEM_SERVICE_STORE};
 
@@ -162,6 +169,7 @@ mod tests {
             (NETSTACK_PATH, "netstack"),
             (FONTD_PATH, "fontd"),
             (CONFD_PATH, "confd"),
+            (TIMED_PATH, "timed"),
         ] {
             let expected = alloc::format!(
                 "{SYSTEM_SERVICE_STORE}/{service}{BUNDLE_SUFFIX}/{}",

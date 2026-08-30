@@ -21,9 +21,9 @@ workspace = true
 # `init`, which writes its banner and then spawns `/System/Commands/elsh.app/Run`
 # through the `spawn` syscall; the producer builds the session a fresh,
 # isolated address space and admits it Ready, and both processes run. This
-# bin only swaps the audit sink: observing two `ProcessSpawned` (4030) and
-# three audited syscalls (5000) — `init`'s spawn, `init`'s exit, and the
-# session's gated exit — flips `qemu_exit::exit_success`. Keeping the
+# bin only swaps the audit sink: the shared supervision witness recognising
+# the session exit, `init` reaping, and the replacement image flips
+# `qemu_exit::exit_success`. Keeping the
 # QEMU-exit shortcut in a dedicated bin (not a Cargo feature on a production
 # crate) prevents feature unification from leaking it into any production
 # build (fail closed).
@@ -43,6 +43,9 @@ tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
 # `KernelState`, the scheduler, the spawned address spaces) draw from.
 tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The supervision witness both ports' audit sinks fold their event stream
+# through, so neither can drift from the other.
+tairix-test-spawn-supervision = { path = "../spawn_supervision", version = "=0.0.0" }
 
 [build-dependencies]
 tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

@@ -47,7 +47,9 @@
 
 use tairix_abi::time::{Duration64, Time64};
 use tairix_abi::{is_plausible_wall_time, WallClockReading, WallTimeState};
-use tairix_net::ntp::{jitter, KissCode, NtpClient, Outcome, Query, RejectReason, Sample};
+use tairix_net::ntp::{
+    jitter, KissCode, NtpClient, Outcome, Query, RejectReason, Reply, Sample, Transaction,
+};
 
 /// How far the clock's reading may lag the persisted last-seen instant before
 /// the machine is assumed to have been off long enough that its clock has
@@ -76,6 +78,39 @@ pub const INITIAL_DELAY_SPAN: Duration64 = Duration64::from_secs(8);
 ///
 /// An audit classification only — it never changes the recorded provenance.
 pub const STEP_THRESHOLD: Duration64 = Duration64::from_secs(1);
+
+/// The directory holding the persisted [`SyncRecord`], under one of the two
+/// writable paths beneath the read-only `/System`.
+pub const RECORD_DIR: &str = "/System/Settings/Time";
+
+/// Name of the [`RECORD_DIR`] directory within `/System/Settings`.
+///
+/// The image builder authors that directory owned by the time service, since
+/// `/System/Settings` itself is system-user-owned and the service must be able
+/// to rewrite its record. Pinned against [`RECORD_DIR`] by a unit test.
+pub const RECORD_SUBDIR: &str = "Time";
+
+/// The persisted [`SyncRecord`] document.
+pub const RECORD_PATH: &str = "/System/Settings/Time/state";
+
+/// Magic of the [`SyncRecord`] document, carrying its format version
+/// (`"TMS1"` little-endian) as the service-manifest magic does.
+pub const RECORD_MAGIC: u32 = u32::from_le_bytes(*b"TMS1");
+
+/// Encoded length of the [`SyncRecord`] document: magic, a flags byte, two
+/// [`Time64`] fields, and the CRC-32C over everything before it.
+///
+/// Fixed, so a short or long document is refused outright rather than parsed.
+pub const RECORD_LEN: usize = 4 + 1 + 2 * Time64::WIRE_LEN + 4;
+
+/// Offset of the record's trailing checksum.
+const CHECKSUM_AT: usize = RECORD_LEN - 4;
+
+/// Flag bit: the `last_sync` field carries an instant.
+const FLAG_LAST_SYNC: u8 = 0b01;
+
+/// Flag bit: the `last_seen` field carries an instant.
+const FLAG_LAST_SEEN: u8 = 0b10;
 
 /// Why the clock is not to be believed and must be synchronised at once.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -138,6 +173,90 @@ impl SyncRecord {
                 Some(seen) if seen > now => seen,
                 _ => now,
             }),
+        }
+    }
+
+    /// Encode the record as the fixed-length `/System/Settings/Time/state`
+    /// document.
+    #[must_use]
+    pub fn to_bytes(&self) -> [u8; RECORD_LEN] {
+        let mut out = [0u8; RECORD_LEN];
+        out[..4].copy_from_slice(&RECORD_MAGIC.to_le_bytes());
+        let mut flags = 0u8;
+        if let Some(sync) = self.last_sync {
+            flags |= FLAG_LAST_SYNC;
+            out[5..17].copy_from_slice(&sync.to_le_bytes());
+        }
+        if let Some(seen) = self.last_seen {
+            flags |= FLAG_LAST_SEEN;
+            out[17..29].copy_from_slice(&seen.to_le_bytes());
+        }
+        out[4] = flags;
+        let checksum = tairix_crc32c::checksum(&out[..CHECKSUM_AT]);
+        out[CHECKSUM_AT..].copy_from_slice(&checksum.to_le_bytes());
+        out
+    }
+
+    /// Decode a `/System/Settings/Time/state` document, or [`Self::EMPTY`]
+    /// for anything this record cannot vouch for.
+    ///
+    /// Every refusal resolves to the empty record rather than an error,
+    /// because "we do not know when time was last seen" is exactly what a
+    /// lost record means and it makes the stale-boot and went-backwards rules
+    /// simply not fire. Refused: a wrong length or magic, a checksum
+    /// mismatch (a torn rewrite), an instant outside the plausibility window,
+    /// and a `last_seen` earlier than its `last_sync` — none of which a
+    /// correct writer can produce, and all of which would otherwise steer the
+    /// decision matrix from a fiction.
+    ///
+    /// The checksum guards corruption, not tampering: a principal that can
+    /// write the file can recompute it. Only the per-inode policy on the
+    /// document keeps a forged instant out.
+    #[must_use]
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        if bytes.len() != RECORD_LEN {
+            return Self::EMPTY;
+        }
+        let magic = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        if magic != RECORD_MAGIC {
+            return Self::EMPTY;
+        }
+        let stored = u32::from_le_bytes([
+            bytes[CHECKSUM_AT],
+            bytes[CHECKSUM_AT + 1],
+            bytes[CHECKSUM_AT + 2],
+            bytes[CHECKSUM_AT + 3],
+        ]);
+        if stored != tairix_crc32c::checksum(&bytes[..CHECKSUM_AT]) {
+            return Self::EMPTY;
+        }
+        let flags = bytes[4];
+        if flags & !(FLAG_LAST_SYNC | FLAG_LAST_SEEN) != 0 {
+            return Self::EMPTY;
+        }
+        let field = |present: bool, at: usize| -> Option<Option<Time64>> {
+            if !present {
+                return Some(None);
+            }
+            let time = Time64::from_bytes(&bytes[at..at + Time64::WIRE_LEN]).ok()?;
+            is_plausible_wall_time(time).then_some(Some(time))
+        };
+        let (Some(last_sync), Some(last_seen)) = (
+            field(flags & FLAG_LAST_SYNC != 0, 5),
+            field(flags & FLAG_LAST_SEEN != 0, 17),
+        ) else {
+            return Self::EMPTY;
+        };
+        // The type's own invariant: an observed instant is never earlier than
+        // the sync that observed it.
+        if let (Some(sync), Some(seen)) = (last_sync, last_seen) {
+            if seen < sync {
+                return Self::EMPTY;
+            }
+        }
+        Self {
+            last_sync,
+            last_seen,
         }
     }
 }
@@ -294,15 +413,49 @@ impl TimeSync {
         self.ntp.poll(now, entropy)
     }
 
+    /// The transaction currently outstanding, if any — the nonce a reply must
+    /// echo, and the instant it was sent at.
+    ///
+    /// A caller that evaluates the datagram elsewhere needs the transaction to
+    /// hand the evaluator, and needs it again to re-check the nonce echo on
+    /// the verdict it gets back.
+    #[must_use]
+    pub const fn outstanding(&self) -> Option<Transaction> {
+        self.ntp.outstanding()
+    }
+
     /// Feed a received datagram to the engine and decide what it means for the
     /// clock, whose current reading is `reading`.
+    ///
+    /// This decodes the datagram in the caller's own address space, so a
+    /// caller holding `CAP_TIME_SET` uses [`Self::on_reply`] with a verdict
+    /// from a sandbox worker instead.
     pub fn on_datagram(
         &mut self,
         now: Duration64,
         reading: WallClockReading,
         bytes: &[u8],
     ) -> Event {
-        match self.ntp.on_datagram(now, bytes) {
+        let outcome = self.ntp.on_datagram(now, bytes);
+        self.event_for(outcome, reading)
+    }
+
+    /// Feed an already-evaluated [`Reply`] to the engine and decide what it
+    /// means for the clock, whose current reading is `reading`.
+    ///
+    /// The path a service holding `CAP_TIME_SET` takes: the bytes were
+    /// evaluated in a capability-less worker, and only the verdict crosses
+    /// back. The clock policy applied to it is the same one
+    /// [`Self::on_datagram`] applies, so the containment split cannot change
+    /// what a sample means.
+    pub fn on_reply(&mut self, now: Duration64, reading: WallClockReading, reply: Reply) -> Event {
+        let outcome = self.ntp.on_reply(now, reply);
+        self.event_for(outcome, reading)
+    }
+
+    /// Turn an engine [`Outcome`] into the clock [`Event`] it implies.
+    fn event_for(&mut self, outcome: Outcome, reading: WallClockReading) -> Event {
+        match outcome {
             Outcome::Sample(sample) => {
                 self.urgency = None;
                 Event::Apply(update_for(sample, reading))
@@ -341,6 +494,8 @@ fn update_for(sample: Sample, reading: WallClockReading) -> ClockUpdate {
         stratum: sample.stratum,
     }
 }
+
+pub mod events;
 
 #[cfg(test)]
 #[path = "tests.rs"]

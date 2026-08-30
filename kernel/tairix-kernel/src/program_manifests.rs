@@ -229,6 +229,33 @@ pub const CONFD_MANIFEST: &[CapabilityId] = &[
     CapabilityId::LOG_EMIT,
 ];
 
+/// The `timed` time-synchronisation service's manifest
+/// (`plans/TIMESYNC.md` TS-2): `CAP_TIME_SET` — the machine clock, of which
+/// this service is the system's only holder — `CAP_NET` for the UDP datagram
+/// socket it queries the configured time servers over (and the one the stub
+/// resolver looks a server name up with), `CAP_SANDBOX_SPAWN` because every
+/// NTP response is decoded in a capability-empty worker rather than in the
+/// address space holding `CAP_TIME_SET`, `CAP_FS_ACCESS` to read the
+/// boot-time configuration store and rewrite its own last-seen record through
+/// the secured VFS (still authorised per-inode under the service's attested
+/// identity), and `CAP_LOG_EMIT` for its audit records.
+///
+/// It stops there deliberately: no `CAP_IPC_BIND_PRIVILEGED` (it serves
+/// nothing and is only ever a client), no `CAP_NET_RAW` or `CAP_NET_ADMIN`
+/// (reaching a time server is ordinary transport use), no `CAP_PROC_SPAWN` or
+/// `CAP_SPAWN_AS_USER` (the sandbox authority admits only a canonical parser
+/// child), and no chown or users-database authority. The effective set is
+/// this request intersected with the `timed` account's `TIMED_CEILING`, which
+/// carries exactly the same five.
+#[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
+pub const TIMED_MANIFEST: &[CapabilityId] = &[
+    CapabilityId::TIME_SET,
+    CapabilityId::NET,
+    CapabilityId::SANDBOX_SPAWN,
+    CapabilityId::FS_ACCESS,
+    CapabilityId::LOG_EMIT,
+];
+
 /// The `ps` tool's manifest: `CAP_CONSOLE_WRITE` for its listing on fd 1
 /// and diagnostics on fd 2, `CAP_FS_ACCESS` because its short-help
 /// switches read the bundle's own `Help/` tree through the secured VFS
@@ -628,6 +655,53 @@ mod tests {
             CapabilityId::NET,
         ] {
             assert!(!CONFD_MANIFEST.contains(&denied), "{denied:?}");
+        }
+    }
+
+    #[test]
+    fn timed_manifest_is_pinned() {
+        assert_eq!(
+            set(TIMED_MANIFEST),
+            set(&[
+                CapabilityId::TIME_SET,
+                CapabilityId::NET,
+                CapabilityId::SANDBOX_SPAWN,
+                CapabilityId::FS_ACCESS,
+                CapabilityId::LOG_EMIT,
+            ]),
+        );
+        // The account exists only to run this service, so its ceiling and the
+        // bundle's request must coincide or the intersection would silently
+        // strip an authority the code needs.
+        assert_eq!(set(TIMED_MANIFEST), set(tairix_users::TIMED_CEILING));
+        // The clock is the whole authority. It must hold nothing that would
+        // let a compromise reach further — and in particular no general spawn
+        // authority, because the only child it may start is the canonical
+        // parser worker that keeps the packet decode out of this process.
+        for denied in [
+            CapabilityId::IPC_BIND_PRIVILEGED,
+            CapabilityId::NET_RAW,
+            CapabilityId::NET_ADMIN,
+            CapabilityId::PROC_SPAWN,
+            CapabilityId::SPAWN_AS_USER,
+            CapabilityId::FS_CHOWN,
+            CapabilityId::USERS_READ,
+        ] {
+            assert!(!TIMED_MANIFEST.contains(&denied), "{denied:?}");
+        }
+        // Nothing else in the system holds the clock.
+        for other in [
+            CONFD_MANIFEST,
+            DEVMGR_MANIFEST,
+            NETSTACK_MANIFEST,
+            SEATMGR_MANIFEST,
+            SYSINFOD_MANIFEST,
+            FONTD_MANIFEST,
+        ] {
+            assert!(
+                !other.contains(&CapabilityId::TIME_SET),
+                "only `timed` may hold CAP_TIME_SET"
+            );
         }
     }
 
@@ -1382,6 +1456,7 @@ mod tests {
             ("tee", ProgramKind::Command, FILE_TOOL_REQUEST),
             ("telnet", ProgramKind::Command, TELNET_TOOL_REQUEST),
             ("terminal", ProgramKind::Application, TERMINAL_REQUEST),
+            ("timed", ProgramKind::Service, TIMED_MANIFEST),
             ("top", ProgramKind::Command, TOP_MANIFEST),
             ("true", ProgramKind::Command, PURE_TOOL_REQUEST),
             ("unlink", ProgramKind::Command, PURE_TOOL_REQUEST),

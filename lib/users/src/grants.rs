@@ -275,6 +275,28 @@ pub const CONFD_CEILING: &[CapabilityId] = &[
     CapabilityId::LOG_EMIT,
 ];
 
+/// The `timed` time-synchronisation service account's grant ceiling: set the
+/// machine clock, reach the configured time servers, evaluate their replies in
+/// a capability-empty worker, read its configuration and rewrite its own
+/// last-seen record, and emit its audit records — nothing more.
+///
+/// `CAP_TIME_SET` is the whole authority the service has, and this is its only
+/// holder in the system. `CAP_SANDBOX_SPAWN` is what keeps that authority away
+/// from the packets: every NTP response is decoded in a capability-empty
+/// worker, so a hostile datagram faults a process that can set nothing. It
+/// carries `CAP_NET` (ordinary transport use) but neither `CAP_NET_RAW` nor
+/// `CAP_NET_ADMIN`, no `CAP_IPC_BIND_PRIVILEGED` (it serves nothing and is
+/// only ever a client), no `CAP_PROC_SPAWN` or `CAP_SPAWN_AS_USER` (the
+/// sandbox authority admits only a canonical parser child), and no
+/// `CAP_FS_CHOWN` or `CAP_USERS_READ`.
+pub const TIMED_CEILING: &[CapabilityId] = &[
+    CapabilityId::TIME_SET,
+    CapabilityId::NET,
+    CapabilityId::SANDBOX_SPAWN,
+    CapabilityId::FS_ACCESS,
+    CapabilityId::LOG_EMIT,
+];
+
 /// The `greeter` service account's grant ceiling: draw the graphical login
 /// screen on one seat and read that seat's input — nothing that could reach
 /// an account.

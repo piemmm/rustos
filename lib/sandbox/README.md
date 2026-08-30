@@ -82,6 +82,18 @@ imports this seam; a second per-app copy is forbidden.
   the success path and on every error path alike. A prepare replaces any
   source (and placement) an earlier prepare left held on the same
   (reused) worker.
+- **The NTP-evaluation service** (`timesync`): a network time server's reply
+  is evaluated in the worker (`tairix-net`'s RFC 5905 rules), because the
+  `timed` service that acts on the verdict holds `CAP_TIME_SET` and must
+  never parse a packet. Unusually for a consumer here, the caller keeps one
+  check *ahead* of the worker: the reply's origin timestamp must echo the
+  request's CSPRNG nonce — a fixed-offset read of a fixed-length header —
+  so a spoofed flood is dropped with no worker round trip at all rather
+  than becoming a denial of service against the real reply. Only the fixed
+  48-byte header crosses, and the caller-side `evaluate_datagram`
+  re-validates any returned sample against the plausibility window, the
+  round-trip ceiling, and the usable stratum range before it can reach the
+  clock.
 - **The production transport** (`rt`, feature `program`, bare-metal only):
   the parent launches **its own binary** in a worker role via
   `SpawnAttach::sandbox` with two pipes wired to the worker's fd 0/1, and

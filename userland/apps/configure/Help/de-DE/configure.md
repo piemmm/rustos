@@ -76,6 +76,15 @@ Arbeit daher nur langsamer — es ändert niemals ein Ergebnis.
   Verbindungen Not-ECT; `true` bietet ECN im Handshake an und behandelt
   danach eine Überlastmarkierung als Signal zum Drosseln, statt einen
   Paketverlust zu erzwingen.
+- `time.servers` — `none` oder eine kommagetrennte Liste von
+  Netzwerkzeitservern, jeder ein Hostname oder eine Adresse. `none` (die
+  Vorgabe) bedeutet, dass die Uhr nie aus dem Netz gestellt wird: TAIRiX
+  hat keinen eigenen Zeitserver-Pool, also ist das Benennen eines Servers
+  die Entscheidung des Betreibers.
+- `time.refresh` — `6h`, `12h`, `1d`, `2d` oder `7d`: wie viel Laufzeit
+  zwischen erneuten Uhrabfragen vergeht, sobald die Zeit bekannt ist. `1d`
+  ist die Vorgabe. Eine ungestellte, unplausible oder lange veraltete Uhr
+  wird unabhängig davon sofort korrigiert, sobald das Netz es erlaubt.
 
 Die `net.*`-Einstellungen liest der Netzwerk-Stack; eine Änderung wirkt,
 sobald der Stack seine Konfiguration das nächste Mal anwendet.

@@ -73,6 +73,16 @@ afectado — nunca cambia un resultado.
   predeterminada) deja las conexiones Not-ECT; `true` ofrece ECN en el
   saludo y luego trata una marca de congestión como una señal para
   reducir la velocidad en lugar de forzar la pérdida de un paquete.
+- `time.servers` — `none` o una lista de servidores de hora de red
+  separada por comas, cada uno un nombre de host o una dirección. `none`
+  (el valor por omisión) significa que el reloj nunca se ajusta desde la
+  red: TAIRiX no tiene un grupo de servidores de hora propio, así que
+  nombrar un servidor es decisión del operador.
+- `time.refresh` — `6h`, `12h`, `1d`, `2d` o `7d`: cuánto tiempo de
+  actividad pasa entre consultas del reloj una vez conocida la hora. `1d`
+  es el valor por omisión. Un reloj sin ajustar, inverosímil o muy
+  desactualizado se corrige en cuanto la red lo permite, diga esto lo que
+  diga.
 
 La pila de red lee los ajustes `net.*`; un cambio surte efecto cuando
 la pila vuelve a aplicar su configuración.

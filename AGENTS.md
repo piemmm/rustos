@@ -660,6 +660,7 @@ tairix/
 │   │   ├── devmgr/      # Device manager: hardware-tree match + driver autoload.
 │   │   ├── appmgr/      # Application bundle loader.
 │   │   ├── confd/       # App-data service: the per-app settings store.
+│   │   ├── timed/       # Time service: NTP client, sole CAP_TIME_SET holder.
 │   │   └── installer/   # Image installer (partitioning, user creation, naming).
 │   ├── session/         # Authentication and session bring-up.
 │   │   ├── login/       # Session authority: text login + the graphical round.

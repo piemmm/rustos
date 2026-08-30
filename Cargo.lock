@@ -2085,6 +2085,7 @@ dependencies = [
  "tairix-partition",
  "tairix-proglib",
  "tairix-syshelp",
+ "tairix-timesync",
  "tairix-users",
 ]
 
@@ -2379,6 +2380,7 @@ dependencies = [
  "tairix-icon",
  "tairix-image",
  "tairix-log",
+ "tairix-net",
  "tairix-raster",
  "tairix-rt",
  "tairix-svg",
@@ -2730,6 +2732,7 @@ dependencies = [
  "tairix-kernel-core",
  "tairix-kernel-sec",
  "tairix-log",
+ "tairix-timesync",
  "tairix-users",
 ]
 
@@ -3959,6 +3962,7 @@ dependencies = [
 name = "tairix-test-netstack-wire"
 version = "0.0.0"
 dependencies = [
+ "tairix-abi",
  "tairix-netconfig",
  "tairix-sysconfig",
 ]
@@ -4495,6 +4499,7 @@ dependencies = [
  "tairix-kalloc",
  "tairix-kernel",
  "tairix-log",
+ "tairix-test-spawn-supervision",
 ]
 
 [[package]]
@@ -4521,6 +4526,17 @@ dependencies = [
  "tairix-arch-x86_64",
  "tairix-itest-harness",
  "tairix-kernel",
+ "tairix-log",
+ "tairix-test-spawn-supervision",
+]
+
+[[package]]
+name = "tairix-test-spawn-supervision"
+version = "0.0.0"
+dependencies = [
+ "tairix-kernel-core",
+ "tairix-kernel-sec",
+ "tairix-kernel-syscall",
  "tairix-log",
 ]
 
@@ -4926,6 +4942,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-timed-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-kernel-core",
+ "tairix-log",
+ "tairix-test-netstack-wire",
+ "tairix-timesync",
+]
+
+[[package]]
 name = "tairix-test-timer-preempt-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
@@ -5213,10 +5243,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-timed"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-log",
+ "tairix-net",
+ "tairix-resolver",
+ "tairix-rt",
+ "tairix-sandbox",
+ "tairix-sysconfig",
+ "tairix-timesync",
+]
+
+[[package]]
 name = "tairix-timesync"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-crc32c",
+ "tairix-log",
  "tairix-net",
 ]
 

@@ -28,6 +28,9 @@ tairix-log = { path = "../log", version = "=0.0.0" }
 tairix-binfmt = { path = "../binfmt", version = "=0.0.0" }
 # The per-ISA instruction decoders the sandboxed decode service runs.
 tairix-disasm = { path = "../disasm", version = "=0.0.0" }
+# The RFC 5905 response evaluation the sandboxed timesync service runs, so
+# the `timed` service holding `CAP_TIME_SET` never decodes a packet itself.
+tairix-net = { path = "../net", version = "=0.0.0" }
 # The help-document parser + renderer the sandboxed helpdoc service runs.
 tairix-help = { path = "../help", version = "=0.0.0" }
 # The terminal-op vocabulary the helpdoc reply is encoded in and the

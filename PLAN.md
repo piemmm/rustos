@@ -3492,12 +3492,19 @@ See `plans/IO.md` (binding under `AGENTS.md`).
 
 ### Stage 6 follow-up — setting the clock (`plans/TIMESYNC.md`)
 
-**Status: planned.** Nothing in the workspace calls `wall_time_set` outside
-tests, so every boot starts `Unset`: the desktop clock shows its unset label,
-the Date & Time app shows empty fields, and audit-log hash chains and ARXFS
-`Time64` metadata rest on a clock a human sets by hand. A Raspberry Pi 3/4 has
-no RTC at all. `plans/TIMESYNC.md` is the binding design and carries the
-deliverable list (TS-1–TS-6) and its current state; it is not repeated here.
+**Status: in progress.** TS-1 (the engine and the clock policy) is done and
+TS-2 (the `timed` service) is code-complete with three QEMU verticals still
+failing (see `plans/TIMESYNC.md` TS-2): the machine now establishes its clock from a
+configured network time server, with the NTP decode contained in a
+capability-empty sandbox worker. TS-3 (the RTC driver class and the
+QEMU-emulable chips) is next; TS-4–TS-6 follow. `plans/TIMESYNC.md` is the
+binding design and carries the deliverable list and its current state; it is
+not repeated here.
+
+A Raspberry Pi 3/4 has no RTC at all, which is why the network path came
+first: without it such a machine boots `WallTimeState::Unset` for ever, and
+audit-log hash chains, ARXFS `Time64` metadata, and certificate lifetimes all
+rest on the clock this establishes.
 
 Load-bearing decisions a future contributor needs:
 
@@ -3523,9 +3530,14 @@ Load-bearing decisions a future contributor needs:
   fleet of identical images cannot stampede one server, and Kiss-o'-Death
   obeyed (`RATE` widens, `DENY`/`RSTR` retire the server).
 - **`CAP_TIME_SET` never shares an address space with the NTP decode**
-  (§19.5): the decode runs in a `lib/sandbox` worker holding only its pipe,
-  and `timed` re-validates the nonce echo and plausibility window on the reply
-  before applying anything.
+  (§19.5): the decode runs in a `lib/sandbox` worker holding only its pipe.
+  The caller gates the nonce echo *itself*, before the worker is involved, and
+  re-validates any returned sample against the plausibility window, the
+  round-trip ceiling, and the usable stratum range before applying it.
+- **The default server list is empty, on purpose.** TAIRiX has no NTP-pool
+  vendor zone and RFC 8633 §3.1 asks a vendor not to point a fleet at the
+  public pool without one, so the service is enabled by default while the
+  servers are the operator's or the installer's choice.
 - **RTC drivers are ordinary discovered drivers** (§18.3) in a new
   `drivers/rtc/` class, with the shared BCD civil codec defined once in the
   `lib/abi` RTC class module. Three tiers: the QEMU-emulable reference set

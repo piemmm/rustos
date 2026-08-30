@@ -256,6 +256,25 @@ enum NetPeerMode {
     /// the guest requires a post-failover served echo, so neither side can
     /// pass without the flow surviving the member drop.
     Bond,
+    /// An **NTP-server** peer (the `plans/TIMESYNC.md` TS-2 vertical): the
+    /// peer takes its own [`tairix_test_netstack_wire::PEER_STATIC_V6`] on the
+    /// guest's on-link `/64` and answers each of the guest's NTP client
+    /// requests **twice, spoof first** — a well-formed reply whose origin
+    /// timestamp does not echo the request's nonce and which reports
+    /// [`tairix_test_netstack_wire::NTP_SPOOF_SECS`], then the truthful reply
+    /// echoing the nonce and reporting
+    /// [`tairix_test_netstack_wire::NTP_FIXTURE_SECS`].
+    ///
+    /// That ordering is the discriminator: a guest that accepted the spoof
+    /// would set its clock to the wrong instant, and a guest that let the
+    /// spoof cancel its outstanding transaction would ignore the truthful
+    /// reply and never set the clock at all. The peer's verdict requires a
+    /// served request; the guest's own audit witness (the applied
+    /// `wall_secs=`) says which reply it believed, so neither side passes
+    /// alone. Its gate is deliberately **not** a completion gate: the peer
+    /// trips as it sends, while the property under test is what the guest
+    /// does next.
+    NtpServer,
 }
 
 /// Which filesystem volume (if any) the host harness plants on the
@@ -383,6 +402,21 @@ enum FsDisk {
     /// the guest always forms. The console stays the UART text console (no
     /// display/input driver).
     StaticNetRootDisk,
+    /// The [`Self::StaticNetRootDisk`] layout — the same net-only driver set,
+    /// standard application store, and planted static-addressing
+    /// `network.conf` — **plus** a planted
+    /// `/System/Settings/Configuration/system.conf`
+    /// ([`tairix_test_netstack_wire::TIMED_SYSTEM_CONF`]) on the *encrypted
+    /// root*, naming the host peer as the one time server. The
+    /// time-synchronisation vertical's backing (`plans/TIMESYNC.md` TS-2).
+    ///
+    /// The time store is planted on the root volume rather than the read-only
+    /// `/System` one because `timed` reads it through the ordinary VFS, where
+    /// `/System/Settings` resolves to the writable sub-mount the encrypted
+    /// root backs — the same layer `os.loginType` is planted on. The console
+    /// stays the UART text console the serial script drives (no display/input
+    /// driver).
+    TimeNetRootDisk,
     /// The net-only-driver encrypted-root layout carrying the **standard**
     /// signed application store **plus** a planted
     /// `/System/Settings/Network/network.conf`
@@ -5341,6 +5375,63 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
+    // `plans/TIMESYNC.md` TS-2: the live clock-establishment vertical.
+    // `tairix-test-timed-qemu-aarch64` boots the *production* aarch64 pipeline
+    // with the `time-net-root` disk: the net-only signed driver set, the
+    // standard application/service store (so the real `timed` bundle is
+    // present), the planted static-addressing `network.conf`, and — on the
+    // encrypted root, the layer `timed` reads through the ordinary VFS — a
+    // planted `system.conf` naming the host peer as the one time server by
+    // address literal (`FsDisk::TimeNetRootDisk`). A `virtio-net-device` is
+    // attached with the harness-side NTP-server peer on its `dgram` netdev
+    // (`NetPeerMode::NtpServer`).
+    //
+    // The guest boots with the wall clock `Unset` (no RTC is modelled), so
+    // `timed` finds the clock urgent, waits its randomised initial delay, and
+    // queries the peer. The peer answers **twice, spoof first**: a well-formed
+    // reply whose origin timestamp does not echo the request's nonce and which
+    // reports `NTP_SPOOF_SECS`, then the truthful reply echoing the nonce and
+    // reporting `NTP_FIXTURE_SECS`. That ordering is the discriminator — a
+    // guest that accepted the spoof would land on the wrong instant, and one
+    // that let the spoof cancel its transaction would ignore the truthful
+    // reply and never set the clock — so the serial witness requires the
+    // *exact* applied seconds, which only the nonce-gated path can produce.
+    //
+    // Three gates, none sufficient alone: the serial script requires the
+    // unlock (so the planted `system.conf` is reachable), then the login
+    // dialogue, then — expect-only, typing nothing — `timed`'s `CLOCK_SET`
+    // audit record carrying `wall_secs=<NTP_FIXTURE_SECS>`, and only then
+    // types the shell `exit` that completes the chain. The peer must
+    // additionally report a served request. A 300-second budget covers boot +
+    // autoload + service bring-up + the unlock and login dialogue + the
+    // randomised initial delay and any backoff while the interface comes up,
+    // on QEMU TCG; single CPU like the other full-boot verticals.
+    QemuTest {
+        package: "tairix-test-timed-qemu-aarch64",
+        binary: "tairix-test-timed-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::NtpServer,
+        ramfb: false,
+        fs_disk: FsDisk::TimeNetRootDisk,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[
+            ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
+            ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
+            ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
+            // The script ends at the session prompt. The guest itself exits
+            // on the applied instant, which happens seconds later, so a step
+            // gated on that record would still be pending when it does and
+            // the run would fail as an unfinished script.
+            ("root@tairix ~% ", Duration::ZERO, ""),
+        ],
+    },
     // `plans/NETWORK.md` N9b-3-2-β-2-ii-b-bond: the live bond-failover
     // vertical. `tairix-test-netstack-bond-qemu-aarch64` boots the
     // *production* aarch64 pipeline with the `bond-net-root` disk: the
@@ -7415,17 +7506,23 @@ fn root_volume_components(t: &QemuTest, path: &str) -> Result<Vec<String>, Strin
 /// written out as a literal, so it cannot drift from the grammar the guest
 /// parses.
 fn login_type_plant(t: &QemuTest) -> Result<Option<(Vec<String>, String)>, String> {
-    let login_type = match t.fs_disk {
-        FsDisk::AutoloadRootDisk | FsDisk::HoverRootDisk => tairix_sysconfig::LoginType::Text,
+    let settings = match t.fs_disk {
+        FsDisk::AutoloadRootDisk | FsDisk::HoverRootDisk => tairix_sysconfig::SystemConfig {
+            login_type: tairix_sysconfig::LoginType::Text,
+            ..tairix_sysconfig::SystemConfig::default()
+        },
+        // The time vertical's server list lives on this same layer: `timed`
+        // reads the store through the ordinary VFS, where `/System/Settings`
+        // is the writable sub-mount the encrypted root backs, so a document
+        // planted on the read-only `/System` volume would be invisible to it.
+        FsDisk::TimeNetRootDisk => {
+            tairix_sysconfig::SystemConfig::parse(tairix_test_netstack_wire::TIMED_SYSTEM_CONF)
+                .map_err(|e| format!("the time vertical's planted system.conf must parse: {e}"))?
+        }
         _ => return Ok(None),
     };
     let components = root_volume_components(t, tairix_sysconfig::CONFIG_PATH)?;
-    let conf = tairix_sysconfig::SystemConfig {
-        login_type,
-        ..tairix_sysconfig::SystemConfig::default()
-    }
-    .render();
-    Ok(Some((components, conf)))
+    Ok(Some((components, settings.render())))
 }
 
 /// Every document a vertical plants on its encrypted root volume, as the
@@ -7566,6 +7663,7 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         | FsDisk::ListenRootDisk
         | FsDisk::NetToolRootDisk
         | FsDisk::StaticNetRootDisk
+        | FsDisk::TimeNetRootDisk
         | FsDisk::BondNetRootDisk
         | FsDisk::DhcpNetRootDisk
         | FsDisk::Dhcp6NetRootDisk => {
@@ -7574,7 +7672,12 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         _ => EMPTY,
     };
     let static_net_apps = match t.fs_disk {
-        FsDisk::StaticNetRootDisk => super::image_apps::static_net_store_files(ctx, arch, profile)?,
+        // The time vertical takes the same planted static-addressing
+        // `network.conf`: its own extra document is the `system.conf` on the
+        // encrypted root, not another `/System` store file.
+        FsDisk::StaticNetRootDisk | FsDisk::TimeNetRootDisk => {
+            super::image_apps::static_net_store_files(ctx, arch, profile)?
+        }
         _ => EMPTY,
     };
     let bond_net_apps = match t.fs_disk {
@@ -8658,7 +8761,7 @@ fn sibling_serial_log(t: &QemuTest, path: &Path) -> Result<PathBuf, String> {
         .map(|(head, _)| head)
         .ok_or_else(|| {
             format!(
-                "test --qemu ({}): screendump {} is not the under-pressure frame, so its                  transcript cannot be named",
+                "test --qemu ({}): screendump {} is not the under-pressure frame, so its transcript cannot be named",
                 t.package,
                 path.display(),
             )
@@ -9973,6 +10076,7 @@ fn fs_disk_image(t: &QemuTest, stores: StoreSet) -> Result<Option<FsImage>, Stri
         | FsDisk::ListenRootDisk
         | FsDisk::NetToolRootDisk
         | FsDisk::StaticNetRootDisk
+        | FsDisk::TimeNetRootDisk
         | FsDisk::BondNetRootDisk
         | FsDisk::DhcpNetRootDisk
         | FsDisk::Dhcp6NetRootDisk => Some(net_root_fs_disk_image(t, stores)?),
@@ -10033,6 +10137,12 @@ fn net_root_fs_disk_image(t: &QemuTest, stores: StoreSet) -> Result<FsImage, Str
             static_net_apps,
             "static-net-root.img",
             "static-net-root",
+        ),
+        FsDisk::TimeNetRootDisk => (
+            net_only_drivers,
+            static_net_apps,
+            "time-net-root.img",
+            "time-net-root",
         ),
         FsDisk::BondNetRootDisk => (
             net_only_drivers,
@@ -10128,6 +10238,7 @@ fn spawn_net_peer(
         NetPeerMode::V6StaticEcho => super::netpeer::NetPeer::spawn_static(qemu_sock, peer_sock),
         NetPeerMode::V4DhcpEcho => super::netpeer::NetPeer::spawn_dhcp(qemu_sock, peer_sock),
         NetPeerMode::V6Dhcp6Echo => super::netpeer::NetPeer::spawn_dhcp6(qemu_sock, peer_sock),
+        NetPeerMode::NtpServer => super::netpeer::NetPeer::spawn_ntp(qemu_sock, peer_sock),
         // The bond peer needs two wires (two socket pairs), so it is attached
         // directly in `finish_run`, never through this single-wire spawner.
         NetPeerMode::Bond => {
@@ -10846,17 +10957,6 @@ mod tests {
         assert_eq!(SUPERVISOR_MOUNT_SCRIPT[2].2, UNLOCK_PASSPHRASE_LINE);
     }
 
-    /// No two runs of the matrix may write to the same sidecar path, or the
-    /// concurrent runner could let one clobber another's image while its QEMU
-    /// still has it open — rewriting a live guest's disk underneath it — or
-    /// attribute one run's transcript to another. Two things collide and
-    /// [`sidecar_path`] separates both: enrolments sharing one built binary
-    /// (the pre-boot Supervisor verticals drive the byte-identical guest
-    /// through different serial scripts), and the flake hunt's concurrent
-    /// replicas of a single enrolment. Both sidecar kinds are checked, because
-    /// both are per-run outputs. Replica zero of a singly-enrolled binary
-    /// keeps the plain `<binary>.<ext>` name, so the pull-request matrix's
-    /// paths are unchanged.
     /// The artwork assertion's band scoping resolves the transcript beside the
     /// frame it is judging, and reads the marker out of it.
     ///
@@ -10912,6 +11012,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// No two runs of the matrix may write to the same sidecar path, or the
+    /// concurrent runner could let one clobber another's image while its QEMU
+    /// still has it open — rewriting a live guest's disk underneath it — or
+    /// attribute one run's transcript to another. Two things collide and
+    /// [`sidecar_path`] separates both: enrolments sharing one built binary
+    /// (the pre-boot Supervisor verticals drive the byte-identical guest
+    /// through different serial scripts), and the flake hunt's concurrent
+    /// replicas of a single enrolment. Both sidecar kinds are checked, because
+    /// both are per-run outputs. Replica zero of a singly-enrolled binary
+    /// keeps the plain `<binary>.<ext>` name, so the pull-request matrix's
+    /// paths are unchanged.
     #[test]
     fn sidecar_paths_never_collide_across_enrolments_or_replicas() {
         use std::collections::{HashMap, HashSet};

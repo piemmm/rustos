@@ -70,6 +70,11 @@ set by hand.
 - **Automatic time-setting is enabled by default and the user can turn it
   off.** That switch is service enrolment, owned by the service manager, and
   is reachable from both a command line and the desktop (§6).
+- **The default server list is empty.** TAIRiX has no NTP-pool vendor zone and
+  RFC 8633 §3.1 asks a vendor not to point a fleet at the public pool without
+  one, so the *service* is enabled by default while the *servers* are the
+  operator's or the installer's choice. An unconfigured machine records that it
+  has no server rather than querying somebody else's service uninvited.
 
 ## 1. Target architecture (binding)
 
@@ -94,12 +99,20 @@ drivers/rtc/<leaf>/         one crate per chip, matched by discovery
 lib/i2c + drivers/bus/i2c/bcm2835/   the transfer path the I2C chips are reached through
 ```
 
-- `timed` is a system service under its own service account, `requires`
-  `ReadyCondition::NetworkUp`, `activation: permanent`,
-  `restart: on-failure` — SUM1 unit metadata in its signed `AppInfo`, so the
-  kernel derives its grant as `manifest ∩ account-ceiling` at load
-  (`plans/NEW-SERVICEMANAGER.md` SVC-A). It holds `CAP_TIME_SET` and a UDP
-  socket, and no filesystem authority beyond its own state file.
+- `timed` is a system service under its own service account (`timed`, uid 18),
+  and the kernel derives its grant as `manifest ∩ account-ceiling` from the
+  signed `AppInfo` at load. It holds `CAP_TIME_SET`, `CAP_NET`,
+  `CAP_SANDBOX_SPAWN`, `CAP_FS_ACCESS`, and `CAP_LOG_EMIT` — no endpoint bind,
+  no raw or admin network authority, no general spawn.
+  - It is registered in PID 1's compiled-in startup floor. The SUM1 unit
+    metadata (`requires: network-up`, `activation: permanent`,
+    `restart: on-failure`) and enrolment in
+    `/System/Settings/Services/enabled` are **TS-5** work: neither has a live
+    reader until the control transport lands, and authoring metadata nothing
+    consumes would be speculative surface.
+  - It needs no readiness gate: a query it cannot send simply fails, and the
+    engine's bounded backoff paces the retry, so an interface that appears
+    late costs nothing.
 - An RTC driver is an ordinary `drivers/` module: matched by its
   hardware-tree `compatible` key through `lib/devmatch`, autoloaded by
   `devmgr` under `CAP_DRV_LOAD`, granted only the resources its matched node
@@ -350,14 +363,108 @@ Each stage leaves the whole-project §7 gate green before it is reported done.
   encoding, the `time.*` configuration keys, and the sandboxed decode all
   belong with the service that owns the I/O.
 
-### TS-2 — `timed`: the service
-`lib/sandbox::timesync` (the capability-less decode worker, §4);
-`userland/system/timed` with the tickless reactor; the `time.*` `system.conf`
-keys; the `/System/Settings/Time/state` record; the service account,
-manifest, ceiling, SUM1 unit metadata, and default enrolment; the audit event
-ids. QEMU vertical: an unset-clock guest with a fixture responder reaches
-`Trusted`, and a companion case proves a wrong-nonce response is rejected and
-audited.
+### TS-2 — `timed`: the service — code complete, gate not yet green
+- `lib/net::ntp` gains `NtpClient::on_reply` and `lib/timesync` gains
+  `TimeSync::on_reply` / `TimeSync::outstanding`: the transaction machine is
+  reachable from an *already-evaluated* verdict, so a caller holding
+  `CAP_TIME_SET` runs the decode elsewhere and the retry/rotation/KoD
+  discipline still has exactly one implementation.
+- `lib/sandbox::timesync` — `TimeSyncService` (the worker-side evaluation) and
+  `evaluate_datagram` (the caller side). The caller gates the **nonce echo
+  itself**, before the worker is involved, so a spoofed flood costs no round
+  trip; only the fixed 48-byte header crosses; a returned sample is
+  re-validated against the plausibility window, `MAX_ROUND_TRIP`, and the
+  usable stratum range. `KissCode::Other` carries its four raw reference-id
+  octets so a reader can diagnose the server.
+- `tairix_abi::MAX_TIME_SERVERS` is the one server-count bound the config
+  store validates against and `ntp::MAX_SERVERS` is defined as, so a
+  configured server can never sit silently past the engine's reach.
+- `lib/sysconfig` — `time.servers` (bounded host-operand list, `none` for the
+  empty list so the render/parse round trip stays exact) and `time.refresh`
+  (a closed cadence set, because the point of the cadence is politeness).
+  `Key::values` became `Key::shape` (`ValueShape::Closed`/`Free`) and
+  `SystemConfig::get` became `render_value`, since one key's value is no
+  longer a fixed spelling.
+- `lib/timesync` — the `SyncRecord` document codec: fixed-length, magicked,
+  CRC-32C'd. A wrong length/magic, a torn rewrite, an implausible instant, an
+  undefined flag bit, or a `last_seen` before its `last_sync` all resolve to
+  `EMPTY`, so the stale-boot and went-backwards rules do not fire on a
+  fiction. The checksum guards corruption, not tampering.
+- `userland/system/timed` — the engine over injected `Clock`/`RecordStore`/
+  `Transport` seams plus the freestanding tickless reactor (one wait-set, the
+  folded deadline, park never poll), the `23000..24000` audit range, the
+  service account (`timed`, uid 18, `TIMED_CEILING`), `TIMED_MANIFEST`, the
+  `AppInfo.toml`, and the boot-floor registration in PID 1's startup config
+  and the x86_64/riscv64 embedded spawn floor.
+- **The default server list is empty, deliberately.** TAIRiX has no NTP-pool
+  vendor zone and RFC 8633 §3.1 asks a vendor not to point a fleet at the
+  public pool without one, so an unconfigured machine never queries and
+  records that it has no server. The installer or the operator names one.
+- **Config availability is a boot-order fact, not a bug.** The store lives on
+  the encrypted root and this is a boot-floor service, so the first read
+  normally precedes the mount. With no userland "root mounted" event, the
+  reactor re-reads on a bounded doubling one-shot ladder (8 attempts, ~17
+  minutes, parking between them) and then either has a server or parks saying
+  it has none. Configuring a server later means restarting the service.
+- **`lib/resolver`'s delivery port is now process-private.** The kernel's port
+  registry is machine-wide, so the fixed well-known id would have let this
+  long-lived client deny name resolution to every later process for the boot;
+  `bind_delivery_port` draws an unreserved CSPRNG id under a bounded budget.
+  `timed` additionally opens that transport only for a server that is *not* an
+  address literal.
+- QEMU vertical `tairix-test-timed-qemu-aarch64` over the `time-net-root`
+  disk: the peer answers each request **twice, spoof first**, and the serial
+  gate requires the *exact* applied `wall_secs=` of the truthful reply — so a
+  guest that believed the spoof, or that let the spoof cancel its outstanding
+  transaction, fails the run. That one choreography covers both the sync and
+  the anti-spoof property; a separate "wrong nonce is refused" case would have
+  had no positive witness, because a spoofed packet is deliberately not
+  audited (per-packet audit of an injected flood is itself a denial of
+  service).
+- The configuration re-read ladder arms on *any* read that finds no server.
+  An earlier attempt to disarm it when the store's path had no VFS backing —
+  meaning to spare a volume-less guest a pointless timer — stranded the
+  service on every ordinary boot instead: an unmounted encrypted root is
+  indistinguishable from an absent one at `open`, so `timed` gave up three
+  seconds before the unlock and never set the clock. The ladder's own finite
+  length is what bounds the volume-less case; the classification is not worth
+  attempting. Pinned by host tests over `ConfigRetry`, which lives in the
+  engine half so it is testable at all.
+- The `spawn_session` verticals' silence after `login` spawns was **not** the
+  §17.1 cooperative-dispatch defect. Their audit sinks keyed PASS on raw
+  `ProcessSpawned`/`SyscallInvoked` totals, so adding `timed` to the startup
+  set met both thresholds at login's *first* spawn and the guest exited
+  before the harness sent a single scripted line. They now key on the
+  identity of each step through the shared
+  `tairix-test-spawn-supervision` witness, which no service addition can
+  shift. All three now pass.
+- The record write no longer attempts an unconditional `mkdir` of
+  `/System/Settings/Time`. That directory is authored by every image builder
+  and its parent is system-owned, so the attempt was refused on every
+  provisioned machine and filed a denied-mutation audit record on each
+  successful sync — routine noise a real denial would have hidden in. The
+  directory is created only when the record file itself is absent.
+- The vertical had **no termination condition at all**, so it could never have
+  passed. The guest carried no `qemu_exit`, on the stated basis that the
+  harness would drive its serial script to completion — but a run ends only
+  when the guest exits or a completion gate fires, and this peer's gate is
+  deliberately neither. The guest now exits on `timed`'s `CLOCK_SET` record,
+  gated on the applied `wall_secs` equalling the fixture instant, so a guest
+  that believed the spoof records different seconds and never exits. That
+  witness sits on the **diagnostic** sink, not the audit one: a service's own
+  records reach only the former (`kernel/core/src/syscalls.rs`'s `log_emit`).
+  The serial script therefore ends at the session prompt — a step gated on the
+  clock record would still be pending when the guest exits on that same
+  record, which the runner reports as an unfinished script.
+- Its serial script was also mis-ordered: it waited for the clock record and
+  *then* for a shell prompt, but the prompt is printed seconds earlier and the
+  matcher only searches forward, so it typed nothing and the run sat idle
+  until the deadline. Prompt now precedes the clock gate.
+- Deferred to TS-5 by design (not a gap): enrolment in
+  `/System/Settings/Services/enabled` and the SUM1 unit metadata. Neither has
+  a live reader — PID 1 registers only its compiled-in startup floor today —
+  so `timed` is registered there, and TS-5 moves it to the enrolled tier with
+  the control transport that makes enrolment mean something.
 
 ### TS-3 — RTC class + the QEMU-emulable RTCs
 `lib/abi/src/driver/rtc.rs`, `HwDeviceClass::Rtc`, and the `pl031` /

@@ -83,23 +83,30 @@ pub const MAX_SERVICES: usize = count_service_directives(DEFAULT_CONFIG);
 pub const DEFAULT_CONFIG: &str = "\
 # TAIRiX PID 1 startup configuration (plans/PI.md P6b / P11).
 # Open the system console, launch the System Information, network-stack,
-# device-manager, seat-manager, and app-data services, and start the login
-# service as the session — each under its own compiled-in service account
-# (plans/USERS.md). `sysinfod` starts first so the introspection endpoint
-# (`AGENTS.md` §16.6) is published before any client queries it; `netstack`
-# (plans/NETWORK.md) owns the network interfaces and is launched before
-# `devmgr` so it is ready to receive the NIC device channels `devmgr` binds
-# to it; `seatmgr` (plans/DISPLAY.md D3) holds the seat-multiplexing
+# device-manager, seat-manager, app-data, and time services, and start the
+# login service as the session — each under its own compiled-in service
+# account (plans/USERS.md). `sysinfod` starts first so the introspection
+# endpoint (`AGENTS.md` §16.6) is published before any client queries it;
+# `netstack` (plans/NETWORK.md) owns the network interfaces and is launched
+# before `devmgr` so it is ready to receive the NIC device channels `devmgr`
+# binds to it; `seatmgr` (plans/DISPLAY.md D3) holds the seat-multiplexing
 # authority; `confd` (plans/APPDATA.md) owns every application's settings
 # store and is a boot-floor service because a headless machine needs it as
 # much as a desktop does — it binds its endpoint straight away and answers a
-# typed refusal until the encrypted root is unlocked.
+# typed refusal until the encrypted root is unlocked. `timed`
+# (plans/TIMESYNC.md) is last of the services: a machine with no RTC boots
+# knowing nothing about the time, and every audit-log hash chain, filesystem
+# timestamp, and certificate lifetime rests on the clock it establishes. It
+# starts after `netstack` so the interfaces exist by the time its first query
+# is due, and needs no readiness gate of its own — a query it cannot send
+# simply fails and its bounded backoff paces the retry.
 console
 service /System/Services/sysinfod.app/Run sysinfod
 service /System/Services/netstack.app/Run netstack
 service /System/Services/devmgr.app/Run devmgr
 service /System/Services/seatmgr.app/Run seatmgr
 service /System/Services/confd.app/Run confd
+service /System/Services/timed.app/Run timed
 session /System/Services/login.app/Run login
 ";
 
@@ -507,8 +514,10 @@ mod tests {
         // introspection endpoint is published before any client queries it;
         // `netstack` is launched before `devmgr` so it is ready when `devmgr`
         // binds discovered NIC device channels to it. `confd` needs nothing
-        // from the others and nothing needs it before an application runs, so
-        // it comes last of the floor.
+        // from the others and nothing needs it before an application runs;
+        // `timed` comes last because it needs `netstack`'s interfaces to
+        // exist before its first query is due and nothing needs it to have
+        // finished.
         assert_eq!(
             config.services(),
             &[
@@ -531,6 +540,10 @@ mod tests {
                 Launch {
                     path: "/System/Services/confd.app/Run",
                     uid: tairix_users::CONFD_UID.0,
+                },
+                Launch {
+                    path: "/System/Services/timed.app/Run",
+                    uid: tairix_users::TIMED_UID.0,
                 },
             ],
         );
@@ -638,10 +651,10 @@ mod tests {
         // floor is never truncated by a stale magic cap.
         let floor = StartupConfig::parse(DEFAULT_CONFIG).expect("the boot floor parses");
         assert_eq!(floor.services().len(), MAX_SERVICES);
-        // The current floor is sysinfod, netstack, devmgr, seatmgr, confd;
-        // this pins the derived value so a change to the floor is a conscious
-        // one.
-        assert_eq!(MAX_SERVICES, 5);
+        // The current floor is sysinfod, netstack, devmgr, seatmgr, confd,
+        // timed; this pins the derived value so a change to the floor is a
+        // conscious one.
+        assert_eq!(MAX_SERVICES, 6);
     }
 
     #[test]

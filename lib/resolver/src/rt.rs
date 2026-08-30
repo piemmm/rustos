@@ -3,7 +3,10 @@
 //!
 //! [`RtDnsTransport`] implements the pure engine's
 //! [`DnsTransport`](tairix_net::dns::DnsTransport) over the `netsock-v1` UDP
-//! datagram socket (`tairix_rt::net`): it binds an app-local delivery port,
+//! datagram socket (`tairix_rt::net`): it binds a process-private delivery
+//! port ([`bind_delivery_port`] — the kernel's port registry is machine-wide,
+//! so a fixed id would let one long-lived client deny resolution to every
+//! other process for the boot),
 //! opens the datagram socket for a server's address family on demand with a
 //! CSPRNG-drawn ephemeral source port (the RFC 5452 source-port randomisation
 //! the socket layer contributes), sends each encoded query, and parks on the
@@ -39,11 +42,12 @@ use tairix_procinfo::IpcTransport;
 
 use crate::{pointer_name, resolve_name, resolve_pointer, ResolveError};
 
-/// The client's delivery-port endpoint id — an app-local, unrestricted
-/// well-known value (not a reserved kernel id), so binding it needs no
-/// capability. The stack posts this socket's inbound datagrams here.
-/// (`0x_646e_7371` spells "dnsq".)
-const DELIVER_PORT: u64 = 0x_646e_7371;
+/// Attempts [`bind_delivery_port`] makes before failing closed.
+///
+/// The id space is 64 bits wide and the live set is a handful of ports, so a
+/// clash is vanishingly unlikely; a small bounded budget covers it without
+/// ever becoming a retry-until-it-works loop.
+const DELIVER_PORT_ATTEMPTS: usize = 8;
 
 /// Delivery-port mailbox depth. A resolution has one query outstanding at a
 /// time, but retransmission and failover can leave a couple of late replies
@@ -55,6 +59,30 @@ const DELIVER_CAPACITY: usize = 8;
 /// identifies it).
 const DELIVER_TOKEN: u64 = 1;
 
+/// Bind a fresh, **process-private** delivery port and return its id.
+///
+/// The kernel's port registry is machine-wide, so a fixed well-known id here
+/// would let whichever process bound it first — a long-lived one above all —
+/// deny name resolution to every other process for the rest of the boot. A
+/// CSPRNG-drawn unreserved id has no such contention: it is private to this
+/// transport, the stack learns it from the socket, and nothing resolves it by
+/// name. A reserved id (which would need `CAP_IPC_BIND_PRIVILEGED`) and zero
+/// are skipped rather than attempted, and the bounded budget fails closed.
+fn bind_delivery_port() -> Result<u64, Errno> {
+    for _ in 0..DELIVER_PORT_ATTEMPTS {
+        let mut bytes = [0u8; 8];
+        tairix_rt::random_get(&mut bytes, RandomFlags::empty()).map_err(Errno::from_syscall)?;
+        let id = u64::from_le_bytes(bytes);
+        if id == 0 || tairix_abi::ipc::is_reserved_endpoint(id) {
+            continue;
+        }
+        if tairix_rt::port_bind(id, SocketDatagram::MAX_WIRE_LEN, DELIVER_CAPACITY) >= 0 {
+            return Ok(id);
+        }
+    }
+    Err(Errno::AddressInUse)
+}
+
 /// One second in nanoseconds — the widening used to turn a monotonic
 /// [`Duration64`] deadline into the `u64` nanosecond count the wait-set and
 /// clock syscalls speak.
@@ -63,6 +91,8 @@ const ONE_SEC_NANOS: u64 = 1_000_000_000;
 /// A socket-backed [`DnsTransport`]: the monotonic clock, an on-demand UDP
 /// datagram socket per address family, and the delivery-port park.
 pub struct RtDnsTransport {
+    /// This transport's process-private delivery port ([`bind_delivery_port`]).
+    deliver: u64,
     /// The wait-set the delivery port is registered with; `wait` parks on it.
     set: u64,
     /// The IPv4 datagram socket, opened on the first query to a v4 server.
@@ -89,9 +119,7 @@ impl RtDnsTransport {
     /// [`Errno`] if the delivery port cannot be bound or the wait-set cannot
     /// be created or armed.
     pub fn open() -> Result<Self, Errno> {
-        if tairix_rt::port_bind(DELIVER_PORT, SocketDatagram::MAX_WIRE_LEN, DELIVER_CAPACITY) < 0 {
-            return Err(Errno::AddressInUse);
-        }
+        let deliver = bind_delivery_port()?;
         let set = tairix_rt::waitset_create();
         let Ok(set) = u64::try_from(set) else {
             return Err(Errno::from_syscall(set));
@@ -100,13 +128,14 @@ impl RtDnsTransport {
             set,
             WaitSetOp::Add,
             WaitSourceKind::Port,
-            DELIVER_PORT,
+            deliver,
             DELIVER_TOKEN,
         ) != 0
         {
             return Err(Errno::NotImplemented);
         }
         Ok(Self {
+            deliver,
             set,
             v4: None,
             v6: None,
@@ -125,7 +154,7 @@ impl RtDnsTransport {
         if let Some(socket) = *cached {
             return Ok(socket);
         }
-        let socket = tairix_rt::net::socket(family, DELIVER_PORT)?;
+        let socket = tairix_rt::net::socket(family, self.deliver)?;
         // A local port of 0 asks the stack for a CSPRNG-drawn ephemeral port
         // — the RFC 5452 source-port randomisation that widens an off-path
         // spoofer's search space beyond the query id alone.
@@ -243,7 +272,7 @@ impl DnsTransport for RtDnsTransport {
             if now >= deadline_ns {
                 return Ok(Wait::TimedOut);
             }
-            match tairix_rt::net::recv(DELIVER_PORT, &mut self.scratch) {
+            match tairix_rt::net::recv(self.deliver, &mut self.scratch) {
                 Ok((datagram, origin)) => {
                     // Authenticate the sender: capture the stack's origin on
                     // the first datagram, then require every later one to

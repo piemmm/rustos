@@ -114,6 +114,17 @@ pub const LOG_ATTESTATION_KEY_NAME: &str = "LogAttestation";
 /// principal exists.
 const LOG_ATTESTATION_KEY_MODE: u32 = 0o600;
 
+/// Mode for the time service's state directory: owner read/write/search,
+/// world-readable (`0o755`).
+///
+/// The record says only when the machine last knew the time, so it is not a
+/// secret; the ownership is what matters. `timed` owns the directory because
+/// it rewrites its record on every sync, and nothing else writes there —
+/// `/System/Settings` itself is system-user-owned, so without this the service
+/// could not create its own state (a defect the QEMU vertical surfaced as a
+/// denied `mkdir`).
+const TIME_STATE_DIR_MODE: u32 = 0o755;
+
 /// Everything seeded onto the encrypted root beyond the directory
 /// skeleton. Every image profile seeds both account databases (the
 /// canonical default system/service set at minimum, `plans/USERS.md`), so
@@ -338,6 +349,7 @@ fn populate_system_subtree(
     write_security_file(fs, security, USERS_DB_NAME, seed.users_db)?;
     write_security_file(fs, security, GROUPS_DB_NAME, seed.groups_db)?;
     write_library_config(fs, system, seed.library_conf)?;
+    create_time_state_dir(fs, system)?;
     if let Some(key_bytes) = seed.log_attestation_key {
         let keys = fs
             .lookup(security, b"Keys")
@@ -469,6 +481,35 @@ fn plant_network_config(
 /// catalog but only the system identity rewrites it; a user personalises
 /// through their own overlay instead. The text is stored whole, never a
 /// truncated store.
+/// Create `/System/Settings/Time`, owned by the time service.
+///
+/// The service rewrites `state` there after every successful synchronisation.
+/// `/System/Settings` is system-user-owned, so an image that did not author
+/// this directory would leave `timed` unable to create it — the record would
+/// be lost on every boot and a future boot could not tell a short power-off
+/// from a long one.
+fn create_time_state_dir(fs: &mut ARXFS<MemBlock>, system: NodeId) -> Result<(), MkimageError> {
+    let settings = fs
+        .lookup(system, b"Settings")
+        .map_err(MkimageError::RootPartition)?;
+    let dir = fs
+        .create(
+            settings,
+            tairix_timesync::RECORD_SUBDIR.as_bytes(),
+            NodeKind::Directory,
+        )
+        .map_err(MkimageError::RootPartition)?;
+    fs.set_security(
+        dir,
+        Security::new(
+            TIME_STATE_DIR_MODE,
+            tairix_users::TIMED_UID.0,
+            tairix_users::SERVICES_GID.0,
+        ),
+    )
+    .map_err(MkimageError::RootPartition)
+}
+
 fn write_library_config(
     fs: &mut ARXFS<MemBlock>,
     system: NodeId,

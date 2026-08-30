@@ -823,3 +823,52 @@ fn time64_conversion_survives_the_extremes_of_the_seconds_field() {
     }
     assert_eq!(Time64::from_secs(0).secs(), 0);
 }
+
+#[test]
+fn a_sandboxed_verdict_drives_the_engine_exactly_as_the_bytes_would() {
+    // The containment split must not change the state machine: evaluating
+    // elsewhere and feeding the verdict has to leave the engine identical to
+    // having handed it the datagram.
+    let good = |client: &mut NtpClient| {
+        let _ = first_query(client);
+        let mut b = ReplyBuilder::good(NtpTimestamp::from_raw(NONCE));
+        b.receive = ts(plausible_secs());
+        b.transmit = ts(plausible_secs());
+        b.encode()
+    };
+    let now = Duration64::from_nanos(1_000_000);
+
+    let mut direct = NtpClient::new(2, MIN_POLL, Duration64::ZERO);
+    let bytes = good(&mut direct);
+    let via_bytes = direct.on_datagram(now, &bytes);
+
+    let mut split = NtpClient::new(2, MIN_POLL, Duration64::ZERO);
+    let bytes = good(&mut split);
+    let txn = split.outstanding().expect("a request is outstanding");
+    let via_reply = split.on_reply(now, evaluate(&bytes, &txn, now));
+
+    assert_eq!(via_bytes, via_reply);
+    assert_eq!(direct.next_deadline(), split.next_deadline());
+    assert_eq!(direct.outstanding(), split.outstanding());
+}
+
+#[test]
+fn a_verdict_with_nothing_outstanding_changes_no_state() {
+    // A worker reply that races the transaction's own timeout must not be
+    // able to apply a sample the engine is no longer waiting for.
+    let mut client = NtpClient::new(1, MIN_POLL, Duration64::ZERO);
+    let before = client.next_deadline();
+    assert_eq!(
+        client.on_reply(
+            Duration64::ZERO,
+            Reply::Sample(super::Sample {
+                true_time: Time64::from_secs(plausible_secs()),
+                round_trip: Duration64::ZERO,
+                stratum: 2,
+            }),
+        ),
+        Outcome::Unsolicited
+    );
+    assert_eq!(client.next_deadline(), before);
+    assert!(client.outstanding().is_none());
+}

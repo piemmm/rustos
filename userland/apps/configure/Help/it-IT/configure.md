@@ -74,6 +74,16 @@ interessato — non cambia mai un risultato.
   predefinito) lascia le connessioni Not-ECT; `true` offre ECN
   nell'handshake e poi tratta un contrassegno di congestione come un
   segnale di rallentamento invece di forzare la perdita di un pacchetto.
+- `time.servers` — `none` oppure un elenco di server di ora di rete
+  separati da virgole, ciascuno un nome host o un indirizzo. `none` (il
+  valore predefinito) significa che l'orologio non viene mai impostato
+  dalla rete: TAIRiX non ha un proprio insieme di server di ora, quindi
+  indicare un server è una scelta dell'operatore.
+- `time.refresh` — `6h`, `12h`, `1d`, `2d` o `7d`: quanto tempo di
+  attività passa fra due interrogazioni dell'orologio una volta nota
+  l'ora. `1d` è il valore predefinito. Un orologio non impostato, non
+  plausibile o molto vecchio viene corretto appena la rete lo consente,
+  qualunque cosa dica questa impostazione.
 
 Lo stack di rete legge le impostazioni `net.*`; una modifica ha effetto
 quando lo stack applica di nuovo la sua configurazione.

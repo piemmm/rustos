@@ -368,6 +368,57 @@ pub const ECN_SYSTEM_CONF: &str = "\
 net.tcp.ecn true
 ";
 
+// --- Time-synchronisation vertical (plans/TIMESYNC.md TS-2) ------------
+//
+// The time vertical proves the clock is established from the network end to
+// end, and that the anti-spoof gate holds while it happens. The guest boots
+// with the wall clock `Unset` (no RTC is modelled), takes its static IPv6
+// address exactly as the static-addressing vertical does, and its `timed`
+// service queries the one configured server — the host peer, named by
+// address literal so no resolver is involved.
+//
+// The peer answers **twice per request**, spoof first: a well-formed reply
+// whose origin timestamp does *not* echo the request's nonce and which
+// reports a plainly different instant, then the truthful reply echoing the
+// nonce exactly. That ordering is the discriminator. A guest that accepted
+// the spoof would set its clock to the wrong instant; a guest that let the
+// spoof cancel the outstanding transaction would ignore the truthful reply
+// that follows and never set the clock at all. Only a guest whose nonce gate
+// drops the spoof *without* ending the transaction lands on
+// `NTP_FIXTURE_SECS`, which is what the run's serial witness requires.
+
+/// The instant the fixture NTP server reports, in Unix seconds — the value
+/// the guest's clock must end up reading.
+///
+/// Comfortably inside the plausibility window
+/// (`tairix_abi::is_plausible_wall_time`) and a round number of seconds, so
+/// the applied instant's whole-second field is exactly this even after the
+/// engine advances it by half the (sub-millisecond) round trip.
+pub const NTP_FIXTURE_SECS: i64 = 1_800_000_000;
+
+/// The instant the peer's **spoofed** reply reports, in Unix seconds.
+///
+/// Plausible in itself — so it is refused for its nonce, never for its value
+/// — and far enough from [`NTP_FIXTURE_SECS`] that a guest which accepted it
+/// could not be mistaken for one that did not.
+pub const NTP_SPOOF_SECS: i64 = NTP_FIXTURE_SECS + 1_000_000;
+
+/// The `/System/Settings/Configuration/system.conf` the time vertical plants
+/// on its read-only `/System` volume.
+///
+/// It names the host peer ([`PEER_STATIC_V6`]) as the one time server, by
+/// **address literal** so the run exercises the clock path alone and never
+/// depends on a resolver. Cross-checked against the real `lib/sysconfig`
+/// engine and the peer's own address by the
+/// `timed_system_conf_names_the_peer_as_the_only_server` unit test, so the
+/// fixture and the address the peer answers on cannot drift.
+pub const TIMED_SYSTEM_CONF: &str = "\
+# TAIRiX time-synchronisation QEMU vertical system.conf.
+# Names the host peer as the one time server, by address literal, so the
+# vertical proves the clock path without a resolver in it.
+time.servers fd00::1
+";
+
 // --- Bond-failover vertical (N9b-3-2-β-2-ii-b-bond) --------------------
 //
 // The bond vertical proves live link-aggregation failover end to end: the
@@ -1170,5 +1221,42 @@ mod tests {
             },
             "the fixture changes exactly one setting from the absent-store default"
         );
+    }
+
+    /// The planted time `system.conf` and the address the peer answers on are
+    /// one source of truth: the fixture names exactly the peer, and names it
+    /// as a literal so no resolver enters the run.
+    #[test]
+    fn timed_system_conf_names_the_peer_as_the_only_server() {
+        extern crate std;
+        let config = tairix_sysconfig::SystemConfig::parse(TIMED_SYSTEM_CONF)
+            .expect("the planted system.conf parses");
+        let peer = std::string::ToString::to_string(&PEER_STATIC_V6);
+        assert_eq!(config.time_servers, std::vec![peer.clone()]);
+        // An address literal, so the guest reaches the peer with no name
+        // resolution in the path at all.
+        assert!(config.time_servers[0].parse::<Ipv6Addr>().is_ok());
+        assert_eq!(
+            config,
+            tairix_sysconfig::SystemConfig {
+                time_servers: std::vec![peer],
+                ..tairix_sysconfig::SystemConfig::default()
+            },
+            "the fixture changes exactly one setting from the absent-store default"
+        );
+    }
+
+    /// Both fixture instants are inside the plausibility window and far
+    /// enough apart that a guest which accepted the spoof cannot be mistaken
+    /// for one that refused it.
+    #[test]
+    fn the_fixture_instants_are_plausible_and_distinguishable() {
+        for secs in [NTP_FIXTURE_SECS, NTP_SPOOF_SECS] {
+            assert!(
+                tairix_abi::is_plausible_wall_time(tairix_abi::Time64::from_secs(secs)),
+                "{secs} must be a reading the guest can accept on its merits"
+            );
+        }
+        assert!(NTP_SPOOF_SECS.abs_diff(NTP_FIXTURE_SECS) >= 1_000_000);
     }
 }

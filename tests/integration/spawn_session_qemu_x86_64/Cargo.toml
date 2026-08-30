@@ -15,10 +15,9 @@ workspace = true
 # `tairix-kernel`'s library half (`kernel/tairix-kernel/src/lib.rs`),
 # including the `with_init` PID 1 spawn seam, the runtime `with_spawn`
 # producer + embedded-program registry (`plans/PI.md` X3b), and the COM1
-# console backing, and only replaces the audit Sink: observing three
-# `ProcessSpawned` (EventId 4030 — PID 1, the session, and the relaunched
-# session) plus four audited `SyscallInvoked` (EventId 5000 — init's spawn,
-# the session's exit, init's wait, and init's relaunch spawn) flips
+# console backing, and only replaces the audit Sink: the shared supervision
+# witness recognising the session's exit, init's reaping wait, and the
+# replacement image init then builds flips
 # `qemu_exit::exit_success`, so the host-side `tools/qemu::Runner` registers
 # the test as `Outcome::Pass`. This proves the full wait->reap->relaunch
 # supervision cycle on x86_64 (the X4 follow-on): it was raised from the
@@ -38,6 +37,9 @@ path = "src/main.rs"
 tairix-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
 tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The supervision witness both ports' audit sinks fold their event stream
+# through, so neither can drift from the other.
+tairix-test-spawn-supervision = { path = "../spawn_supervision", version = "=0.0.0" }
 
 [build-dependencies]
 tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

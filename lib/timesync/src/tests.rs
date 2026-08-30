@@ -2,11 +2,12 @@
 
 use super::{
     decide, ClockUpdate, Decision, Event, SyncReason, SyncRecord, TimeSync, DEFAULT_REFRESH,
-    INITIAL_DELAY_SPAN, STALE_BOOT_GAP, STEP_THRESHOLD,
+    INITIAL_DELAY_SPAN, RECORD_DIR, RECORD_LEN, RECORD_MAGIC, RECORD_PATH, RECORD_SUBDIR,
+    STALE_BOOT_GAP, STEP_THRESHOLD,
 };
 use tairix_abi::time::{Duration64, Time64};
 use tairix_abi::{WallClockReading, WallTimeState, PLAUSIBLE_FUTURE_SECS, RELEASE_EPOCH_SECS};
-use tairix_net::ntp::{KissCode, NtpTimestamp, PACKET_LEN};
+use tairix_net::ntp::{evaluate, KissCode, NtpTimestamp, PACKET_LEN};
 
 /// A wall instant comfortably inside the plausibility window.
 fn plausible() -> Time64 {
@@ -538,4 +539,125 @@ fn the_clock_update_is_inspectable_for_audit() {
     assert!(stepped);
     assert!(round_trip <= Duration64::from_secs(3));
     assert_eq!(stratum, 2);
+}
+
+#[test]
+fn a_sandboxed_verdict_reaches_the_same_clock_decision_as_the_bytes() {
+    // The containment split must not change what a sample means: evaluating
+    // in the worker and feeding the verdict back has to produce the identical
+    // update the in-process decode would.
+    let mut direct = urgent_client();
+    let (nonce, at) = in_flight(&mut direct);
+    let bytes = reply(nonce, plausible());
+    let via_bytes = direct.on_datagram(at, unset(), &bytes);
+
+    let mut split = urgent_client();
+    let (nonce, at) = in_flight(&mut split);
+    let bytes = reply(nonce, plausible());
+    let txn = split.outstanding().expect("a request is outstanding");
+    let via_reply = split.on_reply(at, unset(), evaluate(&bytes, &txn, at));
+
+    assert_eq!(via_bytes, via_reply);
+    assert_eq!(direct.next_deadline(), split.next_deadline());
+    assert_eq!(direct.urgency(), split.urgency());
+}
+
+#[test]
+fn the_record_round_trips_through_its_document() {
+    let synced = SyncRecord::EMPTY.synced_at(plausible());
+    assert_eq!(SyncRecord::from_bytes(&synced.to_bytes()), synced);
+    // The empty record is a document too, not an absent file.
+    assert_eq!(
+        SyncRecord::from_bytes(&SyncRecord::EMPTY.to_bytes()),
+        SyncRecord::EMPTY
+    );
+    // A record whose last_seen ran ahead of its last_sync survives intact.
+    let ahead = SyncRecord {
+        last_sync: Some(plausible()),
+        last_seen: Some(plausible().saturating_add(Duration64::from_secs(3600))),
+    };
+    assert_eq!(SyncRecord::from_bytes(&ahead.to_bytes()), ahead);
+}
+
+#[test]
+fn a_document_the_record_cannot_vouch_for_resolves_to_empty() {
+    let good = SyncRecord::EMPTY.synced_at(plausible()).to_bytes();
+
+    // Wrong length either way — the document is fixed-length by design.
+    assert_eq!(SyncRecord::from_bytes(&[]), SyncRecord::EMPTY);
+    assert_eq!(
+        SyncRecord::from_bytes(&good[..RECORD_LEN - 1]),
+        SyncRecord::EMPTY
+    );
+    let mut long = good.to_vec();
+    long.push(0);
+    assert_eq!(SyncRecord::from_bytes(&long), SyncRecord::EMPTY);
+
+    // Wrong magic.
+    let mut bad = good;
+    bad[0] ^= 0xFF;
+    assert_eq!(SyncRecord::from_bytes(&bad), SyncRecord::EMPTY);
+
+    // A torn rewrite: one flipped payload bit fails the checksum.
+    let mut torn = good;
+    torn[6] ^= 0x01;
+    assert_eq!(SyncRecord::from_bytes(&torn), SyncRecord::EMPTY);
+
+    // An undefined flag bit is refused rather than ignored.
+    let mut extra = SyncRecord::EMPTY.to_bytes();
+    extra[4] = 0b1000;
+    let checksum = tairix_crc32c::checksum(&extra[..RECORD_LEN - 4]);
+    extra[RECORD_LEN - 4..].copy_from_slice(&checksum.to_le_bytes());
+    assert_eq!(SyncRecord::from_bytes(&extra), SyncRecord::EMPTY);
+}
+
+#[test]
+fn a_recorded_instant_outside_the_plausibility_window_is_refused() {
+    // A garbage instant that survived the checksum (a hostile or buggy
+    // writer) must not steer the decision matrix: a far-future last_seen
+    // would otherwise make the went-backwards rule fire on every boot for
+    // ever, and a fabricated recent one would suppress a needed stale-boot
+    // sync.
+    for instant in [
+        Time64::from_secs(RELEASE_EPOCH_SECS - 1),
+        Time64::from_secs(RELEASE_EPOCH_SECS + PLAUSIBLE_FUTURE_SECS + 1),
+    ] {
+        let record = SyncRecord {
+            last_sync: None,
+            last_seen: Some(instant),
+        };
+        assert_eq!(
+            SyncRecord::from_bytes(&record.to_bytes()),
+            SyncRecord::EMPTY
+        );
+    }
+}
+
+#[test]
+fn a_record_whose_last_seen_precedes_its_last_sync_is_refused() {
+    // The type's invariant is that an observed instant is never earlier than
+    // the sync that observed it; a document breaking it is not this record.
+    let record = SyncRecord {
+        last_sync: Some(plausible().saturating_add(Duration64::from_secs(3600))),
+        last_seen: Some(plausible()),
+    };
+    assert_eq!(
+        SyncRecord::from_bytes(&record.to_bytes()),
+        SyncRecord::EMPTY
+    );
+}
+
+#[test]
+fn the_record_document_shape_is_pinned() {
+    // The document is read by a future boot of a possibly-newer build, so its
+    // length and magic are a contract.
+    assert_eq!(RECORD_LEN, 33);
+    assert_eq!(RECORD_MAGIC, u32::from_le_bytes(*b"TMS1"));
+    assert_eq!(RECORD_PATH, "/System/Settings/Time/state");
+    assert!(RECORD_PATH.starts_with(RECORD_DIR));
+    // The image builder authors the directory by its last component alone, so
+    // the two spellings must agree or the service's own state directory would
+    // be provisioned somewhere it never looks.
+    assert!(RECORD_DIR.ends_with(RECORD_SUBDIR));
+    assert_eq!(RECORD_DIR, "/System/Settings/Time");
 }

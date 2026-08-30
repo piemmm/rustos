@@ -53,39 +53,28 @@
 //!    records the console error, and exits fail-closed (audited
 //!    `SyscallInvoked` #4 of the supervision chain). `init`'s `wait` then
 //!    reaps it and reads its code.
-//! 5. `init` relaunches the session — a second login `spawn` (an audited
-//!    `SyscallInvoked` of the chain) producing an **eighth**
-//!    `ProcessSpawned`. The second login blocks at its own prompt;
-//!    the PASS finisher has already fired by then and the script is
-//!    exhausted, so the run ends without typing at it.
+//! 5. `init` relaunches the session — a second login `spawn`, and with it a
+//!    fresh `ProcessSpawned`. The second login blocks at its own prompt; the
+//!    PASS finisher has already fired by then and the script is exhausted,
+//!    so the run ends without typing at it.
 //!
-//! ## Why the PASS keys on eight spawns and nine audited syscalls
+//! ## What the PASS keys on
 //!
-//! The second through sixth `ProcessSpawned` are the boot services `init`
-//! launches first (`sysinfod`, `netstack`, `devmgr`, `seatmgr`, `confd`). The
-//! **eighth** is the supervision witness: `init` only reaches its second
-//! login `spawn` *after* its `wait` returned, which only happens once the
-//! first login was reaped — so an eighth built image proves the full
-//! reap-and-restart cycle, not merely a single concurrent spawn. Login's
-//! `exit` is on the critical path only if login
-//! actually ran and its blocked `stream_read` received the injected UART RX
-//! bytes: its prompt write is gated through its *own* isolated address space, and `init`'s `wait` cannot return until that `exit`
-//! recorded the child's code. The chain's certain audited syscalls are
-//! `init`'s five service `spawn`s (`sysinfod`, `netstack`, `devmgr`,
-//! `seatmgr`, `confd`), the login `spawn`, `init`'s `wait`,
-//! login's `exit`, and `init`'s second login `spawn` (login's own audited
-//! `users_db_read`, `sysinfod`'s `call_create`, and login's elevation
-//! `call_create` ride on top, which the `>=` thresholds absorb; `devmgr`'s
-//! `hw_tree_read`/`hw_tree_wait` are unaudited). A regression that never
-//! spawns login, never delivers its input, never reaps it, or never
-//! relaunches it never reaches the eighth
-//! `ProcessSpawned`, so the run times out and the harness reports
-//! `Outcome::Timeout` — the documented fail-loud behaviour. The runner adds the converse guard: it fails the run if the guest
-//! exits before every scripted prompt appeared and every line was sent, so
-//! a login that crashes mid-dialogue (e.g. per keystroke) cannot pass on
-//! the relaunch's event counts alone. The mounted volume's users database
-//! serves the credential checks; the scripted wrong password is refused by
-//! the real authenticator, never a stub.
+//! The `SupervisionWitness` of `tests/integration/spawn_supervision`, shared
+//! with the x86-64 port: login exited, `init` was reaping, and `init` built a
+//! replacement image. Each step is recognised by which process acted, never
+//! by how many events went past, so the boot-service list can grow without
+//! touching this vertical — see that crate for why counting was wrong.
+//!
+//! A regression that never spawns login, never delivers its input, never
+//! reaps it, or never relaunches it leaves the witness short of `Complete`,
+//! so the run times out and the harness reports `Outcome::Timeout` — the
+//! documented fail-loud behaviour. The runner adds the converse guard: it
+//! fails the run if the guest exits before every scripted prompt appeared
+//! and every line was sent, so a login that crashes mid-dialogue (e.g. per
+//! keystroke) cannot pass on the relaunch alone. The mounted volume's users
+//! database serves the credential checks; the scripted wrong password is
+//! refused by the real authenticator, never a stub.
 //!
 //! ## Embedded `virt` device tree
 //!
@@ -114,12 +103,12 @@
 #[cfg(itest_aarch64)]
 mod kernel {
     use core::panic::PanicInfo;
-    use core::sync::atomic::{AtomicUsize, Ordering};
 
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
-    use tairix_log::{Event, EventId, Sink};
+    use tairix_log::{Event, Sink};
+    use tairix_test_spawn_supervision::SupervisionWitness;
 
     // The canonical QEMU `virt` device tree, dumped and embedded at build
     // time (`build.rs`). The boot pipeline discovers the board from it
@@ -142,39 +131,13 @@ mod kernel {
     static ALLOCATOR: FreeListAllocator =
         unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
-    /// `EventId` emitted by the spawn caller once an EL0 image is built.
-    /// Pinned by the `event_ids_are_unique` test in `kernel/core/src/audit.rs`.
-    const PROCESS_SPAWNED_EVENT_ID: EventId = EventId(4030);
-
-    /// `EventId` emitted by the syscall dispatcher for an audited syscall —
-    /// `init`'s `spawn` / `wait` and the session's `exit`. Pinned by the
-    /// audit-id test in `kernel/syscall/src/audit.rs`.
-    const SYSCALL_INVOKED_EVENT_ID: EventId = EventId(5000);
-
-    /// Number of `ProcessSpawned` records seen so far. PASS requires eight:
-    /// PID 1 `init`, the `sysinfod`, `netstack`, `devmgr`, `seatmgr`, and
-    /// `confd` services it launches first, and the **two** login instances —
-    /// the second login launch can only happen after `init` reaped the first,
-    /// so an eighth `ProcessSpawned` is the witness that supervision (reap +
-    /// restart) ran.
-    static SPAWNED: AtomicUsize = AtomicUsize::new(0);
-
-    /// Number of audited `SyscallInvoked` records seen so far. PASS requires
-    /// nine, the certain prefix of `init`'s supervise loop up to the
-    /// relaunch: `init`'s six service/session `spawn`s (`sysinfod`,
-    /// `netstack`, `devmgr`, `seatmgr`, `confd`, login), `init`'s `wait`
-    /// (which parks it), the first login's fail-closed `exit`, and `init`'s
-    /// second login `spawn` (the relaunch). The audited `call_create` binds (`sysinfod`'s
-    /// query endpoint, `netstack`'s network rendezvous, `seatmgr`'s
-    /// seat-admin rendezvous, login's elevation rendezvous) ride on top,
-    /// absorbed by the `>=` threshold; `devmgr`'s `hw_tree_read`/
-    /// `hw_tree_wait` are unaudited.
-    static SYSCALLS: AtomicUsize = AtomicUsize::new(0);
+    /// Tracks the launch → run → exit → reap → relaunch cycle by the identity
+    /// of the process performing each step.
+    static WITNESS: SupervisionWitness = SupervisionWitness::new();
 
     /// Sink that replays every event through [`SERIAL_SINK`] and reports PASS
-    /// to QEMU once eight processes have been built and nine audited
-    /// syscalls have run — proving PID 1 launched the boot services and the
-    /// session, waited on and reaped the session when it exited, and
+    /// to QEMU once [`WITNESS`] has seen the whole supervision cycle —
+    /// proving PID 1 launched the session, reaped it when it exited, and
     /// relaunched it (supervision, not spawn-and-forget).
     struct SpawnSessionExitSink;
 
@@ -183,12 +146,7 @@ mod kernel {
             // Replay through the serial sink so the QEMU transcript records
             // the full boot + spawn timeline.
             SerialSink::new().write_event(event);
-            if event.id == PROCESS_SPAWNED_EVENT_ID {
-                SPAWNED.fetch_add(1, Ordering::AcqRel);
-            } else if event.id == SYSCALL_INVOKED_EVENT_ID {
-                SYSCALLS.fetch_add(1, Ordering::AcqRel);
-            }
-            if SPAWNED.load(Ordering::Acquire) >= 8 && SYSCALLS.load(Ordering::Acquire) >= 9 {
+            if WITNESS.observe(event) {
                 qemu_exit::exit_success();
             }
         }

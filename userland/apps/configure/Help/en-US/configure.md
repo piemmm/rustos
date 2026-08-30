@@ -70,6 +70,15 @@ never changes a result.
   connections Not-ECT; `true` offers ECN in the handshake and, once
   negotiated, treats a congestion mark as a signal to slow down instead
   of forcing a packet drop.
+- `time.servers` — `none` or a comma-separated list of network time
+  servers, each a host name or an address literal. `none` (the default)
+  means the clock is never set from the network: TAIRiX has no time-server
+  pool of its own, so naming a server is the operator's choice rather than
+  a default aimed at somebody else's service.
+- `time.refresh` — `6h`, `12h`, `1d`, `2d`, or `7d`: how much uptime
+  passes between clock re-queries once the time is known. `1d` is the
+  default. A clock that is unset, implausible, or long stale is corrected
+  as soon as the network allows, whatever this says.
 
 Changing a `net.*` setting saves it and delivers it to the running network
 stack, so it takes effect at once. If the running stack does not accept it
@@ -89,6 +98,8 @@ boot.
 - `configure cache.all off` — disable every memory cache system-wide.
 - `configure cache.filesystem off` — disable only the filesystem cache.
 - `configure net.ipv6.enabled false` — turn IPv6 off stack-wide.
+- `configure time.servers 0.example.test,1.example.test` — set the
+  network time servers the clock is synchronised from.
 
 ## EXIT STATUS
 

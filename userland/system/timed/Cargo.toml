@@ -1,0 +1,65 @@
+[package]
+name = "tairix-timed"
+description = "TAIRiX time-synchronisation service: the sole holder of CAP_TIME_SET, driving the pure `tairix-timesync` clock policy over an NTP transport whose every response is evaluated in a capability-less sandbox worker (`plans/TIMESYNC.md` TS-2)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The `Run` binary's freestanding userland runtime (`tairix-rt`) is an
+# optional, on-by-default build feature, mirroring `tairix-confd`. `cargo build
+# -p tairix-timed` builds the service program with it; host tooling builds only
+# the engine *library*, so the host test build never pulls the userland
+# runtime's `_start` / `#[global_allocator]` / `panic_impl`.
+[features]
+default = ["program"]
+program = ["dep:tairix-rt", "dep:tairix-resolver", "tairix-sandbox/program"]
+
+# The package is both the `tairix-timed` engine library (the host-testable
+# orchestration over injected clock/store/transport seams) and the `Run`
+# entry-point binary of the time service installed at
+# `/System/Services/timed.app/Run`. The binary is a freestanding pure-Rust
+# program on the native Tier-1 targets and an inert host stub elsewhere (see
+# `src/run.rs`).
+[[bin]]
+name = "tairix-timed-run"
+path = "src/run.rs"
+
+[dependencies]
+# `Time64`, the wall clock's provenance ladder, the plausibility window, and
+# the `Errno` table every refusal fails closed with.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The clock policy: when to sync, what a validated sample means for the clock,
+# and the persisted last-seen record with its on-disk codec.
+tairix-timesync = { path = "../../../lib/timesync", version = "=0.0.0" }
+# The NTP engine's vocabulary: the request a `Query` carries, the `Reply` a
+# worker returns, and the transaction the nonce authenticates.
+tairix-net = { path = "../../../lib/net", version = "=0.0.0" }
+# The parser sandbox the response evaluation runs inside, because this service
+# holds `CAP_TIME_SET` and must never decode a packet in its own address space.
+tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0" }
+# The `time.*` keys of the boot-time configuration store: the server list and
+# the refresh cadence.
+tairix-sysconfig = { path = "../../../lib/sysconfig", version = "=0.0.0" }
+# The structured audit records every clock change, refused sample, and retired
+# server is written through.
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+# The `Run` binary's freestanding userland runtime:
+# `tairix-rt` provides `_start`, the stack canary, the panic handler, the
+# `#[global_allocator]`, the wall-clock and monotonic syscall wrappers, the
+# `net`/`port_bind`/`waitset_*` socket reactor, and the `fs_*` reads and writes
+# the persisted record goes through. `tairix-resolver` turns a configured
+# server name into an address over one long-lived stub-resolver transport.
+# Both are pulled in only for the bare-metal targets the program is built for;
+# on the host the binary is an inert stub and neither is linked.
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+tairix-resolver = { path = "../../../lib/resolver", version = "=0.0.0", optional = true, features = [
+    "program",
+] }

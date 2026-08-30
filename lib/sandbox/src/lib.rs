@@ -42,6 +42,12 @@
 //!   [`imagerender::render_wallpaper`] drives the sequence and validates
 //!   every band's echoed geometry and exact pixel length before trusting
 //!   the assembled RGBA8 buffer.
+//! * [`timesync`] — an NTP server's reply is evaluated inside the worker
+//!   (`tairix-net`'s RFC 5905 rules), because the `timed` service that acts
+//!   on the verdict holds `CAP_TIME_SET` and must never parse a packet. The
+//!   caller-side [`timesync::evaluate_datagram`] gates the nonce echo itself
+//!   before the worker is involved and re-validates any returned sample
+//!   against the plausibility, round-trip, and stratum bounds.
 //! * `rt` (feature `program`, freestanding only; not compiled on hosted
 //!   targets) — the production transport: the parent spawns its own binary
 //!   in the worker role over a pipe pair wired through
@@ -60,6 +66,7 @@ pub mod loopback;
 pub mod proto;
 #[cfg(all(freestanding, feature = "program"))]
 pub mod rt;
+pub mod timesync;
 pub mod wire;
 pub mod worker;
 

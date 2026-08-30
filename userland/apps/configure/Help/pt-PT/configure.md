@@ -73,6 +73,16 @@ afetado — nunca altera um resultado.
   deixa as ligações Not-ECT; `true` oferece ECN no aperto de mão e, a
   seguir, trata uma marca de congestão como um sinal para abrandar em
   vez de forçar a perda de um pacote.
+- `time.servers` — `none` ou uma lista de servidores de hora de rede
+  separada por vírgulas, cada um um nome de anfitrião ou um endereço.
+  `none` (a predefinição) significa que o relógio nunca é acertado a
+  partir da rede: o TAIRiX não tem um conjunto de servidores de hora
+  próprio, pelo que indicar um servidor é uma escolha do operador.
+- `time.refresh` — `6h`, `12h`, `1d`, `2d` ou `7d`: quanto tempo de
+  funcionamento passa entre consultas ao relógio depois de a hora ser
+  conhecida. `1d` é a predefinição. Um relógio não acertado, implausível
+  ou muito desatualizado é corrigido assim que a rede o permita,
+  independentemente desta definição.
 
 A pilha de rede lê as definições `net.*`; uma alteração produz efeito
 quando a pilha aplica novamente a sua configuração.

@@ -20,7 +20,11 @@ path = "src/lib.rs"
 # parser `devmgr` runs, so the two can never drift (one source of truth). A
 # dev-dependency only — the shared constants themselves stay `no_std`.
 tairix-netconfig = { path = "../../../lib/netconfig" }
-# Host-only: the ECN vertical's planted `system.conf` is cross-checked against
-# the ECN toggle through the real parser `devmgr` runs, so the two can never
-# drift. A dev-dependency only — the shared constants themselves stay `no_std`.
+# Host-only: the ECN and time verticals' planted `system.conf` documents are
+# cross-checked against the settings they mean through the real parser `devmgr`
+# runs, so the two can never drift. A dev-dependency only — the shared
+# constants themselves stay `no_std`.
 tairix-sysconfig = { path = "../../../lib/sysconfig" }
+# Host-only: the time vertical's fixture instants are checked against the one
+# plausibility window every time source is judged by.
+tairix-abi = { path = "../../../lib/abi" }

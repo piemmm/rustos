@@ -53,34 +53,19 @@
 //!    the cross-port sibling of the aarch64 `spawn_session_qemu_aarch64`,
 //!    which drives login to the same over-long-username exit).
 //!
-//! ## Why the PASS keys on eight spawns and nine audited syscalls
+//! ## What the PASS keys on
 //!
-//! The second through sixth `ProcessSpawned` are the boot services `init`
-//! launches first (`sysinfod`, `netstack`, `devmgr`, `seatmgr`, `confd`); the
-//! **seventh** proves the runtime producer authorised the login `spawn`, built
-//! an isolated address space, and admitted it (the X3b deliverable). The
-//! **eighth** `ProcessSpawned` is the supervision-cycle
-//! witness: it can only be emitted if `init`'s `wait` reaped the first login,
-//! returned to ring 3, and issued its relaunch `spawn` — so it proves the whole
-//! cycle, not just a single concurrent spawn. The nine certain audited
-//! `SyscallInvoked`
-//! records are `init`'s five service `spawn`s, the login `spawn`, login's
-//! `exit`, `init`'s
-//! `wait`, and `init`'s relaunch `spawn`
-//! (`init`'s `wait` only completes after login exits and is reaped, so login's
-//! `exit` necessarily precedes the `wait` record; the audited `call_create`
-//! binds — `sysinfod`'s query endpoint and, when a console is attested,
-//! login's elevation rendezvous — ride on top, absorbed by the `>=`
-//! thresholds). A regression that never
-//! reaps+relaunches (`< 7` spawns / `< 8` certain audited syscalls) never
-//! reaches the
-//! threshold, so the run times out and the harness reports `Outcome::Timeout`
-//! — the documented fail-loud behaviour.
-//! (`stream_write`/`stream_read` and `devmgr`'s `hw_tree_read`/`hw_tree_wait`
-//! are unaudited, and login's refused `users_db_read` audits as a *rejected*
-//! record, so neither `devmgr` after its spawn nor login but its `exit` and
-//! its endpoint bind
-//! contributes a `SyscallInvoked`.)
+//! The `SupervisionWitness` of `tests/integration/spawn_supervision`, shared
+//! with the aarch64 port: login exited, `init` was reaping, and `init` built a
+//! replacement image — which it can only do once its `wait` reaped the first
+//! login and returned to ring 3. Each step is recognised by which process
+//! acted, never by how many events went past, so the boot-service list can
+//! grow without touching this vertical — see that crate for why counting was
+//! wrong.
+//!
+//! A regression that never reaps and relaunches leaves the witness short of
+//! `Complete`, so the run times out and the harness reports
+//! `Outcome::Timeout` — the documented fail-loud behaviour.
 //!
 //! ## How it differs from the production binary
 //!
@@ -101,14 +86,14 @@
 #[cfg(itest_x86_64)]
 mod kernel {
     use core::panic::PanicInfo;
-    use core::sync::atomic::{AtomicUsize, Ordering};
 
     use tairix_arch_x86_64::qemu_exit;
     use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
     use tairix_kernel::{
         boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
     };
-    use tairix_log::{Event, EventId, Sink};
+    use tairix_log::{Event, Sink};
+    use tairix_test_spawn_supervision::SupervisionWitness;
 
     /// Static heap for the bump allocator (identical to the production bin's
     /// declaration; `#[global_allocator]` is per-binary).
@@ -125,44 +110,23 @@ mod kernel {
     static ALLOCATOR: FreeListAllocator =
         unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
-    /// `EventId` the spawn caller emits once a ring-3 image is built. Pinned
-    /// by the `event_ids_are_unique` test in `kernel/core/src/audit.rs`. PASS
-    /// requires eight: PID 1 `init`, the `sysinfod`, `netstack`, `devmgr`,
-    /// `seatmgr`, and `confd` services it launches first, the login it then
-    /// launches, and the login it **relaunches** after reaping the first — the
-    /// eighth
-    /// is the witness that the `wait`→reap→relaunch supervision cycle
-    /// completed (`plans/PI.md` X4 follow-on).
-    const PROCESS_SPAWNED_EVENT_ID: EventId = EventId(4030);
-
-    /// `EventId` the syscall dispatcher emits for a successfully dispatched
-    /// audited syscall — `init`'s `spawn`/`wait`/`exit` and login's
-    /// `exit`. Pinned by the audit-id test in `kernel/syscall/src/audit.rs`.
-    const SYSCALL_INVOKED_EVENT_ID: EventId = EventId(5000);
-
-    /// Number of `ProcessSpawned` records seen so far.
-    static SPAWNED: AtomicUsize = AtomicUsize::new(0);
-    /// Number of audited `SyscallInvoked` records seen so far.
-    static SYSCALLS: AtomicUsize = AtomicUsize::new(0);
+    /// Tracks the launch → run → exit → reap → relaunch cycle by the identity
+    /// of the process performing each step (`plans/PI.md` X4 follow-on).
+    /// Shared with the aarch64 port so the two cannot drift.
+    static WITNESS: SupervisionWitness = SupervisionWitness::new();
 
     /// Sink that replays every event through [`SERIAL_SINK`] (so the QEMU
     /// transcript captures the full boot + spawn timeline) and reports PASS to
-    /// QEMU once **eight** processes were built and **nine** audited syscalls
-    /// have run — proving PID 1 launched the boot services, launched the
-    /// session into its own isolated ring-3 space, the session executed
-    /// there, and `init` reaped it and relaunched a fresh session (the full
-    /// supervision cycle, `plans/PI.md` X4 follow-on).
+    /// QEMU once [`WITNESS`] has seen the whole supervision cycle — proving
+    /// PID 1 launched the session into its own isolated ring-3 space, the
+    /// session executed there, and `init` reaped it and relaunched a fresh
+    /// session.
     struct SpawnSessionExitSink;
 
     impl Sink for SpawnSessionExitSink {
         fn write_event(&self, event: &Event<'_>) {
             SerialSink::new().write_event(event);
-            if event.id == PROCESS_SPAWNED_EVENT_ID {
-                SPAWNED.fetch_add(1, Ordering::AcqRel);
-            } else if event.id == SYSCALL_INVOKED_EVENT_ID {
-                SYSCALLS.fetch_add(1, Ordering::AcqRel);
-            }
-            if SPAWNED.load(Ordering::Acquire) >= 8 && SYSCALLS.load(Ordering::Acquire) >= 9 {
+            if WITNESS.observe(event) {
                 qemu_exit::exit_success();
             }
         }

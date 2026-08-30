@@ -167,6 +167,12 @@ const PROGRAMS: &[Program] = &[
         prefix: "CONFD",
     },
     Program {
+        pkg: "tairix-timed",
+        bin: "tairix-timed-run",
+        fixture: "timed_rxe.rs",
+        prefix: "TIMED",
+    },
+    Program {
         pkg: "tairix-ps",
         bin: "tairix-ps-run",
         fixture: "ps_rxe.rs",

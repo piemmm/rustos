@@ -339,6 +339,27 @@ pub fn build_users_root_image_with_key(
     let root = fs.root();
     for name in ["System", "Users", "Apps", "Storage"] {
         let node = fs.create(root, name.as_bytes(), NodeKind::Directory)?;
+        if name == "System" {
+            // The time service's state directory, owned by that service
+            // exactly as `tools/mkimage` provisions it: `/System/Settings` is
+            // system-user-owned, so without this `timed` could not create the
+            // directory its own record lives in and every boot would lose the
+            // last-seen instant.
+            let settings = fs.create(node, b"Settings", NodeKind::Directory)?;
+            let time = fs.create(
+                settings,
+                tairix_timesync::RECORD_SUBDIR.as_bytes(),
+                NodeKind::Directory,
+            )?;
+            fs.set_security(
+                time,
+                Security::new(
+                    0o755,
+                    tairix_users::TIMED_UID.0,
+                    tairix_users::SERVICES_GID.0,
+                ),
+            )?;
+        }
         if name == "Users" {
             // The planted account's recorded home directory, owned by the
             // account and owner-only exactly as `tools/mkimage` provisions

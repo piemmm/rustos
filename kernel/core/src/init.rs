@@ -52,6 +52,12 @@ use crate::rlimit::{default_pinned_limit_bytes, LimitSet};
 use crate::spawn::InitSpawnCtx;
 use crate::syscalls::{KernelDispatchHook, KernelSpawnCtx, SpawnCredential};
 
+/// PID 1's process name.
+///
+/// Kernel-known rather than resolved from a path or caller, because PID 1 is
+/// built before any store is readable. Audit consumers match on it.
+pub const INIT_PROC_NAME: &str = "init";
+
 /// Ordered identifier of every subsystem init phase orchestrated by
 /// [`kernel_main`].
 ///
@@ -1518,7 +1524,7 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
             .with_proc_id(crate::proc_id::mint_proc_id_bootstrap())
             // PID 1 is the init process; its name is kernel-known, not
             // resolved from any caller.
-            .with_name(ProcName::from_bytes_truncating(b"init"));
+            .with_name(ProcName::from_bytes_truncating(INIT_PROC_NAME.as_bytes()));
         self.caps.write().insert(record);
 
         // Register PID 1's frozen address space + direct map under the same

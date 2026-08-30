@@ -56,7 +56,7 @@ use core::fmt;
 use tairix_abi::net_ipc::NetworkSettings;
 use tairix_abi::Errno;
 use tairix_help::{own_short_help, HelpSource};
-use tairix_sysconfig::{Key, SystemConfig};
+use tairix_sysconfig::{Key, SystemConfig, ValueShape};
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `configure`'s own Help tree is
@@ -108,13 +108,18 @@ impl fmt::Display for ConfigureError {
         match self {
             Self::Usage => f.write_str("command line not understood"),
             Self::UnknownKey => f.write_str("unknown setting (run `configure` to list them)"),
-            Self::InvalidValue(key) => {
-                write!(f, "invalid value for {}; valid:", key.name())?;
-                for value in key.values() {
-                    write!(f, " {value}")?;
+            Self::InvalidValue(key) => match key.shape() {
+                ValueShape::Closed(values) => {
+                    write!(f, "invalid value for {}; valid:", key.name())?;
+                    for value in values {
+                        write!(f, " {value}")?;
+                    }
+                    Ok(())
                 }
-                Ok(())
-            }
+                ValueShape::Free(form) => {
+                    write!(f, "invalid value for {}; expected {form}", key.name())
+                }
+            },
             Self::Malformed(err) => write!(f, "store not understood: {err}"),
             Self::Read(err) => write!(f, "cannot read the store: {err}"),
             Self::Write(err) => write!(f, "cannot write the store: {err}"),
@@ -248,7 +253,7 @@ pub fn run(
             for key in Key::ALL {
                 text.push_str(key.name());
                 text.push(' ');
-                text.push_str(config.get(*key));
+                text.push_str(&config.render_value(*key));
                 text.push('\n');
             }
             output
@@ -258,7 +263,7 @@ pub fn run(
         Command::Show(name) => {
             let key = Key::from_name(name).ok_or(ConfigureError::UnknownKey)?;
             let config = load(store)?;
-            let text = format!("{}\n", config.get(key));
+            let text = format!("{}\n", config.render_value(key));
             output
                 .write_all(text.as_bytes())
                 .map_err(ConfigureError::Output)
@@ -480,7 +485,9 @@ mod tests {
              net.ipv6.privacy false\n\
              net.tcp.syncookies auto\n\
              net.tcp.keepalive false\n\
-             net.tcp.ecn false\n",
+             net.tcp.ecn false\n\
+             time.servers none\n\
+             time.refresh 1d\n",
         );
     }
 
@@ -519,7 +526,7 @@ mod tests {
         .expect("sets");
         let text = store.text.borrow().clone().expect("store written");
         let config = SystemConfig::parse(&text).expect("canonical render parses");
-        assert_eq!(config.get(Key::LoginType), "graphical");
+        assert_eq!(config.render_value(Key::LoginType), "graphical");
         // Nothing goes to stdout on a successful set (the GNU quiet
         // convention).
         assert_eq!(output.text(), "");

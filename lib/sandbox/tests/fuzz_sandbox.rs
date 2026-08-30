@@ -1,5 +1,5 @@
-//! Deterministic fuzz harness for the sandbox seam's decode, helpdoc, and
-//! imagerender surfaces.
+//! Deterministic fuzz harness for the sandbox seam's decode, helpdoc,
+//! imagerender, and timesync surfaces.
 //!
 //! Two hostile directions, both driven through the public client path so
 //! the request encoder, the service's request decoder, the decoders
@@ -10,8 +10,9 @@
 //!   templates and pure noise fed to
 //!   [`tairix_sandbox::decode::container_summary`] / [`manifest_summary`] /
 //!   [`disassemble`] / [`render_help`] / [`rasterise_icon`] over the
-//!   in-process loopback worker: every outcome must be a typed result,
-//!   never a panic.
+//!   in-process loopback worker — and mutated NTP server replies fed to
+//!   [`tairix_sandbox::timesync::evaluate_datagram`]: every outcome must be
+//!   a typed result, never a panic.
 //! * **Hostile workers** — a launcher whose "worker" frames pure noise as
 //!   its reply: the caller-side fail-closed reply decoders must refuse or
 //!   accept typed, never panic, and the seam must survive.
@@ -35,6 +36,7 @@ use tairix_sandbox::imagerender::{
 };
 use tairix_sandbox::loopback::LoopbackLauncher;
 use tairix_sandbox::proto::Channel;
+use tairix_sandbox::timesync::{evaluate_datagram, TimeSyncService};
 use tairix_wallpaper::WallpaperFit;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
@@ -52,6 +54,112 @@ fn low_byte(x: u64) -> u8 {
 fn bounded(x: u64, max: usize) -> usize {
     let span = u64::try_from(max).unwrap_or(u64::MAX).saturating_add(1);
     usize::try_from(x % span).unwrap_or(0)
+}
+
+/// A well-formed stratum-2 NTP server reply echoing `nonce`, reporting an
+/// instant inside the plausibility window — the template mutations start from.
+fn ntp_reply_template(nonce: u64) -> Vec<u8> {
+    /// Seconds from the NTP epoch (1900) to the Unix epoch (1970).
+    const NTP_UNIX_DELTA: i64 = 2_208_988_800;
+    let unix_secs = tairix_abi::RELEASE_EPOCH_SECS + 86_400;
+    let field = u32::try_from((unix_secs + NTP_UNIX_DELTA).rem_euclid(1 << 32))
+        .expect("reduced modulo 2^32");
+    let ts = (u64::from(field) << 32).to_be_bytes();
+    let mut p = vec![0u8; tairix_net::ntp::PACKET_LEN];
+    p[0] = (4 << 3) | 4; // version 4, mode 4 (server)
+    p[1] = 2; // stratum
+    p[24..32].copy_from_slice(&nonce.to_be_bytes());
+    p[32..40].copy_from_slice(&ts);
+    p[40..48].copy_from_slice(&ts);
+    p
+}
+
+/// One help-render fuzz iteration: a help document with a handful of bytes
+/// flipped, a random truncation, and pure noise, rendered through the honest
+/// worker under every surface, styling level, and served-locale tag (including
+/// malformed spellings, so the request grammar is fuzzed too).
+///
+/// Returns the render mode used, so the caller can reuse it against the
+/// hostile worker.
+fn fuzz_help_iteration(
+    sandbox: &mut ParserSandbox<LoopbackLauncher<fn() -> HelpService>, SilentSink>,
+    noise: &[u8],
+    next: &mut impl FnMut() -> u64,
+) -> RenderMode {
+    let mut help = HELP_TEMPLATE.to_vec();
+    for _ in 0..bounded(next(), 6) {
+        let pos = bounded(next(), help.len() - 1);
+        help[pos] ^= low_byte(next() >> 17);
+    }
+    let mode = if next() & 1 == 0 {
+        RenderMode::Short
+    } else {
+        RenderMode::Full
+    };
+    let styling = match bounded(next(), 2) {
+        0 => Styling::Plain,
+        1 => Styling::Monochrome,
+        _ => Styling::Colour,
+    };
+    let locales = ["en-US", "fr-FR", "zh-CN", "", "not a tag", "xx-XX"];
+    let locale = locales[bounded(next(), locales.len() - 1)];
+    let _ = render_help(sandbox, mode, styling, locale, &help);
+    let cut = bounded(next(), help.len());
+    let _ = render_help(sandbox, mode, styling, locale, &help[..cut]);
+    let _ = render_help(sandbox, mode, styling, locale, noise);
+    mode
+}
+
+/// One NTP-evaluation fuzz iteration: a mutated well-formed reply, a
+/// truncated one, and pure noise, each evaluated through the honest worker
+/// under both a matching and a mismatched nonce. A sample that survives must
+/// be one the engine's own rules admit — the caller-side re-validation the
+/// authority split rests on.
+///
+/// Returns the nonce and receive instant used, so the caller can reuse them
+/// against the hostile worker.
+fn fuzz_ntp_iteration(
+    sandbox: &mut ParserSandbox<LoopbackLauncher<fn() -> TimeSyncService>, SilentSink>,
+    noise: &[u8],
+    next: &mut impl FnMut() -> u64,
+) -> (u64, tairix_abi::time::Duration64) {
+    let nonce = next();
+    let mut packet = ntp_reply_template(nonce);
+    for _ in 0..bounded(next(), 8) {
+        let pos = bounded(next(), packet.len() - 1);
+        packet[pos] ^= low_byte(next() >> 17);
+    }
+    let received = tairix_abi::time::Duration64::from_nanos(next() >> 24);
+    let cut = bounded(next(), packet.len());
+    for (label_nonce, bytes) in [
+        (nonce, &packet[..]),
+        (nonce ^ 1, &packet[..]),
+        (nonce, &packet[..cut]),
+        (nonce, noise),
+    ] {
+        let txn = tairix_net::ntp::Transaction {
+            server: 0,
+            nonce: tairix_net::ntp::NtpTimestamp::from_raw(label_nonce),
+            sent_at: tairix_abi::time::Duration64::ZERO,
+        };
+        if let Ok(tairix_net::ntp::Reply::Sample(sample)) =
+            evaluate_datagram(sandbox, &txn, received, bytes)
+        {
+            assert!(
+                tairix_abi::is_plausible_wall_time(sample.true_time),
+                "an implausible instant escaped the evaluation"
+            );
+            assert!(
+                sample.round_trip <= tairix_net::ntp::MAX_ROUND_TRIP,
+                "an over-long round trip escaped the evaluation"
+            );
+            assert!(
+                (1..16).contains(&sample.stratum),
+                "an unusable stratum escaped the evaluation"
+            );
+        }
+    }
+    (nonce, received)
 }
 
 /// Discards every logged event.
@@ -338,6 +446,10 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
         LoopbackLauncher::new(ImageRenderService::default as fn() -> ImageRenderService),
         SilentSink,
     );
+    let mut honest_time = ParserSandbox::new(
+        LoopbackLauncher::new(TimeSyncService::default as fn() -> TimeSyncService),
+        SilentSink,
+    );
     let hostile_state = Rc::new(RefCell::new(next()));
     let mut hostile = ParserSandbox::new(
         HostileLauncher {
@@ -381,32 +493,11 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
             &noise,
         );
 
-        // 4. A help document with a handful of bytes flipped, a random
-        //    truncation, and pure noise, rendered through the honest
-        //    worker under both surfaces.
-        let mut help = HELP_TEMPLATE.to_vec();
-        for _ in 0..bounded(next(), 6) {
-            let pos = bounded(next(), help.len() - 1);
-            help[pos] ^= low_byte(next() >> 17);
-        }
-        let mode = if next() & 1 == 0 {
-            RenderMode::Short
-        } else {
-            RenderMode::Full
-        };
-        // Vary the styling level and the served-locale tag (including
-        // malformed spellings) so the render request grammar is fuzzed too.
-        let styling = match bounded(next(), 2) {
-            0 => Styling::Plain,
-            1 => Styling::Monochrome,
-            _ => Styling::Colour,
-        };
-        let locales = ["en-US", "fr-FR", "zh-CN", "", "not a tag", "xx-XX"];
-        let locale = locales[bounded(next(), locales.len() - 1)];
-        let _ = render_help(&mut honest_help, mode, styling, locale, &help);
-        let cut = bounded(next(), help.len());
-        let _ = render_help(&mut honest_help, mode, styling, locale, &help[..cut]);
-        let _ = render_help(&mut honest_help, mode, styling, locale, &noise);
+        // 4. Help documents through the honest worker, in their own helper
+        //    to keep this loop's body a readable, bounded size. Returns the
+        //    render mode used, so the caller can reuse it against the
+        //    hostile worker.
+        let mode = fuzz_help_iteration(&mut honest_help, &noise, &mut next);
 
         // 6. The icon-rasterisation and wallpaper surfaces, fuzzed in
         //    their own helpers to keep this loop's body a readable,
@@ -416,7 +507,13 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
         let (wallpaper_w, wallpaper_h, fit) =
             fuzz_wallpaper_iteration(&mut honest_icon, &noise, &mut next);
 
-        // 7. The hostile worker: framed noise replies into every client
+        // 7. NTP server replies through the honest worker, in its own helper
+        //    to keep this loop's body a readable, bounded size. Returns the
+        //    nonce used, so the caller can reuse it against the hostile
+        //    worker too.
+        let (nonce, received) = fuzz_ntp_iteration(&mut honest_time, &noise, &mut next);
+
+        // 8. The hostile worker: framed noise replies into every client
         //    decoder. Each request crashes and replaces the worker, so
         //    every iteration sees fresh noise.
         let _ = container_summary(&mut hostile, &rxe);
@@ -425,6 +522,17 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
         let _ = render_help(&mut hostile, mode, Styling::Colour, "en-US", HELP_TEMPLATE);
         let _ = rasterise_icon(&mut hostile, side, SVG_TEMPLATE);
         let _ = render_wallpaper(&mut hostile, wallpaper_w, wallpaper_h, fit, &png_template());
+        let hostile_txn = tairix_net::ntp::Transaction {
+            server: 0,
+            nonce: tairix_net::ntp::NtpTimestamp::from_raw(nonce),
+            sent_at: tairix_abi::time::Duration64::ZERO,
+        };
+        let _ = evaluate_datagram(
+            &mut hostile,
+            &hostile_txn,
+            received,
+            &ntp_reply_template(nonce),
+        );
 
         iteration += 1;
         if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {

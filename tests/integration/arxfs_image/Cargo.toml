@@ -26,6 +26,9 @@ path = "src/lib.rs"
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-drv-fs-arxfs = { path = "../../../drivers/filesystem/arxfs", version = "=0.0.0" }
 tairix-users = { path = "../../../lib/users", version = "=0.0.0" }
+# The one definition of the time service's state-directory name, so the fixture
+# authors it exactly where the service looks for it.
+tairix-timesync = { path = "../../../lib/timesync", version = "=0.0.0" }
 
 # The users-root round-trip test drives the kernel's boot-time
 # users-database load (`tairix_kernel_core::users`) against the built

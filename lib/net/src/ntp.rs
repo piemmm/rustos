@@ -30,6 +30,13 @@
 //! measured on the caller's **monotonic** clock rather than derived from the
 //! packet: the local send/receive legs never enter the wire at all.
 //!
+//! Decoding and the transaction machine are therefore separable:
+//! [`evaluate`] turns bytes into a [`Reply`] and [`NtpClient::on_reply`]
+//! turns a `Reply` into engine state. A caller holding `CAP_TIME_SET` runs
+//! the first half in a capability-less sandbox worker and only the second in
+//! its own address space; [`NtpClient::on_datagram`] is the composition for
+//! callers with nothing to protect.
+//!
 //! # Politeness is the engine's job
 //!
 //! A client that hammers a public server is a defect, so the cadence controls
@@ -40,7 +47,7 @@
 //! [`KissCode::Deny`] / [`KissCode::Restrict`] retire it).
 
 use tairix_abi::time::{Duration64, Time64, NANOS_PER_SEC};
-use tairix_abi::{is_plausible_wall_time, RELEASE_EPOCH_SECS};
+use tairix_abi::{is_plausible_wall_time, MAX_TIME_SERVERS, RELEASE_EPOCH_SECS};
 
 use crate::timeutil::{from_nanos, nanos, NEVER};
 
@@ -99,11 +106,9 @@ pub const MAX_ROOT_DISTANCE: Duration64 = Duration64::from_secs(1);
 
 /// Most servers a client may be configured with.
 ///
-/// A fixed validation bound on configuration input, not a capacity that
-/// should scale with the machine: a client needs a handful of servers to be
-/// robust, and a longer list would only spread queries thinner while enlarging
-/// the state a hostile server set can occupy.
-pub const MAX_SERVERS: usize = 8;
+/// The shared bound the configuration store validates its list against, so a
+/// configured server can never sit silently past the engine's reach.
+pub const MAX_SERVERS: usize = MAX_TIME_SERVERS;
 
 /// Leap-second warning a server advertises (RFC 5905 §7.3).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -800,12 +805,35 @@ impl NtpClient {
     ///
     /// A datagram that is not the outstanding transaction's reply leaves every
     /// bit of state alone.
+    ///
+    /// This decodes in the caller's own address space. A caller holding
+    /// `CAP_TIME_SET` must not do that: it runs [`evaluate`] in a
+    /// capability-less sandbox worker and feeds the verdict to
+    /// [`Self::on_reply`] instead.
     pub fn on_datagram(&mut self, now: Duration64, bytes: &[u8]) -> Outcome {
+        let Some(txn) = self.outstanding() else {
+            return Outcome::Unsolicited;
+        };
+        self.on_reply(now, evaluate(bytes, &txn, now))
+    }
+
+    /// Feed an already-evaluated [`Reply`] to the engine at monotonic `now`.
+    ///
+    /// The transaction machine proper, with no decoding: a caller that
+    /// evaluated the datagram elsewhere — in the sandbox worker
+    /// `plans/TIMESYNC.md` §4 requires of a process holding `CAP_TIME_SET` —
+    /// drives the engine through here, so the retry, rotation, and
+    /// Kiss-o'-Death discipline has exactly one implementation whether or not
+    /// the decode was sandboxed.
+    ///
+    /// A verdict arriving with nothing outstanding is [`Outcome::Unsolicited`]
+    /// and changes nothing.
+    pub fn on_reply(&mut self, now: Duration64, reply: Reply) -> Outcome {
         let Phase::Awaiting { txn, .. } = self.phase else {
             return Outcome::Unsolicited;
         };
         let now_ns = nanos(now);
-        match evaluate(bytes, &txn, now) {
+        match reply {
             Reply::Unsolicited => Outcome::Unsolicited,
             Reply::Sample(sample) => {
                 self.failures = 0;

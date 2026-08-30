@@ -63,6 +63,17 @@
 //!   connection offers ECN in its SYN/SYN-ACK and, once negotiated, marks
 //!   eligible segments ECT(0) and treats a CE mark as a congestion signal
 //!   instead of forcing a drop; `false` leaves connections Not-ECT.
+//! * `time.servers` — `none` (default) or a comma-separated list of at most
+//!   [`MAX_TIME_SERVERS`] network time servers, each a host name or an
+//!   address literal (`plans/TIMESYNC.md` §3). The default is deliberately
+//!   empty: TAIRiX has no NTP-pool vendor zone, and RFC 8633 §3.1 asks a
+//!   vendor not to point a fleet at the public pool without one, so the
+//!   operator or the installer names the servers and a machine with none
+//!   configured simply never queries.
+//! * `time.refresh` — `6h`, `12h`, `1d` (default), `2d`, or `7d`: how much
+//!   *uptime* passes between steady-state re-queries. A closed set rather
+//!   than a free-form span, so no configuration can ask for a cadence that
+//!   abuses a public server; the client's own hard floor applies on top.
 //!
 //! # Security
 //!
@@ -84,10 +95,13 @@
 extern crate alloc;
 
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::fmt;
 
 use tairix_abi::driver_store::SystemConfigFile;
 use tairix_abi::net_ipc::NetworkSettings;
+use tairix_abi::time::Duration64;
+use tairix_abi::MAX_TIME_SERVERS;
 use tairix_util::conf::strip_comment;
 
 /// The directory that holds the boot-time configuration store.
@@ -97,6 +111,17 @@ pub const CONFIG_DIR: &str = "/System/Settings/Configuration";
 /// `/System/Settings/` file set so this engine and the pre-unlock reader that
 /// serves it cannot name different files.
 pub const CONFIG_PATH: &str = SystemConfigFile::System.path();
+
+/// Longest single `time.servers` entry, in bytes.
+///
+/// The longest dotted DNS name RFC 1035 §2.3.4 allows (255 wire bytes, so
+/// 253 in dotted form), which also comfortably admits any address literal.
+/// A longer entry is refused rather than truncated.
+pub const MAX_TIME_SERVER_LEN: usize = 253;
+
+/// The `time.servers` spelling for "no servers configured", so an empty list
+/// still has a canonical value and the render/parse round trip stays exact.
+pub const NO_TIME_SERVERS: &str = "none";
 
 /// Maximum length, in bytes, of a store text [`SystemConfig::parse`] will
 /// consider. A larger input is refused outright ([`ConfigError::TooLong`])
@@ -349,6 +374,83 @@ impl SynCookies {
     }
 }
 
+/// How much uptime passes between steady-state clock re-queries
+/// (`time.refresh`).
+///
+/// A closed set rather than a free-form span: the point of the cadence is
+/// politeness to a public time server, and an operator must not be able to
+/// spell a value that abuses one. The client's own hard poll floor still
+/// applies on top.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum RefreshCadence {
+    /// Every six hours of uptime.
+    SixHours,
+    /// Every twelve hours of uptime.
+    TwelveHours,
+    /// Once a day of uptime — the default.
+    #[default]
+    Daily,
+    /// Every two days of uptime.
+    TwoDays,
+    /// Every seven days of uptime.
+    Weekly,
+}
+
+impl RefreshCadence {
+    /// The canonical value spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SixHours => "6h",
+            Self::TwelveHours => "12h",
+            Self::Daily => "1d",
+            Self::TwoDays => "2d",
+            Self::Weekly => "7d",
+        }
+    }
+
+    /// Decode a value spelling; `None` for anything outside the closed set.
+    #[must_use]
+    pub fn from_value(value: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|c| c.as_str() == value)
+    }
+
+    /// Every cadence, in canonical listing order.
+    pub const ALL: &'static [Self] = &[
+        Self::SixHours,
+        Self::TwelveHours,
+        Self::Daily,
+        Self::TwoDays,
+        Self::Weekly,
+    ];
+
+    /// The span this cadence names.
+    #[must_use]
+    pub const fn interval(self) -> Duration64 {
+        const HOUR: i64 = 3_600;
+        Duration64::from_secs(match self {
+            Self::SixHours => 6 * HOUR,
+            Self::TwelveHours => 12 * HOUR,
+            Self::Daily => 24 * HOUR,
+            Self::TwoDays => 48 * HOUR,
+            Self::Weekly => 7 * 24 * HOUR,
+        })
+    }
+}
+
+/// What a registry key accepts.
+///
+/// Most keys carry a closed set of canonical spellings; a key whose value is
+/// inherently open — a list of host names — describes its accepted form
+/// instead, and its own parser is what admits or refuses a spelling.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ValueShape {
+    /// One of these canonical spellings, and nothing else.
+    Closed(&'static [&'static str]),
+    /// Free-form text of this described form.
+    Free(&'static str),
+}
+
 /// One key of the closed configuration registry.
 ///
 /// Adding a key means adding a variant here, its row in [`Key::ALL`], its
@@ -382,6 +484,10 @@ pub enum Key {
     NetTcpKeepalive,
     /// `net.tcp.ecn` — the stack-wide RFC 3168 TCP ECN switch.
     NetTcpEcn,
+    /// `time.servers` — the network time servers the clock is set from.
+    TimeServers,
+    /// `time.refresh` — the steady-state clock re-query cadence.
+    TimeRefresh,
 }
 
 impl Key {
@@ -399,6 +505,8 @@ impl Key {
         Self::NetTcpSynCookies,
         Self::NetTcpKeepalive,
         Self::NetTcpEcn,
+        Self::TimeServers,
+        Self::TimeRefresh,
     ];
 
     /// Whether this key belongs to the stack-wide `net.*` family, and so
@@ -421,7 +529,9 @@ impl Key {
             | Self::CacheFilesystem
             | Self::CacheBlock
             | Self::CacheTransform
-            | Self::CacheSemantic => false,
+            | Self::CacheSemantic
+            | Self::TimeServers
+            | Self::TimeRefresh => false,
         }
     }
 
@@ -441,6 +551,8 @@ impl Key {
             Self::NetTcpSynCookies => "net.tcp.syncookies",
             Self::NetTcpKeepalive => "net.tcp.keepalive",
             Self::NetTcpEcn => "net.tcp.ecn",
+            Self::TimeServers => "time.servers",
+            Self::TimeRefresh => "time.refresh",
         }
     }
 
@@ -451,11 +563,10 @@ impl Key {
         Self::ALL.iter().copied().find(|key| key.name() == name)
     }
 
-    /// The key's closed value set, in canonical order, for diagnostics and
-    /// the `configure` listing.
+    /// What the key accepts, for diagnostics and the `configure` listing.
     #[must_use]
-    pub const fn values(self) -> &'static [&'static str] {
-        match self {
+    pub const fn shape(self) -> ValueShape {
+        ValueShape::Closed(match self {
             Self::LoginType => &["text", "graphical"],
             Self::CacheAll => &["on", "off"],
             Self::CacheFilesystem
@@ -467,7 +578,11 @@ impl Key {
             }
             Self::NetTcpSynCookies => &["auto", "always"],
             Self::NetTcpKeepalive | Self::NetTcpEcn => &["true", "false"],
-        }
+            Self::TimeRefresh => &["6h", "12h", "1d", "2d", "7d"],
+            Self::TimeServers => {
+                return ValueShape::Free("`none`, or a comma-separated list of host names")
+            }
+        })
     }
 }
 
@@ -488,6 +603,8 @@ pub enum ConfigError {
     DuplicateKey,
     /// A line names a key but carries no value.
     MissingValue,
+    /// A `time.servers` list names more than [`MAX_TIME_SERVERS`] servers.
+    TooManyTimeServers,
 }
 
 impl fmt::Display for ConfigError {
@@ -498,6 +615,7 @@ impl fmt::Display for ConfigError {
             Self::InvalidValue => "a configuration value is outside its key's set",
             Self::DuplicateKey => "configuration repeats a key",
             Self::MissingValue => "a configuration key is missing its value",
+            Self::TooManyTimeServers => "configuration names too many time servers",
         };
         f.write_str(message)
     }
@@ -509,7 +627,7 @@ impl fmt::Display for ConfigError {
 /// implies — every key at its documented default — so a consumer that finds
 /// no store file (a fresh installation, a boot before the root unlock) runs
 /// on defaults without a special case.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SystemConfig {
     /// The login service's boot-default session type (`os.loginType`).
     pub login_type: LoginType,
@@ -545,6 +663,16 @@ pub struct SystemConfig {
     /// Notification (`net.tcp.ecn`). Disabled by default: connections are
     /// Not-ECT unless the operator opts in.
     pub net_tcp_ecn: NetToggle,
+    /// The network time servers the clock is set from (`time.servers`), in
+    /// configured order. Empty by default, which is a machine that never
+    /// queries — see the module documentation for why.
+    ///
+    /// A store document's list is validated as it is parsed or `set`; a
+    /// programmatic caller assembling one directly is responsible for the
+    /// same bounds, exactly as it is for every other field here.
+    pub time_servers: Vec<String>,
+    /// The steady-state clock re-query cadence (`time.refresh`).
+    pub time_refresh: RefreshCadence,
 }
 
 impl Default for SystemConfig {
@@ -568,6 +696,8 @@ impl Default for SystemConfig {
             net_tcp_syncookies: SynCookies::default(),
             net_tcp_keepalive: NetToggle::Disabled,
             net_tcp_ecn: NetToggle::Disabled,
+            time_servers: Vec::new(),
+            time_refresh: RefreshCadence::default(),
         }
     }
 }
@@ -638,8 +768,22 @@ impl SystemConfig {
 
     /// The current value of `key`, in its canonical spelling.
     #[must_use]
-    pub const fn get(&self, key: Key) -> &'static str {
+    pub fn render_value(&self, key: Key) -> String {
+        if key == Key::TimeServers {
+            return render_time_servers(&self.time_servers);
+        }
+        String::from(self.closed_value(key))
+    }
+
+    /// The canonical spelling of a closed-set key's current value.
+    ///
+    /// [`Key::TimeServers`] is the one key whose value is not a fixed
+    /// spelling, so it is rendered by [`Self::render_value`] instead; asking
+    /// for it here yields its "no servers" spelling rather than a fiction.
+    const fn closed_value(&self, key: Key) -> &'static str {
         match key {
+            Key::TimeServers => NO_TIME_SERVERS,
+            Key::TimeRefresh => self.time_refresh.as_str(),
             Key::LoginType => self.login_type.as_str(),
             Key::CacheAll => self.cache_all.as_str(),
             Key::CacheFilesystem => self.cache_filesystem.as_str(),
@@ -729,6 +873,13 @@ impl SystemConfig {
             Key::NetTcpEcn => {
                 self.net_tcp_ecn = NetToggle::from_value(value).ok_or(ConfigError::InvalidValue)?;
             }
+            Key::TimeServers => {
+                self.time_servers = parse_time_servers(value)?;
+            }
+            Key::TimeRefresh => {
+                self.time_refresh =
+                    RefreshCadence::from_value(value).ok_or(ConfigError::InvalidValue)?;
+            }
         }
         Ok(())
     }
@@ -749,11 +900,67 @@ impl SystemConfig {
         for key in Key::ALL {
             out.push_str(key.name());
             out.push(' ');
-            out.push_str(self.get(*key));
+            out.push_str(&self.render_value(*key));
             out.push('\n');
         }
         out
     }
+}
+
+/// Parse a `time.servers` value into its validated list.
+///
+/// # Errors
+///
+/// [`ConfigError::TooManyTimeServers`] above [`MAX_TIME_SERVERS`], or
+/// [`ConfigError::InvalidValue`] for an entry that is empty, over-long,
+/// duplicated, or spelled with a byte no host operand may contain.
+fn parse_time_servers(value: &str) -> Result<Vec<String>, ConfigError> {
+    if value == NO_TIME_SERVERS {
+        return Ok(Vec::new());
+    }
+    let mut out: Vec<String> = Vec::new();
+    for entry in value.split(',').map(str::trim) {
+        if !is_host_operand(entry) || out.iter().any(|seen| seen == entry) {
+            return Err(ConfigError::InvalidValue);
+        }
+        if out.len() == MAX_TIME_SERVERS {
+            return Err(ConfigError::TooManyTimeServers);
+        }
+        out.push(String::from(entry));
+    }
+    Ok(out)
+}
+
+/// Whether `entry` is spelled as a host operand: a bounded, non-empty run of
+/// the bytes a DNS name or an address literal is written with.
+///
+/// A shape check, not a resolution: whether the name exists is the resolver's
+/// answer at use time, and `none` is refused because it is the list's own
+/// "no servers" spelling.
+fn is_host_operand(entry: &str) -> bool {
+    !entry.is_empty()
+        && entry.len() <= MAX_TIME_SERVER_LEN
+        && entry != NO_TIME_SERVERS
+        && entry
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b':'))
+}
+
+/// Render a server list as its canonical `,`-joined spelling — the exact
+/// form [`parse_time_servers`] round-trips, with the empty list spelled
+/// [`NO_TIME_SERVERS`].
+fn render_time_servers(servers: &[String]) -> String {
+    if servers.is_empty() {
+        return String::from(NO_TIME_SERVERS);
+    }
+    let mut out = String::new();
+    for (index, name) in servers.iter().enumerate() {
+        if index != 0 {
+            out.push(',');
+        }
+        out.push_str(name);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -764,9 +971,12 @@ mod tests {
     use std::string::String;
 
     use super::{
-        CacheClass, CacheMode, CacheSwitch, ConfigError, Key, LoginType, NetToggle, SynCookies,
-        SystemConfig, CONFIG_PATH, MAX_CONFIG_LEN,
+        CacheClass, CacheMode, CacheSwitch, ConfigError, Key, LoginType, NetToggle, RefreshCadence,
+        SynCookies, SystemConfig, ValueShape, CONFIG_PATH, MAX_CONFIG_LEN, MAX_TIME_SERVERS,
+        MAX_TIME_SERVER_LEN, NO_TIME_SERVERS,
     };
+    use std::vec;
+    use std::vec::Vec;
 
     #[test]
     fn an_empty_store_is_the_default_configuration() {
@@ -774,7 +984,10 @@ mod tests {
         // A machine that can run a desktop boots to one; login degrades to
         // the text prompt on one that cannot.
         assert_eq!(SystemConfig::default().login_type, LoginType::Graphical);
-        assert_eq!(SystemConfig::default().get(Key::LoginType), "graphical");
+        assert_eq!(
+            SystemConfig::default().render_value(Key::LoginType),
+            "graphical"
+        );
     }
 
     #[test]
@@ -867,8 +1080,14 @@ mod tests {
                                     net_tcp_syncookies: syncookies,
                                     net_tcp_keepalive: keepalive,
                                     net_tcp_ecn: NetToggle::Enabled,
+                                    time_servers: vec![
+                                        String::from("0.example.test"),
+                                        String::from("2001:db8::1"),
+                                    ],
+                                    time_refresh: RefreshCadence::TwoDays,
                                 };
-                                assert_eq!(SystemConfig::parse(&config.render()), Ok(config));
+                                let rendered = config.render();
+                                assert_eq!(SystemConfig::parse(&rendered), Ok(config));
                             }
                         }
                     }
@@ -995,7 +1214,11 @@ mod tests {
         for class in CacheClass::ALL {
             // The key a class points at must decode its own per-class value
             // set (`auto`/`off`), never the master's (`on`/`off`).
-            assert_eq!(class.key().values(), &["auto", "off"]);
+            assert_eq!(
+                class.key().shape(),
+                ValueShape::Closed(&["auto", "off"]),
+                "{class:?} must decode its own per-class value set"
+            );
         }
     }
 
@@ -1013,6 +1236,124 @@ mod tests {
     }
 
     #[test]
+    fn the_time_defaults_never_query_a_public_server_uninvited() {
+        // TAIRiX has no NTP-pool vendor zone, so an out-of-the-box machine
+        // names no server and simply never queries; the operator or the
+        // installer configures the list.
+        let config = SystemConfig::default();
+        assert!(config.time_servers.is_empty());
+        assert_eq!(config.render_value(Key::TimeServers), NO_TIME_SERVERS);
+        assert_eq!(config.time_refresh, RefreshCadence::Daily);
+    }
+
+    #[test]
+    fn a_time_server_list_parses_renders_and_round_trips() {
+        let config = SystemConfig::parse("time.servers 0.example.test, 9.9.9.9 ,2001:db8::1\n")
+            .expect("parses");
+        assert_eq!(
+            config.time_servers,
+            vec![
+                String::from("0.example.test"),
+                String::from("9.9.9.9"),
+                String::from("2001:db8::1"),
+            ]
+        );
+        assert_eq!(
+            config.render_value(Key::TimeServers),
+            "0.example.test,9.9.9.9,2001:db8::1"
+        );
+        // `none` is the empty list's canonical spelling, so the whole
+        // registry is always renderable and always re-parseable.
+        let empty = SystemConfig::parse("time.servers none\n").expect("parses");
+        assert!(empty.time_servers.is_empty());
+        assert_eq!(SystemConfig::parse(&empty.render()), Ok(empty));
+    }
+
+    #[test]
+    fn a_malformed_time_server_list_fails_closed() {
+        for text in [
+            // An empty entry, either end or in the middle.
+            "time.servers \n",
+            "time.servers ,\n",
+            "time.servers a.test,,b.test\n",
+            "time.servers a.test,\n",
+            // A duplicate would waste a rotation slot on one server.
+            "time.servers a.test,a.test\n",
+            // Bytes no host operand can contain.
+            "time.servers a test\n",
+            "time.servers a/b.test\n",
+            "time.servers a\\b.test\n",
+            "time.servers ../../etc\n",
+            // `none` is the list's own empty spelling, never a host.
+            "time.servers a.test,none\n",
+        ] {
+            assert!(
+                matches!(
+                    SystemConfig::parse(text),
+                    Err(ConfigError::InvalidValue | ConfigError::MissingValue)
+                ),
+                "{text:?} must be refused"
+            );
+        }
+        // An over-long entry is refused rather than truncated.
+        let long = "a".repeat(MAX_TIME_SERVER_LEN + 1);
+        assert_eq!(
+            SystemConfig::parse(&format!("time.servers {long}\n")),
+            Err(ConfigError::InvalidValue)
+        );
+    }
+
+    #[test]
+    fn a_list_past_the_engines_reach_is_refused_not_silently_dropped() {
+        // A configured server the client could never query would be a lie,
+        // so the bound the engine holds is the bound the store enforces.
+        let fits: Vec<String> = (0..MAX_TIME_SERVERS)
+            .map(|i| format!("s{i}.test"))
+            .collect();
+        let config =
+            SystemConfig::parse(&format!("time.servers {}\n", fits.join(","))).expect("parses");
+        assert_eq!(config.time_servers.len(), MAX_TIME_SERVERS);
+
+        let too_many: Vec<String> = (0..=MAX_TIME_SERVERS)
+            .map(|i| format!("s{i}.test"))
+            .collect();
+        assert_eq!(
+            SystemConfig::parse(&format!("time.servers {}\n", too_many.join(","))),
+            Err(ConfigError::TooManyTimeServers)
+        );
+    }
+
+    #[test]
+    fn every_refresh_cadence_parses_and_names_its_span() {
+        for cadence in RefreshCadence::ALL {
+            let text = format!("time.refresh {}\n", cadence.as_str());
+            let config = SystemConfig::parse(&text).expect("parses");
+            assert_eq!(config.time_refresh, *cadence);
+            assert_eq!(config.render_value(Key::TimeRefresh), cadence.as_str());
+            // Every cadence is a real, positive span in whole hours.
+            assert!(cadence.interval().secs() >= 6 * 3_600);
+        }
+        assert_eq!(RefreshCadence::Daily.interval().secs(), 86_400);
+        // A free-form span is not admitted: the closed set is the politeness
+        // control.
+        for value in ["1h", "0d", "30s", "1 d", "", "daily"] {
+            assert_eq!(RefreshCadence::from_value(value), None, "{value:?}");
+        }
+        assert_eq!(
+            SystemConfig::parse("time.refresh 1h\n"),
+            Err(ConfigError::InvalidValue)
+        );
+    }
+
+    #[test]
+    fn the_time_keys_are_not_network_policy() {
+        // A `time.*` change must not be delivered to the network stack as a
+        // stack-wide policy update.
+        assert!(!Key::TimeServers.is_network());
+        assert!(!Key::TimeRefresh.is_network());
+    }
+
+    #[test]
     fn render_lists_every_registry_key() {
         let text = SystemConfig::default().render();
         for key in Key::ALL {
@@ -1024,7 +1365,10 @@ mod tests {
     fn key_registry_round_trips_names_and_values() {
         for key in Key::ALL {
             assert_eq!(Key::from_name(key.name()), Some(*key));
-            assert!(!key.values().is_empty());
+            match key.shape() {
+                ValueShape::Closed(values) => assert!(!values.is_empty()),
+                ValueShape::Free(form) => assert!(!form.is_empty()),
+            }
         }
         assert_eq!(
             Key::from_name("os.LoginType"),
@@ -1041,7 +1385,7 @@ mod tests {
             .set(Key::LoginType, "graphical")
             .expect("value in set");
         assert_eq!(config.login_type, LoginType::Graphical);
-        assert_eq!(config.get(Key::LoginType), "graphical");
+        assert_eq!(config.render_value(Key::LoginType), "graphical");
         assert_eq!(
             config.set(Key::LoginType, "bogus"),
             Err(ConfigError::InvalidValue),

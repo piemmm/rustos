@@ -215,6 +215,24 @@ sandboxes a parse imports it:
   earlier one left held; `OP_RASTERISE` keeps working unchanged whether or
   not it is interleaved with a wallpaper sequence on the same worker.
 
+- **NTP response evaluation** (`timesync`): a network time server's reply
+  is evaluated inside the worker (`tairix_net::ntp::evaluate`) because the
+  `timed` service that acts on the verdict holds `CAP_TIME_SET`, and
+  setting the machine clock arbitrarily can invalidate certificate
+  lifetimes, reorder how a reader interprets the audit log, and move
+  capability expiry (`plans/TIMESYNC.md` §4). This consumer is unusual in
+  that the caller keeps a check of its own *ahead* of the worker: the
+  reply's origin timestamp must echo the request's CSPRNG nonce, read from
+  a fixed offset in a fixed-length header, so a spoofed flood is dropped
+  without a worker round trip rather than becoming a denial of service
+  against the real reply. Only the fixed `PACKET_LEN` header crosses the
+  seam. The parent-side `evaluate_datagram` then re-validates any returned
+  sample against the plausibility window, the round-trip ceiling, and the
+  usable stratum range before it can reach the clock, and the engine's
+  transaction machine is driven from the *verdict* (`NtpClient::on_reply`)
+  so the retry, rotation, and Kiss-o'-Death discipline has one
+  implementation whether or not the decode was sandboxed.
+
 Host tests inject the in-process `loopback` fake exactly as the
 `Fs`/`Tty` seams take fakes, so a consumer's full parent-side path runs
 under plain `cargo test`.

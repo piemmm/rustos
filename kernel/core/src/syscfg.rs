@@ -73,7 +73,7 @@ where
     };
 
     control.apply(&config);
-    audit_applied(audit, config, source);
+    audit_applied(audit, &config, source);
 }
 
 /// The stable `cause` string for a bootstrap-read refusal other than a
@@ -89,7 +89,7 @@ const fn read_error_cause(err: BootstrapReadError) -> &'static str {
 
 /// Audit the applied cache policy: the store `source` and the effective mode
 /// of each cache class (the master `cache.all` ceiling already folded in).
-fn audit_applied(audit: &dyn Sink, config: SystemConfig, source: &'static str) {
+fn audit_applied(audit: &dyn Sink, config: &SystemConfig, source: &'static str) {
     emit(
         audit,
         Level::Info,
@@ -108,7 +108,11 @@ fn audit_applied(audit: &dyn Sink, config: SystemConfig, source: &'static str) {
 }
 
 /// One audit field naming a cache class's effective mode (`auto` / `off`).
-fn class_field(key: &str, config: SystemConfig, class: CacheClass) -> tairix_log::Field<'_> {
+fn class_field<'a>(
+    key: &'a str,
+    config: &SystemConfig,
+    class: CacheClass,
+) -> tairix_log::Field<'a> {
     tairix_log::Field {
         key,
         value: FieldValue::Str(config.effective_cache(class).as_str()),
