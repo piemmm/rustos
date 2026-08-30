@@ -4709,6 +4709,9 @@ where
         let wall = Time64::from_bytes(&buf)?;
         let cpu = SchedulerArch::current_cpu(self.arch);
         let monotonic_ns = self.arch.monotonic_ns(cpu);
+        // The clock itself enforces the provenance ladder, so a `Firmware`
+        // source cannot roll a validated reading back however the caller
+        // spells its request.
         self.wall_clock.set(wall, monotonic_ns, state).map(|()| 0)
     }
 

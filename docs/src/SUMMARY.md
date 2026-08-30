@@ -108,6 +108,7 @@
 - [Network drivers](./drivers/network.md)
 - [Display drivers](./drivers/display.md)
 - [Input drivers](./drivers/input.md)
+- [Real-time-clock drivers](./drivers/rtc.md)
 
 # Filesystem
 

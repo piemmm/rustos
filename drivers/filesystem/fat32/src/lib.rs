@@ -56,7 +56,7 @@ use tairix_abi::driver::filesystem::{
     DirEntry, FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats,
     FilesystemWrite, NodeId, NodeInfo, NodeKind, NodeSecurity, NodeTimes, VolumeStats,
 };
-use tairix_abi::time::Time64;
+use tairix_abi::time::{CivilTime, Time64};
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 
 /// Per-driver `DriverHandle` marker returned by [`register`].
@@ -514,40 +514,15 @@ fn parse_short_entry(raw: &[u8; DIR_ENTRY_LEN]) -> ParsedEntry {
 /// date/time is not decodable and yields [`Time64::UNIX_EPOCH`], the
 /// documented "no stamp" value — never a clamped or guessed date.
 fn dos_datetime_to_time64(date: u16, time: u16) -> Time64 {
-    let year = i64::from(date >> 9) + 1980;
-    let month = u32::from((date >> 5) & 0x0F);
-    let day = u32::from(date & 0x1F);
-    let hour = i64::from(time >> 11);
-    let minute = i64::from((time >> 5) & 0x3F);
-    let second = i64::from(time & 0x1F) * 2;
-    if !(1..=12).contains(&month) || day == 0 || hour > 23 || minute > 59 || second > 58 {
-        return Time64::UNIX_EPOCH;
-    }
-    let days_in_month: u32 = match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        _ => {
-            let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-            if leap {
-                29
-            } else {
-                28
-            }
-        }
+    let civil = CivilTime {
+        year: i64::from(date >> 9) + 1980,
+        month: u32::from((date >> 5) & 0x0F),
+        day: u32::from(date & 0x1F),
+        hour: u32::from(time >> 11),
+        minute: u32::from((time >> 5) & 0x3F),
+        second: u32::from(time & 0x1F) * 2,
     };
-    if day > days_in_month {
-        return Time64::UNIX_EPOCH;
-    }
-    // Civil-date to epoch-day conversion (Howard Hinnant's `days_from_civil`
-    // algorithm), exact over the whole FAT range.
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let mp = i64::from((month + 9) % 12);
-    let doy = (153 * mp + 2) / 5 + i64::from(day) - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
-    Time64::from_secs(days * 86_400 + hour * 3_600 + minute * 60 + second)
+    civil.to_time64().unwrap_or(Time64::UNIX_EPOCH)
 }
 
 /// VFAT short-name checksum binding a long-name set to its 8.3 entry.

@@ -9,10 +9,10 @@ use core::fmt::Write as _;
 
 use tairix_abi::fs::{FileId, FileKind};
 use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
+use tairix_abi::time::CivilTime;
 use tairix_abi::time::Time64;
 use tairix_abi::Errno;
 use tairix_curses::downgrade;
-use tairix_fsmeta::calendar::CivilTime;
 use tairix_help::{own_short_help, HelpSource};
 use tairix_path::join;
 use tairix_termcap::{ColorChoice, ColorDepth};
@@ -1303,7 +1303,7 @@ fn render_time(stamp: Time64, style: TimeStyle, now: Time64) -> String {
                 format!("{month_name} {:>2}  {:04}", civil.day, civil.year)
             }
         }
-        TimeStyle::LongIso => civil.iso_minute(),
+        TimeStyle::LongIso => tairix_fsmeta::calendar::iso_minute(&civil),
         TimeStyle::FullIso => format!(
             "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:09} +0000",
             civil.year,

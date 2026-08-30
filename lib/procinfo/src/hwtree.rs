@@ -220,6 +220,7 @@ pub fn class_label(class: Option<HwDeviceClass>) -> &'static str {
         Some(HwDeviceClass::Timer) => "timer",
         Some(HwDeviceClass::InterruptController) => "interrupt-controller",
         Some(HwDeviceClass::Serial) => "serial",
+        Some(HwDeviceClass::Rtc) => "rtc",
         Some(HwDeviceClass::Other) | None => "device",
     }
 }

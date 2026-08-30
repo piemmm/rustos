@@ -5,14 +5,16 @@
 //! record, and the audit records — with no processes and no sockets.
 
 use super::{
-    events, Clock, ConfigRetry, RecordStore, Step, Timed, TimedConfig, Transport,
-    CONFIG_RETRY_ATTEMPTS, CONFIG_RETRY_BASE_NANOS,
+    events, Clock, RecordStore, RetryLadder, RtcSource, Step, Timed, TimedConfig, Transport,
+    CONFIG_RETRY_ATTEMPTS, CONFIG_RETRY_BASE_NANOS, RTC_RETRY_ATTEMPTS, RTC_RETRY_BASE_NANOS,
 };
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
+use tairix_abi::driver::rtc::RtcStatus;
+use tairix_abi::rtc_ipc::RtcReading;
 use tairix_abi::time::{Duration64, Time64};
 use tairix_abi::{Errno, WallClockReading, WallTimeState, RELEASE_EPOCH_SECS};
 use tairix_log::{Event, EventId, Sink};
@@ -38,6 +40,10 @@ impl Sink for RecordingSink {
 impl RecordingSink {
     fn saw(&self, id: EventId) -> bool {
         self.events.borrow().contains(&id)
+    }
+
+    fn count(&self, id: EventId) -> usize {
+        self.events.borrow().iter().filter(|e| **e == id).count()
     }
 }
 
@@ -129,12 +135,85 @@ impl Transport for FakeTransport {
     }
 }
 
+/// An [`RtcSource`] double: answers a programmed reading and records every
+/// instant written back.
+#[derive(Clone)]
+struct FakeRtc {
+    /// What each successive `read` answers; the last entry repeats, so a test
+    /// that never changes it models a chip with a settled answer.
+    reads: Rc<RefCell<Vec<Result<RtcReading, Errno>>>>,
+    written: Rc<RefCell<Vec<Time64>>>,
+    refuse_set: Option<Errno>,
+}
+
+impl FakeRtc {
+    /// A board with no clock chip: nothing serves the endpoint, ever, so the
+    /// service climbs its whole ladder looking for one.
+    fn absent() -> Self {
+        Self::answering(vec![Err(Errno::NotFound)])
+    }
+
+    /// A chip that answered but has nothing to vouch for — a flat backup
+    /// cell. The question is settled, so no ladder is armed; this is the
+    /// default for every case that is about the network engine rather than
+    /// the RTC.
+    fn no_reading() -> Self {
+        Self::answering(vec![Ok(reading(None))])
+    }
+
+    /// A chip vouching for `time`.
+    fn holding(time: Time64) -> Self {
+        Self::answering(vec![Ok(reading(Some(time)))])
+    }
+
+    fn answering(reads: Vec<Result<RtcReading, Errno>>) -> Self {
+        Self {
+            reads: Rc::new(RefCell::new(reads)),
+            written: Rc::new(RefCell::new(Vec::new())),
+            refuse_set: None,
+        }
+    }
+}
+
+impl RtcSource for FakeRtc {
+    fn read(&mut self) -> Result<RtcReading, Errno> {
+        let mut reads = self.reads.borrow_mut();
+        if reads.len() > 1 {
+            reads.remove(0)
+        } else {
+            reads.first().copied().unwrap_or(Err(Errno::NotFound))
+        }
+    }
+
+    fn set(&mut self, time: Time64) -> Result<(), Errno> {
+        if let Some(err) = self.refuse_set {
+            return Err(err);
+        }
+        self.written.borrow_mut().push(time);
+        Ok(())
+    }
+}
+
+/// A chip reading carrying `time` (or none), with an otherwise healthy
+/// one-second, battery-backed status.
+fn reading(time: Option<Time64>) -> RtcReading {
+    RtcReading {
+        time,
+        status: RtcStatus {
+            precision: Duration64::from_secs(1),
+            battery_backed: true,
+            oscillator_stopped: time.is_none(),
+        },
+    }
+}
+
 type TestService = Timed<
     FakeClock,
     FakeStore,
     FakeTransport,
     LoopbackLauncher<fn() -> TimeSyncService>,
     RecordingSink,
+    FakeRtc,
 >;
 
 /// A wall instant comfortably inside the plausibility window.
@@ -158,6 +237,17 @@ fn service(
     config: SystemConfig,
     sink: RecordingSink,
 ) -> TestService {
+    service_with_rtc(clock, store, transport, config, sink, FakeRtc::no_reading())
+}
+
+fn service_with_rtc(
+    clock: FakeClock,
+    store: FakeStore,
+    transport: FakeTransport,
+    config: SystemConfig,
+    sink: RecordingSink,
+    rtc: FakeRtc,
+) -> TestService {
     Timed::new(TimedConfig {
         clock,
         store,
@@ -167,6 +257,7 @@ fn service(
             sink.clone(),
         ),
         sink,
+        rtc,
         config,
         entropy: 0x0F0F_0F0F_0F0F_0F0F,
     })
@@ -578,14 +669,18 @@ fn the_event_ids_are_frozen_inside_the_reserved_range() {
 /// what stranded it when a failed open was mistaken for a volume-less boot.
 #[test]
 fn the_reread_ladder_arms_whenever_no_server_is_configured() {
-    let armed = ConfigRetry::arm(0, false).expect("an unconfigured service re-reads");
+    let armed = RetryLadder::arm(0, CONFIG_RETRY_BASE_NANOS, CONFIG_RETRY_ATTEMPTS, false)
+        .expect("an unconfigured service re-reads");
     assert_eq!(armed.at, CONFIG_RETRY_BASE_NANOS);
 }
 
 /// Nothing to wait for once a server is known.
 #[test]
 fn the_reread_ladder_stays_disarmed_when_a_server_is_configured() {
-    assert_eq!(ConfigRetry::arm(0, true), None);
+    assert_eq!(
+        RetryLadder::arm(0, CONFIG_RETRY_BASE_NANOS, CONFIG_RETRY_ATTEMPTS, true),
+        None
+    );
 }
 
 /// The rungs double and the ladder is finite, so a machine that genuinely has
@@ -593,7 +688,8 @@ fn the_reread_ladder_stays_disarmed_when_a_server_is_configured() {
 /// boot. The window must still outlast an unlock by a wide margin.
 #[test]
 fn the_reread_ladder_doubles_and_is_spent_after_its_attempts() {
-    let mut rung = ConfigRetry::arm(0, false).expect("armed");
+    let mut rung =
+        RetryLadder::arm(0, CONFIG_RETRY_BASE_NANOS, CONFIG_RETRY_ATTEMPTS, false).expect("armed");
     let mut at = rung.at;
     let mut climbed = 1;
     while rung.advance(at) {
@@ -616,7 +712,8 @@ fn the_reread_ladder_doubles_and_is_spent_after_its_attempts() {
 /// actually ran rather than compounding the lateness.
 #[test]
 fn a_late_rung_schedules_from_the_moment_it_ran() {
-    let mut rung = ConfigRetry::arm(0, false).expect("armed");
+    let mut rung =
+        RetryLadder::arm(0, CONFIG_RETRY_BASE_NANOS, CONFIG_RETRY_ATTEMPTS, false).expect("armed");
     let late = rung.at + 60_000_000_000;
     assert!(rung.advance(late));
     assert_eq!(rung.at, late + 2 * CONFIG_RETRY_BASE_NANOS);
@@ -626,8 +723,186 @@ fn a_late_rung_schedules_from_the_moment_it_ran() {
 /// fire the ladder continuously.
 #[test]
 fn the_ladder_saturates_instead_of_wrapping_a_late_clock() {
-    let mut rung = ConfigRetry::arm(u64::MAX, false).expect("armed");
+    let mut rung = RetryLadder::arm(
+        u64::MAX,
+        CONFIG_RETRY_BASE_NANOS,
+        CONFIG_RETRY_ATTEMPTS,
+        false,
+    )
+    .expect("armed");
     assert_eq!(rung.at, u64::MAX);
     assert!(rung.advance(u64::MAX));
     assert_eq!(rung.at, u64::MAX);
+}
+
+// --- The board's real-time clock ----------------------------------------
+
+#[test]
+fn a_chip_reading_establishes_the_clock_as_firmware_before_any_network() {
+    let clock = FakeClock::unset();
+    let sink = RecordingSink::default();
+    let at = plausible();
+    let rtc = FakeRtc::holding(at);
+    let _service = service_with_rtc(
+        clock.clone(),
+        FakeStore::default(),
+        FakeTransport::default(),
+        configured(),
+        sink.clone(),
+        rtc,
+    );
+    // The service — not the driver — decides the provenance, and it is the
+    // firmware rung: a chip reading is believed until the network corrects it.
+    assert_eq!(
+        clock.sets.borrow().as_slice(),
+        &[(at, WallTimeState::Firmware)]
+    );
+    assert!(sink.saw(events::RTC_CLOCK_SET));
+}
+
+#[test]
+fn a_chip_with_nothing_to_vouch_for_leaves_the_clock_unset_and_says_why() {
+    let clock = FakeClock::unset();
+    let sink = RecordingSink::default();
+    let service = service_with_rtc(
+        clock.clone(),
+        FakeStore::default(),
+        FakeTransport::default(),
+        configured(),
+        sink.clone(),
+        FakeRtc::no_reading(),
+    );
+    // No fabricated instant reaches the clock.
+    assert!(clock.sets.borrow().is_empty());
+    assert!(sink.saw(events::RTC_NO_READING));
+    // The chip answered, so there is nothing to come back for: the only
+    // deadline left is the engine's own first query, which the base RTC delay
+    // does not front-run.
+    let due = service.next_deadline().expect("a query is scheduled");
+    assert!(
+        due.saturating_total_nanos() != RTC_RETRY_BASE_NANOS,
+        "no RTC rung remains: {due:?}"
+    );
+}
+
+#[test]
+fn a_board_with_no_chip_climbs_a_bounded_ladder_then_stops_asking() {
+    let clock = FakeClock::unset();
+    let sink = RecordingSink::default();
+    let mut service = service_with_rtc(
+        clock.clone(),
+        FakeStore::default(),
+        FakeTransport::default(),
+        configured(),
+        sink.clone(),
+        FakeRtc::absent(),
+    );
+    // The first rung is armed at the base delay, and it is what the reactor
+    // wakes for.
+    assert_eq!(
+        service.next_deadline(),
+        Some(Duration64::from_nanos(RTC_RETRY_BASE_NANOS))
+    );
+    // Climb every rung; the ladder is finite, so the service stops waking for
+    // a chip that is never going to answer. Rung `k` falls due at
+    // `base * (2^(k+1) - 1)` — the running sum of the doubling waits — so
+    // polling at each of those instants climbs exactly one rung per poll.
+    let mut now = Duration64::ZERO;
+    for k in 0..RTC_RETRY_ATTEMPTS {
+        now = Duration64::from_nanos(RTC_RETRY_BASE_NANOS * ((1u64 << (k + 1)) - 1));
+        service.poll(now, 1);
+    }
+    assert!(sink.saw(events::RTC_UNAVAILABLE));
+    assert!(clock.sets.borrow().is_empty(), "and never invents a time");
+    // The ladder is spent, so a further poll neither wakes for it nor audits
+    // its exhaustion twice.
+    let before = sink.count(events::RTC_UNAVAILABLE);
+    service.poll(
+        Duration64::from_nanos(
+            now.saturating_total_nanos()
+                .saturating_add(3_600_000_000_000),
+        ),
+        1,
+    );
+    assert_eq!(sink.count(events::RTC_UNAVAILABLE), before);
+}
+
+#[test]
+fn a_chip_that_binds_late_still_establishes_the_clock() {
+    // The driver is autoloaded after this boot-floor service starts, so the
+    // first read finds no endpoint and the second finds the chip.
+    let clock = FakeClock::unset();
+    let sink = RecordingSink::default();
+    let at = plausible();
+    let rtc = FakeRtc::answering(vec![Err(Errno::NotFound), Ok(reading(Some(at)))]);
+    let mut service = service_with_rtc(
+        clock.clone(),
+        FakeStore::default(),
+        FakeTransport::default(),
+        configured(),
+        sink.clone(),
+        rtc,
+    );
+    assert!(clock.sets.borrow().is_empty(), "not on the first attempt");
+    service.poll(Duration64::from_nanos(RTC_RETRY_BASE_NANOS), 1);
+    assert_eq!(
+        clock.sets.borrow().as_slice(),
+        &[(at, WallTimeState::Firmware)]
+    );
+    assert!(sink.saw(events::RTC_CLOCK_SET));
+}
+
+#[test]
+fn a_validated_sample_is_written_back_to_the_chip() {
+    let clock = FakeClock::unset();
+    let sink = RecordingSink::default();
+    let rtc = FakeRtc::no_reading();
+    let written = Rc::clone(&rtc.written);
+    let mut svc = service_with_rtc(
+        clock,
+        FakeStore::default(),
+        FakeTransport::default(),
+        configured(),
+        sink.clone(),
+        rtc,
+    );
+
+    // Drive one successful sync and confirm the applied instant reached the
+    // chip, so the next boot starts from it with no network.
+    let (nonce, at) = in_flight(&mut svc);
+    let Step::ClockSet(update) = svc.on_datagram(at, &reply(nonce, plausible())) else {
+        panic!("a well-formed reply must set the clock");
+    };
+    assert_eq!(written.borrow().as_slice(), &[update.wall]);
+    assert!(sink.saw(events::RTC_WRITEBACK));
+}
+
+#[test]
+fn a_chip_that_refuses_the_write_back_does_not_undo_the_sync() {
+    let clock = FakeClock::unset();
+    let sink = RecordingSink::default();
+    let mut rtc = FakeRtc::no_reading();
+    rtc.refuse_set = Some(Errno::PermissionDenied);
+    let written = Rc::clone(&rtc.written);
+    let mut svc = service_with_rtc(
+        clock.clone(),
+        FakeStore::default(),
+        FakeTransport::default(),
+        configured(),
+        sink.clone(),
+        rtc,
+    );
+    let (nonce, at) = in_flight(&mut svc);
+    assert!(matches!(
+        svc.on_datagram(at, &reply(nonce, plausible())),
+        Step::ClockSet(_)
+    ));
+    assert!(written.borrow().is_empty());
+    assert!(sink.saw(events::RTC_WRITEBACK_REFUSED));
+    // The machine clock is still correct; only the next boot loses its head
+    // start.
+    assert_eq!(
+        clock.sets.borrow().last().map(|(_, state)| *state),
+        Some(WallTimeState::Trusted)
+    );
 }

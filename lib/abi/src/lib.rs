@@ -54,6 +54,7 @@ pub mod raid_ipc;
 pub mod random;
 pub mod reply;
 pub mod rlimit;
+pub mod rtc_ipc;
 pub mod rxe;
 pub mod seat;
 pub mod service;
@@ -212,9 +213,9 @@ pub use sysinfo::{
 };
 pub use terminal::{InputMode, TerminalSize, TERMINAL_SIZE_WIRE_LEN};
 pub use time::{
-    coarsen_clock_ns, is_plausible_wall_time, Duration64, Time64, WallClockReading, WallTimeState,
-    COARSE_CLOCK_GRANULARITY_NS, MAX_TIME_SERVERS, NANOS_PER_SEC, PLAUSIBLE_FUTURE_SECS,
-    RELEASE_EPOCH_SECS,
+    civil_from_days, coarsen_clock_ns, days_from_civil, days_in_month, is_plausible_wall_time,
+    CivilTime, Duration64, Time64, WallClockReading, WallTimeState, COARSE_CLOCK_GRANULARITY_NS,
+    MAX_TIME_SERVERS, NANOS_PER_SEC, PLAUSIBLE_FUTURE_SECS, RELEASE_EPOCH_SECS, SECS_PER_DAY,
 };
 pub use volume::{
     validate_volume_name, VolumeAttachRequest, VolumeDetachRequest, VolumeFsType,

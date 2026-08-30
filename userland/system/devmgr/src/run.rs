@@ -87,6 +87,7 @@ mod program {
             Some(HwDeviceClass::Network) => "network",
             Some(HwDeviceClass::Storage) => "storage",
             Some(HwDeviceClass::Serial) => "serial",
+            Some(HwDeviceClass::Rtc) => "rtc",
             Some(HwDeviceClass::Other) => "other",
             None => "?",
         }

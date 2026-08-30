@@ -15,8 +15,8 @@ use alloc::vec::Vec;
 use core::fmt::Write as _;
 
 use tairix_abi::time::Time64;
+use tairix_abi::time::{civil_from_days, days_from_civil};
 use tairix_abi::FileKind;
-use tairix_fsmeta::calendar::{civil_from_days, days_from_civil};
 
 use crate::fs::Fs;
 use crate::ops::{plan_target, Conflict, Decision, FileOp, OpError, OpKind, OpProgress};

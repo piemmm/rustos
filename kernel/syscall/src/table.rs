@@ -1565,7 +1565,10 @@ pub trait SyscallHandlers {
     /// validated boundary, rejects a non-canonical instant, and records the
     /// new wall offset and state — leaving the monotonic clock untouched.
     /// Returns `Ok(0)`; a malformed instant, a short buffer, or a
-    /// non-settable state fails closed.
+    /// non-settable state fails closed, as does a write the provenance
+    /// ladder refuses ([`tairix_abi::WallTimeState::supersedes`]: a
+    /// `Firmware` source may not overwrite a validated or deliberately
+    /// corrected reading), which returns [`Errno::AlreadyExists`].
     ///
     /// The default implementation fails closed with
     /// [`Errno::NotImplemented`]; the real handler is installed in

@@ -5,9 +5,9 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::fs::mode_string;
+use tairix_abi::time::CivilTime;
 use tairix_abi::time::Time64;
 use tairix_abi::{Errno, FileKind, FileStat, FS_MODE_MASK, FS_NAME_MAX};
-use tairix_fsmeta::calendar::CivilTime;
 use tairix_help::{own_short_help, HelpSource};
 
 use crate::command::{Command, Options, Piece, Subject, Trailer};

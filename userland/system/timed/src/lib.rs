@@ -35,6 +35,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::rtc_ipc::RtcReading;
 use tairix_abi::time::{Duration64, Time64};
 use tairix_abi::{Errno, FieldValue, WallClockReading, WallTimeState};
 use tairix_log::{Event, Field, Level, Sink};
@@ -89,6 +90,32 @@ pub trait RecordStore {
     fn write(&self, bytes: &[u8]) -> Result<(), Errno>;
 }
 
+/// The board's real-time clock, as the service reaches it.
+///
+/// The chip belongs to an autoloaded driver holding no clock authority; this
+/// service is the only holder of `CAP_TIME_SET` and is what turns a chip
+/// reading into a wall time. Keeping the split here is what makes the
+/// provenance ladder enforceable: the driver reports a reading, and this
+/// service — not the driver — says it is `Firmware`.
+pub trait RtcSource {
+    /// Read the chip: the instant it can vouch for, if any, and its status.
+    ///
+    /// # Errors
+    ///
+    /// The typed refusal. A board with no clock chip has no driver serving
+    /// the endpoint, which reads as `NotFound` — an ordinary state, not a
+    /// failure.
+    fn read(&mut self) -> Result<RtcReading, Errno>;
+
+    /// Write `time` back to the chip so the next boot starts from it.
+    ///
+    /// # Errors
+    ///
+    /// The typed refusal. A failure costs the next boot its head start and
+    /// nothing else, so a caller reports it and carries on.
+    fn set(&mut self, time: Time64) -> Result<(), Errno>;
+}
+
 /// The datagram transport to the configured servers.
 ///
 /// `index` addresses the configured server list positionally, exactly as the
@@ -127,14 +154,18 @@ pub enum Step {
 
 /// The time-synchronisation service: the clock policy, the NTP engine, the
 /// sandboxed evaluation, and the persisted record, over injected seams.
-pub struct Timed<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink> {
+pub struct Timed<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink, K: RtcSource> {
     clock: C,
     store: R,
     transport: T,
     sandbox: ParserSandbox<L, S>,
     sink: S,
+    rtc: K,
     sync: TimeSync,
     record: SyncRecord,
+    /// The ladder for re-reading the RTC while its driver is not up yet, or
+    /// `None` once the chip answered or the ladder is spent.
+    rtc_retry: Option<RetryLadder>,
     /// The configured servers, held only so an audit record can name the one
     /// a decision was about; the engine itself addresses them by index.
     servers: Vec<String>,
@@ -142,7 +173,7 @@ pub struct Timed<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink> {
 
 /// Everything [`Timed::new`] needs, so the constructor does not grow a
 /// six-argument signature.
-pub struct TimedConfig<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink> {
+pub struct TimedConfig<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink, K: RtcSource> {
     /// The wall and monotonic clocks.
     pub clock: C,
     /// The persisted last-seen record's backing document.
@@ -153,6 +184,8 @@ pub struct TimedConfig<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: S
     pub sandbox: ParserSandbox<L, S>,
     /// The audit sink.
     pub sink: S,
+    /// The board's real-time clock.
+    pub rtc: K,
     /// The boot-time configuration: the server list and the refresh cadence.
     pub config: SystemConfig,
     /// A CSPRNG word, spreading the first query so a fleet booting from one
@@ -160,24 +193,36 @@ pub struct TimedConfig<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: S
     pub entropy: u64,
 }
 
-impl<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink + Clone> Timed<C, R, T, L, S> {
+impl<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink + Clone, K: RtcSource>
+    Timed<C, R, T, L, S, K>
+{
     /// Build the service, deciding from the clock's reading and the persisted
     /// record when the first query of this boot is due.
     ///
     /// A clock that cannot be read is treated as unset: correcting a clock we
     /// could not see beats believing a reading we never got.
     #[must_use]
-    pub fn new(config: TimedConfig<C, R, T, L, S>) -> Self {
+    pub fn new(config: TimedConfig<C, R, T, L, S, K>) -> Self {
         let TimedConfig {
             clock,
             store,
             transport,
             sandbox,
             sink,
+            mut rtc,
             config,
             entropy,
         } = config;
         let record = read_record(&store);
+        // The RTC first, so a board that has one enters the decision matrix
+        // with a `Firmware` clock rather than an unset one — which is the
+        // whole reason a machine carries a clock chip.
+        let rtc_retry = RetryLadder::arm(
+            clock.monotonic().saturating_total_nanos(),
+            RTC_RETRY_BASE_NANOS,
+            RTC_RETRY_ATTEMPTS,
+            seed_clock_from_rtc(&mut rtc, &clock, &sink),
+        );
         let reading = clock
             .wall()
             .unwrap_or_else(|_| WallClockReading::new(Time64::from_secs(0), WallTimeState::Unset));
@@ -197,8 +242,10 @@ impl<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink + Clone> Timed
             transport,
             sandbox,
             sink,
+            rtc,
             sync,
             record,
+            rtc_retry,
             servers,
         };
         service.audit_startup();
@@ -207,9 +254,16 @@ impl<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink + Clone> Timed
 
     /// The single monotonic instant the reactor should wake at, or `None` when
     /// there is nothing left to wait for.
+    ///
+    /// Folds the RTC ladder in, so a service with no server configured still
+    /// wakes to re-read a clock chip whose driver was not up yet.
     #[must_use]
     pub fn next_deadline(&self) -> Option<Duration64> {
-        self.sync.next_deadline()
+        let rtc_at = self.rtc_retry.map(|rung| Duration64::from_nanos(rung.at));
+        match (self.sync.next_deadline(), rtc_at) {
+            (Some(engine), Some(rtc)) => Some(engine.min(rtc)),
+            (only, None) | (None, only) => only,
+        }
     }
 
     /// Whether every configured server has refused further queries.
@@ -229,6 +283,7 @@ impl<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink + Clone> Timed
     /// `entropy` must be a **fresh** CSPRNG word on every call: it becomes the
     /// nonce that authenticates the reply.
     pub fn poll(&mut self, now: Duration64, entropy: u64) -> Step {
+        self.poll_rtc(now);
         let Some(Query { server, packet }) = self.sync.poll(now, entropy) else {
             if self.sync.is_exhausted() {
                 self.record_event(
@@ -393,7 +448,66 @@ impl<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink + Clone> Timed
                 }],
             );
         }
+        // Write the validated instant back to the board's clock chip, so a
+        // machine that syncs once then boots offline still starts from a good
+        // time. A refusal costs the next boot its head start and nothing
+        // else, so it is reported and the sync stands.
+        match self.rtc.set(update.wall) {
+            Ok(()) => self.record_event(
+                events::RTC_WRITEBACK,
+                Level::Info,
+                "timed: the validated instant was written back to the real-time clock",
+                &[Field {
+                    key: "wall_secs",
+                    value: FieldValue::SignedInt(update.wall.secs()),
+                }],
+            ),
+            Err(err) => self.record_event(
+                events::RTC_WRITEBACK_REFUSED,
+                Level::Info,
+                "timed: the real-time clock did not accept the validated instant",
+                &[Field {
+                    key: "error",
+                    value: FieldValue::Error(err),
+                }],
+            ),
+        }
         Step::ClockSet(update)
+    }
+
+    /// Climb the RTC ladder if a rung is due, and stop climbing once the chip
+    /// has answered or the ladder is spent.
+    ///
+    /// A chip that answers *late* improves the clock but does not re-derive
+    /// the sync decision: the engine's rotation and backoff are already in
+    /// flight, and rebuilding them would forget which servers had refused.
+    /// The cost is at most one early query on a machine whose RTC bound after
+    /// the service started.
+    fn poll_rtc(&mut self, now: Duration64) {
+        let Some(rung) = self.rtc_retry.as_mut() else {
+            return;
+        };
+        if now.saturating_total_nanos() < rung.at {
+            return;
+        }
+        if seed_clock_from_rtc(&mut self.rtc, &self.clock, &self.sink) {
+            self.rtc_retry = None;
+            return;
+        }
+        if !self
+            .rtc_retry
+            .as_mut()
+            .is_some_and(|rung| rung.advance(now.saturating_total_nanos()))
+        {
+            emit(
+                &self.sink,
+                events::RTC_UNAVAILABLE,
+                Level::Info,
+                "timed: no real-time clock answered within the start-up window",
+                &[],
+            );
+            self.rtc_retry = None;
+        }
     }
 
     /// Record what the service decided about the clock at startup.
@@ -450,16 +564,89 @@ impl<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink + Clone> Timed
         message: &str,
         fields: &[Field<'_>],
     ) {
-        tairix_log::log(
-            &self.sink,
-            &Event {
-                level,
-                id,
-                message,
-                fields,
-            },
-        );
+        emit(&self.sink, id, level, message, fields);
     }
+}
+
+/// Emit one audit record through `sink`.
+///
+/// A free function because the RTC seeding runs before the service value
+/// exists, and one emitter beats two.
+fn emit<S: Sink>(
+    sink: &S,
+    id: tairix_log::EventId,
+    level: Level,
+    message: &str,
+    fields: &[Field<'_>],
+) {
+    tairix_log::log(
+        sink,
+        &Event {
+            level,
+            id,
+            message,
+            fields,
+        },
+    );
+}
+
+/// Read the board's clock chip and, if it vouched for an instant, set the
+/// wall clock from it as `Firmware`.
+///
+/// Returns whether the question is **settled** — the chip answered, whether
+/// or not it had a time to give — so a caller knows whether to keep climbing
+/// its ladder. The kernel enforces the provenance ladder, so a `Firmware`
+/// write that arrives after a network sync is refused there rather than
+/// trusted to be polite here; that refusal is reported, not retried.
+fn seed_clock_from_rtc<C: Clock, S: Sink, K: RtcSource>(rtc: &mut K, clock: &C, sink: &S) -> bool {
+    // No driver serves the endpoint yet, or the read was refused. Both look
+    // the same from here, so the ladder — not a guess — bounds it.
+    let Ok(reading) = rtc.read() else {
+        return false;
+    };
+    let Some(time) = reading.time else {
+        emit(
+            sink,
+            events::RTC_NO_READING,
+            Level::Info,
+            "timed: the real-time clock has no instant it can vouch for",
+            &[Field {
+                key: "oscillator_stopped",
+                value: FieldValue::Bool(reading.status.oscillator_stopped),
+            }],
+        );
+        // The chip answered; asking it again would get the same answer.
+        return true;
+    };
+    match clock.set_wall(time, WallTimeState::Firmware) {
+        Ok(()) => emit(
+            sink,
+            events::RTC_CLOCK_SET,
+            Level::Info,
+            "timed: the clock was set from the board's real-time clock",
+            &[
+                Field {
+                    key: "wall_secs",
+                    value: FieldValue::SignedInt(time.secs()),
+                },
+                Field {
+                    key: "battery_backed",
+                    value: FieldValue::Bool(reading.status.battery_backed),
+                },
+            ],
+        ),
+        Err(err) => emit(
+            sink,
+            events::RTC_CLOCK_SET,
+            Level::Info,
+            "timed: the kernel did not accept the real-time clock's reading",
+            &[Field {
+                key: "error",
+                value: FieldValue::Error(err),
+            }],
+        ),
+    }
+    true
 }
 
 /// Read the persisted record, resolving every failure to
@@ -530,7 +717,7 @@ const fn failure_name(failure: tairix_sandbox::timesync::TimeSyncFailure) -> &'s
 /// is waiting for.
 pub const CONFIG_RETRY_BASE_NANOS: u64 = 4_000_000_000;
 
-/// How many rungs [`ConfigRetry`] climbs before giving up.
+/// How many rungs the configuration ladder climbs before giving up.
 ///
 /// Eight doublings from four seconds span about seventeen minutes: far longer
 /// than any unlock takes, and finite, so a machine that genuinely has no
@@ -538,33 +725,54 @@ pub const CONFIG_RETRY_BASE_NANOS: u64 = 4_000_000_000;
 /// of the boot. Configuring a server later means restarting the service.
 pub const CONFIG_RETRY_ATTEMPTS: u32 = 8;
 
-/// The bounded, doubling schedule for re-reading the configuration store.
+/// First delay before re-reading the board's real-time clock, in nanoseconds.
 ///
-/// Only live while no server is configured; it stops the moment one is, and
-/// stops for good once the ladder is spent.
+/// The RTC is served by an autoloaded user-space driver, so on a boot-floor
+/// service the endpoint is usually not bound yet at start-up. There is no
+/// userland event for "that driver bound", so the read climbs the same
+/// bounded ladder the configuration read does — a one-shot timer folded into
+/// the reactor's own deadline, never a spin.
+pub const RTC_RETRY_BASE_NANOS: u64 = 1_000_000_000;
+
+/// How many rungs the RTC ladder climbs before giving up.
+///
+/// Six doublings from one second span about a minute. Driver autoload runs as
+/// soon as the hardware tree is published, far earlier than the encrypted
+/// root is mounted, so this is generous; the point of the bound is that a
+/// board with no clock chip at all — a Raspberry Pi 3/4 — stops asking
+/// instead of waking for the rest of the boot.
+pub const RTC_RETRY_ATTEMPTS: u32 = 6;
+
+/// A bounded, doubling one-shot schedule for retrying something that is not
+/// available yet and has no readiness event to wait on.
+///
+/// Two things need it: the configuration store, which lives on a root this
+/// boot-floor service starts before, and the RTC, whose driver `devmgr`
+/// autoloads after the service is already running. Both are the same problem
+/// — no userland event says "it is there now" — so both climb this one
+/// definition rather than each carrying a schedule of its own.
+///
+/// Why a failed attempt never disarms it: every way the thing can be missing
+/// looks the same from here. A boot where it never appears is bounded by the
+/// ladder's own finite length rather than by guessing at the error, so the
+/// guess is not worth making — reading one wrong is what strands the service.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct ConfigRetry {
-    /// Absolute nanosecond deadline of the next re-read.
+pub struct RetryLadder {
+    /// Absolute nanosecond deadline of the next attempt.
     pub at: u64,
     wait: u64,
     left: u32,
 }
 
-impl ConfigRetry {
-    /// The schedule a service that found no configured server starts on, or
-    /// [`None`] when a server *is* configured and there is nothing to wait for.
-    ///
-    /// Why a failed read never disarms it: the store lives on the encrypted
-    /// root, and every way it can be missing before that root is mounted looks
-    /// the same from here. A boot with no volume at all is bounded by the
-    /// ladder itself rather than by guessing at the error, so the guess is not
-    /// worth making — reading one wrong is what strands the service.
+impl RetryLadder {
+    /// The schedule to climb while `satisfied` is false, or [`None`] when
+    /// there is nothing to wait for.
     #[must_use]
-    pub fn arm(now: u64, configured: bool) -> Option<Self> {
-        (!configured).then_some(Self {
-            at: now.saturating_add(CONFIG_RETRY_BASE_NANOS),
-            wait: CONFIG_RETRY_BASE_NANOS,
-            left: CONFIG_RETRY_ATTEMPTS,
+    pub fn arm(now: u64, base_nanos: u64, attempts: u32, satisfied: bool) -> Option<Self> {
+        (!satisfied).then_some(Self {
+            at: now.saturating_add(base_nanos),
+            wait: base_nanos,
+            left: attempts,
         })
     }
 

@@ -311,7 +311,7 @@ fn utc_date_today() -> Result<String, String> {
         .as_secs();
     let days =
         i64::try_from(secs / 86_400).map_err(|e| format!("devids: system clock overflow: {e}"))?;
-    let (y, m, d) = tairix_fsmeta::calendar::civil_from_days(days);
+    let (y, m, d) = tairix_abi::time::civil_from_days(days);
     Ok(format!("{y:04}-{m:02}-{d:02}"))
 }
 

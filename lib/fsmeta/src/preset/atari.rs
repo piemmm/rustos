@@ -6,9 +6,8 @@
 //! distinct from a generic FAT mapping so intent is not lost, and converts the
 //! packed date/time to and from a [`Time64`] through the checked path.
 
-use tairix_abi::time::Time64;
+use tairix_abi::time::{civil_from_days, days_from_civil, Time64};
 
-use crate::calendar::{civil_from_days, days_from_civil};
 use crate::MetadataError;
 
 /// Read-only attribute bit.

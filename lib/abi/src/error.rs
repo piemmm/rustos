@@ -99,7 +99,11 @@ pub enum Errno {
     /// handed back so it can be torn down. Also emitted by
     /// `display_acquire` when the caller already holds the seat lease it
     /// is asking for: a double acquire is a caller bug, surfaced rather
-    /// than silently succeeding (`plans/DISPLAY.md`).
+    /// than silently succeeding (`plans/DISPLAY.md`), and by `wall_time_set`
+    /// when the wall clock already holds a reading from a better source than
+    /// the write offers ([`crate::WallTimeState::supersedes`]): the existing
+    /// reading is never overwritten, so a local counter cannot roll a
+    /// validated network sync backwards (`plans/TIMESYNC.md`).
     AlreadyExists = 17,
     /// A user-space pointer handed to a syscall does not name memory the
     /// caller may access in the direction the call requires.

@@ -71,3 +71,26 @@ pub const RECORD_NOT_WRITTEN: EventId = EventId(23_011);
 /// Every configured server has refused further queries, so nothing further
 /// will be attempted this boot.
 pub const SERVERS_EXHAUSTED: EventId = EventId(23_012);
+
+/// The board's real-time clock supplied a reading and the wall clock was set
+/// from it, tagged `Firmware` — the machine now has a plausible time before
+/// any network exists.
+pub const RTC_CLOCK_SET: EventId = EventId(23_013);
+
+/// An RTC was reachable but had no instant to offer: its oscillator stopped,
+/// its clock-integrity flag is set, or its registers hold no real date. The
+/// clock is left for the network to establish.
+pub const RTC_NO_READING: EventId = EventId(23_014);
+
+/// No RTC answered, or the one that did refused the read. Not an error on a
+/// board that has no clock chip (a Raspberry Pi 3/4); the clock simply waits
+/// for the network.
+pub const RTC_UNAVAILABLE: EventId = EventId(23_015);
+
+/// A validated network sample was written back to the board's real-time
+/// clock, so the next boot starts from a good time with no network.
+pub const RTC_WRITEBACK: EventId = EventId(23_016);
+
+/// The write-back of a validated sample to the RTC was refused. The machine
+/// clock is still correct; only the next boot loses the head start.
+pub const RTC_WRITEBACK_REFUSED: EventId = EventId(23_017);

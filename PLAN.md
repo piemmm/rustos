@@ -3496,9 +3496,12 @@ See `plans/IO.md` (binding under `AGENTS.md`).
 `timed` service) are done: the machine now establishes its clock from a
 configured network time server, with the NTP decode contained in a
 capability-empty sandbox worker. TS-3 (the RTC driver class and the
-QEMU-emulable chips) is next; TS-4–TS-6 follow. `plans/TIMESYNC.md` is the
-binding design and carries the deliverable list and its current state; it is
-not repeated here.
+QEMU-emulable chips) is part-landed — the class ABI, the kernel-enforced
+provenance ladder, the RTC service protocol, the `pl031` driver, and `timed`'s
+RTC client and write-back are in; the image wiring, the QEMU verticals, and
+the `mc146818` / `goldfish` drivers remain. TS-4–TS-6 follow.
+`plans/TIMESYNC.md` is the binding design and carries the deliverable list and
+its current state; it is not repeated here.
 
 A Raspberry Pi 3/4 has no RTC at all, which is why the network path came
 first: without it such a machine boots `WallTimeState::Unset` for ever, and

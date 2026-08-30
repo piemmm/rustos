@@ -1008,5 +1008,5 @@ fn format_stamp(stamp: Time64) -> String {
     if stamp == Time64::UNIX_EPOCH {
         return String::from("-");
     }
-    tairix_fsmeta::calendar::CivilTime::from_time64(stamp).iso_minute()
+    tairix_fsmeta::calendar::iso_minute(&tairix_abi::time::CivilTime::from_time64(stamp))
 }

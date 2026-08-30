@@ -3,7 +3,7 @@
 //! This module is the single source of truth for the user/kernel ABI that
 //! sits between a loaded driver module (`.rxe` binary)
 //! and its host. The host lives in user space by default
-//! and dispatches calls into one of the six driver-class traits defined in
+//! and dispatches calls into one of the driver-class traits defined in
 //! the submodules below:
 //!
 //! * [`display`] — framebuffer and GPU surfaces.
@@ -12,6 +12,7 @@
 //! * [`net`] — link-layer network interfaces.
 //! * [`input`] — keyboard / pointer / scroll input.
 //! * [`bus`] — bus enumeration (PCI, MMIO, virtio).
+//! * [`rtc`] — the board's battery-backed real-time clock.
 //!
 //! # Lifecycle
 //!
@@ -60,6 +61,7 @@ pub mod net_ring;
 pub mod pci;
 pub mod port_io;
 pub mod register;
+pub mod rtc;
 pub mod timing;
 pub mod virtio;
 pub mod virtio_mmio;

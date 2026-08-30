@@ -501,6 +501,7 @@ fn classify(node: &Node<'_>) -> HwDeviceClass {
         b"timer" => HwDeviceClass::Timer,
         b"interrupt-controller" | b"intc" | b"gic" => HwDeviceClass::InterruptController,
         b"serial" | b"uart" => HwDeviceClass::Serial,
+        b"rtc" => HwDeviceClass::Rtc,
         b"ethernet" => HwDeviceClass::Network,
         b"mmc" | b"sdhci" | b"emmc2" => HwDeviceClass::Storage,
         b"keyboard" | b"mouse" | b"touchscreen" => HwDeviceClass::Input,

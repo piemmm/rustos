@@ -564,6 +564,7 @@ tairix/
 │   │   └── arxfs/      # Native, POSIX-compliant, capability-aware FS.
 │   ├── input/
 │   ├── network/
+│   ├── rtc/            # Real-time clocks: pl031 (and the staged chip set).
 │   ├── storage/
 │   └── bus/             # Bus drivers: virtio, mmio, usb/ (xhci, vl805),
 │                        #   pcie_brcm.

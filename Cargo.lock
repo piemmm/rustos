@@ -1251,6 +1251,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-drv-rtc-pl031"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-caps",
+ "tairix-drvrt",
+ "tairix-rt",
+]
+
+[[package]]
 name = "tairix-drv-storage-emmc2"
 version = "0.0.0"
 dependencies = [

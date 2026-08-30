@@ -73,8 +73,11 @@ impl WallClockState {
     /// `monotonic_now_ns`.
     ///
     /// Rejects [`WallTimeState::Unset`] — "unset" is the *absence* of a set,
-    /// never a value a caller may write (fail closed); the monotonic clock is
-    /// untouched.
+    /// never a value a caller may write (fail closed) — and enforces the
+    /// provenance ladder ([`WallTimeState::supersedes`]): a `Firmware`
+    /// source cannot overwrite a reading a network sync or a deliberate
+    /// correction established. Either refusal leaves the stored reading and
+    /// the monotonic clock untouched.
     fn set(
         &mut self,
         wall: Time64,
@@ -83,6 +86,9 @@ impl WallClockState {
     ) -> Result<(), Errno> {
         if !state.is_set() {
             return Err(Errno::OutOfRange);
+        }
+        if !state.supersedes(self.state) {
+            return Err(Errno::AlreadyExists);
         }
         self.wall_at_set = wall;
         self.monotonic_at_set_ns = monotonic_now_ns;
@@ -104,8 +110,10 @@ pub trait WallClockSource: Sync {
 
     /// Set the wall time from a trusted source, recording the provenance
     /// `state`. Returns [`Errno::OutOfRange`] for a non-settable state
-    /// ([`WallTimeState::Unset`]) and [`Errno::NotImplemented`] from a clock
-    /// that cannot be set (the fail-closed default).
+    /// ([`WallTimeState::Unset`]), [`Errno::AlreadyExists`] when the ladder
+    /// refuses the write because the stored reading came from a better source
+    /// ([`WallTimeState::supersedes`]), and [`Errno::NotImplemented`] from a
+    /// clock that cannot be set (the fail-closed default).
     fn set(&self, wall: Time64, monotonic_now_ns: u64, state: WallTimeState) -> Result<(), Errno>;
 }
 
@@ -226,6 +234,51 @@ mod tests {
         assert_eq!(clock.read(0).state(), WallTimeState::Trusted);
         clock.set(secs(21), 0, WallTimeState::Adjusted).unwrap();
         assert_eq!(clock.read(0).state(), WallTimeState::Adjusted);
+    }
+
+    #[test]
+    fn a_firmware_source_cannot_overwrite_a_validated_reading() {
+        // The regression this guards: an RTC driver that binds late (or a
+        // hostile one) must not be able to roll the clock back over a
+        // network sync, which would revive expired certificate lifetimes
+        // and reorder audit reasoning.
+        let clock = KernelWallClock::new();
+        clock.set(secs(2_000), 0, WallTimeState::Trusted).unwrap();
+        assert_eq!(
+            clock.set(secs(1_000), 0, WallTimeState::Firmware),
+            Err(Errno::AlreadyExists)
+        );
+        // Neither the instant nor the provenance moved.
+        assert_eq!(clock.read(0).time(), secs(2_000));
+        assert_eq!(clock.read(0).state(), WallTimeState::Trusted);
+
+        // A deliberate manual correction is equally protected.
+        let clock = KernelWallClock::new();
+        clock.set(secs(2_000), 0, WallTimeState::Adjusted).unwrap();
+        assert_eq!(
+            clock.set(secs(1_000), 0, WallTimeState::Firmware),
+            Err(Errno::AlreadyExists)
+        );
+        assert_eq!(clock.read(0).time(), secs(2_000));
+        assert_eq!(clock.read(0).state(), WallTimeState::Adjusted);
+    }
+
+    #[test]
+    fn the_ladder_still_admits_every_legitimate_write() {
+        let clock = KernelWallClock::new();
+        // Firmware establishes an unset clock and may refresh itself.
+        clock.set(secs(10), 0, WallTimeState::Firmware).unwrap();
+        clock.set(secs(11), 0, WallTimeState::Firmware).unwrap();
+        assert_eq!(clock.read(0).time(), secs(11));
+        // A network sync replaces it, and a later sync refreshes that.
+        clock.set(secs(20), 0, WallTimeState::Trusted).unwrap();
+        clock.set(secs(21), 0, WallTimeState::Trusted).unwrap();
+        // A manual correction may still step a synced clock, and a later
+        // sync may still correct the manual step.
+        clock.set(secs(30), 0, WallTimeState::Adjusted).unwrap();
+        clock.set(secs(31), 0, WallTimeState::Trusted).unwrap();
+        assert_eq!(clock.read(0).time(), secs(31));
+        assert_eq!(clock.read(0).state(), WallTimeState::Trusted);
     }
 
     #[test]

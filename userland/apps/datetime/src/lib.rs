@@ -40,8 +40,8 @@ pub mod view;
 use alloc::string::String;
 use core::fmt::Write as _;
 
+use tairix_abi::time::{days_from_civil, CivilTime};
 use tairix_abi::time::{Time64, WallClockReading};
-use tairix_fsmeta::calendar::{days_from_civil, CivilTime};
 
 /// Seconds in one minute.
 const SECS_PER_MIN: i64 = 60;

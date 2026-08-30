@@ -49,6 +49,7 @@ mod program {
 
     use tairix_abi::net::{SocketAddr, SocketDatagram, SocketId};
     use tairix_abi::net_ipc::NetAddrFamily;
+    use tairix_abi::rtc_ipc::{self, RtcOp, RtcReading, RTC_ENDPOINT};
     use tairix_abi::time::{Duration64, Time64};
     use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
     use tairix_abi::{
@@ -63,7 +64,10 @@ mod program {
     use tairix_sandbox::rt::{worker_role, RtLauncher};
     use tairix_sandbox::timesync::TimeSyncService;
     use tairix_sysconfig::SystemConfig;
-    use tairix_timed::{Clock, ConfigRetry, RecordStore, Timed, TimedConfig, Transport};
+    use tairix_timed::{
+        Clock, RecordStore, RetryLadder, RtcSource, Timed, TimedConfig, Transport,
+        CONFIG_RETRY_ATTEMPTS, CONFIG_RETRY_BASE_NANOS,
+    };
     use tairix_timesync::events::{NO_SERVERS_CONFIGURED, SERVICE_UNAVAILABLE, TIMED_RANGE_START};
     use tairix_timesync::{RECORD_DIR, RECORD_LEN, RECORD_PATH};
 
@@ -110,6 +114,38 @@ mod program {
             } else {
                 Ok(())
             }
+        }
+    }
+
+    /// The production [`RtcSource`]: the board's clock chip, reached through
+    /// the autoloaded RTC driver's well-known call endpoint.
+    ///
+    /// A board with no clock chip has no driver serving the endpoint, so the
+    /// call fails `NotFound` and the engine's bounded ladder decides how long
+    /// to keep looking. Every refusal is typed and in-band; nothing here
+    /// retries on the spot.
+    struct RtRtc;
+
+    impl RtRtc {
+        /// Issue one request and return the framed reply bytes.
+        fn call(op: RtcOp, time: Time64, reply: &mut [u8]) -> Result<usize, Errno> {
+            let mut request = [0u8; rtc_ipc::REQUEST_LEN];
+            rtc_ipc::encode_request(&mut request, op, time)?;
+            tairix_rt::ipc_call(RTC_ENDPOINT, &request, reply).map_err(Errno::from_syscall)
+        }
+    }
+
+    impl RtcSource for RtRtc {
+        fn read(&mut self) -> Result<RtcReading, Errno> {
+            let mut reply = [0u8; rtc_ipc::REPLY_LEN];
+            let n = Self::call(RtcOp::Read, Time64::UNIX_EPOCH, &mut reply)?;
+            rtc_ipc::decode_reading(&reply[..n])
+        }
+
+        fn set(&mut self, time: Time64) -> Result<(), Errno> {
+            let mut reply = [0u8; rtc_ipc::REPLY_LEN];
+            let n = Self::call(RtcOp::Set, time, &mut reply)?;
+            rtc_ipc::decode_ack(&reply[..n])
         }
     }
 
@@ -410,10 +446,16 @@ mod program {
         // is not mounted yet. Waiting here instead would hold the boot up
         // behind a service nothing else is waiting for.
         let mut config = load_config();
-        let mut retry = ConfigRetry::arm(tairix_rt::clock_get(), !config.time_servers.is_empty());
+        let mut retry = RetryLadder::arm(
+            tairix_rt::clock_get(),
+            CONFIG_RETRY_BASE_NANOS,
+            CONFIG_RETRY_ATTEMPTS,
+            !config.time_servers.is_empty(),
+        );
         let build = |config: SystemConfig| {
             Timed::new(TimedConfig {
                 clock: RtClock,
+                rtc: RtRtc,
                 store: RtRecordStore,
                 transport: RtTransport::new(&config.time_servers),
                 sandbox: ParserSandbox::new(RtLauncher::own_binary(), LOG_SINK),

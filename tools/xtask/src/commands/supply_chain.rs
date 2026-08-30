@@ -30,6 +30,8 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::Path;
 
+use tairix_abi::time::days_from_civil;
+
 use super::sbom::{parse_cargo_lock, parse_key, LockedPackage};
 
 /// The committed supply-chain policy file, relative to the workspace root.
@@ -309,7 +311,7 @@ pub fn check_source_pins(locked: &[LockedPackage], pins: &[SourcePin]) -> Result
 /// Fail, closed, for every accepted advisory whose age exceeds its SLA.
 ///
 /// `today_days` is the current date as a count of days since the Unix
-/// epoch (see [`days_from_civil`]); taking it as a parameter keeps the
+/// epoch (see [`tairix_abi::time::days_from_civil`]); taking it as a parameter keeps the
 /// decision a pure, testable function independent of the wall clock.
 pub fn evaluate_advisory_sla(advisories: &[AdvisoryEntry], today_days: i64) -> Result<(), String> {
     let mut violations: Vec<String> = Vec::new();
@@ -340,21 +342,6 @@ pub fn evaluate_advisory_sla(advisories: &[AdvisoryEntry], today_days: i64) -> R
     }
 }
 
-/// Days from `1970-01-01` to the civil date `(y, m, d)`, negative before
-/// the epoch. Howard Hinnant's `days_from_civil` algorithm; valid for any
-/// proleptic-Gregorian date. Only the *difference* between two such counts
-/// is used here, so leap years and month lengths are handled exactly
-/// without a calendar table.
-pub fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let mp = if m > 2 { m - 3 } else { m + 9 };
-    let doy = (153 * mp + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
-}
-
 /// Parse a `YYYY-MM-DD` date into days since the Unix epoch.
 pub fn parse_date(text: &str) -> Result<i64, String> {
     let mut parts = text.split('-');
@@ -367,10 +354,10 @@ pub fn parse_date(text: &str) -> Result<i64, String> {
         .parse::<i64>()
         .map_err(|_| format!("`{text}`: year `{y}` is not a number"))?;
     let month = m
-        .parse::<i64>()
+        .parse::<u32>()
         .map_err(|_| format!("`{text}`: month `{m}` is not a number"))?;
     let day = d
-        .parse::<i64>()
+        .parse::<u32>()
         .map_err(|_| format!("`{text}`: day `{d}` is not a number"))?;
     if !(1..=12).contains(&month) {
         return Err(format!("`{text}`: month {month} out of range 1..=12"));
@@ -641,16 +628,6 @@ reason = "fix queued in PR #42"
             err.contains("duplicate source-pin for memchr 2.7.4"),
             "{err}"
         );
-    }
-
-    #[test]
-    fn days_from_civil_matches_known_anchors() {
-        assert_eq!(days_from_civil(1970, 1, 1), 0);
-        assert_eq!(days_from_civil(1970, 1, 2), 1);
-        assert_eq!(days_from_civil(1969, 12, 31), -1);
-        // 2000-03-01 is 11017 days after the epoch (crosses a leap year).
-        assert_eq!(days_from_civil(2000, 3, 1), 11017);
-        assert_eq!(days_from_civil(2024, 1, 1), 19723);
     }
 
     #[test]

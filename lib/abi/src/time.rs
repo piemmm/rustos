@@ -329,6 +329,38 @@ impl WallTimeState {
     pub const fn is_set(self) -> bool {
         !matches!(self, Self::Unset)
     }
+
+    /// How much a reading in this state may be trusted, for the ordering
+    /// [`supersedes`](Self::supersedes) enforces.
+    ///
+    /// [`Trusted`](Self::Trusted) and [`Adjusted`](Self::Adjusted) share a
+    /// rank deliberately: both describe a principal that examined the clock
+    /// and decided it was wrong — a validated network sample, or a human
+    /// stepping it by hand. Neither outranks the other, so a later network
+    /// sync still corrects a manual step and a later manual step still
+    /// corrects a sync, while *neither* can be undone by a local counter.
+    const fn trust_rank(self) -> u8 {
+        match self {
+            Self::Unset => 0,
+            Self::Firmware => 1,
+            Self::Trusted | Self::Adjusted => 2,
+        }
+    }
+
+    /// `true` when a write in this state may replace a clock currently in
+    /// `current` — the wall clock's **provenance ladder**.
+    ///
+    /// A local counter ([`Firmware`](Self::Firmware): an RTC, firmware
+    /// hand-off) establishes an [`Unset`](Self::Unset) clock and may replace
+    /// another such counter's reading, but it can never overwrite a validated
+    /// network sample or a deliberate correction. Rolling a machine's clock
+    /// backwards is how an expired certificate is revived and how audit
+    /// reasoning is reordered, so the kernel refuses the write rather than
+    /// trusting every clock source to be polite.
+    #[must_use]
+    pub const fn supersedes(self, current: Self) -> bool {
+        self.trust_rank() >= current.trust_rank()
+    }
 }
 
 /// A wall-clock reading: the absolute [`Time64`] instant plus the
@@ -498,11 +530,176 @@ impl Duration64 {
     }
 }
 
+/// Seconds in one UTC day.
+pub const SECS_PER_DAY: i64 = 86_400;
+
+/// Days from the Unix epoch (1970-01-01) to the given proleptic-Gregorian
+/// civil date. `month` is `1..=12`, `day` is `1..=31`; the caller validates
+/// the ranges. Negative for dates before the epoch.
+///
+/// Howard Hinnant's `days_from_civil` algorithm, exact for every date in the
+/// `i64` range.
+#[must_use]
+pub fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let m = i64::from(month);
+    let d = i64::from(day);
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// The proleptic-Gregorian civil date `(year, month, day)` for a count of days
+/// from the Unix epoch — the inverse of [`days_from_civil`].
+#[must_use]
+pub fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+    // `mp` is `0..=11`, so `m` is `1..=12` and `d` is `1..=31`: both fit `u32`.
+    (year, narrow_small(m), narrow_small(d))
+}
+
+/// Narrow a known-small, non-negative `i64` calendar component to `u32`.
+///
+/// Applied only to a month, day, or time-of-day component the caller has just
+/// derived in range, so the zero fallback is unreachable; it exists so the
+/// conversion is total rather than a panicking cast.
+fn narrow_small(value: i64) -> u32 {
+    u32::try_from(value).unwrap_or(0)
+}
+
+/// Days in `month` of `year`, honouring the proleptic-Gregorian leap rule.
+///
+/// Returns `0` for a month outside `1..=12`, so a caller validating a
+/// hardware register block's field rejects it rather than admitting a date
+/// the calendar cannot hold.
+#[must_use]
+pub const fn days_in_month(year: i64, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 0,
+    }
+}
+
+/// A broken-down UTC civil time: the calendar fields of an absolute instant.
+///
+/// The one decomposition of a count of seconds since the Unix epoch into
+/// `(year, month, day, hour, minute, second)`, so no consumer — a listing's
+/// date column, the desktop clock, or an RTC chip's BCD register block
+/// ([`crate::driver::rtc`]) — re-derives the day/time arithmetic. All fields
+/// are UTC; TAIRiX has no timezone offset to apply here.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct CivilTime {
+    /// Proleptic-Gregorian year (may be negative for dates before year 1).
+    pub year: i64,
+    /// Month of the year, `1..=12`.
+    pub month: u32,
+    /// Day of the month, `1..=31`.
+    pub day: u32,
+    /// Hour of the day, `0..=23`.
+    pub hour: u32,
+    /// Minute of the hour, `0..=59`.
+    pub minute: u32,
+    /// Second of the minute, `0..=59` (no leap seconds).
+    pub second: u32,
+}
+
+impl CivilTime {
+    /// Decompose `secs` seconds since the Unix epoch into UTC calendar
+    /// fields. Negative `secs` (instants before 1970) are handled exactly
+    /// through Euclidean division, so the time-of-day is always in range.
+    #[must_use]
+    pub fn from_unix_secs(secs: i64) -> Self {
+        let days = secs.div_euclid(SECS_PER_DAY);
+        let tod = secs.rem_euclid(SECS_PER_DAY);
+        let (year, month, day) = civil_from_days(days);
+        Self {
+            year,
+            month,
+            day,
+            hour: narrow_small(tod / 3_600),
+            minute: narrow_small((tod % 3_600) / 60),
+            second: narrow_small(tod % 60),
+        }
+    }
+
+    /// Decompose the whole-seconds part of a [`Time64`] instant. The
+    /// sub-second field is not part of the calendar breakdown; a consumer
+    /// that renders nanoseconds reads [`Time64::subsec_nanos`] itself.
+    #[must_use]
+    pub fn from_time64(time: Time64) -> Self {
+        Self::from_unix_secs(time.secs())
+    }
+
+    /// `true` when every field is inside its calendar range, including the
+    /// month's own day count under the year's leap rule.
+    ///
+    /// Hour `24` and second `60` are rejected: TAIRiX models no leap second
+    /// and no end-of-day alias, so a source offering either is offering a
+    /// value the calendar cannot represent.
+    #[must_use]
+    pub const fn is_valid(&self) -> bool {
+        self.month >= 1
+            && self.month <= 12
+            && self.day >= 1
+            && self.day <= days_in_month(self.year, self.month)
+            && self.hour < 24
+            && self.minute < 60
+            && self.second < 60
+    }
+
+    /// The whole-second Unix instant these fields name, or `None` when they
+    /// are not a valid civil time ([`Self::is_valid`]).
+    ///
+    /// Fails closed rather than normalising an out-of-range field, so a
+    /// corrupt register block never yields a plausible-looking instant.
+    #[must_use]
+    pub fn to_unix_secs(&self) -> Option<i64> {
+        if !self.is_valid() {
+            return None;
+        }
+        let days = days_from_civil(self.year, self.month, self.day);
+        Some(
+            days * SECS_PER_DAY
+                + i64::from(self.hour) * 3_600
+                + i64::from(self.minute) * 60
+                + i64::from(self.second),
+        )
+    }
+
+    /// The whole-second [`Time64`] instant these fields name, or `None` when
+    /// they are not a valid civil time ([`Self::is_valid`]).
+    #[must_use]
+    pub fn to_time64(&self) -> Option<Time64> {
+        self.to_unix_secs().map(Time64::from_secs)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        coarsen_clock_ns, is_plausible_wall_time, Duration64, Time64, COARSE_CLOCK_GRANULARITY_NS,
-        NANOS_PER_SEC, PLAUSIBLE_FUTURE_SECS, RELEASE_EPOCH_SECS,
+        civil_from_days, coarsen_clock_ns, days_from_civil, days_in_month, is_plausible_wall_time,
+        CivilTime, Duration64, Time64, COARSE_CLOCK_GRANULARITY_NS, NANOS_PER_SEC,
+        PLAUSIBLE_FUTURE_SECS, RELEASE_EPOCH_SECS,
     };
     use crate::Errno;
 
@@ -841,6 +1038,147 @@ mod tests {
     fn duration_since_saturates_instead_of_wrapping() {
         let span = Time64::from_secs(i64::MAX).saturating_duration_since(Time64::from_secs(-1));
         assert_eq!(span.secs(), i64::MAX);
+    }
+
+    #[test]
+    fn a_local_counter_never_overwrites_a_validated_reading() {
+        use crate::WallTimeState::{Adjusted, Firmware, Trusted, Unset};
+        // Firmware establishes an unset clock and may replace another
+        // counter's reading...
+        assert!(Firmware.supersedes(Unset));
+        assert!(Firmware.supersedes(Firmware));
+        // ...but never a network sync or a deliberate correction.
+        assert!(!Firmware.supersedes(Trusted));
+        assert!(!Firmware.supersedes(Adjusted));
+    }
+
+    #[test]
+    fn a_deliberate_source_may_replace_any_reading() {
+        use crate::WallTimeState::{Adjusted, Firmware, Trusted, Unset};
+        for source in [Trusted, Adjusted] {
+            for current in [Unset, Firmware, Trusted, Adjusted] {
+                assert!(
+                    source.supersedes(current),
+                    "{source:?} must be able to replace {current:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_ladder_is_reflexive_so_a_source_can_refresh_itself() {
+        use crate::WallTimeState::{Adjusted, Firmware, Trusted, Unset};
+        for state in [Unset, Firmware, Trusted, Adjusted] {
+            assert!(state.supersedes(state), "{state:?} must refresh itself");
+        }
+    }
+
+    #[test]
+    fn civil_round_trips_across_the_epoch_and_leap_days() {
+        for secs in [
+            0,               // 1970-01-01T00:00:00Z
+            -1,              // 1969-12-31T23:59:59Z
+            -2_208_988_800,  // 1900-01-01T00:00:00Z (not a leap year)
+            951_782_400,     // 2000-02-29T00:00:00Z (a leap year)
+            1_709_214_367,   // 2024-02-29T13:46:07Z
+            2_147_483_648,   // one second past the 32-bit boundary
+            4_102_444_800,   // 2100-01-01T00:00:00Z (not a leap year)
+            253_402_300_799, // 9999-12-31T23:59:59Z
+        ] {
+            let civil = CivilTime::from_unix_secs(secs);
+            assert!(civil.is_valid(), "{secs} decomposed to an invalid date");
+            assert_eq!(civil.to_unix_secs(), Some(secs), "round trip of {secs}");
+        }
+    }
+
+    #[test]
+    fn known_instants_decompose_field_for_field() {
+        let epoch = CivilTime::from_unix_secs(0);
+        assert_eq!((epoch.year, epoch.month, epoch.day), (1970, 1, 1));
+        assert_eq!((epoch.hour, epoch.minute, epoch.second), (0, 0, 0));
+
+        // A leap day past 2038, so the decomposition is exercised well
+        // outside the 32-bit range.
+        let leap = CivilTime::from_unix_secs(1_709_214_367);
+        assert_eq!((leap.year, leap.month, leap.day), (2024, 2, 29));
+        assert_eq!((leap.hour, leap.minute, leap.second), (13, 46, 7));
+
+        // One second before the epoch keeps its time-of-day in range rather
+        // than wrapping negative.
+        let pre = CivilTime::from_unix_secs(-1);
+        assert_eq!((pre.year, pre.month, pre.day), (1969, 12, 31));
+        assert_eq!((pre.hour, pre.minute, pre.second), (23, 59, 59));
+    }
+
+    #[test]
+    fn from_time64_ignores_the_sub_second_field() {
+        let time = Time64::new(1_709_214_367, 500_000_000).expect("valid nanos");
+        assert_eq!(
+            CivilTime::from_time64(time),
+            CivilTime::from_unix_secs(1_709_214_367)
+        );
+        assert_eq!(
+            CivilTime::from_time64(time).to_time64(),
+            Some(Time64::from_secs(1_709_214_367))
+        );
+    }
+
+    #[test]
+    fn an_out_of_range_field_fails_closed_instead_of_normalising() {
+        let base = CivilTime::from_unix_secs(0);
+        for bad in [
+            CivilTime { month: 0, ..base },
+            CivilTime { month: 13, ..base },
+            CivilTime { day: 0, ..base },
+            CivilTime { day: 32, ..base },
+            // 2023 is not a leap year, so 29 February does not exist.
+            CivilTime {
+                year: 2023,
+                month: 2,
+                day: 29,
+                ..base
+            },
+            CivilTime { hour: 24, ..base },
+            CivilTime { minute: 60, ..base },
+            // No leap second: 60 is not a representable second.
+            CivilTime { second: 60, ..base },
+        ] {
+            assert!(!bad.is_valid(), "{bad:?} must not validate");
+            assert_eq!(bad.to_unix_secs(), None, "{bad:?} must not convert");
+            assert_eq!(bad.to_time64(), None, "{bad:?} must not convert");
+        }
+        // The leap day the rule *does* admit still converts.
+        let leap = CivilTime {
+            year: 2024,
+            month: 2,
+            day: 29,
+            ..base
+        };
+        assert!(leap.is_valid());
+        assert!(leap.to_time64().is_some());
+    }
+
+    #[test]
+    fn days_in_month_follows_the_gregorian_leap_rule() {
+        assert_eq!(days_in_month(2024, 2), 29, "divisible by 4");
+        assert_eq!(days_in_month(2023, 2), 28);
+        assert_eq!(days_in_month(1900, 2), 28, "century, not divisible by 400");
+        assert_eq!(days_in_month(2000, 2), 29, "divisible by 400");
+        assert_eq!(days_in_month(2024, 4), 30);
+        assert_eq!(days_in_month(2024, 12), 31);
+        // An out-of-range month yields zero, so every day fails validation.
+        assert_eq!(days_in_month(2024, 0), 0);
+        assert_eq!(days_in_month(2024, 13), 0);
+    }
+
+    #[test]
+    fn epoch_day_anchors_match_the_calendar() {
+        assert_eq!(days_from_civil(1970, 1, 1), 0);
+        assert_eq!(days_from_civil(1969, 12, 31), -1);
+        assert_eq!(days_from_civil(2000, 3, 1), 11_017);
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(civil_from_days(-1), (1969, 12, 31));
+        assert_eq!(civil_from_days(11_017), (2000, 3, 1));
     }
 
     #[test]

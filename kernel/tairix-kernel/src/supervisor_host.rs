@@ -158,6 +158,7 @@ impl<'a, B: Block + 'static> KernelSupervisorHost<'a, B> {
             Some(HwDeviceClass::Network) => "network",
             Some(HwDeviceClass::Storage) => "storage",
             Some(HwDeviceClass::Serial) => "serial",
+            Some(HwDeviceClass::Rtc) => "rtc",
             Some(HwDeviceClass::Other) | None => "other",
         }
     }

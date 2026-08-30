@@ -38,8 +38,8 @@
 use alloc::string::String;
 use core::fmt::Write as _;
 
+use tairix_abi::time::CivilTime;
 use tairix_abi::time::{Time64, WallClockReading};
-use tairix_fsmeta::calendar::CivilTime;
 use tairix_taskbar::clock::UNSET_LABEL;
 
 use crate::switchuser::park_within;

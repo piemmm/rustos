@@ -153,6 +153,9 @@ members = [
     "drivers/storage/raid",
     "drivers/storage/raid_member",
 
+    # Drivers — real-time clock
+    "drivers/rtc/pl031",
+
     # Drivers — network
     "drivers/network/genet",
     "drivers/network/virtio_net",

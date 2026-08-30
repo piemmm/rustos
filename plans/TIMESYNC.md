@@ -466,11 +466,84 @@ Each stage leaves the whole-project §7 gate green before it is reported done.
   so `timed` is registered there, and TS-5 moves it to the enrolled tier with
   the control transport that makes enrolment mean something.
 
-### TS-3 — RTC class + the QEMU-emulable RTCs
-`lib/abi/src/driver/rtc.rs`, `HwDeviceClass::Rtc`, and the `pl031` /
-`mc146818` / `goldfish` drivers with the `devmgr` autoload path setting the
-clock as `Firmware`, plus the provenance-ladder rule that an RTC read never
-overwrites a `Trusted` reading. A QEMU vertical per hardware target.
+### TS-3 — RTC class + the QEMU-emulable RTCs — PART-LANDED
+
+**Landed.**
+- **The clock authority stays with `timed`.** An RTC driver holds no clock
+  capability: it serves the `Rtc` class over `tairix_abi::rtc_ipc`'s
+  `RTC_ENDPOINT`, and `timed` — the sole `CAP_TIME_SET` holder, a documented
+  invariant this plan must not break — reads it and tags the reading
+  `Firmware` itself. §1's "it sets the clock as `Firmware`" is the *outcome*,
+  not the issuer: `wall_time_set` takes provenance from its caller, so a
+  driver holding the capability could assert `Trusted` and the ladder below
+  would be worthless.
+- **The provenance ladder is kernel-enforced, not driver politeness.**
+  `WallTimeState::supersedes` ranks `Unset` < `Firmware` < {`Trusted`,
+  `Adjusted`}, with the top two deliberately equal so a network sync still
+  corrects a manual step and a manual step still corrects a sync, while
+  neither can be undone by a local counter. `KernelWallClock::set` refuses a
+  losing write with `Errno::AlreadyExists` and leaves the stored reading and
+  the monotonic capture untouched.
+- **`lib/abi::time` now owns the civil calendar.** `CivilTime`,
+  `days_from_civil`, `civil_from_days`, and `days_in_month` moved there from
+  `lib/fsmeta` (which keeps only the alloc-dependent `iso_minute` spelling),
+  which also removed the two other copies of the same algorithm — `fat32`'s
+  inlined DOS-timestamp decode and `tools/xtask`'s `supply_chain`. The RTC
+  class needs it and `lib/abi` is the one crate everything already depends on.
+- `lib/abi/src/driver/rtc.rs` — the `Rtc` trait (`status` / `read` / `set`),
+  `RtcStatus`, and the shared BCD codec plus `resolve_two_digit_year`, which
+  resolves a chip's `yy` inside the same fixed plausibility window the wall
+  clock validates against. `read` answers `Ok(None)` for a chip that cannot
+  vouch — a value, not an error, because a flat backup cell is ordinary.
+- `HwDeviceClass::Rtc = 11`, appended, with the `rtc` device-tree name stem
+  classified in the aarch64 discovery walk.
+- `lib/abi/src/rtc_ipc.rs` — the status-framed wire contract and the
+  `serve_request` transform every RTC driver runs, bound restricted-sender
+  under `CAP_TIME_SET` (no new capability: the clock authority is exactly the
+  principal that may touch the chip). One well-known id, not a slot range —
+  a second RTC would need a selection policy no consumer has, so a second
+  driver's `call_create` fails closed and it stands down, leaving the first
+  RTC in hardware-tree order.
+- `drivers/rtc/pl031/` — device logic as a host-tested `lib` target beside the
+  `Run` binary (the charter's co-location rule, since no non-driver consumer
+  shares it). Bring-up sets `RTCCR`'s write-once start bit; a counter that
+  will not start vouches for nothing rather than offering a frozen register.
+  `battery_backed` is reported `false` because the part has no indicator and
+  the device tree declares none.
+- `timed` — the `RtcSource` seam, the RTC read at start-up (before the
+  decision matrix, so a board with a chip enters it with a `Firmware` clock),
+  the write-back of a validated sample, and audit ids `23013..=23017`. The
+  read climbs the same bounded doubling ladder the configuration read does:
+  `ConfigRetry` became the shared `RetryLadder`, since "no userland event says
+  it is there now" is one problem, not two.
+
+**Remaining.** None of it is a gap in what landed; all of it is deployment
+and the two other chips.
+- **Image wiring + the QEMU vertical.** `PL031_STORE_PATH` /
+  `build_pl031_bundle` in `tools/xtask`'s `image_drivers`, a driver-store set
+  carrying it, and a vertical gating on `timed`'s `RTC_CLOCK_SET`. It must not
+  join the `time-net-root` disk's set: that vertical requires a boot with the
+  clock `Unset`, and a bound PL031 would make the decision matrix defer the
+  query for a day and time the run out.
+- **`drivers/rtc/mc146818/` is blocked on a prerequisite that does not exist:
+  there is no user-space port-I/O path.** `HwResourceKind::Port` is in the
+  hardware-tree ABI, but no syscall lets a granted driver issue `inb`/`outb`;
+  the only `PortIo8` implementation is in `kernel/arch/x86_64` and its one
+  consumer (`drivers/input/ps2`) is linked by a test crate, not autoloaded.
+  The driver therefore needs a capability-gated port-I/O trap bounded to the
+  matched node's granted range — a kernel/ABI increment in its own right, and
+  a security-sensitive one — or an in-kernel bootstrap-floor placement that
+  the charter's floor rule does not justify for a clock. The x86_64 node
+  synthesis on the legacy-fallback discovery path is the smaller half.
+- **`drivers/rtc/goldfish/` is blocked on riscv64 discovery.**
+  `kernel/arch/riscv64/src/platform.rs` emits only root, memory, and a timer;
+  it does no generic `compatible` walk, so `google,goldfish-rtc` is never
+  discovered. aarch64 already has that walk, so the charter forbids a second
+  copy: the generic FDT→hwtree walk must be hoisted to a shared home (a
+  `lib/*` crate or a `kernel/arch/api` helper) with only the genuinely
+  divergent interrupt-cell decode left per port, and riscv64 moved onto it.
+- The honest `▢` marks in the `README.md` matrix are cleared per target as
+  each driver lands; aarch64 is `◐ pl031` until its vertical proves it binds.
 
 ### TS-4 — Pi RTC support
 The `lib/vcmailbox` RTC tags and `drivers/rtc/rpi/`; then `lib/i2c`,

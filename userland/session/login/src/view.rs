@@ -193,7 +193,7 @@ fn label_attributes() -> Attributes {
 
 /// Render `t` as a minute-granular clock line, `YYYY-MM-DD HH:MM` (UTC).
 fn format_clock(t: Time64) -> String {
-    tairix_fsmeta::calendar::CivilTime::from_time64(t).iso_minute()
+    tairix_fsmeta::calendar::iso_minute(&tairix_abi::time::CivilTime::from_time64(t))
 }
 
 /// Render a fixed-point load value as `W.CC`.
