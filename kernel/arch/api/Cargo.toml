@@ -36,6 +36,11 @@ path = "src/lib.rs"
 [dependencies]
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
+# The device-tree reader and its bus-aware `reg` decoder: the generic
+# FDT->hardware-tree walk every FDT-based port shares lives here
+# (`fdtwalk`), so the ports contribute only their interrupt specifier and
+# their board augmentation rather than a copy of the walk each.
+tairix-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
 
 # The stack-unwinder fuzz harness (`tests/fuzz_backtrace.rs`) drives
 # `backtrace::walk` over adversarial frame chains. It uses
@@ -43,3 +48,8 @@ tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
 # loop to a wall-clock budget; dev-only, never shipped.
 [dev-dependencies]
 tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }
+# The `fdtwalk` tests build their trees with the shared device-tree fixture
+# builder rather than a hand-rolled blob writer.
+tairix-fdt = { path = "../../../lib/fdt", version = "=0.0.0", features = [
+    "test-fixtures",
+] }

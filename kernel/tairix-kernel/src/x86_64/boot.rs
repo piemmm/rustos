@@ -1024,7 +1024,9 @@ fn try_boot(
 /// 1. ACPI normalisation through the port's
 ///    [`tairix_arch_x86_64::platform::AcpiDiscovery`] — the root, every
 ///    enabled Local APIC as a CPU node, and the I/O APICs as
-///    interrupt-controller nodes — from the already-validated `madt_bytes`.
+///    interrupt-controller nodes — from the already-validated `madt_bytes`,
+///    plus the legacy CMOS clock as an `Rtc` node carrying its `0x70`/`0x71`
+///    port pair, which no ACPI table enumerates.
 /// 2. The virtio-PCI probe: enumerate configuration space and emit every
 ///    virtio-net function as a role-tagged network node
 ///    ([`crate::hwdiscovery::observe_virtio_pci_network_devices`]) and every

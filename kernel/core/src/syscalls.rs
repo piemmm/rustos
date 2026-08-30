@@ -87,10 +87,10 @@ use tairix_abi::sysinfo::{
 use tairix_abi::{
     decode_log_record, BootFacts, BootId, CallRecvFlags, CapabilityId, CapabilityQuery,
     DescriptorTable, DirEntry, Errno, FdWire, FileId, FileStat, InputMode, IntrospectDomain,
-    IrqHandle, LimitKind, MapFlags, OpenFlags, PortName, PowerAction, ProcId, ProcessStart,
-    RandomFlags, ResourceLimit, SchedPriority, Signal, SignalIntakeOp, SpawnAttach, StreamMode,
-    SyscallNumber, TerminalSize, Time64, UnlinkFlags, WaitFlags, WaitSetOp, WaitSourceKind,
-    WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, FS_ATTR_KEY_MAX,
+    IrqHandle, LimitKind, MapFlags, OpenFlags, PortName, PortWidth, PowerAction, ProcId,
+    ProcessStart, RandomFlags, ResourceLimit, SchedPriority, Signal, SignalIntakeOp, SpawnAttach,
+    StreamMode, SyscallNumber, TerminalSize, Time64, UnlinkFlags, WaitFlags, WaitSetOp,
+    WaitSourceKind, WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, FS_ATTR_KEY_MAX,
     FS_ATTR_VALUE_MAX, FS_IO_MAX, FS_NAME_MAX, FS_PATH_MAX, FS_SYMLINK_MAX, LOG_FIELDS_MAX,
     LOG_RECORD_MAX, PORT_NAME_MAX_LEN, PROCESS_START_MAX_TOTAL_LEN, PROC_ID_HEX_LEN, PROC_ID_LEN,
     RANDOM_REQUEST_MAX_BYTES, RESOURCE_REF_MAX, SPAWN_ATTACH_LEN, SPAWN_UID_INHERIT,
@@ -130,9 +130,10 @@ use crate::audit::AuditEvent;
 use crate::bootinfo::KernelArch;
 use crate::console::{ConsoleDevice, NO_CONSOLES};
 use crate::devres::{
-    dma_constraint, mappable_subwindow, translate_device_addr, DmaAllocFacility, MmioMapFacility,
-    MmioMemoryKind, MsiAllocFacility, SharedMemFacility, NULL_DMA_ALLOC_FACILITY,
-    NULL_MMIO_MAP_FACILITY, NULL_MSI_ALLOC_FACILITY, NULL_SHARED_MEM_FACILITY,
+    addressable_port, dma_constraint, mappable_subwindow, translate_device_addr, DmaAllocFacility,
+    MmioMapFacility, MmioMemoryKind, MsiAllocFacility, PortIoFacility, SharedMemFacility,
+    NULL_DMA_ALLOC_FACILITY, NULL_MMIO_MAP_FACILITY, NULL_MSI_ALLOC_FACILITY,
+    NULL_SHARED_MEM_FACILITY,
 };
 use crate::dispatch_slot::{DispatchHook, DispatchOutcome, RescheduleAction, UserFaultOutcome};
 use crate::filemap::{FileMap, NULL_FILE_MAP};
@@ -392,6 +393,14 @@ where
     /// producer through [`Self::with_mmio_map_facility`]. Held as a `'static`
     /// borrow, exactly like the console device and the `mem_map` producer.
     mmio_map_facility: &'static (dyn MmioMapFacility + 'static),
+    /// The architecture port-I/O producer the `port_read` / `port_write`
+    /// syscalls drive to issue one transfer against a granted legacy I/O
+    /// port range (`plans/TIMESYNC.md` TS-3). `None` on a platform with no
+    /// I/O port space — every port trap then fails closed with
+    /// [`Errno::NotImplemented`] rather than each port carrying a stub —
+    /// and installed by the x86_64 boot path through
+    /// [`Self::with_port_io_facility`].
+    port_io_facility: Option<&'static (dyn PortIoFacility + 'static)>,
     /// The architecture DMA-alloc producer the `dma_alloc` syscall drives to
     /// carve a coherent DMA buffer into the caller's own live address space
     /// (`plans/PI.md` P10 chunk 5d-0). Defaults to
@@ -789,6 +798,11 @@ where
             // `NotImplemented` with no map facility) — never mapping an
             // ungranted or arbitrary region.
             mmio_map_facility: &NULL_MMIO_MAP_FACILITY,
+            // No I/O port space until an architecture that has one installs
+            // its producer: `port_read` / `port_write` fail closed with
+            // `NotImplemented`, never addressing a port on a machine whose
+            // ports the kernel cannot reach.
+            port_io_facility: None,
             // The DMA-alloc facility is unwired until the boot path installs
             // the `kernel/mem` carve producer (`plans/PI.md` P10 chunk 5d-0):
             // `dma_alloc` fails closed (`NotFound` for an ungranted handle,
@@ -1209,6 +1223,53 @@ where
     ) -> Self {
         self.mmio_map_facility = mmio_map_facility;
         self
+    }
+
+    /// Install the architecture port-I/O producer the `port_read` /
+    /// `port_write` syscalls drive, consuming and returning `self`
+    /// (`plans/TIMESYNC.md` TS-3).
+    ///
+    /// [`None`] — every port but the x86 family — leaves both traps failing
+    /// closed with [`Errno::NotImplemented`].
+    #[must_use]
+    pub const fn with_port_io_facility(
+        mut self,
+        port_io_facility: Option<&'static (dyn PortIoFacility + 'static)>,
+    ) -> Self {
+        self.port_io_facility = port_io_facility;
+        self
+    }
+
+    /// Resolve `handle` to a port range granted to the *calling task* and
+    /// confirm the whole `port .. port + width` transfer lies inside it.
+    ///
+    /// The security spine both port traps share, so a read and a write can
+    /// never diverge on what they admit. Unbounded port I/O is privilege
+    /// escalation — the ports a machine exposes include the interrupt
+    /// controller, the DMA controller, and the reset line — so a forged or
+    /// another driver's handle, a grant of the wrong kind, and an access
+    /// escaping the granted range are all refused before any instruction is
+    /// issued. A platform with no port-I/O producer is refused here too,
+    /// rather than after a grant lookup that could never lead anywhere.
+    fn granted_port(
+        &self,
+        caller: &CallerContext<'_>,
+        handle: u64,
+        port: u64,
+        width: PortWidth,
+    ) -> Result<(u16, &'static (dyn PortIoFacility + 'static)), Errno> {
+        // Returned together with the port so a caller cannot reach the
+        // mechanism without having passed the check, and so no second lookup
+        // needs a fallback for a platform this already refused.
+        let Some(facility) = self.port_io_facility else {
+            return Err(Errno::NotImplemented);
+        };
+        // `caller.process()` is kernel-trusted, never caller-supplied, so a
+        // handle minted for another driver resolves to nothing here.
+        let Some(resource) = self.aspaces.read().grant(caller.process(), handle) else {
+            return Err(Errno::NotFound);
+        };
+        Ok((addressable_port(&resource, port, width)?, facility))
     }
 
     /// Install the architecture DMA-alloc producer the `dma_alloc` syscall
@@ -6253,6 +6314,34 @@ where
             self.publish_region_mapping(caller.process(), base, pages_spanning(len as u64));
         }
         result
+    }
+
+    fn port_read(
+        &self,
+        caller: &CallerContext<'_>,
+        handle: u64,
+        port: u64,
+        width: PortWidth,
+    ) -> SyscallResult {
+        let (port, facility) = self.granted_port(caller, handle, port, width)?;
+        Ok(u64::from(facility.read(port, width).as_u32()))
+    }
+
+    fn port_write(
+        &self,
+        caller: &CallerContext<'_>,
+        handle: u64,
+        port: u64,
+        width: PortWidth,
+        value: u64,
+    ) -> SyscallResult {
+        let (port, facility) = self.granted_port(caller, handle, port, width)?;
+        // Only the width's own bits reach the bus: a caller that supplied a
+        // wider value is naming bits the instruction cannot move. Narrowing
+        // here, once, is also what keeps the value and the width from
+        // disagreeing below.
+        facility.write(port, width.narrow(value));
+        Ok(0)
     }
 
     fn dma_alloc(
@@ -11672,6 +11761,24 @@ where
         if let Some(facility) = msi_alloc_facility {
             self.handlers = self.handlers.with_msi_alloc_facility(facility);
         }
+        self
+    }
+
+    /// Install the architecture port-I/O producer the `port_read` /
+    /// `port_write` syscalls drive, consuming and returning `self`
+    /// (`plans/TIMESYNC.md` TS-3).
+    ///
+    /// The hook-level mirror of
+    /// [`KernelSyscallHandlers::with_port_io_facility`]: the boot path
+    /// passes the architecture port's [`KernelArch::port_io_facility`]
+    /// directly, and [`None`] (every port but the x86 family) leaves both
+    /// traps fail-closed with [`Errno::NotImplemented`].
+    #[must_use]
+    pub fn with_port_io_facility(
+        mut self,
+        port_io_facility: Option<&'static (dyn PortIoFacility + 'static)>,
+    ) -> Self {
+        self.handlers = self.handlers.with_port_io_facility(port_io_facility);
         self
     }
 
@@ -24208,6 +24315,233 @@ mod tests {
         // producer and reports Ok(0).
         assert_eq!(h.mem_unmap(&ctx, 0x10_0000, 0x1000), Ok(0));
         assert_eq!(*producer.release.lock(), Some((0x10_0000, 0x1000)));
+    }
+
+    /// A port-I/O facility that records every transfer it was handed and
+    /// answers reads with a fixed value, so the handler tests can assert
+    /// what did — and did not — reach the mechanism.
+    struct RecordingPortIo {
+        reads: tairix_sync::SpinLock<Option<(u16, tairix_abi::PortWidth)>>,
+        writes: tairix_sync::SpinLock<Option<(u16, tairix_abi::PortValue)>>,
+    }
+
+    impl crate::devres::PortIoFacility for RecordingPortIo {
+        fn read(&self, port: u16, width: tairix_abi::PortWidth) -> tairix_abi::PortValue {
+            *self.reads.lock() = Some((port, width));
+            width.narrow(0xA5A5_A5A5)
+        }
+
+        fn write(&self, port: u16, value: tairix_abi::PortValue) {
+            *self.writes.lock() = Some((port, value));
+        }
+    }
+
+    fn recording_port_io() -> &'static RecordingPortIo {
+        Box::leak(Box::new(RecordingPortIo {
+            reads: tairix_sync::SpinLock::new(None),
+            writes: tairix_sync::SpinLock::new(None),
+        }))
+    }
+
+    /// Every port trap fails closed on a platform that installed no
+    /// producer, before any grant is even looked up: a machine whose ports
+    /// the kernel cannot reach must never appear to have answered.
+    #[test]
+    fn port_traps_fail_closed_with_no_facility_installed() {
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let handle = aspaces
+            .write()
+            .mint_grant(ProcessId(2), tairix_abi::hwtree::HwResource::port(0x70, 2));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            h.port_read(&ctx, handle, 0x70, tairix_abi::PortWidth::Byte),
+            Err(Errno::NotImplemented)
+        );
+        assert_eq!(
+            h.port_write(&ctx, handle, 0x70, tairix_abi::PortWidth::Byte, 0x0B),
+            Err(Errno::NotImplemented)
+        );
+    }
+
+    /// A grant inside the caller's own port range reaches the mechanism, and
+    /// a write carries only the width's own bits.
+    #[test]
+    fn a_granted_port_reaches_the_mechanism_narrowed_to_its_width() {
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let handle = aspaces
+            .write()
+            .mint_grant(ProcessId(2), tairix_abi::hwtree::HwResource::port(0x70, 2));
+        let facility = recording_port_io();
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_port_io_facility(Some(facility));
+
+        assert_eq!(
+            h.port_read(&ctx, handle, 0x71, tairix_abi::PortWidth::Byte),
+            Ok(0xA5)
+        );
+        assert_eq!(
+            *facility.reads.lock(),
+            Some((0x71, tairix_abi::PortWidth::Byte))
+        );
+
+        // The caller named bits a byte transfer cannot move; only the low
+        // eight reach the bus.
+        assert_eq!(
+            h.port_write(&ctx, handle, 0x70, tairix_abi::PortWidth::Byte, 0xDEAD_BE0B),
+            Ok(0)
+        );
+        assert_eq!(
+            *facility.writes.lock(),
+            Some((0x70, tairix_abi::PortValue::Byte(0x0B)))
+        );
+    }
+
+    /// The security spine: a forged handle, another driver's handle, a grant
+    /// of the wrong kind, a port outside the granted range, and a width that
+    /// would run off its end are each refused **without reaching the
+    /// mechanism**. Unbounded port I/O is privilege escalation — the ports a
+    /// machine exposes include the interrupt controller and the reset line —
+    /// so every one of these must fail closed.
+    #[test]
+    fn a_port_outside_the_grant_never_reaches_the_mechanism() {
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        // The CMOS pair: ports 0x70..0x72.
+        let handle = aspaces
+            .write()
+            .mint_grant(ProcessId(2), tairix_abi::hwtree::HwResource::port(0x70, 2));
+        // A window grant of the same numbers is the wrong *kind* and must not
+        // become a licence to address ports.
+        let window = aspaces
+            .write()
+            .mint_grant(ProcessId(2), tairix_abi::hwtree::HwResource::mmio(0x70, 2));
+        let facility = recording_port_io();
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_port_io_facility(Some(facility));
+
+        let byte = tairix_abi::PortWidth::Byte;
+        // Below and above the granted range.
+        assert_eq!(
+            h.port_read(&ctx, handle, 0x6F, byte),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(
+            h.port_read(&ctx, handle, 0x72, byte),
+            Err(Errno::OutOfRange)
+        );
+        // Inside the range, but the transfer's own width runs off the end:
+        // a word at 0x71 would reach 0x72, a neighbouring device's register.
+        assert_eq!(
+            h.port_read(&ctx, handle, 0x71, tairix_abi::PortWidth::Word),
+            Err(Errno::OutOfRange)
+        );
+        // The wrong grant kind.
+        assert_eq!(
+            h.port_read(&ctx, window, 0x70, byte),
+            Err(Errno::OutOfRange)
+        );
+        // A handle nobody minted, and one minted for another process.
+        assert_eq!(
+            h.port_read(&ctx, handle.wrapping_add(64), 0x70, byte),
+            Err(Errno::NotFound)
+        );
+        let foreign_caps = make_caps_record(3, &[], sink);
+        let foreign = CallerContext {
+            task_id: SecTaskId(3),
+            caps: &foreign_caps,
+        };
+        assert_eq!(
+            h.port_read(&foreign, handle, 0x70, byte),
+            Err(Errno::NotFound)
+        );
+
+        // A write is gated identically — the two traps share one spine.
+        assert_eq!(
+            h.port_write(&ctx, handle, 0x72, byte, 0),
+            Err(Errno::OutOfRange)
+        );
+
+        assert!(facility.reads.lock().is_none());
+        assert!(facility.writes.lock().is_none());
+    }
+
+    /// A transfer whose *end* runs off the top of the architectural 16-bit
+    /// port space is refused even though its first byte narrows fine.
+    ///
+    /// Only a malformed grant reaches this, but the check is what makes the
+    /// validator total: a base-only narrow admits the overhang, and on x86 a
+    /// word at `0xFFFF` addresses a port that does not exist.
+    #[test]
+    fn a_transfer_overhanging_the_port_space_is_refused() {
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        // A grant reaching the very last port, and one byte past it.
+        let handle = aspaces.write().mint_grant(
+            ProcessId(2),
+            tairix_abi::hwtree::HwResource::port(0xFFFF, 2),
+        );
+        let facility = recording_port_io();
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_port_io_facility(Some(facility));
+
+        // The last byte of the space is addressable.
+        assert_eq!(
+            h.port_read(&ctx, handle, 0xFFFF, tairix_abi::PortWidth::Byte),
+            Ok(0xA5)
+        );
+        // A word starting there is not: it would run to `0x10000`.
+        assert_eq!(
+            h.port_read(&ctx, handle, 0xFFFF, tairix_abi::PortWidth::Word),
+            Err(Errno::OutOfRange)
+        );
+        // …and a port already past the space is refused whatever the width.
+        assert_eq!(
+            h.port_read(&ctx, handle, 0x1_0000, tairix_abi::PortWidth::Byte),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(
+            *facility.reads.lock(),
+            Some((0xFFFF, tairix_abi::PortWidth::Byte)),
+            "only the one legal transfer reached the mechanism"
+        );
     }
 
     /// An MMIO-map facility that records the `(phys_base, len)` it was

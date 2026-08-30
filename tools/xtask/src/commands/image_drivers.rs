@@ -119,6 +119,19 @@ pub const RAID_MEMBER_STORE_PATH: &[&[u8]] = &[b"Drivers", b"storage", b"raid_me
 /// into served arrays.
 pub const RAID_STORE_PATH: &[&[u8]] = &[b"Drivers", b"storage", b"raid", b"Run"];
 
+/// Store path of the PL031 real-time-clock driver bundle: class `rtc`, the
+/// chip leaf `pl031` (the part name appears only at the leaf; the class
+/// namespace above it stays vendor-neutral).
+pub const PL031_STORE_PATH: &[&[u8]] = &[b"Drivers", b"rtc", b"pl031", b"Run"];
+
+/// Store path of the Goldfish real-time-clock driver bundle: class `rtc`,
+/// the chip leaf `goldfish` (the riscv64 `virt` board's clock).
+pub const GOLDFISH_STORE_PATH: &[&[u8]] = &[b"Drivers", b"rtc", b"goldfish", b"Run"];
+
+/// Store path of the MC146818 real-time-clock driver bundle: class `rtc`,
+/// the chip leaf `mc146818` (the PC-compatible CMOS clock).
+pub const MC146818_STORE_PATH: &[&[u8]] = &[b"Drivers", b"rtc", b"mc146818", b"Run"];
+
 /// Cross-compile `package` for the freestanding aarch64 target, convert the
 /// linked PIE ELF to a production-biased `rxe`, and wrap it as the signed
 /// payload of a `kind = UserSpace` bundle requesting exactly `caps` and
@@ -667,6 +680,86 @@ pub fn build_genet_bundle(
     )
 }
 
+/// Build and sign the PL031 real-time-clock driver bundle.
+///
+/// It maps its discovered counter window (`CAP_MMIO_MAP`) and binds the
+/// well-known RTC service endpoint restricted-sender (`CAP_IPC_BIND_PRIVILEGED`)
+/// — and nothing more. It holds **no** clock authority: the reading is served
+/// to the one holder of `CAP_TIME_SET`, which tags its provenance itself, so
+/// a clock chip can never assert its way past a network sync. Carries
+/// `tairix_drv_rtc_pl031::BIND_KEYS`, so it autoloads against a discovered
+/// `arm,pl031` node (and stays unbound on a board that has none).
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_pl031_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
+    build_bundle(
+        ctx,
+        arch,
+        "tairix-drv-rtc-pl031",
+        &[CapabilityId::MMIO_MAP, CapabilityId::IPC_BIND_PRIVILEGED],
+        tairix_drv_rtc_pl031::BIND_KEYS,
+        profile,
+    )
+}
+
+/// Build and sign the Goldfish real-time-clock driver bundle.
+///
+/// The riscv64 `virt` board's clock: the same two capabilities and the same
+/// no-clock-authority split as [`build_pl031_bundle`], differing only in the
+/// chip it binds. Carries `tairix_drv_rtc_goldfish::BIND_KEYS`, so it
+/// autoloads against a discovered `google,goldfish-rtc` node.
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_goldfish_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
+    build_bundle(
+        ctx,
+        arch,
+        "tairix-drv-rtc-goldfish",
+        &[CapabilityId::MMIO_MAP, CapabilityId::IPC_BIND_PRIVILEGED],
+        tairix_drv_rtc_goldfish::BIND_KEYS,
+        profile,
+    )
+}
+
+/// Build and sign the MC146818 real-time-clock driver bundle.
+///
+/// The PC-compatible CMOS clock, reached over its granted `0x70`/`0x71` port
+/// pair rather than a mapped window — so `CAP_MMIO_MAP` here gates the
+/// bounded port-I/O trap instead, the same authority the node's port
+/// resource already requires. Carries `tairix_drv_rtc_mc146818::BIND_KEYS`,
+/// so it autoloads against the `motorola,mc146818` node the x86_64
+/// legacy-fallback discovery path synthesises.
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_mc146818_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
+    build_bundle(
+        ctx,
+        arch,
+        "tairix-drv-rtc-mc146818",
+        &[CapabilityId::MMIO_MAP, CapabilityId::IPC_BIND_PRIVILEGED],
+        tairix_drv_rtc_mc146818::BIND_KEYS,
+        profile,
+    )
+}
+
 /// The composed, signed driver bundles the `-M virt` autoload verticals
 /// plant into their whole-disk fixture's `/System/Drivers/` store, each
 /// paired with its store path as an [`AppStoreFile`] the planter lays down:
@@ -738,6 +831,54 @@ pub fn net_driver_store_files(
                 VIRTIO_NET_STORE_PATH,
                 build_virtio_net_bundle(ctx, arch, profile)?,
             )])
+        })
+        .as_ref()
+        .map(Vec::as_slice)
+        .map_err(Clone::clone)
+}
+
+/// The signed **clock-chip driver bundle alone**, paired with its store path
+/// — the `/System/Drivers/` set the real-time-clock vertical
+/// (`plans/TIMESYNC.md` TS-3) plants.
+///
+/// Which chip depends on the board: the PL031 on aarch64 `virt`, the
+/// Goldfish RTC on riscv64 `virt`, the CMOS clock on a PC.
+///
+/// Deliberately only the RTC driver: a display driver would take over
+/// console 0, and a NIC driver would give `timed` a network path, which
+/// would make a clock the network could equally have established. The
+/// vertical's whole claim is that the clock came from the chip before any
+/// network existed.
+///
+/// Built once per xtask process and memoised, like the other store sets.
+///
+/// # Errors
+///
+/// As [`build_pl031_bundle`].
+pub fn rtc_driver_store_files(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<&'static [AppStoreFile], String> {
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; MEMO_SLOTS] =
+        [const { OnceLock::new() }; MEMO_SLOTS];
+    FILES[memo_slot(arch, profile)]
+        .get_or_init(|| {
+            // Each board has its own clock chip, so the set is the one
+            // driver that board could bind — never all of them.
+            Ok(vec![match arch {
+                PieArch::Aarch64 => {
+                    store_file(PL031_STORE_PATH, build_pl031_bundle(ctx, arch, profile)?)
+                }
+                PieArch::Riscv64 => store_file(
+                    GOLDFISH_STORE_PATH,
+                    build_goldfish_bundle(ctx, arch, profile)?,
+                ),
+                PieArch::X86_64 => store_file(
+                    MC146818_STORE_PATH,
+                    build_mc146818_bundle(ctx, arch, profile)?,
+                ),
+            }])
         })
         .as_ref()
         .map(Vec::as_slice)
@@ -883,6 +1024,7 @@ mod tests {
         framebuffer: (String, Vec<u8>),
         network: (String, Vec<u8>),
         genet: (String, Vec<u8>),
+        rtc: (String, Vec<u8>),
     }
 
     impl BundleSource {
@@ -904,13 +1046,23 @@ mod tests {
                     path_str(GENET_STORE_PATH),
                     sign(tairix_drv_network_genet::BIND_KEYS),
                 ),
+                rtc: (
+                    path_str(PL031_STORE_PATH),
+                    sign(tairix_drv_rtc_pl031::BIND_KEYS),
+                ),
             }
         }
 
         /// The bundles in scan order, so a test's candidate indices and the
         /// scanner's agree by construction.
-        fn all(&self) -> [&(String, Vec<u8>); 4] {
-            [&self.kbd, &self.framebuffer, &self.network, &self.genet]
+        fn all(&self) -> [&(String, Vec<u8>); 5] {
+            [
+                &self.kbd,
+                &self.framebuffer,
+                &self.network,
+                &self.genet,
+                &self.rtc,
+            ]
         }
     }
 
@@ -927,7 +1079,7 @@ mod tests {
     }
 
     /// Scan the whole store, candidate indices pinned by scan order (input 0,
-    /// display 1, virtio-net 2, GENET 3).
+    /// display 1, virtio-net 2, GENET 3, PL031 4).
     fn scanned_store(source: &BundleSource) -> DriverStore {
         let paths: Vec<&str> = source.all().iter().map(|(p, _)| p.as_str()).collect();
         scan_store(source, &paths, &DiscardSink)
@@ -974,6 +1126,7 @@ mod tests {
             sign(tairix_drv_display_framebuffer::BIND_KEYS),
             sign(tairix_drv_network_virtio_net::BIND_KEYS),
             sign(tairix_drv_network_genet::BIND_KEYS),
+            sign(tairix_drv_rtc_pl031::BIND_KEYS),
         ] {
             // The same fail-closed structural check the image build applies
             // to every planted bundle accepts each one.
@@ -994,7 +1147,7 @@ mod tests {
         let source = BundleSource::new();
         let store = scanned_store(&source);
         let candidates = store.candidates();
-        assert_eq!(candidates.len(), 4, "every signed bundle is a candidate");
+        assert_eq!(candidates.len(), 5, "every signed bundle is a candidate");
 
         let input_keys = [HwMatchKey::virtio(VIRTIO_INPUT_DEVICE_ID)];
         match resolve(&input_keys, &candidates) {
@@ -1019,6 +1172,13 @@ mod tests {
         match resolve(&genet_keys, &candidates) {
             MatchResolution::Winner { candidate, .. } => assert_eq!(candidate, 3),
             other => panic!("a GENET node must bind the GENET bundle, got {other:?}"),
+        }
+
+        let rtc_keys =
+            [HwMatchKey::compatible(tairix_drv_rtc_pl031::PL031_COMPATIBLE).expect("fits")];
+        match resolve(&rtc_keys, &candidates) {
+            MatchResolution::Winner { candidate, .. } => assert_eq!(candidate, 4),
+            other => panic!("a PL031 node must bind the clock-chip bundle, got {other:?}"),
         }
     }
 

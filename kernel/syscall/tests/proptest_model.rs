@@ -405,6 +405,29 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+
+    fn port_read(
+        &self,
+        _c: &CallerContext<'_>,
+        _handle: u64,
+        _port: u64,
+        _width: tairix_abi::PortWidth,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+
+    fn port_write(
+        &self,
+        _c: &CallerContext<'_>,
+        _handle: u64,
+        _port: u64,
+        _width: tairix_abi::PortWidth,
+        _value: u64,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
     fn dma_alloc(
         &self,
         _c: &CallerContext<'_>,

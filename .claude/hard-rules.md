@@ -60,3 +60,4 @@ TRAPS THAT WILL COST YOU AN HOUR EACH
   `{ cargo xtask ci > /tmp/ci.log 2>&1; echo "CI-RC=$?" >> /tmp/ci.log; }`,
   read the recorded `CI-RC=` back (a harness exit code is the `echo`'s), arm
   exactly one waiter, and do no other work while it runs.
+- There have been several compilation failures in the past due to stale cached compilation artifacts. Run 'cargo clean' before the running the ci.

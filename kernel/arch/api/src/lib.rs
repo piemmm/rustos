@@ -125,6 +125,7 @@ pub mod coreclock;
 pub mod cpucycles;
 pub mod cpufeatures;
 pub mod entropy;
+pub mod fdtwalk;
 pub mod frames;
 pub mod irq;
 pub mod memtag;

@@ -89,6 +89,10 @@ tairix-sysconfig = { path = "../../lib/sysconfig", version = "=0.0.0" }
 # `tairix-test-netstack-wire` topology so the two ends cannot drift.
 tairix-net = { path = "../../lib/net", version = "=0.0.0" }
 tairix-test-netstack-wire = { path = "../../tests/integration/netstack_wire", version = "=0.0.0" }
+# The clock-chip fixture instant: the harness pins the emulated RTC to it on
+# the QEMU command line and the guest checks the applied reading against the
+# same window, so the two ends cannot drift.
+tairix-test-rtc-fixture = { path = "../../tests/integration/rtc_fixture", version = "=0.0.0" }
 # `test --qemu` plants the Stage 5 end-to-end FAT32 vertical's backing
 # image from the same `tairix-test-fat32-image` fixture the kernel-side
 # tail reads, so the planted layout and the guest's expectations share
@@ -190,6 +194,15 @@ tairix-drv-network-virtio-net = { path = "../../drivers/network/virtio_net", ver
 # from the same crate, so the on-disk bundle, the planted addressing default,
 # and the driver never drift.
 tairix-drv-network-genet = { path = "../../drivers/network/genet", version = "=0.0.0" }
+# The PL031 clock-chip driver's canonical bind table and `compatible` string,
+# signed into the bundle the `image_drivers` pipeline cross-compiles from the
+# same crate, so the shipped bundle and the driver cannot drift.
+tairix-drv-rtc-pl031 = { path = "../../drivers/rtc/pl031", version = "=0.0.0" }
+# The Goldfish clock-chip driver's bind table, for the riscv64 image, on the
+# same single-source-of-truth basis.
+tairix-drv-rtc-goldfish = { path = "../../drivers/rtc/goldfish", version = "=0.0.0" }
+# The CMOS clock-chip driver's bind table, for the x86_64 image.
+tairix-drv-rtc-mc146818 = { path = "../../drivers/rtc/mc146818", version = "=0.0.0" }
 # The one `network.conf` grammar engine: the shipped Raspberry Pi addressing
 # default is authored here and validated through the same parser `netstack`
 # reads it with, so a malformed default fails the image build.

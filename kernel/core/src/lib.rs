@@ -183,10 +183,11 @@ pub use console::{
 };
 pub use cpu_state::{install as initialize_cpu_state, CpuStateInitError};
 pub use devres::{
-    dma_constraint, mappable_subwindow, translate_device_addr, DmaAllocFacility, DmaCarve,
-    DmaConstraint, MmioMapFacility, MsiAllocFacility, NullDmaAllocFacility, NullMmioMapFacility,
-    NullMsiAllocFacility, NullSharedMemFacility, SharedMemFacility, NULL_DMA_ALLOC_FACILITY,
-    NULL_MMIO_MAP_FACILITY, NULL_MSI_ALLOC_FACILITY, NULL_SHARED_MEM_FACILITY,
+    addressable_port, dma_constraint, mappable_subwindow, translate_device_addr, DmaAllocFacility,
+    DmaCarve, DmaConstraint, MmioMapFacility, MsiAllocFacility, NullDmaAllocFacility,
+    NullMmioMapFacility, NullMsiAllocFacility, NullSharedMemFacility, PortIoFacility,
+    SharedMemFacility, NULL_DMA_ALLOC_FACILITY, NULL_MMIO_MAP_FACILITY, NULL_MSI_ALLOC_FACILITY,
+    NULL_SHARED_MEM_FACILITY,
 };
 pub use dispatch_slot::{
     AlreadyInstalledError, DispatchCallbackSlot, DispatchHook, DispatchOutcome, RescheduleAction,

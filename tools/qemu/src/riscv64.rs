@@ -47,7 +47,7 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::process::Command;
 
-use crate::{net_device_arg, netdev_dgram_arg, Outcome, SessionKind, Spec};
+use crate::{net_device_arg, netdev_dgram_arg, rtc_base_args, Outcome, SessionKind, Spec};
 
 /// Default guest RAM size in mebibytes for a riscv64 QEMU integration
 /// test.
@@ -163,6 +163,12 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
     argv.push("-cpu".into());
     argv.push(CPU.into());
     argv.push("-no-reboot".into());
+    // Pin the board's emulated real-time clock when the vertical asked for
+    // a deterministic one, so a clock-chip driver's reading is a value the
+    // run can assert rather than whatever the host clock says.
+    if let Some(args) = rtc_base_args(spec) {
+        argv.extend(args);
+    }
     // Headless by default (the test runner captures serial only); an
     // interactive windowed run omits `-display` here so the runner can append
     // the windowing backend it selected at spawn time.
@@ -269,6 +275,7 @@ mod tests {
             block_devices: Vec::new(),
             net_devices: Vec::new(),
             display_ramfb: false,
+            rtc_base_unix_secs: None,
             extra_args: Vec::new(),
             input_keyboard: None,
             input_typing: Vec::new(),
@@ -328,6 +335,25 @@ mod tests {
             }
             other => panic!("expected Fail, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn argv_pins_the_rtc_only_when_the_spec_asked_for_it() {
+        let plain = fixture_spec(1);
+        let argv = render(&build_argv(&plain, Path::new("/tmp/k.elf")));
+        assert!(
+            !argv.iter().any(|a| a == "-rtc"),
+            "a spec that pinned no instant leaves the host clock"
+        );
+
+        // 2027-03-05T12:00:00Z, spelled through the workspace calendar.
+        let pinned = fixture_spec(1).with_rtc_base(1_804_248_000);
+        let argv = render(&build_argv(&pinned, Path::new("/tmp/k.elf")));
+        let pos = argv
+            .iter()
+            .position(|a| a == "-rtc")
+            .expect("argv pins the clock chip");
+        assert_eq!(argv[pos + 1], "base=2027-03-05T12:00:00");
     }
 
     #[test]

@@ -155,6 +155,8 @@ members = [
 
     # Drivers — real-time clock
     "drivers/rtc/pl031",
+    "drivers/rtc/goldfish",
+    "drivers/rtc/mc146818",
 
     # Drivers — network
     "drivers/network/genet",
@@ -384,7 +386,10 @@ members = [
     "tests/integration/fat32_image",
     "tests/integration/netstack_wire",
     "tests/integration/spawn_supervision",
+    "tests/integration/rtc_fixture",
     "tests/integration/timed_qemu_aarch64",
+    "tests/integration/rtc_pl031_qemu_aarch64",
+    "tests/integration/rtc_goldfish_qemu_riscv64",
     "tests/integration/arxfs_image",
     "tests/integration/encrypted_root_image",
     "tests/integration/appbar_qemu_aarch64",

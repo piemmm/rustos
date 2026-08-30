@@ -183,7 +183,7 @@ pub fn pl011_init_writes(ibrd: u32, fbrd: u32) -> [(usize, u32); 6] {
 pub struct DiscoveredGpio {
     /// CPU-physical MMIO base of the GPIO register block (the node's
     /// `reg`, bus-translated through the ancestor `ranges` exactly like
-    /// the console — [`crate::fdt::translated_reg`]).
+    /// the console — [`tairix_fdt::translated_reg`]).
     pub base: u64,
 }
 
@@ -195,11 +195,11 @@ pub struct DiscoveredGpio {
 /// only BCM2711 boards need.
 #[must_use]
 pub fn find_gpio(fdt: &Fdt<'_>) -> Option<DiscoveredGpio> {
-    crate::fdt::scan_translated(fdt, |node, levels, depth| {
+    tairix_fdt::scan_translated(fdt, |node, levels, depth| {
         node.property("compatible")?
             .iter_strings()
             .find(|s| *s == GPIO_COMPATIBLE)?;
-        let (base, _) = crate::fdt::translated_reg(node, depth, levels, 0)?;
+        let (base, _) = tairix_fdt::translated_reg(node, depth, levels, 0)?;
         Some(DiscoveredGpio { base })
     })
 }

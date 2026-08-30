@@ -66,18 +66,18 @@ pub struct DiscoveredMailbox {
 /// Find the `VideoCore` firmware mailbox doorbell in `fdt`.
 ///
 /// The walk early-returns at the matched node
-/// ([`crate::fdt::scan_translated`]), so it stays safe with the MMU
+/// ([`tairix_fdt::scan_translated`]), so it stays safe with the MMU
 /// off. Returns `None` when the tree carries no mailbox (e.g. QEMU
 /// `virt`) or the node's `reg` cannot be decoded/translated — the
 /// caller then leaves the video console unconfigured (fail closed).
 #[must_use]
 pub fn find_mailbox(fdt: &Fdt<'_>) -> Option<DiscoveredMailbox> {
-    crate::fdt::scan_translated(fdt, |node, levels, depth| {
+    tairix_fdt::scan_translated(fdt, |node, levels, depth| {
         let compatible = node.property("compatible")?;
         if !compatible.iter_strings().any(|s| s == MAILBOX_COMPATIBLE) {
             return None;
         }
-        let (base, len) = crate::fdt::translated_reg(node, depth, levels, 0)?;
+        let (base, len) = tairix_fdt::translated_reg(node, depth, levels, 0)?;
         Some(DiscoveredMailbox { base, len })
     })
 }

@@ -506,6 +506,27 @@ architecture port; the x86_64 port supplies the only real
 implementation (`AGENTS.md` §17.2 / §17.4). See
 [Input drivers](../drivers/input.md).
 
+Those two seams serve drivers the kernel hosts in-tree. A driver
+autoloaded into **user space** reaches the port space through the
+capability-gated `port_read` / `port_write` traps instead, which take an
+unforgeable device-resource grant handle rather than a bare port number:
+the kernel resolves it against the calling task, confirms it names a
+`HwResourceKind::Port` range, and confirms the whole
+`port .. port + width` transfer lies inside it before issuing anything.
+Unbounded port I/O is privilege escalation — the ports a machine exposes
+include the interrupt controller, the DMA controller, and the reset line
+— so a driver addresses exactly the range its matched node requested and
+nothing else (`AGENTS.md` §4, §5.4).
+
+The traps are gated on `CAP_MMIO_MAP`, the authority a port resource
+already requires, so no capability was added (`AGENTS.md` §5.2). The
+transfer width is `PortWidth` (1, 2, or 4 bytes) and is validated, not
+trusted: a wider access than the grant covers would reach a neighbouring
+device's registers. A value crossing the boundary is narrowed to its
+width once, into a `PortValue`, so the width and the value cannot
+disagree below that point. Only the x86 family installs a producer;
+every other port fails both traps closed with `NotImplemented`.
+
 ## Bus
 
 `trait Bus`. One method:

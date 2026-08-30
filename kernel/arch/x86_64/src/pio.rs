@@ -118,6 +118,66 @@ impl PortIo8 for X86PortIo8 {
     }
 }
 
+/// Read 16 bits from I/O port `port`.
+///
+/// The word width has no `lib/abi` driver seam of its own because no
+/// in-kernel driver needs one; it exists for the capability-gated
+/// user-space port-I/O trap, whose ABI carries all three architectural
+/// widths. A free function rather than a third zero-sized backend type:
+/// there is no trait to satisfy and nothing to hold.
+#[must_use]
+pub fn read16(port: u16) -> u16 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let value: u16;
+        // SAFETY: `in ax, dx` is a side-effect-only 16-bit PIO read against
+        // `port`. Same justification as `X86PortIo8::read8`: the caller has
+        // already bounded `port` inside a granted range, the instruction
+        // touches no memory and clobbers nothing outside `ax`, so `nomem`,
+        // `nostack`, and `preserves_flags` hold, and the surrounding
+        // `cfg` keeps `in`/`out` off a non-x86_64 code generator.
+        unsafe {
+            core::arch::asm!(
+                "in ax, dx",
+                in("dx") port,
+                out("ax") value,
+                options(nomem, nostack, preserves_flags),
+            );
+        }
+        value
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        // Non-x86_64 host build: no port space exists off x86 and this is
+        // never reached, so the shim returns a constant rather than
+        // emitting an invalid instruction.
+        let _ = port;
+        0
+    }
+}
+
+/// Write 16 bits of `value` to I/O port `port`.
+pub fn write16(port: u16, value: u16) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: `out dx, ax` is a side-effect-only 16-bit PIO write to
+        // `port`. Same justification as [`read16`].
+        unsafe {
+            core::arch::asm!(
+                "out dx, ax",
+                in("dx") port,
+                in("ax") value,
+                options(nomem, nostack, preserves_flags),
+            );
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        // Non-x86_64 host build: see `read16`.
+        let _ = (port, value);
+    }
+}
+
 impl PortIo for X86PortIo {
     fn read32(&self, port: u16) -> u32 {
         #[cfg(target_arch = "x86_64")]

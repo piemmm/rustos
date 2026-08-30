@@ -36,7 +36,7 @@
 use alloc::vec::Vec;
 
 use tairix_abi::hwtree::{FramebufferMemory, HwResource, HwResourceKind};
-use tairix_abi::{Errno, MsiAllocation};
+use tairix_abi::{Errno, MsiAllocation, PortValue, PortWidth};
 
 /// The memory type a mapped device window is given.
 ///
@@ -230,6 +230,76 @@ impl MmioMapFacility for NullMmioMapFacility {
 /// path; the boot path replaces it with the real producer through
 /// `KernelSyscallHandlers::with_mmio_map_facility`.
 pub static NULL_MMIO_MAP_FACILITY: NullMmioMapFacility = NullMmioMapFacility;
+
+/// The kernel-side producer that issues one legacy I/O port transfer.
+///
+/// The `in`/`out` instructions exist only on the x86 family and are
+/// irreducibly architecture-specific, so — like [`MmioMapFacility`] — the
+/// concrete producer is installed at boot through a `with_*` builder and the
+/// handler reaches it through this trait. A port with no I/O space never
+/// installs one, so the trap fails closed there rather than each port
+/// carrying a stub.
+///
+/// The handler has already resolved the caller's grant, confirmed it names a
+/// port range, and bounded `port .. port + width` inside it: this trait is
+/// the *mechanism* only and performs no authorisation of its own. A port that
+/// installs no producer has no inert stand-in — the handler refuses before it
+/// would reach one — so there is no null implementation to reach by accident.
+pub trait PortIoFacility: Sync {
+    /// Read one transfer of `width` from I/O port `port`.
+    fn read(&self, port: u16, width: PortWidth) -> PortValue;
+
+    /// Write `value` — already exactly as wide as the instruction to issue —
+    /// to I/O port `port`.
+    fn write(&self, port: u16, value: PortValue);
+}
+
+/// Number of addresses in the architectural I/O port space.
+///
+/// A fixed bound the hardware sets, not a capacity: `in`/`out` take a 16-bit
+/// port, so a transfer reaching past this addresses nothing.
+const PORT_SPACE_LEN: u64 = 0x1_0000;
+
+/// Validate a port transfer against a granted resource, returning the port
+/// to address.
+///
+/// The grant must name a port range of this driver's, and the whole
+/// `port .. port + width` transfer must lie inside it: a wider access than
+/// the grant covers reaches a neighbouring device's registers, so the width
+/// is validated, not trusted. Every other kind, an out-of-range port, and an
+/// access escaping the grant are refused before a single instruction is
+/// issued (fail closed — unbounded port I/O is privilege escalation).
+///
+/// # Errors
+///
+/// [`Errno::OutOfRange`] for a grant of the wrong kind, a port outside the
+/// architectural 16-bit space, or a transfer escaping the granted range.
+pub fn addressable_port(resource: &HwResource, port: u64, width: PortWidth) -> Result<u16, Errno> {
+    if resource.kind() != Some(HwResourceKind::Port) {
+        return Err(Errno::OutOfRange);
+    }
+    // A port at the very top of the space, or a malformed grant whose base
+    // plus length wraps, names no real range.
+    let end = port.checked_add(width.bytes()).ok_or(Errno::OutOfRange)?;
+    let grant_end = resource
+        .base()
+        .checked_add(resource.length())
+        .ok_or(Errno::OutOfRange)?;
+    // A zero-length grant has `grant_end == base`, so every transfer's end
+    // exceeds it and nothing is addressable through it.
+    if port < resource.base() || end > grant_end {
+        return Err(Errno::OutOfRange);
+    }
+    // The whole transfer, not just its first byte, must lie inside the
+    // architectural 16-bit space: a word at `0xFFFF` would run off the end of
+    // it, and a grant declaring such a range is malformed rather than an
+    // invitation to wrap. Checking `end` rather than `port` is what makes
+    // this total — a base-only check admits the overhang.
+    if end > PORT_SPACE_LEN {
+        return Err(Errno::OutOfRange);
+    }
+    u16::try_from(port).map_err(|_| Errno::OutOfRange)
+}
 
 /// The kernel-side producer that allocates a message-signalled interrupt
 /// (MSI) vector and reports the architecture-built doorbell for it (the

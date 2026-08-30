@@ -441,6 +441,22 @@ pub trait KernelArch: SchedulerArch {
         None
     }
 
+    /// Hand the kernel core the architecture's **port-I/O producer** — the
+    /// mechanism that issues one `in`/`out` against a legacy I/O port — so
+    /// the capability-gated `port_read` / `port_write` traps have something
+    /// to drive (`plans/TIMESYNC.md` TS-3). The reference must be `'static`
+    /// and is read once, during [`crate::Phase::Syscall`].
+    ///
+    /// # Default
+    ///
+    /// The default returns [`None`]: only the x86 family has an I/O port
+    /// space, so every other port leaves both traps failing closed with
+    /// `NotImplemented` rather than carrying a stub that addresses nothing.
+    #[must_use]
+    fn port_io_facility(&self) -> Option<&'static (dyn crate::devres::PortIoFacility + 'static)> {
+        None
+    }
+
     /// Hand the kernel core the architecture's **direct physical map** — the
     /// kernel-privileged view through which it can read and write any RAM
     /// frame by physical address — so the shared-memory facility can scrub a

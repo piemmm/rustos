@@ -612,6 +612,7 @@ name = "tairix-arch-api"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-fdt",
  "tairix-fuzzseed",
  "tairix-rng",
 ]
@@ -1248,6 +1249,26 @@ dependencies = [
  "tairix-rt",
  "tairix-virtio",
  "tairix-virtio-net",
+]
+
+[[package]]
+name = "tairix-drv-rtc-goldfish"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-caps",
+ "tairix-drvrt",
+ "tairix-rt",
+]
+
+[[package]]
+name = "tairix-drv-rtc-mc146818"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-caps",
+ "tairix-drvrt",
+ "tairix-rt",
 ]
 
 [[package]]
@@ -2262,6 +2283,7 @@ dependencies = [
 name = "tairix-qemu"
 version = "0.0.0"
 dependencies = [
+ "tairix-abi",
  "tairix-binfmt",
 ]
 
@@ -4180,6 +4202,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-rtc-fixture"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+]
+
+[[package]]
+name = "tairix-test-rtc-goldfish-qemu-riscv64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-riscv64",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-kernel-core",
+ "tairix-log",
+ "tairix-test-rtc-fixture",
+ "tairix-timesync",
+]
+
+[[package]]
+name = "tairix-test-rtc-pl031-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-kernel-core",
+ "tairix-log",
+ "tairix-test-rtc-fixture",
+ "tairix-timesync",
+]
+
+[[package]]
 name = "tairix-test-sandbox"
 version = "0.0.0"
 dependencies = [
@@ -5566,6 +5623,9 @@ dependencies = [
  "tairix-drv-input-virtio-input",
  "tairix-drv-network-genet",
  "tairix-drv-network-virtio-net",
+ "tairix-drv-rtc-goldfish",
+ "tairix-drv-rtc-mc146818",
+ "tairix-drv-rtc-pl031",
  "tairix-drv-storage-raid",
  "tairix-drv-storage-raid-member",
  "tairix-drv-storage-usb-msd",
@@ -5611,6 +5671,7 @@ dependencies = [
  "tairix-test-framestats",
  "tairix-test-memsoak",
  "tairix-test-netstack-wire",
+ "tairix-test-rtc-fixture",
  "tairix-test-tcpecho",
  "tairix-test-tcpserve",
  "tairix-theme",

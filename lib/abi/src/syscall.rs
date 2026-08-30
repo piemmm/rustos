@@ -2333,6 +2333,50 @@ impl SyscallNumber {
     /// [`Self::FS_READLINK`].
     pub const FS_REALPATH: Self = Self(116);
 
+    /// Read one value from a granted legacy I/O port
+    /// (`plans/TIMESYNC.md` TS-3).
+    ///
+    /// Arguments: `handle: u64` — an unforgeable, kernel-issued
+    /// device-resource grant handle the driver received for the matched
+    /// hardware-tree node it binds (a
+    /// [`crate::hwtree::HwResourceKind::Port`] range); `port: u64` — the
+    /// port to read; and `width: u64` — a [`crate::PortWidth`] discriminant
+    /// (1, 2, or 4 bytes). The kernel resolves the handle **against the
+    /// calling task** (rejecting forgery exactly as
+    /// [`SyscallNumber::MMIO_MAP`] does), confirms it names a port range,
+    /// decodes the width, and confirms `port .. port + width` lies wholly
+    /// inside the granted range before issuing anything — a wider access
+    /// than the grant covers would reach a neighbouring device's registers.
+    ///
+    /// Unbounded port I/O is privilege escalation: the ports a machine
+    /// exposes include the interrupt controller, the DMA controller, and
+    /// the reset line, so a driver reaches exactly the range its matched
+    /// node requested and nothing else (no ambient authority). Gated by
+    /// [`crate::CapabilityId::MMIO_MAP`], the same authority the node's
+    /// port resource already requires. An unknown or non-owned handle, a
+    /// grant of the wrong kind, an unrepresentable width, an access
+    /// escaping the granted range, or a platform with no I/O port space
+    /// fails closed.
+    ///
+    /// Returns the value read, zero-extended, or (by the shared register
+    /// convention) a negated errno.
+    pub const PORT_READ: Self = Self(117);
+
+    /// Write one value to a granted legacy I/O port
+    /// (`plans/TIMESYNC.md` TS-3).
+    ///
+    /// Arguments are [`Self::PORT_READ`]'s plus `value: u64`, of which only
+    /// the width's own bits reach the bus. Every check
+    /// [`Self::PORT_READ`] makes applies identically — the grant is
+    /// resolved against the calling task, the kind confirmed, the width
+    /// decoded, and the access bounded inside the granted range — before a
+    /// single `out` is issued.
+    ///
+    /// It IS audited per call, unlike the read: a write to a legacy port
+    /// changes device state a later reader cannot reconstruct, and a driver
+    /// issues few of them.
+    pub const PORT_WRITE: Self = Self(118);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 
@@ -2559,6 +2603,8 @@ mod tests {
         assert_eq!(SyscallNumber::DISPLAY_RELEASE.as_u16(), 24);
         assert_eq!(SyscallNumber::KEYBOARD_READ.as_u16(), 25);
         assert_eq!(SyscallNumber::MMIO_MAP.as_u16(), 26);
+        assert_eq!(SyscallNumber::PORT_READ.as_u16(), 117);
+        assert_eq!(SyscallNumber::PORT_WRITE.as_u16(), 118);
         assert_eq!(SyscallNumber::DMA_ALLOC.as_u16(), 27);
         assert_eq!(SyscallNumber::RESOURCE_GRANTS.as_u16(), 28);
         assert_eq!(SyscallNumber::HW_TREE_READ.as_u16(), 29);

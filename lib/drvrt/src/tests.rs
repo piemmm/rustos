@@ -1132,6 +1132,37 @@ fn endpoint_grant_is_none_without_an_endpoint_grant() {
 }
 
 #[test]
+fn port_grant_resolves_the_handle_the_port_traps_take() {
+    // A port grant names a range to address, not a window to map, so what a
+    // driver needs from it is the handle the trap resolves — never the base
+    // (which `sole_port_range` reads from the resource itself).
+    let mock = MockSyscalls::new();
+    let host = RtDriverHost::new(
+        caps(&[CapabilityId::MMIO_MAP]),
+        mock,
+        &[
+            regs_grant(),
+            GrantedResource::new(11, HwResource::port(0x70, 2)),
+        ],
+        None,
+    )
+    .unwrap();
+    assert_eq!(host.port_grant(), Some(11));
+    assert_eq!(
+        tairix_abi::driver::sole_port_range(host.resources()),
+        Ok((0x70, 2))
+    );
+}
+
+#[test]
+fn port_grant_is_none_without_a_port_grant() {
+    let mock = MockSyscalls::new();
+    let host =
+        RtDriverHost::new(caps(&[CapabilityId::MMIO_MAP]), mock, &[regs_grant()], None).unwrap();
+    assert_eq!(host.port_grant(), None);
+}
+
+#[test]
 fn map_shared_maps_the_granted_region() {
     // The HCD created the region and forwarded it as a `Shared` grant; the
     // class driver maps the same frames through `shm_map`.

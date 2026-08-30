@@ -19,11 +19,13 @@
 //! transitively force a `#[global_allocator]` into the two pre-existing
 //! freestanding Stage-2 QEMU test bins.
 
+use tairix_abi::{PortIo, PortIo8, PortValue, PortWidth};
 use tairix_arch_api::PlatformEntropy;
 use tairix_arch_x86_64::apic_timer::{Calibration, Rdtsc, TscReader};
 use tairix_arch_x86_64::context_hal::ContextSwitchHal;
 use tairix_arch_x86_64::entropy::PlatformRng as X86PlatformEntropy;
 use tairix_arch_x86_64::kernel_arch::{halt as arch_halt, X86_64Arch};
+use tairix_arch_x86_64::pio::{X86PortIo, X86PortIo8};
 use tairix_kernel_core::{IrqRouting, KernelArch};
 use tairix_kernel_irq::{IrqController, IrqTable};
 use tairix_kernel_mem::BootMemoryMap;
@@ -368,6 +370,36 @@ impl SchedulerArch for BinArch {
 /// directly, so no per-instance state is needed.
 static X86_PLATFORM_ENTROPY: X86PlatformEntropy = X86PlatformEntropy::new();
 
+/// The x86_64 legacy port-I/O producer the capability-gated `port_read` /
+/// `port_write` traps drive (`plans/TIMESYNC.md` TS-3).
+///
+/// Pure mechanism: the caller's grant has already been resolved and the
+/// transfer bounded inside the granted range by the kernel handler, so this
+/// only selects the instruction width. Each width delegates to the one
+/// existing `in`/`out` site for it rather than re-emitting the instruction.
+struct X86PortIoFacility;
+
+impl tairix_kernel_core::PortIoFacility for X86PortIoFacility {
+    fn read(&self, port: u16, width: PortWidth) -> PortValue {
+        match width {
+            PortWidth::Byte => PortValue::Byte(X86PortIo8.read8(port)),
+            PortWidth::Word => PortValue::Word(tairix_arch_x86_64::pio::read16(port)),
+            PortWidth::Dword => PortValue::Dword(X86PortIo.read32(port)),
+        }
+    }
+
+    fn write(&self, port: u16, value: PortValue) {
+        match value {
+            PortValue::Byte(v) => X86PortIo8.write8(port, v),
+            PortValue::Word(v) => tairix_arch_x86_64::pio::write16(port, v),
+            PortValue::Dword(v) => X86PortIo.write32(port, v),
+        }
+    }
+}
+
+/// The one producer instance the boot path publishes.
+static X86_PORT_IO_FACILITY: X86PortIoFacility = X86PortIoFacility;
+
 impl KernelArch for BinArch {
     type Cs = ContextSwitchHal;
 
@@ -377,6 +409,15 @@ impl KernelArch for BinArch {
 
     fn halt(&self) -> ! {
         arch_halt()
+    }
+
+    fn port_io_facility(
+        &self,
+    ) -> Option<&'static (dyn tairix_kernel_core::PortIoFacility + 'static)> {
+        // The x86 family is the only one with an I/O port space, so this is
+        // the only port that offers a producer; every other leaves both
+        // traps fail-closed.
+        Some(&X86_PORT_IO_FACILITY)
     }
 
     fn reboot(&self) {

@@ -1,0 +1,35 @@
+[package]
+name = "tairix-test-rtc-pl031-qemu-aarch64"
+description = "plans/TIMESYNC.md TS-3 QEMU integration test: boot the production aarch64 tairix-kernel pipeline (boot_aarch64::boot) on the virt board against the rtc-root disk, whose read-only /System store carries the kernel-signed PL031 clock-chip driver bundle and nothing else. QEMU starts the board's PL031 at a pinned instant, so the run proves the whole chain -- discover the arm,pl031 node, autoload the signed bundle into user space, bind the RTC service endpoint, and have timed read it and set the wall clock as Firmware -- lands on a value only a correct register decode can produce, with no network and before the operator unlocks anything."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tairix-test-rtc-pl031-qemu-aarch64"
+path = "src/main.rs"
+
+# Freestanding "boot the production aarch64 kernel pipeline against the
+# rtc-root disk and prove the clock is established from the board's own clock
+# chip" integration test. It reuses the entire production aarch64 boot pipeline
+# through `tairix-kernel`'s library half (`boot_aarch64::boot`) unchanged.
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+tairix-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The witness the guest exits on: the service's own `RTC_CLOCK_SET` event id.
+tairix-timesync = { path = "../../../lib/timesync", version = "=0.0.0" }
+# The window the applied reading must land in, shared with the harness that
+# pins the emulated chip's start instant on the QEMU command line.
+tairix-test-rtc-fixture = { path = "../rtc_fixture", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

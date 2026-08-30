@@ -531,7 +531,7 @@ pub struct DiscoveredConsole {
     /// CPU-physical MMIO base of the UART register block: the node's
     /// first `reg` entry, decoded with its parent bus's cell counts and
     /// translated through the ancestor buses' `ranges`
-    /// ([`crate::fdt::translated_reg`]).
+    /// ([`tairix_fdt::translated_reg`]).
     pub base: u64,
     /// Length in bytes of the register window (the node's first `reg`
     /// size cell).
@@ -548,23 +548,23 @@ pub struct DiscoveredConsole {
 /// primary console — `serial0`/`ttyAMA0` — to the PL011, and that is what
 /// QEMU's `raspi*` models route to `-serial`). The node's `reg` is
 /// decoded with its parent bus's cell counts and translated through the
-/// ancestor buses' `ranges` ([`crate::fdt::translated_reg`]) — on the
+/// ancestor buses' `ranges` ([`tairix_fdt::translated_reg`]) — on the
 /// real Pi 4 tree the UARTs sit under `/soc`, whose one-cell `reg`
 /// values are *bus* addresses (`0x7E20_1000`) remapped to CPU-physical
 /// space (`0xFE20_1000`). The walk early-returns at the matched PL011,
-/// so it stays safe with the MMU off ([`crate::fdt::scan_translated`]).
+/// so it stays safe with the MMU off ([`tairix_fdt::scan_translated`]).
 /// Returns `None` if the tree is malformed or carries no recognised,
 /// translatable console (the caller then keeps the
 /// [`DEFAULT_CONSOLE_BASE`] default — fail closed).
 #[must_use]
 pub fn find_console(fdt: &Fdt<'_>) -> Option<DiscoveredConsole> {
     let mut mini_uart: Option<DiscoveredConsole> = None;
-    let pl011 = crate::fdt::scan_translated(fdt, |node, levels, depth| {
+    let pl011 = tairix_fdt::scan_translated(fdt, |node, levels, depth| {
         let model = node
             .property("compatible")?
             .iter_strings()
             .find_map(ConsoleModel::from_compatible)?;
-        let (base, len) = crate::fdt::translated_reg(node, depth, levels, 0)?;
+        let (base, len) = tairix_fdt::translated_reg(node, depth, levels, 0)?;
         let found = DiscoveredConsole { base, len, model };
         match model {
             // A PL011 is the preferred console; take it immediately.

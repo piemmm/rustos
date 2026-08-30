@@ -28,8 +28,8 @@
 use core::cell::RefCell;
 use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::{
-    spec_for, AbiType, CapabilityId, Errno, IrqHandle, LinkFlags, MapFlags, OpenFlags, PowerAction,
-    RandomFlags, RealpathMode, SyscallNumber, SyscallSpec, UnlinkFlags, WaitFlags,
+    spec_for, AbiType, CapabilityId, Errno, IrqHandle, LinkFlags, MapFlags, OpenFlags, PortWidth,
+    PowerAction, RandomFlags, RealpathMode, SyscallNumber, SyscallSpec, UnlinkFlags, WaitFlags,
     ENCODED_TABLE_LEN, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_MODE_MASK, SYSCALLS,
     SYSCALL_MAX_ARGS,
 };
@@ -1041,6 +1041,19 @@ fn operand_semantics_accept(spec: &SyscallSpec, args: &[u64; SYSCALL_MAX_ARGS]) 
     if spec.number == SyscallNumber::SYSTEM_POWER {
         let raw = u32::try_from(args[0] & 0xFFFF_FFFF).unwrap_or(u32::MAX);
         if PowerAction::from_u32(raw).is_err() {
+            return false;
+        }
+    }
+    // The port traps' width argument (arg 2) is the same shape: the
+    // dispatcher runs the raw value through `PortWidth::from_u8`, which admits
+    // only the three architectural widths. A wider access than a grant covers
+    // reaches a neighbouring device's registers, so the width is refused
+    // before any grant is looked up. Mirror that here.
+    if spec.number == SyscallNumber::PORT_READ || spec.number == SyscallNumber::PORT_WRITE {
+        let Ok(raw) = u8::try_from(args[2]) else {
+            return false;
+        };
+        if PortWidth::from_u8(raw).is_err() {
             return false;
         }
     }

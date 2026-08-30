@@ -1,0 +1,39 @@
+[package]
+name = "tairix-drv-rtc-mc146818"
+description = "TAIRiX Motorola MC146818-compatible PC CMOS real-time-clock driver: the `motorola,mc146818` calendar register block every PC-compatible machine exposes at I/O ports 0x70/0x71, served to the clock authority over the RTC service endpoint."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Two targets, one crate, both on cargo's default names and paths like every
+# sibling driver — the bundle builder cross-compiles `--bin <package>`, so a
+# renamed binary would not be installable. The device logic (`src/lib.rs`) is
+# the chip's own register decode, so it lives with the driver rather than in
+# `lib/*`, and is host-testable against a model of the index/data pair. The
+# `Run` binary (`src/main.rs`) links the userland runtime, so it is
+# freestanding-only and an inert host stub elsewhere (`build.rs`).
+
+[dependencies]
+# The `abi-v1` surface: the `Rtc` class trait, the shared BCD codec and
+# two-digit-year window, the RTC service wire contract, the port-range grant
+# resolver, and the capability ids.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+
+# The `Run` binary's freestanding-only dependencies; on the host it is an inert
+# stub, so nothing here reaches the host build.
+[target.'cfg(target_os = "none")'.dependencies]
+# The capability-set type the rt-backed `DriverHost` is built over.
+tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+# The user-space driver runtime: turns the kernel-issued device-resource
+# grants into the port-range grant handle the transfers are issued against.
+tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
+# The pure-Rust userland runtime: `_start`, the stack canary, the panic
+# handler, the `port_read` / `port_write` traps, and the `call_create` /
+# `call_recv` / `call_reply` wrappers.
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }

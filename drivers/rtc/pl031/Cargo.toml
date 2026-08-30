@@ -11,18 +11,14 @@ publish.workspace = true
 [lints]
 workspace = true
 
-# Two targets, one crate. The device logic (`src/lib.rs`) is the chip's own
-# register decode, so it lives with the driver rather than in `lib/*`, and is
-# host-testable against a mock register window. The `Run` binary
-# (`src/main.rs`) is what `devmgr` autoloads into user space; it links the
-# userland runtime, so it is freestanding-only and an inert host stub
+# Two targets, one crate, both on cargo's default paths and names like every
+# sibling driver — the bundle builder cross-compiles `--bin <package>`, so a
+# renamed binary would not be installable. The device logic (`src/lib.rs`) is
+# the chip's own register decode, so it lives with the driver rather than in
+# `lib/*`, and is host-testable against a mock register window. The `Run`
+# binary (`src/main.rs`) is what `devmgr` autoloads into user space; it links
+# the userland runtime, so it is freestanding-only and an inert host stub
 # elsewhere (`build.rs`).
-[lib]
-path = "src/lib.rs"
-
-[[bin]]
-name = "tairix-drv-rtc-pl031-run"
-path = "src/main.rs"
 
 [dependencies]
 # The `abi-v1` surface: the `Rtc` class trait, the RTC service wire contract,

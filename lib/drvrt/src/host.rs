@@ -375,6 +375,27 @@ impl<S: GrantSyscalls> RtDriverHost<S> {
             .map(|slot| slot.resource.base())
     }
 
+    /// The kernel-issued grant handle naming the driver's single
+    /// [`HwResourceKind::Port`] range, or `None` if it holds no port grant.
+    ///
+    /// A port-addressed legacy device has nothing to map: the driver names
+    /// this handle in `port_read` / `port_write`, and the kernel resolves it
+    /// owner-checked and re-bounds `port .. port + width` inside the grant's
+    /// own range on every trap. The handle therefore carries no authority of
+    /// its own — it can only reach the ports the matched node requested. The
+    /// range itself comes from
+    /// [`sole_port_range`](tairix_abi::driver::sole_port_range) over
+    /// [`resources`](Self::resources), which is what a driver bounds its own
+    /// register offsets against before the first transfer.
+    #[must_use]
+    pub fn port_grant(&self) -> Option<u64> {
+        self.grants
+            .iter()
+            .flatten()
+            .find(|slot| slot.resource.kind() == Some(HwResourceKind::Port))
+            .map(|slot| slot.handle)
+    }
+
     /// Map the cross-process shared data buffer the driver was granted,
     /// returning its base user virtual address and the region's byte
     /// length — the kernel's own record, so the driver sizes its view of

@@ -11,9 +11,9 @@
 use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::{
     i32_from_register, i32_register_is_canonical, spec_for, AbiType, CallRecvFlags, CapabilityId,
-    Errno, IrqHandle, LinkFlags, MapFlags, OpenFlags, PowerAction, RandomFlags, RealpathMode,
-    SchedPriority, Signal, SignalIntakeOp, SyscallNumber, SyscallSpec, UnlinkFlags, WaitFlags,
-    ENCODED_TABLE, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_MODE_MASK, PROC_ID_HEX_LEN,
+    Errno, IrqHandle, LinkFlags, MapFlags, OpenFlags, PortWidth, PowerAction, RandomFlags,
+    RealpathMode, SchedPriority, Signal, SignalIntakeOp, SyscallNumber, SyscallSpec, UnlinkFlags,
+    WaitFlags, ENCODED_TABLE, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_MODE_MASK, PROC_ID_HEX_LEN,
     SYSCALL_MAX_ARGS,
 };
 use tairix_crypto::{sha256, Sha256Digest};
@@ -1120,6 +1120,51 @@ pub trait SyscallHandlers {
         _handle: u64,
         _offset: u64,
         _len: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Read one value from a granted legacy I/O port
+    /// (`plans/TIMESYNC.md` TS-3).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::MMIO_MAP`] — the same authority the node's port
+    /// resource requires — and decoded `width` to a [`PortWidth`]. The
+    /// implementation resolves `handle` **against the calling task**
+    /// (rejecting forgery exactly as [`Self::mmio_map`]), confirms the grant
+    /// names a port range, and confirms the whole `port .. port + width`
+    /// transfer lies inside it before issuing anything: unbounded port I/O
+    /// reaches the interrupt controller, the DMA controller, and the reset
+    /// line, so a driver addresses exactly the range its matched node
+    /// requested (no ambient authority).
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]: a build with neither a grant table nor a
+    /// port-I/O facility wired has nothing to address. The real handler is
+    /// installed in `kernel/core`.
+    fn port_read(
+        &self,
+        _caller: &CallerContext<'_>,
+        _handle: u64,
+        _port: u64,
+        _width: PortWidth,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Write one value to a granted legacy I/O port
+    /// (`plans/TIMESYNC.md` TS-3).
+    ///
+    /// Every check [`Self::port_read`] makes applies identically before a
+    /// single `out` is issued; only the width's own bits of `value` reach
+    /// the bus. Returns zero on success.
+    fn port_write(
+        &self,
+        _caller: &CallerContext<'_>,
+        _handle: u64,
+        _port: u64,
+        _width: PortWidth,
+        _value: u64,
     ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
@@ -3135,6 +3180,20 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 let len = decode_len(args.0[2])?;
                 self.handlers.mmio_map(caller, args.0[0], args.0[1], len)
             }
+            // `validate_arg` accepts args[0] as an opaque `Handle` u64; the
+            // handler resolves it against the calling task and the grant
+            // table. args[1] is the port and args[2] the transfer width,
+            // decoded here so an unrepresentable width is refused before the
+            // handler — and therefore before any grant is even looked up.
+            SyscallNumber::PORT_READ => {
+                let width = decode_port_width(args.0[2])?;
+                self.handlers.port_read(caller, args.0[0], args.0[1], width)
+            }
+            SyscallNumber::PORT_WRITE => {
+                let width = decode_port_width(args.0[2])?;
+                self.handlers
+                    .port_write(caller, args.0[0], args.0[1], width, args.0[3])
+            }
             SyscallNumber::DMA_ALLOC => {
                 // `validate_arg` accepts args[0] as an opaque `Handle` u64
                 // (resolved against the calling task + grant table in the
@@ -3846,6 +3905,17 @@ fn decode_len(raw: u64) -> Result<usize, Errno> {
     usize::try_from(raw).map_err(|_| Errno::LengthOutOfRange)
 }
 
+/// Decode a port-transfer width, refusing anything that is not one of the
+/// three architectural widths.
+///
+/// Rejected at dispatch rather than in the handler so a malformed width
+/// costs no grant lookup, and so a widened access can never reach the
+/// range check with a value the check was not written for.
+fn decode_port_width(raw: u64) -> Result<PortWidth, Errno> {
+    let narrowed = u8::try_from(raw).map_err(|_| Errno::OutOfRange)?;
+    PortWidth::from_u8(narrowed)
+}
+
 /// Decode an extended-attribute key length, bounding it to
 /// `1..=FS_ATTR_KEY_MAX` before any user memory is staged.
 ///
@@ -4375,6 +4445,33 @@ mod tests {
             // sub-region offset, length) without wiring a real grant table /
             // map facility here.
             Ok(handle + offset + len as u64)
+        }
+
+        fn port_read(
+            &self,
+            _c: &CallerContext<'_>,
+            handle: u64,
+            port: u64,
+            width: PortWidth,
+        ) -> SyscallResult {
+            self.record("port_read");
+            // Echo the three decoded arguments so the reachability test can
+            // assert the dispatcher decoded each — the width in particular,
+            // which it refuses outright unless it is one of the three
+            // architectural values.
+            Ok(handle + port + width.bytes())
+        }
+
+        fn port_write(
+            &self,
+            _c: &CallerContext<'_>,
+            handle: u64,
+            port: u64,
+            width: PortWidth,
+            value: u64,
+        ) -> SyscallResult {
+            self.record("port_write");
+            Ok(handle + port + width.bytes() + value)
         }
 
         fn dma_alloc(

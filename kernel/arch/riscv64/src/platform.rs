@@ -1,80 +1,76 @@
 //! riscv64 early-boot platform discovery.
 //!
 //! Implements the Arch HAL
-//! [`PlatformDiscovery`](tairix_arch_api::PlatformDiscovery) slice by
-//! normalising the
-//! flattened device tree the `virt` board hands the kernel (FDT → hardware tree) into [`tairix_abi::hwtree`] nodes. This is
-//! a tracked *move* of the facts the [`crate::fdt`] reader already extracts
-//! behind the common HAL trait, not a new parser: the
-//! boot path used to consume the `/memory` region and the
-//! `timebase-frequency` directly; it now reaches them as a
-//! [`tairix_abi::HwNode`] tree
-//! through the same trait every port implements.
+//! [`PlatformDiscovery`](tairix_arch_api::PlatformDiscovery) slice over the
+//! shared device-tree walk ([`tairix_arch_api::fdtwalk`]), which normalises
+//! the flattened device tree the `virt` board hands the kernel into
+//! [`tairix_abi::hwtree`] nodes generically: every node carrying a
+//! `compatible` becomes a hardware-tree node whose match keys are that
+//! property's strings, `reg` entries become capability-gated MMIO resources
+//! translated through each ancestor bus's `ranges`, and `/memory` nodes
+//! become `Memory` nodes.
 //!
-//! The emitted tree is intentionally shallow — exactly what the current
-//! reader can see: a root, the first `/memory` region, and (when present) a
-//! timer device. Richer enumeration (CPU nodes, the PLIC, virtio-mmio
-//! children) lands as the reader and the bus drivers grow, behind this same
-//! trait.
+//! What is genuinely this port's, and so lives here, is the **PLIC
+//! interrupt specifier**: the QEMU `virt` board's PLIC declares
+//! `#interrupt-cells = <1>`, so the single cell *is* the source number
+//! rather than a type-relative offset, and source `0` is the reserved
+//! "no interrupt" sentinel. The controller's discovered `riscv,ndev` source
+//! count bounds it, read once before the walk, so a device is never bound to
+//! a line the controller cannot raise.
 
-use crate::fdt::Fdt;
-use tairix_abi::{HwDeviceClass, HwNode, HwResource, HW_NODE_ROOT, HW_NODE_ROOT_ID};
-use tairix_arch_api::{DiscoveryError, HwNodeSink, PlatformDiscovery};
+use crate::fdt::{plic_ndev, plic_source_in_range, Fdt, PLIC_SOURCE_NONE};
+use tairix_arch_api::fdtwalk::FdtPlatform;
+use tairix_fdt::read_cells;
 
-/// Builds the hardware tree from a borrowed flattened device tree.
-///
-/// Holds the [`Fdt`] reader so the same instance is host-testable against a
-/// hand-built blob and usable at boot over the firmware-provided pointer.
-pub struct FdtDiscovery<'a> {
-    fdt: Fdt<'a>,
+/// This port's half of the shared device-tree walk: the PLIC interrupt
+/// specifier, carrying the controller's discovered source count.
+pub struct Riscv64Fdt {
+    /// The PLIC's `riscv,ndev` source count, or `None` when the tree
+    /// describes no PLIC or its node carries no readable count.
+    ndev: Option<u32>,
 }
 
-impl<'a> FdtDiscovery<'a> {
-    /// Wrap an already-validated [`Fdt`] reader.
-    #[must_use]
-    pub fn new(fdt: Fdt<'a>) -> Self {
-        Self { fdt }
+impl FdtPlatform for Riscv64Fdt {
+    /// The single-cell PLIC binding the `virt` board describes interrupts
+    /// with.
+    const INTERRUPT_CELLS: usize = 1;
+
+    fn from_tree(fdt: &Fdt<'_>) -> Self {
+        Self {
+            ndev: plic_ndev(fdt),
+        }
+    }
+
+    /// The cell is the PLIC source number itself. The reserved `0` sentinel
+    /// routes to no line and is refused; a source above the controller's
+    /// discovered count is refused too, so the tree never carries a line
+    /// the PLIC cannot raise. With no discovered count the upper bound
+    /// falls to the controller's own arm-time range guard, which is where
+    /// the boot path's `plic_device_source` leaves it as well.
+    fn interrupt_line(&self, specifier: &[u8]) -> Option<u32> {
+        let source = u32::try_from(read_cells(specifier, 0, 1)?).ok()?;
+        match self.ndev {
+            Some(ndev) => plic_source_in_range(source, ndev).then_some(source),
+            None => (source != PLIC_SOURCE_NONE).then_some(source),
+        }
     }
 }
 
-impl PlatformDiscovery for FdtDiscovery<'_> {
-    fn discover(&self, sink: &mut dyn HwNodeSink) -> Result<(), DiscoveryError> {
-        // Root first so every later node's parent is already emitted. Its
-        // id is the shared [`HW_NODE_ROOT_ID`]; its parent is the
-        // `HW_NODE_ROOT` sentinel (so it alone is `is_root`).
-        sink.emit(HwNode::new(
-            HW_NODE_ROOT_ID,
-            HW_NODE_ROOT,
-            HwDeviceClass::Root,
-        ))?;
-        let mut next_id: u32 = 1;
-
-        if let Some((base, size)) = self.fdt.first_memory_region() {
-            let mut node = HwNode::new(next_id, HW_NODE_ROOT_ID, HwDeviceClass::Memory);
-            // A single resource can never exceed the node's bound; a
-            // failure would be a logic error in the ABI, so surface it as
-            // a malformed source rather than panicking.
-            node.push_resource(HwResource::mmio(base, size))
-                .map_err(|_| DiscoveryError::MalformedSource)?;
-            sink.emit(node)?;
-            next_id += 1;
-        }
-
-        if self.fdt.timebase_frequency().is_some() {
-            sink.emit(HwNode::new(next_id, HW_NODE_ROOT_ID, HwDeviceClass::Timer))?;
-        }
-
-        Ok(())
-    }
-}
+/// The [`PlatformDiscovery`](tairix_arch_api::PlatformDiscovery)
+/// implementation the boot path constructs: the shared walk over this
+/// port's [`Riscv64Fdt`].
+pub type FdtDiscovery<'a> = tairix_arch_api::fdtwalk::FdtDiscovery<'a, Riscv64Fdt>;
 
 #[cfg(test)]
 mod tests {
     use super::FdtDiscovery;
     use crate::fdt::tests::virt_like;
     use crate::fdt::Fdt;
-    use tairix_abi::{HwDeviceClass, HwNode};
+    use tairix_abi::{HwDeviceClass, HwNode, HwResourceKind};
     use tairix_arch_api::platform::{conformance, DiscoveryError, HwNodeSink, PlatformDiscovery};
+
+    /// The `virt_like` fixture's PLIC source for its one virtio-mmio slot.
+    const SLOT_PLIC_IRQ: u32 = 1;
 
     #[test]
     fn passes_platform_discovery_conformance() {
@@ -84,36 +80,114 @@ mod tests {
         conformance::run(&disco);
     }
 
-    /// A counting sink so the test can assert the exact tree the `virt`
-    /// blob yields: root + memory + timer.
+    /// Collects the emitted tree so a test can assert the exact nodes the
+    /// blob yields.
     #[derive(Default)]
-    struct CountingSink {
-        memory: usize,
-        timer: usize,
-        total: usize,
+    struct CollectingSink {
+        nodes: std::vec::Vec<HwNode>,
     }
 
-    impl HwNodeSink for CountingSink {
+    impl HwNodeSink for CollectingSink {
         fn emit(&mut self, node: HwNode) -> Result<(), DiscoveryError> {
-            self.total += 1;
-            match node.class() {
-                Some(HwDeviceClass::Memory) => self.memory += 1,
-                Some(HwDeviceClass::Timer) => self.timer += 1,
-                _ => {}
-            }
+            self.nodes.push(node);
             Ok(())
         }
     }
 
+    fn discover_all(blob: &[u8]) -> std::vec::Vec<HwNode> {
+        let fdt = Fdt::new(blob).expect("valid fdt");
+        let mut sink = CollectingSink::default();
+        FdtDiscovery::new(fdt)
+            .discover(&mut sink)
+            .expect("discovery succeeds");
+        sink.nodes
+    }
+
+    fn by_key(nodes: &[HwNode], compatible: &str) -> HwNode {
+        let wanted = tairix_abi::HwMatchKey::compatible(compatible.as_bytes()).expect("fits");
+        *nodes
+            .iter()
+            .find(|n| n.match_keys().contains(&wanted))
+            .unwrap_or_else(|| panic!("a node carries {compatible}"))
+    }
+
+    /// The `virt`-shaped tree every emission test reads: `/memory`, the
+    /// PLIC declaring one source, and one `virtio,mmio` slot on the source
+    /// named by `slot_irq`.
+    fn virt_tree(slot_irq: u32) -> std::vec::Vec<u8> {
+        crate::fdt::tests::virt_like_with_virtio(
+            0x8000_0000,
+            0x1000_0000,
+            10_000_000,
+            1,
+            &[(0x1000_1000, slot_irq)],
+        )
+    }
+
     #[test]
-    fn emits_memory_and_timer_from_virt_tree() {
-        let blob = virt_like(0x8000_0000, 0x1000_0000, 10_000_000);
-        let fdt = Fdt::new(&blob).expect("valid fdt");
-        let disco = FdtDiscovery::new(fdt);
-        let mut sink = CountingSink::default();
-        disco.discover(&mut sink).expect("discovery succeeds");
-        assert_eq!(sink.total, 3, "root + memory + timer");
-        assert_eq!(sink.memory, 1);
-        assert_eq!(sink.timer, 1);
+    fn emits_the_memory_window_and_every_compatible_node() {
+        let nodes = discover_all(&virt_tree(SLOT_PLIC_IRQ));
+
+        let memory: std::vec::Vec<&HwNode> = nodes
+            .iter()
+            .filter(|n| n.class() == Some(HwDeviceClass::Memory))
+            .collect();
+        assert_eq!(memory.len(), 1, "one described memory window");
+        let window = memory[0].resources()[0];
+        assert_eq!((window.base(), window.length()), (0x8000_0000, 0x1000_0000));
+
+        // The PLIC is discovered as an interrupt controller with its own
+        // register window — the node the boot path reads `riscv,ndev` and
+        // `reg` off, now visible in the tree a tool can list.
+        let plic = by_key(&nodes, "riscv,plic0");
+        assert_eq!(plic.class(), Some(HwDeviceClass::InterruptController));
+        assert_eq!(plic.resources()[0].base(), 0x0c00_0000);
+
+        // Every non-root node hangs off the root: the fixture nests no bus.
+        assert!(nodes.iter().skip(1).all(|n| n.parent() == 0));
+    }
+
+    #[test]
+    fn a_virtio_slot_carries_its_plic_source_as_an_irq_resource() {
+        // The whole point of moving this port onto the shared walk: a
+        // discovered device now carries the line its driver parks on, which
+        // the previous shallow emission could not describe at all.
+        let nodes = discover_all(&virt_tree(SLOT_PLIC_IRQ));
+        let slot = by_key(&nodes, "virtio,mmio");
+        let irqs: std::vec::Vec<u64> = slot
+            .resources()
+            .iter()
+            .filter(|r| r.kind() == Some(HwResourceKind::Irq))
+            .map(tairix_abi::HwResource::base)
+            .collect();
+        assert_eq!(irqs, std::vec![u64::from(SLOT_PLIC_IRQ)]);
+    }
+
+    #[test]
+    fn the_reserved_plic_sentinel_is_dropped_not_guessed() {
+        // Source 0 routes to no line, so the node is still emitted (its
+        // `compatible` binds a driver) but carries no interrupt.
+        let nodes = discover_all(&virt_tree(0));
+        let slot = by_key(&nodes, "virtio,mmio");
+        assert!(
+            slot.resources()
+                .iter()
+                .all(|r| r.kind() != Some(HwResourceKind::Irq)),
+            "the reserved sentinel carries no line"
+        );
+    }
+
+    #[test]
+    fn a_source_above_the_controller_count_is_refused() {
+        // The tree declares `riscv,ndev = 1`, so source 2 is a line this
+        // PLIC cannot raise.
+        let nodes = discover_all(&virt_tree(2));
+        let slot = by_key(&nodes, "virtio,mmio");
+        assert!(
+            slot.resources()
+                .iter()
+                .all(|r| r.kind() != Some(HwResourceKind::Irq)),
+            "an out-of-range source carries no line"
+        );
     }
 }

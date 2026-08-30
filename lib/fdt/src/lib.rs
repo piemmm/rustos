@@ -34,6 +34,13 @@ extern crate alloc;
 #[cfg(any(test, feature = "test-fixtures"))]
 pub mod fixture;
 
+pub mod bus;
+
+pub use bus::{
+    bus_level, dma_ranges_aperture, dma_ranges_aperture_of, outbound_mmio_window, reg_entry_count,
+    scan_translated, translate, translated_reg, BusLevel, MAX_WALK_DEPTH,
+};
+
 /// FDT header magic (`0xd00dfeed`, big-endian on the wire).
 const FDT_MAGIC: u32 = 0xd00d_feed;
 

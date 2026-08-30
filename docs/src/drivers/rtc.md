@@ -97,9 +97,23 @@ time.
 
 ## Shipped drivers
 
-| Driver  | Crate                     | Hardware                              | Status |
-|---------|---------------------------|---------------------------------------|--------|
-| `pl031` | `drivers/rtc/pl031`       | ARM PrimeCell PL031 (`arm,pl031`)     | device logic and service complete; image wiring and its QEMU vertical are the next increment |
+| Driver     | Crate                   | Hardware                                     | Status |
+|------------|-------------------------|----------------------------------------------|--------|
+| `pl031`    | `drivers/rtc/pl031`     | ARM PrimeCell PL031 (`arm,pl031`)            | shipped in the aarch64 driver store; its QEMU vertical proves the clock is set `Firmware` before any network exists |
+| `goldfish` | `drivers/rtc/goldfish`  | Google Goldfish RTC (`google,goldfish-rtc`)  | shipped in the riscv64 driver store, with the same vertical over this port's own chip |
+| `mc146818` | `drivers/rtc/mc146818`  | PC CMOS clock (`motorola,mc146818`)          | device logic and service complete, matching the node the x86_64 legacy-fallback discovery path emits; image wiring and its QEMU vertical are the next increment |
 
-`plans/TIMESYNC.md` TS-3 stages the MC146818 CMOS clock (x86_64) and the
-Goldfish RTC (riscv64) beside it, and TS-4 the Raspberry Pi tiers.
+The CMOS clock is the class's only port-addressed part, and the only one whose
+node is a legacy fallback rather than a discovered one: no ACPI table
+enumerates it and every PC-compatible machine has it at the same fixed
+index/data pair (I/O ports `0x70`/`0x71`), so the x86_64 architecture port
+synthesises the node unconditionally. The driver still binds by *matching*
+that node, so the assumption stops in the architecture port and never reaches
+the driver. Its transfers go through the capability-gated `port_read` /
+`port_write` traps, which bound each access inside the granted range
+kernel-side, rather than through a mapped register window — which is why
+`tairix_abi::driver::sole_port_range` resolves a port grant separately from
+`sole_register_window`.
+
+`plans/TIMESYNC.md` TS-4 stages the Raspberry Pi tiers: the Pi 5's
+mailbox-reached PMIC clock and the I²C HAT chips.

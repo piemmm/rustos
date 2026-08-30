@@ -122,7 +122,7 @@ pub struct DiscoveredGic<'a> {
     /// CPU-physical MMIO base of the distributor: the GIC node's first
     /// `reg` region, decoded with its parent bus's cell counts and
     /// translated through the ancestor buses' `ranges`
-    /// ([`crate::fdt::translated_reg`]).
+    /// ([`tairix_fdt::translated_reg`]).
     pub gicd_base: u64,
     /// CPU-physical MMIO base of the CPU interface (the node's second
     /// `reg` region, decoded and translated likewise).
@@ -136,24 +136,24 @@ pub struct DiscoveredGic<'a> {
 /// region 0 is the distributor, region 1 the CPU interface. Each region
 /// is decoded with the node's parent bus's cell counts and translated
 /// through the ancestor buses' `ranges`
-/// ([`crate::fdt::translated_reg`]) — on the QEMU `virt` board the GIC
+/// ([`tairix_fdt::translated_reg`]) — on the QEMU `virt` board the GIC
 /// sits at the root with 2+2 cells, while the Pi 4's GIC-400 sits under
 /// `/soc` with one-cell *bus* `reg` values (`0x4004_1000`) remapped to
 /// the CPU-physical bases (`0xFF84_1000`). The walk early-returns at
 /// the matched controller, so it stays safe with the MMU off
-/// ([`crate::fdt::scan_translated`]). Returns `None` if the tree is
+/// ([`tairix_fdt::scan_translated`]). Returns `None` if the tree is
 /// malformed or carries no recognised, translatable GIC (the caller
 /// then keeps the [`DEFAULT_GICD_BASE`] / [`DEFAULT_GICC_BASE`] default
 /// — fail closed).
 #[must_use]
 pub fn find_gic<'a>(fdt: &Fdt<'a>) -> Option<DiscoveredGic<'a>> {
-    crate::fdt::scan_translated(fdt, |node, levels, depth| {
+    tairix_fdt::scan_translated(fdt, |node, levels, depth| {
         let matched = node
             .property("compatible")?
             .iter_strings()
             .find(|s| is_gic_compatible(s))?;
-        let (distributor, _) = crate::fdt::translated_reg(node, depth, levels, 0)?;
-        let (cpu_iface, _) = crate::fdt::translated_reg(node, depth, levels, 1)?;
+        let (distributor, _) = tairix_fdt::translated_reg(node, depth, levels, 0)?;
+        let (cpu_iface, _) = tairix_fdt::translated_reg(node, depth, levels, 1)?;
         Some(DiscoveredGic {
             compatible: matched,
             gicd_base: distributor,

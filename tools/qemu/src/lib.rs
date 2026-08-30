@@ -295,6 +295,25 @@ pub(crate) fn net_device_arg(driver: &str, i: usize, dev: &NetDevice, extra: &st
     OsString::from(arg)
 }
 
+/// Render `["-rtc", "base=<datetime>"]` for a spec that pinned its clock
+/// chip's start instant, or nothing for one that left the host clock.
+///
+/// The one definition every per-arch argv builder shares, so the three
+/// boards' emulated RTCs cannot drift on how the instant is spelled. The
+/// datetime is UTC — QEMU reads a bare `YYYY-MM-DDTHH:MM:SS` operand as
+/// such — and is decomposed through the workspace's one calendar.
+pub(crate) fn rtc_base_args(spec: &Spec) -> Option<[OsString; 2]> {
+    let secs = spec.rtc_base_unix_secs?;
+    let t = tairix_abi::time::CivilTime::from_unix_secs(secs);
+    Some([
+        OsString::from("-rtc"),
+        OsString::from(format!(
+            "base={:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+            t.year, t.month, t.day, t.hour, t.minute, t.second
+        )),
+    ])
+}
+
 /// A deterministic key-injection request for an input vertical.
 ///
 /// A `no_std`, non-interactive QEMU guest cannot type at itself, and the
@@ -657,6 +676,15 @@ pub struct Spec {
     /// analogue of [`Spec::with_virtio_blk`] for the framebuffer
     /// vertical. x86_64 ignores it today.
     pub display_ramfb: bool,
+    /// When `Some`, start the board's emulated real-time clock at this
+    /// instant (Unix seconds) instead of the host clock, through QEMU's
+    /// `-rtc base=<datetime>`. Every board QEMU models an RTC for — the
+    /// aarch64 `virt` PL031, the riscv64 `virt` Goldfish RTC, the x86_64
+    /// CMOS chip — reads it, so a vertical that drives a real clock-chip
+    /// driver can assert the *value* it decoded rather than merely that it
+    /// decoded something. `None` leaves the host clock, which is what every
+    /// vertical without an RTC driver wants.
+    pub rtc_base_unix_secs: Option<i64>,
     /// Extra arguments appended verbatim to the QEMU command line after the
     /// per-arch defaults. Use sparingly — they bypass the runner's input
     /// validation.
@@ -770,6 +798,7 @@ impl Spec {
             block_devices: Vec::new(),
             net_devices: Vec::new(),
             display_ramfb: false,
+            rtc_base_unix_secs: None,
             extra_args: Vec::new(),
             input_keyboard: None,
             input_typing: Vec::new(),
@@ -905,6 +934,7 @@ impl Spec {
             block_devices: Vec::new(),
             net_devices: Vec::new(),
             display_ramfb: false,
+            rtc_base_unix_secs: None,
             extra_args: Vec::new(),
             input_keyboard: None,
             input_typing: Vec::new(),
@@ -934,6 +964,7 @@ impl Spec {
             block_devices: Vec::new(),
             net_devices: Vec::new(),
             display_ramfb: false,
+            rtc_base_unix_secs: None,
             extra_args: Vec::new(),
             input_keyboard: None,
             input_typing: Vec::new(),
@@ -1011,6 +1042,15 @@ impl Spec {
     #[must_use]
     pub fn with_ramfb(mut self) -> Self {
         self.display_ramfb = true;
+        self
+    }
+
+    /// Start the board's emulated real-time clock at `unix_secs` rather
+    /// than the host clock, so a clock-chip driver's decoded reading is a
+    /// value the vertical can assert against.
+    #[must_use]
+    pub fn with_rtc_base(mut self, unix_secs: i64) -> Self {
+        self.rtc_base_unix_secs = Some(unix_secs);
         self
     }
 
@@ -3720,6 +3760,7 @@ mod tests {
             }],
             net_devices: Vec::new(),
             display_ramfb: false,
+            rtc_base_unix_secs: None,
             extra_args: Vec::new(),
             input_keyboard: None,
             input_typing: Vec::new(),

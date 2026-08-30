@@ -1546,7 +1546,7 @@ struct EarlyDiscovered {
 /// All three discoveries are early-returning, `ranges`-aware walks
 /// ([`console::configure_from_fdt`] / [`gic::configure_from_fdt`] /
 /// [`video::configure_from_fdt`] over
-/// [`tairix_arch_aarch64::fdt::scan_translated`]), so they are safe with
+/// [`tairix_fdt::scan_translated`]), so they are safe with
 /// the MMU off — and the video bring-up *requires* this phase: with the
 /// data caches off the CPU↔firmware mailbox exchange is coherent without
 /// cache maintenance, and its state cell needs the single-threaded boot

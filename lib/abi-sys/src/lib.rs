@@ -111,6 +111,8 @@ const NUM_POINTER_READ: u64 = SyscallNumber::POINTER_READ.as_u16() as u64;
 const NUM_SEAT_SWITCH: u64 = SyscallNumber::SEAT_SWITCH.as_u16() as u64;
 const NUM_SEAT_REVOKE: u64 = SyscallNumber::SEAT_REVOKE.as_u16() as u64;
 const NUM_MMIO_MAP: u64 = SyscallNumber::MMIO_MAP.as_u16() as u64;
+const NUM_PORT_READ: u64 = SyscallNumber::PORT_READ.as_u16() as u64;
+const NUM_PORT_WRITE: u64 = SyscallNumber::PORT_WRITE.as_u16() as u64;
 const NUM_DMA_ALLOC: u64 = SyscallNumber::DMA_ALLOC.as_u16() as u64;
 const NUM_DMA_FREE: u64 = SyscallNumber::DMA_FREE.as_u16() as u64;
 const NUM_RESOURCE_GRANTS: u64 = SyscallNumber::RESOURCE_GRANTS.as_u16() as u64;
@@ -972,6 +974,56 @@ pub extern "C" fn sys_mmio_map(handle: u64, offset: u64, len: usize) -> u64 {
     // kernel resolves the grant handle against the caller and returns the
     // mapped sub-region's base virtual address.
     unsafe { raw_syscall(NUM_MMIO_MAP, [handle, offset, len as u64, 0, 0, 0]) }
+}
+
+/// `port_read`: read one value from a granted legacy I/O port
+/// (`SyscallNumber::PORT_READ`, `plans/TIMESYNC.md` TS-3). Returns the value
+/// read, zero-extended, or a `TAIRIX_E_*` code reinterpreted into the result.
+///
+/// `handle` is an unforgeable, kernel-issued device-resource grant the driver
+/// received for the hardware-tree node it binds — never a bare port number's
+/// licence — and `width` is 1, 2, or 4 bytes. The kernel resolves the handle
+/// against the calling task, confirms it names a port range, and confirms
+/// the whole `port .. port + width` transfer lies inside it; a
+/// forged/non-owned handle, a wrong-kind grant, an unrepresentable width, an
+/// access escaping the range, or a platform with no I/O port space fails
+/// closed. Gated kernel-side on `TAIRIX_CAP_MMIO_MAP`.
+#[must_use]
+#[export_name = "tairix_sys_port_read"]
+pub extern "C" fn sys_port_read(handle: u64, port: u16, width: u8) -> u64 {
+    // SAFETY: see `sys_yield`. No user pointer is dereferenced; the kernel
+    // resolves the grant handle against the caller and bounds the transfer.
+    unsafe {
+        raw_syscall(
+            NUM_PORT_READ,
+            [handle, u64::from(port), u64::from(width), 0, 0, 0],
+        )
+    }
+}
+
+/// `port_write`: write one value to a granted legacy I/O port
+/// (`SyscallNumber::PORT_WRITE`). Returns `0`, or a `TAIRIX_E_*` code
+/// reinterpreted into the result.
+///
+/// Gated exactly as `tairix_sys_port_read`; only the width's own bits of
+/// `value` reach the bus.
+#[must_use]
+#[export_name = "tairix_sys_port_write"]
+pub extern "C" fn sys_port_write(handle: u64, port: u16, width: u8, value: u32) -> u64 {
+    // SAFETY: see `sys_port_read`.
+    unsafe {
+        raw_syscall(
+            NUM_PORT_WRITE,
+            [
+                handle,
+                u64::from(port),
+                u64::from(width),
+                u64::from(value),
+                0,
+                0,
+            ],
+        )
+    }
 }
 
 /// `dma_alloc`: carve a coherent DMA buffer for the calling driver, bounded
@@ -2973,6 +3025,8 @@ mod tests {
         (NUM_SEAT_SWITCH, "seat_switch", 2),
         (NUM_SEAT_REVOKE, "seat_revoke", 1),
         (NUM_MMIO_MAP, "mmio_map", 3),
+        (NUM_PORT_READ, "port_read", 3),
+        (NUM_PORT_WRITE, "port_write", 4),
         (NUM_DMA_ALLOC, "dma_alloc", 3),
         (NUM_DMA_FREE, "dma_free", 2),
         (NUM_RESOURCE_GRANTS, "resource_grants", 2),

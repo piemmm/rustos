@@ -64,10 +64,10 @@ pub use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
 use tairix_abi::{
     BootFacts, BootId, BootSession, CapabilityId, Errno, FileStat, HwNode, HwRemoveFlags,
-    InputMode, LimitKind, MapFlags, OpenFlags, Origin, PowerAction, RandomFlags, ResourceLimit,
-    SchedPriority, Signal, SignalIntakeOp, SyscallNumber, TerminalSize, Time64, WaitFlags,
-    WaitStatus, WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, ORIGIN_WIRE_LEN,
-    SPAWN_UID_INHERIT, STDIN, TERMINAL_SIZE_WIRE_LEN,
+    InputMode, LimitKind, MapFlags, OpenFlags, Origin, PortWidth, PowerAction, RandomFlags,
+    ResourceLimit, SchedPriority, Signal, SignalIntakeOp, SyscallNumber, TerminalSize, Time64,
+    WaitFlags, WaitStatus, WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT,
+    ORIGIN_WIRE_LEN, SPAWN_UID_INHERIT, STDIN, TERMINAL_SIZE_WIRE_LEN,
 };
 use tairix_abi_trap::raw_syscall;
 use tairix_util::secret::Wiped;
@@ -162,6 +162,8 @@ const NUM_VOLUME_DETACH: u64 = SyscallNumber::VOLUME_DETACH.as_u16() as u64;
 
 /// `mmio_map` syscall number (as above).
 const NUM_MMIO_MAP: u64 = SyscallNumber::MMIO_MAP.as_u16() as u64;
+const NUM_PORT_READ: u64 = SyscallNumber::PORT_READ.as_u16() as u64;
+const NUM_PORT_WRITE: u64 = SyscallNumber::PORT_WRITE.as_u16() as u64;
 
 /// `dma_alloc` syscall number (as above).
 const NUM_DMA_ALLOC: u64 = SyscallNumber::DMA_ALLOC.as_u16() as u64;
@@ -1983,6 +1985,60 @@ pub fn mmio_map(handle: u64, offset: u64, len: usize) -> i64 {
     // dereferences no user pointer; it resolves the grant handle and maps the
     // requested sub-region into the caller's own space, returning its base.
     let ret = unsafe { raw_syscall(NUM_MMIO_MAP, [handle, offset, len as u64, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Read one value from a granted legacy I/O port
+/// (`SyscallNumber::PORT_READ`, `plans/TIMESYNC.md` TS-3).
+///
+/// `handle` is an unforgeable, kernel-issued device-resource grant handle —
+/// never a bare port number's licence: the kernel resolves it owner-checked
+/// against the calling task, confirms it names a port range, and confirms
+/// the whole `port .. port + width` transfer lies inside it before issuing
+/// anything. A driver therefore addresses exactly the range its matched node
+/// requested; unbounded port I/O would reach the interrupt controller, the
+/// DMA controller, and the reset line.
+///
+/// The result follows the standard `abi-v1` signed-register convention: a
+/// non-negative value is the value read, zero-extended, and a negative value
+/// is `-errno`.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 result encoding (value ≥ 0, else -errno).
+pub fn port_read(handle: u64, port: u16, width: PortWidth) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
+    // the call on the far side of the trap. `port_read` dereferences no user
+    // pointer; it resolves the grant handle and issues one bounded transfer.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_PORT_READ,
+            [handle, u64::from(port), width.bytes(), 0, 0, 0],
+        )
+    };
+    ret as i64
+}
+
+/// Write one value to a granted legacy I/O port
+/// (`SyscallNumber::PORT_WRITE`).
+///
+/// Gated exactly as [`port_read`]; only the width's own bits of `value`
+/// reach the bus. Returns `0` on success or `-errno`.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 result encoding (0, else -errno).
+pub fn port_write(handle: u64, port: u16, width: PortWidth, value: u32) -> i64 {
+    // SAFETY: as `port_read` — no user pointer crosses the trap.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_PORT_WRITE,
+            [
+                handle,
+                u64::from(port),
+                width.bytes(),
+                u64::from(value),
+                0,
+                0,
+            ],
+        )
+    };
     ret as i64
 }
 

@@ -28,3 +28,7 @@ path = "src/bin/run.rs"
 # site, and the workspace already owns exactly one ELF64 symbol-table
 # decoder — the one a TAIRiX disassembler view reads. Host-only build glue.
 tairix-binfmt = { path = "../../lib/binfmt", version = "=0.0.0" }
+# `-rtc base=` takes a civil datetime, and the workspace owns exactly one
+# proleptic-Gregorian calendar. Spelling the operand through it keeps the
+# harness and the guest on the same instant.
+tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }

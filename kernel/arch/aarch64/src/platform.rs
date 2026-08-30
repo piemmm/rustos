@@ -1,49 +1,38 @@
 //! aarch64 early-boot platform discovery.
 //!
 //! Implements the Arch HAL
-//! [`PlatformDiscovery`](tairix_arch_api::PlatformDiscovery) slice by
-//! normalising the flattened device tree the firmware hands the kernel
-//! into [`tairix_abi::hwtree`] nodes — **generically**. The walk emits a
-//! node for every device the tree describes, with no per-device list to
-//! grow (`PLAN.md` Stage 4.HW):
+//! [`PlatformDiscovery`](tairix_arch_api::PlatformDiscovery) slice over the
+//! shared device-tree walk ([`tairix_arch_api::fdtwalk`]), which normalises
+//! the flattened device tree the firmware hands the kernel into
+//! [`tairix_abi::hwtree`] nodes generically — no per-device list to grow
+//! (`PLAN.md` Stage 4.HW).
 //!
-//! * every node carrying a `compatible` property becomes a hardware-tree
-//!   node whose match keys are that property's strings, in order (the
-//!   devicetree most-specific-first order the `devmgr` bind resolution
-//!   relies on);
-//! * `/memory` nodes (matched by `device_type`/name — they carry no
-//!   `compatible`) become `Memory` nodes;
-//! * `reg` entries become capability-gated MMIO resources, decoded with
-//!   the parent's `#address-cells`/`#size-cells` and translated through
-//!   each ancestor bus's `ranges` into CPU-physical addresses — an
-//!   untranslatable entry is dropped, never emitted untranslated;
-//! * `interrupts` entries become IRQ resources (the three-cell GIC
-//!   specifier both supported boards use; the second cell is the
-//!   interrupt number);
-//! * the device class is derived from the node's data — `device_type`
-//!   (`memory`/`cpu`), the `interrupt-controller` marker, or the
-//!   spec-recommended generic node-name stem — defaulting to `Other`.
+//! What is genuinely this port's, and so lives here:
 //!
-//! Bus interior nodes (e.g. a `simple-bus` `/soc`) are emitted before
-//! their children, so the flat stream reconstructs the tree shape
-//! (`kernel/arch/api` emission-order contract). Nodes describing no
-//! bindable device — no usable match key and not a memory node — are not
-//! emitted; the matcher could never bind them.
+//! * **the GIC interrupt specifier.** Both supported boards (QEMU `virt`,
+//!   the Pi 4) describe interrupts with the three-cell `<type, number,
+//!   flags>` form whose `number` is relative to its type, so the shared
+//!   walk is handed the cell width and the type-relative INTID mapping
+//!   ([`crate::fdt::gic_intid_from_cells`]);
+//! * **the board augmentation** the shared walk cannot know: the
+//!   `VideoCore` mailbox's DMA property-buffer carve, the GENET MAC's DMA
+//!   reach read from its parent bus, and the BCM2711 PCIe host bridge's
+//!   inbound aperture and outbound window;
+//! * **`pcie_bringup`**, the pre-MMU read of those PCIe windows the
+//!   in-kernel USB bring-up needs before any hardware tree exists.
 //!
 //! The PSCI conduit the tree also carries ([`crate::fdt::psci_method`]) is
 //! the prerequisite the aarch64 SMP bring-up (Stage W6) consumes; it is a
 //! firmware-call property rather than a device node, so it is exposed
 //! through the reader, not as a tree node.
 
-use crate::fdt::{
-    bus_level, dma_ranges_aperture, dma_ranges_aperture_of, gic_intid_from_cells,
-    outbound_mmio_window, reg_entry_count, scan_translated, translated_reg, BusLevel, Fdt,
-    MAX_WALK_DEPTH,
+use crate::fdt::{gic_intid_from_cells, Fdt};
+use tairix_abi::{HwNode, HwResource};
+use tairix_arch_api::fdtwalk::FdtPlatform;
+use tairix_fdt::{
+    bus_level, dma_ranges_aperture, dma_ranges_aperture_of, outbound_mmio_window, read_cells,
+    scan_translated, translated_reg, BusLevel, Node,
 };
-use tairix_abi::driver::net::MAC_ADDRESS_LEN;
-use tairix_abi::{HwDeviceClass, HwMatchKey, HwNode, HwResource, HW_NODE_ROOT, HW_NODE_ROOT_ID};
-use tairix_arch_api::{DiscoveryError, HwNodeSink, PlatformDiscovery};
-use tairix_fdt::{name_stem, read_cells, Node};
 // The single source of the mailbox `compatible` match identity lives in the
 // device's own client crate (`lib/vcmailbox`) so the discovery key here and
 // the `vcmailbox` service driver's `BIND_KEYS` can never diverge.
@@ -91,70 +80,114 @@ pub const PCIE_COMPATIBLE: &[u8] = b"brcm,bcm2711-pcie";
 /// its bind table; this is the discovery side of that contract.
 pub const GENET_COMPATIBLE: &[u8] = b"brcm,bcm2711-genet-v5";
 
-/// Builds the hardware tree from a borrowed flattened device tree.
-pub struct FdtDiscovery<'a> {
-    fdt: Fdt<'a>,
-}
+/// This port's half of the shared device-tree walk: the GIC interrupt
+/// specifier and the BCM2711 board augmentation.
+pub struct Aarch64Fdt;
 
-impl<'a> FdtDiscovery<'a> {
-    /// Wrap an already-validated [`Fdt`] reader.
-    #[must_use]
-    pub fn new(fdt: Fdt<'a>) -> Self {
-        Self { fdt }
+impl FdtPlatform for Aarch64Fdt {
+    /// The three-cell `<type, number, flags>` GIC binding both supported
+    /// boards describe interrupts with.
+    const INTERRUPT_CELLS: usize = 3;
+
+    /// The GIC mapping is a pure function of the specifier's own cells, so
+    /// nothing tree-wide is read.
+    fn from_tree(_fdt: &Fdt<'_>) -> Self {
+        Self
     }
-}
 
-impl PlatformDiscovery for FdtDiscovery<'_> {
-    fn discover(&self, sink: &mut dyn HwNodeSink) -> Result<(), DiscoveryError> {
-        // Root first so every later node's parent is already emitted. Its
-        // id is the shared [`HW_NODE_ROOT_ID`]; its parent is the
-        // `HW_NODE_ROOT` sentinel (so it alone is `is_root`).
-        sink.emit(HwNode::new(
-            HW_NODE_ROOT_ID,
-            HW_NODE_ROOT,
-            HwDeviceClass::Root,
-        ))?;
-        let mut next_id: u32 = 1;
-        // The shared per-depth bus state (`crate::fdt`)
-        // plus this walk's own per-depth fact: the hardware-tree id of
-        // the nearest *emitted* ancestor — the parent id a child emitted
-        // at depth + 1 names. A tree nested beyond `MAX_WALK_DEPTH` is
-        // refused as malformed rather than silently under-enumerated.
-        let mut levels = [BusLevel::DEFAULT; MAX_WALK_DEPTH];
-        let mut ancestors = [0u32; MAX_WALK_DEPTH];
+    /// Map a GIC specifier to the global INTID `irq_bind` and the GIC
+    /// routing use.
+    ///
+    /// The `number` cell is relative to its `type`, so emitting it raw would
+    /// hand an autoloaded driver a line 32 below the one its device raises.
+    /// The mapping is the one shared decoder the boot path's own
+    /// `gic_device_intid` reads, and a type this GICv2 port cannot represent
+    /// (a GICv3-only extended-SPI binding) maps to nothing rather than a
+    /// guessed line.
+    fn interrupt_line(&self, specifier: &[u8]) -> Option<u32> {
+        let kind = u32::try_from(read_cells(specifier, 0, 1)?).ok()?;
+        let number = u32::try_from(read_cells(specifier, 4, 1)?).ok()?;
+        gic_intid_from_cells(kind, number)
+    }
 
-        for node in self.fdt.nodes() {
-            let node = node.map_err(|_| DiscoveryError::MalformedSource)?;
-            let depth = node.depth() as usize;
-            if depth >= MAX_WALK_DEPTH {
-                return Err(DiscoveryError::MalformedSource);
-            }
+    fn augment(&self, node: &Node<'_>, depth: usize, levels: &[BusLevel<'_>], hw: &mut HwNode) {
+        let Some(compatible) = node.property("compatible") else {
+            return;
+        };
+        let names_compatible = |wanted: &[u8]| compatible.iter_strings().any(|s| s == wanted);
 
-            // This node's own cell counts and `ranges` govern its
-            // *children*; record them whether or not the node is emitted.
-            let mut level = bus_level(&node);
-            if depth == 0 {
-                level.ranges = None;
-                levels[0] = level;
-                ancestors[0] = HW_NODE_ROOT_ID;
-                continue;
-            }
-
-            let mut ancestor = ancestors[depth - 1];
-            if let Some(emitted) = build_node(&node, depth, &levels, ancestor, next_id) {
-                sink.emit(emitted)?;
-                ancestor = next_id;
-                next_id = next_id
-                    .checked_add(1)
-                    .ok_or(DiscoveryError::MalformedSource)?;
-            }
-            levels[depth] = level;
-            ancestors[depth] = ancestor;
+        // The VideoCore firmware mailbox additionally *requests* a DMA
+        // property-buffer carve inside the 30-bit aperture (`plans/PI.md`
+        // P7) — a capability-grant request the driver host satisfies, declared here because only the platform
+        // knows the firmware's aperture.
+        if names_compatible(MAILBOX_COMPATIBLE) {
+            let dma = HwResource::dma(VIDEOCORE_APERTURE_LIMIT, MAILBOX_DMA_BUFFER_LEN);
+            // A node with no room left simply carries no carve request; the
+            // capacity bound is the ABI's, never a panic.
+            let _ = hw.push_resource(dma);
         }
 
-        Ok(())
+        // A BCM2711 GENET MAC masters DMA to ordinary system memory but its own
+        // node declares no reach: Devicetree Spec v0.4 §2.3.9 puts `dma-ranges`
+        // on the *bus*, so the constraint is read from the parent bus level (the
+        // Pi 4's `/scb`) — a discovered value, never a board constant. Declared
+        // here because only the platform's tree knows the aperture.
+        if names_compatible(GENET_COMPATIBLE) {
+            if let Some((aperture_top, aperture_len)) = parent_dma_aperture(depth, levels) {
+                // No room left simply carries no carve request; the capacity
+                // bound is the ABI's, never a panic.
+                let _ = hw.push_resource(HwResource::dma(aperture_top, aperture_len));
+            }
+        }
+        // The BCM2711 PCIe host bridge additionally *requests* the
+        // inbound-DMA aperture it grants devices behind it (`plans/PI.md`
+        // P10): the CPU-physical window read from its `dma-ranges`, with the
+        // node's own `#address`/`#size`-cells decoding the child PCI triple
+        // and its parent bus's `#address-cells` the CPU base. Declared here
+        // because only the platform's tree knows the aperture; the VL805 wiring carves its xHCI DMA region below the top.
+        if names_compatible(PCIE_COMPATIBLE) {
+            let level = bus_level(node);
+            let parent_addr_cells = depth
+                .checked_sub(1)
+                .and_then(|i| levels.get(i))
+                .map_or(2, |l| l.addr_cells);
+            if let Some((aperture_top, aperture_len, inbound_pcie_base)) =
+                dma_ranges_aperture(node, level.addr_cells, parent_addr_cells, level.size_cells)
+            {
+                // No room left simply carries no aperture request; the
+                // capacity bound is the ABI's, never a panic. An
+                // unreadable `dma-ranges` likewise omits it rather than
+                // inventing a window. The far-side PCIe base the inbound
+                // viewport starts at rides the resource's translation field
+                // so the VL805 wiring can program the inbound BAR from the
+                // tree, never a board constant.
+                let _ = hw.push_resource(HwResource::dma_translated(
+                    aperture_top,
+                    aperture_len,
+                    inbound_pcie_base,
+                ));
+            }
+            // …and the outbound memory window from its `ranges`: the
+            // CPU-physical aperture the bridge forwards to PCIe memory space
+            // and the PCIe-space base it maps to, so the VL805 wiring can
+            // both program the root complex's outbound window and translate
+            // the enumerated BAR back to a CPU-physical address. Carried as a
+            // single `BusWindow` (CPU base, size, far-side PCIe base) rather
+            // than conflated with the controller's own `reg` MMIO windows. An unreadable `ranges` omits it rather
+            // than inventing a window.
+            if let Some((cpu_base, pcie_base, size)) =
+                outbound_mmio_window(node, level.addr_cells, parent_addr_cells, level.size_cells)
+            {
+                let _ = hw.push_resource(HwResource::bus_window(cpu_base, size, pcie_base));
+            }
+        }
     }
 }
+
+/// The [`PlatformDiscovery`](tairix_arch_api::PlatformDiscovery)
+/// implementation the boot path constructs: the shared walk over this
+/// port's [`Aarch64Fdt`].
+pub type FdtDiscovery<'a> = tairix_arch_api::fdtwalk::FdtDiscovery<'a, Aarch64Fdt>;
 
 /// The BCM2711 PCIe root-complex address windows the in-kernel USB
 /// keyboard bring-up needs (`plans/PI.md` P10), read from the
@@ -241,192 +274,6 @@ pub fn pcie_bringup(fdt: &Fdt<'_>) -> Option<PcieDiscovery> {
     })
 }
 
-/// Build the hardware-tree node for one device-tree node, or `None` when
-/// the node describes nothing the tree can carry (no representable match
-/// key and not a memory node — the matcher could never bind it).
-fn build_node(
-    node: &Node<'_>,
-    depth: usize,
-    levels: &[BusLevel<'_>],
-    parent: u32,
-    id: u32,
-) -> Option<HwNode> {
-    let class = classify(node);
-    let compatible = node.property("compatible");
-    let mut hw = HwNode::new(id, parent, class);
-
-    let mut keys = 0usize;
-    if let Some(compat) = compatible {
-        for s in compat.iter_strings() {
-            // A string longer than `HW_COMPATIBLE_MAX` is rejected by the
-            // ABI on *both* sides — a driver bind key could never carry
-            // it either — so skipping it provably loses no match. Keys
-            // past the node capacity are dropped most-specific-first
-            // preserved (the devicetree list order).
-            let Ok(key) = HwMatchKey::compatible(s) else {
-                continue;
-            };
-            if hw.push_match_key(key).is_err() {
-                break;
-            }
-            keys += 1;
-        }
-    }
-    if keys == 0 && class != HwDeviceClass::Memory {
-        return None;
-    }
-
-    push_mmio_resources(node, depth, levels, &mut hw);
-    push_irq_resources(node, &mut hw);
-
-    // The VideoCore firmware mailbox additionally *requests* a DMA
-    // property-buffer carve inside the 30-bit aperture (`plans/PI.md`
-    // P7) — a capability-grant request the driver host satisfies, declared here because only the platform
-    // knows the firmware's aperture.
-    if compatible.is_some_and(|c| c.iter_strings().any(|s| s == MAILBOX_COMPATIBLE)) {
-        let dma = HwResource::dma(VIDEOCORE_APERTURE_LIMIT, MAILBOX_DMA_BUFFER_LEN);
-        // A node with no room left simply carries no carve request; the
-        // capacity bound is the ABI's, never a panic.
-        let _ = hw.push_resource(dma);
-    }
-
-    // A BCM2711 GENET MAC masters DMA to ordinary system memory but its own
-    // node declares no reach: Devicetree Spec v0.4 §2.3.9 puts `dma-ranges`
-    // on the *bus*, so the constraint is read from the parent bus level (the
-    // Pi 4's `/scb`) — a discovered value, never a board constant. Declared
-    // here because only the platform's tree knows the aperture.
-    if compatible.is_some_and(|c| c.iter_strings().any(|s| s == GENET_COMPATIBLE)) {
-        if let Some((aperture_top, aperture_len)) = parent_dma_aperture(depth, levels) {
-            // No room left simply carries no carve request; the capacity
-            // bound is the ABI's, never a panic.
-            let _ = hw.push_resource(HwResource::dma(aperture_top, aperture_len));
-        }
-    }
-
-    // A network device's factory link-layer address is not readable from
-    // every MAC's own registers (the BCM2711's GENET holds none), so the
-    // platform firmware publishes it on the node and the driver programs it
-    // in. Read from the standard ethernet-controller binding for *any*
-    // network node, never a board special case.
-    if let Some(mac) = local_mac_address(node) {
-        let _ = hw.push_resource(HwResource::link_address(mac));
-    }
-
-    // The BCM2711 PCIe host bridge additionally *requests* the
-    // inbound-DMA aperture it grants devices behind it (`plans/PI.md`
-    // P10): the CPU-physical window read from its `dma-ranges`, with the
-    // node's own `#address`/`#size`-cells decoding the child PCI triple
-    // and its parent bus's `#address-cells` the CPU base. Declared here
-    // because only the platform's tree knows the aperture; the VL805 wiring carves its xHCI DMA region below the top.
-    if compatible.is_some_and(|c| c.iter_strings().any(|s| s == PCIE_COMPATIBLE)) {
-        let level = bus_level(node);
-        let parent_addr_cells = depth
-            .checked_sub(1)
-            .and_then(|i| levels.get(i))
-            .map_or(2, |l| l.addr_cells);
-        if let Some((aperture_top, aperture_len, inbound_pcie_base)) =
-            dma_ranges_aperture(node, level.addr_cells, parent_addr_cells, level.size_cells)
-        {
-            // No room left simply carries no aperture request; the
-            // capacity bound is the ABI's, never a panic. An
-            // unreadable `dma-ranges` likewise omits it rather than
-            // inventing a window. The far-side PCIe base the inbound
-            // viewport starts at rides the resource's translation field
-            // so the VL805 wiring can program the inbound BAR from the
-            // tree, never a board constant.
-            let _ = hw.push_resource(HwResource::dma_translated(
-                aperture_top,
-                aperture_len,
-                inbound_pcie_base,
-            ));
-        }
-        // …and the outbound memory window from its `ranges`: the
-        // CPU-physical aperture the bridge forwards to PCIe memory space
-        // and the PCIe-space base it maps to, so the VL805 wiring can
-        // both program the root complex's outbound window and translate
-        // the enumerated BAR back to a CPU-physical address. Carried as a
-        // single `BusWindow` (CPU base, size, far-side PCIe base) rather
-        // than conflated with the controller's own `reg` MMIO windows. An unreadable `ranges` omits it rather
-        // than inventing a window.
-        if let Some((cpu_base, pcie_base, size)) =
-            outbound_mmio_window(node, level.addr_cells, parent_addr_cells, level.size_cells)
-        {
-            let _ = hw.push_resource(HwResource::bus_window(cpu_base, size, pcie_base));
-        }
-    }
-
-    Some(hw)
-}
-
-/// Decode each `reg` entry with the parent's cell counts, translate it
-/// through the ancestor buses' `ranges` (the shared
-/// [`crate::fdt::translated_reg`] decoder), and push
-/// it as an MMIO resource.
-///
-/// Entries that cannot be decoded (out-of-range cell counts, a length
-/// that is not a whole number of entries) or translated (an ancestor bus
-/// without usable `ranges`) are dropped — the tree never carries an
-/// invented or untranslated window. Entries past the
-/// node's resource capacity are dropped likewise (a ABI bound).
-fn push_mmio_resources(node: &Node<'_>, depth: usize, levels: &[BusLevel<'_>], hw: &mut HwNode) {
-    let Some(entries) = reg_entry_count(node, depth, levels) else {
-        return;
-    };
-    for index in 0..entries {
-        if let Some((base, len)) = translated_reg(node, depth, levels, index) {
-            if hw.push_resource(HwResource::mmio(base, len)).is_err() {
-                return;
-            }
-        }
-    }
-}
-
-/// Push one IRQ resource per `interrupts` specifier, carrying the **global
-/// GICv2 INTID** the granted line is bound by.
-///
-/// Both supported boards (QEMU `virt`, the Pi 4) describe interrupts with
-/// the three-cell GIC specifier `<type, number, flags>`, whose `number` is
-/// *relative to its type*: an SPI is offset by 32 and a PPI by 16 to reach
-/// the INTID `irq_bind` and the GIC routing use. Emitting the raw cell would
-/// hand an autoloaded driver a line 32 below the one its device raises, so
-/// the specifier is mapped through the one shared decoder
-/// ([`crate::fdt::gic_intid_from_cells`]) — the same value the boot path's
-/// own `gic_device_intid` reads. A specifier that is not a whole number of
-/// cells, or whose type this GICv2 port cannot represent (a GICv3-only
-/// extended-SPI binding), is dropped — never a guessed line.
-fn push_irq_resources(node: &Node<'_>, hw: &mut HwNode) {
-    /// Byte length of one three-cell GIC interrupt specifier.
-    const GIC_SPECIFIER_LEN: usize = 12;
-    let Some(interrupts) = node.property("interrupts") else {
-        return;
-    };
-    let value = interrupts.value();
-    if value.is_empty() || value.len() % GIC_SPECIFIER_LEN != 0 {
-        return;
-    }
-    let mut off = 0;
-    while off + GIC_SPECIFIER_LEN <= value.len() {
-        let (Some(kind), Some(number)) = (read_cells(value, off, 1), read_cells(value, off + 4, 1))
-        else {
-            return;
-        };
-        let (Ok(kind), Ok(number)) = (u32::try_from(kind), u32::try_from(number)) else {
-            return;
-        };
-        // A specifier this port cannot map is skipped, not guessed at; the
-        // rest of the list is still emitted.
-        if let Some(intid) = gic_intid_from_cells(kind, number) {
-            if hw
-                .push_resource(HwResource::irq(u64::from(intid), 1))
-                .is_err()
-            {
-                return;
-            }
-        }
-        off += GIC_SPECIFIER_LEN;
-    }
-}
-
 /// The DMA aperture a node's **parent bus** grants the devices on it, as
 /// `(exclusive top, extent)`, or [`None`] when no ancestor level declares
 /// one.
@@ -449,66 +296,6 @@ fn parent_dma_aperture(depth: usize, levels: &[BusLevel<'_>]) -> Option<(u64, u6
         parent.size_cells,
     )?;
     Some((top, len))
-}
-
-/// The firmware-published link-layer address on `node`, from the standard
-/// ethernet-controller binding.
-///
-/// `mac-address` (the current address) takes precedence over
-/// `local-mac-address` (the address programmed at manufacture), matching the
-/// binding's own precedence. A property that is not exactly one address is
-/// ignored rather than truncated or padded, and an all-zero address is
-/// refused (it is neither a valid unicast nor the broadcast address, so it
-/// carries no identity) — fail closed, never a guessed MAC.
-fn local_mac_address(node: &Node<'_>) -> Option<[u8; MAC_ADDRESS_LEN]> {
-    for name in ["mac-address", "local-mac-address"] {
-        let Some(property) = node.property(name) else {
-            continue;
-        };
-        let value = property.value();
-        if value.len() != MAC_ADDRESS_LEN {
-            continue;
-        }
-        let mut octets = [0u8; MAC_ADDRESS_LEN];
-        octets.copy_from_slice(value);
-        if octets != [0u8; MAC_ADDRESS_LEN] {
-            return Some(octets);
-        }
-    }
-    None
-}
-
-/// Derive the device class from the node's own data, most authoritative
-/// source first: `device_type` (the spec keeps it for `memory` and
-/// `cpu`), the `interrupt-controller` marker property, then the
-/// spec-recommended generic node-name stem. Anything else is honestly
-/// [`HwDeviceClass::Other`] — the class is advisory; binding is by match
-/// key.
-fn classify(node: &Node<'_>) -> HwDeviceClass {
-    if let Some(device_type) = node.property("device_type") {
-        match device_type.iter_strings().next() {
-            Some(b"memory") => return HwDeviceClass::Memory,
-            Some(b"cpu") => return HwDeviceClass::Cpu,
-            _ => {}
-        }
-    }
-    if node.property("interrupt-controller").is_some() {
-        return HwDeviceClass::InterruptController;
-    }
-    match name_stem(node.name()) {
-        b"memory" => HwDeviceClass::Memory,
-        b"cpu" => HwDeviceClass::Cpu,
-        b"timer" => HwDeviceClass::Timer,
-        b"interrupt-controller" | b"intc" | b"gic" => HwDeviceClass::InterruptController,
-        b"serial" | b"uart" => HwDeviceClass::Serial,
-        b"rtc" => HwDeviceClass::Rtc,
-        b"ethernet" => HwDeviceClass::Network,
-        b"mmc" | b"sdhci" | b"emmc2" => HwDeviceClass::Storage,
-        b"keyboard" | b"mouse" | b"touchscreen" => HwDeviceClass::Input,
-        b"display" | b"gpu" | b"hdmi" | b"framebuffer" => HwDeviceClass::Display,
-        b"soc" | b"bus" | b"pci" | b"pcie" | b"usb" | b"axi" => HwDeviceClass::Bus,
-        _ => HwDeviceClass::Other,
-    }
 }
 
 #[cfg(test)]

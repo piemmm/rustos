@@ -2399,6 +2399,9 @@ fn run_phases<A: KernelArch>(
         .with_log_sink(log_sink)
         // Serve `msi_alloc` through the arch MSI controller (`None` is fail-closed).
         .with_msi_alloc_facility(state.arch.as_ref().msi_alloc_facility())
+        // Serve `port_read` / `port_write` through the arch port-I/O
+        // producer (`None` — every port but the x86 family — is fail-closed).
+        .with_port_io_facility(state.arch.as_ref().port_io_facility())
         // Serve `shm_*` through the `kernel/mem`-backed shared-memory producer.
         .with_shared_mem_facility(shared_mem_facility)
         // Serve `signal` through the scheduler-side producer built above

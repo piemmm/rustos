@@ -140,6 +140,8 @@ extern "C" {
 #define TAIRIX_SYS_FS_READLINK 114u
 #define TAIRIX_SYS_FS_LINK 115u
 #define TAIRIX_SYS_FS_REALPATH 116u
+#define TAIRIX_SYS_PORT_READ 117u
+#define TAIRIX_SYS_PORT_WRITE 118u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns TAIRIX_E_WOULD_BLOCK when a
@@ -426,6 +428,8 @@ int32_t tairix_sys_fs_symlink(void * a0, uintptr_t a1, void * a2, uintptr_t a3);
 uint64_t tairix_sys_fs_readlink(void * a0, uintptr_t a1, void * a2, uintptr_t a3);
 int32_t tairix_sys_fs_link(void * a0, uintptr_t a1, void * a2, uintptr_t a3, uint32_t a4);
 uint64_t tairix_sys_fs_realpath(void * a0, uintptr_t a1, void * a2, uintptr_t a3, uint32_t a4);
+uint64_t tairix_sys_port_read(uint64_t a0, uintptr_t a1, uint32_t a2);
+uint64_t tairix_sys_port_write(uint64_t a0, uintptr_t a1, uint32_t a2, uintptr_t a3);
 
 #ifdef __cplusplus
 } /* extern "C" */

@@ -2895,6 +2895,56 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // A pure read like fs_readlink; not audited per call.
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::PORT_READ,
+        name: "port_read",
+        arg_count: 3,
+        args: [
+            AbiType::Handle,
+            AbiType::Len,
+            AbiType::U32,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `U64` carries the value read (zero-extended) or, by the shared
+        // register convention, a negated errno.
+        ret: AbiType::U64,
+        // Reaching the legacy I/O port space is privileged, never ambient:
+        // the ports a machine exposes include the interrupt controller, the
+        // DMA controller, and the reset line, so only a driver granted the
+        // matched node's port range holds `CAP_MMIO_MAP` — the same
+        // authority that node's port resource already requires — and the
+        // kernel bounds every access inside that unforgeable grant. A read
+        // is NOT audited: a driver polls a status register (the CMOS
+        // update-in-progress flag) far too often for a per-call record, and
+        // the read changes nothing a later reader could not observe.
+        required_capability: Some(CapabilityId::MMIO_MAP),
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::PORT_WRITE,
+        name: "port_write",
+        arg_count: 4,
+        args: [
+            AbiType::Handle,
+            AbiType::Len,
+            AbiType::U32,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `U64` carries zero on success or a negated errno, exactly like
+        // the other unit-returning traps.
+        ret: AbiType::U64,
+        // The same grant-bounded gate as `port_read`. It IS audited per
+        // call, unlike the read: a write changes device state a later
+        // reader cannot reconstruct, and a driver issues few of them
+        // (selecting a CMOS register, arming a controller), so the record
+        // cannot drown the log.
+        required_capability: Some(CapabilityId::MMIO_MAP),
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

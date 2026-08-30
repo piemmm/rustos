@@ -1,0 +1,20 @@
+[package]
+name = "tairix-test-rtc-fixture"
+description = "Shared clock-chip fixture for the QEMU real-time-clock verticals. The harness starts the emulated chip at a fixed instant (`-rtc base=`) and each freestanding guest checks the applied reading against the same window, so neither end can drift from the other."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# The plausibility window the fixture instant is checked to sit inside, so a
+# fixture nobody could accept fails the build rather than a run.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }

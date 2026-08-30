@@ -72,7 +72,7 @@ pub use mailbox::MailboxChannel;
 pub use mmio::{MmioMapError, MmioMapper, RegisterWindow, WindowError};
 pub use msix::{MsiMessage, MsixBus};
 pub use pci::PciBus;
-pub use port_io::{PortIo, PortIo8};
+pub use port_io::{PortIo, PortIo8, PortValue, PortWidth};
 pub use register::{DriverRegisterReply, DRIVER_REGISTER_REPLY_MAGIC, DRIVER_REGISTER_STATUS_OK};
 pub use timing::Delay;
 pub use virtio::VirtioHost;
@@ -865,6 +865,57 @@ where
         return Err(DriverError::OutOfRange);
     }
     Ok((base, len))
+}
+
+/// Resolve the *single* legacy I/O port range from a driver's kernel-issued
+/// device-resource grants, as `(first port, port count)`.
+///
+/// The [`Port`](crate::hwtree::HwResourceKind::Port) sibling of
+/// [`sole_register_window`]. A port-addressed device (the PC CMOS clock's
+/// index/data pair, an ISA UART) is reached through the capability-gated
+/// `port_read` / `port_write` traps rather than a mapping, so its grant
+/// names a range to address instead of a window to map — hence a separate
+/// resolver rather than a mode of the mapping one.
+///
+/// Non-port resources are ignored. The range is returned in the 16-bit width
+/// the I/O port space actually has: a grant describing ports beyond `0xFFFF`
+/// is malformed rather than an invitation to truncate.
+///
+/// # Errors
+///
+/// Fails closed, never guessing a missing or ambiguous range:
+///
+/// * [`DriverError::NotFound`] if no port grant is present.
+/// * [`DriverError::Unsupported`] if more than one is present (an ambiguous
+///   delivery — a packaging defect the driver refuses rather than picking
+///   one).
+/// * [`DriverError::OutOfRange`] for an empty range or one that does not lie
+///   wholly inside the 16-bit port space.
+///
+/// # Capabilities
+///
+/// None. This inspects a grant set the kernel already minted; each transfer
+/// is capability-checked and re-bounded kernel-side at the port trap.
+pub fn sole_port_range<'a, I>(resources: I) -> Result<(u16, u16), DriverError>
+where
+    I: IntoIterator<Item = &'a HwResource>,
+{
+    let mut range: Option<(u64, u64)> = None;
+    for resource in resources {
+        if resource.kind() == Some(crate::hwtree::HwResourceKind::Port) {
+            if range.is_some() {
+                return Err(DriverError::Unsupported);
+            }
+            range = Some((resource.base(), resource.length()));
+        }
+    }
+    let (base, count) = range.ok_or(DriverError::NotFound)?;
+    let base = u16::try_from(base).map_err(|_| DriverError::OutOfRange)?;
+    let count = u16::try_from(count).map_err(|_| DriverError::OutOfRange)?;
+    if count == 0 || u32::from(base) + u32::from(count) > 0x1_0000 {
+        return Err(DriverError::OutOfRange);
+    }
+    Ok((base, count))
 }
 
 /// Resolve the *single* linear scan-out surface from a driver's
@@ -1791,6 +1842,59 @@ mod tests {
         assert_eq!(
             sole_register_window([HwResource::mmio(0x1000_0000, 0)].iter()),
             Err(DriverError::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn sole_port_range_resolves_the_range_beside_the_other_grants() {
+        let grants = [
+            HwResource::mmio(0x1000_0000, 0x1000),
+            HwResource::port(0x70, 2),
+            HwResource::irq(8, 1),
+        ];
+        assert_eq!(sole_port_range(grants.iter()), Ok((0x70, 2)));
+        // A port grant is not a mappable window, and a window is not a port
+        // range: neither resolver may answer from the other's grant.
+        assert_eq!(
+            sole_register_window([HwResource::port(0x70, 2)].iter()),
+            Err(DriverError::NotFound)
+        );
+        assert_eq!(
+            sole_port_range([HwResource::mmio(0x1000_0000, 0x1000)].iter()),
+            Err(DriverError::NotFound)
+        );
+    }
+
+    #[test]
+    fn sole_port_range_fails_closed() {
+        assert_eq!(
+            sole_port_range([HwResource::dma(0x8000_0000, 0)].iter()),
+            Err(DriverError::NotFound)
+        );
+        let two = [HwResource::port(0x70, 2), HwResource::port(0x3F8, 8)];
+        assert_eq!(sole_port_range(two.iter()), Err(DriverError::Unsupported));
+        // An empty range addresses nothing.
+        assert_eq!(
+            sole_port_range([HwResource::port(0x70, 0)].iter()),
+            Err(DriverError::OutOfRange)
+        );
+        // The I/O port space is 16-bit, so a base or an end past it is a
+        // malformed grant rather than a range to truncate into.
+        for bad in [
+            HwResource::port(0x1_0000, 2),
+            HwResource::port(0xFFFF, 2),
+            HwResource::port(0x70, 0x1_0000),
+        ] {
+            assert_eq!(
+                sole_port_range([bad].iter()),
+                Err(DriverError::OutOfRange),
+                "{bad:?} does not lie inside the port space"
+            );
+        }
+        // The exact top of the space does fit.
+        assert_eq!(
+            sole_port_range([HwResource::port(0xFFFE, 2)].iter()),
+            Ok((0xFFFE, 2))
         );
     }
 
