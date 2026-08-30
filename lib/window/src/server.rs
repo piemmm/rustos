@@ -43,9 +43,9 @@ use tairix_abi::origin::ProcId;
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 pub use tairix_abi::window_ipc::WindowSizing;
 use tairix_abi::window_ipc::{
-    encode_create_reply, encode_desktop_reply, encode_minted_id_reply, AppBar, AppMenu, MenuAnchor,
-    WindowEvent, WindowRequest, WindowTitle, WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN,
-    WINDOW_MINTED_ID_REPLY_LEN,
+    encode_create_reply, encode_desktop_reply, encode_minted_id_reply, AppBar, AppMenu,
+    AppMenuItemId, MenuAnchor, MenuOutcome, WindowEvent, WindowRequest, WindowTitle,
+    WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN, WINDOW_MINTED_ID_REPLY_LEN,
 };
 use tairix_abi::Errno;
 use tairix_display::{FrameRegion, ShmMapper};
@@ -297,6 +297,49 @@ pub trait WindowHost {
         Err(Errno::NotSupported)
     }
 
+    /// A validated `CreateMenuPanel`: the owner of `owner_window_id` — whose
+    /// open `open_id` is live and holds no panel — offered `surface` as the
+    /// attached window hanging from panel row `row`, and the engine has
+    /// minted it `window_id`. The host places, clips, and composites it
+    /// wearing the row's own label as its band title.
+    ///
+    /// **The host validates `row`, and whether it is too late.** The engine
+    /// does not retain the chain's menu, so it cannot tell a panel row from
+    /// any other id the application states; the host, which renders the
+    /// chain, refuses a `row` that is not a live panel row of it. Nor did
+    /// anything about the chain wait for this surface, so the pointer may
+    /// already have settled elsewhere — only the host knows that either.
+    /// Refusing then is what stops a slow or hostile application planting a
+    /// panel under a row the user has left, and the refusal costs the
+    /// application only the frames it drew. (A surface for an open that has
+    /// already been *answered* never reaches here at all — the engine has no
+    /// open to hang it on.)
+    ///
+    /// An error refuses the panel: the engine unmaps the region, mints no
+    /// window, and relays the refusal, exactly as
+    /// [`popup_opened`](Self::popup_opened) does.
+    ///
+    /// The default refuses: a host that composes no menu service — or one
+    /// whose chains hang no application surfaces — cannot honour an attached
+    /// window, and saying so is more honest than accepting a surface nothing
+    /// will place.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the host will not hang a surface for; the refusal is
+    /// relayed to the client, which frees its region and carries on.
+    fn menu_panel_opened(
+        &mut self,
+        window_id: u64,
+        owner_window_id: u64,
+        open_id: u64,
+        row: AppMenuItemId,
+        surface: &DisplayMode,
+    ) -> Result<(), Errno> {
+        let _ = (window_id, owner_window_id, open_id, row, surface);
+        Err(Errno::NotSupported)
+    }
+
     /// A validated `SetAppBar`: the attested `owner` declared (or
     /// re-declared) its presence on the desktop's icon bar — its event
     /// route, whether it handles the primary click, and its menu, all
@@ -438,6 +481,47 @@ pub struct PopupSpec {
     pub offset_y: i32,
 }
 
+/// Everything one `CreateMenuPanel` asks for, in one place: the app half
+/// fills it in for [`WindowClient::create_menu_panel`], the engine's panel
+/// path receives the decoded request as the same unit, so both halves
+/// describe an attached window once.
+///
+/// It states no placement. A popup carries an offset from its parent's
+/// client origin; an attached window hangs off a menu row the session
+/// placed, and the application is never told where that is.
+///
+/// [`WindowClient::create_menu_panel`]: crate::client::WindowClient::create_menu_panel
+#[derive(Copy, Clone)]
+pub struct MenuPanelSpec {
+    /// The caller's own window whose chain the panel hangs on.
+    pub window_id: u64,
+    /// That window's unanswered open, from the open's reply.
+    pub open_id: u64,
+    /// The panel row of that open's menu, as the arrival named it.
+    pub row: AppMenuItemId,
+    /// The `shm_grant`ed region holding the panel's frames, mapped once.
+    pub shm_handle: u64,
+    /// The endpoint the panel's own events are delivered to.
+    pub event_endpoint: u64,
+    /// How many frames the region holds, back to back.
+    pub frame_count: u32,
+    /// The geometry of one frame, bounded to `APP_MENU_PANEL_MAX_PX`.
+    pub surface: DisplayMode,
+}
+
+/// The chain a window is an attached panel of: which open, and which of its
+/// panel rows.
+///
+/// Keyed on the open rather than the owning window, because an open id is
+/// minted once and never reused — so an attachment can only ever be reaped
+/// by the gesture that created it, never by a later chain on the same
+/// window.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MenuAttachment {
+    pub(crate) open_id: u64,
+    pub(crate) row: AppMenuItemId,
+}
+
 /// One live window: its attested owner, its event route, its
 /// once-mapped frame region, and whether a trusted-picker request is
 /// awaiting its conclusion.
@@ -465,10 +549,18 @@ struct WindowRecord<R> {
     /// shape is enforced in one place and an application can tell one
     /// gesture's answer from the next's.
     menu_open: Option<u64>,
-    /// The parent top-level window this record is a popup of, or `None`
-    /// for an ordinary top-level window. A popup is closed when its
-    /// parent closes, so the link lives beside the window it binds.
+    /// The top-level window this record is a **transient** of — the parent
+    /// of a popup, the chain owner of an attached menu panel — or `None`
+    /// for an ordinary top-level window. A transient is closed when the
+    /// window it hangs from closes, so the link lives beside the window it
+    /// binds. A detached panel clears it: it is an ordinary window from
+    /// then on.
     parent: Option<u64>,
+    /// The chain this record is an attached panel of, or `None` for every
+    /// other window. Set when the panel is accepted, cleared by the
+    /// outcome that detaches it, and the reason the panel cannot outlive
+    /// its chain.
+    attachment: Option<MenuAttachment>,
 }
 
 impl<R> WindowRecord<R> {
@@ -589,7 +681,9 @@ impl<M: ShmMapper> WindowServer<M> {
                 return match decoded {
                     // A request that mints an id answers with the frame that
                     // carries it, so an attestation failure must too.
-                    WindowRequest::Create { .. } | WindowRequest::CreatePopup { .. } => {
+                    WindowRequest::Create { .. }
+                    | WindowRequest::CreatePopup { .. }
+                    | WindowRequest::CreateMenuPanel { .. } => {
                         create_reply(reply, Err(err), self.server)
                     }
                     WindowRequest::OpenMenu { .. } => minted_id_reply(reply, Err(err)),
@@ -653,6 +747,33 @@ impl<M: ShmMapper> WindowServer<M> {
                     offset_y,
                 };
                 create_reply(reply, self.create_popup(host, caller, spec), self.server)
+            }
+            WindowRequest::CreateMenuPanel {
+                window_id,
+                open_id,
+                row,
+                shm_handle,
+                event_endpoint,
+                frame_count,
+                width_px,
+                height_px,
+                stride_bytes,
+                format,
+            } => {
+                let spec = MenuPanelSpec {
+                    window_id,
+                    open_id,
+                    row,
+                    shm_handle,
+                    event_endpoint,
+                    frame_count,
+                    surface: surface_of(width_px, height_px, stride_bytes, format),
+                };
+                create_reply(
+                    reply,
+                    self.create_menu_panel(host, caller, spec),
+                    self.server,
+                )
             }
             WindowRequest::OpenMenu {
                 window_id,
@@ -725,7 +846,9 @@ impl<M: ShmMapper> WindowServer<M> {
             // the create-reply frame; refusing it here keeps this total
             // without a second copy of that path, and refuses rather than
             // opening a window down a route that never validated one.
-            WindowRequest::Create { .. } | WindowRequest::CreatePopup { .. } => {
+            WindowRequest::Create { .. }
+            | WindowRequest::CreatePopup { .. }
+            | WindowRequest::CreateMenuPanel { .. } => {
                 create_reply(reply, Err(Errno::NotSupported), self.server)
             }
             // Likewise a menu open, which mints an open id.
@@ -794,6 +917,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 pick_pending: false,
                 menu_open: None,
                 parent: None,
+                attachment: None,
             },
         );
         Ok(window_id)
@@ -858,9 +982,138 @@ impl<M: ShmMapper> WindowServer<M> {
                 pick_pending: false,
                 menu_open: None,
                 parent: Some(spec.parent_window_id),
+                attachment: None,
             },
         );
         Ok(window_id)
+    }
+
+    /// Hang an attached window from a panel row of `caller`'s live chain,
+    /// returning the minted window id.
+    ///
+    /// The chain is the scope: the named window must be the caller's own and
+    /// must hold `open_id` unanswered, so a surface for a chain that has
+    /// already closed is unrepresentable rather than merely refused. One
+    /// panel hangs per chain — a chain's deepest child is a plate or a
+    /// panel, never both — and a second while one is live is refused. The
+    /// host decides whether the pointer is still on the row and must accept
+    /// before anything is recorded, so a late or refused panel leaves no
+    /// window, no mapping, and no id spent.
+    fn create_menu_panel(
+        &mut self,
+        host: &mut dyn WindowHost,
+        caller: ProcId,
+        spec: MenuPanelSpec,
+    ) -> Result<u64, Errno> {
+        if caller.is_kernel() {
+            return Err(Errno::PermissionDenied);
+        }
+        // A chain the caller does not hold answers exactly like one that
+        // never existed, whoever owns the window and whatever the open id
+        // names elsewhere.
+        if owned_window(&self.windows, caller, spec.window_id)?.menu_open != Some(spec.open_id) {
+            return Err(Errno::NotFound);
+        }
+        if self.panel_of(spec.open_id).is_some() {
+            return Err(Errno::AlreadyExists);
+        }
+        let frame_len = frame_bytes(&spec.surface)?;
+        let total = frame_len
+            .checked_mul(spec.frame_count as usize)
+            .ok_or(Errno::LengthOutOfRange)?;
+        if !self.client_frames_fit(caller, total as u64, None) {
+            return Err(Errno::NoSpace);
+        }
+        let region = self.mapper.map(spec.shm_handle, total)?;
+        let window_id = self.next_id;
+        let next = window_id.checked_add(1).ok_or(Errno::NoSpace)?;
+        host.menu_panel_opened(
+            window_id,
+            spec.window_id,
+            spec.open_id,
+            spec.row,
+            &spec.surface,
+        )?;
+        self.next_id = next;
+        self.windows.insert(
+            window_id,
+            WindowRecord {
+                owner: caller,
+                event_endpoint: spec.event_endpoint,
+                surface: spec.surface,
+                frame_count: spec.frame_count,
+                frame_len,
+                region: Some(region),
+                pick_pending: false,
+                menu_open: None,
+                parent: Some(spec.window_id),
+                attachment: Some(MenuAttachment {
+                    open_id: spec.open_id,
+                    row: spec.row,
+                }),
+            },
+        );
+        Ok(window_id)
+    }
+
+    /// The live window attached to chain `open_id`, if it has one.
+    fn panel_of(&self, open_id: u64) -> Option<u64> {
+        self.windows
+            .iter()
+            .find(|(_, record)| {
+                record
+                    .attachment
+                    .is_some_and(|attached| attached.open_id == open_id)
+            })
+            .map(|(&id, _)| id)
+    }
+
+    /// Close the attached window hanging from chain `open_id`, if one is
+    /// live; a no-op otherwise.
+    ///
+    /// What the menu service calls when the pointer settles on another row
+    /// of the panel's parent plate: the chain lives on, but its panel does
+    /// not. The chain's own outcome reaps whatever is still attached, so
+    /// this is the *mid-chain* operation, never the last line of defence.
+    pub fn close_menu_panel(&mut self, host: &mut dyn WindowHost, open_id: u64) {
+        if let Some(panel) = self.panel_of(open_id) {
+            self.remove_with_transients(host, panel);
+        }
+    }
+
+    /// Settle every window attached to chain `open_id` now that it has
+    /// closed with `outcome`: the panel the outcome detaches becomes an
+    /// ordinary top-level window, and any other is torn down.
+    ///
+    /// Run when the outcome is decided rather than when the application
+    /// receives it, so a client that stops draining its mailbox cannot keep
+    /// a session-placed surface on the screen after its chain is gone.
+    fn settle_menu_panels(
+        &mut self,
+        host: &mut dyn WindowHost,
+        open_id: u64,
+        outcome: MenuOutcome,
+    ) {
+        let mut closing = Vec::new();
+        for (&id, record) in &mut self.windows {
+            let Some(attached) = record.attachment else {
+                continue;
+            };
+            if attached.open_id != open_id {
+                continue;
+            }
+            if outcome.detaches(attached.row) {
+                // Detached: no longer chain state, so a later menu — or the
+                // close of the window whose chain it hung on — leaves it be.
+                record.attachment = None;
+                record.parent = None;
+            } else {
+                closing.push(id);
+            }
+        }
+        for id in closing {
+            self.remove_with_transients(host, id);
+        }
     }
 
     /// Re-map `caller`'s window `window_id` onto a fresh frame region of
@@ -1062,15 +1315,15 @@ impl<M: ShmMapper> WindowServer<M> {
         window_id: u64,
     ) -> Result<(), Errno> {
         owned_window(&self.windows, caller, window_id)?;
-        self.remove_with_popups(host, window_id);
+        self.remove_with_transients(host, window_id);
         Ok(())
     }
 
-    /// Remove `window_id` and every popup keyed to it, telling the host of
-    /// each teardown. The parent is dropped first, then its popups; a
-    /// popup (which owns no popups) drops alone.
-    fn remove_with_popups(&mut self, host: &mut dyn WindowHost, window_id: u64) {
-        let popups: alloc::vec::Vec<u64> = self
+    /// Remove `window_id` and every transient keyed to it — its popups and
+    /// any attached menu panel — telling the host of each teardown. The
+    /// window is dropped first, then its transients.
+    fn remove_with_transients(&mut self, host: &mut dyn WindowHost, window_id: u64) {
+        let transients: alloc::vec::Vec<u64> = self
             .windows
             .iter()
             .filter(|(_, record)| record.parent == Some(window_id))
@@ -1078,9 +1331,9 @@ impl<M: ShmMapper> WindowServer<M> {
             .collect();
         self.windows.remove(&window_id);
         host.window_closed(window_id);
-        for popup in popups {
-            self.windows.remove(&popup);
-            host.window_closed(popup);
+        for transient in transients {
+            self.windows.remove(&transient);
+            host.window_closed(transient);
         }
     }
 
@@ -1168,36 +1421,44 @@ impl<M: ShmMapper> WindowServer<M> {
     /// and a session bug (a conclusion no one asked for) is refused, not
     /// delivered.
     ///
-    /// A `MenuClosed` outcome is held to the same rule and, additionally,
-    /// must name the window's *own* unanswered open: an outcome for an open
-    /// that was never accepted, for one already answered, or for a
-    /// different one, is refused. That is what makes exactly-once a
-    /// property rather than a convention — a second outcome for one open
-    /// cannot be delivered, and one gesture's dismissal can never arrive
-    /// as another's answer.
+    /// An event that names an open — a `MenuClosed` outcome, a
+    /// `MenuPanelRequested` arrival — must name the window's *own*
+    /// unanswered one: an open that was never accepted, one already
+    /// answered, or another window's, is refused. Only the outcome
+    /// *concludes* it, which is what makes exactly-once a property rather
+    /// than a convention: a second outcome for one open cannot be
+    /// delivered, and one gesture's dismissal can never arrive as another's
+    /// answer.
+    ///
+    /// A concluded chain also settles whatever it had attached: the panel
+    /// whose row the outcome chose detaches into an ordinary top-level
+    /// window, and any other is torn down. That happens as soon as the
+    /// outcome is validated, **before** the sink is asked, because the
+    /// chain's fate is the session's decision and not the application's
+    /// receipt of it — otherwise a client that stopped draining its mailbox
+    /// would keep a session-placed surface on the screen.
     ///
     /// # Errors
     ///
     /// * [`Errno::NotFound`] — no such window (it was closed, or never
     ///   existed); the session drops the event.
     /// * [`Errno::OutOfRange`] — a pointer event outside the window's
-    ///   surface, a pick conclusion with no pick pending, a menu outcome
-    ///   naming anything but the window's unanswered open (both routing
-    ///   bugs, refused rather than delivered), or an application-scoped
-    ///   event (those go through [`Self::deliver_app_event`]).
+    ///   surface, a pick conclusion with no pick pending, an event naming
+    ///   anything but the window's unanswered open (both routing bugs,
+    ///   refused rather than delivered), or an application-scoped event
+    ///   (those go through [`Self::deliver_app_event`]).
     /// * Any [`Errno`] the sink surfaces; a refused delivery leaves a
     ///   pending pick or open still owed (the session decides whether to
     ///   retry or tear the client down). A sink that *accepts* it is
     ///   answering for it, whether it goes out now or from a hold-back.
     pub fn deliver_event(
         &mut self,
+        host: &mut dyn WindowHost,
         sink: &mut dyn EventSink,
         event: &WindowEvent,
     ) -> Result<(), Errno> {
-        let record = self
-            .windows
-            .get_mut(&event.window_id().ok_or(Errno::OutOfRange)?)
-            .ok_or(Errno::NotFound)?;
+        let window_id = event.window_id().ok_or(Errno::OutOfRange)?;
+        let record = self.windows.get(&window_id).ok_or(Errno::NotFound)?;
         if let WindowEvent::Pointer { x, y, .. } = *event {
             if x >= record.surface.width_px || y >= record.surface.height_px {
                 return Err(Errno::OutOfRange);
@@ -1210,19 +1471,35 @@ impl<M: ShmMapper> WindowServer<M> {
         if concludes_pick && !record.pick_pending {
             return Err(Errno::OutOfRange);
         }
-        let concludes_open = match *event {
-            WindowEvent::MenuClosed { open_id, .. } => Some(open_id),
+        let names_open = match *event {
+            WindowEvent::MenuClosed { open_id, .. }
+            | WindowEvent::MenuPanelRequested { open_id, .. } => Some(open_id),
             _ => None,
         };
-        if concludes_open.is_some() && concludes_open != record.menu_open {
+        if names_open.is_some() && names_open != record.menu_open {
             return Err(Errno::OutOfRange);
         }
-        sink.deliver(record.event_endpoint, event)?;
-        if concludes_pick {
-            record.pick_pending = false;
+        let concludes_open = match *event {
+            WindowEvent::MenuClosed {
+                open_id, outcome, ..
+            } => Some((open_id, outcome)),
+            _ => None,
+        };
+        let endpoint = record.event_endpoint;
+        if let Some((open_id, outcome)) = concludes_open {
+            self.settle_menu_panels(host, open_id, outcome);
         }
-        if concludes_open.is_some() {
-            record.menu_open = None;
+        sink.deliver(endpoint, event)?;
+        // Settling may have torn transients down, never the window the
+        // event addresses, but the lookup stays fallible so the path is
+        // total without resting on that argument.
+        if let Some(record) = self.windows.get_mut(&window_id) {
+            if concludes_pick {
+                record.pick_pending = false;
+            }
+            if concludes_open.is_some() {
+                record.menu_open = None;
+            }
         }
         Ok(())
     }

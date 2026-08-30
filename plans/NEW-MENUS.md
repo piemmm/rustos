@@ -10,8 +10,8 @@ Binding under `AGENTS.md` (§3, §15.18).
 | M1a | Variable-length request framing: per-op wire length, exact-length decode | **landed** |
 | M1b | Model: per-plate rows, submenu depth, titles, shortcuts, `About`→`Info` | **landed** |
 | M1c | The per-gesture open: anchor in, `Chosen`/`Dismissed`/`Refused` out | **landed** |
-| M1d | Attached-window row kind + its present/arrive/refuse events | next |
-| M2 | The service: bands, drag, arrival-open, attach/detach, grab, lifetime | planned |
+| M1d | Attached-window row kind + its present/arrive/refuse events | **landed** |
+| M2 | The service: bands, drag, arrival-open, attach/detach, grab, lifetime | next |
 | M3.1 | Migrate `userland/apps/terminal`, delete its shell | planned |
 | M3.2 | Migrate the pinboard backdrop menu, delete its shell | planned |
 | M3.3 | Migrate `userland/apps/files`, delete its shell | planned (decision 2) |
@@ -38,6 +38,9 @@ stage that closes it carries its regression test (§2.18, §7).
 | D7 | `lib/window`'s client encoded every request into a fresh `MAX_WIRE_LEN` stack array and the session's serve loop received into one, so both cleared the widest operation's width on every call — including the hot `Present`. M1a made the *frame* per-operation but left these two buffers at the ceiling. Each is now held once for the life of the connection. | **closed in M1b** |
 | D8 | The bar built a child plate's rows without folding a declared separator into the next row's group break, so a separator inside a declared submenu drew as a blank disabled row where the same separator on the root plate drew a divider. One `plate_rows` builder now serves both. | **closed in M1b** |
 | D9 | The model describes a chain `APP_MENU_MAX_DEPTH` plates deep; the bar renders one level, so a submenu declared *inside* a submenu draws its chevron and opens nothing. Nothing in the tree declares one (`appbar::declaration` refuses a submenu outright), and the chain renderer is what M2 is. | M2 |
+| D11 | The frame-layout block every surface-opening request shares ended at the literal `41`, spelled three times over (`RESIZE_WIRE_LEN`, `POPUP_PARENT_OFFSET`, `CREATE_TITLE_LEN_OFFSET`) with its field offsets spelled again inside the codec — D2's shape a second time, and a fourth operation was about to join it. One `FRAME_LAYOUT_AT`/`FRAME_LAYOUT_END` now says where the block is and how wide, and every operation that puts operands after it derives its own offsets. | **closed in M1d** |
+| D12 | Three requests open a surface and each wrote the same prologue longhand — the granted region, the event route, the frame layout. One `write_surface_operands` now writes it for all of them (§2.2). | **closed in M1d** |
+| D13 | `WindowClient` remembers each window's extent and last presented frame to answer a redraw, and pruned that record only in its own `close`. The **session** ends an attached window with its chain, so a client using panels would have kept one record per gesture — unbounded growth on a list every `present` linearly scans. The client now settles its records on a chain's outcome, by the one shared `MenuOutcome::detaches` rule the desktop settles by, and `close` forgets a window even when the session no longer knows it. | **closed in M1d** |
 | D10 | The bar's own menus state two things the model cannot carry: a row denied for want of a capability (`AuthorityState::NeedsCapability`, which draws an Authority Mark rather than merely greying) and a row whose setting is already in effect (`ActivityState::Complete`). `taskbar/src/system.rs` and `clock_menu.rs` both use them, so M3.4 would lose them. Whether the *service-facing* model carries them is a design question with a security edge: an application must not be able to claim the *system* lacks authority for its own row, so the answer may be that they are in-process-only — which is what §1.6's "the wire model is a bounded subset" has to be made precise about. | M2 (§15.7 — needs a decision) |
 
 **This is an architecture change, not a performance one.** The ~300 ms
@@ -300,8 +303,10 @@ special case the general chain generalises.
   `Chosen(id)` / `Dismissed` / `Refused(reason)` delivered **once** to the
   requesting window~~ — landed as M1c, with the outcome keyed to a
   session-minted open id so one gesture's answer cannot read as another's.
-- **A row kind for an app-provided attached window**, plus the present
-  request and the arrival/refusal events §1.4 needs.
+- ~~A row kind for an app-provided attached window, plus the present request
+  and the arrival/refusal events~~ — landed as M1d, with the detach carried by
+  the existing three-way outcome rather than a new one, and the panel's
+  lifetime enforced by the engine rather than left to the service.
 
 **And that re-opened M0's transport decision**, settled as decision 1 and
 landed as M1a. M1b then found the same cost in a second place the framing
@@ -428,9 +433,63 @@ another. `WindowHost::menu_open_requested` defaults to refusing, so a desktop
 composing no menu service fails closed, and a refused open records nothing and
 spends no id.
 
-**M1d — attached windows.** The row kind, the present request §1.4 needs,
-and the arrival/refusal events, including the refusal of a window that
-arrives after the pointer has left its row.
+**M1d — attached windows (landed).** `AppMenuRow::Panel { id, label,
+enabled }` is the row whose child is a surface the *application* draws — the
+general form of the session-drawn `Info` row, which keeps its manifest-attested
+text. It is admitted exactly where a submenu row is, by one shared rule (on the
+deepest plate either would open a child past the bound), opens no plate of its
+own, and states no accelerator, reason, mark or emphasis for the reason a
+submenu states none. Its **band title is its own label**, so no title crosses
+the wire: §1.1's "not new wire fields where they can be derived" holds.
+
+Its id comes from the **same space** an `Item`'s does, and the uniqueness rule
+is now stated once over every id-bearing row rather than per kind. That is
+forced, not chosen: choosing a panel row detaches its window, and the detach is
+reported by the very `MenuOutcome::Chosen(id)` any other choice is — so a
+shared id would make one answer ambiguous, and `MenuOutcome` needed no new
+case.
+
+**The present request is its own operation** (`CreateMenuPanel`, op 15), not
+fields on `CreatePopup`: a popup is anchored to a window the caller owns at an
+offset from that window's client origin and dies with its parent, where an
+attached window hangs off a *menu row the session placed* — so it states no
+offset at all — wears the plate band, and lives with the chain. What they share
+— region, event route, frame layout — is one definition (D12), and the reply is
+the create reply, since it mints a *window* id where an open mints an open id.
+Its extent is a format bound refused at decode (`APP_MENU_PANEL_MAX_PX`, 1024
+physical pixels either way): the info panel it generalises is 260 logical
+pixels wide, so an ask anything like a screen is refused before a byte is
+mapped, and the session still places and clips what it accepts.
+
+**Arrival is an event, refusal is a reply.** `WindowEvent::MenuPanelRequested
+{ window_id, open_id, row }` spends ten of the event frame's twenty-four
+payload bytes, so it costs every other event nothing. There is deliberately no
+"the pointer left" event: the refusal already covers the late case, and a
+second event would tell an application how the pointer moves inside chrome it
+does not own. The late refusal is a **typed reply on the present request**,
+because only the session knows where the pointer is and it can decide at the
+moment the request lands — an event would be a second answer that could itself
+race the next arrival. The worst late case is not even refused but
+*unrepresentable*: a surface for an open that has already been answered has no
+chain to hang on, so the engine refuses it without asking the host anything.
+
+**The lifetime is the engine's, in one place.** A panel is a transient of the
+window whose chain it hangs on, so `remove_with_popups` became
+`remove_with_transients` and reaps it with the popups. Delivering a chain's
+outcome settles whatever was attached: the panel whose row the outcome *chose*
+detaches (attachment and transient link both clear, so it is an ordinary
+window a later menu will not close) and any other is torn down. That settling
+runs when the outcome is **validated, before the sink is asked** — the chain's
+fate is the session's decision, not the application's receipt of it, so a
+client that stops draining its mailbox cannot keep a session-placed surface on
+the screen. One panel hangs per chain (a chain's deepest child is a plate or a
+panel, never both); the service closes it mid-chain with `close_menu_panel`.
+`WindowHost::menu_panel_opened` defaults to refusing, and `deliver_event` now
+takes the host so the teardown reaches the compositor.
+
+Until the bar migrates (M3.4) it hangs no attached windows of its own, so it
+draws a declared panel row's chevron **greyed** rather than as a row that opens
+something it cannot open. Nothing in the tree declares one yet.
 
 ### M2 — the service
 

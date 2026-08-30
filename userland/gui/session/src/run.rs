@@ -5318,19 +5318,19 @@ mod program {
         let Some(owner) = event.window_id().and_then(|id| server.owner_of(id)) else {
             return;
         };
-        if let Err(Errno::NotFound) = server.deliver_event(sink, event) {
+        let mut bridge = ShellWindowHost {
+            shell,
+            compositor,
+            windows,
+            picker,
+            apps,
+        };
+        if let Err(Errno::NotFound) = server.deliver_event(&mut bridge, sink, event) {
             // `owner_of` proved the window exists, so the `NotFound` is
             // the sink's: the owner's event port is gone — the kernel
             // reclaimed it at exit — and its windows go with it. A merely
             // full mailbox never reaches here: the sink holds that event
             // and answers for it.
-            let mut bridge = ShellWindowHost {
-                shell,
-                compositor,
-                windows,
-                picker,
-                apps,
-            };
             server.client_exited(&mut bridge, owner);
         }
     }

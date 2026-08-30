@@ -1285,6 +1285,18 @@ fn structured_window_requests_with_corrupted_fields_never_panic() {
                 AppMenuLabel::new("Edit").expect("a valid title"),
             )),
         },
+        WindowRequest::CreateMenuPanel {
+            window_id: 3,
+            open_id: 11,
+            row: AppMenuItemId::new(4).expect("a valid id"),
+            shm_handle: 7,
+            event_endpoint: 0x900d,
+            frame_count: 1,
+            width_px: 160,
+            height_px: 96,
+            stride_bytes: 640,
+            format: DisplayFormat::Bgra8888,
+        },
         WindowRequest::QueryDesktop,
     ];
     let mut base = std::vec![0u8; WindowRequest::MAX_WIRE_LEN + 1];
@@ -1349,6 +1361,12 @@ fn fuzz_menu(mut menu: AppMenu) -> AppMenu {
         2,
     )
     .expect("room inside the nested submenu");
+    menu.push(AppMenuRow::Panel {
+        id: AppMenuItemId::new(4).expect("a valid id"),
+        label: AppMenuLabel::new("Preview").expect("a valid label"),
+        enabled: true,
+    })
+    .expect("room for a panel row");
     menu.push(AppMenuRow::Separator).expect("a separator");
     menu.push(AppMenuRow::Info).expect("an Info row");
     menu.push(AppMenuRow::Item(
@@ -1439,6 +1457,28 @@ fn structured_menu_outcome_inputs_with_corrupted_fields_never_panic() {
                 exercise(&base);
                 base[byte] ^= 1 << bit;
             }
+        }
+    }
+}
+
+/// The attached-window arrival, seeded and bit-flipped.
+///
+/// It rides the same fixed event frame as every other event, so a flip lands
+/// as readily on the open id or the row as on the header — and an arrival
+/// naming neither must fail closed.
+#[test]
+fn structured_menu_panel_inputs_with_corrupted_fields_never_panic() {
+    let mut base = WindowEvent::MenuPanelRequested {
+        window_id: 4,
+        open_id: 11,
+        row: AppMenuItemId::new(4).expect("a valid id"),
+    }
+    .to_le_bytes();
+    for byte in 0..base.len() {
+        for bit in 0..8u32 {
+            base[byte] ^= 1 << bit;
+            exercise(&base);
+            base[byte] ^= 1 << bit;
         }
     }
 }

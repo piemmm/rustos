@@ -154,6 +154,18 @@ pub const APP_MENU_SHORTCUT_MAX: usize = 24;
 /// so the bound is a clause rather than a sentence.
 pub const APP_MENU_REASON_MAX: usize = 64;
 
+/// Largest extent, in physical pixels, either way, of the attached window an
+/// [`AppMenuRow::Panel`] row hangs ([`WindowRequest::CreateMenuPanel`]).
+///
+/// A **format** bound, not a capacity: an attached window hangs off one menu
+/// row, so it is a *panel*. The session-drawn info panel it generalises is
+/// 260 logical pixels wide, and a thousand physical pixels either way holds a
+/// far richer one than that even on a high-density desktop — while an ask
+/// anything like a screen is refused before a byte of it is mapped. The
+/// session still places and clips the accepted surface within the chain, so
+/// this bounds what may be *asked for*, not where it lands.
+pub const APP_MENU_PANEL_MAX_PX: u32 = 1024;
+
 /// A validated menu row label: bounded UTF-8 with no control characters,
 /// over the shared [`BoundedText`] validator.
 ///
@@ -344,6 +356,34 @@ pub enum AppMenuRow {
         /// never opens.
         enabled: bool,
     },
+    /// A row whose child is an **attached window**: a surface the
+    /// application itself draws, hanging where a submenu's plate would hang
+    /// (`plans/NEW-MENUS.md`).
+    ///
+    /// The general form of [`Info`](Self::Info), and the one place an
+    /// application's own pixels enter a chain. The desktop asks for the
+    /// surface when the pointer arrives on the row
+    /// ([`WindowEvent::MenuPanelRequested`]) and the application answers
+    /// with [`WindowRequest::CreateMenuPanel`]; nothing about the chain
+    /// waits on that answer, and a surface that arrives after the pointer
+    /// has moved on is refused rather than shown.
+    ///
+    /// Choosing the row **detaches** the attached window — it becomes an
+    /// ordinary top-level window and the chain dismisses — which is why the
+    /// row carries an id from the same space an [`Item`](Self::Item) does:
+    /// the detach is reported as an ordinary
+    /// [`MenuOutcome::Chosen`] naming it.
+    Panel {
+        /// The row's own id, unique among the menu's id-bearing rows. An
+        /// arrival names it, the answering surface names it back, and
+        /// choosing the row reports it.
+        id: AppMenuItemId,
+        /// The row's label, which is also the attached window's band title.
+        label: AppMenuLabel,
+        /// Whether the row asks for a surface at all. A disabled panel row
+        /// draws greyed and is never arrived on.
+        enabled: bool,
+    },
     /// The application-information row, whose child is the session's own
     /// info panel, drawn from the **signed manifest** of the bundle the
     /// kernel attested owns the declaring process.
@@ -393,12 +433,21 @@ pub enum AppMenuRowView<'a> {
         /// Whether the submenu opens.
         enabled: bool,
     },
+    /// A row whose child is an attached window the application draws.
+    Panel {
+        /// The row's own id.
+        id: AppMenuItemId,
+        /// The row's label, which is also the attached window's band title.
+        label: &'a str,
+        /// Whether the row asks for a surface.
+        enabled: bool,
+    },
     /// The application-information row.
     Info,
 }
 
-/// Which of the four kinds a stored row is, carrying the id only the
-/// chooseable one has.
+/// Which of the five kinds a stored row is, carrying the id the two
+/// id-bearing ones have.
 ///
 /// Held as this closed kind rather than the wire byte, so reporting a stored
 /// row back is total: there is no kind whose id has to be reconstructed, and
@@ -408,6 +457,7 @@ enum RowKind {
     Item(AppMenuItemId),
     Separator,
     Submenu,
+    Panel(AppMenuItemId),
     Info,
 }
 
@@ -418,14 +468,20 @@ impl RowKind {
             Self::Item(_) => APP_MENU_KIND_ITEM,
             Self::Separator => APP_MENU_KIND_SEPARATOR,
             Self::Submenu => APP_MENU_KIND_SUBMENU,
+            Self::Panel(_) => APP_MENU_KIND_PANEL,
             Self::Info => APP_MENU_KIND_INFO,
         }
     }
 
-    /// The item id this kind states, zero for the kinds that state none.
+    /// The id this kind states, zero for the kinds that state none.
+    ///
+    /// A chooseable row and a panel row draw from **one** id space, because
+    /// one answer names both: choosing a panel row detaches its attached
+    /// window and is reported as an ordinary [`MenuOutcome::Chosen`], so two
+    /// rows sharing an id would make that answer ambiguous.
     const fn wire_id(self) -> u16 {
         match self {
-            Self::Item(id) => id.get(),
+            Self::Item(id) | Self::Panel(id) => id.get(),
             Self::Separator | Self::Submenu | Self::Info => 0,
         }
     }
@@ -477,8 +533,9 @@ impl RowRecord {
 ///
 /// A menu's shape is checked as it is built, so building one cannot produce
 /// a shape the session would have to re-reject: a row's parent names an
-/// earlier submenu row, a plate holds at most [`APP_MENU_MAX_ROWS`] rows,
-/// and a chain runs at most [`APP_MENU_MAX_DEPTH`] plates deep.
+/// earlier submenu row, a plate holds at most [`APP_MENU_MAX_ROWS`] rows, a
+/// chain runs at most [`APP_MENU_MAX_DEPTH`] levels deep, and no two rows
+/// state the same id.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct AppMenu {
     rows: [RowRecord; APP_MENU_MAX_TOTAL_ROWS],
@@ -537,8 +594,8 @@ impl AppMenu {
     ///   [`APP_MENU_TEXT_BYTES`].
     /// * [`Errno::OutOfRange`] — the row cannot stand at the top level, or
     ///   duplicates something the menu already holds (a second
-    ///   [`AppMenuRow::Info`], a repeated item id, a labelled row with no
-    ///   label).
+    ///   [`AppMenuRow::Info`], an id an earlier row already states, a
+    ///   labelled row with no label).
     pub fn push(&mut self, row: AppMenuRow) -> Result<(), Errno> {
         self.push_row(row, None)
     }
@@ -551,8 +608,8 @@ impl AppMenu {
     /// As [`Self::push`], plus [`Errno::OutOfRange`] when `parent` does not
     /// name an earlier [`AppMenuRow::Submenu`], when `row` is an
     /// [`AppMenuRow::Info`] row (which is always top-level), or when `row`
-    /// is a submenu that would open a plate past
-    /// [`APP_MENU_MAX_DEPTH`].
+    /// would open a child past [`APP_MENU_MAX_DEPTH`] — a submenu's plate
+    /// and a [`Panel`](AppMenuRow::Panel)'s attached window alike.
     pub fn push_under(&mut self, row: AppMenuRow, parent: usize) -> Result<(), Errno> {
         let parent = u8::try_from(parent).map_err(|_| Errno::OutOfRange)?;
         if parent == PARENT_NONE {
@@ -606,6 +663,11 @@ impl AppMenu {
                 label,
                 enabled: record.enabled,
             },
+            RowKind::Panel(id) => AppMenuRowView::Panel {
+                id,
+                label,
+                enabled: record.enabled,
+            },
             RowKind::Info => AppMenuRowView::Info,
         }
     }
@@ -649,6 +711,11 @@ impl AppMenu {
             ),
             AppMenuRow::Submenu { label, enabled } => {
                 record.kind = RowKind::Submenu;
+                record.enabled = enabled;
+                (label, AppMenuShortcut::EMPTY, AppMenuReason::EMPTY)
+            }
+            AppMenuRow::Panel { id, label, enabled } => {
+                record.kind = RowKind::Panel(id);
                 record.enabled = enabled;
                 (label, AppMenuShortcut::EMPTY, AppMenuReason::EMPTY)
             }
@@ -713,23 +780,33 @@ impl AppMenu {
         {
             return Err(Errno::NoSpace);
         }
+        // A chooseable row and a panel row draw from one id space: choosing
+        // either is reported by the same answer, so a shared id would make
+        // that answer ambiguous.
+        let states_id = match row {
+            AppMenuRow::Item(item) => Some(item.id),
+            AppMenuRow::Panel { id, .. } => Some(*id),
+            AppMenuRow::Separator | AppMenuRow::Submenu { .. } | AppMenuRow::Info => None,
+        };
+        if let Some(id) = states_id {
+            if self.rows[..at]
+                .iter()
+                .any(|held| held.kind.wire_id() == id.get())
+            {
+                return Err(Errno::OutOfRange);
+            }
+        }
         match row {
             AppMenuRow::Item(item) => {
                 if item.label.is_empty() {
                     return Err(Errno::OutOfRange);
                 }
-                if self.rows[..at]
-                    .iter()
-                    .any(|held| held.kind == RowKind::Item(item.id))
-                {
-                    return Err(Errno::OutOfRange);
-                }
             }
             AppMenuRow::Separator => {}
-            AppMenuRow::Submenu { label, .. } => {
-                // A submenu on the deepest plate could only open a plate
-                // past the bound, so it would draw a parent that opens
-                // nothing.
+            // A row on the deepest plate that opens a child would open it
+            // past the bound and so draw a parent that opens nothing. A
+            // submenu's plate and an attached window both hang there.
+            AppMenuRow::Submenu { label, .. } | AppMenuRow::Panel { label, .. } => {
                 if label.is_empty() || depth >= APP_MENU_MAX_DEPTH {
                     return Err(Errno::OutOfRange);
                 }
@@ -951,6 +1028,21 @@ pub enum MenuOutcome {
     Dismissed,
     /// The chain never came up, for the stated reason.
     Refused(MenuRefusal),
+}
+
+impl MenuOutcome {
+    /// Whether this answer **detaches** the attached window hanging from
+    /// panel row `row`.
+    ///
+    /// Choosing a panel row promotes its window to an ordinary top-level
+    /// one; every other answer closes it with the chain. Both halves of the
+    /// channel read the rule from here, so the desktop's teardown and an
+    /// application's own bookkeeping cannot disagree about which windows a
+    /// closing chain took with it.
+    #[must_use]
+    pub const fn detaches(self, row: AppMenuItemId) -> bool {
+        matches!(self, Self::Chosen(chosen) if chosen.get() == row.get())
+    }
 }
 
 /// Wire discriminant of [`MenuOutcome::Chosen`].
@@ -1350,6 +1442,72 @@ pub enum WindowRequest {
         /// The rows to open, and the title of the root plate's band.
         menu: AppMenu,
     },
+    /// Hang an **attached window** — a surface the caller draws — from the
+    /// [`AppMenuRow::Panel`] row `row` of the caller's open chain
+    /// `open_id`, answering the [`WindowEvent::MenuPanelRequested`] the
+    /// desktop sent when the pointer arrived on that row
+    /// (`plans/NEW-MENUS.md`).
+    ///
+    /// **Not a [`Self::CreatePopup`], and not extra fields on one.** A popup
+    /// is anchored to a window the caller owns, at an offset from that
+    /// window's client origin, and lives until the parent closes. An
+    /// attached window hangs off a *menu row the session placed* — the
+    /// caller is never told where that is, so it states no offset at all —
+    /// wears the plate's title band rather than none, is bounded to
+    /// [`APP_MENU_PANEL_MAX_PX`] either way, and lives and dies with the
+    /// chain. The frame-layout block is shared with `Create`, `CreatePopup`
+    /// and `Resize` verbatim, so one definition validates the geometry of
+    /// all four.
+    ///
+    /// **Late is refused, never shown.** Nothing about the chain waits for
+    /// this, so the request may well arrive after the pointer has moved on.
+    /// A surface for an open that has already been answered cannot be
+    /// represented at all — the open is gone — and one for a row the pointer
+    /// has left is refused by the session, so a slow or hostile application
+    /// can neither freeze the chain nor plant a panel under a row the user
+    /// left. Either way the refusal is typed, nothing is mapped, and the
+    /// application frees its own region and carries on.
+    ///
+    /// It carries no capability: the scope is the window the caller already
+    /// owns and that window's own unanswered open. The reply is the
+    /// [`WINDOW_CREATE_REPLY_LEN`]-byte create reply — the minted window id
+    /// and the serving session's identity — and thereafter [`Self::Present`]
+    /// and [`Self::Close`] act on that id like any other window's.
+    ///
+    /// Choosing the row **detaches** the window: it becomes an ordinary
+    /// top-level window, and the chain's answer reports the choice
+    /// ([`MenuOutcome::Chosen`] naming `row`). Any other answer closes it
+    /// with the chain.
+    CreateMenuPanel {
+        /// The caller's own window whose chain this hangs on (from the
+        /// `Create` reply); never zero.
+        window_id: u64,
+        /// The window's unanswered open, from that open's reply; never
+        /// zero.
+        open_id: u64,
+        /// The [`AppMenuRow::Panel`] row of that open's menu the surface
+        /// hangs from, as the arrival named it.
+        row: AppMenuItemId,
+        /// The `shm_grant` handle minted to the session's serving task,
+        /// naming the region that holds the panel's frames back-to-back.
+        shm_handle: u64,
+        /// The caller's own endpoint the session delivers this surface's
+        /// [`WindowEvent`]s to. Never a reserved endpoint.
+        event_endpoint: u64,
+        /// Frames laid out back-to-back in the region
+        /// (`1..=WINDOW_MAX_FRAMES`).
+        frame_count: u32,
+        /// Panel width in pixels: never zero, at most
+        /// [`APP_MENU_PANEL_MAX_PX`].
+        width_px: u32,
+        /// Panel height in pixels: never zero, at most
+        /// [`APP_MENU_PANEL_MAX_PX`].
+        height_px: u32,
+        /// Bytes between consecutive scanlines; at least one scanline.
+        stride_bytes: u32,
+        /// Pixel encoding of the frames.
+        format: DisplayFormat,
+    },
 }
 
 /// Wire operation discriminant of [`WindowRequest::Create`].
@@ -1374,6 +1532,8 @@ const OP_SET_TITLE: u16 = 12;
 const OP_SET_APP_BAR: u16 = 13;
 /// Wire operation discriminant of [`WindowRequest::OpenMenu`].
 const OP_OPEN_MENU: u16 = 14;
+/// Wire operation discriminant of [`WindowRequest::CreateMenuPanel`].
+const OP_CREATE_MENU_PANEL: u16 = 15;
 
 /// Encoded size of every request's header: magic (4), version (2), op (2).
 ///
@@ -1390,9 +1550,23 @@ const PRESENT_WIRE_LEN: usize = 36;
 /// Encoded size of a request whose whole operand block is one window id
 /// ([`WindowRequest::Close`], [`WindowRequest::PickFile`]).
 const WINDOW_ID_WIRE_LEN: usize = REQUEST_HEADER_LEN + 8;
+/// Byte offset of the frame-layout block [`WindowRequest::Create`],
+/// [`WindowRequest::CreatePopup`], [`WindowRequest::Resize`], and
+/// [`WindowRequest::CreateMenuPanel`] share verbatim
+/// ([`FrameLayout::write_to`] / [`read_frame_layout`]).
+const FRAME_LAYOUT_AT: usize = 24;
+/// One past the shared frame-layout block's last byte: four `u32` fields
+/// then the one-byte pixel format.
+///
+/// Named once, because every operation that carries the block puts its own
+/// operands after it — a literal per operation would be four spellings of
+/// one fact, and moving a field in the block would silently desynchronise
+/// three of them.
+const FRAME_LAYOUT_END: usize = FRAME_LAYOUT_AT + 17;
+
 /// Encoded size of a [`WindowRequest::Resize`]: the header, the window id,
 /// the shared-memory handle, and the shared frame-layout block.
-const RESIZE_WIRE_LEN: usize = 41;
+const RESIZE_WIRE_LEN: usize = FRAME_LAYOUT_END;
 /// Encoded size of a [`WindowRequest::SetBackdropBlur`]: the header, the
 /// window id, and the radius.
 const SET_BACKDROP_BLUR_WIRE_LEN: usize = 18;
@@ -1402,10 +1576,9 @@ const QUERY_DESKTOP_WIRE_LEN: usize = REQUEST_HEADER_LEN;
 
 /// Byte offset of a [`WindowRequest::CreatePopup`] operand tail that
 /// follows the shared frame-layout block: the parent window id (8), then
-/// the two signed placement offsets (4 each). The popup reuses
-/// [`read_frame_layout`]'s offsets 24..=40 verbatim, so only this tail is
+/// the two signed placement offsets (4 each). Only this tail is
 /// popup-specific.
-const POPUP_PARENT_OFFSET: usize = 41;
+const POPUP_PARENT_OFFSET: usize = FRAME_LAYOUT_END;
 /// Byte offset of [`WindowRequest::CreatePopup::offset_x`].
 const POPUP_OFFSET_X: usize = POPUP_PARENT_OFFSET + 8;
 /// Byte offset of [`WindowRequest::CreatePopup::offset_y`].
@@ -1413,11 +1586,26 @@ const POPUP_OFFSET_Y: usize = POPUP_OFFSET_X + 4;
 /// Encoded size of a [`WindowRequest::CreatePopup`].
 const CREATE_POPUP_WIRE_LEN: usize = POPUP_OFFSET_Y + 4;
 
+/// Byte offset of a [`WindowRequest::CreateMenuPanel`]'s operand tail,
+/// following the shared frame-layout block: the window whose chain the
+/// panel hangs on (8), the open it answers (8), then the row (2).
+///
+/// It starts where a popup's parent id does, and for the same reason: both
+/// name the window the surface belongs to, immediately past the block whose
+/// geometry they share.
+const MENU_PANEL_WINDOW_OFFSET: usize = FRAME_LAYOUT_END;
+/// Byte offset of the open a [`WindowRequest::CreateMenuPanel`] answers.
+const MENU_PANEL_OPEN_OFFSET: usize = MENU_PANEL_WINDOW_OFFSET + 8;
+/// Byte offset of the row a [`WindowRequest::CreateMenuPanel`] hangs from.
+const MENU_PANEL_ROW_OFFSET: usize = MENU_PANEL_OPEN_OFFSET + 8;
+/// Encoded size of a [`WindowRequest::CreateMenuPanel`].
+const CREATE_MENU_PANEL_WIRE_LEN: usize = MENU_PANEL_ROW_OFFSET + 2;
+
 /// Byte offset of a [`WindowRequest::Create`] title length, immediately
 /// after the shared frame-layout block. The create tail runs on from here:
 /// the title text, the resizable flag, and the declared minimum client
 /// size.
-const CREATE_TITLE_LEN_OFFSET: usize = 41;
+const CREATE_TITLE_LEN_OFFSET: usize = FRAME_LAYOUT_END;
 /// Byte offset of a [`WindowRequest::Create`] title's text.
 const CREATE_TITLE_TEXT_OFFSET: usize = CREATE_TITLE_LEN_OFFSET + 1;
 /// Byte offset of a [`WindowSizing`]'s resizable flag.
@@ -1559,6 +1747,8 @@ const APP_MENU_KIND_SEPARATOR: u8 = 2;
 const APP_MENU_KIND_SUBMENU: u8 = 3;
 /// Wire kind of [`AppMenuRow::Info`].
 const APP_MENU_KIND_INFO: u8 = 4;
+/// Wire kind of [`AppMenuRow::Panel`].
+const APP_MENU_KIND_PANEL: u8 = 5;
 
 impl WindowRequest {
     /// Encoded size of the longest request any operation can produce, and so
@@ -1584,6 +1774,7 @@ impl WindowRequest {
         match *self {
             Self::Create { .. } => CREATE_WIRE_LEN,
             Self::CreatePopup { .. } => CREATE_POPUP_WIRE_LEN,
+            Self::CreateMenuPanel { .. } => CREATE_MENU_PANEL_WIRE_LEN,
             Self::Present { .. } => PRESENT_WIRE_LEN,
             Self::Close { .. } | Self::PickFile { .. } => WINDOW_ID_WIRE_LEN,
             Self::Resize { .. } => RESIZE_WIRE_LEN,
@@ -1651,6 +1842,7 @@ impl WindowRequest {
         match *self {
             Self::Create { .. } => OP_CREATE,
             Self::CreatePopup { .. } => OP_CREATE_POPUP,
+            Self::CreateMenuPanel { .. } => OP_CREATE_MENU_PANEL,
             Self::Present { .. } => OP_PRESENT,
             Self::Close { .. } => OP_CLOSE,
             Self::PickFile { .. } => OP_PICK_FILE,
@@ -1668,32 +1860,7 @@ impl WindowRequest {
     fn write_operands(&self, out: &mut [u8]) {
         match *self {
             Self::Create { .. } => self.write_create_operands(out),
-            Self::CreatePopup {
-                parent_window_id,
-                shm_handle,
-                event_endpoint,
-                frame_count,
-                width_px,
-                height_px,
-                stride_bytes,
-                format,
-                offset_x,
-                offset_y,
-            } => {
-                put_u64(out, 8, shm_handle);
-                put_u64(out, 16, event_endpoint);
-                FrameLayout {
-                    frame_count,
-                    width_px,
-                    height_px,
-                    stride_bytes,
-                    format,
-                }
-                .write_to(out);
-                put_u64(out, POPUP_PARENT_OFFSET, parent_window_id);
-                put_i32(out, POPUP_OFFSET_X, offset_x);
-                put_i32(out, POPUP_OFFSET_Y, offset_y);
-            }
+            Self::CreatePopup { .. } => self.write_popup_operands(out),
             Self::Present {
                 window_id,
                 frame_index,
@@ -1738,6 +1905,7 @@ impl WindowRequest {
                 put_u16(out, 16, radius_px);
             }
             Self::QueryDesktop => {}
+            Self::CreateMenuPanel { .. } => self.write_menu_panel_operands(out),
             Self::SetAppBar(ref bar) => write_app_bar(out, bar),
             Self::OpenMenu {
                 window_id,
@@ -1745,6 +1913,79 @@ impl WindowRequest {
                 ref menu,
             } => write_open_menu(out, window_id, anchor, menu),
         }
+    }
+
+    /// Write a [`CreatePopup`](Self::CreatePopup)'s operand block: the
+    /// shared surface prologue, then the parent it hangs above and the
+    /// offsets from that parent's client origin. A no-op for any other
+    /// request.
+    fn write_popup_operands(&self, out: &mut [u8]) {
+        let Self::CreatePopup {
+            parent_window_id,
+            shm_handle,
+            event_endpoint,
+            frame_count,
+            width_px,
+            height_px,
+            stride_bytes,
+            format,
+            offset_x,
+            offset_y,
+        } = *self
+        else {
+            return;
+        };
+        write_surface_operands(
+            out,
+            shm_handle,
+            event_endpoint,
+            &FrameLayout {
+                frame_count,
+                width_px,
+                height_px,
+                stride_bytes,
+                format,
+            },
+        );
+        put_u64(out, POPUP_PARENT_OFFSET, parent_window_id);
+        put_i32(out, POPUP_OFFSET_X, offset_x);
+        put_i32(out, POPUP_OFFSET_Y, offset_y);
+    }
+
+    /// Write a [`CreateMenuPanel`](Self::CreateMenuPanel)'s operand block:
+    /// the shared surface prologue, then the chain it hangs on. A no-op for
+    /// any other request.
+    fn write_menu_panel_operands(&self, out: &mut [u8]) {
+        let Self::CreateMenuPanel {
+            window_id,
+            open_id,
+            row,
+            shm_handle,
+            event_endpoint,
+            frame_count,
+            width_px,
+            height_px,
+            stride_bytes,
+            format,
+        } = *self
+        else {
+            return;
+        };
+        write_surface_operands(
+            out,
+            shm_handle,
+            event_endpoint,
+            &FrameLayout {
+                frame_count,
+                width_px,
+                height_px,
+                stride_bytes,
+                format,
+            },
+        );
+        put_u64(out, MENU_PANEL_WINDOW_OFFSET, window_id);
+        put_u64(out, MENU_PANEL_OPEN_OFFSET, open_id);
+        put_u16(out, MENU_PANEL_ROW_OFFSET, row.get());
     }
 
     /// Write a [`Create`](Self::Create)'s operand block: the shared frame
@@ -1765,16 +2006,18 @@ impl WindowRequest {
         else {
             return;
         };
-        put_u64(out, 8, shm_handle);
-        put_u64(out, 16, event_endpoint);
-        FrameLayout {
-            frame_count,
-            width_px,
-            height_px,
-            stride_bytes,
-            format,
-        }
-        .write_to(out);
+        write_surface_operands(
+            out,
+            shm_handle,
+            event_endpoint,
+            &FrameLayout {
+                frame_count,
+                width_px,
+                height_px,
+                stride_bytes,
+                format,
+            },
+        );
         encode_title(out, CREATE_TITLE_LEN_OFFSET, &title);
         out[CREATE_RESIZABLE_OFFSET] = u8::from(sizing.resizable());
         put_u32(out, CREATE_MIN_WIDTH_OFFSET, sizing.min_width_px());
@@ -1804,15 +2047,16 @@ impl WindowRequest {
     ///   operation needs, or a dirty title tail.
     /// * [`Errno::AbiVersionUnsupported`] — not `window-v1`.
     /// * [`Errno::OutOfRange`] — an operation or pixel format outside the
-    ///   closed set, a malformed title, a zero window id, a reserved
-    ///   event endpoint, or a menu open carrying no rows.
+    ///   closed set, a malformed title, a zero window id, open id or menu
+    ///   row, a reserved event endpoint, or a menu open carrying no rows.
     /// * [`Errno::LengthOutOfRange`] — a frame count outside
     ///   `1..=WINDOW_MAX_FRAMES`, a zero-extent geometry, a stride too
     ///   small for one scanline, an over-long title length, a minimum
     ///   client size declared by a window that is not resizable, an empty
     ///   damage rectangle, a backdrop-blur radius above
-    ///   [`WINDOW_BACKDROP_BLUR_MAX_PX`], or a menu anchor whose far edge
-    ///   is not a representable window-local coordinate.
+    ///   [`WINDOW_BACKDROP_BLUR_MAX_PX`], a menu panel wider or taller than
+    ///   [`APP_MENU_PANEL_MAX_PX`], or a menu anchor whose far edge is not a
+    ///   representable window-local coordinate.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() < REQUEST_HEADER_LEN {
             return Err(Errno::BufferTooSmall);
@@ -1827,25 +2071,8 @@ impl WindowRequest {
         match op {
             OP_CREATE => read_create(bytes),
             OP_CREATE_POPUP => read_create_popup(bytes),
-            OP_PRESENT => {
-                exact_len(bytes, PRESENT_WIRE_LEN)?;
-                let window_id = nonzero_id(read_u64(bytes, 8))?;
-                let frame_index = read_u32(bytes, 16);
-                let damage = DamageRect {
-                    x: read_u32(bytes, 20),
-                    y: read_u32(bytes, 24),
-                    width_px: read_u32(bytes, 28),
-                    height_px: read_u32(bytes, 32),
-                };
-                if damage.width_px == 0 || damage.height_px == 0 {
-                    return Err(Errno::LengthOutOfRange);
-                }
-                Ok(Self::Present {
-                    window_id,
-                    frame_index,
-                    damage,
-                })
-            }
+            OP_CREATE_MENU_PANEL => read_create_menu_panel(bytes),
+            OP_PRESENT => read_present(bytes),
             OP_CLOSE => {
                 exact_len(bytes, WINDOW_ID_WIRE_LEN)?;
                 let window_id = nonzero_id(read_u64(bytes, 8))?;
@@ -1893,6 +2120,28 @@ impl WindowRequest {
             _ => Err(Errno::OutOfRange),
         }
     }
+}
+
+/// Decode the operands of a [`WindowRequest::Present`]: the window, the
+/// frame index, and the damage rectangle, which is never empty.
+fn read_present(bytes: &[u8]) -> Result<WindowRequest, Errno> {
+    exact_len(bytes, PRESENT_WIRE_LEN)?;
+    let window_id = nonzero_id(read_u64(bytes, 8))?;
+    let frame_index = read_u32(bytes, 16);
+    let damage = DamageRect {
+        x: read_u32(bytes, 20),
+        y: read_u32(bytes, 24),
+        width_px: read_u32(bytes, 28),
+        height_px: read_u32(bytes, 32),
+    };
+    if damage.width_px == 0 || damage.height_px == 0 {
+        return Err(Errno::LengthOutOfRange);
+    }
+    Ok(WindowRequest::Present {
+        window_id,
+        frame_index,
+        damage,
+    })
 }
 
 /// Decode the operands of a [`WindowRequest::SetTitle`]: the window being
@@ -2130,13 +2379,14 @@ fn read_app_menu_row(
         cursor,
         record[APP_MENU_ROW_REASON_LEN_OFFSET],
     )?;
-    let bare = label.is_empty()
-        && shortcut.is_empty()
+    // A row that opens a child draws a chevron where an item draws its
+    // caption, and opens rather than acting, so it states none of an item's
+    // emphasis.
+    let opens_a_child = shortcut.is_empty()
         && reason.is_empty()
-        && !enabled
         && mark == AppMenuMark::None
-        && role == AppMenuRole::Neutral
-        && id == 0;
+        && role == AppMenuRole::Neutral;
+    let bare = opens_a_child && label.is_empty() && !enabled && id == 0;
     let row = match record[0] {
         APP_MENU_KIND_ITEM => {
             let item = AppMenuItem::new(AppMenuItemId::new(id)?, label)
@@ -2148,20 +2398,19 @@ fn read_app_menu_row(
         }
         // A submenu draws a chevron where an item draws its caption, and
         // opens rather than acting, so it states neither and has no id.
-        APP_MENU_KIND_SUBMENU
-            if shortcut.is_empty()
-                && reason.is_empty()
-                && mark == AppMenuMark::None
-                && role == AppMenuRole::Neutral
-                && id == 0 =>
-        {
-            AppMenuRow::Submenu { label, enabled }
-        }
+        APP_MENU_KIND_SUBMENU if opens_a_child && id == 0 => AppMenuRow::Submenu { label, enabled },
+        // A panel row opens too, so it states the same nothing — but it
+        // carries an id, because the answer that reports its choice names
+        // one.
+        APP_MENU_KIND_PANEL if opens_a_child => AppMenuRow::Panel {
+            id: AppMenuItemId::new(id)?,
+            label,
+            enabled,
+        },
         APP_MENU_KIND_SEPARATOR if bare => AppMenuRow::Separator,
         APP_MENU_KIND_INFO if bare => AppMenuRow::Info,
-        APP_MENU_KIND_SEPARATOR | APP_MENU_KIND_SUBMENU | APP_MENU_KIND_INFO => {
-            return Err(Errno::OutOfRange)
-        }
+        // A known kind whose guard failed and an unknown one are the same
+        // refusal: the row states something its kind cannot.
         _ => return Err(Errno::OutOfRange),
     };
     Ok((row, parent))
@@ -2297,9 +2546,44 @@ fn read_create_popup(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     })
 }
 
-/// The frame-layout fields `Create`, `CreatePopup`, and `Resize` share
-/// verbatim at the same wire offsets: the frame count, geometry, stride, and
-/// pixel format.
+/// Decode the operands of a [`WindowRequest::CreateMenuPanel`]: the granted
+/// region and event route and the shared frame layout, then the chain this
+/// hangs on — the window, its open, and the row.
+///
+/// The panel's extent is held to [`APP_MENU_PANEL_MAX_PX`] here, on top of
+/// the layout's own non-zero/stride checks: an attached window hangs off one
+/// menu row, so an ask that is not panel-shaped is refused before a byte of
+/// it is mapped. A zero window id, a zero open id, a zero row, or a reserved
+/// event endpoint is refused for the same reason `Create` refuses them —
+/// each names nothing.
+fn read_create_menu_panel(bytes: &[u8]) -> Result<WindowRequest, Errno> {
+    exact_len(bytes, CREATE_MENU_PANEL_WIRE_LEN)?;
+    let shm_handle = read_u64(bytes, 8);
+    let event_endpoint = read_u64(bytes, 16);
+    if crate::ipc::is_reserved_endpoint(event_endpoint) {
+        return Err(Errno::OutOfRange);
+    }
+    let layout = read_frame_layout(bytes)?;
+    if layout.width_px > APP_MENU_PANEL_MAX_PX || layout.height_px > APP_MENU_PANEL_MAX_PX {
+        return Err(Errno::LengthOutOfRange);
+    }
+    Ok(WindowRequest::CreateMenuPanel {
+        window_id: nonzero_id(read_u64(bytes, MENU_PANEL_WINDOW_OFFSET))?,
+        open_id: nonzero_id(read_u64(bytes, MENU_PANEL_OPEN_OFFSET))?,
+        row: AppMenuItemId::new(read_u16(bytes, MENU_PANEL_ROW_OFFSET))?,
+        shm_handle,
+        event_endpoint,
+        frame_count: layout.frame_count,
+        width_px: layout.width_px,
+        height_px: layout.height_px,
+        stride_bytes: layout.stride_bytes,
+        format: layout.format,
+    })
+}
+
+/// The frame-layout fields `Create`, `CreatePopup`, `Resize`, and
+/// `CreateMenuPanel` share verbatim at the same wire offsets: the frame
+/// count, geometry, stride, and pixel format.
 struct FrameLayout {
     frame_count: u32,
     width_px: u32,
@@ -2312,28 +2596,43 @@ impl FrameLayout {
     /// Write the block at the offsets [`read_frame_layout`] reads it from, so
     /// encoding and decoding can never disagree about where it sits.
     fn write_to(&self, out: &mut [u8]) {
-        put_u32(out, 24, self.frame_count);
-        put_u32(out, 28, self.width_px);
-        put_u32(out, 32, self.height_px);
-        put_u32(out, 36, self.stride_bytes);
-        out[40] = self.format.as_u8();
+        put_u32(out, FRAME_LAYOUT_AT, self.frame_count);
+        put_u32(out, FRAME_LAYOUT_AT + 4, self.width_px);
+        put_u32(out, FRAME_LAYOUT_AT + 8, self.height_px);
+        put_u32(out, FRAME_LAYOUT_AT + 12, self.stride_bytes);
+        out[FRAME_LAYOUT_AT + 16] = self.format.as_u8();
     }
 }
 
-/// Decode and validate the frame layout those requests carry at bytes
-/// 24..=40 — the frame count within `1..=WINDOW_MAX_FRAMES`, a non-zero
-/// geometry, a known pixel format, and a stride that holds at least one
-/// scanline. The one definition every such arm shares, so the geometry bounds
-/// can never diverge between opening, popping up, and resizing a window.
+/// Write the operand block every surface-opening request begins with: the
+/// granted region, the event route, and the shared frame layout, at the
+/// offsets [`read_frame_layout`] and its callers read them back from.
+fn write_surface_operands(
+    out: &mut [u8],
+    shm_handle: u64,
+    event_endpoint: u64,
+    layout: &FrameLayout,
+) {
+    put_u64(out, 8, shm_handle);
+    put_u64(out, 16, event_endpoint);
+    layout.write_to(out);
+}
+
+/// Decode and validate the frame layout those requests carry at
+/// [`FRAME_LAYOUT_AT`] — the frame count within `1..=WINDOW_MAX_FRAMES`, a
+/// non-zero geometry, a known pixel format, and a stride that holds at least
+/// one scanline. The one definition every such arm shares, so the geometry
+/// bounds can never diverge between opening, popping up, resizing a window,
+/// and hanging a menu panel.
 fn read_frame_layout(bytes: &[u8]) -> Result<FrameLayout, Errno> {
-    let frame_count = read_u32(bytes, 24);
+    let frame_count = read_u32(bytes, FRAME_LAYOUT_AT);
     if frame_count == 0 || frame_count > WINDOW_MAX_FRAMES {
         return Err(Errno::LengthOutOfRange);
     }
-    let width_px = read_u32(bytes, 28);
-    let height_px = read_u32(bytes, 32);
-    let stride_bytes = read_u32(bytes, 36);
-    let format = DisplayFormat::from_u8(bytes[40])?;
+    let width_px = read_u32(bytes, FRAME_LAYOUT_AT + 4);
+    let height_px = read_u32(bytes, FRAME_LAYOUT_AT + 8);
+    let stride_bytes = read_u32(bytes, FRAME_LAYOUT_AT + 12);
+    let format = DisplayFormat::from_u8(bytes[FRAME_LAYOUT_AT + 16])?;
     if width_px == 0 || height_px == 0 {
         return Err(Errno::LengthOutOfRange);
     }
@@ -2552,6 +2851,8 @@ const EV_APP_BAR_MENU: u16 = 14;
 const EV_CONTENT_RELEASED: u16 = 15;
 /// Wire event discriminant of [`WindowEvent::MenuClosed`].
 const EV_MENU_CLOSED: u16 = 16;
+/// Wire event discriminant of [`WindowEvent::MenuPanelRequested`].
+const EV_MENU_PANEL_REQUESTED: u16 = 17;
 
 /// Wire pointer-action discriminant of [`PointerAction::Moved`].
 const PTR_MOVED: u16 = 0;
@@ -2798,6 +3099,30 @@ pub enum WindowEvent {
         /// What became of the chain.
         outcome: MenuOutcome,
     },
+    /// The pointer arrived on the [`AppMenuRow::Panel`] row `row` of the
+    /// chain `open_id`: present an **attached window** for it if you want
+    /// one ([`WindowRequest::CreateMenuPanel`]).
+    ///
+    /// The chain does not wait. It stays live and fully usable while the
+    /// application decides, and a surface that arrives after the pointer has
+    /// moved on is refused rather than shown — so ignoring this event, or
+    /// answering it slowly, costs the user nothing and the row simply opens
+    /// nothing.
+    ///
+    /// It says only that the pointer reached the row, which is the least
+    /// that asking for content can say. There is no matching "the pointer
+    /// left" event, and there will not be: the refusal already covers the
+    /// late case, and a second event would tell the application how the
+    /// pointer moves inside desktop chrome it does not own.
+    MenuPanelRequested {
+        /// The window whose chain is open.
+        window_id: u64,
+        /// The open the row belongs to, from that open's reply; never zero.
+        open_id: u64,
+        /// The panel row the pointer arrived on, as the application
+        /// declared it.
+        row: AppMenuItemId,
+    },
 }
 
 impl WindowEvent {
@@ -2826,7 +3151,8 @@ impl WindowEvent {
             | Self::ContentReleased { window_id }
             | Self::Scrolled { window_id, .. }
             | Self::DesktopChanged { window_id, .. }
-            | Self::MenuClosed { window_id, .. } => Some(window_id),
+            | Self::MenuClosed { window_id, .. }
+            | Self::MenuPanelRequested { window_id, .. } => Some(window_id),
             Self::AppBarDefault | Self::AppBarMenu { .. } => None,
         }
     }
@@ -2927,6 +3253,11 @@ impl WindowEvent {
                 put_u16(&mut out, MENU_CLOSED_ITEM_OFFSET, item);
                 put_u16(&mut out, MENU_CLOSED_REFUSAL_OFFSET, refusal);
             }
+            Self::MenuPanelRequested { open_id, row, .. } => {
+                put_u16(&mut out, 6, EV_MENU_PANEL_REQUESTED);
+                put_u64(&mut out, 16, open_id);
+                put_u16(&mut out, MENU_PANEL_REQUESTED_ROW_OFFSET, row.get());
+            }
         }
         out
     }
@@ -2942,7 +3273,7 @@ impl WindowEvent {
     /// * [`Errno::OutOfRange`] — an event kind, focus flag, pointer
     ///   action, button, menu outcome, or refusal reason outside the closed
     ///   set, a zero window id on a window-scoped event, a non-zero one on
-    ///   an application-scoped event, a zero menu item or open id, or a
+    ///   an application-scoped event, a zero menu row or open id, or a
     ///   menu outcome stating a field its own case does not carry.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() < Self::WIRE_LEN {
@@ -2980,32 +3311,7 @@ impl WindowEvent {
                 let key = KeyInput::from_bytes(&bytes[16..16 + KeyInput::WIRE_LEN])?;
                 Ok(Self::Key { window_id, key })
             }
-            EV_POINTER => {
-                event_reserved_zero(bytes, 30)?;
-                let x = read_u32(bytes, 16);
-                let y = read_u32(bytes, 20);
-                let ptr_kind = read_u16(bytes, 24);
-                let button = read_u16(bytes, 26);
-                let modifiers = Modifiers::from_bits(read_u16(bytes, 28))?;
-                let action = match ptr_kind {
-                    PTR_MOVED => {
-                        if button != crate::input::BUTTON_NONE {
-                            return Err(Errno::OutOfRange);
-                        }
-                        PointerAction::Moved
-                    }
-                    PTR_PRESSED => PointerAction::Pressed(PointerButtonCode::from_code(button)?),
-                    PTR_RELEASED => PointerAction::Released(PointerButtonCode::from_code(button)?),
-                    _ => return Err(Errno::OutOfRange),
-                };
-                Ok(Self::Pointer {
-                    window_id,
-                    x,
-                    y,
-                    action,
-                    modifiers,
-                })
-            }
+            EV_POINTER => read_pointer_event(window_id, bytes),
             EV_FILE_PICKED => {
                 event_reserved_zero(bytes, 24)?;
                 let handle = read_u64(bytes, 16);
@@ -3049,9 +3355,48 @@ impl WindowEvent {
                     outcome: read_menu_outcome(bytes)?,
                 })
             }
+            EV_MENU_PANEL_REQUESTED => {
+                event_reserved_zero(bytes, MENU_PANEL_REQUESTED_WIRE_END)?;
+                Ok(Self::MenuPanelRequested {
+                    window_id,
+                    open_id: nonzero_id(read_u64(bytes, 16))?,
+                    row: AppMenuItemId::new(read_u16(bytes, MENU_PANEL_REQUESTED_ROW_OFFSET))?,
+                })
+            }
             _ => Err(Errno::OutOfRange),
         }
     }
+}
+
+/// Decode a window-local pointer event: the position, the action, and the
+/// modifiers held when it happened.
+///
+/// A button code on a move, or one outside the closed set, is refused rather
+/// than dropped, so an action has exactly one encoding.
+fn read_pointer_event(window_id: u64, bytes: &[u8]) -> Result<WindowEvent, Errno> {
+    event_reserved_zero(bytes, 30)?;
+    let x = read_u32(bytes, 16);
+    let y = read_u32(bytes, 20);
+    let button = read_u16(bytes, 26);
+    let modifiers = Modifiers::from_bits(read_u16(bytes, 28))?;
+    let action = match read_u16(bytes, 24) {
+        PTR_MOVED => {
+            if button != crate::input::BUTTON_NONE {
+                return Err(Errno::OutOfRange);
+            }
+            PointerAction::Moved
+        }
+        PTR_PRESSED => PointerAction::Pressed(PointerButtonCode::from_code(button)?),
+        PTR_RELEASED => PointerAction::Released(PointerButtonCode::from_code(button)?),
+        _ => return Err(Errno::OutOfRange),
+    };
+    Ok(WindowEvent::Pointer {
+        window_id,
+        x,
+        y,
+        action,
+        modifiers,
+    })
 }
 
 /// Decode an event addressed to the whole application rather than to one
@@ -3120,6 +3465,14 @@ const MENU_CLOSED_REFUSAL_OFFSET: usize = MENU_CLOSED_ITEM_OFFSET + 2;
 /// event frame is reserved and required zero.
 const MENU_CLOSED_WIRE_END: usize = MENU_CLOSED_REFUSAL_OFFSET + 2;
 
+/// Byte offset, within a [`WindowEvent::MenuPanelRequested`] frame, of the
+/// row the pointer arrived on, following the open id.
+const MENU_PANEL_REQUESTED_ROW_OFFSET: usize = 24;
+/// End of a [`WindowEvent::MenuPanelRequested`]'s own block. Ten of the
+/// event frame's twenty-four payload bytes, so an arrival costs every other
+/// event on the channel nothing.
+const MENU_PANEL_REQUESTED_WIRE_END: usize = MENU_PANEL_REQUESTED_ROW_OFFSET + 2;
+
 /// The three-way outcome a [`WindowEvent::MenuClosed`] frame carries.
 ///
 /// Each case reads exactly one of the two payload fields, and the other must
@@ -3152,24 +3505,28 @@ mod tests {
     use super::{
         app_bar_wire_len, decode_create_reply, decode_desktop_reply, decode_minted_id_reply,
         encode_create_reply, encode_desktop_reply, encode_minted_id_reply, open_menu_wire_len,
-        put_i32, put_u16, put_u64, read_u16, AppBar, AppMenu, AppMenuItem, AppMenuItemId,
+        put_i32, put_u16, put_u32, put_u64, read_u16, AppBar, AppMenu, AppMenuItem, AppMenuItemId,
         AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole, AppMenuRow, AppMenuRowView,
         AppMenuShortcut, MenuAnchor, MenuOutcome, MenuRefusal, PointerAction, WindowEvent,
         WindowRequest, WindowSizing, WindowTitle, APP_BAR_FLAGS_OFFSET, APP_BAR_MAX_WIRE_LEN,
         APP_BAR_ROWS_OFFSET, APP_BAR_ROW_COUNT_OFFSET, APP_BAR_TEXT_LEN_OFFSET,
         APP_MENU_KIND_SEPARATOR, APP_MENU_KIND_SUBMENU, APP_MENU_LABEL_MAX, APP_MENU_MAX_DEPTH,
-        APP_MENU_MAX_ROWS, APP_MENU_MAX_TOTAL_ROWS, APP_MENU_REASON_MAX, APP_MENU_ROW_FLAGS_OFFSET,
-        APP_MENU_ROW_FLAG_ENABLED, APP_MENU_ROW_ID_OFFSET, APP_MENU_ROW_LABEL_LEN_OFFSET,
-        APP_MENU_ROW_PARENT_OFFSET, APP_MENU_ROW_SHORTCUT_LEN_OFFSET, APP_MENU_ROW_WIRE_LEN,
-        APP_MENU_SHORTCUT_MAX, APP_MENU_TEXT_BYTES, CREATE_MIN_HEIGHT_OFFSET,
-        CREATE_MIN_WIDTH_OFFSET, CREATE_POPUP_WIRE_LEN, CREATE_RESIZABLE_OFFSET, CREATE_WIRE_LEN,
-        DESKTOP_REPLY_SERVER_OFFSET, MENU_CLOSED_ITEM_OFFSET, MENU_CLOSED_OUTCOME_OFFSET,
-        MENU_CLOSED_REFUSAL_OFFSET, MENU_CLOSED_WIRE_END, OPEN_MENU_ANCHOR_OFFSET,
-        OPEN_MENU_MAX_WIRE_LEN, OPEN_MENU_ROW_COUNT_OFFSET, OPEN_MENU_TEXT_LEN_OFFSET,
-        OPEN_MENU_TITLE_LEN_OFFSET, PRESENT_WIRE_LEN, REQUEST_HEADER_LEN, SET_TITLE_LEN_OFFSET,
-        SET_TITLE_TEXT_OFFSET, SET_TITLE_WIRE_LEN, WINDOW_BACKDROP_BLUR_MAX_PX,
-        WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN, WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC,
-        WINDOW_MAX_FRAMES, WINDOW_MINTED_ID_REPLY_LEN, WINDOW_REQUEST_MAGIC, WINDOW_TITLE_MAX,
+        APP_MENU_MAX_ROWS, APP_MENU_MAX_TOTAL_ROWS, APP_MENU_PANEL_MAX_PX, APP_MENU_REASON_MAX,
+        APP_MENU_ROW_FLAGS_OFFSET, APP_MENU_ROW_FLAG_ENABLED, APP_MENU_ROW_ID_OFFSET,
+        APP_MENU_ROW_LABEL_LEN_OFFSET, APP_MENU_ROW_PARENT_OFFSET,
+        APP_MENU_ROW_SHORTCUT_LEN_OFFSET, APP_MENU_ROW_WIRE_LEN, APP_MENU_SHORTCUT_MAX,
+        APP_MENU_TEXT_BYTES, CREATE_MIN_HEIGHT_OFFSET, CREATE_MIN_WIDTH_OFFSET,
+        CREATE_POPUP_WIRE_LEN, CREATE_RESIZABLE_OFFSET, CREATE_WIRE_LEN,
+        DESKTOP_REPLY_SERVER_OFFSET, FRAME_LAYOUT_AT, MENU_CLOSED_ITEM_OFFSET,
+        MENU_CLOSED_OUTCOME_OFFSET, MENU_CLOSED_REFUSAL_OFFSET, MENU_CLOSED_WIRE_END,
+        MENU_PANEL_OPEN_OFFSET, MENU_PANEL_REQUESTED_ROW_OFFSET, MENU_PANEL_REQUESTED_WIRE_END,
+        MENU_PANEL_ROW_OFFSET, MENU_PANEL_WINDOW_OFFSET, OPEN_MENU_ANCHOR_OFFSET,
+        OPEN_MENU_MAX_WIRE_LEN, OPEN_MENU_ROWS_OFFSET, OPEN_MENU_ROW_COUNT_OFFSET,
+        OPEN_MENU_TEXT_LEN_OFFSET, OPEN_MENU_TITLE_LEN_OFFSET, PRESENT_WIRE_LEN,
+        REQUEST_HEADER_LEN, SET_TITLE_LEN_OFFSET, SET_TITLE_TEXT_OFFSET, SET_TITLE_WIRE_LEN,
+        WINDOW_BACKDROP_BLUR_MAX_PX, WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN,
+        WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC, WINDOW_MAX_FRAMES, WINDOW_MINTED_ID_REPLY_LEN,
+        WINDOW_REQUEST_MAGIC, WINDOW_TITLE_MAX,
     };
     use crate::desktop::{Appearance, DesktopInfo};
     use crate::driver::display::{DamageRect, DisplayFormat};
@@ -3389,6 +3746,12 @@ mod tests {
             3,
         )
         .expect("room inside the nested submenu");
+        menu.push(AppMenuRow::Panel {
+            id: AppMenuItemId::new(5).expect("a valid id"),
+            label: label("Preview"),
+            enabled: true,
+        })
+        .expect("room for a panel row");
         menu.push(AppMenuRow::Separator).expect("a separator");
         menu.push(AppMenuRow::Info).expect("an Info row");
         menu.push(AppMenuRow::Item(
@@ -3530,7 +3893,25 @@ mod tests {
         visit(opening(&sample_titled_menu()));
         visit(opening(&one_of_each_bare_row()));
         visit(opening(&widest_open_menu()));
+        visit(sample_menu_panel());
         visit(WindowRequest::QueryDesktop);
+    }
+
+    /// An attached window hung from a chain's panel row: the narrowest
+    /// geometry, so the framing tests see the operation's own length.
+    fn sample_menu_panel() -> WindowRequest {
+        WindowRequest::CreateMenuPanel {
+            window_id: 3,
+            open_id: 11,
+            row: AppMenuItemId::new(5).expect("a valid id"),
+            shm_handle: 7,
+            event_endpoint: 0x900d,
+            frame_count: 1,
+            width_px: 160,
+            height_px: 96,
+            stride_bytes: 640,
+            format: DisplayFormat::Bgra8888,
+        }
     }
 
     /// A menu whose rows carry no text at all: the narrowest each kind gets,
@@ -4012,8 +4393,14 @@ mod tests {
             panic!("the last row is an item");
         };
         assert_eq!(last.role, AppMenuRole::Destructive);
-        assert!(matches!(row(5).0, AppMenuRowView::Separator));
-        assert!(matches!(row(6).0, AppMenuRowView::Info));
+        let AppMenuRowView::Panel { id, label, enabled } = row(5).0 else {
+            panic!("the panel row reports itself");
+        };
+        assert_eq!(id.get(), 5);
+        assert_eq!(label, "Preview");
+        assert!(enabled);
+        assert!(matches!(row(6).0, AppMenuRowView::Separator));
+        assert!(matches!(row(7).0, AppMenuRowView::Info));
 
         // Every field a menu reports is still a value its own validator
         // would accept, because the block holds only what one wrote.
@@ -4076,6 +4463,203 @@ mod tests {
             plates += 1;
         }
         assert_eq!(plates, APP_MENU_MAX_DEPTH, "the chain runs the full depth");
+    }
+
+    /// A panel row's attached window hangs where a submenu's plate would,
+    /// so it is admitted exactly where a submenu row is — and never opens a
+    /// plate of its own.
+    #[test]
+    fn a_panel_row_is_admitted_where_a_submenu_row_is() {
+        let mut menu = AppMenu::EMPTY;
+        let submenu = AppMenuRow::Submenu {
+            label: label("Deeper"),
+            enabled: true,
+        };
+        let panel = |id: u16| AppMenuRow::Panel {
+            id: AppMenuItemId::new(id).expect("a valid id"),
+            label: label("Preview"),
+            enabled: true,
+        };
+        // The chain of submenu rows that opens each plate in turn, down to
+        // the row on the deepest plate a chain may hold.
+        menu.push(submenu).expect("the root's submenu row");
+        let mut parent = 0;
+        while menu.push_under(submenu, parent).is_ok() {
+            parent = menu.len() - 1;
+        }
+
+        // On the deepest plate a panel's window would hang past the bound,
+        // exactly as the submenu's plate just did.
+        assert_eq!(menu.push_under(panel(9), parent), Err(Errno::OutOfRange));
+
+        // One plate shallower it is admitted, and it opens no plate of its
+        // own: nothing may be pushed under it.
+        let shallower = menu
+            .rows()
+            .nth(parent)
+            .and_then(|(_, above)| above)
+            .expect("a plate above the deepest");
+        menu.push_under(panel(9), shallower)
+            .expect("a panel row hangs where a submenu would");
+        let panel_at = menu.len() - 1;
+        assert_eq!(
+            menu.push_under(item(10, "Inside a panel"), panel_at),
+            Err(Errno::OutOfRange),
+            "a panel's child is a surface, never rows"
+        );
+
+        // An empty label is refused for the same reason a submenu's is: the
+        // row's text is also its attached window's band title.
+        assert_eq!(
+            menu.push(AppMenuRow::Panel {
+                id: AppMenuItemId::new(11).expect("a valid id"),
+                label: AppMenuLabel::EMPTY,
+                enabled: true,
+            }),
+            Err(Errno::OutOfRange)
+        );
+    }
+
+    /// A chooseable row and a panel row share one id space, so the single
+    /// answer that names a row can never be ambiguous.
+    #[test]
+    fn a_panel_row_and_an_item_cannot_share_an_id() {
+        let mut menu = AppMenu::EMPTY;
+        menu.push(item(7, "Copy")).expect("an item");
+        assert_eq!(
+            menu.push(AppMenuRow::Panel {
+                id: AppMenuItemId::new(7).expect("a valid id"),
+                label: label("Preview"),
+                enabled: true,
+            }),
+            Err(Errno::OutOfRange),
+            "a panel may not take an item's id"
+        );
+        menu.push(AppMenuRow::Panel {
+            id: AppMenuItemId::new(8).expect("a valid id"),
+            label: label("Preview"),
+            enabled: true,
+        })
+        .expect("its own id is free");
+        assert_eq!(
+            menu.push(item(8, "Paste")),
+            Err(Errno::OutOfRange),
+            "nor an item a panel's"
+        );
+    }
+
+    /// A panel row that crossed the wire is exactly one a builder could have
+    /// made: it opens rather than acts, so it states no accelerator, reason,
+    /// mark or emphasis, and it always carries an id.
+    #[test]
+    fn a_panel_row_on_the_wire_states_only_what_a_panel_row_can() {
+        let mut menu = AppMenu::titled(label("Edit"));
+        menu.push(AppMenuRow::Panel {
+            id: AppMenuItemId::new(6).expect("a valid id"),
+            label: label("Preview"),
+            enabled: true,
+        })
+        .expect("a panel row");
+        let opening = opening(&menu);
+        assert_eq!(WindowRequest::from_bytes(&opening.frame()), Ok(opening));
+
+        let row_at = OPEN_MENU_ROWS_OFFSET;
+        // Its id is load-bearing: a zero one names no row and is refused.
+        let mut zero_id = opening.frame();
+        put_u16(&mut zero_id, row_at + APP_MENU_ROW_ID_OFFSET, 0);
+        assert_eq!(
+            WindowRequest::from_bytes(&zero_id),
+            Err(Errno::OutOfRange),
+            "a panel row without an id names nothing"
+        );
+
+        // A mark or emphasis a panel row cannot state is refused rather than
+        // dropped, so the decoder admits no shape the builder would not.
+        for flags in [
+            APP_MENU_ROW_FLAG_ENABLED | (AppMenuMark::Check as u8) << 1,
+            APP_MENU_ROW_FLAG_ENABLED | 1 << 3,
+        ] {
+            let mut marked = opening.frame();
+            marked[row_at + APP_MENU_ROW_FLAGS_OFFSET] = flags;
+            assert_eq!(WindowRequest::from_bytes(&marked), Err(Errno::OutOfRange));
+        }
+    }
+
+    /// Which window a closing chain detaches is one rule both halves read.
+    #[test]
+    fn only_choosing_a_panels_own_row_detaches_it() {
+        let row = AppMenuItemId::new(6).expect("a valid id");
+        let other = AppMenuItemId::new(7).expect("a valid id");
+        assert!(MenuOutcome::Chosen(row).detaches(row));
+        assert!(!MenuOutcome::Chosen(other).detaches(row));
+        assert!(!MenuOutcome::Dismissed.detaches(row));
+        assert!(!MenuOutcome::Refused(MenuRefusal::SeatBusy).detaches(row));
+    }
+
+    /// An arrival carries the chain and the row and nothing else, inside the
+    /// fixed event frame every other event already shares.
+    #[test]
+    fn a_menu_panel_arrival_round_trips_and_fails_closed() {
+        let arrival = WindowEvent::MenuPanelRequested {
+            window_id: 4,
+            open_id: 11,
+            row: AppMenuItemId::new(6).expect("a valid id"),
+        };
+        let bytes = arrival.to_le_bytes();
+        assert_eq!(WindowEvent::from_bytes(&bytes), Ok(arrival));
+        assert_eq!(arrival.window_id(), Some(4));
+
+        // Its whole payload is ten of the frame's twenty-four bytes, and the
+        // rest must be zero — an arrival smuggles nothing along.
+        let mut dirty = bytes;
+        dirty[MENU_PANEL_REQUESTED_WIRE_END] = 1;
+        assert_eq!(WindowEvent::from_bytes(&dirty), Err(Errno::BadMagic));
+
+        // Neither the chain nor the row may be absent.
+        let mut no_open = bytes;
+        put_u64(&mut no_open, 16, 0);
+        assert_eq!(WindowEvent::from_bytes(&no_open), Err(Errno::OutOfRange));
+        let mut no_row = bytes;
+        put_u16(&mut no_row, MENU_PANEL_REQUESTED_ROW_OFFSET, 0);
+        assert_eq!(WindowEvent::from_bytes(&no_row), Err(Errno::OutOfRange));
+    }
+
+    /// An attached window is bounded to a panel at both ends, and names a
+    /// live chain: a zero window, open or row is refused.
+    #[test]
+    fn a_menu_panel_request_is_bounded_and_names_a_chain() {
+        let panel = sample_menu_panel();
+        assert_eq!(WindowRequest::from_bytes(&panel.frame()), Ok(panel));
+
+        for at in [MENU_PANEL_WINDOW_OFFSET, MENU_PANEL_OPEN_OFFSET] {
+            let mut zeroed = panel.frame();
+            put_u64(&mut zeroed, at, 0);
+            assert_eq!(WindowRequest::from_bytes(&zeroed), Err(Errno::OutOfRange));
+        }
+        let mut no_row = panel.frame();
+        put_u16(&mut no_row, MENU_PANEL_ROW_OFFSET, 0);
+        assert_eq!(WindowRequest::from_bytes(&no_row), Err(Errno::OutOfRange));
+
+        // The extent bound is the format's, not the session's: a surface no
+        // menu row could hang is refused before anything maps it.
+        for at in [FRAME_LAYOUT_AT + 4, FRAME_LAYOUT_AT + 8] {
+            let mut huge = panel.frame();
+            put_u32(&mut huge, at, APP_MENU_PANEL_MAX_PX + 1);
+            put_u32(
+                &mut huge,
+                FRAME_LAYOUT_AT + 12,
+                (APP_MENU_PANEL_MAX_PX + 1) * 4,
+            );
+            assert_eq!(
+                WindowRequest::from_bytes(&huge),
+                Err(Errno::LengthOutOfRange)
+            );
+        }
+
+        // And a reserved event endpoint is refused exactly as a create's is.
+        let mut reserved = panel.frame();
+        put_u64(&mut reserved, 16, SEATMGR_ENDPOINT);
+        assert_eq!(WindowRequest::from_bytes(&reserved), Err(Errno::OutOfRange));
     }
 
     #[test]

@@ -23,14 +23,14 @@ use tairix_abi::input::{
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::window_ipc::{
     decode_create_reply, decode_desktop_reply, decode_minted_id_reply, AppBar, AppMenu, MenuAnchor,
-    PointerAction, WindowEvent, WindowRequest, WindowTitle, WINDOW_CREATE_REPLY_LEN,
+    MenuOutcome, PointerAction, WindowEvent, WindowRequest, WindowTitle, WINDOW_CREATE_REPLY_LEN,
     WINDOW_DESKTOP_REPLY_LEN, WINDOW_MINTED_ID_REPLY_LEN,
 };
 use tairix_abi::{Errno, ProcId};
 use tairix_geometry::{Point, Rect, Region};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 
-use crate::server::{PopupSpec, WindowSizing};
+use crate::server::{MenuAttachment, MenuPanelSpec, PopupSpec, WindowSizing};
 
 /// High tag of an app's event-mailbox endpoint id (see
 /// [`event_endpoint_for`]).
@@ -294,6 +294,10 @@ struct LastPresent {
     /// The frame index of the last accepted present, if the window has
     /// presented at all since it was created or resized.
     frame_index: Option<u32>,
+    /// The menu chain this window is an attached panel of, or `None` for
+    /// every other window. The session ends a panel with its chain rather
+    /// than the app closing it, so this is how the record goes with it.
+    chain: Option<MenuAttachment>,
 }
 
 /// A typed handle on the desktop session's window service.
@@ -516,11 +520,12 @@ impl<T: WindowTransport> WindowClient<T> {
     /// The session's typed refusal, a transport failure, or a corrupt
     /// status frame.
     pub fn close(&mut self, window_id: u64) -> Result<(), Errno> {
-        let request = WindowRequest::Close { window_id };
-        self.status_call(&request)?;
+        let closed = self.status_call(&WindowRequest::Close { window_id });
+        // Forget it either way: a window the session does not know is
+        // certainly not one to keep re-presenting.
         self.presented
             .retain(|record| record.window_id != window_id);
-        Ok(())
+        closed
     }
 
     /// Re-map window `window_id` onto a fresh frame region: `frame_count`
@@ -684,6 +689,93 @@ impl<T: WindowTransport> WindowClient<T> {
         decode_minted_id_reply(&reply[..len])
     }
 
+    /// Hang an **attached window** — a surface this app draws — from panel
+    /// row `spec.row` of its open chain `spec.open_id`, answering the
+    /// [`WindowEvent::MenuPanelRequested`] the desktop sent when the pointer
+    /// arrived on that row (`plans/NEW-MENUS.md`).
+    ///
+    /// Unlike [`Self::create_popup`] the app states no placement: the
+    /// surface hangs off a menu row the session placed, which the app is
+    /// never told the position of, and the session places and clips it
+    /// there. It is bounded to
+    /// [`APP_MENU_PANEL_MAX_PX`](tairix_abi::window_ipc::APP_MENU_PANEL_MAX_PX)
+    /// either way, wears the row's own label as its band title, and counts
+    /// against the same per-client window budget as [`Self::create`].
+    ///
+    /// Returns the minted window id and the serving session's [`ProcId`], as
+    /// [`Self::create`] does; thereafter [`Self::present`] and
+    /// [`Self::close`] act on that id. The surface lives and dies with the
+    /// chain — choosing its row detaches it into an ordinary top-level
+    /// window and any other outcome closes it — so an app that sees its
+    /// chain's [`WindowEvent::MenuClosed`] naming a row other than this one
+    /// should forget the id.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::NotFound`] — the window is not the caller's own, or that
+    ///   window holds no such unanswered open. **The ordinary case**: the
+    ///   chain closed while the app was drawing. Free the region and carry
+    ///   on.
+    /// * The session's typed refusal that the pointer has left the row —
+    ///   equally ordinary, since nothing about the chain waited — or that it
+    ///   composes no attached windows ([`Errno::NotSupported`]).
+    /// * [`Errno::AlreadyExists`] — the chain already has an attached
+    ///   window.
+    /// * [`Errno::LengthOutOfRange`] — a geometry outside the panel bound,
+    ///   caught by the protocol before any call.
+    /// * A transport failure, or a corrupt reply (fail closed, never a
+    ///   guessed id).
+    ///
+    /// [`WindowEvent::MenuPanelRequested`]: tairix_abi::window_ipc::WindowEvent::MenuPanelRequested
+    /// [`WindowEvent::MenuClosed`]: tairix_abi::window_ipc::WindowEvent::MenuClosed
+    pub fn create_menu_panel(&mut self, spec: &MenuPanelSpec) -> Result<(u64, ProcId), Errno> {
+        let request = WindowRequest::CreateMenuPanel {
+            window_id: spec.window_id,
+            open_id: spec.open_id,
+            row: spec.row,
+            shm_handle: spec.shm_handle,
+            event_endpoint: spec.event_endpoint,
+            frame_count: spec.frame_count,
+            width_px: spec.surface.width_px,
+            height_px: spec.surface.height_px,
+            stride_bytes: spec.surface.stride_bytes,
+            format: spec.surface.format,
+        };
+        let mut reply = [0u8; WINDOW_CREATE_REPLY_LEN];
+        let len = self.call(&request, &mut reply)?;
+        let (window_id, server) = decode_create_reply(&reply[..len])?;
+        self.note_extent(window_id, spec.surface.width_px, spec.surface.height_px);
+        if let Some(record) = self.record_mut(window_id) {
+            record.chain = Some(MenuAttachment {
+                open_id: spec.open_id,
+                row: spec.row,
+            });
+        }
+        Ok((window_id, server))
+    }
+
+    /// Forget the windows chain `open_id` took with it when it closed with
+    /// `outcome`, keeping the one the outcome detached.
+    ///
+    /// The session ends an attached window with its chain rather than the
+    /// app closing it, so without this the client would keep a record per
+    /// gesture — unbounded growth on a list every present scans. Which
+    /// window survives is [`MenuOutcome::detaches`], the same rule the
+    /// desktop settles by, so the two cannot disagree.
+    ///
+    /// [`WindowEvents::wait`] calls it, so an app inherits the bookkeeping
+    /// by using the client library.
+    pub fn settle_menu_chain(&mut self, open_id: u64, outcome: MenuOutcome) {
+        self.presented.retain_mut(|record| match record.chain {
+            Some(chain) if chain.open_id == open_id => {
+                let detached = outcome.detaches(chain.row);
+                record.chain = None;
+                detached
+            }
+            _ => true,
+        });
+    }
+
     /// Declare this **application's** presence on the desktop's icon bar:
     /// where its bar events arrive, whether it handles the primary click
     /// itself, and the menu a secondary press opens.
@@ -781,6 +873,7 @@ impl<T: WindowTransport> WindowClient<T> {
             width_px,
             height_px,
             frame_index: None,
+            chain: None,
         });
     }
 
@@ -866,8 +959,16 @@ impl<S: EventSource> WindowEvents<S> {
         let mut frame = [0u8; WindowEvent::WIRE_LEN];
         self.source.next(&mut frame)?;
         let event = WindowEvent::from_bytes(&frame)?;
-        if let WindowEvent::RedrawRequested { window_id } = event {
-            let _ = client.answer_redraw(window_id);
+        match event {
+            WindowEvent::RedrawRequested { window_id } => {
+                let _ = client.answer_redraw(window_id);
+            }
+            // The session ended this chain, and any attached window with
+            // it, so the client stops tracking what is no longer there.
+            WindowEvent::MenuClosed {
+                open_id, outcome, ..
+            } => client.settle_menu_chain(open_id, outcome),
+            _ => {}
         }
         Ok(event)
     }

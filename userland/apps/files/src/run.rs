@@ -1968,6 +1968,7 @@ mod program {
             | WindowEvent::AppBarDefault
             | WindowEvent::AppBarMenu { .. }
             | WindowEvent::MenuClosed { .. }
+            | WindowEvent::MenuPanelRequested { .. }
             | WindowEvent::CloseRequested { .. }
             | WindowEvent::Focus { .. }
             | WindowEvent::Minimized { .. }

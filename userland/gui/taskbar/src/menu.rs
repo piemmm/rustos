@@ -716,6 +716,12 @@ fn declared_item(row: AppMenuRowView<'_>) -> MenuItem {
                 drawn.with_state(ControlState::disabled())
             }
         }
+        // The bar hangs no attached windows — that is the menu service's —
+        // so a panel row draws its chevron greyed rather than reading as a
+        // row that opens something the bar cannot open.
+        AppMenuRowView::Panel { label, .. } => MenuItem::new(label)
+            .with_submenu(true)
+            .with_state(ControlState::disabled()),
         AppMenuRowView::Info => MenuItem::new(INFO_ROW_LABEL).with_submenu(true),
         // A separator never becomes a row (`plate_rows` folds it into the
         // next row's group break); an unreachable one draws as a spacer
