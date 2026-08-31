@@ -1065,6 +1065,7 @@ dependencies = [
  "tairix-abi",
  "tairix-caps",
  "tairix-drvrt",
+ "tairix-hid",
  "tairix-log",
  "tairix-rt",
  "tairix-usb",

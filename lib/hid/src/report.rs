@@ -117,27 +117,64 @@ pub enum HidReportMap {
     Keyboard(KeyboardMap),
 }
 
-/// A compact, public description of a parsed [`HidReportMap`] for diagnostics
-/// (`plans/USB.md`): which boot device the map decodes, the Report ID its
-/// reports carry (`0` = no report IDs), and the located bit offset/size/count
-/// of its fields. It carries no interpretation logic — it only exposes what
-/// the parser decided so the host-controller driver can log how a device's
-/// reports are being read on metal (QEMU models no Pi USB).
+/// Where one decoded field sits in the transmitted report, as the parser
+/// located it.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct ReportMapSummary {
-    /// `true` for a keyboard map, `false` for a mouse map.
-    pub is_keyboard: bool,
-    /// Report ID prefixing this device's reports (`0` = no report IDs).
-    pub report_id: u8,
-    /// Bit offset of the primary field (mouse buttons / keyboard modifiers).
-    pub primary_offset_bits: u16,
-    /// Bit offset of the secondary field (mouse X / keyboard key array).
-    pub secondary_offset_bits: u16,
-    /// Per-element bit size of the secondary field.
-    pub secondary_size_bits: u8,
-    /// Element count of the secondary field (mouse X = 1; keyboard = key
-    /// slots).
-    pub secondary_count: u8,
+pub struct ReportFieldSummary {
+    /// Bit offset from the start of the report, including the leading Report
+    /// ID byte when the device uses report IDs.
+    pub offset_bits: u16,
+    /// Per-element bit width.
+    pub size_bits: u8,
+    /// Element count — `1` for a scalar axis, the button or key-slot count
+    /// otherwise.
+    pub count: u8,
+}
+
+/// A public description of a parsed [`HidReportMap`] for diagnostics
+/// (`plans/USB.md`): every field the map located, so a metal capture shows
+/// exactly how a device's reports are being read (QEMU models no Pi USB).
+///
+/// One variant per device kind rather than a shared primary/secondary pair:
+/// a mouse map locates four fields and a keyboard two, so a
+/// lowest-common-denominator shape could not report a pointer's Y axis or its
+/// wheel at all — and those are precisely the offsets that decide whether
+/// button bits are being read from the right place.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ReportMapSummary {
+    /// A pointer map: buttons, X, Y, and the wheel when the device has one.
+    Mouse {
+        /// Report ID prefixing this device's reports (`0` = no report IDs).
+        report_id: u8,
+        /// The button bits.
+        buttons: ReportFieldSummary,
+        /// The signed X displacement field.
+        x: ReportFieldSummary,
+        /// The signed Y displacement field.
+        y: ReportFieldSummary,
+        /// The signed wheel field, when the device declares one.
+        wheel: Option<ReportFieldSummary>,
+    },
+    /// A keyboard map: the modifier flags and the key array.
+    Keyboard {
+        /// Report ID prefixing this device's reports (`0` = no report IDs).
+        report_id: u8,
+        /// The eight 1-bit modifier flags.
+        modifiers: ReportFieldSummary,
+        /// The key-array field.
+        keys: ReportFieldSummary,
+    },
+}
+
+impl FieldLoc {
+    /// This location as its public diagnostic summary.
+    const fn summary(self) -> ReportFieldSummary {
+        ReportFieldSummary {
+            offset_bits: self.offset_bits,
+            size_bits: self.size_bits,
+            count: self.count,
+        }
+    }
 }
 
 /// Byte length of the normalised boot mouse report [`HidReportMap::normalize`]
@@ -504,21 +541,17 @@ impl HidReportMap {
     #[must_use]
     pub fn summary(&self) -> ReportMapSummary {
         match self {
-            Self::Mouse(map) => ReportMapSummary {
-                is_keyboard: false,
+            Self::Mouse(map) => ReportMapSummary::Mouse {
                 report_id: map.report_id,
-                primary_offset_bits: map.buttons.offset_bits,
-                secondary_offset_bits: map.x.offset_bits,
-                secondary_size_bits: map.x.size_bits,
-                secondary_count: 1,
+                buttons: map.buttons.summary(),
+                x: map.x.summary(),
+                y: map.y.summary(),
+                wheel: map.wheel.map(FieldLoc::summary),
             },
-            Self::Keyboard(map) => ReportMapSummary {
-                is_keyboard: true,
+            Self::Keyboard(map) => ReportMapSummary::Keyboard {
                 report_id: map.report_id,
-                primary_offset_bits: map.modifiers.offset_bits,
-                secondary_offset_bits: map.keys.offset_bits,
-                secondary_size_bits: map.keys.size_bits,
-                secondary_count: map.keys.count,
+                modifiers: map.modifiers.summary(),
+                keys: map.keys.summary(),
             },
         }
     }
@@ -663,6 +696,60 @@ mod tests {
                 assert!(m.wheel.is_none());
             }
             HidReportMap::Keyboard(_) => panic!("expected a mouse map"),
+        }
+    }
+
+    #[test]
+    fn a_mouse_summary_reports_every_located_field() {
+        // The diagnostic exists to show which bits each field is read from, so
+        // a shape that could not name Y or the wheel could not answer the one
+        // question it is asked.
+        let map = parse(WHEEL_MOUSE_DESC).expect("parses");
+        match map.summary() {
+            ReportMapSummary::Mouse {
+                report_id,
+                buttons,
+                x,
+                y,
+                wheel,
+            } => {
+                assert_eq!(report_id, 0);
+                assert_eq!(
+                    (buttons.offset_bits, buttons.size_bits, buttons.count),
+                    (0, 1, 3)
+                );
+                assert_eq!((x.offset_bits, x.size_bits), (8, 8));
+                assert_eq!((y.offset_bits, y.size_bits), (16, 8));
+                let wheel = wheel.expect("the descriptor declares a wheel");
+                assert_eq!((wheel.offset_bits, wheel.size_bits), (24, 8));
+            }
+            ReportMapSummary::Keyboard { .. } => panic!("expected a mouse summary"),
+        }
+    }
+
+    #[test]
+    fn a_wheelless_mouse_summary_reports_no_wheel() {
+        let map = parse(BOOT_MOUSE_DESC).expect("parses");
+        match map.summary() {
+            ReportMapSummary::Mouse { wheel, .. } => assert!(wheel.is_none()),
+            ReportMapSummary::Keyboard { .. } => panic!("expected a mouse summary"),
+        }
+    }
+
+    #[test]
+    fn a_keyboard_summary_reports_its_two_fields() {
+        let map = parse(BOOT_KEYBOARD_DESC).expect("parses");
+        match map.summary() {
+            ReportMapSummary::Keyboard {
+                report_id,
+                modifiers,
+                keys,
+            } => {
+                assert_eq!(report_id, 0);
+                assert_eq!((modifiers.offset_bits, modifiers.size_bits), (0, 1));
+                assert_eq!((keys.offset_bits, keys.size_bits, keys.count), (16, 8, 6));
+            }
+            ReportMapSummary::Mouse { .. } => panic!("expected a keyboard summary"),
         }
     }
 

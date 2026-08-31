@@ -44,15 +44,19 @@
 /* Maximum message length, in bytes. */
 #define TAIRIX_LOG_MESSAGE_MAX ((uintptr_t)120u)
 /* Maximum number of structured key/value fields. */
-#define TAIRIX_LOG_FIELDS_MAX ((uintptr_t)8u)
+#define TAIRIX_LOG_FIELDS_MAX ((uintptr_t)32u)
 /* Maximum field key length, in bytes. */
 #define TAIRIX_LOG_FIELD_KEY_MAX ((uintptr_t)32u)
 /* Maximum encoded field-value length, in bytes (tag + payload). */
 #define TAIRIX_LOG_FIELD_VALUE_MAX ((uintptr_t)256u)
+/* Byte budget for all of a record's encoded fields together: a
+ * record whose fields exceed it is refused even when it is within
+ * TAIRIX_LOG_FIELDS_MAX. */
+#define TAIRIX_LOG_FIELDS_PAYLOAD_MAX ((uintptr_t)2560u)
 /* Fixed record header length, in bytes. */
 #define TAIRIX_LOG_RECORD_HEADER_LEN ((uintptr_t)8u)
 /* Maximum encoded record length, in bytes. */
-#define TAIRIX_LOG_RECORD_MAX ((uintptr_t)2440u)
+#define TAIRIX_LOG_RECORD_MAX ((uintptr_t)2688u)
 
 /* Field-value type tags: the first byte of an encoded field value. */
 #define TAIRIX_FIELD_TAG_NULL ((uint8_t)0u)

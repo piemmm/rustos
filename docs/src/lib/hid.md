@@ -43,9 +43,11 @@ dependency (`AGENTS.md` §17.4 /
   an undecodable or unsupported descriptor yields `None` (the caller falls back
   to boot protocol), never a guess or a panic (`AGENTS.md` §2.9).
   `HidReportMap::summary` → `ReportMapSummary` exposes what the parser decided
-  (kind, report ID, primary/secondary field offsets/size/count) so the xHCI
-  driver can log how a device's reports are being read on metal — the diagnostic
-  window the invisible-under-QEMU report path needs.
+  — one variant per device kind, naming every located field's bit offset, width,
+  and element count — so the xHCI driver can log how a device's reports are
+  being read on metal. A shared primary/secondary pair could not report a
+  pointer's Y axis or its wheel, and those are the offsets that show whether
+  button bits are read from the right place.
 - **Console-input producer** (`KeyboardConsole`, `pump_once`, `ConsoleSink`):
   resolves each HID-usage key edge into the `tairix_input::Key` a US layout
   produces (applying held modifiers + caps/num lock) and emits the decoded

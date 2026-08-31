@@ -51,7 +51,7 @@
 
 use crate::field::{decode_named_field, encode_named_field, FieldValue};
 use crate::le::{put_i32, put_u16, put_u32, read_i32, read_u16, read_u32};
-use crate::log::{LOG_FIELD_VALUE_MAX, LOG_LEVEL_MAX, LOG_MESSAGE_MAX};
+use crate::log::{LOG_FIELDS_MAX, LOG_FIELD_VALUE_MAX, LOG_LEVEL_MAX, LOG_MESSAGE_MAX};
 use crate::{Errno, FIELD_NAME_MAX};
 
 /// Well-known synchronous call-endpoint id the journal service binds and
@@ -88,8 +88,10 @@ pub const LOG_INGRESS_EVENT_ID_MAX: usize = 64;
 /// Maximum length, in bytes, of `caller.requested_source`.
 pub const LOG_INGRESS_REQUESTED_SOURCE_MAX: usize = 128;
 
-/// Maximum number of `data.*` fields one request may carry.
-pub const LOG_INGRESS_MAX_DATA_FIELDS: usize = 32;
+/// Maximum number of `data.*` fields one request may carry. Shared with the
+/// diagnostic record model so a record that fits one channel fits the others,
+/// exactly as [`LOG_INGRESS_MESSAGE_MAX`] is.
+pub const LOG_INGRESS_MAX_DATA_FIELDS: usize = LOG_FIELDS_MAX;
 
 /// Upper bound, in bytes, on a fully populated encoded request: the header,
 /// every optional string at its maximum, and the maximum number of `data.*`

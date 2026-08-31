@@ -4645,7 +4645,10 @@ fn a_report_protocol_mouse_is_configured_and_normalizes_reports() {
         .expect("a HID interface has an enumeration diagnostic");
     assert!(enum_diag.report_protocol, "the mouse runs report protocol");
     assert!(
-        enum_diag.map.is_some_and(|map| !map.is_keyboard),
+        matches!(
+            enum_diag.map,
+            Some(tairix_hid::ReportMapSummary::Mouse { .. })
+        ),
         "a parsed mouse report map, not a keyboard"
     );
 

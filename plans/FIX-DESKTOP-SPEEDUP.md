@@ -198,8 +198,8 @@ the two samples. This is the regression gate every later stage tightens.
   program-library folder, planted only on this disk. It reads
   `DESKTOP_FRAME_STATS` through `lib/procinfo::for_each_desktop_frame_report`
   under its own `CAP_SYSINFO_GLOBAL` and re-emits the eight counters the gate
-  reads as one `log_emit` record — `abi-v1` bounds a record to eight fields, so
-  it carries exactly those. It requires **one** publishing session and fails
+  reads as one `log_emit` record, within the `abi-v1`
+  `LOG_FIELDS_MAX` bound. It requires **one** publishing session and fails
   closed otherwise. A run that cannot sample emits its own failure record and
   the gate fails the run on sight of it.
 - **The gate listens on the *diagnostic* trail.** `log_emit` reaches the log

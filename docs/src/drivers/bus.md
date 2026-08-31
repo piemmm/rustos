@@ -506,8 +506,10 @@ once, so a metal boot shows *how* each device's reports are read — a keyboard
 as boot-protocol, a mouse as report-protocol — without guessing.
 `UsbDevice::hid_enum_diag` records report vs boot protocol, the declared
 report-descriptor length, the parsed field layout when in report protocol
-(`tairix_hid::ReportMapSummary`: kind, report ID, primary/secondary
-offsets/size/count), `wMaxPacketSize`, and the armed capture length — logged
+(`tairix_hid::ReportMapSummary`: kind, report ID, and every located field's
+bit offset, width, and element count — a mouse's buttons, X, Y, and wheel, or a
+keyboard's modifiers and key array), `wMaxPacketSize`, and the armed capture
+length — logged
 at node publish (`usb-hcd: HID interface report protocol` /
 `… boot-protocol fallback`, event id 4150). It carries no report payload, so
 no keystroke ever reaches the log.

@@ -114,6 +114,7 @@ mod program {
     use tairix_drv_bus_usb::domain::{ControllerDomainEvent, ControllerHealth};
     use tairix_drv_bus_usb::serve::{attach_transport_grants, UrbOutcome, UrbReply, UrbService};
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
+    use tairix_hid::{ReportFieldSummary, ReportMapSummary};
     use tairix_log::{log, Event, EventId, Field, Level};
     use tairix_rt::{ClockDelay, LogSink};
     use tairix_usb::device::{EnumStage, EventWait, HubEvent, MAX_INTERFACES, XHCI_MAX_SLOTS};
@@ -172,6 +173,84 @@ mod program {
     /// Logged once per interface at node publish, so a metal capture shows how
     /// a keyboard/mouse's reports will be read (QEMU models no Pi USB).
     const HCD_HID_ENUM: EventId = EventId(4150);
+
+    /// Field slots the HID enumeration record fills: the five interface facts,
+    /// `keyboard` + `report_id`, and the widest map's located fields (a mouse's
+    /// buttons with a count, plus three two-key axes).
+    const HID_ENUM_FIELDS_MAX: usize = 16;
+
+    const _: () = assert!(HID_ENUM_FIELDS_MAX <= tairix_abi::LOG_FIELDS_MAX);
+
+    /// The diagnostic keys one located report field logs under: its bit
+    /// offset, its per-element width, and its element count where a count is
+    /// meaningful (a scalar axis has none).
+    #[derive(Copy, Clone)]
+    struct LocKeys {
+        offset: &'static str,
+        size: &'static str,
+        count: Option<&'static str>,
+    }
+
+    const BUTTON_KEYS: LocKeys = LocKeys {
+        offset: "btn_off_bits",
+        size: "btn_size_bits",
+        count: Some("btn_count"),
+    };
+    const X_KEYS: LocKeys = LocKeys {
+        offset: "x_off_bits",
+        size: "x_size_bits",
+        count: None,
+    };
+    const Y_KEYS: LocKeys = LocKeys {
+        offset: "y_off_bits",
+        size: "y_size_bits",
+        count: None,
+    };
+    const WHEEL_KEYS: LocKeys = LocKeys {
+        offset: "wheel_off_bits",
+        size: "wheel_size_bits",
+        count: None,
+    };
+    const MODIFIER_KEYS: LocKeys = LocKeys {
+        offset: "mod_off_bits",
+        size: "mod_size_bits",
+        count: None,
+    };
+    const KEY_ARRAY_KEYS: LocKeys = LocKeys {
+        offset: "keys_off_bits",
+        size: "keys_size_bits",
+        count: Some("keys_count"),
+    };
+
+    /// Append `key = value` at `count`, advancing it. A full buffer drops the
+    /// field rather than panicking; the compile-time bound above is what keeps
+    /// that from happening.
+    fn push_field(
+        fields: &mut [Field<'static>],
+        count: &mut usize,
+        key: &'static str,
+        value: tairix_log::FieldValue<'static>,
+    ) {
+        if let Some(slot) = fields.get_mut(*count) {
+            *slot = Field { key, value };
+            *count += 1;
+        }
+    }
+
+    /// Append one located field's offset, width, and element count.
+    fn push_loc(
+        fields: &mut [Field<'static>],
+        count: &mut usize,
+        keys: LocKeys,
+        loc: ReportFieldSummary,
+    ) {
+        let u = tairix_log::FieldValue::UnsignedInt;
+        push_field(fields, count, keys.offset, u(u64::from(loc.offset_bits)));
+        push_field(fields, count, keys.size, u(u64::from(loc.size_bits)));
+        if let Some(key) = keys.count {
+            push_field(fields, count, key, u(u64::from(loc.count)));
+        }
+    }
 
     /// Interior fault-domain event id: the controller faulted and the whole
     /// subtree entered its shared recovery grace window (`plans/FIX-IO.md`
@@ -998,92 +1077,108 @@ mod program {
         };
         let u = |v: u64| tairix_log::FieldValue::UnsignedInt(v);
         let b = tairix_log::FieldValue::Bool;
-        match diag.map {
-            Some(map) => log(
-                &LogSink,
-                &Event {
-                    level: Level::Info,
-                    id: HCD_HID_ENUM,
-                    message: "usb-hcd: HID interface report protocol",
-                    fields: &[
-                        Field {
-                            key: "index",
-                            value: u(index as u64),
-                        },
-                        Field {
-                            key: "report_proto",
-                            value: b(diag.report_protocol),
-                        },
-                        Field {
-                            key: "desc_len",
-                            value: u(u64::from(diag.report_descriptor_len)),
-                        },
-                        Field {
-                            key: "max_packet",
-                            value: u(u64::from(diag.int_max_packet)),
-                        },
-                        Field {
-                            key: "capture_len",
-                            value: u(u64::from(diag.capture_len)),
-                        },
-                        Field {
-                            key: "keyboard",
-                            value: b(map.is_keyboard),
-                        },
-                        Field {
-                            key: "report_id",
-                            value: u(u64::from(map.report_id)),
-                        },
-                        Field {
-                            key: "primary_off_bits",
-                            value: u(u64::from(map.primary_offset_bits)),
-                        },
-                        Field {
-                            key: "secondary_off_bits",
-                            value: u(u64::from(map.secondary_offset_bits)),
-                        },
-                        Field {
-                            key: "secondary_size_bits",
-                            value: u(u64::from(map.secondary_size_bits)),
-                        },
-                        Field {
-                            key: "secondary_count",
-                            value: u(u64::from(map.secondary_count)),
-                        },
-                    ],
-                },
-            ),
-            None => log(
+        // The interface's own enumeration facts, common to both arms.
+        let mut fields = [Field {
+            key: "",
+            value: tairix_log::FieldValue::Null,
+        }; HID_ENUM_FIELDS_MAX];
+        let mut count = 0usize;
+        push_field(&mut fields, &mut count, "index", u(index as u64));
+        push_field(
+            &mut fields,
+            &mut count,
+            "report_proto",
+            b(diag.report_protocol),
+        );
+        push_field(
+            &mut fields,
+            &mut count,
+            "desc_len",
+            u(u64::from(diag.report_descriptor_len)),
+        );
+        push_field(
+            &mut fields,
+            &mut count,
+            "max_packet",
+            u(u64::from(diag.int_max_packet)),
+        );
+        push_field(
+            &mut fields,
+            &mut count,
+            "capture_len",
+            u(u64::from(diag.capture_len)),
+        );
+        let Some(map) = diag.map else {
+            log(
                 &LogSink,
                 &Event {
                     level: Level::Info,
                     id: HCD_HID_ENUM,
                     message: "usb-hcd: HID interface boot-protocol fallback",
-                    fields: &[
-                        Field {
-                            key: "index",
-                            value: u(index as u64),
-                        },
-                        Field {
-                            key: "report_proto",
-                            value: b(diag.report_protocol),
-                        },
-                        Field {
-                            key: "desc_len",
-                            value: u(u64::from(diag.report_descriptor_len)),
-                        },
-                        Field {
-                            key: "max_packet",
-                            value: u(u64::from(diag.int_max_packet)),
-                        },
-                        Field {
-                            key: "capture_len",
-                            value: u(u64::from(diag.capture_len)),
-                        },
-                    ],
+                    fields: &fields[..count],
                 },
-            ),
+            );
+            return;
         };
+        // Every field the parser located, so the log shows where each one is
+        // read from rather than only the first of them: a pointer whose axes
+        // are misread produces flickering button bits, and only the offsets
+        // side by side show it.
+        match map {
+            ReportMapSummary::Mouse {
+                report_id,
+                buttons,
+                x,
+                y,
+                wheel,
+            } => {
+                push_field(&mut fields, &mut count, "keyboard", b(false));
+                push_field(
+                    &mut fields,
+                    &mut count,
+                    "report_id",
+                    u(u64::from(report_id)),
+                );
+                push_loc(&mut fields, &mut count, BUTTON_KEYS, buttons);
+                push_loc(&mut fields, &mut count, X_KEYS, x);
+                push_loc(&mut fields, &mut count, Y_KEYS, y);
+                match wheel {
+                    Some(loc) => push_loc(&mut fields, &mut count, WHEEL_KEYS, loc),
+                    // An absent wheel is stated, never a zero offset a reader
+                    // would take for a located field.
+                    None => push_field(
+                        &mut fields,
+                        &mut count,
+                        WHEEL_KEYS.offset,
+                        tairix_log::FieldValue::Null,
+                    ),
+                }
+            }
+            ReportMapSummary::Keyboard {
+                report_id,
+                modifiers,
+                keys,
+            } => {
+                push_field(&mut fields, &mut count, "keyboard", b(true));
+                push_field(
+                    &mut fields,
+                    &mut count,
+                    "report_id",
+                    u(u64::from(report_id)),
+                );
+                push_loc(&mut fields, &mut count, MODIFIER_KEYS, modifiers);
+                push_loc(&mut fields, &mut count, KEY_ARRAY_KEYS, keys);
+            }
+        }
+        log(
+            &LogSink,
+            &Event {
+                level: Level::Info,
+                id: HCD_HID_ENUM,
+                message: "usb-hcd: HID interface report protocol",
+                fields: &fields[..count],
+            },
+        );
     }
 
     /// A diagnostic field carrying a controller value that may not have been

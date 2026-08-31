@@ -60,7 +60,31 @@ pub const LOG_LEVEL_MAX: u8 = 5;
 pub const LOG_MESSAGE_MAX: usize = 120;
 
 /// Maximum number of structured fields a record may carry.
-pub const LOG_FIELDS_MAX: usize = 8;
+///
+/// One bound with the journal's [`LOG_INGRESS_MAX_DATA_FIELDS`], exactly as
+/// [`LOG_MESSAGE_MAX`] is: an emit cap narrower than the ingest cap sheds a
+/// record's *trailing* fields, so a diagnostic silently loses the values it
+/// was added to report while still printing a plausible line.
+///
+/// [`LOG_INGRESS_MAX_DATA_FIELDS`]: crate::LOG_INGRESS_MAX_DATA_FIELDS
+pub const LOG_FIELDS_MAX: usize = 32;
+
+/// Byte budget for one record's encoded fields taken together.
+///
+/// A validation bound on an untrusted record, and deliberately a *total*
+/// rather than [`LOG_FIELD_KEY_MAX`] + [`LOG_FIELD_VALUE_MAX`] times
+/// [`LOG_FIELDS_MAX`]: values are overwhelmingly small integers, so budgeting
+/// the sum lets a record carry many of them without sizing every staging
+/// buffer for the worst case of all of them at once. It admits the longest
+/// record the narrower field cap ever did, so nothing that encoded before is
+/// refused now.
+pub const LOG_FIELDS_PAYLOAD_MAX: usize = 2560;
+
+/// The budget must admit at least one maximal field, or a legal field could
+/// never be encoded at all.
+const _: () = assert!(
+    LOG_FIELDS_PAYLOAD_MAX >= NAMED_FIELD_KEY_PREFIX_LEN + LOG_FIELD_KEY_MAX + LOG_FIELD_VALUE_MAX
+);
 
 /// Maximum length, in bytes, of a single field key.
 pub const LOG_FIELD_KEY_MAX: usize = 32;
@@ -76,9 +100,7 @@ pub const LOG_RECORD_HEADER_LEN: usize = 8;
 
 /// Upper bound, in bytes, on a fully populated encoded record. The kernel
 /// copies at most this many bytes from the caller before decoding.
-pub const LOG_RECORD_MAX: usize = LOG_RECORD_HEADER_LEN
-    + LOG_MESSAGE_MAX
-    + LOG_FIELDS_MAX * (NAMED_FIELD_KEY_PREFIX_LEN + LOG_FIELD_KEY_MAX + LOG_FIELD_VALUE_MAX);
+pub const LOG_RECORD_MAX: usize = LOG_RECORD_HEADER_LEN + LOG_MESSAGE_MAX + LOG_FIELDS_PAYLOAD_MAX;
 
 /// Serialise one diagnostic record into `buf`, returning the byte length
 /// written.
@@ -93,7 +115,8 @@ pub const LOG_RECORD_MAX: usize = LOG_RECORD_HEADER_LEN
 /// * [`Errno::OutOfRange`] — `level` exceeds [`LOG_LEVEL_MAX`].
 /// * [`Errno::LengthOutOfRange`] — `message`, the field count, a key, or an
 ///   encoded value exceeds its maximum.
-/// * [`Errno::BufferTooSmall`] — `buf` cannot hold the encoded record.
+/// * [`Errno::BufferTooSmall`] — `buf`, or the [`LOG_FIELDS_PAYLOAD_MAX`]
+///   budget, cannot hold the encoded fields.
 #[allow(clippy::cast_possible_truncation)]
 pub fn encode_record(
     buf: &mut [u8],
@@ -123,22 +146,22 @@ pub fn encode_record(
     }
 
     buf[0] = level;
-    // `fields.len() <= LOG_FIELDS_MAX` (8) fits a `u8`.
+    // `fields.len() <= LOG_FIELDS_MAX` fits a `u8`.
     buf[1] = fields.len() as u8;
     // `message.len() <= LOG_MESSAGE_MAX` (120) fits a `u16`.
     put_u16(buf, 2, message.len() as u16);
     put_u32(buf, 4, event_id);
     buf[LOG_RECORD_HEADER_LEN..header_and_message].copy_from_slice(message.as_bytes());
 
+    // The fields must fit the ABI's own payload budget as well as `buf`, so an
+    // over-budget record is refused here rather than by whoever copies it.
+    let payload_limit = header_and_message.saturating_add(LOG_FIELDS_PAYLOAD_MAX);
     let mut offset = header_and_message;
     for (key, value) in fields {
-        offset += encode_named_field(
-            &mut buf[offset..],
-            key,
-            value,
-            LOG_FIELD_KEY_MAX,
-            LOG_FIELD_VALUE_MAX,
-        )?;
+        let window = buf
+            .get_mut(offset..buf.len().min(payload_limit))
+            .ok_or(Errno::LengthOutOfRange)?;
+        offset += encode_named_field(window, key, value, LOG_FIELD_KEY_MAX, LOG_FIELD_VALUE_MAX)?;
     }
 
     Ok(offset)
@@ -289,8 +312,8 @@ pub fn decode_record(bytes: &[u8]) -> Result<LogRecordRef<'_>, Errno> {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_record, encode_record, LOG_FIELDS_MAX, LOG_FIELD_KEY_MAX, LOG_LEVEL_MAX,
-        LOG_MESSAGE_MAX, LOG_RECORD_HEADER_LEN, LOG_RECORD_MAX,
+        decode_record, encode_record, LOG_FIELDS_MAX, LOG_FIELD_KEY_MAX, LOG_FIELD_VALUE_MAX,
+        LOG_LEVEL_MAX, LOG_MESSAGE_MAX, LOG_RECORD_HEADER_LEN, LOG_RECORD_MAX,
     };
     use crate::field::FieldValue;
     use crate::Errno;
@@ -324,6 +347,63 @@ mod tests {
         assert_eq!(record.field_count(), 0);
         assert_eq!(record.fields().count(), 0);
         assert_eq!(record.message(), "hello");
+    }
+
+    /// `LOG_FIELDS_MAX` distinct one-byte keys, so a full-width record can be
+    /// built without an allocator.
+    const WIDE_KEYS: [&str; LOG_FIELDS_MAX] = [
+        "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r",
+        "s", "t", "u", "v", "w", "x", "y", "z", "A", "B", "C", "D", "E", "F",
+    ];
+
+    #[test]
+    fn round_trips_a_record_carrying_the_full_field_bound() {
+        // A diagnostic wider than eight fields is the case that silently lost
+        // its tail: the HID enumeration record reported eleven and the reader
+        // saw the first eight, complete-looking.
+        let mut buf = [0u8; LOG_RECORD_MAX];
+        let mut fields = [("", FieldValue::Null); LOG_FIELDS_MAX];
+        for (i, slot) in fields.iter_mut().enumerate() {
+            *slot = (WIDE_KEYS[i], FieldValue::UnsignedInt(i as u64));
+        }
+        let len = encode_record(&mut buf, 2, 4150, "hid layout", &fields).expect("encodes");
+        let record = decode_record(&buf[..len]).expect("decodes");
+        assert_eq!(record.field_count(), LOG_FIELDS_MAX);
+        for (i, (key, value)) in record.fields().enumerate() {
+            assert_eq!(key, WIDE_KEYS[i]);
+            assert_eq!(value, FieldValue::UnsignedInt(i as u64));
+        }
+    }
+
+    #[test]
+    fn encode_rejects_more_fields_than_the_bound() {
+        let mut buf = [0u8; LOG_RECORD_MAX];
+        let fields = [("k", FieldValue::UnsignedInt(0)); LOG_FIELDS_MAX + 1];
+        assert_eq!(
+            encode_record(&mut buf, 2, 0, "x", &fields),
+            Err(Errno::LengthOutOfRange)
+        );
+    }
+
+    #[test]
+    fn encode_rejects_fields_past_the_payload_budget() {
+        // Within the field *count* but past the byte budget: refused rather
+        // than encoded into a record no consumer may copy.
+        let long_bytes = [b'v'; LOG_FIELD_VALUE_MAX - 3];
+        let long = core::str::from_utf8(&long_bytes).expect("ASCII");
+        let fields = [("k", FieldValue::Str(long)); LOG_FIELDS_MAX];
+        let mut buf = [0u8; LOG_RECORD_MAX * 2];
+        assert!(matches!(
+            encode_record(&mut buf, 2, 0, "x", &fields),
+            Err(Errno::BufferTooSmall | Errno::LengthOutOfRange)
+        ));
+    }
+
+    #[test]
+    fn the_emit_and_ingress_field_bounds_are_one_bound() {
+        // Two values for "how many fields one record carries" is what let the
+        // narrower one shed a record's tail unnoticed.
+        assert_eq!(LOG_FIELDS_MAX, crate::LOG_INGRESS_MAX_DATA_FIELDS);
     }
 
     #[test]

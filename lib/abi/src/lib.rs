@@ -129,8 +129,8 @@ pub use ipc::{
 };
 pub use log::{
     decode_record as decode_log_record, encode_record as encode_log_record, LogFieldIter,
-    LogRecordRef, LOG_FIELDS_MAX, LOG_FIELD_KEY_MAX, LOG_FIELD_VALUE_MAX, LOG_LEVEL_MAX,
-    LOG_MESSAGE_MAX, LOG_RECORD_HEADER_LEN, LOG_RECORD_MAX,
+    LogRecordRef, LOG_FIELDS_MAX, LOG_FIELDS_PAYLOAD_MAX, LOG_FIELD_KEY_MAX, LOG_FIELD_VALUE_MAX,
+    LOG_LEVEL_MAX, LOG_MESSAGE_MAX, LOG_RECORD_HEADER_LEN, LOG_RECORD_MAX,
 };
 pub use log_ingress::{
     decode_reply as decode_log_ingress_reply, encode_reply as encode_log_ingress_reply,

@@ -51,6 +51,9 @@ tairix-rt = { path = "../../../../lib/rt", version = "=0.0.0" }
 # emits its one-shot bring-up / disconnect diagnostics through, routed to the
 # kernel log by `tairix_rt::LogSink`.
 tairix-log = { path = "../../../../lib/log", version = "=0.0.0" }
+# The parsed HID report-map summary the per-interface enumeration diagnostic
+# reports, so a metal capture shows which bits each report field is read from.
+tairix-hid = { path = "../../../../lib/hid", version = "=0.0.0" }
 # Fixed-buffer formatting helpers for numeric diagnostic fields, avoiding
 # allocation in the freestanding HCD.
 tairix-util = { path = "../../../../lib/util", version = "=0.0.0" }

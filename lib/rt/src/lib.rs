@@ -3002,32 +3002,66 @@ fn clamp_utf8(s: &str, max: usize) -> &str {
 /// call and the record is dropped (the sink is best-effort and never panics).
 ///
 /// A message or field that exceeds the `abi-v1` record bounds is clamped to
-/// the largest valid prefix and excess fields past
-/// [`tairix_abi::LOG_FIELDS_MAX`] are dropped, so an over-long record still
-/// reaches the log rather than being discarded whole.
+/// the largest valid prefix so an over-long record still reaches the log
+/// rather than being discarded whole. A record carrying more than
+/// [`tairix_abi::LOG_FIELDS_MAX`] fields keeps as many as will fit and spends
+/// the last slot on a `fields_dropped` count, so the loss is *stated* — a
+/// diagnostic that quietly shed its trailing fields reads as complete and
+/// sends the reader looking in the wrong place.
 #[derive(Debug, Default, Copy, Clone)]
 pub struct LogSink;
 
+/// Marshal `event`'s fields into the `(key, value)` pairs the record encoder
+/// takes, returning how many slots of `pairs` are populated.
+///
+/// Keys and string values are clamped to their `abi-v1` bound so an over-long
+/// one still encodes rather than dropping the record whole. A record carrying
+/// more than [`tairix_abi::LOG_FIELDS_MAX`] fields keeps as many as will fit
+/// and spends the last slot on a `fields_dropped` count: a diagnostic that
+/// quietly shed its trailing fields reads as complete and sends the reader
+/// looking in the wrong place.
+fn marshal_log_fields<'e>(
+    event: &tairix_log::Event<'e>,
+    pairs: &mut [(&'e str, tairix_abi::FieldValue<'e>)],
+) -> usize {
+    let bound = pairs.len();
+    let over = event.fields.len() > bound;
+    let kept = if over {
+        bound.saturating_sub(1)
+    } else {
+        event.fields.len()
+    };
+    for (slot, field) in pairs.iter_mut().zip(event.fields.iter()).take(kept) {
+        let value = match field.value {
+            // Leave room for the value's tag + length prefix.
+            tairix_abi::FieldValue::Str(s) => {
+                tairix_abi::FieldValue::Str(clamp_utf8(s, tairix_abi::LOG_FIELD_VALUE_MAX - 3))
+            }
+            other => other,
+        };
+        *slot = (clamp_utf8(field.key, tairix_abi::LOG_FIELD_KEY_MAX), value);
+    }
+    if !over {
+        return kept;
+    }
+    let dropped = event.fields.len().saturating_sub(kept);
+    match pairs.get_mut(kept) {
+        Some(slot) => {
+            *slot = (
+                "fields_dropped",
+                tairix_abi::FieldValue::UnsignedInt(dropped as u64),
+            );
+            kept + 1
+        }
+        None => kept,
+    }
+}
+
 impl tairix_log::Sink for LogSink {
     fn write_event(&self, event: &tairix_log::Event<'_>) {
-        // Marshal the borrowed fields into the `(key, value)` pairs the
-        // encoder takes, clamping keys/strings to their bound and dropping any
-        // field past `LOG_FIELDS_MAX` (best-effort). A `Str` value longer than
-        // the per-field encoded bound is trimmed so the record still encodes
-        // rather than being dropped whole; non-string values are fixed-size.
         let mut pairs: [(&str, tairix_abi::FieldValue<'_>); tairix_abi::LOG_FIELDS_MAX] =
             [("", tairix_abi::FieldValue::Null); tairix_abi::LOG_FIELDS_MAX];
-        let field_count = event.fields.len().min(tairix_abi::LOG_FIELDS_MAX);
-        for (slot, field) in pairs.iter_mut().zip(event.fields.iter()).take(field_count) {
-            let value = match field.value {
-                // Leave room for the value's tag + length prefix.
-                tairix_abi::FieldValue::Str(s) => {
-                    tairix_abi::FieldValue::Str(clamp_utf8(s, tairix_abi::LOG_FIELD_VALUE_MAX - 3))
-                }
-                other => other,
-            };
-            *slot = (clamp_utf8(field.key, tairix_abi::LOG_FIELD_KEY_MAX), value);
-        }
+        let field_count = marshal_log_fields(event, &mut pairs);
         let message = clamp_utf8(event.message, tairix_abi::LOG_MESSAGE_MAX);
 
         let mut buf = [0u8; tairix_abi::LOG_RECORD_MAX];
@@ -5123,6 +5157,55 @@ mod tests {
     /// The negative register the kernel encodes `errno` as.
     fn refusal(errno: Errno) -> u64 {
         u64::from_ne_bytes((-i64::from(errno.as_i32())).to_ne_bytes())
+    }
+
+    #[test]
+    fn a_record_within_the_field_bound_marshals_every_field() {
+        let fields = [
+            tairix_log::Field {
+                key: "x_off_bits",
+                value: tairix_abi::FieldValue::UnsignedInt(8),
+            },
+            tairix_log::Field {
+                key: "y_off_bits",
+                value: tairix_abi::FieldValue::UnsignedInt(24),
+            },
+        ];
+        let event = tairix_log::Event {
+            level: tairix_log::Level::Info,
+            id: tairix_log::EventId(4150),
+            message: "hid layout",
+            fields: &fields,
+        };
+        let mut pairs = [("", tairix_abi::FieldValue::Null); tairix_abi::LOG_FIELDS_MAX];
+        assert_eq!(marshal_log_fields(&event, &mut pairs), 2);
+        assert_eq!(pairs[0].0, "x_off_bits");
+        assert_eq!(pairs[1].0, "y_off_bits");
+    }
+
+    #[test]
+    fn a_record_over_the_field_bound_states_its_shortfall() {
+        // The silent shed is what cost a diagnosis: the reader saw a
+        // complete-looking line whose most useful fields had been dropped.
+        const OVER: usize = tairix_abi::LOG_FIELDS_MAX + 3;
+        let fields = [tairix_log::Field {
+            key: "k",
+            value: tairix_abi::FieldValue::UnsignedInt(1),
+        }; OVER];
+        let event = tairix_log::Event {
+            level: tairix_log::Level::Info,
+            id: tairix_log::EventId(1),
+            message: "wide",
+            fields: &fields,
+        };
+        let mut pairs = [("", tairix_abi::FieldValue::Null); tairix_abi::LOG_FIELDS_MAX];
+        let count = marshal_log_fields(&event, &mut pairs);
+        assert_eq!(count, tairix_abi::LOG_FIELDS_MAX);
+        let (key, value) = pairs[count - 1];
+        assert_eq!(key, "fields_dropped");
+        // Four: the three past the bound, plus the one whose slot the marker
+        // took.
+        assert_eq!(value, tairix_abi::FieldValue::UnsignedInt(4));
     }
 
     #[test]
