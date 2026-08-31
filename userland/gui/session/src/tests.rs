@@ -3602,6 +3602,37 @@ fn shell_raise_window_shows_and_focuses_tracked_tasks() {
     assert_eq!(shell.router().focused(), Some(id));
 }
 
+/// A raise brings the window's own transients up with it, so the keyboard must
+/// land on the sheet that ended up on top and not on the window underneath it.
+///
+/// Focusing the owner instead is how a key reaches an application's client
+/// while that client's modal sheet is still on screen — nothing dismisses the
+/// sheet, because a picker cell is not a press on the client — so the
+/// application would run a menu accelerator behind its own open sheet.
+#[test]
+fn shell_raise_window_focuses_the_sheet_its_window_has_open() {
+    let mut shell = shell();
+    let mut comp = compositor();
+
+    let id = shell
+        .open_window(&mut comp, Point::new(200, 200), app_surface(), "Terminal")
+        .unwrap();
+    let wm = comp.window(id).map(|_| id).expect("the window is placed");
+    let sheet = shell
+        .open_popup_window(&mut comp, wm, Point::new(210, 210), app_surface())
+        .expect("the parent is a window");
+    assert_eq!(shell.router().focused(), Some(sheet));
+
+    // The bar's hover picker chooses the owner's window.
+    assert!(shell.raise_window(&mut comp, id));
+
+    assert_eq!(
+        shell.router().focused(),
+        Some(sheet),
+        "the raise focused the window behind its own open sheet"
+    );
+}
+
 #[test]
 fn full_launch_flow() {
     let mut shell = shell();
@@ -7886,7 +7917,6 @@ fn a_desktop_with_no_artwork_at_all_still_draws_every_icon_from_its_glyphs() {
 // --- The pinboard: the desktop layer and its context menu -----------------
 
 use crate::desktop::Desktop;
-use crate::pinboard::PinboardMenu;
 use tairix_browse::GridView;
 use tairix_wallpaper::{Backdrop, PinboardSettings, Rgb};
 use tairix_window::WindowHost;
@@ -8363,62 +8393,86 @@ fn a_partial_desktop_repaint_draws_what_a_whole_one_would() {
     }
 }
 
+/// The desktop's own menu is a chain like every other, so the shell draws it
+/// as compositor windows it reconciles against the chain's own list — and the
+/// backdrop menu keeps no window of its own to be left behind.
 #[test]
-fn the_pinboard_menu_is_shown_as_its_own_window_and_taken_down_when_it_closes() {
+fn the_backdrop_menu_is_drawn_as_chain_plates_and_taken_down_when_it_closes() {
+    use crate::menu::{ChainGeometry, ChainOwner, MenuChain};
+    use crate::pinboard;
+
     let (mut shell, mut comp) = headless_desktop();
     shell.present(&mut comp);
     let before = comp.window_count();
-    let mut menu = PinboardMenu::new();
+    let mut chain = MenuChain::new();
+    let theme = shell.session().active_theme().clone();
+    let (screen, scale, epoch) = (comp.screen_rect(), comp.scale(), comp.chrome_epoch());
+    let geom = ChainGeometry {
+        screen,
+        scale,
+        theme: &theme,
+        epoch,
+    };
 
-    shell.present_pinboard_menu(&mut comp, &menu);
+    assert!(shell.present_menu_chain(&mut comp, &chain, None, None));
     assert_eq!(
-        shell.pinboard_window(),
-        None,
-        "a closed menu places no window"
+        comp.window_count(),
+        before,
+        "a seat with no chain places nothing"
     );
-    assert_eq!(comp.window_count(), before);
 
-    menu.open(Point::new(100, 100), true, &PinboardSettings::default());
-    shell.present_pinboard_menu(&mut comp, &menu);
-    let placed = shell.pinboard_window().expect("an open menu is placed");
+    let at = Point::new(100, 100);
+    chain
+        .open(
+            ChainOwner::Session,
+            pinboard::model(true, &PinboardSettings::default()),
+            Rect::new(at.x, at.y, 0, 0),
+            crate::windows::MENU_SIDE,
+            crate::windows::MENU_GAP_PX,
+            &geom,
+        )
+        .expect("the backdrop model opens");
+    assert!(shell.present_menu_chain(&mut comp, &chain, None, None));
+    assert_eq!(comp.window_count(), before + 1, "one plate, one window");
+    let plate = chain.row_rect(0, 0, &geom).expect("the plate has a row");
+    assert!(
+        plate.left() >= at.x && plate.top() >= at.y,
+        "the plate opens at the pointer, got {plate:?}"
+    );
+
+    assert!(shell.present_menu_chain(&mut comp, &chain, None, None));
+    assert_eq!(
+        comp.window_count(),
+        before + 1,
+        "re-presenting reuses the plate's window"
+    );
+
+    // A menu opened in the far corner is placed wholly on screen.
+    chain
+        .open(
+            ChainOwner::Session,
+            pinboard::model(false, &PinboardSettings::default()),
+            Rect::new(screen.right() - 1, screen.bottom() - 1, 0, 0),
+            crate::windows::MENU_SIDE,
+            crate::windows::MENU_GAP_PX,
+            &geom,
+        )
+        .expect("the backdrop model opens");
+    assert!(shell.present_menu_chain(&mut comp, &chain, None, None));
     assert_eq!(comp.window_count(), before + 1);
-    let screen = comp.screen_rect();
-    let plate = window_rect(&comp, placed);
-    assert_eq!(
-        plate.origin,
-        Point::new(100, 100),
-        "a menu with room opens at the pointer"
-    );
-    assert!(plate.right() <= screen.right() && plate.bottom() <= screen.bottom());
-
-    shell.present_pinboard_menu(&mut comp, &menu);
-    assert_eq!(
-        shell.pinboard_window(),
-        Some(placed),
-        "re-presenting reuses the menu's window"
-    );
-    assert_eq!(comp.window_count(), before + 1);
-
-    menu.open(
-        Point::new(screen.right() - 1, screen.bottom() - 1),
-        false,
-        &PinboardSettings::default(),
-    );
-    shell.present_pinboard_menu(&mut comp, &menu);
-    let corner = window_rect(&comp, shell.pinboard_window().expect("still placed"));
+    let corner = chain.surfaces().first().expect("the root plate").rect;
     assert!(
         corner.right() <= screen.right() && corner.bottom() <= screen.bottom(),
         "a menu opened in the corner is clamped wholly on screen, got {corner:?}"
     );
 
-    menu.close();
-    shell.present_pinboard_menu(&mut comp, &menu);
+    assert!(chain.dismiss());
+    assert!(shell.present_menu_chain(&mut comp, &chain, None, None));
     assert_eq!(
-        shell.pinboard_window(),
-        None,
-        "closing the menu takes its window down"
+        comp.window_count(),
+        before,
+        "dismissing the chain takes its plates down"
     );
-    assert_eq!(comp.window_count(), before);
 }
 
 /// The backdrop blur `window` asks the compositor for.
@@ -8522,19 +8576,43 @@ fn the_bars_menu_popover_and_readout_frost_what_is_behind_them() {
     );
 }
 
-/// The desktop's own backdrop menu is not the bar's chrome: it covers what it
-/// opens over, so nothing behind it is blurred for it.
+/// A menu plate is not the bar's chrome: it covers what it opens over, so
+/// nothing behind it is blurred for it.
 #[test]
-fn the_backdrops_own_menu_frosts_nothing() {
+fn a_menu_plate_frosts_nothing() {
+    use crate::menu::{ChainGeometry, ChainOwner, MenuChain};
+    use crate::pinboard;
+
     let (mut shell, mut comp) = headless_desktop();
-    let mut menu = PinboardMenu::new();
-    menu.open(Point::new(100, 100), true, &PinboardSettings::default());
-    shell.present_pinboard_menu(&mut comp, &menu);
-    let id = shell.pinboard_window().expect("an open menu is placed");
+    let mut chain = MenuChain::new();
+    let theme = shell.session().active_theme().clone();
+    chain
+        .open(
+            ChainOwner::Session,
+            pinboard::model(true, &PinboardSettings::default()),
+            Rect::new(100, 100, 0, 0),
+            crate::windows::MENU_SIDE,
+            crate::windows::MENU_GAP_PX,
+            &ChainGeometry {
+                screen: comp.screen_rect(),
+                scale: comp.scale(),
+                theme: &theme,
+                epoch: comp.chrome_epoch(),
+            },
+        )
+        .expect("the backdrop model opens");
+    assert!(shell.present_menu_chain(&mut comp, &chain, None, None));
+    let plate = chain.surfaces().first().expect("the root plate").rect;
+    let id = comp
+        .window_at(Point::new(
+            plate.left() + i32::try_from(plate.width / 2).expect("small"),
+            plate.top() + i32::try_from(plate.height / 2).expect("small"),
+        ))
+        .expect("the plate is the window over its own centre");
     assert_eq!(
         comp.window(id).expect("live").blur_radius(),
         0,
-        "an opaque menu paid for a blur nothing shows through"
+        "an opaque plate paid for a blur nothing shows through"
     );
 }
 

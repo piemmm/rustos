@@ -111,16 +111,18 @@ mod program {
     };
     use tairix_caps::CapabilitySet;
     use tairix_desktop_session::menu::{
-        ChainAction, ChainOutcome, ChainOwner, MenuChain, SurfaceKind,
+        ChainAction, ChainOutcome, ChainOwner, MenuChain, ModelRefused, SurfaceKind,
     };
+    use tairix_desktop_session::pinboard::{self, PinboardCommand};
     use tairix_desktop_session::switchuser::{
         SeatPresentation, SessionAuthority, SwitchUser, NO_DEADLINE_NS,
     };
+    use tairix_desktop_session::windows::{MENU_GAP_PX, MENU_SIDE};
     use tairix_desktop_session::{
         admitted_pid, catalogued, chain_geometry, deliver_pending_open, desktop_info,
         drop_is_noteworthy, ensure_switchboard, launch_argv, load_library,
         load_pinboard as read_pinboard_store, maybe_send_seat_report, open_tray, parse,
-        persist_pinboard, reap_launched, relay_power, resolve_window_identities,
+        persist_pinboard, reap_launched, relay_power, resolve_window_identities, seat_menu_refusal,
         serve_pinboard_apply, serve_switchboard_request, window_control_alternate_event,
         window_control_event, Answer, AppBarBridge, AppBarService, ArtworkDesk, ArtworkFileReader,
         ArtworkSandbox, CliError, Command, ConcludedPick, ConfirmPrompt, Delivery, Desktop,
@@ -128,12 +130,12 @@ mod program {
         ElevatePrompt, Elevator, FrameContent, FramePacer, FrameReportGate, FrameStatsPublisher,
         FrameStatsSink, HangTracker, HoldBack, IconRasteriser, InputSource, KeyboardInputSource,
         LaunchTable, ListingClient, ListingDesk, LockedDrain, OwnerWindow, PickConclusion,
-        PinboardMenu, PinboardMenuOutcome, Prepared, PresentedOwners, PromptOutcome, ScreenFade,
-        ScreenLock, SeatEventReader, SeatInputChannel, SessionClock, SessionFileReader,
-        SessionPicker, SessionWindows, ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome,
-        SwitchboardServe, WallpaperDesk, WallpaperSource, BUNDLE_RUN_SUFFIX, CONTENT_RELEASED,
-        CONTENT_RELEASED_MESSAGE, DATETIME_RUN_PATH, ELEVATE_PROMPT_SHOWN,
-        ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_CALL_REFUSED,
+        Prepared, PresentedOwners, PromptOutcome, ScreenFade, ScreenLock, SeatEventReader,
+        SeatInputChannel, SessionClock, SessionFileReader, SessionPicker, SessionWindows,
+        ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, WallpaperDesk,
+        WallpaperSource, BUNDLE_RUN_SUFFIX, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE,
+        DATETIME_RUN_PATH, ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL,
+        FILES_RUN_PATH, MENU_SHOWN, MENU_SHOWN_MESSAGE, SWITCHBOARD_CALL_REFUSED,
         SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, USAGE, WALLPAPER_LABEL, WALLPAPER_RUN_PATH,
         WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE,
     };
@@ -156,7 +158,9 @@ mod program {
     use tairix_window::{
         event_endpoint_for, CallerIdentity, EventSink, WindowServer, WINDOW_REPLY_MAX,
     };
-    use tairix_wm::{chrome_cache, frost_cache, Compositor, InputResponse, Rect, Region, Surface};
+    use tairix_wm::{
+        chrome_cache, frost_cache, Compositor, InputResponse, Point, Rect, Region, Surface,
+    };
 
     extern crate alloc;
 
@@ -845,14 +849,16 @@ mod program {
     /// A frame that did reach the display is where the desktop's one-shot
     /// reveal witness is announced, so the record can only follow pixels
     /// this session actually put on the screen. Each served window whose
-    /// first painted frame this one carried is announced there too, for the
-    /// same reason: until the frame lands, nobody has seen the window.
+    /// first painted frame this one carried is announced there too, and the
+    /// menu chain this one first carried, for the same reason: until the frame
+    /// lands, nobody has seen either.
     fn present(
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
         display: &mut Option<RemoteDisplay<'_, RtDisplayTransport>>,
         fade: &mut ScreenFade,
         windows: &mut SessionWindows,
+        menu: &mut MenuChain,
     ) -> Result<(), i32> {
         let Some(display) = display.as_mut() else {
             return Ok(());
@@ -870,6 +876,24 @@ mod program {
                             fields: &[LogField {
                                 key: "window",
                                 value: LogFieldValue::UnsignedInt(window),
+                            }],
+                        },
+                    );
+                });
+                menu.report_newly_shown(|owner| {
+                    let owner = match owner {
+                        ChainOwner::Window { .. } => "window",
+                        ChainOwner::Session => "desktop",
+                    };
+                    log(
+                        &LOG_SINK,
+                        &LogEvent {
+                            level: LogLevel::Info,
+                            id: MENU_SHOWN,
+                            message: MENU_SHOWN_MESSAGE,
+                            fields: &[LogField {
+                                key: "owner",
+                                value: LogFieldValue::Str(owner),
                             }],
                         },
                     );
@@ -1712,6 +1736,7 @@ mod program {
             &mut display,
             &mut fade,
             &mut windows,
+            &mut menu,
         ) {
             return code;
         }
@@ -2129,6 +2154,7 @@ mod program {
                         &mut display,
                         &mut fade,
                         &mut windows,
+                        &mut menu,
                     ) {
                         return code;
                     }
@@ -2178,7 +2204,7 @@ mod program {
                     // Read before the bridge borrows the picker: a menu may
                     // not be drawn over a lock screen or the trusted picker,
                     // and an accepted open is answered `SeatBusy` instead.
-                    let seat_held = lock.is_locked() || picker.wm_id().is_some();
+                    let seat_held = seat_held(&lock, &picker);
                     let n = {
                         let mut bridge = ShellWindowHost {
                             shell: &mut shell,
@@ -2224,6 +2250,14 @@ mod program {
                         &mut sink,
                         &mut picker,
                         &mut apps.service,
+                        &mut BackdropDesk {
+                            pinboard: &mut pinboard,
+                            wallpapers: &wallpapers,
+                            desktop: &mut desktop,
+                            launched: &mut launched,
+                            associations: &mut associations,
+                        },
+                        tairix_rt::clock_get(),
                     );
                 }
             } else if token == NOTIFY_TOKEN {
@@ -2653,6 +2687,7 @@ mod program {
                 // into it and none reaches what is behind, which is what
                 // makes a press outside a dismissal rather than a click on
                 // the window the menu was covering.
+                let now_ns = tairix_rt::clock_get();
                 if drain_menu_chain(
                     &mut menu,
                     &mut pointer,
@@ -2664,29 +2699,13 @@ mod program {
                     &mut sink,
                     &mut picker,
                     &mut apps.service,
-                ) == Drained::Faulted
-                {
-                    return drain_fault(&mut shell, &mut compositor, Errno::DeviceFault);
-                }
-            } else if token == SEAT_TOKEN && pinboard.menu.is_open() {
-                // The backdrop menu is up, so it is modal: the seat's
-                // events are drained straight into it here — not through
-                // the shell — so no press or keystroke behind the open
-                // plate reaches a window, the bar, or the icon column.
-                // This is the routing half of the menu's modality, exactly
-                // as the lock's drain above is the routing half of the
-                // lock.
-                let now_ns = tairix_rt::clock_get();
-                if drain_pinboard_menu(
-                    &mut pinboard,
-                    &wallpapers,
-                    &mut pointer,
-                    &mut keyboard,
-                    &mut desktop,
-                    &mut shell,
-                    &mut compositor,
-                    &mut launched,
-                    &mut associations,
+                    &mut BackdropDesk {
+                        pinboard: &mut pinboard,
+                        wallpapers: &wallpapers,
+                        desktop: &mut desktop,
+                        launched: &mut launched,
+                        associations: &mut associations,
+                    },
                     now_ns,
                 ) == Drained::Faulted
                 {
@@ -2719,6 +2738,9 @@ mod program {
                         &mut desktop,
                         &mut shell,
                         &mut compositor,
+                        &windows,
+                        &mut menu,
+                        seat_held(&lock, &picker),
                         &mut launched,
                         &mut associations,
                         now_ns,
@@ -2790,6 +2812,9 @@ mod program {
                                 &mut desktop,
                                 &mut shell,
                                 &mut compositor,
+                                &windows,
+                                &mut menu,
+                                seat_held(&lock, &picker),
                                 &mut launched,
                                 &mut associations,
                                 now_ns,
@@ -2958,6 +2983,7 @@ mod program {
                     &mut display,
                     &mut fade,
                     &mut windows,
+                    &mut menu,
                 ) {
                     return code;
                 }
@@ -3546,10 +3572,13 @@ mod program {
         }
     }
 
-    /// The session's pinboard state, kept beside the loop: the backdrop's
-    /// context menu, the loop's own sandbox worker (the wallpaper's fallback
-    /// when no thread was granted), and what the wallpaper surface now on
-    /// screen was prepared from.
+    /// The session's pinboard state, kept beside the loop: the loop's own
+    /// sandbox worker (the wallpaper's fallback when no thread was granted),
+    /// and what the wallpaper surface now on screen was prepared from.
+    ///
+    /// The backdrop menu is *not* here: it is the seat's one menu chain like
+    /// every other menu on the desktop, so the pinboard hands over a model and
+    /// keeps no shell of its own.
     ///
     /// The settings themselves are *not* here: the desktop model owns them,
     /// so there is exactly one copy of what is in force. Nor is the store —
@@ -3558,9 +3587,21 @@ mod program {
     /// so there is no handle here that could go stale against what the
     /// service holds.
     struct PinboardPanel {
-        menu: PinboardMenu,
         sandbox: SharedSandbox,
         prepared: Option<WallpaperSource>,
+    }
+
+    /// The desktop state a chosen **backdrop-menu** row acts on, bundled so it
+    /// reaches the chain's one delivery point without a dozen more parameters.
+    ///
+    /// Only the desktop's own chain reads it. An application's chain is
+    /// answered over the window channel and touches none of this.
+    struct BackdropDesk<'a, S: DirectorySource> {
+        pinboard: &'a mut PinboardPanel,
+        wallpapers: &'a Wallpapers,
+        desktop: &'a mut Desktop<S>,
+        launched: &'a mut LaunchTable,
+        associations: &'a mut alloc::vec::Vec<AppAssociation>,
     }
 
     /// Load the user's pinboard settings into `desktop` (reporting an
@@ -3579,7 +3620,6 @@ mod program {
         }
         desktop.apply_settings(loaded.settings);
         PinboardPanel {
-            menu: PinboardMenu::new(),
             sandbox,
             prepared: None,
         }
@@ -3646,6 +3686,8 @@ mod program {
         sink: &mut RtEventSink,
         picker: &mut SessionPicker<S, F>,
         apps: &mut dyn AppBarBridge,
+        desk: &mut BackdropDesk<'_, S>,
+        now_ns: u64,
     ) -> Drained {
         // The chain is taking the stream, so the shell gives the pointer up
         // for the reason the lock's drain does: no gesture of its own can be
@@ -3670,7 +3712,8 @@ mod program {
                         menu.handle(&event, at, &geom)
                     };
                     settle_menu_chain(
-                        &acted, menu, shell, compositor, windows, server, sink, picker, apps,
+                        &acted, menu, shell, compositor, windows, server, sink, picker, apps, desk,
+                        now_ns,
                     );
                     if !menu.is_open() {
                         break;
@@ -3692,7 +3735,8 @@ mod program {
                         menu.handle(&event, at, &geom)
                     };
                     settle_menu_chain(
-                        &acted, menu, shell, compositor, windows, server, sink, picker, apps,
+                        &acted, menu, shell, compositor, windows, server, sink, picker, apps, desk,
+                        now_ns,
                     );
                     if !menu.is_open() {
                         break;
@@ -3718,6 +3762,8 @@ mod program {
         sink: &mut RtEventSink,
         picker: &mut SessionPicker<S, F>,
         apps: &mut dyn AppBarBridge,
+        desk: &mut BackdropDesk<'_, S>,
+        now_ns: u64,
     ) {
         match acted {
             ChainAction::Consumed => {}
@@ -3747,7 +3793,9 @@ mod program {
                 }
             }
         }
-        answer_menu_chain(menu, shell, compositor, windows, server, sink, picker, apps);
+        answer_menu_chain(
+            menu, shell, compositor, windows, server, sink, picker, apps, desk, now_ns,
+        );
     }
 
     /// Deliver every answer the chain owes, and bring the screen into line
@@ -3767,6 +3815,8 @@ mod program {
         sink: &mut RtEventSink,
         picker: &mut SessionPicker<S, F>,
         apps: &mut dyn AppBarBridge,
+        desk: &mut BackdropDesk<'_, S>,
+        now_ns: u64,
     ) {
         // Before the drain, not after: a chain the mode has moved under owes
         // an answer of its own, and settling once the queue is empty would
@@ -3776,8 +3826,14 @@ mod program {
             menu.settle_mode(&geom);
         }
         for (owner, outcome) in menu.take_answers() {
-            let ChainOwner::Window { window_id, open_id } = owner else {
-                continue;
+            // A total match, so a third kind of owner cannot silently be
+            // answered as the desktop's own.
+            let (window_id, open_id) = match owner {
+                ChainOwner::Window { window_id, open_id } => (window_id, open_id),
+                ChainOwner::Session => {
+                    answer_backdrop_menu(outcome, shell, compositor, desk, now_ns);
+                    continue;
+                }
             };
             let outcome = match outcome {
                 ChainOutcome::Chosen(item) => MenuOutcome::Chosen(item),
@@ -3806,6 +3862,52 @@ mod program {
         present_menu_chain(menu, shell, compositor, windows);
     }
 
+    /// Answer the desktop's own chain in process: put a chosen row's command
+    /// through the desktop model and the one action path.
+    ///
+    /// The model resolves the command against its own state, so a row and the
+    /// equivalent gesture on the icon column produce the very same action; the
+    /// session merely carries it out. A row id the menu never declared names
+    /// no command and is dropped (fail closed — never guessed at).
+    fn answer_backdrop_menu<S: DirectorySource>(
+        outcome: ChainOutcome,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        desk: &mut BackdropDesk<'_, S>,
+        now_ns: u64,
+    ) {
+        let command = match outcome {
+            ChainOutcome::Chosen(item) => PinboardCommand::from_item(item),
+            ChainOutcome::Dismissed => None,
+            ChainOutcome::Refused(reason) => {
+                let _ = writeln!(Stderr, "desktop: no backdrop menu ({reason:?})");
+                None
+            }
+        };
+        let Some(command) = command else {
+            return;
+        };
+        let acted = desk.desktop.command(command, desk.associations, now_ns);
+        let whole = acted.relisted
+            | apply_desktop_action(
+                acted.action,
+                desk.pinboard,
+                desk.wallpapers,
+                desk.desktop,
+                shell,
+                compositor,
+                desk.launched,
+                now_ns,
+            );
+        if acted.relisted {
+            refresh_library(shell, compositor);
+            *desk.associations = desktop_associations(shell);
+        }
+        if whole {
+            shell.present_desktop(compositor, desk.desktop);
+        }
+    }
+
     /// Reconcile the compositor against the chain, resolving the owner's and
     /// the attached window's compositor windows the session holds.
     fn present_menu_chain(
@@ -3830,175 +3932,6 @@ mod program {
             // half on the screen; taking it down needs the reconcile to run
             // once more, now over an empty list.
             let _ = shell.present_menu_chain(compositor, menu, owner, attached);
-        }
-    }
-
-    /// Drain the seat's pointer and keyboard straight into the open backdrop
-    /// menu, routing nothing anywhere else.
-    ///
-    /// This is what makes the menu modal: the shell is never given the
-    /// events, so no press or keystroke behind the plate reaches a window,
-    /// the bar, or the icon column while the menu is up. A chosen row is
-    /// resolved by the desktop model — the same resolution a gesture goes
-    /// through — and carried out by the same one action path, so a command
-    /// and a double-click can never disagree. A press away and Escape both
-    /// dismiss, which takes the menu's window down.
-    #[allow(clippy::too_many_arguments)] // The desktop's whole mutable state, threaded explicitly.
-    fn drain_pinboard_menu<S: DirectorySource>(
-        pinboard: &mut PinboardPanel,
-        wallpapers: &Wallpapers,
-        pointer: &mut DeviceInputSource<SeatInputChannel<PointerReader>>,
-        keyboard: &mut KeyboardInputSource<SeatInputChannel<KeyboardReader>>,
-        desktop: &mut Desktop<S>,
-        shell: &mut DesktopShell,
-        compositor: &mut Compositor,
-        launched: &mut LaunchTable,
-        associations: &mut alloc::vec::Vec<AppAssociation>,
-        now_ns: u64,
-    ) -> Drained {
-        // The cursor the motion below moves is settled once for the whole
-        // batch, not per sample: only where the pointer ended up is on
-        // screen, so a sweep across the plate costs one refresh.
-        // The menu is taking the stream, exactly as the lock's drain does, so
-        // the shell gives the pointer up for the same reason: no gesture of its
-        // own can be completed from here, and nothing behind the plate may be
-        // left showing a hover.
-        shell.yield_pointer(compositor);
-        let mut moved = false;
-        loop {
-            match pointer.poll() {
-                Ok(None) => break,
-                Ok(Some(event)) => {
-                    // Motion alone still goes to the shell, so the tracked
-                    // pointer and the on-screen cursor stay in step for the
-                    // moment the plate closes; its outcome is discarded and
-                    // no press ever reaches it, which is what keeps the
-                    // windows beneath the plate untouched.
-                    if matches!(event, tairix_wm::InputEvent::PointerMoved { .. }) {
-                        let _ = shell.apply(event, compositor, now_ns);
-                        moved = true;
-                    }
-                    let acted = if let Some(bounds) =
-                        shell.pinboard_menu_bounds(compositor, &pinboard.menu)
-                    {
-                        pinboard.menu.on_pointer(
-                            &event,
-                            shell.router().pointer(),
-                            bounds,
-                            compositor.scale(),
-                            shell.session().active_theme(),
-                        )
-                    } else {
-                        // An open menu the shell cannot place has no plate to
-                        // route against; dismiss rather than guess at one.
-                        pinboard.menu.close();
-                        PinboardMenuOutcome::Dismissed
-                    };
-                    settle_pinboard_menu(
-                        acted,
-                        pinboard,
-                        wallpapers,
-                        desktop,
-                        shell,
-                        compositor,
-                        launched,
-                        associations,
-                        now_ns,
-                    );
-                }
-                Err(_) => return Drained::Faulted,
-            }
-        }
-        if moved {
-            shell.settle(compositor);
-        }
-        loop {
-            match keyboard.poll_record() {
-                Ok(None) => break,
-                // Every key belongs to the open plate: the arrows move the
-                // highlight, Enter chooses, Escape dismisses, and a key it
-                // has no meaning for is dropped rather than reaching a
-                // window behind it.
-                Ok(Some((tairix_wm::InputEvent::KeyPressed { key, .. }, _))) => {
-                    // The shell can only fail to place a plate for a menu that
-                    // is already closed, and a closed menu claims no key, so
-                    // the empty stand-in is never read.
-                    let bounds = shell
-                        .pinboard_menu_bounds(compositor, &pinboard.menu)
-                        .unwrap_or(Rect::EMPTY);
-                    let acted = pinboard.menu.on_key(
-                        key,
-                        bounds,
-                        compositor.scale(),
-                        shell.session().active_theme(),
-                    );
-                    settle_pinboard_menu(
-                        acted,
-                        pinboard,
-                        wallpapers,
-                        desktop,
-                        shell,
-                        compositor,
-                        launched,
-                        associations,
-                        now_ns,
-                    );
-                }
-                Ok(Some(_)) => {}
-                Err(_) => return Drained::Faulted,
-            }
-        }
-        Drained::Empty
-    }
-
-    /// Apply one backdrop-menu outcome: repaint a moved highlight, take the
-    /// menu's window down when it closed, and put a chosen command through
-    /// the desktop model and the one action path.
-    #[allow(clippy::too_many_arguments)] // The desktop's whole mutable state, threaded explicitly.
-    fn settle_pinboard_menu<S: DirectorySource>(
-        acted: PinboardMenuOutcome,
-        pinboard: &mut PinboardPanel,
-        wallpapers: &Wallpapers,
-        desktop: &mut Desktop<S>,
-        shell: &mut DesktopShell,
-        compositor: &mut Compositor,
-        launched: &mut LaunchTable,
-        associations: &mut alloc::vec::Vec<AppAssociation>,
-        now_ns: u64,
-    ) {
-        match acted {
-            PinboardMenuOutcome::Ignored => {}
-            // The one presentation call both repaints an open plate and takes
-            // a closed one's window down, so a dismissal needs no second
-            // path.
-            PinboardMenuOutcome::Changed | PinboardMenuOutcome::Dismissed => {
-                shell.present_pinboard_menu(compositor, &pinboard.menu);
-            }
-            PinboardMenuOutcome::Chose(command) => {
-                shell.present_pinboard_menu(compositor, &pinboard.menu);
-                // The model resolves the command against its own state, so a
-                // row and the equivalent gesture produce the very same
-                // action; the session merely carries it out.
-                let acted = desktop.command(command, associations, now_ns);
-                let whole = acted.relisted
-                    | apply_desktop_action(
-                        acted.action,
-                        pinboard,
-                        wallpapers,
-                        desktop,
-                        shell,
-                        compositor,
-                        launched,
-                        now_ns,
-                    );
-                if acted.relisted {
-                    refresh_library(shell, compositor);
-                    *associations = desktop_associations(shell);
-                }
-                if whole {
-                    shell.present_desktop(compositor, desktop);
-                }
-            }
         }
     }
 
@@ -4967,6 +4900,9 @@ mod program {
         desktop: &mut Desktop<S>,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
+        windows: &SessionWindows,
+        menu: &mut MenuChain,
+        seat_held: bool,
         launched: &mut LaunchTable,
         associations: &mut alloc::vec::Vec<AppAssociation>,
         now_ns: u64,
@@ -4990,7 +4926,15 @@ mod program {
                     desktop.press(pointer, &layout, now_ns, associations, &mut damage)
                 }
                 InputResponse::DesktopSecondaryPressed => {
-                    desktop.context_press(pointer, &layout, &mut damage)
+                    // The backdrop menu is the seat's one chain, so this asks
+                    // for it directly rather than naming an action: it is the
+                    // desktop's own model handed to the one service, exactly
+                    // as an application's `OpenMenu` is.
+                    let on_icon = desktop.context_press(pointer, &layout, &mut damage);
+                    open_backdrop_menu(
+                        pointer, on_icon, seat_held, desktop, menu, shell, compositor, windows,
+                    );
+                    DesktopOutcome::ignored()
                 }
                 InputResponse::DesktopKey { key, pressed, .. } => {
                     desktop.key(*key, *pressed, &layout, associations, &mut damage)
@@ -5026,6 +4970,68 @@ mod program {
             shell.present_desktop(compositor, desktop);
         } else if !damage.is_empty() {
             shell.present_desktop_area(compositor, desktop, &damage);
+        }
+    }
+
+    /// Open the backdrop menu as the seat's one chain, anchored at the press
+    /// that asked for it.
+    ///
+    /// The desktop's own menu is a client of the menu service exactly as an
+    /// application's is; the only difference is that its model is built here
+    /// rather than decoded from the wire, so its rows may state things
+    /// (a command the *system* lacks the authority for) that an application
+    /// structurally cannot. The chain places, draws, grabs, traverses and
+    /// dismisses it, and its one answer arrives at the session's single
+    /// delivery point like every other chain's.
+    ///
+    /// A model the chain will not show is reported and opens nothing: a
+    /// refused menu is an answer, never a reason to draw one here.
+    /// Whether a surface a menu may not displace holds the seat: the screen
+    /// lock, or the trusted picker.
+    ///
+    /// One definition, because both directions a chain arrives from consult it
+    /// — an application's `OpenMenu` over the window channel and the desktop's
+    /// own backdrop press.
+    fn seat_held<S: DirectorySource, F: FnMut() -> S>(
+        lock: &ScreenLock,
+        picker: &SessionPicker<S, F>,
+    ) -> bool {
+        lock.is_locked() || picker.wm_id().is_some()
+    }
+
+    #[allow(clippy::too_many_arguments)] // The chain's whole mutable surround, threaded explicitly.
+    fn open_backdrop_menu<S: DirectorySource>(
+        at: Point,
+        on_icon: bool,
+        seat_held: bool,
+        desktop: &Desktop<S>,
+        menu: &mut MenuChain,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        windows: &SessionWindows,
+    ) {
+        // The same seat rule an application's open resolves through: a menu
+        // must not take the grab from a lock screen or the trusted picker,
+        // whichever direction it arrives from.
+        if let Some(reason) = seat_menu_refusal(compositor.screen_rect(), seat_held) {
+            let _ = writeln!(Stderr, "desktop: no backdrop menu ({reason:?})");
+            return;
+        }
+        let model = pinboard::model(on_icon, desktop.settings());
+        let anchor = Rect::new(at.x, at.y, 0, 0);
+        let geom = chain_geometry(shell, compositor);
+        match menu.open(
+            ChainOwner::Session,
+            model,
+            anchor,
+            MENU_SIDE,
+            MENU_GAP_PX,
+            &geom,
+        ) {
+            Ok(()) => present_menu_chain(menu, shell, compositor, windows),
+            Err(ModelRefused::NoRows) => {
+                let _ = writeln!(Stderr, "desktop: the backdrop menu offers no rows");
+            }
         }
     }
 
@@ -5093,11 +5099,6 @@ mod program {
                     &label,
                     &run_path,
                 );
-                false
-            }
-            Some(DesktopAction::OpenMenu { at, on_icon }) => {
-                pinboard.menu.open(at, on_icon, desktop.settings());
-                shell.present_pinboard_menu(compositor, &pinboard.menu);
                 false
             }
             Some(DesktopAction::CreateFolder { path }) => {

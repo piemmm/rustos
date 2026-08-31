@@ -250,10 +250,18 @@ fn focus_window(
     taskbar.tasks_mut().set_focused(Some(task));
 }
 
-/// Show `window`, raise it to the top of the stack, and give it keyboard
-/// focus — the one path shared by [`TaskBridge::open`] and
-/// [`TaskBridge::raise`]. Returns whether focus moved (it does not when the
-/// compositor no longer knows `window`).
+/// Show `window`, raise it to the top of the stack, and give the keyboard to
+/// the front of the family that rose — the one path shared by
+/// [`TaskBridge::open`] and [`TaskBridge::raise`]. Returns whether focus moved
+/// (it does not when the compositor no longer knows `window`).
+///
+/// The keyboard goes to the front-most window of the family rather than to
+/// `window` itself, because a raise brings a window's transients up with it: a
+/// settings sheet or menu its owner opened ends up *above* the owner, so
+/// focusing the owner would type into a window the user cannot see the top of
+/// and leave that transient's own keys — including the Escape that closes it —
+/// going somewhere else. An owner with no transient open is its own family
+/// front, so the ordinary case is unchanged.
 fn show_raise_focus(
     compositor: &mut Compositor,
     router: &mut SessionInputRouter,
@@ -261,5 +269,6 @@ fn show_raise_focus(
 ) -> bool {
     compositor.set_visible(window, true);
     compositor.raise(window);
-    router.focus(window, compositor)
+    let front = compositor.family_front(window).unwrap_or(window);
+    router.focus(front, compositor)
 }

@@ -176,6 +176,53 @@ fn settle_on(
 
 // --- the singleton -------------------------------------------------------
 
+/// The one thing anybody outside this process can learn about a plate: a frame
+/// carrying it went out. Once per open, or a consumer counting the record
+/// cannot tell one menu from a repainted one.
+#[test]
+fn a_chain_announces_itself_shown_once_per_open() {
+    let theme = theme();
+    let g = geom(&theme);
+    let mut chain = MenuChain::new();
+
+    let mut seen: Vec<ChainOwner> = Vec::new();
+    chain.report_newly_shown(|owner| seen.push(owner));
+    assert!(seen.is_empty(), "a seat with no chain announces nothing");
+
+    open(&mut chain, APP, nested_model(), Point::new(40, 40), &g);
+    chain.report_newly_shown(|owner| seen.push(owner));
+    assert_eq!(seen, alloc::vec![APP]);
+
+    chain.report_newly_shown(|owner| seen.push(owner));
+    assert_eq!(
+        seen.len(),
+        1,
+        "a later frame announced the same chain again"
+    );
+
+    // A submenu opening is more of the chain, not a new one.
+    settle_on(&mut chain, 0, 1, &g);
+    assert_eq!(plates(&chain), 2);
+    chain.report_newly_shown(|owner| seen.push(owner));
+    assert_eq!(seen.len(), 1, "a deeper plate announced a second chain");
+
+    // The desktop's own menu is announced exactly as an application's is; a
+    // fresh chain is a fresh open.
+    open(
+        &mut chain,
+        ChainOwner::Session,
+        flat_model(),
+        Point::new(200, 60),
+        &g,
+    );
+    chain.report_newly_shown(|owner| seen.push(owner));
+    assert_eq!(seen, alloc::vec![APP, ChainOwner::Session]);
+
+    assert!(chain.dismiss());
+    chain.report_newly_shown(|owner| seen.push(owner));
+    assert_eq!(seen.len(), 2, "a chain that has closed announced itself");
+}
+
 #[test]
 fn a_second_open_closes_the_first_and_answers_it_dismissed() {
     let theme = theme();

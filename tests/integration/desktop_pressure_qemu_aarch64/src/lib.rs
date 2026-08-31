@@ -33,7 +33,12 @@
 /// The terminal, because its icon-bar declaration makes a primary click on
 /// its slot open another window in the *same* process, so one gesture,
 /// repeated, is the whole script.
-pub const BAR_APP_NAME: &str = "terminal";
+///
+/// It **is** the icon-bar vertical's own subject rather than a second spelling
+/// of it: the host launches through the one shared bar-launch reconstruction,
+/// so the bundle this PASS gate waits for and the bundle that reconstruction
+/// launches are equal by definition and are defined once.
+pub use tairix_test_appbar_qemu_aarch64::BAR_APP_NAME;
 
 /// Windows the whole script opens: the one the launch itself opens plus one
 /// per slot click after it.

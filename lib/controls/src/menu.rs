@@ -322,6 +322,13 @@ impl MenuItem {
         self.role
     }
 
+    /// The item's mark: the tick of an independent setting, or the bullet of
+    /// the chosen member of a group.
+    #[must_use]
+    pub fn mark(&self) -> MenuMark {
+        self.mark
+    }
+
     /// The item's composed state.
     #[must_use]
     pub fn state(&self) -> ControlState {

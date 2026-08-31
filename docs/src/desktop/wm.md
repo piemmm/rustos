@@ -1545,6 +1545,13 @@ the grab, traversal, dismissal and lifetime — is
 surfaces it lists and takes down what it no longer has, so a plate cannot
 outlive the state that placed it.
 
+The same service answers the desktop's *own* menus, which hand it a model built
+in process rather than one decoded from the wire; both resolve through one seat
+rule, so a menu cannot take the grab from the lock screen or the trusted picker
+by arriving from either direction. Nothing on this channel says a plate has been
+*drawn* — the reply is only the acceptance — so the session announces that
+itself, once per open, after the frame carrying the chain reached the display.
+
 The renderer, the chain's placement, the grab and the dismissal rules are the
 session's menu service; the contract above is what an app sees of them.
 

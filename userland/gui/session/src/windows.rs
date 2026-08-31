@@ -56,6 +56,23 @@ pub const WINDOW_SHOWN: EventId = EventId(20_003);
 /// matches on this constant rather than on a copy of its text.
 pub const WINDOW_SHOWN_MESSAGE: &str = "served window first frame on screen";
 
+/// Event id of the one-shot announcement that an open menu chain's plates
+/// reached the display, in the desktop session's reserved range.
+///
+/// The sibling of [`WINDOW_SHOWN`], for the surfaces no application owns. A
+/// chain's plates are the session's own compositor windows, so nothing on the
+/// window channel says a word about them: an application learns that its open
+/// was *accepted* and never that a plate was drawn, and the desktop's own menus
+/// cross no channel at all. So "the menu is on screen" is announced here or
+/// nowhere — which is what lets a user diagnosing a menu that never appeared,
+/// or a QEMU vertical deciding when a plate is worth reading and clicking,
+/// gate on a fact instead of a delay.
+pub const MENU_SHOWN: EventId = EventId(20_006);
+
+/// The exact message [`MENU_SHOWN`] is emitted with. A log consumer matches on
+/// this constant rather than on a copy of its text.
+pub const MENU_SHOWN_MESSAGE: &str = "menu chain on screen";
+
 /// Event id of the record the session emits when it hands a window's frame
 /// region back under memory pressure, in the desktop session's reserved
 /// range.
@@ -505,18 +522,27 @@ pub struct ShellWindowHost<'a> {
 impl ShellWindowHost<'_> {
     /// Why the seat cannot carry a chain right now, if it cannot.
     fn seat_refusal(&self) -> Option<MenuRefusal> {
-        if self.compositor.screen_rect().is_empty() {
-            return Some(MenuRefusal::NoDisplay);
-        }
-        // A menu must never appear over a lock screen, the trusted picker, or
-        // a system-modal prompt: those hold the seat's input, and drawing over
-        // one would let an application put its own rows in front of a
-        // password field.
-        if self.seat_held {
-            return Some(MenuRefusal::SeatBusy);
-        }
-        None
+        seat_menu_refusal(self.compositor.screen_rect(), self.seat_held)
     }
+}
+
+/// Why the seat cannot carry a menu chain on a `screen`, with `seat_held`
+/// saying whether a surface a menu may not displace has the seat.
+///
+/// One rule for every chain, whoever asked for it: an application's `OpenMenu`
+/// and the desktop's own backdrop menu both resolve through this, so a menu
+/// cannot appear over a lock screen or the trusted picker by arriving from the
+/// other direction. Drawing over one would take the seat's grab away from a
+/// password field or a file choice the user is being asked to make.
+#[must_use]
+pub fn seat_menu_refusal(screen: Rect, seat_held: bool) -> Option<MenuRefusal> {
+    if screen.is_empty() {
+        return Some(MenuRefusal::NoDisplay);
+    }
+    if seat_held {
+        return Some(MenuRefusal::SeatBusy);
+    }
+    None
 }
 
 /// The side a window's menu opens on, and the clearance it leaves.
@@ -1036,6 +1062,30 @@ mod tests {
         fn app_bar_withdrawn(&mut self, owner: ProcId) {
             self.withdrawn.push(owner);
         }
+    }
+
+    /// The one seat rule every chain resolves through, whichever direction it
+    /// arrives from — an application's `OpenMenu` or the desktop's own
+    /// backdrop press. A chain that took the grab from a password field or a
+    /// trusted file choice would be the defect this refusal exists to stop.
+    #[test]
+    fn no_chain_is_carried_on_a_held_seat_or_a_screen_with_no_extent() {
+        let screen = Rect::new(0, 0, 640, 480);
+        assert_eq!(seat_menu_refusal(screen, false), None);
+        assert_eq!(
+            seat_menu_refusal(screen, true),
+            Some(MenuRefusal::SeatBusy),
+            "a lock screen or the trusted picker holds the seat"
+        );
+        assert_eq!(
+            seat_menu_refusal(Rect::EMPTY, false),
+            Some(MenuRefusal::NoDisplay)
+        );
+        assert_eq!(
+            seat_menu_refusal(Rect::EMPTY, true),
+            Some(MenuRefusal::NoDisplay),
+            "no display is the answer before the seat is even consulted"
+        );
     }
 
     /// An accepted open composes a focused desktop window, records both

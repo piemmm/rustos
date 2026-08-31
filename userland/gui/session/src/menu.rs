@@ -486,6 +486,11 @@ struct OpenChain {
     outcome: Option<ChainOutcome>,
     /// The screen and output mode the chain was placed against.
     mode: (Rect, ChromeEpoch),
+    /// Whether a frame carrying this chain has reached the display, so the
+    /// announcement is made once per open. Per-open rather than per-seat
+    /// because a fresh chain is a fresh `OpenChain`: nothing has to remember
+    /// to clear it.
+    shown: bool,
 }
 
 impl MenuChain {
@@ -505,6 +510,28 @@ impl MenuChain {
     /// answered in-process.
     pub fn take_answers(&mut self) -> Vec<(ChainOwner, ChainOutcome)> {
         core::mem::take(&mut self.answers)
+    }
+
+    /// Report who owns the open chain if the frame just handed to the display
+    /// is the first to carry it.
+    ///
+    /// Called immediately after a frame reached the display, which is what
+    /// makes the claim true — the chain's surfaces are compositor windows, so
+    /// a frame composited while it is up carries its plates. Once per open,
+    /// and never for a chain that has closed: a chain the session could not
+    /// draw is refused rather than announced.
+    ///
+    /// Takes a reporter rather than returning anything so an idle wake — which
+    /// is nearly every wake — costs a bool test.
+    pub fn report_newly_shown(&mut self, report: impl FnOnce(ChainOwner)) {
+        let Some(chain) = self.open.as_mut() else {
+            return;
+        };
+        if chain.shown {
+            return;
+        }
+        chain.shown = true;
+        report(chain.owner);
     }
 
     /// Whether a chain is up. While one is, it holds the seat's pointer and
@@ -558,6 +585,7 @@ impl MenuChain {
             drag: None,
             outcome: None,
             mode: geom.mode(),
+            shown: false,
         };
         chain.replace_geometry(geom);
         self.open = Some(chain);

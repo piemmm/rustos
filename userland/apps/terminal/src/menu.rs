@@ -61,8 +61,11 @@ impl Command {
         Self::ALL.get(index).copied()
     }
 
-    /// The row label.
-    const fn label(self) -> &'static str {
+    /// The row label — the text a user reads, and the only thing that names a
+    /// row from outside this module (the QEMU vertical clicks the row this
+    /// spells rather than a position it would have to keep in step).
+    #[must_use]
+    pub const fn label(self) -> &'static str {
         match self {
             Self::Settings => "Settings…",
             Self::Larger => "Larger text",

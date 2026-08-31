@@ -2,7 +2,7 @@
 
 The **pinboard** is the desktop backdrop: the wallpaper drawn behind
 everything, the icons for the logged-in user's `Desktop` folder drawn over
-it, and the context menu that appears when the backdrop is right-clicked.
+it, and the menu that appears when the backdrop is right-clicked.
 The binding design is `plans/PINBOARD.md`; this page is the reference for
 how it is put together and where each decision lives.
 
@@ -32,7 +32,7 @@ settings, or a re-list that moved the icons. See
 | `lib/raster` | the one image resampler both the icon and wallpaper paths use |
 | [`lib/sandbox`](../security/sandbox.md) | decoding and placing a wallpaper inside a capability-empty worker |
 | `lib/browse` | the icon grid, its two arrangements, the shared sort, and the new-folder naming rule |
-| `userland/gui/session` | the pinboard itself: the layer, the menu, the settings, and the apply service |
+| `userland/gui/session` | the pinboard itself: the layer, the backdrop menu's row model, the settings, and the apply service |
 | `userland/apps/wallpaper` | the chooser the user actually clicks |
 
 Nothing about the pinboard lives in the kernel or in a driver.
@@ -180,14 +180,15 @@ activated as what it *names*: bundle-ness reads off the target's own leaf, a
 folder or file is opened through the link, and one whose target has gone is
 refused with its reason rather than launched blind.
 
-## The context menu
+## The backdrop menu
 
-A right-click on the backdrop opens the pinboard menu at the pointer, built
-from the shared [menu control](./widgets.md) and presented as a popup window
-the same way the taskbar's menus are. It offers: `Open` (only when the click
-landed on an icon), `New Folder`, the four sort orders, the two
-arrangements, `Refresh`, `Open Desktop Folder`, and `Change Background…`,
-with the active sort and arrangement marked.
+A right-click on the backdrop opens the desktop's own menu at the pointer. It
+is a chain like every other menu on the system — the pinboard hands a row model
+to the one [menu service](./menus.md) and keeps no shell of its own — and it
+offers: `Open` (only when the click landed on an icon), `New Folder`, the four
+sort orders, the two arrangements, `Refresh`, `Open Desktop Folder`, and
+`Change Background…`, with the sort and the arrangement in force shown as their
+group's chosen member and not offered again.
 
 Managing an entry — rename, copy, delete, properties — is deliberately
 absent. Those verbs belong to [the file manager](./apps.md), which owns them
@@ -197,7 +198,9 @@ copy of them here would be duplication.
 The menu never acts on its own authority. It names a command; the session
 carries it out, and reports on `stderr` anything it could not do — a
 refused folder creation, a chooser that would not launch — leaving the
-desktop unchanged rather than failing silently or dying over a refusal.
+desktop unchanged rather than failing silently or dying over a refusal. Where
+each row's command is resolved, and how its one answer reaches the session,
+is [the session's own page](./session.md#the-backdrop-menu).
 
 ## The chooser
 

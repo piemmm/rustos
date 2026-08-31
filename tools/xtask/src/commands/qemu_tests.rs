@@ -6489,6 +6489,70 @@ static TESTS: &[QemuTest] = &[
         pointer_script: Some(appbar_pointer_script),
         serial: &[],
     },
+    // `plans/NEW-MENUS.md` D17: the desktop **menu chain** vertical — the
+    // first thing on the system ever to put a menu plate on a screen. A
+    // dedicated sibling of the icon-bar vertical above rather than a further
+    // stage on it, so a gate mis-count in one choreography cannot wedge the
+    // other (`plans/OPEN-DEFECTS.md` D19/D20).
+    //
+    // It boots the same graphical world, types the unlock passphrase, logs in,
+    // and starts `desktop`. The pointer script then does what no host test
+    // can: launches the terminal from the program library, right-clicks its
+    // *client*, and clicks the *Settings…* row of the menu the desktop opens
+    // for it. Every rectangle comes from driving the production chain and the
+    // terminal's own model, so the click lands where the desktop draws.
+    //
+    // PASS needs all three of the guest's witnesses, in order: an `APP_LOADED`
+    // naming the terminal's bundle, a 12-byte minted-id reply on the reserved
+    // window endpoint (the reply of exactly one operation, `OpenMenu`), and a
+    // create reply *after* it — the settings sheet the chosen row opens, which
+    // the terminal opens on nothing but the one `MenuClosed` answer naming
+    // that row. Two dumps read the screen: the terminal's window alone, and
+    // the same screen with the plate over it, each gated on the session's own
+    // witness that the frame is on screen and verified before the gesture that
+    // follows it.
+    //
+    // Single CPU and the same 300-second *inactivity* budget its siblings
+    // carry: the longest the guest may fall silent, never a runtime deadline,
+    // so co-scheduling cannot turn a merely slow guest into a timeout.
+    QemuTest {
+        package: "tairix-test-menu-qemu-aarch64",
+        binary: "tairix-test-menu-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: true,
+        fs_disk: FsDisk::AutoloadRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[
+            (
+                AUTOLOAD_INPUT_KEY_MARKER,
+                AUTOLOAD_INPUT_ARMED_OCCURRENCES,
+                UNLOCK_PASSPHRASE_LINE,
+            ),
+            (AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
+        ],
+        screendumps: &[
+            ScreendumpPlan {
+                marker: APPBAR_WINDOW_SHOWN_MARKER,
+                occurrences: 1,
+                suffix: MENU_WINDOW_DUMP,
+                assert: assert_menu_window_dark_screendump,
+            },
+            ScreendumpPlan {
+                marker: MENU_SHOWN_MARKER,
+                occurrences: 1,
+                suffix: MENU_PLATE_DUMP,
+                assert: assert_menu_plate_dark_screendump,
+            },
+        ],
+        pointer_script: Some(menu_pointer_script),
+        serial: &[],
+    },
     // Elevated Date & Time launch: right-click the taskbar clock, choose
     // *Set Date & Time…*, authenticate as the fixture root account through
     // the session's credential prompt, and witness the Date & Time window.
@@ -9888,6 +9952,268 @@ fn desktop_pressure_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
         pen.aim(APPBAR_WINDOW_SHOWN_MARKER, opened, rest);
     }
     Ok(pen.steps())
+}
+
+/// The desktop-menu vertical's screendump names. Two frames: the terminal
+/// window alone, and the same screen with the chain's plate over it.
+const MENU_WINDOW_DUMP: &str = "window";
+const MENU_PLATE_DUMP: &str = "plate";
+
+/// Serial marker the desktop-menu vertical waits for before photographing and
+/// clicking a plate: the session's own announcement that a frame carrying the
+/// open chain reached the display. Imported from the session crate's own
+/// definition, so the emitter and this consumer can never drift.
+///
+/// It is the only honest gate. An accepted `OpenMenu` reply says the session
+/// *took* the request, not that a plate was drawn — the chain is refused at
+/// draw time if it cannot be given a surface — and nothing an application ever
+/// learns says a word about the plate's pixels. So a dump or a click gated on
+/// anything earlier races the frame the plate is in.
+const MENU_SHOWN_MARKER: &str = tairix_desktop_session::MENU_SHOWN_MESSAGE;
+
+/// The cascade slot the terminal's launch window takes in this vertical: the
+/// first, because nothing has opened a served window before it.
+///
+/// The desktop's autostarted components open none — the file manager in its
+/// desktop role holds an icon-bar slot and opens a window only when the user
+/// asks, and the Switchboard samples headlessly until its panel is opened — so
+/// the launch from the program library is the first `Create` the session
+/// serves.
+const MENU_TERMINAL_CASCADE_SLOT: u64 = 0;
+
+/// The plate the terminal's window menu opens at `press`, and the screen
+/// rectangle of the row labelled `label` on it.
+///
+/// Reconstructed by driving the **production** chain — the same model decode,
+/// the same placement rule, the same row geometry the guest lays out — so the
+/// script clicks where the desktop actually draws rather than at coordinates
+/// copied from a screenshot. The terminal's own `menu` module supplies both the
+/// model and the row's label, so nothing here restates a row by position.
+///
+/// The chain is opened for the session as its own owner because the owner decides
+/// only where an *answer* goes; placement reads the anchor, the side, the
+/// clearance and the screen, all of which are the same for either owner. The
+/// terminal declares no submenu and no panel row, so every row of its model
+/// sits on the root plate in declaration order.
+fn menu_plate_and_row(
+    press: tairix_geometry::Point,
+    label: &str,
+) -> Result<(tairix_geometry::Rect, tairix_geometry::Rect), String> {
+    use tairix_desktop_session::menu::{ChainModel, ChainOwner, MenuChain};
+    use tairix_desktop_session::windows::{MENU_GAP_PX, MENU_SIDE};
+
+    let (width, height) = ramfb_screen();
+    let theme = tairix_theme::Theme::dark();
+    let geom = tairix_desktop_session::menu::ChainGeometry {
+        screen: tairix_geometry::Rect::new(0, 0, width, height),
+        scale: RECONSTRUCTION_SCALE,
+        theme: &theme,
+        // The session composites at the reference density with the shipped
+        // theme, so the chrome epoch a chain is placed against is that pair.
+        epoch: (RECONSTRUCTION_SCALE.percent(), 0),
+    };
+    let wire = tairix_terminal::menu::model()
+        .map_err(|err| format!("menu script: the terminal's menu model is invalid: {err}"))?;
+    // No information row is declared, so the attested identity a chain would
+    // draw one from is never read.
+    let model = ChainModel::from_app_menu(wire.title(), &wire, None);
+    let row = model
+        .rows()
+        .iter()
+        .position(|row| row.drawn().label() == label)
+        .ok_or_else(|| format!("menu script: the terminal's menu has no {label:?} row"))?;
+    let mut chain = MenuChain::new();
+    chain
+        .open(
+            ChainOwner::Session,
+            model,
+            tairix_geometry::Rect::new(press.x, press.y, 0, 0),
+            MENU_SIDE,
+            MENU_GAP_PX,
+            &geom,
+        )
+        .map_err(|err| format!("menu script: the terminal's menu opens nothing: {err:?}"))?;
+    let plate = chain
+        .surfaces()
+        .first()
+        .ok_or_else(|| "menu script: the open chain lists no surface".to_string())?
+        .rect;
+    let row = chain
+        .row_rect(0, row, &geom)
+        .ok_or_else(|| format!("menu script: the {label:?} row lays nothing out"))?;
+    Ok((plate, row))
+}
+
+/// Launch the terminal from the program library, right-click its client to open
+/// the **desktop's** window menu for it, then click that menu's *Settings…*
+/// row.
+///
+/// The launch is [`reconstruct_bar_launch`]; the plate and the row are
+/// [`menu_plate_and_row`], driven from the terminal's own model.
+///
+/// Every gate is **causal** rather than timed, and each is the strongest fact
+/// the emitting side can honestly state:
+///
+/// - The desktop's own reveal witness opens the script, so nothing is injected
+///   before there is a bar to hit.
+/// - The right-click waits on the session's per-window
+///   [`APPBAR_WINDOW_SHOWN_MARKER`]: a frame carrying the terminal's own first
+///   painted pixels has reached the display, so its client is there to press.
+///   A create reply would say only that the window exists.
+/// - The row's click waits on [`MENU_SHOWN_MARKER`], the session's own witness
+///   that a frame carrying the chain went out — the only statement anywhere
+///   that a plate has been *drawn*, and the reason this vertical needed it to
+///   exist.
+///
+/// The row's click is also what keeps the guest alive long enough to be
+/// photographed: it is what makes the terminal open its settings sheet, which
+/// is the create that completes the guest's PASS, and the runner sends no
+/// pointer step until every dump already asked for has been read back and
+/// parsed.
+fn menu_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
+    use tairix_qemu::MouseButton;
+
+    let BarLaunch {
+        shell,
+        library_button,
+        entry_row,
+        ..
+    } = reconstruct_bar_launch()?;
+    // A secondary press inside the terminal's client is delivered to it as a
+    // window-local pointer event, and the session resolves the anchor it sends
+    // back against that window's live client origin — so the press point in
+    // screen coordinates *is* the anchor's screen origin.
+    let press = served_client_aim(
+        MENU_TERMINAL_CASCADE_SLOT,
+        tairix_terminal::WIN_RESIZABLE,
+        shell.session().active_theme(),
+    );
+    let (_, row) = menu_plate_and_row(press, MENU_SETTINGS_ROW_LABEL)?;
+    let settings_row = rect_centre(row, "Settings row")?;
+
+    let ready = AUTOLOAD_DESKTOP_REVEALED_MARKER;
+    let mut pen = PointerPen::pinned_at_origin(ready, ramfb_screen());
+    pen.click(ready, 1, MouseButton::Primary, library_button);
+    pen.click(ready, 1, MouseButton::Primary, entry_row);
+    pen.click(APPBAR_WINDOW_SHOWN_MARKER, 1, MouseButton::Secondary, press);
+    pen.click(MENU_SHOWN_MARKER, 1, MouseButton::Primary, settings_row);
+    Ok(pen.steps())
+}
+
+/// The label the terminal gives its *Settings…* row, read back from the
+/// terminal's own command list rather than spelled here.
+const MENU_SETTINGS_ROW_LABEL: &str = tairix_terminal::menu::Command::Settings.label();
+
+/// [`ScreendumpPlan`] assertion for the desktop-menu vertical's **first** dump:
+/// the terminal's window is on screen over the composited desktop.
+///
+/// This frame is also the baseline the plate dump is read against, which is
+/// what turns "something is drawn where the plate goes" into "*this* run's
+/// right-click put it there".
+fn assert_menu_window_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
+    let theme = tairix_theme::Theme::dark();
+    let image = read_screendump(t, path)?;
+    assert_cascade_slot_covered(t, path, &image, &theme, MENU_TERMINAL_CASCADE_SLOT)
+}
+
+/// [`ScreendumpPlan`] assertion for the desktop-menu vertical's **second**
+/// dump: the chain's plate is drawn, exactly where the chain places it.
+///
+/// Two independent facts, because either alone is weak. The plate rectangle
+/// differs from the same rectangle in the window-only frame, so *something* was
+/// drawn there by this gesture; and a large share of its interior is exactly the
+/// theme's own raised-surface colour, so what was drawn is a plate rather than
+/// whatever the terminal happened to repaint. The rectangle is the one the
+/// production chain reports, so a placement regression moves the probe off the
+/// plate and fails here rather than passing on a menu drawn somewhere else.
+fn assert_menu_plate_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
+    /// The share of the plate rectangle that must differ from the frame before
+    /// the menu opened. Measured at 0.922 on the board.
+    const MIN_PLATE_DRIFT: f64 = 0.75;
+    /// The share of the plate's interior that must be the plate's own ground.
+    ///
+    /// Well under one, because the band, its title text, the row labels, the
+    /// group dividers and the rim all sit on that ground: measured at 0.844,
+    /// with the floor left low enough that a highlighted row or a heavier face
+    /// cannot turn a drawn plate into a failure.
+    const MIN_PLATE_GROUND: f64 = 0.55;
+    /// How far inside the plate the probe reads, in pixels: clear of the rim
+    /// and of the anti-aliasing on its rounded corners.
+    const PLATE_PROBE_INSET_PX: u32 = 4;
+
+    let theme = tairix_theme::Theme::dark();
+    let image = read_screendump(t, path)?;
+    let before = read_screendump(
+        t,
+        &baseline_dump_path(t, path, &[MENU_PLATE_DUMP], MENU_WINDOW_DUMP)?,
+    )?;
+    let press = served_client_aim(
+        MENU_TERMINAL_CASCADE_SLOT,
+        tairix_terminal::WIN_RESIZABLE,
+        &theme,
+    );
+    let (plate, _) = menu_plate_and_row(press, MENU_SETTINGS_ROW_LABEL)?;
+    let ground = theme.palette().surface_raised;
+
+    #[allow(clippy::cast_sign_loss)] // A plate is placed at positive screen offsets.
+    let (left, top) = (
+        plate.left() as u32 + PLATE_PROBE_INSET_PX,
+        plate.top() as u32 + PLATE_PROBE_INSET_PX,
+    );
+    let right = left + plate.width - 2 * PLATE_PROBE_INSET_PX;
+    let bottom = top + plate.height - 2 * PLATE_PROBE_INSET_PX;
+    let mut total = 0u64;
+    let mut drifted = 0u64;
+    let mut on_ground = 0u64;
+    for y in top..bottom {
+        for x in left..right {
+            let read = |from: &tairix_qemu::screendump::Image| {
+                from.pixel(x, y).map_err(|e| {
+                    format!(
+                        "test --qemu ({}): screendump {} lacks the menu plate at {plate:?}: {e}",
+                        t.package,
+                        path.display(),
+                    )
+                })
+            };
+            let pixel = read(&image)?;
+            total += 1;
+            if pixel != read(&before)? {
+                drifted += 1;
+            }
+            if pixel == (ground.r, ground.g, ground.b) {
+                on_ground += 1;
+            }
+        }
+    }
+    #[allow(clippy::cast_precision_loss)] // Plate pixel counts are far below 2^52.
+    let share = |count: u64| {
+        if total == 0 {
+            0.0
+        } else {
+            count as f64 / total as f64
+        }
+    };
+    let (drift, ground_share) = (share(drifted), share(on_ground));
+    if drift < MIN_PLATE_DRIFT {
+        return Err(format!(
+            "test --qemu ({}): screendump {} shows no menu plate at {plate:?}: only {drift:.3} of \
+             it differs from the same rectangle before the right-click (expected >= \
+             {MIN_PLATE_DRIFT})",
+            t.package,
+            path.display(),
+        ));
+    }
+    if ground_share < MIN_PLATE_GROUND {
+        return Err(format!(
+            "test --qemu ({}): screendump {} draws something at {plate:?} that is not a plate: \
+             only {ground_share:.3} of it is the theme's raised-surface colour (expected >= \
+             {MIN_PLATE_GROUND})",
+            t.package,
+            path.display(),
+        ));
+    }
+    Ok(())
 }
 
 /// The label the terminal gives its *New window* row, as the script names the

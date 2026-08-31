@@ -142,6 +142,33 @@ A declared separator becomes the next row's group break rather than a row of
 its own, so a separator inside a submenu draws the divider it draws on the root
 plate and no index the chain reports names a rule.
 
+## The desktop's own menus
+
+The desktop's own surfaces are clients of the service exactly as an application
+is; the only difference is that their model is built in process rather than
+decoded from the wire, and that difference is what lets their rows say things an
+application structurally cannot. **The backdrop menu** is the first of them: a
+secondary press on the pinboard hands `pinboard::model`'s rows to the chain with
+the session as their owner, so its answer is returned in process rather than as
+a `MenuClosed`, and it resolves through the same seat rule an application's open
+does — a menu never takes the grab from the lock screen or the trusted picker,
+whichever direction it arrives from. See [the pinboard](./pinboard.md#the-backdrop-menu).
+
+## Saying that a plate is on screen
+
+Nothing on the window channel says a word about a plate's pixels: an application
+learns that its open was *accepted*, never that anything was drawn, and the
+desktop's own menus cross no channel at all. So the session announces it —
+`MENU_SHOWN`, "menu chain on screen", once per open and only after a frame
+carrying the chain reached the display, naming the owner it belongs to: an
+application's window, or the desktop itself.
+
+That record is the sibling of the per-window `WINDOW_SHOWN`, and for the same
+reason: it is the only honest gate for anything outside the session that needs
+to know a menu is visible — a user diagnosing a menu that never appeared, or the
+QEMU vertical deciding when a plate is worth photographing and clicking. A chain
+the session could not give a surface is refused rather than announced.
+
 ## Where it lives
 
 - `userland/gui/session/src/menu.rs` — the chain: the model, the plates, the

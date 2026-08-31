@@ -9,24 +9,26 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
+use tairix_abi::window_ipc::AppMenuItemId;
 use tairix_abi::{Errno, Time64};
 use tairix_browse::{
     AppAssociation, DirectorySource, Entry, EntryKind, GridView, LinkTarget, Listing,
 };
-use tairix_controls::{ActivityState, MenuItem};
+use tairix_controls::{ActivityState, MenuMark};
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::NoArtwork;
 use tairix_proglib::{BundlePath, Catalog, DisplayName, EntryId, LibraryCategory, LibraryEntry};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 use tairix_wallpaper::{Backdrop, IconFlow, IconSort, PinboardSettings, Rgb, WallpaperChoice};
-use tairix_wm::{InputEvent, Key, NamedKey, PointerButton};
+use tairix_wm::{Key, NamedKey};
 
 use crate::desktop::{
     Desktop, DesktopAction, DesktopActivation, DesktopOutcome, PinboardChange, DESKTOP_MARGIN,
     RELIST_MIN_INTERVAL_NS,
 };
-use crate::pinboard::{PinboardCommand, PinboardMenu, PinboardMenuOutcome};
+use crate::menu::{ChainChild, ChainModel};
+use crate::pinboard::{self, PinboardCommand};
 
 /// What a [`FakeDir`] answers with, and how often it has been asked.
 ///
@@ -1077,25 +1079,20 @@ fn a_secondary_press_on_an_icon_selects_it_and_asks_for_the_menu() {
     let at = centre_of(&layout, 1);
 
     let mut damage = Region::new();
-    let opened = desktop.context_press(at, &layout, &mut damage);
+    assert!(
+        desktop.context_press(at, &layout, &mut damage),
+        "the press landed on an icon, so the menu offers `Open`"
+    );
     assert_eq!(damage.rects(), [cell(&layout, 1)]);
     assert_eq!(
         desktop.selected(),
         Some(1),
         "the menu acts on what was pointed at"
     );
-    assert_eq!(
-        opened.action,
-        Some(DesktopAction::OpenMenu { at, on_icon: true })
-    );
 
     damage.clear();
-    let again = desktop.context_press(at, &layout, &mut damage);
+    assert!(desktop.context_press(at, &layout, &mut damage));
     assert!(damage.is_empty(), "the selection did not move");
-    assert_eq!(
-        again.action,
-        Some(DesktopAction::OpenMenu { at, on_icon: true })
-    );
 }
 
 #[test]
@@ -1105,19 +1102,15 @@ fn a_secondary_press_on_the_backdrop_leaves_the_selection_untouched() {
     desktop.press(centre_of(&layout, 0), &layout, 0, &[], &mut Region::new());
 
     let mut damage = Region::new();
-    let opened = desktop.context_press(EMPTY_DESKTOP, &layout, &mut damage);
+    assert!(
+        !desktop.context_press(EMPTY_DESKTOP, &layout, &mut damage),
+        "a press on empty backdrop has nothing to open"
+    );
     assert!(damage.is_empty(), "the backdrop menu moves no highlight");
     assert_eq!(
         desktop.selected(),
         Some(0),
         "asking for the menu is not a way to lose a selection"
-    );
-    assert_eq!(
-        opened.action,
-        Some(DesktopAction::OpenMenu {
-            at: EMPTY_DESKTOP,
-            on_icon: false,
-        })
     );
 }
 
@@ -1235,48 +1228,19 @@ fn refresh_relists_now_and_the_remaining_rows_name_their_own_action() {
     assert_eq!(desktop.folder_path(), "/Users/ada/Desktop");
 }
 
-// --- The context menu itself ----------------------------------------------
+// --- The backdrop menu's row model ----------------------------------------
 
-/// The screen the menu is clamped onto.
-fn screen() -> Rect {
-    Rect::new(0, 0, 800, 600)
-}
-
-/// The menu's plate on [`screen`], which must exist for an open menu.
-fn plate_of(menu: &PinboardMenu, theme: &Theme) -> Rect {
-    menu.layout(screen(), Scale::ONE, theme)
-        .expect("an open menu has a plate")
-}
-
-/// A primary press.
-const fn press_event() -> InputEvent {
-    InputEvent::PointerPressed {
-        button: PointerButton::Primary,
-    }
-}
-
-/// A primary release.
-const fn release_event() -> InputEvent {
-    InputEvent::PointerReleased {
-        button: PointerButton::Primary,
-    }
+/// The rows the menu offers, in order, as the labels a user reads.
+fn labels(model: &ChainModel) -> Vec<&str> {
+    model.rows().iter().map(|row| row.drawn().label()).collect()
 }
 
 #[test]
 fn the_menu_offers_exactly_the_closed_row_set_with_the_settings_in_force_marked() {
-    let mut menu = PinboardMenu::new();
-    assert!(!menu.is_open());
-    menu.open(
-        Point::new(10, 10),
-        true,
-        &arranged_by(IconFlow::Trailing, IconSort::Size),
-    );
+    let model = pinboard::model(true, &arranged_by(IconFlow::Trailing, IconSort::Size));
 
-    assert!(menu.is_open());
-    assert_eq!(menu.anchor(), Some(Point::new(10, 10)));
-    let labels: Vec<&str> = menu.menu().items().iter().map(MenuItem::label).collect();
     assert_eq!(
-        labels,
+        labels(&model),
         vec![
             "Open",
             "New Folder",
@@ -1292,215 +1256,128 @@ fn the_menu_offers_exactly_the_closed_row_set_with_the_settings_in_force_marked(
         ]
     );
 
-    let marked: Vec<&str> = menu
-        .menu()
-        .items()
+    // The sort orders and the arrangements are each a group of alternatives,
+    // so the one in force is drawn as that group's chosen member — never as
+    // finished work, which is what an activity bead means.
+    let marked: Vec<&str> = model
+        .rows()
         .iter()
-        .filter(|item| item.state().activity == ActivityState::Complete)
-        .map(MenuItem::label)
+        .filter(|row| row.drawn().mark() == MenuMark::Radio)
+        .map(|row| row.drawn().label())
         .collect();
     assert_eq!(marked, vec!["Sort by Size", "Arrange from the Right"]);
-    for item in menu.menu().items() {
-        if item.state().activity == ActivityState::Complete {
-            assert!(
-                item.reason().is_some(),
-                "a marked row says why it is not offered"
-            );
+    for row in model.rows() {
+        let item = row.drawn();
+        if item.mark() != MenuMark::Radio {
+            assert!(item.state().enabled, "{:?} is offered", item.label());
+            assert_eq!(item.state().activity, ActivityState::Idle);
+            continue;
         }
+        assert!(
+            !item.state().enabled,
+            "the setting in force is not a command"
+        );
+        assert!(
+            item.reason().is_some(),
+            "a marked row says why it is not offered"
+        );
+        assert_eq!(
+            item.state().activity,
+            ActivityState::Idle,
+            "an appearance row states no progress"
+        );
     }
 }
 
 #[test]
 fn every_row_names_the_command_at_its_own_index() {
-    let mut menu = PinboardMenu::new();
-    menu.open(Point::ORIGIN, true, &PinboardSettings::default());
-    let commands: Vec<PinboardCommand> = (0..menu.menu().len())
-        .filter_map(|index| menu.command_at(index))
+    let model = pinboard::model(true, &PinboardSettings::default());
+    let commands: Vec<PinboardCommand> = (1..=u16::try_from(model.rows().len()).expect("small"))
+        .map(|raw| {
+            PinboardCommand::from_item(AppMenuItemId::new(raw).expect("a non-zero row id"))
+                .expect("a declared row")
+        })
         .collect();
+    assert_eq!(commands, PinboardCommand::ALL.to_vec());
     assert_eq!(
-        commands,
-        vec![
-            PinboardCommand::Open,
-            PinboardCommand::NewFolder,
-            PinboardCommand::SortBy(IconSort::Name),
-            PinboardCommand::SortBy(IconSort::Kind),
-            PinboardCommand::SortBy(IconSort::Size),
-            PinboardCommand::SortBy(IconSort::Date),
-            PinboardCommand::ArrangeFrom(IconFlow::Leading),
-            PinboardCommand::ArrangeFrom(IconFlow::Trailing),
-            PinboardCommand::Refresh,
-            PinboardCommand::OpenDesktopFolder,
-            PinboardCommand::ChangeBackground,
-        ]
-    );
-    assert_eq!(
-        menu.command_at(menu.menu().len()),
+        PinboardCommand::from_item(
+            AppMenuItemId::new(u16::try_from(PinboardCommand::ALL.len() + 1).expect("small"))
+                .expect("a non-zero row id")
+        ),
         None,
-        "an index the menu does not have names no command"
+        "an id the menu does not have names no command"
     );
 }
 
+/// The rows a gesture leaves out must not shift what the rows around them
+/// mean: an id is a command's own position, never a row's.
 #[test]
-fn a_menu_opened_on_the_backdrop_offers_no_open_row() {
-    let mut menu = PinboardMenu::new();
-    menu.open(Point::ORIGIN, false, &PinboardSettings::default());
+fn a_menu_opened_on_the_backdrop_offers_no_open_row_and_shifts_no_id() {
+    let bare = pinboard::model(false, &PinboardSettings::default());
     assert_eq!(
-        menu.menu().items().first().map(MenuItem::label),
+        bare.rows().first().map(|row| row.drawn().label()),
         Some("New Folder")
     );
-    assert_eq!(menu.command_at(0), Some(PinboardCommand::NewFolder));
     assert!(
-        !menu.menu().items()[0].is_group_break(),
+        !bare.rows()[0].drawn().is_group_break(),
         "the first row divides nothing"
     );
+    assert_eq!(
+        bare.rows().len(),
+        PinboardCommand::ALL.len() - 1,
+        "only `Open` is left out"
+    );
 
-    menu.open(Point::ORIGIN, true, &PinboardSettings::default());
+    let over_icon = pinboard::model(true, &PinboardSettings::default());
     assert!(
-        menu.menu().items()[1].is_group_break(),
+        over_icon.rows()[1].drawn().is_group_break(),
         "with Open above it, New Folder starts its own group"
     );
+
+    // `New Folder` is `ALL` position 1, so its id is 2 whichever gesture built
+    // the plate — the row it sits at moved, its command did not.
+    let id = AppMenuItemId::new(2).expect("a non-zero row id");
+    assert_eq!(
+        PinboardCommand::from_item(id),
+        Some(PinboardCommand::NewFolder)
+    );
 }
 
+/// Every group break the plate draws, so a divider cannot drift onto a row
+/// that begins nothing.
 #[test]
-fn the_menu_is_clamped_wholly_onto_the_screen_from_every_corner() {
-    let theme = theme();
-    let screen = screen();
-    let mut menu = PinboardMenu::new();
+fn the_menu_groups_its_rows_by_what_they_are() {
+    let model = pinboard::model(true, &PinboardSettings::default());
+    let grouped: Vec<&str> = model
+        .rows()
+        .iter()
+        .filter(|row| row.drawn().is_group_break())
+        .map(|row| row.drawn().label())
+        .collect();
     assert_eq!(
-        menu.layout(screen, Scale::ONE, &theme),
-        None,
-        "a closed menu has no plate"
+        grouped,
+        vec![
+            "New Folder",
+            "Sort by Name",
+            "Arrange from the Left",
+            "Refresh"
+        ]
     );
+}
 
-    for corner in [
-        Point::new(screen.left(), screen.top()),
-        Point::new(screen.right() - 1, screen.top()),
-        Point::new(screen.left(), screen.bottom() - 1),
-        Point::new(screen.right() - 1, screen.bottom() - 1),
-    ] {
-        menu.open(corner, true, &PinboardSettings::default());
-        let plate = plate_of(&menu, &theme);
-        assert!(
-            plate.left() >= screen.left() && plate.top() >= screen.top(),
-            "{corner:?} ran off the near edge"
-        );
-        assert!(
-            plate.right() <= screen.right() && plate.bottom() <= screen.bottom(),
-            "{corner:?} ran off the far edge"
-        );
+/// The chain answers with a row id and nothing else, so every row the model
+/// offers must carry one it can read back.
+#[test]
+fn the_model_declares_no_row_the_chain_cannot_answer_with() {
+    for on_icon in [false, true] {
+        let model = pinboard::model(on_icon, &PinboardSettings::default());
+        assert!(!model.rows().is_empty(), "a plate with nothing to choose");
+        for row in model.rows() {
+            assert_eq!(
+                *row.child(),
+                ChainChild::None,
+                "the backdrop menu declares no submenu and hangs no window"
+            );
+        }
     }
-
-    menu.open(Point::new(100, 100), true, &PinboardSettings::default());
-    assert_eq!(
-        plate_of(&menu, &theme).origin,
-        Point::new(100, 100),
-        "a menu with room opens exactly at the pointer"
-    );
-}
-
-#[test]
-fn a_click_on_a_row_chooses_its_command_and_the_keyboard_reaches_it_too() {
-    let theme = theme();
-    let mut menu = PinboardMenu::new();
-    menu.open(Point::new(100, 100), true, &PinboardSettings::default());
-    let plate = plate_of(&menu, &theme);
-    let row = menu
-        .menu()
-        .row_rect(0, plate, Scale::ONE, &theme)
-        .expect("the Open row");
-    let at = Point::new(row.left() + 1, row.top() + 1);
-
-    assert_eq!(
-        menu.on_pointer(
-            &InputEvent::PointerMoved { to: at },
-            at,
-            plate,
-            Scale::ONE,
-            &theme
-        ),
-        PinboardMenuOutcome::Changed
-    );
-    assert_eq!(
-        menu.on_pointer(&press_event(), at, plate, Scale::ONE, &theme),
-        PinboardMenuOutcome::Ignored
-    );
-    assert_eq!(
-        menu.on_pointer(&release_event(), at, plate, Scale::ONE, &theme),
-        PinboardMenuOutcome::Chose(PinboardCommand::Open)
-    );
-    assert!(!menu.is_open(), "choosing closes the menu");
-
-    menu.open(Point::new(100, 100), true, &PinboardSettings::default());
-    let plate = plate_of(&menu, &theme);
-    assert_eq!(
-        menu.on_key(down(), plate, Scale::ONE, &theme),
-        PinboardMenuOutcome::Changed
-    );
-    assert_eq!(
-        menu.on_key(enter(), plate, Scale::ONE, &theme),
-        PinboardMenuOutcome::Chose(PinboardCommand::Open)
-    );
-}
-
-#[test]
-fn escape_dismisses_the_menu_and_so_does_a_press_away_from_it() {
-    let theme = theme();
-    let mut menu = PinboardMenu::new();
-    menu.open(Point::new(100, 100), false, &PinboardSettings::default());
-    let plate = plate_of(&menu, &theme);
-    assert_eq!(
-        menu.on_key(escape(), plate, Scale::ONE, &theme),
-        PinboardMenuOutcome::Dismissed
-    );
-    assert!(!menu.is_open());
-    assert_eq!(
-        menu.on_key(escape(), plate, Scale::ONE, &theme),
-        PinboardMenuOutcome::Ignored,
-        "a closed menu claims nothing"
-    );
-
-    menu.open(Point::new(100, 100), false, &PinboardSettings::default());
-    let plate = plate_of(&menu, &theme);
-    let away = Point::new(plate.left() - 5, plate.top() - 5);
-    assert_eq!(
-        menu.on_pointer(&press_event(), away, plate, Scale::ONE, &theme),
-        PinboardMenuOutcome::Dismissed
-    );
-    assert!(!menu.is_open());
-    assert_eq!(
-        menu.on_pointer(&press_event(), away, plate, Scale::ONE, &theme),
-        PinboardMenuOutcome::Ignored
-    );
-}
-
-#[test]
-fn the_row_for_a_setting_already_in_force_cannot_be_chosen() {
-    let theme = theme();
-    let mut menu = PinboardMenu::new();
-    menu.open(Point::new(100, 100), true, &PinboardSettings::default());
-    let plate = plate_of(&menu, &theme);
-    // "Sort by Name" is the default order, so its row is marked and inert.
-    let row = menu
-        .menu()
-        .row_rect(2, plate, Scale::ONE, &theme)
-        .expect("the marked sort row");
-    let at = Point::new(row.left() + 1, row.top() + 1);
-    assert_eq!(
-        menu.command_at(2),
-        Some(PinboardCommand::SortBy(IconSort::Name))
-    );
-
-    menu.on_pointer(
-        &InputEvent::PointerMoved { to: at },
-        at,
-        plate,
-        Scale::ONE,
-        &theme,
-    );
-    menu.on_pointer(&press_event(), at, plate, Scale::ONE, &theme);
-    assert_eq!(
-        menu.on_pointer(&release_event(), at, plate, Scale::ONE, &theme),
-        PinboardMenuOutcome::Ignored
-    );
-    assert!(menu.is_open(), "an inert row neither acts nor dismisses");
 }

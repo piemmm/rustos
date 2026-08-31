@@ -126,14 +126,6 @@ pub enum DesktopActivation {
 pub enum DesktopAction {
     /// Carry out this activation.
     Activate(DesktopActivation),
-    /// Open the pinboard's context menu anchored at this screen position.
-    OpenMenu {
-        /// The pointer position the menu is anchored at.
-        at: Point,
-        /// Whether the press landed on an icon, which is what decides whether
-        /// the menu offers `Open`.
-        on_icon: bool,
-    },
     /// Create a directory at this absolute path.
     ///
     /// The name is already chosen — through the shared new-directory naming
@@ -635,7 +627,8 @@ impl<S: DirectorySource> Desktop<S> {
     }
 
     /// A secondary (right) press at screen position `at`: the pinboard's
-    /// context-menu gesture.
+    /// context-menu gesture. Answers whether the press landed on an icon,
+    /// which is the only thing that decides whether the menu offers `Open`.
     ///
     /// A press on an icon selects it, so the menu acts on the thing the user
     /// pointed at; a press on empty backdrop leaves the selection exactly as
@@ -643,12 +636,11 @@ impl<S: DirectorySource> Desktop<S> {
     /// The gesture claims no keyboard focus: the window manager does not move
     /// focus for a secondary press on the backdrop, and the desktop does not
     /// pretend otherwise.
-    pub fn context_press(
-        &mut self,
-        at: Point,
-        layout: &GridView,
-        damage: &mut Region,
-    ) -> DesktopOutcome {
+    ///
+    /// It names no [`DesktopAction`]: the menu is the seat's one chain, opened
+    /// by the embedder that owns it, so the desktop model describes the rows
+    /// and never asks for a surface.
+    pub fn context_press(&mut self, at: Point, layout: &GridView, damage: &mut Region) -> bool {
         let on_icon = index_at(layout, at);
         if let Some(index) = on_icon {
             if self.selected != Some(index) {
@@ -657,13 +649,7 @@ impl<S: DirectorySource> Desktop<S> {
                 Self::mark_cell(layout, self.selected, damage);
             }
         }
-        DesktopOutcome {
-            relisted: false,
-            action: Some(DesktopAction::OpenMenu {
-                at,
-                on_icon: on_icon.is_some(),
-            }),
-        }
+        on_icon.is_some()
     }
 
     /// Resolve one pinboard menu `command` against the desktop's own state, at

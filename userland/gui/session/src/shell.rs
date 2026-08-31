@@ -68,7 +68,6 @@ use crate::desktop::Desktop;
 use crate::fade::BackdropFade;
 use crate::input::{SessionInputResponse, SessionInputRouter};
 use crate::menu::{ChainGeometry, MenuChain, SurfaceKind};
-use crate::pinboard::PinboardMenu;
 use crate::presenter::{place, TaskbarPresenter};
 use crate::session::DesktopSession;
 use crate::tasks::TaskBridge;
@@ -161,9 +160,6 @@ pub struct DesktopShell {
     /// The ground [`wallpaper`](Self::wallpaper) is dissolving out of, while
     /// it is: the whole screen changing at once is never cut to.
     backdrop_fade: BackdropFade,
-    /// The compositor window the pinboard's open context menu is shown in, if
-    /// one is placed.
-    pinboard_window: Option<WindowId>,
     /// The compositor window each surface of the open menu chain is drawn in.
     ///
     /// Reconciled against the chain's own list on every present, so a plate
@@ -300,7 +296,6 @@ impl DesktopShell {
             active_frame: None,
             wallpaper: None,
             backdrop_fade: BackdropFade::default(),
-            pinboard_window: None,
             menu_windows: Vec::new(),
             thumbs: WindowThumbnails::new(),
             #[cfg(test)]
@@ -1005,14 +1000,6 @@ impl DesktopShell {
         }
     }
 
-    /// Show the pinboard's open context `menu` as its own compositor window,
-    /// or take that window down when the menu is closed.
-    ///
-    /// The plate is placed through the same shared window placement the
-    /// taskbar's own menu uses, and rounded with the popup radius the menu's
-    /// plate is painted with, so the window and its pixels cannot disagree
-    /// about where the rounding is.
-    ///
     /// Bring the compositor's windows into line with the open menu chain:
     /// draw every plate and the information panel it lists, move the attached
     /// window it placed, and take down everything it no longer has.
@@ -1135,62 +1122,6 @@ impl DesktopShell {
         self.menu_windows = kept;
         self.sync_active_frame(compositor);
         drawn
-    }
-
-    /// Fails closed: a plate surface the heap will not give back leaves what is
-    /// on screen untouched rather than showing an empty window.
-    pub fn present_pinboard_menu(&mut self, compositor: &mut Compositor, menu: &PinboardMenu) {
-        let scale = compositor.scale();
-        let theme = self.session.active_theme();
-        let Some(bounds) = self.pinboard_menu_bounds(compositor, menu) else {
-            if let Some(id) = self.pinboard_window.take() {
-                compositor.remove(id);
-            }
-            return;
-        };
-        let Some(mut surface) = Surface::new(bounds.width, bounds.height) else {
-            return;
-        };
-        let local = Rect::new(0, 0, bounds.width, bounds.height);
-        menu.render(&mut surface, local, scale, theme);
-        let corners = Corners::from_radius(scale.scale_length(theme.metrics().popup_corner_radius));
-        // The backdrop's own menu is not the taskbar's floating chrome: it
-        // covers what it opens over, so nothing behind it is frosted.
-        self.pinboard_window = Some(place(
-            compositor,
-            self.pinboard_window,
-            bounds.origin,
-            surface,
-            (corners, 0),
-        ));
-    }
-
-    /// The compositor window the pinboard's context menu is shown in, if one is
-    /// placed.
-    #[must_use]
-    pub const fn pinboard_window(&self) -> Option<WindowId> {
-        self.pinboard_window
-    }
-
-    /// The plate the pinboard's open context `menu` occupies on this output,
-    /// or `None` when the menu is closed.
-    ///
-    /// The one place the plate is measured, so what
-    /// [`present_pinboard_menu`](Self::present_pinboard_menu) paints and what
-    /// a press is routed against can never be two different rectangles. The
-    /// shell owns the active theme the measurement needs, which is why it is
-    /// asked here rather than reconstructed by the embedder.
-    #[must_use]
-    pub fn pinboard_menu_bounds(
-        &self,
-        compositor: &Compositor,
-        menu: &PinboardMenu,
-    ) -> Option<Rect> {
-        menu.layout(
-            compositor.screen_rect(),
-            compositor.scale(),
-            self.session.active_theme(),
-        )
     }
 
     /// The grid the desktop's icons occupy on this output: the shared column

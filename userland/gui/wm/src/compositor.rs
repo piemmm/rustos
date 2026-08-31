@@ -1162,13 +1162,19 @@ impl Compositor {
     /// owns — where the next one belongs — or `None` when `parent` is not a
     /// window here.
     fn family_top(&self, parent: WindowId) -> Option<usize> {
-        let mut top = self.index_of(parent)?;
+        Some(self.family_front_index(parent)?.saturating_add(1))
+    }
+
+    /// The stack index of the front-most member of `parent`'s family: the
+    /// top-most transient it owns, or `parent` itself when it owns none.
+    fn family_front_index(&self, parent: WindowId) -> Option<usize> {
+        let mut front = self.index_of(parent)?;
         for (index, window) in self.windows.iter().enumerate() {
             if window.parent() == Some(parent) {
-                top = top.max(index);
+                front = front.max(index);
             }
         }
-        Some(top.saturating_add(1))
+        Some(front)
     }
 
     /// Borrow a window by id.
@@ -1421,6 +1427,22 @@ impl Compositor {
     /// transient of, or `id` itself when it owns its place in the stack.
     fn family_root(&self, id: WindowId) -> WindowId {
         self.window(id).and_then(Window::parent).unwrap_or(id)
+    }
+
+    /// The front-most window of `id`'s family — the top-most transient its
+    /// owner has open, or `id`'s own family root when it has none. `None` for
+    /// a window this compositor does not know.
+    ///
+    /// A family rises as a unit ([`raise`](Self::raise)), so after a raise this
+    /// is the window the pointer and the keyboard actually meet. Anything
+    /// choosing a window to *focus* must ask for it rather than focus the
+    /// owner: a sheet or menu its owner opened sits above that owner, so
+    /// focusing the owner would put the keyboard behind a surface the user can
+    /// see and the owner cannot dismiss.
+    #[must_use]
+    pub fn family_front(&self, id: WindowId) -> Option<WindowId> {
+        let front = self.family_front_index(self.family_root(id))?;
+        self.windows.get(front).map(Window::id)
     }
 
     /// How many windows `id` owns as transients.

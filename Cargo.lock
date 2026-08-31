@@ -2998,6 +2998,7 @@ dependencies = [
  "tairix-kernel-ipc",
  "tairix-log",
  "tairix-reclaim",
+ "tairix-test-appbar-qemu-aarch64",
  "tairix-util",
 ]
 
@@ -3721,6 +3722,22 @@ dependencies = [
  "tairix-kernel",
  "tairix-log",
  "tairix-test-memsoak",
+]
+
+[[package]]
+name = "tairix-test-menu-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-appload",
+ "tairix-arch-aarch64",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-kernel-ipc",
+ "tairix-log",
+ "tairix-test-appbar-qemu-aarch64",
+ "tairix-util",
 ]
 
 [[package]]
@@ -5670,6 +5687,7 @@ dependencies = [
  "tairix-test-fat32-image",
  "tairix-test-framestats",
  "tairix-test-memsoak",
+ "tairix-test-menu-qemu-aarch64",
  "tairix-test-netstack-wire",
  "tairix-test-rtc-fixture",
  "tairix-test-tcpecho",

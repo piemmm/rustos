@@ -455,29 +455,40 @@ wallpaper, a theme switch, adopted settings, and a re-list that moved the icons
 the old layout describes the new column). A freshly allocated layer is likewise
 painted whole, since it holds no pixels a partial paint could preserve.
 
-### The pinboard's context menu
+### The backdrop menu
 
 A secondary press on the backdrop is the desktop's context-menu gesture:
 `Desktop::context_press` selects the icon it landed on (so the menu acts on what
 the user pointed at) or, on empty backdrop, leaves the selection exactly as it
-was, and asks for `DesktopAction::OpenMenu { at, on_icon }`. It claims no
-keyboard focus, because the window manager does not move focus for a secondary
-backdrop press (`InputResponse::DesktopSecondaryPressed`) and the desktop does
-not pretend otherwise.
+was, and answers whether an icon was under it. It claims no keyboard focus,
+because the window manager does not move focus for a secondary backdrop press
+(`InputResponse::DesktopSecondaryPressed`) and the desktop does not pretend
+otherwise. It names no `DesktopAction`: the menu is the seat's one chain, and
+the embedder that owns the chain opens it.
 
-`PinboardMenu` (`userland/gui/session::pinboard`) is that menu: one shared
-`lib/controls` `Menu` plus the anchor it was opened at. Its command set is
-closed (`plans/PINBOARD.md` §7) — *Open* (only when the press landed on an
-icon), *New Folder*, the four *Sort by* rows, the two *Arrange from* rows,
-*Refresh*, *Open Desktop Folder*, and *Change Background…* — and one `rows_for`
-pass builds each row together with the `PinboardCommand` it names, so a row
-index can never disagree with the command it dispatches. The sort order and
-arrangement already in force are drawn marked and non-actionable with their
-reason stated, because choosing what is already in force is a statement of
-where the desktop is rather than a command. `PinboardMenu::layout` anchors the
-plate at the pointer and clamps it wholly onto the screen, so a right-click in a
-corner opens a menu the user can reach; a closed menu has no plate at all
-rather than a fabricated one at the origin.
+**The desktop's own menu is a client of the [menu service](./menus.md) like any
+application's**, and keeps no shell of its own. `pinboard::model` builds the
+`ChainModel` the chain renders and `PinboardCommand::from_item` reads a chosen
+row back; the plate, its title band, the placement, the grab, traversal and the
+dismissal are all the chain's. The only difference from an application's menu is
+where the model came from — built in process rather than decoded from the wire —
+which is also what lets its rows say things an application structurally cannot
+(that the *system* lacks the authority for a command).
+
+Its command set is closed (`plans/PINBOARD.md` §7) — *Open* (only when the press
+landed on an icon), *New Folder*, the four *Sort by* rows, the two *Arrange
+from* rows, *Refresh*, *Open Desktop Folder*, and *Change Background…* — and
+each row's id is its command's own position in `PinboardCommand::ALL`, so
+leaving *Open* out shifts no other row's meaning and a reordering cannot re-map
+what a row does. The sort order and the arrangement already in force are each a
+group of alternatives, so the one that holds is drawn as that group's chosen
+member (a bullet), non-actionable, with its reason stated: choosing what already
+holds is a statement of where the desktop is rather than a command.
+
+It opens through the same seat rule an application's `OpenMenu` resolves
+through (`seat_menu_refusal`), so a backdrop press cannot take the grab from the
+lock screen or the trusted picker by arriving from the other direction; a
+refusal is stated on `stderr` and opens nothing.
 
 The menu holds no authority: `Desktop::command` is the **one** place a command
 becomes a `DesktopAction`, and *Open* resolves through the very same activation
@@ -492,12 +503,9 @@ names `DesktopAction::CreateFolder` with the name already chosen through
 `DesktopAction::ChangeBackground`, which the embedder resolves to the installed
 wallpaper chooser (the model knows no bundle paths).
 
-`DesktopShell::present_pinboard_menu` shows the open plate as its own
-compositor window and takes that window down when the menu closes, through the
-same shared `place` helper the taskbar's own menu window uses, rounded with the
-same popup radius the plate is painted with. A plate surface the heap will not
-give back leaves what is on screen untouched rather than showing an empty
-window.
+The answer arrives at the chain's **one** delivery point, alongside every
+application's, and is put through that same action path — so a chosen row and
+the equivalent gesture on the icon column cannot diverge.
 
 ## Resolving taskbar responses
 

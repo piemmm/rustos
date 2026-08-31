@@ -13,8 +13,8 @@ Binding under `AGENTS.md` (§3, §15.18).
 | M1d | Attached-window row kind + its present/arrive/refuse events | **landed** |
 | M2 | The service: bands, drag, arrival-open, attach/detach, grab, lifetime | **landed** |
 | M3.1 | Migrate `userland/apps/terminal`, delete its shell | **landed** |
-| M3.2 | Migrate the pinboard backdrop menu, delete its shell | next |
-| M3.3 | Migrate `userland/apps/files`, delete its shell | planned (decision 2) |
+| M3.2 | Migrate the pinboard backdrop menu, delete its shell | **landed** |
+| M3.3 | Migrate `userland/apps/files`, delete its shell | next (decision 2) |
 | M3.4 | Migrate the bar's `menu.rs`/`clock_menu.rs`/`system.rs` | planned |
 | M3.5 | The bar's start menu, if its rows fit the model | undecided (decision 3) |
 | M4 | Plate as a cached damage-reporting surface | planned |
@@ -43,8 +43,9 @@ stage that closes it carries its regression test (§2.18, §7).
 | D13 | `WindowClient` remembers each window's extent and last presented frame to answer a redraw, and pruned that record only in its own `close`. The **session** ends an attached window with its chain, so a client using panels would have kept one record per gesture — unbounded growth on a list every `present` linearly scans. The client now settles its records on a chain's outcome, by the one shared `MenuOutcome::detaches` rule the desktop settles by, and `close` forgets a window even when the session no longer knows it. | **closed in M1d** |
 | D14 | The shared `Menu` maps *any* chevroned row's activation to `OpenSubmenu`, so it cannot tell a panel row's click — which detaches its window — from a submenu row's, which opens a plate. Resolved by layer rather than by widening the control: `Menu` owns rows and chevrons, and the chain owns panel semantics, so it reads the row kind itself (pointer release on a panel row detaches; keyboard Right enters, Enter/Space detaches). | **closed in M2** |
 | D15 | `MenuChain::render_plate` drew its rows through `Menu::render`, which lays a **complete** plate of its own — rim, rounded corners and ground. The chain had already laid one for the band and the rows together, so every plate carried the Signal Rim twice and the rows' own rounded top corners notched the outer ground just under the band. Resolved by layer, not by a flag: `Menu` gained `render_rows`, which paints rows into a plate someone else laid, and `render` is now that plus the plate. Row geometry is unchanged — both land exactly where `row_rect` reports — so hit-testing never disagreed with drawing and only the extra rim was ever visible. | **closed in M3.1** |
-| D16 | The terminal assigned a freshly-opened settings sheet straight over `TerminalWindow::overlay`, so an assignment that found one already there would drop it without calling `close` — leaving a session-side popup window on screen with nothing owning it. Whether a second `OpenSheet` is reachable today turns on whether the session can deliver a key to a parent whose popup is up, which was **not** verified; the assignment is now made unable to leak (`set_overlay` closes what it replaces) rather than argued safe. Its regression test is owed with D17's vertical, which is the first thing able to observe `run.rs`. | fix landed in M3.1, test owed in M3.2 |
-| D17 | **No QEMU vertical opens a menu**, so the chain's drain, grab and answer paths in `userland/gui/session/src/run.rs` — and now the terminal's own open/answer path — are exercised by nothing, and no one has seen a plate on screen. Blocked on an observability seam the service does not have: a runner gates a screendump and a scripted click on a guest-emitted witness (`PointerStep::ready_marker`, whose own docs name "an opened menu"), and the session announces `WINDOW_SHOWN` for a served window but nothing at all for a chain it has put up. Closing it means a chain-shown record beside `WINDOW_SHOWN`, then the vertical: launch the terminal, right-click its client, dump the plate, click a row, and latch the round trip on content — the 12-byte minted-id reply that only an accepted `OpenMenu` produces, then a create observed after it. | M3.2 |
+| D16 | The terminal assigned a freshly-opened settings sheet straight over `TerminalWindow::overlay`, so an assignment that found one already there would drop it without calling `close` — leaving a session-side popup window on screen with nothing owning it. `set_overlay` made the assignment unable to leak. **The open question is answered: it was a *live* leak, not a latent one.** A key does reach a parent whose popup is up — not by focusing its decoration, which gives the keyboard to the *furniture* and swallows the key, but through the bar's hover window picker: `raise_window` → `TaskBridge::raise` → `router.focus` moved focus to the parent with no client press, so nothing dismissed the sheet and the next `Ctrl ,` ran `Command::Settings` behind it. That focus move is itself the defect (D18) and is fixed there, which is where the regression test lives; `set_overlay` stays as the guard, now unreachable by construction rather than argued safe. | **closed in M3.2** (cause is D18) |
+| D17 | **No QEMU vertical opened a menu**, so the chain's drain, grab and answer paths in `userland/gui/session/src/run.rs` — and the terminal's own open/answer path — were exercised by nothing, and no one had ever seen a plate on screen. **Closed**: the session now announces `MENU_SHOWN` ("menu chain on screen", `EventId(20_006)`) beside `WINDOW_SHOWN`, once per open and only after a frame carrying the chain reached the display — the only honest gate, since the reply an application gets says the open was *accepted*, never that a plate was drawn. `tests/integration/menu_qemu_aarch64` then launches the terminal from the program library, right-clicks its client, photographs the plate at the rectangle the production chain reports, and clicks its *Settings…* row; the guest latches `APP_LOADED` for the bundle, the 12-byte minted-id reply only `OpenMenu` produces, and a create observed *after* it — the sheet the chosen row opens, which the terminal opens on nothing but the one `MenuClosed` naming that row. | **closed in M3.2** |
+| D18 | Raising a window gave the keyboard to *that* window even when its own live transient sat above it. A raise brings a window's transients up with it (`Compositor::raise` restacks the family), so `show_raise_focus` — the one path `TaskBridge::open` and `TaskBridge::raise` share — left the focused window *underneath* its own modal sheet: the bar's hover window picker could focus a terminal behind its open settings sheet, with no client press to dismiss it, and the next accelerator ran in the client instead of the sheet. That is the route that made D16 live. **Fixed** by focusing the front of the family that rose (`Compositor::family_front`, one rule shared with `family_top`); a window with no transient open is its own family front, so the ordinary case is unchanged. | **closed in M3.2** |
 | D10 | The bar's own menus state two things the model cannot carry: a row denied for want of a capability (`AuthorityState::NeedsCapability`, which draws an Authority Mark rather than merely greying) and a row whose setting is already in effect (`ActivityState::Complete`). **Answered.** The Authority Mark says *the system* refused a command, and only the system may say it, so it is in-process-only — and structurally, not by a check: the wire model has no field for an authority state, so a decoded row is always `Allowed` and an application cannot paint the mark on its own row. §1.6's "bounded subset" means an absent field, never a validated one. `ActivityState::Complete` ("work finished successfully") is a *misuse* on an appearance row and is deleted rather than carried: the alternatives are a radio group, which the wire already spells `AppMenuMark::Radio` plus disabled plus a reason. The bar's own rows keep `NeedsCapability` through M3.4, because they are the session's. | **answered in M2** |
 
 **This is an architecture change, not a performance one.** The ~300 ms
@@ -565,7 +566,7 @@ surface's menu shell (§2.14):
 1. `userland/apps/terminal` — `menu.rs` (`ContextMenu`, and `Command`'s
    shortcut table where the model now carries it) and the popup-window
    plumbing its run loop drives it through.
-2. `userland/gui/session`'s pinboard backdrop menu.
+2. ~~`userland/gui/session`'s pinboard backdrop menu~~ — landed as M3.2.
 3. `userland/apps/files` — its `ContextMenu` and `OpenWithMenu`. The shared
    `lib/browse::ContextMenuModel` **stays**: it is a model, and it is what
    keeps the file manager and the trusted picker from diverging. Open With…
@@ -589,6 +590,37 @@ through `Command::accelerator`, so a row cannot advertise a keystroke that does
 nothing. `Command::accelerator` itself stays: matching a keystroke is not the
 same thing as captioning a row. The settings sheet is **not** a menu and keeps
 its popup surface; `Content`/`OverlayRequest` collapsed to it alone.
+
+**M3.2 (landed).** The pinboard keeps no menu shell: `PinboardMenu`, its
+`PinboardMenuOutcome`, the seat drain and settle path that drove it, and
+`DesktopShell`'s `present_pinboard_menu` / `pinboard_menu_bounds` / its own
+compositor window are all gone. `pinboard.rs` is now the row model alone —
+`PinboardCommand::ALL` built into a `ChainModel` by `pinboard::model`, read back
+by `PinboardCommand::from_item` — and `DesktopAction::OpenMenu` is deleted with
+it: `Desktop::context_press` answers whether an icon was under the press and
+names no action, because the menu is the seat's chain and the embedder that owns
+the chain opens it.
+
+It opens with `ChainOwner::Session`, so no `OpenMenu` crosses a wire, no open id
+is minted, and its one answer arrives at `run.rs`'s single delivery point
+(`answer_menu_chain`) beside every application's. **The two seat drains became
+one**: the chain's drain now carries the desktop state a chosen backdrop row
+acts on, so the pinboard's duplicate is gone.
+
+Two rules landed with it rather than being carried over. D10's judgement is
+applied: the sort order and the arrangement in force are a *radio group* —
+`MenuMark::Radio` plus disabled plus a reason — not `ActivityState::Complete`,
+which said "work finished successfully" about an appearance row. And a row's id
+is its command's own position in `PinboardCommand::ALL` rather than its position
+on the plate, so the gesture that leaves `Open` out shifts no other row's
+meaning. The bar's `system.rs` still spells an in-force row with
+`ActivityState::Complete`; M3.4 converts it the same way.
+
+The desktop's own menu also now resolves through the **same** seat rule an
+application's open does (`seat_menu_refusal`, hoisted out of
+`ShellWindowHost::seat_refusal`), so a backdrop press cannot take the grab from
+the lock screen or the trusted picker by arriving from the other direction — a
+guarantee M2 stated as the service's and the old shell did not have.
 
 `userland/gui/switchboard` has **no** menu of its own — it only receives
 `AppBarMenu` — and is not a migration target.

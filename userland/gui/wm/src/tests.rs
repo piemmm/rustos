@@ -808,6 +808,48 @@ fn lowering_a_window_takes_its_transient_with_it() {
     assert_eq!(c.window_at(Point::new(6, 6)), Some(menu));
 }
 
+/// A raise brings a window's transients up with it, so whoever chooses a
+/// window to *focus* after one must be told which window ended up on top.
+#[test]
+fn the_family_front_is_the_transient_a_raise_leaves_on_top() {
+    let mut c = new_compositor(mode(32, 32), BLUE).expect("compositor");
+    let alone = c.add_window(Point::ORIGIN, opaque(8, 8, RED));
+    assert_eq!(
+        c.family_front(alone),
+        Some(alone),
+        "a window with no transient is its own family front"
+    );
+
+    let owner = c.add_window(Point::ORIGIN, opaque(32, 32, RED));
+    let sheet = c
+        .add_transient_window(owner, Point::new(4, 4), opaque(8, 8, BLUE))
+        .expect("the owner is a window");
+
+    assert!(c.raise(owner), "the owner is known");
+    assert_eq!(c.family_front(owner), Some(sheet));
+    assert_eq!(
+        c.family_front(sheet),
+        Some(sheet),
+        "asking from either end of a family answers the same window"
+    );
+    assert_eq!(
+        c.window_at(Point::new(6, 6)),
+        Some(sheet),
+        "the front of the family is the window the pointer meets"
+    );
+}
+
+#[test]
+fn the_family_front_of_a_window_that_is_not_here_is_nothing() {
+    let mut c = new_compositor(mode(8, 8), BLUE).expect("compositor");
+    let gone = c.add_window(Point::ORIGIN, opaque(8, 8, RED));
+    assert!(c.remove(gone));
+    assert!(
+        c.family_front(gone).is_none(),
+        "a window that is not here has no family to be the front of"
+    );
+}
+
 #[test]
 fn a_transient_needs_a_window_to_belong_to() {
     let mut c = new_compositor(mode(8, 8), BLUE).expect("compositor");

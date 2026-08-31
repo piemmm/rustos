@@ -2,7 +2,7 @@
 
 This document is the normative specification for the TAIRiX **pinboard**: the
 desktop backdrop the user sees behind every window — its wallpaper, the icons
-for their own `Desktop` folder, the backdrop's context menu, and the per-user
+for their own `Desktop` folder, the backdrop's menu, and the per-user
 settings all three read.
 
 `AGENTS.md` is binding and wins over this document wherever they disagree.
@@ -27,6 +27,10 @@ This spec defers to its companions and MUST stay consistent with them:
   posture; they are *not* icons and do not enter the icon vocabulary.
 - **Controls** — `plans/GUI-CONTROLS-DESIGN.md` owns every control the menu
   and the chooser are built from. No new control family is defined here.
+- **Menus** — `plans/NEW-MENUS.md` owns the menu chain the backdrop menu is
+  one client of (M3.2). This document states the menu's *rows and commands*
+  (§7); the plate, the band, the placement, the grab and the dismissal are
+  that document's, and no menu shell is defined here.
 - **Bundles / help / resolution** — `plans/APPS.md` owns the `.app` bundle
   the chooser ships as.
 - **Settings stores** — the shared per-user store pattern the settings
@@ -120,7 +124,7 @@ One document, one engine, one writer.
   program the user launches can write this one at all. The session loads at
   bring-up and publishes on every change; the in-memory settings adopt an
   edit **only after the publish succeeded**, so memory and the store never
-  diverge. The chooser and the context menu do not write it — they ask the
+  diverge. The chooser and the backdrop menu do not write it — they ask the
   session to (§6).
 
 ## 3. The wallpaper
@@ -271,7 +275,7 @@ costs correctness or memory safety.
 
 ## 6. Applying a change
 
-The chooser and the context menu both **ask**; the session **decides,
+The chooser and the backdrop menu both **ask**; the session **decides,
 applies, and persists**.
 
 - **Rendezvous** — `PINBOARD_ENDPOINT`, a reserved, seat-scoped call
@@ -302,11 +306,13 @@ applies, and persists**.
 - **Reading** is not brokered: the chooser reads the document itself, since
   it is the user's own file and a reader needs no coordination.
 
-## 7. The context menu
+## 7. The backdrop menu
 
-Button 2 anywhere on the backdrop opens the pinboard menu at the pointer,
-built from the shared `tairix_controls::Menu` and presented as a popup
-window the same way the taskbar's menus are. Its item set is closed:
+Button 2 anywhere on the backdrop opens the pinboard menu at the pointer. It is
+**the seat's one menu chain** (`plans/NEW-MENUS.md`), not a surface of the
+pinboard's own: the pinboard hands over a row model and the desktop's menu
+service places, draws, grabs, traverses and dismisses it, exactly as it does an
+application's. Its item set is closed:
 
 | item | effect |
 |------|--------|
@@ -327,9 +333,16 @@ forbids.
 
 A press on empty backdrop with button 2 does not disturb the selection; a
 press over an icon selects it first, so the menu always acts on what the
-user pointed at. Escape, a click elsewhere, or an activated item closes it.
-The menu is clamped to the screen, so one opened at the bottom-right corner
-opens inward rather than off the edge.
+user pointed at. Each row's id is its command's own position in the closed set
+above, so the gesture that leaves `Open` out shifts no other row's meaning. The
+sort order and the arrangement in force are shown as their group's chosen
+member — a bullet, disabled, with its reason stated — because choosing what
+already holds is a statement of where the desktop is rather than a command.
+
+Escape, a click elsewhere, or an activated item closes it, and the chain
+clamps it wholly onto the screen, so one opened at the bottom-right corner
+opens inward rather than off the edge. It obeys the service's seat rule: a
+menu never appears over the lock screen or the trusted picker.
 Every item the session cannot carry out (a refused `fs_mkdir`, a chooser
 that will not launch) reports why on `stderr` and leaves the desktop
 unchanged — the menu never fails silently and never dies over a refusal.
@@ -420,7 +433,7 @@ nothing in the settings model needs to change.
 | P5 | `lib/sandbox`: wallpaper render ops | done |
 | P6 | `lib/abi`: `pinboard_ipc` | done |
 | P7 | `lib/browse`: `GridFlow::ColumnsFromLeading` | done |
-| P8 | `userland/gui/session`: the pinboard | done |
+| P8 | `userland/gui/session`: the pinboard | done (its menu is the shared chain, `plans/NEW-MENUS.md` M3.2) |
 | P9 | `userland/apps/wallpaper`: the chooser | done, except the picked-directory listing (§8) |
 | P10 | docs, `AGENTS.md` §3, the `plans/` jump-sheet | done |
 
@@ -447,9 +460,12 @@ nothing in the settings model needs to change.
   destination, and a malformed image.
 - **`lib/abi`** — wire round-trip and every decode refusal.
 - **`userland/gui/session`** — the pinboard's gestures against the existing
-  fakes: menu open/close/act, each item's action, flow and sort changes
+  fakes: the backdrop menu's row model (its closed row set, the marks on the
+  settings in force, the id↔command inverse, the group breaks, and the rows a
+  gesture leaves out shifting no id), each item's action, flow and sort changes
   re-laying the grid, an apply from a foreign uid refused, a wallpaper that
-  will not decode degrading to the backdrop. The crossfade: a picture is
+  will not decode degrading to the backdrop. The menu's *behaviour* — opening,
+  clamping, choosing, dismissing — is the chain's and is tested there. The crossfade: a picture is
   invisible at the instant it is installed and stands alone once arrived, a
   frame part-way through is the mix of the two grounds (including in the
   outgoing picture's margins), the copy of the ground being left is released on

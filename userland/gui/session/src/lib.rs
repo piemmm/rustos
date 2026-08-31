@@ -264,7 +264,7 @@ pub use pace::FramePacer;
 pub use picker::{
     ConcludedPick, PickConclusion, PickerSlot, SessionPicker, PICKER_ORIGIN, PICKER_TITLE,
 };
-pub use pinboard::{PinboardCommand, PinboardMenu, PinboardMenuOutcome};
+pub use pinboard::PinboardCommand;
 pub use presenter::TaskbarPresenter;
 pub use seat::{SeatEventReader, SeatInputChannel};
 pub use session::DesktopSession;
@@ -287,7 +287,8 @@ pub use thumbs::WindowThumbnails;
 pub use vigil::{HangTracker, UNRESPONSIVE_AFTER_NS};
 pub use wallpaper::{Prepared, WallpaperDesk, WallpaperSource};
 pub use windows::{
-    chain_geometry, desktop_info, resolve_window_identities, window_control_alternate_event,
-    window_control_event, SessionWindows, ShellWindowHost, CONTENT_RELEASED,
-    CONTENT_RELEASED_MESSAGE, WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE,
+    chain_geometry, desktop_info, resolve_window_identities, seat_menu_refusal,
+    window_control_alternate_event, window_control_event, SessionWindows, ShellWindowHost,
+    CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, MENU_SHOWN, MENU_SHOWN_MESSAGE, WINDOW_SHOWN,
+    WINDOW_SHOWN_MESSAGE,
 };
