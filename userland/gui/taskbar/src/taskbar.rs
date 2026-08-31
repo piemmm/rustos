@@ -20,8 +20,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::switchboard_ipc::TraySummary;
+use tairix_abi::window_ipc::AppMenuItemId;
 use tairix_controls::{
-    ControlRole, IconButton, PlateSeating, PointerState, TaskbarItem, TraySignalAction,
+    ControlRole, IconButton, PlatePlacement, PlateSeating, PointerState, TaskbarItem,
+    TraySignalAction,
 };
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::IconKind;
@@ -34,9 +36,10 @@ use crate::apps::{AppSlot, AppStrip};
 use crate::clock::Clock;
 use crate::clock_menu::ClockPermits;
 use crate::edge::Edge;
+use crate::input::TaskbarResponse;
 use crate::layout::{BarLayout, Hit, NotificationsLayout, TrayReadoutLayout};
 use crate::library::{LibraryIconRequest, LibraryLayout, LibraryPopup};
-use crate::menu::{BarMenu, MenuLayout, MenuSubject};
+use crate::menu::{self, MenuRequest, MenuSubject};
 use crate::notifications::{NotificationArea, StatusSignal, TransientNotification};
 use crate::picker::{PickerEntry, PickerLayout, WindowPicker};
 use crate::repaint::TaskbarRepaint;
@@ -136,7 +139,6 @@ pub struct Taskbar {
     library: LibraryPopup,
     apps: AppStrip,
     picker: WindowPicker,
-    menu: BarMenu,
     tasks: TaskList,
     notifications: NotificationArea,
     clock: Clock,
@@ -167,7 +169,6 @@ impl Taskbar {
             library: LibraryPopup::new(),
             apps: AppStrip::new(),
             picker: WindowPicker::new(),
-            menu: BarMenu::new(),
             tasks: TaskList::new(),
             notifications: NotificationArea::new(),
             clock: Clock::new(),
@@ -289,21 +290,6 @@ impl Taskbar {
         }
         self.apps.set_apps(apps);
         self.repaint |= TaskbarRepaint::BAR;
-    }
-
-    /// The bar's context menu (open or closed).
-    #[must_use]
-    pub const fn menu(&self) -> &BarMenu {
-        &self.menu
-    }
-
-    /// The bar's context menu, mutably, for routing one input event into it.
-    ///
-    /// This latches nothing: the router latches from the outcome the menu
-    /// reports, and every pointer sample over the open menu routes through
-    /// here, so a sample that changes no pixel must repaint nothing.
-    pub(crate) fn menu_routing_mut(&mut self) -> &mut BarMenu {
-        &mut self.menu
     }
 
     /// The running-task list.
@@ -442,13 +428,11 @@ impl Taskbar {
     /// broker exists is a property of the session's console, which the
     /// session reads from the kernel — so it defaults to refusing: a bar
     /// that was never told offers neither a lock with no way back nor a
-    /// clock command that could only fail. Only the menus render it, and
-    /// only while open, so a change latches that surface alone.
+    /// clock command that could only fail. Only a menu renders it, and a
+    /// menu is built at the moment it is asked for, so nothing on the bar
+    /// changes with it.
     pub fn set_elevation_available(&mut self, available: bool) {
-        if self.elevation_available != available {
-            self.elevation_available = available;
-            self.repaint |= TaskbarRepaint::MENU;
-        }
+        self.elevation_available = available;
     }
 
     /// Adopt the session's attestation that it can step aside for another
@@ -460,12 +444,10 @@ impl Taskbar {
     /// can establish. It defaults to refusing, so a bar that was never told
     /// offers no switch at all rather than one that would strand the user
     /// on a login screen with no way back. Only the system menu renders it,
-    /// and only while open, so a change latches that surface alone.
+    /// and it is built at the moment it is asked for, so nothing on the bar
+    /// changes with it.
     pub fn set_switch_user_available(&mut self, available: bool) {
-        if self.switch_user_available != available {
-            self.switch_user_available = available;
-            self.repaint |= TaskbarRepaint::MENU;
-        }
+        self.switch_user_available = available;
     }
 
     /// Feed a primary press or release `event` to the Switchboard readout's
@@ -690,18 +672,6 @@ impl Taskbar {
         ))
     }
 
-    /// Compute the context menu's geometry, or `None` while it is closed.
-    #[must_use]
-    pub fn menu_layout(&self, scale: Scale) -> Option<MenuLayout> {
-        self.menu.layout(
-            self.config.edge,
-            self.config.screen_width,
-            self.config.screen_height,
-            scale,
-            &self.theme,
-        )
-    }
-
     /// The pixel side an application slot's icon paints at in a slot of
     /// `logical_extent`, asked of the control that will paint it so the
     /// answer can never drift from the drawn geometry.
@@ -737,27 +707,25 @@ impl Taskbar {
         crate::picker::thumbnail_size(scale, &self.theme)
     }
 
-    /// Open the icon-bar menu the application at `index` declared, anchored
-    /// at its slot. The menu is its own overlay surface, so this latches
-    /// only [`menu`](TaskbarRepaint::menu).
+    /// The chain the desktop should open for the menu the application at
+    /// `index` declared, anchored at its slot.
     ///
-    /// An application that declared no menu opens nothing at all — a
-    /// secondary press on its slot is simply claimed — so the bar never
-    /// shows an empty plate on the application's behalf.
-    pub(crate) fn open_app_menu(&mut self, index: usize, anchor: Rect) {
-        let Some(app) = self.apps.get(index) else {
-            return;
-        };
+    /// An application that declared no menu asks for nothing at all — a
+    /// secondary press on its slot is simply claimed — so the bar never shows
+    /// an empty plate on the application's behalf. The plate is titled from
+    /// the bundle's **signed** manifest, so a menu cannot be titled as an
+    /// application it is not.
+    pub(crate) fn app_menu(&self, index: usize, anchor: Rect, scale: Scale) -> Option<MenuRequest> {
+        let app = self.apps.get(index)?;
         if app.menu().is_empty() {
-            return;
+            return None;
         }
-        let subject = MenuSubject::App {
-            index,
-            menu: *app.menu(),
-            identity: app.identity().clone(),
-        };
-        self.menu.open(subject, anchor);
-        self.repaint |= TaskbarRepaint::MENU;
+        let identity = app.identity();
+        Some(MenuRequest {
+            subject: MenuSubject::App { app: index },
+            model: menu::app_menu(&identity.name, app.menu(), identity),
+            placement: self.menu_placement(anchor, scale),
+        })
     }
 
     /// Open the window picker over the application at `index`, anchored at
@@ -857,17 +825,18 @@ impl Taskbar {
         false
     }
 
-    /// Open the context menu for a program-library entry row, anchored at
-    /// that row. Latches only [`menu`](TaskbarRepaint::menu): the popup
-    /// beneath is unaffected by an overlay opening on top of it.
-    pub(crate) fn open_entry_menu(&mut self, entry: EntryId, anchor: Rect) {
-        self.menu.open(MenuSubject::Entry { entry }, anchor);
-        self.repaint |= TaskbarRepaint::MENU;
+    /// The chain the desktop should open for a program-library entry row,
+    /// anchored at that row.
+    pub(crate) fn entry_menu(&self, entry: EntryId, anchor: Rect, scale: Scale) -> MenuRequest {
+        MenuRequest {
+            subject: MenuSubject::Entry { entry },
+            model: menu::entry_menu(),
+            placement: self.menu_placement(anchor, scale),
+        }
     }
 
-    /// Open the desktop's system quick-actions menu, anchored at the
-    /// Switchboard capsule's slot. Latches only
-    /// [`menu`](TaskbarRepaint::menu).
+    /// The chain the desktop should open for the system quick actions,
+    /// anchored at the Switchboard capsule's slot.
     ///
     /// The rows' postures are read from what the bar already knows: the
     /// appearance it is painting with, whether the publishing service
@@ -876,7 +845,7 @@ impl Taskbar {
     /// attested that it can prompt for this user's password. None of that
     /// is authority the bar holds — it renders what it was told, and every
     /// unknown reads as refused.
-    pub(crate) fn open_system_menu(&mut self, anchor: Rect) {
+    pub(crate) fn system_menu(&self, anchor: Rect, scale: Scale) -> MenuRequest {
         let permits = SystemPermits {
             appearance: self.theme.appearance(),
             power: self.tray.power_capable(),
@@ -885,32 +854,59 @@ impl Taskbar {
             lock_available: self.elevation_available,
             switch_user_available: self.switch_user_available,
         };
-        self.menu.open(MenuSubject::System { permits }, anchor);
-        self.repaint |= TaskbarRepaint::MENU;
+        MenuRequest {
+            subject: MenuSubject::System,
+            model: menu::system_menu(permits),
+            placement: self.menu_placement(anchor, scale),
+        }
     }
 
-    /// Open the clock's menu, anchored at the clock. Latches only
-    /// [`menu`](TaskbarRepaint::menu).
+    /// The chain the desktop should open for the clock, anchored at it.
     ///
     /// The reading it states is the label the bar is already drawing, so the
     /// menu and the bar can never disagree about the time, and an unset
     /// clock says so rather than showing a fabricated one. Setting a clock
     /// needs a capability the bar does not hold, so the command is offered
     /// only where the session attested a broker to authenticate against.
-    pub(crate) fn open_clock_menu(&mut self, anchor: Rect) {
+    pub(crate) fn clock_menu(&self, anchor: Rect, scale: Scale) -> MenuRequest {
         let permits = ClockPermits {
             reading: String::from(self.clock.label()),
             set_available: self.elevation_available,
         };
-        self.menu.open(MenuSubject::Clock { permits }, anchor);
-        self.repaint |= TaskbarRepaint::MENU;
+        MenuRequest {
+            subject: MenuSubject::Clock,
+            model: menu::clock_menu(&permits),
+            placement: self.menu_placement(anchor, scale),
+        }
     }
 
-    /// Close the context menu without acting. Latches only
-    /// [`menu`](TaskbarRepaint::menu).
-    pub(crate) fn close_menu(&mut self) {
-        self.menu.close();
-        self.repaint |= TaskbarRepaint::MENU;
+    /// Where a menu anchored at `anchor` opens: away from the bar's own edge,
+    /// clear of it by the shared control gap.
+    fn menu_placement(&self, anchor: Rect, scale: Scale) -> PlatePlacement {
+        menu::placement(
+            anchor,
+            self.config.edge,
+            scale.scale_length(self.theme.metrics().control_gap),
+        )
+    }
+
+    /// What choosing the row `item` of the bar's open `subject` asks the
+    /// embedder for, closing the program-library popup where the chosen row
+    /// acts somewhere the popup would stand in front of.
+    ///
+    /// The bar's half of the desktop's one menu answer: the chain places,
+    /// draws and dismisses, and this reads the chosen row back through the
+    /// same table the plate was built from.
+    pub fn menu_chosen(
+        &mut self,
+        subject: &MenuSubject,
+        item: AppMenuItemId,
+    ) -> Option<TaskbarResponse> {
+        let response = subject.chosen(item)?;
+        if subject.closes_library() {
+            self.close_library();
+        }
+        Some(response)
     }
 
     /// Open the program-library popup (fresh: search cleared, folders

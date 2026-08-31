@@ -511,7 +511,7 @@ impl SessionInputRouter {
 /// a menu that took the keys but not the clicks (or the reverse) would be a
 /// modal surface only some of the time.
 fn modal(taskbar: &Taskbar) -> bool {
-    taskbar.menu().is_open() || taskbar.library().is_open()
+    taskbar.library().is_open()
 }
 
 /// Wrap a taskbar router outcome, collapsing its no-op to

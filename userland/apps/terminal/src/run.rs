@@ -2078,7 +2078,6 @@ mod program {
                         | WindowEvent::AppBarDefault
                         | WindowEvent::AppBarMenu { .. }
                         | WindowEvent::MenuClosed { .. }
-                        | WindowEvent::MenuPanelRequested { .. }
                         | WindowEvent::Focus { .. }
                         | WindowEvent::Scrolled { .. }
                         | WindowEvent::Minimized { .. }

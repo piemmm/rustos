@@ -7,9 +7,8 @@ screen-facing sides by the theme's `Metrics::taskbar_margin` and keeps its
 normal thickness on the work-area side. This page describes the **layout,
 model, and rendering**: the geometry of every region, pointer hit-testing for
 input routing, the program-library popup / application-strip /
-notification-area / Switchboard-tray state machines, the bar's right-click
-**context menu**,
-and painting those regions — including the clock label's **text** — into a
+notification-area / Switchboard-tray state machines, the four **menus** it asks
+the desktop to open, and painting those regions — including the clock label's **text** — into a
 themed pixel surface, plus **routing** pointer, scroll, and key events into
 taskbar actions and drawing **notification-icon
 artwork** (scalable, themeable vector glyphs) and the desktop's **icon
@@ -179,7 +178,7 @@ separately** rather than carrying one "something changed" bit:
 | --------------- | ---------------------------------------------------- |
 | `bar`           | the bar strip itself                                  |
 | `library`       | the program-library popup                             |
-| `menu`          | the bar's context menu                                |
+| `picker`        | the hover window picker                                |
 | `notifications` | the notification popover                              |
 | `readout`       | the Switchboard capsule's expanded instrument readout |
 
@@ -188,23 +187,26 @@ each single surface, `any()` asks whether anything is pending, and `|` / `|=`
 compose latches, so a mutator touching two surfaces latches both in one
 expression.
 
-**Why per surface.** The five surfaces are wildly unequal in cost: measured on
-the host in release, rendering the bar takes 1655 µs and the library popup
-1001 µs, against the context menu's 104 µs. With a single boolean the embedder
-could not tell which had changed, so it re-rendered and re-pushed all five
-every time — a pointer drifting from one row to the next of a small open menu
-cost about 2.8 ms of rendering plus a recomposite of five window rectangles,
-when 104 µs and one small rectangle was the whole of the change. That is a
-pointer moving over a menu, the most frequent interaction the desktop has, and
-it is why the desktop felt laggy. Naming the surface lets the presenter repaint
-the 104 µs one and leave the other four exactly as the compositor already has
-them.
+**Why per surface.** The surfaces are wildly unequal in cost: measured on the
+host in release, rendering the bar takes 1655 µs and the library popup 1001 µs,
+against about a hundred for a small popover. With a single boolean the embedder
+could not tell which had changed, so it re-rendered and re-pushed all of them
+every time — a pointer drifting from one cell to the next of a small open
+popover cost about 2.8 ms of rendering plus a recomposite of every window
+rectangle, when a hundred microseconds and one small rectangle was the whole of
+the change. That is a pointer moving over a popover, among the most frequent
+interactions the desktop has, and it is why the desktop felt laggy. Naming the
+surface lets the presenter repaint the cheap one and leave the others exactly as
+the compositor already has them.
+
+A menu is **not** among them: every menu is the desktop's own chain, so the bar
+has no menu pixels to latch.
 
 **The contract.** Every change that alters what a surface draws latches that
 surface, and a change touching several latches all of them:
 
 - a hover moving between bar buttons or application slots → `bar`;
-- a highlight moving inside the open context menu → `menu`;
+- a highlight moving inside the open hover window picker → `picker`;
 - opening or closing the popup → `library` **and** `bar` (the Library button
   reads as visually held open);
 - raising or dismissing a notification → `notifications` **and** `bar` (the
@@ -339,9 +341,9 @@ popup painter) needs no cache of its own, so it stays a `&self` method.
 
 ## Floating chrome
 
-The bar and every popup it opens — the program-library panel, context menu,
-notification popover, and Switchboard readout — are drawn with the floating
-theme the bar adopted, and the session asks the compositor for the theme's
+The bar and every popup it opens — the program-library panel, the hover window
+picker, the notification popover, and the Switchboard readout — are drawn with
+the floating theme the bar adopted, and the session asks the compositor for the theme's
 `chrome_backdrop_blur` — `7` logical pixels in both built-in themes — behind
 each surface. Along-bar popup placement is clamped to the bar's own span, so
 no popup enters the wallpaper gap.
@@ -631,53 +633,58 @@ and does nothing; it takes no keyboard, so the focused window keeps its keys;
 and it closes when the slot is clicked, or when the application stops having a
 choice to offer.
 
-## The context menu
+## The bar's menus
 
-`BarMenu` is the bar's one right-click surface, composed from the shared
-`tairix-controls` `Menu`. It opens over one of three subjects:
+The bar draws **no menu**. Every menu on the desktop is the seat's one chain,
+drawn by the session ([menus](./menus.md)), so a secondary press on the bar
+answers `TaskbarResponse::OpenMenu(MenuRequest)` — which menu it is, the rows to
+draw, and where the plate hangs — and the desktop opens it. The bar keeps no
+menu state at all: while a chain is up the seat's grab means no event reaches
+the bar, so there is nothing for it to be modal about.
 
-- **A running application's slot**, showing the menu that *application*
-  declared over the window channel — and nothing at all when it declared
-  none, so the bar never invents one on an application's behalf. Every
-  top-level declared row draws in declaration order with the enablement, mark,
-  accelerator caption, disabled-row reason and role it asked for; a declared
-  separator opens the group its next row begins rather than becoming a
-  choosable row; a declared `Submenu` row opens its children beside the plate
-  (flipped to the leading side when the trailing side would leave the screen);
-  and choosing a row reports `AppMenuChosen { app, item }`, which the session
-  relays back to the declaring process. The bar never interprets an id.
+Four subjects ask for one:
 
-  The model describes a chain up to `APP_MENU_MAX_DEPTH` plates deep; this bar
-  renders one level of it, and the session-owned menu service that renders the
-  whole chain is staged in `plans/NEW-MENUS.md`.
+- **A running application's slot**, offering the menu that *application*
+  declared over the window channel — and nothing at all when it declared none,
+  so the bar never invents one on an application's behalf. Every declared row
+  is stated in declaration order with the enablement, mark, accelerator
+  caption, disabled-row reason and role it asked for; a declared separator opens
+  the group its next row begins rather than becoming a choosable row; a declared
+  `Submenu` row's own rows become its child plate. Choosing a row answers
+  `AppMenuChosen { app, item }`, which the session relays back to the declaring
+  process — the bar never interprets an id. The plate is titled from the
+  bundle's **signed** manifest, so a menu cannot be titled as an application it
+  is not.
 
-  The one row inside such a menu that is the bar's own is the **information**
-  row (`AppMenuRow::Info`, drawn as *Info*): its child is the application's
-  information panel, a `FactList` of the bundle's *signed* manifest — name, version, and its purpose and author when
-  the manifest states them. An application declares only that the row exists,
-  so it cannot state an identity that is not its own inside system-drawn
-  chrome, and an omitted field is absent rather than a blank row. The panel is
-  attached to the menu: dismissing the menu takes it away with it, and
-  `Escape` inside it steps back to the menu rather than closing both.
+  The one row inside such a menu that is the desktop's own is the
+  **information** row (`AppMenuRow::Info`, drawn as *Info*): its child is the
+  application's information panel, a `FactList` of the bundle's *signed*
+  manifest — name, version, and its purpose and author when the manifest states
+  them. An application declares only that the row exists, so it cannot state an
+  identity that is not its own inside system-drawn chrome, and an omitted field
+  is absent rather than a blank row.
 - **A program-library entry row** in the open popup: the two things the popup
-  can do to a row that its own click cannot. *Open* is reported as
-  `LibraryLaunch`; *Create Desktop Shortcut* as `CreateDesktopShortcut`, which
-  the session turns into a symbolic link in the user's own `Desktop` folder —
-  named after the entry, pointing at its bundle directory
-  (`plans/SYMLINKS.md`). Both rows come from one `EntryRow` list, which
-  `rows_for` renders and `choose` reads the activated index back through, so a
-  reordering cannot silently re-map what a row does; `EntryRow::label` is the
-  one definition an embedder's test or a QEMU pointer script aims by. Either
-  row closes the popup: it is modal, so leaving it up would stand between the
-  user and what they asked for.
-- **The Switchboard capsule**: the desktop's system quick-actions menu (see
-  *The system quick-actions menu*).
+  can do to a row that its own click cannot. *Open* answers `LibraryLaunch`;
+  *Create Desktop Shortcut* answers `CreateDesktopShortcut`, which the session
+  turns into a symbolic link in the user's own `Desktop` folder — named after the
+  entry, pointing at its bundle directory (`plans/SYMLINKS.md`). Both rows come
+  from one `EntryRow` list that the model is built from and the answer is read
+  back through, so a reordering cannot silently re-map what a row does;
+  `EntryRow::label` is the one definition an embedder's test or a QEMU pointer
+  script aims by. Either row closes the popup: it is modal, so leaving it up
+  would stand between the user and what they asked for.
+- **The Switchboard capsule**: the desktop's system quick actions (see *The
+  system quick-actions menu*).
+- **The clock**: the reading the bar is drawing, and setting the machine's time
+  (see *The clock's menu*).
 
-The menu opens outward from the bar edge, anchored at the slot or row it is
-about, clamped to the screen (`Taskbar::menu_layout`), and the session
-presents the plate and whatever is open beside it as **one** rounded window
-above the bar — a submenu is part of the menu, not a second window to keep
-stacked against it. The menu itself performs nothing (`AGENTS.md` §5.4).
+A menu opens outward from the bar's own edge, anchored at the slot or row it is
+about; the chain bounds and flips it to stay on screen. The bar performs nothing
+(`AGENTS.md` §5.4): a chosen row is read back through the same table the plate
+was built from into the typed response the session carries out, and a row's id
+is its *command's* own position in that table rather than its position on the
+plate — so a menu that leaves a row out (the system menu without *Switch
+User…*) shifts no other row's meaning.
 
 ## Input routing
 
@@ -759,15 +766,10 @@ it acts only on a primary or secondary press, hit-tested against the current
 Any other button, a release, a key, or a press that misses every region
 changes nothing and is reported as `Ignored` (fail closed, `AGENTS.md` §2.9).
 
-While the context menu is **open** it is the top modal layer: the whole
-stream routes into it first — motion highlights rows, a primary press-and-
-release chooses, arrows and `Enter` drive it from the keyboard, `Right`
-opens the highlighted row's submenu or information panel, `Escape` steps
-back out of an open child and then dismisses, and a press outside the plate
-(and outside whatever is open beside it) dismisses **only the menu**,
-leaving whatever is beneath for the next click (one click does one thing,
-`AGENTS.md` §2.1). The hover picker is *not* modal: it claims a press over
-its own plate and nothing else.
+While a **menu** is up the bar sees no input at all: the chain holds the seat's
+pointer and keyboard, so motion, presses and keys all route into it and none
+reaches the bar ([menus](./menus.md#the-grab)). The hover picker is *not* modal:
+it claims a press over its own plate and nothing else.
 
 While the popup is **open** the router treats it as modal and consumes the
 whole event stream — presses, releases, scroll, and keys all route into the
@@ -822,11 +824,11 @@ and a press dragged off the capsule before release opens nothing at all
 
 ## The system quick-actions menu
 
-A **secondary** press on the Switchboard capsule opens the desktop's system
-menu through the bar's one modal menu surface — there is no second popup
+A **secondary** press on the Switchboard capsule asks the desktop for the
+system menu, drawn by the seat's one chain like every other
 (`plans/NEW-TASKBAR.md` T13). Its rows are one table, `system::ROWS`, from
-which both the rendered menu and the row → command mapping are derived, so
-the two can never disagree (`AGENTS.md` §2.2):
+which both the stated rows and the row → command mapping are derived, so the
+two can never disagree (`AGENTS.md` §2.2):
 
 | Row | What the session does |
 |---|---|
@@ -856,9 +858,9 @@ session](session.md#the-screen-lock).
 
 ## The clock's menu
 
-A **secondary** press on the clock opens the clock's menu through
-the same one modal menu surface (`plans/NEW-TASKBAR.md` T17) — the button
-that asks for a context menu everywhere else on the desktop, here too. A
+A **secondary** press on the clock asks the desktop for the clock's menu
+(`plans/NEW-TASKBAR.md` T17) — the button that asks for a menu everywhere else on
+the desktop, here too. A
 primary press is claimed and inert, like a status signal's: the clock is a
 live reading rather than a control, and a left click that pops a menu up is a
 menu nobody asked for. Its rows are one table, `clock_menu::ROWS`, from which
@@ -1002,9 +1004,9 @@ board: it boots the graphical session, opens the program library, launches
 the terminal from its row, right-clicks the slot the session gave that
 process, and chooses *New window* from the menu the **application itself**
 declared. Its coordinates are not hand-copied — the host script drives this
-very crate's `TaskbarInput` with the events the guest will receive and reads
-the rectangles back out of `Taskbar::layout`, `Taskbar::menu_layout`, and
-`Menu::row_rect`, with the menu built from the terminal's own declaration —
+very crate's `TaskbarInput` with the events the guest will receive, reads the
+bar's own rectangles back out of `Taskbar::layout`, and drives the production
+menu chain over the model the press asked for to find the row's rectangle —
 and it passes only when the terminal's bundle is loaded, its first window is
 created and painted, and a *second* create follows: nothing else the script
 injects opens a window, and the desktop's own surfaces are session-painted

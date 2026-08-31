@@ -14,8 +14,14 @@ use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Rgba, Theme};
 
+use tairix_abi::window_ipc::{AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow};
+
 use crate::damage::sink;
-use crate::menu::{plate_rect, Menu, MenuAction, MenuItem, PlateSide};
+use crate::menu::{
+    plate_rect, ChainChild, ChainModel, ChainRow, Menu, MenuAction, MenuItem, PlatePlacement,
+    PlateSide,
+};
+use crate::record::{Fact, FactList};
 use crate::state::{AuthorityState, ControlRole, ControlState};
 use crate::testkit::{control_font, high_contrast, text_ladder};
 
@@ -1093,26 +1099,71 @@ const VIEW: Rect = Rect::new(0, 0, 800, 600);
 #[test]
 fn plate_rect_opens_edge_adjacent_on_the_side_it_is_asked_for() {
     let anchor = Rect::new(300, 200, 40, 20);
-    let trailing = plate_rect(100, 60, anchor, PlateSide::Trailing, 0, VIEW);
+    let trailing = plate_rect(100, 60, PlatePlacement::adjacent(anchor), VIEW);
     assert_eq!(trailing.left(), anchor.right());
     assert_eq!(trailing.top(), anchor.top(), "aligned on the cross axis");
 
-    let leading = plate_rect(100, 60, anchor, PlateSide::Leading, 0, VIEW);
+    let leading = plate_rect(
+        100,
+        60,
+        PlatePlacement {
+            anchor,
+            side: PlateSide::Leading,
+            gap: 0,
+        },
+        VIEW,
+    );
     assert_eq!(leading.right(), anchor.left());
 
-    let below = plate_rect(100, 60, anchor, PlateSide::Below, 0, VIEW);
+    let below = plate_rect(
+        100,
+        60,
+        PlatePlacement {
+            anchor,
+            side: PlateSide::Below,
+            gap: 0,
+        },
+        VIEW,
+    );
     assert_eq!(below.top(), anchor.bottom());
     assert_eq!(below.left(), anchor.left());
 
-    let above = plate_rect(100, 60, anchor, PlateSide::Above, 0, VIEW);
+    let above = plate_rect(
+        100,
+        60,
+        PlatePlacement {
+            anchor,
+            side: PlateSide::Above,
+            gap: 0,
+        },
+        VIEW,
+    );
     assert_eq!(above.bottom(), anchor.top());
 }
 
 #[test]
 fn plate_rect_holds_the_plate_off_by_the_gap_it_is_given() {
     let anchor = Rect::new(300, 200, 40, 20);
-    let flush = plate_rect(100, 60, anchor, PlateSide::Above, 0, VIEW);
-    let held = plate_rect(100, 60, anchor, PlateSide::Above, 12, VIEW);
+    let flush = plate_rect(
+        100,
+        60,
+        PlatePlacement {
+            anchor,
+            side: PlateSide::Above,
+            gap: 0,
+        },
+        VIEW,
+    );
+    let held = plate_rect(
+        100,
+        60,
+        PlatePlacement {
+            anchor,
+            side: PlateSide::Above,
+            gap: 12,
+        },
+        VIEW,
+    );
     assert_eq!(
         flush.top() - held.top(),
         12,
@@ -1126,7 +1177,7 @@ fn plate_rect_flips_rather_than_sliding_when_the_preferred_side_has_no_room() {
     // viewport, so the plate takes the other side and the anchor stays at a
     // corner of it rather than somewhere inside.
     let anchor = Rect::new(790, 100, 0, 0);
-    let placed = plate_rect(100, 60, anchor, PlateSide::Trailing, 0, VIEW);
+    let placed = plate_rect(100, 60, PlatePlacement::adjacent(anchor), VIEW);
     assert_eq!(placed.right(), anchor.left(), "flipped, not slid");
     assert!(placed.right() <= VIEW.right());
 }
@@ -1134,14 +1185,14 @@ fn plate_rect_flips_rather_than_sliding_when_the_preferred_side_has_no_room() {
 #[test]
 fn plate_rect_keeps_the_preferred_side_when_it_fits() {
     let anchor = Rect::new(10, 100, 0, 0);
-    let placed = plate_rect(100, 60, anchor, PlateSide::Trailing, 0, VIEW);
+    let placed = plate_rect(100, 60, PlatePlacement::adjacent(anchor), VIEW);
     assert_eq!(placed.left(), anchor.left(), "room trailing, so no flip");
 }
 
 #[test]
 fn plate_rect_slides_the_cross_axis_to_stay_on_screen() {
     let anchor = Rect::new(100, 580, 0, 0);
-    let placed = plate_rect(100, 60, anchor, PlateSide::Trailing, 0, VIEW);
+    let placed = plate_rect(100, 60, PlatePlacement::adjacent(anchor), VIEW);
     assert!(placed.bottom() <= VIEW.bottom(), "slid up rather than off");
     assert!(placed.top() < anchor.top());
 }
@@ -1151,7 +1202,7 @@ fn plate_rect_takes_the_roomier_side_when_neither_fits() {
     // An anchor spanning nearly the whole viewport leaves neither side room;
     // the roomier one keeps the plate beside its anchor rather than over it.
     let anchor = Rect::new(200, 100, 560, 20);
-    let placed = plate_rect(300, 60, anchor, PlateSide::Trailing, 0, VIEW);
+    let placed = plate_rect(300, 60, PlatePlacement::adjacent(anchor), VIEW);
     assert!(
         placed.right() <= anchor.left() + i32::try_from(placed.width).unwrap_or(0),
         "placed on the leading side, which has the room: {placed:?}"
@@ -1163,9 +1214,7 @@ fn plate_rect_bounds_a_plate_larger_than_the_viewport() {
     let placed = plate_rect(
         4000,
         4000,
-        Rect::new(10, 10, 0, 0),
-        PlateSide::Trailing,
-        0,
+        PlatePlacement::adjacent(Rect::new(10, 10, 0, 0)),
         VIEW,
     );
     assert_eq!((placed.width, placed.height), (VIEW.width, VIEW.height));
@@ -1177,9 +1226,7 @@ fn plate_rect_answers_a_degenerate_viewport_with_a_drawable_rectangle() {
     let placed = plate_rect(
         100,
         60,
-        Rect::new(0, 0, 0, 0),
-        PlateSide::Trailing,
-        0,
+        PlatePlacement::adjacent(Rect::new(0, 0, 0, 0)),
         Rect::EMPTY,
     );
     assert!(placed.width >= 1 && placed.height >= 1);
@@ -1194,13 +1241,135 @@ fn a_zero_extent_anchor_is_the_point_case_of_the_same_rule() {
     let through_rule = plate_rect(
         menu.preferred_width(Scale::ONE, &theme),
         menu.preferred_height(Scale::ONE, &theme),
-        Rect::new(at.x, at.y, 0, 0),
-        PlateSide::Trailing,
-        0,
+        PlatePlacement::adjacent(Rect::new(at.x, at.y, 0, 0)),
         VIEW,
     );
     assert_eq!(
         through_menu, through_rule,
         "one rule serves the point anchor and the region alike"
     );
+}
+
+// --- the wire model is a bounded subset of the service model -------------
+
+/// An empty wire menu titled `title`.
+fn wire_menu(title: &str) -> AppMenu {
+    AppMenu::titled(AppMenuLabel::new(title).expect("a title"))
+}
+
+/// A bounded wire label.
+fn wire_label(text: &str) -> AppMenuLabel {
+    AppMenuLabel::new(text).expect("a label")
+}
+
+/// A non-zero declared row id.
+fn wire_id(raw: u16) -> AppMenuItemId {
+    AppMenuItemId::new(raw).expect("a non-zero id")
+}
+
+#[test]
+fn a_decoded_row_can_never_claim_the_system_lacks_authority() {
+    let mut wire = wire_menu("App");
+    wire.push(AppMenuRow::Item(AppMenuItem::new(
+        wire_id(1),
+        wire_label("Do it"),
+    )))
+    .expect("a row");
+    wire.push(AppMenuRow::Item(
+        AppMenuItem::new(wire_id(2), wire_label("Denied")).disabled(),
+    ))
+    .expect("a row");
+
+    let model = ChainModel::from_app_menu("App", &wire, None);
+    for row in model.rows() {
+        assert_eq!(
+            row.drawn().state().authority,
+            AuthorityState::Allowed,
+            "no wire field carries an authority state, so none can be claimed"
+        );
+    }
+}
+
+#[test]
+fn a_declared_separator_becomes_the_next_rows_group_break_on_every_plate() {
+    let mut wire = wire_menu("App");
+    wire.push(AppMenuRow::Item(AppMenuItem::new(
+        wire_id(1),
+        wire_label("One"),
+    )))
+    .expect("a row");
+    wire.push(AppMenuRow::Separator).expect("a rule");
+    wire.push(AppMenuRow::Submenu {
+        label: wire_label("More"),
+        enabled: true,
+    })
+    .expect("a submenu");
+    let parent = wire.len() - 1;
+    wire.push_under(
+        AppMenuRow::Item(AppMenuItem::new(wire_id(2), wire_label("Inner"))),
+        parent,
+    )
+    .expect("a row");
+    wire.push_under(AppMenuRow::Separator, parent)
+        .expect("a rule");
+    wire.push_under(
+        AppMenuRow::Item(AppMenuItem::new(wire_id(3), wire_label("After"))),
+        parent,
+    )
+    .expect("a row");
+
+    let model = ChainModel::from_app_menu("App", &wire, None);
+    let breaks: alloc::vec::Vec<bool> = model
+        .rows()
+        .iter()
+        .map(|row| row.drawn().is_group_break())
+        .collect();
+    assert_eq!(
+        breaks,
+        vec![false, true, false, true],
+        "a separator draws a divider inside a submenu exactly as on the root"
+    );
+    assert_eq!(
+        model.rows().len(),
+        4,
+        "and takes no row of its own on either plate"
+    );
+}
+
+#[test]
+fn an_information_row_without_an_attested_identity_is_left_out() {
+    let mut wire = wire_menu("App");
+    wire.push(AppMenuRow::Item(AppMenuItem::new(
+        wire_id(1),
+        wire_label("One"),
+    )))
+    .expect("a row");
+    wire.push(AppMenuRow::Info).expect("an info row");
+
+    let bare = ChainModel::from_app_menu("App", &wire, None);
+    assert_eq!(bare.rows().len(), 1, "no identity, no panel to open");
+
+    let facts = FactList::new(vec![Fact::new("Name", "App")]);
+    let attested = ChainModel::from_app_menu("App", &wire, Some(&facts));
+    assert_eq!(attested.rows().len(), 2);
+    assert!(
+        matches!(attested.rows()[1].child(), ChainChild::Info(_)),
+        "the desktop's own panel, from the signed manifest"
+    );
+}
+
+#[test]
+fn a_row_reports_the_plate_it_is_filed_under_and_the_id_an_answer_names() {
+    let mut model = ChainModel::new("Bar");
+    let parent = model.push(ChainRow::submenu(MenuItem::new("More")));
+    let child = model.push(ChainRow::item(wire_id(7), MenuItem::new("Do it")).under(parent));
+
+    assert_eq!(model.rows()[parent].parent(), None, "the root plate");
+    assert_eq!(
+        model.rows()[parent].id(),
+        None,
+        "a submenu names no command"
+    );
+    assert_eq!(model.rows()[child].parent(), Some(parent));
+    assert_eq!(model.rows()[child].id(), Some(wire_id(7)));
 }

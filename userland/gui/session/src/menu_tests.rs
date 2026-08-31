@@ -10,14 +10,14 @@ use alloc::vec::Vec;
 use tairix_abi::window_ipc::{
     AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow, MenuRefusal, APP_MENU_MAX_DEPTH,
 };
-use tairix_controls::{Fact, FactList, MenuItem, PlateSide};
+use tairix_controls::{ChainChild, ChainModel, ChainRow, Fact, FactList, MenuItem, PlatePlacement};
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_theme::Theme;
 use tairix_wm::{InputEvent, Key, NamedKey, PointerButton};
 
 use crate::menu::{
-    ChainAction, ChainChild, ChainGeometry, ChainModel, ChainOutcome, ChainOwner, ChainRow,
-    ChainSurface, MenuChain, ModelRefused, PanelRefused, SurfaceKind,
+    ChainAction, ChainGeometry, ChainOutcome, ChainOwner, ChainSurface, MenuChain, ModelRefused,
+    SurfaceKind,
 };
 
 const SCREEN: Rect = Rect::new(0, 0, 1280, 800);
@@ -118,9 +118,7 @@ fn open(
         .open(
             owner,
             model,
-            Rect::new(at.x, at.y, 0, 0),
-            PlateSide::Trailing,
-            0,
+            PlatePlacement::adjacent(Rect::new(at.x, at.y, 0, 0)),
             g,
         )
         .expect("the model opens");
@@ -186,14 +184,14 @@ fn a_chain_announces_itself_shown_once_per_open() {
     let mut chain = MenuChain::new();
 
     let mut seen: Vec<ChainOwner> = Vec::new();
-    chain.report_newly_shown(|owner| seen.push(owner));
+    chain.report_newly_shown(|owner| seen.push(owner.clone()));
     assert!(seen.is_empty(), "a seat with no chain announces nothing");
 
     open(&mut chain, APP, nested_model(), Point::new(40, 40), &g);
-    chain.report_newly_shown(|owner| seen.push(owner));
+    chain.report_newly_shown(|owner| seen.push(owner.clone()));
     assert_eq!(seen, alloc::vec![APP]);
 
-    chain.report_newly_shown(|owner| seen.push(owner));
+    chain.report_newly_shown(|owner| seen.push(owner.clone()));
     assert_eq!(
         seen.len(),
         1,
@@ -203,23 +201,23 @@ fn a_chain_announces_itself_shown_once_per_open() {
     // A submenu opening is more of the chain, not a new one.
     settle_on(&mut chain, 0, 1, &g);
     assert_eq!(plates(&chain), 2);
-    chain.report_newly_shown(|owner| seen.push(owner));
+    chain.report_newly_shown(|owner| seen.push(owner.clone()));
     assert_eq!(seen.len(), 1, "a deeper plate announced a second chain");
 
     // The desktop's own menu is announced exactly as an application's is; a
     // fresh chain is a fresh open.
     open(
         &mut chain,
-        ChainOwner::Session,
+        ChainOwner::Backdrop,
         flat_model(),
         Point::new(200, 60),
         &g,
     );
-    chain.report_newly_shown(|owner| seen.push(owner));
-    assert_eq!(seen, alloc::vec![APP, ChainOwner::Session]);
+    chain.report_newly_shown(|owner| seen.push(owner.clone()));
+    assert_eq!(seen, alloc::vec![APP, ChainOwner::Backdrop]);
 
     assert!(chain.dismiss());
-    chain.report_newly_shown(|owner| seen.push(owner));
+    chain.report_newly_shown(|owner| seen.push(owner.clone()));
     assert_eq!(seen.len(), 2, "a chain that has closed announced itself");
 }
 
@@ -235,14 +233,20 @@ fn a_second_open_closes_the_first_and_answers_it_dismissed() {
         window_id: 9,
         open_id: 43,
     };
-    open(&mut chain, second, flat_model(), Point::new(200, 60), &g);
+    open(
+        &mut chain,
+        second.clone(),
+        flat_model(),
+        Point::new(200, 60),
+        &g,
+    );
 
     assert_eq!(
         chain.take_answers(),
         alloc::vec![(APP, ChainOutcome::Dismissed)],
         "the displaced chain is answered, and only it"
     );
-    assert_eq!(chain.owner(), Some(second));
+    assert_eq!(chain.owner(), Some(&second));
     assert_eq!(plates(&chain), 1, "one chain, one root plate");
 }
 
@@ -254,17 +258,15 @@ fn a_model_with_no_root_rows_opens_nothing_and_leaves_the_chain_alone() {
     open(&mut chain, APP, flat_model(), Point::new(40, 40), &g);
 
     let refused = chain.open(
-        ChainOwner::Session,
+        ChainOwner::Backdrop,
         ChainModel::new("Empty"),
-        Rect::new(0, 0, 0, 0),
-        PlateSide::Trailing,
-        0,
+        PlatePlacement::adjacent(Rect::new(0, 0, 0, 0)),
         &g,
     );
     assert_eq!(refused, Err(ModelRefused::NoRows));
     assert_eq!(
         chain.owner(),
-        Some(APP),
+        Some(&APP),
         "the chain that was up is untouched"
     );
     assert!(chain.take_answers().is_empty(), "nothing was answered");
@@ -508,117 +510,66 @@ fn a_dragged_plate_keeps_its_position_when_the_chain_re_places() {
     );
 }
 
-// --- attached windows ----------------------------------------------------
+// --- the information panel -----------------------------------------------
 
-/// A model whose second row hangs an application-drawn surface.
-fn panel_model() -> ChainModel {
-    let mut model = ChainModel::new("Panelled");
+/// A model whose second row opens the desktop's own information panel.
+fn info_model() -> ChainModel {
+    let mut model = ChainModel::new("Attested");
     model.push(ChainRow::item(id(1), MenuItem::new("One")));
-    model.push(ChainRow::panel(id(2), MenuItem::new("Details")));
+    model.push(ChainRow::info(
+        MenuItem::new("Info"),
+        FactList::new(alloc::vec![
+            Fact::new("Name", "App"),
+            Fact::new("Version", "1.0"),
+        ]),
+    ));
     model
 }
 
 #[test]
-fn arriving_on_a_panel_row_asks_its_owner_and_does_not_wait() {
+fn the_information_panel_hangs_where_a_submenu_would_and_dies_with_the_chain() {
     let theme = theme();
     let g = geom(&theme);
     let mut chain = MenuChain::new();
-    open(&mut chain, APP, panel_model(), Point::new(40, 40), &g);
+    open(&mut chain, APP, info_model(), Point::new(40, 40), &g);
+    let row = chain.row_rect(0, 1, &g).expect("the information row");
     let (acted, _) = settle_on(&mut chain, 0, 1, &g);
-    assert_eq!(acted, ChainAction::RequestPanel(id(2)));
-    assert_eq!(plates(&chain), 1, "the chain is fully up while it waits");
-
-    // The chain is still routable with nothing attached yet.
-    let (acted, _) = settle_on(&mut chain, 0, 0, &g);
     assert_eq!(acted, ChainAction::Redraw);
-}
-
-#[test]
-fn a_surface_for_a_row_the_pointer_has_left_is_refused() {
-    let theme = theme();
-    let g = geom(&theme);
-    let mut chain = MenuChain::new();
-    open(&mut chain, APP, panel_model(), Point::new(40, 40), &g);
-    settle_on(&mut chain, 0, 1, &g);
-    settle_on(&mut chain, 0, 0, &g);
-
-    assert_eq!(
-        chain.place_panel(88, 42, id(2), 200, 120, &g),
-        Err(PanelRefused::TooLate),
-        "the pointer moved on, so the surface finds no row to hang from"
-    );
-}
-
-#[test]
-fn a_surface_naming_another_chains_open_is_refused() {
-    let theme = theme();
-    let g = geom(&theme);
-    let mut chain = MenuChain::new();
-    open(&mut chain, APP, panel_model(), Point::new(40, 40), &g);
-    settle_on(&mut chain, 0, 1, &g);
-    assert_eq!(
-        chain.place_panel(88, 4242, id(2), 200, 120, &g),
-        Err(PanelRefused::TooLate),
-        "an open id that is not this chain's hangs nothing"
-    );
-}
-
-#[test]
-fn an_attached_window_hangs_where_a_submenu_would_and_dies_with_the_chain() {
-    let theme = theme();
-    let g = geom(&theme);
-    let mut chain = MenuChain::new();
-    open(&mut chain, APP, panel_model(), Point::new(40, 40), &g);
-    let row = chain.row_rect(0, 1, &g).expect("the panel row");
-    settle_on(&mut chain, 0, 1, &g);
-    let placed = chain
-        .place_panel(88, 42, id(2), 200, 120, &g)
-        .expect("the surface hangs");
+    let (_, placed) = chain.info_panel().expect("the panel hangs");
     assert_eq!(placed.left(), plate(&chain, 0).right(), "edge-adjacent");
     assert_eq!(placed.top(), row.top(), "at its own row's height");
-    assert!(chain.attaches(88));
     assert!(chain.surfaces().contains(&ChainSurface {
         rect: placed,
-        kind: SurfaceKind::Attached(88),
+        kind: SurfaceKind::Info,
     }));
 
     // Settling on another row of the same plate takes it down with the rest
     // of what hung there.
     settle_on(&mut chain, 0, 0, &g);
-    assert!(!chain.attaches(88), "the attached window went with the row");
+    assert!(chain.info_panel().is_none(), "the panel went with its row");
 }
 
 #[test]
-fn choosing_a_panel_row_answers_chosen_so_the_engine_detaches_it() {
+fn choosing_the_information_row_answers_nothing_and_keeps_its_panel() {
     let theme = theme();
     let g = geom(&theme);
     let mut chain = MenuChain::new();
-    open(&mut chain, APP, panel_model(), Point::new(40, 40), &g);
+    open(&mut chain, APP, info_model(), Point::new(40, 40), &g);
     let (_, at) = settle_on(&mut chain, 0, 1, &g);
-    chain
-        .place_panel(88, 42, id(2), 200, 120, &g)
-        .expect("hung");
 
     chain.handle(&PRESS, at, &g);
     let acted = chain.handle(&RELEASE, at, &g);
-    assert_eq!(
+    assert_ne!(
         acted,
         ChainAction::Closed,
-        "choosing a panel row ends the chain"
+        "the row states an identity; it names no command to answer with"
     );
-    assert_eq!(
-        chain.take_answers(),
-        alloc::vec![(APP, ChainOutcome::Chosen(id(2)))],
-        "the detach is reported as an ordinary choice"
-    );
-    assert!(
-        chain.surfaces().is_empty(),
-        "a closed chain lists nothing, which is what clears the screen"
-    );
+    assert!(chain.take_answers().is_empty());
+    assert!(chain.info_panel().is_some(), "and its panel stays up");
 }
 
 #[test]
-fn a_submenu_row_never_detaches() {
+fn clicking_a_submenu_row_keeps_its_plate_rather_than_acting() {
     let theme = theme();
     let g = geom(&theme);
     let mut chain = MenuChain::new();
@@ -629,34 +580,10 @@ fn a_submenu_row_never_detaches() {
     assert_ne!(
         acted,
         ChainAction::Closed,
-        "clicking a submenu row keeps its plate; it cannot become a window"
+        "a submenu row opens rather than answering"
     );
     assert!(chain.take_answers().is_empty());
     assert_eq!(plates(&chain), 2);
-}
-
-#[test]
-fn a_session_owned_chain_hangs_no_application_surface() {
-    let theme = theme();
-    let g = geom(&theme);
-    let mut chain = MenuChain::new();
-    open(
-        &mut chain,
-        ChainOwner::Session,
-        panel_model(),
-        Point::new(40, 40),
-        &g,
-    );
-    let (acted, _) = settle_on(&mut chain, 0, 1, &g);
-    assert_eq!(
-        acted,
-        ChainAction::Redraw,
-        "the desktop's own chain has no client to ask for a surface"
-    );
-    assert_eq!(
-        chain.place_panel(88, 42, id(2), 200, 120, &g),
-        Err(PanelRefused::TooLate)
-    );
 }
 
 // --- the grab ------------------------------------------------------------
@@ -684,22 +611,20 @@ fn a_press_outside_the_chain_dismisses_it_and_is_consumed() {
 }
 
 #[test]
-fn a_press_on_an_attached_window_belongs_to_the_application() {
+fn a_press_on_the_information_panel_is_claimed_and_acts_on_nothing() {
     let theme = theme();
     let g = geom(&theme);
     let mut chain = MenuChain::new();
-    open(&mut chain, APP, panel_model(), Point::new(40, 40), &g);
+    open(&mut chain, APP, info_model(), Point::new(40, 40), &g);
     settle_on(&mut chain, 0, 1, &g);
-    let placed = chain
-        .place_panel(88, 42, id(2), 200, 120, &g)
-        .expect("hung");
+    let (_, placed) = chain.info_panel().expect("the panel hangs");
 
     let inside = Point::new(placed.left() + 8, placed.top() + 8);
     let acted = chain.handle(&PRESS, inside, &g);
     assert_eq!(
         acted,
         ChainAction::Consumed,
-        "the chain neither acts nor closes"
+        "a panel of facts offers no action, so the press is claimed"
     );
     assert!(chain.is_open());
 }
@@ -771,19 +696,16 @@ fn escape_closes_the_deepest_child_first_and_then_dismisses() {
 }
 
 #[test]
-fn escape_closes_an_attached_panel_before_the_menu_that_opened_it() {
+fn escape_closes_the_information_panel_before_the_menu_that_opened_it() {
     let theme = theme();
     let g = geom(&theme);
     let mut chain = MenuChain::new();
-    open(&mut chain, APP, panel_model(), Point::new(40, 40), &g);
+    open(&mut chain, APP, info_model(), Point::new(40, 40), &g);
     settle_on(&mut chain, 0, 1, &g);
-    chain
-        .place_panel(88, 42, id(2), 200, 120, &g)
-        .expect("hung");
 
     let acted = chain.handle(&key(NamedKey::Escape), Point::ORIGIN, &g);
     assert_eq!(acted, ChainAction::Redraw);
-    assert!(!chain.attaches(88), "the panel closed first");
+    assert!(chain.info_panel().is_none(), "the panel closed first");
     assert!(chain.is_open(), "and the chain it hung on survived");
 }
 
@@ -993,14 +915,14 @@ fn a_refusal_answers_the_asking_window_and_leaves_the_chain_alone() {
         window_id: 11,
         open_id: 44,
     };
-    chain.refuse(asking, MenuRefusal::SeatBusy);
+    chain.refuse(asking.clone(), MenuRefusal::SeatBusy);
     assert_eq!(
         chain.take_answers(),
         alloc::vec![(asking, ChainOutcome::Refused(MenuRefusal::SeatBusy))]
     );
     assert_eq!(
         chain.owner(),
-        Some(APP),
+        Some(&APP),
         "a refusal is a fact about the seat, not a reason to end a menu the \
          user is already using"
     );
@@ -1066,4 +988,56 @@ fn a_highlight_moving_on_one_plate_disturbs_no_other() {
     assert_eq!(plate(&chain, 0), root);
     assert_eq!(plate(&chain, 1), child);
     assert_eq!(plates(&chain), 2, "and no plate opened or closed");
+}
+
+// --- what a plate is painted with -----------------------------------------
+
+/// A plate lays the raised ground it covers what is behind it with, and
+/// repaints with the theme.
+///
+/// The pixels are what no state test can state. It is deliberately *opaque*:
+/// a plate is not the bar's floating chrome, so nothing behind it is blurred
+/// for it (`tests::a_menu_plate_frosts_nothing` holds the other half of that
+/// pair — the compositor window asks for no blur).
+#[test]
+fn a_plate_lays_the_raised_ground_and_follows_the_theme() {
+    let dark = Theme::dark();
+    let light = Theme::light();
+    let mut chain = MenuChain::new();
+
+    let painted = |chain: &MenuChain, theme: &Theme| -> tairix_raster::Surface {
+        let g = geom(theme);
+        let plate = chain.surfaces().first().expect("the root plate").rect;
+        let mut surface =
+            tairix_raster::Surface::new(plate.width, plate.height).expect("a plate surface");
+        chain.render_plate(0, &mut surface, &g);
+        surface
+    };
+
+    open(
+        &mut chain,
+        APP,
+        flat_model(),
+        Point::new(40, 40),
+        &geom(&dark),
+    );
+    let on_dark = painted(&chain, &dark);
+    let ground = tairix_raster::Color::from(dark.palette().surface_raised).premultiply();
+    assert!(
+        on_dark.pixels().contains(&ground),
+        "a plate lays the raised ground"
+    );
+    assert_eq!(ground.a, 255, "and covers what it opened over");
+
+    let on_light = painted(&chain, &light);
+    assert_eq!(
+        (on_dark.width(), on_dark.height()),
+        (on_light.width(), on_light.height()),
+        "the same model, so the same plate"
+    );
+    assert_ne!(
+        on_dark.pixels(),
+        on_light.pixels(),
+        "a theme switch repaints the plate"
+    );
 }

@@ -48,7 +48,7 @@ use tairix_wm::{
 };
 
 use crate::artwork::ArtworkDesk;
-use crate::menu::MenuChain;
+use crate::menu::{ChainAction, ChainGeometry, ChainOutcome, ChainOwner, MenuChain};
 use crate::shell::SettleWork;
 use crate::{
     deliver_pending_open, desktop_info, drop_is_noteworthy, ensure_switchboard, load_icon_set,
@@ -1122,15 +1122,13 @@ fn primary_press_on_the_clock_is_claimed_by_the_bar_and_opens_no_menu() {
 
     // The bar claimed it — a press it let through would have reached the
     // desktop behind and reported it — and the clock, being a reading rather
-    // than a control, did nothing with it.
+    // than a control, did nothing with it. A menu is what a *secondary* press
+    // asks for, so `Ignored` is also the proof that none was asked for: an ask
+    // would have arrived here as `TaskbarResponse::OpenMenu`.
     assert_eq!(
         seat.press_at(clock.x, clock.y),
         SessionInputResponse::Ignored,
         "a press on the bar is the bar's, even where it acts on nothing"
-    );
-    assert!(
-        !seat.session.taskbar().menu().is_open(),
-        "a left click on the clock opened its menu"
     );
 }
 
@@ -1768,8 +1766,8 @@ fn a_press_on_a_window_covering_the_bar_reaches_that_window() {
         })
     );
     assert!(
-        !shell.session().taskbar().menu().is_open(),
-        "the covered bar opened the clock's menu on a click that was not its own"
+        !matches!(outcome, ShellOutcome::Taskbar(TaskbarResponse::OpenMenu(_))),
+        "the covered bar asked for the clock's menu on a click that was not its own"
     );
 }
 
@@ -1812,7 +1810,10 @@ fn a_secondary_press_on_a_window_covering_the_bar_reaches_that_window() {
             local: Point::new(40, 40),
         })
     );
-    assert!(!shell.session().taskbar().menu().is_open());
+    assert!(!matches!(
+        outcome,
+        ShellOutcome::Taskbar(TaskbarResponse::OpenMenu(_))
+    ));
 }
 
 #[test]
@@ -3141,20 +3142,63 @@ fn library_row_at(shell: &DesktopShell, label: &str) -> Point {
     centre(*rect)
 }
 
-/// The centre of the open context menu's row labelled `label`.
-fn menu_row_at(shell: &DesktopShell, label: &str) -> Point {
-    let taskbar = shell.session().taskbar();
-    let layout = taskbar.menu_layout(Scale::ONE).expect("the menu lays out");
-    let control = taskbar.menu().control();
-    let index = control
-        .items()
+/// Drive one of the bar's own menus end to end: open the chain the bar asked
+/// for, click the row labelled `label`, and answer the chosen row back through
+/// the bar.
+///
+/// The whole round trip the session's serve loop drives, minus its own
+/// plumbing: the bar hands over a model and an anchor, the chain places, draws
+/// and grabs, and the bar reads the chosen row back into the typed response the
+/// embedder carries out.
+fn choose_bar_menu_row(
+    shell: &mut DesktopShell,
+    comp: &mut Compositor,
+    request: tairix_taskbar::MenuRequest,
+    label: &str,
+) -> Option<TaskbarResponse> {
+    let theme = shell.session().active_theme().clone();
+    let geom = ChainGeometry {
+        screen: comp.screen_rect(),
+        scale: comp.scale(),
+        theme: &theme,
+        epoch: comp.chrome_epoch(),
+    };
+    let subject = request.subject.clone();
+    let row = request
+        .model
+        .rows()
         .iter()
-        .position(|item| item.label() == label)
+        .position(|row| row.drawn().label() == label)
         .expect("labelled row");
-    let rect = control
-        .row_rect(index, layout.panel, Scale::ONE, taskbar.theme())
-        .expect("row rect");
-    centre(rect)
+    let mut chain = MenuChain::new();
+    chain
+        .open(
+            ChainOwner::Bar(request.subject),
+            request.model,
+            request.placement,
+            &geom,
+        )
+        .expect("the bar's model opens");
+    assert!(
+        shell.present_menu_chain(comp, &chain, None),
+        "a plate drawn"
+    );
+    let at = centre(chain.row_rect(0, row, &geom).expect("the row lays out"));
+    chain.handle(&moved(at.x, at.y), at, &geom);
+    chain.handle(&PRIMARY_PRESS, at, &geom);
+    let acted = chain.handle(&PRIMARY_RELEASE, at, &geom);
+    assert_eq!(acted, ChainAction::Closed, "the chosen row ends the chain");
+    let answers = chain.take_answers();
+    assert_eq!(answers.len(), 1, "exactly one answer per chain");
+    let (owner, outcome) = answers.into_iter().next().expect("one answer");
+    assert_eq!(owner, ChainOwner::Bar(subject.clone()));
+    let ChainOutcome::Chosen(item) = outcome else {
+        panic!("expected a chosen row, got {outcome:?}");
+    };
+    shell
+        .session_mut()
+        .taskbar_mut()
+        .menu_chosen(&subject, item)
 }
 
 /// A source refusing every listing, standing in for a session whose
@@ -3674,22 +3718,22 @@ fn the_entry_menus_shortcut_row_asks_the_embedder_to_make_one() {
         .library_mut()
         .set_catalog(catalog(&[("chess", "Chess", LibraryCategory::Games)]));
 
-    // Open the popup, then the row's own context menu.
+    // Open the popup, then ask for the row's own context menu.
     shell.handle(moved(24, 1060), &mut comp, 0);
     shell.handle(PRIMARY_PRESS, &mut comp, 0);
     let at = library_row_at(&shell, "Chess");
     shell.handle(moved(at.x, at.y), &mut comp, 0);
-    shell.handle(SECONDARY_PRESS, &mut comp, 0);
-    assert!(shell.session().taskbar().menu().is_open());
+    let ShellOutcome::Taskbar(TaskbarResponse::OpenMenu(request)) =
+        shell.handle(SECONDARY_PRESS, &mut comp, 0)
+    else {
+        panic!("a secondary press on a library row asked for no menu");
+    };
 
     // The shortcut row, found by the label its one definition gives it.
-    let row = menu_row_at(&shell, EntryRow::Shortcut.label());
-    shell.handle(moved(row.x, row.y), &mut comp, 0);
-    shell.handle(PRIMARY_PRESS, &mut comp, 0);
-    let outcome = shell.handle(PRIMARY_RELEASE, &mut comp, 0);
+    let answered = choose_bar_menu_row(&mut shell, &mut comp, request, EntryRow::Shortcut.label());
 
-    let ShellOutcome::Taskbar(TaskbarResponse::CreateDesktopShortcut { entry }) = outcome else {
-        panic!("expected a shortcut request, got {outcome:?}");
+    let Some(TaskbarResponse::CreateDesktopShortcut { entry }) = answered else {
+        panic!("expected a shortcut request, got {answered:?}");
     };
     assert_eq!(entry.as_str(), "os.tairix.chess");
     assert!(
@@ -4032,22 +4076,26 @@ fn secondary_press_over_an_app_slot_opens_the_menu_it_declared() {
 
     let at = app_slot_point(&shell, 0);
     shell.handle(moved(at.x, at.y), &mut comp, 0);
+    let ShellOutcome::Taskbar(TaskbarResponse::OpenMenu(request)) =
+        shell.handle(SECONDARY_PRESS, &mut comp, 0)
+    else {
+        panic!("a secondary press on a slot asked for no menu");
+    };
     assert_eq!(
-        shell.handle(SECONDARY_PRESS, &mut comp, 0),
-        ShellOutcome::Ignored,
-        "opening a menu acts on nothing by itself"
-    );
-    assert!(shell.session().taskbar().menu().is_open());
-    assert!(
-        shell.presenter().menu_window().is_some(),
-        "the menu is shown as its own window"
+        request.subject,
+        tairix_taskbar::MenuSubject::App { app: 0 },
+        "the menu names the slot's own application"
     );
 
-    // A click away takes only the menu down.
-    shell.handle(moved(900, 300), &mut comp, 0);
-    shell.handle(PRIMARY_PRESS, &mut comp, 0);
-    assert!(!shell.session().taskbar().menu().is_open());
-    assert!(shell.presenter().menu_window().is_none());
+    // The declared row is relayed back to the application by its own id: the
+    // bar never interprets one.
+    assert_eq!(
+        choose_bar_menu_row(&mut shell, &mut comp, request, "Quit"),
+        Some(TaskbarResponse::AppMenuChosen {
+            app: 0,
+            item: AppMenuItemId::new(1).expect("non-zero"),
+        })
+    );
 }
 
 #[test]
@@ -8398,9 +8446,6 @@ fn a_partial_desktop_repaint_draws_what_a_whole_one_would() {
 /// backdrop menu keeps no window of its own to be left behind.
 #[test]
 fn the_backdrop_menu_is_drawn_as_chain_plates_and_taken_down_when_it_closes() {
-    use crate::menu::{ChainGeometry, ChainOwner, MenuChain};
-    use crate::pinboard;
-
     let (mut shell, mut comp) = headless_desktop();
     shell.present(&mut comp);
     let before = comp.window_count();
@@ -8414,7 +8459,7 @@ fn the_backdrop_menu_is_drawn_as_chain_plates_and_taken_down_when_it_closes() {
         epoch,
     };
 
-    assert!(shell.present_menu_chain(&mut comp, &chain, None, None));
+    assert!(shell.present_menu_chain(&mut comp, &chain, None));
     assert_eq!(
         comp.window_count(),
         before,
@@ -8424,15 +8469,13 @@ fn the_backdrop_menu_is_drawn_as_chain_plates_and_taken_down_when_it_closes() {
     let at = Point::new(100, 100);
     chain
         .open(
-            ChainOwner::Session,
-            pinboard::model(true, &PinboardSettings::default()),
-            Rect::new(at.x, at.y, 0, 0),
-            crate::windows::MENU_SIDE,
-            crate::windows::MENU_GAP_PX,
+            ChainOwner::Backdrop,
+            crate::pinboard::model(true, &PinboardSettings::default()),
+            crate::windows::window_menu_placement(Rect::new(at.x, at.y, 0, 0)),
             &geom,
         )
         .expect("the backdrop model opens");
-    assert!(shell.present_menu_chain(&mut comp, &chain, None, None));
+    assert!(shell.present_menu_chain(&mut comp, &chain, None));
     assert_eq!(comp.window_count(), before + 1, "one plate, one window");
     let plate = chain.row_rect(0, 0, &geom).expect("the plate has a row");
     assert!(
@@ -8440,7 +8483,7 @@ fn the_backdrop_menu_is_drawn_as_chain_plates_and_taken_down_when_it_closes() {
         "the plate opens at the pointer, got {plate:?}"
     );
 
-    assert!(shell.present_menu_chain(&mut comp, &chain, None, None));
+    assert!(shell.present_menu_chain(&mut comp, &chain, None));
     assert_eq!(
         comp.window_count(),
         before + 1,
@@ -8450,15 +8493,18 @@ fn the_backdrop_menu_is_drawn_as_chain_plates_and_taken_down_when_it_closes() {
     // A menu opened in the far corner is placed wholly on screen.
     chain
         .open(
-            ChainOwner::Session,
-            pinboard::model(false, &PinboardSettings::default()),
-            Rect::new(screen.right() - 1, screen.bottom() - 1, 0, 0),
-            crate::windows::MENU_SIDE,
-            crate::windows::MENU_GAP_PX,
+            ChainOwner::Backdrop,
+            crate::pinboard::model(false, &PinboardSettings::default()),
+            crate::windows::window_menu_placement(Rect::new(
+                screen.right() - 1,
+                screen.bottom() - 1,
+                0,
+                0,
+            )),
             &geom,
         )
         .expect("the backdrop model opens");
-    assert!(shell.present_menu_chain(&mut comp, &chain, None, None));
+    assert!(shell.present_menu_chain(&mut comp, &chain, None));
     assert_eq!(comp.window_count(), before + 1);
     let corner = chain.surfaces().first().expect("the root plate").rect;
     assert!(
@@ -8467,7 +8513,7 @@ fn the_backdrop_menu_is_drawn_as_chain_plates_and_taken_down_when_it_closes() {
     );
 
     assert!(chain.dismiss());
-    assert!(shell.present_menu_chain(&mut comp, &chain, None, None));
+    assert!(shell.present_menu_chain(&mut comp, &chain, None));
     assert_eq!(
         comp.window_count(),
         before,
@@ -8523,29 +8569,14 @@ fn the_bar_and_its_library_popup_frost_what_is_behind_them() {
     );
 }
 
-/// The bar's other three surfaces are the same chrome. Each is opened the
-/// way the desktop opens it, on its own shell: the ones that are modal would
-/// otherwise swallow the input that raises the next.
+/// The bar's popover surfaces are the same chrome. Each is opened the way the
+/// desktop opens it, on its own shell: the ones that are modal would otherwise
+/// swallow the input that raises the next.
 #[test]
-fn the_bars_menu_popover_and_readout_frost_what_is_behind_them() {
-    let mut menued = shell();
-    let mut comp = compositor();
-    let blur = chrome_blur(&menued);
-    menued.set_apps(
-        &mut comp,
-        vec![tairix_taskbar::AppSlot::new("Files", IconKind::AppBundle)
-            .with_declaration(app_bar(true).menu, true)],
-    );
-    let slot = app_slot_point(&menued, 0);
-    menued.handle(moved(slot.x, slot.y), &mut comp, 0);
-    menued.handle(SECONDARY_PRESS, &mut comp, 0);
-    assert_eq!(
-        blur_of(&comp, menued.presenter().menu_window(), "the context menu"),
-        blur
-    );
-
+fn the_bars_popover_and_readout_frost_what_is_behind_them() {
     let mut hovered = shell();
     let mut comp = compositor();
+    let blur = chrome_blur(&hovered);
     hovered.present(&mut comp);
     let capsule = capsule_point(&hovered);
     hovered.handle(moved(capsule.x, capsule.y), &mut comp, 0);
@@ -8578,21 +8609,20 @@ fn the_bars_menu_popover_and_readout_frost_what_is_behind_them() {
 
 /// A menu plate is not the bar's chrome: it covers what it opens over, so
 /// nothing behind it is blurred for it.
+///
+/// `plans/NEW-MENUS.md` M5 supersedes this: menus are to become floating
+/// chrome, translucent over a blurred backdrop like the program-library
+/// popup, and this test inverts with that stage.
 #[test]
 fn a_menu_plate_frosts_nothing() {
-    use crate::menu::{ChainGeometry, ChainOwner, MenuChain};
-    use crate::pinboard;
-
     let (mut shell, mut comp) = headless_desktop();
     let mut chain = MenuChain::new();
     let theme = shell.session().active_theme().clone();
     chain
         .open(
-            ChainOwner::Session,
-            pinboard::model(true, &PinboardSettings::default()),
-            Rect::new(100, 100, 0, 0),
-            crate::windows::MENU_SIDE,
-            crate::windows::MENU_GAP_PX,
+            ChainOwner::Backdrop,
+            crate::pinboard::model(true, &PinboardSettings::default()),
+            crate::windows::window_menu_placement(Rect::new(100, 100, 0, 0)),
             &ChainGeometry {
                 screen: comp.screen_rect(),
                 scale: comp.scale(),
@@ -8601,7 +8631,7 @@ fn a_menu_plate_frosts_nothing() {
             },
         )
         .expect("the backdrop model opens");
-    assert!(shell.present_menu_chain(&mut comp, &chain, None, None));
+    assert!(shell.present_menu_chain(&mut comp, &chain, None));
     let plate = chain.surfaces().first().expect("the root plate").rect;
     let id = comp
         .window_at(Point::new(

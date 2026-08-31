@@ -16,8 +16,8 @@ A menu is a **chain of session-owned plates**.
   placed edge-adjacent to its parent at its parent row's top, flipped to the
   parent's other side when the screen edge leaves no room, and slid to stay on
   screen.
-- A **child** is either a **submenu** — more rows from the same model — or an
-  **attached window**: a surface hanging where a submenu's plate would hang.
+- A **child** is either a **submenu** — more rows from the same model — or the
+  **information panel**, which hangs where a submenu's plate would.
 - The chain is the **seat's singleton**. Opening a menu closes whatever was up
   and answers its requester `Dismissed`.
 
@@ -26,7 +26,6 @@ A menu is a **chain of session-owned plates**.
 A plate's title is derived, never a new field on the wire:
 
 - a submenu's title is its parent row's label;
-- an attached window's is its own row's label;
 - the icon-bar menu's root title is the application's name from its **signed**
   manifest, so a menu cannot be titled as an application it is not;
 - a per-window menu's root title is the application's, bounded and sanitised
@@ -69,42 +68,34 @@ hover delay, no timer. Two rules make that deterministic without one:
 
 A disabled row opens nothing and closes nothing.
 
-## Attached windows
+## The information panel
 
-An attached window is the general form of the information panel, and the one
-place an application's own pixels enter a chain.
+The one child of a chain that is not a plate of rows. It hangs where a submenu's
+plate would and lives and dies with the chain: it closes when the pointer
+settles on another row of its parent, when the chain dismisses, or when the
+chain's owner dies. A press on it is claimed and acts on nothing — it states
+facts and offers no command, so its row names no id and choosing it answers
+nothing.
 
-- **Attached**, it lives and dies with the chain: it closes when the pointer
-  settles on another row of its parent, when the chain dismisses, or when the
-  chain's owner dies.
-- **Clicking its row detaches it.** The window becomes an ordinary top-level
-  window with the compositor's full furniture, and the chain dismisses. The
-  detach is reported as an ordinary `MenuOutcome::Chosen` naming the row, so an
-  application's handling stays one total `match`.
-- **A submenu never detaches.** No gesture turns a submenu into a window.
+It is **session-drawn from the signed manifest**: the application declares only
+that the row exists and supplies none of the panel's text, so it cannot state an
+identity that is not its own inside desktop chrome. A process with nothing
+attesting an identity gets no information row rather than a fabricated panel.
 
-Presenting one may not stall the chain. Arrival on the row sends the owning
-application a request to present; the chain stays live and fully usable while
-it answers, and a window that arrives after the pointer has moved on is refused
-rather than shown. The chain — not the window engine — makes that call, because
-only the chain knows the model and where the pointer has settled.
-
-The information panel is the canonical instance and stays **session-drawn from
-the signed manifest**: the application declares only that the row exists and
-supplies none of the panel's text. A process with nothing attesting an identity
-gets no information row rather than a fabricated panel.
+There is deliberately no *application*-drawn child. One was built and deleted
+for want of a client: a presentation surface cannot conclude a gesture (below),
+and a chain the desktop opened for itself — the icon bar's, the backdrop's — has
+no application to ask in the first place.
 
 ## The grab
 
 While a chain is up the seat's pointer and keyboard route to it:
 
-- a press **inside** the chain acts there; an attached window's own input is
-  the application's, as any window's is;
+- a press **inside** the chain acts there;
 - a press **outside** dismisses the chain and is **consumed** — a dismissal
   never doubles as a click on whatever was behind the menu;
 - **Escape** closes the deepest open child; with only the root open it
-  dismisses the chain, so repeated Escape always gets the user out, and an
-  attached panel closes before the menu that opened it;
+  dismisses the chain, so repeated Escape always gets the user out;
 - **traversal** is the service's: Up/Down within a plate, Home/End to its ends,
   Right into the highlighted row's child, Left back out, Enter/Space to
   activate;
@@ -119,10 +110,9 @@ A press on any plate's band moves **that plate and its descendants**; ancestors
 stay put. Dragging pins the plate — its placement stops being derived from the
 anchor — and its children re-place relative to their parent row as usual.
 
-Dragging is not detaching. A dragged chain is still the seat's one chain, still
-holds the grab, and still closes on an outside press. Nothing an application
-sends can pin a menu open; the only thing that moves a plate is the user's own
-drag.
+A dragged chain is still the seat's one chain, still holds the grab, and still
+closes on an outside press. Nothing an application sends can pin a menu open;
+the only thing that moves a plate is the user's own drag.
 
 ## The model, and what an application may say
 
@@ -155,27 +145,51 @@ wire complete in the one request. So candidates could not be filled in lazily,
 and gathering them — filesystem reads over the program stores — would be paid on
 *every* gesture that opens the menu, for a list rarely asked for.
 
-And an **attached window cannot conclude the gesture**. Only a row of the chain
-ends a chain, and an application holds no request that dismisses one; a list
-inside a panel would therefore leave the chain standing after the user had
-chosen. A panel is a *presentation* surface — the information panel is its
-canonical instance — not a selection one.
+And a **presentation surface cannot conclude the gesture**. Only a row of the
+chain ends a chain, and an application holds no request that dismisses one; a
+list drawn inside a child surface would therefore leave the chain standing after
+the user had chosen.
 
 So a dynamic list is one row that concludes the chain, and the application's own
 list surface after it. The file manager's "Open With…" is the worked example
 (`plans/NEW-MENUS.md` §6, decision 2).
+
+The same test settles the desktop's own launcher. The program-library popup is a
+searchable, scrolled list over as many entries as a user has installed: a plate
+neither scrolls nor takes text, so it is not a menu and keeps its own surface.
+The genuine menu *inside* it — the context menu on one of its rows — is the
+desktop's chain like every other (`plans/NEW-MENUS.md` §6, decision 3).
 
 ## The desktop's own menus
 
 The desktop's own surfaces are clients of the service exactly as an application
 is; the only difference is that their model is built in process rather than
 decoded from the wire, and that difference is what lets their rows say things an
-application structurally cannot. **The backdrop menu** is the first of them: a
-secondary press on the pinboard hands `pinboard::model`'s rows to the chain with
-the session as their owner, so its answer is returned in process rather than as
-a `MenuClosed`, and it resolves through the same seat rule an application's open
-does — a menu never takes the grab from the lock screen or the trusted picker,
-whichever direction it arrives from. See [the pinboard](./pinboard.md#the-backdrop-menu).
+application structurally cannot — the Authority Mark that says *the system*
+refused a command. Both open through one call (`menu::open_desktop_menu`), which
+applies the same seat rule an application's open resolves through, so a menu
+never takes the grab from the lock screen or the trusted picker whichever
+direction it arrives from.
+
+- **The backdrop menu** — a secondary press on the pinboard hands
+  `pinboard::model`'s rows to the chain. See
+  [the pinboard](./pinboard.md#the-backdrop-menu).
+- **The icon bar's four menus** — an application slot's declared menu, a
+  program-library row's context menu, the system quick actions, and the clock. A
+  secondary press answers `TaskbarResponse::OpenMenu`, carrying which menu it
+  is, its rows, and where the plate hangs; the bar holds no menu state at all,
+  because while a chain is up the grab means no event reaches it. See
+  [the taskbar](./taskbar.md#the-bars-menus).
+
+Both are answered in process rather than by a `MenuClosed`, and the address an
+answer goes to is the chain's owner: `Window` for an application's, `Backdrop`,
+or `Bar` carrying which of the bar's menus it was. A chosen row of a bar chain
+is read back by the bar itself, over the same table the plate was built from,
+into the very typed response a click on the bar produces — so a *Log Out* row
+and a *Log Out* click are honoured in one place. The one exception that is not
+an exception: a chosen row of an application's **declared** menu is relayed to
+that application as `WindowEvent::AppBarMenu { item }`, because the row is the
+application's and the desktop never interprets one.
 
 ## The applications that are clients
 
@@ -211,12 +225,12 @@ the session could not give a surface is refused rather than announced.
   placement, the grab, traversal, dismissal and lifetime. It touches no
   compositor; the session presents what it lists and takes down what it no
   longer has.
-- `lib/controls` — `Menu` and `MenuItem` for rows, `TitleBar` for bands,
-  `plate_rect` for placement.
+- `lib/controls` — `ChainModel` (the one model every menu is built as, which
+  the wire model decodes into), `Menu` and `MenuItem` for rows, `TitleBar` for
+  bands, `plate_rect` and `PlatePlacement` for placement.
 - `lib/abi/src/window_ipc.rs` — the wire model, the per-gesture open, and the
   one `MenuClosed` outcome.
-- `lib/window` — the engine that keys an open to its attested owner, holds one
-  unanswered open per window, and settles an attached window against the
-  outcome.
+- `lib/window` — the engine that keys an open to its attested owner and holds
+  one unanswered open per window, so exactly one answer reaches it.
 
 The staged design is `plans/NEW-MENUS.md`.

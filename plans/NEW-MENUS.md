@@ -10,19 +10,24 @@ Binding under `AGENTS.md` (§3, §15.18).
 | M1a | Variable-length request framing: per-op wire length, exact-length decode | **landed** |
 | M1b | Model: per-plate rows, submenu depth, titles, shortcuts, `About`→`Info` | **landed** |
 | M1c | The per-gesture open: anchor in, `Chosen`/`Dismissed`/`Refused` out | **landed** |
-| M1d | Attached-window row kind + its present/arrive/refuse events | **landed** |
+| M1d | ~~Attached-window row kind~~ — deleted in M3.4 (D19) | **superseded** |
 | M2 | The service: bands, drag, arrival-open, attach/detach, grab, lifetime | **landed** |
 | M3.1 | Migrate `userland/apps/terminal`, delete its shell | **landed** |
 | M3.2 | Migrate the pinboard backdrop menu, delete its shell | **landed** |
 | M3.3 | Migrate `userland/apps/files`, delete its shell | **landed** |
-| M3.4 | Migrate the bar's `menu.rs`/`clock_menu.rs`/`system.rs` | planned |
-| M3.5 | The bar's start menu, if its rows fit the model | undecided (decision 3) |
+| M3.4 | Migrate the bar's four menu subjects, delete `BarMenu` | **landed** |
+| M3.5 | ~~The bar's start menu~~ — **not in scope** (decision 3) | **settled** |
 | M4 | Plate as a cached damage-reporting surface | planned |
+| M5 | Plates are floating chrome: 80% opacity over a 50% backdrop blur | planned |
 
-Open decisions: 3 (binds M3.5). Decision 1 is **settled** — variable-length
-framing, landed as M1a. Decision 2 is **settled** — Open With… is one row that
-concludes the chain, and the chooser is the application's own list surface;
-landed as M3.3.
+Open decisions: 4 (binds M5 — what the owner's "80% opacity and 50% blur"
+means in the theme, whose shared values every other floating surface takes).
+Decision 1 is **settled** — variable-length framing, landed
+as M1a. Decision 2 is **settled** — Open With… is one row that concludes the
+chain, and the chooser is the application's own list surface; landed as M3.3.
+Decision 3 is **settled** — the program-library popup is not a menu and stays
+bespoke, so M3.5 is closed with nothing to do; the context menu *on* one of its
+rows is a genuine menu and migrated with M3.4.
 
 ### Defects found, to fix in the stage named
 
@@ -43,15 +48,17 @@ stage that closes it carries its regression test (§2.18, §7).
 | D11 | The frame-layout block every surface-opening request shares ended at the literal `41`, spelled three times over (`RESIZE_WIRE_LEN`, `POPUP_PARENT_OFFSET`, `CREATE_TITLE_LEN_OFFSET`) with its field offsets spelled again inside the codec — D2's shape a second time, and a fourth operation was about to join it. One `FRAME_LAYOUT_AT`/`FRAME_LAYOUT_END` now says where the block is and how wide, and every operation that puts operands after it derives its own offsets. | **closed in M1d** |
 | D12 | Three requests open a surface and each wrote the same prologue longhand — the granted region, the event route, the frame layout. One `write_surface_operands` now writes it for all of them (§2.2). | **closed in M1d** |
 | D13 | `WindowClient` remembers each window's extent and last presented frame to answer a redraw, and pruned that record only in its own `close`. The **session** ends an attached window with its chain, so a client using panels would have kept one record per gesture — unbounded growth on a list every `present` linearly scans. The client now settles its records on a chain's outcome, by the one shared `MenuOutcome::detaches` rule the desktop settles by, and `close` forgets a window even when the session no longer knows it. | **closed in M1d** |
-| D14 | The shared `Menu` maps *any* chevroned row's activation to `OpenSubmenu`, so it cannot tell a panel row's click — which detaches its window — from a submenu row's, which opens a plate. Resolved by layer rather than by widening the control: `Menu` owns rows and chevrons, and the chain owns panel semantics, so it reads the row kind itself (pointer release on a panel row detaches; keyboard Right enters, Enter/Space detaches). | **closed in M2** |
+| D14 | The shared `Menu` maps *any* chevroned row's activation to `OpenSubmenu`, so it could not tell a panel row's click — which detached its window — from a submenu row's, which opens a plate. Resolved by layer rather than by widening the control: `Menu` owns rows and chevrons, and the chain owned panel semantics. Moot since D19 deleted the panel row: every chevroned row now opens its child. | **closed in M2** |
 | D15 | `MenuChain::render_plate` drew its rows through `Menu::render`, which lays a **complete** plate of its own — rim, rounded corners and ground. The chain had already laid one for the band and the rows together, so every plate carried the Signal Rim twice and the rows' own rounded top corners notched the outer ground just under the band. Resolved by layer, not by a flag: `Menu` gained `render_rows`, which paints rows into a plate someone else laid, and `render` is now that plus the plate. Row geometry is unchanged — both land exactly where `row_rect` reports — so hit-testing never disagreed with drawing and only the extra rim was ever visible. | **closed in M3.1** |
 | D16 | The terminal assigned a freshly-opened settings sheet straight over `TerminalWindow::overlay`, so an assignment that found one already there would drop it without calling `close` — leaving a session-side popup window on screen with nothing owning it. `set_overlay` made the assignment unable to leak. **The open question is answered: it was a *live* leak, not a latent one.** A key does reach a parent whose popup is up — not by focusing its decoration, which gives the keyboard to the *furniture* and swallows the key, but through the bar's hover window picker: `raise_window` → `TaskBridge::raise` → `router.focus` moved focus to the parent with no client press, so nothing dismissed the sheet and the next `Ctrl ,` ran `Command::Settings` behind it. That focus move is itself the defect (D18) and is fixed there, which is where the regression test lives; `set_overlay` stays as the guard, now unreachable by construction rather than argued safe. | **closed in M3.2** (cause is D18) |
 | D17 | **No QEMU vertical opened a menu**, so the chain's drain, grab and answer paths in `userland/gui/session/src/run.rs` — and the terminal's own open/answer path — were exercised by nothing, and no one had ever seen a plate on screen. **Closed**: the session now announces `MENU_SHOWN` ("menu chain on screen", `EventId(20_006)`) beside `WINDOW_SHOWN`, once per open and only after a frame carrying the chain reached the display — the only honest gate, since the reply an application gets says the open was *accepted*, never that a plate was drawn. `tests/integration/menu_qemu_aarch64` then launches the terminal from the program library, right-clicks its client, photographs the plate at the rectangle the production chain reports, and clicks its *Settings…* row; the guest latches `APP_LOADED` for the bundle, the 12-byte minted-id reply only `OpenMenu` produces, and a create observed *after* it — the sheet the chosen row opens, which the terminal opens on nothing but the one `MenuClosed` naming that row. | **closed in M3.2** |
 | D18 | Raising a window gave the keyboard to *that* window even when its own live transient sat above it. A raise brings a window's transients up with it (`Compositor::raise` restacks the family), so `show_raise_focus` — the one path `TaskBridge::open` and `TaskBridge::raise` share — left the focused window *underneath* its own modal sheet: the bar's hover window picker could focus a terminal behind its open settings sheet, with no client press to dismiss it, and the next accelerator ran in the client instead of the sheet. That is the route that made D16 live. **Fixed** by focusing the front of the family that rose (`Compositor::family_front`, one rule shared with `family_top`); a window with no transient open is its own family front, so the ordinary case is unchanged. | **closed in M3.2** |
-| D19 | `AppMenuRow::Panel`, `WindowRequest::CreateMenuPanel` and `WindowEvent::MenuPanelRequested` have **no production client** — only a fuzz seed (`lib/abi/tests/fuzz_decode.rs`) declares a panel row. M1d landed the attached window for the shape decision 2 turned out not to want: a panel is a *presentation* surface (the session-drawn `Info` row is its canonical instance) and cannot conclude a gesture, so a selection list is not one. Either the bar's migration finds it a genuine presentation child, or the row kind, its operation, its event and the engine's attach/detach lifetime are deleted (§2.14). Deciding needs the bar's own subjects in hand. | **M3.4** |
+| D19 | `AppMenuRow::Panel`, `WindowRequest::CreateMenuPanel` and `WindowEvent::MenuPanelRequested` had **no production client** — only a fuzz seed declared a panel row. M1d landed the attached window for the shape decision 2 turned out not to want. **Closed by deletion.** None of the bar's four subjects is its client, and the reason is structural rather than a judgement: an attached window is a surface the *owning application* draws, and a bar chain's owner is the desktop itself, so there is no client to ask. A presentation child the desktop would draw itself — a calendar under the clock — is the `Info` row's kind, not this one's. So the row kind, its `AppMenuRowView` and `RowKind` cases, `APP_MENU_KIND_PANEL`, `APP_MENU_PANEL_MAX_PX`, `WindowRequest::CreateMenuPanel`, `WindowEvent::MenuPanelRequested`, `MenuOutcome::detaches`, `WindowHost::menu_panel_opened`, `MenuPanelSpec`, the engine's `MenuAttachment` lifetime and `close_menu_panel`, `WindowClient::create_menu_panel`/`settle_menu_chain`, the chain's `ChainChild::Panel`/`Attached`/`place_panel`/`PanelRefused`/`SurfaceKind::Attached`/`ChainAction::RequestPanel`, and the fuzz seed are all gone. `deliver_event` lost the `host` parameter M1d gave it for the teardown, and §1.4 collapses to the one child a chain hangs: the desktop-drawn information panel. | **closed in M3.4** |
 | D20 | The chain holds the seat's grab, so a press outside it is consumed and never delivered — which makes the second press of `files.app`'s FM12 **right-double-click** ("activate, then close this window") structurally unreachable the moment its first press opens a desktop menu. Not an implementation cost: an application deliberately cannot see a press inside chrome it does not own. **Resolved by re-spelling the capability rather than dropping it**: `ContextCommand::OpenAndClose` carries the same `AfterHandoff::CloseWindow` activation as a menu row — discoverable, and reachable from the keyboard, which the gesture never was — and `gesture.rs`'s `secondary_press`/`SecondaryPress`/`MenuOnSingle` are deleted with the gesture. A right-press still breaks a half-finished left pair (the app resets the tracker). | **closed in M3.3** |
-| D21 | Threading the chain through `files.app` grew three of its routers (`apply_event`, `apply_nav_event`, `apply_pointer`) past the argument threshold, so each carries a justified `#[allow(clippy::too_many_arguments)]`. The `MenuLink` bundle already collapses the client, the window id and the open slot into one value; what remains is that the window's *state* (browser, overlays, places) and what it acts *through* (the link, the launcher) are threaded as separate parameters at every level. The proper fix is one bundle per side, applied to the whole router chain in a change of its own — it is not migration work and would inflate a diff that already spans thirteen files. The same surround is threaded through the bar in M3.4, so bundle it once there for both rather than twice. | **M3.4** |
-| D10 | The bar's own menus state two things the model cannot carry: a row denied for want of a capability (`AuthorityState::NeedsCapability`, which draws an Authority Mark rather than merely greying) and a row whose setting is already in effect (`ActivityState::Complete`). **Answered.** The Authority Mark says *the system* refused a command, and only the system may say it, so it is in-process-only — and structurally, not by a check: the wire model has no field for an authority state, so a decoded row is always `Allowed` and an application cannot paint the mark on its own row. §1.6's "bounded subset" means an absent field, never a validated one. `ActivityState::Complete` ("work finished successfully") is a *misuse* on an appearance row and is deleted rather than carried: the alternatives are a radio group, which the wire already spells `AppMenuMark::Radio` plus disabled plus a reason. The bar's own rows keep `NeedsCapability` through M3.4, because they are the session's. | **answered in M2** |
+| D21 | Threading the chain through `files.app` grew three of its routers (`apply_event`, `apply_nav_event`, `apply_pointer`) past the argument threshold, so each carried a justified `#[allow(clippy::too_many_arguments)]`. **Closed**: one bundle per side — `WindowState` for what a round acts *on* (browser, overlays, places) and `Acts` for what it acts *through* (the menu link, the launcher). All three routers are back under the threshold and all three allows are gone. | **closed in M3.4** |
+| D22 | The one-based `index ↔ AppMenuItemId` numbering every command-list menu uses was spelled twice — `lib/browse::chrome`'s `row_id`/`context_command_from_item` and `session::pinboard`'s `PinboardCommand::row_id`/`from_item` — and M3.4 needed it a third time for the bar's three table-driven menus. **Closed**: `AppMenuItemId::for_index` / `AppMenuItemId::index` are the one definition, beside the id type whose non-zero invariant is the reason the numbering is one-based at all. | **closed in M3.4** |
+| D23 | The bar's own menus were reachable only through the bar: no host test could open one *and* read its answer back, because the plate and the grab were the bar's own shell and the answer never left it. Migrating them made the round trip host-testable in two halves — the model and the id→response inverse in the taskbar suite, the plate, grab and one answer in the session suite (`choose_bar_menu_row` drives the whole path the serve loop drives). The end-to-end wiring stays witnessed by the two QEMU verticals that already click a bar menu row: `appbar_qemu_aarch64` (a slot's declared *New window*) and `datetime_elevate_qemu_aarch64` (the clock's *Set Date & Time…*), both of which now pass only if the chain path is right. | **closed in M3.4** |
+| D10 | The bar's own menus state two things the model cannot carry: a row denied for want of a capability (`AuthorityState::NeedsCapability`, which draws an Authority Mark rather than merely greying) and a row whose setting is already in effect (`ActivityState::Complete`). **Answered.** The Authority Mark says *the system* refused a command, and only the system may say it, so it is in-process-only — and structurally, not by a check: the wire model has no field for an authority state, so a decoded row is always `Allowed` and an application cannot paint the mark on its own row. §1.6's "bounded subset" means an absent field, never a validated one. `ActivityState::Complete` ("work finished successfully") is a *misuse* on an appearance row and is deleted rather than carried: the alternatives are a radio group, which the wire already spells `AppMenuMark::Radio` plus disabled plus a reason. The bar's own rows keep `NeedsCapability`, because they are the desktop's. **Closed in M3.4**: `system.rs`'s in-force appearance row is now `MenuMark::Radio` plus disabled plus its reason, as the pinboard's sort and arrangement rows became in M3.2, and no menu row anywhere states an activity. (`render.rs`'s remaining `ActivityState::Complete` is a *notification card* for a `Success` severity — "work finished successfully" about work that did — and is correct.) | **closed in M3.4** |
 
 **This is an architecture change, not a performance one.** The ~300 ms
 context-menu stall that first prompted it was a kernel defect and is closed
@@ -70,7 +77,7 @@ submenu's rules live — not milliseconds. Do not justify it on speed.
   is not a capacity), §27 (a foundational primitive is complete, not the
   slice its first caller needs).
 - `plans/APPWIN.md` — the window channel this extends, and the
-  transient/owner relationship a plate and an attached window both use.
+  transient/owner relationship a plate uses.
 - `plans/COMPOSITOR-WORK.md` — server-side furniture. `lib/controls::window`'s
   `TitleBar` and the compositor's `WindowChrome` strip cache are what a menu's
   title band and its drag gesture are *made of*, not something to write again.
@@ -96,9 +103,9 @@ A menu is a **chain of session-owned plates**, not a window an app draws.
   flipped to the parent's other side when the screen edge leaves no room,
   and slid vertically to stay on screen.
 - **A child is one of two things**: a **submenu** (more rows, from the same
-  model) or an **attached window** (a surface: the session's own info panel,
-  or one the owning app presents). Both hang where a submenu hangs and both
-  obey the chain's lifetime. They differ in exactly one rule, below.
+  model) or the **information panel** — the session's own `FactList` of the
+  owning bundle's signed manifest. Both hang where a submenu hangs and both
+  obey the chain's lifetime.
 - **The chain is the seat's singleton.** One chain per seat, whoever asked
   for it. Opening a menu closes the chain that was open and answers its
   requester `Dismissed`.
@@ -150,53 +157,39 @@ deterministic without one:
 
 A disabled submenu row opens nothing (fail closed).
 
-### 1.4 Attached windows, and the one rule that makes them different
+### 1.4 The information panel
 
-An **attached window** is a surface hanging where a submenu would hang. It
-is the general form of the info panel, and it is the one place an app's own
-pixels enter a chain.
+The one child of a chain that is not a plate of rows is the **information
+panel**: a `FactList` of the owning bundle's `AppInfo`, hanging where a
+submenu's plate would and dying with the chain — it closes when the pointer
+settles on another row of its parent, when the chain dismisses, or when the
+chain's owner dies. It wears the plate title band, so it reads as part of the
+chain, and a press on it is claimed and acts on nothing: it states facts and
+offers no command, so its row names no id and choosing it answers nothing.
 
-- **Attached** it lives and dies with the chain: it closes when the pointer
-  settles on another row of its parent, when the chain dismisses, or when
-  the chain's owner dies. It wears the plate title band, so it reads as part
-  of the chain.
-- **Clicking its row detaches it.** The window becomes an ordinary top-level
-  window — the compositor's full `WindowFrame` furniture replaces the menu
-  band — and the chain dismisses. A detached window is no longer chain state
-  and a later menu does not close it.
-- **A real submenu never detaches.** Clicking a submenu row opens or keeps
-  its plate; there is no gesture that turns a submenu into a window.
+It stays **session-drawn from the signed manifest**. The app declares only
+that the row exists and supplies none of the panel's text, so it cannot state
+an identity that is not its own inside desktop chrome.
 
-The info panel is the canonical instance and stays **session-drawn from the
-signed manifest**. The app declares only that the row exists and supplies
-none of the panel's text, so it cannot state an identity that is not its own
-inside desktop chrome. That property is already built and is not traded away
-for generality: an app-provided attached window is the app's *own* content
-in its own client rect, never the identity panel.
-
-An app-provided attached window is bounded, placed, and clipped by the
-session (a format bound, §24.4) — it cannot become a full-screen surface
-parented to a menu row, and it cannot cover the plates of its own chain.
-
-**Presenting one may not stall the chain (`plans/FIX-DESKTOP.md`).** Arrival
-on the row sends the owning app a request to present; the chain stays live
-and fully usable while the app answers. A window that arrives after the
-pointer has moved on is refused rather than shown, so a slow or hostile app
-can neither freeze the menu nor plant a panel under a row the user has left.
+**There is deliberately no app-drawn attached window.** M1d landed one — a
+surface the *application* presented, hanging off a menu row, detaching when
+its row was chosen — and it never found a client: decision 2 established that
+a selection list cannot be one (a panel cannot conclude a gesture), and M3.4
+established that a *desktop*-owned chain has no application to ask in the
+first place. The whole mechanism is deleted (D19). A presentation child the
+desktop draws itself is this panel's kind, not a second one.
 
 ### 1.5 The grab
 
 While a chain is up the seat's pointer and keyboard route to it:
 
-- A press **inside** the chain — any plate, any attached window — acts there.
-  An attached window's own input is the app's, as any window's is.
+- A press **inside** the chain — any plate, the information panel — acts
+  there.
 - A press **outside** the chain dismisses it and is **consumed**, not
   delivered. A dismissal must not double as a click on whatever was behind
   the menu.
 - **Escape** closes the deepest open child; with only the root open it
-  dismisses the chain. Repeated Escape therefore always gets the user out,
-  and an attached panel's Escape closes that panel first, which is what a
-  panel with a field in it should do.
+  dismisses the chain. Repeated Escape therefore always gets the user out.
 - **Keyboard traversal** is the service's: Up/Down within a plate, Home/End
   to its ends, Right into the highlighted row's child, Left back out of it,
   Enter/Space to activate.
@@ -245,7 +238,7 @@ never a second model with a second set of behaviours (§2.2).
    fail-closed, fuzzed (§19.6). Evolved in place until first release
    (§2.13) — no `v2`, no shim.
 5. **Bounded by construction (§24.4).** Rows per plate, label bytes, submenu
-   depth, attached-window extent and total model bytes are *format* bounds a
+   depth and total model bytes are *format* bounds a
    hostile client cannot widen, not capacities that grow with the machine.
 6. **No blocking on an app (`plans/FIX-DESKTOP.md`).** No step of opening,
    traversing, or dismissing a chain waits on a client.
@@ -314,9 +307,9 @@ special case the general chain generalises.
   requesting window~~ — landed as M1c, with the outcome keyed to a
   session-minted open id so one gesture's answer cannot read as another's.
 - ~~A row kind for an app-provided attached window, plus the present request
-  and the arrival/refusal events~~ — landed as M1d, with the detach carried by
-  the existing three-way outcome rather than a new one, and the panel's
-  lifetime enforced by the engine rather than left to the service.
+  and the arrival/refusal events~~ — landed as M1d and **deleted in M3.4**: no
+  client ever wanted it (D19), so the chain's one non-plate child is the
+  session's own information panel.
 
 **And that re-opened M0's transport decision**, settled as decision 1 and
 landed as M1a. M1b then found the same cost in a second place the framing
@@ -443,63 +436,12 @@ another. `WindowHost::menu_open_requested` defaults to refusing, so a desktop
 composing no menu service fails closed, and a refused open records nothing and
 spends no id.
 
-**M1d — attached windows (landed).** `AppMenuRow::Panel { id, label,
-enabled }` is the row whose child is a surface the *application* draws — the
-general form of the session-drawn `Info` row, which keeps its manifest-attested
-text. It is admitted exactly where a submenu row is, by one shared rule (on the
-deepest plate either would open a child past the bound), opens no plate of its
-own, and states no accelerator, reason, mark or emphasis for the reason a
-submenu states none. Its **band title is its own label**, so no title crosses
-the wire: §1.1's "not new wire fields where they can be derived" holds.
-
-Its id comes from the **same space** an `Item`'s does, and the uniqueness rule
-is now stated once over every id-bearing row rather than per kind. That is
-forced, not chosen: choosing a panel row detaches its window, and the detach is
-reported by the very `MenuOutcome::Chosen(id)` any other choice is — so a
-shared id would make one answer ambiguous, and `MenuOutcome` needed no new
-case.
-
-**The present request is its own operation** (`CreateMenuPanel`, op 15), not
-fields on `CreatePopup`: a popup is anchored to a window the caller owns at an
-offset from that window's client origin and dies with its parent, where an
-attached window hangs off a *menu row the session placed* — so it states no
-offset at all — wears the plate band, and lives with the chain. What they share
-— region, event route, frame layout — is one definition (D12), and the reply is
-the create reply, since it mints a *window* id where an open mints an open id.
-Its extent is a format bound refused at decode (`APP_MENU_PANEL_MAX_PX`, 1024
-physical pixels either way): the info panel it generalises is 260 logical
-pixels wide, so an ask anything like a screen is refused before a byte is
-mapped, and the session still places and clips what it accepts.
-
-**Arrival is an event, refusal is a reply.** `WindowEvent::MenuPanelRequested
-{ window_id, open_id, row }` spends ten of the event frame's twenty-four
-payload bytes, so it costs every other event nothing. There is deliberately no
-"the pointer left" event: the refusal already covers the late case, and a
-second event would tell an application how the pointer moves inside chrome it
-does not own. The late refusal is a **typed reply on the present request**,
-because only the session knows where the pointer is and it can decide at the
-moment the request lands — an event would be a second answer that could itself
-race the next arrival. The worst late case is not even refused but
-*unrepresentable*: a surface for an open that has already been answered has no
-chain to hang on, so the engine refuses it without asking the host anything.
-
-**The lifetime is the engine's, in one place.** A panel is a transient of the
-window whose chain it hangs on, so `remove_with_popups` became
-`remove_with_transients` and reaps it with the popups. Delivering a chain's
-outcome settles whatever was attached: the panel whose row the outcome *chose*
-detaches (attachment and transient link both clear, so it is an ordinary
-window a later menu will not close) and any other is torn down. That settling
-runs when the outcome is **validated, before the sink is asked** — the chain's
-fate is the session's decision, not the application's receipt of it, so a
-client that stops draining its mailbox cannot keep a session-placed surface on
-the screen. One panel hangs per chain (a chain's deepest child is a plate or a
-panel, never both); the service closes it mid-chain with `close_menu_panel`.
-`WindowHost::menu_panel_opened` defaults to refusing, and `deliver_event` now
-takes the host so the teardown reaches the compositor.
-
-Until the bar migrates (M3.4) it hangs no attached windows of its own, so it
-draws a declared panel row's chevron **greyed** rather than as a row that opens
-something it cannot open. Nothing in the tree declares one yet.
+**M1d — attached windows (landed, then deleted).** The row kind, its present
+request, its arrival event and the engine's attach/detach lifetime were built
+here and removed in M3.4 for want of any client (D19). What the stage
+contributed that *stayed* is the shared frame-layout block one definition now
+serves (D11), the shared surface prologue every surface-opening request writes
+through (D12), and the client's per-window record pruning (D13).
 
 ### M2 — the service (landed)
 
@@ -526,11 +468,10 @@ What it guarantees, beyond section 1 itself:
   `ChainRow` carries the whole of `ControlState`, because the desktop's own
   rows may state that the *system* lacks authority for a command; the wire has
   no field for that, so a decoded application row cannot claim it (D10).
-- **The host validates the panel row and the lateness**, because the engine
-  retains neither the model nor the pointer. `ShellWindowHost::menu_open_requested`
-  resolves the window-local anchor against the owner's live client origin and
-  never reads a file; `menu_panel_opened` asks the chain where a surface hangs
-  and composes it as a transient of the owner, or relays the refusal.
+- **The host resolves the anchor**, because the engine retains neither the
+  model nor the pointer: `ShellWindowHost::menu_open_requested` resolves the
+  window-local anchor against the owner's live client origin and never reads a
+  file.
 - **`lib/controls::window`'s `TitleBar` seats an empty command set**
   (`TitleBarCommands::Empty`, `TitleBar::plate()`), extended rather than
   copied: one drag gesture, one untrusted-label bounding. The whole-band drag
@@ -574,11 +515,11 @@ surface's menu shell (§2.14):
 2. ~~`userland/gui/session`'s pinboard backdrop menu~~ — landed as M3.2.
 3. ~~`userland/apps/files` — its `ContextMenu` and `OpenWithMenu`~~ — landed
    as M3.3.
-4. `userland/gui/taskbar` — `menu.rs`, `clock_menu.rs`, `system.rs`. The bar
-   keeps its *subjects* and loses its shell.
-5. `userland/gui/taskbar`'s start menu, if its rows fit without distorting
-   the model — its entries carry icons and are launcher entries rather than
-   commands. Decide with evidence; it may legitimately stay bespoke.
+4. ~~`userland/gui/taskbar` — `menu.rs`, `clock_menu.rs`, `system.rs`~~ —
+   landed as M3.4. The bar kept its *subjects* and lost its shell.
+5. ~~`userland/gui/taskbar`'s start menu~~ — decision 3 settled it: the
+   program-library popup is a searchable scrolled list, not a menu, and stays
+   bespoke. Nothing to migrate.
 
 **M3.1 (landed).** `userland/apps/terminal` keeps no menu shell: `ContextMenu`,
 its `MenuOutcome`, and the popup arm that drew them are gone, and `menu.rs` is
@@ -603,7 +544,7 @@ it: `Desktop::context_press` answers whether an icon was under the press and
 names no action, because the menu is the seat's chain and the embedder that owns
 the chain opens it.
 
-It opens with `ChainOwner::Session`, so no `OpenMenu` crosses a wire, no open id
+It opens with `ChainOwner::Backdrop`, so no `OpenMenu` crosses a wire, no open id
 is minted, and its one answer arrives at `run.rs`'s single delivery point
 (`answer_menu_chain`) beside every application's. **The two seat drains became
 one**: the chain's drain now carries the desktop state a chosen backdrop row
@@ -615,8 +556,8 @@ applied: the sort order and the arrangement in force are a *radio group* —
 which said "work finished successfully" about an appearance row. And a row's id
 is its command's own position in `PinboardCommand::ALL` rather than its position
 on the plate, so the gesture that leaves `Open` out shifts no other row's
-meaning. The bar's `system.rs` still spells an in-force row with
-`ActivityState::Complete`; M3.4 converts it the same way.
+meaning. M3.4 converted the bar's `system.rs` in-force appearance row the same
+way.
 
 The desktop's own menu also now resolves through the **same** seat rule an
 application's open does (`seat_menu_refusal`, hoisted out of
@@ -680,13 +621,71 @@ end-to-end test; `PLAN.md`'s claim that the FM9-c right-click→Delete
 click-through was wired into the `autoload_input` vertical was already stale and
 is corrected there.
 
+**M3.4 (landed).** The icon bar keeps no menu shell: `BarMenu`, `MenuLayout`,
+`MenuChoice`, `MenuOutcome`, `OpenChild`, `TaskbarRepaint::MENU`,
+`TaskbarRenderer::render_menu`, `TaskbarPresenter::present_menu`,
+`Taskbar::{menu, menu_routing_mut, menu_layout, open_*_menu, close_menu}` and
+the router's `route_to_menu`/`apply_choice`/`apply_system_action` are all gone.
+The bar holds **no menu state at all** — while a chain is up the seat's grab
+means no event reaches the bar, so there is nothing for it to be modal about.
+
+It is an **in-process** client, so M3.2 is its template rather than M3.1: a
+secondary press answers `TaskbarResponse::OpenMenu(MenuRequest)` — which menu,
+its rows, and where the plate hangs — and `run.rs`'s `open_bar_menu` opens the
+seat's one chain for it. All four subjects migrated: the application slot's
+declared menu, the program-library row's context menu, the system quick
+actions, and the clock.
+
+**The model type moved to `lib/controls`.** An in-process client builds a
+`ChainModel` (never an `AppMenu` — D10's authority state has no wire field), and
+the bar cannot depend on the session, which depends on *it*. So `ChainModel`,
+`ChainRow`, `ChainChild`, `from_app_menu` and `INFO_ROW_LABEL` now live beside
+the `Menu`/`MenuItem`/`FactList` they are made of, and `lib/controls` gains the
+`lib/abi` edge the row id and the wire model need (every crate that already
+depends on `lib/controls` depends on `lib/abi` too, so nothing widens). The
+chain itself — state, geometry, grab, lifetime, answers — stays in the session.
+`PlatePlacement { anchor, side, gap }` joined it: three values every caller
+passes together, which turns `plate_rect` from six arguments into four and lets
+the desktop's shared open path stay inside the argument threshold.
+
+**One chain, two answer shapes, and the seam is the owner.** `ChainOwner` is
+now `Window { window_id, open_id } | Backdrop | Bar(MenuSubject)` — the address
+an answer goes to. A chosen row of a **wire** chain leaves as the `MenuClosed`
+the engine holds it to; a chosen row of a **bar** chain is read back by the bar
+itself (`Taskbar::menu_chosen`, over the same table the plate was built from)
+into the very `TaskbarResponse` a click on the bar produces, and routed where
+those are. So the application-scoped `AppBarMenu` relay is untouched: the App
+subject answers `AppMenuChosen { app, item }` and `route_outcome` relays the id
+to the declaring process exactly as before. The subject travels **inside** the
+owner rather than beside it, so a chain the next open displaces cannot have its
+answer read against the next chain's subject.
+
+The desktop's two in-process menus now open through **one** call
+(`menu::open_desktop_menu`), which applies the seat rule (§1.5) and the model
+check together, so neither the backdrop nor the bar can take the grab from the
+lock screen or the trusted picker. And **the two seat drains became one**: the
+chain drain lives inside the `SEAT_TOKEN` branch and its answers flow through
+the branch's existing routing loop, so a *Log Out* row and a *Log Out* click
+are honoured in one place — the alternative was a third copy of that routing.
+
+Three rules landed with it rather than being carried over. A row's id is its
+command's own position in its table (M3.2's rule), so the system menu without
+*Switch User…* shifts no other row's meaning — and that numbering is now one
+definition rather than three (D22). D10's remainder is applied: the in-force
+appearance row is a radio group, not `ActivityState::Complete`. And D19 is
+closed by deletion: a desktop-owned chain has no application to draw an
+attached window, so the mechanism had no client and is gone.
+
 `userland/gui/switchboard` has **no** menu of its own — it only receives
 `AppBarMenu` — and is not a migration target.
 `userland/apps/widgets` draws a `Menu` as a *control-gallery sample*, not as
 a menu; it stays.
 
-The final step removes any menu-shell helper in `lib/controls` left without
-two consumers (§15.5).
+Every menu-shell helper in `lib/controls` has two or more consumers (§15.5):
+`plate_rect` and `PlatePlacement` place every plate and the information panel,
+`Menu::render_rows` paints the rows of every plate, `TitleBar::plate` bands
+them, and `ChainModel` is built by the bar, by the pinboard and by the wire
+decode.
 
 ### M4 — what the compositor can then do
 
@@ -694,6 +693,50 @@ Only after M3, because it is meaningless while apps own menu pixels: a plate
 becomes a cached, damage-reporting surface like the window furniture
 (`plans/COMPOSITOR-WORK.md`), so moving a highlight repaints two rows rather
 than the plate.
+
+### M5 — a plate is floating chrome, not a solid card
+
+**Owner requirement.** Every menu is to read like the program-library popup and
+the Switchboard capsule's own menu already do: **80% opacity over a 50%
+backdrop blur**. A plate today is *opaque* and asks for no blur — M2 decided it
+"covers what it opens over" — so this **supersedes that decision**, and the two
+tests in the session crate that state it — the one asserting a plate asks for no
+blur, and the one asserting it lays the opaque raised ground — invert with the
+stage.
+
+Opacity and blur are **one decision, not two.** Blur behind an opaque surface
+is per-frame work nothing shows through; translucency without blur is sharp
+detail competing with the rows on top. The theme already pairs them
+(`Palette::chrome_alpha` with `Metrics::chrome_backdrop_blur`) and every other
+floating surface takes both, so a plate takes both or neither.
+
+**The numbers do not match the reference surfaces, and that is the decision to
+settle first** (decision 4 below). Today's shared floating chrome is
+`CHROME_ALPHA = 179` (70%) over `chrome_backdrop_blur = 7` logical pixels — so
+the popup the requirement cites as correct is at 70%, not 80%, and 7 px is not
+readily "50%" of anything but the `WINDOW_BACKDROP_BLUR_MAX_PX` (64) wire
+ceiling, of which it would be 32.
+
+What the stage does, once decision 4 fixes the values:
+
+- The chain grounds its plates in the **floating** theme
+  (`Theme::floating()`, which flips `SurfaceGround` and touches no metric, so
+  no rectangle moves) and asks the compositor for the theme's
+  `chrome_backdrop_blur` where it places each surface — the plate, the
+  information panel, and every child.
+- The floating form is derived **once** for the desktop rather than per surface
+  (the bar clones its own today), so the bar, its popups and every plate ground
+  themselves identically and a theme switch cannot leave one behind.
+- One theme for the whole chain: the plate's pixels and the rectangles its rows
+  are hit-tested against must not come from two.
+- The plate's own **rows** already take `chrome_alpha` when the ground is
+  floating (`Palette::chrome_alpha`'s rule — anything reading as part of the
+  surface takes it), so a resting row stays exactly its ground with no second
+  rule.
+
+Untouched by it: the plate is still one ground for the band and the rows
+together (D15), and the corner radius and rim are still the shared popup
+recipe's.
 
 ---
 
@@ -756,8 +799,65 @@ than the plate.
    sits in the surface kind the file manager already draws for Properties and
    the delete confirmation. M3.1 set the precedent: the terminal's settings
    sheet is not a menu and kept its own surface.
-3. **Whether the bar's start menu is in scope** (M3 step 5), or stays a
-   bespoke surface because its rows are icon-bearing launcher entries.
+3. **The bar's start menu — settled. It is not a menu and stays bespoke**, so
+   M3 step 5 is closed with nothing to migrate. The program-library popup
+   (`userland/gui/taskbar/src/library.rs`) is a **searchable, scrolled list over
+   a data set the machine's size decides**: it holds a text filter, a scroll
+   offset with the shared `ScrollBar`, and expandable folders over a catalog as
+   large as the programs a user installs. That is decision 2's shape exactly,
+   and two of its reasons bind here whatever else does not:
+   - **A plate does not scroll.** `plate_rect` bounds a plate to the viewport
+     and nothing scrolls it, so the entry set — which grows with what is
+     installed — has no bound a plate could promise to hold. Raising the
+     per-plate row bound moves the refusal rather than removing it, and widens a
+     format bound "to be flexible" (§24.4).
+   - **A plate has no text input.** The filter is the popup's primary
+     affordance: typing narrows the list. A menu's rows are fixed at open, and
+     the model carries no field a keystroke could edit.
+   Two reasons that would have bound an application's list deliberately do
+   **not** apply, and saying so is what makes this a decision rather than a
+   restatement: the popup is session-owned, so nothing about it crosses the
+   wire complete, and its rows carry icons, which `MenuItem::with_icon` can
+   already draw. Neither rescues it from the two above. Expandable folders are
+   *disclosure within one surface*, not a chain of child plates, so they are not
+   a submenu either.
+   What this costs is that the launcher does not read as a menu, which is the
+   honest shape: a list of *everything installed* is a browser, and browsers
+   scroll and filter. What it buys is that the popup keeps the search and the
+   scroll it needs, while the genuine menu inside it — the context menu on one
+   of its rows (`MenuSubject::Entry`) — is the desktop's chain like every other,
+   migrated in M3.4.
+
+4. **What "80% opacity and 50% blur" means in the theme** (binds M5). The
+   requirement names two figures and two reference surfaces, and they disagree:
+   the program-library popup and the Switchboard capsule's menu are drawn at
+   `CHROME_ALPHA` = 179 (**70%**) over `chrome_backdrop_blur` = **7 logical
+   pixels**. So either the figures are a description of that existing look, or
+   they are new values — and the difference is not a detail, because
+   `chrome_alpha` and `chrome_backdrop_blur` are **shared by every floating
+   surface**: changing them re-skins the bar, the library popup, the
+   notification popover, the Switchboard readout and every control plate
+   standing on them, including the two surfaces the requirement cites as
+   already right.
+   - **Reading A — match the reference surfaces.** Menus adopt the existing
+     shared values; no theme constant moves and nothing else on the desktop
+     changes appearance. The figures are read as the owner's description of the
+     look, not as literals.
+   - **Reading B — the figures are literal.** `CHROME_ALPHA` becomes 204
+     (80%) and the blur becomes half the wire ceiling, 32 logical pixels — a
+     four-and-a-half-fold increase in blur radius. Both are shared, so this is
+     a deliberate re-skin of all floating chrome, and it wants a look at the
+     cost: the blur is a separable box blur whose cost is proportional to the
+     blurred *area* rather than the radius, but a wider radius still widens the
+     window-sum build at each backdrop's edges, and the physical radius scales
+     with the desktop's UI scale.
+   - **Reading C — menus alone take new figures.** Rejected unless the owner
+     asks for it: a second alpha and a second blur for menus would be two more
+     theme values saying what `chrome_alpha` and `chrome_backdrop_blur` already
+     say, and the requirement's own wording ("as per the program library list")
+     asks for menus to match those surfaces rather than to differ from them.
+   **Stop and ask before implementing** (§15.7): every reading changes what is
+   touched, and B changes how the whole desktop looks.
 
 ---
 
@@ -767,8 +867,8 @@ than the plate.
   in the desktop — the apps' and the desktop's own — comes from the one
   service.
 - Every plate has a title band and drags by it; submenus open on arrival
-  with no timer; an attached window attaches, detaches on a click of its
-  row, and cannot be a submenu that does.
+  with no timer; the information panel hangs where a submenu would and dies
+  with the chain.
 - The info panel's text is the session's, from the signed manifest.
 - Every migrated surface's menu code is **deleted**, not left beside the new
   path (§2.14), and no second menu shell or title-bar control exists

@@ -48,8 +48,8 @@ pub use desktop::Desktop;
 #[cfg(feature = "rt")]
 pub use frames::WindowFrames;
 pub use server::{
-    client_frame_budget_bytes, CallerIdentity, EventSink, MenuPanelSpec, PopupSpec, WindowHost,
-    WindowServer, WindowSizing, WINDOW_REPLY_MAX,
+    client_frame_budget_bytes, CallerIdentity, EventSink, PopupSpec, WindowHost, WindowServer,
+    WindowSizing, WINDOW_REPLY_MAX,
 };
 
 #[cfg(test)]

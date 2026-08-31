@@ -34,6 +34,11 @@ tairix-input = { path = "../input", version = "=0.0.0" }
 # buffer through the shared volatile wipe, because a plain `fill(0)` before
 # the bytes are freed is a dead store an optimiser may delete outright.
 tairix-util = { path = "../util", version = "=0.0.0" }
+# The menu row id an outcome names, and the bounded wire menu a client's
+# declaration crosses in: `ChainModel` is the one model every menu the desktop
+# renders is built as, and the wire model decodes into it here rather than in
+# whichever process happens to hold the chain.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
 
 # The controls' host tests draw text, so they inject the shared solid test
 # transport via the `test-util` feature (never a running `fontd`).

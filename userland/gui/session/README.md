@@ -342,19 +342,19 @@ surface's own colour role at the palette's `chrome_alpha` — which reads as
 frosted glass only over a blurred backdrop, so the two
 are one decision and are taken from the theme at the one place a surface is
 placed — never after, where a window would show for a frame wearing the
-frosting of whatever was placed before it. The pinboard's own backdrop menu
-goes through the same placement and asks for none: it covers what it opens
-over. The bar itself now floats clear of the screen edges it faces
+frosting of whatever was placed before it. A **menu plate** goes through the
+same placement and asks for none: it covers what it opens over. The bar itself now floats clear of the screen edges it faces
 (`Metrics::taskbar_margin`), so all four of its corners round against
 wallpaper; `DesktopShell::work_area` still keeps a maximized window out of the
 whole band from that screen edge to the bar's inner side, gap included.
 
 `present` repaints **only the surfaces the taskbar latched as changed**
 (`TaskbarRepaint`, drained once by `DesktopShell::present`). The bar, the
-library popup, the context menu, the notification popover, and the capsule's
-instrument readout each cost a full re-render and a full window damage
-rectangle, so a pointer crossing one small open menu repaints that menu and
-leaves the other four exactly as they are. Two things override an empty
+library popup, the hover window picker, the notification popover, and the
+capsule's instrument readout each cost a full re-render and a full window damage
+rectangle, so a pointer crossing one small open popover repaints that popover
+and leaves the others exactly as they are. A menu is not among them: it is the
+seat's own chain, reconciled by `present_menu_chain`. Two things override an empty
 latch: a surface that has no window yet is always painted, so the first frame
 puts everything on screen; and a change of desktop density repaints
 everything, because the scale belongs to the output rather than to the
@@ -395,11 +395,13 @@ clock of its own.
 Every pointer event resolves, retargets, then delivers — and there is no fourth
 step:
 
-- **a modal surface of the bar's holds the pointer**: while its context menu or
-  its program-library popup is open, every pointer event and every key routes
-  to the taskbar wherever the pointer is. That is an active grab, and it is
-  what makes a press anywhere a click-away dismissal without also acting on
-  what it landed on;
+- **the seat's menu chain holds the pointer**: while a menu is up every pointer
+  event and every key routes into the chain wherever the pointer is, and a press
+  outside it dismisses and is consumed;
+- **the bar's program-library popup holds the pointer**: while it is open every
+  pointer event and every key routes to the taskbar wherever the pointer is.
+  That is an active grab, and it is what makes a press anywhere a click-away
+  dismissal without also acting on what it landed on;
 - **a held button holds the pointer**: the first press takes an implicit grab
   for the surface it landed on, and everything up to the release of the *last*
   button goes there — a window drag that runs under the bar keeps dragging, and
@@ -414,13 +416,13 @@ step:
   was. The taskbar drops its hover and closes the window picker; the window
   manager puts out the title-bar command the pointer was on;
 - **keys follow the keyboard, not the pointer**: they go to the window manager
-  unless a modal taskbar surface is open, so a pointer resting on the bar never
-  diverts a keystroke from the window being typed in;
+  unless the chain or the bar's popup is open, so a pointer resting on the bar
+  never diverts a keystroke from the window being typed in;
 - anything the holder did not act on is `SessionInputResponse::Ignored`.
 
 `yield_pointer` is the seam to the two modal surfaces the seat does *not*
-route — the screen lock and the pinboard's backdrop menu, both of which drain
-the seat's channels straight into themselves. A gesture in flight when one opens
+route — the screen lock and the menu chain, both of which drain the seat's
+channels straight into themselves. A gesture in flight when one opens
 ends with a release the seat is never given, so the drain says so: the gesture
 ends and both routers are told the pointer left. Without it the seat would hold
 a grab for a button that can never come up, and the bar would be unreachable for

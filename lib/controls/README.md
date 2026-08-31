@@ -105,6 +105,13 @@ The **command surfaces** are the menu, toolbar, tab strip, and combo box:
   Bead; current-row highlight distinct from a keyboard focus ring). The `Menu`
   owns Up/Down/Home/End/Right/Enter/Space/Escape and pointer hover/click, sizes
   itself (`preferred_width`/`preferred_height`), and emits a typed `MenuAction`.
+  It also carries `plate_rect` — the one rule that places a plate against a
+  `PlatePlacement` — and `ChainModel`, the one *model* every menu the desktop
+  renders is built as: a titled, parent-indexed list of `ChainRow`s, which a
+  desktop surface builds in process and an application's wire declaration
+  decodes into (`ChainModel::from_app_menu`). The model lives here rather than
+  with the chain that renders it because its clients are not all in the process
+  that owns the chain (`plans/NEW-MENUS.md` §1.6).
 - `toolbar` — `Toolbar` composes `IconButton`/`SplitButton` tools in `u16`
   groups (raised strip, group dividers, active-tool accent seam), routing
   pointer/keyboard input to the tools it owns and emitting a typed
@@ -419,8 +426,10 @@ control tracking a hover it does not draw — the report stands.
 dependencies; the drawn controls (`button`, `selector`, `value`, `text`, `menu`,
 `toolbar`, `tabs`, `combo`) depend only on other `lib/*`
 crates — `tairix-geometry`, `tairix-theme`, `tairix-raster`, `tairix-font`,
-`tairix-icon`, `tairix-input`, and `tairix-util` (the shared secret erase a
-masked text field discards its buffer through) — never on `kernel/*`,
+`tairix-icon`, `tairix-input`, `tairix-util` (the shared secret erase a masked
+text field discards its buffer through) and `tairix-abi` (the menu row id an
+outcome names, and the bounded wire menu `ChainModel` decodes) — never on
+`kernel/*`,
 `drivers/*`, or `userland/*`, so the crate stays a shared building block the
 desktop consumers depend on and never the reverse. The owning viewport maps the
 computed one-dimensional `ThumbSpan` onto a `tairix_geometry::Rect` for its

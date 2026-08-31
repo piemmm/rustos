@@ -46,16 +46,14 @@
 //! while the popup is open, so the focused window's keys are untouched
 //! otherwise.
 //!
-//! A secondary press opens the bar's one context surface
-//! ([`BarMenu`](crate::BarMenu)): on a running application's slot with the
-//! popup closed — showing the menu that *application* declared, or nothing
-//! at all when it declared none — on the clock, showing the clock's own
-//! menu, or on a program-library entry row inside
-//! the open popup. While
-//! the menu is open it is the top modal layer — the whole stream routes
-//! into it first, and a press outside its plate dismisses only the menu
-//! (one click does one thing), leaving whatever is beneath for the next
-//! click.
+//! A secondary press asks the desktop to open a menu
+//! ([`TaskbarResponse::OpenMenu`]): on a running application's slot with the
+//! popup closed — the menu that *application* declared, or nothing at all when
+//! it declared none — on the Switchboard capsule, on the clock, or on a
+//! program-library entry row inside the open popup. The bar draws no menu
+//! pixel: the seat's one chain places, draws, grabs and answers it, so while a
+//! menu is up no event reaches the bar at all
+//! (`plans/NEW-MENUS.md`).
 //!
 //! Resting the pointer on a slot whose application owns more than one window
 //! opens the [`WindowPicker`], which is a pointer surface and nothing else: it
@@ -98,15 +96,13 @@ use tairix_input::{InputEvent, PointerButton, PointerFocus};
 use tairix_proglib::EntryId;
 use tairix_theme::Appearance;
 
-use crate::clock_menu::ClockAction;
 use crate::layout::Hit;
 use crate::library::{LibraryRow, PopupOutcome};
-use crate::menu::{MenuChoice, MenuOutcome};
+use crate::menu::MenuRequest;
 use crate::picker::{
     PickerEntry, WindowPicker, PICKER_CLOSE_GRACE_NS, PICKER_MIN_WINDOWS, PICKER_OPEN_DELAY_NS,
 };
 use crate::repaint::TaskbarRepaint;
-use crate::system::{self, SystemAction};
 use crate::taskbar::Taskbar;
 use crate::tasks::TaskId;
 
@@ -167,6 +163,12 @@ pub enum TaskbarResponse {
         /// The application's strip index.
         app: usize,
     },
+    /// A secondary press asked the desktop to open one of the bar's own
+    /// menus. The embedder opens it as the seat's one menu chain and answers
+    /// the chosen row back through
+    /// [`Taskbar::menu_chosen`](crate::Taskbar::menu_chosen); the bar draws no
+    /// menu pixel and holds no menu state.
+    OpenMenu(MenuRequest),
     /// A row of the menu an application declared was chosen. The embedder
     /// relays the application's own row id back to it; the bar never
     /// interprets one.
@@ -392,12 +394,11 @@ impl TaskbarInput {
     /// time-driven Switchboard capsule gesture against the monotonic time
     /// `now_ns`, returning what changed.
     ///
-    /// With the popup and menu closed only a primary or secondary press
-    /// acts; pointer motion updates the tracked position, the bar's hover
-    /// feedback, and the hover window picker, and every other event is
-    /// [`TaskbarResponse::Ignored`]. With the context menu open the whole
-    /// stream routes into it; with the popup open it routes there (see the
-    /// [module docs](self)).
+    /// With the popup closed only a primary or secondary press acts; pointer
+    /// motion updates the tracked position, the bar's hover feedback, and the
+    /// hover window picker, and every other event is
+    /// [`TaskbarResponse::Ignored`]. With the popup open the whole stream
+    /// routes there (see the [module docs](self)).
     pub fn handle(
         &mut self,
         event: InputEvent,
@@ -418,11 +419,12 @@ impl TaskbarInput {
             if let Some(response) = self.continue_capsule_press(taskbar, scale, now_ns) {
                 return response;
             }
-            // The hover picker follows the pointer while no modal surface is
-            // up: a modal menu or popup owns the whole stream, and opening a
+            // The hover picker follows the pointer while the popup is
+            // closed: a modal popup owns the whole stream, and opening a
             // picker underneath it would show a surface the user cannot
-            // reach.
-            if !taskbar.menu().is_open() && !taskbar.library().is_open() {
+            // reach. A menu never reaches here at all — the desktop's chain
+            // holds the seat while one is up.
+            if !taskbar.library().is_open() {
                 // A grid drag in progress belongs to the scrollbar, not to
                 // the cell the pointer happens to be over.
                 if taskbar.scroll_picker(&event, self.pointer, scale, &mut damage) {
@@ -432,9 +434,6 @@ impl TaskbarInput {
                     return response;
                 }
             }
-        }
-        if taskbar.menu().is_open() {
-            return self.route_to_menu(event, taskbar, scale, &mut damage);
         }
         if taskbar.library().is_open() {
             return self.route_to_popup(event, taskbar, scale, &mut damage);
@@ -726,26 +725,29 @@ impl TaskbarInput {
     }
 
     /// Handle a secondary-button press at the current pointer position with
-    /// the popup and menu closed: a press on a running application's slot
-    /// opens the menu that application declared (and nothing at all when it
-    /// declared none), a press on the Switchboard capsule opens the
-    /// desktop's system quick-actions menu; anywhere else on the bar is
-    /// claimed and does nothing.
+    /// the popup closed: a press on a running application's slot asks for the
+    /// menu that application declared (and for nothing at all when it declared
+    /// none), a press on the Switchboard capsule asks for the desktop's system
+    /// quick actions, a press on the clock asks for its menu; anywhere else on
+    /// the bar is claimed and does nothing.
     ///
-    /// Opening a menu acts on nothing by itself — the response is always
-    /// `Ignored`, and only choosing a row reports an outcome.
+    /// The bar draws no menu: it hands the embedder a model and an anchor, and
+    /// the desktop's one chain places, draws, grabs and answers it.
     fn press_secondary(&mut self, taskbar: &mut Taskbar, scale: Scale) -> TaskbarResponse {
         let layout = taskbar.layout(scale);
-        match layout.hit_test(self.pointer) {
+        let asked = match layout.hit_test(self.pointer) {
             Some(Hit::App(index)) => {
                 let anchor = layout.apps.get(index).copied().unwrap_or(Rect::EMPTY);
-                taskbar.open_app_menu(index, anchor);
+                taskbar.app_menu(index, anchor, scale)
             }
-            Some(Hit::Switchboard) => taskbar.open_system_menu(layout.switchboard),
-            Some(Hit::Clock) => taskbar.open_clock_menu(layout.clock),
-            _ => {}
+            Some(Hit::Switchboard) => Some(taskbar.system_menu(layout.switchboard, scale)),
+            Some(Hit::Clock) => Some(taskbar.clock_menu(layout.clock, scale)),
+            _ => None,
+        };
+        match asked {
+            Some(request) => TaskbarResponse::OpenMenu(request),
+            None => TaskbarResponse::Ignored,
         }
-        TaskbarResponse::Ignored
     }
 
     /// Follow the pointer with the hover window picker, arming or dropping
@@ -968,113 +970,6 @@ impl TaskbarInput {
         TaskbarResponse::AppRaise { app: index }
     }
 
-    /// Route one event into the open context menu (the top modal layer).
-    fn route_to_menu(
-        &mut self,
-        event: InputEvent,
-        taskbar: &mut Taskbar,
-        scale: Scale,
-        damage: &mut Region,
-    ) -> TaskbarResponse {
-        let Some(layout) = taskbar.menu_layout(scale) else {
-            // An open menu always lays out; a missing layout means the menu
-            // just closed under us — drop the claim rather than guess.
-            taskbar.close_menu();
-            return TaskbarResponse::Ignored;
-        };
-        let theme = taskbar.theme().clone();
-        let outcome = match event {
-            InputEvent::KeyPressed { key, .. } => taskbar
-                .menu_routing_mut()
-                .route_key(key, &layout, scale, &theme, damage),
-            InputEvent::KeyReleased { .. } => MenuOutcome::Ignored,
-            ref pointer_event => taskbar.menu_routing_mut().route_pointer(
-                pointer_event,
-                self.pointer,
-                &layout,
-                scale,
-                &theme,
-                damage,
-            ),
-        };
-        match outcome {
-            MenuOutcome::Ignored => TaskbarResponse::Ignored,
-            MenuOutcome::Changed | MenuOutcome::Dismissed => {
-                // The menu is its own overlay surface: a highlight move, a
-                // fold, or a dismiss changes only what it draws.
-                taskbar.request_repaint(TaskbarRepaint::MENU);
-                TaskbarResponse::Ignored
-            }
-            MenuOutcome::Choose(choice) => {
-                taskbar.request_repaint(TaskbarRepaint::MENU);
-                Self::apply_choice(taskbar, choice)
-            }
-        }
-    }
-
-    /// Translate a chosen menu row into the typed response the embedder
-    /// resolves.
-    fn apply_choice(taskbar: &mut Taskbar, choice: MenuChoice) -> TaskbarResponse {
-        match choice {
-            MenuChoice::AppMenu { index, item } => {
-                TaskbarResponse::AppMenuChosen { app: index, item }
-            }
-            MenuChoice::OpenEntry(entry) => {
-                // Launching from the entry menu behaves exactly like
-                // launching from the row itself: the popup closes.
-                taskbar.close_library();
-                TaskbarResponse::LibraryLaunch { entry }
-            }
-            MenuChoice::ShortcutEntry(entry) => {
-                // The shortcut appears on the desktop, and the popup is
-                // modal: leaving it up would stand between the user and the
-                // icon they just asked for.
-                taskbar.close_library();
-                TaskbarResponse::CreateDesktopShortcut { entry }
-            }
-            MenuChoice::System(action) => Self::apply_system_action(action),
-            MenuChoice::Clock(action) => match action {
-                ClockAction::SetDateTime => TaskbarResponse::SetDateTime,
-            },
-        }
-    }
-
-    /// Translate a chosen system quick action into the typed response the
-    /// session applies under its own authority.
-    ///
-    /// The two inspection rows reuse the capsule's own Switchboard-opening
-    /// response and the launch row reuses the bar's one launch response, so
-    /// no command here introduces a second path to a destination the bar
-    /// already reaches.
-    fn apply_system_action(action: SystemAction) -> TaskbarResponse {
-        match action {
-            SystemAction::About => TaskbarResponse::OpenSwitchboard {
-                section: CommandSection::System,
-            },
-            SystemAction::SystemMonitor => TaskbarResponse::OpenSwitchboard {
-                section: CommandSection::Tasks,
-            },
-            // The row is only actionable when this identifier resolved
-            // against the catalog, so a refusal here cannot happen through
-            // the menu; reporting nothing rather than a launch that must
-            // fail is still the honest answer if it ever did.
-            SystemAction::TaskShell => match EntryId::new(system::TASK_SHELL_BUNDLE) {
-                Ok(entry) => TaskbarResponse::LibraryLaunch { entry },
-                Err(_) => TaskbarResponse::Ignored,
-            },
-            SystemAction::Appearance(appearance) => TaskbarResponse::SetAppearance { appearance },
-            SystemAction::Lock => TaskbarResponse::LockSession,
-            SystemAction::SwitchUser => TaskbarResponse::SwitchUser,
-            SystemAction::LogOut => TaskbarResponse::LogOut,
-            SystemAction::Restart => TaskbarResponse::ConfirmSystemPower {
-                action: PowerAction::Restart,
-            },
-            SystemAction::ShutDown => TaskbarResponse::ConfirmSystemPower {
-                action: PowerAction::PowerOff,
-            },
-        }
-    }
-
     /// Route one event into the open program-library popup.
     ///
     /// A primary press on the Library button toggles the popup shut before
@@ -1104,8 +999,7 @@ impl TaskbarInput {
             }
         ) {
             if let Some((entry, anchor)) = Self::entry_row_at(taskbar, self.pointer, scale) {
-                taskbar.open_entry_menu(entry, anchor);
-                return TaskbarResponse::Ignored;
+                return TaskbarResponse::OpenMenu(taskbar.entry_menu(entry, anchor, scale));
             }
         }
 

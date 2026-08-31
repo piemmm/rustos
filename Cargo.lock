@@ -825,6 +825,7 @@ dependencies = [
 name = "tairix-controls"
 version = "0.0.0"
 dependencies = [
+ "tairix-abi",
  "tairix-font",
  "tairix-geometry",
  "tairix-icon",

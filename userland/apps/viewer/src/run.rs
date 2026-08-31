@@ -706,7 +706,6 @@ mod program {
             | WindowEvent::AppBarDefault
             | WindowEvent::AppBarMenu { .. }
             | WindowEvent::MenuClosed { .. }
-            | WindowEvent::MenuPanelRequested { .. }
             | WindowEvent::DesktopChanged { .. }
             | WindowEvent::Key { .. }
             | WindowEvent::Focus { .. }

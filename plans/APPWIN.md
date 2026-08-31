@@ -360,8 +360,8 @@ Done. What now holds:
   are physical pixels from the **parent's client origin** and any signed
   value is legitimate. `ShellWindowHost::popup_opened` adds them to the
   parent's live client origin and clamps the whole popup on screen with
-  the shared `tairix_geometry::Rect::clamped_onto` — hoisted out of the
-  taskbar's `BarMenu::layout`, which now calls it, so there is one
+  the shared `tairix_geometry::Rect::clamped_onto`, which the one plate
+  placement rule (`tairix_controls::plate_rect`) also ends with, so there is one
   placement clamp.
 - **Engine rules** (`lib/window`): no kernel caller; the parent must be a
   live window the attested caller owns (foreign *and* unknown parents both

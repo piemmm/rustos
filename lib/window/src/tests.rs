@@ -19,7 +19,7 @@ use tairix_abi::reply::decode_status_reply;
 use tairix_abi::window_ipc::{
     AppBar, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow, AppMenuRowView,
     MenuAnchor, MenuOutcome, MenuRefusal, PointerAction, WindowEvent, WindowRequest,
-    APP_MENU_PANEL_MAX_PX, WINDOW_TITLE_MAX,
+    WINDOW_TITLE_MAX,
 };
 use tairix_abi::Errno;
 use tairix_display::{FrameRegion, ShmMapper};
@@ -31,8 +31,8 @@ use crate::client::{
 };
 use crate::desktop::Desktop;
 use crate::server::{
-    client_frame_budget_bytes, CallerIdentity, EventSink, MenuPanelSpec, PopupSpec, WindowHost,
-    WindowServer, WindowSizing, WINDOW_REPLY_MAX,
+    client_frame_budget_bytes, CallerIdentity, EventSink, PopupSpec, WindowHost, WindowServer,
+    WindowSizing, WINDOW_REPLY_MAX,
 };
 
 /// 4×3 BGRA test surface, stride == one scanline.
@@ -143,7 +143,6 @@ struct RecordingHost {
     closed: Vec<u64>,
     picks: Vec<u64>,
     menu_opens: Vec<(u64, u64, MenuAnchor, AppMenu)>,
-    menu_panels: Vec<(u64, u64, u64, AppMenuItemId, DisplayMode)>,
     blur_sets: Vec<(u64, u16)>,
     retitled: Vec<(u64, String)>,
     app_bars: Vec<(ProcId, AppBar)>,
@@ -155,9 +154,6 @@ struct RecordingHost {
     refuse_retitle: Option<Errno>,
     refuse_pick: Option<Errno>,
     refuse_menu_open: Option<Errno>,
-    /// What the host answers a panel with — the refusal a session gives
-    /// when the pointer has already left the row it would hang from.
-    refuse_menu_panel: Option<Errno>,
     /// The desktop this host composites, or the refusal a host with no
     /// screen to describe answers with.
     desktop: Result<DesktopInfo, Errno>,
@@ -173,7 +169,6 @@ impl Default for RecordingHost {
             closed: Vec::new(),
             picks: Vec::new(),
             menu_opens: Vec::new(),
-            menu_panels: Vec::new(),
             blur_sets: Vec::new(),
             retitled: Vec::new(),
             app_bars: Vec::new(),
@@ -185,7 +180,6 @@ impl Default for RecordingHost {
             refuse_retitle: None,
             refuse_pick: None,
             refuse_menu_open: None,
-            refuse_menu_panel: None,
             desktop: Ok(sample_desktop()),
         }
     }
@@ -286,22 +280,6 @@ impl WindowHost for RecordingHost {
         Ok(())
     }
 
-    fn menu_panel_opened(
-        &mut self,
-        window_id: u64,
-        owner_window_id: u64,
-        open_id: u64,
-        row: AppMenuItemId,
-        surface: &DisplayMode,
-    ) -> Result<(), Errno> {
-        if let Some(err) = self.refuse_menu_panel {
-            return Err(err);
-        }
-        self.menu_panels
-            .push((window_id, owner_window_id, open_id, row, *surface));
-        Ok(())
-    }
-
     fn app_bar_declared(&mut self, owner: ProcId, bar: &AppBar) -> Result<(), Errno> {
         if let Some(err) = self.refuse_app_bar {
             return Err(err);
@@ -368,61 +346,6 @@ impl WindowHost for MinimalHost {
     }
 }
 
-/// A host that composes a menu service but implements only the mandatory
-/// bridge methods beside it, so the attached-window default runs untouched.
-struct MenuOnlyHost;
-
-impl WindowHost for MenuOnlyHost {
-    fn window_opened(
-        &mut self,
-        _owner: ProcId,
-        _window_id: u64,
-        _surface: &DisplayMode,
-        _title: &str,
-        _sizing: WindowSizing,
-    ) -> Result<(), Errno> {
-        Ok(())
-    }
-
-    fn window_presented(
-        &mut self,
-        _window_id: u64,
-        _surface: &DisplayMode,
-        _frame: &[u8],
-        _damage: DamageRect,
-    ) -> Result<(), Errno> {
-        Ok(())
-    }
-
-    fn window_resized(&mut self, _window_id: u64, _surface: &DisplayMode) -> Result<(), Errno> {
-        Ok(())
-    }
-
-    fn window_retitled(&mut self, _window_id: u64, _title: &str) -> Result<(), Errno> {
-        Ok(())
-    }
-
-    fn window_closed(&mut self, _window_id: u64) {}
-
-    fn pick_requested(&mut self, _window_id: u64) -> Result<(), Errno> {
-        Ok(())
-    }
-
-    fn menu_open_requested(
-        &mut self,
-        _window_id: u64,
-        _open_id: u64,
-        _anchor: MenuAnchor,
-        _menu: &AppMenu,
-    ) -> Result<(), Errno> {
-        Ok(())
-    }
-
-    fn desktop(&mut self) -> Result<DesktopInfo, Errno> {
-        Ok(sample_desktop())
-    }
-}
-
 /// A sink recording each delivered event by endpoint, doubling as the
 /// backing queue the client-side event source pops.
 #[derive(Default)]
@@ -479,7 +402,7 @@ fn deliver(
     event: &WindowEvent,
 ) -> Result<(), Errno> {
     let inner = &mut *loopback.borrow_mut();
-    inner.server.deliver_event(&mut inner.host, sink, event)
+    inner.server.deliver_event(sink, event)
 }
 
 /// One request encoded exactly as a client sends it: a frame of its own
@@ -637,7 +560,6 @@ fn a_desktop_change_reaches_every_live_window() {
             inner
                 .server
                 .deliver_event(
-                    &mut inner.host,
                     &mut sink,
                     &WindowEvent::DesktopChanged {
                         window_id,
@@ -1463,7 +1385,7 @@ fn events_reach_the_owning_endpoint_and_decode_through_the_client() {
         for event in &events {
             inner
                 .server
-                .deliver_event(&mut inner.host, &mut sink, event)
+                .deliver_event(&mut sink, event)
                 .expect("routed");
         }
     }
@@ -1570,18 +1492,15 @@ fn event_routing_fails_closed() {
     let inner = &mut *loopback.borrow_mut();
     // An unknown window routes nowhere.
     assert_eq!(
-        inner.server.deliver_event(
-            &mut inner.host,
-            &mut sink,
-            &WindowEvent::CloseRequested { window_id: 99 }
-        ),
+        inner
+            .server
+            .deliver_event(&mut sink, &WindowEvent::CloseRequested { window_id: 99 }),
         Err(Errno::NotFound)
     );
     // A pointer position outside the window's surface is a routing bug,
     // refused rather than delivered.
     assert_eq!(
         inner.server.deliver_event(
-            &mut inner.host,
             &mut sink,
             &WindowEvent::Pointer {
                 window_id: window,
@@ -1597,7 +1516,6 @@ fn event_routing_fails_closed() {
     // rather than delivered — for both conclusions.
     assert_eq!(
         inner.server.deliver_event(
-            &mut inner.host,
             &mut sink,
             &WindowEvent::FilePicked {
                 window_id: window,
@@ -1607,11 +1525,9 @@ fn event_routing_fails_closed() {
         Err(Errno::OutOfRange)
     );
     assert_eq!(
-        inner.server.deliver_event(
-            &mut inner.host,
-            &mut sink,
-            &WindowEvent::PickCancelled { window_id: window }
-        ),
+        inner
+            .server
+            .deliver_event(&mut sink, &WindowEvent::PickCancelled { window_id: window }),
         Err(Errno::OutOfRange)
     );
     assert!(sink.delivered.is_empty());
@@ -1799,7 +1715,7 @@ fn backdrop_blur_defaults_to_an_accepted_no_op() {
 }
 
 /// The menu a test application opens for one of its windows: a titled root
-/// plate with one chooseable row and one panel row.
+/// plate with one chooseable row and one submenu row.
 fn sample_open_menu() -> AppMenu {
     let mut menu = AppMenu::titled(AppMenuLabel::new("Edit").expect("a valid title"));
     menu.push(AppMenuRow::Item(AppMenuItem::new(
@@ -1807,12 +1723,11 @@ fn sample_open_menu() -> AppMenu {
         AppMenuLabel::new("Copy").expect("a valid label"),
     )))
     .expect("room");
-    menu.push(AppMenuRow::Panel {
-        id: panel_row(),
-        label: AppMenuLabel::new("Preview").expect("a valid label"),
+    menu.push(AppMenuRow::Submenu {
+        label: AppMenuLabel::new("Paste Special").expect("a valid label"),
         enabled: true,
     })
-    .expect("room for a panel row");
+    .expect("room for a submenu row");
     menu
 }
 
@@ -1862,8 +1777,8 @@ fn a_menu_open_is_owner_bound_single_pending_and_answered_exactly_once() {
         assert_eq!(told_menu.len(), 2);
         assert!(told_menu.rows().any(|(row, _)| matches!(
             row,
-            AppMenuRowView::Panel { id, label, enabled }
-                if id == panel_row() && label == "Preview" && enabled
+            AppMenuRowView::Submenu { label, enabled }
+                if label == "Paste Special" && enabled
         )));
     }
 
@@ -2110,426 +2025,6 @@ fn a_host_with_no_menu_service_refuses_an_open() {
     assert_eq!(
         tairix_abi::window_ipc::decode_minted_id_reply(&reply[..len]),
         Err(Errno::NotSupported)
-    );
-}
-
-/// The panel row's id in [`sample_open_menu`], and the surface a test
-/// application offers for it.
-const PANEL_ROW: u16 = 2;
-
-/// The row an arrival names and an attached window hangs from.
-fn panel_row() -> AppMenuItemId {
-    AppMenuItemId::new(PANEL_ROW).expect("a valid id")
-}
-
-/// A one-frame SURFACE-shaped attached window for `open`'s panel row,
-/// granted as `shm` and routing its own events to `events`.
-fn panel_spec(window: u64, open: u64, shm: u64, events: u64) -> MenuPanelSpec {
-    MenuPanelSpec {
-        window_id: window,
-        open_id: open,
-        row: panel_row(),
-        shm_handle: shm,
-        event_endpoint: events,
-        frame_count: 1,
-        surface: SURFACE,
-    }
-}
-
-/// A window with a chain up, ready to hang a panel from: the window, and the
-/// open id its panel requests name.
-fn open_chain(client: &mut WindowClient<Rc<RefCell<Loopback>>>) -> (u64, u64) {
-    let window = create_id(client, 7, EVENTS_A, 1, "a").expect("a");
-    let open = client
-        .open_menu(window, sample_menu_anchor(), &sample_open_menu())
-        .expect("the open is accepted");
-    (window, open)
-}
-
-/// An attached window hangs only from a live chain the caller holds, and
-/// reaches the host with everything it needs to place it.
-#[test]
-fn an_attached_window_hangs_only_from_a_chain_its_caller_holds() {
-    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
-    let (window, open) = open_chain(&mut client);
-
-    // An open the window does not hold answers exactly like a chain that
-    // never existed, and the host is never told.
-    assert_eq!(
-        client.create_menu_panel(&panel_spec(window, open + 1, 8, EVENTS_A)),
-        Err(Errno::NotFound)
-    );
-    assert!(loopback.borrow().host.menu_panels.is_empty());
-
-    // Nor does another client's window lend its chain, whatever open it
-    // names.
-    loopback.borrow_mut().ticket = TICKET_B;
-    assert_eq!(
-        client.create_menu_panel(&panel_spec(window, open, 8, EVENTS_A)),
-        Err(Errno::NotFound)
-    );
-    assert!(loopback.borrow().host.menu_panels.is_empty());
-    loopback.borrow_mut().ticket = TICKET_A;
-
-    let (panel, _) = client
-        .create_menu_panel(&panel_spec(window, open, 8, EVENTS_A))
-        .expect("the chain's own owner hangs one");
-    assert_ne!(panel, window);
-    {
-        let host = &loopback.borrow().host;
-        assert_eq!(host.menu_panels.len(), 1);
-        assert_eq!(
-            host.menu_panels[0],
-            (panel, window, open, panel_row(), SURFACE)
-        );
-    }
-
-    // It is an ordinary window of the caller's from there on.
-    client.present(panel, 0, full_damage()).expect("presented");
-    assert_eq!(
-        loopback.borrow().host.presented.last().expect("it").0,
-        panel
-    );
-}
-
-/// A surface the application draws too slowly is refused, not shown — and a
-/// refusal leaves no window, no mapping, and no id spent.
-///
-/// The chain never waited for it, so a late answer is the ordinary case
-/// rather than a fault: the session, which alone knows where the pointer
-/// is, refuses one for a row the user has left.
-#[test]
-fn a_late_attached_window_is_refused_and_records_nothing() {
-    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
-    let (window, open) = open_chain(&mut client);
-    let before = loopback.borrow().server.window_count();
-
-    loopback.borrow_mut().host.refuse_menu_panel = Some(Errno::NotFound);
-    assert_eq!(
-        client.create_menu_panel(&panel_spec(window, open, 8, EVENTS_A)),
-        Err(Errno::NotFound)
-    );
-    assert_eq!(loopback.borrow().server.window_count(), before);
-
-    // And the refusal spent no window id: the next accepted panel takes the
-    // one the refused attempt would have had.
-    loopback.borrow_mut().host.refuse_menu_panel = None;
-    let (panel, _) = client
-        .create_menu_panel(&panel_spec(window, open, 8, EVENTS_A))
-        .expect("a panel in time is accepted");
-    assert_eq!(panel, window + 1, "a refused panel consumes nothing");
-}
-
-/// A surface for a chain that has already closed cannot be hung at all: the
-/// open is gone, so the engine refuses without asking the host where the
-/// pointer is.
-///
-/// That is the worst late case — the application answering after the whole
-/// gesture ended — and it is unrepresentable rather than merely refused.
-#[test]
-fn an_answered_chain_can_take_no_attached_window() {
-    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
-    let (window, open) = open_chain(&mut client);
-
-    let mut sink = QueueSink::default();
-    deliver(
-        &loopback,
-        &mut sink,
-        &WindowEvent::MenuClosed {
-            window_id: window,
-            open_id: open,
-            outcome: MenuOutcome::Dismissed,
-        },
-    )
-    .expect("the chain is answered");
-
-    assert_eq!(
-        client.create_menu_panel(&panel_spec(window, open, 8, EVENTS_A)),
-        Err(Errno::NotFound)
-    );
-    assert!(loopback.borrow().host.menu_panels.is_empty());
-}
-
-/// One attached window hangs per chain: a chain's deepest child is a plate
-/// or a panel, never both, so a second is refused until the service closes
-/// the first.
-#[test]
-fn one_attached_window_hangs_per_chain() {
-    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN), (9, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
-    let (window, open) = open_chain(&mut client);
-    let (panel, _) = client
-        .create_menu_panel(&panel_spec(window, open, 8, EVENTS_A))
-        .expect("the first panel");
-
-    let mut second = panel_spec(window, open, 9, EVENTS_A);
-    second.row = AppMenuItemId::new(1).expect("a valid id");
-    assert_eq!(client.create_menu_panel(&second), Err(Errno::AlreadyExists));
-    assert_eq!(loopback.borrow().host.menu_panels.len(), 1);
-
-    // The pointer settles on another row of the panel's parent plate: the
-    // chain lives on, its panel does not, and the slot frees.
-    {
-        let inner = &mut *loopback.borrow_mut();
-        inner.server.close_menu_panel(&mut inner.host, open);
-        assert_eq!(inner.host.closed, alloc::vec![panel]);
-    }
-    client
-        .create_menu_panel(&second)
-        .expect("the freed slot takes another");
-
-    // Closing a chain that has no panel is a no-op, not a refusal.
-    let inner = &mut *loopback.borrow_mut();
-    inner.server.close_menu_panel(&mut inner.host, open + 500);
-    assert_eq!(inner.host.closed.len(), 1);
-}
-
-/// A chain that closes takes its attached window with it — and does so when
-/// the outcome is *decided*, not when the application receives it, so a
-/// client that stops draining its mailbox cannot keep the surface up.
-#[test]
-fn a_closing_chain_takes_its_attached_window_with_it() {
-    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
-    let (window, open) = open_chain(&mut client);
-    let (panel, _) = client
-        .create_menu_panel(&panel_spec(window, open, 8, EVENTS_A))
-        .expect("a panel");
-
-    let dismissed = WindowEvent::MenuClosed {
-        window_id: window,
-        open_id: open,
-        outcome: MenuOutcome::Dismissed,
-    };
-    assert_eq!(
-        deliver(&loopback, &mut FullSink, &dismissed),
-        Err(Errno::WouldBlock),
-        "a full mailbox is relayed, not swallowed"
-    );
-    assert_eq!(
-        loopback.borrow().host.closed,
-        alloc::vec![panel],
-        "the surface goes with the chain the session already closed"
-    );
-    assert_eq!(
-        client.present(panel, 0, full_damage()),
-        Err(Errno::NotFound)
-    );
-
-    // The outcome is still owed, and answering it a second time settles
-    // nothing further.
-    let mut sink = QueueSink::default();
-    deliver(&loopback, &mut sink, &dismissed).expect("an accepted outcome answers it");
-    assert_eq!(loopback.borrow().host.closed, alloc::vec![panel]);
-}
-
-/// Choosing a panel row **detaches** its window: the surface becomes an
-/// ordinary top-level window, so a later close of the window whose chain it
-/// hung on leaves it standing.
-#[test]
-fn choosing_a_panel_row_detaches_its_window() {
-    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
-    let (window, open) = open_chain(&mut client);
-    let (panel, _) = client
-        .create_menu_panel(&panel_spec(window, open, 8, EVENTS_A))
-        .expect("a panel");
-
-    let mut sink = QueueSink::default();
-    deliver(
-        &loopback,
-        &mut sink,
-        &WindowEvent::MenuClosed {
-            window_id: window,
-            open_id: open,
-            outcome: MenuOutcome::Chosen(panel_row()),
-        },
-    )
-    .expect("the choice is delivered");
-    assert!(
-        loopback.borrow().host.closed.is_empty(),
-        "the chosen row's surface survives its chain"
-    );
-    client
-        .present(panel, 0, full_damage())
-        .expect("a detached window presents like any other");
-
-    // No longer chain state: closing the window it hung from leaves it.
-    client.close(window).expect("the owner window closes");
-    assert_eq!(loopback.borrow().host.closed, alloc::vec![window]);
-    client
-        .present(panel, 0, full_damage())
-        .expect("and it is still the caller's own window");
-}
-
-/// An arrival names the window's own live open, and — unlike an outcome —
-/// leaves it live: the chain is still open when the application answers.
-#[test]
-fn an_arrival_names_a_live_open_and_does_not_answer_it() {
-    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
-    let (window, open) = open_chain(&mut client);
-
-    let mut sink = QueueSink::default();
-    assert_eq!(
-        deliver(
-            &loopback,
-            &mut sink,
-            &WindowEvent::MenuPanelRequested {
-                window_id: window,
-                open_id: open + 1,
-                row: panel_row(),
-            }
-        ),
-        Err(Errno::OutOfRange),
-        "an arrival for an open the window does not hold is a routing bug"
-    );
-    assert!(sink.delivered.is_empty());
-
-    let arrival = WindowEvent::MenuPanelRequested {
-        window_id: window,
-        open_id: open,
-        row: panel_row(),
-    };
-    deliver(&loopback, &mut sink, &arrival).expect("the arrival reaches the owner");
-    // Arriving on a second panel row of the same chain is not a second
-    // answer, so it delivers too — and the chain is still open, so the
-    // application can still hang a surface from it.
-    deliver(&loopback, &mut sink, &arrival).expect("the open is still live");
-    assert_eq!(sink.delivered.len(), 2);
-    client
-        .create_menu_panel(&panel_spec(window, open, 8, EVENTS_A))
-        .expect("the chain still takes a panel");
-}
-
-/// A host whose chains hang no application surfaces refuses one rather than
-/// accepting a surface nothing will place.
-///
-/// The trait's own default, exercised through a host that composes a menu
-/// service but implements only the mandatory bridge methods beside it.
-#[test]
-fn a_host_that_hangs_no_surfaces_refuses_an_attached_window() {
-    let mapper = MockMapper::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
-    let mut server = WindowServer::new(mapper, SERVER, CLIENT_FRAME_MAX);
-    let mut host = MenuOnlyHost;
-    let mut identity = MockIdentity;
-    let mut reply = [0u8; WINDOW_REPLY_MAX];
-
-    let create = request_frame(&WindowRequest::Create {
-        shm_handle: 7,
-        event_endpoint: EVENTS_A,
-        frame_count: 1,
-        width_px: SURFACE.width_px,
-        height_px: SURFACE.height_px,
-        stride_bytes: SURFACE.stride_bytes,
-        format: SURFACE.format,
-        title: tairix_abi::window_ipc::WindowTitle::new("a").expect("valid title"),
-        sizing: WindowSizing::Fixed,
-    });
-    let len = server.serve(&mut host, &mut identity, TICKET_A, &create, &mut reply);
-    let (window, _) = tairix_abi::window_ipc::decode_create_reply(&reply[..len]).expect("created");
-
-    let open = request_frame(&WindowRequest::OpenMenu {
-        window_id: window,
-        anchor: sample_menu_anchor(),
-        menu: sample_open_menu(),
-    });
-    let len = server.serve(&mut host, &mut identity, TICKET_A, &open, &mut reply);
-    let open_id = tairix_abi::window_ipc::decode_minted_id_reply(&reply[..len])
-        .expect("the open is accepted");
-
-    let panel = request_frame(&WindowRequest::CreateMenuPanel {
-        window_id: window,
-        open_id,
-        row: panel_row(),
-        shm_handle: 8,
-        event_endpoint: EVENTS_A,
-        frame_count: 1,
-        width_px: SURFACE.width_px,
-        height_px: SURFACE.height_px,
-        stride_bytes: SURFACE.stride_bytes,
-        format: SURFACE.format,
-    });
-    let len = server.serve(&mut host, &mut identity, TICKET_A, &panel, &mut reply);
-    assert_eq!(
-        tairix_abi::window_ipc::decode_create_reply(&reply[..len]),
-        Err(Errno::NotSupported)
-    );
-    assert_eq!(server.window_count(), 1);
-}
-
-/// The client stops tracking an attached window the chain took with it, and
-/// keeps tracking the one it detached.
-///
-/// The session ends a panel with its chain rather than the app closing it, so
-/// without this the client would keep a record per gesture — unbounded growth
-/// on a list every present scans. `WindowEvents::wait` settles it by the same
-/// rule the desktop settles by.
-#[test]
-fn the_client_forgets_an_attached_window_its_chain_took() {
-    for (outcome, survives) in [
-        (MenuOutcome::Dismissed, false),
-        (MenuOutcome::Chosen(panel_row()), true),
-    ] {
-        let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
-        let mut client = WindowClient::new(Rc::clone(&loopback));
-        let (window, open) = open_chain(&mut client);
-        let (panel, _) = client
-            .create_menu_panel(&panel_spec(window, open, 8, EVENTS_A))
-            .expect("a panel");
-        client.present(panel, 0, full_damage()).expect("presented");
-
-        let mut waiter = WindowEvents::new(QueueSource {
-            queue: [WindowEvent::MenuClosed {
-                window_id: window,
-                open_id: open,
-                outcome,
-            }
-            .to_le_bytes()]
-            .into_iter()
-            .collect(),
-        });
-        waiter.wait(&mut client).expect("the outcome arrives");
-
-        // A record the client kept is one it would answer a redraw for; a
-        // record it dropped re-presents nothing.
-        assert_eq!(
-            client.answer_redraw(panel),
-            Ok(survives),
-            "the chain's answer decides whether the panel is still tracked"
-        );
-    }
-}
-
-/// An attached window wider or taller than a panel is refused by the
-/// protocol, before a client can even ask for it.
-#[test]
-fn an_attached_window_is_bounded_to_a_panel() {
-    let mut widest = WindowRequest::CreateMenuPanel {
-        window_id: 3,
-        open_id: 4,
-        row: panel_row(),
-        shm_handle: 8,
-        event_endpoint: EVENTS_A,
-        frame_count: 1,
-        width_px: APP_MENU_PANEL_MAX_PX,
-        height_px: APP_MENU_PANEL_MAX_PX,
-        stride_bytes: APP_MENU_PANEL_MAX_PX * 4,
-        format: DisplayFormat::Bgra8888,
-    };
-    assert_eq!(
-        WindowRequest::from_bytes(&request_frame(&widest)),
-        Ok(widest)
-    );
-    if let WindowRequest::CreateMenuPanel { width_px, .. } = &mut widest {
-        *width_px += 1;
-    }
-    assert_eq!(
-        WindowRequest::from_bytes(&request_frame(&widest)),
-        Err(Errno::LengthOutOfRange)
     );
 }
 

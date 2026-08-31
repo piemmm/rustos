@@ -96,14 +96,14 @@ owns:
   (`AppMenuChosen`), a hover asking for the window picker
   (`ShowWindowPicker`) and a cell chosen in it (`WindowChosen`), or a
   notification-icon press. A primary press on the clock is claimed and inert;
-  its menu answers a secondary press. While the context
-  menu OR the program-library popup is open it is
-  modal and consumes the whole stream — presses, releases, scroll, and keys
-  all route into the modal surface; a press on the Library button toggles the
-  popup shut and a press anywhere else dismisses it without acting on what it
-  landed on (`LibraryDismissed`, `BarMenu::Dismissed`) — one click does one
-  thing (`AGENTS.md` §2.1). Anything else, or a press that misses every
-  region, is `Ignored` (fail closed, `AGENTS.md` §2.9).
+  its menu answers a secondary press. While the program-library popup is open
+  it is modal and consumes the whole stream — presses, releases, scroll, and
+  keys all route into it; a press on the Library button toggles it shut and a
+  press anywhere else dismisses it without acting on what it landed on
+  (`LibraryDismissed`) — one click does one thing (`AGENTS.md` §2.1). While a
+  **menu** is up the bar sees no input at all: the desktop's chain holds the
+  seat. Anything else, or a press that misses every region, is `Ignored` (fail
+  closed, `AGENTS.md` §2.9).
 - **The program-library popup** — `LibraryPopup` (`plans/NEW-TASKBAR.md`
   T5), a pure model over the **resolved** `tairix-proglib` `Catalog` the
   session hands it (`set_catalog`; the popup never touches the VFS),
@@ -160,35 +160,45 @@ owns:
   `WindowChosen { id }`. It opens only where there is a choice to make, so no
   dwell timer is needed and single-window applications never flash a popup;
   it takes no keyboard and closes when the pointer leaves.
-- **The context menu** — `BarMenu`, the bar's one right-click surface. A
-  secondary press on an **application slot** opens the menu that *application*
-  declared over the window channel — and nothing at all when it declared none
-  — with one row the bar owns: *About*, whose submenu is a `FactList` of the
-  bundle's **signed** manifest, so an application cannot state an identity
-  that is not its own. A secondary press on a library entry row opens the one
-  `EntryRow` list — *Open* and *Create Desktop Shortcut*, the two things the
-  popup can do to a row that its own click cannot — and one on the Switchboard
-  capsule opens the system menu below.
-  Choosing a row reports a typed `TaskbarResponse` (`AppMenuChosen`,
-  `LibraryLaunch`, `CreateDesktopShortcut`, or a system action); the session
-  performs it.
+- **The menus** — the bar draws none. Every menu on the desktop is the seat's
+  one chain (`plans/NEW-MENUS.md`), so a secondary press answers
+  `TaskbarResponse::OpenMenu(MenuRequest)` — which menu it is, the rows to draw,
+  and where the plate hangs — and the desktop opens, places, grabs and answers
+  it. `menu.rs` is the row model alone: four subjects and the inverse that reads
+  a chosen row back.
+  A press on an **application slot** offers the menu that *application*
+  declared over the window channel — and nothing at all when it declared none —
+  with one row the desktop owns: *Info*, whose child is a `FactList` of the
+  bundle's **signed** manifest, so an application cannot state an identity that
+  is not its own. A press on a **library entry row** offers the one `EntryRow`
+  list (*Open* and *Create Desktop Shortcut*, the two things the popup can do to
+  a row that its own click cannot); one on the **Switchboard capsule** the system
+  menu below; one on the **clock** its own.
+  A chosen row is read back by `Taskbar::menu_chosen` into the typed
+  `TaskbarResponse` a click on the bar would have produced (`AppMenuChosen`,
+  `LibraryLaunch`, `CreateDesktopShortcut`, `SetDateTime`, or a system action);
+  the session performs it. A row's id is its *command's* own position in its
+  table rather than its position on the plate, so a menu that leaves a row out
+  shifts no other row's meaning.
 - **The system menu** — the start-menu session controls, whose shape is the
   one ordered `system::ROWS` table (inspect the machine, change how it looks,
   then secure, leave, or stop it). The bar holds none of that authority: it
-  renders what the session attested through `SystemPermits`, so a row whose
-  backing is missing is shown non-actionable with its reason rather than
-  offered and then failing. *Switch User…* is the one exception and is
+  states what the session attested through `SystemPermits`, so a row whose
+  backing is missing is non-actionable with its reason rather than offered and
+  then failing; the appearance already in use is its group's chosen member — a
+  bullet, disabled, with its reason. *Switch User…* is the one exception and is
   **absent** rather than refused: a desktop whose session authority never
   gave it a wake mailbox cannot be resumed, so there is no facility to
   explain the absence of (`set_switch_user_available`, `plans/NEW-DESKTOP-LOGIN.md`
   G5). Both the rendered rows and the row → command mapping read the same
-  filter, so a hidden row can never stay clickable at its old index.
+  filter, and a row's id is its position in `ROWS` rather than on the plate, so
+  the rows a hidden one leaves keep their own meaning.
   *Lock Screen* reads one attestation, `set_elevation_available`: whether this
   session's console has a re-authentication broker. The clock menu's set-time
   row needs the same broker and reads the same attestation — one fact, not two
   booleans that would always be equal (`AGENTS.md` §2.2). Both default to
   refusing.
-- **The clock's menu** — the same one modal menu surface, opened by a
+- **The clock's menu** — asked for by a
   **secondary** press on the clock (a primary press on a reading is claimed
   and inert, like a status signal's), whose shape is the one ordered
   `clock_menu::ROWS` table: the reading the bar is drawing (a statement, not a

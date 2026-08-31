@@ -111,18 +111,18 @@ mod program {
     };
     use tairix_caps::CapabilitySet;
     use tairix_desktop_session::menu::{
-        ChainAction, ChainOutcome, ChainOwner, MenuChain, ModelRefused, SurfaceKind,
+        open_desktop_menu, ChainAction, ChainOutcome, ChainOwner, MenuChain,
     };
     use tairix_desktop_session::pinboard::{self, PinboardCommand};
     use tairix_desktop_session::switchuser::{
         SeatPresentation, SessionAuthority, SwitchUser, NO_DEADLINE_NS,
     };
-    use tairix_desktop_session::windows::{MENU_GAP_PX, MENU_SIDE};
+    use tairix_desktop_session::windows::window_menu_placement;
     use tairix_desktop_session::{
         admitted_pid, catalogued, chain_geometry, deliver_pending_open, desktop_info,
         drop_is_noteworthy, ensure_switchboard, launch_argv, load_library,
         load_pinboard as read_pinboard_store, maybe_send_seat_report, open_tray, parse,
-        persist_pinboard, reap_launched, relay_power, resolve_window_identities, seat_menu_refusal,
+        persist_pinboard, reap_launched, relay_power, resolve_window_identities,
         serve_pinboard_apply, serve_switchboard_request, window_control_alternate_event,
         window_control_event, Answer, AppBarBridge, AppBarService, ArtworkDesk, ArtworkFileReader,
         ArtworkSandbox, CliError, Command, ConcludedPick, ConfirmPrompt, Delivery, Desktop,
@@ -153,7 +153,7 @@ mod program {
     use tairix_sandbox::imagerender::{rasterise_icon, render_wallpaper, ImageRenderService};
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
     use tairix_sandbox::{ParserSandbox, ServeEnd};
-    use tairix_taskbar::{TaskId, TaskbarConfig, TaskbarResponse};
+    use tairix_taskbar::{MenuRequest, MenuSubject, TaskId, TaskbarConfig, TaskbarResponse};
     use tairix_wallpaper::{PinboardSettings, MAX_WALLPAPER_BYTES};
     use tairix_window::{
         event_endpoint_for, CallerIdentity, EventSink, WindowServer, WINDOW_REPLY_MAX,
@@ -883,7 +883,8 @@ mod program {
                 menu.report_newly_shown(|owner| {
                     let owner = match owner {
                         ChainOwner::Window { .. } => "window",
-                        ChainOwner::Session => "desktop",
+                        ChainOwner::Backdrop => "backdrop",
+                        ChainOwner::Bar(_) => "bar",
                     };
                     log(
                         &LOG_SINK,
@@ -1711,6 +1712,12 @@ mod program {
         // The seat's one menu chain. Every menu on the desktop — an
         // application's and the desktop's own — is this one service's.
         let mut menu = MenuChain::new();
+        // What a chosen row of one of the **icon bar's** own chains resolved
+        // to. The bar's menus answer with the very same typed responses a
+        // click on the bar produces, so they are routed where those are
+        // rather than acted on a second way; the seat branch drains this in
+        // the wake the row was chosen in.
+        let mut answered: Vec<tairix_desktop_session::ShellOutcome> = Vec::new();
         // First frame: place the bar, paint the desktop's icons beneath
         // every window, install the pointer cursor at the seat's initial
         // pointer position, and push the whole surface once;
@@ -2241,6 +2248,10 @@ mod program {
                     // rather than in the bridge, for the reason the identity
                     // pass above does: the engine holds the borrow the
                     // delivery needs while a request is being served.
+                    // A chain displaced here is dismissed, never chosen — a
+                    // row is chosen only where a seat event reaches the chain,
+                    // which is the seat's own drain — so nothing lands in the
+                    // bar's answer sink for this branch to route.
                     answer_menu_chain(
                         &mut menu,
                         &mut shell,
@@ -2250,12 +2261,13 @@ mod program {
                         &mut sink,
                         &mut picker,
                         &mut apps.service,
-                        &mut BackdropDesk {
+                        &mut DesktopMenuDesk {
                             pinboard: &mut pinboard,
                             wallpapers: &wallpapers,
                             desktop: &mut desktop,
                             launched: &mut launched,
                             associations: &mut associations,
+                            answered: &mut answered,
                         },
                         tairix_rt::clock_get(),
                     );
@@ -2682,49 +2694,54 @@ mod program {
                 {
                     return drain_fault(&mut shell, &mut compositor, Errno::DeviceFault);
                 }
-            } else if token == SEAT_TOKEN && menu.is_open() {
-                // A chain holds the seat: every pointer and key event routes
-                // into it and none reaches what is behind, which is what
-                // makes a press outside a dismissal rather than a click on
-                // the window the menu was covering.
-                let now_ns = tairix_rt::clock_get();
-                if drain_menu_chain(
-                    &mut menu,
-                    &mut pointer,
-                    &mut keyboard,
-                    &mut shell,
-                    &mut compositor,
-                    &mut windows,
-                    &mut server,
-                    &mut sink,
-                    &mut picker,
-                    &mut apps.service,
-                    &mut BackdropDesk {
-                        pinboard: &mut pinboard,
-                        wallpapers: &wallpapers,
-                        desktop: &mut desktop,
-                        launched: &mut launched,
-                        associations: &mut associations,
-                    },
-                    now_ns,
-                ) == Drained::Faulted
-                {
-                    return drain_fault(&mut shell, &mut compositor, Errno::DeviceFault);
-                }
             } else if token == SEAT_TOKEN {
-                // Drain both input channels through the shell, routing
-                // every outcome onward (to the focused app window, or the
-                // launcher spawn); the events already applied stay
-                // applied, and a faulting drain ends the session. The
-                // drains are genuinely non-blocking (`pointer_read` /
-                // `keyboard_read` return 0 when empty).
+                // Drain both input channels, routing every outcome onward (to
+                // the focused app window, or the launcher spawn); the events
+                // already applied stay applied, and a faulting drain ends the
+                // session. The drains are genuinely non-blocking
+                // (`pointer_read` / `keyboard_read` return 0 when empty).
                 // One wake is one instant: the whole drained batch resolves
                 // its time-driven gestures (a held capsule press) against
                 // the clock read here, and an idle desktop reads none.
                 let now_ns = tairix_rt::clock_get();
-                let outcomes = match shell.pump(&mut pointer, &mut compositor, now_ns) {
-                    Ok(outcomes) => outcomes,
-                    Err(err) => return drain_fault(&mut shell, &mut compositor, err),
+                // A chain holds the seat: every pointer and key event routes
+                // into it and none reaches what is behind, which is what makes
+                // a press outside a dismissal rather than a click on the window
+                // the menu was covering. Its own answers then route through the
+                // very same path a click on the bar's takes, so a *Log Out* row
+                // and a *Log Out* click are honoured in one place.
+                let chain_held = menu.is_open();
+                let outcomes = if chain_held {
+                    if drain_menu_chain(
+                        &mut menu,
+                        &mut pointer,
+                        &mut keyboard,
+                        &mut shell,
+                        &mut compositor,
+                        &mut windows,
+                        &mut server,
+                        &mut sink,
+                        &mut picker,
+                        &mut apps.service,
+                        &mut DesktopMenuDesk {
+                            pinboard: &mut pinboard,
+                            wallpapers: &wallpapers,
+                            desktop: &mut desktop,
+                            launched: &mut launched,
+                            associations: &mut associations,
+                            answered: &mut answered,
+                        },
+                        now_ns,
+                    ) == Drained::Faulted
+                    {
+                        return drain_fault(&mut shell, &mut compositor, Errno::DeviceFault);
+                    }
+                    core::mem::take(&mut answered)
+                } else {
+                    match shell.pump(&mut pointer, &mut compositor, now_ns) {
+                        Ok(outcomes) => outcomes,
+                        Err(err) => return drain_fault(&mut shell, &mut compositor, err),
+                    }
                 };
                 // Set once the session has given the screen up: what is left
                 // of this batch, and everything still queued behind it, is
@@ -2797,9 +2814,11 @@ mod program {
                 // Every keystroke is applied in order, and the screen is
                 // settled once for the whole batch below: a held key
                 // repeating costs one taskbar present, active-frame sync and
-                // cursor refresh rather than one of each per repeat.
+                // cursor refresh rather than one of each per repeat. A chain
+                // that held this batch drained the keyboard into itself, so
+                // there is nothing here for the shell.
                 let mut typed = false;
-                while !stepped_aside {
+                while !stepped_aside && !chain_held {
                     match keyboard.poll_record() {
                         Ok(None) => break,
                         Ok(Some((event, record))) => {
@@ -3591,17 +3610,27 @@ mod program {
         prepared: Option<WallpaperSource>,
     }
 
-    /// The desktop state a chosen **backdrop-menu** row acts on, bundled so it
-    /// reaches the chain's one delivery point without a dozen more parameters.
+    /// What a chosen row of one of the **desktop's own** menus acts on,
+    /// bundled so it reaches the chain's one delivery point without a dozen
+    /// more parameters.
     ///
-    /// Only the desktop's own chain reads it. An application's chain is
-    /// answered over the window channel and touches none of this.
-    struct BackdropDesk<'a, S: DirectorySource> {
+    /// Only a desktop-owned chain reads it. An application's chain is answered
+    /// over the window channel and touches none of this.
+    ///
+    /// The backdrop's rows act on the desktop model directly. The icon bar's
+    /// resolve to the same typed [`TaskbarResponse`] a click on the bar
+    /// produces, so they leave through `answered` and are routed exactly where
+    /// every other bar outcome is — there is no second place a *Log Out* row
+    /// and a *Log Out* click are honoured.
+    struct DesktopMenuDesk<'a, S: DirectorySource> {
         pinboard: &'a mut PinboardPanel,
         wallpapers: &'a Wallpapers,
         desktop: &'a mut Desktop<S>,
         launched: &'a mut LaunchTable,
         associations: &'a mut alloc::vec::Vec<AppAssociation>,
+        /// The outcomes the bar's own chains resolved to, in the order they
+        /// were chosen.
+        answered: &'a mut Vec<tairix_desktop_session::ShellOutcome>,
     }
 
     /// Load the user's pinboard settings into `desktop` (reporting an
@@ -3686,7 +3715,7 @@ mod program {
         sink: &mut RtEventSink,
         picker: &mut SessionPicker<S, F>,
         apps: &mut dyn AppBarBridge,
-        desk: &mut BackdropDesk<'_, S>,
+        desk: &mut DesktopMenuDesk<'_, S>,
         now_ns: u64,
     ) -> Drained {
         // The chain is taking the stream, so the shell gives the pointer up
@@ -3762,35 +3791,13 @@ mod program {
         sink: &mut RtEventSink,
         picker: &mut SessionPicker<S, F>,
         apps: &mut dyn AppBarBridge,
-        desk: &mut BackdropDesk<'_, S>,
+        desk: &mut DesktopMenuDesk<'_, S>,
         now_ns: u64,
     ) {
         match acted {
             ChainAction::Consumed => {}
             ChainAction::Redraw | ChainAction::Closed => {
                 present_menu_chain(menu, shell, compositor, windows);
-            }
-            ChainAction::RequestPanel(row) => {
-                // The arrival goes out and the chain carries on: nothing
-                // about it waits for the application to answer.
-                present_menu_chain(menu, shell, compositor, windows);
-                if let Some(ChainOwner::Window { window_id, open_id }) = menu.owner() {
-                    deliver(
-                        server,
-                        sink,
-                        shell,
-                        compositor,
-                        windows,
-                        picker,
-                        apps,
-                        menu,
-                        &WindowEvent::MenuPanelRequested {
-                            window_id,
-                            open_id,
-                            row: *row,
-                        },
-                    );
-                }
             }
         }
         answer_menu_chain(
@@ -3815,7 +3822,7 @@ mod program {
         sink: &mut RtEventSink,
         picker: &mut SessionPicker<S, F>,
         apps: &mut dyn AppBarBridge,
-        desk: &mut BackdropDesk<'_, S>,
+        desk: &mut DesktopMenuDesk<'_, S>,
         now_ns: u64,
     ) {
         // Before the drain, not after: a chain the mode has moved under owes
@@ -3830,8 +3837,12 @@ mod program {
             // answered as the desktop's own.
             let (window_id, open_id) = match owner {
                 ChainOwner::Window { window_id, open_id } => (window_id, open_id),
-                ChainOwner::Session => {
+                ChainOwner::Backdrop => {
                     answer_backdrop_menu(outcome, shell, compositor, desk, now_ns);
+                    continue;
+                }
+                ChainOwner::Bar(subject) => {
+                    answer_bar_menu(&subject, outcome, shell, desk);
                     continue;
                 }
             };
@@ -3840,9 +3851,6 @@ mod program {
                 ChainOutcome::Dismissed => MenuOutcome::Dismissed,
                 ChainOutcome::Refused(reason) => MenuOutcome::Refused(reason),
             };
-            // The engine settles whatever the chain had attached against this
-            // very answer, so the session never tears an attached window down
-            // itself.
             deliver(
                 server,
                 sink,
@@ -3862,6 +3870,65 @@ mod program {
         present_menu_chain(menu, shell, compositor, windows);
     }
 
+    /// Answer one of the **icon bar's** own chains in process: read the chosen
+    /// row back through the bar's own subject and queue what it asks for.
+    ///
+    /// The bar keeps the vocabulary, so this asks it rather than interpreting
+    /// an id here, and the answer joins the outcomes a click on the bar
+    /// produces. A row id the menu never declared names nothing and is dropped
+    /// (fail closed — never guessed at); a refusal is stated and the bar
+    /// carries on.
+    fn answer_bar_menu<S: DirectorySource>(
+        subject: &MenuSubject,
+        outcome: ChainOutcome,
+        shell: &mut DesktopShell,
+        desk: &mut DesktopMenuDesk<'_, S>,
+    ) {
+        let item = match outcome {
+            ChainOutcome::Chosen(item) => item,
+            ChainOutcome::Dismissed => return,
+            ChainOutcome::Refused(reason) => {
+                let _ = writeln!(Stderr, "desktop: no bar menu ({reason:?})");
+                return;
+            }
+        };
+        if let Some(response) = shell.session_mut().taskbar_mut().menu_chosen(subject, item) {
+            desk.answered
+                .push(tairix_desktop_session::ShellOutcome::Taskbar(response));
+        }
+    }
+
+    /// Open one of the icon bar's own menus as the seat's one chain.
+    ///
+    /// The bar hands over a model, an anchor and which menu it is; everything
+    /// after that — titling, placement, drawing, the grab, traversal,
+    /// dismissal, and the one answer — is the chain's, exactly as for an
+    /// application's `OpenMenu`. A refused menu is an answer stated on
+    /// `stderr`, never a reason to draw one on the bar.
+    fn open_bar_menu(
+        request: MenuRequest,
+        seat_held: bool,
+        menu: &mut MenuChain,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        windows: &SessionWindows,
+    ) {
+        let geom = chain_geometry(shell, compositor);
+        match open_desktop_menu(
+            menu,
+            ChainOwner::Bar(request.subject),
+            request.model,
+            request.placement,
+            seat_held,
+            &geom,
+        ) {
+            Ok(()) => present_menu_chain(menu, shell, compositor, windows),
+            Err(refused) => {
+                let _ = writeln!(Stderr, "desktop: no bar menu ({refused:?})");
+            }
+        }
+    }
+
     /// Answer the desktop's own chain in process: put a chosen row's command
     /// through the desktop model and the one action path.
     ///
@@ -3873,7 +3940,7 @@ mod program {
         outcome: ChainOutcome,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
-        desk: &mut BackdropDesk<'_, S>,
+        desk: &mut DesktopMenuDesk<'_, S>,
         now_ns: u64,
     ) {
         let command = match outcome {
@@ -3916,22 +3983,12 @@ mod program {
         compositor: &mut Compositor,
         windows: &SessionWindows,
     ) {
-        let owner = match menu.owner() {
-            Some(ChainOwner::Window { window_id, .. }) => windows.wm_id(window_id),
-            Some(ChainOwner::Session) | None => None,
-        };
-        let attached = menu
-            .surfaces()
-            .into_iter()
-            .find_map(|surface| match surface.kind {
-                SurfaceKind::Attached(id) => windows.wm_id(id),
-                SurfaceKind::Plate(_) | SurfaceKind::Info => None,
-            });
-        if !shell.present_menu_chain(compositor, menu, owner, attached) && menu.exhausted() {
+        let owner = menu.owner_window().and_then(|id| windows.wm_id(id));
+        if !shell.present_menu_chain(compositor, menu, owner) && menu.exhausted() {
             // The chain could not be drawn, so it is refused rather than left
             // half on the screen; taking it down needs the reconcile to run
             // once more, now over an empty list.
-            let _ = shell.present_menu_chain(compositor, menu, owner, attached);
+            let _ = shell.present_menu_chain(compositor, menu, owner);
         }
     }
 
@@ -4545,6 +4602,19 @@ mod program {
                 // (synchronously here or by the reap), desktop carries on.
                 launch_library_entry(shell, &entry, launched);
             }
+            ShellOutcome::Taskbar(TaskbarResponse::OpenMenu(request)) => {
+                // The bar draws no menu: it hands over a model and an anchor,
+                // and the seat's one chain places, draws, grabs and answers it
+                // — the same service an application's `OpenMenu` reaches.
+                open_bar_menu(
+                    request,
+                    seat_held(lock, picker),
+                    menu,
+                    shell,
+                    compositor,
+                    windows,
+                );
+            }
             ShellOutcome::Taskbar(TaskbarResponse::OpenLibrary) => {
                 // Re-read the stores each time the popup opens, so an edit
                 // made through `applib` (or a fresh install) shows without
@@ -4986,12 +5056,12 @@ mod program {
     ///
     /// A model the chain will not show is reported and opens nothing: a
     /// refused menu is an answer, never a reason to draw one here.
-    /// Whether a surface a menu may not displace holds the seat: the screen
-    /// lock, or the trusted picker.
     ///
-    /// One definition, because both directions a chain arrives from consult it
-    /// — an application's `OpenMenu` over the window channel and the desktop's
-    /// own backdrop press.
+    /// Whether a surface a menu may not displace holds the seat: the screen
+    /// lock, or the trusted picker. One definition, because every direction a
+    /// chain arrives from consults it — an application's `OpenMenu` over the
+    /// window channel, the desktop's own backdrop press, and a press on the
+    /// icon bar.
     fn seat_held<S: DirectorySource, F: FnMut() -> S>(
         lock: &ScreenLock,
         picker: &SessionPicker<S, F>,
@@ -5010,27 +5080,19 @@ mod program {
         compositor: &mut Compositor,
         windows: &SessionWindows,
     ) {
-        // The same seat rule an application's open resolves through: a menu
-        // must not take the grab from a lock screen or the trusted picker,
-        // whichever direction it arrives from.
-        if let Some(reason) = seat_menu_refusal(compositor.screen_rect(), seat_held) {
-            let _ = writeln!(Stderr, "desktop: no backdrop menu ({reason:?})");
-            return;
-        }
         let model = pinboard::model(on_icon, desktop.settings());
-        let anchor = Rect::new(at.x, at.y, 0, 0);
         let geom = chain_geometry(shell, compositor);
-        match menu.open(
-            ChainOwner::Session,
+        match open_desktop_menu(
+            menu,
+            ChainOwner::Backdrop,
             model,
-            anchor,
-            MENU_SIDE,
-            MENU_GAP_PX,
+            window_menu_placement(Rect::new(at.x, at.y, 0, 0)),
+            seat_held,
             &geom,
         ) {
             Ok(()) => present_menu_chain(menu, shell, compositor, windows),
-            Err(ModelRefused::NoRows) => {
-                let _ = writeln!(Stderr, "desktop: the backdrop menu offers no rows");
+            Err(refused) => {
+                let _ = writeln!(Stderr, "desktop: no backdrop menu ({refused:?})");
             }
         }
     }
@@ -5632,23 +5694,24 @@ mod program {
         let Some(owner) = event.window_id().and_then(|id| server.owner_of(id)) else {
             return;
         };
-        let mut bridge = ShellWindowHost {
-            shell,
-            compositor,
-            windows,
-            picker,
-            apps,
-            menu,
-            // Delivery never serves an `OpenMenu`, so this bridge cannot
-            // vouch for the seat and says so rather than claiming it free.
-            seat_held: true,
-        };
-        if let Err(Errno::NotFound) = server.deliver_event(&mut bridge, sink, event) {
+        if let Err(Errno::NotFound) = server.deliver_event(sink, event) {
             // `owner_of` proved the window exists, so the `NotFound` is
             // the sink's: the owner's event port is gone — the kernel
             // reclaimed it at exit — and its windows go with it. A merely
             // full mailbox never reaches here: the sink holds that event
             // and answers for it.
+            let mut bridge = ShellWindowHost {
+                shell,
+                compositor,
+                windows,
+                picker,
+                apps,
+                menu,
+                // A teardown serves no `OpenMenu`, so this bridge cannot
+                // vouch for the seat and says so rather than claiming it
+                // free.
+                seat_held: true,
+            };
             server.client_exited(&mut bridge, owner);
         }
     }

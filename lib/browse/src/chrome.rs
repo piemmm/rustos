@@ -445,31 +445,11 @@ impl ContextCommand {
     }
 }
 
-/// The row id for the command at `index` of [`CONTEXT_COMMANDS`].
-///
-/// One-based, because a menu id is never zero; [`context_command_from_item`]
-/// is the inverse, so the two are one rule rather than two tables to keep in
-/// step. The id is a command's position in [`CONTEXT_COMMANDS`] rather than on
-/// the plate, so a menu that leaves a row out shifts no other row's meaning.
-///
-/// # Errors
-///
-/// [`Errno::OutOfRange`] for an index no id can number, which the fixed
-/// [`CONTEXT_COMMANDS`] cannot reach.
-fn row_id(index: usize) -> Result<AppMenuItemId, Errno> {
-    let raw = u16::try_from(index)
-        .ok()
-        .and_then(|position| position.checked_add(1))
-        .ok_or(Errno::OutOfRange)?;
-    AppMenuItemId::new(raw)
-}
-
 /// The context-menu command the chosen row `item` names, or `None` for an id
 /// this menu never declared (fail closed — an outcome is never guessed at).
 #[must_use]
 pub fn context_command_from_item(item: AppMenuItemId) -> Option<ContextCommand> {
-    let index = usize::from(item.get().checked_sub(1)?);
-    CONTEXT_COMMANDS.get(index).copied()
+    CONTEXT_COMMANDS.get(item.index()).copied()
 }
 
 /// Build the row model a secondary press asks the desktop to open: one row per
@@ -498,7 +478,8 @@ pub fn context_menu(model: ContextMenuModel, title: &str) -> Result<AppMenu, Err
         if command.opens_group() {
             menu.push(AppMenuRow::Separator)?;
         }
-        let mut item = AppMenuItem::new(row_id(index)?, AppMenuLabel::new(command.label())?)
+        let id = AppMenuItemId::for_index(index).ok_or(Errno::OutOfRange)?;
+        let mut item = AppMenuItem::new(id, AppMenuLabel::new(command.label())?)
             .with_shortcut(AppMenuShortcut::new(command.shortcut())?);
         if command.is_destructive() {
             item = item.with_role(AppMenuRole::Destructive);

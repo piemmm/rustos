@@ -8102,32 +8102,31 @@ thread costs the RAM of its working set rather than of its `stack-bytes` bound.
 
 ---
 
-## NEW-MENUS — menus owned by the desktop, not by the app (`plans/NEW-MENUS.md`)  **[PLANNED, NOT STARTED]**
+## NEW-MENUS — menus owned by the desktop, not by the app (`plans/NEW-MENUS.md`)  **[M0–M3 DONE, M4 PLANNED]**
 
 **Dependencies:** Stage 7 (compositor, session, controls). Independent of
 `plans/FIX-DESKTOP-SPEEDUP.md`, which closed the performance reason for it
 (H): a popup-window menu is no longer expensive, so this is an
 **architecture** change and must not be justified on speed.
 
-**The defect it closes.** Every menu is drawn and driven by the app that
-owns it, so nothing models "the menu that is up": two apps can each have one
-open, the shell around `lib/controls`' `Menu` (placement, grab, dismissal,
-submenu traversal, owner death) is spelled four times, the compositor cannot
-cache pixels it does not own, and an in-window menu can be clipped by its own
-window. The fix is a session-owned singleton: the app sends a bounded menu
-*model* and an anchor, the desktop places/draws/grabs/dismisses, and the app
-receives one outcome — chosen, dismissed, or refused.
+**What now stands.** Every menu on the desktop is the seat's one chain, owned
+by the session: an application sends a bounded *model* and an anchor and
+receives exactly one outcome, and the desktop's own surfaces — the pinboard
+backdrop and the icon bar's four menus — are clients of the same service with
+their models built in process. No surface keeps a menu shell: the terminal's,
+the file manager's, the pinboard's and the bar's are all deleted, and one
+renderer (`lib/controls`' `Menu`/`TitleBar`), one placement rule (`plate_rect`),
+one model (`ChainModel`) and one grab serve all of them.
 
-**Staged (detail in the plan; do not duplicate it here, §13):** M0 the model
-and the wire, M1 the session's menu service, M2 migrate and **delete** each
-app's menu shell, M3 the plate becomes a cached damage-reporting surface.
+**What is left.** M4 alone: the plate becomes a cached damage-reporting
+surface like the window furniture, so moving a highlight repaints two rows
+rather than the plate. It was meaningless while applications owned menu
+pixels, and is now unblocked.
 
-**Escalated for decision (§15.7):**
-
-1. M0's transport — inline bounded rows in the request frame, or the model
-   in a granted shared region. Blocks all of M0.
-2. Whether the taskbar's start menu is in scope, or legitimately stays a
-   bespoke launcher surface.
+All three escalated decisions are settled in the plan's §6: variable-length
+request framing (M1a), Open With… as one row plus the application's own chooser
+(M3.3), and the program-library popup staying a bespoke searchable list rather
+than a menu (M3.4).
 
 ---
 

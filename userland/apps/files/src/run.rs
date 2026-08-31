@@ -808,15 +808,19 @@ mod program {
         let mut damage = damage::sink();
         let window_id = win.window;
         let (repaint, close) = apply_event(
-            &mut win.browser,
-            &mut win.overlays,
-            &mut win.places,
-            &mut MenuLink {
-                client,
-                window: window_id,
-                open: &mut win.menu,
+            &mut WindowState {
+                browser: &mut win.browser,
+                overlays: &mut win.overlays,
+                places: &mut win.places,
             },
-            launcher,
+            &mut Acts {
+                menu: MenuLink {
+                    client,
+                    window: window_id,
+                    open: &mut win.menu,
+                },
+                launcher,
+            },
             canvas,
             event,
             &mut damage,
@@ -1499,6 +1503,28 @@ mod program {
         open: &'a mut Option<u64>,
     }
 
+    /// The window's own mutable state one event round may change.
+    ///
+    /// One value rather than three parameters threaded separately, because
+    /// every level of the router chain carries all three: what the window is
+    /// showing (the browser), what is layered over it (the overlays), and the
+    /// rail beside it (the places).
+    struct WindowState<'a, S: DirectorySource> {
+        browser: &'a mut Browser<S>,
+        overlays: &'a mut Overlays,
+        places: &'a mut Places,
+    }
+
+    /// What one event round acts *through*, as against what it acts *on*.
+    ///
+    /// The desktop's menu chain and the app launcher: neither is window state,
+    /// and both are carried at every level of the router chain, so they travel
+    /// as one value for the reason [`WindowState`] does.
+    struct Acts<'a> {
+        menu: MenuLink<'a>,
+        launcher: &'a RefCell<Launcher>,
+    }
+
     /// The transient overlay state layered over the browser view, threaded
     /// through the event loop so the painted overlays and the state they
     /// reflect stay in step. At most one of `rename`/`properties`/`delete` is
@@ -1719,17 +1745,18 @@ mod program {
     /// viewport the renderer uses, so the drawn view, the selection reveal,
     /// and the wheel scroll all agree on the geometry; `launcher` is the
     /// launched-bundle bookkeeping an activation spawns through.
-    #[allow(clippy::too_many_arguments)] // The window's whole mutable state, threaded explicitly.
     fn apply_event<S: DirectorySource>(
-        browser: &mut Browser<S>,
-        overlays: &mut Overlays,
-        places: &mut Places,
-        menu: &mut MenuLink<'_>,
-        launcher: &RefCell<Launcher>,
+        win: &mut WindowState<'_, S>,
+        acts: &mut Acts<'_>,
         canvas: Canvas<'_>,
         event: &WindowEvent,
         damage: &mut Region,
     ) -> (Repaint, bool) {
+        let WindowState {
+            browser,
+            overlays,
+            places,
+        } = win;
         let theme = canvas.theme();
         let scale = canvas.scale;
         let window = canvas.window();
@@ -1757,12 +1784,19 @@ mod program {
             open_id, outcome, ..
         } = *event
         {
-            if *menu.open != Some(open_id) {
+            if *acts.menu.open != Some(open_id) {
                 return (Repaint::Nothing, false);
             }
-            *menu.open = None;
-            let (changed, close) =
-                apply_menu_outcome(browser, overlays, launcher, scale, theme, viewport, outcome);
+            *acts.menu.open = None;
+            let (changed, close) = apply_menu_outcome(
+                browser,
+                overlays,
+                acts.launcher,
+                scale,
+                theme,
+                viewport,
+                outcome,
+            );
             return (whole_if(changed), close);
         }
 
@@ -1770,8 +1804,15 @@ mod program {
         // that opens it has already concluded the chain) and needs the launcher
         // to hand the chosen application its file.
         if overlays.open_with.is_some() {
-            let (changed, close) =
-                apply_open_with_event(overlays, launcher, scale, theme, viewport, event, damage);
+            let (changed, close) = apply_open_with_event(
+                overlays,
+                acts.launcher,
+                scale,
+                theme,
+                viewport,
+                event,
+                damage,
+            );
             return (whole_if(changed), close);
         }
 
@@ -1820,9 +1861,7 @@ mod program {
             return (merge(outcome.repaint, hover), false);
         }
 
-        let (repaint, close) = apply_nav_event(
-            browser, overlays, menu, launcher, canvas, viewport, event, damage,
-        );
+        let (repaint, close) = apply_nav_event(win, acts, canvas, viewport, event, damage);
         (merge(repaint, hover), close)
     }
 
@@ -1833,17 +1872,17 @@ mod program {
     /// `viewport` is the rail-inset content area the listing and the scrollbar
     /// occupy; the toolbar band spans the whole window, which the routers below
     /// read from `canvas`.
-    #[allow(clippy::too_many_arguments)] // The window's whole mutable state, threaded explicitly.
     fn apply_nav_event<S: DirectorySource>(
-        browser: &mut Browser<S>,
-        overlays: &mut Overlays,
-        menu: &mut MenuLink<'_>,
-        launcher: &RefCell<Launcher>,
+        win: &mut WindowState<'_, S>,
+        acts: &mut Acts<'_>,
         canvas: Canvas<'_>,
         viewport: Rect,
         event: &WindowEvent,
         damage: &mut Region,
     ) -> (Repaint, bool) {
+        let WindowState {
+            browser, overlays, ..
+        } = win;
         let theme = canvas.theme();
         let scale = canvas.scale;
         match event {
@@ -1864,7 +1903,7 @@ mod program {
                 } else if matches!(key, KeyValue::Named(NamedKeyCode::Enter)) {
                     whole(activate(
                         browser,
-                        launcher,
+                        acts.launcher,
                         scale,
                         theme,
                         viewport,
@@ -1913,9 +1952,9 @@ mod program {
             }
             // A pointer event the desktop routed into this window's local
             // coordinates: routed by `apply_pointer`.
-            WindowEvent::Pointer { .. } => apply_pointer(
-                browser, overlays, menu, launcher, canvas, viewport, event, damage,
-            ),
+            WindowEvent::Pointer { .. } => {
+                apply_pointer(win, acts, canvas, viewport, event, damage)
+            }
             // A secondary press on the window's Close control asks to leave the
             // folder rather than the window: it climbs to the parent and closes
             // only at the top, where there is nothing left to leave. A parent
@@ -1959,14 +1998,11 @@ mod program {
             //
             // A `MenuClosed` was resolved before this dispatch too, against the
             // open id the window is waiting on; one reaching here named no such
-            // open and is a stale answer, dropped rather than acted on. The
-            // context menu declares no panel row, so no chain of its own ever
-            // asks this window for a surface.
+            // open and is a stale answer, dropped rather than acted on.
             WindowEvent::Key { .. }
             | WindowEvent::AppBarDefault
             | WindowEvent::AppBarMenu { .. }
             | WindowEvent::MenuClosed { .. }
-            | WindowEvent::MenuPanelRequested { .. }
             | WindowEvent::CloseRequested { .. }
             | WindowEvent::Focus { .. }
             | WindowEvent::Minimized { .. }
@@ -2039,17 +2075,17 @@ mod program {
     ///
     /// `viewport` is the rail-inset content area; the toolbar band spans the
     /// whole window, which [`apply_primary_press`] reads from `canvas`.
-    #[allow(clippy::too_many_arguments)] // The press, its context, and what it may open.
     fn apply_pointer<S: DirectorySource>(
-        browser: &mut Browser<S>,
-        overlays: &mut Overlays,
-        menu: &mut MenuLink<'_>,
-        launcher: &RefCell<Launcher>,
+        win: &mut WindowState<'_, S>,
+        acts: &mut Acts<'_>,
         canvas: Canvas<'_>,
         viewport: Rect,
         event: &WindowEvent,
         damage: &mut Region,
     ) -> (Repaint, bool) {
+        let WindowState {
+            browser, overlays, ..
+        } = win;
         let theme = canvas.theme();
         let scale = canvas.scale;
         let WindowEvent::Pointer {
@@ -2083,11 +2119,24 @@ mod program {
         }
         if let Some(point) = secondary_press_point(*action, *x, *y) {
             let hit = tairix_browse::render::entry_index_at(browser, scale, theme, viewport, point);
-            return whole(open_context_menu(browser, overlays, menu, point, hit));
+            return whole(open_context_menu(
+                browser,
+                overlays,
+                &mut acts.menu,
+                point,
+                hit,
+            ));
         }
         match press_point(*action, *x, *y) {
             Some(point) => apply_primary_press(
-                browser, overlays, launcher, canvas, viewport, point, *modifiers, damage,
+                browser,
+                overlays,
+                acts.launcher,
+                canvas,
+                viewport,
+                point,
+                *modifiers,
+                damage,
             ),
             None => (Repaint::Nothing, false),
         }

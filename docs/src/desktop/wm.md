@@ -1470,92 +1470,33 @@ rather than accepting a chain nothing will answer — and a refused menu is an
 answer the app reports and carries on from, never a reason to draw one
 itself.
 
-### Attached windows: the one place an app's pixels enter a chain
+### The one child that is not a plate: the information panel
 
-A menu row is one of five kinds, and `Panel { id, label, enabled }` is the one
-whose child is a surface the *application* draws, hanging where a submenu's
-plate would hang (`plans/NEW-MENUS.md` §1.4). It is the general form of the
-session-drawn `Info` row: `Info` states an identity from the bundle's signed
-manifest and the app supplies none of its text, while a `Panel`'s attached
-window is the app's own content in its own client rect — never the identity
-panel.
+A menu row is one of four kinds, and `Info` is the one whose child is a
+surface rather than more rows: the session's own `FactList` of the owning
+bundle's signed `AppInfo`, hanging where a submenu's plate would hang
+(`plans/NEW-MENUS.md` §1.4). The app declares only that the row exists and
+supplies none of the panel's text, so it cannot state an identity that is not
+its own inside desktop chrome — and it states no accelerator, reason, mark or
+emphasis, for the reason a submenu states none: it opens rather than acts. At
+most one such row per menu, always at the top level, and it carries no id,
+because there is no command for choosing it to answer with.
 
-A panel row is admitted exactly where a submenu row is, by the same one rule:
-on the deepest plate either would open a child past `APP_MENU_MAX_DEPTH`, so
-both are refused there rather than drawn opening nothing. It carries an id
-from the **same space** an `Item` does, and no two rows may state one id —
-because choosing a panel row *detaches* its window and is reported by the same
-`MenuOutcome::Chosen(id)` any other choice is, so a shared id would make that
-answer ambiguous. Nothing may be pushed under a panel row: its child is a
-surface, not rows. It states no accelerator, reason, mark or emphasis, for the
-reason a submenu states none — it opens rather than acts — and it carries no
-title of its own, because the band title is the row's own label, exactly as a
-submenu plate's is.
+There is deliberately **no app-drawn child**. One was built — a `Panel` row
+whose surface the application presented, detaching when its row was chosen —
+and deleted for want of any client (`plans/NEW-MENUS.md` D19): a presentation
+surface cannot conclude a gesture, and a chain the *desktop* opened for itself
+has no application to ask in the first place. `CreatePopup` remains the way an
+app opens a surface of its own beside a window.
 
-The exchange is three steps, and **no step waits on the app**:
+### The service that answers it
 
-1. The pointer arrives on the row and the session sends the owner
-   `WindowEvent::MenuPanelRequested { window_id, open_id, row }`. The chain
-   stays live and fully usable. The event says only that the pointer reached
-   the row — there is deliberately no matching "the pointer left" event, which
-   would tell the app how the pointer moves inside chrome it does not own.
-2. The app answers with `WindowRequest::CreateMenuPanel` (op 15): the granted
-   region, its event route, the shared frame-layout block, and the chain —
-   the window, the open, the row. It states **no placement**: the surface
-   hangs off a row the session placed, and an app is never told where that is.
-   The reply is the same create reply a `Create` gives, and `Present`/`Close`
-   act on the minted id thereafter.
-3. **Late is refused, never shown.** A surface for an open the window no
-   longer holds is unrepresentable — the engine has no chain to hang it on and
-   answers `NotFound` without asking the host anything — and one for a row the
-   pointer has left is refused by the session, which alone knows where the
-   pointer is. Either way nothing is mapped, no id is spent, and the app frees
-   its own region and carries on. A slow or hostile app can therefore neither
-   freeze the chain nor plant a panel under a row the user left.
-
-It is its own operation rather than fields on `CreatePopup`, which differs in
-kind: a popup is anchored to a window the caller owns at an offset from that
-window's client origin and lives until the parent closes, where an attached
-window hangs off a menu row, states no offset, wears the plate's title band,
-and lives with the chain. What they *do* share — the granted region, the event
-route, and the frame-layout block — is one definition
-(`write_surface_operands` / `read_frame_layout`), used by `Create`,
-`CreatePopup` and `CreateMenuPanel` alike, so one place validates the geometry
-of all of them.
-
-Its extent is a **format bound**, refused at decode: at most
-`APP_MENU_PANEL_MAX_PX` (1024) physical pixels either way. An attached window
-hangs off one menu row, so it is a panel — the info panel it generalises is
-260 logical pixels wide — and an ask anything like a screen is refused before
-a byte of it is mapped. The session still places and clips the accepted
-surface within the chain, and the frames still count against the same
-per-client budget as any window's.
-
-The **lifetime is the engine's, in one place**. A panel is a transient of the
-window whose chain it hangs on, so closing that window (or the client exiting)
-tears it down with the popups. When the chain's outcome is delivered, the
-engine settles whatever was attached: the panel whose row the outcome *chose*
-detaches — its attachment and its transient link both clear, so it is an
-ordinary top-level window a later menu will not close — and any other is torn
-down. That settling runs when the outcome is **validated**, before the sink is
-asked, because the chain's fate is the session's decision and not the app's
-receipt of it; a client that stopped draining its mailbox cannot keep a
-session-placed surface on the screen. One panel hangs per chain — a chain's
-deepest child is a plate or a panel, never both — and the service closes it
-mid-chain with `WindowServer::close_menu_panel(host, open_id)` when the
-pointer settles on another row. `WindowHost::menu_panel_opened` defaults to
-refusing, so a host whose chains hang no application surfaces says so.
-
-### The service that answers both
-
-The desktop session implements both host seams. `menu_open_requested`
-resolves the window-local anchor against the owner's live client origin,
-builds the chain's model from the wire menu, and brings the chain up;
-`menu_panel_opened` asks the chain where the surface hangs and composes it
-as a transient of the owner, or relays the chain's refusal. Neither reads a
-file or waits on a client: the information row's attested facts come from the
-identity the icon-bar service has already resolved, and a process with none
-gets no information row rather than a fabricated panel.
+The desktop session implements the host seam. `menu_open_requested` resolves
+the window-local anchor against the owner's live client origin, builds the
+chain's model from the wire menu, and brings the chain up. It reads no file and
+waits on no client: the information row's attested facts come from the identity
+the icon-bar service has already resolved, and a process with none gets no
+information row rather than a fabricated panel.
 
 The chain itself — placement, bands and their drag, arrival-driven children,
 the grab, traversal, dismissal and lifetime — is

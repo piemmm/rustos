@@ -18,16 +18,7 @@ use alloc::vec::Vec;
 use tairix_controls::{AuthorityState, ControlRole, ControlState, MenuItem};
 
 use crate::clock;
-
-/// One command the clock's menu can offer.
-///
-/// A closed set: every variant has a row in [`ROWS`] and a typed outcome the
-/// session knows how to apply.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum ClockAction {
-    /// Set the machine's date and time, by way of an account that may.
-    SetDateTime,
-}
+use crate::input::TaskbarResponse;
 
 /// One row of the clock's menu.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -40,13 +31,13 @@ pub enum ClockRow {
 }
 
 impl ClockRow {
-    /// The command choosing this row asks for, or `None` for a row that is
-    /// a statement rather than a command.
+    /// What choosing this row asks the embedder for, or `None` for a row that
+    /// is a statement rather than a command.
     #[must_use]
-    pub const fn action(self) -> Option<ClockAction> {
+    pub(crate) const fn response(self) -> Option<TaskbarResponse> {
         match self {
             Self::Reading => None,
-            Self::SetDateTime => Some(ClockAction::SetDateTime),
+            Self::SetDateTime => Some(TaskbarResponse::SetDateTime),
         }
     }
 }
@@ -94,37 +85,42 @@ pub struct ClockPermits {
     pub set_available: bool,
 }
 
-/// Build the menu's rows for `permits`, in [`ROWS`] order.
+/// Build the menu's rows for `permits`, in [`ROWS`] order, each with its own
+/// position in that table — which is the id an answer names.
 ///
 /// The command is rendered whether or not it can act: a missing broker is
 /// stated on a non-actionable row, never hidden (which would leave the user
 /// guessing) and never silently offered (which would promise an action that
 /// cannot happen).
 #[must_use]
-pub fn rows(permits: &ClockPermits) -> Vec<MenuItem> {
+pub(crate) fn rows(permits: &ClockPermits) -> Vec<(usize, MenuItem)> {
     ROWS.iter()
-        .map(|row| match row {
-            ClockRow::Reading => {
-                let label = if states_a_time(&permits.reading) {
-                    permits.reading.as_str()
-                } else {
-                    READING_UNSET_LABEL
-                };
-                MenuItem::new(label).with_state(ControlState::disabled())
-            }
-            ClockRow::SetDateTime => {
-                let item = MenuItem::new(SET_ROW_LABEL)
-                    .with_group_break(true)
-                    .with_role(ControlRole::Neutral);
-                if permits.set_available {
-                    item
-                } else {
-                    item.with_state(
-                        ControlState::default().with_authority(AuthorityState::NeedsCapability),
-                    )
-                    .with_reason(REASON_NO_BROKER)
+        .enumerate()
+        .map(|(index, row)| {
+            let item = match row {
+                ClockRow::Reading => {
+                    let label = if states_a_time(&permits.reading) {
+                        permits.reading.as_str()
+                    } else {
+                        READING_UNSET_LABEL
+                    };
+                    MenuItem::new(label).with_state(ControlState::disabled())
                 }
-            }
+                ClockRow::SetDateTime => {
+                    let item = MenuItem::new(SET_ROW_LABEL)
+                        .with_group_break(true)
+                        .with_role(ControlRole::Neutral);
+                    if permits.set_available {
+                        item
+                    } else {
+                        item.with_state(
+                            ControlState::default().with_authority(AuthorityState::NeedsCapability),
+                        )
+                        .with_reason(REASON_NO_BROKER)
+                    }
+                }
+            };
+            (index, item)
         })
         .collect()
 }
@@ -136,20 +132,21 @@ fn states_a_time(label: &str) -> bool {
     !label.is_empty() && label != clock::UNSET_LABEL
 }
 
-/// The command the row at `index` asks for, or `None` for an index that
+/// What the row at `index` asks the embedder for, or `None` for an index that
 /// names no command — a statement row, or one past the end (fail closed,
 /// never a guessed command).
 #[must_use]
-pub fn action_at(index: usize) -> Option<ClockAction> {
-    ROWS.get(index).copied().and_then(ClockRow::action)
+pub(crate) fn response_at(index: usize) -> Option<TaskbarResponse> {
+    ROWS.get(index).copied().and_then(ClockRow::response)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        action_at, rows, ClockAction, ClockPermits, ClockRow, READING_UNSET_LABEL,
-        REASON_NO_BROKER, ROWS, SET_ROW_LABEL,
+        response_at, rows, ClockPermits, ClockRow, READING_UNSET_LABEL, REASON_NO_BROKER, ROWS,
+        SET_ROW_LABEL,
     };
+    use crate::input::TaskbarResponse;
     use alloc::string::ToString;
 
     fn permits(reading: &str, set_available: bool) -> ClockPermits {
@@ -159,9 +156,14 @@ mod tests {
         }
     }
 
+    /// The rows a menu built for `permits` draws, in plate order.
+    fn drawn(permits: &ClockPermits) -> alloc::vec::Vec<tairix_controls::MenuItem> {
+        rows(permits).into_iter().map(|(_, item)| item).collect()
+    }
+
     #[test]
     fn the_reading_leads_and_states_the_bars_own_label() {
-        let items = rows(&permits("09:41", true));
+        let items = drawn(&permits("09:41", true));
         assert_eq!(items.len(), ROWS.len());
         assert_eq!(items[0].label(), "09:41");
         // A statement, never a command: it cannot be chosen.
@@ -175,32 +177,34 @@ mod tests {
         // What the bar actually draws while the clock is unset, and the state
         // before the first reading has been spelled at all.
         for reading in [crate::clock::UNSET_LABEL, ""] {
-            let items = rows(&permits(reading, true));
+            let items = drawn(&permits(reading, true));
             assert_eq!(items[0].label(), READING_UNSET_LABEL);
         }
     }
 
     #[test]
     fn without_a_broker_the_command_is_rendered_refused_with_its_reason() {
-        let items = rows(&permits("09:41", false));
+        let items = drawn(&permits("09:41", false));
         assert!(!items[1].state().is_actionable());
         assert_eq!(items[1].reason(), Some(REASON_NO_BROKER));
     }
 
     #[test]
     fn only_the_command_row_names_a_command() {
-        assert_eq!(action_at(0), None);
-        assert_eq!(action_at(1), Some(ClockAction::SetDateTime));
+        assert_eq!(response_at(0), None);
+        assert_eq!(response_at(1), Some(TaskbarResponse::SetDateTime));
         // Past the end names nothing rather than the nearest row.
-        assert_eq!(action_at(2), None);
+        assert_eq!(response_at(2), None);
     }
 
     #[test]
-    fn every_row_in_the_table_renders_and_maps_back_consistently() {
-        let items = rows(&permits("09:41", true));
+    fn every_row_in_the_table_renders_and_carries_its_own_position() {
+        let built = rows(&permits("09:41", true));
         for (index, row) in ROWS.iter().enumerate() {
-            assert_eq!(action_at(index), row.action());
-            assert!(!items[index].label().is_empty());
+            let (position, item) = &built[index];
+            assert_eq!(*position, index, "a row carries its own table position");
+            assert_eq!(response_at(index), row.response());
+            assert!(!item.label().is_empty());
         }
         assert_eq!(ROWS.first().copied(), Some(ClockRow::Reading));
     }

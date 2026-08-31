@@ -63,7 +63,6 @@ enum AppMenuRowKind {
     Item,
     Separator,
     Submenu,
-    Panel,
     Info,
 }
 
@@ -73,7 +72,6 @@ impl AppMenuRowKind {
             AppMenuRowView::Item(_) => Self::Item,
             AppMenuRowView::Separator => Self::Separator,
             AppMenuRowView::Submenu { .. } => Self::Submenu,
-            AppMenuRowView::Panel { .. } => Self::Panel,
             AppMenuRowView::Info => Self::Info,
         }
     }

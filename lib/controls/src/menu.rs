@@ -1,4 +1,6 @@
-//! The menu command surface: [`MenuItem`] and [`Menu`] (spec §11.10).
+//! The menu command surface: [`MenuItem`] and [`Menu`] (spec §11.10), the
+//! shared plate placement rule [`plate_rect`], and [`ChainModel`] — the one
+//! model every menu the desktop renders is built as.
 //!
 //! A menu is a *pinned command plate*, not floating ornament: an elevated
 //! `surface_raised` plate with a Signal Rim, carrying a column of row controls.
@@ -10,10 +12,17 @@
 //! metric, radius, and *face* resolves from the active [`Theme`]
 //! and [`Scale`]; nothing here restates a recipe the shared `crate::paint`
 //! core already owns.
+//!
+//! [`ChainModel`] lives here rather than with the chain that renders it
+//! (`plans/NEW-MENUS.md` §1.6) because a menu's *clients* are not all in the
+//! process that owns the chain: the desktop's own icon bar builds one, the
+//! desktop's backdrop builds one, and an application's wire declaration
+//! decodes into one. One model, beside the rows and plates it is made of.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::window_ipc::{AppMenu, AppMenuItemId, AppMenuMark, AppMenuRole, AppMenuRowView};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::{glyph_mask, IconKind};
@@ -27,6 +36,7 @@ use crate::paint::{
     paint_surface_plate, plate_border, resolve_bead, role_font, surface_rect, text_plate_height,
     to_i32, BeadShape, ChevronDir, ChromeLayer,
 };
+use crate::record::FactList;
 use crate::state::{ControlDisposition, ControlRole, ControlState, RenderInvariant};
 
 /// The outcome of feeding input to a [`Menu`].
@@ -77,37 +87,60 @@ impl PlateSide {
     }
 }
 
-/// Where a plate `width` × `height` sits when it opens against `anchor`.
+/// Where a plate opens: the region it hangs off, the side it grows on, and
+/// the clearance it leaves.
+///
+/// One value rather than three parameters threaded separately, because
+/// [`plate_rect`] reads all three together and every caller carries all three:
+/// a root plate at a press point, a slot-anchored icon-bar menu, a submenu
+/// beside its parent row.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct PlatePlacement {
+    /// The region the plate opens against, in the same space as the viewport.
+    /// A zero extent is the point case.
+    pub anchor: Rect,
+    /// The side of the anchor the plate prefers.
+    pub side: PlateSide,
+    /// The clearance between the anchor's far edge and the plate. Zero is the
+    /// edge-adjacency a chain needs so travelling from a parent row into its
+    /// own child crosses no dead space.
+    pub gap: u32,
+}
+
+impl PlatePlacement {
+    /// A plate hanging edge-adjacent off the trailing side of `anchor`, which
+    /// is where a chain's child hangs from its parent row.
+    #[must_use]
+    pub const fn adjacent(anchor: Rect) -> Self {
+        Self {
+            anchor,
+            side: PlateSide::Trailing,
+            gap: 0,
+        }
+    }
+}
+
+/// Where a plate `width` × `height` sits when it opens as `placement` asks.
 ///
 /// The one placement rule every menu plate and every surface hanging where a
 /// plate would goes through: a root plate at a press point, a slot-anchored
-/// icon-bar menu, a submenu beside its parent, and an attached window all
-/// differ only in the anchor region, the side, and the clearance — never in
-/// the arithmetic. Two rules would drift, and did.
+/// icon-bar menu, and a submenu beside its parent all differ only in the
+/// placement — never in the arithmetic. Two rules would drift, and did.
 ///
 /// The plate is first bounded to `viewport` — a plate larger than the screen
-/// is drawn smaller, never off the edge — then opens on `side` with `gap`
-/// pixels of clearance from the anchor's far edge, flips to the opposite side
+/// is drawn smaller, never off the edge — then opens on the asked-for side
+/// with its clearance from the anchor's far edge, flips to the opposite side
 /// when that would leave `viewport` (and the opposite side would not), and is
 /// finally slid along the cross axis and clamped inside `viewport` by the
 /// shared [`Rect::clamped_onto`]. Its near edge on the cross axis aligns with
-/// the anchor's, so a submenu hangs at its parent row's top. A zero-extent
-/// anchor is the point case, and a `gap` of zero is the edge-adjacency a chain
-/// needs so travelling from a parent row into its own child crosses no dead
-/// space.
+/// the anchor's, so a submenu hangs at its parent row's top.
 ///
 /// When neither side has room the roomier one wins, so an oversized plate is
 /// placed beside its anchor rather than over it. A degenerate (zero-sized)
 /// viewport still yields a drawable, if clipped, rectangle.
 #[must_use]
-pub fn plate_rect(
-    width: u32,
-    height: u32,
-    anchor: Rect,
-    side: PlateSide,
-    gap: u32,
-    viewport: Rect,
-) -> Rect {
+pub fn plate_rect(width: u32, height: u32, placement: PlatePlacement, viewport: Rect) -> Rect {
+    let PlatePlacement { anchor, side, gap } = placement;
     let width = width.clamp(1, viewport.width.max(1));
     let height = height.clamp(1, viewport.height.max(1));
     let (extent, span) = if side.horizontal() {
@@ -814,9 +847,7 @@ impl Menu {
         plate_rect(
             self.preferred_width(scale, theme),
             self.preferred_height(scale, theme),
-            Rect::new(anchor.x, anchor.y, 0, 0),
-            PlateSide::Trailing,
-            0,
+            PlatePlacement::adjacent(Rect::new(anchor.x, anchor.y, 0, 0)),
             viewport,
         )
     }
@@ -1134,3 +1165,270 @@ fn paint_menu_mark(surface: &mut Surface, slot: (u32, u32, u32), mark: MenuMark,
         }
     }
 }
+
+/// What arriving on or choosing a row opens.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ChainChild {
+    /// Nothing. Choosing the row is the chain's outcome.
+    None,
+    /// A plate holding the rows that name this one as their parent.
+    Submenu,
+    /// The desktop's own information panel. Its facts are read from the
+    /// bundle's signed manifest before the chain opened, so an application
+    /// cannot state an identity that is not its own.
+    Info(FactList),
+}
+
+/// One row of the model a menu chain renders.
+///
+/// The service-facing model, which the wire model decodes *into*
+/// ([`ChainModel::from_app_menu`]). It is a superset: a row here carries the
+/// whole of [`ControlState`], because the desktop's own rows legitimately say
+/// things — that the *system* lacks the authority for a command — that an
+/// application must never be able to say about itself.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChainRow {
+    /// The submenu row this one sits under; `None` on the root plate.
+    parent: Option<usize>,
+    /// The id an outcome names, for the rows that carry one.
+    id: Option<AppMenuItemId>,
+    /// What this row opens.
+    child: ChainChild,
+    /// Everything the shared row control draws.
+    item: MenuItem,
+}
+
+impl ChainRow {
+    /// A chooseable row: choosing it answers the chain with `id`.
+    #[must_use]
+    pub fn item(id: AppMenuItemId, item: MenuItem) -> Self {
+        Self {
+            parent: None,
+            id: Some(id),
+            child: ChainChild::None,
+            item,
+        }
+    }
+
+    /// A row whose child is the plate holding the rows filed under it.
+    #[must_use]
+    pub fn submenu(item: MenuItem) -> Self {
+        Self {
+            parent: None,
+            id: None,
+            child: ChainChild::Submenu,
+            item: item.with_submenu(true),
+        }
+    }
+
+    /// A row whose child is the desktop's own information panel.
+    #[must_use]
+    pub fn info(item: MenuItem, facts: FactList) -> Self {
+        Self {
+            parent: None,
+            id: None,
+            child: ChainChild::Info(facts),
+            item: item.with_submenu(true),
+        }
+    }
+
+    /// This row filed under the plate row `parent` opens.
+    #[must_use]
+    pub const fn under(mut self, parent: usize) -> Self {
+        self.parent = Some(parent);
+        self
+    }
+
+    /// The plate row this one is filed under, or `None` on the root plate.
+    #[must_use]
+    pub const fn parent(&self) -> Option<usize> {
+        self.parent
+    }
+
+    /// The id an outcome naming this row carries, for the rows that have one.
+    #[must_use]
+    pub const fn id(&self) -> Option<AppMenuItemId> {
+        self.id
+    }
+
+    /// Everything the shared row control draws for this row.
+    #[must_use]
+    pub const fn drawn(&self) -> &MenuItem {
+        &self.item
+    }
+
+    /// What this row opens.
+    #[must_use]
+    pub const fn child(&self) -> &ChainChild {
+        &self.child
+    }
+
+    /// This row beginning a new visual group.
+    #[must_use]
+    pub fn grouped(mut self) -> Self {
+        self.item = self.item.with_group_break(true);
+        self
+    }
+}
+
+/// The model a menu chain renders: a root plate title and a parent-indexed
+/// list of rows.
+///
+/// Every menu the desktop draws is one of these, whoever asked for it: the
+/// desktop's own surfaces build one in process, and an application's
+/// declaration decodes into one ([`from_app_menu`](Self::from_app_menu)).
+/// There is deliberately no second model with a second set of behaviours.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ChainModel {
+    title: String,
+    rows: Vec<ChainRow>,
+}
+
+impl ChainModel {
+    /// An empty model titled `title`.
+    #[must_use]
+    pub fn new(title: impl Into<String>) -> Self {
+        Self {
+            title: title.into(),
+            rows: Vec::new(),
+        }
+    }
+
+    /// Append `row`, returning the index later rows file themselves under.
+    pub fn push(&mut self, row: ChainRow) -> usize {
+        self.rows.push(row);
+        self.rows.len() - 1
+    }
+
+    /// The root plate's title.
+    #[must_use]
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    /// The model's rows, in declaration order.
+    #[must_use]
+    pub fn rows(&self) -> &[ChainRow] {
+        &self.rows
+    }
+
+    /// Decode an application's wire menu into the model a chain renders,
+    /// titled `title`.
+    ///
+    /// The wire model is a **bounded subset** of this one, and the boundary is
+    /// structural rather than checked: there is no wire field for an authority
+    /// state or a progress state, so a decoded row is always
+    /// [`ControlState`]'s default authority. The Authority Mark says *the
+    /// system* refused a command, and only the system may say it — an
+    /// application painting it on its own row would be spoofing desktop
+    /// chrome.
+    ///
+    /// A declared separator becomes the next row's group break rather than a
+    /// row of its own, so a separator inside a submenu draws the divider it
+    /// draws on the root plate, and no index the chain reports is a rule
+    /// nothing can be chosen on.
+    #[must_use]
+    pub fn from_app_menu(title: &str, menu: &AppMenu, identity: Option<&FactList>) -> Self {
+        let mut model = Self::new(title);
+        // A declared row's index is what its children name, and a folded
+        // separator takes no index here, so the two spaces are mapped rather
+        // than assumed equal.
+        let mut mapped: Vec<Option<usize>> = Vec::new();
+        // One pending break per plate: a separator ending the root plate must
+        // not put a divider above the first row of a submenu.
+        let mut pending: Vec<(Option<usize>, bool)> = Vec::new();
+        for (row, declared_parent) in menu.rows() {
+            let parent = declared_parent.and_then(|at| mapped.get(at).copied().flatten());
+            if matches!(row, AppMenuRowView::Separator) {
+                mapped.push(None);
+                set_pending(&mut pending, parent, true);
+                continue;
+            }
+            let Some(mut built) = wire_row(row, identity) else {
+                mapped.push(None);
+                continue;
+            };
+            if take_pending(&mut pending, parent) {
+                built = built.grouped();
+            }
+            if let Some(at) = parent {
+                built = built.under(at);
+            }
+            mapped.push(Some(model.push(built)));
+        }
+        model
+    }
+}
+
+/// Note whether the plate under `parent` owes its next row a group break.
+fn set_pending(pending: &mut Vec<(Option<usize>, bool)>, parent: Option<usize>, owed: bool) {
+    if let Some(slot) = pending.iter_mut().find(|(at, _)| *at == parent) {
+        slot.1 = owed;
+    } else {
+        pending.push((parent, owed));
+    }
+}
+
+/// Take the group break the plate under `parent` was owed, if any.
+fn take_pending(pending: &mut [(Option<usize>, bool)], parent: Option<usize>) -> bool {
+    pending
+        .iter_mut()
+        .find(|(at, _)| *at == parent)
+        .is_some_and(|slot| core::mem::replace(&mut slot.1, false))
+}
+
+/// One declared row as a chain's own row, or `None` for a row that renders
+/// nothing (a separator, which the caller folds, or an information row on a
+/// chain whose owner attested no identity).
+fn wire_row(row: AppMenuRowView<'_>, identity: Option<&FactList>) -> Option<ChainRow> {
+    match row {
+        AppMenuRowView::Separator => None,
+        AppMenuRowView::Item(item) => {
+            let mut built = MenuItem::new(item.label)
+                .with_mark(wire_mark(item.mark))
+                .with_role(wire_role(item.role))
+                .with_state(ControlState::default().with_enabled(item.enabled));
+            if !item.shortcut.is_empty() {
+                built = built.with_shortcut(item.shortcut);
+            }
+            if !item.reason.is_empty() {
+                built = built.with_reason(item.reason);
+            }
+            Some(ChainRow::item(item.id, built))
+        }
+        AppMenuRowView::Submenu { label, enabled } => Some(ChainRow::submenu(
+            MenuItem::new(label).with_state(ControlState::default().with_enabled(enabled)),
+        )),
+        // Without an attested identity there is nothing truthful to put in the
+        // panel, so the row is left out rather than drawn opening a blank one.
+        AppMenuRowView::Info => {
+            identity.map(|facts| ChainRow::info(MenuItem::new(INFO_ROW_LABEL), facts.clone()))
+        }
+    }
+}
+
+/// The shared mark for a declared one.
+const fn wire_mark(mark: AppMenuMark) -> MenuMark {
+    match mark {
+        AppMenuMark::None => MenuMark::None,
+        AppMenuMark::Check => MenuMark::Check,
+        AppMenuMark::Radio => MenuMark::Radio,
+    }
+}
+
+/// The shared role for a declared one.
+const fn wire_role(role: AppMenuRole) -> ControlRole {
+    match role {
+        AppMenuRole::Neutral => ControlRole::Neutral,
+        AppMenuRole::Destructive => ControlRole::Destructive,
+    }
+}
+
+/// The label the desktop gives every application's information row.
+///
+/// The one row of an application's own menu whose *label* is the desktop's:
+/// the panel it opens is system chrome stating an attested identity, so every
+/// application reaches it by the same name. Public because aiming *at* the row
+/// is the same fact as reading one back — a test or a QEMU pointer script
+/// finds it by this name rather than by restating its position.
+pub const INFO_ROW_LABEL: &str = "Info";

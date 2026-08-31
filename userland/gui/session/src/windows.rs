@@ -21,11 +21,9 @@ use alloc::vec::Vec;
 
 use tairix_abi::desktop::DesktopInfo;
 use tairix_abi::driver::display::{DamageRect, DisplayMode};
-use tairix_abi::window_ipc::{
-    AppBar, AppMenu, AppMenuItemId, MenuAnchor, MenuRefusal, WindowEvent,
-};
+use tairix_abi::window_ipc::{AppBar, AppMenu, MenuAnchor, MenuRefusal, WindowEvent};
 use tairix_abi::{Errno, ProcId};
-use tairix_controls::PlateSide;
+use tairix_controls::{ChainModel, PlatePlacement};
 use tairix_display::winframe;
 use tairix_icon::{ArtworkOutcome, IconKind, IconRequest};
 use tairix_log::EventId;
@@ -35,7 +33,7 @@ use tairix_wm::{Color, Compositor, Point, Rect, Surface, WindowControlKind, Wind
 
 use crate::apps::{AppBarBridge, BUNDLE_RUN_SUFFIX};
 use crate::launch::LaunchTable;
-use crate::menu::{ChainGeometry, ChainModel, ChainOwner, MenuChain, ModelRefused, PanelRefused};
+use crate::menu::{ChainGeometry, ChainOwner, MenuChain, ModelRefused};
 use crate::picker::PickerSlot;
 use crate::shell::DesktopShell;
 
@@ -507,8 +505,7 @@ pub struct ShellWindowHost<'a> {
     /// ([`AppBarService`](crate::apps::AppBarService) in production): a
     /// validated icon-bar declaration lands here.
     pub apps: &'a mut dyn AppBarBridge,
-    /// The seat's one menu chain: a validated `OpenMenu` brings it up and a
-    /// validated `CreateMenuPanel` hangs a surface on it.
+    /// The seat's one menu chain, which a validated `OpenMenu` brings up.
     pub menu: &'a mut MenuChain,
     /// Whether a surface a menu may not displace holds the seat — the screen
     /// lock, the trusted picker, or a system-modal prompt. An accepted open is
@@ -545,7 +542,8 @@ pub fn seat_menu_refusal(screen: Rect, seat_held: bool) -> Option<MenuRefusal> {
     None
 }
 
-/// The side a window's menu opens on, and the clearance it leaves.
+/// Where a window's own menu opens against the press `anchor` its application
+/// reported.
 ///
 /// Trailing with no clearance is what makes the press point a *corner* of the
 /// plate rather than a point inside it, and edge-adjacency is what a chain
@@ -553,10 +551,10 @@ pub fn seat_menu_refusal(screen: Rect, seat_held: bool) -> Option<MenuRefusal> {
 /// space. Named here because two independent readers need the same values:
 /// the session, which places the chain, and the QEMU vertical, which
 /// reconstructs where a row was drawn in order to click it.
-pub const MENU_SIDE: PlateSide = PlateSide::Trailing;
-
-/// The clearance a window's menu leaves between the anchor and its plate.
-pub const MENU_GAP_PX: u32 = 0;
+#[must_use]
+pub const fn window_menu_placement(anchor: Rect) -> PlatePlacement {
+    PlatePlacement::adjacent(anchor)
+}
 
 /// The scale, theme and screen every menu-chain geometry answer resolves at.
 ///
@@ -851,59 +849,8 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         let model = ChainModel::from_app_menu(menu.title(), menu, facts.as_ref());
         let geom = chain_geometry(self.shell, self.compositor);
         self.menu
-            .open(owner, model, anchor, MENU_SIDE, MENU_GAP_PX, &geom)
+            .open(owner, model, window_menu_placement(anchor), &geom)
             .map_err(|ModelRefused::NoRows| Errno::OutOfRange)
-    }
-
-    fn menu_panel_opened(
-        &mut self,
-        window_id: u64,
-        owner_window_id: u64,
-        open_id: u64,
-        row: AppMenuItemId,
-        surface: &DisplayMode,
-    ) -> Result<(), Errno> {
-        let Some(parent) = self.windows.wm_id(owner_window_id) else {
-            return Err(Errno::NotFound);
-        };
-        let Some(owner) = self.windows.owner_of(owner_window_id) else {
-            return Err(Errno::NotFound);
-        };
-        // The chain decides whether the row is real and whether the pointer
-        // has moved on since the arrival went out; the engine retains neither
-        // the model nor the pointer, so only this can refuse a late surface.
-        let geom = chain_geometry(self.shell, self.compositor);
-        let placed = self
-            .menu
-            .place_panel(
-                window_id,
-                open_id,
-                row,
-                surface.width_px,
-                surface.height_px,
-                &geom,
-            )
-            .map_err(|refused| match refused {
-                PanelRefused::NoExtent => Errno::LengthOutOfRange,
-                PanelRefused::NoChain | PanelRefused::TooLate => Errno::NotFound,
-            })?;
-        let Some(content) =
-            Surface::filled(surface.width_px, surface.height_px, OPEN_FILL.premultiply())
-        else {
-            return Err(Errno::LengthOutOfRange);
-        };
-        // Undecorated and transient like a popup: an attached window wears the
-        // plate band the chain draws, not the window manager's furniture, and
-        // it rides its owner's stacking.
-        let Some(wm) =
-            self.shell
-                .open_popup_window(self.compositor, parent, placed.origin, content)
-        else {
-            return Err(Errno::NotFound);
-        };
-        self.compositor.set_app_presented(wm, true);
-        self.windows.insert(window_id, wm, Some(parent), owner);
-        Ok(())
     }
 
     fn pick_requested(&mut self, window_id: u64) -> Result<(), Errno> {

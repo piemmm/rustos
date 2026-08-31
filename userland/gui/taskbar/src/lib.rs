@@ -17,14 +17,14 @@
 //!   own default action (or, for an application that declared none, raises
 //!   its most recently used window); hovering a slot whose application owns
 //!   more than one window opens the [`WindowPicker`] to choose between them;
-//!   and a secondary press opens the [`BarMenu`] over the menu the
-//!   *application itself* declared. Every such menu reads in one order — the
-//!   bar-drawn *Info* row first, whose submenu is the application's
+//!   and a secondary press asks the desktop to open the menu the *application
+//!   itself* declared ([`MenuRequest`]). Every such menu reads in one order —
+//!   the desktop-drawn *Info* row first, whose child is the application's
 //!   information panel drawn from its signed manifest; the application's own
 //!   rows next; and *Quit* last. That convention is the applications' to
 //!   follow and is written once, in `tairix_window::declaration`, not
-//!   restated here: the bar draws exactly what it was declared. An
-//!   application that declared no menu opens nothing. The windows themselves
+//!   restated here: the bar states exactly what it was declared. An
+//!   application that declared no menu asks for nothing. The windows themselves
 //!   stay in the [`TaskList`], the one window registry the picker and the
 //!   Switchboard capsule both read.
 //! - **Trailing end** — the [`NotificationArea`]: the persistent status
@@ -96,14 +96,14 @@ mod tests;
 
 pub use apps::{AppIdentity, AppSlot, AppStrip};
 pub use clock::Clock;
-pub use clock_menu::{ClockAction, ClockPermits, ClockRow};
+pub use clock_menu::{ClockPermits, ClockRow};
 pub use edge::{Edge, Orientation};
 pub use input::{TaskbarInput, TaskbarResponse};
 pub use layout::{BarLayout, Hit, NotificationCard, NotificationsLayout, TrayReadoutLayout};
 pub use library::{
     folder_label, LibraryFocus, LibraryIconRequest, LibraryLayout, LibraryPopup, LibraryRow,
 };
-pub use menu::{BarMenu, EntryRow, MenuLayout, MenuSubject, INFO_ROW_LABEL};
+pub use menu::{EntryRow, MenuRequest, MenuSubject};
 pub use notifications::{
     IconId, NotificationArea, NotifySeverity, StatusKind, StatusSignal, TransientNotification,
 };

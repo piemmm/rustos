@@ -20,10 +20,8 @@
 //! launches anything.
 
 use tairix_abi::window_ipc::AppMenuItemId;
-use tairix_controls::{ControlState, MenuItem, MenuMark};
+use tairix_controls::{ChainModel, ChainRow, ControlState, MenuItem, MenuMark};
 use tairix_wallpaper::{IconFlow, IconSort, PinboardSettings};
-
-use crate::menu::{ChainModel, ChainRow};
 
 /// The root plate's title: the surface the menu acts on, named as the user
 /// knows it.
@@ -81,24 +79,11 @@ impl PinboardCommand {
     /// The command the chosen row `item` names, or `None` for an id this menu
     /// never declared (fail closed — a command is never guessed at).
     ///
-    /// The inverse of the one-based numbering [`model`] gives each row.
+    /// The inverse of the numbering [`model`] gives each row, which is the
+    /// shared one every command-list menu uses.
     #[must_use]
     pub fn from_item(item: AppMenuItemId) -> Option<Self> {
-        let index = usize::from(item.get().checked_sub(1)?);
-        Self::ALL.get(index).copied()
-    }
-
-    /// The row id for the command at `index` of [`Self::ALL`].
-    ///
-    /// One-based, because a menu row id is never zero; [`Self::from_item`] is
-    /// the inverse, so the two are one rule rather than two tables to keep in
-    /// step. `None` for an index no id can number, which the fixed
-    /// [`Self::ALL`] cannot reach.
-    fn row_id(index: usize) -> Option<AppMenuItemId> {
-        let raw = u16::try_from(index)
-            .ok()
-            .and_then(|position| position.checked_add(1))?;
-        AppMenuItemId::new(raw).ok()
+        Self::ALL.get(item.index()).copied()
     }
 
     /// The row label.
@@ -180,7 +165,7 @@ pub fn model(on_icon: bool, settings: &PinboardSettings) -> ChainModel {
         if command.needs_icon() && !on_icon {
             continue;
         }
-        let Some(id) = PinboardCommand::row_id(index) else {
+        let Some(id) = AppMenuItemId::for_index(index) else {
             continue;
         };
         let mut item = MenuItem::new(command.label());

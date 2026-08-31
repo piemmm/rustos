@@ -1001,8 +1001,8 @@ impl DesktopShell {
     }
 
     /// Bring the compositor's windows into line with the open menu chain:
-    /// draw every plate and the information panel it lists, move the attached
-    /// window it placed, and take down everything it no longer has.
+    /// draw every plate and the information panel it lists, and take down
+    /// everything it no longer has.
     ///
     /// Reconciliation rather than a set of add/remove calls, so a surface can
     /// never outlive the state that placed it and no path has to remember to
@@ -1024,7 +1024,6 @@ impl DesktopShell {
         compositor: &mut Compositor,
         chain: &MenuChain,
         owner: Option<WindowId>,
-        attached: Option<WindowId>,
     ) -> bool {
         let scale = compositor.scale();
         let theme = self.session.active_theme().clone();
@@ -1080,14 +1079,6 @@ impl DesktopShell {
                     );
                     facts.render(&mut pixels, local, scale, &theme);
                     pixels
-                }
-                // The application drew this one and the session already holds
-                // its window; only where it sits is the chain's to say.
-                SurfaceKind::Attached(_) => {
-                    if let Some(id) = attached {
-                        compositor.move_window(id, placed.rect.origin);
-                    }
-                    continue;
                 }
             };
             let id = match (existing, owner) {

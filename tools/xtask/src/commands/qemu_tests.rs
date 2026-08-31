@@ -9340,7 +9340,7 @@ fn datetime_elevate_aim_points() -> Result<(tairix_geometry::Point, tairix_geome
     use tairix_input::{InputEvent, PointerButton};
     use tairix_log::DiscardSink;
     use tairix_reclaim::ReportedPressure;
-    use tairix_taskbar::{TaskbarConfig, TaskbarInput};
+    use tairix_taskbar::{TaskbarConfig, TaskbarInput, TaskbarResponse};
 
     static NO_PRESSURE_FEED: ReportedPressure = ReportedPressure::unknown();
     static DISCARD_SINK: DiscardSink = DiscardSink;
@@ -9364,60 +9364,52 @@ fn datetime_elevate_aim_points() -> Result<(tairix_geometry::Point, tairix_geome
         .set_elevation_available(true);
 
     let mut router = TaskbarInput::new();
+    // What the press asked the embedder for, which for a secondary press on a
+    // menu target is the model and anchor the chain opens with.
     let mut press_at = |shell: &mut DesktopShell, at: Point, button: PointerButton| {
         let taskbar = shell.session_mut().taskbar_mut();
         router.handle(InputEvent::PointerMoved { to: at }, taskbar, scale, now_ns);
-        router.handle(
+        let pressed = router.handle(
             InputEvent::PointerPressed { button },
             taskbar,
             scale,
             now_ns,
         );
-        router.handle(
+        let released = router.handle(
             InputEvent::PointerReleased { button },
             taskbar,
             scale,
             now_ns,
         );
+        if matches!(pressed, TaskbarResponse::Ignored) {
+            released
+        } else {
+            pressed
+        }
     };
 
     let bar = shell.session().taskbar().layout(scale);
     let clock = rect_centre(bar.clock, "clock")?;
 
-    // Open the clock menu exactly as the first click will. A menu is what a
+    // Ask for the clock menu exactly as the first click will. A menu is what a
     // secondary press asks for: the clock is a reading, and a primary press
-    // on it is claimed and inert.
-    press_at(&mut shell, clock, PointerButton::Secondary);
-    if !shell.session().taskbar().menu().is_open() {
-        return Err(
-            "datetime-elevate script: a secondary press on the clock opened no menu".to_string(),
-        );
-    }
-    let menu_layout = shell
-        .session()
-        .taskbar()
-        .menu_layout(scale)
-        .ok_or_else(|| "datetime-elevate script: the open menu lays nothing out".to_string())?;
-    let control = shell.session().taskbar().menu().control();
-    let set_label = tairix_taskbar::clock_menu::SET_ROW_LABEL;
-    let row = control
-        .items()
-        .iter()
-        .position(|item| item.label() == set_label)
-        .ok_or_else(|| format!("datetime-elevate script: the menu has no {set_label:?} row"))?;
-    let set_row = rect_centre(
-        control
-            .row_rect(
-                row,
-                menu_layout.panel,
-                scale,
-                shell.session().taskbar().theme(),
-            )
-            .ok_or_else(|| {
-                "datetime-elevate script: the set-time row lays nothing out".to_string()
-            })?,
-        "Set Date & Time row",
+    // on it is claimed and inert. The bar answers with the model and the
+    // anchor, and the desktop's own chain places and draws it.
+    let request = match press_at(&mut shell, clock, PointerButton::Secondary) {
+        TaskbarResponse::OpenMenu(request) => request,
+        other => {
+            return Err(format!(
+            "datetime-elevate script: a secondary press on the clock asked for no menu: {other:?}"
+        ))
+        }
+    };
+    let (_, row) = chain_plate_and_row(
+        request.model,
+        request.placement,
+        tairix_taskbar::clock_menu::SET_ROW_LABEL,
+        "datetime-elevate script",
     )?;
+    let set_row = rect_centre(row, "Set Date & Time row")?;
     Ok((clock, set_row))
 }
 
@@ -9742,27 +9734,39 @@ const RECONSTRUCTION_SCALE: tairix_geometry::Scale = tairix_geometry::Scale::ONE
 /// geometry, and no rectangle depends on how long a press was held.
 const RECONSTRUCTION_INSTANT_NS: u64 = 0;
 
-/// Press and release `button` at `at` in the reconstructed model.
+/// Press and release `button` at `at` in the reconstructed model, answering
+/// what the press asked the embedder for.
+///
+/// The press is what a secondary click's answer comes from — the bar reports
+/// the model and anchor its menu opens with — so the response is returned
+/// rather than dropped. A release that asks for nothing does not overwrite what
+/// the press asked for.
 fn bar_press(
     shell: &mut tairix_desktop_session::DesktopShell,
     router: &mut tairix_taskbar::TaskbarInput,
     at: tairix_geometry::Point,
     button: tairix_input::PointerButton,
-) {
+) -> tairix_taskbar::TaskbarResponse {
     use tairix_input::InputEvent;
+    use tairix_taskbar::TaskbarResponse;
     let taskbar = shell.session_mut().taskbar_mut();
+    let mut asked = TaskbarResponse::Ignored;
     for event in [
         InputEvent::PointerMoved { to: at },
         InputEvent::PointerPressed { button },
         InputEvent::PointerReleased { button },
     ] {
-        router.handle(
+        let response = router.handle(
             event,
             taskbar,
             RECONSTRUCTION_SCALE,
             RECONSTRUCTION_INSTANT_NS,
         );
+        if matches!(asked, TaskbarResponse::Ignored) {
+            asked = response;
+        }
     }
+    asked
 }
 
 /// Reconstruct the launch of the terminal from the program library.
@@ -9911,6 +9915,7 @@ fn reconstruct_bar_launch() -> Result<BarLaunch, String> {
 fn appbar_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     use tairix_input::PointerButton;
     use tairix_qemu::MouseButton;
+    use tairix_taskbar::TaskbarResponse;
 
     let BarLaunch {
         mut shell,
@@ -9919,38 +9924,25 @@ fn appbar_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
         entry_row,
         slot,
     } = reconstruct_bar_launch()?;
-    let scale = RECONSTRUCTION_SCALE;
-    bar_press(&mut shell, &mut router, slot, PointerButton::Secondary);
-    if !shell.session().taskbar().menu().is_open() {
-        return Err("icon-bar script: a secondary press on the slot opened no menu".to_string());
-    }
     // The *New window* row, named from the declaration rather than by
-    // position: the rows the bar draws skip the declared separator, so
-    // counting them here would restate a rule the model already applies.
-    let menu_layout = shell
-        .session()
-        .taskbar()
-        .menu_layout(scale)
-        .ok_or_else(|| "icon-bar script: the open menu lays nothing out".to_string())?;
-    let control = shell.session().taskbar().menu().control();
-    let row = control
-        .items()
-        .iter()
-        .position(|item| item.label() == TERMINAL_NEW_WINDOW_LABEL)
-        .ok_or_else(|| {
-            format!("icon-bar script: the menu has no {TERMINAL_NEW_WINDOW_LABEL:?} row")
-        })?;
-    let new_window = rect_centre(
-        control
-            .row_rect(
-                row,
-                menu_layout.panel,
-                scale,
-                shell.session().taskbar().theme(),
-            )
-            .ok_or_else(|| "icon-bar script: the chosen row lays nothing out".to_string())?,
-        "New window row",
+    // position: a declared separator opens the next row's group rather than
+    // taking a row of its own, so counting rows here would restate a rule the
+    // model already applies.
+    let request = match bar_press(&mut shell, &mut router, slot, PointerButton::Secondary) {
+        TaskbarResponse::OpenMenu(request) => request,
+        other => {
+            return Err(format!(
+                "icon-bar script: the slot asked for no menu: {other:?}"
+            ))
+        }
+    };
+    let (_, row) = chain_plate_and_row(
+        request.model,
+        request.placement,
+        TERMINAL_NEW_WINDOW_LABEL,
+        "icon-bar script",
     )?;
+    let new_window = rect_centre(row, "New window row")?;
 
     let ready = AUTOLOAD_DESKTOP_REVEALED_MARKER;
     let mut pen = PointerPen::pinned_at_origin(ready, ramfb_screen());
@@ -10049,67 +10041,90 @@ const MENU_SHOWN_MARKER: &str = tairix_desktop_session::MENU_SHOWN_MESSAGE;
 /// serves.
 const MENU_TERMINAL_CASCADE_SLOT: u64 = 0;
 
-/// The plate the terminal's window menu opens at `press`, and the screen
-/// rectangle of the row labelled `label` on it.
+/// The geometry the production menu chain resolves at on this guest's screen.
 ///
-/// Reconstructed by driving the **production** chain — the same model decode,
-/// the same placement rule, the same row geometry the guest lays out — so the
-/// script clicks where the desktop actually draws rather than at coordinates
-/// copied from a screenshot. The terminal's own `menu` module supplies both the
-/// model and the row's label, so nothing here restates a row by position.
-///
-/// The chain is opened for the session as its own owner because the owner decides
-/// only where an *answer* goes; placement reads the anchor, the side, the
-/// clearance and the screen, all of which are the same for either owner. The
-/// terminal declares no submenu and no panel row, so every row of its model
-/// sits on the root plate in declaration order.
-fn menu_plate_and_row(
-    press: tairix_geometry::Point,
-    label: &str,
-) -> Result<(tairix_geometry::Rect, tairix_geometry::Rect), String> {
-    use tairix_desktop_session::menu::{ChainModel, ChainOwner, MenuChain};
-    use tairix_desktop_session::windows::{MENU_GAP_PX, MENU_SIDE};
-
+/// The session composites at the reference density with the shipped theme, so
+/// the chrome epoch a chain is placed against is that pair.
+fn reconstruction_chain_geometry(
+    theme: &tairix_theme::Theme,
+) -> tairix_desktop_session::menu::ChainGeometry<'_> {
     let (width, height) = ramfb_screen();
-    let theme = tairix_theme::Theme::dark();
-    let geom = tairix_desktop_session::menu::ChainGeometry {
+    tairix_desktop_session::menu::ChainGeometry {
         screen: tairix_geometry::Rect::new(0, 0, width, height),
         scale: RECONSTRUCTION_SCALE,
-        theme: &theme,
-        // The session composites at the reference density with the shipped
-        // theme, so the chrome epoch a chain is placed against is that pair.
+        theme,
         epoch: (RECONSTRUCTION_SCALE.percent(), 0),
-    };
-    let wire = tairix_terminal::menu::model()
-        .map_err(|err| format!("menu script: the terminal's menu model is invalid: {err}"))?;
-    // No information row is declared, so the attested identity a chain would
-    // draw one from is never read.
-    let model = ChainModel::from_app_menu(wire.title(), &wire, None);
+    }
+}
+
+/// The root plate of the chain the desktop opens for `model` at `placement`,
+/// and the screen rectangle of the row labelled `label` on it.
+///
+/// Reconstructed by driving the **production** chain — the same model, the same
+/// placement rule, the same row geometry the guest lays out — so a script
+/// clicks where the desktop actually draws rather than at coordinates copied
+/// from a screenshot.
+///
+/// The chain is opened for the backdrop as its owner because the owner decides
+/// only where an *answer* goes; placement reads the model, the placement and
+/// the screen, all of which are the same for any owner.
+///
+/// One definition, because every menu a pointer script clicks a row of is
+/// reconstructed this way: an application's own window menu, the clock's, and
+/// the icon-bar slot's alike.
+fn chain_plate_and_row(
+    model: tairix_controls::ChainModel,
+    placement: tairix_controls::PlatePlacement,
+    label: &str,
+    what: &str,
+) -> Result<(tairix_geometry::Rect, tairix_geometry::Rect), String> {
+    use tairix_desktop_session::menu::{ChainOwner, MenuChain};
+
+    let theme = tairix_theme::Theme::dark();
+    let geom = reconstruction_chain_geometry(&theme);
     let row = model
         .rows()
         .iter()
         .position(|row| row.drawn().label() == label)
-        .ok_or_else(|| format!("menu script: the terminal's menu has no {label:?} row"))?;
+        .ok_or_else(|| format!("{what}: the menu has no {label:?} row"))?;
     let mut chain = MenuChain::new();
     chain
-        .open(
-            ChainOwner::Session,
-            model,
-            tairix_geometry::Rect::new(press.x, press.y, 0, 0),
-            MENU_SIDE,
-            MENU_GAP_PX,
-            &geom,
-        )
-        .map_err(|err| format!("menu script: the terminal's menu opens nothing: {err:?}"))?;
+        .open(ChainOwner::Backdrop, model, placement, &geom)
+        .map_err(|err| format!("{what}: the menu opens nothing: {err:?}"))?;
     let plate = chain
         .surfaces()
         .first()
-        .ok_or_else(|| "menu script: the open chain lists no surface".to_string())?
+        .ok_or_else(|| format!("{what}: the open chain lists no surface"))?
         .rect;
     let row = chain
         .row_rect(0, row, &geom)
-        .ok_or_else(|| format!("menu script: the {label:?} row lays nothing out"))?;
+        .ok_or_else(|| format!("{what}: the {label:?} row lays nothing out"))?;
     Ok((plate, row))
+}
+
+/// The plate the terminal's window menu opens at `press`, and the screen
+/// rectangle of the row labelled `label` on it.
+///
+/// The terminal's own `menu` module supplies both the model and the row's
+/// label, so nothing here restates a row by position. It declares no submenu,
+/// so every row of its model sits on the root plate in declaration order.
+fn menu_plate_and_row(
+    press: tairix_geometry::Point,
+    label: &str,
+) -> Result<(tairix_geometry::Rect, tairix_geometry::Rect), String> {
+    let wire = tairix_terminal::menu::model()
+        .map_err(|err| format!("menu script: the terminal's menu model is invalid: {err}"))?;
+    // No information row is declared, so the attested identity a chain would
+    // draw one from is never read.
+    let model = tairix_controls::ChainModel::from_app_menu(wire.title(), &wire, None);
+    chain_plate_and_row(
+        model,
+        tairix_desktop_session::windows::window_menu_placement(tairix_geometry::Rect::new(
+            press.x, press.y, 0, 0,
+        )),
+        label,
+        "menu script",
+    )
 }
 
 /// Launch the terminal from the program library, right-click its client to open

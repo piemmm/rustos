@@ -123,6 +123,10 @@
 //! row's reason); it owns keyboard navigation, pointer hover/click, the spec §13
 //! authority rendering (a denied row keeps its slot and shows an Authority
 //! Mark), and a destructive row's danger rail, emitting a typed [`MenuAction`].
+//! It also carries [`plate_rect`] — the one rule that places a plate against a
+//! [`PlatePlacement`] — and [`ChainModel`], the one model every menu the
+//! desktop renders is built as, whether a desktop surface built it in process
+//! or an application's declaration decoded into it.
 //!
 //! The [`toolbar`] module is the toolbar / toolstrip — [`Toolbar`]. It is a
 //! horizontal container of [`IconButton`] / [`SplitButton`] tools grouped with
@@ -283,7 +287,10 @@ pub use collection::{
 };
 pub use combo::{ComboAction, ComboBox};
 pub use decision::{Dialog, DialogAction, HelpTip, HelpTipAction, Tooltip};
-pub use menu::{plate_rect, Menu, MenuAction, MenuItem, MenuMark, PlateSide};
+pub use menu::{
+    plate_rect, ChainChild, ChainModel, ChainRow, Menu, MenuAction, MenuItem, MenuMark,
+    PlatePlacement, PlateSide, INFO_ROW_LABEL,
+};
 pub use metric::{MetricInstrument, MetricLayout, MetricTile, StatusPill};
 pub use nav::{Breadcrumb, BreadcrumbAction, Crumb};
 pub use paint::{ground_fill, paint_surface_plate, plate_border, ChromeLayer};

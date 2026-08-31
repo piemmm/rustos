@@ -20,8 +20,13 @@
 //! no session authority started — where there is no refusal to explain and
 //! the row is left out entirely ([`SystemRow::offered_by`]).
 
-use tairix_controls::{ActivityState, AuthorityState, ControlRole, ControlState, MenuItem};
+use tairix_abi::switchboard_ipc::CommandSection;
+use tairix_abi::PowerAction;
+use tairix_controls::{AuthorityState, ControlRole, ControlState, MenuItem, MenuMark};
+use tairix_proglib::EntryId;
 use tairix_theme::Appearance;
+
+use crate::input::TaskbarResponse;
 
 /// One system quick action the menu can offer.
 ///
@@ -212,15 +217,20 @@ pub struct SystemPermits {
     pub switch_user_available: bool,
 }
 
-/// The rows `permits` offers, in [`ROWS`] order.
+/// The rows `permits` offers, each with its position in [`ROWS`].
 ///
-/// The one filter both the rendered rows and the row → command mapping read,
-/// so a hidden row can never still be clickable at its old index.
-fn offered(permits: SystemPermits) -> impl Iterator<Item = &'static SystemRow> {
-    ROWS.iter().filter(move |row| row.offered_by(permits))
+/// The one filter the rendered rows read. The *position* travels with the row
+/// because it is the id an answer names, so a hidden row shifts nothing and
+/// the row → command mapping needs no copy of the filter.
+fn offered(permits: SystemPermits) -> impl Iterator<Item = (usize, &'static SystemRow)> {
+    ROWS.iter()
+        .enumerate()
+        .filter(move |(_, row)| row.offered_by(permits))
 }
 
-/// Build the menu's rows for `permits`.
+/// Build the menu's rows for `permits`, each with its own position in
+/// [`ROWS`] — which is the id an answer names, so a row left out shifts no
+/// other row's meaning.
 ///
 /// Every offered row is rendered, in [`ROWS`] order: a command whose
 /// backing is missing is shown non-actionable with the reason stated, never
@@ -230,15 +240,19 @@ fn offered(permits: SystemPermits) -> impl Iterator<Item = &'static SystemRow> {
 /// does not have at all ([`SystemRow::offered_by`]) is the exception and is
 /// not rendered.
 #[must_use]
-pub fn rows(permits: SystemPermits) -> alloc::vec::Vec<MenuItem> {
+pub(crate) fn rows(permits: SystemPermits) -> alloc::vec::Vec<(usize, MenuItem)> {
     offered(permits)
-        .map(|row| {
+        .map(|(index, row)| {
             let item = MenuItem::new(row.label)
                 .with_group_break(row.group_break)
                 .with_role(row.role);
-            match row.action {
+            let item = match row.action {
+                // The two appearances are a group of alternatives exactly one
+                // of which holds, so the one in force is the group's chosen
+                // member: a bullet, disabled, with its reason.
                 SystemAction::Appearance(choice) if choice == permits.appearance => item
-                    .with_state(ControlState::disabled().with_activity(ActivityState::Complete))
+                    .with_mark(MenuMark::Radio)
+                    .with_state(ControlState::disabled())
                     .with_reason(REASON_ALREADY_IN_USE),
                 SystemAction::TaskShell if !permits.task_shell_installed => item
                     .with_state(ControlState::disabled())
@@ -254,18 +268,48 @@ pub fn rows(permits: SystemPermits) -> alloc::vec::Vec<MenuItem> {
                     )
                     .with_reason(REASON_NO_POWER_AUTHORITY),
                 _ => item,
-            }
+            };
+            (index, item)
         })
         .collect()
 }
 
-/// The command the row at `index` of the menu built for `permits` asks for,
-/// or `None` for an index that menu does not name (fail closed — never guess
-/// at a command).
+/// What the row at position `index` of [`ROWS`] asks the embedder for, or
+/// `None` for a position no row holds (fail closed — never guess at a
+/// command).
 ///
-/// Indexed over the rows `permits` actually offers, exactly as [`rows`]
-/// renders them, so a row left out shifts the commands below it here too.
+/// Indexed over [`ROWS`] itself rather than over the rows a menu happened to
+/// offer, so a row `permits` left out cannot shift the meaning of another.
+///
+/// The two inspection rows reuse the capsule's own Switchboard-opening
+/// response and the launch row reuses the bar's one launch response, so no
+/// command here introduces a second path to a destination the bar already
+/// reaches.
 #[must_use]
-pub fn action_at(permits: SystemPermits, index: usize) -> Option<SystemAction> {
-    offered(permits).nth(index).map(|row| row.action)
+pub(crate) fn response_at(index: usize) -> Option<TaskbarResponse> {
+    Some(match ROWS.get(index)?.action {
+        SystemAction::About => TaskbarResponse::OpenSwitchboard {
+            section: CommandSection::System,
+        },
+        SystemAction::SystemMonitor => TaskbarResponse::OpenSwitchboard {
+            section: CommandSection::Tasks,
+        },
+        // The row is only actionable when this identifier resolved against
+        // the catalog, so a refusal here cannot happen through the menu;
+        // reporting nothing rather than a launch that must fail is still the
+        // honest answer if it ever did.
+        SystemAction::TaskShell => TaskbarResponse::LibraryLaunch {
+            entry: EntryId::new(TASK_SHELL_BUNDLE).ok()?,
+        },
+        SystemAction::Appearance(appearance) => TaskbarResponse::SetAppearance { appearance },
+        SystemAction::Lock => TaskbarResponse::LockSession,
+        SystemAction::SwitchUser => TaskbarResponse::SwitchUser,
+        SystemAction::LogOut => TaskbarResponse::LogOut,
+        SystemAction::Restart => TaskbarResponse::ConfirmSystemPower {
+            action: PowerAction::Restart,
+        },
+        SystemAction::ShutDown => TaskbarResponse::ConfirmSystemPower {
+            action: PowerAction::PowerOff,
+        },
+    })
 }

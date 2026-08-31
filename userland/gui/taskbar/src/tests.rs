@@ -65,12 +65,14 @@ fn pressured_renderer(gauge: &'static ReportedPressure) -> TaskbarRenderer {
     TaskbarRenderer::new(icon_cache(TEST_SEAT, TEST_FB_BYTES, gauge, &TEST_SINK))
 }
 
+use tairix_controls::{ChainChild, ChainModel, ChainRow, INFO_ROW_LABEL};
+
 use crate::apps::{AppIdentity, AppSlot};
 use crate::edge::{Edge, Orientation};
 use crate::input::{TaskbarInput, TaskbarResponse, LONG_PRESS_AFTER_NS};
 use crate::layout::Hit;
 use crate::library::{folder_label, LibraryFocus, LibraryRow};
-use crate::menu::{EntryRow, MenuSubject, INFO_ROW_LABEL};
+use crate::menu::{EntryRow, MenuRequest, MenuSubject};
 use crate::notifications::{
     IconId, NotifySeverity, StatusKind, StatusSignal, TransientNotification,
 };
@@ -243,9 +245,10 @@ fn visible_row_where(
         .copied()
 }
 
-/// Open the program-library popup, then open the context menu on its first
-/// visible entry row, and report the entry that row names.
-fn open_entry_menu(input: &mut TaskbarInput, taskbar: &mut Taskbar) -> EntryId {
+/// Open the program-library popup, then ask for the context menu on its first
+/// visible entry row, reporting the entry that row names and the menu the bar
+/// asked the desktop for.
+fn ask_entry_menu(input: &mut TaskbarInput, taskbar: &mut Taskbar) -> (EntryId, MenuRequest) {
     open_library(input, taskbar);
     let (row, rect) = visible_row_where(taskbar, |row| matches!(row, LibraryRow::Entry { .. }))
         .expect("an entry row is visible");
@@ -253,75 +256,14 @@ fn open_entry_menu(input: &mut TaskbarInput, taskbar: &mut Taskbar) -> EntryId {
         LibraryRow::Entry { id, .. } => id.clone(),
         LibraryRow::Folder { .. } => panic!("not an entry"),
     };
-    let inside = centre_of(rect);
-    input.handle(
-        InputEvent::PointerMoved { to: inside },
-        taskbar,
-        Scale::ONE,
-        NOW_NS,
-    );
-    input.handle(
-        InputEvent::PointerPressed {
-            button: PointerButton::Secondary,
-        },
-        taskbar,
-        Scale::ONE,
-        NOW_NS,
-    );
-    assert!(taskbar.menu().is_open());
+    let request = ask_menu(input, taskbar, centre_of(rect)).expect("the row asks for its own menu");
     assert_eq!(
-        taskbar.menu().subject(),
-        Some(&MenuSubject::Entry {
+        request.subject,
+        MenuSubject::Entry {
             entry: entry.clone()
-        })
+        }
     );
-    entry
-}
-
-/// Click `row` of the open entry menu and report what the bar answered.
-///
-/// The row is found by the label its one definition gives it, so a
-/// reordering moves the click with it rather than aiming at a stale index.
-fn choose_entry_row(
-    input: &mut TaskbarInput,
-    taskbar: &mut Taskbar,
-    row: EntryRow,
-) -> TaskbarResponse {
-    let layout = taskbar
-        .menu_layout(Scale::ONE)
-        .expect("the open menu lays out");
-    let control = taskbar.menu().control();
-    let index = control
-        .items()
-        .iter()
-        .position(|item| item.label() == row.label())
-        .expect("the row is drawn");
-    let rect = control
-        .row_rect(index, layout.panel, Scale::ONE, taskbar.theme())
-        .expect("the row lays out");
-    let over = centre_of(rect);
-    input.handle(
-        InputEvent::PointerMoved { to: over },
-        taskbar,
-        Scale::ONE,
-        NOW_NS,
-    );
-    input.handle(
-        InputEvent::PointerPressed {
-            button: PointerButton::Primary,
-        },
-        taskbar,
-        Scale::ONE,
-        NOW_NS,
-    );
-    input.handle(
-        InputEvent::PointerReleased {
-            button: PointerButton::Primary,
-        },
-        taskbar,
-        Scale::ONE,
-        NOW_NS,
-    )
+    (entry, request)
 }
 
 /// A dark theme with `contrast` swapped in, for accessibility renders.
@@ -1453,42 +1395,39 @@ fn status_icon_and_clock_presses_are_claimed_and_inert() {
         press_at(&mut input, &mut bar, icon.x, icon.y),
         TaskbarResponse::Ignored
     );
-    // The clock is the other one: a left click on it acts on nothing and
-    // opens nothing. Its menu answers a secondary press.
+    // The clock is the other one: a left click on it acts on nothing and asks
+    // for nothing. Its menu answers a secondary press, so `Ignored` is also
+    // the proof that no menu was asked for.
     let clock = centre_of(layout.clock);
     assert_eq!(
         press_at(&mut input, &mut bar, clock.x, clock.y),
         TaskbarResponse::Ignored
     );
-    assert!(
-        !bar.menu().is_open(),
-        "a left click on the clock opened a menu"
-    );
 }
 
-/// Seat one application on the bar and open the menu it declared with a
-/// secondary press on its slot, returning the slot's centre.
-fn open_app_menu(input: &mut TaskbarInput, bar: &mut Taskbar) -> Point {
-    let slot = centre_of(bar.layout(Scale::ONE).apps[0]);
-    input.handle(
-        InputEvent::PointerMoved { to: slot },
+/// Ask for the menu a secondary press at `at` offers, or `None` when the press
+/// asks for none.
+fn ask_menu(input: &mut TaskbarInput, bar: &mut Taskbar, at: Point) -> Option<MenuRequest> {
+    input.handle(InputEvent::PointerMoved { to: at }, bar, Scale::ONE, NOW_NS);
+    match input.handle(
+        InputEvent::PointerPressed {
+            button: PointerButton::Secondary,
+        },
         bar,
         Scale::ONE,
         NOW_NS,
-    );
-    assert_eq!(
-        input.handle(
-            InputEvent::PointerPressed {
-                button: PointerButton::Secondary,
-            },
-            bar,
-            Scale::ONE,
-            NOW_NS,
-        ),
-        TaskbarResponse::Ignored,
-        "opening a menu acts on nothing by itself"
-    );
-    slot
+    ) {
+        TaskbarResponse::OpenMenu(request) => Some(request),
+        TaskbarResponse::Ignored => None,
+        other => panic!("a secondary press asked for {other:?}"),
+    }
+}
+
+/// Ask for the menu the one seated application declared, by a secondary press
+/// on its slot.
+fn ask_app_menu(input: &mut TaskbarInput, bar: &mut Taskbar) -> Option<MenuRequest> {
+    let slot = centre_of(bar.layout(Scale::ONE).apps[0]);
+    ask_menu(input, bar, slot)
 }
 
 /// A bar with one application whose declared menu is [`declared_menu`].
@@ -1501,38 +1440,57 @@ fn bar_with_declared_app() -> Taskbar {
     bar
 }
 
+/// The rows of `model`'s plate under `parent`, in declaration order.
+fn plate_of(model: &ChainModel, parent: Option<usize>) -> Vec<MenuItem> {
+    model
+        .rows()
+        .iter()
+        .filter(|row| row.parent() == parent)
+        .map(|row| row.drawn().clone())
+        .collect()
+}
+
+/// The row labelled `label`, or the test fails.
+fn row_named<'a>(model: &'a ChainModel, label: &str) -> &'a ChainRow {
+    model
+        .rows()
+        .iter()
+        .find(|row| row.drawn().label() == label)
+        .unwrap_or_else(|| panic!("the model has no {label:?} row"))
+}
+
+/// What choosing the row labelled `label` of `request` asks the embedder for.
+fn choose_row(bar: &mut Taskbar, request: &MenuRequest, label: &str) -> Option<TaskbarResponse> {
+    let id = row_named(&request.model, label)
+        .id()
+        .unwrap_or_else(|| panic!("the {label:?} row names no command"));
+    bar.menu_chosen(&request.subject, id)
+}
+
 #[test]
-fn secondary_press_on_an_app_slot_opens_the_menu_it_declared() {
+fn secondary_press_on_an_app_slot_asks_for_the_menu_it_declared() {
     let mut bar = bar_with_declared_app();
     let mut input = TaskbarInput::new();
-    open_app_menu(&mut input, &mut bar);
-    assert!(bar.menu().is_open());
+    let request = ask_app_menu(&mut input, &mut bar).expect("the slot asks for its menu");
+    assert_eq!(request.subject, MenuSubject::App { app: 0 });
     assert_eq!(
-        bar.menu().subject(),
-        Some(&MenuSubject::App {
-            index: 0,
-            menu: declared_menu(),
-            identity: identity("Terminal"),
-        })
+        request.model.title(),
+        "Terminal",
+        "the plate is titled from the bundle's signed manifest"
     );
 }
 
 #[test]
-fn an_application_that_declared_no_menu_opens_nothing() {
+fn an_application_that_declared_no_menu_asks_for_nothing() {
     let mut bar = bottom_bar();
     // A process the session gave a slot for its windows alone: no
-    // declaration, so a secondary press is claimed and shows no plate.
+    // declaration, so a secondary press is claimed and asks for no menu.
     bar.set_apps(alloc::vec![app("Unattributed")]);
     let _ = bar.take_repaint();
     let mut input = TaskbarInput::new();
-    open_app_menu(&mut input, &mut bar);
     assert!(
-        !bar.menu().is_open(),
+        ask_app_menu(&mut input, &mut bar).is_none(),
         "the bar never invents a menu on an application's behalf"
-    );
-    assert!(
-        bar.menu_layout(Scale::ONE).is_none(),
-        "and there is nothing to present"
     );
     assert_eq!(
         bar.take_repaint(),
@@ -1542,7 +1500,7 @@ fn an_application_that_declared_no_menu_opens_nothing() {
 }
 
 #[test]
-fn the_menu_draws_exactly_the_rows_the_application_declared() {
+fn the_menu_states_exactly_the_rows_the_application_declared() {
     let mut menu = AppMenu::EMPTY;
     menu.push(item(1, "New window")).expect("fits");
     menu.push(AppMenuRow::Item(
@@ -1579,17 +1537,17 @@ fn the_menu_draws_exactly_the_rows_the_application_declared() {
         .with_declaration(menu, true)
         .with_identity(identity("Terminal"))]);
     let mut input = TaskbarInput::new();
-    open_app_menu(&mut input, &mut bar);
+    let request = ask_app_menu(&mut input, &mut bar).expect("the slot asks for its menu");
 
-    // Every top-level declared row draws, in declaration order, with the
+    // Every top-level declared row is stated, in declaration order, with the
     // enablement, mark, accelerator caption, disabled-row reason and role
     // the application asked for; the declared separator opens the group its
     // next row begins rather than becoming a row; the submenu's own child is
     // not a top-level row; and the information row is the one row whose
-    // label and submenu are the bar's.
+    // label and child are the desktop's.
     assert_eq!(
-        bar.menu().control().items(),
-        &[
+        plate_of(&request.model, None),
+        alloc::vec![
             MenuItem::new("New window"),
             MenuItem::new("Wrap lines").with_mark(MenuMark::Check),
             MenuItem::new("Green screen").with_mark(MenuMark::Radio),
@@ -1605,12 +1563,23 @@ fn the_menu_draws_exactly_the_rows_the_application_declared() {
             MenuItem::new(INFO_ROW_LABEL).with_submenu(true),
         ]
     );
+    // The submenu's own row is on its child plate, filed under it.
+    let parent = request
+        .model
+        .rows()
+        .iter()
+        .position(|row| row.drawn().label() == "Profile")
+        .expect("the submenu row");
+    assert_eq!(
+        plate_of(&request.model, Some(parent)),
+        alloc::vec![MenuItem::new("Amber")]
+    );
 }
 
 #[test]
-fn a_menu_at_the_row_cap_draws_every_row_it_declared() {
+fn a_menu_at_the_row_cap_states_every_row_it_declared() {
     // The format bound is a bound, not a truncation point: a menu that fills
-    // it draws all of its rows, and nothing beyond it can be declared.
+    // it states all of its rows, and nothing beyond it can be declared.
     let mut menu = AppMenu::EMPTY;
     for row in 0..APP_MENU_MAX_ROWS {
         let id = u16::try_from(row + 1).expect("a small id");
@@ -1624,75 +1593,62 @@ fn a_menu_at_the_row_cap_draws_every_row_it_declared() {
         .with_declaration(menu, false)
         .with_identity(identity("Busy"))]);
     let mut input = TaskbarInput::new();
-    open_app_menu(&mut input, &mut bar);
-    assert_eq!(bar.menu().control().items().len(), APP_MENU_MAX_ROWS);
+    let request = ask_app_menu(&mut input, &mut bar).expect("the slot asks for its menu");
+    assert_eq!(plate_of(&request.model, None).len(), APP_MENU_MAX_ROWS);
 
-    // The last row is still reachable and reports its own id.
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::End));
+    // The last row still reports its own id.
+    let last =
+        AppMenuItemId::new(u16::try_from(APP_MENU_MAX_ROWS).expect("small")).expect("non-zero");
     assert_eq!(
-        press_key(&mut input, &mut bar, Key::Named(NamedKey::Enter)),
-        TaskbarResponse::AppMenuChosen {
-            app: 0,
-            item: AppMenuItemId::new(u16::try_from(APP_MENU_MAX_ROWS).expect("small"))
-                .expect("non-zero"),
-        }
+        request.model.rows().last().and_then(ChainRow::id),
+        Some(last)
+    );
+    assert_eq!(
+        bar.menu_chosen(&request.subject, last),
+        Some(TaskbarResponse::AppMenuChosen { app: 0, item: last })
     );
 }
 
 #[test]
-fn a_disabled_declared_row_cannot_be_chosen() {
+fn a_disabled_declared_row_is_stated_disabled_with_its_reason() {
     let mut menu = AppMenu::EMPTY;
-    menu.push(AppMenuRow::Item(menu_item(9, "Paste").disabled()))
-        .expect("fits");
+    menu.push(AppMenuRow::Item(
+        menu_item(9, "Paste")
+            .disabled()
+            .with_reason(AppMenuReason::new("The clipboard is empty").expect("a short reason")),
+    ))
+    .expect("fits");
     let mut bar = bottom_bar();
     bar.set_apps(alloc::vec![app("Terminal")
         .with_declaration(menu, true)
         .with_identity(identity("Terminal"))]);
     let mut input = TaskbarInput::new();
-    open_app_menu(&mut input, &mut bar);
+    let request = ask_app_menu(&mut input, &mut bar).expect("the slot asks for its menu");
 
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
-    assert_eq!(
-        press_key(&mut input, &mut bar, Key::Named(NamedKey::Enter)),
-        TaskbarResponse::Ignored,
-        "a disabled row never acts"
-    );
-    assert!(bar.menu().is_open(), "and never closes the menu either");
+    let row = row_named(&request.model, "Paste");
+    assert!(!row.drawn().state().is_actionable());
+    assert_eq!(row.drawn().reason(), Some("The clipboard is empty"));
 }
 
 #[test]
 fn choosing_a_declared_row_relays_the_applications_own_id() {
     let mut bar = bar_with_declared_app();
     let mut input = TaskbarInput::new();
-    open_app_menu(&mut input, &mut bar);
+    let request = ask_app_menu(&mut input, &mut bar).expect("the slot asks for its menu");
 
-    // Down/Enter chooses the first declared row, "New window" (id 1).
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
-    assert_eq!(
-        press_key(&mut input, &mut bar, Key::Named(NamedKey::Enter)),
-        TaskbarResponse::AppMenuChosen {
-            app: 0,
-            item: AppMenuItemId::new(1).expect("non-zero"),
-        }
-    );
-    assert!(!bar.menu().is_open(), "a choice closes the menu");
-
-    // Down/Down/Enter chooses "Quit" (id 2) — the separator between them is
-    // not a row, so the second press lands on the command after it.
-    open_app_menu(&mut input, &mut bar);
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
-    assert_eq!(
-        press_key(&mut input, &mut bar, Key::Named(NamedKey::Enter)),
-        TaskbarResponse::AppMenuChosen {
-            app: 0,
-            item: AppMenuItemId::new(2).expect("non-zero"),
-        }
-    );
+    // The bar interprets no application row: it hands the id straight back.
+    for (label, id) in [("New window", 1), ("Quit", 2)] {
+        let item = AppMenuItemId::new(id).expect("non-zero");
+        assert_eq!(row_named(&request.model, label).id(), Some(item));
+        assert_eq!(
+            choose_row(&mut bar, &request, label),
+            Some(TaskbarResponse::AppMenuChosen { app: 0, item })
+        );
+    }
 }
 
 #[test]
-fn a_declared_submenu_opens_and_its_rows_report_their_own_ids() {
+fn a_declared_submenu_becomes_a_child_plate_whose_rows_keep_their_own_ids() {
     let mut menu = AppMenu::EMPTY;
     menu.push(AppMenuRow::Submenu {
         label: menu_label("Profile"),
@@ -1706,43 +1662,30 @@ fn a_declared_submenu_opens_and_its_rows_report_their_own_ids() {
         .with_declaration(menu, true)
         .with_identity(identity("Terminal"))]);
     let mut input = TaskbarInput::new();
-    open_app_menu(&mut input, &mut bar);
+    let request = ask_app_menu(&mut input, &mut bar).expect("the slot asks for its menu");
 
-    // Right opens the submenu the highlighted row hangs off itself.
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Right));
-    let submenu = bar.menu().submenu().expect("the submenu is open");
     assert_eq!(
-        submenu
-            .items()
-            .iter()
-            .map(MenuItem::label)
-            .collect::<Vec<_>>(),
-        alloc::vec!["Amber", "Green"]
+        plate_of(&request.model, None),
+        alloc::vec![MenuItem::new("Profile").with_submenu(true)]
     );
-    let layout = bar.menu_layout(Scale::ONE).expect("menu layout");
-    assert!(!layout.child.is_empty(), "and lays out beside the plate");
-    assert_eq!(layout.bounds(), layout.panel.union(&layout.child));
-
-    // Down/Down/Enter inside it chooses "Green" (id 8).
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
     assert_eq!(
-        press_key(&mut input, &mut bar, Key::Named(NamedKey::Enter)),
-        TaskbarResponse::AppMenuChosen {
+        plate_of(&request.model, Some(0))
+            .iter()
+            .map(|item| String::from(item.label()))
+            .collect::<Vec<_>>(),
+        alloc::vec![String::from("Amber"), String::from("Green")]
+    );
+    assert_eq!(
+        choose_row(&mut bar, &request, "Green"),
+        Some(TaskbarResponse::AppMenuChosen {
             app: 0,
             item: AppMenuItemId::new(8).expect("non-zero"),
-        }
+        })
     );
-    assert!(!bar.menu().is_open());
 }
 
 /// A separator inside a declared submenu opens the group its next row
 /// begins, exactly as one on the root plate does.
-///
-/// The child plate used to be built without that folding, so a declared
-/// separator drew there as a blank unchooseable row while the very same
-/// separator on the root plate drew a divider.
 #[test]
 fn a_separator_inside_a_declared_submenu_opens_a_group_rather_than_a_blank_row() {
     let mut menu = AppMenu::EMPTY;
@@ -1759,68 +1702,33 @@ fn a_separator_inside_a_declared_submenu_opens_a_group_rather_than_a_blank_row()
         .with_declaration(menu, true)
         .with_identity(identity("Terminal"))]);
     let mut input = TaskbarInput::new();
-    open_app_menu(&mut input, &mut bar);
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Right));
+    let request = ask_app_menu(&mut input, &mut bar).expect("the slot asks for its menu");
 
-    let submenu = bar.menu().submenu().expect("the submenu is open");
     assert_eq!(
-        submenu.items(),
-        &[
+        plate_of(&request.model, Some(0)),
+        alloc::vec![
             MenuItem::new("Amber"),
             MenuItem::new("Green").with_group_break(true),
         ],
         "the separator is a group break, not a row"
     );
-
-    // And the row after it is still chooseable by its own id, which a blank
-    // row standing between them would have shifted.
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::End));
+    // And the row after it still carries its own id, which a blank row
+    // standing between them would have shifted.
     assert_eq!(
-        press_key(&mut input, &mut bar, Key::Named(NamedKey::Enter)),
-        TaskbarResponse::AppMenuChosen {
-            app: 0,
-            item: AppMenuItemId::new(8).expect("non-zero"),
-        }
+        row_named(&request.model, "Green").id(),
+        AppMenuItemId::new(8).ok()
     );
 }
 
 #[test]
-fn escape_inside_a_declared_submenu_closes_only_the_submenu() {
-    let mut menu = AppMenu::EMPTY;
-    menu.push(AppMenuRow::Submenu {
-        label: menu_label("Profile"),
-        enabled: true,
-    })
-    .expect("fits");
-    menu.push_under(item(7, "Amber"), 0).expect("fits");
-    let mut bar = bottom_bar();
-    bar.set_apps(alloc::vec![app("Terminal")
-        .with_declaration(menu, true)
-        .with_identity(identity("Terminal"))]);
-    let mut input = TaskbarInput::new();
-    open_app_menu(&mut input, &mut bar);
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Right));
-    assert!(bar.menu().submenu().is_some());
-
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Escape));
-    assert!(bar.menu().submenu().is_none(), "one key, one step back");
-    assert!(bar.menu().is_open());
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Escape));
-    assert!(!bar.menu().is_open());
-}
-
-#[test]
-fn about_opens_the_manifest_attested_information_panel() {
+fn the_information_row_states_the_manifest_attested_identity() {
     let mut bar = bar_with_declared_app();
     let mut input = TaskbarInput::new();
-    open_app_menu(&mut input, &mut bar);
+    let request = ask_app_menu(&mut input, &mut bar).expect("the slot asks for its menu");
 
-    // The About row is the last of the three top-level rows.
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::End));
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Right));
-    let facts = bar.menu().info_panel().expect("the panel is open");
+    let ChainChild::Info(facts) = row_named(&request.model, INFO_ROW_LABEL).child() else {
+        panic!("the information row's child is the desktop's own panel");
+    };
     assert_eq!(
         facts
             .facts()
@@ -1835,30 +1743,10 @@ fn about_opens_the_manifest_attested_information_panel() {
         ],
         "the panel states the signed manifest, never what the process claims"
     );
-    assert!(
-        bar.menu().submenu().is_none(),
-        "the panel is facts, not a menu of rows"
-    );
-    let layout = bar.menu_layout(Scale::ONE).expect("menu layout");
-    assert!(!layout.child.is_empty());
-
-    // A pointer over the panel is claimed and offers nothing to choose.
-    let inside = centre_of(layout.child);
     assert_eq!(
-        press_at(&mut input, &mut bar, inside.x, inside.y),
-        TaskbarResponse::Ignored
-    );
-    assert!(bar.menu().is_open());
-
-    // The panel is attached to the menu: dismissing the menu takes it away.
-    assert_eq!(
-        press_at(&mut input, &mut bar, 500, 100),
-        TaskbarResponse::Ignored
-    );
-    assert!(!bar.menu().is_open());
-    assert!(
-        bar.menu().info_panel().is_none(),
-        "the panel disappears with the menu that carried it"
+        row_named(&request.model, INFO_ROW_LABEL).id(),
+        None,
+        "it states an identity; it names no command to answer with"
     );
 }
 
@@ -1874,10 +1762,10 @@ fn a_manifest_without_purpose_or_author_states_only_what_it_has() {
             author: None,
         })]);
     let mut input = TaskbarInput::new();
-    open_app_menu(&mut input, &mut bar);
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::End));
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Right));
-    let facts = bar.menu().info_panel().expect("the panel is open");
+    let request = ask_app_menu(&mut input, &mut bar).expect("the slot asks for its menu");
+    let ChainChild::Info(facts) = row_named(&request.model, INFO_ROW_LABEL).child() else {
+        panic!("the information row's child is the desktop's own panel");
+    };
     assert_eq!(
         facts
             .facts()
@@ -1890,109 +1778,17 @@ fn a_manifest_without_purpose_or_author_states_only_what_it_has() {
 }
 
 #[test]
-fn menu_is_modal_and_dismisses_on_click_away_or_escape() {
-    let mut bar = bar_with_declared_app();
-    let mut input = TaskbarInput::new();
-    let slot = open_app_menu(&mut input, &mut bar);
-    assert!(bar.menu().is_open());
-
-    // Motion over the menu highlights rows. The pointer also leaves the
-    // application slot it started on, so the bar's own hover feedback
-    // latches too.
-    let menu_layout = bar.menu_layout(Scale::ONE).unwrap();
-    let menu_item_0 = Point::new(menu_layout.panel.left() + 5, menu_layout.panel.top() + 5);
-    let _ = bar.take_repaint();
-    input.handle(
-        InputEvent::PointerMoved { to: menu_item_0 },
-        &mut bar,
-        Scale::ONE,
-        NOW_NS,
-    );
-    assert_eq!(
-        bar.take_repaint(),
-        TaskbarRepaint::BAR | TaskbarRepaint::MENU,
-        "leaving the slot repaints the bar, and the new highlight repaints the menu"
-    );
-    assert_eq!(bar.menu().control().current(), Some(0));
-
-    // Scroll is claimed (Ignored).
-    assert_eq!(
-        input.handle(
-            InputEvent::PointerScrolled { dx: 0, dy: 1 },
-            &mut bar,
-            Scale::ONE,
-            NOW_NS,
-        ),
-        TaskbarResponse::Ignored
-    );
-
-    // Re-verify it is open before click-away.
-    assert!(bar.menu().is_open());
-
-    // Click away dismisses menu only.
-    assert_eq!(
-        press_at(&mut input, &mut bar, 500, 100),
-        TaskbarResponse::Ignored
-    );
-    assert!(!bar.menu().is_open());
-
-    // Move pointer back to the slot before reopening.
-    input.handle(
-        InputEvent::PointerMoved { to: slot },
-        &mut bar,
-        Scale::ONE,
-        NOW_NS,
-    );
-
-    // Reopen and test Escape.
-    input.handle(
-        InputEvent::PointerPressed {
-            button: PointerButton::Secondary,
-        },
-        &mut bar,
-        Scale::ONE,
-        NOW_NS,
-    );
-    assert!(bar.menu().is_open());
-    assert_eq!(
-        press_key(&mut input, &mut bar, Key::Named(NamedKey::Escape)),
-        TaskbarResponse::Ignored
-    );
-    assert!(!bar.menu().is_open());
-}
-
-#[test]
-fn keyboard_highlight_moves_in_the_menu_latch_only_the_menu() {
-    let mut bar = bar_with_declared_app();
-    let mut input = TaskbarInput::new();
-    open_app_menu(&mut input, &mut bar);
-    assert!(bar.menu().is_open());
-
-    // The keyboard never touches pointer hover, so a highlight move this
-    // way latches the menu alone — no incidental bar change to compose with.
-    let _ = bar.take_repaint();
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
-    assert_eq!(bar.menu().control().current(), Some(0));
-    assert_eq!(
-        bar.take_repaint(),
-        TaskbarRepaint::MENU,
-        "a keyboard highlight move repaints only the menu"
-    );
-}
-
-#[test]
 fn entry_menu_launches_the_row_it_was_opened_on() {
     let mut bar = bottom_bar();
     let mut input = TaskbarInput::new();
-    let entry_id = open_entry_menu(&mut input, &mut bar);
+    let (entry_id, request) = ask_entry_menu(&mut input, &mut bar);
 
     // Launching from the entry menu behaves exactly like launching from the
     // row itself, and closes the popup.
     assert_eq!(
-        choose_entry_row(&mut input, &mut bar, EntryRow::Open),
-        TaskbarResponse::LibraryLaunch { entry: entry_id }
+        choose_row(&mut bar, &request, EntryRow::Open.label()),
+        Some(TaskbarResponse::LibraryLaunch { entry: entry_id })
     );
-    assert!(!bar.menu().is_open());
     assert!(!bar.library().is_open());
 }
 
@@ -2000,17 +1796,16 @@ fn entry_menu_launches_the_row_it_was_opened_on() {
 fn entry_menu_asks_the_session_for_a_desktop_shortcut() {
     let mut bar = bottom_bar();
     let mut input = TaskbarInput::new();
-    let entry_id = open_entry_menu(&mut input, &mut bar);
+    let (entry_id, request) = ask_entry_menu(&mut input, &mut bar);
 
     // The bar writes nothing: it names the entry and the session, which
     // holds the filesystem capability, makes the link. The popup closes for
     // the same reason a launch closes it — it is modal, and the shortcut
     // appears on the desktop behind it.
     assert_eq!(
-        choose_entry_row(&mut input, &mut bar, EntryRow::Shortcut),
-        TaskbarResponse::CreateDesktopShortcut { entry: entry_id }
+        choose_row(&mut bar, &request, EntryRow::Shortcut.label()),
+        Some(TaskbarResponse::CreateDesktopShortcut { entry: entry_id })
     );
-    assert!(!bar.menu().is_open());
     assert!(!bar.library().is_open());
 }
 
@@ -2018,19 +1813,18 @@ fn entry_menu_asks_the_session_for_a_desktop_shortcut() {
 fn entry_menu_offers_exactly_the_two_rows_it_defines() {
     let mut bar = bottom_bar();
     let mut input = TaskbarInput::new();
-    open_entry_menu(&mut input, &mut bar);
+    let (_, request) = ask_entry_menu(&mut input, &mut bar);
 
-    let labels: Vec<&str> = bar
-        .menu()
-        .control()
-        .items()
-        .iter()
-        .map(MenuItem::label)
-        .collect();
     assert_eq!(
-        labels,
-        alloc::vec![EntryRow::Open.label(), EntryRow::Shortcut.label()],
-        "the rows the menu draws are the ones it defines, in order"
+        plate_of(&request.model, None)
+            .iter()
+            .map(|item| String::from(item.label()))
+            .collect::<Vec<_>>(),
+        alloc::vec![
+            String::from(EntryRow::Open.label()),
+            String::from(EntryRow::Shortcut.label()),
+        ],
+        "the rows the menu states are the ones it defines, in order"
     );
 }
 
@@ -2941,17 +2735,10 @@ fn a_modal_surface_keeps_the_picker_from_opening_underneath_it() {
     let mut input = TaskbarInput::new();
     let slot = centre_of(bar.layout(Scale::ONE).apps[0]);
 
-    // With the declared menu up, a sample over the slot asks for no picker:
-    // the user could not reach one under a modal surface.
-    open_app_menu(&mut input, &mut bar);
-    assert_eq!(
-        moved_at(&mut input, &mut bar, slot, NOW_NS),
-        TaskbarResponse::Ignored
-    );
-    assert!(!bar.picker().is_open());
-
-    // Same with the library popup.
-    bar.close_menu();
+    // With the library popup up, a sample over the slot asks for no picker:
+    // the user could not reach one under a modal surface. A menu never
+    // reaches the bar at all — the desktop's chain holds the seat while one
+    // is up — so the popup is the only surface that can suppress it here.
     open_library(&mut input, &mut bar);
     assert!(matches!(
         moved_at(&mut input, &mut bar, slot, NOW_NS),
@@ -3116,7 +2903,6 @@ fn secondary_press_outside_dismisses_and_folder_rows_are_claimed() {
         TaskbarResponse::Ignored
     );
     assert!(bar.library().is_open());
-    assert!(!bar.menu().is_open(), "a folder row opens no context menu");
 
     // Outside: dismisses, exactly like a primary click-away.
     input.handle(
@@ -3513,7 +3299,6 @@ fn typing_in_the_filter_latches_only_the_popup() {
         TaskbarRepaint::LIBRARY,
         "a filter edit repaints the popup only"
     );
-    assert!(!latched.menu, "the filter never touches the context menu");
 }
 
 #[test]
@@ -4590,19 +4375,11 @@ fn app_strip_and_menu_actions_latch_repaints() {
     ]);
     assert_eq!(bar.take_repaint(), TaskbarRepaint::BAR);
 
-    // Opening the menu is its own overlay: menu only.
-    bar.open_app_menu(0, Rect::EMPTY);
-    assert_eq!(bar.take_repaint(), TaskbarRepaint::MENU);
-
     // Motion over a slot changes the bar's own hover feedback: bar only.
     let layout = bar.layout(Scale::ONE);
     let slot = centre_of(layout.apps[0]);
     bar.track_hover(Some(slot), Scale::ONE, &mut damage::sink());
     assert_eq!(bar.take_repaint(), TaskbarRepaint::BAR);
-
-    // Closing the menu: menu only.
-    bar.close_menu();
-    assert_eq!(bar.take_repaint(), TaskbarRepaint::MENU);
 }
 
 #[test]
@@ -4964,62 +4741,6 @@ fn a_bar_with_no_artwork_at_all_still_draws_every_element() {
             "the {label} slot must never be blank without artwork"
         );
     }
-}
-
-#[test]
-fn render_menu_paints_the_modal_plate_and_follows_theme() {
-    let mut bar = bar_with_declared_app();
-    let renderer = TaskbarRenderer::new(test_icon_cache());
-
-    // None when closed.
-    assert!(renderer.render_menu(&bar, Scale::ONE).is_none());
-
-    // Open and check render.
-    bar.open_app_menu(0, Rect::new(100, 760, 48, 40));
-    let layout = bar.menu_layout(Scale::ONE).expect("menu layout");
-    let dark = renderer
-        .render_menu(&bar, Scale::ONE)
-        .expect("menu renders");
-    assert_eq!(dark.width(), layout.panel.width);
-    assert_eq!(dark.height(), layout.panel.height);
-
-    // The plate is floating chrome, not the opaque raised fill a menu wears
-    // inside a window.
-    assert!(region_has_pixel(
-        &dark,
-        layout.panel,
-        Rect::new(
-            layout.panel.left(),
-            layout.panel.top(),
-            layout.panel.width,
-            layout.panel.height
-        ),
-        floating_ground(&Theme::dark(), Theme::dark().palette().surface_raised)
-    ));
-    // Contains on_surface ink for labels.
-    assert!(region_has_role_ink(
-        &dark,
-        layout.panel,
-        Rect::new(
-            layout.panel.left(),
-            layout.panel.top(),
-            layout.panel.width,
-            layout.panel.height
-        ),
-        Theme::dark().palette().on_surface,
-        floating_ground(&Theme::dark(), Theme::dark().palette().surface_raised),
-    ));
-
-    // Theme switch changes pixels.
-    bar.apply_theme(&Theme::light());
-    let light = renderer
-        .render_menu(&bar, Scale::ONE)
-        .expect("menu renders");
-    let centre = Point::new(layout.panel.left() + 5, layout.panel.top() + 5);
-    assert_ne!(
-        pixel_at(&dark, layout.panel, centre.x, centre.y),
-        pixel_at(&light, layout.panel, centre.x, centre.y)
-    );
 }
 
 // ---- rendering: the popup -------------------------------------------
@@ -6644,17 +6365,6 @@ fn every_popup_the_bar_opens_grounds_itself_in_the_floating_chrome() {
         theme.palette().surface,
     );
 
-    let mut bar = bar_with_declared_app();
-    bar.open_app_menu(0, Rect::new(100, 760, 48, 40));
-    let menu = bar.menu_layout(Scale::ONE).expect("menu layout");
-    grounded(
-        "context menu",
-        &renderer.render_menu(&bar, Scale::ONE).expect("renders"),
-        menu.panel,
-        menu.panel,
-        theme.palette().surface_raised,
-    );
-
     let mut bar = bottom_bar();
     let _ = bar.raise_notification(TransientNotification::new(
         2,
@@ -6700,7 +6410,6 @@ fn taskbar_repaint_none_and_all_are_the_expected_extremes() {
     assert_eq!(
         TaskbarRepaint::BAR
             | TaskbarRepaint::LIBRARY
-            | TaskbarRepaint::MENU
             | TaskbarRepaint::PICKER
             | TaskbarRepaint::NOTIFICATIONS
             | TaskbarRepaint::READOUT,
@@ -6725,13 +6434,6 @@ fn taskbar_repaint_single_surface_constants_set_only_that_field() {
         }
     );
     assert_eq!(
-        TaskbarRepaint::MENU,
-        TaskbarRepaint {
-            menu: true,
-            ..TaskbarRepaint::NONE
-        }
-    );
-    assert_eq!(
         TaskbarRepaint::NOTIFICATIONS,
         TaskbarRepaint {
             notifications: true,
@@ -6748,7 +6450,7 @@ fn taskbar_repaint_single_surface_constants_set_only_that_field() {
     for single in [
         TaskbarRepaint::BAR,
         TaskbarRepaint::LIBRARY,
-        TaskbarRepaint::MENU,
+        TaskbarRepaint::PICKER,
         TaskbarRepaint::NOTIFICATIONS,
         TaskbarRepaint::READOUT,
     ] {
@@ -6759,14 +6461,13 @@ fn taskbar_repaint_single_surface_constants_set_only_that_field() {
 
 #[test]
 fn taskbar_repaint_bit_or_composes_without_losing_either_side() {
-    let composed = TaskbarRepaint::BAR | TaskbarRepaint::MENU;
+    let composed = TaskbarRepaint::BAR | TaskbarRepaint::PICKER;
     assert_eq!(
         composed,
         TaskbarRepaint {
             bar: true,
             library: false,
-            menu: true,
-            picker: false,
+            picker: true,
             notifications: false,
             readout: false,
         }
@@ -6846,7 +6547,6 @@ fn reading_through_an_immutable_accessor_latches_nothing() {
 
     assert_eq!(bar.tasks().len(), 1);
     assert!(!bar.library().is_open());
-    assert!(!bar.menu().is_open());
     assert!(bar.clock().label().is_empty());
     assert!(!bar.tray().is_expanded());
     assert_eq!(bar.notifications().signal_count(), 0);
@@ -6913,67 +6613,66 @@ fn power_capable_summary() -> TraySummary {
     summary
 }
 
-/// Move the pointer to `at` and press the secondary button there.
-fn secondary_press_at(
-    input: &mut TaskbarInput,
-    taskbar: &mut Taskbar,
-    at: Point,
-) -> TaskbarResponse {
-    input.handle(
-        InputEvent::PointerMoved { to: at },
-        taskbar,
-        Scale::ONE,
-        NOW_NS,
-    );
-    input.handle(
-        InputEvent::PointerPressed {
-            button: PointerButton::Secondary,
-        },
-        taskbar,
-        Scale::ONE,
-        NOW_NS,
+/// Ask for the system menu with a secondary press on the Switchboard capsule.
+fn ask_system_menu(input: &mut TaskbarInput, taskbar: &mut Taskbar) -> MenuRequest {
+    let capsule = centre_of(taskbar.layout(Scale::ONE).switchboard);
+    let request = ask_menu(input, taskbar, capsule).expect("the capsule asks for its menu");
+    assert_eq!(request.subject, MenuSubject::System);
+    request
+}
+
+/// Ask for the clock's menu with a secondary press on it.
+fn ask_clock_menu(input: &mut TaskbarInput, bar: &mut Taskbar) -> MenuRequest {
+    let clock = centre_of(bar.layout(Scale::ONE).clock);
+    let request = ask_menu(input, bar, clock).expect("the clock asks for its menu");
+    assert_eq!(request.subject, MenuSubject::Clock);
+    request
+}
+
+/// What choosing the row at position `index` of a table-driven menu asks for.
+///
+/// The id a row carries is its command's own position in that table rather
+/// than its position on the plate, so a menu that leaves a row out asks the
+/// same question of every row that remains.
+fn chosen_at(bar: &mut Taskbar, request: &MenuRequest, index: usize) -> Option<TaskbarResponse> {
+    bar.menu_chosen(
+        &request.subject,
+        AppMenuItemId::for_index(index).expect("a numbered row"),
     )
 }
 
-/// Open the system menu by right-clicking the Switchboard capsule,
-/// asserting it opened.
-fn open_system_menu(input: &mut TaskbarInput, taskbar: &mut Taskbar) {
-    let capsule = centre_of(taskbar.layout(Scale::ONE).switchboard);
-    assert_eq!(
-        secondary_press_at(input, taskbar, capsule),
-        TaskbarResponse::Ignored,
-        "opening the menu acts on nothing by itself"
-    );
-    assert!(taskbar.menu().is_open());
+/// The row at position `index` of the table the menu was built from, or `None`
+/// when `permits` left it out.
+fn table_row(request: &MenuRequest, index: usize) -> Option<&MenuItem> {
+    let id = AppMenuItemId::for_index(index).expect("a numbered row");
+    request
+        .model
+        .rows()
+        .iter()
+        .find(|row| row.id() == Some(id))
+        .map(ChainRow::drawn)
 }
 
-/// Choose the row at `index` with the keyboard: walk Down to it from the
-/// top, then press Enter.
-fn choose_row(input: &mut TaskbarInput, taskbar: &mut Taskbar, index: usize) -> TaskbarResponse {
-    for _ in 0..=index {
-        press_key(input, taskbar, Key::Named(NamedKey::Down));
-    }
-    assert_eq!(
-        taskbar.menu().control().current(),
-        Some(index),
-        "the keyboard highlight reached row {index}"
-    );
-    press_key(input, taskbar, Key::Named(NamedKey::Enter))
+/// The row at position `index`, or the test fails.
+fn offered_row(request: &MenuRequest, index: usize) -> &MenuItem {
+    table_row(request, index).unwrap_or_else(|| panic!("row {index} is offered"))
 }
 
 #[test]
-fn the_row_table_renders_its_labels_groups_and_roles() {
+fn the_row_table_states_its_labels_groups_and_roles() {
     let mut bar = bar_with_task_shell();
     bar.set_tray_summary(Some(power_capable_summary()));
     let mut input = TaskbarInput::new();
-    open_system_menu(&mut input, &mut bar);
+    let request = ask_system_menu(&mut input, &mut bar);
 
-    let rows: Vec<(&str, bool, tairix_controls::ControlRole)> = bar
-        .menu()
-        .control()
-        .items()
+    let rows: Vec<(&str, bool, tairix_controls::ControlRole)> = request
+        .model
+        .rows()
         .iter()
-        .map(|item| (item.label(), item.is_group_break(), item.role()))
+        .map(|row| {
+            let item = row.drawn();
+            (item.label(), item.is_group_break(), item.role())
+        })
         .collect();
     assert_eq!(
         rows,
@@ -7012,10 +6711,10 @@ fn the_row_table_renders_its_labels_groups_and_roles() {
 }
 
 #[test]
-fn the_active_appearance_row_carries_the_check_and_is_not_actionable() {
-    // Every row index is a direct index into the command table, whichever
-    // appearance is active: a group break draws a divider above a row, it is
-    // never a row of its own.
+fn the_active_appearance_row_is_the_groups_chosen_member_and_is_not_actionable() {
+    // The two appearances are a group of alternatives exactly one of which
+    // holds, so the one in force is marked as its group's chosen member —
+    // a bullet, disabled, with its reason — never as work that finished.
     for (appearance, active_row, inactive_row) in
         [(Appearance::Dark, 4, 3), (Appearance::Light, 3, 4)]
     {
@@ -7028,127 +6727,66 @@ fn the_active_appearance_row_carries_the_check_and_is_not_actionable() {
             },
         );
         let mut input = TaskbarInput::new();
-        open_system_menu(&mut input, &mut bar);
-        let items = bar.menu().control().items();
+        let request = ask_system_menu(&mut input, &mut bar);
 
-        let active = &items[active_row];
-        assert_eq!(active.state().activity, ActivityState::Complete);
+        let active = offered_row(&request, active_row);
+        assert_eq!(active.mark(), MenuMark::Radio);
         assert!(
             !active.state().is_actionable(),
             "the appearance already in use cannot be chosen again ({appearance:?})"
         );
         assert_eq!(active.reason(), Some("Already in use"));
 
-        let inactive = &items[inactive_row];
+        let inactive = offered_row(&request, inactive_row);
         assert!(
             inactive.state().is_actionable(),
             "the other appearance is the one worth choosing ({appearance:?})"
         );
-        assert_ne!(inactive.state().activity, ActivityState::Complete);
+        assert_eq!(inactive.mark(), MenuMark::None);
         assert_eq!(inactive.reason(), None);
     }
 }
 
 #[test]
-fn a_secondary_press_elsewhere_on_the_bar_opens_no_system_menu() {
+fn a_secondary_press_elsewhere_on_the_bar_asks_for_no_system_menu() {
     let mut bar = bar_with_task_shell();
     let mut input = TaskbarInput::new();
     // The Library button is a live control that carries no menu of its own.
     let library = centre_of(bar.layout(Scale::ONE).library);
 
-    assert_eq!(
-        secondary_press_at(&mut input, &mut bar, library),
-        TaskbarResponse::Ignored
-    );
     assert!(
-        !bar.menu().is_open(),
-        "only the capsule opens the system menu"
+        ask_menu(&mut input, &mut bar, library).is_none(),
+        "only the capsule asks for the system menu"
     );
-}
-
-#[test]
-fn the_system_menu_is_modal_and_a_click_away_dismisses_without_acting() {
-    let mut bar = bar_with_task_shell();
-    bar.set_tray_summary(Some(power_capable_summary()));
-    let mut input = TaskbarInput::new();
-    open_system_menu(&mut input, &mut bar);
-
-    // A press well clear of the plate: it dismisses the menu and nothing
-    // else acts on it.
-    let away = Point::new(5, 5);
-    assert_eq!(
-        press_at(&mut input, &mut bar, away.x, away.y),
-        TaskbarResponse::Ignored
-    );
-    assert!(!bar.menu().is_open());
-}
-
-#[test]
-fn escape_dismisses_the_system_menu_without_acting() {
-    let mut bar = bar_with_task_shell();
-    let mut input = TaskbarInput::new();
-    open_system_menu(&mut input, &mut bar);
-
-    assert_eq!(
-        press_key(&mut input, &mut bar, Key::Named(NamedKey::Escape)),
-        TaskbarResponse::Ignored
-    );
-    assert!(!bar.menu().is_open());
-}
-
-#[test]
-fn keyboard_navigation_reaches_every_row_and_enter_activates_the_highlighted_one() {
-    let mut bar = bar_with_task_shell();
-    bar.set_tray_summary(Some(power_capable_summary()));
-    // Every row of the table offered, so the walk really does visit them all.
-    bar.set_switch_user_available(true);
-    let mut input = TaskbarInput::new();
-    open_system_menu(&mut input, &mut bar);
-
-    // Down visits each row in turn, including the non-actionable one: a
-    // group break is a divider drawn above a row, never a row to skip.
-    for expected in 0..crate::system::ROWS.len() {
-        press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
-        assert_eq!(bar.menu().control().current(), Some(expected));
-    }
-
-    // Enter on the last row (Shut Down) activates exactly it.
-    assert_eq!(
-        press_key(&mut input, &mut bar, Key::Named(NamedKey::Enter)),
-        TaskbarResponse::ConfirmSystemPower {
-            action: tairix_abi::PowerAction::PowerOff,
-        }
-    );
-    assert!(!bar.menu().is_open(), "activating closes the menu");
 }
 
 #[test]
 fn every_row_maps_to_exactly_its_expected_response() {
     let expected = alloc::vec![
-        TaskbarResponse::OpenSwitchboard {
+        Some(TaskbarResponse::OpenSwitchboard {
             section: CommandSection::System,
-        },
-        TaskbarResponse::OpenSwitchboard {
+        }),
+        Some(TaskbarResponse::OpenSwitchboard {
             section: CommandSection::Tasks,
-        },
-        TaskbarResponse::LibraryLaunch {
+        }),
+        Some(TaskbarResponse::LibraryLaunch {
             entry: EntryId::new("os.tairix.terminal").expect("id"),
-        },
-        TaskbarResponse::SetAppearance {
+        }),
+        Some(TaskbarResponse::SetAppearance {
             appearance: Appearance::Light,
-        },
-        // The dark row is the one in use under the dark theme, so it is not
-        // actionable and reports nothing; the light row above it is.
-        TaskbarResponse::Ignored,
-        TaskbarResponse::LockSession,
-        TaskbarResponse::SwitchUser,
-        TaskbarResponse::LogOut,
-        TaskbarResponse::ConfirmSystemPower {
+        }),
+        Some(TaskbarResponse::SetAppearance {
+            appearance: Appearance::Dark,
+        }),
+        Some(TaskbarResponse::LockSession),
+        Some(TaskbarResponse::SwitchUser),
+        Some(TaskbarResponse::LogOut),
+        Some(TaskbarResponse::ConfirmSystemPower {
             action: tairix_abi::PowerAction::Restart,
-        },
-        TaskbarResponse::ConfirmSystemPower {
+        }),
+        Some(TaskbarResponse::ConfirmSystemPower {
             action: tairix_abi::PowerAction::PowerOff,
-        },
+        }),
     ];
     assert_eq!(
         expected.len(),
@@ -7156,20 +6794,25 @@ fn every_row_maps_to_exactly_its_expected_response() {
         "the table and the expectations describe the same menu"
     );
 
+    let mut bar = bar_with_task_shell();
+    bar.set_tray_summary(Some(power_capable_summary()));
+    bar.set_elevation_available(true);
+    bar.set_switch_user_available(true);
+    let mut input = TaskbarInput::new();
+    let request = ask_system_menu(&mut input, &mut bar);
     for (index, want) in expected.into_iter().enumerate() {
-        let mut bar = bar_with_task_shell();
-        bar.set_tray_summary(Some(power_capable_summary()));
-        bar.set_elevation_available(true);
-        bar.set_switch_user_available(true);
-        let mut input = TaskbarInput::new();
-        open_system_menu(&mut input, &mut bar);
         assert_eq!(
-            choose_row(&mut input, &mut bar, index),
+            chosen_at(&mut bar, &request, index),
             want,
             "row {index} ({})",
             crate::system::ROWS[index].label
         );
     }
+    // An id past the table names nothing rather than the nearest row.
+    assert_eq!(
+        chosen_at(&mut bar, &request, crate::system::ROWS.len()),
+        None
+    );
 }
 
 #[test]
@@ -7178,10 +6821,10 @@ fn an_unpermitted_power_row_is_denied_with_the_authority_mark_and_a_reason() {
     let mut bar = bar_with_task_shell();
     bar.set_tray_summary(Some(tray_summary(0, 0, 100)));
     let mut input = TaskbarInput::new();
-    open_system_menu(&mut input, &mut bar);
+    let request = ask_system_menu(&mut input, &mut bar);
 
-    for row in [7, 8] {
-        let item = &bar.menu().control().items()[row];
+    for row in [8, 9] {
+        let item = offered_row(&request, row);
         assert_eq!(
             item.state().authority,
             tairix_controls::AuthorityState::NeedsCapability,
@@ -7194,16 +6837,6 @@ fn an_unpermitted_power_row_is_denied_with_the_authority_mark_and_a_reason() {
             Some("The system service cannot power this machine")
         );
     }
-
-    // Choosing one reports nothing: a refused row acts on nothing at all.
-    assert_eq!(
-        choose_row(&mut input, &mut bar, 7),
-        TaskbarResponse::Ignored
-    );
-    assert!(
-        bar.menu().is_open(),
-        "a non-actionable row neither acts nor closes the menu"
-    );
 }
 
 #[test]
@@ -7212,10 +6845,10 @@ fn the_power_rows_are_denied_when_no_authority_has_been_published() {
     // Silence is not permission.
     let mut bar = bar_with_task_shell();
     let mut input = TaskbarInput::new();
-    open_system_menu(&mut input, &mut bar);
+    let request = ask_system_menu(&mut input, &mut bar);
 
-    for row in [7, 8] {
-        let item = &bar.menu().control().items()[row];
+    for row in [8, 9] {
+        let item = offered_row(&request, row);
         assert_eq!(
             item.state().authority,
             tairix_controls::AuthorityState::NeedsCapability,
@@ -7227,15 +6860,13 @@ fn the_power_rows_are_denied_when_no_authority_has_been_published() {
 
     // A summary that arrives claiming the authority permits the rows, and a
     // service that then dies withdraws them again.
-    bar.close_menu();
     bar.set_tray_summary(Some(power_capable_summary()));
-    open_system_menu(&mut input, &mut bar);
-    assert!(bar.menu().control().items()[7].state().is_actionable());
+    let request = ask_system_menu(&mut input, &mut bar);
+    assert!(offered_row(&request, 8).state().is_actionable());
 
-    bar.close_menu();
     bar.set_tray_summary(None);
-    open_system_menu(&mut input, &mut bar);
-    assert!(!bar.menu().control().items()[7].state().is_actionable());
+    let request = ask_system_menu(&mut input, &mut bar);
+    assert!(!offered_row(&request, 8).state().is_actionable());
 }
 
 #[test]
@@ -7244,9 +6875,9 @@ fn the_lock_row_is_denied_until_the_session_attests_it_can_prompt() {
     // because a lock with no way back is a trap, not a security measure.
     let mut bar = bar_with_task_shell();
     let mut input = TaskbarInput::new();
-    open_system_menu(&mut input, &mut bar);
+    let request = ask_system_menu(&mut input, &mut bar);
 
-    let item = &bar.menu().control().items()[5];
+    let item = offered_row(&request, 5);
     assert_eq!(item.label(), "Lock Screen");
     assert_eq!(
         item.state().authority,
@@ -7258,22 +6889,16 @@ fn the_lock_row_is_denied_until_the_session_attests_it_can_prompt() {
         item.reason(),
         Some("This session has no password prompt to unlock with")
     );
-    assert_eq!(
-        choose_row(&mut input, &mut bar, 5),
-        TaskbarResponse::Ignored,
-        "a lock that could never be undone is never emitted"
-    );
 
     // The session attests, and the row becomes the real command.
-    bar.close_menu();
     bar.set_elevation_available(true);
-    open_system_menu(&mut input, &mut bar);
-    let item = &bar.menu().control().items()[5];
+    let request = ask_system_menu(&mut input, &mut bar);
+    let item = offered_row(&request, 5);
     assert!(item.state().is_actionable());
     assert_eq!(item.reason(), None);
     assert_eq!(
-        choose_row(&mut input, &mut bar, 5),
-        TaskbarResponse::LockSession
+        chosen_at(&mut bar, &request, 5),
+        Some(TaskbarResponse::LockSession)
     );
 }
 
@@ -7283,80 +6908,37 @@ fn the_switch_user_row_is_absent_until_the_session_can_be_resumed() {
     // so the row is left out rather than offered and then refused.
     let mut bar = bar_with_task_shell();
     let mut input = TaskbarInput::new();
-    open_system_menu(&mut input, &mut bar);
+    let request = ask_system_menu(&mut input, &mut bar);
 
-    let items = bar.menu().control().items();
-    assert_eq!(items.len(), crate::system::ROWS.len() - 1);
-    assert!(items.iter().all(|item| item.label() != "Switch User…"));
-    // The rows below it close up, and the command mapping closes up with
-    // them, so nothing below is reachable at a stale index.
-    assert_eq!(items[5].label(), "Lock Screen");
-    assert_eq!(items[6].label(), "Log Out");
-    assert_eq!(choose_row(&mut input, &mut bar, 6), TaskbarResponse::LogOut);
+    assert_eq!(request.model.rows().len(), crate::system::ROWS.len() - 1);
+    assert!(request
+        .model
+        .rows()
+        .iter()
+        .all(|row| row.drawn().label() != "Switch User…"));
+    assert!(
+        table_row(&request, 6).is_none(),
+        "the absent row's own position states nothing"
+    );
+    // A row's id is its command's own position, so the rows below it keep
+    // their meaning rather than closing up onto a stale index.
+    assert_eq!(offered_row(&request, 5).label(), "Lock Screen");
+    assert_eq!(offered_row(&request, 7).label(), "Log Out");
+    assert_eq!(
+        chosen_at(&mut bar, &request, 7),
+        Some(TaskbarResponse::LogOut)
+    );
 
     // The session attests it bound the mailbox, and the row appears.
-    bar.close_menu();
     bar.set_switch_user_available(true);
-    open_system_menu(&mut input, &mut bar);
-
-    let item = &bar.menu().control().items()[6];
+    let request = ask_system_menu(&mut input, &mut bar);
+    let item = offered_row(&request, 6);
     assert_eq!(item.label(), "Switch User…");
     assert!(item.state().is_actionable());
     assert_eq!(item.reason(), None);
     assert_eq!(
-        choose_row(&mut input, &mut bar, 6),
-        TaskbarResponse::SwitchUser
-    );
-}
-
-#[test]
-fn attesting_the_wake_mailbox_latches_only_the_menu_surface() {
-    let mut bar = bar_with_task_shell();
-    let _ = bar.take_repaint();
-
-    bar.set_switch_user_available(true);
-    assert_eq!(bar.take_repaint(), TaskbarRepaint::MENU);
-
-    // Re-attesting the same answer changes no pixel anywhere.
-    bar.set_switch_user_available(true);
-    assert_eq!(bar.take_repaint(), TaskbarRepaint::NONE);
-}
-
-#[test]
-fn attesting_the_broker_latches_only_the_menu_surface() {
-    let mut bar = bar_with_task_shell();
-    let _ = bar.take_repaint();
-
-    bar.set_elevation_available(true);
-    assert_eq!(bar.take_repaint(), TaskbarRepaint::MENU);
-
-    // Re-attesting the same answer changes no pixel anywhere.
-    bar.set_elevation_available(true);
-    assert_eq!(bar.take_repaint(), TaskbarRepaint::NONE);
-}
-
-// ---- the clock's menu --------------------------------------------------
-
-/// Open the clock's menu with a secondary press on the clock.
-fn open_clock_menu(input: &mut TaskbarInput, bar: &mut Taskbar) {
-    let clock = centre_of(bar.layout(Scale::ONE).clock);
-    input.handle(
-        InputEvent::PointerMoved { to: clock },
-        bar,
-        Scale::ONE,
-        NOW_NS,
-    );
-    assert_eq!(
-        input.handle(
-            InputEvent::PointerPressed {
-                button: tairix_input::PointerButton::Secondary,
-            },
-            bar,
-            Scale::ONE,
-            NOW_NS,
-        ),
-        TaskbarResponse::Ignored,
-        "opening a menu acts on nothing by itself"
+        chosen_at(&mut bar, &request, 6),
+        Some(TaskbarResponse::SwitchUser)
     );
 }
 
@@ -7365,16 +6947,12 @@ fn the_clock_menu_states_the_reading_the_bar_is_drawing() {
     let mut bar = bottom_bar();
     bar.clock_mut().set_label("09:41");
     let mut input = TaskbarInput::new();
-    open_clock_menu(&mut input, &mut bar);
+    let request = ask_clock_menu(&mut input, &mut bar);
 
-    let items = bar.menu().control().items();
-    assert_eq!(items.len(), crate::clock_menu::ROWS.len());
-    assert_eq!(items[0].label(), "09:41");
+    assert_eq!(request.model.rows().len(), crate::clock_menu::ROWS.len());
+    assert_eq!(offered_row(&request, 0).label(), "09:41");
     // A statement, not a command: choosing it asks for nothing.
-    assert_eq!(
-        choose_row(&mut input, &mut bar, 0),
-        TaskbarResponse::Ignored
-    );
+    assert_eq!(chosen_at(&mut bar, &request, 0), None);
 }
 
 #[test]
@@ -7384,10 +6962,10 @@ fn an_unset_clock_menu_says_so_rather_than_showing_a_fabricated_time() {
     let mut bar = bottom_bar();
     bar.clock_mut().set_label(crate::clock::UNSET_LABEL);
     let mut input = TaskbarInput::new();
-    open_clock_menu(&mut input, &mut bar);
+    let request = ask_clock_menu(&mut input, &mut bar);
 
     assert_eq!(
-        bar.menu().control().items()[0].label(),
+        offered_row(&request, 0).label(),
         crate::clock_menu::READING_UNSET_LABEL
     );
 }
@@ -7399,9 +6977,9 @@ fn the_set_time_row_is_denied_until_the_session_attests_a_broker() {
     let mut bar = bottom_bar();
     bar.clock_mut().set_label("09:41");
     let mut input = TaskbarInput::new();
-    open_clock_menu(&mut input, &mut bar);
+    let request = ask_clock_menu(&mut input, &mut bar);
 
-    let item = &bar.menu().control().items()[1];
+    let item = offered_row(&request, 1);
     assert_eq!(item.label(), crate::clock_menu::SET_ROW_LABEL);
     assert_eq!(
         item.state().authority,
@@ -7410,27 +6988,21 @@ fn the_set_time_row_is_denied_until_the_session_attests_a_broker() {
     );
     assert!(!item.state().is_actionable());
     assert_eq!(item.reason(), Some(crate::clock_menu::REASON_NO_BROKER));
-    assert_eq!(
-        choose_row(&mut input, &mut bar, 1),
-        TaskbarResponse::Ignored,
-        "a command that could only fail is never emitted"
-    );
 
     // The session attests, and the row becomes the real command.
-    bar.close_menu();
     bar.set_elevation_available(true);
-    open_clock_menu(&mut input, &mut bar);
-    let item = &bar.menu().control().items()[1];
+    let request = ask_clock_menu(&mut input, &mut bar);
+    let item = offered_row(&request, 1);
     assert!(item.state().is_actionable());
     assert_eq!(item.reason(), None);
     assert_eq!(
-        choose_row(&mut input, &mut bar, 1),
-        TaskbarResponse::SetDateTime
+        chosen_at(&mut bar, &request, 1),
+        Some(TaskbarResponse::SetDateTime)
     );
 }
 
 #[test]
-fn a_primary_press_on_the_clock_opens_no_menu() {
+fn a_primary_press_on_the_clock_asks_for_no_menu() {
     // The reported defect: a left click on the clock popped its menu up.
     // A menu is what a secondary press asks for, here as everywhere else on
     // the desktop; a primary press on a reading is claimed and inert.
@@ -7442,40 +7014,30 @@ fn a_primary_press_on_the_clock_opens_no_menu() {
         press_at(&mut input, &mut bar, clock.x, clock.y),
         TaskbarResponse::Ignored
     );
-    assert!(
-        !bar.menu().is_open(),
-        "a left click on the clock opened its menu"
-    );
     // The clock still has its menu, and it is still the same one: the
     // secondary press that asks for it reaches the set-time command.
-    open_clock_menu(&mut input, &mut bar);
+    let request = ask_clock_menu(&mut input, &mut bar);
     assert_eq!(
-        choose_row(&mut input, &mut bar, 1),
-        TaskbarResponse::SetDateTime
+        chosen_at(&mut bar, &request, 1),
+        Some(TaskbarResponse::SetDateTime)
     );
 }
 
 #[test]
-fn a_launch_row_whose_bundle_is_absent_is_disabled_and_emits_nothing() {
+fn a_launch_row_whose_bundle_is_absent_is_disabled_and_asks_for_nothing() {
     // The standard fixture has no terminal bundle.
     let mut bar = bottom_bar();
     let mut input = TaskbarInput::new();
-    open_system_menu(&mut input, &mut bar);
+    let request = ask_system_menu(&mut input, &mut bar);
 
-    let item = &bar.menu().control().items()[2];
+    let item = offered_row(&request, 2);
     assert_eq!(item.label(), "Task Shell");
     assert!(!item.state().is_actionable());
     assert_eq!(item.reason(), Some("Not installed"));
-
-    assert_eq!(
-        choose_row(&mut input, &mut bar, 2),
-        TaskbarResponse::Ignored,
-        "a launch that must fail is never emitted"
-    );
 }
 
 #[test]
-fn opening_the_system_menu_latches_only_the_menu_surface() {
+fn asking_for_the_system_menu_latches_nothing_the_bar_draws() {
     let mut bar = bar_with_task_shell();
     let mut input = TaskbarInput::new();
     let capsule = centre_of(bar.layout(Scale::ONE).switchboard);
@@ -7498,5 +7060,9 @@ fn opening_the_system_menu_latches_only_the_menu_surface() {
         Scale::ONE,
         NOW_NS,
     );
-    assert_eq!(bar.take_repaint(), TaskbarRepaint::MENU);
+    assert_eq!(
+        bar.take_repaint(),
+        TaskbarRepaint::NONE,
+        "the plate is the desktop chain's surface, so the bar repaints nothing"
+    );
 }

@@ -807,18 +807,17 @@ What now stands:
   *New window* row through the same builder. A submenu row is refused there
   rather than drawn childless — a flat list cannot express parented children,
   so an application needing one builds its own `AppMenu`.
-- **The bar draws exactly what was declared.** `MenuSubject::App` renders
-  every top-level declared row in declaration order with its enablement and
-  mark; a declared separator opens the group its next row begins rather than
-  becoming a choosable row; a declared submenu's children open beside the
-  plate (one level, flipped when the trailing side would leave the screen);
-  and the `Info` row's child is the information panel. That row is the one
-  whose *label* is the bar's rather than the application's: it draws as
-  `INFO_ROW_LABEL` ("Info", with the submenu arrow), so every application
-  reaches its panel by the same name. Choosing a row reports
-  `AppMenuChosen { app, item }` and the session relays the id straight back —
-  the bar never interprets one. An application that declared no menu opens
-  **nothing**.
+- **The bar states exactly what was declared.** `MenuSubject::App` is the
+  menu the desktop's one chain draws for a slot (`plans/NEW-MENUS.md` M3.4):
+  every declared row in declaration order with its enablement and mark, a
+  declared separator opening the group its next row begins rather than becoming
+  a choosable row, a declared submenu's rows on its child plate, and the `Info`
+  row's child the information panel. That row is the one whose *label* is the
+  desktop's rather than the application's: it draws as `INFO_ROW_LABEL` ("Info",
+  with the submenu arrow), so every application reaches its panel by the same
+  name. Choosing a row answers `AppMenuChosen { app, item }` and the session
+  relays the id straight back — the bar never interprets one. An application
+  that declared no menu asks for **nothing**.
 - **The hover window picker** (`WindowPicker`) opens at
   `PICKER_MIN_WINDOWS` (two) windows and no fewer, and both its edges are
   timed by the clock rather than by the pointer: it opens once the pointer has
@@ -1307,9 +1306,9 @@ proptest oracles cover it end to end.
 Where System Settings lives (issue requirement: **not** in the library).
 
 The quick-actions menu opens on a **secondary press on the Switchboard
-capsule** (desktop1 panel 5) and reuses the bar's one modal `BarMenu`
-machinery — there is no second popup surface. The taskbar holds no
-authority: each row reports a typed outcome and the session resolves it.
+capsule** (desktop1 panel 5) and is drawn by the seat's one menu chain like
+every other menu on the desktop (`plans/NEW-MENUS.md` M3.4). The taskbar holds
+no authority: each row reports a typed outcome and the session resolves it.
 
 **Rows, in order** (`—` marks a group divider):
 
@@ -1319,7 +1318,7 @@ authority: each row reports a typed outcome and the session resolves it.
 | System Monitor | session → Switchboard `Tasks` | the T11 open panel |
 | Task Shell | session → launch `os.tairix.terminal` | the graphical terminal bundle |
 | — | | |
-| Light / Dark Appearance | session `ThemeRegistry::set_theme` | §10; the active one carries a check bead and is not actionable |
+| Light / Dark Appearance | session `ThemeRegistry::set_theme` | §10; the active one is the group's chosen member — a bullet, disabled, with its reason |
 | — | | |
 | Lock Screen | session `ScreenLock` → `ElevateRequest::Verify` | the per-console elevation broker |
 | Log Out | session exits cleanly | the login supervisor re-prompts |
@@ -1416,15 +1415,16 @@ write an optimiser cannot delete as a dead store, now shared by the login
 prompt, the broker, the shell's `elevate` builtin, and the runtime's
 elevation client.
 
-**Tests**: the row table renders the expected labels, groups, roles and check
-marks for both appearances; a secondary press on the Switchboard capsule opens the menu
-and a press elsewhere does not; the menu is modal and a click away dismisses
-without acting; keyboard navigation reaches every row; an unpermitted power
-row is non-actionable, carries the Authority Mark and states its reason;
-power rows are denied when no authority has been published; the lock row is
-denied until the session attests its console has a broker, and emits nothing
-while denied; a launch row with no catalog entry is disabled and emits
-nothing; each row maps to exactly the expected typed outcome; the confirmation dialog
+**Tests**: the row table states the expected labels, groups and roles, with the
+appearance in force marked as its group's chosen member, for both appearances; a
+secondary press on the Switchboard capsule asks for the menu and a press
+elsewhere does not; an unpermitted power row is non-actionable, carries the
+Authority Mark and states its reason; power rows are denied when no authority
+has been published; the lock row is denied until the session attests its console
+has a broker; a launch row with no catalog entry is disabled with its reason;
+each row maps to exactly the expected typed outcome and a row left out shifts no
+other row's; the plate, the grab and the one answer are the chain's
+(`plans/NEW-MENUS.md`); the confirmation dialog
 relays exactly once on confirm and nothing on cancel or Escape; the power
 relay round-trips and rejects malformed input; the Switchboard acts only when
 it holds the capability. For the lock: engaging covers the screen and is
@@ -1756,11 +1756,10 @@ it or the reverse):
 
 Tested in the taskbar suite (the reading leads and is non-actionable and
 repeats the bar's label; an unset clock states so; the set-time row is denied
-with its reason and emits nothing until the session attests, then emits the
-typed request; every row in the table renders and maps back consistently; a
-secondary press on the clock opens the menu and a primary press opens
-nothing; attesting the broker
-latches only the menu surface) and in the session suite (the prompt opens
+with its reason until the session attests, then asks for the typed request;
+every row in the table is stated and maps back consistently; a secondary press
+on the clock asks for the menu and a primary press asks for nothing) and in the
+session suite (the prompt opens
 once and refuses a second; Escape cancels and offers nothing; Enter offers
 exactly what was typed, once, for the program the prompt named, and reports
 the started pid; an incomplete prompt is never offered and moves the keyboard

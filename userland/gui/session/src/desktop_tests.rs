@@ -27,8 +27,8 @@ use crate::desktop::{
     Desktop, DesktopAction, DesktopActivation, DesktopOutcome, PinboardChange, DESKTOP_MARGIN,
     RELIST_MIN_INTERVAL_NS,
 };
-use crate::menu::{ChainChild, ChainModel};
 use crate::pinboard::{self, PinboardCommand};
+use tairix_controls::{ChainChild, ChainModel};
 
 /// What a [`FakeDir`] answers with, and how often it has been asked.
 ///

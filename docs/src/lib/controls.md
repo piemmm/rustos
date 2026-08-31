@@ -49,7 +49,7 @@ under the floor and are unchanged.
 | `metric` | `MetricTile`, `StatusPill` |
 | `record` | `FactList`, `Timeline` |
 | `text` | `TextField`, `SearchField` |
-| `menu`, `toolbar`, `tabs`, `combo` | `Menu`/`MenuItem`, `Toolbar`, `Tab`/`Tabs`, `ComboBox` |
+| `menu`, `toolbar`, `tabs`, `combo` | `Menu`/`MenuItem`, `ChainModel`, `plate_rect`, `Toolbar`, `Tab`/`Tabs`, `ComboBox` |
 | `nav`, `rail` | `Breadcrumb`, `ActionRail` |
 | `collection` | `ListRow`, `TableRow`, `TableCell`, `TableHeader`, `Card`, `Panel` |
 | `scroll`, `scrollbar` | the geometry engine and the one `ScrollBar` over it |
@@ -76,12 +76,27 @@ drawn at all. Byte-for-byte drift guards assert both directions — the label,
 value, and action never move the capsule's pixels, and everything it does draw
 always does.
 
-`Menu::anchored_rect` is the one placement rule for a popup menu opened at a
-pointer: it sizes the menu from its own preferred width and height clamped to
-the viewport, then places its top-left at the anchor, shifting left or up only
-as far as needed to keep the whole menu inside the viewport. Every context
-menu — the file manager's right-click menu, a terminal's — reads this one
-method rather than each deriving its own placement arithmetic.
+`plate_rect(width, height, placement, viewport)` is the one placement rule for
+every plate and everything that hangs where one would. A `PlatePlacement` names
+the three values every caller carries together — the anchor region, the side the
+plate prefers, and the clearance it leaves. The plate is bounded to the viewport,
+opens on the preferred side, flips to the opposite one when that side has no room
+(and the roomier one wins when neither does), then slides along the cross axis
+and clamps. `Menu::anchored_rect` is its point case: a zero-extent anchor
+opening trailing with no clearance, which is a context menu at a press point. So
+a root plate, a slot-anchored icon-bar menu and a submenu beside its parent row
+all read one piece of arithmetic rather than each deriving its own.
+
+`ChainModel` is the one *model* a menu is built as: a plate title and a
+parent-indexed list of `ChainRow`s, each carrying the id an outcome names, what
+the row opens (nothing, a submenu, or the desktop's information panel), and the
+`MenuItem` that draws it. A desktop surface builds one in process; an
+application's bounded wire declaration decodes into one
+(`ChainModel::from_app_menu`), which is why the model lives here rather than with
+the chain that renders it — its clients are not all in the process that owns the
+chain. The wire model is a **bounded subset**, structurally: it has no field for
+an authority state, so a decoded row can never claim that *the system* refused a
+command (`plans/NEW-MENUS.md` §1.6).
 
 ### Reporting a reading, and standing beside a list
 

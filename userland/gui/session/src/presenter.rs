@@ -43,7 +43,6 @@ use tairix_wm::{Compositor, Corners, Point, Scale, Surface, WindowId};
 pub struct TaskbarPresenter {
     bar: Option<WindowId>,
     popup: Option<WindowId>,
-    menu: Option<WindowId>,
     picker: Option<WindowId>,
     notifications: Option<WindowId>,
     readout: Option<WindowId>,
@@ -60,7 +59,6 @@ impl TaskbarPresenter {
         Self {
             bar: None,
             popup: None,
-            menu: None,
             picker: None,
             notifications: None,
             readout: None,
@@ -80,13 +78,6 @@ impl TaskbarPresenter {
     #[must_use]
     pub const fn popup_window(&self) -> Option<WindowId> {
         self.popup
-    }
-
-    /// The compositor window currently showing the open context menu, or
-    /// `None` when it is closed (or before its first presentation).
-    #[must_use]
-    pub const fn menu_window(&self) -> Option<WindowId> {
-        self.menu
     }
 
     /// The compositor window currently showing the open hover window
@@ -129,7 +120,6 @@ impl TaskbarPresenter {
         [
             self.bar,
             self.popup,
-            self.menu,
             self.picker,
             self.notifications,
             self.readout,
@@ -197,9 +187,6 @@ impl TaskbarPresenter {
         if parts.library || self.popup.is_none() {
             self.present_popup(compositor, renderer, taskbar, scale);
         }
-        if parts.menu || self.menu.is_none() {
-            self.present_menu(compositor, renderer, taskbar, scale);
-        }
         if parts.picker || self.picker.is_none() {
             self.present_picker(compositor, renderer, taskbar, scale);
         }
@@ -223,9 +210,6 @@ impl TaskbarPresenter {
             compositor.remove(id);
         }
         if let Some(id) = self.picker.take() {
-            compositor.remove(id);
-        }
-        if let Some(id) = self.menu.take() {
             compositor.remove(id);
         }
         if let Some(id) = self.popup.take() {
@@ -283,35 +267,6 @@ impl TaskbarPresenter {
         self.popup = Some(place(
             compositor,
             self.popup,
-            layout.panel.origin,
-            surface,
-            (corners, chrome_blur(taskbar.theme())),
-        ));
-    }
-
-    /// Present the context menu while it is open, or remove it once closed.
-    /// It is presented after the popup, so an entry menu sits above the
-    /// panel it was opened from.
-    fn present_menu(
-        &mut self,
-        compositor: &mut Compositor,
-        renderer: &mut TaskbarRenderer,
-        taskbar: &Taskbar,
-        scale: Scale,
-    ) {
-        let Some(layout) = taskbar.menu_layout(scale) else {
-            if let Some(id) = self.menu.take() {
-                compositor.remove(id);
-            }
-            return;
-        };
-        let Some(surface) = renderer.render_menu(taskbar, scale) else {
-            return;
-        };
-        let corners = Corners::from_radius(layout.corner_radius);
-        self.menu = Some(place(
-            compositor,
-            self.menu,
             layout.panel.origin,
             surface,
             (corners, chrome_blur(taskbar.theme())),

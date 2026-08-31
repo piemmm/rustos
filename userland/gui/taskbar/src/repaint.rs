@@ -1,16 +1,15 @@
 //! Which of the taskbar's rendered surfaces need repainting.
 //!
-//! The taskbar presents up to six independent pixel surfaces at once: the
-//! bar strip, the program-library popup, the context menu, the window
-//! picker, the notification popover, and the Switchboard capsule's expanded
-//! readout. A hover moving within a small popup, or a highlight moving
-//! inside an open menu, changes only that one surface's pixels — the others
+//! The taskbar presents up to five independent pixel surfaces at once: the
+//! bar strip, the program-library popup, the window picker, the notification
+//! popover, and the Switchboard capsule's expanded readout. A hover moving
+//! within a small popup changes only that one surface's pixels — the others
 //! are untouched. Latching a single flag for all of them (as the bar once
 //! did) forces the embedder to re-render and re-composite every surface for
 //! every such change, which is measurably wasteful: repainting the bar and
-//! the library popup cost more than ten times what repainting the context
-//! menu alone costs, so a single flag turns cheap, frequent hovers into the
-//! most expensive path on the desktop. [`TaskbarRepaint`] names each surface
+//! the library popup cost more than ten times what repainting a small popover
+//! alone costs, so a single flag turns cheap, frequent hovers into the most
+//! expensive path on the desktop. [`TaskbarRepaint`] names each surface
 //! separately so
 //! [`Taskbar::take_repaint`](crate::Taskbar::take_repaint) tells the embedder
 //! exactly which of them actually changed.
@@ -21,16 +20,20 @@
 //! while a change that touches several (opening the library popup also
 //! presses the bar's Library button; a theme swap repaints everything) sets
 //! all of them, composed with [`BitOr`]/[`BitOrAssign`].
+//!
+//! A menu is not among them: every menu on the desktop is the seat's one
+//! chain, drawn by the session (`plans/NEW-MENUS.md`), so the bar has no menu
+//! pixels to latch.
 
 use core::ops::{BitOr, BitOrAssign};
 
 /// Which of the taskbar's rendered surfaces need repainting.
 ///
-/// See the [module docs](self) for why this is six flags rather than one,
+/// See the [module docs](self) for why this is five flags rather than one,
 /// and [`Taskbar::take_repaint`](crate::Taskbar::take_repaint) for the exact
 /// contract each flag promises.
 // The surfaces are independent yes/no facts about one frame, not a state
-// machine: every combination is legal and is produced in practice (a menu
+// machine: every combination is legal and is produced in practice (a picker
 // hover latches one, opening the library popup latches two, a theme swap
 // latches all of them). Folding them into an enum or sub-structs would hide
 // which surface a latch site actually dirties, which is the whole point of
@@ -42,8 +45,6 @@ pub struct TaskbarRepaint {
     pub bar: bool,
     /// The program-library popup.
     pub library: bool,
-    /// The bar's context menu.
-    pub menu: bool,
     /// The window picker an application slot opens on hover.
     pub picker: bool,
     /// The notification popover.
@@ -57,7 +58,6 @@ impl TaskbarRepaint {
     pub const NONE: Self = Self {
         bar: false,
         library: false,
-        menu: false,
         picker: false,
         notifications: false,
         readout: false,
@@ -72,12 +72,6 @@ impl TaskbarRepaint {
     /// Only the program-library popup.
     pub const LIBRARY: Self = Self {
         library: true,
-        ..Self::NONE
-    };
-
-    /// Only the bar's context menu.
-    pub const MENU: Self = Self {
-        menu: true,
         ..Self::NONE
     };
 
@@ -104,7 +98,6 @@ impl TaskbarRepaint {
     pub const ALL: Self = Self {
         bar: true,
         library: true,
-        menu: true,
         picker: true,
         notifications: true,
         readout: true,
@@ -113,7 +106,7 @@ impl TaskbarRepaint {
     /// Whether any surface is latched.
     #[must_use]
     pub const fn any(self) -> bool {
-        self.bar || self.library || self.menu || self.picker || self.notifications || self.readout
+        self.bar || self.library || self.picker || self.notifications || self.readout
     }
 }
 
@@ -124,7 +117,6 @@ impl BitOr for TaskbarRepaint {
         Self {
             bar: self.bar || rhs.bar,
             library: self.library || rhs.library,
-            menu: self.menu || rhs.menu,
             picker: self.picker || rhs.picker,
             notifications: self.notifications || rhs.notifications,
             readout: self.readout || rhs.readout,

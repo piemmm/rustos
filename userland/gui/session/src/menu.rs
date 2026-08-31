@@ -4,10 +4,8 @@
 //! A chain is a root plate and the descendants open beneath it. A **plate** is
 //! a title band over a column of rows: the shared [`TitleBar`] seating no
 //! commands, and the shared [`Menu`]. A **child** is either a submenu — more
-//! rows from the same model — or an **attached window**: the session's own
-//! information panel, or a surface the owning application draws. Both hang
-//! where a submenu hangs and both die with the chain; they differ only in that
-//! choosing an attached window's row detaches it.
+//! rows from the same model — or the session's own information panel, which
+//! hangs where a submenu hangs and dies with the chain.
 //!
 //! The application describes and the desktop decides. A client hands over a
 //! model and an anchor; everything after that — titling, placement, drawing,
@@ -23,284 +21,20 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use tairix_abi::window_ipc::{
-    AppMenu, AppMenuItemId, AppMenuMark, AppMenuRole, AppMenuRowView, MenuRefusal,
-};
+use tairix_abi::window_ipc::{AppMenuItemId, MenuRefusal};
 use tairix_controls::{
-    plate_rect, ControlRole, ControlState, FactList, Menu, MenuAction, MenuItem, MenuMark,
-    PlateSide, TitleBar, TitleBarCommands, TitleBarEvent,
+    plate_rect, ChainChild, ChainModel, FactList, Menu, MenuAction, PlatePlacement, TitleBar,
+    TitleBarCommands, TitleBarEvent,
 };
 use tairix_geometry::{Point, Rect, Region, Scale};
-use tairix_taskbar::menu::{info_panel_width, INFO_ROW_LABEL};
+use tairix_taskbar::MenuSubject;
+
+use crate::windows::seat_menu_refusal;
 use tairix_theme::Theme;
 use tairix_wm::{ChromeEpoch, InputEvent, Key, NamedKey};
 
-/// The floor a presented surface must have to be hung at all. Its ceiling is
-/// the wire's own format bound, refused before a byte is mapped, and the
-/// screen the session clamps it onto.
-const MIN_ATTACHED_PX: u32 = 1;
-
-/// What arriving on or choosing a row opens.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ChainChild {
-    /// Nothing. Choosing the row is the chain's outcome.
-    None,
-    /// A plate holding the rows that name this one as their parent.
-    Submenu,
-    /// A surface the owning application draws, asked for on arrival.
-    Panel,
-    /// The session's own information panel. Its facts are the host's, read
-    /// from the bundle's signed manifest before the chain opened, so an
-    /// application cannot state an identity that is not its own.
-    Info(FactList),
-}
-
-/// One row of the model a chain renders.
-///
-/// The service-facing model, which the wire model decodes *into*
-/// ([`ChainModel::from_app_menu`]). It is a superset: a row here carries the
-/// whole of [`ControlState`], because the desktop's own rows legitimately say
-/// things — that the *system* lacks the authority for a command — that an
-/// application must never be able to say about itself.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ChainRow {
-    /// The submenu or panel row this one sits under; `None` on the root plate.
-    parent: Option<usize>,
-    /// The id an outcome names, for the rows that carry one.
-    id: Option<AppMenuItemId>,
-    /// What this row opens.
-    child: ChainChild,
-    /// Everything the shared row control draws.
-    item: MenuItem,
-}
-
-impl ChainRow {
-    /// A chooseable row: choosing it answers the chain with `id`.
-    #[must_use]
-    pub fn item(id: AppMenuItemId, item: MenuItem) -> Self {
-        Self {
-            parent: None,
-            id: Some(id),
-            child: ChainChild::None,
-            item,
-        }
-    }
-
-    /// A row whose child is the plate holding the rows filed under it.
-    #[must_use]
-    pub fn submenu(item: MenuItem) -> Self {
-        Self {
-            parent: None,
-            id: None,
-            child: ChainChild::Submenu,
-            item: item.with_submenu(true),
-        }
-    }
-
-    /// A row whose child is a surface the owning application draws. Choosing
-    /// it detaches that surface, which is why it carries an id.
-    #[must_use]
-    pub fn panel(id: AppMenuItemId, item: MenuItem) -> Self {
-        Self {
-            parent: None,
-            id: Some(id),
-            child: ChainChild::Panel,
-            item: item.with_submenu(true),
-        }
-    }
-
-    /// A row whose child is the session's own information panel.
-    #[must_use]
-    pub fn info(item: MenuItem, facts: FactList) -> Self {
-        Self {
-            parent: None,
-            id: None,
-            child: ChainChild::Info(facts),
-            item: item.with_submenu(true),
-        }
-    }
-
-    /// This row filed under the plate row `parent` opens.
-    #[must_use]
-    pub const fn under(mut self, parent: usize) -> Self {
-        self.parent = Some(parent);
-        self
-    }
-
-    /// Everything the shared row control draws for this row.
-    #[must_use]
-    pub const fn drawn(&self) -> &MenuItem {
-        &self.item
-    }
-
-    /// What this row opens.
-    #[must_use]
-    pub const fn child(&self) -> &ChainChild {
-        &self.child
-    }
-
-    /// This row beginning a new visual group.
-    #[must_use]
-    pub fn grouped(mut self) -> Self {
-        self.item = self.item.with_group_break(true);
-        self
-    }
-}
-
-/// The model a chain renders: a root plate title and a parent-indexed list of
-/// rows.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct ChainModel {
-    title: String,
-    rows: Vec<ChainRow>,
-}
-
-impl ChainModel {
-    /// An empty model titled `title`.
-    #[must_use]
-    pub fn new(title: impl Into<String>) -> Self {
-        Self {
-            title: title.into(),
-            rows: Vec::new(),
-        }
-    }
-
-    /// Append `row`, returning the index later rows file themselves under.
-    pub fn push(&mut self, row: ChainRow) -> usize {
-        self.rows.push(row);
-        self.rows.len() - 1
-    }
-
-    /// The root plate's title.
-    #[must_use]
-    pub fn title(&self) -> &str {
-        &self.title
-    }
-
-    /// The model's rows, in declaration order.
-    #[must_use]
-    pub fn rows(&self) -> &[ChainRow] {
-        &self.rows
-    }
-
-    /// Decode an application's wire menu into the model the chain renders,
-    /// titled `title`.
-    ///
-    /// The wire model is a **bounded subset** of this one, and the boundary is
-    /// structural rather than checked: there is no wire field for an authority
-    /// state or a progress state, so a decoded row is always
-    /// [`ControlState`]'s default authority. The Authority Mark says *the
-    /// system* refused a command, and only the system may say it — an
-    /// application painting it on its own row would be spoofing desktop
-    /// chrome.
-    ///
-    /// A declared separator becomes the next row's group break rather than a
-    /// row of its own, so a separator inside a submenu draws the divider it
-    /// draws on the root plate, and no index the chain reports is a rule
-    /// nothing can be chosen on.
-    #[must_use]
-    pub fn from_app_menu(title: &str, menu: &AppMenu, identity: Option<&FactList>) -> Self {
-        let mut model = Self::new(title);
-        // A declared row's index is what its children name, and a folded
-        // separator takes no index here, so the two spaces are mapped rather
-        // than assumed equal.
-        let mut mapped: Vec<Option<usize>> = Vec::new();
-        // One pending break per plate: a separator ending the root plate must
-        // not put a divider above the first row of a submenu.
-        let mut pending: Vec<(Option<usize>, bool)> = Vec::new();
-        for (row, declared_parent) in menu.rows() {
-            let parent = declared_parent.and_then(|at| mapped.get(at).copied().flatten());
-            if matches!(row, AppMenuRowView::Separator) {
-                mapped.push(None);
-                set_pending(&mut pending, parent, true);
-                continue;
-            }
-            let Some(mut built) = wire_row(row, identity) else {
-                mapped.push(None);
-                continue;
-            };
-            if take_pending(&mut pending, parent) {
-                built = built.grouped();
-            }
-            if let Some(at) = parent {
-                built = built.under(at);
-            }
-            mapped.push(Some(model.push(built)));
-        }
-        model
-    }
-}
-
-/// Note whether the plate under `parent` owes its next row a group break.
-fn set_pending(pending: &mut Vec<(Option<usize>, bool)>, parent: Option<usize>, owed: bool) {
-    if let Some(slot) = pending.iter_mut().find(|(at, _)| *at == parent) {
-        slot.1 = owed;
-    } else {
-        pending.push((parent, owed));
-    }
-}
-
-/// Take the group break the plate under `parent` was owed, if any.
-fn take_pending(pending: &mut [(Option<usize>, bool)], parent: Option<usize>) -> bool {
-    pending
-        .iter_mut()
-        .find(|(at, _)| *at == parent)
-        .is_some_and(|slot| core::mem::replace(&mut slot.1, false))
-}
-
-/// One declared row as the chain's own row, or `None` for a row that renders
-/// nothing here (a separator, which the caller folds, or an information row
-/// on a chain whose owner attested no identity).
-fn wire_row(row: AppMenuRowView<'_>, identity: Option<&FactList>) -> Option<ChainRow> {
-    match row {
-        AppMenuRowView::Separator => None,
-        AppMenuRowView::Item(item) => {
-            let mut built = MenuItem::new(item.label)
-                .with_mark(wire_mark(item.mark))
-                .with_role(wire_role(item.role))
-                .with_state(ControlState::default().with_enabled(item.enabled));
-            if !item.shortcut.is_empty() {
-                built = built.with_shortcut(item.shortcut);
-            }
-            if !item.reason.is_empty() {
-                built = built.with_reason(item.reason);
-            }
-            Some(ChainRow::item(item.id, built))
-        }
-        AppMenuRowView::Submenu { label, enabled } => Some(ChainRow::submenu(
-            MenuItem::new(label).with_state(ControlState::default().with_enabled(enabled)),
-        )),
-        AppMenuRowView::Panel { id, label, enabled } => Some(ChainRow::panel(
-            id,
-            MenuItem::new(label).with_state(ControlState::default().with_enabled(enabled)),
-        )),
-        // Without an attested identity there is nothing truthful to put in the
-        // panel, so the row is left out rather than drawn opening a blank one.
-        AppMenuRowView::Info => {
-            identity.map(|facts| ChainRow::info(MenuItem::new(INFO_ROW_LABEL), facts.clone()))
-        }
-    }
-}
-
-/// The shared mark for a declared one.
-const fn wire_mark(mark: AppMenuMark) -> MenuMark {
-    match mark {
-        AppMenuMark::None => MenuMark::None,
-        AppMenuMark::Check => MenuMark::Check,
-        AppMenuMark::Radio => MenuMark::Radio,
-    }
-}
-
-/// The shared role for a declared one.
-const fn wire_role(role: AppMenuRole) -> ControlRole {
-    match role {
-        AppMenuRole::Neutral => ControlRole::Neutral,
-        AppMenuRole::Destructive => ControlRole::Destructive,
-    }
-}
-
 /// Who asked for the chain, and therefore where its one answer goes.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ChainOwner {
     /// An application's window. The answer is the `MenuClosed` naming
     /// `open_id` that the engine holds it to.
@@ -310,10 +44,16 @@ pub enum ChainOwner {
         /// The session-minted id of the open this chain answers.
         open_id: u64,
     },
-    /// The session itself. The answer is returned in-process; the desktop's
-    /// own menus are clients of this service like any application's, and the
-    /// only difference is where the model came from.
-    Session,
+    /// The desktop's own pinboard backdrop. The answer is resolved in
+    /// process against the desktop model.
+    Backdrop,
+    /// The desktop's own icon bar. The answer is resolved in process against
+    /// the bar's own subject, which is what a chosen row of it acts on.
+    ///
+    /// The subject travels with the address rather than beside it, so a chain
+    /// the next open displaces cannot have its answer read against the next
+    /// chain's subject.
+    Bar(MenuSubject),
 }
 
 /// How a chain ended.
@@ -336,18 +76,13 @@ pub enum ChainAction {
     Consumed,
     /// The chain's geometry or pixels changed; re-present its surfaces.
     Redraw,
-    /// The pointer arrived on a panel row: ask the chain's owner to present a
-    /// surface for it. Nothing about the chain waits for the answer.
-    RequestPanel(AppMenuItemId),
     /// The chain closed.
     ///
     /// Neither the answer nor the surfaces are here. The answer leaves through
     /// [`MenuChain::take_answers`], so the one delivery point cannot be
     /// bypassed and no path can answer a chain twice; the surfaces go by the
     /// session reconciling against [`MenuChain::surfaces`], which a closed
-    /// chain reports empty. An attached window is not in that list either way:
-    /// the window engine settles it against the outcome, and the session doing
-    /// it too would be a second rule for one decision.
+    /// chain reports empty.
     Closed,
 }
 
@@ -367,9 +102,6 @@ pub enum SurfaceKind {
     Plate(usize),
     /// The session-drawn information panel.
     Info,
-    /// The attached window the application presented, by its window-channel
-    /// id. The session already holds this surface; the chain only places it.
-    Attached(u64),
 }
 
 /// One plate of the open chain.
@@ -390,32 +122,22 @@ struct Plate {
     open_row: Option<usize>,
 }
 
-/// What hangs where a submenu's plate would, when it is not a plate.
+/// Logical width of the information panel at the reference density: wide
+/// enough for a one-line purpose beside its label.
+const INFO_PANEL_WIDTH: u32 = 260;
+
+/// The information panel's width in physical pixels at `scale`.
+fn info_panel_width(scale: Scale, _theme: &Theme) -> u32 {
+    scale.scale_length(INFO_PANEL_WIDTH).max(1)
+}
+
+/// The desktop's own information panel, hanging where a submenu's plate would.
 #[derive(Clone, Debug)]
-enum Attached {
-    /// Asked for on arrival and not yet answered. The chain is fully usable
-    /// meanwhile, and a surface that arrives after the pointer has moved on
-    /// finds no pending row and is refused.
-    Pending {
-        /// The panel row that asked.
-        row: AppMenuItemId,
-    },
-    /// The session's own information panel, with the attested facts it
-    /// states.
-    Info {
-        /// The facts, read from the owner's signed manifest by the host.
-        facts: FactList,
-        /// Where it sits.
-        rect: Rect,
-    },
-    /// A surface the owning application presented.
-    App {
-        /// Its window-channel id, so the session can find its compositor
-        /// window to place and the engine can settle it.
-        window_id: u64,
-        /// Where it sits.
-        rect: Rect,
-    },
+struct InfoPanel {
+    /// The facts, read from the owner's signed manifest by the host.
+    facts: FactList,
+    /// Where it sits.
+    rect: Rect,
 }
 
 /// A drag in flight: which plate the band press landed on, and where the
@@ -474,13 +196,10 @@ struct OpenChain {
     owner: ChainOwner,
     model: ChainModel,
     plates: Vec<Plate>,
-    attached: Option<Attached>,
-    /// The root's anchor region, in screen pixels.
-    anchor: Rect,
-    /// The side the root opens on.
-    side: PlateSide,
-    /// The clearance the root opens with.
-    gap: u32,
+    /// The information panel hanging off the deepest plate, if one is open.
+    info: Option<InfoPanel>,
+    /// Where the root plate opens, in screen pixels.
+    placement: PlatePlacement,
     drag: Option<Drag>,
     /// The answer this chain has settled on, once something has ended it.
     outcome: Option<ChainOutcome>,
@@ -523,7 +242,7 @@ impl MenuChain {
     ///
     /// Takes a reporter rather than returning anything so an idle wake — which
     /// is nearly every wake — costs a bool test.
-    pub fn report_newly_shown(&mut self, report: impl FnOnce(ChainOwner)) {
+    pub fn report_newly_shown(&mut self, report: impl FnOnce(&ChainOwner)) {
         let Some(chain) = self.open.as_mut() else {
             return;
         };
@@ -531,7 +250,7 @@ impl MenuChain {
             return;
         }
         chain.shown = true;
-        report(chain.owner);
+        report(&chain.owner);
     }
 
     /// Whether a chain is up. While one is, it holds the seat's pointer and
@@ -542,9 +261,22 @@ impl MenuChain {
     }
 
     /// The owner of the open chain, if one is up.
+    ///
+    /// Borrowed rather than cloned: an owner carries the bar's subject, which
+    /// holds a catalog id, and this is read on the pointer-sample path.
     #[must_use]
-    pub fn owner(&self) -> Option<ChainOwner> {
-        self.open.as_ref().map(|chain| chain.owner)
+    pub fn owner(&self) -> Option<&ChainOwner> {
+        self.open.as_ref().map(|chain| &chain.owner)
+    }
+
+    /// The window-channel id of the open chain's owning window, for a chain an
+    /// application asked for; `None` for one the desktop opened for itself.
+    #[must_use]
+    pub fn owner_window(&self) -> Option<u64> {
+        match self.owner()? {
+            ChainOwner::Window { window_id, .. } => Some(*window_id),
+            ChainOwner::Backdrop | ChainOwner::Bar(_) => None,
+        }
     }
 
     /// Open `model` for `owner`, anchored at `anchor` in screen pixels and
@@ -567,9 +299,7 @@ impl MenuChain {
         &mut self,
         owner: ChainOwner,
         model: ChainModel,
-        anchor: Rect,
-        side: PlateSide,
-        gap: u32,
+        placement: PlatePlacement,
         geom: &ChainGeometry<'_>,
     ) -> Result<(), ModelRefused> {
         let root = plate_for(&model, None, geom)?;
@@ -578,10 +308,8 @@ impl MenuChain {
             owner,
             model,
             plates: alloc::vec![root],
-            attached: None,
-            anchor,
-            side,
-            gap,
+            info: None,
+            placement,
             drag: None,
             outcome: None,
             mode: geom.mode(),
@@ -621,18 +349,11 @@ impl MenuChain {
                 kind: SurfaceKind::Plate(depth),
             })
             .collect();
-        match chain.attached.as_ref() {
-            Some(Attached::Info { rect, .. }) => out.push(ChainSurface {
-                rect: *rect,
+        if let Some(panel) = chain.info.as_ref() {
+            out.push(ChainSurface {
+                rect: panel.rect,
                 kind: SurfaceKind::Info,
-            }),
-            Some(Attached::App {
-                window_id, rect, ..
-            }) => out.push(ChainSurface {
-                rect: *rect,
-                kind: SurfaceKind::Attached(*window_id),
-            }),
-            Some(Attached::Pending { .. }) | None => {}
+            });
         }
         out
     }
@@ -712,52 +433,8 @@ impl MenuChain {
     /// facts it states and the rectangle it occupies.
     #[must_use]
     pub fn info_panel(&self) -> Option<(&FactList, Rect)> {
-        match self.open.as_ref()?.attached.as_ref()? {
-            Attached::Info { facts, rect } => Some((facts, *rect)),
-            Attached::Pending { .. } | Attached::App { .. } => None,
-        }
-    }
-
-    /// Place an application's attached window for `row` at `width` × `height`,
-    /// or report why it cannot hang there.
-    ///
-    /// The host asks this the moment a `CreateMenuPanel` lands, before it
-    /// commits a compositor window to it. **The chain, not the engine, decides
-    /// whether the row is real and whether it is too late**: the engine does
-    /// not retain the model, and only the chain knows where the pointer has
-    /// settled since the arrival went out. Refusing here is what stops a slow
-    /// or hostile application planting a panel under a row the user has left.
-    ///
-    /// # Errors
-    ///
-    /// [`PanelRefused`] when no chain is up, the chain up is not the one that
-    /// asked, the pending row is not this one, or the surface has no extent to
-    /// place.
-    pub fn place_panel(
-        &mut self,
-        window_id: u64,
-        open_id: u64,
-        row: AppMenuItemId,
-        width: u32,
-        height: u32,
-        geom: &ChainGeometry<'_>,
-    ) -> Result<Rect, PanelRefused> {
-        if width < MIN_ATTACHED_PX || height < MIN_ATTACHED_PX {
-            return Err(PanelRefused::NoExtent);
-        }
-        let chain = self.open.as_mut().ok_or(PanelRefused::NoChain)?;
-        // A surface answering an arrival from a chain that has since been
-        // replaced belongs to no chain that is up, whatever its row says.
-        if !matches!(chain.owner, ChainOwner::Window { open_id: id, .. } if id == open_id) {
-            return Err(PanelRefused::TooLate);
-        }
-        match chain.attached.as_ref() {
-            Some(Attached::Pending { row: pending }) if *pending == row => {}
-            _ => return Err(PanelRefused::TooLate),
-        }
-        let rect = chain.hang(width, height, geom);
-        chain.attached = Some(Attached::App { window_id, rect });
-        Ok(rect)
+        let panel = self.open.as_ref()?.info.as_ref()?;
+        Some((&panel.facts, panel.rect))
     }
 
     /// Close the chain, answering its owner `Dismissed`.
@@ -817,24 +494,7 @@ impl MenuChain {
     /// Close the chain if `window_id` owns it — the window closed, or the
     /// application behind it died. Returns whether it did.
     pub fn dismiss_owner(&mut self, window_id: u64) -> bool {
-        let owned = matches!(
-            self.owner(),
-            Some(ChainOwner::Window { window_id: id, .. }) if id == window_id
-        );
-        owned && self.close_open()
-    }
-
-    /// Whether `window_id` is the attached window of the open chain.
-    ///
-    /// The session asks before treating a served window as an ordinary one:
-    /// an attached window's pixels are the application's, but its placement
-    /// and its lifetime are the chain's.
-    #[must_use]
-    pub fn attaches(&self, window_id: u64) -> bool {
-        matches!(
-            self.open.as_ref().and_then(|c| c.attached.as_ref()),
-            Some(Attached::App { window_id: id, .. }) if *id == window_id
-        )
+        owned_by(self.owner(), window_id) && self.close_open()
     }
 
     /// Route one seat event into the chain.
@@ -869,6 +529,11 @@ impl MenuChain {
     }
 }
 
+/// Whether `owner` is the window-channel window `window_id`.
+fn owned_by(owner: Option<&ChainOwner>, window_id: u64) -> bool {
+    matches!(owner, Some(ChainOwner::Window { window_id: id, .. }) if *id == window_id)
+}
+
 /// Why a model cannot be shown as a chain.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ModelRefused {
@@ -877,16 +542,44 @@ pub enum ModelRefused {
     NoRows,
 }
 
-/// Why an application's attached window cannot hang where it asked.
+/// Why one of the desktop's own menus did not come up.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum PanelRefused {
-    /// No chain is up. The gesture the surface answers is over.
-    NoChain,
-    /// The pointer has settled somewhere else since the arrival went out, or
-    /// the row never asked for a surface at all.
-    TooLate,
-    /// The surface has no extent to place.
-    NoExtent,
+pub enum DesktopMenuRefused {
+    /// The seat cannot show a menu at all: there is no output to place on, or
+    /// a surface a menu may not displace holds it.
+    Seat(MenuRefusal),
+    /// The model itself cannot be shown.
+    Model(ModelRefused),
+}
+
+/// Open one of the desktop's own menus as the seat's one chain.
+///
+/// The backdrop's and the icon bar's menus are clients of the menu service
+/// exactly as an application's is; the only difference is that their models are
+/// built in process, so their rows may state things an application
+/// structurally cannot. Both arrive through here, so a desktop press cannot
+/// take the grab from the lock screen or the trusted picker by arriving from a
+/// direction that skipped the seat rule — the same rule an application's
+/// `OpenMenu` resolves through.
+///
+/// # Errors
+///
+/// [`DesktopMenuRefused`] when the seat will not show a menu or the model
+/// cannot be drawn as one; the chain that was up is left exactly as it was.
+pub fn open_desktop_menu(
+    chain: &mut MenuChain,
+    owner: ChainOwner,
+    model: ChainModel,
+    placement: PlatePlacement,
+    seat_held: bool,
+    geom: &ChainGeometry<'_>,
+) -> Result<(), DesktopMenuRefused> {
+    if let Some(reason) = seat_menu_refusal(geom.screen, seat_held) {
+        return Err(DesktopMenuRefused::Seat(reason));
+    }
+    chain
+        .open(owner, model, placement, geom)
+        .map_err(DesktopMenuRefused::Model)
 }
 
 impl OpenChain {
@@ -910,27 +603,27 @@ impl OpenChain {
             }
             let (width, height) = plate_extent(&self.plates[depth], geom);
             let rect = match depth.checked_sub(1) {
-                None => plate_rect(width, height, self.anchor, self.side, self.gap, geom.screen),
+                None => plate_rect(width, height, self.placement, geom.screen),
                 Some(parent) => {
                     let against = self.child_anchor(parent, geom);
-                    plate_rect(width, height, against, PlateSide::Trailing, 0, geom.screen)
+                    plate_rect(
+                        width,
+                        height,
+                        PlatePlacement::adjacent(against),
+                        geom.screen,
+                    )
                 }
             };
             self.plates[depth].rect = rect;
         }
-        let hung = match self.attached.as_ref() {
-            Some(Attached::Info { rect, .. } | Attached::App { rect, .. }) => {
-                Some((rect.width, rect.height))
-            }
-            Some(Attached::Pending { .. }) | None => None,
-        };
-        if let Some((width, height)) = hung {
+        if let Some((width, height)) = self
+            .info
+            .as_ref()
+            .map(|panel| (panel.rect.width, panel.rect.height))
+        {
             let rect = self.hang(width, height, geom);
-            match self.attached.as_mut() {
-                Some(Attached::Info { rect: at, .. } | Attached::App { rect: at, .. }) => {
-                    *at = rect;
-                }
-                Some(Attached::Pending { .. }) | None => {}
+            if let Some(panel) = self.info.as_mut() {
+                panel.rect = rect;
             }
         }
     }
@@ -950,19 +643,24 @@ impl OpenChain {
         Rect::new(plate.rect.left(), row.top(), plate.rect.width, row.height)
     }
 
-    /// Where a `width` × `height` attached window hangs: exactly where the
-    /// child plate of the same row would, so a surface and a submenu are
-    /// placed by one rule.
+    /// Where a `width` × `height` information panel hangs: exactly where the
+    /// child plate of the same row would, so a panel and a submenu are placed
+    /// by one rule.
     fn hang(&self, width: u32, height: u32, geom: &ChainGeometry<'_>) -> Rect {
         let deepest = self.plates.len().saturating_sub(1);
         let against = self.child_anchor(deepest, geom);
-        plate_rect(width, height, against, PlateSide::Trailing, 0, geom.screen)
+        plate_rect(
+            width,
+            height,
+            PlatePlacement::adjacent(against),
+            geom.screen,
+        )
     }
 
     /// Close every plate deeper than `depth`, and anything hanging off them.
     fn truncate_to(&mut self, depth: usize) {
         self.plates.truncate(depth + 1);
-        self.attached = None;
+        self.info = None;
         if let Some(plate) = self.plates.get_mut(depth) {
             plate.open_row = None;
         }
@@ -971,13 +669,8 @@ impl OpenChain {
     /// The chain's surface the pointer is over, deepest first — a child is
     /// drawn over its parent, so the deepest match owns the point.
     fn surface_at(&self, pointer: Point) -> Option<Hit> {
-        match self.attached.as_ref() {
-            Some(Attached::Info { rect, .. } | Attached::App { rect, .. })
-                if rect.contains(pointer) =>
-            {
-                return Some(Hit::Attached);
-            }
-            _ => {}
+        if self.info.as_ref().is_some_and(|p| p.rect.contains(pointer)) {
+            return Some(Hit::Info);
         }
         self.plates
             .iter()
@@ -1003,9 +696,9 @@ impl OpenChain {
             // the press goes no further: a dismissal is not also a click on
             // what the menu was covering.
             (InputEvent::PointerPressed { .. }, None) => self.closing(ChainOutcome::Dismissed),
-            // An attached window's own input is the application's, as any
-            // window's is. The chain neither reads it nor reports it.
-            (_, Some(Hit::Attached) | None) => ChainAction::Consumed,
+            // The information panel states facts and offers no action, so a
+            // pointer over it is claimed and does nothing.
+            (_, Some(Hit::Info) | None) => ChainAction::Consumed,
             (_, Some(Hit::Plate(depth))) => self.plate_pointer(depth, event, pointer, geom),
         }
     }
@@ -1041,16 +734,9 @@ impl OpenChain {
         let over = plate.menu.row_at(rows, geom.scale, geom.theme, pointer);
         match acted {
             Some(MenuAction::Activated { index }) => self.choose(depth, index),
-            // A panel row wears a chevron like a submenu's, so the shared
-            // control reports a click on it the same way. Clicking one
-            // detaches its window; clicking a submenu row keeps its plate.
-            Some(MenuAction::OpenSubmenu { index }) => {
-                if self.detachable(depth, index) {
-                    self.choose(depth, index)
-                } else {
-                    self.arrive(depth, Some(index), geom)
-                }
-            }
+            // A click on a row that opens a child keeps its child open
+            // rather than acting: the child is what the row is for.
+            Some(MenuAction::OpenSubmenu { index }) => self.arrive(depth, Some(index), geom),
             Some(MenuAction::Dismissed) => self.closing(ChainOutcome::Dismissed),
             None => {
                 // Arrival, with no click and no timer: a child opens when the
@@ -1207,20 +893,19 @@ impl OpenChain {
         let Some(&model_row) = plate.rows.get(index) else {
             return ChainAction::Consumed;
         };
-        let Some(entry) = self.model.rows.get(model_row) else {
+        let Some(entry) = self.model.rows().get(model_row) else {
             return ChainAction::Consumed;
         };
         // A disabled row opens nothing, and leaves whatever was open alone: a
         // pointer resting on a row it cannot use has not chosen to close
         // anything.
-        if !entry.item.state().is_actionable() {
+        if !entry.drawn().state().is_actionable() {
             return ChainAction::Consumed;
         }
-        let child = entry.child.clone();
-        let id = entry.id;
+        let child = entry.child().clone();
         // Whether anything was actually taken down, which is what tells a
         // no-child arrival from one that closed a plate.
-        let closed = self.plates.len() > depth + 1 || self.attached.is_some();
+        let closed = self.plates.len() > depth + 1 || self.info.is_some();
         self.truncate_to(depth);
         if let Some(plate) = self.plates.get_mut(depth) {
             plate.open_row = Some(index);
@@ -1256,34 +941,13 @@ impl OpenChain {
             ChainChild::Info(facts) => {
                 let width = info_panel_width(geom.scale, geom.theme);
                 let height = facts.measured_height(geom.scale, geom.theme).max(1);
-                self.attached = Some(Attached::Info {
+                self.info = Some(InfoPanel {
                     facts,
                     rect: self.hang(width, height, geom),
                 });
                 ChainAction::Redraw
             }
-            // Nothing about the chain waits for the surface: the arrival goes
-            // out, the chain stays live, and one that lands after the pointer
-            // has moved on finds no pending row. A chain the session itself
-            // opened has no client to ask, so the row opens nothing.
-            ChainChild::Panel => match (id, self.owner) {
-                (Some(row), ChainOwner::Window { .. }) => {
-                    self.attached = Some(Attached::Pending { row });
-                    ChainAction::RequestPanel(row)
-                }
-                _ => ChainAction::Redraw,
-            },
         }
-    }
-
-    /// Whether row `index` of the plate at `depth` is one whose click
-    /// detaches an attached window rather than opening a plate.
-    fn detachable(&self, depth: usize, index: usize) -> bool {
-        self.plates
-            .get(depth)
-            .and_then(|plate| plate.rows.get(index))
-            .and_then(|&row| self.model.rows.get(row))
-            .is_some_and(|row| matches!(row.child, ChainChild::Panel))
     }
 
     /// A row of the plate at `depth` was chosen.
@@ -1291,10 +955,10 @@ impl OpenChain {
         let Some(&model_row) = self.plates.get(depth).and_then(|p| p.rows.get(index)) else {
             return ChainAction::Consumed;
         };
-        let Some(entry) = self.model.rows.get(model_row) else {
+        let Some(entry) = self.model.rows().get(model_row) else {
             return ChainAction::Consumed;
         };
-        match entry.id {
+        match entry.id() {
             Some(id) => self.closing(ChainOutcome::Chosen(id)),
             // A submenu and the information row name no id, so there is
             // nothing for choosing one to answer: it opens or keeps its child.
@@ -1306,10 +970,9 @@ impl OpenChain {
     fn on_key(&mut self, key: Key, geom: &ChainGeometry<'_>) -> ChainAction {
         let deepest = self.plates.len().saturating_sub(1);
         // Escape closes the deepest open child first, so repeated Escape
-        // always gets the user out and a panel with a field in it closes
-        // before the menu that opened it.
+        // always gets the user out.
         if key == Key::Named(NamedKey::Escape) {
-            if self.attached.is_some() {
+            if self.info.is_some() {
                 self.truncate_to(deepest);
                 return ChainAction::Redraw;
             }
@@ -1320,10 +983,10 @@ impl OpenChain {
             return ChainAction::Redraw;
         }
         if key == Key::Named(NamedKey::Left) {
-            if deepest == 0 && self.attached.is_none() {
+            if deepest == 0 && self.info.is_none() {
                 return ChainAction::Consumed;
             }
-            let back = if self.attached.is_some() {
+            let back = if self.info.is_some() {
                 deepest
             } else {
                 deepest - 1
@@ -1334,12 +997,6 @@ impl OpenChain {
         let Some(plate) = self.plates.get_mut(deepest) else {
             return ChainAction::Consumed;
         };
-        // Right enters the highlighted row's child; Enter and Space activate
-        // it. The shared control reports both as opening a submenu for any
-        // chevroned row, so a panel row's *activation* — which detaches its
-        // window — is told apart here, where the row kinds live.
-        let activating = matches!(key, Key::Named(NamedKey::Enter) | Key::Char(' '));
-        let current = plate.menu.current();
         let rows = rows_rect(plate, geom);
         let mut damage = Region::new();
         let acted = plate
@@ -1347,11 +1004,6 @@ impl OpenChain {
             .on_key(key, rows, geom.scale, geom.theme, &mut damage);
         match acted {
             Some(MenuAction::Activated { index }) => self.choose(deepest, index),
-            Some(MenuAction::OpenSubmenu { index })
-                if activating && current == Some(index) && self.detachable(deepest, index) =>
-            {
-                self.choose(deepest, index)
-            }
             Some(MenuAction::OpenSubmenu { index }) => self.arrive(deepest, Some(index), geom),
             Some(MenuAction::Dismissed) => self.closing(ChainOutcome::Dismissed),
             None => {
@@ -1379,8 +1031,8 @@ fn chain_outcome(chain: Option<&mut OpenChain>) -> ChainOutcome {
 enum Hit {
     /// The plate at this depth.
     Plate(usize),
-    /// Whatever hangs off the deepest plate.
-    Attached,
+    /// The information panel hanging off the deepest plate.
+    Info,
 }
 
 /// Build the plate holding the rows filed under `opener` (`None` for the
@@ -1395,30 +1047,30 @@ fn plate_for(
     geom: &ChainGeometry<'_>,
 ) -> Result<Plate, ModelRefused> {
     let rows: Vec<usize> = model
-        .rows
+        .rows()
         .iter()
         .enumerate()
-        .filter(|(_, row)| row.parent == opener)
+        .filter(|(_, row)| row.parent() == opener)
         .map(|(index, _)| index)
         .collect();
     if rows.is_empty() {
         return Err(ModelRefused::NoRows);
     }
-    let items: Vec<MenuItem> = rows
+    let items: Vec<tairix_controls::MenuItem> = rows
         .iter()
-        .filter_map(|&index| model.rows.get(index))
-        .map(|row| row.item.clone())
+        .filter_map(|&index| model.rows().get(index))
+        .map(|row| row.drawn().clone())
         .collect();
     let mut band = TitleBar::plate();
     // A submenu's band states its parent row's label; the root's states the
     // title the chain was opened with. Neither is a new wire field, and both
     // go through the same untrusted-label bounding a window title does.
     band.set_title(&match opener {
-        None => model.title.clone(),
+        None => model.title().to_string(),
         Some(at) => model
-            .rows
+            .rows()
             .get(at)
-            .map_or_else(String::new, |row| row.item.label().to_string()),
+            .map_or_else(String::new, |row| row.drawn().label().to_string()),
     });
     let _ = geom;
     Ok(Plate {

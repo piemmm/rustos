@@ -22,11 +22,6 @@
 //! silhouette instead of squaring off across the cut. Placing the surface
 //! stays the window manager's job.
 //!
-//! [`TaskbarRenderer::render_menu`] paints the open context menu: the shared
-//! `lib/controls` [`Menu`](tairix_controls::Menu) plate at the geometry
-//! [`Taskbar::menu_layout`] computed, presented by the window manager as its
-//! own small window above the bar.
-//!
 //! [`TaskbarRenderer::render_library`] paints the open program-library popup:
 //! the shared [`Panel`](tairix_controls::Panel) chrome anchored back at the
 //! Library button, the search field, one shared list row per folder or
@@ -344,58 +339,6 @@ impl TaskbarRenderer {
             let side = signal.icon_side(bounds, scale, theme);
             let art = artwork.artwork(IconRequest::kind(signal.icon()), side);
             signal.render(&mut surface, bounds, scale, theme, art);
-        }
-        Some(surface)
-    }
-
-    /// Paint the open context menu — and whatever is open beside it — into a
-    /// [`Surface`] using the taskbar's own theme.
-    ///
-    /// One surface holds the menu plate and its open submenu or information
-    /// panel together, because they are one transient the session presents as
-    /// one window: a submenu is part of the menu, not a second thing stacked
-    /// against it.
-    ///
-    /// Returns `None` when the menu is closed (there is nothing to draw) or
-    /// when its pixel dimensions cannot be allocated, so the caller fails
-    /// closed rather than panicking. The window manager places the returned
-    /// surface above the bar and rounds it with
-    /// [`MenuLayout::corner_radius`](crate::menu::MenuLayout::corner_radius).
-    #[must_use]
-    pub fn render_menu(&self, taskbar: &Taskbar, scale: Scale) -> Option<Surface> {
-        let layout = taskbar.menu_layout(scale)?;
-        let theme = taskbar.theme();
-        let bounds = layout.bounds();
-        let mut surface = Surface::new(bounds.width, bounds.height)?;
-        let origin = bounds.origin;
-        taskbar.menu().control().render(
-            &mut surface,
-            local_rect(layout.panel, origin),
-            scale,
-            theme,
-        );
-        if !layout.child.is_empty() {
-            let child = local_rect(layout.child, origin);
-            if let Some(submenu) = taskbar.menu().submenu() {
-                submenu.render(&mut surface, child, scale, theme);
-            } else if let Some(facts) = taskbar.menu().info_panel() {
-                // The information panel is a plate of facts, not a menu, so
-                // it wears the same floating surface recipe every popup the
-                // bar opens does and states its facts on it.
-                let _ = paint_surface_plate(
-                    &mut surface,
-                    (
-                        u32::try_from(child.left()).unwrap_or(0),
-                        u32::try_from(child.top()).unwrap_or(0),
-                        child.width,
-                        child.height,
-                    ),
-                    (layout.corner_radius, plate_border(theme, scale)),
-                    theme,
-                    (theme.palette().surface_raised, ChromeLayer::Ground),
-                );
-                facts.render(&mut surface, child, scale, theme);
-            }
         }
         Some(surface)
     }
