@@ -278,10 +278,10 @@ grants no ambient authority.
 
 The codec is the BOOTP fixed header plus the RFC 2132 option TLVs.
 `DhcpReply::parse` surfaces only the fields a client acts on — message
-type, `yiaddr`, server identifier, subnet mask, routers, DNS servers, and
-the lease/T1/T2 times — and is total, bounded (a fixed option-region walk
-and fixed-capacity `MAX_ADDRESSES` address lists — never an attacker-sized
-allocation), and fail-closed: it rejects a wrong `op`/`htype`/`hlen`, a
+type, `yiaddr`, server identifier, subnet mask, routers, DNS servers
+(option 6), time servers (option 42), and the lease/T1/T2 times — and is
+total, bounded (a fixed option-region walk and fixed-capacity
+`MAX_ADDRESSES` address lists — never an attacker-sized allocation), and fail-closed: it rejects a wrong `op`/`htype`/`hlen`, a
 missing or corrupt magic cookie, a `xid`/`chaddr` that does not match the
 client's outstanding request (bounding off-path spoofing), or an options
 field with no message type, and it honours RFC 2131 §4.1 option overload
@@ -341,7 +341,10 @@ plus the RFC 8415 §21 option TLVs. `Dhcp6Reply::parse` walks the top-level
 options and the options nested inside an IA_NA, surfacing only the fields a
 client acts on — the Server Identifier DUID, the IA_NA's IAID / T1 / T2, the
 leased IA Addresses with their preferred/valid lifetimes, the top-level and
-IA-level Status Codes, and the DNS servers (RFC 3646). It is total, bounded
+IA-level Status Codes, the DNS servers (RFC 3646 option 23), and the time
+servers (RFC 5908 option 56, or the RFC 4075 option 31 it supersedes — a
+server offering both is taken at its newer word rather than at whichever it
+sent first). It is total, bounded
 (a fixed option-region walk, fixed-capacity `MAX_ADDRESSES` lists, a DUID
 capped at the RFC 8415 §11 128-octet maximum — never an attacker-sized
 allocation), and fail-closed: it rejects a truncated header, a message type
@@ -495,6 +498,15 @@ serves it as the `ResolverServers` broker read. The System Information API
 surfaces that same set as the ungated `NET_RESOLVER_SERVERS` query — the
 resolv.conf-analogue `state:net/resolver/servers` reading — so a resolver
 client and an operator see one source of truth (`plans/DNS.md` DNS2).
+
+`Stack::dhcp_ntp_servers()` is its twin for the network *time* servers
+(DHCPv4 option 42, DHCPv6 option 56), over the same one walk of the two
+live leases, and reaches the clock service by the same route: the
+`TimeServers` broker read, the ungated `NET_TIME_SERVERS` query, and the
+`state:net/time/servers` reading. The clock service prefers that set over
+its built-in fallback and below an explicitly configured server, so this
+one is deliberately *purely* DHCP-learned — a static tier here would
+destroy the distinction (`plans/TIMESYNC.md` §3).
 
 ### `igmp`, `mld` — multicast group-membership message codecs
 

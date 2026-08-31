@@ -22,7 +22,8 @@
 //!
 //! Every server message is attacker-controlled. [`Dhcp6Reply::parse`] is
 //! total (never panics), bounded (a fixed option-region walk, fixed-capacity
-//! address / DNS lists — [`MAX_ADDRESSES`]), and fail-closed: a malformed or
+//! address / DNS / time-server lists — [`MAX_ADDRESSES`]), and fail-closed:
+//! a malformed or
 //! internally inconsistent message yields `None` and nothing is applied.
 //! Off-path spoofing is bounded by the randomised transaction id; the state
 //! machine additionally rejects any reply whose transaction id or echoed
@@ -77,6 +78,19 @@ pub mod opt {
     pub const STATUS_CODE: u16 = 13;
     /// DNS Recursive Name Server list (RFC 3646 option 23).
     pub const DNS_SERVERS: u16 = 23;
+    /// SNTP Server list (RFC 4075 option 31), superseded by
+    /// [`NTP_SERVER`] but still deployed.
+    pub const SNTP_SERVERS: u16 = 31;
+    /// NTP Server (RFC 5908 option 56): a set of sub-options rather than a
+    /// bare address list.
+    pub const NTP_SERVER: u16 = 56;
+}
+
+/// Sub-option codes of [`opt::NTP_SERVER`] (RFC 5908 §4).
+pub mod ntp_sub {
+    /// Unicast NTP server address (sub-option 1): exactly one 16-octet
+    /// IPv6 address.
+    pub const SRV_ADDR: u16 = 1;
 }
 
 /// `DHCPv6` status codes (RFC 8415 §21.13). Only the ones the client acts on
@@ -359,6 +373,10 @@ pub struct Dhcp6Reply {
     pub ia_status: u16,
     /// The DNS recursive name servers (RFC 3646 option 23), in wire order.
     pub dns_servers: Ipv6List,
+    /// The network time servers, in wire order: the RFC 5908 option 56
+    /// unicast server addresses when the server supplied any, else the
+    /// RFC 4075 option 31 list it supersedes.
+    pub ntp_servers: Ipv6List,
 }
 
 /// Read a big-endian `u16` at `data[off..off+2]`, or `None` if truncated.
@@ -402,6 +420,12 @@ struct ReplyBuilder {
     top_status: u16,
     ia_status: u16,
     dns_servers: Ipv6List,
+    /// RFC 5908 option 56 unicast addresses.
+    ntp_servers: Ipv6List,
+    /// RFC 4075 option 31 addresses, used only when option 56 supplied
+    /// none: RFC 5908 supersedes it, so a server offering both is taken at
+    /// its newer word rather than at whichever it happened to send first.
+    sntp_servers: Ipv6List,
     saw_ia_na: bool,
 }
 
@@ -455,6 +479,11 @@ impl Dhcp6Reply {
             top_status: b.top_status,
             ia_status: b.ia_status,
             dns_servers: b.dns_servers,
+            ntp_servers: if b.ntp_servers.is_empty() {
+                b.sntp_servers
+            } else {
+                b.ntp_servers
+            },
         })
     }
 }
@@ -471,9 +500,27 @@ impl ReplyBuilder {
                 }
             }
             opt::DNS_SERVERS => self.dns_servers.extend_from_bytes(data),
+            opt::SNTP_SERVERS => self.sntp_servers.extend_from_bytes(data),
+            opt::NTP_SERVER => self.absorb_ntp_server(data),
             opt::IA_NA => self.absorb_ia_na(data),
             _ => {}
         }
+    }
+
+    /// Parse an NTP Server option (RFC 5908 §4): a set of sub-options, of
+    /// which only the unicast server address is usable — this client speaks
+    /// no multicast NTP, and an FQDN sub-option would need a resolver the
+    /// address-configuration path does not have.
+    fn absorb_ntp_server(&mut self, data: &[u8]) {
+        walk_options(data, |code, sub| {
+            if code == ntp_sub::SRV_ADDR {
+                // RFC 5908 §4.1 fixes the sub-option at one address; a
+                // different length is malformed and dropped whole.
+                if let Ok(octets) = <[u8; 16]>::try_from(sub) {
+                    self.ntp_servers.push(Ipv6Addr::from(octets));
+                }
+            }
+        });
     }
 
     /// Parse an `IA_NA` option (RFC 8415 §21.4): its IAID + T1/T2 and the
@@ -527,8 +574,10 @@ fn parse_ia_addr(data: &[u8]) -> Option<LeasedAddress> {
 // ---------------------------------------------------------------------------
 
 /// The options the client asks every server to populate (Option Request
-/// Option, RFC 8415 §21.7): the DNS servers an interface wants.
-const REQUESTED_OPTIONS: [u16; 1] = [opt::DNS_SERVERS];
+/// Option, RFC 8415 §21.7): the DNS servers an interface wants, and both
+/// spellings of the network time servers — RFC 5908's and the RFC 4075 one
+/// it supersedes, since a deployed server may answer either.
+const REQUESTED_OPTIONS: [u16; 3] = [opt::DNS_SERVERS, opt::NTP_SERVER, opt::SNTP_SERVERS];
 
 /// A buffer this size always suffices for [`write_message`]: the header,
 /// every option the client emits (a full-length Server Identifier included),
@@ -751,6 +800,8 @@ pub struct Lease6 {
     pub t2: u32,
     /// The DNS recursive name servers the lease carried, in wire order.
     pub dns_servers: Ipv6List,
+    /// The network time servers the lease carried, in wire order.
+    pub ntp_servers: Ipv6List,
     /// The DUID of the server that granted the lease.
     pub server_id: Option<Duid>,
 }
@@ -1329,6 +1380,7 @@ impl Dhcp6Client {
             t1: t1s,
             t2: t2s,
             dns_servers: reply.dns_servers,
+            ntp_servers: reply.ntp_servers,
             server_id: reply.server_id.or(self.server_id),
         };
         self.state = State::Bound;
@@ -1497,6 +1549,87 @@ mod tests {
         let lease = reply.addresses.first_usable().unwrap();
         assert_eq!(lease.addr, addr());
         assert_eq!(lease.valid_lifetime, 7200);
+    }
+
+    #[test]
+    fn the_option_request_asks_for_both_time_server_spellings() {
+        let spec = MessageSpec {
+            message_type: MessageType::Solicit,
+            transaction_id: 1,
+            client_duid: Duid::ll_ethernet(MAC),
+            server_id: None,
+            iaid: IAID,
+            elapsed_centis: 0,
+            ia_addr: None,
+            request_options: true,
+        };
+        let mut buf = [0u8; MAX_MESSAGE_LEN];
+        let n = write_message(&spec, &mut buf).expect("write");
+        let mut asked = alloc::vec::Vec::new();
+        walk_options(&buf[MESSAGE_HEADER_LEN..n], |code, data| {
+            if code == opt::ORO {
+                for pair in data.as_chunks::<2>().0 {
+                    asked.push(u16::from_be_bytes(*pair));
+                }
+            }
+        });
+        assert!(
+            asked.contains(&opt::NTP_SERVER) && asked.contains(&opt::SNTP_SERVERS),
+            "a server only supplies an option it was asked for: {asked:?}"
+        );
+    }
+
+    #[test]
+    fn the_rfc_5908_time_servers_supersede_the_rfc_4075_list() {
+        let client = Duid::ll_ethernet(MAC);
+        let sntp = Ipv6Addr::new(0x2001, 0xDB8, 0, 0, 0, 0, 0, 0x1F);
+        let ntp = Ipv6Addr::new(0x2001, 0xDB8, 0, 0, 0, 0, 0, 0x7B);
+        let mut bytes = build_message(MessageType::Reply, 7, addr(), 3600, 7200, 0, 0);
+        push_option(&mut bytes, opt::SNTP_SERVERS, &sntp.octets());
+        let mut sub = alloc::vec::Vec::new();
+        push_option(&mut sub, ntp_sub::SRV_ADDR, &ntp.octets());
+        push_option(&mut bytes, opt::NTP_SERVER, &sub);
+        let reply = Dhcp6Reply::parse(&bytes, 7, &client).expect("parse");
+        assert_eq!(
+            reply.ntp_servers.as_slice(),
+            &[ntp],
+            "option 56 wins outright; option 31 is not merged in"
+        );
+    }
+
+    #[test]
+    fn the_rfc_4075_time_servers_are_used_when_no_rfc_5908_option_arrives() {
+        let client = Duid::ll_ethernet(MAC);
+        let sntp = Ipv6Addr::new(0x2001, 0xDB8, 0, 0, 0, 0, 0, 0x1F);
+        let mut bytes = build_message(MessageType::Reply, 7, addr(), 3600, 7200, 0, 0);
+        push_option(&mut bytes, opt::SNTP_SERVERS, &sntp.octets());
+        let reply = Dhcp6Reply::parse(&bytes, 7, &client).expect("parse");
+        assert_eq!(reply.ntp_servers.as_slice(), &[sntp]);
+    }
+
+    #[test]
+    fn a_time_server_sub_option_of_the_wrong_length_is_dropped() {
+        let client = Duid::ll_ethernet(MAC);
+        let good = Ipv6Addr::new(0x2001, 0xDB8, 0, 0, 0, 0, 0, 0x7B);
+        let mut bytes = build_message(MessageType::Reply, 7, addr(), 3600, 7200, 0, 0);
+        let mut sub = alloc::vec::Vec::new();
+        // Two addresses in one sub-option, which RFC 5908 §4.1 fixes at one,
+        // then a well-formed one: the malformed sub-option is dropped whole
+        // rather than read as an address list.
+        let mut pair = alloc::vec::Vec::new();
+        pair.extend_from_slice(&good.octets());
+        pair.extend_from_slice(&good.octets());
+        push_option(&mut sub, ntp_sub::SRV_ADDR, &pair);
+        push_option(&mut sub, ntp_sub::SRV_ADDR, &good.octets());
+        // A multicast sub-option this client does not speak, ignored.
+        push_option(
+            &mut sub,
+            2,
+            &Ipv6Addr::new(0xFF02, 0, 0, 0, 0, 0, 0, 0x101).octets(),
+        );
+        push_option(&mut bytes, opt::NTP_SERVER, &sub);
+        let reply = Dhcp6Reply::parse(&bytes, 7, &client).expect("parse");
+        assert_eq!(reply.ntp_servers.as_slice(), &[good]);
     }
 
     #[test]

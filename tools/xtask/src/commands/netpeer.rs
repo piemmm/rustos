@@ -227,6 +227,25 @@ impl NetPeer {
         Self::spawn_with(qemu_sock, peer_sock, run_ntp_peer)
     }
 
+    /// Bind `peer_sock` and start the **DHCP-server-plus-NTP-server** peer
+    /// thread (the `plans/TIMESYNC.md` TS-7 vertical): the peer leases the
+    /// guest [`wire::DHCP_LEASED_V4`] exactly as [`Self::spawn_dhcp`] does,
+    /// but its OFFER and ACK carry RFC 2132 option 42 naming *itself* as the
+    /// network time server — and it then answers the guest's NTP requests
+    /// spoof-first, as [`Self::spawn_ntp`] does.
+    ///
+    /// The guest for this vertical has **no** configured time server, so it
+    /// can only find a reachable one by reading that option: its built-in
+    /// fallback names public-pool hosts, unreachable on an isolated wire. A
+    /// guest that ignored option 42 therefore sets no clock and the run fails
+    /// loud. Its verdict ([`Self::stop_and_join`]) is `Ok` once it has
+    /// offered, acked, and served a time request with both replies; the
+    /// guest's own witness (the applied `wall_secs=`) proves which reply it
+    /// believed, so neither side passes alone.
+    pub fn spawn_dhcp_time(qemu_sock: &Path, peer_sock: &Path) -> Result<Self, String> {
+        Self::spawn_with(qemu_sock, peer_sock, run_dhcp_time_peer)
+    }
+
     /// Bind `peer_sock` and start the **DHCPv6-server** peer thread (the
     /// DHCP D4c vertical): the peer answers the guest's DHCPv6 `Solicit`
     /// with an `Advertise` and its `Request` with a `Reply`, leasing it
@@ -725,7 +744,7 @@ fn run_dhcp_peer(
                     };
                     if let Some(kind) = reply_kind {
                         ident = ident.wrapping_add(1);
-                        let frame = dhcp_server::build_frame(kind, &request, ident);
+                        let frame = dhcp_server::build_frame(kind, &request, None, ident);
                         let _ = socket.send_to(&frame, qemu_sock);
                         match kind {
                             MessageType::Offer => offered = true,
@@ -764,6 +783,118 @@ fn run_dhcp_peer(
     } else {
         Err(format!(
             "netstack peer: DHCP exchange incomplete (offered={offered}, acked={acked}, reply={reply})"
+        ))
+    }
+}
+
+/// The DHCP-server-plus-NTP-server peer loop: lease the guest an address whose
+/// option 42 names *this peer*, then answer the time queries that follow.
+///
+/// The vertical it serves has **no** configured time server, so the only way
+/// the guest can find a reachable one is by reading option 42 out of its own
+/// lease: the built-in fallback names public-pool hosts, which cannot resolve
+/// on an isolated wire. A guest that ignored the option therefore never sets
+/// its clock and the run fails loud, which is what makes this peer a
+/// discriminator rather than a tautology.
+///
+/// The DHCP exchange is [`run_dhcp_peer`]'s, minus the echo campaign the
+/// addressing vertical needs (this one's proof is the guest's own applied
+/// instant), and the time replies are the shared spoof-first pair. Its verdict
+/// is `Ok` once it has offered, acked, and served a request with both replies.
+fn run_dhcp_time_peer(
+    socket: &UnixDatagram,
+    qemu_sock: &PathBuf,
+    stop: &AtomicBool,
+    succeeded: &AtomicBool,
+) -> Result<(), String> {
+    let facts = DeviceFacts {
+        mac: MacAddress(wire::PEER_MAC),
+        mtu: 1500,
+        link: LinkState::Up,
+        offloads: NetOffloads::empty(),
+        rx_queues: 1,
+        max_tx_frame: 1500 + tairix_abi::driver::net::ETHERNET_HEADER_LEN,
+        multicast_filter: McastFilter::Unfiltered,
+    };
+    let start = Instant::now();
+    let now = |t0: Instant| {
+        Duration64::from_nanos(u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX))
+    };
+    let mut stack = Stack::new(
+        &StackConfig::new(facts, wire::PEER_IID, IPV4_IDENT_SEED),
+        Box::new(FixedTempSource),
+        now(start),
+    )
+    .map_err(|e| format!("netstack peer: engine construction: {e:?}"))?;
+    stack
+        .set_ipv4_config(wire::DHCP_SERVER_V4, wire::DHCP_PREFIX_LEN, None)
+        .map_err(|e| format!("netstack peer: server address assignment: {e:?}"))?;
+
+    let mut offered = false;
+    let mut acked = false;
+    let mut served = 0u32;
+    let mut ident: u16 = 0xD4C0;
+    let mut buf = [0u8; MAX_FRAME];
+
+    while !stop.load(Ordering::Acquire) {
+        // Timer-due engine output (the ARP the guest's queries provoke).
+        let mut out = StackOutput::default();
+        stack.advance(now(start), &mut out);
+        send_frames(socket, qemu_sock, &out.frames);
+
+        match socket.recv(&mut buf) {
+            Ok(len) => {
+                if let Some(request) = dhcp_server::parse_frame(&buf[..len]) {
+                    let reply_kind = match request.message_type {
+                        MessageType::Discover => Some(MessageType::Offer),
+                        MessageType::Request => Some(MessageType::Ack),
+                        _ => None,
+                    };
+                    if let Some(kind) = reply_kind {
+                        ident = ident.wrapping_add(1);
+                        let frame = dhcp_server::build_frame(
+                            kind,
+                            &request,
+                            Some(wire::DHCP_SERVER_V4),
+                            ident,
+                        );
+                        let _ = socket.send_to(&frame, qemu_sock);
+                        match kind {
+                            MessageType::Offer => offered = true,
+                            MessageType::Ack => acked = true,
+                            _ => {}
+                        }
+                    }
+                } else if let Some(request) = parse_ntp_frame(&buf[..len]) {
+                    answer_ntp_spoof_first(socket, qemu_sock, &request);
+                    served = served.saturating_add(1);
+                } else {
+                    // Neither DHCP nor NTP: the guest's ARP for the peer.
+                    let mut out = StackOutput::default();
+                    stack.on_frame(&buf[..len], now(start), &mut out);
+                    send_frames(socket, qemu_sock, &out.frames);
+                }
+            }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(e) => return Err(format!("netstack peer: socket receive: {e}")),
+        }
+
+        // The peer cannot know which reply the guest believed, so its own gate
+        // is only "the chain got this far"; the guest's serial witness (the
+        // exact applied instant) is what proves the rest. Neither side passes
+        // alone.
+        if acked && served > 0 {
+            succeeded.store(true, Ordering::Release);
+        }
+    }
+
+    if offered && acked && served > 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "netstack peer: DHCP-plus-time exchange incomplete (offered={offered}, acked={acked}, ntp_served={served})"
         ))
     }
 }
@@ -891,7 +1022,12 @@ mod dhcp_server {
     /// constants, so the value the peer offers and the value the guest is
     /// pinged at are one and the same. The trailing bytes stay zero (`PAD`),
     /// padding the message to its fixed length.
-    fn write_reply(kind: MessageType, request: &Request, out: &mut [u8; dhcp::MAX_MESSAGE_LEN]) {
+    fn write_reply(
+        kind: MessageType,
+        request: &Request,
+        time_server: Option<Ipv4Addr>,
+        out: &mut [u8; dhcp::MAX_MESSAGE_LEN],
+    ) {
         out.fill(0);
         out[0] = dhcp::OP_BOOTREPLY;
         out[1] = dhcp::HTYPE_ETHERNET;
@@ -928,6 +1064,12 @@ mod dhcp_server {
             dhcp::opt::LEASE_TIME,
             &wire::DHCP_LEASE_SECS.to_be_bytes(),
         );
+        // Option 42 only where the vertical is about it, so the plain DHCP
+        // vertical's wire stays exactly what it was and this option is the
+        // one difference the time vertical turns on.
+        if let Some(server) = time_server {
+            put_option(out, &mut pos, dhcp::opt::NTP_SERVER, &server.octets());
+        }
         out[pos] = dhcp::opt::END;
     }
 
@@ -936,9 +1078,14 @@ mod dhcp_server {
     /// DHCP message as UDP(67→68)/IPv4(`server`→`255.255.255.255`)/Ethernet
     /// with the production `lib/net` writers, so the guest's client decodes
     /// it exactly as it would a real server's.
-    pub fn build_frame(kind: MessageType, request: &Request, ident: u16) -> Vec<u8> {
+    pub fn build_frame(
+        kind: MessageType,
+        request: &Request,
+        time_server: Option<Ipv4Addr>,
+        ident: u16,
+    ) -> Vec<u8> {
         let mut message = [0u8; dhcp::MAX_MESSAGE_LEN];
-        write_reply(kind, request, &mut message);
+        write_reply(kind, request, time_server, &mut message);
 
         let source = wire::DHCP_SERVER_V4;
         let destination = Ipv4Addr::BROADCAST;
@@ -1024,7 +1171,7 @@ mod dhcp_server {
                 chaddr,
             };
             for kind in [MessageType::Offer, MessageType::Ack] {
-                let frame = build_frame(kind, &request, 0x4321);
+                let frame = build_frame(kind, &request, None, 0x4321);
                 // Peel the frame back to the DHCP payload with the same
                 // production decoders the guest uses.
                 let eth_frame = eth::EthernetFrame::parse(&frame).expect("valid Ethernet frame");
@@ -1048,7 +1195,49 @@ mod dhcp_server {
                 assert_eq!(reply.subnet_mask, Some(wire::DHCP_SUBNET_MASK));
                 assert_eq!(reply.routers.first(), Some(wire::DHCP_SERVER_V4));
                 assert_eq!(reply.lease_secs, Some(wire::DHCP_LEASE_SECS));
+                assert!(
+                    reply.ntp_servers.is_empty(),
+                    "no time server is advertised unless the vertical asks for one"
+                );
             }
+        }
+
+        /// The time-server option round-trips through the production client
+        /// codec, so the vertical's whole premise — that the guest can read
+        /// option 42 out of its lease — is checked without QEMU.
+        #[test]
+        fn the_advertised_time_server_round_trips_through_the_client_codec() {
+            let chaddr = MacAddress(wire::GUEST_MAC);
+            let xid = 0x00C0_FFEE;
+            let request = Request {
+                message_type: MessageType::Request,
+                xid,
+                chaddr,
+            };
+            let frame = build_frame(
+                MessageType::Ack,
+                &request,
+                Some(wire::DHCP_SERVER_V4),
+                0x1111,
+            );
+            let eth_frame = eth::EthernetFrame::parse(&frame).expect("valid Ethernet frame");
+            let (ip, _opts, payload) =
+                Ipv4Header::parse(eth_frame.payload).expect("valid IPv4 packet");
+            let datagram = udp::UdpDatagram::parse(
+                Pseudo::V4 {
+                    source: ip.source,
+                    destination: ip.destination,
+                },
+                payload,
+            )
+            .expect("valid UDP datagram");
+            let reply =
+                DhcpReply::parse(datagram.payload, xid, chaddr).expect("a valid server reply");
+            assert_eq!(
+                reply.ntp_servers.as_slice(),
+                &[wire::DHCP_SERVER_V4],
+                "the guest learns the peer as its time server"
+            );
         }
 
         /// The server never mistakes its own reply for a client request: a
@@ -1061,7 +1250,7 @@ mod dhcp_server {
                 xid: 1,
                 chaddr: MacAddress(wire::GUEST_MAC),
             };
-            let frame = build_frame(MessageType::Offer, &request, 7);
+            let frame = build_frame(MessageType::Offer, &request, None, 7);
             assert!(parse_frame(&frame).is_none());
         }
 
@@ -1893,7 +2082,12 @@ struct NtpRequest {
     /// value a genuine reply must echo as its origin timestamp.
     nonce: u64,
     /// The client's source address; the reply's destination.
-    client_addr: Ipv6Addr,
+    client_addr: IpAddr,
+    /// The address the request was *addressed to* — the reply's source. Taken
+    /// from the wire rather than from a scenario constant, so the same
+    /// responder serves the IPv6 static-addressing vertical and the IPv4
+    /// DHCP-learned one without knowing which it is in.
+    server_addr: IpAddr,
     /// The client's source port; the reply's destination port.
     client_port: u16,
     /// The client's source MAC — the reply frame's link-layer destination.
@@ -1903,23 +2097,28 @@ struct NtpRequest {
 /// Decode the NTP client request an Ethernet frame carries, or `None` if the
 /// frame is not one (fail closed). Every layer is parsed with the production
 /// `lib/net` decoders, so the server accepts exactly the frames a real client
-/// emits.
+/// emits — over either address family, since a guest addressed by DHCP asks
+/// over IPv4 and a statically addressed one over IPv6.
 fn parse_ntp_frame(frame: &[u8]) -> Option<NtpRequest> {
     let eth_frame = eth::EthernetFrame::parse(frame)?;
-    if eth_frame.ethertype != ETHERTYPE_IPV6 {
-        return None;
-    }
-    let (ip, payload) = Ipv6Header::parse(eth_frame.payload)?;
-    if ip.next_header != PROTOCOL_UDP {
-        return None;
-    }
-    let datagram = udp::UdpDatagram::parse(
-        Pseudo::V6 {
-            source: ip.source,
-            destination: ip.destination,
-        },
-        payload,
-    )?;
+    let (source, destination, payload) = match eth_frame.ethertype {
+        ETHERTYPE_IPV6 => {
+            let (ip, payload) = Ipv6Header::parse(eth_frame.payload)?;
+            if ip.next_header != PROTOCOL_UDP {
+                return None;
+            }
+            (IpAddr::V6(ip.source), IpAddr::V6(ip.destination), payload)
+        }
+        ETHERTYPE_IPV4 => {
+            let (ip, _options, payload) = Ipv4Header::parse(eth_frame.payload)?;
+            if ip.protocol != PROTOCOL_UDP {
+                return None;
+            }
+            (IpAddr::V4(ip.source), IpAddr::V4(ip.destination), payload)
+        }
+        _ => return None,
+    };
+    let datagram = udp::UdpDatagram::parse(udp_pseudo(source, destination), payload)?;
     if datagram.destination_port != NTP_PORT {
         return None;
     }
@@ -1932,10 +2131,28 @@ fn parse_ntp_frame(frame: &[u8]) -> Option<NtpRequest> {
     nonce.copy_from_slice(&header[NTP_TRANSMIT_TS_AT..NTP_TRANSMIT_TS_AT + 8]);
     Some(NtpRequest {
         nonce: u64::from_be_bytes(nonce),
-        client_addr: ip.source,
+        client_addr: source,
+        server_addr: destination,
         client_port: datagram.source_port,
         client_mac: eth_frame.source,
     })
+}
+
+/// The UDP checksum pseudo-header for a `source`→`destination` pair, which
+/// must be of one family (a mixed pair cannot arrive from a parsed frame).
+fn udp_pseudo(source: IpAddr, destination: IpAddr) -> Pseudo {
+    match (source, destination) {
+        (IpAddr::V4(source), IpAddr::V4(destination)) => Pseudo::V4 {
+            source,
+            destination,
+        },
+        (IpAddr::V6(source), IpAddr::V6(destination)) => Pseudo::V6 {
+            source,
+            destination,
+        },
+        // One family per packet: a parsed frame never mixes them.
+        _ => unreachable!("an IP packet's addresses are of one family"),
+    }
 }
 
 /// The 64-bit NTP timestamp denoting `unix_secs`, wrapping into whatever era
@@ -1967,14 +2184,11 @@ fn build_ntp_reply(request: &NtpRequest, origin: u64, unix_secs: i64) -> Vec<u8>
     message[NTP_RECEIVE_TS_AT..NTP_RECEIVE_TS_AT + 8].copy_from_slice(&stamp.to_be_bytes());
     message[NTP_TRANSMIT_TS_AT..NTP_TRANSMIT_TS_AT + 8].copy_from_slice(&stamp.to_be_bytes());
 
-    let source = wire::PEER_STATIC_V6;
+    let source = request.server_addr;
     let destination = request.client_addr;
     let mut datagram = vec![0u8; udp::UDP_HEADER_LEN + message.len()];
     udp::write(
-        Pseudo::V6 {
-            source,
-            destination,
-        },
+        udp_pseudo(source, destination),
         NTP_PORT,
         request.client_port,
         &message,
@@ -1982,24 +2196,55 @@ fn build_ntp_reply(request: &NtpRequest, origin: u64, unix_secs: i64) -> Vec<u8>
     )
     .expect("the UDP buffer is sized for the NTP header");
 
-    let mut header = Ipv6Header::new(source, destination, PROTOCOL_UDP);
-    header.hop_limit = ND_HOP_LIMIT;
-    let mut packet = vec![0u8; IPV6_HEADER_LEN + datagram.len()];
-    header
-        .write(&mut packet, datagram.len())
-        .expect("the IPv6 header fits the sized packet");
-    packet[IPV6_HEADER_LEN..].copy_from_slice(&datagram);
+    let (packet, ethertype) = match (source, destination) {
+        (IpAddr::V6(source), IpAddr::V6(destination)) => {
+            let mut header = Ipv6Header::new(source, destination, PROTOCOL_UDP);
+            header.hop_limit = ND_HOP_LIMIT;
+            let mut packet = vec![0u8; IPV6_HEADER_LEN + datagram.len()];
+            header
+                .write(&mut packet, datagram.len())
+                .expect("the IPv6 header fits the sized packet");
+            packet[IPV6_HEADER_LEN..].copy_from_slice(&datagram);
+            (packet, ETHERTYPE_IPV6)
+        }
+        (IpAddr::V4(source), IpAddr::V4(destination)) => {
+            let header = Ipv4Header::new(source, destination, PROTOCOL_UDP);
+            let mut packet = vec![0u8; IPV4_HEADER_LEN + datagram.len()];
+            header
+                .write(&mut packet, datagram.len())
+                .expect("the IPv4 header fits the sized packet");
+            packet[IPV4_HEADER_LEN..].copy_from_slice(&datagram);
+            (packet, ETHERTYPE_IPV4)
+        }
+        _ => unreachable!("an IP packet's addresses are of one family"),
+    };
 
     let mut frame = vec![0u8; ETHERNET_HEADER_LEN + packet.len()];
     eth::write_header(
         &mut frame,
         request.client_mac,
         MacAddress(wire::PEER_MAC),
-        ETHERTYPE_IPV6,
+        ethertype,
     )
     .expect("the Ethernet header fits the sized frame");
     frame[ETHERNET_HEADER_LEN..].copy_from_slice(&packet);
     frame
+}
+
+/// Answer one NTP client request the way every time vertical's peer does:
+/// **spoof first**, then the truthful reply.
+///
+/// The spoof is well-formed but its origin timestamp does not echo the
+/// request's nonce, and it reports a plainly different instant. A guest whose
+/// nonce gate works drops it *without* ending the transaction, so the truthful
+/// reply that follows still lands; a guest that believed it lands on the wrong
+/// instant, and one that let it cancel the transaction sets no clock at all.
+/// That ordering is the whole discriminator, so it has one definition.
+fn answer_ntp_spoof_first(socket: &UnixDatagram, qemu_sock: &PathBuf, request: &NtpRequest) {
+    let spoof = build_ntp_reply(request, request.nonce ^ u64::MAX, wire::NTP_SPOOF_SECS);
+    let _ = socket.send_to(&spoof, qemu_sock);
+    let truth = build_ntp_reply(request, request.nonce, wire::NTP_FIXTURE_SECS);
+    let _ = socket.send_to(&truth, qemu_sock);
 }
 
 /// The NTP-server peer loop: answer the guest's time queries spoof-first.
@@ -2041,16 +2286,7 @@ fn run_ntp_peer(
         match socket.recv(&mut buf) {
             Ok(len) => {
                 if let Some(request) = parse_ntp_frame(&buf[..len]) {
-                    // The spoof first: a well-formed reply whose origin
-                    // timestamp does not echo the nonce, reporting a plainly
-                    // different instant. A guest whose nonce gate works drops
-                    // it *without* ending the transaction, so the truthful
-                    // reply that follows still lands.
-                    let spoof =
-                        build_ntp_reply(&request, request.nonce ^ u64::MAX, wire::NTP_SPOOF_SECS);
-                    let _ = socket.send_to(&spoof, qemu_sock);
-                    let truth = build_ntp_reply(&request, request.nonce, wire::NTP_FIXTURE_SECS);
-                    let _ = socket.send_to(&truth, qemu_sock);
+                    answer_ntp_spoof_first(socket, qemu_sock, &request);
                     served = served.saturating_add(1);
                     succeeded.store(true, Ordering::Release);
                 } else {

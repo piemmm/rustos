@@ -35,6 +35,13 @@
 //! validity and change how a reader interprets the log. That is an audit
 //! distinction the caller records; it does not change the provenance.
 //!
+//! # Which servers, from where
+//!
+//! [`select_servers`] is the other half of the policy: an operator's
+//! `time.servers` entry outranks a DHCP-supplied server, which outranks the
+//! built-in public-pool fallback, and the tiers are never merged. The result
+//! is never empty, so a machine always has somewhere to ask.
+//!
 //! # No I/O, no clock, no randomness
 //!
 //! Everything here is pure and host-tested: monotonic time, the wall-clock
@@ -44,6 +51,8 @@
 #![no_std]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
+
+extern crate alloc;
 
 use tairix_abi::time::{Duration64, Time64};
 use tairix_abi::{is_plausible_wall_time, WallClockReading, WallTimeState};
@@ -496,6 +505,11 @@ fn update_for(sample: Sample, reading: WallClockReading) -> ClockUpdate {
 }
 
 pub mod events;
+pub mod servers;
+
+pub use servers::{
+    select_servers, ServerSelection, ServerSource, TimeServer, FALLBACK_TIME_SERVERS,
+};
 
 #[cfg(test)]
 #[path = "tests.rs"]

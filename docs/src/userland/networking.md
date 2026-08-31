@@ -143,25 +143,36 @@ which the `sysinfod` broker forwards to `netstack`'s capability-gated
 broker read (the `NetstackRequest::BondMembers` operation); they require
 `CAP_SYSINFO_GLOBAL` and are audited, and a non-bond alias fails closed.
 
-## Observing the resolver servers
+## Observing the resolver and time servers
 
-The host's active recursive-resolver (DNS) servers are addressable the same
-way — TAIRiX's equivalent of reading `/etc/resolv.conf`:
+The host's two server sets are addressable the same way — TAIRiX's equivalent
+of reading `/etc/resolv.conf` and `/etc/ntp.conf`:
 
 - `state:net/resolver/servers` — the comma-separated recursive DNS servers
   the host will query (V4 as dotted-quad, V6 in RFC 5952 form, in the
   stack's order), or `none` when it has learned none.
+- `state:net/time/servers` — the network time servers the host's DHCP
+  client(s) learned (DHCPv4 option 42, DHCPv6 option 56, or the RFC 4075
+  option 31 it supersedes), or `none`.
 
-The set is each managed interface's statically configured servers
+The resolver set is each managed interface's statically configured servers
 (`<iface>.dns.servers`) followed by its DHCP-learned servers (DHCPv4
 option 6, DHCPv6 option 23), aggregated across every interface,
 deduplicated, and bounded — static servers rank first as the operator's
-explicit choice. Unlike the socket, counter, and bond reads above, this is **not**
-privileged: the recursive-server list is public host configuration and
-exposes no per-principal secret, so the `NET_RESOLVER_SERVERS` query is
-ungated (no capability, no audit). It resolves through the same
-`tairix_procinfo` resolver onto that query, which the `sysinfod` broker
-forwards to `netstack`'s `NetstackRequest::ResolverServers` broker read.
+explicit choice. The time set has no static tier: a statically chosen time
+server is the clock service's own `time.servers` configuration, which
+*outranks* what the network offered rather than joining it
+([`timed`](timed.md)), so this read answers "what did the network offer",
+not "what is in use".
+
+Unlike the socket, counter, and bond reads above, neither is privileged:
+both lists are public host configuration and expose no per-principal
+secret, so the `NET_RESOLVER_SERVERS` and `NET_TIME_SERVERS` queries are
+ungated (no capability, no audit). Being told which time server to ask
+confers no authority either — only the clock service can act on a sample,
+and only after validating it. Both resolve through the same
+`tairix_procinfo` walk onto their query, which the `sysinfod` broker
+forwards to `netstack`'s `ResolverServers` / `TimeServers` broker read.
 
 ## `host` — DNS lookups
 

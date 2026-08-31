@@ -19,10 +19,9 @@ use tairix_abi::net::{
 use tairix_abi::net_ipc::{
     NetAddrFamily, NetBondConfigMsg, NetBondMemberRecord, NetBondMode, NetDnsServers, NetIfKind,
     NetInterfaceConfigMsg, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
-    NetInterfaceRatesRecord, NetInterfaceStateRecord, NetIpv4Config, NetIpv6Config,
-    NetResolverServer, NetSockProto, NetSockState, NetSocketRecord, NetstackRequest,
-    NetworkSettings, IF_NAME_LEN, NETSTACK_LIST_LIMIT_MAX, NETSTACK_MAX_REPLY,
-    NET_BOND_MAX_MEMBERS,
+    NetInterfaceRatesRecord, NetInterfaceStateRecord, NetIpv4Config, NetIpv6Config, NetServerAddr,
+    NetSockProto, NetSockState, NetSocketRecord, NetstackRequest, NetworkSettings, IF_NAME_LEN,
+    NETSTACK_LIST_LIMIT_MAX, NETSTACK_MAX_REPLY, NET_BOND_MAX_MEMBERS,
 };
 use tairix_abi::reply::{decode_page_reply, decode_status_reply};
 use tairix_abi::{
@@ -3049,7 +3048,7 @@ fn resolver_servers_is_a_broker_read_and_frames_a_page() {
     .expect("broker read");
     let (count, body) = decode_page_reply(
         &reply[..len],
-        NetResolverServer::WIRE_LEN,
+        NetServerAddr::WIRE_LEN,
         NETSTACK_LIST_LIMIT_MAX,
     )
     .expect("page");
@@ -3079,7 +3078,7 @@ fn statically_configured_dns_servers_join_the_resolver_set() {
     // servers, in order, in the active resolver set.
     let mut ns = managed_stack();
     let dns = NetDnsServers::from_servers(&[
-        NetResolverServer {
+        NetServerAddr {
             family: NetAddrFamily::V4,
             addr: {
                 let mut a = [0u8; 16];
@@ -3087,7 +3086,7 @@ fn statically_configured_dns_servers_join_the_resolver_set() {
                 a
             },
         },
-        NetResolverServer {
+        NetServerAddr {
             family: NetAddrFamily::V6,
             addr: Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1).octets(),
         },

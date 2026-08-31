@@ -346,7 +346,7 @@ fn addressing_of(
 /// closed). An interface with no static servers yields the empty list.
 #[cfg(feature = "program")]
 fn dns_of(iface: &tairix_netconfig::InterfaceConfig) -> Option<tairix_abi::net_ipc::NetDnsServers> {
-    let records: Vec<tairix_abi::net_ipc::NetResolverServer> = iface
+    let records: Vec<tairix_abi::net_ipc::NetServerAddr> = iface
         .dns_servers()
         .iter()
         .map(|addr| dns_record_of(*addr))
@@ -355,21 +355,21 @@ fn dns_of(iface: &tairix_netconfig::InterfaceConfig) -> Option<tairix_abi::net_i
 }
 
 /// Project a configured [`IpAddr`](core::net::IpAddr) onto the ABI
-/// [`NetResolverServer`](tairix_abi::net_ipc::NetResolverServer) wire shape
+/// [`NetServerAddr`](tairix_abi::net_ipc::NetServerAddr) wire shape
 /// (family plus sixteen address bytes; a V4 server uses the first four).
 #[cfg(feature = "program")]
-fn dns_record_of(addr: core::net::IpAddr) -> tairix_abi::net_ipc::NetResolverServer {
-    use tairix_abi::net_ipc::{NetAddrFamily, NetResolverServer};
+fn dns_record_of(addr: core::net::IpAddr) -> tairix_abi::net_ipc::NetServerAddr {
+    use tairix_abi::net_ipc::{NetAddrFamily, NetServerAddr};
     match addr {
         core::net::IpAddr::V4(a) => {
             let mut bytes = [0u8; 16];
             bytes[..4].copy_from_slice(&a.octets());
-            NetResolverServer {
+            NetServerAddr {
                 family: NetAddrFamily::V4,
                 addr: bytes,
             }
         }
-        core::net::IpAddr::V6(a) => NetResolverServer {
+        core::net::IpAddr::V6(a) => NetServerAddr {
             family: NetAddrFamily::V6,
             addr: a.octets(),
         },

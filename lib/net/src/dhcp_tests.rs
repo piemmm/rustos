@@ -9,6 +9,7 @@ const SERVER: Ipv4Addr = Ipv4Addr::new(192, 168, 1, 1);
 const LEASED: Ipv4Addr = Ipv4Addr::new(192, 168, 1, 50);
 const MASK: Ipv4Addr = Ipv4Addr::new(255, 255, 255, 0);
 const DNS: Ipv4Addr = Ipv4Addr::new(192, 168, 1, 1);
+const NTP: Ipv4Addr = Ipv4Addr::new(192, 168, 1, 123);
 
 fn secs(s: i64) -> Duration64 {
     Duration64::from_secs(s)
@@ -55,6 +56,7 @@ fn server_reply(
     opt(&mut i, 1, &MASK.octets());
     opt(&mut i, 3, &SERVER.octets());
     opt(&mut i, 6, &DNS.octets());
+    opt(&mut i, opt::NTP_SERVER, &NTP.octets());
     if let Some(l) = lease_secs {
         opt(&mut i, 51, &l.to_be_bytes());
     }
@@ -149,7 +151,84 @@ fn parse_accepts_a_well_formed_offer() {
     assert_eq!(reply.subnet_mask, Some(MASK));
     assert_eq!(reply.routers.first(), Some(SERVER));
     assert_eq!(reply.dns_servers.first(), Some(DNS));
+    assert_eq!(reply.ntp_servers.first(), Some(NTP));
     assert_eq!(reply.lease_secs, Some(3600));
+}
+
+#[test]
+fn the_parameter_request_list_asks_for_the_time_servers() {
+    let spec = MessageSpec {
+        message_type: MessageType::Discover,
+        xid: 1,
+        secs: 0,
+        broadcast: true,
+        client_addr: Ipv4Addr::UNSPECIFIED,
+        chaddr: MAC,
+        requested_addr: None,
+        server_id: None,
+    };
+    let mut buf = [0u8; MAX_MESSAGE_LEN];
+    write_message(&spec, &mut buf).expect("write");
+    let mut i = OPTIONS_OFFSET;
+    let mut asked = None;
+    while i + 2 <= buf.len() {
+        let code = buf[i];
+        if code == opt::END {
+            break;
+        }
+        let len = usize::from(buf[i + 1]);
+        if code == opt::PARAMETER_REQUEST_LIST {
+            asked = buf.get(i + 2..i + 2 + len).map(<[u8]>::to_vec);
+            break;
+        }
+        i += 2 + len;
+    }
+    let asked = asked.expect("the request carries a parameter request list");
+    assert!(
+        asked.contains(&opt::NTP_SERVER),
+        "a server only supplies option 42 when it is asked for: {asked:?}"
+    );
+}
+
+#[test]
+fn a_time_server_option_past_the_fixed_bound_is_dropped_whole() {
+    // Five addresses offered, four the fixed capacity admits: the excess is
+    // ignored rather than sizing anything on the server's word.
+    let mut bytes = server_reply(MessageType::Ack, 0x1234, LEASED, Some(SERVER), Some(60));
+    let end = bytes.len() - 1;
+    let mut wide = Vec::new();
+    for last in 1..=5u8 {
+        wide.extend_from_slice(&Ipv4Addr::new(10, 0, 0, last).octets());
+    }
+    bytes.truncate(end);
+    bytes.push(opt::NTP_SERVER);
+    bytes.push(u8::try_from(wide.len()).expect("fits"));
+    bytes.extend_from_slice(&wide);
+    bytes.push(opt::END);
+    let reply = DhcpReply::parse(&bytes, 0x1234, MAC).expect("parse");
+    assert_eq!(
+        reply.ntp_servers.len(),
+        MAX_ADDRESSES,
+        "the list is capped at its fixed bound"
+    );
+    assert_eq!(reply.ntp_servers.first(), Some(NTP), "wire order is kept");
+}
+
+#[test]
+fn a_truncated_trailing_time_server_address_is_ignored() {
+    let mut bytes = server_reply(MessageType::Ack, 0x1234, LEASED, Some(SERVER), Some(60));
+    let end = bytes.len() - 1;
+    bytes.truncate(end);
+    bytes.push(opt::NTP_SERVER);
+    bytes.push(6);
+    bytes.extend_from_slice(&[10, 0, 0, 9, 10, 0]);
+    bytes.push(opt::END);
+    let reply = DhcpReply::parse(&bytes, 0x1234, MAC).expect("parse");
+    assert_eq!(
+        reply.ntp_servers.as_slice(),
+        &[NTP, Ipv4Addr::new(10, 0, 0, 9)],
+        "the whole address parses; the two-octet tail is dropped"
+    );
 }
 
 #[test]
@@ -294,6 +373,7 @@ fn full_acquisition_reaches_bound_with_config() {
     assert_eq!(lease.subnet_mask, Some(MASK));
     assert_eq!(lease.router, Some(SERVER));
     assert_eq!(lease.dns_servers.first(), Some(DNS));
+    assert_eq!(lease.ntp_servers.first(), Some(NTP));
     assert_eq!(lease.server_id, Some(SERVER));
     // T1 = lease/2 = 1800s.
     assert_eq!(client.next_deadline(), Some(secs(1800)));
@@ -515,6 +595,7 @@ fn stale_reply_for_a_past_transaction_is_ignored() {
         subnet_mask: None,
         routers: AddressList::default(),
         dns_servers: AddressList::default(),
+        ntp_servers: AddressList::default(),
         lease_secs: None,
         renewal_secs: None,
         rebinding_secs: None,

@@ -2,8 +2,8 @@
 //!
 //! `timed` is the only holder of `CAP_TIME_SET` on a running machine. It reads
 //! the clock, decides whether to believe it (`tairix_timesync`), queries the
-//! configured network time servers (`tairix_net::ntp`), and applies a
-//! validated sample. This crate is that orchestration over **injected seams**,
+//! network time servers that crate's source policy selected
+//! (`tairix_net::ntp`), and applies a validated sample. This crate is that orchestration over **injected seams**,
 //! so all of it is host-tested; `src/run.rs` wires the real clock, sockets,
 //! resolver, and files.
 //!
@@ -32,7 +32,6 @@
 
 extern crate alloc;
 
-use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::rtc_ipc::RtcReading;
@@ -42,8 +41,10 @@ use tairix_log::{Event, Field, Level, Sink};
 use tairix_net::ntp::Query;
 use tairix_sandbox::host::{Launcher, ParserSandbox};
 use tairix_sandbox::timesync::evaluate_datagram;
-use tairix_sysconfig::SystemConfig;
-use tairix_timesync::{events, ClockUpdate, Event as SyncEvent, SyncReason, SyncRecord, TimeSync};
+use tairix_timesync::{
+    events, ClockUpdate, Event as SyncEvent, ServerSelection, ServerSource, SyncReason, SyncRecord,
+    TimeServer, TimeSync,
+};
 
 /// The wall and monotonic clocks the service reads and sets.
 ///
@@ -116,13 +117,13 @@ pub trait RtcSource {
     fn set(&mut self, time: Time64) -> Result<(), Errno>;
 }
 
-/// The datagram transport to the configured servers.
+/// The datagram transport to the servers in use.
 ///
-/// `index` addresses the configured server list positionally, exactly as the
+/// `index` addresses the selected server list positionally, exactly as the
 /// engine's rotation cursor does, so the engine never holds an address and
 /// name resolution stays out of the pure path.
 pub trait Transport {
-    /// Send `packet` to the configured server at `index`.
+    /// Send `packet` to the server at `index`.
     ///
     /// # Errors
     ///
@@ -138,7 +139,7 @@ pub trait Transport {
 /// without re-deriving it from the log.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Step {
-    /// A request was sent to this configured server index.
+    /// A request was sent to the server at this index.
     Queried(u8),
     /// A request was due but could not be sent, for this reason.
     NotSent(Errno),
@@ -166,9 +167,11 @@ pub struct Timed<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink, K
     /// The ladder for re-reading the RTC while its driver is not up yet, or
     /// `None` once the chip answered or the ladder is spent.
     rtc_retry: Option<RetryLadder>,
-    /// The configured servers, held only so an audit record can name the one
-    /// a decision was about; the engine itself addresses them by index.
-    servers: Vec<String>,
+    /// The servers in use, held only so an audit record can name the one a
+    /// decision was about; the engine itself addresses them by index.
+    servers: Vec<TimeServer>,
+    /// Which tier those servers came from, for the audit trail.
+    source: ServerSource,
     /// Whether the "every server has refused" state has already been
     /// reported. Exhaustion is a *state* the engine can sit in for the rest
     /// of the boot, so the record is edge-triggered: announcing it on every
@@ -184,7 +187,7 @@ pub struct TimedConfig<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: S
     pub clock: C,
     /// The persisted last-seen record's backing document.
     pub store: R,
-    /// The datagram transport to the configured servers.
+    /// The datagram transport to the servers in use.
     pub transport: T,
     /// The sandbox the response evaluation runs in.
     pub sandbox: ParserSandbox<L, S>,
@@ -192,8 +195,10 @@ pub struct TimedConfig<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: S
     pub sink: S,
     /// The board's real-time clock.
     pub rtc: K,
-    /// The boot-time configuration: the server list and the refresh cadence.
-    pub config: SystemConfig,
+    /// The servers to query and the tier they came from.
+    pub selection: ServerSelection,
+    /// The steady-state refresh cadence, measured in uptime.
+    pub refresh: Duration64,
     /// A CSPRNG word, spreading the first query so a fleet booting from one
     /// image does not converge on a single instant.
     pub entropy: u64,
@@ -216,7 +221,8 @@ impl<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink + Clone, K: Rt
             sandbox,
             sink,
             mut rtc,
-            config,
+            selection,
+            refresh,
             entropy,
         } = config;
         let record = read_record(&store);
@@ -232,16 +238,9 @@ impl<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink + Clone, K: Rt
         let reading = clock
             .wall()
             .unwrap_or_else(|_| WallClockReading::new(Time64::from_secs(0), WallTimeState::Unset));
-        let servers = config.time_servers.clone();
+        let ServerSelection { source, servers } = selection;
         let count = u8::try_from(servers.len()).unwrap_or(u8::MAX);
-        let sync = TimeSync::new(
-            count,
-            config.time_refresh.interval(),
-            reading,
-            record,
-            clock.monotonic(),
-            entropy,
-        );
+        let sync = TimeSync::new(count, refresh, reading, record, clock.monotonic(), entropy);
         let service = Self {
             clock,
             store,
@@ -253,6 +252,7 @@ impl<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink + Clone, K: Rt
             record,
             rtc_retry,
             servers,
+            source,
             exhaustion_reported: false,
         };
         service.audit_startup();
@@ -273,7 +273,7 @@ impl<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink + Clone, K: Rt
         }
     }
 
-    /// Whether every configured server has refused further queries.
+    /// Whether every server in use has refused further queries.
     #[must_use]
     pub fn is_exhausted(&self) -> bool {
         self.sync.is_exhausted()
@@ -298,7 +298,7 @@ impl<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink + Clone, K: Rt
                     self.record_event(
                         events::SERVERS_EXHAUSTED,
                         Level::Warn,
-                        "timed: every configured time server has refused further queries",
+                        "timed: every time server in use has refused further queries",
                         &[],
                     );
                 }
@@ -525,17 +525,14 @@ impl<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink + Clone, K: Rt
         }
     }
 
-    /// Record what the service decided about the clock at startup.
+    /// Record what the service decided about the clock at startup, and where
+    /// the servers it will ask came from.
+    ///
+    /// The set is never empty — the selection's lowest tier is the built-in
+    /// fallback — so this is the one start-up record, and `source` is what
+    /// tells an operator whether the machine is asking their server, their
+    /// network's, or the public pool.
     fn audit_startup(&self) {
-        if self.servers.is_empty() {
-            self.record_event(
-                events::NO_SERVERS_CONFIGURED,
-                Level::Warn,
-                "timed: no time servers are configured, so the clock is never set from the network",
-                &[],
-            );
-            return;
-        }
         self.record_event(
             events::SERVICE_READY,
             Level::Info,
@@ -549,6 +546,10 @@ impl<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink + Clone, K: Rt
                     },
                 },
                 Field {
+                    key: "source",
+                    value: FieldValue::Str(self.source.as_str()),
+                },
+                Field {
                     key: "servers",
                     value: FieldValue::UnsignedInt(u64::try_from(self.servers.len()).unwrap_or(0)),
                 },
@@ -556,16 +557,16 @@ impl<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink + Clone, K: Rt
         );
     }
 
-    /// The audit field naming a configured server by index.
+    /// The audit field naming a server by index.
     ///
-    /// An index the configured list does not hold cannot come from the engine
-    /// (its rotation is bounded by the count it was built with), so the field
+    /// An index the list does not hold cannot come from the engine (its
+    /// rotation is bounded by the count it was built with), so the field
     /// states the index rather than inventing a name.
     fn server_field(&self, index: u8) -> Field<'_> {
         Field {
             key: "server",
             value: match self.servers.get(usize::from(index)) {
-                Some(name) => FieldValue::Str(name),
+                Some(server) => FieldValue::Str(&server.name),
                 None => FieldValue::UnsignedInt(u64::from(index)),
             },
         }

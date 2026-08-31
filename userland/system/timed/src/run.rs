@@ -15,10 +15,17 @@
 //! datagrams to, armed with the timeout the engine's single folded deadline
 //! implies. The loop parks; it never polls. A wake is either a datagram
 //! (evaluate it in the sandbox worker, apply the verdict) or the deadline
-//! lapsing (send the next request). With no deadline left — every configured
-//! server retired, or no server configured and the store re-read ladder spent
-//! — the service exits rather than holding a task and a bound delivery port
-//! doing nothing.
+//! lapsing (send the next request). With no deadline left — every server in
+//! use retired and the re-selection ladder spent — the service exits rather
+//! than holding a task and a bound delivery port doing nothing.
+//!
+//! # Where the servers come from
+//!
+//! The three tiers of `tairix_timesync::select_servers`: the operator's
+//! `time.servers`, else what DHCP offered, else the built-in fallback. A
+//! boot-floor service starts before either of the first two is knowable, so it
+//! starts on the fallback and re-selects on a bounded ladder, replacing its
+//! servers only when a *strictly better* tier appears.
 //!
 //! # Two roles, one binary
 //!
@@ -48,7 +55,7 @@ mod program {
     use alloc::vec::Vec;
 
     use tairix_abi::net::{SocketAddr, SocketDatagram, SocketId};
-    use tairix_abi::net_ipc::NetAddrFamily;
+    use tairix_abi::net_ipc::{ip_from_parts, NetAddrFamily};
     use tairix_abi::rtc_ipc::{self, RtcOp, RtcReading, RTC_ENDPOINT};
     use tairix_abi::time::{Duration64, Time64};
     use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
@@ -58,6 +65,7 @@ mod program {
     use tairix_log::{Event, EventId, Level};
     use tairix_net::addr::IpAddr;
     use tairix_net::ntp::PORT;
+    use tairix_procinfo::{IpcTransport, WalkStep};
     use tairix_resolver::RtDnsTransport;
     use tairix_rt::LogSink;
     use tairix_sandbox::host::ParserSandbox;
@@ -68,8 +76,11 @@ mod program {
         Clock, RecordStore, RetryLadder, RtcSource, Timed, TimedConfig, Transport,
         CONFIG_RETRY_ATTEMPTS, CONFIG_RETRY_BASE_NANOS,
     };
-    use tairix_timesync::events::{NO_SERVERS_CONFIGURED, SERVICE_UNAVAILABLE, TIMED_RANGE_START};
-    use tairix_timesync::{RECORD_DIR, RECORD_LEN, RECORD_PATH};
+    use tairix_timesync::events::{SERVERS_FROM_FALLBACK, SERVICE_UNAVAILABLE, TIMED_RANGE_START};
+    use tairix_timesync::{
+        select_servers, ServerSelection, ServerSource, TimeServer, RECORD_DIR, RECORD_LEN,
+        RECORD_PATH,
+    };
 
     /// Exit code when the reactor could not be armed: the delivery port could
     /// not be bound, or the wait-set could not be created or armed. A
@@ -215,21 +226,25 @@ mod program {
         v6: Option<SocketId>,
     }
 
-    /// One configured server: its spelling and, once resolved, its address.
+    /// One selected server: its spelling and, once known, its address.
     struct ServerEntry {
         name: Vec<u8>,
         address: Option<IpAddr>,
     }
 
     impl RtTransport {
-        /// Build the transport over the configured server names.
-        fn new(names: &[alloc::string::String]) -> Self {
-            let servers = names
+        /// Build the transport over the selected servers.
+        ///
+        /// A network-supplied server arrives as an address and is entered
+        /// already resolved, so a machine whose only DNS advice would have
+        /// come from the same lease never needs a resolver to keep time.
+        fn new(servers: &[TimeServer]) -> Self {
+            let servers = servers
                 .iter()
                 .take(MAX_TIME_SERVERS)
-                .map(|name| ServerEntry {
-                    name: name.as_bytes().to_vec(),
-                    address: None,
+                .map(|server| ServerEntry {
+                    name: server.name.as_bytes().to_vec(),
+                    address: server.address,
                 })
                 .collect();
             Self {
@@ -334,6 +349,24 @@ mod program {
                 fields: &[],
             },
         );
+    }
+
+    /// Read the network time servers this host's DHCP client(s) learned, over
+    /// the ungated system-information query `sysinfod` fronts.
+    ///
+    /// Advice, not authority: the answer is a set of addresses to *ask*, and
+    /// every sample one returns is still nonce-gated and plausibility-checked
+    /// before the clock moves. An unavailable service (the usual case on a
+    /// boot-floor start-up, before `sysinfod` and `netstack` are up) is an
+    /// empty set, which simply leaves a lower tier in place; the caller's
+    /// bounded ladder is what looks again.
+    fn learned_time_servers() -> Vec<IpAddr> {
+        let mut servers = Vec::new();
+        let _ = tairix_procinfo::for_each_time_server(&IpcTransport, |record| {
+            servers.push(ip_from_parts(record.family, record.addr));
+            Ok(WalkStep::Continue)
+        });
+        servers
     }
 
     /// Read the boot-time configuration store, falling back to the documented
@@ -441,30 +474,34 @@ mod program {
             return EXIT_REACTOR_UNAVAILABLE;
         };
 
-        // Built immediately, from whatever the store says right now — which on
-        // a boot-floor service is usually nothing, because the encrypted root
-        // is not mounted yet. Waiting here instead would hold the boot up
-        // behind a service nothing else is waiting for.
+        // Built immediately, from whatever is knowable right now — which on a
+        // boot-floor service is usually neither the store (the encrypted root
+        // is not mounted yet) nor a lease (no NIC is up), so it is usually the
+        // built-in fallback. Waiting here instead would hold the boot up
+        // behind a service nothing else is waiting for, and the fallback tier
+        // is exactly what makes waiting unnecessary.
         let mut config = load_config();
+        let mut selection = select_servers(&config.time_servers, &learned_time_servers());
         let mut retry = RetryLadder::arm(
             tairix_rt::clock_get(),
             CONFIG_RETRY_BASE_NANOS,
             CONFIG_RETRY_ATTEMPTS,
-            !config.time_servers.is_empty(),
+            selection.source == ServerSource::Configured,
         );
-        let build = |config: SystemConfig| {
+        let build = |selection: &ServerSelection, refresh: Duration64| {
             Timed::new(TimedConfig {
                 clock: RtClock,
                 rtc: RtRtc,
                 store: RtRecordStore,
-                transport: RtTransport::new(&config.time_servers),
+                transport: RtTransport::new(&selection.servers),
                 sandbox: ParserSandbox::new(RtLauncher::own_binary(), LOG_SINK),
                 sink: LOG_SINK,
-                config,
+                selection: selection.clone(),
+                refresh,
                 entropy: entropy(),
             })
         };
-        let mut service = build(config);
+        let mut service = build(&selection, config.time_refresh.interval());
 
         // The stack's kernel-attested origin, captured from the first
         // datagram so every later one can be required to match it. The
@@ -478,12 +515,11 @@ mod program {
             let now = tairix_rt::clock_get();
             let engine_at = service.next_deadline().map(nanos);
             let Some(timeout) = timeout_until(now, engine_at, retry.as_ref().map(|r| r.at)) else {
-                // Nothing left to wait for: every configured server retired,
-                // or none was configured and the re-read ladder is spent.
-                // Exit rather than hold a task and a bound delivery port for
-                // the rest of the boot doing nothing; restarting the service
-                // is what picks a later configuration up either way, and PID 1
-                // audits the exit.
+                // Nothing left to wait for: every server in use has retired
+                // and the re-read ladder is spent. Exit rather than hold a
+                // task and a bound delivery port for the rest of the boot
+                // doing nothing; restarting the service is what picks a later
+                // configuration up either way, and PID 1 audits the exit.
                 return 0;
             };
             let waited = tairix_rt::waitset_wait(set, timeout, &mut token);
@@ -518,23 +554,36 @@ mod program {
                 return EXIT_REACTOR_UNAVAILABLE;
             }
 
-            // The configuration re-read rung, if one is due: the encrypted
-            // root may have been mounted since the last attempt.
+            // The re-selection rung, if one is due: the encrypted root may
+            // have been mounted, or a DHCP lease acquired, since the last
+            // attempt. Only a *strictly better* tier replaces the servers in
+            // use — an equal-tier change (a renewed lease naming a different
+            // server) would reset the engine's rotation and backoff and
+            // forget which servers had refused, which costs more than it
+            // buys.
             if let Some(rung) = retry.as_mut() {
                 if nanos(woken) >= rung.at {
                     config = load_config();
-                    if config.time_servers.is_empty() {
-                        if !rung.advance(nanos(woken)) {
-                            record(
-                                NO_SERVERS_CONFIGURED,
-                                Level::Warn,
-                                "timed: no time server was configured within the start-up window",
-                            );
-                            retry = None;
-                        }
-                    } else {
-                        service = build(config.clone());
+                    let next = select_servers(&config.time_servers, &learned_time_servers());
+                    let upgraded = next.source > selection.source;
+                    if upgraded {
+                        selection = next;
+                        service = build(&selection, config.time_refresh.interval());
+                    }
+                    if selection.source == ServerSource::Configured {
+                        // The best tier there is: nothing further to look for.
                         retry = None;
+                    } else if !rung.advance(nanos(woken)) {
+                        if selection.source == ServerSource::Fallback {
+                            record(
+                                SERVERS_FROM_FALLBACK,
+                                Level::Info,
+                                "timed: no configured or network-supplied time server was found within the start-up window; the built-in fallback stands",
+                            );
+                        }
+                        retry = None;
+                    }
+                    if upgraded {
                         continue;
                     }
                 }

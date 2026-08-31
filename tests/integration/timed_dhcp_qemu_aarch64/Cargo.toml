@@ -1,0 +1,36 @@
+[package]
+name = "tairix-test-timed-dhcp-qemu-aarch64"
+description = "plans/TIMESYNC.md TS-7 QEMU integration test: boot the production aarch64 tairix-kernel pipeline (boot_aarch64::boot) on the virt board against the dhcp-net-root disk (whose planted network.conf selects ipv4.method dhcp and which carries NO configured time server) with a virtio-net-device attached and the harness-side DHCP-server-plus-NTP-server peer on the QEMU dgram netdev. Proves the guest reads the network time server out of RFC 2132 option 42 in its own lease and sets its clock from it: the peer leases an address whose option 42 names itself and then answers the guest's NTP requests spoof-first, so only a guest that read the option, resolved nothing, and gated the spoof on its nonce reaches the fixture instant the witness requires. A guest that ignored option 42 would fall back to the public-pool names, which cannot resolve on an isolated wire, and would never set its clock."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tairix-test-timed-dhcp-qemu-aarch64"
+path = "src/main.rs"
+
+# Freestanding "boot the production aarch64 kernel pipeline against the
+# dhcp-net-root disk and prove the clock is set from the time server the DHCP
+# lease named" integration test. It reuses the entire production aarch64 boot
+# pipeline through `tairix-kernel`'s library half (`boot_aarch64::boot`)
+# unchanged. The guest exits on its own applied instant, which is the property
+# under test; the peer cannot know which reply was believed.
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+tairix-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The witness the guest exits on: the service's own `CLOCK_SET` event id, and
+# the instant the harness-side peer reports, so neither can drift from it.
+tairix-timesync = { path = "../../../lib/timesync", version = "=0.0.0" }
+tairix-test-netstack-wire = { path = "../netstack_wire", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

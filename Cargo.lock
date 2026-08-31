@@ -5030,6 +5030,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-timed-dhcp-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-kernel-core",
+ "tairix-log",
+ "tairix-test-netstack-wire",
+ "tairix-timesync",
+]
+
+[[package]]
 name = "tairix-test-timed-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
@@ -5337,6 +5351,7 @@ dependencies = [
  "tairix-abi",
  "tairix-log",
  "tairix-net",
+ "tairix-procinfo",
  "tairix-resolver",
  "tairix-rt",
  "tairix-sandbox",

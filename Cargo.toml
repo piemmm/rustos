@@ -387,6 +387,7 @@ members = [
     "tests/integration/netstack_wire",
     "tests/integration/spawn_supervision",
     "tests/integration/rtc_fixture",
+    "tests/integration/timed_dhcp_qemu_aarch64",
     "tests/integration/timed_qemu_aarch64",
     "tests/integration/rtc_pl031_qemu_aarch64",
     "tests/integration/rtc_goldfish_qemu_riscv64",

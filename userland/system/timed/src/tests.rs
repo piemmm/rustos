@@ -16,34 +16,59 @@ use core::cell::RefCell;
 use tairix_abi::driver::rtc::RtcStatus;
 use tairix_abi::rtc_ipc::RtcReading;
 use tairix_abi::time::{Duration64, Time64};
-use tairix_abi::{Errno, WallClockReading, WallTimeState, RELEASE_EPOCH_SECS};
+use tairix_abi::{Errno, FieldValue, WallClockReading, WallTimeState, RELEASE_EPOCH_SECS};
 use tairix_log::{Event, EventId, Sink};
+use tairix_net::addr::{IpAddr, Ipv4Addr};
 use tairix_net::ntp::{NtpTimestamp, PACKET_LEN};
 use tairix_sandbox::host::ParserSandbox;
 use tairix_sandbox::loopback::LoopbackLauncher;
 use tairix_sandbox::timesync::TimeSyncService;
-use tairix_sysconfig::{RefreshCadence, SystemConfig};
-use tairix_timesync::{SyncRecord, STALE_BOOT_GAP};
+use tairix_sysconfig::RefreshCadence;
+use tairix_timesync::{select_servers, ServerSelection, SyncRecord, STALE_BOOT_GAP};
 
-/// Captures every logged event id, so a case can assert what was audited.
+/// One captured record: its event id and its string fields.
+type Recorded = (EventId, Vec<(String, String)>);
+
+/// Captures every logged event id and its string fields, so a case can assert
+/// both what was audited and what the record said.
 #[derive(Clone, Default)]
 struct RecordingSink {
-    events: Rc<RefCell<Vec<EventId>>>,
+    events: Rc<RefCell<Vec<Recorded>>>,
 }
 
 impl Sink for RecordingSink {
     fn write_event(&self, event: &Event<'_>) {
-        self.events.borrow_mut().push(event.id);
+        let strings = event
+            .fields
+            .iter()
+            .filter_map(|field| match field.value {
+                FieldValue::Str(text) => Some((String::from(field.key), String::from(text))),
+                _ => None,
+            })
+            .collect();
+        self.events.borrow_mut().push((event.id, strings));
     }
 }
 
 impl RecordingSink {
     fn saw(&self, id: EventId) -> bool {
-        self.events.borrow().contains(&id)
+        self.count(id) > 0
     }
 
     fn count(&self, id: EventId) -> usize {
-        self.events.borrow().iter().filter(|e| **e == id).count()
+        self.events.borrow().iter().filter(|e| e.0 == id).count()
+    }
+
+    /// The value of the `key` string field on the first `id` record.
+    fn field(&self, id: EventId, key: &str) -> Option<String> {
+        self.events
+            .borrow()
+            .iter()
+            .find(|record| record.0 == id)?
+            .1
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value.clone())
     }
 }
 
@@ -221,30 +246,39 @@ fn plausible() -> Time64 {
     Time64::from_secs(RELEASE_EPOCH_SECS + 86_400)
 }
 
-/// The configuration a test machine boots with: two servers, daily refresh.
-fn configured() -> SystemConfig {
-    SystemConfig {
-        time_servers: vec![String::from("a.test"), String::from("b.test")],
-        time_refresh: RefreshCadence::Daily,
-        ..SystemConfig::default()
-    }
+/// The servers a test machine boots with: two, named by the operator.
+fn configured() -> ServerSelection {
+    select_servers(&[String::from("a.test"), String::from("b.test")], &[])
+}
+
+/// A machine nobody named a server for, and whose network offered none: the
+/// built-in fallback stands.
+fn fallback() -> ServerSelection {
+    select_servers(&[], &[])
 }
 
 fn service(
     clock: FakeClock,
     store: FakeStore,
     transport: FakeTransport,
-    config: SystemConfig,
+    selection: ServerSelection,
     sink: RecordingSink,
 ) -> TestService {
-    service_with_rtc(clock, store, transport, config, sink, FakeRtc::no_reading())
+    service_with_rtc(
+        clock,
+        store,
+        transport,
+        selection,
+        sink,
+        FakeRtc::no_reading(),
+    )
 }
 
 fn service_with_rtc(
     clock: FakeClock,
     store: FakeStore,
     transport: FakeTransport,
-    config: SystemConfig,
+    selection: ServerSelection,
     sink: RecordingSink,
     rtc: FakeRtc,
 ) -> TestService {
@@ -258,7 +292,8 @@ fn service_with_rtc(
         ),
         sink,
         rtc,
-        config,
+        selection,
+        refresh: RefreshCadence::Daily.interval(),
         entropy: 0x0F0F_0F0F_0F0F_0F0F,
     })
 }
@@ -471,22 +506,82 @@ fn a_corrupt_record_makes_no_rule_fire_rather_than_firing_on_a_fiction() {
     assert!(due.secs() > 3_600, "{due:?}");
 }
 
+/// A machine nobody named a server for still keeps time: the built-in
+/// fallback is the lowest tier, so there is always somewhere to ask.
+///
+/// This is the behaviour that replaced "no servers configured, so the clock
+/// is never set from the network" — the reason a stock installation used to
+/// boot with an unset clock forever.
 #[test]
-fn a_machine_with_no_configured_servers_never_queries_and_says_so() {
+fn a_machine_with_nothing_named_queries_the_built_in_fallback() {
     let sink = RecordingSink::default();
     let transport = FakeTransport::default();
     let mut svc = service(
         FakeClock::unset(),
         FakeStore::default(),
         transport.clone(),
-        SystemConfig::default(),
+        fallback(),
         sink.clone(),
     );
-    assert!(sink.saw(events::NO_SERVERS_CONFIGURED));
-    assert!(svc.is_exhausted());
-    assert_eq!(svc.next_deadline(), None);
-    assert_eq!(svc.poll(Duration64::from_secs(3_600), 1), Step::Idle);
-    assert!(transport.sent.borrow().is_empty());
+    assert!(sink.saw(events::SERVICE_READY));
+    assert!(!svc.is_exhausted(), "the fallback tier is never empty");
+    let due = svc.next_deadline().expect("a query is scheduled");
+    assert_eq!(svc.poll(due, 1), Step::Queried(0));
+    assert_eq!(
+        transport.sent.borrow().len(),
+        1,
+        "the fallback servers are actually queried"
+    );
+}
+
+/// The start-up record names the tier, so an operator can tell whose server
+/// their machine is asking without reading the configuration.
+#[test]
+fn the_startup_record_names_the_source_of_the_servers() {
+    for (selection, expected) in [
+        (configured(), "configured"),
+        (
+            select_servers(&[], &[IpAddr::V4(Ipv4Addr::new(192, 168, 66, 1))]),
+            "network",
+        ),
+        (fallback(), "fallback"),
+    ] {
+        let sink = RecordingSink::default();
+        let _svc = service(
+            FakeClock::unset(),
+            FakeStore::default(),
+            FakeTransport::default(),
+            selection,
+            sink.clone(),
+        );
+        assert_eq!(
+            sink.field(events::SERVICE_READY, "source").as_deref(),
+            Some(expected),
+        );
+    }
+}
+
+/// A network-supplied server needs no resolver: the address came with it.
+#[test]
+fn a_network_supplied_server_is_queried_without_a_name_to_resolve() {
+    let learned = IpAddr::V4(Ipv4Addr::new(192, 168, 66, 1));
+    let sink = RecordingSink::default();
+    let selection = select_servers(&[], &[learned]);
+    assert_eq!(selection.servers[0].address, Some(learned));
+    let transport = FakeTransport::default();
+    let mut svc = service(
+        FakeClock::unset(),
+        FakeStore::default(),
+        transport.clone(),
+        selection,
+        sink.clone(),
+    );
+    let due = svc.next_deadline().expect("a query is scheduled");
+    assert_eq!(svc.poll(due, 1), Step::Queried(0));
+    assert_eq!(
+        sink.field(events::SERVICE_READY, "source").as_deref(),
+        Some("network")
+    );
 }
 
 /// Exhaustion is a state the engine can sit in for the rest of the boot, so
@@ -498,14 +593,21 @@ fn a_machine_with_no_configured_servers_never_queries_and_says_so() {
 #[test]
 fn the_exhaustion_warning_is_reported_once_not_on_every_poll() {
     let sink = RecordingSink::default();
+    let learned = IpAddr::V4(Ipv4Addr::new(192, 168, 66, 1));
     let mut svc = service(
         FakeClock::unset(),
         FakeStore::default(),
         FakeTransport::default(),
-        SystemConfig::default(),
+        select_servers(&[], &[learned]),
         sink.clone(),
     );
-    assert!(svc.is_exhausted(), "no server is configured");
+    // Retire the one server the way a real one refuses: a Kiss-o'-Death.
+    let (nonce, at) = in_flight(&mut svc);
+    let mut kiss = reply(nonce, plausible());
+    kiss[1] = 0;
+    kiss[12..16].copy_from_slice(b"DENY");
+    assert_eq!(svc.on_datagram(at, &kiss), Step::NoSample);
+    assert!(svc.is_exhausted(), "the only server refused");
     for secs in [1_i64, 2, 5, 30, 60] {
         assert_eq!(svc.poll(Duration64::from_secs(secs), 1), Step::Idle);
     }
@@ -669,7 +771,7 @@ fn the_event_ids_are_frozen_inside_the_reserved_range() {
     for id in [
         events::SERVICE_READY,
         events::SERVICE_UNAVAILABLE,
-        events::NO_SERVERS_CONFIGURED,
+        events::SERVERS_FROM_FALLBACK,
         events::CLOCK_SET,
         events::CLOCK_SET_REFUSED,
         events::SAMPLE_REFUSED,

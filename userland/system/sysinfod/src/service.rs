@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use tairix_abi::hwtree::{HwNode, HwTreeHeader};
 use tairix_abi::net_ipc::{
     NetBondMemberRecord, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
-    NetInterfaceRatesRecord, NetInterfaceStateRecord, NetResolverServer, NetSocketRecord,
+    NetInterfaceRatesRecord, NetInterfaceStateRecord, NetServerAddr, NetSocketRecord,
 };
 use tairix_abi::raid_admin::{RaidArrayRecord, RaidMemberRecord};
 use tairix_abi::sysinfo::{
@@ -228,7 +228,9 @@ fn dispatch(
     } else if query == SysinfoQueryId::NET_BOND_MEMBERS {
         net_bond_members_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::NET_RESOLVER_SERVERS {
-        net_resolver_servers_list(source, caller, payload, response)
+        server_addr_list(&source.net_resolver_servers(caller)?, payload, response)
+    } else if query == SysinfoQueryId::NET_TIME_SERVERS {
+        server_addr_list(&source.net_time_servers(caller)?, payload, response)
     } else if query == SysinfoQueryId::IRQ_LIST {
         irq_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::CRASH_RECORD {
@@ -480,24 +482,25 @@ fn net_bond_members_list(
     )
 }
 
-/// Decode the [`NetInterfaceListRequest`] and page the resolver-server
-/// records into `response`. The active set is small and closed, so a
-/// single page always suffices, but it shares the one paging codec
-/// rather than inventing a bespoke reply shape.
-fn net_resolver_servers_list(
-    source: &dyn SysinfoSource,
-    caller: &Caller,
+/// Decode the [`NetInterfaceListRequest`] and page a server-address set
+/// into `response`.
+///
+/// Both server sets — the recursive resolvers and the network time servers
+/// — are small and closed, so a single page always suffices, and both share
+/// this one paging codec rather than inventing a bespoke reply shape or a
+/// second copy of it.
+fn server_addr_list(
+    records: &[NetServerAddr],
     payload: &[u8],
     response: &mut [u8],
 ) -> Result<usize, Errno> {
     let request = NetInterfaceListRequest::from_bytes(payload)?;
-    let records = source.net_resolver_servers(caller)?;
     page_records(
         response,
         request.offset as usize,
         request.limit as usize,
         records.len(),
-        NetResolverServer::WIRE_LEN,
+        NetServerAddr::WIRE_LEN,
         |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
     )
 }
@@ -925,7 +928,7 @@ mod tests {
     use tairix_abi::hwtree::{HwDeviceClass, HwNode, HwTreeHeader, HW_NODE_ROOT};
     use tairix_abi::net_ipc::{
         NetBondMemberRecord, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
-        NetInterfaceRatesRecord, NetInterfaceStateRecord, NetResolverServer, NetSockProto,
+        NetInterfaceRatesRecord, NetInterfaceStateRecord, NetServerAddr, NetSockProto,
         NetSockState, NetSocketRecord,
     };
     use tairix_abi::raid::{ArrayHealth, RaidLevel};
@@ -1466,8 +1469,14 @@ mod tests {
         fn net_resolver_servers(
             &self,
             _caller: &Caller,
-        ) -> Result<alloc::vec::Vec<NetResolverServer>, Errno> {
+        ) -> Result<alloc::vec::Vec<NetServerAddr>, Errno> {
             Ok(fixture_resolver_servers())
+        }
+        fn net_time_servers(
+            &self,
+            _caller: &Caller,
+        ) -> Result<alloc::vec::Vec<NetServerAddr>, Errno> {
+            Ok(fixture_time_servers())
         }
         fn irqs(&self, _caller: &Caller) -> Result<alloc::vec::Vec<IrqRecord>, Errno> {
             Ok(alloc::vec![
@@ -2228,19 +2237,31 @@ mod tests {
 
     /// The active resolver-server set the fixture serves: one V4 and one
     /// V6 recursive server.
-    fn fixture_resolver_servers() -> alloc::vec::Vec<NetResolverServer> {
+    fn fixture_resolver_servers() -> alloc::vec::Vec<NetServerAddr> {
         let mut v4 = [0u8; 16];
         v4[..4].copy_from_slice(&[10, 0, 2, 3]);
         alloc::vec![
-            NetResolverServer {
+            NetServerAddr {
                 family: tairix_abi::net_ipc::NetAddrFamily::V4,
                 addr: v4,
             },
-            NetResolverServer {
+            NetServerAddr {
                 family: tairix_abi::net_ipc::NetAddrFamily::V6,
                 addr: [0x26; 16],
             },
         ]
+    }
+
+    /// The DHCP-learned time servers the fixture serves. Deliberately
+    /// disjoint from the resolver set, so a test cannot pass by answering
+    /// one query with the other's records.
+    fn fixture_time_servers() -> alloc::vec::Vec<NetServerAddr> {
+        let mut v4 = [0u8; 16];
+        v4[..4].copy_from_slice(&[192, 168, 66, 1]);
+        alloc::vec![NetServerAddr {
+            family: tairix_abi::net_ipc::NetAddrFamily::V4,
+            addr: v4,
+        }]
     }
 
     /// The bond-member record the fixture serves.
@@ -2351,16 +2372,43 @@ mod tests {
         let sink = RecordingSink::new();
         let n = serve_once(&source, &caller(&none), &sink, &req, &mut resp).unwrap();
         let expected = fixture_resolver_servers();
-        assert_eq!(n, expected.len() * NetResolverServer::WIRE_LEN);
+        assert_eq!(n, expected.len() * NetServerAddr::WIRE_LEN);
         for (index, want) in expected.iter().enumerate() {
-            let base = index * NetResolverServer::WIRE_LEN;
-            let got = NetResolverServer::from_bytes(&resp[base..]).unwrap();
+            let base = index * NetServerAddr::WIRE_LEN;
+            let got = NetServerAddr::from_bytes(&resp[base..]).unwrap();
             assert_eq!(&got, want);
         }
         assert!(
             sink.events.borrow().as_slice().is_empty(),
             "an ungated read emits no audit record"
         );
+    }
+
+    #[test]
+    fn net_time_servers_is_ungated_and_answers_its_own_set() {
+        tairix_log::set_max_level(Level::Trace);
+        let source = FixtureSource::new();
+        let nlr = NetInterfaceListRequest {
+            offset: 0,
+            limit: 8,
+            flags: 0,
+        };
+        let req = request_bytes(SysinfoQueryId::NET_TIME_SERVERS, &nlr.to_le_bytes());
+        let mut resp = [0u8; 512];
+
+        // Ungated like the resolver set, and no audit record: what time
+        // server the network offers is public configuration, not authority.
+        let none = Caps(&[]);
+        let sink = RecordingSink::new();
+        let n = serve_once(&source, &caller(&none), &sink, &req, &mut resp).unwrap();
+        let expected = fixture_time_servers();
+        assert_eq!(n, expected.len() * NetServerAddr::WIRE_LEN);
+        assert_eq!(
+            NetServerAddr::from_bytes(&resp[..]).unwrap(),
+            expected[0],
+            "the time-server query answers the time-server set"
+        );
+        assert!(sink.events.borrow().as_slice().is_empty());
     }
 
     #[test]

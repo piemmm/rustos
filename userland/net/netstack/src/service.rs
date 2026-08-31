@@ -103,6 +103,7 @@ pub fn serve(
         | NetstackRequest::Sockets { .. }
         | NetstackRequest::BondMembers { .. }
         | NetstackRequest::ResolverServers
+        | NetstackRequest::TimeServers
         | NetstackRequest::StackDefence => CapabilityId::SYSINFO_INTROSPECT,
         _ => CapabilityId::NET_ADMIN,
     };
@@ -150,6 +151,7 @@ pub fn serve(
         | NetstackRequest::Sockets { .. }
         | NetstackRequest::BondMembers { .. }
         | NetstackRequest::ResolverServers
+        | NetstackRequest::TimeServers
         | NetstackRequest::StackDefence => serve_read(stack, sockets, decoded, response, now),
         NetstackRequest::ApplyNetworkSettings(settings) => {
             // Pure state mutation (no I/O), so unlike `BindDriver` it is
@@ -253,7 +255,15 @@ fn serve_read(
             let records: alloc::vec::Vec<_> = stack
                 .resolver_servers()
                 .iter()
-                .map(tairix_abi::net_ipc::NetResolverServer::to_le_bytes)
+                .map(tairix_abi::net_ipc::NetServerAddr::to_le_bytes)
+                .collect();
+            encode_page_reply(&records, NETSTACK_LIST_LIMIT_MAX, response)
+        }
+        NetstackRequest::TimeServers => {
+            let records: alloc::vec::Vec<_> = stack
+                .time_servers()
+                .iter()
+                .map(tairix_abi::net_ipc::NetServerAddr::to_le_bytes)
                 .collect();
             encode_page_reply(&records, NETSTACK_LIST_LIMIT_MAX, response)
         }
@@ -337,6 +347,7 @@ fn op_field(request: &NetstackRequest) -> Field<'static> {
         NetstackRequest::ApplyNetworkSettings(_) => "apply network settings",
         NetstackRequest::BindDriver { .. } => "bind driver",
         NetstackRequest::ResolverServers => "resolver servers",
+        NetstackRequest::TimeServers => "time servers",
         NetstackRequest::StackDefence => "stack defence",
     };
     Field {

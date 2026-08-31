@@ -35,6 +35,7 @@ fn exercise_parse(bytes: &[u8], xid: u32, chaddr: MacAddress) {
         assert_eq!(reply.xid, xid);
         assert!(reply.routers.len() <= MAX_ADDRESSES);
         assert!(reply.dns_servers.len() <= MAX_ADDRESSES);
+        assert!(reply.ntp_servers.len() <= MAX_ADDRESSES);
     }
 }
 

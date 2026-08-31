@@ -1,24 +1,24 @@
-//! The shared active-resolver-server walk.
+//! The shared walks over the network-supplied server sets the host holds:
+//! the recursive resolvers, and the network time servers.
 //!
-//! TAIRiX has no `/etc/resolv.conf`: the host's active recursive-resolver
-//! server set is read through the typed, versioned, capability-checked
-//! `sysinfo-v1` [`SysinfoQueryId::NET_RESOLVER_SERVERS`] query, served by
-//! `sysinfod` (which forwards to `netstack`'s broker read). The set is the
-//! aggregated, deduplicated DHCP-learned ∪ statically-configured DNS servers
-//! the stack maintains (`plans/DNS.md` DNS2), the one source both this read and
-//! a userland resolver client share — so the two can never disagree. The paging
-//! loop is the generic [`walk_pages`](crate::list) the socket and mount walks
-//! use, so only the per-record decode lives here.
+//! TAIRiX has no `/etc/resolv.conf` and no `/etc/ntp.conf`: each set is read
+//! through a typed, versioned, capability-checked `sysinfo-v1` query served
+//! by `sysinfod` (which forwards to `netstack`'s broker read). Both sets are
+//! aggregated and deduplicated across every managed interface by the stack,
+//! and both are the one source their reader and their client share — so the
+//! two can never disagree. The paging loop is the generic
+//! [`walk_pages`](crate::list) the socket and mount walks use, so only the
+//! per-record decode lives here, once for both sets.
 
-use tairix_abi::net_ipc::{NetResolverServer, MAX_RESOLVER_SERVERS};
+use tairix_abi::net_ipc::{NetServerAddr, MAX_RESOLVER_SERVERS};
 use tairix_abi::sysinfo::{NetInterfaceListRequest, SysinfoQueryId};
-use tairix_abi::Errno;
+use tairix_abi::{Errno, MAX_TIME_SERVERS};
 
 use crate::list::{walk_pages, ListError, WalkStep};
 use crate::request::CallError;
 use crate::transport::Transport;
 
-/// Number of [`NetResolverServer`]s requested per page.
+/// Number of resolver [`NetServerAddr`]s requested per page.
 ///
 /// The active set is a small, closed set bounded by
 /// [`MAX_RESOLVER_SERVERS`], so one page always suffices; the walk still
@@ -28,8 +28,45 @@ use crate::transport::Transport;
 pub const RESOLVER_SERVER_PAGE: u16 = 4;
 const _: () = assert!(RESOLVER_SERVER_PAGE as usize == MAX_RESOLVER_SERVERS);
 
+/// Number of time-server [`NetServerAddr`]s requested per page, bounded by
+/// the same [`MAX_TIME_SERVERS`] the time client's own server array is.
+pub const TIME_SERVER_PAGE: u16 = 8;
+const _: () = assert!(TIME_SERVER_PAGE as usize == MAX_TIME_SERVERS);
+
+/// Page one server set and hand each decoded record to `sink`.
+///
+/// The two sets differ only in their query id and page size; the record
+/// codec, the paging, and the fail-closed decode are one definition.
+fn for_each_server(
+    transport: &dyn Transport,
+    query: SysinfoQueryId,
+    page: u16,
+    mut sink: impl FnMut(&NetServerAddr) -> Result<WalkStep, Errno>,
+) -> Result<(), ListError> {
+    walk_pages(
+        transport,
+        query,
+        NetServerAddr::WIRE_LEN,
+        page,
+        |offset, limit| {
+            NetInterfaceListRequest {
+                offset,
+                limit,
+                flags: 0,
+            }
+            .to_le_bytes()
+            .to_vec()
+        },
+        |chunk| {
+            let record = NetServerAddr::from_bytes(chunk)
+                .map_err(|errno| ListError::Call(CallError::Service(errno)))?;
+            sink(&record).map_err(ListError::Sink)
+        },
+    )
+}
+
 /// Page the host's active recursive-resolver server set and hand each
-/// decoded [`NetResolverServer`] to `sink`.
+/// decoded [`NetServerAddr`] to `sink`.
 ///
 /// The query is [`SysinfoQueryId::NET_RESOLVER_SERVERS`], which the broker
 /// serves ungated: the recursive DNS servers a host queries are public host
@@ -42,7 +79,7 @@ const _: () = assert!(RESOLVER_SERVER_PAGE as usize == MAX_RESOLVER_SERVERS);
 /// ordinary success, so it stays distinguishable from a failure.
 ///
 /// The walk **fails closed**: a reply whose length is not a whole number of
-/// [`NetResolverServer::WIRE_LEN`] records, or one that would overflow the
+/// [`NetServerAddr::WIRE_LEN`] records, or one that would overflow the
 /// page offset, is rejected rather than partially delivered.
 ///
 /// # Errors
@@ -53,27 +90,42 @@ const _: () = assert!(RESOLVER_SERVER_PAGE as usize == MAX_RESOLVER_SERVERS);
 ///   walk stops at that record.
 pub fn for_each_resolver_server(
     transport: &dyn Transport,
-    mut sink: impl FnMut(&NetResolverServer) -> Result<WalkStep, Errno>,
+    sink: impl FnMut(&NetServerAddr) -> Result<WalkStep, Errno>,
 ) -> Result<(), ListError> {
-    walk_pages(
+    for_each_server(
         transport,
         SysinfoQueryId::NET_RESOLVER_SERVERS,
-        NetResolverServer::WIRE_LEN,
         RESOLVER_SERVER_PAGE,
-        |offset, limit| {
-            NetInterfaceListRequest {
-                offset,
-                limit,
-                flags: 0,
-            }
-            .to_le_bytes()
-            .to_vec()
-        },
-        |chunk| {
-            let record = NetResolverServer::from_bytes(chunk)
-                .map_err(|errno| ListError::Call(CallError::Service(errno)))?;
-            sink(&record).map_err(ListError::Sink)
-        },
+        sink,
+    )
+}
+
+/// Page the network time servers the host's DHCP client(s) learned and hand
+/// each decoded [`NetServerAddr`] to `sink`.
+///
+/// The query is [`SysinfoQueryId::NET_TIME_SERVERS`], served ungated for the
+/// same reason as the resolver set: which time server a host is *told* to
+/// use is public network configuration and exposes no per-principal secret.
+/// It is advice, not authority — the reply is a set of addresses a caller
+/// may query, and every sample they return is still validated against the
+/// nonce echo and the plausibility window before any clock moves
+/// (`plans/TIMESYNC.md` §3).
+///
+/// Same fail-closed and [`WalkStep`] semantics as
+/// [`for_each_resolver_server`].
+///
+/// # Errors
+///
+/// As [`for_each_resolver_server`].
+pub fn for_each_time_server(
+    transport: &dyn Transport,
+    sink: impl FnMut(&NetServerAddr) -> Result<WalkStep, Errno>,
+) -> Result<(), ListError> {
+    for_each_server(
+        transport,
+        SysinfoQueryId::NET_TIME_SERVERS,
+        TIME_SERVER_PAGE,
+        sink,
     )
 }
 
@@ -85,17 +137,17 @@ mod tests {
     use tairix_abi::net_ipc::NetAddrFamily;
     use tairix_abi::sysinfo::SysinfoRequestHeader;
 
-    /// An in-memory `sysinfod` stand-in answering resolver-server queries
+    /// An in-memory `sysinfod` stand-in answering either server-set query
     /// from a fixed record set, decoding the request exactly as the real
     /// service and returning the reply as packed records.
     struct Fixture {
-        records: Vec<NetResolverServer>,
+        records: Vec<NetServerAddr>,
         deny: bool,
         seen: RefCell<Vec<SysinfoQueryId>>,
     }
 
     impl Fixture {
-        fn new(records: Vec<NetResolverServer>) -> Self {
+        fn new(records: Vec<NetServerAddr>) -> Self {
             Self {
                 records,
                 deny: false,
@@ -119,7 +171,7 @@ mod tests {
                 return Ok(Vec::new());
             }
             let take = core::cmp::min(self.records.len() - offset, req.limit as usize);
-            let mut out = Vec::with_capacity(take * NetResolverServer::WIRE_LEN);
+            let mut out = Vec::with_capacity(take * NetServerAddr::WIRE_LEN);
             for record in &self.records[offset..offset + take] {
                 out.extend_from_slice(&record.to_le_bytes());
             }
@@ -127,16 +179,16 @@ mod tests {
         }
     }
 
-    fn v4(a: u8, b: u8, c: u8, d: u8) -> NetResolverServer {
+    fn v4(a: u8, b: u8, c: u8, d: u8) -> NetServerAddr {
         let mut addr = [0u8; 16];
         addr[..4].copy_from_slice(&[a, b, c, d]);
-        NetResolverServer {
+        NetServerAddr {
             family: NetAddrFamily::V4,
             addr,
         }
     }
 
-    fn collect(fixture: &Fixture) -> Result<Vec<NetResolverServer>, ListError> {
+    fn collect(fixture: &Fixture) -> Result<Vec<NetServerAddr>, ListError> {
         let seen = RefCell::new(Vec::new());
         for_each_resolver_server(fixture, |r| {
             seen.borrow_mut().push(*r);
@@ -149,7 +201,7 @@ mod tests {
     fn walk_routes_the_resolver_query_and_yields_records() {
         let servers = alloc::vec![
             v4(10, 0, 2, 3),
-            NetResolverServer {
+            NetServerAddr {
                 family: NetAddrFamily::V6,
                 addr: [0x26; 16],
             },
@@ -169,6 +221,24 @@ mod tests {
         let got = collect(&fixture).expect("ok");
         assert!(got.is_empty());
         assert_eq!(fixture.seen.borrow().len(), 1);
+    }
+
+    #[test]
+    fn the_time_server_walk_routes_its_own_query() {
+        let servers = alloc::vec![v4(192, 168, 66, 1)];
+        let fixture = Fixture::new(servers.clone());
+        let seen = RefCell::new(Vec::new());
+        for_each_time_server(&fixture, |r| {
+            seen.borrow_mut().push(*r);
+            Ok(WalkStep::Continue)
+        })
+        .expect("ok");
+        assert_eq!(seen.into_inner(), servers);
+        assert_eq!(
+            fixture.seen.borrow().as_slice(),
+            &[SysinfoQueryId::NET_TIME_SERVERS],
+            "the time-server walk must not read the resolver set"
+        );
     }
 
     #[test]

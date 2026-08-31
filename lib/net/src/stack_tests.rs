@@ -137,6 +137,9 @@ const DHCP_MASK: Ipv4Addr = Ipv4Addr::new(255, 255, 255, 0);
 /// The two recursive DNS servers the test server leases (option 6).
 const DHCP_DNS_1: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 3);
 const DHCP_DNS_2: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 4);
+/// The two network time servers the test server leases (option 42).
+const DHCP_NTP_1: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 5);
+const DHCP_NTP_2: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 6);
 
 /// The DHCP message bytes carried by a single emitted frame (Ethernet +
 /// IPv4 + UDP stripped), plus the UDP ports, or `None` if it is not a
@@ -178,6 +181,11 @@ fn dhcp_server_frame(msg: u8, xid: u32, lease_secs: Option<u32>) -> Vec<u8> {
     dns[..4].copy_from_slice(&DHCP_DNS_1.octets());
     dns[4..].copy_from_slice(&DHCP_DNS_2.octets());
     opt(6, &dns);
+    // Time servers (option 42), same four-octet concatenation.
+    let mut ntp = [0u8; 8];
+    ntp[..4].copy_from_slice(&DHCP_NTP_1.octets());
+    ntp[4..].copy_from_slice(&DHCP_NTP_2.octets());
+    opt(42, &ntp);
     if let Some(l) = lease_secs {
         opt(51, &l.to_be_bytes());
     }
@@ -371,6 +379,11 @@ const DHCP6_LEASED: Ipv6Addr = Ipv6Addr::new(0x2001, 0xDB8, 0, 0, 0, 0, 0, 0x123
 /// The two recursive DNS servers the test server leases (RFC 3646 option 23).
 const DHCP6_DNS_1: Ipv6Addr = Ipv6Addr::new(0x2001, 0xDB8, 0, 0, 0, 0, 0, 0x53);
 const DHCP6_DNS_2: Ipv6Addr = Ipv6Addr::new(0x2001, 0xDB8, 0, 0, 0, 0, 0, 0x54);
+/// The two network time servers the test server leases (RFC 5908 option 56).
+const DHCP6_NTP_1: Ipv6Addr = Ipv6Addr::new(0x2001, 0xDB8, 0, 0, 0, 0, 0, 0x7B);
+const DHCP6_NTP_2: Ipv6Addr = Ipv6Addr::new(0x2001, 0xDB8, 0, 0, 0, 0, 0, 0x7C);
+/// A time server offered in the RFC 4075 option 31 form option 56 supersedes.
+const DHCP6_SNTP: Ipv6Addr = Ipv6Addr::new(0x2001, 0xDB8, 0, 0, 0, 0, 0, 0x1F);
 /// The client's IA identifier (derived from `MAC_A`'s low four octets).
 const DHCP6_IAID: u32 = 1;
 /// The test server's DUID (a DUID-LL of `MAC_B`).
@@ -437,6 +450,15 @@ fn dhcp6_server_frame(mt: u8, xid: u32, preferred: u32, valid: u32, t1: u32, t2:
     dns[..16].copy_from_slice(&DHCP6_DNS_1.octets());
     dns[16..].copy_from_slice(&DHCP6_DNS_2.octets());
     push_opt6(&mut msg, 23, &dns);
+    // NTP Server (option 56): one `SRV_ADDR` sub-option per server.
+    let mut ntp = Vec::new();
+    for server in [DHCP6_NTP_1, DHCP6_NTP_2] {
+        push_opt6(&mut ntp, 1, &server.octets());
+    }
+    push_opt6(&mut msg, 56, &ntp);
+    // The superseded RFC 4075 spelling as well, so the reply exercises the
+    // precedence rule rather than only one option at a time.
+    push_opt6(&mut msg, 31, &DHCP6_SNTP.octets());
     // UDP 547 → 546 over IPv6, server link-local → client link-local.
     let src = link_local(IID_B);
     let dst = link_local(IID_A);
@@ -598,6 +620,53 @@ fn dhcp6_dns_servers_are_surfaced_from_the_lease() {
     assert!(
         c.dhcp_dns_servers().is_empty(),
         "the learned servers are gone once the lease is withdrawn"
+    );
+}
+
+#[test]
+fn dhcp6_ntp_servers_prefer_the_rfc_5908_option_over_the_one_it_supersedes() {
+    let mut c = dhcp6_client();
+    assert!(
+        c.dhcp_ntp_servers().is_empty(),
+        "no learned time servers before a lease"
+    );
+    dhcp6_drive_to_bound(&mut c);
+    assert_eq!(
+        c.dhcp_ntp_servers(),
+        alloc::vec![IpAddr::V6(DHCP6_NTP_1), IpAddr::V6(DHCP6_NTP_2)],
+        "the option-56 servers are surfaced and the option-31 one ignored"
+    );
+    c.disable_dhcp6();
+    assert!(
+        c.dhcp_ntp_servers().is_empty(),
+        "the learned time servers are gone once the lease is withdrawn"
+    );
+}
+
+#[test]
+fn dhcp_ntp_servers_are_surfaced_from_the_lease() {
+    let mut c = dhcp_client();
+    assert!(
+        c.dhcp_ntp_servers().is_empty(),
+        "no learned time servers before a lease"
+    );
+    let xid = discover_xid(&c.advance_collect(t(0)).frames[0].bytes);
+    c.on_frame_collect(&dhcp_server_frame(2, xid, Some(3600)), t(0));
+    c.on_frame_collect(&dhcp_server_frame(5, xid, Some(3600)), t(0));
+    assert_eq!(
+        c.dhcp_ntp_servers(),
+        alloc::vec![IpAddr::V4(DHCP_NTP_1), IpAddr::V4(DHCP_NTP_2)],
+        "the lease's time servers are surfaced in wire order"
+    );
+
+    // Withdrawal (a lost lease) returns the client to INIT: the servers are
+    // derived from the current lease, never a stale copy.
+    c.advance_collect(t(1800));
+    c.advance_collect(t(3150));
+    c.advance_collect(t(3600));
+    assert!(
+        c.dhcp_ntp_servers().is_empty(),
+        "the learned time servers are gone once the lease is withdrawn"
     );
 }
 

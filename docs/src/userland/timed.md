@@ -54,31 +54,68 @@ It binds no endpoint (it is only ever a client) and holds no `CAP_NET_RAW`, no
 reach. Compromising it yields the machine clock — which is precisely why the
 packet parsing is not in it.
 
+## Which servers, from where
+
+Three tiers, worst to best, with the first non-empty one winning outright
+(`tairix_timesync::select_servers`):
+
+| Tier | Where it comes from |
+|---|---|
+| `fallback` | The built-in `0.pool.ntp.org` … `3.pool.ntp.org`. |
+| `network` | DHCPv4 option 42 / DHCPv6 option 56, learned by `netstack` from the current lease and published through the ungated `net_time_servers` system-information query. |
+| `configured` | The `time.servers` key the operator or the installer wrote. |
+
+The tiers are never merged: a machine whose network named a server must not
+keep querying the public pool as well, and an operator who named one must not
+have a DHCP server's choice mixed into their list. The set is therefore never
+empty, so a stock installation keeps time with no configuration at all — the
+`fallback` tier exists precisely because a machine that asks nobody has no
+clock.
+
+A network-supplied server arrives *as an address*, so it needs no name
+resolution: a machine whose only DNS advice would have come from the same lease
+still keeps time. The `state:net/time/servers` read shows what the network
+offered, and the service's own start-up audit record carries a `source` field
+naming the tier actually in use.
+
+RFC 8633 §3.1 asks a vendor shipping a fleet to obtain its own NTP-pool vendor
+zone rather than point every device at the generic names; TAIRiX has no such
+zone yet, so the generic names are what it can honestly use. What makes that
+acceptable is the politeness policy the engine enforces on every tier alike — a
+hard minimum poll interval, one request in flight per server, bounded
+exponential backoff with CSPRNG jitter, a randomised initial delay, and
+obedience to a Kiss-o'-Death — plus the pool's own DNS rotation. Registering a
+vendor zone changes only `FALLBACK_TIME_SERVERS`.
+
 ## Configuration
 
 Two keys in `/System/Settings/Configuration/system.conf`:
 
 * `time.servers` — `none` (the default) or a comma-separated list of at most
-  eight host names or address literals.
+  eight host names or address literals. `none` does not mean "never query": it
+  means the operator expressed no preference, so a lower tier above applies.
 * `time.refresh` — `6h`, `12h`, `1d` (the default), `2d`, or `7d`: how much
   *uptime* passes between steady-state re-queries.
 
-The default names no server. TAIRiX has no NTP-pool vendor zone, and RFC 8633
-§3.1 asks a vendor not to point a fleet at the public pool without one, so an
-unconfigured machine simply never queries and records that it has no server.
-Naming one is the operator's or the installer's decision.
-
 The store lives on the encrypted root and this is a boot-floor service, so its
 first read normally happens before that root is mounted. There is no userland
-event for "the root is mounted", so the store is re-read on a bounded, doubling
-schedule folded into the reactor's own deadline — about seventeen minutes of
-attempts, parking between them, never a spin and never a wait on the start-up
-path, which would hold the boot up behind a service nothing else is waiting
-for. A failed read never disarms that schedule: before the root is mounted the
-path has no backing at all, which is indistinguishable from a volume-less boot,
-so the service would strand itself exactly when it most needs to retry. The
-ladder being finite is what bounds the volume-less case instead — it is spent
-after its attempts and the service exits.
+event for "the root is mounted", so the tiers are re-selected on a bounded,
+doubling schedule folded into the reactor's own deadline — about seventeen
+minutes of attempts, parking between them, never a spin and never a wait on the
+start-up path, which would hold the boot up behind a service nothing else is
+waiting for. The same schedule is what picks up a DHCP lease acquired after the
+service started, so the two "it is not there yet" problems have one mechanism.
+A failed read never disarms it: before the root is mounted the path has no
+backing at all, which is indistinguishable from a volume-less boot, so the
+service would strand itself exactly when it most needs to retry. The ladder
+being finite is what bounds the volume-less case instead.
+
+Only a *strictly better* tier replaces the servers in use. An equal-tier change
+— a renewed lease naming a different server — would reset the engine's rotation
+and backoff and forget which servers had refused, which costs more than it
+buys; the ladder's finite length bounds that churn instead. Reaching the
+`configured` tier disarms the ladder outright, there being nothing better to
+look for.
 
 A server name resolves through the shared literal-first host-operand policy
 (`lib/resolver`), so an address literal works with no resolver configured at
@@ -105,9 +142,9 @@ One wait-set over the delivery port the network stack posts the service's
 datagrams to, armed with the timeout the engine's single folded deadline
 implies. The loop parks; it never polls. A wake is either a datagram (evaluate
 it in the worker, apply the verdict) or the deadline lapsing (send the next
-request). With no deadline left — every configured server retired by a
-Kiss-o'-Death, or none configured and the re-read ladder spent — the service
-exits rather than holding a task and a bound delivery port doing nothing.
+request). With no deadline left — every server in use retired by a
+Kiss-o'-Death and the re-selection ladder spent — the service exits rather than
+holding a task and a bound delivery port doing nothing.
 
 A request that cannot be sent is not retried on the spot: the engine's own
 response timeout ends the transaction and its bounded backoff paces the next
@@ -136,8 +173,14 @@ and every audit record are covered without processes or sockets. The
 `fuzz_sandbox` harness fuzzes the evaluation surface from both directions
 (hostile datagrams into the worker, hostile verdicts back at the caller).
 
-The end-to-end path is the `tairix-test-timed-qemu-aarch64` vertical: an
-unset-clock guest, a fixture responder that answers each request **spoof
-first**, and a serial witness requiring the *exact* instant the truthful reply
-carried — so a guest that believed the spoof, or that let the spoof cancel its
-outstanding transaction, fails the run rather than passing it.
+The end-to-end path is two QEMU verticals. `tairix-test-timed-qemu-aarch64`
+covers the `configured` tier: an unset-clock guest, a fixture responder that
+answers each request **spoof first**, and a serial witness requiring the
+*exact* instant the truthful reply carried — so a guest that believed the
+spoof, or that let the spoof cancel its outstanding transaction, fails the run
+rather than passing it. `tairix-test-timed-dhcp-qemu-aarch64` covers the
+`network` tier with **no** configured server at all: the peer leases an address
+carrying DHCP option 42 that names itself, and only a guest that read that
+option finds a reachable server — the fallback names cannot resolve on an
+isolated wire, so a guest that ignored it never sets its clock and the run
+fails loud.

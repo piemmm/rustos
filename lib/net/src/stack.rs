@@ -820,30 +820,53 @@ impl Stack {
         &self.iface
     }
 
+    /// One address list each DHCP client's *current* lease carries, in wire
+    /// order: the IPv4 lease's addresses first, then the IPv6 lease's.
+    ///
+    /// Deriving from the live lease is what makes acquisition and withdrawal
+    /// track exactly — the list is empty when neither family holds a lease
+    /// (INIT, or a lost/expired lease returns the client to INIT) — and the
+    /// leases' fixed-capacity option lists are what stop a hostile server
+    /// sizing the allocation.
+    fn dhcp_learned(
+        &self,
+        from_v4: impl Fn(&dhcp::Lease) -> dhcp::AddressList,
+        from_v6: impl Fn(&dhcpv6::Lease6) -> dhcpv6::Ipv6List,
+    ) -> Vec<IpAddr> {
+        let mut servers = Vec::new();
+        if let Some(lease) = self.dhcp.as_ref().and_then(|d| d.client.lease()) {
+            servers.extend(from_v4(&lease).as_slice().iter().copied().map(IpAddr::V4));
+        }
+        if let Some(lease) = self.dhcp6.as_ref().and_then(|d| d.client.lease()) {
+            servers.extend(from_v6(&lease).as_slice().iter().copied().map(IpAddr::V6));
+        }
+        servers
+    }
+
     /// The recursive DNS servers this interface's DHCP client(s) learned
-    /// from their current lease(s), in wire order: the IPv4 lease's servers
-    /// (RFC 2132 option 6) first, then the IPv6 lease's (RFC 3646 option
-    /// 23).
+    /// from their current lease(s): the IPv4 lease's servers (RFC 2132
+    /// option 6) first, then the IPv6 lease's (RFC 3646 option 23).
     ///
     /// This is the pure `lib/net` source the `netstack` service aggregates
     /// with any statically configured servers into an interface's active
-    /// resolver set (`plans/DNS.md` DNS2). The set is derived from each
-    /// client's *current* lease, so it tracks acquisition and withdrawal
-    /// exactly: it is empty when neither family holds a lease (INIT, or a
-    /// lost/expired lease returns the client to INIT), and a lease that
-    /// carried no servers contributes none. The result is bounded by the
-    /// two leases' fixed-capacity option lists, so a hostile server can
-    /// never size the allocation.
+    /// resolver set (`plans/DNS.md` DNS2).
     #[must_use]
     pub fn dhcp_dns_servers(&self) -> Vec<IpAddr> {
-        let mut servers = Vec::new();
-        if let Some(lease) = self.dhcp.as_ref().and_then(|d| d.client.lease()) {
-            servers.extend(lease.dns_servers.as_slice().iter().copied().map(IpAddr::V4));
-        }
-        if let Some(lease) = self.dhcp6.as_ref().and_then(|d| d.client.lease()) {
-            servers.extend(lease.dns_servers.as_slice().iter().copied().map(IpAddr::V6));
-        }
-        servers
+        self.dhcp_learned(|l| l.dns_servers, |l| l.dns_servers)
+    }
+
+    /// The network time servers this interface's DHCP client(s) learned from
+    /// their current lease(s): the IPv4 lease's servers (RFC 2132 option 42)
+    /// first, then the IPv6 lease's (RFC 5908 option 56, or the RFC 4075
+    /// option 31 it supersedes).
+    ///
+    /// This is the pure `lib/net` source the `netstack` service aggregates
+    /// into the host's learned time-server set, which `timed` prefers over
+    /// its built-in fallback and below an explicitly configured server
+    /// (`plans/TIMESYNC.md` §3).
+    #[must_use]
+    pub fn dhcp_ntp_servers(&self) -> Vec<IpAddr> {
+        self.dhcp_learned(|l| l.ntp_servers, |l| l.ntp_servers)
     }
 
     /// Configure the static IPv4 assignment: address, subnet, and
@@ -3544,7 +3567,7 @@ impl Stack {
         for action in actions {
             match action {
                 Dhcp6Action::Send(send) => self.send_dhcp6(out, &send, now),
-                Dhcp6Action::Configured(lease) => self.apply_dhcp6_lease(out, lease, now),
+                Dhcp6Action::Configured(lease) => self.apply_dhcp6_lease(out, &lease, now),
                 Dhcp6Action::Deconfigured => self.withdraw_dhcp6_lease(out),
             }
         }
@@ -3608,7 +3631,7 @@ impl Stack {
     /// service audit the change. When the interface refuses the address
     /// (family disabled, table full) nothing is applied and no event is
     /// emitted (fail safe, never a partial state).
-    fn apply_dhcp6_lease(&mut self, out: &mut StackOutput, lease: Lease6, now: Duration64) {
+    fn apply_dhcp6_lease(&mut self, out: &mut StackOutput, lease: &Lease6, now: Duration64) {
         match self.iface.add_ipv6_dhcp(lease.addr, now) {
             // A fresh assignment, or a renewal of the same address, is a
             // usable lease: audit it either way.
