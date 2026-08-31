@@ -186,7 +186,7 @@ impl ArchImageBuilder for X86_64ProcessSpawn {
         };
         crate::stack_arena::publish_reclaim_frames(pt_frames);
         let grow = FrameArenaGrow::new(frames, paging::configured_identity_bytes());
-        match KTHREAD_STACK_ARENA.alloc(&grow, &crate::stack_arena::IdentityBlockStore) {
+        match KTHREAD_STACK_ARENA.alloc(&grow, &crate::stack_arena::IdentityArenaMemory) {
             Some(stack) => {
                 let guard = stack.guard_page();
                 (Box::new(stack), Some(guard))

@@ -167,6 +167,15 @@ enforcement is not yet wired; until it is, those ceilings are observed and
 settable but not yet acted on at the descriptor/spawn path, and their
 reported usage stays an honest zero (no live accounter yet).
 
+`KernelMemoryStats::user_resident_bytes` is **not** one of those honest
+zeroes any more: it is the live sum of the mapped pages of every registered
+address space, derived per record by the same `resident_bytes` the
+per-process rows use, so the aggregate and the rows cannot drift apart. It
+is what lets the `memsoak` vertical judge kernel-side retention byte-exactly
+— free memory alone falls whenever *any* process allocates, so the sum of
+the two is the quantity a strict verdict can be made over
+(`plans/OPEN-DEFECTS.md` D70).
+
 ## The `ulimit` shell command
 
 The `ulimit` builtin in the default shell (`userland/shell/elsh`) is the
@@ -312,21 +321,38 @@ falls as well as rises, without thrashing:
 - **Per-block live-count accounting.** Each block (boot-carved + each chained)
   carries the count of guarded regions currently handed out from it. A free
   locates its owning block by address range and checked-decrements that count;
-  a foreign/misaligned address or an already-zero count is rejected without
-  underflowing — fail closed (§2.9), surfaced as a typed `FreeOutcome`. A block
-  whose count reaches zero is *idle*. The per-block `{ next, live, cursor }`
-  records live in a reserved, identity-mapped header at each block's own base —
-  outside the guarded regions, accessed through the `BlockStore` seam — so the
-  block list is itself a §24.1 capacity (no second allocation, no fixed block
-  cap; the host tests drive an in-memory `BlockStore`).
+  a foreign/misaligned address, a region the block never handed out, an
+  already-zero count, and a region already on a free list are each rejected
+  without underflowing or double-linking — fail closed (§2.9), surfaced as a
+  typed `FreeOutcome`. A block whose count reaches zero is *idle*. The
+  per-block `{ next, live, cursor, free_head }` records live in a reserved,
+  identity-mapped header at each block's own base — outside the guarded
+  regions, accessed through the `ArenaMemory` seam — so the block list is
+  itself a §24.1 capacity (no second allocation, no fixed block cap; the host
+  tests drive an in-memory `ArenaMemory`).
+- **A returned region is reusable while its block still has live stacks.**
+  Each block keeps a free list of the regions handed back to it
+  (`free_head`, threaded through the freed regions themselves), and `alloc`
+  pops that list before it advances the block's bump cursor. Without it a
+  block's capacity was recoverable only when the *whole* block drained, which
+  never happens to the boot block — a handful of long-lived boot kthreads pin
+  it — so the arena chained a fresh 2 MiB block every `capacity` spawns and
+  the boot arena's RAM was never reused: a capacity tracking spawn *history*
+  rather than the live set, ratcheting up on any busy system (§24.1, §26.2).
+  This was defect D68.
+  A returned region is **zeroed** before it is threaded (§4 zero-on-free — a
+  kthread stack can hold spilled capability tokens, so recycling one
+  unscrubbed would hand them to the next task), and the link and its free
+  marker live in the first bytes of the region's *usable* area: never the
+  guard page, which aarch64 has unmapped at that very address in the exiting
+  task's own root.
 - **One-free-block grace (hysteresis).** Exactly one idle chained block stays
   resident: a chained block is returned to the allocator only when it goes idle
   *and* another idle chained block already exists, so an alloc/free oscillation
   across a block boundary reuses the retained idle block instead of repeatedly
   free→chain (amortised, no thrash, §2.16). Reclamation is at most one block
   return per free — never a spin/retry loop (§2.1) — under the same `SpinLock`
-  off the hot path. An idle block is reset and reused before a fresh one is
-  chained.
+  off the hot path.
 - **Boot block is never returned.** The boot-carved first block
   (`RegionKind::Reserved`, kernel-image-owned) is never released; only
   `FrameArenaGrow`-chained blocks are reclaimed, through a symmetric
@@ -340,10 +366,11 @@ falls as well as rises, without thrashing:
   in the kernel's identity map.
 
 The live-count accounting, the grace hysteresis (release only on the second
-idle block, zero releases under boundary oscillation), idle-block reuse, the
-fail-closed double-/foreign-/misaligned-free paths, the boot-block-never-
-released invariant, and the real-buffer zero-on-free scrub are all covered by
-host unit tests; the `Drop` reclaim seam and the `free_order` return-to-
+idle block, zero releases under boundary oscillation), region recycling inside
+a block that still holds a live stack, the scrub-before-reuse order, the
+fail-closed double-/foreign-/misaligned-/never-allocated-free paths, the
+boot-block-never-released invariant, and the real-buffer zero-on-free scrub are
+all covered by host unit tests; the `Drop` reclaim seam and the `free_order` return-to-
 allocator step run on the `stack_arena_qemu_aarch64` / `stack_overrun_qemu_
 aarch64` verticals. Sizing the per-arch CPU/hart secondary-bring-up bound from
 §18 discovery is the remaining §24.1 sweep work (see *Per-arch CPU/hart handle

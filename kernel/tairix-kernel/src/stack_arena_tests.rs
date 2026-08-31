@@ -1,9 +1,11 @@
 //! Host unit tests for the guard-arena kthread-stack allocator
-//! ([`super`]). They exercise the grow *and* shrink paths over an in-memory [`BlockStore`] so the block-list arithmetic,
-//! per-block live-count accounting, and the one-free-block grace run on the
-//! CI host without real RAM; the production identity-mapped header access,
-//! the `Drop` reclaim seam, and the `free_order` return-to-allocator step
-//! are proven on the aarch64 QEMU guard verticals.
+//! ([`super`]). They exercise the grow *and* shrink paths over an in-memory
+//! [`ArenaMemory`] so the block-list arithmetic, per-block live-count
+//! accounting, region recycling, and the one-free-block grace run on the CI
+//! host without real RAM; the production identity-mapped header and region
+//! access, the `Drop` reclaim seam, and the `free_order`
+//! return-to-allocator step are proven on the aarch64 QEMU guard
+//! verticals.
 
 use super::*;
 
@@ -16,7 +18,7 @@ use std::vec::Vec;
 
 /// A page-aligned, plausibly RAM-resident fake arena base for the host
 /// tests (the real one is the 2 MiB-aligned carved arena). It is never
-/// dereferenced — header access goes through [`MapBlockStore`].
+/// dereferenced — arena memory goes through [`MapArenaMemory`].
 const FAKE_BASE: u64 = 0x4000_0000;
 
 /// Regions a freshly chained 2 MiB block can hold after its header page —
@@ -26,31 +28,71 @@ fn regions_per_chained_block() -> u64 {
     (ARENA_GROW_BLOCK_BYTES - BLOCK_HEADER_BYTES) / STACK_REGION_BYTES
 }
 
-/// An in-memory [`BlockStore`]: the host stand-in for the production
-/// identity-mapped header, keyed by block base. Single-threaded test use,
-/// so a [`RefCell`] suffices.
-struct MapBlockStore {
+/// An in-memory [`ArenaMemory`]: the host stand-in for the production
+/// identity-mapped header page and per-region free marker, keyed by block
+/// base and region base. Single-threaded test use, so a [`RefCell`]
+/// suffices.
+struct MapArenaMemory {
     headers: RefCell<HashMap<u64, BlockHeader>>,
+    /// The [`FreeRegion`] marker each region carries — the same type and
+    /// predicate the production store keeps in the region's own memory, so
+    /// the two cannot disagree about what "already free" means.
+    markers: RefCell<HashMap<u64, FreeRegion>>,
+    /// Regions this store scrubbed, in release order, so a test can assert
+    /// zero-on-free happened without real RAM to inspect.
+    scrubbed: RefCell<Vec<u64>>,
 }
 
-impl MapBlockStore {
+impl MapArenaMemory {
     fn new() -> Self {
         Self {
             headers: RefCell::new(HashMap::new()),
+            markers: RefCell::new(HashMap::new()),
+            scrubbed: RefCell::new(Vec::new()),
         }
+    }
+
+    fn scrubbed(&self) -> Vec<u64> {
+        self.scrubbed.borrow().clone()
+    }
+
+    fn marker(&self, region: u64) -> FreeRegion {
+        self.markers
+            .borrow()
+            .get(&region)
+            .copied()
+            .unwrap_or(FreeRegion::taken())
     }
 }
 
-impl BlockStore for MapBlockStore {
-    fn read(&self, base: u64) -> BlockHeader {
+impl ArenaMemory for MapArenaMemory {
+    fn read_header(&self, base: u64) -> BlockHeader {
         *self
             .headers
             .borrow()
             .get(&base)
             .expect("read of an uninitialised block header")
     }
-    fn write(&self, base: u64, header: BlockHeader) {
+    fn write_header(&self, base: u64, header: BlockHeader) {
         self.headers.borrow_mut().insert(base, header);
+    }
+    fn release_region(&self, region: u64, next_free: u64) -> bool {
+        if self.marker(region).is_free() {
+            return false;
+        }
+        self.scrubbed.borrow_mut().push(region);
+        self.markers
+            .borrow_mut()
+            .insert(region, FreeRegion::free(next_free));
+        true
+    }
+    fn claim_region(&self, region: u64) -> u64 {
+        let marker = self.marker(region);
+        assert!(marker.is_free(), "claim of a region not on a free list");
+        self.markers
+            .borrow_mut()
+            .insert(region, FreeRegion::taken());
+        marker.next
     }
 }
 
@@ -134,14 +176,14 @@ fn usable_map(base: u64, len: u64) -> BootMemoryMap {
 #[test]
 fn uninstalled_arena_allocates_nothing() {
     let arena = StackArena::new();
-    let store = MapBlockStore::new();
+    let store = MapArenaMemory::new();
     assert_eq!(arena.alloc(&NoGrow, &store), None);
 }
 
 #[test]
 fn uninstalled_arena_free_reports_not_installed() {
     let arena = StackArena::new();
-    let store = MapBlockStore::new();
+    let store = MapArenaMemory::new();
     assert_eq!(
         arena.free(FAKE_BASE, &NeverShrink, &store),
         FreeOutcome::NotInstalled
@@ -151,7 +193,7 @@ fn uninstalled_arena_free_reports_not_installed() {
 #[test]
 fn install_is_once_and_refuses_re_entry() {
     let arena = StackArena::new();
-    let store = MapBlockStore::new();
+    let store = MapArenaMemory::new();
     assert!(arena.install(FAKE_BASE, 2 * 1024 * 1024, &store));
     // A second install must be refused so a live list is never silently
     // re-based.
@@ -160,7 +202,7 @@ fn install_is_once_and_refuses_re_entry() {
 
 #[test]
 fn install_rejects_overflow_and_too_small_blocks() {
-    let store = MapBlockStore::new();
+    let store = MapArenaMemory::new();
 
     let arena = StackArena::new();
     assert!(!arena.install(u64::MAX - 1, 16, &store));
@@ -184,7 +226,7 @@ fn install_rejects_overflow_and_too_small_blocks() {
 #[test]
 fn consecutive_regions_step_by_one_region_above_the_header_page() {
     let arena = StackArena::new();
-    let store = MapBlockStore::new();
+    let store = MapArenaMemory::new();
     assert!(arena.install(
         FAKE_BASE,
         BLOCK_HEADER_BYTES + 4 * STACK_REGION_BYTES,
@@ -208,7 +250,7 @@ fn consecutive_regions_step_by_one_region_above_the_header_page() {
 #[test]
 fn top_is_above_the_guard_and_aligned() {
     let arena = StackArena::new();
-    let store = MapBlockStore::new();
+    let store = MapArenaMemory::new();
     assert!(arena.install(FAKE_BASE, BLOCK_HEADER_BYTES + STACK_REGION_BYTES, &store));
     let stack = arena.alloc(&NoGrow, &store).expect("region fits");
 
@@ -224,7 +266,7 @@ fn top_is_above_the_guard_and_aligned() {
 #[test]
 fn exhaustion_without_a_grow_source_fails_closed() {
     let arena = StackArena::new();
-    let store = MapBlockStore::new();
+    let store = MapArenaMemory::new();
     assert!(arena.install(
         FAKE_BASE,
         BLOCK_HEADER_BYTES + 2 * STACK_REGION_BYTES,
@@ -241,7 +283,7 @@ fn grows_onto_a_fresh_chained_block_when_the_first_is_exhausted() {
     const SECOND_BLOCK: u64 = FAKE_BASE + 0x1000_0000;
     let bases = [SECOND_BLOCK];
     let grow = FakeGrow::new(&bases);
-    let store = MapBlockStore::new();
+    let store = MapArenaMemory::new();
 
     let arena = StackArena::new();
     assert!(arena.install(FAKE_BASE, BLOCK_HEADER_BYTES + STACK_REGION_BYTES, &store));
@@ -268,7 +310,7 @@ fn grows_onto_a_fresh_chained_block_when_the_first_is_exhausted() {
 #[test]
 fn fails_closed_when_the_grow_source_is_exhausted() {
     let grow = FakeGrow::new(&[]);
-    let store = MapBlockStore::new();
+    let store = MapArenaMemory::new();
     let arena = StackArena::new();
     assert!(arena.install(FAKE_BASE, BLOCK_HEADER_BYTES + STACK_REGION_BYTES, &store));
     assert!(arena.alloc(&grow, &store).is_some());
@@ -278,7 +320,7 @@ fn fails_closed_when_the_grow_source_is_exhausted() {
 #[test]
 fn free_decrements_the_owning_block_live_count() {
     let arena = StackArena::new();
-    let store = MapBlockStore::new();
+    let store = MapArenaMemory::new();
     assert!(arena.install(
         FAKE_BASE,
         BLOCK_HEADER_BYTES + 2 * STACK_REGION_BYTES,
@@ -287,36 +329,36 @@ fn free_decrements_the_owning_block_live_count() {
 
     let a = arena.alloc(&NoGrow, &store).expect("a").guard_page();
     let b = arena.alloc(&NoGrow, &store).expect("b").guard_page();
-    assert_eq!(store.read(FAKE_BASE).live, 2);
+    assert_eq!(store.read_header(FAKE_BASE).live, 2);
 
     // Freeing one returns `Freed` (boot block stays in use) and decrements.
     assert_eq!(arena.free(a, &NeverShrink, &store), FreeOutcome::Freed);
-    assert_eq!(store.read(FAKE_BASE).live, 1);
+    assert_eq!(store.read_header(FAKE_BASE).live, 1);
     assert_eq!(arena.free(b, &NeverShrink, &store), FreeOutcome::Freed);
-    assert_eq!(store.read(FAKE_BASE).live, 0);
+    assert_eq!(store.read_header(FAKE_BASE).live, 0);
 }
 
 #[test]
 fn double_free_fails_closed_without_underflow() {
     let arena = StackArena::new();
-    let store = MapBlockStore::new();
+    let store = MapArenaMemory::new();
     assert!(arena.install(FAKE_BASE, BLOCK_HEADER_BYTES + STACK_REGION_BYTES, &store));
     let a = arena.alloc(&NoGrow, &store).expect("a").guard_page();
 
     assert_eq!(arena.free(a, &NeverShrink, &store), FreeOutcome::Freed);
-    assert_eq!(store.read(FAKE_BASE).live, 0);
+    assert_eq!(store.read_header(FAKE_BASE).live, 0);
     // Second free of the same region is rejected without underflowing.
     assert_eq!(arena.free(a, &NeverShrink, &store), FreeOutcome::DoubleFree);
-    assert_eq!(store.read(FAKE_BASE).live, 0);
+    assert_eq!(store.read_header(FAKE_BASE).live, 0);
 }
 
 #[test]
 fn foreign_and_misaligned_free_fail_closed() {
     let arena = StackArena::new();
-    let store = MapBlockStore::new();
+    let store = MapArenaMemory::new();
     assert!(arena.install(FAKE_BASE, BLOCK_HEADER_BYTES + STACK_REGION_BYTES, &store));
     let a = arena.alloc(&NoGrow, &store).expect("a").guard_page();
-    assert_eq!(store.read(FAKE_BASE).live, 1);
+    assert_eq!(store.read_header(FAKE_BASE).live, 1);
 
     // An address in no block at all.
     assert_eq!(
@@ -334,13 +376,13 @@ fn foreign_and_misaligned_free_fail_closed() {
         FreeOutcome::ForeignAddress
     );
     // None of the rejects touched the live count.
-    assert_eq!(store.read(FAKE_BASE).live, 1);
+    assert_eq!(store.read_header(FAKE_BASE).live, 1);
 }
 
 #[test]
 fn boot_block_is_never_released() {
     let arena = StackArena::new();
-    let store = MapBlockStore::new();
+    let store = MapArenaMemory::new();
     assert!(arena.install(
         FAKE_BASE,
         BLOCK_HEADER_BYTES + 2 * STACK_REGION_BYTES,
@@ -354,7 +396,7 @@ fn boot_block_is_never_released() {
     // panic if a release were attempted.
     assert_eq!(arena.free(a, &NeverShrink, &store), FreeOutcome::Freed);
     assert_eq!(arena.free(b, &NeverShrink, &store), FreeOutcome::Freed);
-    assert_eq!(store.read(FAKE_BASE).live, 0);
+    assert_eq!(store.read_header(FAKE_BASE).live, 0);
 }
 
 #[test]
@@ -364,7 +406,7 @@ fn release_fires_only_on_the_second_idle_chained_block() {
     let bases = [BLOCK_A, BLOCK_B];
     let grow = FakeGrow::new(&bases);
     let shrink = FakeShrink::new(true);
-    let store = MapBlockStore::new();
+    let store = MapArenaMemory::new();
     let cap = regions_per_chained_block();
 
     // Boot block holds exactly one region, so further allocations chain.
@@ -380,11 +422,11 @@ fn release_fires_only_on_the_second_idle_chained_block() {
     for _ in 0..cap {
         a_guards.push(arena.alloc(&grow, &store).expect("A region").guard_page());
     }
-    assert_eq!(store.read(BLOCK_A).live, cap);
+    assert_eq!(store.read_header(BLOCK_A).live, cap);
     // The next allocation must chain block B (A is full).
     let b_guard = arena.alloc(&grow, &store).expect("B region").guard_page();
     assert_eq!(grow.next.get(), 2, "two chained blocks");
-    assert_eq!(store.read(BLOCK_B).live, 1);
+    assert_eq!(store.read_header(BLOCK_B).live, 1);
 
     // Free all of A: the last free makes A idle — kept by the grace.
     for (i, g) in a_guards.iter().enumerate() {
@@ -420,7 +462,7 @@ fn a_retained_release_keeps_the_block_reusable() {
     let grow = FakeGrow::new(&bases);
     // A shrink source that refuses to release (cannot safely scrub/unmap).
     let shrink = FakeShrink::new(false);
-    let store = MapBlockStore::new();
+    let store = MapArenaMemory::new();
     let cap = regions_per_chained_block();
 
     let arena = StackArena::new();
@@ -452,7 +494,7 @@ fn boundary_oscillation_yields_zero_releases() {
     let bases = [BLOCK_A];
     let grow = FakeGrow::new(&bases);
     let shrink = FakeShrink::new(true);
-    let store = MapBlockStore::new();
+    let store = MapArenaMemory::new();
 
     let arena = StackArena::new();
     assert!(arena.install(FAKE_BASE, BLOCK_HEADER_BYTES + STACK_REGION_BYTES, &store));
@@ -479,7 +521,7 @@ fn reused_idle_block_serves_again() {
     let bases = [BLOCK_A];
     let grow = FakeGrow::new(&bases);
     let shrink = FakeShrink::new(true);
-    let store = MapBlockStore::new();
+    let store = MapArenaMemory::new();
 
     let arena = StackArena::new();
     assert!(arena.install(FAKE_BASE, BLOCK_HEADER_BYTES + STACK_REGION_BYTES, &store));
@@ -489,26 +531,143 @@ fn reused_idle_block_serves_again() {
     assert_eq!(g1, BLOCK_A + BLOCK_HEADER_BYTES);
     assert_eq!(arena.free(g1, &shrink, &store), FreeOutcome::FreedKeptIdle);
 
-    // The idle block is reset and reused; its first region is handed out
-    // again (no fresh block chained).
+    // The idle block's returned region is handed out again (no fresh block
+    // chained).
     let g2 = arena
         .alloc(&grow, &store)
         .expect("A region 2 reuses")
         .guard_page();
     assert_eq!(g2, BLOCK_A + BLOCK_HEADER_BYTES);
     assert_eq!(grow.next.get(), 1);
-    assert_eq!(store.read(BLOCK_A).live, 1);
+    assert_eq!(store.read_header(BLOCK_A).live, 1);
+}
+
+/// The `plans/OPEN-DEFECTS.md` D68 regression: a block that still holds a
+/// live stack must recycle the regions handed back to it. Without the free
+/// list a returned region was recoverable only when the *whole* block
+/// drained, which the boot block never does — a few long-lived boot kthreads
+/// pin it — so the arena chained a fresh 2 MiB block every `capacity`
+/// spawns and its RAM was never reclaimed.
+#[test]
+fn a_block_with_a_live_stack_still_recycles_its_returned_regions() {
+    const REGIONS: u64 = 4;
+    // A grow source with nothing to hand out: chaining at all fails the test
+    // loudly rather than silently absorbing the leak.
+    let grow = FakeGrow::new(&[]);
+    let store = MapArenaMemory::new();
+
+    let arena = StackArena::new();
+    assert!(arena.install(
+        FAKE_BASE,
+        BLOCK_HEADER_BYTES + REGIONS * STACK_REGION_BYTES,
+        &store
+    ));
+
+    // One long-lived stack pins the block, exactly as a boot kthread does.
+    let pinned = arena.alloc(&grow, &store).expect("pinning region");
+
+    // Many more spawn/exit rounds than the block has regions.
+    for _ in 0..(REGIONS * 8) {
+        let g = arena
+            .alloc(&grow, &store)
+            .expect("recycled region")
+            .guard_page();
+        assert_eq!(arena.free(g, &NeverShrink, &store), FreeOutcome::Freed);
+    }
+
+    assert_eq!(grow.next.get(), 0, "no block was chained");
+    let header = store.read_header(FAKE_BASE);
+    assert_eq!(header.live, 1, "only the pinned stack is live");
+    // The cursor advanced for the pinned stack and one recycled region and
+    // then stopped: every later round came off the free list.
+    assert_eq!(
+        header.alloc_next,
+        FAKE_BASE + BLOCK_HEADER_BYTES + 2 * STACK_REGION_BYTES
+    );
+    drop(pinned);
+}
+
+/// Every returned region is zeroed before it can be handed to a new owner:
+/// a kthread stack can hold spilled capability tokens, so recycling one
+/// unscrubbed would leak them to the next task.
+#[test]
+fn a_returned_region_is_scrubbed_before_it_is_reused() {
+    let store = MapArenaMemory::new();
+    let arena = StackArena::new();
+    assert!(arena.install(
+        FAKE_BASE,
+        BLOCK_HEADER_BYTES + 2 * STACK_REGION_BYTES,
+        &store
+    ));
+    let a = arena.alloc(&NoGrow, &store).expect("a").guard_page();
+    let b = arena.alloc(&NoGrow, &store).expect("b").guard_page();
+    assert!(store.scrubbed().is_empty(), "nothing freed yet");
+
+    assert_eq!(arena.free(b, &NeverShrink, &store), FreeOutcome::Freed);
+    assert_eq!(arena.free(a, &NeverShrink, &store), FreeOutcome::Freed);
+    assert_eq!(store.scrubbed(), std::vec![b, a]);
+
+    // The most recently returned region is the next one handed out.
+    assert_eq!(arena.alloc(&NoGrow, &store).expect("reuse").guard_page(), a);
+}
+
+/// A double free of a region whose block still has live stacks is refused:
+/// linking it twice would put one region on the free list twice and hand it
+/// to two owners. The block's live count is untouched.
+#[test]
+fn double_free_inside_a_live_block_is_refused() {
+    let store = MapArenaMemory::new();
+    let arena = StackArena::new();
+    assert!(arena.install(
+        FAKE_BASE,
+        BLOCK_HEADER_BYTES + 2 * STACK_REGION_BYTES,
+        &store
+    ));
+    let a = arena.alloc(&NoGrow, &store).expect("a").guard_page();
+    let _b = arena.alloc(&NoGrow, &store).expect("b");
+
+    assert_eq!(arena.free(a, &NeverShrink, &store), FreeOutcome::Freed);
+    assert_eq!(store.read_header(FAKE_BASE).live, 1);
+    assert_eq!(arena.free(a, &NeverShrink, &store), FreeOutcome::DoubleFree);
+    assert_eq!(store.read_header(FAKE_BASE).live, 1);
+    // One entry on the free list, so the next allocation serves it once and
+    // the one after falls through to the (exhausted) cursor.
+    assert_eq!(arena.alloc(&NoGrow, &store).expect("reuse").guard_page(), a);
+    assert_eq!(arena.alloc(&NoGrow, &store), None);
+}
+
+/// A region address the block never handed out is refused: it is a region
+/// start in range, so only the bump cursor distinguishes it, and freeing it
+/// would credit capacity that was never taken.
+#[test]
+fn freeing_a_never_allocated_region_is_refused() {
+    let store = MapArenaMemory::new();
+    let arena = StackArena::new();
+    assert!(arena.install(
+        FAKE_BASE,
+        BLOCK_HEADER_BYTES + 2 * STACK_REGION_BYTES,
+        &store
+    ));
+    let _a = arena.alloc(&NoGrow, &store).expect("a");
+    let untaken = FAKE_BASE + BLOCK_HEADER_BYTES + STACK_REGION_BYTES;
+
+    assert_eq!(
+        arena.free(untaken, &NeverShrink, &store),
+        FreeOutcome::DoubleFree
+    );
+    assert_eq!(store.read_header(FAKE_BASE).live, 1);
+    assert_eq!(store.read_header(FAKE_BASE).free_head, 0);
 }
 
 #[test]
-fn scrub_block_zeroes_a_real_region() {
+fn scrub_zeroes_a_real_region() {
     // A real, owned host buffer stands in for an idle block's RAM.
     let mut buf = std::vec![0xAAu8; 8192];
     let base = buf.as_mut_ptr() as u64;
     // SAFETY: `[base, base + buf.len())` is the owned, mapped, writable
     // backing of `buf`, exclusively borrowed for the duration of the call.
     unsafe {
-        scrub_block(base, buf.len());
+        scrub(base, buf.len());
     }
     assert!(buf.iter().all(|&b| b == 0), "the whole region is zeroed");
 }
@@ -530,7 +689,7 @@ fn frame_allocator_grow_chains_a_real_block_past_the_first() {
     let map = usable_map(0, 8 * 1024 * 1024);
     let frames = FrameAllocator::new(&map).expect("allocator builds");
     let grow = FrameArenaGrow::new(&frames, 8 * 1024 * 1024);
-    let store = MapBlockStore::new();
+    let store = MapArenaMemory::new();
 
     let arena = StackArena::new();
     assert!(arena.install(FIRST_BLOCK, BLOCK_HEADER_BYTES + STACK_REGION_BYTES, &store));
@@ -552,7 +711,7 @@ fn frame_allocator_grow_fails_closed_on_physical_exhaustion() {
     let map = usable_map(0, 1024 * 1024); // 1 MiB < a 2 MiB block
     let frames = FrameAllocator::new(&map).expect("allocator builds");
     let grow = FrameArenaGrow::new(&frames, 1 << 31);
-    let store = MapBlockStore::new();
+    let store = MapArenaMemory::new();
 
     let arena = StackArena::new();
     assert!(arena.install(FAKE_BASE, BLOCK_HEADER_BYTES + STACK_REGION_BYTES, &store));
@@ -569,7 +728,7 @@ fn frame_allocator_grow_rejects_a_block_outside_the_identity_window() {
     let map = usable_map(0, 8 * 1024 * 1024);
     let frames = FrameAllocator::new(&map).expect("allocator builds");
     let grow = FrameArenaGrow::new(&frames, 1024 * 1024); // 1 MiB window
-    let store = MapBlockStore::new();
+    let store = MapArenaMemory::new();
 
     let arena = StackArena::new();
     assert!(arena.install(FAKE_BASE, BLOCK_HEADER_BYTES + STACK_REGION_BYTES, &store));
@@ -578,7 +737,7 @@ fn frame_allocator_grow_rejects_a_block_outside_the_identity_window() {
 
     // The rejected block was returned to the allocator, not leaked.
     let grow_ok = FrameArenaGrow::new(&frames, 8 * 1024 * 1024);
-    let store2 = MapBlockStore::new();
+    let store2 = MapArenaMemory::new();
     let arena2 = StackArena::new();
     assert!(arena2.install(FAKE_BASE, BLOCK_HEADER_BYTES + STACK_REGION_BYTES, &store2));
     assert!(arena2.alloc(&grow_ok, &store2).is_some());

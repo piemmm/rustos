@@ -437,7 +437,7 @@ pub fn boot(
             crate::stack_arena::KTHREAD_STACK_ARENA.install(
                 arena.base,
                 arena.len,
-                &crate::stack_arena::IdentityBlockStore,
+                &crate::stack_arena::IdentityArenaMemory,
             );
         }
     }

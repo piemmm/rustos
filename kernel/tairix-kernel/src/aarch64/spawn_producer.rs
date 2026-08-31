@@ -212,7 +212,7 @@ impl ArchImageBuilder for Aarch64ProcessSpawn {
             return (Box::new(BoxStack::new()), None);
         }
         let grow = FrameArenaGrow::new(frames, (identity_gib as u64) << 30);
-        match KTHREAD_STACK_ARENA.alloc(&grow, &crate::stack_arena::IdentityBlockStore) {
+        match KTHREAD_STACK_ARENA.alloc(&grow, &crate::stack_arena::IdentityArenaMemory) {
             Some(stack) => {
                 let guard = stack.guard_page();
                 (Box::new(stack), Some(guard))

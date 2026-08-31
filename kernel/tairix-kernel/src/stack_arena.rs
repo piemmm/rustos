@@ -35,14 +35,33 @@
 //! never returned. A block that cannot be safely scrubbed/returned is
 //! retained rather than released (fail closed).
 //!
+//! # A freed region is reusable while its block still has live stacks
+//!
+//! Each block therefore keeps a free list of its returned regions
+//! ([`BlockHeader::free_head`]), threaded through the freed regions
+//! themselves, and [`StackArena::alloc`] pops that list before it advances
+//! the bump cursor. Without it a block's capacity is only recoverable when
+//! the *whole* block drains, which never happens to the boot block: a
+//! handful of long-lived boot kthreads pin it forever, so its freed regions
+//! would be lost and the arena would chain a fresh 2 MiB block every
+//! `capacity` spawns — a capacity tracking spawn *history* instead of the
+//! live set, ratcheting up on any busy system.
+//!
+//! A returned region is **zeroed** before it is threaded, because a kthread
+//! stack can hold spilled capability tokens and the next owner must not be
+//! able to read them. The guard page is never touched: on aarch64 it is
+//! unmapped at this very address in the exiting task's own root, so writing
+//! it could fault. The link and its free marker therefore live in the first
+//! bytes of the *usable* stack area, which stays mapped in every root.
+//!
 //! # Block list is itself a capacity (no fixed ceiling)
 //!
 //! Each block's `{ next, live, cursor, … }` record lives in an
 //! intrusive header in the block's own base page — outside the guarded
 //! regions — so block tracking needs no second growable allocation and no
-//! hand-picked block cap. Header access is abstracted behind [`BlockStore`]:
+//! hand-picked block cap. Header access is abstracted behind [`ArenaMemory`]:
 //! production reads/writes the identity-mapped header in place
-//! ([`IdentityBlockStore`]); the host unit tests use an in-memory map, so
+//! ([`IdentityArenaMemory`]); the host unit tests use an in-memory map, so
 //! the allocator arithmetic is exercised on CI without real RAM.
 //!
 //! Like [`crate::mem_map`], the bump/list arithmetic is free of the
@@ -163,12 +182,12 @@ const STACK_VA_OFFSET: u64 = 0;
 /// [`Drop`] returns that region to the arena ([`StackArena::free`]) so the
 /// capacity shrinks when a task exits. On the host build
 /// the `Drop` is inert (the unit tests call `free` explicitly through a test
-/// [`BlockStore`]); only the freestanding `aarch64`/`x86_64`/`riscv64`
+/// [`ArenaMemory`]); only the freestanding `aarch64`/`x86_64`/`riscv64`
 /// builds wire the production reclaim path.
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct ArenaStack {
     /// First byte of the region's **physical/identity** base — the low edge
-    /// of the one-page guard. The arena's [`BlockStore`] bookkeeping and
+    /// of the one-page guard. The arena's [`ArenaMemory`] bookkeeping and
     /// [`StackArena::free`] locate the owning block by this physical address,
     /// so it is stored unmodified; the kernel-visible VA (which adds
     /// [`STACK_VA_OFFSET`]) is computed in [`Self::guard_page`]/
@@ -191,7 +210,7 @@ impl ArenaStack {
 impl Drop for ArenaStack {
     fn drop(&mut self) {
         // The host build exercises reclamation through `StackArena::free`
-        // directly (with a test `BlockStore`); only the freestanding
+        // directly (with a test `ArenaMemory`); only the freestanding
         // bare-metal builds own the single `'static` arena + frame
         // allocator the production reclaim path needs, so the `Drop` is inert
         // elsewhere and never references state that build lacks.
@@ -207,9 +226,10 @@ impl Drop for ArenaStack {
 // kernel-visible VA — see `STACK_VA_OFFSET`), rounded down to `STACK_ALIGN`:
 // the aligned exclusive upper bound of the usable stack above the guard. The
 // arena is `RegionKind::Reserved` (boot block) or a `FrameAllocator`-reserved
-// chained block, so the frames are not handed elsewhere, and the bump cursor
-// hands each region out exactly once, so the region is exclusive to its owner
-// for as long as the `ArenaStack` lives. The guard page aside (which the
+// chained block, so the frames are not handed elsewhere, and a region leaves
+// its block's free list when it is handed out and rejoins it only from its
+// owner's `Drop`, so it is exclusive to that owner for as long as the
+// `ArenaStack` lives. The guard page aside (which the
 // spawn seam deliberately unmaps in the task's own root, at this same VA),
 // every byte of the usable region stays mapped and writable — via the
 // identity map on aarch64, via the per-task higher-half window on x86_64.
@@ -236,7 +256,7 @@ unsafe impl KernelStack for ArenaStack {
 /// base page (the block list is itself a capacity, so
 /// it needs no second growable allocation and no hand-picked block cap).
 ///
-/// A plain `#[repr(C)]` of `u64`s so [`IdentityBlockStore`] can read/write
+/// A plain `#[repr(C)]` of `u64`s so [`IdentityArenaMemory`] can read/write
 /// it in place at the block base (2 MiB-aligned, so well-aligned for `u64`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
@@ -247,15 +267,70 @@ pub(crate) struct BlockHeader {
     /// the owning block of a freed region by address range and to bound the
     /// bump cursor.
     block_end: u64,
-    /// Bump cursor: base of the next free region in this block.
+    /// Bump cursor: base of the next never-yet-handed-out region in this
+    /// block. Only ever advances; returned regions come back through
+    /// [`Self::free_head`].
     alloc_next: u64,
     /// Count of regions currently handed out from this block and not yet
     /// freed. A block with `live == 0` is *idle*.
     live: u64,
+    /// Base of the first returned region on this block's free list, or `0`
+    /// when none. Each entry carries the next in its own first usable bytes
+    /// ([`FreeRegion`]), so recycling needs no side table.
+    free_head: u64,
     /// `1` for the boot-carved block (kernel-image-owned `Reserved` frames,
     /// never returned to the allocator), `0` for a chained block.
     is_boot: u64,
 }
+
+/// Marker distinguishing a region that is on its block's free list from one
+/// that is handed out. A live stack grows *down* from the region top, so it
+/// reaches these lowest bytes only when it is one push from its guard page,
+/// and a recycled region has its marker cleared as it is handed out. A stack
+/// that did write this exact word would have its region refused and retained
+/// rather than handed to a second owner — the safe direction.
+const FREE_REGION_MAGIC: u64 = 0x_4652_4545_5F52_474E;
+
+/// Bookkeeping a *free* region carries in its own first usable bytes, at
+/// `region + STACK_GUARD_BYTES` — inside the usable stack area, never the
+/// guard page (which aarch64 unmaps at this address in the owning task's
+/// root).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub(crate) struct FreeRegion {
+    /// [`FREE_REGION_MAGIC`] while the region is on a free list.
+    magic: u64,
+    /// Next free region in the same block, or `0` for the tail.
+    next: u64,
+}
+
+impl FreeRegion {
+    /// The marker of a region on a free list, whose successor is `next`
+    /// (`0` for the tail).
+    const fn free(next: u64) -> Self {
+        Self {
+            magic: FREE_REGION_MAGIC,
+            next,
+        }
+    }
+
+    /// The marker of a region that is handed out.
+    const fn taken() -> Self {
+        Self { magic: 0, next: 0 }
+    }
+
+    /// Whether this marker says its region is on a free list — the one
+    /// double-free test, so the production and host [`ArenaMemory`] cannot
+    /// disagree about it.
+    const fn is_free(self) -> bool {
+        self.magic == FREE_REGION_MAGIC
+    }
+}
+
+/// The free marker must fit in the usable area, clear of the guard page.
+const _FREE_REGION_FITS: () = {
+    assert!(core::mem::size_of::<FreeRegion>() <= KTHREAD_STACK_BYTES);
+};
 
 impl BlockHeader {
     /// Base of the first region in a block based at `base` (immediately
@@ -265,19 +340,30 @@ impl BlockHeader {
     }
 }
 
-/// Read/write access to the intrusive [`BlockHeader`] stored at a block's
-/// base.
+/// Access to the arena's own RAM: the intrusive [`BlockHeader`] at a
+/// block's base, and the free-list bookkeeping a returned region carries in
+/// its own first usable bytes.
 ///
-/// Production ([`IdentityBlockStore`]) accesses the identity-mapped header
-/// in place; the host unit tests use an in-memory map so the arena
+/// Production ([`IdentityArenaMemory`]) accesses both in place through the
+/// identity map; the host unit tests model them in memory so the arena
 /// arithmetic runs on CI without real RAM. All access happens under the
-/// arena's [`SpinLock`], so the store implementations need no internal
+/// arena's [`SpinLock`], so the implementations need no internal
 /// synchronisation.
-pub(crate) trait BlockStore {
+pub(crate) trait ArenaMemory {
     /// Read the header stored at block base `base`.
-    fn read(&self, base: u64) -> BlockHeader;
+    fn read_header(&self, base: u64) -> BlockHeader;
     /// Write `header` to the header slot at block base `base`.
-    fn write(&self, base: u64, header: BlockHeader);
+    fn write_header(&self, base: u64, header: BlockHeader);
+    /// Zero the region's usable area and thread it onto its block's free
+    /// list ahead of `next_free` (`0` for the tail).
+    ///
+    /// Returns `false` — changing nothing — when the region is already
+    /// marked free: that is a double free, and linking it twice would hand
+    /// one region to two owners.
+    fn release_region(&self, region: u64, next_free: u64) -> bool;
+    /// Take `region` off its free list, clearing its marker and returning
+    /// the successor it carried.
+    fn claim_region(&self, region: u64) -> u64;
 }
 
 /// A source of fresh, 2 MiB-aligned, identity-mapped arena blocks the
@@ -326,8 +412,11 @@ pub(crate) enum FreeOutcome {
     /// misaligned address. Rejected without touching any block (fail closed,
     /// never an underflow).
     ForeignAddress,
-    /// `guard` named a region in a block whose live count is already zero — a
-    /// double free. Rejected without decrementing (fail closed, no underflow).
+    /// `guard` named a region that is not currently handed out: its block's
+    /// live count is already zero, it sits at or above the bump cursor so was
+    /// never handed out, or its own marker says it is already on a free list.
+    /// Rejected without decrementing or double-linking (fail closed, no
+    /// underflow, and never one region handed to two owners).
     DoubleFree,
 }
 
@@ -387,7 +476,7 @@ impl StackArena {
     /// already installed (a re-entry is refused rather than silently
     /// re-basing a live list), if `base + len` overflows,
     /// or if the block is too small to hold its header page plus one region.
-    pub(crate) fn install(&self, base: u64, len: u64, store: &dyn BlockStore) -> bool {
+    pub(crate) fn install(&self, base: u64, len: u64, mem: &dyn ArenaMemory) -> bool {
         let mut inner = self.inner.lock();
         if inner.installed {
             return false;
@@ -401,13 +490,14 @@ impl StackArena {
             Some(region_end) if region_end <= block_end => {}
             _ => return false,
         }
-        store.write(
+        mem.write_header(
             base,
             BlockHeader {
                 next: 0,
                 block_end,
                 alloc_next: first,
                 live: 0,
+                free_head: 0,
                 is_boot: 1,
             },
         );
@@ -416,8 +506,9 @@ impl StackArena {
         true
     }
 
-    /// Hand out the next guarded stack region, reusing an idle block or
-    /// chaining a fresh one from `grow` when every block is full.
+    /// Hand out a guarded stack region — a returned one where a block has
+    /// any, else a fresh one from a block's bump cursor, else from a block
+    /// newly chained out of `grow`.
     ///
     /// Returns `None` only when the arena is not installed or the `grow`
     /// source is itself exhausted (fail closed — the caller falls back to a
@@ -426,33 +517,42 @@ impl StackArena {
     /// The grow path chains **at most once** per call: a chained block holds
     /// a header page and many regions (`_ARENA_GROW_BLOCK_FITS_A_REGION`), so
     /// the fresh block necessarily satisfies the request (no retry-until-it-works).
-    pub(crate) fn alloc(&self, grow: &dyn ArenaGrow, store: &dyn BlockStore) -> Option<ArenaStack> {
+    pub(crate) fn alloc(&self, grow: &dyn ArenaGrow, mem: &dyn ArenaMemory) -> Option<ArenaStack> {
         let mut inner = self.inner.lock();
         if !inner.installed {
             return None;
         }
 
-        // Reuse: walk the existing blocks; an idle block is reset to its
-        // first region so its freed space is reusable, and the first block
-        // with room serves the request.
+        // Reuse before growth: a block's returned regions come first, so a
+        // block with live stacks still recycles and the boot block's
+        // capacity is not lost to the kthreads that pin it. Only when a
+        // block has neither a returned region nor bump room is the next
+        // block tried.
         let mut cur = inner.head;
         while cur != 0 {
-            let mut header = store.read(cur);
+            let mut header = mem.read_header(cur);
             let was_idle = header.live == 0;
-            if was_idle {
-                header.alloc_next = BlockHeader::first_region(cur);
-            }
-            if let Some(region_end) = header.alloc_next.checked_add(STACK_REGION_BYTES) {
-                if region_end <= header.block_end {
-                    let guard = header.alloc_next;
-                    header.alloc_next = region_end;
-                    header.live += 1;
-                    store.write(cur, header);
-                    if was_idle && header.is_boot == 0 {
-                        inner.idle_chained = inner.idle_chained.saturating_sub(1);
+            let region = if header.free_head != 0 {
+                let region = header.free_head;
+                header.free_head = mem.claim_region(region);
+                Some(region)
+            } else {
+                match header.alloc_next.checked_add(STACK_REGION_BYTES) {
+                    Some(region_end) if region_end <= header.block_end => {
+                        let region = header.alloc_next;
+                        header.alloc_next = region_end;
+                        Some(region)
                     }
-                    return Some(ArenaStack { guard });
+                    _ => None,
                 }
+            };
+            if let Some(guard) = region {
+                header.live += 1;
+                mem.write_header(cur, header);
+                if was_idle && header.is_boot == 0 {
+                    inner.idle_chained = inner.idle_chained.saturating_sub(1);
+                }
+                return Some(ArenaStack { guard });
             }
             cur = header.next;
         }
@@ -465,13 +565,14 @@ impl StackArena {
         if region_end > block_end {
             return None;
         }
-        store.write(
+        mem.write_header(
             base,
             BlockHeader {
                 next: inner.head,
                 block_end,
                 alloc_next: region_end,
                 live: 1,
+                free_head: 0,
                 is_boot: 0,
             },
         );
@@ -479,20 +580,23 @@ impl StackArena {
         Some(ArenaStack { guard: first })
     }
 
-    /// Return the region whose guard page is `guard` to its owning block.
+    /// Return the region whose guard page is `guard` to its owning block,
+    /// zeroed and reusable.
     ///
-    /// Locates the owning block by address range, checked-decrements its
-    /// live count, and — when a chained block goes idle and another idle
-    /// chained block is already resident — releases this one through
-    /// `shrink` (the one-free-block grace). A foreign or
-    /// misaligned address, or an already-zero block, is rejected without
-    /// underflowing (fail closed). The boot block is never
-    /// released. See [`FreeOutcome`].
+    /// Locates the owning block by address range, scrubs the region and
+    /// threads it onto that block's free list, checked-decrements the live
+    /// count, and — when a chained block goes idle and another idle chained
+    /// block is already resident — releases this one through `shrink` (the
+    /// one-free-block grace). A foreign or misaligned address, a region the
+    /// block never handed out, an already-zero live count, and a region
+    /// already on a free list are each rejected without underflowing or
+    /// double-linking (fail closed). The boot block is never released. See
+    /// [`FreeOutcome`].
     pub(crate) fn free(
         &self,
         guard: u64,
         shrink: &dyn ArenaShrink,
-        store: &dyn BlockStore,
+        mem: &dyn ArenaMemory,
     ) -> FreeOutcome {
         let mut inner = self.inner.lock();
         if !inner.installed {
@@ -502,18 +606,25 @@ impl StackArena {
         let mut prev = 0u64;
         let mut cur = inner.head;
         while cur != 0 {
-            let header = store.read(cur);
+            let header = mem.read_header(cur);
             let first = BlockHeader::first_region(cur);
             if guard >= first && guard < header.block_end {
                 if !(guard - first).is_multiple_of(STACK_REGION_BYTES) {
                     return FreeOutcome::ForeignAddress;
                 }
-                if header.live == 0 {
+                // A region at or above the bump cursor was never handed out,
+                // so it cannot be returned — and its memory holds no marker
+                // to recognise.
+                if guard >= header.alloc_next || header.live == 0 {
+                    return FreeOutcome::DoubleFree;
+                }
+                if !mem.release_region(guard, header.free_head) {
                     return FreeOutcome::DoubleFree;
                 }
                 let mut updated = header;
                 updated.live -= 1;
-                store.write(cur, updated);
+                updated.free_head = guard;
+                mem.write_header(cur, updated);
 
                 if updated.live != 0 || updated.is_boot != 0 {
                     return FreeOutcome::Freed;
@@ -525,9 +636,9 @@ impl StackArena {
                         if prev == 0 {
                             inner.head = updated.next;
                         } else {
-                            let mut prev_header = store.read(prev);
+                            let mut prev_header = mem.read_header(prev);
                             prev_header.next = updated.next;
-                            store.write(prev, prev_header);
+                            mem.write_header(prev, prev_header);
                         }
                         return FreeOutcome::FreedReleasedBlock;
                     }
@@ -629,7 +740,7 @@ impl ArenaShrink for FrameArenaShrink<'_> {
         // exclusive RAM (clear spilled capability tokens
         // before the frames are reused).
         unsafe {
-            scrub_block(base, len_usize);
+            scrub(base, len_usize);
         }
         let frame = Frame::containing(PhysAddr::new(base));
         self.frames
@@ -638,19 +749,19 @@ impl ArenaShrink for FrameArenaShrink<'_> {
     }
 }
 
-/// Zero `[base, base + len)` in place (zero-on-free).
+/// Zero `[base, base + len)` in place (zero-on-free) — a whole idle block
+/// on release, or one returned region's usable area.
 ///
-/// Split out from [`FrameArenaShrink::release_block`] so the scrub itself is
-/// unit-tested over a real host buffer, while the surrounding
-/// `free_order` return-to-allocator step is proven on the aarch64 QEMU
-/// guard verticals (the host `FrameAllocator` is index-addressed and cannot
-/// dereference a fabricated low physical base).
+/// Split out so the scrub itself is unit-tested over a real host buffer,
+/// while the surrounding `free_order` return-to-allocator step is proven on
+/// the aarch64 QEMU guard verticals (the host `FrameAllocator` is
+/// index-addressed and cannot dereference a fabricated low physical base).
 ///
 /// # Safety
 ///
 /// `[base, base + len)` must be an owned, mapped, writable, exclusively-held
 /// RAM region with no live reference into it.
-unsafe fn scrub_block(base: u64, len: usize) {
+unsafe fn scrub(base: u64, len: usize) {
     let Ok(base_usize) = usize::try_from(base) else {
         return;
     };
@@ -661,30 +772,75 @@ unsafe fn scrub_block(base: u64, len: usize) {
     }
 }
 
-/// The production [`BlockStore`]: read/write the intrusive [`BlockHeader`]
-/// in the identity-mapped header page at the block's own base.
+/// The production [`ArenaMemory`]: the intrusive [`BlockHeader`] in the
+/// identity-mapped header page at the block's own base, and a freed
+/// region's [`FreeRegion`] marker at the foot of its usable area — the same
+/// identity addressing, a region being RAM inside that same block.
 #[cfg(all(
     freestanding,
     any(kernel_isa = "aarch64", kernel_isa = "x86_64", kernel_isa = "riscv64")
 ))]
-pub(crate) struct IdentityBlockStore;
+pub(crate) struct IdentityArenaMemory;
 
 #[cfg(all(
     freestanding,
     any(kernel_isa = "aarch64", kernel_isa = "x86_64", kernel_isa = "riscv64")
 ))]
-impl BlockStore for IdentityBlockStore {
-    fn read(&self, base: u64) -> BlockHeader {
+impl IdentityArenaMemory {
+    /// Address of `region`'s [`FreeRegion`] slot: the foot of its usable
+    /// area, one page above its page-aligned base, so clear of the guard
+    /// page and `u64`-aligned.
+    const fn marker(region: u64) -> *mut FreeRegion {
+        (region + STACK_GUARD_BYTES) as *mut FreeRegion
+    }
+}
+
+#[cfg(all(
+    freestanding,
+    any(kernel_isa = "aarch64", kernel_isa = "x86_64", kernel_isa = "riscv64")
+))]
+impl ArenaMemory for IdentityArenaMemory {
+    fn read_header(&self, base: u64) -> BlockHeader {
         // SAFETY: `base` is a block base the arena installed/chained — a
         // 2 MiB-aligned (so `BlockHeader`-aligned), identity-mapped RAM page
         // reserved for this header, accessed under the arena lock, and
-        // initialised by a prior `write` before any `read`.
+        // initialised by a prior write before any read.
         unsafe { core::ptr::read(base as *const BlockHeader) }
     }
-    fn write(&self, base: u64, header: BlockHeader) {
-        // SAFETY: as for `read` — `base`'s header page is owned, aligned,
-        // identity-mapped, writable RAM, accessed under the arena lock.
+    fn write_header(&self, base: u64, header: BlockHeader) {
+        // SAFETY: as for `read_header` — `base`'s header page is owned,
+        // aligned, identity-mapped, writable RAM, accessed under the arena
+        // lock.
         unsafe { core::ptr::write(base as *mut BlockHeader, header) }
+    }
+
+    fn release_region(&self, region: u64, next_free: u64) -> bool {
+        let marker = Self::marker(region);
+        // SAFETY: `region` is a base the arena handed out of a block it
+        // owns, so `[region, region + STACK_REGION_BYTES)` is identity-mapped
+        // RAM; the marker sits one page above that base, clear of the guard
+        // page, and is aligned. The owning `ArenaStack` has just dropped, so
+        // no live reference into the region remains, and the arena lock
+        // excludes every other arena path.
+        unsafe {
+            if core::ptr::read(marker).is_free() {
+                return false;
+            }
+            scrub(region + STACK_GUARD_BYTES, KTHREAD_STACK_BYTES);
+            core::ptr::write(marker, FreeRegion::free(next_free));
+        }
+        true
+    }
+
+    fn claim_region(&self, region: u64) -> u64 {
+        let marker = Self::marker(region);
+        // SAFETY: as for `release_region`; `region` is on a free list, so a
+        // prior `release_region` wrote this marker.
+        unsafe {
+            let next = core::ptr::read(marker).next;
+            core::ptr::write(marker, FreeRegion::taken());
+            next
+        }
     }
 }
 
@@ -752,7 +908,7 @@ pub(crate) fn guarded_kernel_stack<A: tairix_arch_api::mmu::AddressSpace>(
     use alloc::boxed::Box;
 
     let grow = FrameArenaGrow::new(frames, identity_limit);
-    let Some(stack) = KTHREAD_STACK_ARENA.alloc(&grow, &IdentityBlockStore) else {
+    let Some(stack) = KTHREAD_STACK_ARENA.alloc(&grow, &IdentityArenaMemory) else {
         return Box::new(tairix_kernel_core::BoxStack::new());
     };
     let guard = stack.guard_page();
@@ -799,10 +955,10 @@ pub(crate) fn publish_reclaim_frames(frames: &'static FrameAllocator) {
 fn reclaim_arena_stack(guard: u64) {
     match SHRINK_FRAMES.get() {
         Ok(Some(frames)) => {
-            KTHREAD_STACK_ARENA.free(guard, &FrameArenaShrink::new(frames), &IdentityBlockStore);
+            KTHREAD_STACK_ARENA.free(guard, &FrameArenaShrink::new(frames), &IdentityArenaMemory);
         }
         _ => {
-            KTHREAD_STACK_ARENA.free(guard, &RetainShrink, &IdentityBlockStore);
+            KTHREAD_STACK_ARENA.free(guard, &RetainShrink, &IdentityArenaMemory);
         }
     }
 }

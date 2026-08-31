@@ -72,7 +72,7 @@ use tairix_arch_x86_64::irqmask::RflagsIrqControl;
 use tairix_arch_x86_64::serial::SERIAL_SINK;
 
 use crate::mem_map::carve_guard_arena_from_map;
-use crate::stack_arena::{IdentityBlockStore, KTHREAD_STACK_ARENA};
+use crate::stack_arena::{IdentityArenaMemory, KTHREAD_STACK_ARENA};
 use crate::x86_64::arch_wrapper::BinArch;
 use crate::x86_64::dispatch::{production_dispatch, production_user_fault, DISPATCH_SLOT};
 use crate::x86_64::init_spawn::X86_64_INIT_SPAWN;
@@ -682,7 +682,7 @@ pub fn bring_up_bsp(
         paging::configured_identity_bytes(),
     );
     if let Some(arena) = guard_arena {
-        KTHREAD_STACK_ARENA.install(arena.base, arena.len, &IdentityBlockStore);
+        KTHREAD_STACK_ARENA.install(arena.base, arena.len, &IdentityArenaMemory);
     }
     crate::mem_map::log_guard_arena(
         log_sink,

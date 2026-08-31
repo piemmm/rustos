@@ -1110,7 +1110,7 @@ pub fn try_boot(
         crate::stack_arena::KTHREAD_STACK_ARENA.install(
             arena.base,
             arena.len,
-            &crate::stack_arena::IdentityBlockStore,
+            &crate::stack_arena::IdentityArenaMemory,
         );
     }
     crate::mem_map::log_guard_arena(

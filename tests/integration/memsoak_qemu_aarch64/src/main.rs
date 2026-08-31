@@ -1,10 +1,10 @@
 //! `plans/APPS.md` "Immediate work" I2/I3 QEMU integration test: boot the
 //! *production* aarch64 `tairix-kernel` pipeline on the `virt` board with
 //! the planted whole-disk encrypted-root image, log in as the seeded `root`
-//! account, and prove — with a **numeric** `KernelMemoryStats.free_bytes`
-//! comparison on the live system — that the per-cycle process footprint is
-//! exactly reclaimed (the I2 teardown) and that the `top -d0` refresh shape
-//! retains no kernel memory (the I3 live re-test).
+//! account, and prove — with a **numeric** `KernelMemoryStats` comparison on
+//! the live system — that the per-cycle process footprint is exactly
+//! reclaimed (the I2 teardown) and that the `top -d0` refresh shape retains
+//! no kernel memory (the I3 live re-test).
 //!
 //! ## What this test asserts
 //!
@@ -23,8 +23,10 @@
 //! against the kernel-attested origin).
 //!
 //! The fixture (`tairix-test-memsoak`) then soaks the live system: warmup
-//! cycles pay every once-per-boot cost, a baseline
-//! `KERNEL_MEMORY_STATS.free_bytes` is sampled through sysinfod, and each
+//! cycles pay every once-per-boot cost, a baseline `KERNEL_MEMORY_STATS`
+//! sample — free memory plus user residency, so another process allocating
+//! meanwhile cannot move it (`tairix_test_memsoak::sample_bytes`) — is taken
+//! through sysinfod, and each
 //! of the measured cycles spawns and reaps a `true.app` child (the full
 //! spawn → exit → reap → teardown path: user frames, startup block, and
 //! page-table hierarchy reclaimed), parks on a timed `stream_read` whose

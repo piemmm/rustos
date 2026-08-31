@@ -17,7 +17,8 @@
 //!    window.
 //! 2. **Baseline** — one `KERNEL_MEMORY_STATS` query through the System
 //!    Information API (`sysinfod` gates it on this process's own
-//!    `CAP_SYSINFO_KERNEL`, kernel-attested — no ambient authority).
+//!    `CAP_SYSINFO_KERNEL`, kernel-attested — no ambient authority),
+//!    reduced to the sampled quantity by `tairix_test_memsoak::sample_bytes`.
 //! 3. **Soak** — `MEASURED_CYCLES` cycles, each the I2 login/logout
 //!    equivalent plus the I3 `top -d0` refresh shape: spawn and reap a
 //!    `true.app` child off the mounted store (the full spawn → exit → reap →
@@ -51,18 +52,20 @@ mod program {
     use tairix_procinfo::{call, for_each_process, IpcTransport, Transport, WalkStep};
     use tairix_rt::io::{write_stderr_line, Stdin, Stdout, Write};
     use tairix_test_memsoak::{
-        report_line, verdict, Verdict, CHILD_PATH, CYCLE_PARK_NANOS, MEASURED_CYCLES, WARMUP_CYCLES,
+        report_line, sample_bytes, verdict, Verdict, CHILD_PATH, CYCLE_PARK_NANOS, MEASURED_CYCLES,
+        WARMUP_CYCLES,
     };
 
-    /// Sample the kernel's free-memory figure through the System
-    /// Information API: one `KERNEL_MEMORY_STATS` round trip, decoded
-    /// through the frozen `sysinfo-v1` wire type. Fails closed on a refusal
-    /// or a malformed reply — the soak never fabricates a sample.
-    fn sample_free_bytes(transport: &dyn Transport) -> Result<u64, &'static str> {
+    /// Take one soak sample through the System Information API: one
+    /// `KERNEL_MEMORY_STATS` round trip, decoded through the frozen
+    /// `sysinfo-v1` wire type and reduced by `sample_bytes` (which documents
+    /// why free memory alone is not the quantity to judge). Fails closed on
+    /// a refusal or a malformed reply — the soak never fabricates a sample.
+    fn sample(transport: &dyn Transport) -> Result<u64, &'static str> {
         let bytes = call(transport, SysinfoQueryId::KERNEL_MEMORY_STATS, &[])
             .map_err(|_| "memsoak: KERNEL_MEMORY_STATS query refused")?;
         KernelMemoryStats::from_bytes(&bytes)
-            .map(|stats| stats.free_bytes)
+            .map(|stats| sample_bytes(&stats))
             .map_err(|_| "memsoak: KERNEL_MEMORY_STATS reply malformed")
     }
 
@@ -123,7 +126,7 @@ mod program {
                 fail(reason);
             }
         }
-        let baseline = match sample_free_bytes(&transport) {
+        let baseline = match sample(&transport) {
             Ok(value) => value,
             Err(reason) => fail(reason),
         };
@@ -132,7 +135,7 @@ mod program {
                 fail(reason);
             }
         }
-        let final_free = match sample_free_bytes(&transport) {
+        let final_free = match sample(&transport) {
             Ok(value) => value,
             Err(reason) => fail(reason),
         };

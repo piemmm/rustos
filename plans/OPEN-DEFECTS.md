@@ -3972,59 +3972,151 @@ passes `NodeKind::Symlink` to `create`. `mount`/`unmount` keep `Busy` — an
 already-mounted volume and one with open files are the resource-in-use `EBUSY`
 the code is for.
 
-## D68 — the spawn/reap/park/list cycle retains kernel memory permanently (OPEN)
+## D68 — a guard-arena block could only recycle when it drained completely, so the boot arena was stranded and the capacity ratcheted (FIXED)
 
-**Mechanism.** `tests/integration/memsoak_program` drives an identical
-four-step cycle — spawn and reap a `true.app` child, park on a timed
-`stream_read` whose bound elapses, walk the self-scoped process list, ride a
-sysinfod IPC round trip — and compares the system-wide
-`KernelMemoryStats.free_bytes` before and after the measured window. The
-window loses memory, deterministically, on `aarch64`.
+**Mechanism.** `tairix_kernel::stack_arena` hands each kthread kernel stack
+out of a guard-arena block through a forward bump cursor, and could rewind
+that cursor only when the *whole* block was idle (`live == 0`). A handful of
+long-lived boot kthreads sit in the boot-carved block for the life of the
+system, so it never goes idle: every region handed back to it was lost, the
+cursor reached the block end after `capacity` spawns, and from then on the
+arena chained a fresh 2 MiB block out of the frame allocator. The
+one-free-block grace keeps one such chained block resident permanently, so
+the boot arena's RAM was consumed once and never reused and the arena's
+capacity tracked a system's spawn *history* instead of its live stacks. The
+ratchet has no bound under concurrent spawn load: any block whose live count
+never reaches zero is stranded the same way, one 2 MiB block at a time.
 
-**Evidence.** Three runs of `cargo xtask test --qemu --only memsoak`, the
-first two on trees differing by an unrelated change and producing
-byte-identical numbers:
+**How it surfaced, and the arithmetic.** `tests/integration/memsoak_program`
+repeats one identical cycle — spawn and reap a `true.app` child, park on a
+timed `stream_read` whose bound elapses, walk the self-scoped process list,
+ride a sysinfod IPC round trip — and requires the system-wide
+`KernelMemoryStats.free_bytes` to return to its baseline byte for byte. On
+the QEMU `virt` guest the boot arena is RAM/64 ≈ 4 MiB, which after its
+header page holds 60 regions of `4 KiB guard + 64 KiB debug stack`; boot's own
+kthreads take about ten, so the ~50th child exhausted the block and drew
+exactly one 2 MiB chained block. Sampling `free_bytes` between the cycle's
+steps over 128 cycles put that single 2 MiB step in the spawn/reap step and
+showed nothing else: it is a staircase with a long period, not the
+per-cycle leak the first reading of the figures suggested.
 
-| `WARMUP_CYCLES` | `MEASURED_CYCLES` | baseline | final | lost |
-|---|---|---|---|---|
-| 4 | 32 | 181182464 | 181174272 | 8192 (2 pages) |
-| 4 | 32 | 181182464 | 181174272 | 8192 (identical, second tree) |
-| 48 | 32 | 181174272 | 179077120 | 2097152 (2 MiB) |
+**The fix.** Each block keeps a free list of the regions handed back to it
+(`BlockHeader::free_head`), threaded through the freed regions themselves, and
+`alloc` pops that list before advancing the bump cursor — so a block with live
+stacks recycles, the boot block never exhausts, and no chained block is drawn
+at all under a serial spawn/exit workload. Consequences that are part of the
+contract:
 
-Two things follow. It is **not flaky** — the same tree and a tree without the
-change under test give the same figures to the byte. And it is **not a
-one-off amortised growth the warmup is meant to absorb**: twelve times the
-warmup made the measured loss *worse*, and the warmup-48 baseline is exactly
-the warmup-4 final, so retention is monotonic in cycles rather than a boundary
-crossed once. A workload that repeats one identical cycle must reach a steady
-high-water mark; this one does not, which is the definition of a leak rather
-than of capacity.
+- A returned region is **zeroed** before it is threaded: a kthread stack can
+  hold spilled capability tokens, and the previous design's only scrub was on
+  whole-block release, so a region recycled out of an idle chained block was
+  handed to its next owner unscrubbed.
+- The link and its free marker live in the first bytes of the region's
+  *usable* area, never the guard page: on aarch64 the guard page is unmapped
+  at that same address in the exiting task's own root, so writing it could
+  fault.
+- Three O(1) fail-closed guards replace the single "the block's live count is
+  zero" test: a region at or above the bump cursor was never handed out, a
+  zero live count cannot be decremented, and a region whose marker already
+  says free is refused rather than linked twice (which would hand one region
+  to two owners).
+- The idle-block cursor reset is gone — it would now hand out a region that is
+  also on the free list.
 
-The step sizes are frame-granular because `free_bytes` counts frames: a
-sub-page retention per cycle is invisible until the kernel heap draws its next
-block from the frame allocator, which is what turns a small per-cycle loss
-into an 8 KiB step and then a 2 MiB one.
+The seam that reads and writes arena RAM (`ArenaMemory`, formerly
+`BlockStore`) covers the region marker as well as the block header, so the
+host tests model both and the production identity-mapped store and the host
+double share one `FreeRegion::is_free` predicate.
 
-**Why it is recorded rather than fixed here.** The leak is in one of four
-independent kernel paths, and `kernel/core` holds many task-keyed maps
-(`fswatch` waiters, `sharedreg` mappings, `procsignal` intake/pending/stopped,
-and others) any one of which could fail to prune on exit. Naming the culprit
-needs a per-step bisect — a fixture variant per cycle step, one QEMU run
-each — not a guess, and the fixture parks forever on failure by design so each
-run costs the vertical's full 600 s ceiling. Guessing at the map would be the
-hack the charter forbids.
+**Regression cover.** The `memsoak` vertical is the end-to-end regression: it
+failed before the fix and now reports `MEMSOAK PASS baseline=181182464
+final=181182464 cycles=32`. Host unit tests pin the mechanism directly —
+`a_block_with_a_live_stack_still_recycles_its_returned_regions` (the block
+recycles 32 rounds through a 4-region block with one region pinned, and no
+block is chained), `a_returned_region_is_scrubbed_before_it_is_reused`,
+`double_free_inside_a_live_block_is_refused`, and
+`freeing_a_never_allocated_region_is_refused`.
 
-**Localising it.** Split `cycle` into four fixtures, each repeating one step,
-and run each: the one whose `free_bytes` drifts owns the leak. Then instrument
-that path's allocations across the window. Prime suspects, in order: a
-task-keyed kernel map not pruned by the reap path; a one-shot timer node
-allocated per timed park and not freed on expiry; a per-query snapshot
-retained by the sysinfo path.
+**What the hunt ruled out.** The kernel heap is not involved: no QEMU
+test-kernel bin publishes its `#[global_allocator]`, so `install_frame_heap_
+source` is a no-op in every vertical and the heap draws no frames at all
+there (recorded as D69). The reap path's task-keyed maps are not involved
+either — `AddressSpaceRegistry::withdraw`'s `stale_task_entry` tripwire is a
+`debug_assert` and the verticals are debug builds, and the live process count
+was flat across the soak. The remaining 8 KiB step the pre-fix figures showed
+belongs to `timed`, whose address space gains two pages once when it wakes
+inside the measured window; that was the fixture's system-wide sampling, not
+the cycle, and is fixed as D70.
 
-**What it blocks.** `cargo xtask ci` cannot go green while this stands: the
-fixture's strict byte-equality verdict is deliberate (tolerating "small" drift
-would let a slow leak pass N cycles and fail N+M), so the vertical fails and
-takes the pipeline with it. Any change whose gate run reports
-`tairix-test-memsoak-qemu-aarch64` UNFINISHED at the 600 s ceiling should read
-its serial log for the `MEMSOAK FAIL` line before concluding anything about
-timeouts.
+## D69 — no QEMU test kernel publishes its allocator, so the growable kernel heap is inert in every vertical (OPEN)
+
+**Mechanism.** `plans/FIX-KHEAP.md` made the kernel heap grow on demand
+through two seams: a bin publishes its `#[global_allocator]` with
+`tairix_kernel_core::kheap::register_global_heap`, and the boot path then
+wires the frame-backed growth source into it with `install_frame_heap_source`.
+`kernel/tairix-kernel/src/main.rs` calls the first for all three production
+ports. **None of the 128 QEMU test-kernel bins does**, and
+`install_frame_heap_source` returns early when no heap was published — so in
+every vertical the heap is silently capped at its 64 MiB `.bss` bootstrap
+region, the byte-granular tier never grows a region and the slab tier never
+draws a frame.
+
+Two consequences. The growth and slab-page paths FIX-KHEAP added have **no
+end-to-end coverage**: every claim about them rests on host unit tests over a
+non-allocating page-table double, which is exactly the gap that plan's
+"deliberate carve-outs" names. And a vertical whose kernel exceeds the
+bootstrap region fails an allocation that production would satisfy, so the
+test kernels are strictly weaker than the thing they certify. Nothing has hit
+it because 64 MiB is ample for a vertical.
+
+**Why it is recorded rather than fixed here.** It was found while proving the
+heap was *not* D68's leak, and it is orthogonal to it. The one-line-per-bin
+fix touches 128 files and changes the memory behaviour of every vertical at
+once, which does not belong in a D68 diff. The better fix is structural: make
+the step impossible to skip rather than adding a 129th place to remember it —
+either `boot()` takes the `&'static FreeListAllocator` (the compiler then
+enforces it, at the cost of the same 128 call-site edits) or `tairix_kalloc`
+publishes the active allocator itself so `kheap` has nothing to be told
+(`register_global_heap` then disappears entirely, §2.14). `tairix_kalloc`'s
+own `install_irq_control` doc already contrasts itself with this seam and
+names this failure mode — "covers every heap in the binary rather than only
+the one a bin remembered to publish" — so the fragility was known.
+
+## D70 — the memsoak fixture judged a figure any process could move, so an unrelated service's allocation failed it (FIXED)
+
+**Mechanism.** `tests/integration/memsoak_program` compared the system-wide
+`KernelMemoryStats.free_bytes` before and after its measured window and
+required byte equality. `free_bytes` counts every frame the machine has handed
+out, so the sample conflated the kernel memory the cycle failed to return —
+what the soak is for — with user memory *any other process* allocated during
+the window. On a live boot those exist: sampling per cycle over 128 cycles
+attributed an 8 KiB step to `timed`, whose address space gains two pages once
+when an NTP wake lands inside the window, at a pid the cycle never touches.
+The window is ~190 ms and `timed` wakes every few seconds, so this was a
+timing-dependent failure of a few percent per run — a pass was not evidence
+the next run passes, and no `WARMUP_CYCLES` length excludes an event driven by
+wall time rather than by cycle count.
+
+**The fix.** The sample is `free_bytes + user_resident_bytes`
+(`tairix_test_memsoak::sample_bytes`). A page moving between the free pool and
+*any* user address space leaves that sum unchanged, while kernel memory the
+cycle failed to return still lowers it, so the byte-exact verdict is untouched
+and now judges only the quantity it is meaningful over. No tolerance band was
+introduced: the fixture's own reasoning against one — it would let a slow leak
+pass N cycles and fail N+M — stands.
+
+`KernelMemoryStats::user_resident_bytes` is live to make that possible. It was
+an honest `0` ("per-space resident accounting has no live accounter yet"); it
+is now the summed mapped pages of every registered address space, derived per
+record by the one `resident_bytes` the per-process rows already used, so the
+aggregate and the rows cannot drift apart. It is the same walk
+`IntrospectSource::processes` performs, on a capability-gated diagnostic query,
+and it discloses nothing `total_bytes - free_bytes` did not already. Its
+consumers (`sysmon`'s memory bar, `switchboard`, `sysinfo`, `top`) were already
+written against a live value and simply become truthful.
+
+**Regression cover.** Host tests in the fixture library pin the property
+directly: `a_page_moving_into_a_user_address_space_leaves_the_sample_unchanged`
+(the case that used to fail the soak), `a_page_retained_kernel_side_lowers_the_
+sample` (the case that still must), and `the_sample_saturates_rather_than_
+wrapping`.

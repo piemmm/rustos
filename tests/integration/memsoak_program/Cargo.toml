@@ -1,6 +1,6 @@
 [package]
 name = "tairix-test-memsoak"
-description = "plans/APPS.md I2/I3 memory-stability fixture: the `memsoak` command app the aarch64 memory-stability QEMU vertical plants on its disk and runs from the scripted root shell. It samples KernelMemoryStats.free_bytes through the System Information API (sysinfod), drives repeated spawn/wait cycles plus the top-refresh-shaped work (timed stream_read, self process-list walk, memory query), and reports MEMSOAK PASS/FAIL; on failure it parks forever so the run fails loudly by timeout. Never planted on a production image."
+description = "plans/APPS.md I2/I3 memory-stability fixture: the `memsoak` command app the aarch64 memory-stability QEMU vertical plants on its disk and runs from the scripted root shell. It samples free memory plus user residency through the System Information API (sysinfod), drives repeated spawn/wait cycles plus the top-refresh-shaped work (timed stream_read, self process-list walk, memory query), and reports MEMSOAK PASS/FAIL; on failure it parks forever so the run fails loudly by timeout. Never planted on a production image."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

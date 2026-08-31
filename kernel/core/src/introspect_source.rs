@@ -35,6 +35,7 @@ use tairix_kernel_sched_api::{Priority, SchedulerPolicy, TaskId, TaskState};
 use tairix_kernel_sec::ProcessId;
 use tairix_reclaim::PressureBand;
 
+use crate::aspace::AddressSpaceRegistry;
 use crate::bootinfo::KernelArch;
 use crate::fs::FilesystemService;
 use crate::init::KernelState;
@@ -102,6 +103,20 @@ fn counts_toward_load(state: TaskState, task: TaskId, observer: Option<TaskId>) 
 /// would look like a nearly-empty machine.
 fn usable_ram_bytes(usable_frames: usize) -> u64 {
     (usable_frames as u64).saturating_mul(PAGE_SIZE as u64)
+}
+
+/// Whole pages currently mapped in `process`'s registered address space, in
+/// bytes — image, stack, and anonymous regions; the registry snapshot is
+/// re-frozen on every mutating map syscall.
+///
+/// A process with no registered space (a pure kernel task) truthfully reports
+/// zero. One definition, so the per-process rows and the system-wide
+/// user-residency aggregate cannot drift apart.
+fn resident_bytes(aspaces: &AddressSpaceRegistry, process: ProcessId) -> u64 {
+    aspaces
+        .resolve(process)
+        .map_or(0, |(space, _)| space.mapped_pages() as u64)
+        .saturating_mul(PAGE_SIZE as u64)
 }
 
 /// The unprovisioned machine-id sentinel: all zero, meaning "no per-install
@@ -237,14 +252,7 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
                 .state
                 .arch
                 .ticks_to_ns(self.state.scheduler.cpu_ticks_of(task_id).unwrap_or(0));
-            // Whole pages currently mapped in the task's registered address
-            // space (image + stack + anonymous regions; the registry snapshot
-            // is re-frozen on every mutating map syscall). A task with no
-            // registered space (a pure kernel task) truthfully reports zero.
-            let mem_bytes = aspaces
-                .resolve(ProcessId(task_id))
-                .map_or(0, |(space, _)| space.mapped_pages() as u64)
-                .saturating_mul(PAGE_SIZE as u64);
+            let mem_bytes = resident_bytes(&aspaces, ProcessId(task_id));
             // The task's service level from the scheduler's own record. A
             // record the scheduler has already drained no longer competes
             // for CPU at any level; the admission default is the honest
@@ -279,14 +287,22 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
     fn kernel_memory(&self) -> Result<Vec<u8>, Errno> {
         let free_frames = self.state.frame_allocator.free_frames() as u64;
         let page = PAGE_SIZE as u64;
+        // Summed over the same records and through the same derivation the
+        // per-process view reports, so the aggregate and the rows can never
+        // disagree. It reveals nothing `total_bytes - free_bytes` does not
+        // already, and this query is capability-gated regardless.
+        let user_resident_bytes = {
+            let caps = self.state.caps.read();
+            let aspaces = self.state.aspaces.read();
+            caps.iter().fold(0u64, |sum, record| {
+                sum.saturating_add(resident_bytes(&aspaces, record.process()))
+            })
+        };
         let stats = KernelMemoryStats {
             total_bytes: usable_ram_bytes(self.usable_frames()),
             free_bytes: free_frames.saturating_mul(page),
             kernel_heap_bytes: self.kernel_heap_bytes,
-            // Per-space resident accounting has no live accounter yet; report
-            // it conservatively as zero rather than a guess, exactly as the
-            // `SysinfoSource` contract permits for an unavailable usage figure.
-            user_resident_bytes: 0,
+            user_resident_bytes,
             page_size: u32::try_from(PAGE_SIZE).unwrap_or(u32::MAX),
             reserved: 0,
         };
