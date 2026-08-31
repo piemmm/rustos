@@ -1038,19 +1038,16 @@ fn render_into_a_tiny_viewport_does_not_panic() {
 /// same at 200% as at 100% while only the text around them grew.
 #[test]
 fn the_chrome_scales_with_the_desktop_density_not_only_its_text() {
-    use crate::chrome::ContextMenuModel;
     use crate::render::{
-        build_context_menu, chrome_height, context_menu_rect, delete_dialog_rect, grid_metrics,
+        chrome_height, delete_dialog_rect, grid_metrics, open_with_chooser_rect,
         properties_panel_rect, row_height, scrollbar_bounds, sidebar_view, toolbar_height,
     };
-    use tairix_geometry::Point;
 
     let theme = Theme::dark();
     let hidpi = Scale::from_percent(200).expect("200% is a valid scale");
     let vp = Rect::new(0, 0, 600, 600);
     let browser = Browser::open_root(MockFs::fixture()).expect("root");
     let places = Places::new(&home(), &[]);
-    let menu = build_context_menu(ContextMenuModel::for_browser(&browser, true));
 
     // The horizontal bands, top to bottom.
     assert!(toolbar_height(hidpi, &theme) > toolbar_height(Scale::ONE, &theme));
@@ -1073,8 +1070,10 @@ fn the_chrome_scales_with_the_desktop_density_not_only_its_text() {
     assert!(tiles_hidpi.cell_height > tiles.cell_height);
     assert!(tiles_hidpi.gap > tiles.gap);
 
-    // The overlays: the Properties panel, the delete confirmation, and the
-    // right-click menu.
+    // The overlays this surface still owns: the Properties panel, the delete
+    // confirmation, and the "Open With…" chooser. The right-click menu is not
+    // among them — its plates are the desktop's, placed by the one shared rule
+    // that reads the desktop's own density.
     assert!(
         properties_panel_rect(vp, hidpi, &theme).height
             > properties_panel_rect(vp, Scale::ONE, &theme).height
@@ -1083,11 +1082,10 @@ fn the_chrome_scales_with_the_desktop_density_not_only_its_text() {
         delete_dialog_rect(vp, hidpi, &theme).height
             > delete_dialog_rect(vp, Scale::ONE, &theme).height
     );
-    let anchor = Point::new(8, 8);
-    let popup = context_menu_rect(&menu, anchor, vp, Scale::ONE, &theme);
-    let popup_hidpi = context_menu_rect(&menu, anchor, vp, hidpi, &theme);
-    assert!(popup_hidpi.width > popup.width);
-    assert!(popup_hidpi.height > popup.height);
+    assert!(
+        open_with_chooser_rect(vp, hidpi, &theme).height
+            > open_with_chooser_rect(vp, Scale::ONE, &theme).height
+    );
 
     // And the whole view still paints at the higher density.
     assert!(paint(
@@ -5062,6 +5060,7 @@ fn the_context_menu_needs_a_selection_for_the_item_commands() {
     let menu = ContextMenuModel::for_browser(&browser, false);
     for command in [
         ContextCommand::Open,
+        ContextCommand::OpenAndClose,
         ContextCommand::OpenWith,
         ContextCommand::Rename,
         ContextCommand::Cut,
@@ -5070,6 +5069,11 @@ fn the_context_menu_needs_a_selection_for_the_item_commands() {
         ContextCommand::Delete,
     ] {
         assert!(!menu.is_enabled(command), "{command:?} without a selection");
+        assert_eq!(
+            menu.reason(command),
+            "nothing selected",
+            "{command:?} says why"
+        );
     }
     assert!(!menu.is_enabled(ContextCommand::Paste));
 }
@@ -5085,6 +5089,9 @@ fn the_context_menu_enables_the_item_commands_on_a_directory() {
     let menu = ContextMenuModel::for_browser(&browser, false);
     assert!(menu.is_enabled(ContextCommand::Open));
     assert!(!menu.is_enabled(ContextCommand::OpenWith));
+    // A folder becomes this window's own new content, so there is no hand-off
+    // for Open and Close to close the window after.
+    assert!(!menu.is_enabled(ContextCommand::OpenAndClose));
     assert!(menu.is_enabled(ContextCommand::Rename));
     assert!(menu.is_enabled(ContextCommand::Cut));
     assert!(menu.is_enabled(ContextCommand::Copy));
@@ -5105,6 +5112,9 @@ fn the_context_menu_enables_the_item_commands_on_a_bundle() {
     let menu = ContextMenuModel::for_browser(&browser, false);
     assert!(menu.is_enabled(ContextCommand::Open));
     assert!(!menu.is_enabled(ContextCommand::OpenWith));
+    // Launching a bundle hands the entry to another program, so the window may
+    // close behind it.
+    assert!(menu.is_enabled(ContextCommand::OpenAndClose));
     assert!(menu.is_enabled(ContextCommand::Rename));
     assert!(menu.is_enabled(ContextCommand::Properties));
     assert!(menu.is_enabled(ContextCommand::Delete));
@@ -5119,8 +5129,10 @@ fn the_context_menu_enables_the_item_commands_on_a_file() {
     assert_eq!(browser.selected_name(), Some("notes.txt"));
     let menu = ContextMenuModel::for_browser(&browser, false);
     assert!(menu.is_enabled(ContextCommand::Open));
-    // Open With… is offered only for a regular file, so it is enabled here.
+    // Open With… is offered only for a regular file, so it is enabled here, and
+    // opening a file hands it over, so Open and Close is too.
     assert!(menu.is_enabled(ContextCommand::OpenWith));
+    assert!(menu.is_enabled(ContextCommand::OpenAndClose));
     assert!(menu.is_enabled(ContextCommand::Rename));
     assert!(menu.is_enabled(ContextCommand::Cut));
     assert!(menu.is_enabled(ContextCommand::Copy));
@@ -5143,16 +5155,18 @@ fn the_context_menu_enables_paste_only_when_a_clipboard_is_held() {
 fn context_commands_list_covers_every_variant_once() {
     use crate::chrome::{ContextCommand, CONTEXT_COMMANDS};
 
-    // The drawn menu iterates CONTEXT_COMMANDS, so it must hold each command
-    // exactly once, in a stable order. Open With… joined with its FM6b chooser
-    // verb; Delete now joins with FM9-c's confirm-and-remove verb. New Folder
-    // stays absent — the drawn
-    // menu has no verb to invoke for it (it is a toolbar write tool), so it
-    // would be speculative surface here.
+    // The declared menu iterates CONTEXT_COMMANDS and a row's id is a command's
+    // position in it, so it must hold each command exactly once in a stable
+    // order. Open and Close carries the "open this and I am done here" verb the
+    // desktop's menu grab took the right-double-click gesture's second press
+    // away from (`plans/NEW-MENUS.md` D20). New Folder stays absent — the menu
+    // has no verb to invoke for it (it is a toolbar write tool), so it would be
+    // speculative surface here.
     assert_eq!(
         CONTEXT_COMMANDS,
         &[
             ContextCommand::Open,
+            ContextCommand::OpenAndClose,
             ContextCommand::OpenWith,
             ContextCommand::Rename,
             ContextCommand::Cut,
@@ -5165,250 +5179,345 @@ fn context_commands_list_covers_every_variant_once() {
 }
 
 #[test]
-fn build_context_menu_labels_each_row_and_mirrors_the_model_enablement() {
-    use crate::chrome::{ContextCommand, ContextMenuModel, CONTEXT_COMMANDS};
-    use crate::render::build_context_menu;
+fn the_context_menu_row_ids_are_the_inverse_of_the_command_list() {
+    use crate::chrome::{context_command_from_item, CONTEXT_COMMANDS};
+    use tairix_abi::window_ipc::AppMenuItemId;
 
-    // A selected entry, no clipboard: the selection commands are actionable and
-    // Paste is disabled. Each drawn row carries its command's label and its
-    // actionability mirrors the model, so a disabled command reads muted
-    // (present) rather than vanishing.
-    let browser = Browser::open_root(activation_source()).expect("root");
-    let model = ContextMenuModel::for_browser(&browser, false);
-    let menu = build_context_menu(model);
-    assert_eq!(menu.len(), CONTEXT_COMMANDS.len());
-    for (item, &command) in menu.items().iter().zip(CONTEXT_COMMANDS) {
-        assert_eq!(item.label(), command.label());
-        assert_eq!(
-            item.state().is_actionable(),
-            model.is_enabled(command),
-            "{command:?} actionability mirrors the model"
-        );
+    // A row's id is its command's position in CONTEXT_COMMANDS, one-based, so
+    // reading a chosen row back is the exact inverse of numbering it and no
+    // second table can drift. An id past the list names no command (fail
+    // closed) rather than resolving to a neighbour.
+    for (index, &command) in CONTEXT_COMMANDS.iter().enumerate() {
+        let raw = u16::try_from(index + 1).expect("a small index");
+        let id = AppMenuItemId::new(raw).expect("a non-zero id");
+        assert_eq!(context_command_from_item(id), Some(command));
     }
-
-    // Paste specifically is disabled with no clipboard and enabled with one.
-    let paste_index = CONTEXT_COMMANDS
-        .iter()
-        .position(|&c| c == ContextCommand::Paste)
-        .expect("Paste is modelled");
-    assert!(!menu.items()[paste_index].state().is_actionable());
-    let with_clip = build_context_menu(ContextMenuModel::for_browser(&browser, true));
-    assert!(with_clip.items()[paste_index].state().is_actionable());
-}
-
-#[test]
-fn context_menu_rect_anchors_at_the_click_and_clamps_within_the_viewport() {
-    use crate::chrome::ContextMenuModel;
-    use crate::render::{build_context_menu, context_menu_rect};
-
-    let theme = Theme::dark();
-    // A window comfortably larger than the menu, so a mid-window anchor fits.
-    let vp = Rect::new(0, 0, 800, 600);
-    let browser = Browser::open_root(activation_source()).expect("root");
-    let menu = build_context_menu(ContextMenuModel::for_browser(&browser, true));
-
-    // Placed with its top-left at the click point when the whole menu fits.
-    let rect = context_menu_rect(&menu, Point::new(40, 30), vp, Scale::ONE, &theme);
-    assert_eq!((rect.origin.x, rect.origin.y), (40, 30));
-    assert!(rect.width > 0 && rect.height > 0);
-
-    // A click near the bottom-right corner shifts the menu left/up so the whole
-    // menu stays inside the window rather than spilling off it.
-    let corner = context_menu_rect(&menu, Point::new(798, 598), vp, Scale::ONE, &theme);
-    assert!(
-        corner.origin.x + i32::try_from(corner.width).unwrap() <= i32::try_from(vp.width).unwrap()
-    );
-    assert!(
-        corner.origin.y + i32::try_from(corner.height).unwrap()
-            <= i32::try_from(vp.height).unwrap()
-    );
-    assert!(corner.origin.x >= 0 && corner.origin.y >= 0);
-
-    // A window smaller than the menu still yields a drawable clamped rect
-    // (no panic), never a zero or over-size rectangle.
-    let tiny = Rect::new(0, 0, 10, 8);
-    let small = context_menu_rect(&menu, Point::new(3, 3), tiny, Scale::ONE, &theme);
-    assert!(small.width >= 1 && small.width <= tiny.width);
-    assert!(small.height >= 1 && small.height <= tiny.height);
-}
-
-#[test]
-fn draw_context_menu_paints_into_the_surface_without_panicking() {
-    use crate::chrome::ContextMenuModel;
-    use crate::render::{build_context_menu, draw_context_menu};
-    use tairix_raster::Surface;
-
-    let theme = Theme::dark();
-    let vp = Rect::new(0, 0, 400, 400);
-    let browser = Browser::open_root(activation_source()).expect("root");
-    let menu = build_context_menu(ContextMenuModel::for_browser(&browser, false));
-
-    let mut surface = Surface::new(vp.width, vp.height).expect("surface");
-    let before = surface.pixels().to_vec();
-    draw_context_menu(
-        &mut surface,
-        &menu,
-        Point::new(20, 20),
-        Scale::ONE,
-        &theme,
-        vp,
-    );
-    assert_ne!(surface.pixels().to_vec(), before);
-
-    // A degenerate viewport draws nothing and does not panic.
-    let mut tiny = Surface::new(2, 2).expect("tiny surface");
-    draw_context_menu(
-        &mut tiny,
-        &menu,
-        Point::new(0, 0),
-        Scale::ONE,
-        &theme,
-        Rect::new(0, 0, 2, 2),
-    );
-}
-
-#[test]
-fn context_menu_command_at_mirrors_the_enabled_rows_and_fails_closed() {
-    use crate::chrome::{ContextCommand, ContextMenuModel, CONTEXT_COMMANDS};
-    use crate::render::{build_context_menu, context_menu_command_at};
-
-    let theme = Theme::dark();
-    let vp = Rect::new(0, 0, 400, 400);
-    // A selection, no clipboard: the item commands are enabled, Paste disabled.
-    let browser = Browser::open_root(activation_source()).expect("root");
-    let model = ContextMenuModel::for_browser(&browser, false);
-    let menu = build_context_menu(model);
-    let anchor = Point::new(30, 24);
-
-    // Scanning the whole window, every command the hit-test resolves is an
-    // enabled one, and every enabled command is reachable — so the drawn rows
-    // and the hit-test cover exactly the model's actionable commands, and a
-    // disabled row (Paste) never resolves (fail closed).
-    let mut seen: Vec<ContextCommand> = Vec::new();
-    let mut y = 0;
-    while y < i32::try_from(vp.height).unwrap() {
-        let mut x = 0;
-        while x < i32::try_from(vp.width).unwrap() {
-            if let Some(cmd) =
-                context_menu_command_at(&menu, anchor, vp, Scale::ONE, &theme, Point::new(x, y))
-            {
-                assert!(model.is_enabled(cmd), "resolved a disabled command {cmd:?}");
-                if !seen.contains(&cmd) {
-                    seen.push(cmd);
-                }
-            }
-            x += 1;
-        }
-        y += 1;
-    }
-    for &cmd in CONTEXT_COMMANDS {
-        assert_eq!(
-            seen.contains(&cmd),
-            model.is_enabled(cmd),
-            "{cmd:?} reachable iff enabled"
-        );
-    }
-
-    // A click well outside the menu resolves nothing (fail closed).
+    let past = u16::try_from(CONTEXT_COMMANDS.len() + 1).expect("a small index");
     assert_eq!(
-        context_menu_command_at(&menu, anchor, vp, Scale::ONE, &theme, Point::new(399, 399)),
+        context_command_from_item(AppMenuItemId::new(past).expect("non-zero")),
         None
     );
 }
 
 #[test]
-fn context_menu_command_rect_mirrors_the_hit_test_for_each_command() {
-    use crate::chrome::{ContextMenuModel, CONTEXT_COMMANDS};
-    use crate::render::{build_context_menu, context_menu_command_at, context_menu_command_rect};
+fn the_context_menu_declares_one_row_per_command_with_its_label_and_caption() {
+    use crate::chrome::{context_menu, ContextMenuModel, CONTEXT_COMMANDS};
+    use tairix_abi::window_ipc::AppMenuRowView;
 
-    let theme = Theme::dark();
-    let vp = Rect::new(0, 0, 400, 400);
-    // A selection so the item commands (Delete among them) are enabled.
-    let browser = Browser::open_root(activation_source()).expect("root");
+    // The desktop draws the menu, so what this asserts is the *declaration*:
+    // one item row per command in order, carrying that command's own label and
+    // accelerator caption. Separators are declared too, but the chain folds
+    // each into the following row's group break, so they are not rows a reader
+    // has to skip to line a command up with its id.
+    let mut browser = Browser::open_root(activation_source()).expect("root");
+    browser.select(2).expect("select notes.txt");
+    let model = ContextMenuModel::for_browser(&browser, true);
+    let menu = context_menu(model, "Files").expect("the fixed rows fit the bounds");
+    assert_eq!(menu.title(), "Files");
+
+    let items: alloc::vec::Vec<_> = menu
+        .rows()
+        .filter_map(|(row, _parent)| match row {
+            AppMenuRowView::Item(item) => Some(item),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(items.len(), CONTEXT_COMMANDS.len());
+    for (item, &command) in items.iter().zip(CONTEXT_COMMANDS) {
+        assert_eq!(item.label, command.label(), "{command:?} label");
+        assert_eq!(item.shortcut, command.shortcut(), "{command:?} caption");
+    }
+}
+
+#[test]
+fn a_declared_context_row_is_disabled_with_its_reason_never_left_out() {
+    use crate::chrome::{context_menu, ContextCommand, ContextMenuModel, CONTEXT_COMMANDS};
+    use tairix_abi::window_ipc::AppMenuRowView;
+
+    // An empty directory makes every selection-scoped command inactionable.
+    // The menu's shape must not move with the selection, so each is declared
+    // *disabled with its reason* rather than omitted — which is also what keeps
+    // a row's id equal to its command's position however few are actionable.
+    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+    browser.open_index(2).expect("enter System");
+    browser.open_index(0).expect("enter the empty Fonts");
+    assert_eq!(browser.selected_name(), None);
+
     let model = ContextMenuModel::for_browser(&browser, false);
-    let menu = build_context_menu(model);
-    let anchor = Point::new(30, 24);
+    let menu = context_menu(model, "Files").expect("the fixed rows fit the bounds");
+    let items: alloc::vec::Vec<_> = menu
+        .rows()
+        .filter_map(|(row, _parent)| match row {
+            AppMenuRowView::Item(item) => Some(item),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(items.len(), CONTEXT_COMMANDS.len());
+    for (item, &command) in items.iter().zip(CONTEXT_COMMANDS) {
+        assert!(!item.enabled, "{command:?} is inactionable here");
+        assert_eq!(item.reason, model.reason(command), "{command:?} reason");
+        assert!(!item.reason.is_empty(), "{command:?} says why");
+    }
+    // The reasons are the model's, never the builder's invention.
+    assert_eq!(model.reason(ContextCommand::Paste), "nothing to paste");
+}
 
-    // The forward rect of each command centres inside a row that the hit-test
-    // resolves back to that same command — so the click point the harness aims
-    // at and the app's own hit-test can never disagree. A disabled command
-    // still has a drawn (muted) row, so its rect exists but the hit-test
-    // declines it (fail closed).
-    for &command in CONTEXT_COMMANDS {
-        let rect = context_menu_command_rect(&menu, anchor, vp, Scale::ONE, &theme, command)
-            .expect("every listed command has a drawn row");
-        let centre = Point::new(
-            rect.left() + i32::try_from(rect.width / 2).unwrap(),
-            rect.top() + i32::try_from(rect.height / 2).unwrap(),
+#[test]
+fn the_context_menu_reason_distinguishes_why_a_row_cannot_act() {
+    use crate::chrome::{ContextCommand, ContextMenuModel};
+
+    // Enablement alone cannot say *why*, and a row that greys out with no
+    // reason is the thing the wire model's reason field exists to fix. A
+    // directory, a bundle, and a file each turn Open With… and Open and Close
+    // down for a different reason, and each states it.
+    let mut browser = Browser::open_root(activation_source()).expect("root");
+    assert_eq!(browser.selected_name(), Some("Docs"));
+    let on_directory = ContextMenuModel::for_browser(&browser, false);
+    assert_eq!(
+        on_directory.reason(ContextCommand::OpenWith),
+        "only a file opens with an application"
+    );
+    assert_eq!(
+        on_directory.reason(ContextCommand::OpenAndClose),
+        "a folder opens in this window",
+        "a descent is this window's new content, so closing it would leave nothing"
+    );
+    assert_eq!(on_directory.reason(ContextCommand::Open), "");
+
+    browser.select(1).expect("select Editor.app");
+    let on_bundle = ContextMenuModel::for_browser(&browser, false);
+    assert_eq!(
+        on_bundle.reason(ContextCommand::OpenWith),
+        "only a file opens with an application",
+        "a bundle launches itself"
+    );
+    assert_eq!(
+        on_bundle.reason(ContextCommand::OpenAndClose),
+        "",
+        "launching a bundle hands the entry over, so the window may close"
+    );
+
+    browser.select(2).expect("select notes.txt");
+    let on_file = ContextMenuModel::for_browser(&browser, false);
+    assert_eq!(on_file.reason(ContextCommand::OpenWith), "");
+    assert_eq!(on_file.reason(ContextCommand::OpenAndClose), "");
+    // Enablement is derived from the reason, so the two cannot disagree.
+    for command in crate::chrome::CONTEXT_COMMANDS {
+        assert_eq!(
+            on_file.is_enabled(*command),
+            on_file.reason(*command).is_empty(),
+            "{command:?}"
         );
-        let hit = context_menu_command_at(&menu, anchor, vp, Scale::ONE, &theme, centre);
-        if model.is_enabled(command) {
-            assert_eq!(hit, Some(command), "{command:?} rect round-trips");
+    }
+}
+
+#[test]
+fn only_removal_declares_the_destructive_emphasis() {
+    use crate::chrome::{context_menu, ContextCommand, ContextMenuModel, CONTEXT_COMMANDS};
+    use tairix_abi::window_ipc::{AppMenuRole, AppMenuRowView};
+
+    // Emphasis is a property of the command, not of whether it is actionable,
+    // so it is asserted over a fully-enabled menu: exactly the one row whose
+    // verb destroys something wears the destructive role.
+    let mut browser = Browser::open_root(activation_source()).expect("root");
+    browser.select(2).expect("select notes.txt");
+    let menu = context_menu(ContextMenuModel::for_browser(&browser, true), "Files")
+        .expect("the fixed rows fit the bounds");
+    let roles: alloc::vec::Vec<_> = menu
+        .rows()
+        .filter_map(|(row, _parent)| match row {
+            AppMenuRowView::Item(item) => Some(item.role),
+            _ => None,
+        })
+        .collect();
+    for (role, &command) in roles.iter().zip(CONTEXT_COMMANDS) {
+        let expected = if command == ContextCommand::Delete {
+            AppMenuRole::Destructive
         } else {
-            assert_eq!(hit, None, "{command:?} disabled row fails closed");
-        }
+            AppMenuRole::Neutral
+        };
+        assert_eq!(*role, expected, "{command:?} emphasis");
     }
 }
 
 #[test]
-fn build_open_with_menu_lists_each_candidate_application_by_name_in_order() {
-    use crate::render::build_open_with_menu;
+fn a_context_menu_title_the_bounds_refuse_opens_nothing() {
+    use crate::chrome::{context_menu, ContextMenuModel};
+    use tairix_abi::window_ipc::APP_MENU_LABEL_MAX;
 
-    // The chooser draws one enabled row per candidate, captioned by the
-    // bundle's name, in the order `applications_for` returned them.
-    let mut store = open_with_store();
-    let bundles = store.installed_bundles().expect("enumerate");
-    let apps = applications_for("notes.txt", &bundles);
-    assert_eq!(apps.len(), 2);
-
-    let menu = build_open_with_menu(&apps);
-    assert_eq!(menu.len(), apps.len());
-    for (item, app) in menu.items().iter().zip(&apps) {
-        assert_eq!(item.label(), app.name());
-        // Every candidate is a genuine choice, so no row is disabled.
-        assert!(item.state().is_actionable());
-    }
+    // The title is untrusted display text bounded exactly as a row label is, so
+    // an over-long one is refused at build rather than encoded and quietly
+    // trimmed: the caller reports the refusal and opens no menu.
+    let browser = Browser::open_root(activation_source()).expect("root");
+    let model = ContextMenuModel::for_browser(&browser, false);
+    let over_long = "F".repeat(APP_MENU_LABEL_MAX + 1);
+    assert!(context_menu(model, &over_long).is_err());
+    assert!(context_menu(model, "Files").is_ok());
 }
 
 #[test]
-fn open_with_index_at_mirrors_the_rows_and_fails_closed_off_the_menu() {
-    use crate::render::{build_open_with_menu, open_with_index_at};
+fn the_open_with_chooser_needs_a_candidate_and_keeps_the_ranked_order() {
+    use crate::open_with::{AppAssociation, OpenWithChooser};
 
+    // No installed application claiming the type is an honest empty answer the
+    // caller states on its error stream; a chooser is never built over nothing,
+    // so its selection always names a real row.
+    assert!(OpenWithChooser::new(&[], "/Users/u/notes.txt", "notes.txt").is_none());
+
+    let editor = AppAssociation::new(
+        "Editor",
+        "/Apps/Editor.app",
+        alloc::vec![String::from("text/plain")],
+    );
+    let viewer = AppAssociation::new(
+        "Viewer",
+        "/Apps/Viewer.app",
+        alloc::vec![String::from("text/plain")],
+    );
+    let chooser = OpenWithChooser::new(&[&editor, &viewer], "/Users/u/notes.txt", "notes.txt")
+        .expect("two candidates");
+    assert_eq!(chooser.candidates().len(), 2);
+    assert_eq!(chooser.candidates()[0].name(), "Editor");
+    assert_eq!(chooser.candidates()[1].bundle_path(), "/Apps/Viewer.app");
+    assert_eq!(chooser.file_path(), "/Users/u/notes.txt");
+    assert_eq!(chooser.display_name(), "notes.txt");
+    // The first candidate is current, so an immediate activation opens the file
+    // with the same application the default open would have picked.
+    assert_eq!(chooser.selected(), 0);
+    assert_eq!(chooser.chosen().expect("a current row").name(), "Editor");
+}
+
+#[test]
+fn the_open_with_selection_clamps_at_both_ends() {
+    use crate::open_with::{AppAssociation, OpenWithChooser};
+
+    let apps: alloc::vec::Vec<AppAssociation> = (0..3)
+        .map(|n| AppAssociation::new(alloc::format!("App{n}"), "/Apps/A.app", alloc::vec![]))
+        .collect();
+    let refs: alloc::vec::Vec<&AppAssociation> = apps.iter().collect();
+    let mut chooser = OpenWithChooser::new(&refs, "/f", "f").expect("three candidates");
+
+    assert!(chooser.step(1));
+    assert_eq!(chooser.selected(), 1);
+    assert!(chooser.step(5));
+    assert_eq!(chooser.selected(), 2, "stops at the last candidate");
+    assert!(!chooser.step(1), "already at the end: nothing moved");
+    assert!(chooser.step(-9));
+    assert_eq!(chooser.selected(), 0, "stops at the first candidate");
+    assert!(chooser.select(99));
+    assert_eq!(chooser.selected(), 2, "an out-of-range index clamps");
+}
+
+#[test]
+fn the_open_with_scroll_clamps_and_reveals_the_selection() {
+    use crate::open_with::{AppAssociation, OpenWithChooser};
+
+    // Ten candidates in a list showing three: the offset can never exceed what
+    // the list holds, and revealing scrolls the *least* that brings the current
+    // row into view — the rule keyboard traversal moves through, so a selection
+    // can never sit outside the drawn rows.
+    let apps: alloc::vec::Vec<AppAssociation> = (0..10)
+        .map(|n| AppAssociation::new(alloc::format!("App{n}"), "/Apps/A.app", alloc::vec![]))
+        .collect();
+    let refs: alloc::vec::Vec<&AppAssociation> = apps.iter().collect();
+    let mut chooser = OpenWithChooser::new(&refs, "/f", "f").expect("ten candidates");
+    let visible = 3;
+
+    assert!(chooser.set_offset(99, visible));
+    assert_eq!(chooser.offset(), 7, "the last full page is the furthest");
+    assert!(chooser.scroll_by(-2, visible));
+    assert_eq!(chooser.offset(), 5);
+
+    chooser.select(9);
+    assert!(chooser.reveal(visible));
+    assert_eq!(chooser.offset(), 7, "the last row sits at the list's foot");
+    chooser.select(0);
+    assert!(chooser.reveal(visible));
+    assert_eq!(chooser.offset(), 0, "the first row sits at its head");
+    chooser.select(1);
+    assert!(!chooser.reveal(visible), "already in view: nothing moved");
+
+    // A list that shows everything is not scrollable at all.
+    assert!(!chooser.scroll_range(10).is_scrollable());
+}
+
+#[test]
+fn the_open_with_chooser_draws_and_hit_tests_the_same_rows() {
+    use crate::open_with::{AppAssociation, OpenWithChooser};
+    use crate::render::{
+        draw_open_with_chooser, open_with_chooser_rect, open_with_row_at, open_with_visible_rows,
+    };
+
+    // Paint and press resolve through one placement, so a click lands on
+    // exactly the row the user saw — including after a scroll, where the row at
+    // a given position on screen is a *different* candidate. A press off the
+    // rows resolves to nothing (fail closed).
     let theme = Theme::dark();
-    let vp = Rect::new(0, 0, 400, 400);
-    let mut store = open_with_store();
-    let bundles = store.installed_bundles().expect("enumerate");
-    let apps = applications_for("notes.txt", &bundles);
-    let menu = build_open_with_menu(&apps);
-    let anchor = Point::new(30, 24);
+    let vp = Rect::new(0, 0, 480, 480);
+    let apps: alloc::vec::Vec<AppAssociation> = (0..20)
+        .map(|n| AppAssociation::new(alloc::format!("App{n}"), "/Apps/A.app", alloc::vec![]))
+        .collect();
+    let refs: alloc::vec::Vec<&AppAssociation> = apps.iter().collect();
+    let mut chooser = OpenWithChooser::new(&refs, "/f", "f").expect("twenty candidates");
 
-    // Scanning the whole window, every index the hit-test resolves is a valid
-    // candidate index, and every candidate is reachable exactly once — so the
-    // drawn rows and the hit-test cover the same application list.
-    let mut seen: Vec<usize> = Vec::new();
-    let mut y = 0;
-    while y < i32::try_from(vp.height).unwrap() {
-        let mut x = 0;
-        while x < i32::try_from(vp.width).unwrap() {
-            if let Some(index) =
-                open_with_index_at(&menu, anchor, vp, Scale::ONE, &theme, Point::new(x, y))
-            {
-                assert!(index < apps.len(), "resolved an out-of-range index {index}");
-                if !seen.contains(&index) {
-                    seen.push(index);
-                }
-            }
-            x += 1;
-        }
-        y += 1;
-    }
-    seen.sort_unstable();
-    assert_eq!(seen, (0..apps.len()).collect::<Vec<_>>());
+    let visible = open_with_visible_rows(vp, Scale::ONE, &theme);
+    assert!(visible > 0, "a 480x480 window shows rows");
+    assert!(
+        visible < apps.len(),
+        "the panel is a fixed shape, so a long list scrolls inside it"
+    );
 
-    // A click well outside the menu resolves nothing (fail closed).
+    let bounds = open_with_chooser_rect(vp, Scale::ONE, &theme);
+    // Probe down the panel's own column until a row answers, so this asserts
+    // the slot → candidate mapping rather than re-deriving the band's height.
+    let topmost = |chooser: &OpenWithChooser| {
+        let bottom = bounds.top() + i32::try_from(bounds.height).unwrap_or(i32::MAX);
+        (bounds.top()..bottom).find_map(|y| {
+            open_with_row_at(
+                chooser,
+                vp,
+                Scale::ONE,
+                &theme,
+                Point::new(bounds.left() + 4, y),
+            )
+        })
+    };
     assert_eq!(
-        open_with_index_at(&menu, anchor, vp, Scale::ONE, &theme, Point::new(399, 399)),
+        topmost(&chooser),
+        Some(0),
+        "unscrolled, the top row is the first"
+    );
+    assert!(chooser.set_offset(5, visible));
+    assert_eq!(topmost(&chooser), Some(5), "scrolled, it is the sixth");
+
+    // Off the panel entirely, and on its title band, resolve to nothing.
+    assert_eq!(
+        open_with_row_at(&chooser, vp, Scale::ONE, &theme, Point::new(-10, -10)),
         None
+    );
+    assert_eq!(
+        open_with_row_at(
+            &chooser,
+            vp,
+            Scale::ONE,
+            &theme,
+            Point::new(bounds.left() + 4, bounds.top())
+        ),
+        None,
+        "the title band is not a row"
+    );
+
+    // Drawing is clip-safe: a viewport with no room for the panel paints
+    // nothing rather than faulting.
+    let mut surface = Surface::new(480, 480).expect("surface");
+    draw_open_with_chooser(&mut surface, &chooser, Scale::ONE, &theme, vp);
+    let mut tiny = Surface::new(8, 8).expect("surface");
+    draw_open_with_chooser(
+        &mut tiny,
+        &chooser,
+        Scale::ONE,
+        &theme,
+        Rect::new(0, 0, 8, 8),
     );
 }
 

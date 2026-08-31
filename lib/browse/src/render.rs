@@ -39,8 +39,8 @@ use tairix_controls::state::{
 use tairix_controls::text::TextField;
 use tairix_controls::value::Progress;
 use tairix_controls::{
-    Checkbox, IconButton, IconTile, ListRow, Menu, MenuItem, Panel, ScrollAction, ScrollBar,
-    ScrollPart, TableCell, TableRow, Toolbar,
+    Checkbox, IconButton, IconTile, ListRow, Panel, ScrollAction, ScrollBar, ScrollPart, TableCell,
+    TableRow, Toolbar,
 };
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
@@ -50,10 +50,7 @@ use tairix_raster::Surface;
 use tairix_theme::{TextRole, Theme};
 
 use crate::browser::Browser;
-use crate::chrome::{
-    self, ContextCommand, ContextMenuModel, ManagerTool, ManagerToolModel, ToolbarCommand,
-    ToolbarModel,
-};
+use crate::chrome::{self, ManagerTool, ManagerToolModel, ToolbarCommand, ToolbarModel};
 use crate::delete::DeletePlan;
 use crate::entry::{Entry, EntryKind};
 use crate::format::{format_date, format_size};
@@ -61,7 +58,7 @@ use crate::layout::{
     GridFill, GridFlow, GridMetrics, GridView, ListView, SidebarView, ViewLayout, ViewMode,
 };
 use crate::media::{entry_icon_request, icon_for_entry};
-use crate::open_with::AppAssociation;
+use crate::open_with::OpenWithChooser;
 use crate::places::{self, Place, Places};
 use crate::progress::ProgressModel;
 use crate::properties::Properties;
@@ -632,9 +629,47 @@ pub fn scroll_pointer<S: DirectorySource>(
     let model = scroll_model(browser, scale, theme, viewport);
     let bar = browser.scrollbar_mut();
     bar.set_model(model);
-    // Position the bar at this event before applying the action, so a press
-    // knows which part it landed on and a drag reads the current point (the
-    // press/release events carry no position of their own).
+    if let ScrollRouted::ScrollTo { offset } =
+        route_scroll_bar(bar, bounds, scale, theme, point, event, damage)?
+    {
+        browser.set_scroll_offset(offset);
+    }
+    Some(true)
+}
+
+/// What routing a pointer event to a drawn scrollbar did.
+enum ScrollRouted {
+    /// The bar consumed it and asks its owner to scroll to this offset.
+    ScrollTo {
+        /// The offset the bar resolved, already clamped by its own model.
+        offset: u64,
+    },
+    /// The bar consumed it and only its own drawn state moved — a drag begun,
+    /// or a hover.
+    Redrawn,
+}
+
+/// Route a pointer `event` at window-local `point` to `bar` over `bounds`,
+/// answering what the bar made of it or `None` when the pointer had nothing to
+/// do with it.
+///
+/// The one routing every drawn scrollbar in this engine resolves a press
+/// through — the listing's ([`scroll_pointer`]) and the "Open With…" chooser's
+/// ([`open_with_scroll_pointer`]) — so a bar cannot come to behave differently
+/// in one surface from another. The caller has already synced the bar's model
+/// to its own geometry; this positions the bar at the event before applying
+/// the action, because a press knows which part it landed on only from the
+/// pointer's current place (a press and a release carry no position of their
+/// own).
+fn route_scroll_bar(
+    bar: &mut ScrollBar,
+    bounds: Rect,
+    scale: Scale,
+    theme: &Theme,
+    point: Point,
+    event: &InputEvent,
+    damage: &mut Region,
+) -> Option<ScrollRouted> {
     let synth = bar.on_pointer(
         &InputEvent::PointerMoved { to: point },
         bounds,
@@ -660,15 +695,10 @@ pub fn scroll_pointer<S: DirectorySource>(
     if !consumed {
         return None;
     }
-    match action {
-        Some(ScrollAction::ScrollTo { offset }) => {
-            browser.set_scroll_offset(offset);
-            Some(true)
-        }
-        // A consumed press on the thumb (drag start) or a hover moves nothing
-        // yet but changes the bar's drawn state, so the caller repaints.
-        None => Some(true),
-    }
+    Some(match action {
+        Some(ScrollAction::ScrollTo { offset }) => ScrollRouted::ScrollTo { offset },
+        None => ScrollRouted::Redrawn,
+    })
 }
 
 /// Build the [`TableRow`] for one list entry: a leading name cell carrying the
@@ -2179,169 +2209,184 @@ pub fn progress_cancel_at(viewport: Rect, scale: Scale, theme: &Theme, point: Po
     point.x >= rect.left() && point.x < right && point.y >= rect.top() && point.y < bottom
 }
 
-/// Build the drawn right-click context [`Menu`] for `model`: one [`MenuItem`]
-/// per [`chrome::CONTEXT_COMMANDS`] entry, in order, each carrying the
-/// command's label and keyboard-shortcut caption and rendered disabled (not
-/// hidden) when the model reports the command is not currently actionable — so
-/// the menu's shape is stable and an inapplicable command reads muted rather
-/// than vanishing. The menu performs nothing itself — the caller dispatches the
-/// chosen command in its own capability-checked tail — so composing it grants
-/// no authority; the read-only picker never opens a write context menu, so it
-/// never builds one.
+/// Most candidate rows the "Open With…" chooser shows at once.
+///
+/// The panel is a fixed shape a dialog can sit in rather than one that grows
+/// with the applications a user has installed; a longer list scrolls inside it
+/// ([`OpenWithChooser`]). A smaller window shrinks the list further, because
+/// the panel is still clamped to the window it is centred in.
+const OPEN_WITH_MAX_ROWS: u32 = 8;
+
+/// The bounds of the "Open With…" chooser panel, centred and clamped within
+/// `viewport`.
+///
+/// One placement definition, shared by [`draw_open_with_chooser`],
+/// [`open_with_row_at`] and [`open_with_visible_rows`], so what is drawn and
+/// what a press resolves to can never disagree. It sits on the same centred
+/// sizing the delete confirmation ([`delete_dialog_rect`]) and the progress
+/// panel use, so the manager's modal surfaces are placed alike.
 #[must_use]
-pub fn build_context_menu(model: ContextMenuModel) -> Menu {
-    let items: Vec<MenuItem> = chrome::CONTEXT_COMMANDS
-        .iter()
-        .map(|&command| {
-            let mut item = MenuItem::new(command.label()).with_shortcut(command.shortcut());
-            if !model.is_enabled(command) {
-                item = item.with_state(ControlState::disabled());
-            }
-            item
-        })
-        .collect();
-    Menu::new(items)
+pub fn open_with_chooser_rect(viewport: Rect, scale: Scale, theme: &Theme) -> Rect {
+    centered_overlay_rect(viewport, scale, theme, OPEN_WITH_MAX_ROWS)
 }
 
-/// The bounds of the context `menu` anchored at window-local `anchor` (the
-/// right-click point), clamped so the whole menu stays inside `viewport`.
+/// How many candidate rows the chooser's list shows at the current geometry.
 ///
-/// Delegates to [`Menu::anchored_rect`], the one shared placement rule every
-/// popup-menu owner uses, so [`draw_context_menu`] and
-/// [`context_menu_command_at`] place and hit-test the same rectangle.
+/// Zero when the window leaves the panel no content area at all, which draws
+/// and hit-tests nothing rather than dividing by an empty row.
 #[must_use]
-pub fn context_menu_rect(
-    menu: &Menu,
-    anchor: Point,
-    viewport: Rect,
-    scale: Scale,
-    theme: &Theme,
-) -> Rect {
-    menu.anchored_rect(anchor, viewport, scale, theme)
+pub fn open_with_visible_rows(viewport: Rect, scale: Scale, theme: &Theme) -> usize {
+    let Some(content) = open_with_content_rect(viewport, scale, theme) else {
+        return 0;
+    };
+    let row = row_height(scale, theme);
+    if row == 0 {
+        return 0;
+    }
+    (content.height / row) as usize
 }
 
-/// Draw the context `menu` anchored at `anchor`, on top of the current view.
+/// The chooser panel's content area — where the rows and the scroll gutter go.
+fn open_with_content_rect(viewport: Rect, scale: Scale, theme: &Theme) -> Option<Rect> {
+    let bounds = open_with_chooser_rect(viewport, scale, theme);
+    Panel::new(String::new()).content_rect(bounds, scale, theme)
+}
+
+/// The window-local rectangle the chooser's `visible` list draws its row at
+/// `slot` (a position on screen, not a candidate index) into, and the gutter
+/// the scrollbar occupies beside them.
+fn open_with_row_rect(content: Rect, scale: Scale, theme: &Theme, slot: usize) -> Rect {
+    let row = row_height(scale, theme);
+    let gutter = gutter_width(scale, theme, content.width);
+    let top = content.origin.y.saturating_add(to_i32(
+        row.saturating_mul(u32::try_from(slot).unwrap_or(u32::MAX)),
+    ));
+    Rect::new(
+        content.origin.x,
+        top,
+        content.width.saturating_sub(gutter),
+        row,
+    )
+}
+
+/// The scroll gutter beside the chooser's rows, or `None` when the panel is too
+/// narrow for one.
+fn open_with_gutter_rect(content: Rect, scale: Scale, theme: &Theme) -> Option<Rect> {
+    let gutter = gutter_width(scale, theme, content.width);
+    if gutter == 0 {
+        return None;
+    }
+    Some(Rect::new(
+        content
+            .origin
+            .x
+            .saturating_add(to_i32(content.width.saturating_sub(gutter))),
+        content.origin.y,
+        gutter,
+        content.height,
+    ))
+}
+
+/// Draw the "Open With…" `chooser` centred over the current view: a titled
+/// panel naming the file, one [`ListRow`] per visible candidate with the
+/// current one selected, and the scrollbar beside them when the list is longer
+/// than the panel shows.
 ///
-/// Every blit clips, so an anchor near an edge simply shows the shifted,
-/// possibly-clipped menu rather than panicking. It reads only the passed-in
-/// menu and draws — no I/O, no authority.
-pub fn draw_context_menu(
+/// It reads only the passed-in chooser and draws — no I/O, no authority — and
+/// every blit clips, so a window too small for the panel simply shows what fits.
+pub fn draw_open_with_chooser(
     surface: &mut Surface,
-    menu: &Menu,
-    anchor: Point,
+    chooser: &OpenWithChooser,
     scale: Scale,
     theme: &Theme,
     viewport: Rect,
 ) {
-    let bounds = context_menu_rect(menu, anchor, viewport, scale, theme);
-    menu.render(surface, bounds, scale, theme);
-}
-
-/// The enabled [`ContextCommand`] the context `menu` (opened at `anchor`) draws
-/// at window-local pixel `point`, or `None` when the click is not on an
-/// actionable row — off the menu, or on a command rendered disabled (fail
-/// closed: a disabled row never acts).
-///
-/// This mirrors [`draw_context_menu`]'s placement through the shared
-/// [`context_menu_rect`] and the menu's own [`Menu::row_at`] geometry, so a
-/// click resolves to exactly the row the user pressed. The menu is built from
-/// [`chrome::CONTEXT_COMMANDS`] in order, so the row index maps straight back
-/// to its command.
-#[must_use]
-pub fn context_menu_command_at(
-    menu: &Menu,
-    anchor: Point,
-    viewport: Rect,
-    scale: Scale,
-    theme: &Theme,
-    point: Point,
-) -> Option<ContextCommand> {
-    let index = menu_enabled_row_at(menu, anchor, viewport, scale, theme, point)?;
-    chrome::CONTEXT_COMMANDS.get(index).copied()
-}
-
-/// The window-local [`Rect`] the context `menu` (opened at `anchor`) draws the
-/// row for `command` at, or `None` when `command` is not among
-/// [`chrome::CONTEXT_COMMANDS`]. The forward mirror of
-/// [`context_menu_command_at`] over the shared [`context_menu_rect`] placement
-/// and the menu's own [`Menu::row_rect`] geometry, so a caller that must aim
-/// *at* a command — the desktop integration harness that clicks Delete — reads
-/// the exact rectangle [`draw_context_menu`] paints and
-/// [`context_menu_command_at`] hit-tests, never a hand-copied position.
-#[must_use]
-pub fn context_menu_command_rect(
-    menu: &Menu,
-    anchor: Point,
-    viewport: Rect,
-    scale: Scale,
-    theme: &Theme,
-    command: ContextCommand,
-) -> Option<Rect> {
-    let index = chrome::CONTEXT_COMMANDS
-        .iter()
-        .position(|&c| c == command)?;
-    let bounds = context_menu_rect(menu, anchor, viewport, scale, theme);
-    menu.row_rect(index, bounds, scale, theme)
-}
-
-/// The index of the enabled row of `menu` (anchored at `anchor`) that
-/// window-local pixel `point` lands on, or `None` when the click is off the
-/// menu or on a disabled row (fail closed).
-///
-/// The one placement + row geometry the drawn menus resolve a click through:
-/// both the right-click [`context_menu_command_at`] and the "Open With…"
-/// chooser [`open_with_index_at`] map a press to a row this way, so a menu's
-/// paint and its hit-test can never disagree.
-fn menu_enabled_row_at(
-    menu: &Menu,
-    anchor: Point,
-    viewport: Rect,
-    scale: Scale,
-    theme: &Theme,
-    point: Point,
-) -> Option<usize> {
-    let bounds = context_menu_rect(menu, anchor, viewport, scale, theme);
-    let index = menu.row_at(bounds, scale, theme, point)?;
-    if !menu.items().get(index)?.state().is_actionable() {
-        return None;
+    let bounds = open_with_chooser_rect(viewport, scale, theme);
+    let panel = Panel::new(alloc::format!("Open {} with", chooser.display_name()));
+    panel.render(surface, bounds, scale, theme);
+    let Some(content) = panel.content_rect(bounds, scale, theme) else {
+        return;
+    };
+    let visible = open_with_visible_rows(viewport, scale, theme);
+    let first = usize::try_from(chooser.offset()).unwrap_or(usize::MAX);
+    for slot in 0..visible {
+        let Some(candidate) = chooser.candidates().get(first.saturating_add(slot)) else {
+            break;
+        };
+        let mut row = ListRow::new(candidate.name()).with_icon(IconKind::AppBundle);
+        row.set_selected(first.saturating_add(slot) == chooser.selected());
+        row.render(
+            surface,
+            open_with_row_rect(content, scale, theme, slot),
+            scale,
+            theme,
+            None,
+        );
     }
-    Some(index)
+    if let Some(gutter) = open_with_gutter_rect(content, scale, theme) {
+        let mut bar: ScrollBar = *chooser.scrollbar();
+        bar.set_model(chooser.scroll_model(visible));
+        bar.render(surface, gutter, scale, theme);
+    }
 }
 
-/// Build the drawn "Open With…" chooser [`Menu`] from `apps` — the installed
-/// applications [`applications_for`](crate::open_with::applications_for)
-/// returned for the file, in that source order: one enabled [`MenuItem`] per
-/// candidate, captioned with the bundle's name.
+/// The candidate index the drawn `chooser` resolves window-local pixel `point`
+/// to, or `None` when the press is not on a candidate row — off the panel, on
+/// its title band, in the scroll gutter, or past the last row (fail closed).
 ///
-/// The rows carry no keyboard shortcut (a chosen application is picked by
-/// pointer) and are all actionable, since each is a genuine candidate. The
-/// caller only opens this chooser when `apps` is non-empty — no application is
-/// an honest "no application" answer stated elsewhere, never an empty menu. The
-/// menu performs nothing itself: launching the chosen bundle is the file
-/// manager's own capability-checked hand-off, so composing it grants no
-/// authority (the read-only picker never opens it).
+/// It mirrors [`draw_open_with_chooser`]'s geometry through the shared
+/// [`open_with_chooser_rect`], so a press resolves to exactly the row the user
+/// saw. The index is absolute (the chooser's scroll offset is applied), so it
+/// names a candidate rather than a position on screen.
 #[must_use]
-pub fn build_open_with_menu(apps: &[&AppAssociation]) -> Menu {
-    let items: Vec<MenuItem> = apps.iter().map(|app| MenuItem::new(app.name())).collect();
-    Menu::new(items)
-}
-
-/// The index into the "Open With…" chooser's application list that the drawn
-/// `menu` (opened at `anchor`) resolves window-local pixel `point` to, or
-/// `None` when the click is off the menu (fail closed).
-///
-/// [`build_open_with_menu`] builds the menu from the candidate list in order,
-/// so the returned index maps straight back to that application. It shares the
-/// placement and row geometry the right-click menu uses
-/// ([`context_menu_command_at`]), so paint and click agree.
-#[must_use]
-pub fn open_with_index_at(
-    menu: &Menu,
-    anchor: Point,
+pub fn open_with_row_at(
+    chooser: &OpenWithChooser,
     viewport: Rect,
     scale: Scale,
     theme: &Theme,
     point: Point,
 ) -> Option<usize> {
-    menu_enabled_row_at(menu, anchor, viewport, scale, theme, point)
+    let content = open_with_content_rect(viewport, scale, theme)?;
+    let visible = open_with_visible_rows(viewport, scale, theme);
+    let first = usize::try_from(chooser.offset()).unwrap_or(usize::MAX);
+    (0..visible).find_map(|slot| {
+        let rect = open_with_row_rect(content, scale, theme, slot);
+        if rect.width == 0 || !rect.contains(point) {
+            return None;
+        }
+        let index = first.saturating_add(slot);
+        (index < chooser.candidates().len()).then_some(index)
+    })
+}
+
+/// Route a pointer `event` at window-local `point` to the chooser's own
+/// scrollbar, reporting `Some(repaint)` when the bar consumed it (so the caller
+/// does not also treat the press as a click on a row) and `None` when the
+/// pointer had nothing to do with the bar.
+///
+/// The bar owns the interaction its press started, exactly as the listing's
+/// does ([`scroll_pointer`]) and through the same shared routing, so the two
+/// cannot come to behave differently.
+pub fn open_with_scroll_pointer(
+    chooser: &mut OpenWithChooser,
+    scale: Scale,
+    theme: &Theme,
+    viewport: Rect,
+    point: Point,
+    event: &InputEvent,
+    damage: &mut Region,
+) -> Option<bool> {
+    let content = open_with_content_rect(viewport, scale, theme)?;
+    let gutter = open_with_gutter_rect(content, scale, theme)?;
+    let visible = open_with_visible_rows(viewport, scale, theme);
+    let model = chooser.scroll_model(visible);
+    let routed = {
+        let bar = chooser.scrollbar_mut();
+        bar.set_model(model);
+        route_scroll_bar(bar, gutter, scale, theme, point, event, damage)?
+    };
+    if let ScrollRouted::ScrollTo { offset } = routed {
+        chooser.set_offset(offset, visible);
+    }
+    Some(true)
 }

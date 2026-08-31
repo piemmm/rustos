@@ -287,30 +287,37 @@ action, below). **New Folder** is a
 *write* tool that lives on the manager-only toolbar (below), not on this menu
 shared with the read-only picker.
 
-The **context menu is now drawn and clickable**. A secondary-button
-(right-click) press selects the item under the pointer — or clears the
-selection on empty space, so only the directory-scoped Paste is offered —
-and opens a `lib/controls` `Menu` painted from the `ContextMenuModel`:
-`render::build_context_menu` builds one `MenuItem` per `CONTEXT_COMMANDS`
-entry (its `ContextCommand::label()` and keyboard-`shortcut()` caption,
-rendered disabled when the model reports it inapplicable),
-`render::context_menu_rect` anchors it at the click and clamps it inside the
-window (delegating to the shared `lib/controls` `Menu::anchored_rect`, so a
-second context-menu owner elsewhere in the desktop places its popup the same
-way), `render::draw_context_menu` paints it topmost, and
-`render::context_menu_command_at` mirrors that placement to return **only an
-enabled command** (a press on a disabled row or off the menu resolves to
-nothing, failing closed). The `files.app` `Run` binary routes a chosen
-command through `dispatch_context_command` to the **exact same** app verbs
-the toolbar and keyboard already drive — Open (`activate`), Open With… (the
-chooser below), Rename, Cut, Copy, Paste, Properties, and Delete (the same
-modal-confirmed `begin_delete` the `Delete` key opens, below) — so the menu can
-never diverge from them (`AGENTS.md` §2.2) and adds no authority (every verb is
-the user's own §5.3-checked action). `Escape` or a press off the menu dismisses
-it. Because the `Delete` key is not the only way in, the confirm-and-remove
-flow is reachable by pointer alone (`render::context_menu_command_rect` is the
-shared forward mirror of the hit-test, so a caller — including the desktop
-integration harness — can aim at exactly the drawn Delete row, §2.2).
+**The context menu is the desktop's, and the file manager draws no menu
+pixel.** A secondary-button (right-click) press selects the item under the
+pointer — or clears the selection on empty space, so only the directory-scoped
+Paste is offered — and asks the desktop's one menu service to bring a chain up
+([menus](./menus.md)): `chrome::context_menu` declares one row per
+`CONTEXT_COMMANDS` entry carrying that command's `label()` and keyboard
+`shortcut()`, and the `Run` binary sends it as a `WindowRequest::OpenMenu`
+anchored at the window-local point the press was reported at — the only space
+the application can speak truthfully, since it is never told where its window
+sits. The desktop titles the plate (the application's own name), places it,
+draws it, holds the grab, traverses it by keyboard, and dismisses it.
+
+A command the model reports inapplicable is declared **disabled with its
+reason** rather than left out, so the menu's shape does not move with the
+selection and a row says *why* it cannot be chosen — `ContextMenuModel::reason`
+is the one rule, and `is_enabled` is derived from it, so a row can never grey
+out with nothing to say. Removal declares the destructive emphasis. A row's id
+is its command's position in `CONTEXT_COMMANDS`, so `context_command_from_item`
+reads a chosen row back through the exact inverse of numbering it.
+
+The answer is exactly one `WindowEvent::MenuClosed` naming the open id the
+window minted, so an answer to a gesture already settled cannot run a stale
+command; the `Run` binary routes the chosen command through
+`dispatch_context_command` to the **exact same** app verbs the toolbar and
+keyboard already drive — Open (`activate`), Open and Close (the same activation
+with the window closed behind the hand-off), Open With… (the chooser below),
+Rename, Cut, Copy, Paste, Properties, and Delete (the same modal-confirmed
+`begin_delete` the `Delete` key opens, below) — so the menu can never diverge
+from them (`AGENTS.md` §2.2) and adds no authority (every verb is the user's own
+§5.3-checked action). A refused open is an answer: it is stated on `stderr` and
+the window carries on with no menu, never drawing one of its own.
 
 **A desktop shortcut, not a taskbar pin, is how an application gets a second
 place to launch from.** Taskbar pinning was removed from the design
@@ -403,15 +410,23 @@ The `files.app` `Run` binary acts on this decision when the user presses
 `Enter`, **double-clicks an item**, and chooses **Open** from the right-click
 menu — all three route through the one shared `activate`, so a pointer
 double-click can never open something a keyboard `Enter` would not
-(`AGENTS.md` §2.2). Four gestures reach it, and which one a press is comes
-from the app's own pure, host-tested `gesture` module:
+(`AGENTS.md` §2.2). Three gestures and one menu row reach it, and which one a
+press is comes from the app's own pure, host-tested `gesture` module:
 
 | gesture | what it does |
 |---|---|
 | double-click / `Enter` | activate: descend, run a bundle, or open a file |
 | shift-double-click / `Shift+Enter` | list a bundle's contents instead of running it |
-| right-click | open the context menu on the item |
-| right-double-click | activate, then close this window |
+| right-click | ask the desktop for the context menu on the item |
+| the **Open and Close** menu row | activate, then close this window |
+
+There is no right-*double*-click. The menu the first press opens is the
+desktop's chain and holds the seat's grab, so the second press is consumed there
+and never reaches the application — which is a property of the design, not a
+gap: an application never sees a press inside chrome it does not own. The "open
+this and I am done here" verb is a menu row instead, which is discoverable and
+reachable from the keyboard as the gesture never was
+(`plans/NEW-MENUS.md` D20).
 
 The pairing is the shared, pure `click::DoubleClickTracker`
 (`plans/NEW-FILEMANAGER.md` FM12), keyed on the **button** as well as the item:
@@ -420,8 +435,9 @@ button* on that *same* item within `DOUBLE_CLICK_INTERVAL_NS` (half a second,
 timed by the capability-free monotonic `clock_get`) completes the gesture. One
 press of each button is therefore two gestures begun, never one completed. The
 tracker is reset whenever a press lands on chrome (a toolbar tool) rather than
-an item, so a click *through* the chrome and back is never mistaken for a
-double-click; a non-monotonic clock reading fails closed to a single click.
+an item, and by a right-click, so neither a click *through* the chrome and back
+nor a click either side of a menu is mistaken for a double-click; a
+non-monotonic clock reading fails closed to a single click.
 
 The modifier a shift-double-click carries reaches the app on the pointer event
 itself (`WindowEvent::Pointer`'s `modifiers`, stamped by the seat): a modifier
@@ -429,12 +445,12 @@ key reaches no surface as a key, so an app could not otherwise know one is
 held. `Shift+Enter` is the same intent from the keyboard, resolved through the
 one `gesture::bundle_intent` spelling so the two cannot diverge.
 
-A right-double-click closes the window **only** once the entry has been handed
+Open and Close closes the window **only** once the entry has been handed
 to another program (`AfterHandoff::CloseWindow` on a `LaunchBundle` or
-`OpenFile`). A `Descended` never closes it whichever was asked for — the
-folder just listed *is* the window's new content, so closing it would leave the
-user with nothing. The context menu the first of the two presses opened is
-superseded by the gesture it turned out to begin.
+`OpenFile`). A folder just listed *is* the window's new content, so closing it
+would leave the user with nothing — which is why the row is offered only over a
+file or a bundle and states "a folder opens in this window" otherwise, rather
+than being drawn and quietly not closing.
 
 On any activation,
 a `Descended` reveals the selection and repaints, and a
@@ -470,20 +486,32 @@ application claims leaves the listing unchanged and states the refusal on
 of prompting the session's trusted picker (its standalone launch is
 unchanged).
 
-The explicit **"Open With…"** chooser is now drawn and wired. Choosing **Open
-With…** from the right-click menu on a regular file resolves the file's
-absolute path (the one shared `selected_target_path` spelling), enumerates the
-full `applications_for` candidate list over `RtBundleSource`, and — when at
-least one application claims the type — paints it as a `lib/controls` `Menu`
-(`render::build_open_with_menu`, one row per candidate in source order,
-anchored where the context menu was through the shared `context_menu_rect`).
-The chooser owns input while open: a primary-button press resolves through
-`render::open_with_index_at` (the shared enabled-row hit-test the context menu
-also uses, so paint and click cannot disagree, `AGENTS.md` §2.2) to the chosen
-candidate, which is launched through the **same** `DOCUMENT_ROLE_ARG` + `STDIN`
-hand-off the default open uses; `Escape` or a press off the menu dismisses it.
-A file no installed application claims is stated fail-loud on `stderr` and
-opens nothing — an honest "no application" answer, never an empty menu
+**"Open With…" is a chooser, not a menu.** The candidate set is as long as the
+applications a user has installed, so no menu plate can promise to hold it, and
+the desktop's menu model crosses the wire *complete* — every row of every plate
+in the one open — so candidates could not be filled in lazily either. Making
+them rows would put a read of three program stores on **every** right-click for
+a list the user rarely asks for (`plans/NEW-MENUS.md` §6, decision 2). So the
+menu row concludes the chain, and the file manager then opens a list surface of
+its own.
+
+Choosing **Open With…** resolves the file's absolute path (the one shared
+`selected_target_path` spelling), enumerates the full `applications_for`
+candidate list over `RtBundleSource`, and — when at least one application claims
+the type — opens an `OpenWithChooser`: a centred modal panel titled for the file,
+holding one `ListRow` per candidate in ranked order with the current one
+selected, drawn by `render::draw_open_with_chooser` and scrolled inside its own
+fixed shape. The list is reached in full however long it is: by wheel, by the
+drawn scrollbar's drag (which routes through the very rule the listing's bar
+does, so the two cannot behave differently), and by Up/Down/Home/End with the
+selection revealed. `Enter`, or a primary press on a row resolved through
+`render::open_with_row_at` (which mirrors the draw's placement, so paint and
+click cannot disagree, `AGENTS.md` §2.2), launches the chosen candidate through
+the **same** `DOCUMENT_ROLE_ARG` + `STDIN` hand-off the default open uses;
+`Escape` or a press off the rows dismisses it and launches nothing.
+
+A file no installed application claims is stated fail-loud on `stderr` and opens
+nothing — an honest "no application" answer, never an empty chooser
 (`AGENTS.md` §2.24). The default open still picks the first association; the
 chooser lets the user pick any of them.
 
@@ -1371,9 +1399,7 @@ were being dropped, so `tairix_wm`'s input router now raises+focuses and
 delivers a client-area right-press as `InputResponse::SecondaryActivated`, the
 desktop session's router forwards it to the window manager, and the session
 delivers `WindowEvent::Pointer` `Pressed(Secondary)` to the app — host-tested
-in `tairix-wm` and `tairix-desktop-session`. The shared `Menu::row_rect` and
-`render::context_menu_command_rect` give a caller the drawn Delete row's rect
-(`AGENTS.md` §2.2).
+in `tairix-wm` and `tairix-desktop-session`.
 
 The earlier note that a scripted right-click "never arrives in the guest" was a
 test-harness bug, not an emulator limit, and is now fixed and proven. QEMU's
@@ -1389,25 +1415,15 @@ a `virtio-mouse-device`, injects a secondary press+release, and asserts the
 driver decodes `BTN_RIGHT` (`0x111`), never the middle button (`0x112`) — it
 times out with the old mask and passes with the fix.
 
-The full right-click → Delete → confirm click-through is now wired into the
-aarch64 `autoload_input` vertical end to end. Appended after the FM9-b Viewer
-open-a-file, it is gated on the Viewer's `sc=fd_redeem` serial line (the last
-FM9-b event, and the image's only `fd_redeem`), so it runs strictly after the
-CU6 delegation without depending on the app-ward delivery counter (the FM9-b
-Viewer window delivers its own focus event, leaving that count statically
-unknown). The runner right-clicks the FM9-a folder row (the secondary press
-raises+focuses the files window over the frontmost Viewer and opens the context
-menu on the folder), clicks the drawn **Delete** row, and clicks the
-confirmation dialog's Delete button — every point reconstructed from the app's
-own layout code (`render::selection_rect`, `render::context_menu_command_rect`
-over the menu built exactly as the app builds it, and `render::delete_dialog_rect`
-with the dialog's own `action_rects`), never a hand-copied coordinate
-(`AGENTS.md` §2.2). A tenth guest PASS witness latches from the kernel's
-`FsNodeMutated op=rmdir` audit record, gated on the FM9-b delegation being
-redeemed so no earlier removal can satisfy it (fail closed — a refusal logs
-`FsMutationDenied`, a different id) — so the manager's right-click delete is
-kernel-attested under the logged-in user's own identity, non-flaky across
-repeated runs.
+**No QEMU vertical clicks the file manager's context menu.** The plates are the
+desktop's now, so a script that aimed at one would reconstruct the *session's*
+chain rather than the app's layout — and the session's chain is already driven
+end to end by `tests/integration/menu_qemu_aarch64`, which opens a menu, waits
+for the `MENU_SHOWN` record that says a plate actually reached the display,
+photographs the plate at the rectangle the production chain reports, and clicks
+one of its rows. What is left unproven by a host test in the file manager's own
+case is the glue that sends the open and matches the answer's id, which is the
+same shape that vertical already exercises for the terminal.
 
 ### The properties model
 

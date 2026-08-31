@@ -106,7 +106,9 @@ mod program {
         KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyCode, PointerButtonCode,
     };
     use tairix_abi::seat::SEAT_PRIMARY;
-    use tairix_abi::window_ipc::{PointerAction, WindowEvent, WINDOW_ENDPOINT};
+    use tairix_abi::window_ipc::{
+        MenuAnchor, MenuOutcome, PointerAction, WindowEvent, WINDOW_ENDPOINT,
+    };
     use tairix_abi::{
         load_failure_reason, CapabilityId, Errno, FdWire, Origin, ProcId, SpawnAttach, UnlinkFlags,
         WaitFlags, WaitSetOp, WaitSourceKind, WaitStatus, BUNDLE_SUFFIX, DOCUMENT_ROLE_ARG,
@@ -114,27 +116,27 @@ mod program {
         SYSTEM_COMMAND_STORE, WAITSET_CHILD_ANY, WAIT_PID_ANY,
     };
     use tairix_browse::render::{
-        build_context_menu, build_delete_dialog, build_open_with_menu, context_menu_command_at,
-        delete_dialog_action_at, draw_context_menu, draw_delete_dialog, draw_owner_control,
-        draw_progress_dialog, draw_properties_editable, manager_tool_at, open_with_index_at,
-        owner_editor_rect, owner_field_at, permission_cell_at, render_into, scroll_pointer,
-        OwnerField, DELETE_CANCEL_INDEX, DELETE_CONFIRM_INDEX,
+        build_delete_dialog, delete_dialog_action_at, draw_delete_dialog, draw_open_with_chooser,
+        draw_owner_control, draw_progress_dialog, draw_properties_editable, manager_tool_at,
+        open_with_row_at, open_with_scroll_pointer, open_with_visible_rows, owner_editor_rect,
+        owner_field_at, permission_cell_at, render_into, scroll_pointer, OwnerField,
+        DELETE_CANCEL_INDEX, DELETE_CONFIRM_INDEX,
     };
     use tairix_browse::{
-        applications_for, association_from_appinfo, empty_trash_plan, paste_strategy, plan_paste,
-        suggest_new_dir_name, trash_dest_path, trash_dir, trash_strategy, validate_new_name,
-        Activation, AppAssociation, Browser, BundleIntent, BundleSource, Clipboard, ClipboardOp,
-        ContextCommand, ContextMenuModel, CopyAction, CopyCursor, CopyKind, CopyWalk, DeleteAction,
-        DeleteDisposition, DeletePlan, DeleteWalk, DirectorySource, DoubleClickTracker, EntryKind,
-        ManagerChrome, ManagerTool, ManagerToolModel, OwnerChange, PasteItem, PasteStrategy,
-        Places, ProgressModel, ProgressOp, Properties, RenameError, RtLinkReader, ToolbarCommand,
+        applications_for, association_from_appinfo, context_command_from_item, context_menu,
+        empty_trash_plan, paste_strategy, plan_paste, suggest_new_dir_name, trash_dest_path,
+        trash_dir, trash_strategy, validate_new_name, Activation, AppAssociation, Browser,
+        BundleIntent, BundleSource, Clipboard, ClipboardOp, ContextCommand, ContextMenuModel,
+        CopyAction, CopyCursor, CopyKind, CopyWalk, DeleteAction, DeleteDisposition, DeletePlan,
+        DeleteWalk, DirectorySource, DoubleClickTracker, EntryKind, ManagerChrome, ManagerTool,
+        ManagerToolModel, OpenWithChooser, OwnerChange, PasteItem, PasteStrategy, Places,
+        ProgressModel, ProgressOp, Properties, RenameError, RtLinkReader, ToolbarCommand,
         TrashStrategy, VfsDirectorySource, ViewMode, Volume, VolumeId, MANAGER_TOOLS, WIN_HEIGHT,
         WIN_SIZING, WIN_WIDTH,
     };
     use tairix_controls::damage;
     use tairix_controls::decision::Dialog;
     use tairix_controls::text::{TextAction, TextField};
-    use tairix_controls::Menu;
     use tairix_display::{winframe, SERIAL};
     use tairix_geometry::{Point, Rect, Region, Scale};
     use tairix_help::{own_short_help, BundleHelp};
@@ -157,13 +159,17 @@ mod program {
 
     use crate::appbar;
     use crate::command::{self, unlistable_reason, Command, Role, UsageError, USAGE};
-    use crate::gesture::{
-        self, bundle_intent, AfterHandoff, MenuOnSingle, PrimaryPress, SecondaryPress,
-    };
+    use crate::gesture::{self, bundle_intent, AfterHandoff, PrimaryPress};
     use crate::listing::{self, ViewMark};
     use crate::location::{leave_directory, location_title, retitle, Leave};
     use crate::operation::{operation_control, OperationControl};
     use crate::sidebar::{self, press_point};
+
+    /// The application's own name, as its context menu's plate is titled.
+    ///
+    /// A per-window menu's title is the application's, bounded and sanitised
+    /// exactly as a row label is: a name, not a credential.
+    const APP_NAME: &str = "Files";
 
     /// Exit code when the initial directory listing was refused (no
     /// filesystem reach, or a corrupt stream). A reserved, fail-closed
@@ -419,6 +425,12 @@ mod program {
         /// clipped repaint sound — every pixel outside the clip is the one
         /// already on screen.
         surface: Surface,
+        /// The open id of this window's unanswered context menu, if one is up.
+        ///
+        /// The desktop mints one per gesture and never reuses it, so an answer
+        /// that names anything else belongs to a gesture already settled and is
+        /// not acted on.
+        menu: Option<u64>,
     }
 
     /// Paint `win`'s current state and present it.
@@ -572,6 +584,7 @@ mod program {
             frames,
             title,
             surface,
+            menu: None,
         })
     }
 
@@ -793,10 +806,16 @@ mod program {
         // and listing for the marks they move themselves, report into this
         // one, which is what the present is clipped to.
         let mut damage = damage::sink();
+        let window_id = win.window;
         let (repaint, close) = apply_event(
             &mut win.browser,
             &mut win.overlays,
             &mut win.places,
+            &mut MenuLink {
+                client,
+                window: window_id,
+                open: &mut win.menu,
+            },
             launcher,
             canvas,
             event,
@@ -1463,49 +1482,21 @@ mod program {
         Trash(TrashRun),
     }
 
-    /// The open right-click context menu: the built [`Menu`] and the
-    /// window-local point it is anchored at.
+    /// One window's link to the desktop's menu service: the channel a chain is
+    /// asked for over, the window the ask is scoped to, and the open id that
+    /// window is waiting on an answer for.
     ///
-    /// `None` unless the user right-clicked; the event loop threads it so the
-    /// painted menu and the anchor its hit-test mirrors stay in step. It opens
-    /// only in navigation mode (no other overlay is up), owns input while
-    /// open, and performs nothing itself — a chosen command runs the user's
-    /// own verb, exactly the paths the toolbar and keyboard drive.
-    struct ContextMenu {
-        /// The window-local right-click point the menu is placed at and
-        /// hit-tested against (one anchor, so paint and click agree).
-        anchor: Point,
-        /// The drawn menu, built from the shared context-menu model.
-        menu: Menu,
-    }
-
-    /// The open "Open With…" application chooser: the drawn [`Menu`] of the
-    /// installed applications that can open the selected file, the point it is
-    /// anchored at, and — index-aligned with the menu rows — the bundle paths a
-    /// chosen row launches and the file it hands them.
-    ///
-    /// `None` unless the user chose Open With… on a regular file that at least
-    /// one installed application claims (no application is an honest refusal
-    /// stated on `stderr`, never an empty menu). It owns input while open and
-    /// performs nothing itself — a chosen application is launched by the
-    /// manager's own capability-checked hand-off ([`Launcher::launch_viewer`]),
-    /// exactly the path the default open uses.
-    struct OpenWithMenu {
-        /// The window-local point the chooser is placed at and hit-tested
-        /// against (the right-click point Open With… was invoked from, so the
-        /// chooser appears where the menu that opened it was).
-        anchor: Point,
-        /// The drawn chooser menu, built from the candidate applications in
-        /// order ([`build_open_with_menu`]).
-        menu: Menu,
-        /// The candidate bundle directory paths, index-aligned with the menu
-        /// rows: a chosen row `i` launches `bundles[i]`.
-        bundles: alloc::vec::Vec<String>,
-        /// The absolute path of the file the chosen application opens.
-        file_path: String,
-        /// The file's leaf name — the title handed to the launched viewer and
-        /// the name the "no application" refusal states.
-        display_name: String,
+    /// One value rather than three parameters threaded separately, because the
+    /// exactly-once rule reads all three together: an answer is acted on only
+    /// when it names the open *this* window minted, and the desktop never
+    /// reuses an id, so anything else answers a gesture already settled.
+    struct MenuLink<'a> {
+        /// The window channel the open is sent over.
+        client: &'a mut WindowClient<RtWindowTransport>,
+        /// The session's id for the window the chain belongs to.
+        window: u64,
+        /// The open id of this window's unanswered menu, if one is up.
+        open: &'a mut Option<u64>,
     }
 
     /// The transient overlay state layered over the browser view, threaded
@@ -1521,11 +1512,15 @@ mod program {
         owner: Option<OwnerEditor>,
         /// The delete-confirmation dialog, when open (`Delete`).
         delete: Option<DeleteConfirm>,
-        /// The right-click context menu, when open (secondary-button press).
-        menu: Option<ContextMenu>,
         /// The "Open With…" application chooser, when open (chosen from the
         /// context menu on a regular file).
-        open_with: Option<OpenWithMenu>,
+        ///
+        /// A chooser, not a menu: the candidates are as many as the
+        /// applications a user has installed, which no menu plate can promise
+        /// to hold, so this window draws a scrolled list of its own
+        /// (`plans/NEW-MENUS.md` §6, decision 2). The right-click menu itself
+        /// is the desktop's chain and appears nowhere here.
+        open_with: Option<OpenWithChooser>,
         /// The running long file operation (a recursive delete), when one is in
         /// progress. While it is set the event loop drives it interleaved with
         /// input rather than parking, showing progress and honouring a cancel.
@@ -1696,25 +1691,12 @@ mod program {
                 if let Some(confirm) = overlays.delete.as_ref() {
                     draw_delete_dialog(surface, &confirm.dialog, scale, theme, viewport);
                 }
-                // The right-click context menu draws last, on top of the view.
-                // It opens only in navigation mode, so it never overlaps the
-                // modal overlays above; drawing it last keeps it topmost
-                // regardless.
-                if let Some(ctx) = overlays.menu.as_ref() {
-                    draw_context_menu(surface, &ctx.menu, ctx.anchor, scale, theme, viewport);
-                }
-                // The "Open With…" chooser draws on top of the view exactly as
-                // the context menu does; the two are never open together (the
-                // chooser replaces the context menu that opened it).
+                // The "Open With…" chooser is modal and draws on top of the
+                // view. The right-click menu is not drawn here at all — its
+                // plates are the desktop's own surfaces, so this window never
+                // paints a menu pixel.
                 if let Some(chooser) = overlays.open_with.as_ref() {
-                    draw_context_menu(
-                        surface,
-                        &chooser.menu,
-                        chooser.anchor,
-                        scale,
-                        theme,
-                        viewport,
-                    );
+                    draw_open_with_chooser(surface, chooser, scale, theme, viewport);
                 }
                 // A running long operation's progress + cancel panel is modal:
                 // drawn last so it is topmost while the walk runs interleaved
@@ -1737,10 +1719,12 @@ mod program {
     /// viewport the renderer uses, so the drawn view, the selection reveal,
     /// and the wheel scroll all agree on the geometry; `launcher` is the
     /// launched-bundle bookkeeping an activation spawns through.
+    #[allow(clippy::too_many_arguments)] // The window's whole mutable state, threaded explicitly.
     fn apply_event<S: DirectorySource>(
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
         places: &mut Places,
+        menu: &mut MenuLink<'_>,
         launcher: &RefCell<Launcher>,
         canvas: Canvas<'_>,
         event: &WindowEvent,
@@ -1766,22 +1750,28 @@ mod program {
             return (Repaint::Nothing, true);
         }
 
-        // The right-click context menu owns input while it is open (it opens
-        // only in navigation mode, so no other overlay is up); it needs the
-        // launcher for a context-menu Open, so it is handled here rather than
-        // in the launcher-less modal router.
-        if overlays.menu.is_some() {
+        // The one answer the desktop owes an open. An id that names anything
+        // else answers a gesture already settled, so acting on it would run a
+        // stale command.
+        if let WindowEvent::MenuClosed {
+            open_id, outcome, ..
+        } = *event
+        {
+            if *menu.open != Some(open_id) {
+                return (Repaint::Nothing, false);
+            }
+            *menu.open = None;
             let (changed, close) =
-                apply_menu_event(browser, overlays, launcher, scale, theme, viewport, event);
+                apply_menu_outcome(browser, overlays, launcher, scale, theme, viewport, outcome);
             return (whole_if(changed), close);
         }
 
-        // The "Open With…" chooser likewise owns input while open (it replaces
-        // the context menu that opened it) and needs the launcher to hand the
-        // chosen application its file.
+        // The "Open With…" chooser owns input while open (the context-menu row
+        // that opens it has already concluded the chain) and needs the launcher
+        // to hand the chosen application its file.
         if overlays.open_with.is_some() {
             let (changed, close) =
-                apply_open_with_event(overlays, launcher, scale, theme, viewport, event);
+                apply_open_with_event(overlays, launcher, scale, theme, viewport, event, damage);
             return (whole_if(changed), close);
         }
 
@@ -1830,8 +1820,9 @@ mod program {
             return (merge(outcome.repaint, hover), false);
         }
 
-        let (repaint, close) =
-            apply_nav_event(browser, overlays, launcher, canvas, viewport, event, damage);
+        let (repaint, close) = apply_nav_event(
+            browser, overlays, menu, launcher, canvas, viewport, event, damage,
+        );
         (merge(repaint, hover), close)
     }
 
@@ -1842,9 +1833,11 @@ mod program {
     /// `viewport` is the rail-inset content area the listing and the scrollbar
     /// occupy; the toolbar band spans the whole window, which the routers below
     /// read from `canvas`.
+    #[allow(clippy::too_many_arguments)] // The window's whole mutable state, threaded explicitly.
     fn apply_nav_event<S: DirectorySource>(
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
+        menu: &mut MenuLink<'_>,
         launcher: &RefCell<Launcher>,
         canvas: Canvas<'_>,
         viewport: Rect,
@@ -1920,9 +1913,9 @@ mod program {
             }
             // A pointer event the desktop routed into this window's local
             // coordinates: routed by `apply_pointer`.
-            WindowEvent::Pointer { .. } => {
-                apply_pointer(browser, overlays, launcher, canvas, viewport, event, damage)
-            }
+            WindowEvent::Pointer { .. } => apply_pointer(
+                browser, overlays, menu, launcher, canvas, viewport, event, damage,
+            ),
             // A secondary press on the window's Close control asks to leave the
             // folder rather than the window: it climbs to the parent and closes
             // only at the top, where there is nothing left to leave. A parent
@@ -1961,9 +1954,14 @@ mod program {
             // it a second time.
             // The file manager declares no default action, so the session
             // raises its window on a click rather than telling it — an
-            // `AppBarDefault` therefore cannot arrive, a bar menu row was
-            // resolved before this dispatch, and a chain outcome answers an
-            // open the file manager does not yet ask for.
+            // `AppBarDefault` therefore cannot arrive, and a bar menu row was
+            // resolved before this dispatch.
+            //
+            // A `MenuClosed` was resolved before this dispatch too, against the
+            // open id the window is waiting on; one reaching here named no such
+            // open and is a stale answer, dropped rather than acted on. The
+            // context menu declares no panel row, so no chain of its own ever
+            // asks this window for a surface.
             WindowEvent::Key { .. }
             | WindowEvent::AppBarDefault
             | WindowEvent::AppBarMenu { .. }
@@ -2034,15 +2032,18 @@ mod program {
     /// right-edge scrollbar owns its gutter, so it gets first refusal on a
     /// primary press/drag/release — a click on the bar scrolls the listing
     /// instead of selecting an item beneath it, and it consumes only events
-    /// that belong to it. A secondary-button press opens the context menu on
-    /// the item under the pointer, and a primary press is routed by
-    /// [`apply_primary_press`]. Every other pointer action is a no-op.
+    /// that belong to it. A secondary-button press asks the desktop to open
+    /// this window's context menu on the item under the pointer, and a primary
+    /// press is routed by [`apply_primary_press`]. Every other pointer action
+    /// is a no-op.
     ///
     /// `viewport` is the rail-inset content area; the toolbar band spans the
     /// whole window, which [`apply_primary_press`] reads from `canvas`.
+    #[allow(clippy::too_many_arguments)] // The press, its context, and what it may open.
     fn apply_pointer<S: DirectorySource>(
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
+        menu: &mut MenuLink<'_>,
         launcher: &RefCell<Launcher>,
         canvas: Canvas<'_>,
         viewport: Rect,
@@ -2081,16 +2082,8 @@ mod program {
             return (Repaint::Nothing, false);
         }
         if let Some(point) = secondary_press_point(*action, *x, *y) {
-            return whole(apply_secondary_press(
-                browser,
-                overlays,
-                launcher,
-                scale,
-                theme,
-                viewport,
-                point,
-                MenuOnSingle::Open,
-            ));
+            let hit = tairix_browse::render::entry_index_at(browser, scale, theme, viewport, point);
+            return whole(open_context_menu(browser, overlays, menu, point, hit));
         }
         match press_point(*action, *x, *y) {
             Some(point) => apply_primary_press(
@@ -3529,72 +3522,34 @@ mod program {
         Some(pointer_point(x, y))
     }
 
-    /// Apply one **secondary** press at window-local `point`, acting on what
-    /// the shared [`gesture::secondary_press`] decision makes of it.
-    ///
-    /// A right-double-click runs the very same [`activate`] dispatch a primary
-    /// double-click does and then closes this window, because the entry has
-    /// been handed to another program and there is nothing left here to do. A
-    /// lone press is the ordinary right-click; `single` says whether that means
-    /// opening the context menu or leaving an already-open one alone.
-    #[allow(clippy::too_many_arguments)] // The press, its context, and the two policies it needs.
-    fn apply_secondary_press<S: DirectorySource>(
-        browser: &mut Browser<S>,
-        overlays: &mut Overlays,
-        launcher: &RefCell<Launcher>,
-        scale: Scale,
-        theme: &Theme,
-        viewport: Rect,
-        point: Point,
-        single: MenuOnSingle,
-    ) -> (bool, bool) {
-        let hit = tairix_browse::render::entry_index_at(browser, scale, theme, viewport, point);
-        match gesture::secondary_press(
-            &mut overlays.double_click,
-            tairix_rt::clock_get(),
-            hit,
-            single,
-        ) {
-            SecondaryPress::OpenAndLeave { index } => {
-                // The menu the first press opened is superseded by the gesture
-                // it turned out to begin.
-                let repaint = overlays.menu.take().is_some();
-                let _ = browser.select(index);
-                let (changed, close) = activate(
-                    browser,
-                    launcher,
-                    scale,
-                    theme,
-                    viewport,
-                    BundleIntent::Launch,
-                    AfterHandoff::CloseWindow,
-                );
-                (changed || repaint, close)
-            }
-            SecondaryPress::OpenMenu { index } => {
-                open_context_menu(browser, overlays, point, index)
-            }
-            SecondaryPress::Ignore => (false, false),
-        }
-    }
-
-    /// Open the right-click context menu at window-local `point`, on the item
-    /// `index` the caller's hit-test resolved (`None` for empty space or the
-    /// chrome).
+    /// Ask the desktop to open this window's context menu at window-local
+    /// `point`, on the item `index` the caller's hit-test resolved (`None` for
+    /// empty space or the chrome).
     ///
     /// The item is selected first so the menu's commands act on what was
     /// clicked; a right-click on nothing clears the selection so the menu
-    /// offers only the directory-scoped Paste. The menu is built from the
-    /// shared [`ContextMenuModel`] with the app's own held-clipboard state, so
-    /// an inapplicable command renders disabled. The menu itself performs
-    /// nothing — a chosen command runs the user's own permission-checked verb
-    /// in [`dispatch_context_command`], no new authority.
+    /// offers only the directory-scoped Paste. The rows are the shared
+    /// [`context_menu`] declaration over the [`ContextMenuModel`] with this
+    /// app's own held-clipboard state, so an inapplicable command is declared
+    /// disabled with its reason rather than left out.
+    ///
+    /// The anchor is the client-local point the press was reported at, which is
+    /// the only space this window can speak truthfully: it is never told where
+    /// it sits on screen. The desktop titles, places, draws, grabs and
+    /// dismisses; the answer arrives later as one `MenuClosed` naming the id
+    /// minted here. A refusal is an answer — it is reported and the window
+    /// carries on with no menu, never drawing one of its own.
+    ///
+    /// The press also breaks any half-finished primary pair, so a click either
+    /// side of a right-click cannot read as a double-click.
     fn open_context_menu<S: DirectorySource>(
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
+        menu: &mut MenuLink<'_>,
         point: Point,
         index: Option<usize>,
     ) -> (bool, bool) {
+        overlays.double_click.reset();
         match index {
             Some(index) => {
                 let _ = browser.select(index);
@@ -3602,83 +3557,56 @@ mod program {
             None => browser.clear_selection(),
         }
         let model = ContextMenuModel::for_browser(browser, overlays.clipboard.is_some());
-        overlays.menu = Some(ContextMenu {
-            anchor: point,
-            menu: build_context_menu(model),
-        });
+        let rows = match context_menu(model, APP_NAME) {
+            Ok(rows) => rows,
+            Err(err) => {
+                report_error(&alloc::format!("menu model refused ({err}); not shown"));
+                return (true, false);
+            }
+        };
+        let anchor = match MenuAnchor::new(point.x, point.y, 0, 0) {
+            Ok(anchor) => anchor,
+            Err(err) => {
+                report_error(&alloc::format!("menu anchor refused ({err}); not shown"));
+                return (true, false);
+            }
+        };
+        match menu.client.open_menu(menu.window, anchor, &rows) {
+            Ok(open_id) => *menu.open = Some(open_id),
+            Err(err) => report_error(&alloc::format!("menu refused ({err}); not shown")),
+        }
+        // The selection moved whether or not a chain came up, so the listing is
+        // repainted either way.
         (true, false)
     }
 
-    /// Handle one event while the right-click context menu owns the window.
+    /// Act on the one outcome the desktop owes this window's open.
     ///
-    /// `Escape` dismisses it. A primary-button press on an enabled command runs
-    /// that command's verb (and closes the menu); a press off the menu, or on a
-    /// disabled row, simply dismisses it (fail closed — a disabled row never
-    /// acts). A **secondary** press is the second half of a right-double-click:
-    /// on the same item within the interval it supersedes this menu and opens
-    /// the entry, and anything else leaves the menu exactly as it is. Every
-    /// other event leaves the menu open.
-    fn apply_menu_event<S: DirectorySource>(
+    /// A chosen row runs its command's verb; a dismissal does nothing; a
+    /// refusal is stated on `stderr` and the window carries on. A row id this
+    /// window never declared names no command and is dropped (fail closed —
+    /// an outcome is never guessed at).
+    fn apply_menu_outcome<S: DirectorySource>(
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
         launcher: &RefCell<Launcher>,
         scale: Scale,
         theme: &Theme,
         viewport: Rect,
-        event: &WindowEvent,
+        outcome: MenuOutcome,
     ) -> (bool, bool) {
-        match event {
-            WindowEvent::Key {
-                key:
-                    KeyInput::Pressed {
-                        key: KeyValue::Named(NamedKeyCode::Escape),
-                        ..
-                    },
-                ..
-            } => {
-                overlays.menu = None;
-                (true, false)
+        match outcome {
+            MenuOutcome::Chosen(item) => match context_command_from_item(item) {
+                Some(command) => dispatch_context_command(
+                    browser, overlays, launcher, scale, theme, viewport, command,
+                ),
+                None => (false, false),
+            },
+            MenuOutcome::Dismissed => (false, false),
+            MenuOutcome::Refused(reason) => {
+                report_error(&alloc::format!("the desktop showed no menu ({reason:?})"));
+                (false, false)
             }
-            WindowEvent::Pointer { x, y, action, .. } => {
-                // A second secondary press completes the "open this and leave"
-                // gesture the first one began, superseding the menu it opened.
-                if let Some(point) = secondary_press_point(*action, *x, *y) {
-                    return apply_secondary_press(
-                        browser,
-                        overlays,
-                        launcher,
-                        scale,
-                        theme,
-                        viewport,
-                        point,
-                        MenuOnSingle::Leave,
-                    );
-                }
-                let Some(point) = press_point(*action, *x, *y) else {
-                    return (false, false);
-                };
-                // Take the menu out (closing it) so the dispatch can borrow the
-                // overlays mutably; a press off an enabled row is a plain
-                // dismiss.
-                let Some(ctx) = overlays.menu.take() else {
-                    return (false, false);
-                };
-                match context_menu_command_at(&ctx.menu, ctx.anchor, viewport, scale, theme, point)
-                {
-                    // Open With… uniquely opens a submenu at the right-click
-                    // anchor rather than acting at once, so it is handled here
-                    // where the anchor is in hand; every other command runs its
-                    // verb through the one shared dispatch.
-                    Some(ContextCommand::OpenWith) => {
-                        begin_open_with(browser, overlays, ctx.anchor)
-                    }
-                    Some(command) => dispatch_context_command(
-                        browser, overlays, launcher, scale, theme, viewport, command,
-                    ),
-                    None => (true, false),
-                }
-            }
-            _ => (false, false),
         }
     }
 
@@ -3705,10 +3633,18 @@ mod program {
                 BundleIntent::Launch,
                 AfterHandoff::Keep,
             ),
-            // Open With… opens a submenu anchored at the right-click point, so
-            // it is dispatched by `apply_menu_event` (which holds the anchor)
-            // rather than here.
-            ContextCommand::OpenWith => (false, false),
+            // Opening and closing is the same activation, with the window
+            // closed behind it once the entry has been handed over.
+            ContextCommand::OpenAndClose => activate(
+                browser,
+                launcher,
+                scale,
+                theme,
+                viewport,
+                BundleIntent::Launch,
+                AfterHandoff::CloseWindow,
+            ),
+            ContextCommand::OpenWith => begin_open_with(browser, overlays),
             ContextCommand::Rename => {
                 begin_rename(browser, &mut overlays.rename, scale, theme, viewport)
             }
@@ -3738,8 +3674,7 @@ mod program {
         }
     }
 
-    /// Open the "Open With…" application chooser for the selected regular file,
-    /// anchored at `anchor` (the right-click point Open With… was chosen from).
+    /// Open the "Open With…" application chooser for the selected regular file.
     ///
     /// The chooser is offered only for a regular file — a directory descends
     /// and a bundle launches itself, so neither has an application to pick (the
@@ -3747,20 +3682,24 @@ mod program {
     /// it again, fail closed). The candidate applications are the installed
     /// bundles whose declared associations claim the file's type
     /// ([`RtBundleSource`] + [`applications_for`], keyed off the leaf name,
-    /// never a hard-coded viewer). When no installed application claims the
-    /// file the refusal is stated fail-loud on `stderr` and nothing is opened —
-    /// an honest answer, never an empty menu or a fabricated open. The chooser
-    /// itself launches nothing: a chosen row runs the same capability-checked
-    /// hand-off the default open uses ([`apply_open_with_event`]).
+    /// never a hard-coded viewer). Enumerating them is a read of three program
+    /// stores, so it happens *here* — when the user asks — rather than on every
+    /// right-click, which is why the candidates are a chooser of this window's
+    /// own and not rows of the desktop's menu.
+    ///
+    /// When no installed application claims the file the refusal is stated
+    /// fail-loud on `stderr` and nothing is opened — an honest answer, never an
+    /// empty chooser or a fabricated open. The chooser itself launches nothing:
+    /// a chosen row runs the same capability-checked hand-off the default open
+    /// uses ([`apply_open_with_event`]).
     fn begin_open_with<S: DirectorySource>(
         browser: &Browser<S>,
         overlays: &mut Overlays,
-        anchor: Point,
     ) -> (bool, bool) {
         let Some(entry) = browser.selected_entry() else {
             return (false, false);
         };
-        if entry.kind() != EntryKind::File {
+        if entry.kind().resolved() != Some(EntryKind::File) {
             return (false, false);
         }
         let name = entry.name().to_string();
@@ -3777,34 +3716,27 @@ mod program {
         // reports it.
         let installed = source.installed_bundles().unwrap_or_default();
         let apps = applications_for(&name, &installed);
-        if apps.is_empty() {
+        let Some(chooser) = OpenWithChooser::new(&apps, file_path, &name) else {
             report_error(&alloc::format!("no application to open {name}"));
             return (false, false);
-        }
-        let menu = build_open_with_menu(&apps);
-        let bundles = apps
-            .iter()
-            .map(|app| app.bundle_path().to_string())
-            .collect();
-        overlays.open_with = Some(OpenWithMenu {
-            anchor,
-            menu,
-            bundles,
-            file_path,
-            display_name: name,
-        });
+        };
+        overlays.open_with = Some(chooser);
         (true, false)
     }
 
     /// Handle one event while the "Open With…" chooser owns the window.
     ///
-    /// `Escape` dismisses it. A primary-button press on a candidate row hands
-    /// the file to that application through the same
-    /// [`Launcher::launch_viewer`] hand-off the default open uses (the file
-    /// opened read-only in the manager's table and wired onto the child's
-    /// `STDIN`, so the application reads it with no filesystem capability of
-    /// its own); a press off the menu simply dismisses it (fail closed). Every
-    /// other event leaves the chooser open.
+    /// `Escape` dismisses it. Up/Down/Home/End move the current candidate and
+    /// scroll the least that keeps it in view; `Enter` hands the file to it. A
+    /// primary press on a candidate row does the same, the scroll gutter owns a
+    /// press that lands on it, and a press anywhere else dismisses the chooser
+    /// (fail closed — a press off the rows never launches). A wheel scrolls the
+    /// list. Every other event leaves the chooser open.
+    ///
+    /// The hand-off is the same [`Launcher::launch_viewer`] the default open
+    /// uses: the file opened read-only in the manager's own table and wired
+    /// onto the child's `STDIN`, so the application reads it with no filesystem
+    /// capability of its own.
     fn apply_open_with_event(
         overlays: &mut Overlays,
         launcher: &RefCell<Launcher>,
@@ -3812,50 +3744,103 @@ mod program {
         theme: &Theme,
         viewport: Rect,
         event: &WindowEvent,
+        damage: &mut Region,
     ) -> (bool, bool) {
+        let visible = open_with_visible_rows(viewport, scale, theme);
         match event {
             WindowEvent::Key {
-                key:
-                    KeyInput::Pressed {
-                        key: KeyValue::Named(NamedKeyCode::Escape),
-                        ..
-                    },
+                key: KeyInput::Pressed { key, .. },
                 ..
             } => {
-                overlays.open_with = None;
-                (true, false)
+                let Some(chooser) = overlays.open_with.as_mut() else {
+                    return (false, false);
+                };
+                match key {
+                    KeyValue::Named(NamedKeyCode::Escape) => {
+                        overlays.open_with = None;
+                        (true, false)
+                    }
+                    KeyValue::Named(NamedKeyCode::Enter) => {
+                        launch_open_with(overlays, launcher);
+                        (true, false)
+                    }
+                    KeyValue::Named(NamedKeyCode::Up) => {
+                        let moved = chooser.step(-1);
+                        (chooser.reveal(visible) || moved, false)
+                    }
+                    KeyValue::Named(NamedKeyCode::Down) => {
+                        let moved = chooser.step(1);
+                        (chooser.reveal(visible) || moved, false)
+                    }
+                    KeyValue::Named(NamedKeyCode::Home) => {
+                        let moved = chooser.select(0);
+                        (chooser.reveal(visible) || moved, false)
+                    }
+                    KeyValue::Named(NamedKeyCode::End) => {
+                        let moved = chooser.select(usize::MAX);
+                        (chooser.reveal(visible) || moved, false)
+                    }
+                    _ => (false, false),
+                }
+            }
+            WindowEvent::Scrolled { dy, .. } => {
+                let Some(chooser) = overlays.open_with.as_mut() else {
+                    return (false, false);
+                };
+                (chooser.scroll_by(i64::from(*dy), visible), false)
             }
             WindowEvent::Pointer { x, y, action, .. } => {
+                let point = pointer_point(*x, *y);
+                // The gutter owns a press that lands on it, so dragging the
+                // thumb scrolls the list instead of dismissing the chooser.
+                if let Some(chooser) = overlays.open_with.as_mut() {
+                    let mut scrolled = None;
+                    for input in pointer_input_events(*action, point) {
+                        if let Some(repaint) = open_with_scroll_pointer(
+                            chooser, scale, theme, viewport, point, &input, damage,
+                        ) {
+                            scrolled = Some(scrolled.unwrap_or(false) || repaint);
+                        }
+                    }
+                    if let Some(repaint) = scrolled {
+                        return (repaint, false);
+                    }
+                }
                 let Some(point) = press_point(*action, *x, *y) else {
                     return (false, false);
                 };
-                // Take the chooser out (closing it) so a chosen application is
-                // launched from owned state; a press off a row is a dismiss.
-                let Some(chooser) = overlays.open_with.take() else {
+                let Some(chooser) = overlays.open_with.as_mut() else {
                     return (false, false);
                 };
-                match open_with_index_at(
-                    &chooser.menu,
-                    chooser.anchor,
-                    viewport,
-                    scale,
-                    theme,
-                    point,
-                ) {
+                match open_with_row_at(chooser, viewport, scale, theme, point) {
                     Some(index) => {
-                        if let Some(bundle) = chooser.bundles.get(index) {
-                            launcher.borrow_mut().launch_viewer(
-                                bundle,
-                                &chooser.file_path,
-                                &chooser.display_name,
-                            );
-                        }
-                        (true, false)
+                        chooser.select(index);
+                        launch_open_with(overlays, launcher);
                     }
-                    None => (true, false),
+                    // A press off the rows closes the chooser and launches
+                    // nothing.
+                    None => overlays.open_with = None,
                 }
+                (true, false)
             }
             _ => (false, false),
+        }
+    }
+
+    /// Hand the chooser's file to its current candidate and close the chooser.
+    ///
+    /// The chooser is taken out first, so the launch runs from owned state and
+    /// a second activation cannot reach a chooser that is already gone.
+    fn launch_open_with(overlays: &mut Overlays, launcher: &RefCell<Launcher>) {
+        let Some(chooser) = overlays.open_with.take() else {
+            return;
+        };
+        if let Some(candidate) = chooser.chosen() {
+            launcher.borrow_mut().launch_viewer(
+                candidate.bundle_path(),
+                chooser.file_path(),
+                chooser.display_name(),
+            );
         }
     }
 
@@ -4569,7 +4554,6 @@ mod program {
             properties: None,
             owner: None,
             delete: None,
-            menu: None,
             open_with: None,
             operation: None,
             clipboard: None,

@@ -113,23 +113,26 @@ can never diverge in navigation semantics, listing policy, or look.
   and a bundle launches itself, so neither has an application to choose), and
   Paste needs only the app's held clipboard — threaded in, since the clipboard
   lives in the app, not the browser. Each command's `label()` and
-  keyboard-`shortcut()` caption drive the drawn `MenuItem`, and
-  `CONTEXT_COMMANDS` is the one top-to-bottom order the menu iterates. Only
-  commands the file manager can carry out today are modelled, so none is
-  speculative surface: Delete and New Folder are absent from
-  `CONTEXT_COMMANDS` and each lands with the stage that first wires its
-  behaviour. The drawn menu is the renderer's `build_context_menu` (one
-  `MenuItem` per command, disabled when the model says so), `context_menu_rect`
-  (anchored at the click and clamped to the window), `draw_context_menu`
-  (painted topmost), and the mirror `context_menu_command_at` (returning
-  **only** an enabled command — fail closed off the menu or on a disabled
-  row); the files app opens it on a secondary-button press and routes a chosen
-  command to the same verbs the toolbar and keyboard drive. The **Open With…**
-  chooser itself is the renderer's `build_open_with_menu` (one row per
-  `applications_for` candidate, in source order) plus the mirror
-  `open_with_index_at` (the same enabled-row hit-test the context menu uses),
-  and the files app launches the chosen candidate through the same document
-  hand-off the default open uses.
+  keyboard-`shortcut()` caption drive its declared row, and `CONTEXT_COMMANDS`
+  is the one top-to-bottom order the menu iterates. Only commands the file
+  manager can carry out today are modelled, so none is speculative surface:
+  New Folder is absent from `CONTEXT_COMMANDS` (it is a toolbar write tool) and
+  lands with the stage that first wires its behaviour.
+  `is_enabled` is **derived from** `reason`, so a row can never grey out with
+  nothing to say — the reason is the display text the menu states beside the
+  label. **Nothing here draws a menu**: `context_menu(model, title)` declares
+  the row model the desktop's own menu service renders
+  (`plans/NEW-MENUS.md`), read back by `context_command_from_item`, whose
+  one-based numbering is that declaration's exact inverse. The files app sends
+  it on a secondary-button press and routes the one answer to the same verbs the
+  toolbar and keyboard drive.
+  The **Open With…** chooser is *not* a menu: `open_with::OpenWithChooser`
+  holds the candidates, a selection and a scroll offset, and the renderer's
+  `draw_open_with_chooser` / `open_with_row_at` / `open_with_scroll_pointer`
+  draw a scrolled list of `ListRow`s in a `Panel` and resolve a press through
+  the one placement all three share. A list, because the candidate set grows
+  with the applications a user installs and no menu plate can promise to hold
+  it.
 - **In-place rename** (`rename`, `Browser::rename_selected`): the model of
   the file manager's first write operation (`plans/NEW-FILEMANAGER.md` FM5),
   host-tested without a kernel. `validate_new_name` spells the typed name
@@ -187,11 +190,9 @@ can never diverge in navigation semantics, listing policy, or look.
   an honest empty answer — a "no application" notice, never a fabricated
   default — and the type decision is a display hint only: the load gate still
   verifies and capability-checks whichever bundle the user picks. The engine
-  never spawns. The renderer draws the candidate list as the
-  `build_open_with_menu` chooser and resolves a click through
-  `open_with_index_at` (sharing the context menu's placement and row geometry),
-  so the files app can offer the full list where the default open picks the
-  first.
+  never spawns. The renderer draws the candidate list as the scrolled
+  `OpenWithChooser` panel above, so the files app can offer the full list —
+  however long — where the default open picks the first.
   `association_from_appinfo(bundle_path, appinfo)` is the pure, fail-closed
   decode a running-system `BundleSource` uses per bundle: it reads a manifest's
   header and declared MIME table (the same body layout the loader reads) into an

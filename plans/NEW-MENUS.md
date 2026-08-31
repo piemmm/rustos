@@ -14,13 +14,15 @@ Binding under `AGENTS.md` (§3, §15.18).
 | M2 | The service: bands, drag, arrival-open, attach/detach, grab, lifetime | **landed** |
 | M3.1 | Migrate `userland/apps/terminal`, delete its shell | **landed** |
 | M3.2 | Migrate the pinboard backdrop menu, delete its shell | **landed** |
-| M3.3 | Migrate `userland/apps/files`, delete its shell | next (decision 2) |
+| M3.3 | Migrate `userland/apps/files`, delete its shell | **landed** |
 | M3.4 | Migrate the bar's `menu.rs`/`clock_menu.rs`/`system.rs` | planned |
 | M3.5 | The bar's start menu, if its rows fit the model | undecided (decision 3) |
 | M4 | Plate as a cached damage-reporting surface | planned |
 
-Open decisions: 2 (binds M3.3), 3 (binds M3.5). Decision 1 is **settled** —
-variable-length framing, landed as M1a.
+Open decisions: 3 (binds M3.5). Decision 1 is **settled** — variable-length
+framing, landed as M1a. Decision 2 is **settled** — Open With… is one row that
+concludes the chain, and the chooser is the application's own list surface;
+landed as M3.3.
 
 ### Defects found, to fix in the stage named
 
@@ -46,6 +48,9 @@ stage that closes it carries its regression test (§2.18, §7).
 | D16 | The terminal assigned a freshly-opened settings sheet straight over `TerminalWindow::overlay`, so an assignment that found one already there would drop it without calling `close` — leaving a session-side popup window on screen with nothing owning it. `set_overlay` made the assignment unable to leak. **The open question is answered: it was a *live* leak, not a latent one.** A key does reach a parent whose popup is up — not by focusing its decoration, which gives the keyboard to the *furniture* and swallows the key, but through the bar's hover window picker: `raise_window` → `TaskBridge::raise` → `router.focus` moved focus to the parent with no client press, so nothing dismissed the sheet and the next `Ctrl ,` ran `Command::Settings` behind it. That focus move is itself the defect (D18) and is fixed there, which is where the regression test lives; `set_overlay` stays as the guard, now unreachable by construction rather than argued safe. | **closed in M3.2** (cause is D18) |
 | D17 | **No QEMU vertical opened a menu**, so the chain's drain, grab and answer paths in `userland/gui/session/src/run.rs` — and the terminal's own open/answer path — were exercised by nothing, and no one had ever seen a plate on screen. **Closed**: the session now announces `MENU_SHOWN` ("menu chain on screen", `EventId(20_006)`) beside `WINDOW_SHOWN`, once per open and only after a frame carrying the chain reached the display — the only honest gate, since the reply an application gets says the open was *accepted*, never that a plate was drawn. `tests/integration/menu_qemu_aarch64` then launches the terminal from the program library, right-clicks its client, photographs the plate at the rectangle the production chain reports, and clicks its *Settings…* row; the guest latches `APP_LOADED` for the bundle, the 12-byte minted-id reply only `OpenMenu` produces, and a create observed *after* it — the sheet the chosen row opens, which the terminal opens on nothing but the one `MenuClosed` naming that row. | **closed in M3.2** |
 | D18 | Raising a window gave the keyboard to *that* window even when its own live transient sat above it. A raise brings a window's transients up with it (`Compositor::raise` restacks the family), so `show_raise_focus` — the one path `TaskBridge::open` and `TaskBridge::raise` share — left the focused window *underneath* its own modal sheet: the bar's hover window picker could focus a terminal behind its open settings sheet, with no client press to dismiss it, and the next accelerator ran in the client instead of the sheet. That is the route that made D16 live. **Fixed** by focusing the front of the family that rose (`Compositor::family_front`, one rule shared with `family_top`); a window with no transient open is its own family front, so the ordinary case is unchanged. | **closed in M3.2** |
+| D19 | `AppMenuRow::Panel`, `WindowRequest::CreateMenuPanel` and `WindowEvent::MenuPanelRequested` have **no production client** — only a fuzz seed (`lib/abi/tests/fuzz_decode.rs`) declares a panel row. M1d landed the attached window for the shape decision 2 turned out not to want: a panel is a *presentation* surface (the session-drawn `Info` row is its canonical instance) and cannot conclude a gesture, so a selection list is not one. Either the bar's migration finds it a genuine presentation child, or the row kind, its operation, its event and the engine's attach/detach lifetime are deleted (§2.14). Deciding needs the bar's own subjects in hand. | **M3.4** |
+| D20 | The chain holds the seat's grab, so a press outside it is consumed and never delivered — which makes the second press of `files.app`'s FM12 **right-double-click** ("activate, then close this window") structurally unreachable the moment its first press opens a desktop menu. Not an implementation cost: an application deliberately cannot see a press inside chrome it does not own. **Resolved by re-spelling the capability rather than dropping it**: `ContextCommand::OpenAndClose` carries the same `AfterHandoff::CloseWindow` activation as a menu row — discoverable, and reachable from the keyboard, which the gesture never was — and `gesture.rs`'s `secondary_press`/`SecondaryPress`/`MenuOnSingle` are deleted with the gesture. A right-press still breaks a half-finished left pair (the app resets the tracker). | **closed in M3.3** |
+| D21 | Threading the chain through `files.app` grew three of its routers (`apply_event`, `apply_nav_event`, `apply_pointer`) past the argument threshold, so each carries a justified `#[allow(clippy::too_many_arguments)]`. The `MenuLink` bundle already collapses the client, the window id and the open slot into one value; what remains is that the window's *state* (browser, overlays, places) and what it acts *through* (the link, the launcher) are threaded as separate parameters at every level. The proper fix is one bundle per side, applied to the whole router chain in a change of its own — it is not migration work and would inflate a diff that already spans thirteen files. The same surround is threaded through the bar in M3.4, so bundle it once there for both rather than twice. | **M3.4** |
 | D10 | The bar's own menus state two things the model cannot carry: a row denied for want of a capability (`AuthorityState::NeedsCapability`, which draws an Authority Mark rather than merely greying) and a row whose setting is already in effect (`ActivityState::Complete`). **Answered.** The Authority Mark says *the system* refused a command, and only the system may say it, so it is in-process-only — and structurally, not by a check: the wire model has no field for an authority state, so a decoded row is always `Allowed` and an application cannot paint the mark on its own row. §1.6's "bounded subset" means an absent field, never a validated one. `ActivityState::Complete` ("work finished successfully") is a *misuse* on an appearance row and is deleted rather than carried: the alternatives are a radio group, which the wire already spells `AppMenuMark::Radio` plus disabled plus a reason. The bar's own rows keep `NeedsCapability` through M3.4, because they are the session's. | **answered in M2** |
 
 **This is an architecture change, not a performance one.** The ~300 ms
@@ -567,11 +572,8 @@ surface's menu shell (§2.14):
    shortcut table where the model now carries it) and the popup-window
    plumbing its run loop drives it through.
 2. ~~`userland/gui/session`'s pinboard backdrop menu~~ — landed as M3.2.
-3. `userland/apps/files` — its `ContextMenu` and `OpenWithMenu`. The shared
-   `lib/browse::ContextMenuModel` **stays**: it is a model, and it is what
-   keeps the file manager and the trusted picker from diverging. Open With…
-   becomes a submenu, or an attached window where the candidate list is
-   longer than a plate holds (decision 2).
+3. ~~`userland/apps/files` — its `ContextMenu` and `OpenWithMenu`~~ — landed
+   as M3.3.
 4. `userland/gui/taskbar` — `menu.rs`, `clock_menu.rs`, `system.rs`. The bar
    keeps its *subjects* and loses its shell.
 5. `userland/gui/taskbar`'s start menu, if its rows fit without distorting
@@ -622,6 +624,62 @@ application's open does (`seat_menu_refusal`, hoisted out of
 the lock screen or the trusted picker by arriving from the other direction — a
 guarantee M2 stated as the service's and the old shell did not have.
 
+**M3.3 (landed).** `userland/apps/files` keeps no menu shell: `ContextMenu`,
+`OpenWithMenu`, the two routers that owned input while each was up
+(`apply_menu_event` / the old `apply_open_with_event`), and `lib/browse`'s seven
+drawn-menu renderers (`build_context_menu`, `context_menu_rect`,
+`draw_context_menu`, `context_menu_command_at`, `context_menu_command_rect`,
+`build_open_with_menu`, `open_with_index_at`, and the private
+`menu_enabled_row_at` they shared) are all gone. It is a **wire** client, so
+M3.1 is its template: `lib/browse::chrome` is now the row model alone —
+`CONTEXT_COMMANDS` built into an `AppMenu` by `context_menu`, read back by
+`context_command_from_item`, with the one-based `row_id`/`from_item` inverses so
+ids need no second table — and `run.rs`'s `open_context_menu` sends `OpenMenu`
+with the window-local point the press was reported at, storing the returned open
+id on the window (`OpenWindow::menu`). The answer is one `MenuClosed` matched
+against that id, so an answer to a settled gesture cannot run a stale command; a
+refusal is stated on `stderr` and the window carries on.
+
+Two rules landed with it rather than being carried over. A row's id is its
+command's own position in `CONTEXT_COMMANDS` (M3.2's rule), and because every
+command is declared *disabled with its reason* rather than left out, position on
+the plate and position in the list are the same thing however few are
+actionable. And `ContextMenuModel::is_enabled` is now **derived from** a new
+`reason`, so a row cannot be greyed with nothing to say — the reason field M1b
+landed has its first client, and the three ways Open With… can be inapplicable
+(no selection, not a file, a link that leads nowhere) each say which.
+
+`ContextMenuModel` itself **stays**, as the plan said: it is the model that keeps
+the file manager and the trusted picker from diverging. What moved is only where
+the rows are *drawn*.
+
+The builder lives in `lib/browse` rather than in the app because `run.rs` is a
+freestanding binary no host test can reach: the model, the id round-trip, the
+reasons, the emphasis, and the chooser's whole geometry are host-proven there,
+and what is left in the app is the glue the menu vertical already exercises for
+the terminal.
+
+Decision 2 is settled above, so **Open With… is one row that concludes the
+chain** and the chooser is the application's own surface: `OpenWithChooser` in
+`lib/browse::open_with` (candidates, selection, scroll offset, its own
+`ScrollBar`) drawn by `render::draw_open_with_chooser` as a scrolled list of
+`ListRow`s in a `Panel`, hit-tested by `open_with_row_at` through the one
+placement all three share. It scrolls by wheel, by the drawn bar's drag, and by
+Up/Down/Home/End with the selection revealed; `Enter` or a press on a row hands
+the file over through the same `launch_viewer` the default open uses, and
+`Escape` or a press off the rows dismisses it. Its bar and the listing's now
+route a press through **one** rule (`route_scroll_bar`), so the two cannot come
+to behave differently.
+
+D20 is the migration's own finding: the chain's grab took the right-double-click
+gesture's second press away, so that capability is a menu row now
+(`ContextCommand::OpenAndClose`) and `gesture.rs` loses the three types that
+spelled the gesture. Nothing else in the tree drew or clicked the file manager's
+context menu — no QEMU vertical reconstructed it — so the migration broke no
+end-to-end test; `PLAN.md`'s claim that the FM9-c right-click→Delete
+click-through was wired into the `autoload_input` vertical was already stale and
+is corrected there.
+
 `userland/gui/switchboard` has **no** menu of its own — it only receives
 `AppBarMenu` — and is not a migration target.
 `userland/apps/widgets` draws a `Menu` as a *control-gallery sample*, not as
@@ -652,13 +710,52 @@ than the plate.
    the widening; or grant a shared region per declaration (rejected at M0
    for a per-open cost, but a *declaration* is rare enough that it would now
    be defensible).
-2. **A dynamic list longer than a plate.** Open With… is as long as the set
-   of installed applications that claim the type, which no format bound can
-   promise to hold. Either raise the per-plate row bound to a generous fixed
-   value and refuse (fail closed) beyond it, or spell that a genuinely
-   unbounded list is an **attached window** with its own scrolled list
-   rather than a menu. Both mechanisms exist; the second keeps the menu a
-   menu, at the cost of Open With… no longer looking like a submenu.
+2. **A dynamic list longer than a plate — settled.** Open With… stays **one
+   `Item` row on the one plate**. Choosing it concludes the chain, and the
+   application then opens **its own chooser**, which is not a menu: a scrolled
+   list of `ListRow`s in a `Panel` (`lib/browse::open_with`'s
+   `OpenWithChooser`, drawn by `lib/browse::render`). Both named alternatives
+   were rejected, each for a reason that is fatal on its own:
+   - **Raising the per-plate row bound: no.** The candidate set grows with the
+     applications a user installs, so no fixed value can promise to hold it —
+     raising the bound moves the refusal rather than removing it. And it buys
+     an expressible plate no screen can draw in full: `plate_rect` bounds a
+     plate to the viewport and nothing scrolls it, so thirty-two rows is
+     already about seven hundred logical pixels and a raised bound would put
+     rows where no pointer can reach them. Widening a format bound "to be
+     flexible" is what §24.4 forbids, and the total-row bound is what the
+     endpoint's receive ceiling is sized to, so every menu on the channel
+     would pay for this one list.
+   - **A submenu of candidates: no, because a submenu cannot be lazy.** The
+     model crosses the wire *complete* — every row of every plate rides in the
+     one `OpenMenu` — so the candidates must be enumerated **before** the menu
+     opens. Enumerating them is filesystem I/O over three program stores,
+     reading and decoding every `<Name>.app/AppInfo` (`RtBundleSource`), one of
+     which is `/Apps` and may live on a slow or failing volume. Every
+     right-click would pay it, for a list the user rarely opens, with a latency
+     that scales with the number of installed applications (§2.16, §26.1). The
+     only escape is a cache of every bundle's MIME table held for the life of a
+     long-running desktop component, which then goes stale the moment an
+     application is installed — and the list would *still* be bounded by what
+     one plate holds.
+   - **An attached window: no, because it cannot conclude the gesture.** Only
+     a *row* of the chain ends a chain (`MenuOutcome::Chosen`), and an
+     application deliberately holds no request that dismisses one (invariant 2
+     — it cannot pin a chain open, and symmetrically cannot close one). A
+     candidate list inside a panel would therefore leave the chain standing
+     after the user had chosen an application, and every gesture that would
+     then end it means something else: clicking the panel's own row *detaches*
+     the panel, Escape closes the panel first, an outside press dismisses. The
+     panel is a **presentation** surface — the session-drawn info panel it
+     generalises is a `FactList` — not a selection one. That leaves it without
+     a client (D19).
+   What this costs is that Open With… does not look like a submenu, which is
+   the honest shape: a *chooser over a data set whose size is a property of the
+   machine* is a list, and lists scroll. What it buys is that the menu stays a
+   menu — nine command rows, no I/O to open, one plate — and the unbounded list
+   sits in the surface kind the file manager already draws for Properties and
+   the delete confirmation. M3.1 set the precedent: the terminal's settings
+   sheet is not a menu and kept its own surface.
 3. **Whether the bar's start menu is in scope** (M3 step 5), or stays a
    bespoke surface because its rows are icon-bearing launcher entries.
 

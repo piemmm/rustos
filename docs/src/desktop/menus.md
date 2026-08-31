@@ -142,6 +142,29 @@ A declared separator becomes the next row's group break rather than a row of
 its own, so a separator inside a submenu draws the divider it draws on the root
 plate and no index the chain reports names a rule.
 
+## What a menu is not
+
+A menu is a column of **commands** the desktop draws in full. A chooser over a
+data set whose size is a property of the *machine* — the applications that claim
+a file's type, say — is not one, and no bound on a plate's rows can make it one:
+the set grows with what a user installs. Two further properties of the model
+settle it rather than a matter of taste.
+
+A menu's rows must all exist **before it opens**, because the model crosses the
+wire complete in the one request. So candidates could not be filled in lazily,
+and gathering them — filesystem reads over the program stores — would be paid on
+*every* gesture that opens the menu, for a list rarely asked for.
+
+And an **attached window cannot conclude the gesture**. Only a row of the chain
+ends a chain, and an application holds no request that dismisses one; a list
+inside a panel would therefore leave the chain standing after the user had
+chosen. A panel is a *presentation* surface — the information panel is its
+canonical instance — not a selection one.
+
+So a dynamic list is one row that concludes the chain, and the application's own
+list surface after it. The file manager's "Open With…" is the worked example
+(`plans/NEW-MENUS.md` §6, decision 2).
+
 ## The desktop's own menus
 
 The desktop's own surfaces are clients of the service exactly as an application
@@ -153,6 +176,19 @@ the session as their owner, so its answer is returned in process rather than as
 a `MenuClosed`, and it resolves through the same seat rule an application's open
 does — a menu never takes the grab from the lock screen or the trusted picker,
 whichever direction it arrives from. See [the pinboard](./pinboard.md#the-backdrop-menu).
+
+## The applications that are clients
+
+- **The terminal** (`userland/apps/terminal`) — a secondary press on its client
+  opens its window menu; `menu.rs` is the row model alone.
+- **The file manager** (`userland/apps/files`) — a secondary press on a listing
+  opens its context menu, declared by `lib/browse::chrome::context_menu` over
+  the same `ContextMenuModel` the trusted picker composes, so the two cannot
+  diverge. An inapplicable command is declared *disabled with its reason*
+  rather than left out, so the menu's shape does not move with the selection.
+  See [the file manager](./apps.md).
+
+Neither keeps a menu shell, and neither draws a menu pixel.
 
 ## Saying that a plate is on screen
 

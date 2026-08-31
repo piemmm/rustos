@@ -4137,11 +4137,11 @@ transfer, landed in increments:
   `STDIN` with the reserved `tairix_abi::DOCUMENT_ROLE_ARG` token, so the
   viewer reads its document with no filesystem capability of its own. FM6b's
   explicit **"Open With…" chooser** is now done too: `OpenWith` re-joins the
-  context menu for a regular file, and `render::build_open_with_menu` /
-  `open_with_index_at` draw the full `applications_for` candidate list and
-  launch the picked bundle through the same `DOCUMENT_ROLE_ARG`+`STDIN`
-  hand-off (the default open picks the first association; the chooser lets the
-  user pick any). **FM6b is complete, and FM9's first vertical increment
+  context menu for a regular file, and the app's own `OpenWithChooser` (a
+  scrolled list surface, not a menu — `plans/NEW-MENUS.md` §6, decision 2)
+  offers the full `applications_for` candidate list and launches the picked
+  bundle through the same `DOCUMENT_ROLE_ARG`+`STDIN` hand-off (the default open
+  picks the first association; the chooser lets the user pick any). **FM6b is complete, and FM9's first vertical increment
   FM9-a is landed**: the aarch64 `autoload_input` QEMU vertical now appends,
   after the AW4 terminal round trip, a New-Folder + inline-rename click-through
   that descends into `/Users/root` by layout-reconstructed pointer clicks
@@ -4172,8 +4172,7 @@ transfer, landed in increments:
   them. Now the WM router returns `InputResponse::SecondaryActivated` for a
   client right-press and the session forwards it and delivers `WindowEvent`
   `Pointer{Pressed(Secondary)}` to the app (host-tested in `tairix-wm` and
-  `tairix-desktop-session`; shared `Menu::row_rect` /
-  `render::context_menu_command_rect` locate the Delete row). The earlier
+  `tairix-desktop-session`). The earlier
   "the injected right-click never arrives in QEMU" was a `tools/qemu` **harness
   bug**, not an emulator limit: QEMU's HMP `mouse_button` help string
   ("1=L, 2=M, 4=R") is wrong — `hmp_mouse_button` maps state bit `0x2` to the
@@ -4182,17 +4181,13 @@ transfer, landed in increments:
   button. `MouseButton::mask_bit` now sends `0x2`, and the dedicated
   `tairix-test-pointer-button-virtio-mmio-qemu-aarch64` vertical proves a real
   right-click reaches the guest as `BTN_RIGHT` `0x111` (it times out with the
-  old mask, passes with the fix — the fails-before/passes-after guard). The full
-  right-click→Delete→confirm click-through is now wired into the aarch64
-  `autoload_input` vertical: appended after FM9-b and gated on the Viewer's
-  `sc=fd_redeem` (the last FM9-b serial event), the runner right-clicks the
-  FM9-a folder row to open the context menu, clicks the drawn **Delete** row,
-  and clicks the confirmation dialog's Delete button — every point reconstructed
-  through the shared `render::selection_rect` / `context_menu_command_rect` /
-  `delete_dialog_rect` + `Dialog::action_rects` geometry (§2.2). A tenth guest
-  PASS witness latches from `FsNodeMutated op=rmdir`, gated after the FM9-b
-  delegation is redeemed so no earlier removal can satisfy it (fail closed);
-  non-flaky across repeated runs.
+  old mask, passes with the fix — the fails-before/passes-after guard). **No
+  QEMU vertical clicks the file manager's context menu**: its plates are the
+  desktop's own surfaces now (`plans/NEW-MENUS.md` M3.3), and the session's
+  chain is driven end to end by `tests/integration/menu_qemu_aarch64` — which
+  opens a menu, waits for the `MENU_SHOWN` record that says a plate reached the
+  display, photographs it at the rectangle the production chain reports, and
+  clicks one of its rows.
 - The platform-RNG `EntropySource` that seeds the reserve — **DONE**
   (`plans/WIRING.md` P-0): the Arch-HAL `tairix_arch_api::entropy`
   slice (x86_64 `RDSEED`/`RDRAND`, aarch64 `RNDR` `Supported`; riscv64 `Zkr` /

@@ -148,8 +148,9 @@ pub mod vfs;
 pub use activate::{Activation, BundleIntent};
 pub use browser::Browser;
 pub use chrome::{
-    apply_command, ContextCommand, ContextMenuModel, ManagerTool, ManagerToolModel, ToolbarCommand,
-    ToolbarModel, CONTEXT_COMMANDS, MANAGER_TOOLS, TOOLBAR_COMMANDS,
+    apply_command, context_command_from_item, context_menu, ContextCommand, ContextMenuModel,
+    ManagerTool, ManagerToolModel, ToolbarCommand, ToolbarModel, CONTEXT_COMMANDS, MANAGER_TOOLS,
+    TOOLBAR_COMMANDS,
 };
 pub use click::{ClickKind, DoubleClickTracker, DOUBLE_CLICK_INTERVAL_NS};
 pub use clipboard::{plan_paste, Clipboard, ClipboardOp, PasteError, PasteItem, PastePlan};
@@ -171,7 +172,10 @@ pub use layout::{
 pub use media::{entry_icon_request, icon_for_entry, media_for_entry, media_for_name, MediaType};
 pub use mkdir::{suggest_new_dir_name, validate_new_dir_name, MkdirError, NEW_FOLDER_BASE};
 pub use mode_edit::{validate_mode, ModeError};
-pub use open_with::{applications_for, association_from_appinfo, AppAssociation, BundleSource};
+pub use open_with::{
+    applications_for, association_from_appinfo, AppAssociation, BundleSource, OpenWithCandidate,
+    OpenWithChooser,
+};
 pub use owner_edit::{validate_owner, OwnerChange, OwnerError};
 pub use places::{Place, PlaceKind, Places, Volume, MAX_PLACE_LABEL, WIDEST_FIXED_LABEL};
 pub use progress::{ProgressModel, ProgressOp};
