@@ -6,6 +6,8 @@
 //! protocol-faithful `lib/vcmailbox` mock firmware behind a test channel; the live doorbell is the on-metal acceptance
 //! item (`plans/PI.md` Increment C).
 
+use core::cell::RefCell;
+
 use tairix_abi::driver::mailbox::{MailboxChannel, MAILBOX_PROPERTY_WORDS};
 use tairix_abi::{CapabilityId, DriverError, DriverHost, DriverKind, HwMatchKey};
 
@@ -35,11 +37,11 @@ impl DriverHost for MockHost {
 
 /// A channel backed by the protocol-faithful mock firmware: it answers
 /// every property message exactly as a healthy `VideoCore` would.
-struct MockChannel(MockFirmware);
+struct MockChannel(RefCell<MockFirmware>);
 
 impl MailboxChannel for MockChannel {
     fn exchange(&self, message: &mut [u32; MAILBOX_PROPERTY_WORDS]) -> Result<(), DriverError> {
-        self.0.respond(message);
+        self.0.borrow_mut().respond(message);
         Ok(())
     }
 }
@@ -90,7 +92,7 @@ fn bind_table_matches_the_vl805_by_exact_vendor_device() {
 
 #[test]
 fn reload_firmware_succeeds_over_a_healthy_mailbox() {
-    let channel = MockChannel(MockFirmware::healthy());
+    let channel = MockChannel(RefCell::new(MockFirmware::healthy()));
     // The mock echoes the request value word, so a healthy firmware
     // reports the device address it was asked to act on.
     assert_eq!(
@@ -103,7 +105,7 @@ fn reload_firmware_succeeds_over_a_healthy_mailbox() {
 
 #[test]
 fn probe_firmware_revision_reads_the_revision_word() {
-    let channel = MockChannel(MockFirmware::healthy());
+    let channel = MockChannel(RefCell::new(MockFirmware::healthy()));
     assert_eq!(
         probe_firmware_revision(&channel),
         Ok(MockFirmware::healthy().firmware_revision)

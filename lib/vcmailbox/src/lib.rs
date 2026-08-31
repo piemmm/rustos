@@ -9,9 +9,11 @@
 //! encodes the display-size query and the framebuffer-allocation
 //! request, validates the firmware's response fail-closed (the firmware is an external input), and translates between
 //! the `VideoCore` **bus** addresses the firmware speaks and the ARM
-//! **physical** addresses the kernel can map. Both consumers ride it:
-//! the aarch64 port's framebuffer boot console (`plans/PI.md` P7b) and
-//! the `drivers/display/rpi_hvs` HVS driver (`plans/PI.md` P7).
+//! **physical** addresses the kernel can map. Every consumer rides it:
+//! the aarch64 port's framebuffer boot console (`plans/PI.md` P7b), the
+//! `drivers/display/rpi_hvs` HVS driver (`plans/PI.md` P7), the VL805
+//! firmware reload (`plans/PI.md` P10), and the PMIC real-time clock
+//! (`plans/TIMESYNC.md` TS-4), which is not memory-mapped at all.
 //!
 //! Two layers, split so the protocol is host-testable without hardware:
 //!
@@ -706,30 +708,6 @@ pub fn decode_firmware_revision_response(
     tag_word(words, TAG_GET_FIRMWARE_REVISION)
 }
 
-/// Probe the runtime mailbox by asking the `VideoCore` for its firmware
-/// revision over `transport`.
-///
-/// This is a *liveness probe*, not a feature: the firmware-revision tag
-/// reads a constant and touches no device state, so issuing it
-/// immediately before a heavier property call (e.g.
-/// [`notify_xhci_reset`]) localises a failure of that call. If the probe
-/// itself fails or times out, the runtime mailbox path (doorbell
-/// mapping, buffer bus address, cache coherency) is broken and the
-/// heavier call never had a chance; if the probe succeeds but the
-/// heavier call times out, the transport is sound and the firmware is
-/// specifically dropping that tag (measure, don't
-/// guess).
-///
-/// # Errors
-///
-/// Any [`MailboxError`] from the transport or
-/// [`decode_firmware_revision_response`].
-pub fn query_firmware_revision(transport: &mut dyn MailboxTransport) -> Result<u32, MailboxError> {
-    let mut message = encode_firmware_revision_query();
-    transport.exchange(&mut message)?;
-    decode_firmware_revision_response(&message)
-}
-
 // --- VL805 xHCI firmware reload ------------------------------------------
 
 /// Encode the `TAG_NOTIFY_XHCI_RESET` property message carrying the
@@ -738,8 +716,7 @@ pub fn query_firmware_revision(transport: &mut dyn MailboxTransport) -> Result<u
 /// Public so the VL805 device driver (`drivers/bus/usb/vl805`) can build
 /// the firmware-reload message and run it over the board-neutral
 /// [`MailboxChannel`](tairix_abi::driver::mailbox::MailboxChannel) seam
-/// without re-deriving the property layout (one
-/// definition, shared by [`notify_xhci_reset`] and the driver).
+/// without re-deriving the property layout.
 #[must_use]
 pub fn encode_xhci_reset(dev_addr: u32) -> [u32; PROPERTY_WORDS] {
     let mut words = [0u32; PROPERTY_WORDS];
@@ -780,43 +757,129 @@ pub fn decode_xhci_reset_response(words: &[u32; PROPERTY_WORDS]) -> Result<u32, 
     Ok(value.words.first().copied().unwrap_or(0))
 }
 
-/// Ask the `VideoCore` to (re)load the VL805 xHCI controller's firmware
-/// after a PCIe reset.
+// --- Real-time clock registers -------------------------------------------
+
+/// `RPI_FIRMWARE_GET_RTC_REG`: read one register of the RTC the Pi 5's PMIC
+/// carries. The chip is not memory-mapped, so this property channel is the
+/// only route to it.
+const TAG_GET_RTC_REG: u32 = 0x0003_0087;
+
+/// `RPI_FIRMWARE_SET_RTC_REG`: write one register of the same RTC.
+const TAG_SET_RTC_REG: u32 = 0x0003_8087;
+
+/// Which RTC register a get- or set-register exchange names.
 ///
-/// On the Raspberry Pi 4 the USB-A ports hang off a VL805 xHCI
-/// controller behind the BCM2711 PCIe root complex. The previous boot
-/// stage hands off with the root complex held in `PERST#` reset, which
-/// dropped the VL805's firmware before the OS ran; on a board without
-/// the SPI EEPROM (Pi 4 rev 1.4 and later) it has no firmware of its
-/// own, so its registers read an uninitialised pattern and `Xhci::open`
-/// fails.
-/// The `VideoCore` co-processor holds the firmware blob and reloads it
-/// on this property tag — but only once the PCIe bus is already
-/// configured (the controller enumerated and its BAR based), so the
-/// caller runs this *after* the bus is up and *before* xHCI bring-up
-/// (`plans/PI.md` P10).
+/// The firmware selects the register with the tag's first value word; the
+/// second carries the value. Only the two this crate's consumer needs are
+/// spelled — the counter and the backup-cell voltage — because a selector
+/// with no caller would be surface with no reader. The discriminants are the
+/// firmware's own, so they are not renumbered.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum RtcRegister {
+    /// The 32-bit seconds counter, Unix epoch.
+    Time = 1,
+    /// The backup cell's charge voltage in millivolts, or zero when no cell
+    /// is fitted — the only honest evidence the counter survives a power
+    /// cycle.
+    BackupVolts = 8,
+}
+
+impl RtcRegister {
+    /// The firmware's selector word.
+    #[must_use]
+    pub const fn as_u32(self) -> u32 {
+        self as u32
+    }
+}
+
+/// Encode a query for one RTC register.
 ///
-/// `dev_addr` is the VL805's PCI address encoded as the firmware expects
-/// it: `bus << 20 | slot << 15 | func << 12` (`0x10_0000` for the
-/// hardwired Pi 4 VL805 on bus 1).
+/// The tag's value buffer is two words — the selector and the slot the
+/// firmware writes the value into — and the firmware echoes the selector, so
+/// the decode can prove the answer describes the register that was asked
+/// about.
+#[must_use]
+pub fn encode_rtc_register_query(register: RtcRegister) -> [u32; PROPERTY_WORDS] {
+    let mut words = [0u32; PROPERTY_WORDS];
+    let mut at = 2; // header written last, once the length is known.
+    at = push_tag(&mut words, at, TAG_GET_RTC_REG, &[register.as_u32(), 0]);
+    // End tag (a zero word) is already in place; account for it.
+    at += 1;
+    words[0] = words_to_bytes(at);
+    words[1] = CODE_REQUEST;
+    words
+}
+
+/// Encode a write of `value` to one RTC register.
+#[must_use]
+pub fn encode_rtc_register_write(register: RtcRegister, value: u32) -> [u32; PROPERTY_WORDS] {
+    let mut words = [0u32; PROPERTY_WORDS];
+    let mut at = 2; // header written last, once the length is known.
+    at = push_tag(&mut words, at, TAG_SET_RTC_REG, &[register.as_u32(), value]);
+    // End tag (a zero word) is already in place; account for it.
+    at += 1;
+    words[0] = words_to_bytes(at);
+    words[1] = CODE_REQUEST;
+    words
+}
+
+/// Decode the firmware's answer to [`encode_rtc_register_query`], returning
+/// the register's value.
 ///
-/// Returns the firmware's response value word for the honoured tag — a
-/// healthy firmware echoes the `dev_addr` it acted on, or `0` if it wrote
-/// no value. The value is diagnostic only (logged at bring-up to confirm
-/// the firmware processed the request), never gating: an honoured tag is
-/// a success regardless.
+/// The echoed selector must match `register`: a firmware that answered about
+/// a different register would otherwise have its voltage read as a time.
 ///
 /// # Errors
 ///
-/// Any [`MailboxError`] from the transport, or
-/// [`MailboxError::FirmwareError`] if the firmware rejects the request.
-pub fn notify_xhci_reset(
-    transport: &mut dyn MailboxTransport,
-    dev_addr: u32,
+/// * [`MailboxError::FirmwareError`] — the firmware rejected the request or
+///   returned an unknown header code.
+/// * [`MailboxError::MalformedResponse`] — a protocol violation, an
+///   unhonoured tag (no per-tag response bit), or an echoed selector naming a
+///   different register.
+pub fn decode_rtc_register_response(
+    register: RtcRegister,
+    words: &[u32; PROPERTY_WORDS],
 ) -> Result<u32, MailboxError> {
-    let mut message = encode_xhci_reset(dev_addr);
-    transport.exchange(&mut message)?;
-    decode_xhci_reset_response(&message)
+    match words[1] {
+        CODE_RESPONSE_OK => {}
+        CODE_RESPONSE_ERROR => return Err(MailboxError::FirmwareError),
+        _ => return Err(MailboxError::MalformedResponse),
+    }
+    match tag_pair(words, TAG_GET_RTC_REG)? {
+        (echoed, value) if echoed == register.as_u32() => Ok(value),
+        _ => Err(MailboxError::MalformedResponse),
+    }
+}
+
+/// Validate the firmware's answer to [`encode_rtc_register_write`].
+///
+/// An OK top-level header is necessary but not sufficient: a firmware build
+/// that does not recognise the tag still stamps it while leaving the tag's own
+/// response code clear, so a write that never happened would read as a
+/// success. `find_tag` requires the per-tag response bit.
+///
+/// A write has nothing to return, so a firmware that reports no value words
+/// is honoured; one that does return the buffer must still echo the selector
+/// it acted on.
+///
+/// # Errors
+///
+/// As [`decode_rtc_register_response`].
+pub fn decode_rtc_register_write_response(
+    register: RtcRegister,
+    words: &[u32; PROPERTY_WORDS],
+) -> Result<(), MailboxError> {
+    match words[1] {
+        CODE_RESPONSE_OK => {}
+        CODE_RESPONSE_ERROR => return Err(MailboxError::FirmwareError),
+        _ => return Err(MailboxError::MalformedResponse),
+    }
+    match find_tag(words, TAG_SET_RTC_REG)?.words {
+        [] => Ok(()),
+        [echoed, ..] if *echoed == register.as_u32() => Ok(()),
+        _ => Err(MailboxError::MalformedResponse),
+    }
 }
 
 // --- MMIO doorbell transport ----------------------------------------------

@@ -23,6 +23,18 @@ fn ok_response() -> [u32; PROPERTY_WORDS] {
     words
 }
 
+/// Run one already-encoded message through `firmware`, returning the
+/// firmware-mutated words. The three-step encode/exchange/decode shape every
+/// consumer composes itself, so these tests exercise the same path a driver
+/// does rather than a wrapper only they call.
+fn exchanged(
+    firmware: &mut MockFirmware,
+    mut message: [u32; PROPERTY_WORDS],
+) -> [u32; PROPERTY_WORDS] {
+    firmware.exchange(&mut message).expect("mock never fails");
+    message
+}
+
 // --- Framing -----------------------------------------------------------
 
 #[test]
@@ -665,8 +677,9 @@ fn xhci_reset_round_trips_through_a_healthy_firmware() {
     // value word (the echoed `dev_addr`), which the metal bring-up logs
     // to confirm the firmware processed the request.
     let mut firmware = MockFirmware::healthy();
+    let reply = exchanged(&mut firmware, encode_xhci_reset(TEST_VL805_DEV_ADDR));
     assert_eq!(
-        notify_xhci_reset(&mut firmware, TEST_VL805_DEV_ADDR).expect("reset accepted"),
+        decode_xhci_reset_response(&reply).expect("reset accepted"),
         TEST_VL805_DEV_ADDR
     );
 }
@@ -733,8 +746,9 @@ fn firmware_revision_round_trips_through_a_healthy_firmware() {
     // over the transport; a non-zero value proves the runtime mailbox
     // path is sound before the heavier xHCI-reset call.
     let mut firmware = MockFirmware::healthy();
+    let reply = exchanged(&mut firmware, encode_firmware_revision_query());
     assert_eq!(
-        query_firmware_revision(&mut firmware).expect("revision read"),
+        decode_firmware_revision_response(&reply).expect("revision read"),
         firmware.firmware_revision
     );
 }
@@ -771,6 +785,147 @@ fn firmware_revision_decode_fails_closed() {
     unhonoured[1] = CODE_RESPONSE_OK;
     assert_eq!(
         decode_firmware_revision_response(&unhonoured),
+        Err(MailboxError::MalformedResponse)
+    );
+}
+
+// --- Real-time clock registers -------------------------------------------
+
+#[test]
+fn rtc_query_lays_out_the_get_tag() {
+    let words = encode_rtc_register_query(RtcRegister::Time);
+    // 8 used words: 2 header + a 5-word get tag ([tag, value-len, request,
+    // selector, value slot]) + 1 end marker.
+    assert_eq!(words[0], 8 * 4, "message byte length");
+    assert_eq!(words[1], CODE_REQUEST);
+    assert_eq!(
+        words[2..7],
+        [TAG_GET_RTC_REG, 8, 0, RtcRegister::Time.as_u32(), 0]
+    );
+    assert_eq!(words[7], 0, "end tag");
+}
+
+#[test]
+fn rtc_write_lays_out_the_set_tag() {
+    let words = encode_rtc_register_write(RtcRegister::Time, 1_234_567);
+    assert_eq!(words[0], 8 * 4, "message byte length");
+    assert_eq!(words[1], CODE_REQUEST);
+    assert_eq!(
+        words[2..7],
+        [TAG_SET_RTC_REG, 8, 0, RtcRegister::Time.as_u32(), 1_234_567]
+    );
+    assert_eq!(words[7], 0, "end tag");
+}
+
+#[test]
+fn rtc_registers_round_trip_through_a_healthy_firmware() {
+    let mut firmware = MockFirmware::healthy();
+    for register in [RtcRegister::Time, RtcRegister::BackupVolts] {
+        let reply = exchanged(&mut firmware, encode_rtc_register_query(register));
+        let expected = match register {
+            RtcRegister::Time => firmware.rtc_secs,
+            RtcRegister::BackupVolts => firmware.rtc_backup_mv,
+        };
+        assert_eq!(
+            decode_rtc_register_response(register, &reply),
+            Ok(expected),
+            "{register:?}"
+        );
+    }
+
+    // A write sticks, so a consumer's set-then-read is faithful rather
+    // than a mock that always answers its constructor's value.
+    let reply = exchanged(
+        &mut firmware,
+        encode_rtc_register_write(RtcRegister::Time, 2_000_000_000),
+    );
+    assert_eq!(
+        decode_rtc_register_write_response(RtcRegister::Time, &reply),
+        Ok(())
+    );
+    let reply = exchanged(&mut firmware, encode_rtc_register_query(RtcRegister::Time));
+    assert_eq!(
+        decode_rtc_register_response(RtcRegister::Time, &reply),
+        Ok(2_000_000_000)
+    );
+}
+
+#[test]
+fn rtc_read_rejects_a_response_about_a_different_register() {
+    // The wedge: a firmware that answered about the backup-cell voltage
+    // would otherwise have millivolts read as a wall time. The echoed
+    // selector is what rules that out.
+    let mut words = encode_rtc_register_query(RtcRegister::Time);
+    MockFirmware::healthy().respond(&mut words);
+    assert!(decode_rtc_register_response(RtcRegister::Time, &words).is_ok());
+    words[5] = RtcRegister::BackupVolts.as_u32();
+    assert_eq!(
+        decode_rtc_register_response(RtcRegister::Time, &words),
+        Err(MailboxError::MalformedResponse)
+    );
+}
+
+#[test]
+fn rtc_read_fails_closed_on_a_bad_header_or_unhonoured_tag() {
+    let mut err = encode_rtc_register_query(RtcRegister::Time);
+    err[1] = CODE_RESPONSE_ERROR;
+    assert_eq!(
+        decode_rtc_register_response(RtcRegister::Time, &err),
+        Err(MailboxError::FirmwareError)
+    );
+
+    let mut unknown = encode_rtc_register_query(RtcRegister::Time);
+    unknown[1] = 0x1234_5678;
+    assert_eq!(
+        decode_rtc_register_response(RtcRegister::Time, &unknown),
+        Err(MailboxError::MalformedResponse)
+    );
+
+    // The documented Pi 5 fault: a firmware that stamps the OK header but
+    // never processes the tag. Reading that as a time would report the
+    // request's own zero slot as 1970 rather than "no clock".
+    let mut unhonoured = encode_rtc_register_query(RtcRegister::Time);
+    unhonoured[1] = CODE_RESPONSE_OK;
+    assert_eq!(
+        decode_rtc_register_response(RtcRegister::Time, &unhonoured),
+        Err(MailboxError::MalformedResponse)
+    );
+}
+
+#[test]
+fn rtc_write_fails_closed_on_an_unhonoured_tag() {
+    let mut unhonoured = encode_rtc_register_write(RtcRegister::Time, 42);
+    unhonoured[1] = CODE_RESPONSE_OK;
+    assert_eq!(
+        decode_rtc_register_write_response(RtcRegister::Time, &unhonoured),
+        Err(MailboxError::MalformedResponse)
+    );
+}
+
+#[test]
+fn rtc_write_accepts_a_firmware_that_returns_no_value_words() {
+    // A write has nothing to return, so a firmware reporting a zero-length
+    // response for an honoured tag has still applied it.
+    let mut words = encode_rtc_register_write(RtcRegister::Time, 42);
+    words[1] = CODE_RESPONSE_OK;
+    words[4] = TAG_RESPONSE_BIT;
+    assert_eq!(
+        decode_rtc_register_write_response(RtcRegister::Time, &words),
+        Ok(())
+    );
+}
+
+#[test]
+fn rtc_write_rejects_an_echo_naming_a_different_register() {
+    let mut words = encode_rtc_register_write(RtcRegister::Time, 42);
+    MockFirmware::healthy().respond(&mut words);
+    assert_eq!(
+        decode_rtc_register_write_response(RtcRegister::Time, &words),
+        Ok(())
+    );
+    words[5] = RtcRegister::BackupVolts.as_u32();
+    assert_eq!(
+        decode_rtc_register_write_response(RtcRegister::Time, &words),
         Err(MailboxError::MalformedResponse)
     );
 }

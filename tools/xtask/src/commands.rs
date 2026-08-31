@@ -1464,7 +1464,11 @@ type DriverBundles = Vec<(&'static [&'static [u8]], Vec<u8>)>;
 /// as a block-service endpoint behind a per-LUN storage node
 /// (`plans/DEVICES.md` D2). The GENET NIC needs no bus chain: it hangs
 /// straight off the platform bus, so its driver binds the discovered
-/// `brcm,bcm2711-genet-v5` node and hands `netstack` its frame channel.
+/// `brcm,bcm2711-genet-v5` node and hands `netstack` its frame channel. The
+/// Pi RTC hangs off no bus at all — the firmware owns it — so its driver
+/// binds the discovered `raspberrypi,rpi-rtc` node and reaches the chip
+/// through the mailbox service; on a Pi 3 or Pi 4 there is no such node and
+/// the bundle simply stays unbound.
 fn build_image_driver_bundles(
     ctx: &Context,
     profile: tairix_mkimage::ImageProfile,
@@ -1508,6 +1512,10 @@ fn build_image_driver_bundles(
         (
             image_drivers::FRAMEBUFFER_STORE_PATH,
             image_drivers::build_framebuffer_bundle(ctx, arch, profile)?,
+        ),
+        (
+            image_drivers::RPI_RTC_STORE_PATH,
+            image_drivers::build_rpi_rtc_bundle(ctx, arch, profile)?,
         ),
         (
             image_drivers::USB_MSD_STORE_PATH,

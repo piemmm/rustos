@@ -2715,17 +2715,17 @@ keyboard service kthread**:
     vs response), posted word, poll counts and last status, logged as
     `EventId(4121)` (`keyboard_service::log_mailbox_exchange`). Test:
     `mmio_exchange_stats_localise_the_timeout_stage`.
-  - A **runtime mailbox liveness probe** (`vcmailbox::query_firmware_revision`,
-    `GET_FIRMWARE_REVISION` tag `0x1` — a state-free read) is issued over the
-    same transport immediately **before** the `NOTIFY_XHCI_RESET` reload and
-    logged as `EventId(4122)` (`keyboard_service::log_mailbox_probe`,
-    `probe_outcome` + `firmware_revision_hex` + the shared `ExchangeStats`
-    fields). It separates a broken post-MMU mailbox path (`probe_outcome=timeout`)
-    from `VideoCore` dropping only the xHCI tag (`probe_outcome=ok` with a
-    non-zero revision, then a `4121` reload timeout). Tests:
+  - A **runtime mailbox liveness probe** (`GET_FIRMWARE_REVISION` tag `0x1` —
+    a state-free read) is issued over the same channel immediately **before**
+    the `NOTIFY_XHCI_RESET` reload; it now lives with its one consumer as
+    `vl805::probe_firmware_revision`, the in-kernel keyboard-service scaffold
+    that used to drive it having been deleted at B5. It separates a broken
+    post-MMU mailbox path from `VideoCore` dropping only the xHCI tag (a
+    successful probe with a non-zero revision, then a reload timeout). Tests:
     `firmware_revision_query_lays_out_the_get_tag`,
     `firmware_revision_round_trips_through_a_healthy_firmware`,
-    `firmware_revision_decode_fails_closed`.
+    `firmware_revision_decode_fails_closed`,
+    `probe_firmware_revision_reads_the_revision_word`.
   - **Mailbox response-length handling audited and confirmed correct**
     (against the VideoCore property protocol as documented in the
     raspberrypi.stackexchange.com #133040 answer). The classic bug — telling

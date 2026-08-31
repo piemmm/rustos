@@ -630,10 +630,110 @@ over virtio-PCI rather than MMIO — not a copy of the aarch64 vertical. x86_64
 is `◐ mc146818` in the `README.md` matrix until that lands; the driver, the
 node synthesis, and the port trap beneath them are host-tested and shipped.
 
-### TS-4 — Pi RTC support
-The `lib/vcmailbox` RTC tags and `drivers/rtc/rpi/`; then `lib/i2c`,
-`drivers/bus/i2c/bcm2835/`, and the `ds3231` / `pcf8523` / `pcf85063a` chip
-drivers.
+### TS-4 — Pi RTC support — mailbox tier DONE, I²C tier remaining
+
+**The mailbox tier.** `lib/vcmailbox` carries the RTC property tags — get
+`0x0003_0087`, set `0x0003_8087`, with a two-word value buffer holding a
+register selector and its value — plus `RtcRegister` (`Time`,
+`BackupVolts`; the firmware's own selector numbering, only the two spelled
+that have a caller). The decode requires the **per-tag response bit** and
+checks the **echoed selector**, so the two ways this chip could lie about
+itself are both closed: a firmware that stamps top-level success without
+processing the tag would otherwise read as 1970, and one that answered about
+the backup cell would have millivolts served as a wall time. A write is
+tolerated with zero response words (there is nothing to return) but not with a
+mismatched echo. `mock::MockFirmware` models both registers statefully — a
+write sticks — so a consumer's set-then-read round trip is faithful; its
+`respond` therefore takes `&mut self`, and a `MailboxChannel` test double over
+it needs the `RefCell` shape the production `vcmailbox` service already uses.
+
+`drivers/rtc/rpi/` (`raspberrypi,rpi-rtc`) is the driver. It is the class's
+first part with **no address at all** — no window, no port pair — so it maps
+nothing and its only resource is the IPC path: `RtDriverHost`'s
+`MailboxChannel` over `MAILBOX_ENDPOINT`, gated kernel-side by `CAP_MAILBOX`.
+Its matched node legitimately requests no resources, so the grant set is
+empty. Two decisions worth not re-deriving:
+
+- **A counter of zero is the chip's own "never set since it lost power"
+  signal**, which is the state a board with no backup cell comes up in. `read`
+  answers `Ok(None)` for it and `set` *refuses* to write it, so the two agree
+  and nothing this driver writes can read back as no-time. This is a single
+  distinguished hardware sentinel, not a plausibility window — that stays in
+  `timed`.
+- **`battery_backed` comes from the backup cell's own voltage register.** The
+  battery is an optional accessory on every Pi that has this clock, so a board
+  name would not be evidence. A firmware that does not know the register
+  answers zero, which reads as "no cell" — the conservative direction.
+
+The bundle requests `CAP_MAILBOX` + `CAP_IPC_BIND_PRIVILEGED` and **not**
+`CAP_MMIO_MAP`: the only RTC bundle that needs no mapping authority. It ships
+in the flashable Pi image's store at `Drivers/rtc/rpi/Run` and stays unbound on
+a Pi 3 or Pi 4, which have no such node. `timed`'s existing bounded RTC ladder
+(1 s doubling, 6 rungs) already covers the mailbox service coming up after the
+clock driver, so nothing there changed.
+
+No QEMU vertical is possible — QEMU models no `VideoCore` — so the protocol
+and every fail-closed path are host-proven and the live channel is the on-metal
+acceptance item, exactly as for the rest of `plans/PI.md`'s mailbox work.
+
+**The I²C tier remains**: `lib/i2c`, `drivers/bus/i2c/bcm2835/`, and the
+`ds3231` / `pcf8523` / `pcf85063a` chip drivers. §5 fixes the *requirement* —
+one grant-restricted transfer endpoint per child, so a chip driver can never
+address a neighbour on the bus — and the mechanism that satisfies it is
+**settled below** rather than left to be re-derived, because I²C has no
+enumeration protocol and the obvious readings of "enumerated child" do not
+work:
+
+- A driver learns only its own `HwResource` grants (`resource_grants`); there
+  is no per-driver view of its node's children, and `hw_tree_read` is the
+  privileged *global* inventory (`CAP_SYSINFO_HW`) — far more than a bus driver
+  should hold.
+- `hw_emit_node` publishes only under the emitter's own node and only
+  resources the emitter's own grants cover, so the endpoint authority a chip
+  driver receives *must* be minted from a resource the bus driver already
+  holds. The bus driver is therefore the emitter, and it must learn its
+  children from discovery.
+- Probing every address to find them is forbidden (§18.5) and can be
+  destructive on a write-only register block.
+
+The settled shape: **the parent carries the duty, the child carries the
+authority, and both come from the device tree.**
+
+- The generic FDT walk (`kernel/arch/api::fdtwalk`, shared by aarch64 and
+  riscv64 — do not fork it) recognises a **bus child** by the Devicetree
+  convention for a non-memory-mapped addressed bus: the parent declares
+  `#address-cells = <1>` and `#size-cells = <0>`, so a child's single `reg`
+  cell is its *bus address*, not an MMIO base. That is a Devicetree rule, not
+  an I²C or board rule, so it stays platform-neutral (§2.20).
+- For each such child the walk derives one endpoint id from the child's
+  hardware-tree node id (ids are unique per tree, so a reserved
+  `u32`-wide window is collision-free), and pushes:
+  - onto the **child** node, an existing `HwResourceKind::Endpoint` resource
+    naming that id — the chip driver's sole authority, so its endpoint *is* its
+    chip and it never sees or supplies a bus address;
+  - onto the **parent** node, one new `BusChild`-kind resource pairing that
+    endpoint id with the child's bus address — the bus driver's duty list. A
+    new `HwResourceKind` (append after `LinkAddress = 8`) is needed because the
+    two facts must arrive paired; `Endpoint` means "may submit", never "must
+    serve", so overloading it would be wrong. `HwResource` already carries
+    `flags`/`xlate` alongside `base`/`len` (see `Framebuffer`), so the pair
+    fits one record. Name it for the general case — any addressed,
+    non-enumerable bus (I²C, SPI chip-select, 1-Wire) has this exact shape.
+- Ordering needs nothing new: `mint_grant` does not require the endpoint to
+  exist, and a chip driver whose `ipc_call` lands before the bus driver has
+  bound climbs the same bounded doubling ladder `timed` uses for
+  `RTC_ENDPOINT`. `revoke_endpoint_grants` already withdraws the grant if the
+  bus driver dies, so authority cannot outlive the endpoint instance.
+
+With that fixed, the tier is: `lib/i2c` (the bus-agnostic transfer vocabulary
+— addressing, direction, register sequences, error taxonomy — in the shape
+`lib/usb` and `lib/virtio` hold protocol without device logic), a wire contract
+for the transfer endpoint beside `rtc_ipc`, `drivers/bus/i2c/bcm2835/` (the
+BSC: IRQ-driven via `irq_bind`/`irq_wait`, clock-stretch aware, a bounded
+fail-closed handshake timeout, one endpoint per tree-declared child), and the
+three chip drivers, each honouring its own oscillator-stop / clock-integrity
+flag over the **shared** BCD codec and `resolve_two_digit_year`. QEMU does not
+model the BSC, so each README states that no vertical is possible for the tier.
 
 ### TS-5 — Service-control transport + `servicectl`
 The `Enable`/`Disable`/`Status` ops, the PID 1 control reactor and its
@@ -693,6 +793,21 @@ a stock installation keeps time with no configuration.
   option finds a reachable server, because the fallback names cannot resolve
   on an isolated wire — so ignoring option 42 fails the run rather than
   quietly falling back.
+- **Both time verticals gate on a *window*, not the base second.** A validated
+  sample's instant is the server's transmit timestamp advanced by half the
+  **measured** round trip, and the engine accepts a round trip up to
+  `ntp::MAX_ROUND_TRIP`, so the applied second is the fixture's base plus up to
+  half that ceiling. The witnesses originally required the base exactly, which
+  held only while the round trip stayed sub-second: under the full QEMU matrix
+  a guest measures whole seconds between its request leaving and its reply
+  being read, the engine correctly compensated, and the gate then rejected a
+  perfectly correct clock. `applied_is_fixture_sample` is the one shared
+  predicate both witnesses use, with its window *derived* from
+  `MAX_ROUND_TRIP` rather than restated — so it can never drift from the engine
+  and can never be widened to make a slow run pass. It stays a million seconds
+  clear of the spoof, so every discrimination the witness exists for survives.
+  Do not reintroduce an exact-second gate on any clock a delay compensation
+  passes through.
 
 ## 8. Cross-references
 

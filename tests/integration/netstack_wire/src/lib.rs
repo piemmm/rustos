@@ -384,17 +384,47 @@ net.tcp.ecn true
 // the spoof would set its clock to the wrong instant; a guest that let the
 // spoof cancel the outstanding transaction would ignore the truthful reply
 // that follows and never set the clock at all. Only a guest whose nonce gate
-// drops the spoof *without* ending the transaction lands on
-// `NTP_FIXTURE_SECS`, which is what the run's serial witness requires.
+// drops the spoof *without* ending the transaction lands inside
+// `applied_is_fixture_sample`, which is what the run's serial witness
+// requires.
 
-/// The instant the fixture NTP server reports, in Unix seconds — the value
-/// the guest's clock must end up reading.
+/// The instant the fixture NTP server reports, in Unix seconds — the base of
+/// the window the guest's clock must end up reading.
 ///
 /// Comfortably inside the plausibility window
-/// (`tairix_abi::is_plausible_wall_time`) and a round number of seconds, so
-/// the applied instant's whole-second field is exactly this even after the
-/// engine advances it by half the (sub-millisecond) round trip.
+/// (`tairix_abi::is_plausible_wall_time`) and a round number of seconds with a
+/// zero fraction, so the applied instant is this plus the engine's delay
+/// compensation and nothing else. What a run may legitimately apply is
+/// [`applied_is_fixture_sample`], never this value alone.
 pub const NTP_FIXTURE_SECS: i64 = 1_800_000_000;
+
+/// How far above [`NTP_FIXTURE_SECS`] an applied instant may land and still be
+/// this fixture's sample, in seconds.
+///
+/// A validated sample's instant is the server's transmit timestamp advanced by
+/// half the **measured** round trip, and a sample whose round trip exceeds
+/// `tairix_net::ntp::MAX_ROUND_TRIP` is rejected outright — so the
+/// compensation is bounded by half that ceiling and by nothing else. Derived
+/// from the engine's own bound rather than from how fast a host happens to be:
+/// a host running the whole QEMU matrix measures whole seconds of round trip
+/// between a request leaving and its reply being read where an idle one
+/// measures microseconds, and the compensated instant is *correct* in both
+/// cases. Asserting the base second alone would therefore be asserting the
+/// host's speed, not the guest's clock.
+pub const NTP_DELAY_WINDOW_SECS: i64 = tairix_net::ntp::MAX_ROUND_TRIP.secs() / 2;
+
+/// Whether `secs` is the instant this fixture's truthful server reply
+/// produced, rather than a spoof, a fallback server, or no sample at all.
+///
+/// One definition, shared by both time verticals' witnesses so they cannot
+/// diverge. The window is a second wide against a spoof a million seconds
+/// away, so it keeps every discrimination the witness exists for: a guest that
+/// never queried the peer sets no clock, and one that believed
+/// [`NTP_SPOOF_SECS`] lands nowhere near.
+#[must_use]
+pub const fn applied_is_fixture_sample(secs: i64) -> bool {
+    secs >= NTP_FIXTURE_SECS && secs <= NTP_FIXTURE_SECS + NTP_DELAY_WINDOW_SECS
+}
 
 /// The instant the peer's **spoofed** reply reports, in Unix seconds.
 ///
@@ -1258,5 +1288,65 @@ mod tests {
             );
         }
         assert!(NTP_SPOOF_SECS.abs_diff(NTP_FIXTURE_SECS) >= 1_000_000);
+    }
+
+    /// The accepted window covers every instant the engine's own delay
+    /// compensation can produce, and nothing else.
+    ///
+    /// The regression this pins: the witnesses used to require the base second
+    /// exactly, which held only while the measured round trip stayed
+    /// sub-second. Under the full QEMU matrix a guest measures whole seconds
+    /// between its request leaving and its reply being read, the engine
+    /// correctly advances the applied instant by half of that, and the
+    /// exact-match gate then missed a perfectly correct clock.
+    #[test]
+    fn the_window_admits_every_delay_compensation_a_validated_sample_can_carry() {
+        // The compensation is half the measured round trip, and a sample
+        // beyond `MAX_ROUND_TRIP` is rejected outright, so the widest instant
+        // the engine can apply is the base plus half that ceiling.
+        let widest_nanos = tairix_net::ntp::MAX_ROUND_TRIP.saturating_total_nanos() / 2;
+        let widest_secs = NTP_FIXTURE_SECS
+            + i64::try_from(widest_nanos / 1_000_000_000).expect("sub-second-scale ceiling");
+        assert!(
+            applied_is_fixture_sample(widest_secs),
+            "the widest compensated instant ({widest_secs}) must still be the fixture's"
+        );
+        assert!(applied_is_fixture_sample(NTP_FIXTURE_SECS));
+        assert!(applied_is_fixture_sample(
+            NTP_FIXTURE_SECS + NTP_DELAY_WINDOW_SECS
+        ));
+        // The instant a loaded host actually produced, and the exact value the
+        // removed exact-match gate rejected: a 2.586-second measured round
+        // trip advanced the applied second by one.
+        assert!(applied_is_fixture_sample(NTP_FIXTURE_SECS + 1));
+    }
+
+    /// The window is a bound, not a tolerance to widen: it rejects an instant
+    /// below the fixture, one past the compensation ceiling, and the spoof.
+    #[test]
+    fn the_window_rejects_every_instant_a_correct_guest_cannot_produce() {
+        assert!(!applied_is_fixture_sample(NTP_FIXTURE_SECS - 1));
+        assert!(!applied_is_fixture_sample(
+            NTP_FIXTURE_SECS + NTP_DELAY_WINDOW_SECS + 1
+        ));
+        assert!(
+            !applied_is_fixture_sample(NTP_SPOOF_SECS),
+            "a guest that believed the spoof must never pass"
+        );
+        // The compensation can never reach the spoof, whatever the host's
+        // load, so the discrimination holds at compile time rather than by
+        // luck of a run.
+        const { assert!(NTP_DELAY_WINDOW_SECS < NTP_SPOOF_SECS - NTP_FIXTURE_SECS) };
+    }
+
+    /// Every instant the window admits is one the wall clock would accept on
+    /// its own merits, so a pass is never an artefact of a lax bound.
+    #[test]
+    fn the_whole_window_is_a_plausible_wall_time() {
+        for secs in [NTP_FIXTURE_SECS, NTP_FIXTURE_SECS + NTP_DELAY_WINDOW_SECS] {
+            assert!(tairix_abi::is_plausible_wall_time(
+                tairix_abi::Time64::from_secs(secs)
+            ));
+        }
     }
 }

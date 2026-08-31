@@ -22,15 +22,24 @@ crate owns that protocol once:
   does not model the firmware, so host tests drive the seam with a
   protocol-faithful mock and the doorbell is the on-metal acceptance item
   (`AGENTS.md` §2.1).
+- the **real-time clock registers** (`RtcRegister`, `read_rtc_register` /
+  `write_rtc_register`): the Pi 5's clock is inside the board's PMIC and is not
+  memory-mapped, so the property channel is the only route to it
+  (`plans/TIMESYNC.md` TS-4). Both directions require the per-tag response bit
+  and check the register selector the firmware echoed, so a firmware that
+  stamps success without processing the tag, or answers about a different
+  register, is a fault rather than a plausible wall time.
 
 ## Why it lives in `lib/` (the §2.20 / §2.22 carve-out, legitimately)
 
 This is single-device support — it knows the BCM2711 `VideoCore` — yet it
 **stays** in `lib/*`, unlike the VL805 / BCM2711-PCIe device logic, which was
 collapsed into its driver crate (`AGENTS.md` §2.22). The difference is the
-second consumer: two independent consumers speak this protocol — the aarch64
-port's framebuffer boot console (`kernel/arch/aarch64`, P7b) and the HVS
-display driver (`drivers/display/rpi_hvs`, P7). The boot console is a
+second consumer: independent consumers speak this protocol — the aarch64
+port's framebuffer boot console (`kernel/arch/aarch64`, P7b), the HVS display
+driver (`drivers/display/rpi_hvs`, P7), the VL805 firmware reload
+(`drivers/bus/usb/vl805`, P10), and the PMIC clock (`drivers/rtc/rpi`). The
+boot console is a
 **charter-legal non-driver** consumer (a genuine early-boot need, not a
 removable scaffold), so the §2.20 carve-out applies and the shared definition
 belongs in `lib/*` (`AGENTS.md` §2.22 / §6 / §2.2); a driver crate may not be

@@ -44,11 +44,11 @@ fn node_a_grants() -> [HwResource; 2] {
 }
 
 /// A [`MailboxChannel`] backed by the protocol-faithful mock firmware.
-struct MockChannel(MockFirmware);
+struct MockChannel(RefCell<MockFirmware>);
 
 impl MailboxChannel for MockChannel {
     fn exchange(&self, message: &mut [u32; MAILBOX_PROPERTY_WORDS]) -> Result<(), DriverError> {
-        self.0.respond(message);
+        self.0.borrow_mut().respond(message);
         Ok(())
     }
 }
@@ -139,7 +139,7 @@ fn build_xhci_node_fails_closed_without_the_dma_grant() {
 
 #[test]
 fn reload_then_publish_reloads_over_a_healthy_mailbox_and_emits_node_b() {
-    let host = MockHost::new(Some(MockChannel(MockFirmware::healthy())));
+    let host = MockHost::new(Some(MockChannel(RefCell::new(MockFirmware::healthy()))));
     let node = build_xhci_node(node_a_grants().iter()).expect("node B builds");
     let outcome = reload_firmware_and_publish(&host, node).expect("publish succeeds");
 
@@ -173,7 +173,7 @@ fn reload_then_publish_fails_closed_when_the_emit_is_refused() {
     // The kernel refuses the publish (e.g. a forwarded resource is not
     // covered by a grant, or `CAP_HW_EMIT` is missing): the composition
     // surfaces the refusal rather than reporting success.
-    let mut host = MockHost::new(Some(MockChannel(MockFirmware::healthy())));
+    let mut host = MockHost::new(Some(MockChannel(RefCell::new(MockFirmware::healthy()))));
     host.emit_result = Err(DriverError::PermissionDenied);
     let node = build_xhci_node(node_a_grants().iter()).expect("node B builds");
     assert_eq!(

@@ -25,9 +25,9 @@
 //! * The peer answers each time request **twice, spoof first** — a well-formed
 //!   reply whose origin timestamp does not echo the request's CSPRNG nonce and
 //!   which reports a plainly different instant, then the truthful reply. The
-//!   witness requires the *exact* applied second, so a guest that believed the
-//!   spoof lands elsewhere and a guest that let the spoof cancel its
-//!   outstanding transaction never sets the clock at all.
+//!   witness requires the applied second to be the fixture's, so a guest that
+//!   believed the spoof lands a million seconds away and a guest that let the
+//!   spoof cancel its outstanding transaction never sets the clock at all.
 //! * A network-supplied server arrives as an *address*, so no resolver is
 //!   involved: this run also proves the learned tier needs no DNS, which is
 //!   what makes it useful on a network whose only DNS advice came from the
@@ -58,10 +58,13 @@
 //! ## How the run completes
 //!
 //! There is no serial script: nothing in this chain needs a console dialogue.
-//! The guest exits itself on `timed`'s `CLOCK_SET` audit record carrying the
-//! fixture instant's `wall_secs=`, and the peer must additionally report that
-//! it leased the address and served a time request — so neither side passes
-//! alone. The peer cannot know which reply the guest believed, and the guest's
+//! The guest exits itself on `timed`'s `CLOCK_SET` audit record whose applied
+//! `wall_secs=` is the fixture's sample
+//! (`tairix_test_netstack_wire::applied_is_fixture_sample`, the base instant
+//! plus the delay compensation a validated sample can carry — never the base
+//! alone, which would assert the host's speed rather than the guest's clock),
+//! and the peer must additionally report that it leased the address and served
+//! a time request — so neither side passes alone. The peer cannot know which reply the guest believed, and the guest's
 //! witness cannot appear unless the peer both leased and answered. A run that
 //! never earns the witness fails loud on the runner's inactivity/absolute
 //! deadline.
@@ -125,7 +128,7 @@ mod kernel {
             }
             let applied = event.fields.iter().find(|f| f.key == "wall_secs");
             if let Some(FieldValue::SignedInt(secs)) = applied.map(|f| f.value) {
-                if secs == tairix_test_netstack_wire::NTP_FIXTURE_SECS {
+                if tairix_test_netstack_wire::applied_is_fixture_sample(secs) {
                     qemu_exit::exit_success();
                 }
             }

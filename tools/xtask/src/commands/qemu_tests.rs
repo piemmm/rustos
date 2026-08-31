@@ -5546,17 +5546,19 @@ static TESTS: &[QemuTest] = &[
     // reply whose origin timestamp does not echo the request's nonce and which
     // reports `NTP_SPOOF_SECS`, then the truthful reply echoing the nonce and
     // reporting `NTP_FIXTURE_SECS`. That ordering is the discriminator — a
-    // guest that accepted the spoof would land on the wrong instant, and one
+    // guest that accepted the spoof would land a million seconds away, and one
     // that let the spoof cancel its transaction would ignore the truthful
-    // reply and never set the clock — so the serial witness requires the
-    // *exact* applied seconds, which only the nonce-gated path can produce.
+    // reply and never set the clock — so the guest's witness requires the
+    // applied instant to be the fixture's sample
+    // (`wire::applied_is_fixture_sample`: the base instant plus the delay
+    // compensation a validated sample can carry, never the base alone, which
+    // would assert this host's speed rather than the guest's clock).
     //
     // Three gates, none sufficient alone: the serial script requires the
-    // unlock (so the planted `system.conf` is reachable), then the login
-    // dialogue, then — expect-only, typing nothing — `timed`'s `CLOCK_SET`
-    // audit record carrying `wall_secs=<NTP_FIXTURE_SECS>`, and only then
-    // types the shell `exit` that completes the chain. The peer must
-    // additionally report a served request. A 300-second budget covers boot +
+    // unlock (so the planted `system.conf` is reachable) and then the login
+    // dialogue, ending at the session prompt; the guest itself exits on the
+    // applied instant, which lands seconds later. The peer must additionally
+    // report a served request. A 300-second budget covers boot +
     // autoload + service bring-up + the unlock and login dialogue + the
     // randomised initial delay and any backoff while the interface comes up,
     // on QEMU TCG; single CPU like the other full-boot verticals.
@@ -5609,12 +5611,13 @@ static TESTS: &[QemuTest] = &[
     // rather than a tautology.
     //
     // The peer answers each request **twice, spoof first**, exactly as the
-    // TS-2 vertical's does, so the witness requires the *exact* applied
-    // seconds. No serial script: nothing in the chain needs a console
-    // dialogue, and everything runs before any root unlock. Two gates, neither
-    // sufficient alone — the guest exits on `timed`'s `CLOCK_SET` carrying
-    // `wall_secs=<NTP_FIXTURE_SECS>`, and the peer must report that it
-    // offered, acked, and served a time request. A 300-second budget covers
+    // TS-2 vertical's does, so the witness requires the applied instant to be
+    // the fixture's sample (`wire::applied_is_fixture_sample`). No serial
+    // script: nothing in the chain needs a console dialogue, and everything
+    // runs before any root unlock. Two gates, neither sufficient alone — the
+    // guest exits on `timed`'s `CLOCK_SET` carrying an applied `wall_secs=`
+    // inside that window, and the peer must report that it offered, acked, and
+    // served a time request. A 300-second budget covers
     // boot + autoload + service bring-up + the bind + the DHCP exchange + the
     // ladder rung that picks the lease's server up + the randomised initial
     // delay, on QEMU TCG; single CPU like the other full-boot verticals.

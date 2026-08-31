@@ -1283,6 +1283,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-drv-rtc-rpi"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-caps",
+ "tairix-drvrt",
+ "tairix-rt",
+ "tairix-vcmailbox",
+]
+
+[[package]]
 name = "tairix-drv-storage-emmc2"
 version = "0.0.0"
 dependencies = [
@@ -4016,6 +4027,7 @@ name = "tairix-test-netstack-wire"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-net",
  "tairix-netconfig",
  "tairix-sysconfig",
 ]
@@ -5659,6 +5671,7 @@ dependencies = [
  "tairix-drv-rtc-goldfish",
  "tairix-drv-rtc-mc146818",
  "tairix-drv-rtc-pl031",
+ "tairix-drv-rtc-rpi",
  "tairix-drv-storage-raid",
  "tairix-drv-storage-raid-member",
  "tairix-drv-storage-usb-msd",

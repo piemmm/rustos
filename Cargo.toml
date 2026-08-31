@@ -157,6 +157,7 @@ members = [
     "drivers/rtc/pl031",
     "drivers/rtc/goldfish",
     "drivers/rtc/mc146818",
+    "drivers/rtc/rpi",
 
     # Drivers — network
     "drivers/network/genet",

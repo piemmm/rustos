@@ -19,11 +19,12 @@
 //!   whose origin timestamp does not echo the request's CSPRNG nonce and which
 //!   reports a plainly different instant, then the truthful reply echoing the
 //!   nonce. That ordering is the discriminator, and it is why the run's gate
-//!   requires the *exact* applied second rather than merely "a clock was set":
-//!   a guest that accepted the spoof would land on the spoof's instant, and a
-//!   guest that let the spoof cancel its outstanding transaction would ignore
-//!   the truthful reply and never set the clock at all. Only the
-//!   nonce-gated-but-not-cancelled path reaches the gating value.
+//!   requires the applied second to be the fixture's rather than merely "a
+//!   clock was set": a guest that accepted the spoof would land a million
+//!   seconds away, and a guest that let the spoof cancel its outstanding
+//!   transaction would ignore the truthful reply and never set the clock at
+//!   all. Only the nonce-gated-but-not-cancelled path reaches the gating
+//!   window.
 //! * The NTP decode itself runs in a capability-empty sandbox worker, so this
 //!   run also exercises the live spawn of that worker by a service holding
 //!   `CAP_TIME_SET` — the containment the host tests cover in-process.
@@ -49,11 +50,14 @@
 //! ## How the run completes — harness-driven, race-free
 //!
 //! The serial script drives the unlock and login dialogue and ends there; the
-//! guest then exits itself on `timed`'s `CLOCK_SET` audit record carrying the
-//! fixture instant's `wall_secs=`. Gating the exit on that *value* is what
-//! rejects the spoof the peer sends first — a guest that believed it records
-//! different seconds and never exits, and one that let it cancel the
-//! transaction records nothing at all. The harness additionally requires the
+//! guest then exits itself on `timed`'s `CLOCK_SET` audit record whose applied
+//! `wall_secs=` is the fixture's sample
+//! (`tairix_test_netstack_wire::applied_is_fixture_sample`, the base instant
+//! plus the delay compensation a validated sample can carry — never the base
+//! alone, which would assert the host's speed rather than the guest's clock).
+//! Gating the exit on that *value* is what rejects the spoof the peer sends
+//! first — a guest that believed it records seconds a million away and never
+//! exits, and one that let it cancel the transaction records nothing at all. The harness additionally requires the
 //! peer to report a served request, so neither side passes alone: the peer
 //! cannot know which reply the guest believed, and the guest's witness cannot
 //! appear unless the peer answered. A run that never earns the witness fails
@@ -119,7 +123,7 @@ mod kernel {
             }
             let applied = event.fields.iter().find(|f| f.key == "wall_secs");
             if let Some(FieldValue::SignedInt(secs)) = applied.map(|f| f.value) {
-                if secs == tairix_test_netstack_wire::NTP_FIXTURE_SECS {
+                if tairix_test_netstack_wire::applied_is_fixture_sample(secs) {
                     qemu_exit::exit_success();
                 }
             }

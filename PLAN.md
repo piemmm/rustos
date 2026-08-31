@@ -3498,8 +3498,12 @@ establishes its clock from the network with no configuration at all, and the
 NTP decode is contained in a capability-empty sandbox worker. TS-3 (the RTC
 driver class and the QEMU-emulable chips) is done but for the x86_64 QEMU
 vertical, which needs the tree's first x86_64 full-boot vertical and is its own
-increment. TS-4–TS-6 follow. `plans/TIMESYNC.md` is the binding design and
-carries the deliverable list and its current state; it is not repeated here.
+increment. TS-4's mailbox tier is done — the Pi 5's PMIC clock, reached over
+the `VideoCore` property channel because it is not memory-mapped at all — and
+its I²C tier remains, with the bus-child authority mechanism now settled in the
+plan rather than left to be re-derived. TS-5 and TS-6 follow.
+`plans/TIMESYNC.md` is the binding design and carries the deliverable list and
+its current state; it is not repeated here.
 
 A Raspberry Pi 3/4 has no RTC at all, which is why the network path came
 first: without it such a machine boots `WallTimeState::Unset` for ever, and

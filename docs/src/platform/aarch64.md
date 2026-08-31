@@ -1348,13 +1348,15 @@ the service binds.
   buffer (a fail-closed status-framed error otherwise, `AGENTS.md` §5.4 / §2.9).
   The board-neutral server transform (`mailbox_ipc::serve_request`) lives once
   in `lib/abi` and is shared by the service (`AGENTS.md` §2.2).
-- **The client.** A driver that needs a firmware exchange — the VL805 USB
-  firmware reload (`drivers/bus/usb/vl805`) — obtains a `MailboxChannel` from
-  its host (`DriverHost::mailbox`); the rt-backed `RtDriverHost` implements it
-  by marshalling `exchange` over `ipc_call(MAILBOX_ENDPOINT, …)`, so the VL805
-  driver runs unchanged in user space. The endpoint's send gate (`CAP_MAILBOX`)
-  is enforced kernel-side; a caller without it fails closed (`AGENTS.md` §5.2 /
-  §5.4).
+- **The clients.** A driver that needs a firmware exchange — the VL805 USB
+  firmware reload (`drivers/bus/usb/vl805`) and the Pi 5's PMIC real-time
+  clock (`drivers/rtc/rpi`, whose chip is not memory-mapped at all, so the
+  property channel is its *only* path to the hardware) — obtains a
+  `MailboxChannel` from its host (`DriverHost::mailbox`); the rt-backed
+  `RtDriverHost` implements it by marshalling `exchange` over
+  `ipc_call(MAILBOX_ENDPOINT, …)`, so both drivers run unchanged in user
+  space. The endpoint's send gate (`CAP_MAILBOX`) is enforced kernel-side; a
+  caller without it fails closed (`AGENTS.md` §5.2 / §5.4).
 - **Bind identity.** The mailbox `compatible` string and the service's
   `BIND_KEYS` are one definition in `lib/vcmailbox` (`MAILBOX_COMPATIBLE`), so
   the discovery key here and the autoload match key can never diverge

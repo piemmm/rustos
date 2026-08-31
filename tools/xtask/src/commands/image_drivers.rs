@@ -132,6 +132,11 @@ pub const GOLDFISH_STORE_PATH: &[&[u8]] = &[b"Drivers", b"rtc", b"goldfish", b"R
 /// the chip leaf `mc146818` (the PC-compatible CMOS clock).
 pub const MC146818_STORE_PATH: &[&[u8]] = &[b"Drivers", b"rtc", b"mc146818", b"Run"];
 
+/// Store path of the Raspberry Pi real-time-clock driver bundle: class `rtc`,
+/// the chip leaf `rpi` (the Pi 5's PMIC clock, reached over the firmware
+/// mailbox).
+pub const RPI_RTC_STORE_PATH: &[&[u8]] = &[b"Drivers", b"rtc", b"rpi", b"Run"];
+
 /// Cross-compile `package` for the freestanding aarch64 target, convert the
 /// linked PIE ELF to a production-biased `rxe`, and wrap it as the signed
 /// payload of a `kind = UserSpace` bundle requesting exactly `caps` and
@@ -756,6 +761,35 @@ pub fn build_mc146818_bundle(
         "tairix-drv-rtc-mc146818",
         &[CapabilityId::MMIO_MAP, CapabilityId::IPC_BIND_PRIVILEGED],
         tairix_drv_rtc_mc146818::BIND_KEYS,
+        profile,
+    )
+}
+
+/// Build and sign the Raspberry Pi real-time-clock driver bundle.
+///
+/// The Pi 5's clock lives in the board's power-management IC rather than any
+/// MMIO space, so this is the one RTC bundle that requests no
+/// `CAP_MMIO_MAP`: its only path to the hardware is a property exchange with
+/// the `vcmailbox` service, which the kernel gates on `CAP_MAILBOX`. The same
+/// no-clock-authority split as [`build_pl031_bundle`] otherwise. Carries
+/// `tairix_drv_rtc_rpi::BIND_KEYS`, so it autoloads against a discovered
+/// `raspberrypi,rpi-rtc` node and stays unbound on a Pi 3 or Pi 4, which have
+/// none.
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_rpi_rtc_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
+    build_bundle(
+        ctx,
+        arch,
+        "tairix-drv-rtc-rpi",
+        &[CapabilityId::MAILBOX, CapabilityId::IPC_BIND_PRIVILEGED],
+        tairix_drv_rtc_rpi::BIND_KEYS,
         profile,
     )
 }

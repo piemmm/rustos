@@ -14,6 +14,13 @@ workspace = true
 [lib]
 path = "src/lib.rs"
 
+[dependencies]
+# The one definition of the NTP engine's bounds: the fixture's accepted-sample
+# window is derived from `ntp::MAX_ROUND_TRIP` rather than restating it, so the
+# two can never disagree about which applied instants a validated sample can
+# produce. `no_std`, like these constants.
+tairix-net = { path = "../../../lib/net" }
+
 [dev-dependencies]
 # Host-only: the static-addressing vertical's planted `network.conf` is
 # cross-checked against the wire address/location constants through the real

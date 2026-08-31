@@ -57,7 +57,8 @@ belongs to `timed`, not to a driver.
 Concrete chips divide into two families:
 
 * **Linear counters** — a seconds or nanoseconds count since a documented
-  epoch (ARM PL031, the Goldfish RTC). Nothing to decode beyond the width.
+  epoch (ARM PL031, the Goldfish RTC, the Pi's PMIC clock). Nothing to decode
+  beyond the width.
 * **Calendar register blocks** — packed binary-coded-decimal fields for
   second/minute/hour/day/month/year (MC146818 CMOS, DS3231, PCF8523,
   PCF85063A).
@@ -101,7 +102,8 @@ time.
 |------------|-------------------------|----------------------------------------------|--------|
 | `pl031`    | `drivers/rtc/pl031`     | ARM PrimeCell PL031 (`arm,pl031`)            | shipped in the aarch64 driver store; its QEMU vertical proves the clock is set `Firmware` before any network exists |
 | `goldfish` | `drivers/rtc/goldfish`  | Google Goldfish RTC (`google,goldfish-rtc`)  | shipped in the riscv64 driver store, with the same vertical over this port's own chip |
-| `mc146818` | `drivers/rtc/mc146818`  | PC CMOS clock (`motorola,mc146818`)          | device logic and service complete, matching the node the x86_64 legacy-fallback discovery path emits; image wiring and its QEMU vertical are the next increment |
+| `mc146818` | `drivers/rtc/mc146818`  | PC CMOS clock (`motorola,mc146818`)          | shipped in the x86_64 driver store, matching the node the legacy-fallback discovery path emits; its QEMU vertical waits on the first x86_64 full-boot harness |
+| `rpi`      | `drivers/rtc/rpi`       | Pi 5 PMIC clock (`raspberrypi,rpi-rtc`)      | shipped in the flashable Pi driver store; host-proven against the mock firmware, and no QEMU vertical is possible because QEMU models no `VideoCore` |
 
 The CMOS clock is the class's only port-addressed part, and the only one whose
 node is a legacy fallback rather than a discovered one: no ACPI table
@@ -115,5 +117,23 @@ kernel-side, rather than through a mapped register window — which is why
 `tairix_abi::driver::sole_port_range` resolves a port grant separately from
 `sole_register_window`.
 
-`plans/TIMESYNC.md` TS-4 stages the Raspberry Pi tiers: the Pi 5's
-mailbox-reached PMIC clock and the I²C HAT chips.
+The Pi's clock is the class's only part that is not addressed at all — no
+window, no port pair. It lives inside the board's power-management IC, and the
+`VideoCore` firmware owns it and exposes it as two numbered registers behind
+the mailbox property channel, so the driver's sole path to the hardware is a
+property exchange with the `vcmailbox` service over the board-neutral
+`MailboxChannel` seam. Its counter reads zero until something programs it,
+which is the state a board with no backup cell comes up in, so zero is the
+chip's own "never set" signal: `read` answers `Ok(None)` for it and `set`
+refuses to write it, so the two agree. `battery_backed` comes from the backup
+cell's own voltage register, because the battery is an optional accessory on
+every Pi that has this clock — a board name would not be evidence.
+
+Some Pi firmware revisions answer every property request with the top-level
+success code while never processing the tag. `lib/vcmailbox` requires the
+per-tag response bit, so such a reply is reported as a fault rather than
+believed as a 1970 reading, and the driver never waits on the mailbox for one.
+
+`plans/TIMESYNC.md` TS-4 stages the remaining Raspberry Pi tier: the I²C HAT
+chips, reached through a bus path (`lib/i2c` plus a BSC bus driver) that does
+not exist yet.
