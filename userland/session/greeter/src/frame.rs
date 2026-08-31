@@ -13,7 +13,7 @@ use tairix_abi::driver::display::{DamageRect, DisplayMode};
 use tairix_cursor::PlacedCursor;
 use tairix_display::{scanout_len, sub_screen_damage, ChannelOrder};
 use tairix_geometry::Rect;
-use tairix_raster::Surface;
+use tairix_raster::{DitherRow, Surface};
 
 /// Bytes the channel encoder writes per pixel.
 const PIXEL_BYTES: usize = 4;
@@ -118,8 +118,8 @@ impl Scanout {
         &self.frame
     }
 
-    /// Copy `surface` into the frame within `damage`, `cursor` over the top,
-    /// and say what to present.
+    /// Copy `surface` into the frame within `damage`, dimmed to `reveal`, with
+    /// `cursor` over the top, and say what to present.
     ///
     /// `damage` is `None` for "the whole screen changed". A rectangle is
     /// clipped to the screen first, so one that lies partly or wholly outside
@@ -127,12 +127,17 @@ impl Scanout {
     ///
     /// The cursor is sampled here rather than drawn into `surface`, so the
     /// pixels behind it are never overwritten and one painted surface serves
-    /// every position the pointer takes over it.
+    /// every position the pointer takes over it. The veil
+    /// ([`AuthSurface::reveal`](tairix_greeter::AuthSurface::reveal)) is
+    /// applied here for the same reason, and beneath the cursor exactly as a
+    /// wash painted into the surface would have been: the pointer stays crisp
+    /// over a screen that is dissolving.
     pub fn compose(
         &mut self,
         surface: &Surface,
         cursor: Option<&PlacedCursor>,
         damage: Option<Rect>,
+        reveal: u8,
     ) -> Present {
         let screen = self.screen();
         let clip = match damage {
@@ -142,15 +147,15 @@ impl Scanout {
         if clip.is_empty() {
             return Present::Nothing;
         }
-        self.blit(surface, cursor, clip);
+        self.blit(surface, cursor, clip, reveal);
         match sub_screen_damage(&clip, &self.mode) {
             Some(region) => Present::Region(region),
             None => Present::Whole,
         }
     }
 
-    /// Encode `clip`'s pixels from `surface`, blended under `cursor`, into
-    /// the frame.
+    /// Encode `clip`'s pixels from `surface`, dimmed to `reveal` and blended
+    /// under `cursor`, into the frame.
     ///
     /// `clip` is already inside the screen, and the frame is stride-shaped
     /// for that screen, so a pixel the surface does not have is skipped
@@ -160,7 +165,7 @@ impl Scanout {
     /// Which image row the cursor draws from is resolved once per scanline,
     /// and a scanline it does not reach walks the plain copy, so the blend
     /// costs only the rows the pointer actually covers.
-    fn blit(&mut self, surface: &Surface, cursor: Option<&PlacedCursor>, clip: Rect) {
+    fn blit(&mut self, surface: &Surface, cursor: Option<&PlacedCursor>, clip: Rect, reveal: u8) {
         let Ok(stride) = usize::try_from(self.mode.stride_bytes) else {
             return;
         };
@@ -183,6 +188,7 @@ impl Scanout {
             .unwrap_or(0)
             .min(surface_height.saturating_sub(top));
         let order = self.order;
+        let first_col = u32::try_from(left).unwrap_or(0);
         let pixels = surface.pixels();
         for row in 0..rows {
             let Some(y) = top.checked_add(row) else {
@@ -206,19 +212,26 @@ impl Scanout {
                 continue;
             };
             let (slots, _) = target.as_chunks_mut::<PIXEL_BYTES>();
+            // The veil dims a picture, so its rounding error is spread across
+            // the pixels it covers rather than contouring a gradient — the same
+            // dither, tiled from the surface's own coordinates, that painting
+            // the field into the surface used.
+            let dither = u32::try_from(y).map_or(DitherRow::NEAREST, DitherRow::at);
             let cursor_row = cursor
                 .zip(i32::try_from(y).ok())
                 .and_then(|(cursor, y)| cursor.local_row(y).map(|ly| (cursor, ly)));
             let Some((cursor, ly)) = cursor_row else {
-                for (slot, pixel) in slots.iter_mut().zip(source) {
-                    *slot = order.encode(*pixel);
+                for ((slot, pixel), col) in slots.iter_mut().zip(source).zip(first_col..) {
+                    *slot = order.encode(pixel.dimmed_biased(reveal, dither.bias(col)));
                 }
                 continue;
             };
-            for ((slot, pixel), x) in slots.iter_mut().zip(source).zip(clip.left()..) {
-                let painted = cursor
-                    .sample_row(x, ly)
-                    .map_or(*pixel, |sprite| sprite.over(*pixel));
+            for ((slot, pixel), col) in slots.iter_mut().zip(source).zip(first_col..) {
+                let under = pixel.dimmed_biased(reveal, dither.bias(col));
+                let painted = i32::try_from(col)
+                    .ok()
+                    .and_then(|x| cursor.sample_row(x, ly))
+                    .map_or(under, |sprite| sprite.over(under));
                 *slot = order.encode(painted);
             }
         }

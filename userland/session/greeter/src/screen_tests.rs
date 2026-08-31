@@ -378,6 +378,76 @@ fn the_opening_frame_is_black_and_the_chooser_appears_out_of_it() {
     );
 }
 
+/// A veil step re-blits the surface it already holds and never paints it
+/// again.
+///
+/// The veil is a flat black field over everything, so painting it in would
+/// have meant redrawing the chrome, both stages and every glyph and shadow to
+/// change one number — the whole cost of a screen, once per frame of a fade.
+/// The stamp is what proves the paint did not happen: a paint writes every
+/// pixel, so a surviving stamp is a surface that was not painted.
+#[test]
+fn a_veil_step_reblits_the_surface_and_never_repaints_it() {
+    let mut login = ready();
+    login.repaint();
+    stamp(&mut login, centre());
+    let before = login.frame().to_vec();
+
+    let opening = login.begin_session_fade(0);
+    assert!(covers(opening, login.screen()), "the whole screen is shown");
+    let Some(due) = login.session_fade_due(0) else {
+        panic!("the shipped theme animates the session fade");
+    };
+    login.session_fade_step(due);
+
+    assert_eq!(
+        kept(&login, centre()),
+        Some(MARK),
+        "the painted surface was not painted again"
+    );
+    assert!(
+        !differing(&before, login.frame()).is_empty(),
+        "yet the frame on screen darkened"
+    );
+}
+
+/// A paint repaints the buffer it already holds rather than allocating a
+/// screen-sized one per frame.
+///
+/// An animated frame would otherwise map, zero and unmap a screenful of pixels
+/// to draw the same picture one step on. Every paint writes every pixel, so
+/// reusing the buffer holds exactly what a fresh one would.
+#[test]
+fn a_repaint_reuses_the_buffer_it_already_holds() {
+    let mut login = ready();
+    login.on_input(&key(NamedKey::Enter), 0);
+    let held = login
+        .painted
+        .as_ref()
+        .expect("a surface is kept")
+        .pixels()
+        .as_ptr();
+
+    stamp(&mut login, centre());
+    assert_ne!(login.on_input(&typed('x'), 0).present, Present::Nothing);
+
+    assert_ne!(
+        kept(&login, centre()),
+        Some(MARK),
+        "the keystroke genuinely painted the buffer again"
+    );
+    assert_eq!(
+        login
+            .painted
+            .as_ref()
+            .expect("a surface is kept")
+            .pixels()
+            .as_ptr(),
+        held,
+        "and it is the same buffer, not a fresh screenful"
+    );
+}
+
 /// A theme with no motion has nothing to arrive out of: the screen opens on
 /// the chooser, with no veil to present and no frame owed for one.
 #[test]
@@ -1078,7 +1148,7 @@ fn a_verdict_and_the_countdown_it_starts_each_rebuild_the_surface() {
 }
 
 #[test]
-fn an_installed_wallpaper_drops_the_kept_surface() {
+fn an_installed_wallpaper_owes_a_fresh_paint() {
     let mut login = ready();
     stamp(&mut login, centre());
 
@@ -1095,7 +1165,10 @@ fn an_installed_wallpaper_drops_the_kept_surface() {
         )
         .expect("a screen-sized image"),
     );
-    assert_eq!(kept(&login, centre()), None, "the wallpaper is behind it");
+    assert!(
+        login.paint_owed,
+        "the wallpaper is behind the surface, so the paint is owed again"
+    );
     assert_eq!(login.repaint(), Present::Whole);
     assert_ne!(kept(&login, centre()), Some(MARK));
 }

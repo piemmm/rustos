@@ -54,7 +54,8 @@ pub struct FrameStats {
     pub blur_px: u64,
     /// Composed pixels converted to scan-out bytes.
     pub encoded_px: u64,
-    /// Dirty rectangles the frame recomposed.
+    /// Dirty rectangles the frame redrew, whether by recomposing them or by
+    /// encoding them afresh from the back buffer (a screen fade).
     pub dirty_rects: u32,
     /// Calls the frame made into the display driver to publish itself.
     pub present_calls: u32,
@@ -79,7 +80,7 @@ impl FrameStats {
         chrome_misses: 0,
     };
 
-    /// `true` when the frame recomposed nothing at all.
+    /// `true` when the frame changed nothing at all.
     #[must_use]
     pub const fn is_idle(&self) -> bool {
         self.damaged_px == 0 && self.dirty_rects == 0

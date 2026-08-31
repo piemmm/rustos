@@ -618,7 +618,7 @@ measuring this stage no longer has a 0.5 Hz whole-bar repaint underneath it.
 
 ## Stage D — Make blur cost what it changes  **[done; D.5 is a User decision]**
 
-### D.1 Three damage funnels, because the kind of change decides which frosts survive
+### D.1 Four damage funnels, because the kind of change decides what a frame owes
 There is no bare `damage.add` in the compositor. A mutation uses the **narrowest
 funnel whose reasoning is exact** — losing a frost costs a re-blur and never a
 wrong pixel, so marking too widely is the safe direction, but *needlessly*
@@ -632,8 +632,16 @@ widely is the defect this closes:
   *above* that one only: a frosted window is blended over a blur of the layers
   **below** it, so nothing at or above its own layer is part of its frost.
 - `mark_overlay(rect)` — a change no frost can read: the cursor, composed after
-  every window, and the screen reveal, applied as a pixel is encoded for
-  scan-out. Drops nothing.
+  every window. Drops nothing, and is still a composite: the cursor is blended
+  into the back buffer like any other layer.
+- `mark_scanout(rect)` — the composed pixels are current and only the scan-out
+  bytes encoded from them are stale. The screen reveal is the whole of this
+  channel: it is applied as a composed pixel is encoded, and the back buffer
+  keeps the true composed colour, so a fade step changes what every pixel
+  *presents* without changing any pixel. `recompose_damage` encodes these
+  rectangles from the back buffer as it stands — no layer, no cursor, no
+  frost — after subtracting whatever the composite pass already encoded, so no
+  pixel is encoded twice.
 
 `compose_plan` promotes only a blurred window whose frost must be **recomputed**;
 recomputing one drops any overlapping frost above it, because a blur spreads the
@@ -1359,6 +1367,24 @@ A–E are expected to dominate F entirely.
    shortened to. A wall-clock step therefore reaches the bar at the next
    minute rather than the next wake; there is no step notification to
    subscribe to, and the bar shows whole minutes.
+8. ~~A screen fade recomposites the whole scene per frame~~ — **taken and
+   fixed.** `set_reveal` marked whole-screen *composite* damage, but the reveal
+   is applied only as a composed pixel is encoded, so the back buffer is
+   bit-identical between fade steps: every frame of the desktop's reveal
+   rebuilt the scene it already had. It now marks the scan-out channel D.1
+   describes. Measured on `cargo xtask bench --filter composite` (`fade step`,
+   1 024 000 px): 997 µs → 490 µs opaque, 2.81 ms → 490 µs translucent, 2.80 ms
+   → 489 µs with a backdrop blur — and a fade's cost stops depending on the
+   scene, because it no longer composes it. The residue is the dim-and-encode
+   of every pixel, which is the work the fade genuinely is.
+   - The login screen had the same defect in its own renderer: its veil was
+     painted *into* the surface, so a fade step repainted the backdrop, chrome,
+     both bodies and every glyph to change one number. It is now applied as the
+     surface is blitted, dither and all, and a veil step never paints
+     (`plans/NEW-DESKTOP-LOGIN.md`, `docs/src/lib/greeter.md`). Its paint buffer
+     is retained rather than reallocated per animated frame, and its
+     chooser→prompt transition reports the band it redraws — about a third of
+     the screen's height — rather than claiming the whole screen.
 
 ---
 

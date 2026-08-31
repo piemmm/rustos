@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 
 use tairix_geometry::{Rect, Scale};
 use tairix_input::{Key, NamedKey};
-use tairix_raster::{div255, Color, Surface};
+use tairix_raster::Surface;
 use tairix_theme::{MotionInteraction, Timeline};
 
 use crate::chooser::{AccountTile, Chooser};
@@ -126,6 +126,85 @@ fn a_chooserless_question_shakes_and_fades() {
 /// Picking an account starts the travel; part-way through, the disc is
 /// between the tile it left and the prompt's place, and both stages have ink
 /// on screen.
+/// Every pixel a stage transition moves lies inside the damage it reports.
+///
+/// The transition redraws a band and says so, rather than claiming the screen:
+/// a frame of one is blitted and presented over what it reports, so a pixel
+/// that moved outside it would be left showing the frame before. The claim is
+/// checked against the paint itself over a matrix of scenes — one account and
+/// several, either tile picked, both densities — because the band is derived
+/// from the layout and each of those moves the layout.
+#[test]
+fn a_stage_transition_moves_no_pixel_outside_the_band_it_reports() {
+    assert!(
+        span_of(MotionInteraction::StageTransition) > 0,
+        "the shipped theme animates a stage transition"
+    );
+    for names in [
+        vec!["Ann"],
+        vec!["Ann", "Bob"],
+        vec!["Wilhelmina Fitzgerald"],
+    ] {
+        for pick in 0..names.len() {
+            let tiles: Vec<AccountTile> = names
+                .iter()
+                .map(|name| AccountTile::new(name, "u"))
+                .collect();
+            let mut surface = AuthSurface::with_accounts(tiles);
+            let mut before = render(&surface);
+            for _ in 0..pick {
+                feed_at(
+                    &mut surface,
+                    &named(NamedKey::Tab),
+                    &mut Scripted::refusing(),
+                    0,
+                );
+                before = render(&surface);
+            }
+            feed_at(
+                &mut surface,
+                &named(NamedKey::Enter),
+                &mut Scripted::refusing(),
+                0,
+            );
+
+            let mut now = 0;
+            while let Some(due) = surface.motion_due(now) {
+                now += due.max(1);
+                let outcome = surface.advance(now);
+                if !outcome.redraw() {
+                    break;
+                }
+                let after = render(&surface);
+                let claimed = outcome.damage().unwrap_or(SCREEN);
+                for (x, y) in differing_pixels(&before, &after) {
+                    assert!(
+                        claimed.contains(tairix_geometry::Point::new(
+                            i32::try_from(x).expect("a screen column"),
+                            i32::try_from(y).expect("a screen row"),
+                        )),
+                        "{names:?} picking {pick}: ({x},{y}) moved outside {claimed:?}"
+                    );
+                }
+                before = after;
+            }
+        }
+    }
+}
+
+/// Every coordinate at which the two surfaces hold a different pixel.
+fn differing_pixels(before: &Surface, after: &Surface) -> Vec<(u32, u32)> {
+    let mut found = Vec::new();
+    for y in 0..after.height() {
+        for x in 0..after.width() {
+            if before.get(x, y) != after.get(x, y) {
+                found.push((x, y));
+            }
+        }
+    }
+    found
+}
+
 #[test]
 fn picking_an_account_travels_the_disc_between_the_two_stages() {
     let span = span_of(MotionInteraction::StageTransition);
@@ -494,70 +573,69 @@ fn a_reduced_motion_refusal_says_so_without_moving() {
     );
 }
 
-/// The veil darkens the whole composed screen toward black, monotonically,
-/// and reaches full black.
+/// The veil ramps the strength the screen is presented at monotonically down
+/// to nothing, and says so before the fade is over.
+///
+/// The veil itself is a flat black field over the whole surface, so it is
+/// applied where the surface is blitted into the frame and not painted in — the
+/// pixels it produces are asserted there
+/// (`userland/session/greeter/src/frame_tests.rs`). What belongs here is the
+/// ramp the surface owns.
 #[test]
 fn the_veil_darkens_to_black() {
     let span = span_of(MotionInteraction::SessionFade);
     assert!(span > 0, "the shipped theme animates the session fade");
     let theme = theme();
     let mut surface = AuthSurface::new("ann");
-    let clear = render(&surface);
+    assert_eq!(
+        surface.reveal(),
+        u8::MAX,
+        "an unveiled screen is presented whole"
+    );
 
     surface.begin_session_fade(0, &theme);
     assert!(!surface.session_fade_finished());
 
-    let sample = brightest(&clear);
-    let mut last = clear.get(sample.0, sample.1).expect("a pixel");
+    let mut last = surface.reveal();
     for step in 1..=8u64 {
         surface.advance(span * step / 8);
-        let frame = render(&surface);
-        let pixel = frame.get(sample.0, sample.1).expect("a pixel");
-        assert!(
-            u32::from(pixel.r) + u32::from(pixel.g) + u32::from(pixel.b)
-                <= u32::from(last.r) + u32::from(last.g) + u32::from(last.b),
-            "the veil lightened at step {step}"
-        );
-        last = pixel;
+        let now = surface.reveal();
+        assert!(now <= last, "the veil lightened at step {step}");
+        last = now;
     }
 
     assert!(surface.session_fade_finished());
     assert_eq!(surface.motion_due(span), None);
-    let black = render(&surface);
-    for y in 0..black.height() {
-        for x in 0..black.width() {
-            assert_eq!(black.get(x, y), Some(Color::rgb(0, 0, 0).premultiply()));
-        }
-    }
+    assert_eq!(surface.reveal(), 0, "and it reaches full black");
 }
 
-/// A pixel part-way through the fade is the composed pixel scaled toward
-/// black by exactly the veil's own strength.
+/// A veil step changes no painted pixel, so it owes a blit and never a paint.
+///
+/// This is what keeps a screen fade off the paint path entirely: repainting
+/// chrome, text and both stages to change one strength is the cost the fade
+/// used to carry every frame.
 #[test]
-fn a_mid_fade_pixel_is_the_composed_pixel_scaled_toward_black() {
+fn a_veil_step_owes_a_blit_and_not_a_paint() {
     let span = span_of(MotionInteraction::SessionFade);
     let theme = theme();
     let mut surface = AuthSurface::new("ann");
-    let clear = render(&surface);
+    let painted = render(&surface);
 
-    surface.begin_session_fade(0, &theme);
-    let half = span / 2;
-    surface.advance(half);
-    let faded = render(&surface);
+    let opening = surface.begin_session_fade(0, &theme);
+    assert!(opening.redraw(), "the first veiled frame is owed");
+    assert!(!opening.paints(), "and it is a blit, not a paint");
 
-    // The veil takes the linear progress, and composites over what is
-    // already there: every channel keeps `1 - strength` of itself.
-    let strength = u8::try_from(half * u64::from(u8::MAX) / span).unwrap_or(u8::MAX);
-    let keep = u8::MAX - strength;
-    let (x, y) = brightest(&clear);
-    let under = clear.get(x, y).expect("a pixel");
-    let over = faded.get(x, y).expect("a pixel");
-
-    assert!(strength > 0 && strength < u8::MAX, "part-way through");
-    assert_eq!(over.r, div255(u32::from(under.r) * u32::from(keep)));
-    assert_eq!(over.g, div255(u32::from(under.g) * u32::from(keep)));
-    assert_eq!(over.b, div255(u32::from(under.b) * u32::from(keep)));
-    assert_eq!(over.a, u8::MAX, "the screen stays opaque");
+    let stepped = surface.advance(span / 2);
+    assert!(stepped.redraw() && !stepped.paints());
+    assert_eq!(
+        render(&surface),
+        painted,
+        "the painted surface is untouched by the veil over it"
+    );
+    assert!(
+        surface.reveal() < u8::MAX,
+        "though the strength it is presented at has moved"
+    );
 }
 
 /// Once the screen has begun leaving, the decision is made: a keystroke may
@@ -745,24 +823,4 @@ fn largest_gap(before: &Surface, after: &Surface) -> u32 {
 /// whichever way round they are.
 fn between(value: i32, one: i32, other: i32) -> bool {
     value > one.min(other) && value < one.max(other)
-}
-
-/// The brightest pixel of `frame`, which is the one a fade toward black
-/// changes most.
-fn brightest(frame: &Surface) -> (u32, u32) {
-    let mut best = (0, 0);
-    let mut strongest = 0;
-    for y in 0..frame.height() {
-        for x in 0..frame.width() {
-            let Some(pixel) = frame.get(x, y) else {
-                continue;
-            };
-            let sum = u32::from(pixel.r) + u32::from(pixel.g) + u32::from(pixel.b);
-            if sum > strongest {
-                strongest = sum;
-                best = (x, y);
-            }
-        }
-    }
-    best
 }

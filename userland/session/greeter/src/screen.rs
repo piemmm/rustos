@@ -82,7 +82,15 @@ pub struct LoginScreen<T: SessionTransport> {
     /// sliding across an unchanged screen therefore re-composes a
     /// cursor-sized patch of pixels that already exist, instead of building
     /// a whole screen for every motion report the seat delivers.
+    ///
+    /// The buffer itself is kept across frames and repainted in place: every
+    /// pixel is written on each paint, so an animated frame reuses it rather
+    /// than mapping, zeroing and unmapping a screenful to draw the picture one
+    /// step on.
     painted: Option<Surface>,
+    /// Whether [`painted`](Self::painted) must be painted again before the next
+    /// blit. Set by everything the paint reads changing, cleared by the paint.
+    paint_owed: bool,
 }
 
 /// A repaint request: what changed, and which pixels it changed.
@@ -100,8 +108,10 @@ pub struct LoginScreen<T: SessionTransport> {
 enum Repaint {
     /// Nothing changed, so nothing is painted.
     Nothing,
-    /// Only the pointer moved, over these pixels.
-    Cursor(Rect),
+    /// The painted surface stands and only the bytes blitted from it changed,
+    /// over these pixels — `None` for all of them. The pointer moved over
+    /// them, or the veil closed further over them.
+    Scanout(Option<Rect>),
     /// The surface's own content changed, within this rectangle — `None` for
     /// all of it.
     Painted(Option<Rect>),
@@ -109,26 +119,33 @@ enum Repaint {
 
 impl Repaint {
     fn of(outcome: Outcome) -> Self {
-        if outcome.redraw() {
-            Self::Painted(outcome.damage())
-        } else {
-            Self::Nothing
+        if !outcome.redraw() {
+            return Self::Nothing;
         }
+        if outcome.paints() {
+            return Self::Painted(outcome.damage());
+        }
+        Self::Scanout(outcome.damage())
     }
 
+    /// The wider of two reports, and the stronger: a round that must paint
+    /// paints, over everything either half of it changed.
     fn merged(self, other: Self) -> Self {
         match (self, other) {
             (Self::Nothing, repaint) | (repaint, Self::Nothing) => repaint,
-            (Self::Cursor(mine), Self::Cursor(theirs)) => Self::Cursor(mine.union(&theirs)),
-            (Self::Painted(None), _) | (_, Self::Painted(None)) => Self::Painted(None),
-            (Self::Cursor(moved), Self::Painted(Some(damage)))
-            | (Self::Painted(Some(damage)), Self::Cursor(moved)) => {
-                Self::Painted(Some(damage.union(&moved)))
-            }
-            (Self::Painted(Some(mine)), Self::Painted(Some(theirs))) => {
-                Self::Painted(Some(mine.union(&theirs)))
-            }
+            (Self::Scanout(mine), Self::Scanout(theirs)) => Self::Scanout(wider(mine, theirs)),
+            (Self::Painted(mine), Self::Painted(theirs) | Self::Scanout(theirs))
+            | (Self::Scanout(mine), Self::Painted(theirs)) => Self::Painted(wider(mine, theirs)),
         }
+    }
+}
+
+/// The rectangle covering both, `None` — the whole screen — swallowing whatever
+/// it is merged with.
+fn wider(one: Option<Rect>, other: Option<Rect>) -> Option<Rect> {
+    match (one, other) {
+        (Some(one), Some(other)) => Some(one.union(&other)),
+        _ => None,
     }
 }
 
@@ -159,6 +176,7 @@ impl<T: SessionTransport> LoginScreen<T> {
             cursor,
             pointer: None,
             painted: None,
+            paint_owed: true,
         }
     }
 
@@ -169,7 +187,7 @@ impl<T: SessionTransport> LoginScreen<T> {
     /// nothing here shades it: the text over it carries its own shadow.
     pub fn set_wallpaper(&mut self, image: Surface) {
         self.wallpaper = Some(image);
-        self.painted = None;
+        self.paint_owed = true;
     }
 
     /// Draw `image` as the pointer, from where the pointer already is.
@@ -239,7 +257,7 @@ impl<T: SessionTransport> LoginScreen<T> {
             // The authentication surface has nothing scrollable.
             PointerInput::Scrolled { .. } => return Step::quiet(),
         };
-        let mut repaint = moved.map_or(Repaint::Nothing, Repaint::Cursor);
+        let mut repaint = moved.map_or(Repaint::Nothing, |damage| Repaint::Scanout(Some(damage)));
         let mut verified = false;
         let mut answer = None;
         for event in pointer_input_events(action, self.cursor.at()) {
@@ -423,9 +441,9 @@ impl<T: SessionTransport> LoginScreen<T> {
     fn present_for(&mut self, repaint: Repaint) -> Present {
         match repaint {
             Repaint::Nothing => Present::Nothing,
-            Repaint::Cursor(damage) => self.compose(Some(damage)),
+            Repaint::Scanout(damage) => self.compose(damage),
             Repaint::Painted(damage) => {
-                self.painted = None;
+                self.paint_owed = true;
                 self.compose(damage)
             }
         }
@@ -438,10 +456,13 @@ impl<T: SessionTransport> LoginScreen<T> {
     /// veiled frame — which covers the whole screen — is also the one that
     /// paints the arrow out.
     fn compose(&mut self, damage: Option<Rect>) -> Present {
-        if self.painted.is_none() {
-            self.painted = self.render();
+        if self.paint_owed {
+            self.paint();
         }
         let drawn = self.draws_pointer();
+        // The veil is applied as the surface is blitted, so it is read here
+        // rather than painted in: a fade step re-blits what is already painted.
+        let reveal = self.surface.reveal();
         let Self {
             scanout,
             pointer,
@@ -452,18 +473,42 @@ impl<T: SessionTransport> LoginScreen<T> {
             return Present::Nothing;
         };
         let cursor = if drawn { pointer.as_ref() } else { None };
-        scanout.compose(painted, cursor, damage)
+        scanout.compose(painted, cursor, damage, reveal)
     }
 
-    /// The surface as it now stands, with no cursor drawn into it, or `None`
-    /// when it will not render at all.
-    fn render(&self) -> Option<Surface> {
-        let backdrop = match self.wallpaper.as_ref() {
+    /// Paint the surface, with no cursor drawn into it, into the retained
+    /// buffer — allocating that buffer on the first frame, and again whenever
+    /// the screen's extent has changed under it.
+    ///
+    /// A refused allocation or a refused paint leaves the frame already on
+    /// screen rather than blanking it, and leaves the paint owed so the next
+    /// round tries again.
+    fn paint(&mut self) {
+        let screen = self.scanout.screen();
+        let fits = self
+            .painted
+            .as_ref()
+            .is_some_and(|held| held.width() == screen.width && held.height() == screen.height);
+        if !fits {
+            self.painted = Surface::new(screen.width, screen.height);
+        }
+        let Self {
+            surface,
+            painted: Some(into),
+            wallpaper,
+            scale,
+            theme,
+            ..
+        } = self
+        else {
+            return;
+        };
+        let backdrop = match wallpaper.as_ref() {
             Some(image) => Backdrop::Wallpaper { image },
             None => Backdrop::Desktop,
         };
-        self.surface
-            .render(self.scanout.screen(), self.scale, &self.theme, backdrop)
+        let painted = surface.paint_into(into, screen, *scale, theme, backdrop);
+        self.paint_owed = !painted;
     }
 }
 

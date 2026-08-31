@@ -322,13 +322,6 @@ impl Shake {
     }
 }
 
-/// The black the screen arrives from and leaves through.
-///
-/// Deliberately not a theme colour: the desktop taking the screen over
-/// arrives out of the same black, and the two halves of that handover meet
-/// only if both name the one absolute rather than each its own appearance.
-pub(crate) const VEIL: Rgba = Rgba::rgb(0, 0, 0);
-
 /// The black over the whole screen, running between two strengths: away as
 /// the surface arrives, and up to opaque as it leaves once a secret is
 /// accepted.

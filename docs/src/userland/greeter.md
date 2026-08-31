@@ -183,17 +183,26 @@ pointer with; a login screen may not depend on the window manager, so the
 placement lives in `lib/cursor` and there is one definition of it.
 
 Keeping the cursor out of the surface is what makes a moving mouse cheap.
-The rendered surface is kept between frames and rebuilt only when its own
+The painted surface is kept between frames and painted again only when its own
 content changes — a keystroke, a verdict, a countdown, a clock tick, a
 chooser tile taking the focus, an arriving wallpaper — so a report that
 slides the pointer over an unchanged screen re-composes a cursor-sized patch
-of pixels that already exist and renders nothing. Motion that does change
-something merges the two rectangles and pays exactly one render for the
+of pixels that already exist and paints nothing. Motion that does change
+something merges the two rectangles and pays exactly one paint for the
 report, never one per surface event it expanded into.
 
+The **buffer** is kept too, not just its contents: a paint writes every pixel,
+so it is painted in place rather than allocated afresh. An animated frame would
+otherwise map, zero and unmap a screenful of pixels to draw the same picture
+one step on.
+
+The veil is the case that pays for both. It is a flat black field over
+everything, so it is applied where the surface is blitted into the frame rather
+than painted into it — a fade step is one blit of a surface nobody repainted.
+
 The one thing that stops it being drawn is the screen leaving. Because the
-veil is painted into the surface and the cursor is sampled over the top, a
-drawn arrow would stay at full brightness all the way down to black; so the
+veil is applied to what is under the cursor and the cursor is sampled over the
+top, a drawn arrow would stay at full brightness all the way down to black; so the
 screen hands the composer no cursor at all once the fade begins. That first
 veiled frame covers the whole screen, which is what paints the arrow out
 where it sat. Dimming it instead would have put a second copy of the veil's
@@ -261,8 +270,10 @@ screen does* behind the injected seams: a keystroke reaching a verdict, a
 refusal becoming a countdown, an empty account list, the bounded and
 malformed paging walks, the park deadline (including an untouched screen
 arming no timer), the drawn pointer and its damage, the kept surface (a move
-that changes nothing renders once in total, and the frame it leaves is what
-a full repaint would have drawn), the surface-to-scan-out composition, and
+that changes nothing paints once in total, a paint reuses the buffer it already
+holds, and the frame it leaves is what a full repaint would have drawn), the
+surface-to-scan-out composition — including that a veiled blit presents exactly
+what the wash painted into the surface used to — and
 the closing fade — that it darkens monotonically to black within its budget,
 that it ends on the clock and the budget alone so a stopped clock still lets
 the login leave, that input during it is ignored, that the pointer is gone

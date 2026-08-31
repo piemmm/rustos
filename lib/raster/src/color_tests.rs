@@ -155,3 +155,33 @@ fn the_shorter_of_the_two_runs_ends_the_walk() {
         "no source, no write — a short run does not wrap or repeat"
     );
 }
+
+#[test]
+fn dimming_keeps_the_premultiplied_invariant_and_never_brightens() {
+    let mut rng = Pixels::new(0x00D1_4DED_0000_0001);
+    for pixel in rng.run(64) {
+        assert_eq!(pixel.dimmed(255), pixel, "full strength is the identity");
+        assert_eq!(
+            pixel.dimmed(0),
+            Pixel {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: pixel.a
+            },
+            "no strength is black, and alpha is coverage rather than colour"
+        );
+        for strength in 0..=u8::MAX {
+            let dim = pixel.dimmed(strength);
+            assert_eq!(dim.a, pixel.a, "alpha is never touched");
+            assert!(
+                dim.r <= pixel.a && dim.g <= pixel.a && dim.b <= pixel.a,
+                "premultiplied at strength {strength}"
+            );
+            assert!(
+                dim.r <= pixel.r && dim.g <= pixel.g && dim.b <= pixel.b,
+                "dimming cannot brighten at strength {strength}"
+            );
+        }
+    }
+}

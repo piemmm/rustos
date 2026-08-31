@@ -7109,6 +7109,83 @@ fn changing_the_reveal_repaints_the_whole_screen_and_repeating_it_repaints_nothi
     assert!(!c.has_damage());
 }
 
+/// The screen the fade is applied to, re-composited whole at `strength` — what
+/// a fade step used to cost every frame, and the reference its cheap form must
+/// match byte for byte.
+///
+/// Re-installing the desktop layer it already carries is what forces the whole
+/// composite: it marks both footprints, which is the screen here, and lays back
+/// the very pixels that were there — so the composed scene is unchanged and only
+/// the work done to arrive at it differs.
+fn recomposed_at_reveal(strength: u8) -> Compositor {
+    let mut c = revealable_scene();
+    assert!(c.set_reveal(strength));
+    c.set_desktop(opaque(16, 12, GREEN));
+    c.composite();
+    assert!(
+        c.frame_stats().blended_px > 0,
+        "the reference must genuinely compose the scene it is compared against"
+    );
+    c
+}
+
+#[test]
+fn a_fade_step_re_encodes_the_screen_and_composes_none_of_it() {
+    let mut faded = revealable_scene();
+    assert!(faded.set_reveal(128));
+    assert_eq!(
+        composite_checked(&mut faded).bounds(),
+        faded.screen_rect(),
+        "every pixel's presented value moved, so every pixel is owed"
+    );
+
+    let stats = faded.frame_stats();
+    assert_eq!(
+        (stats.blended_px, stats.opaque_px, stats.blur_px),
+        (0, 0, 0),
+        "no composed pixel moved, so nothing may be blended, copied or blurred"
+    );
+    assert_eq!(
+        stats.encoded_px,
+        u64::from(16u32 * 12),
+        "and every one of them is encoded afresh, exactly once"
+    );
+
+    assert_eq!(
+        faded.frame(),
+        recomposed_at_reveal(128).frame(),
+        "the cheap fade step presents what the whole recomposite presented"
+    );
+}
+
+#[test]
+fn a_fade_step_landing_with_a_repaint_encodes_each_pixel_once() {
+    let mut mixed = revealable_scene();
+    assert!(mixed.move_cursor(Point::new(4, 3)));
+    assert!(mixed.set_reveal(200));
+    mixed.composite();
+
+    assert_eq!(
+        mixed.frame_stats().encoded_px,
+        u64::from(16u32 * 12),
+        "the cursor's own rectangles encoded there and the re-encode took the \
+         rest: no pixel is encoded twice"
+    );
+
+    let mut reference = revealable_scene();
+    assert!(reference.move_cursor(Point::new(4, 3)));
+    assert!(reference.set_reveal(200));
+    reference.set_desktop(opaque(16, 12, GREEN));
+    reference.composite();
+
+    assert_eq!(
+        mixed.frame(),
+        reference.frame(),
+        "and the repaint and the re-encode together present what one whole \
+         recomposite would"
+    );
+}
+
 #[test]
 fn the_hardware_layer_path_declines_while_a_reveal_is_in_flight() {
     let mut c = new_compositor(mode(16, 16), BLUE).expect("compositor");

@@ -22,7 +22,6 @@ use crate::layout::{
 };
 use crate::motion::{
     at_strength, between_rects, fade, sooner, travelling_font, Changed, Shake, Stage, Toward, Veil,
-    VEIL,
 };
 
 /// Longest secret the surface will hold, in characters.
@@ -190,6 +189,7 @@ pub enum Backdrop<'a> {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Outcome {
     redraw: bool,
+    paints: bool,
     verified: bool,
     damage: Option<Rect>,
 }
@@ -199,6 +199,7 @@ impl Outcome {
     const fn quiet() -> Self {
         Self {
             redraw: false,
+            paints: false,
             verified: false,
             damage: Some(Rect::EMPTY),
         }
@@ -209,6 +210,22 @@ impl Outcome {
     const fn changed(damage: Option<Rect>) -> Self {
         Self {
             redraw: true,
+            paints: true,
+            verified: false,
+            damage,
+        }
+    }
+
+    /// A change to the strength the surface reaches the screen at, over
+    /// `damage`: the painted pixels are exactly as they were.
+    ///
+    /// What a veil step is. The embedder blits the surface it already holds at
+    /// the new [`AuthSurface::reveal`] rather than painting chrome,
+    /// text and both stages again to change one number.
+    const fn rescanned(damage: Option<Rect>) -> Self {
+        Self {
+            redraw: true,
+            paints: false,
             verified: false,
             damage,
         }
@@ -219,6 +236,16 @@ impl Outcome {
     #[must_use]
     pub const fn redraw(self) -> bool {
         self.redraw
+    }
+
+    /// Whether the *painted surface* is stale, rather than only the strength it
+    /// is blitted at.
+    ///
+    /// `false` for a veil step and nothing else, which is what lets a screen
+    /// fade cost one blit instead of a whole re-render.
+    #[must_use]
+    pub const fn paints(self) -> bool {
+        self.paints
     }
 
     /// Whether a secret was offered and the verifier accepted it, by which
@@ -515,11 +542,38 @@ impl AuthSurface {
         theme: &Theme,
         backdrop: Backdrop<'_>,
     ) -> Option<Surface> {
-        if screen.width == 0 || screen.height == 0 {
-            return None;
-        }
         let mut surface = Surface::new(screen.width, screen.height)?;
-        paint_backdrop(&mut surface, theme, backdrop);
+        self.paint_into(&mut surface, screen, scale, theme, backdrop)
+            .then_some(surface)
+    }
+
+    /// [`render`](Self::render) into a surface the caller already holds,
+    /// answering whether it painted.
+    ///
+    /// Every pixel is written — the backdrop covers the whole extent before
+    /// anything is drawn over it — so a buffer painted a second time holds
+    /// exactly what a fresh one would, and an owner that repaints on a cadence
+    /// keeps its buffer instead of mapping, zeroing and unmapping a screenful
+    /// of pixels per frame.
+    ///
+    /// `false` when `into` is not `screen`'s own extent, or when the screen has
+    /// no pixels: painting part of a surface the caller believes is covered
+    /// would leave whatever was underneath showing through.
+    pub fn paint_into(
+        &self,
+        into: &mut Surface,
+        screen: Rect,
+        scale: Scale,
+        theme: &Theme,
+        backdrop: Backdrop<'_>,
+    ) -> bool {
+        if screen.width == 0 || screen.height == 0 {
+            return false;
+        }
+        if into.width() != screen.width || into.height() != screen.height {
+            return false;
+        }
+        paint_backdrop(into, theme, backdrop);
         let draw = Draw {
             strength: u8::MAX,
             heading: self.shown_heading(),
@@ -528,21 +582,14 @@ impl AuthSurface {
             offset: self.shake_offset(screen, scale, theme),
             shadow: text_shadow(theme, scale, backdrop),
         };
-        self.paint_chrome(&mut surface, screen, scale, theme, draw.shadow);
+        self.paint_chrome(into, screen, scale, theme, draw.shadow);
 
         match self.stage {
-            Some(stage) => self.paint_stages(&mut surface, stage, screen, scale, theme, draw),
-            None => self.paint_settled(&mut surface, screen, scale, theme, draw),
-        }
-        if let Some(veil) = self.veil {
-            // Through the wash, not a rectangle fill: this is a flat field over
-            // a picture, the shape that bands when every pixel rounds alike.
-            let (w, h) = (surface.width(), surface.height());
-            let black = Color::from(at_strength(VEIL, veil.strength()));
-            surface.fill_vertical_gradient(0, 0, w, h, black, black);
+            Some(stage) => self.paint_stages(into, stage, screen, scale, theme, draw),
+            None => self.paint_settled(into, screen, scale, theme, draw),
         }
         self.place(screen, scale, theme);
-        Some(surface)
+        true
     }
 
     /// Where the secret field — or the login-name field that precedes it —
@@ -583,7 +630,10 @@ impl AuthSurface {
             let moved = stage.advance(now_ns);
             self.stage = (!stage.finished(now_ns)).then_some(stage);
             if moved {
-                changed = changed.merged(Changed::Whole);
+                changed = changed.merged(match placed {
+                    Some(placed) => Changed::Region(stage_band(placed)),
+                    None => Changed::Whole,
+                });
             }
         }
         // Nothing draws the chooser once the prompt has it, so a mark still
@@ -603,6 +653,12 @@ impl AuthSurface {
                 });
             }
         }
+        // The veil is kept apart from the animations above because it alone
+        // changes no painted pixel: it is the strength the surface is blitted
+        // at. A round that moved only the veil therefore owes a blit, and one
+        // that moved anything else owes the paint as well — over the whole
+        // screen, since the strength every pixel is blitted at has moved too.
+        let paints = changed.moved();
         if let Some(mut veil) = self.veil {
             if veil.advance(now_ns) {
                 changed = changed.merged(Changed::Whole);
@@ -616,7 +672,10 @@ impl AuthSurface {
         if !changed.moved() {
             return Outcome::quiet();
         }
-        Outcome::changed(changed.damage())
+        if paints {
+            return Outcome::changed(changed.damage());
+        }
+        Outcome::rescanned(changed.damage())
     }
 
     /// Nanoseconds until the next animation frame, or `None` when nothing is
@@ -664,7 +723,7 @@ impl AuthSurface {
             return Outcome::quiet();
         }
         self.veil = Some(arriving);
-        Outcome::changed(None)
+        Outcome::rescanned(None)
     }
 
     /// Begin the fade the screen leaves through, once a secret has been
@@ -686,7 +745,22 @@ impl AuthSurface {
         }
         let from = self.veil.map_or(0, Veil::strength);
         self.veil = Some(Veil::leaving(from, now_ns, session_fade_ms(theme)));
-        Outcome::changed(None)
+        Outcome::rescanned(None)
+    }
+
+    /// How much of the painted surface reaches the screen: [`u8::MAX`] with no
+    /// veil held, and down to `0` as one closes over it.
+    ///
+    /// The veil is a flat black field over the whole surface, so the embedder
+    /// applies it where the surface is blitted into the frame rather than this
+    /// painting it in: a fade step then re-blits what is already painted at a
+    /// new strength, and never repaints chrome, text and both stages to change
+    /// one number. It is the same absolute black the desktop reveals out of,
+    /// read the other way round, so the two ends of the handover meet.
+    #[must_use]
+    pub fn reveal(&self) -> u8 {
+        self.veil
+            .map_or(u8::MAX, |veil| u8::MAX.saturating_sub(veil.strength()))
     }
 
     /// Whether a veil is held over the screen at all, in either direction.
@@ -882,6 +956,7 @@ impl AuthSurface {
         if submitted && self.offer(&mut *ctx.verifier, ctx.now_ns, rejected_ms) {
             return Outcome {
                 redraw: true,
+                paints: true,
                 verified: true,
                 damage: None,
             };
@@ -1394,6 +1469,40 @@ fn stage_ms(theme: &Theme) -> u16 {
 /// arrives out of the black it later leaves through, so one duration.
 fn session_fade_ms(theme: &Theme) -> u16 {
     theme.motion().duration(MotionInteraction::SessionFade)
+}
+
+/// The band one stage giving way to another redraws: the chrome, both bodies,
+/// and the disc travelling between them.
+///
+/// Full width for the same reason as [`shake_band`]: the account name is
+/// centred across the screen rather than in the block, so a long one reaches
+/// outside every other rectangle here. The disc's travel needs no term of its
+/// own — it is interpolated between the picked tile's disc, inside the chooser,
+/// and the prompt's, so every frame of it lies between two rectangles the band
+/// already spans.
+///
+/// A transition covers about a third of the screen's height, against the whole
+/// screen a `Changed::Whole` would have claimed, and every frame of one pays
+/// the difference twice: once blitting the surface into the frame and once
+/// presenting it.
+fn stage_band(placed: Placement) -> Rect {
+    let prompt = Prompt::new(placed.screen, placed.scale);
+    let top = placed
+        .chrome
+        .top()
+        .min(placed.chooser.top())
+        .min(placed.panel.top())
+        .min(prompt.disc.top())
+        .min(prompt.name.top());
+    let bottom = placed
+        .chrome
+        .bottom()
+        .max(placed.chooser.bottom())
+        .max(placed.panel.bottom())
+        .max(placed.field.bottom())
+        .max(prompt.name.bottom());
+    let height = u32::try_from(bottom.saturating_sub(top)).unwrap_or(0);
+    Rect::new(placed.screen.origin.x, top, placed.screen.width, height)
 }
 
 /// The band a rejected attempt's shake displaces: the disc, the name, and

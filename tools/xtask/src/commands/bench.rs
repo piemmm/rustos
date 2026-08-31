@@ -778,6 +778,11 @@ enum Damage {
     /// its title bar does. Its own pixels are untouched — only its origin
     /// moves — so this is the case a retained frost has to survive.
     Drag,
+    /// One step of a screen fade, as the desktop revealing from black or
+    /// dimming into it does. No composed pixel moves — only the strength the
+    /// screen reaches the display at — so this is what a fade costs against
+    /// the full-screen recomposite it must not pay for.
+    Reveal,
 }
 
 /// How far a dragged window travels between two pointer samples. A hand
@@ -827,6 +832,13 @@ fn composite(harness: &BenchHarness<'_>) -> Result<Vec<Measurement>, String> {
                 let origin = warm.origin;
                 compositor.move_window(warm.top, Point::new(origin.x + step, origin.y + step));
             }
+            Damage::Reveal => {
+                // Two strengths a step apart, alternated, so every call is a
+                // genuine fade frame rather than the strength already in force.
+                let flip = warm.flip.get();
+                warm.flip.set(!flip);
+                compositor.set_reveal(if flip { 128 } else { 129 });
+            }
         }
         region_pixels(&compositor.composite())
     }
@@ -856,6 +868,17 @@ fn composite(harness: &BenchHarness<'_>) -> Result<Vec<Measurement>, String> {
         ("drag, opaque stack", Stack::Opaque, Damage::Drag),
         ("drag, translucent stack", Stack::Translucent, Damage::Drag),
         ("drag, backdrop blur", Stack::BackdropBlur, Damage::Drag),
+        ("fade step, opaque stack", Stack::Opaque, Damage::Reveal),
+        (
+            "fade step, translucent stack",
+            Stack::Translucent,
+            Damage::Reveal,
+        ),
+        (
+            "fade step, backdrop blur",
+            Stack::BackdropBlur,
+            Damage::Reveal,
+        ),
     ];
     let mut rows = Vec::new();
     for (case, stack, damage) in cases {

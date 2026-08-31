@@ -175,10 +175,25 @@ untouched, so the premultiplied invariant (`channel <= a`) holds at every
 strength and the screen fades to black rather than to transparent. A full
 reveal short-circuits to the pixel itself, so a screen nobody is fading
 costs one comparison per encoded pixel and is byte-identical to one that
-never heard of the reveal. Changing the strength damages the whole screen,
-because every presented pixel's value changed; setting the strength
-already in force damages nothing. A mode change carries the strength over,
-so a session that re-modes mid-fade keeps fading.
+never heard of the reveal. Setting the strength already in force damages
+nothing. A mode change carries the strength over, so a session that
+re-modes mid-fade keeps fading.
+
+**A fade step re-encodes; it does not recomposite.** Changing the strength
+changes every presented pixel, but it changes no *composed* pixel — the back
+buffer is bit-identical between two fade steps. So a change of strength goes
+into a channel of its own (`mark_scanout`), and `composite` encodes those
+rectangles from the back buffer as it stands: no root fill, no desktop layer,
+no window, no cursor and no frost. Everything the composite pass touched it
+already encoded at the current strength, so those rectangles are subtracted
+first and no pixel is encoded twice; the frame reports both as one region, and
+`has_damage` answers for both.
+
+That is what makes a screen fade cost what it changes. Measured over a
+1 024 000-pixel screen (`cargo xtask bench --filter composite`, `fade step`),
+one step falls from 997 µs to 490 µs over an opaque stack and from 2.81 ms to
+490 µs over a translucent one or one with a backdrop blur — and the cost stops
+depending on the scene at all, because a fade no longer composes it.
 
 ## The desktop layer
 
@@ -688,8 +703,9 @@ How a retained backdrop is known to be still right:
   that is not confined to a layer (the root fill, the desktop layer, the
   density or theme, or a restacking, which changes *which* layers a frost sees)
   drops every frost it reaches; and a change no frost can read at all — the
-  cursor overlay, composed after every window, and the screen reveal, applied
-  only as a pixel is encoded for scan-out — drops none.
+  cursor overlay, composed after every window — drops none. The screen reveal
+  drops none either, and composes nothing: it marks the scan-out channel
+  instead (see [Screen reveal](#screen-reveal)).
 - **How much of a frost may be reused is asked once per frame and remembered.**
   The recompose plan and the composite that follows it both need the answer, and
   two lookups could disagree — which would leave a window the plan did not
@@ -760,7 +776,7 @@ wrapped one would read as a suspiciously small frame.
 | `opaque_px` | Pixels resolved by copying a fully opaque run of the front window's own pixels. Each cost no blend, and everything beneath it was skipped, which is why `blended_px` falls as this rises. |
 | `blur_px` | Pixels rewritten by a *recomputed* backdrop frost. A frost served from the retained one is copied rather than blurred and counts nothing here, so this is exactly the blur work the frame could not avoid — and zero is what a repaint inside a frosted window should read. |
 | `encoded_px` | Composed pixels converted to scan-out bytes. |
-| `dirty_rects` | Dirty rectangles the frame recomposed. |
+| `dirty_rects` | Dirty rectangles the frame redrew, whether by recomposing them or by encoding them afresh from the back buffer (a fade step). |
 | `present_calls` | Calls the frame made into the display driver to publish itself — the round trips of the section above. |
 | `chrome_hits` / `chrome_misses` | Window-furniture lookups served from the retained cache versus rendered again, whether the cache then kept them or refused. |
 
@@ -771,9 +787,12 @@ runs and a split frame reports exactly what a whole one does.
 The reading that matters is **damaged vs blended vs screen pixels**: damage
 far below the screen means the damage tracking is working, and blends far
 above the damage means the frame is compositing depth the user cannot see.
-`FrameStats::is_idle()` distinguishes a frame that recomposed nothing from one
-that recomposed a little, so a wake that did no work reports *idle* rather
-than a row of zeros pretending to be a frame.
+`FrameStats::is_idle()` distinguishes a frame that changed nothing from one
+that changed a little, so a wake that did no work reports *idle* rather
+than a row of zeros pretending to be a frame. A fade step is the honest
+extreme of that reading: it damages and encodes the whole screen and blends
+none of it, because the composed pixels it presents are the ones already
+there.
 
 ### And what every frame cost (`frame_totals`)
 

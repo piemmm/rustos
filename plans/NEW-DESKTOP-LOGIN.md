@@ -415,9 +415,11 @@ login screen's — it opens on the chooser.
   down with the rest of the frame's state: a picture asks for a shadow, the
   flat desktop colour does not — over that ground the shadow *is* the ground,
   so it would compose to exactly what is already there, and the screen lock
-  pays for one glyph pass rather than two. The entry/exit veil is still laid
-  through the one dithered wash in `lib/raster`, a flat field over a picture
-  being the shape that bands when every pixel rounds alike. The picture is
+  pays for one glyph pass rather than two. The entry/exit veil keeps that
+  dithered rounding where it is now applied — per pixel as the surface is
+  blitted, through `Pixel::dimmed_biased` and the same `DitherRow` tiled from
+  the surface's own coordinates — a flat field over a picture being the shape
+  that bands when every pixel rounds alike. The picture is
   never blurred *wholesale*: frosting a whole wallpaper to make text sit on it
   hides the picture the user chose, so the shadow does the legibility work
   honestly. The shared frost stays where it belongs — the compositor's window

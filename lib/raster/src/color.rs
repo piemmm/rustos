@@ -260,6 +260,49 @@ impl Pixel {
         }
     }
 
+    /// Scale every colour channel towards black, keeping `strength/255` of the
+    /// colour this pixel had, rounding at `bias` ([`div255_biased`]).
+    ///
+    /// `255` returns the pixel untouched, `0` returns black. Alpha is coverage,
+    /// not colour, so it is never touched — an opaque screen stays opaque, and
+    /// the premultiplied invariant (every channel `<= a`) survives because
+    /// scaling down cannot lift a channel above an alpha that did not move.
+    ///
+    /// A screen dissolving to or from black is this, and nothing else: the
+    /// desktop's own reveal strength as a composed pixel is encoded for
+    /// scan-out, and the login screen's veil as a painted pixel is blitted into
+    /// its frame. The two meet on the same absolute black, so they are one
+    /// operation read from either end — the desktop's `strength` is how much of
+    /// the screen reaches the display, the login screen's is the inverse of how
+    /// far its veil has closed.
+    ///
+    /// Dimming an 8-bit picture keeps only `strength` of the levels it held, so
+    /// a caller laying the field over a photograph varies the bias per pixel and
+    /// keeps its gradients instead of contouring them — exactly as a wash does,
+    /// and for the same reason as [`Self::scale_alpha_biased`].
+    #[must_use]
+    #[inline]
+    pub fn dimmed_biased(self, strength: u8, bias: u32) -> Self {
+        if strength == 255 {
+            return self;
+        }
+        let s = u32::from(strength);
+        let toward = |c: u8| div255_biased(u32::from(c) * s, bias);
+        Self {
+            r: toward(self.r),
+            g: toward(self.g),
+            b: toward(self.b),
+            a: self.a,
+        }
+    }
+
+    /// Scale every colour channel towards black, rounded to nearest.
+    #[must_use]
+    #[inline]
+    pub fn dimmed(self, strength: u8) -> Self {
+        self.dimmed_biased(strength, ROUND_NEAREST)
+    }
+
     /// Composite `self` (source) *over* `dst` (destination).
     ///
     /// Both operands are premultiplied; the result is

@@ -53,7 +53,7 @@ both finish.
 | selection cross-fade | `SelectionChange` | the mark dissolving between two tiles |
 | stage transition | `StageTransition` | the chosen disc travelling between chooser and prompt |
 | rejection shake | `AttemptRejected` | the prompt column swinging sideways |
-| the veil | `SessionFade` | the whole screen arriving out of black, and leaving into it |
+| the veil | `SessionFade` | the whole screen arriving out of black, and leaving into it — the one animation that moves no painted pixel |
 
 `advance(now_ns)` steps whatever is running, settles what has finished, and
 reports the union of what it touched. `motion_due(now_ns)` is the nanoseconds
@@ -77,6 +77,16 @@ Picking an account travels the chosen tile's monogram disc to where the
 prompt's disc sits, growing as it goes, while the other tiles dissolve and the
 prompt's name, pill, and notice come up. `Escape` runs the same transition the
 other way.
+
+It reports the **band** it redraws rather than the screen: the chrome, both
+bodies, and the disc travelling between them, full width because a long account
+name is centred across the screen rather than in the block. The disc needs no
+term of its own — it is interpolated between two rectangles the band already
+spans. That band is about a third of the screen's height, and every frame of a
+transition pays the difference twice, once blitting the surface into the frame
+and once presenting it. A unit test composes the transition over a matrix of
+account counts and picked tiles and asserts that no pixel moves outside the
+band, because a pixel that did would be left showing the frame before.
 
 It interpolates the **layout**, not two renders: the disc's rectangle and glyph
 size are interpolated between the two stages' own geometry, and every other
@@ -114,6 +124,16 @@ all — still reports the refusal in full.
 One veil runs both ways over the whole composed screen, so the screen a person
 is shown and the screen they leave are the same black at the same weight.
 
+**It changes no painted pixel.** The veil is a flat black field over
+everything, so `reveal()` reports how much of the painted surface reaches the
+screen and the embedder applies it where that surface is blitted into the
+frame — `Outcome::paints()` is `false` for a veil step and nothing else. A fade
+frame is then one blit of a surface that is already painted, instead of
+repainting the backdrop, the chrome, both bodies and every glyph and its shadow
+to change one number. The rounding error is dithered across the pixels the
+field covers exactly as the wash that painted it in did, so what a fade
+presents has not changed by a byte.
+
 `begin_entry_fade(now_ns, theme)` starts it opaque and opens it off over
 `SessionFade`, before the first frame is presented. A greeter is spawned onto a
 display the desktop handed over cleared to black, so without it the chooser is
@@ -130,11 +150,11 @@ is made, and a keystroke must not re-open the prompt. A screen that is still
 typing while it comes up — so `session_fade_begun()` is direction-aware, and
 both things that must stop when the screen is leaving read that one definition.
 The second of them is the pointer: an embedder that draws one over this surface
-stops, because the veil is painted *into* the surface and a cursor sampled on
-top of it afterwards would stay bright all the way down to black. A pointer is
-an affordance for a screen that is still answering, and a leaving one is not,
-so it leaves with the screen rather than being dimmed by a second copy of the
-veil's arithmetic.
+stops, because the veil is applied to what is *under* the cursor — as the wash
+painted into the surface was — so a cursor sampled over it would stay bright
+all the way down to black. A pointer is an affordance for a screen that is
+still answering, and a leaving one is not, so it leaves with the screen rather
+than being dimmed by a second copy of the veil's arithmetic.
 
 A secret accepted while the screen is still arriving leaves from the strength
 the veil had reached, rather than restarting at nothing and flashing the screen

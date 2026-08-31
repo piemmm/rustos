@@ -36,7 +36,7 @@ use tairix_reclaim::{CacheAccounting, PressureBand, PressureGauge, ReclaimCache,
 use tairix_theme::{CursorKind, Theme};
 
 use crate::chrome::{ChromeEpoch, WindowChrome};
-use crate::color::{div255, Color, DitherRow, Pixel};
+use crate::color::{Color, DitherRow, Pixel};
 use crate::corner::Corners;
 use crate::frost::{inset, FrostEpoch, FrostPlan, FrostedBackdrop};
 use crate::geometry::{Point, Rect, Region, Scale};
@@ -176,6 +176,12 @@ pub struct Compositor {
     /// an embedder hands over a worker pool.
     runner: &'static dyn JobRunner,
     damage: Region,
+    /// Where the composed pixels are current but the scan-out bytes encoded
+    /// from them are stale — the screen reveal's own channel
+    /// ([`mark_scanout`](Self::mark_scanout)). Drained by the same
+    /// [`recompose_damage`](Self::recompose_damage) that drains `damage`, and
+    /// re-encoded rather than recomposed.
+    scanout: Region,
     /// Where a segment of a damaged rectangle still has to compose the layers
     /// below a frosted window: the rectangle less whatever the frost is about
     /// to write over. Held here, and cleared per use, so a frame's segments
@@ -267,6 +273,7 @@ impl Compositor {
             frost_decision: Vec::new(),
             runner: &tairix_parallel::SERIAL,
             damage: Region::new(),
+            scanout: Region::new(),
             plane: Region::new(),
             stats: FrameCounters::new(),
             #[cfg(test)]
@@ -334,6 +341,9 @@ impl Compositor {
         // are dropped by the epoch this mode is part of.
         self.blur_scratch.release();
         self.damage.clear();
+        // A rectangle of the old screen cannot name one of the new, and the
+        // whole-screen composite below re-encodes every pixel anyway.
+        self.scanout.clear();
         let screen = self.screen_rect();
         self.mark(screen);
         true
@@ -382,14 +392,32 @@ impl Compositor {
     }
 
     /// Mark `rect` for recomposition for a change no frost can read: the
-    /// cursor overlay, composed after every window, and the screen reveal,
-    /// which is applied only as a composed pixel is encoded for scan-out.
+    /// cursor overlay, composed after every window.
     ///
-    /// Neither alters the back buffer beneath a frosted window, so a pointer
-    /// sample and a fade step keep every retained frost.
+    /// It does not alter the back buffer beneath a frosted window, so a
+    /// pointer sample keeps every retained frost. It is still a *composite*:
+    /// the cursor is blended into the back buffer like any other layer.
     fn mark_overlay(&mut self, rect: Rect) {
         let above_every_window = self.windows.len();
         self.mark_from(rect, above_every_window);
+    }
+
+    /// Mark `rect` for re-encoding: the composed pixels there are current, and
+    /// only the scan-out bytes derived from them are stale.
+    ///
+    /// The screen reveal is the whole of this channel. It is applied as a
+    /// composed pixel is encoded for scan-out and the back buffer keeps the
+    /// true composed colour, so a fade step changes what every pixel *presents*
+    /// without changing any pixel — recompositing the scene to arrive at the
+    /// back buffer it already holds is work the fade cannot use, and it grows
+    /// with the scene the fade did not touch.
+    ///
+    /// Nothing composes, so no frost is consulted or dropped, and no layer is
+    /// read: [`recompose_damage`](Self::recompose_damage) re-encodes these
+    /// rectangles from the back buffer as it stands. What that is worth is
+    /// measured in `docs/src/desktop/wm.md`.
+    fn mark_scanout(&mut self, rect: Rect) {
+        self.scanout.add(rect);
     }
 
     /// Mark `rect` and invalidate the retained frost of every window from
@@ -974,14 +1002,17 @@ impl Compositor {
     /// true composed colour, so a frosted window's backdrop and a
     /// multi-segment rectangle cannot be dimmed twice.
     ///
-    /// A change repaints the whole screen because every pixel's presented
-    /// value changed; setting the strength already in force damages nothing.
+    /// A change re-encodes the whole screen because every pixel's presented
+    /// value changed — and *only* re-encodes it, because no composed pixel
+    /// moved: the next [`composite`](Self::composite) writes the scan-out bytes
+    /// afresh from the back buffer it already holds, laying no layer. Setting
+    /// the strength already in force damages nothing.
     pub fn set_reveal(&mut self, strength: u8) -> bool {
         if strength == self.reveal {
             return false;
         }
         self.reveal = strength;
-        self.mark_overlay(self.screen_rect());
+        self.mark_scanout(self.screen_rect());
         true
     }
 
@@ -2059,23 +2090,25 @@ impl Compositor {
         self.cursor.as_ref().map(PlacedCursor::bounds)
     }
 
-    /// Whether any pixels are pending recomposition — either an explicitly
-    /// marked rectangle or a cursor move/show/hide/replacement whose damage
-    /// has not yet been derived by a [`composite`](Self::composite).
+    /// Whether the next frame would change a pixel the display shows — an
+    /// explicitly marked rectangle, a pending re-encode
+    /// ([`set_reveal`](Self::set_reveal)), or a cursor
+    /// move/show/hide/replacement whose damage has not yet been derived by a
+    /// [`composite`](Self::composite).
     ///
     /// This answers exactly the question the next
-    /// [`composite`](Self::composite) does: it is `true` if and only if
-    /// that composite would recompose at least one pixel. A caller driving
-    /// a wake loop can therefore skip the frame entirely when it is
-    /// `false`, and never miss one when it is `true`. Damage marked wholly
-    /// off screen is no pending work: composite clips every rectangle to
-    /// the screen, so this clips them too rather than promising a frame
-    /// that would recompose nothing.
+    /// [`composite`](Self::composite) does: it is `true` if and only if that
+    /// composite would change at least one presented pixel — whether by
+    /// recomposing it or by encoding it afresh. A caller driving a wake loop
+    /// can therefore skip the frame entirely when it is `false`, and never
+    /// miss one when it is `true`. Damage marked wholly off screen is no
+    /// pending work: composite clips every rectangle to the screen, so this
+    /// clips them too rather than promising a frame that would change nothing.
     #[must_use]
     pub fn has_damage(&self) -> bool {
         let screen = self.screen_rect();
         let on_screen = |rect: Rect| !rect.intersection(&screen).is_empty();
-        if self.damage.intersects(screen) {
+        if self.damage.intersects(screen) || self.scanout.intersects(screen) {
             return true;
         }
         if !self.cursor_needs_recompose() {
@@ -2183,7 +2216,32 @@ impl Compositor {
             self.recompose_rect(area, base, &hits, &fallback);
         }
         self.retain_pending_frost();
+        self.rescan_scanout(&mut composited, screen);
         composited
+    }
+
+    /// Re-encode the scan-out bytes of everything
+    /// [`mark_scanout`](Self::mark_scanout) marked and the composite above did
+    /// not already cover, adding those rectangles to `changed`.
+    ///
+    /// Everything the composite touched it also encoded, at the current reveal,
+    /// so those rectangles are subtracted rather than encoded twice — a fade
+    /// step that lands in the same frame as a real repaint pays for the repaint
+    /// and the rest of the screen, never for the overlap twice.
+    fn rescan_scanout(&mut self, changed: &mut Region, screen: Rect) {
+        let mut scanout = core::mem::take(&mut self.scanout);
+        scanout.clip(screen);
+        for &done in changed.rects() {
+            scanout.subtract(done);
+        }
+        for &area in scanout.rects() {
+            self.stats.add_damaged(area_px(area.width, area.height));
+            self.encode_rect(area);
+            changed.add(area);
+        }
+        // Handed back emptied so the next frame reuses the buffer it grew.
+        scanout.clear();
+        self.scanout = scanout;
     }
 
     /// Hand the frosts this composite computed to the cache, now that the pass
@@ -2709,7 +2767,20 @@ impl Compositor {
             start = split;
             under = None;
         }
-        self.compose_span(area, under, hits.get(start..), fallback, true);
+        self.compose_span(area, under, hits.get(start..), fallback, Pass::Finish);
+    }
+
+    /// Encode `area`'s scan-out bytes from the back buffer as it stands, at the
+    /// current reveal strength.
+    ///
+    /// The same row and band plumbing every composite runs, with no layer to
+    /// lay: no root fill, no desktop layer, no window, no cursor, and so no
+    /// furniture — which is why the fallback it is handed is empty rather than
+    /// built. What a fade step costs is then one encode of what is already
+    /// composed.
+    fn encode_rect(&mut self, area: Rect) {
+        let unread = ChromeFallback::new();
+        self.compose_span(area, None, None, &unread, Pass::Rescan);
     }
 
     /// Compose the layers `span` names over `area` except `spared`, which the
@@ -2731,7 +2802,7 @@ impl Compositor {
         fallback: &ChromeFallback,
     ) {
         if spared.is_empty() {
-            self.compose_span(area, under, span, fallback, false);
+            self.compose_span(area, under, span, fallback, Pass::Compose);
             return;
         }
         // Taken out and put back so the region keeps the buffers it grew;
@@ -2741,7 +2812,7 @@ impl Compositor {
         plane.add(area);
         plane.subtract(spared);
         for rect in plane.rects() {
-            self.compose_span(*rect, under, span, fallback, false);
+            self.compose_span(*rect, under, span, fallback, Pass::Compose);
         }
         self.plane = plane;
     }
@@ -2892,7 +2963,7 @@ impl Compositor {
         under: Option<Pixel>,
         span: Option<&[usize]>,
         fallback: &ChromeFallback,
-        encode: bool,
+        pass: Pass,
     ) {
         let epoch = self.chrome_epoch();
         #[cfg(test)]
@@ -2918,8 +2989,8 @@ impl Compositor {
         let reveal = *reveal;
         let windows: &[Window] = windows;
         // The cursor is the top-most layer, so only the segment that
-        // finishes the rectangle draws it.
-        let cursor = if encode { cursor.as_ref() } else { None };
+        // finishes the rectangle draws it. A rescan lays no layer at all.
+        let cursor = cursor.as_ref().filter(|_| pass == Pass::Finish);
         // The desktop sits directly under the windows, so it belongs to
         // the segment that starts from the root fill; a continuing segment
         // finds it already in the back buffer.
@@ -2953,7 +3024,7 @@ impl Compositor {
             order,
             reveal,
             opaque_runs,
-            encode,
+            pass,
             stride,
             first_byte,
             row_bytes,
@@ -3185,13 +3256,30 @@ struct SpanShared<'a> {
     order: ChannelOrder,
     reveal: u8,
     opaque_runs: bool,
-    encode: bool,
+    pass: Pass,
     /// Scan-out bytes per screen row.
     stride: usize,
     /// Byte offset of the rectangle's first column within a scan-out row.
     first_byte: usize,
     /// Bytes one row of the rectangle occupies.
     row_bytes: usize,
+}
+
+/// What one pass over a rectangle's rows is for.
+///
+/// A rectangle whose layers must be composed is walked in *segments* — one per
+/// frosted window that reads the backdrop — and only the last of them draws the
+/// cursor and encodes, so the scan-out sees each pixel once, finished.
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum Pass {
+    /// Compose the layers into the back buffer and leave the scan-out to the
+    /// segment that finishes the rectangle.
+    Compose,
+    /// Compose the layers, the cursor over them, and encode the result.
+    Finish,
+    /// Encode the back buffer as it already stands: no layer is read and no
+    /// composed pixel is written. What a screen fade needs, and all it needs.
+    Rescan,
 }
 
 /// One band of a segment: the back-buffer rows it owns, the scan-out bytes of
@@ -3243,11 +3331,12 @@ fn compose_band(shared: &SpanShared<'_>, band: &mut SpanBand<'_>) {
         order,
         reveal,
         opaque_runs,
-        encode,
+        pass,
         stride,
         first_byte,
         row_bytes,
     } = *shared;
+    let encode = pass != Pass::Compose;
     let Ok(left) = u32::try_from(area.left()) else {
         return;
     };
@@ -3256,15 +3345,6 @@ fn compose_band(shared: &SpanShared<'_>, band: &mut SpanBand<'_>) {
     let mut window_rows: Vec<WindowRow<'_>> = Vec::with_capacity(sources.len());
     for py in rows {
         let Ok(y) = i32::try_from(py) else { continue };
-        window_rows.clear();
-        window_rows.extend(
-            sources
-                .iter()
-                .filter_map(|(window, chrome)| window.row(y, *chrome)),
-        );
-        let dither = DitherRow::at(py);
-        let cursor_row = cursor.and_then(|c| c.local_row(y).map(|ly| (c, ly)));
-        let desktop_row = desktop.map(|layer| crate::surface::row(layer, py));
         let Some((_, back_row)) = band.back.row_span_mut(py, left, area.width) else {
             continue;
         };
@@ -3279,6 +3359,22 @@ fn compose_band(shared: &SpanShared<'_>, band: &mut SpanBand<'_>) {
         else {
             continue;
         };
+        if pass == Pass::Rescan {
+            // The composed row is already what it should be; only the strength
+            // it reaches the display at moved.
+            encode_segment(frame_row, back_row, order, reveal);
+            band.work.encoded = band.work.encoded.saturating_add(u64::from(area.width));
+            continue;
+        }
+        window_rows.clear();
+        window_rows.extend(
+            sources
+                .iter()
+                .filter_map(|(window, chrome)| window.row(y, *chrome)),
+        );
+        let dither = DitherRow::at(py);
+        let cursor_row = cursor.and_then(|c| c.local_row(y).map(|ly| (c, ly)));
+        let desktop_row = desktop.map(|layer| crate::surface::row(layer, py));
         // The screen reveal is applied as a pixel is encoded, so a fade in flight
         // has no run a plain copy could serve; the cursor is resolved per row, so
         // only the few rows it draws on lose the fast path.
@@ -3455,26 +3551,7 @@ fn encode_segment(bytes: &mut [u8], pixels: &[Pixel], order: ChannelOrder, revea
         return;
     }
     for (slot, pixel) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(pixels) {
-        *slot = order.encode(revealed(*pixel, reveal));
-    }
-}
-
-/// `pixel` as the screen reveal presents it: scaled towards black by
-/// `strength`, with alpha untouched so an opaque screen stays opaque and the
-/// premultiplied invariant (every channel `<= a`) still holds.
-///
-/// A fully-revealed screen returns the pixel itself, so a desktop that is not
-/// fading pays a compare and encodes exactly the bytes it always did.
-fn revealed(pixel: Pixel, strength: u8) -> Pixel {
-    if strength == u8::MAX {
-        return pixel;
-    }
-    let s = u32::from(strength);
-    Pixel {
-        r: div255(u32::from(pixel.r) * s),
-        g: div255(u32::from(pixel.g) * s),
-        b: div255(u32::from(pixel.b) * s),
-        a: pixel.a,
+        *slot = order.encode(pixel.dimmed(reveal));
     }
 }
 
