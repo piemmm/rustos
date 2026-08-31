@@ -107,7 +107,7 @@ impl core::fmt::Display for ResolveError {
 }
 
 /// Fetch the host's active recursive-resolver server set through `sysinfo`,
-/// converting each `NetResolverServer` record to an [`IpAddr`].
+/// converting each `NetServerAddr` record to an [`IpAddr`].
 ///
 /// The set is the aggregated, deduplicated statically-configured ∪
 /// DHCP-learned servers the network stack maintains, read through the

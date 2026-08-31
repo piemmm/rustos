@@ -17,7 +17,8 @@
 //!
 //! Every server message is attacker-controlled. [`DhcpReply::parse`] is
 //! total (never panics), bounded (a fixed option-region walk, fixed-capacity
-//! router/DNS lists — [`MAX_ADDRESSES`]), and fail-closed: a malformed or
+//! router/DNS/time-server lists — [`MAX_ADDRESSES`]), and fail-closed: a
+//! malformed or
 //! internally inconsistent message yields `None` and nothing is applied.
 //! Off-path spoofing is bounded by the randomised transaction id; the state
 //! machine additionally rejects any reply whose `xid` or `chaddr` does not
@@ -84,9 +85,9 @@ const FILE_OFFSET: usize = 108;
 /// Length of the `file` field.
 const FILE_LEN: usize = 128;
 
-/// Largest number of routers or DNS servers surfaced from one reply. Extra
-/// entries past this fixed bound are ignored (a fixed security bound,
-/// never an attacker-sized allocation).
+/// Largest number of routers, DNS servers, or time servers surfaced from one
+/// reply. Extra entries past this fixed bound are ignored (a fixed security
+/// bound, never an attacker-sized allocation).
 pub const MAX_ADDRESSES: usize = 4;
 
 /// The `0xFFFF_FFFF` lease time meaning "infinite" (RFC 2131 §3.3): no
@@ -105,6 +106,8 @@ pub mod opt {
     pub const ROUTER: u8 = 3;
     /// Domain name server list (option 6).
     pub const DOMAIN_NAME_SERVER: u8 = 6;
+    /// Network time protocol server list (option 42).
+    pub const NTP_SERVER: u8 = 42;
     /// Requested IP address (option 50).
     pub const REQUESTED_IP: u8 = 50;
     /// IP address lease time in seconds (option 51).
@@ -176,8 +179,9 @@ impl MessageType {
     }
 }
 
-/// A bounded list of IPv4 addresses surfaced from a reply option (routers
-/// or DNS servers). Holds at most [`MAX_ADDRESSES`]; entries past that are
+/// A bounded list of IPv4 addresses surfaced from a reply option (routers,
+/// DNS servers, or time servers). Holds at most [`MAX_ADDRESSES`]; entries
+/// past that are
 /// dropped, so a hostile option can never size an allocation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AddressList {
@@ -257,6 +261,8 @@ pub struct DhcpReply {
     pub routers: AddressList,
     /// The DNS servers (option 6), in wire order.
     pub dns_servers: AddressList,
+    /// The network time servers (option 42), in wire order.
+    pub ntp_servers: AddressList,
     /// The lease duration in seconds (option 51), if present.
     pub lease_secs: Option<u32>,
     /// The renewal (T1) time in seconds (option 58), if present.
@@ -275,6 +281,7 @@ struct ReplyBuilder {
     subnet_mask: Option<Ipv4Addr>,
     routers: AddressList,
     dns_servers: AddressList,
+    ntp_servers: AddressList,
     lease_secs: Option<u32>,
     renewal_secs: Option<u32>,
     rebinding_secs: Option<u32>,
@@ -313,6 +320,7 @@ impl ReplyBuilder {
             opt::SUBNET_MASK => self.subnet_mask = addr_option(data).or(self.subnet_mask),
             opt::ROUTER => self.routers.extend_from_bytes(data),
             opt::DOMAIN_NAME_SERVER => self.dns_servers.extend_from_bytes(data),
+            opt::NTP_SERVER => self.ntp_servers.extend_from_bytes(data),
             opt::SERVER_ID => self.server_id = addr_option(data).or(self.server_id),
             opt::LEASE_TIME => self.lease_secs = u32_option(data).or(self.lease_secs),
             opt::RENEWAL_TIME => self.renewal_secs = u32_option(data).or(self.renewal_secs),
@@ -423,6 +431,7 @@ impl DhcpReply {
             subnet_mask: builder.subnet_mask,
             routers: builder.routers,
             dns_servers: builder.dns_servers,
+            ntp_servers: builder.ntp_servers,
             lease_secs: builder.lease_secs,
             renewal_secs: builder.renewal_secs,
             rebinding_secs: builder.rebinding_secs,
@@ -442,10 +451,11 @@ const MAX_MESSAGE_SIZE_ADVERTISED: u16 = 576;
 
 /// The parameter request list (option 55) the client asks every server to
 /// populate: the addressing facts an interface needs to come up.
-const PARAMETER_REQUEST_LIST: [u8; 6] = [
+const PARAMETER_REQUEST_LIST: [u8; 7] = [
     opt::SUBNET_MASK,
     opt::ROUTER,
     opt::DOMAIN_NAME_SERVER,
+    opt::NTP_SERVER,
     opt::LEASE_TIME,
     opt::RENEWAL_TIME,
     opt::REBINDING_TIME,
@@ -645,6 +655,8 @@ pub struct Lease {
     pub router: Option<Ipv4Addr>,
     /// The DNS servers (option 6), in wire order.
     pub dns_servers: AddressList,
+    /// The network time servers (option 42), in wire order.
+    pub ntp_servers: AddressList,
     /// The DHCP server that granted the lease (option 54), if known.
     pub server_id: Option<Ipv4Addr>,
     /// The lease duration in seconds ([`INFINITE_LEASE_SECS`] for a
@@ -1066,6 +1078,7 @@ impl DhcpClient {
             subnet_mask: reply.subnet_mask,
             router: reply.routers.first(),
             dns_servers: reply.dns_servers,
+            ntp_servers: reply.ntp_servers,
             server_id: reply.server_id.or(self.offer_server_id),
             lease_secs,
         };

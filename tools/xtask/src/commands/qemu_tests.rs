@@ -282,6 +282,22 @@ enum NetPeerMode {
     /// trips as it sends, while the property under test is what the guest
     /// does next.
     NtpServer,
+    /// A **DHCP-server-plus-NTP-server** peer (the `plans/TIMESYNC.md` TS-7
+    /// vertical): the peer leases the guest
+    /// [`tairix_test_netstack_wire::DHCP_LEASED_V4`] exactly as
+    /// [`Self::V4DhcpEcho`] does, but its OFFER and ACK carry RFC 2132
+    /// option 42 naming *itself* as the network time server, and it then
+    /// answers the guest's NTP requests spoof-first as [`Self::NtpServer`]
+    /// does.
+    ///
+    /// The guest has **no** configured time server, so option 42 is its only
+    /// route to a reachable one — the built-in fallback names public-pool
+    /// hosts, unreachable on an isolated wire. A guest that ignored the option
+    /// therefore sets no clock and the run fails loud, which is what makes
+    /// this a discriminator rather than a tautology. Like [`Self::NtpServer`]
+    /// the peer's gate is not a completion gate: the guest's own applied
+    /// instant is the property under test.
+    V4DhcpNtpServer,
 }
 
 /// Which filesystem volume (if any) the host harness plants on the
@@ -5571,6 +5587,55 @@ static TESTS: &[QemuTest] = &[
             ("root@tairix ~% ", Duration::ZERO, ""),
         ],
     },
+    // `plans/TIMESYNC.md` TS-7: the live DHCP-supplied-time-server vertical.
+    // `tairix-test-timed-dhcp-qemu-aarch64` boots the *production* aarch64
+    // pipeline with the **same** `dhcp-net-root` disk the DHCPv4 addressing
+    // vertical uses (`FsDisk::DhcpNetRootDisk`): the net-only signed driver
+    // set plus a planted `network.conf` that binds the NIC to `wan` by its bus
+    // location, selects `ipv4.method dhcp`, and disables IPv6. That disk
+    // deliberately plants **no** `system.conf`, so the guest's `time.servers`
+    // is empty and its only route to a reachable time server is RFC 2132
+    // option 42 in its own lease. The peer is the DHCP-server-plus-NTP-server
+    // role (`NetPeerMode::V4DhcpNtpServer`), whose OFFER and ACK carry that
+    // option naming itself.
+    //
+    // The guest boots with the wall clock `Unset` (no RTC is modelled).
+    // `timed` starts on its built-in fallback tier — the public-pool names,
+    // which cannot resolve here and could not be routed to if they did — and
+    // re-selects on its bounded ladder, reading the learned server through the
+    // ungated `net_time_servers` query `sysinfod` fronts once the lease lands.
+    // A guest that ignored option 42 therefore never reaches a server and
+    // never sets its clock, which is what makes this run a discriminator
+    // rather than a tautology.
+    //
+    // The peer answers each request **twice, spoof first**, exactly as the
+    // TS-2 vertical's does, so the witness requires the *exact* applied
+    // seconds. No serial script: nothing in the chain needs a console
+    // dialogue, and everything runs before any root unlock. Two gates, neither
+    // sufficient alone — the guest exits on `timed`'s `CLOCK_SET` carrying
+    // `wall_secs=<NTP_FIXTURE_SECS>`, and the peer must report that it
+    // offered, acked, and served a time request. A 300-second budget covers
+    // boot + autoload + service bring-up + the bind + the DHCP exchange + the
+    // ladder rung that picks the lease's server up + the randomised initial
+    // delay, on QEMU TCG; single CPU like the other full-boot verticals.
+    QemuTest {
+        package: "tairix-test-timed-dhcp-qemu-aarch64",
+        binary: "tairix-test-timed-dhcp-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::V4DhcpNtpServer,
+        ramfb: false,
+        fs_disk: FsDisk::DhcpNetRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[],
+    },
     // `plans/TIMESYNC.md` TS-3: the live clock-chip vertical.
     // `tairix-test-rtc-pl031-qemu-aarch64` boots the *production* aarch64
     // pipeline with the `rtc-root` disk: the standard application/service
@@ -10826,6 +10891,9 @@ fn spawn_net_peer(
         NetPeerMode::V4DhcpEcho => super::netpeer::NetPeer::spawn_dhcp(qemu_sock, peer_sock),
         NetPeerMode::V6Dhcp6Echo => super::netpeer::NetPeer::spawn_dhcp6(qemu_sock, peer_sock),
         NetPeerMode::NtpServer => super::netpeer::NetPeer::spawn_ntp(qemu_sock, peer_sock),
+        NetPeerMode::V4DhcpNtpServer => {
+            super::netpeer::NetPeer::spawn_dhcp_time(qemu_sock, peer_sock)
+        }
         // The bond peer needs two wires (two socket pairs), so it is attached
         // directly in `finish_run`, never through this single-wire spawner.
         NetPeerMode::Bond => {

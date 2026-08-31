@@ -12,7 +12,7 @@ use alloc::boxed::Box;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 
-use tairix_abi::net_ipc::{NetAddrFamily, NetResolverServer};
+use tairix_abi::net_ipc::{NetAddrFamily, NetServerAddr};
 use tairix_abi::sysinfo::{NetInterfaceListRequest, SysinfoQueryId, SysinfoRequestHeader};
 use tairix_abi::time::Duration64;
 use tairix_abi::Errno;
@@ -34,13 +34,13 @@ use super::{
 /// paging like it (a short page terminates the walk). It records which
 /// query id it saw so a test can prove the resolver used the shared query.
 struct SysinfoFake {
-    servers: Vec<NetResolverServer>,
+    servers: Vec<NetServerAddr>,
     deny: bool,
     seen: core::cell::RefCell<Vec<SysinfoQueryId>>,
 }
 
 impl SysinfoFake {
-    fn new(servers: Vec<NetResolverServer>) -> Self {
+    fn new(servers: Vec<NetServerAddr>) -> Self {
         Self {
             servers,
             deny: false,
@@ -71,7 +71,7 @@ impl tairix_procinfo::Transport for SysinfoFake {
             return Ok(Vec::new());
         }
         let take = core::cmp::min(self.servers.len() - offset, req.limit as usize);
-        let mut out = Vec::with_capacity(take * NetResolverServer::WIRE_LEN);
+        let mut out = Vec::with_capacity(take * NetServerAddr::WIRE_LEN);
         for record in &self.servers[offset..offset + take] {
             out.extend_from_slice(&record.to_le_bytes());
         }
@@ -79,17 +79,17 @@ impl tairix_procinfo::Transport for SysinfoFake {
     }
 }
 
-fn v4_record(a: u8, b: u8, c: u8, d: u8) -> NetResolverServer {
+fn v4_record(a: u8, b: u8, c: u8, d: u8) -> NetServerAddr {
     let mut addr = [0u8; 16];
     addr[..4].copy_from_slice(&[a, b, c, d]);
-    NetResolverServer {
+    NetServerAddr {
         family: NetAddrFamily::V4,
         addr,
     }
 }
 
-fn v6_record(bytes: [u8; 16]) -> NetResolverServer {
-    NetResolverServer {
+fn v6_record(bytes: [u8; 16]) -> NetServerAddr {
+    NetServerAddr {
         family: NetAddrFamily::V6,
         addr: bytes,
     }

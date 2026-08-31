@@ -46,6 +46,43 @@ The refresh cadence is measured in **uptime**, not wall time. That is what
 keeps a frequently-rebooting machine from re-querying on every boot while still
 refreshing about once a day.
 
+## Which servers
+
+`select_servers` is the other half of the policy: **whose** server to ask.
+Three tiers, worst to best, first non-empty wins outright:
+
+| `ServerSource` | Where the servers come from |
+|---|---|
+| `Fallback` | `FALLBACK_TIME_SERVERS` — `0.pool.ntp.org` … `3.pool.ntp.org`. |
+| `Network` | What DHCP offered (option 42 / option 56), read through the ungated `net_time_servers` system-information query. |
+| `Configured` | The `time.servers` key an operator or installer wrote. |
+
+The tiers are never merged. A machine whose network named a server must not go
+on querying the public pool as well, and an operator's list must not have a
+DHCP server's choice mixed into it. `ServerSource` is `Ord`ered worst-to-best so
+a caller compares tiers instead of re-deriving the precedence: a set may be
+replaced by one of a strictly greater source and never by an equal or lesser
+one, which is what stops a re-selection resetting a running engine's rotation
+and backoff for no gain.
+
+The result is never empty, because a machine that asks nobody has no clock —
+which is why the fallback tier exists at all. Each tier is truncated to
+`MAX_TIME_SERVERS`, the same bound the engine's server array and the
+configuration store use, so a named server can never sit silently past the
+engine's reach.
+
+A `Network` server arrives as an address and carries it, so it needs no name
+resolution: a machine whose only DNS advice would have come from the same lease
+still keeps time. Its `name` is then the address's text, held for the audit
+trail and never parsed back.
+
+The fallback names the generic public pool because TAIRiX has no NTP-pool
+vendor zone; RFC 8633 §3.1 would prefer one. What makes it acceptable is the
+politeness policy `tairix_net::ntp` enforces on every tier alike — the poll
+floor, one request in flight per server, bounded backoff with CSPRNG jitter, a
+randomised initial delay, and Kiss-o'-Death obedience — plus the pool's own DNS
+rotation.
+
 ## The persisted record
 
 `SyncRecord` holds `last_sync` and `last_seen`, and is written to
@@ -92,6 +129,8 @@ cannot change what a sample means.
 
 ## Purity
 
-`no_std`, `#![forbid(unsafe_code)]`, allocation-free, with monotonic time, the
-wall-clock reading, and every CSPRNG word injected by the caller. The whole
-policy is host-tested with no kernel and no sockets.
+`no_std`, `#![forbid(unsafe_code)]`, with monotonic time, the wall-clock
+reading, and every CSPRNG word injected by the caller. The decision path is
+allocation-free; only `select_servers` allocates, because its result is an
+owned server list the caller keeps. The whole policy is host-tested with no
+kernel and no sockets.

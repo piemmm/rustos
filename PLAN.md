@@ -3492,16 +3492,14 @@ See `plans/IO.md` (binding under `AGENTS.md`).
 
 ### Stage 6 follow-up — setting the clock (`plans/TIMESYNC.md`)
 
-**Status: in progress.** TS-1 (the engine and the clock policy) and TS-2 (the
-`timed` service) are done: the machine now establishes its clock from a
-configured network time server, with the NTP decode contained in a
-capability-empty sandbox worker. TS-3 (the RTC driver class and the
-QEMU-emulable chips) is part-landed — the class ABI, the kernel-enforced
-provenance ladder, the RTC service protocol, the `pl031` driver, and `timed`'s
-RTC client and write-back are in; the image wiring, the QEMU verticals, and
-the `mc146818` / `goldfish` drivers remain. TS-4–TS-6 follow.
-`plans/TIMESYNC.md` is the binding design and carries the deliverable list and
-its current state; it is not repeated here.
+**Status: in progress.** TS-1 (the engine and the clock policy), TS-2 (the
+`timed` service), and TS-7 (the server-source tiers) are done: a machine now
+establishes its clock from the network with no configuration at all, and the
+NTP decode is contained in a capability-empty sandbox worker. TS-3 (the RTC
+driver class and the QEMU-emulable chips) is done but for the x86_64 QEMU
+vertical, which needs the tree's first x86_64 full-boot vertical and is its own
+increment. TS-4–TS-6 follow. `plans/TIMESYNC.md` is the binding design and
+carries the deliverable list and its current state; it is not repeated here.
 
 A Raspberry Pi 3/4 has no RTC at all, which is why the network path came
 first: without it such a machine boots `WallTimeState::Unset` for ever, and
@@ -3536,10 +3534,12 @@ Load-bearing decisions a future contributor needs:
   The caller gates the nonce echo *itself*, before the worker is involved, and
   re-validates any returned sample against the plausibility window, the
   round-trip ceiling, and the usable stratum range before applying it.
-- **The default server list is empty, on purpose.** TAIRiX has no NTP-pool
-  vendor zone and RFC 8633 §3.1 asks a vendor not to point a fleet at the
-  public pool without one, so the service is enabled by default while the
-  servers are the operator's or the installer's choice.
+- **A machine always has somewhere to ask: three ordered server tiers, first
+  non-empty wins outright.** An operator's `time.servers` beats a DHCP-supplied
+  server (option 42 / option 56), which beats the built-in `0..3.pool.ntp.org`
+  fallback; the tiers are never merged. TAIRiX has no NTP-pool vendor zone and
+  RFC 8633 §3.1 would prefer one, but a machine that asks nobody has no clock,
+  and the politeness policy above applies to every tier alike.
 - **RTC drivers are ordinary discovered drivers** (§18.3) in a new
   `drivers/rtc/` class, with the shared BCD civil codec defined once in the
   `lib/abi` RTC class module. Three tiers: the QEMU-emulable reference set

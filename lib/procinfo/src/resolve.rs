@@ -48,7 +48,7 @@ use tairix_abi::cpufeatures::{CpuFeature, CpuFeatureSet};
 use tairix_abi::net_ipc::{
     NetAddrFamily, NetAddrState, NetBondMemberRecord, NetIfAddr, NetIfKind,
     NetInterfaceCountersRecord, NetInterfaceFactsRecord, NetInterfaceRatesRecord,
-    NetInterfaceStateRecord, NetResolverServer, IF_NAME_LEN,
+    NetInterfaceStateRecord, NetServerAddr, IF_NAME_LEN,
 };
 use tairix_abi::sysinfo::{
     reclaim_class_from_name, CpuCoreClass, CpuInfoListRequest, CpuInfoRecord, CpuLoadRecord,
@@ -64,12 +64,12 @@ use crate::cputime::for_each_cpu_time;
 use crate::kstats;
 use crate::kstats::{for_each_net_bond_member, for_each_net_interface};
 use crate::list::{field_lossy, ListError, WalkStep};
+use crate::netservers::{for_each_resolver_server, for_each_time_server};
 use crate::request::{call, CallError};
 use crate::resinfo::{
     render_limit_bound, Authorization, InfoValue, Metric, MetricKind, Producer, ResetBehavior,
     ResourceResponse, ResponsePayload, Sensitivity, Unit,
 };
-use crate::resolver::for_each_resolver_server;
 use crate::transport::Transport;
 
 /// Why resolving an `info:`/`stats:` reference did not produce a value.
@@ -315,7 +315,22 @@ fn resolve_state(
         // stack maintains (the resolv.conf analogue): public host
         // configuration, so it is served ungated.
         ["net", "resolver", "servers"] => (
-            InfoValue::new_str(Sensitivity::Public, &render_resolver_servers(transport)?),
+            InfoValue::new_str(
+                Sensitivity::Public,
+                &render_server_addrs(&net_resolver_servers_all(transport)?),
+            ),
+            Authorization::Unprivileged,
+        ),
+        // The network time servers this host's DHCP client(s) learned, on
+        // the same footing: public network configuration, served ungated.
+        // What the clock service actually queries may outrank this set (an
+        // explicitly configured server does), so this read answers "what
+        // did the network offer", not "what is in use".
+        ["net", "time", "servers"] => (
+            InfoValue::new_str(
+                Sensitivity::Public,
+                &render_server_addrs(&net_time_servers_all(transport)?),
+            ),
             Authorization::Unprivileged,
         ),
         _ => return Err(ResolveInfoError::UnknownSelector),
@@ -1304,7 +1319,7 @@ fn net_bond_members_for(
 /// has none.
 fn net_resolver_servers_all(
     transport: &dyn Transport,
-) -> Result<Vec<NetResolverServer>, ResolveInfoError> {
+) -> Result<Vec<NetServerAddr>, ResolveInfoError> {
     let mut servers = Vec::new();
     for_each_resolver_server(transport, |record| {
         servers.push(*record);
@@ -1314,12 +1329,24 @@ fn net_resolver_servers_all(
     Ok(servers)
 }
 
-/// Render the host's active resolver servers as a comma-separated list in
-/// the stack's order, or `none` when it has learned none.
-fn render_resolver_servers(transport: &dyn Transport) -> Result<String, ResolveInfoError> {
-    let servers = net_resolver_servers_all(transport)?;
+/// Collect the network time servers the host's DHCP client(s) learned, in
+/// the stack's order, over the shared [`for_each_time_server`] walk. An
+/// empty set is the valid `none` answer, exactly as for the resolvers.
+fn net_time_servers_all(transport: &dyn Transport) -> Result<Vec<NetServerAddr>, ResolveInfoError> {
+    let mut servers = Vec::new();
+    for_each_time_server(transport, |record| {
+        servers.push(*record);
+        Ok(WalkStep::Continue)
+    })
+    .map_err(|err| map_list_error(SysinfoQueryId::NET_TIME_SERVERS, err))?;
+    Ok(servers)
+}
+
+/// Render a server set as a comma-separated address list in the stack's
+/// order, or `none` when the set is empty.
+fn render_server_addrs(servers: &[NetServerAddr]) -> String {
     let mut rendered = String::new();
-    for server in &servers {
+    for server in servers {
         if !rendered.is_empty() {
             rendered.push_str(", ");
         }
@@ -1328,12 +1355,12 @@ fn render_resolver_servers(transport: &dyn Transport) -> Result<String, ResolveI
     if rendered.is_empty() {
         rendered.push_str("none");
     }
-    Ok(rendered)
+    rendered
 }
 
 /// Render one resolver server's address as plain text (dotted-quad for a
 /// V4 server, RFC 5952 canonical text for a V6 server).
-fn resolver_server_string(server: &NetResolverServer) -> String {
+fn resolver_server_string(server: &NetServerAddr) -> String {
     match server.family {
         NetAddrFamily::V4 => {
             let mut out = String::new();
@@ -2028,7 +2055,7 @@ mod tests {
     use tairix_abi::net_ipc::{
         NetAddrFamily, NetAddrState, NetBondMemberRecord, NetIfAddr, NetIfKind,
         NetInterfaceCountersRecord, NetInterfaceFactsRecord, NetInterfaceRatesRecord,
-        NetInterfaceStateRecord, NetResolverServer, IF_NAME_LEN, NET_IF_MAX_ADDRS,
+        NetInterfaceStateRecord, NetServerAddr, IF_NAME_LEN, NET_IF_MAX_ADDRS,
     };
     use tairix_abi::origin::{CapabilitySummary, Origin, ProcId, TrustDomain};
     use tairix_abi::sysinfo::{
@@ -2060,7 +2087,8 @@ mod tests {
         cpu_loads: Vec<CpuLoadRecord>,
         cpu_infos: Vec<CpuInfoRecord>,
         irqs: Vec<IrqRecord>,
-        resolver_servers: Vec<NetResolverServer>,
+        resolver_servers: Vec<NetServerAddr>,
+        time_servers: Vec<NetServerAddr>,
         deny: Option<SysinfoQueryId>,
         seen: RefCell<Vec<SysinfoQueryId>>,
     }
@@ -2103,18 +2131,27 @@ mod tests {
 
     /// The active recursive-resolver set the fixture serves: a V4 and a V6
     /// recursive server, so the render test exercises both address forms.
-    fn fixture_resolver_servers() -> Vec<NetResolverServer> {
+    fn fixture_time_servers() -> Vec<NetServerAddr> {
+        let mut v4 = [0u8; 16];
+        v4[..4].copy_from_slice(&[192, 168, 66, 1]);
+        alloc::vec![NetServerAddr {
+            family: NetAddrFamily::V4,
+            addr: v4,
+        }]
+    }
+
+    fn fixture_resolver_servers() -> Vec<NetServerAddr> {
         let mut v4 = [0u8; 16];
         v4[..4].copy_from_slice(&[10, 0, 2, 3]);
         let mut v6 = [0u8; 16];
         v6[..2].copy_from_slice(&[0x20, 0x01]);
         v6[15] = 0x53;
         alloc::vec![
-            NetResolverServer {
+            NetServerAddr {
                 family: NetAddrFamily::V4,
                 addr: v4,
             },
-            NetResolverServer {
+            NetServerAddr {
                 family: NetAddrFamily::V6,
                 addr: v6,
             },
@@ -2276,6 +2313,7 @@ mod tests {
                 cpu_infos: fixture_cpu_infos(),
                 irqs: fixture_irqs(),
                 resolver_servers: fixture_resolver_servers(),
+                time_servers: fixture_time_servers(),
                 deny: None,
                 seen: RefCell::new(Vec::new()),
             }
@@ -2427,6 +2465,15 @@ mod tests {
                     let req = NetInterfaceListRequest::from_bytes(payload)?;
                     let encoders: Vec<_> = self
                         .resolver_servers
+                        .iter()
+                        .map(|record| move || record.to_le_bytes())
+                        .collect();
+                    Ok(Self::page_reply(&encoders, req.offset, req.limit))
+                }
+                SysinfoQueryId::NET_TIME_SERVERS => {
+                    let req = NetInterfaceListRequest::from_bytes(payload)?;
+                    let encoders: Vec<_> = self
+                        .time_servers
                         .iter()
                         .map(|record| move || record.to_le_bytes())
                         .collect();
@@ -3997,6 +4044,33 @@ mod tests {
         let mut fixture = Fixture::new();
         fixture.resolver_servers = Vec::new();
         let servers = resolve_str("state:net/resolver/servers", &fixture).expect("ok");
+        match servers.payload {
+            ResponsePayload::State(v) => assert_eq!(v.value(), "none"),
+            _ => panic!("expected state value"),
+        }
+    }
+
+    #[test]
+    fn state_net_time_servers_render_ungated_and_separately() {
+        let fixture = Fixture::new();
+        let servers = resolve_str("state:net/time/servers", &fixture).expect("ok");
+        assert_eq!(servers.authorization, Authorization::Unprivileged);
+        assert_eq!(servers.query(), "state:net/time/servers");
+        match servers.payload {
+            ResponsePayload::State(v) => {
+                // The time-server set, not the resolver set beside it.
+                assert_eq!(v.value(), "192.168.66.1");
+                assert_eq!(v.sensitivity, Sensitivity::Public);
+            }
+            _ => panic!("expected state value"),
+        }
+    }
+
+    #[test]
+    fn state_net_time_servers_render_none_when_the_network_offered_none() {
+        let mut fixture = Fixture::new();
+        fixture.time_servers = Vec::new();
+        let servers = resolve_str("state:net/time/servers", &fixture).expect("ok");
         match servers.payload {
             ResponsePayload::State(v) => assert_eq!(v.value(), "none"),
             _ => panic!("expected state value"),

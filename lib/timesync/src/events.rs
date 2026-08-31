@@ -26,10 +26,12 @@ pub const SERVICE_READY: EventId = EventId(23_001);
 /// fail-closed rather than half-running, and PID 1 relaunches it.
 pub const SERVICE_UNAVAILABLE: EventId = EventId(23_002);
 
-/// No time servers are configured, so the clock is never set from the
-/// network. Recorded once at startup: an operator reading the log must be able
-/// to tell "nobody configured a server" from "the servers did not answer".
-pub const NO_SERVERS_CONFIGURED: EventId = EventId(23_003);
+/// Nobody named a time server within the start-up window, so the built-in
+/// public-pool fallback stands. Recorded once, when the search for a
+/// configured or network-supplied server ends: an operator reading the log
+/// must be able to tell "my server was never found" from "the servers did not
+/// answer".
+pub const SERVERS_FROM_FALLBACK: EventId = EventId(23_003);
 
 /// The clock was set from a validated network sample. Carries the applied
 /// instant, whether it was a step or a refinement, the correction magnitude

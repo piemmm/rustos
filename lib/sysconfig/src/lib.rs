@@ -65,11 +65,11 @@
 //!   instead of forcing a drop; `false` leaves connections Not-ECT.
 //! * `time.servers` — `none` (default) or a comma-separated list of at most
 //!   [`MAX_TIME_SERVERS`] network time servers, each a host name or an
-//!   address literal (`plans/TIMESYNC.md` §3). The default is deliberately
-//!   empty: TAIRiX has no NTP-pool vendor zone, and RFC 8633 §3.1 asks a
-//!   vendor not to point a fleet at the public pool without one, so the
-//!   operator or the installer names the servers and a machine with none
-//!   configured simply never queries.
+//!   address literal (`plans/TIMESYNC.md` §3). This key is the *operator's*
+//!   choice and outranks every other source; `none` means they expressed
+//!   none, not that the machine never queries — the clock service then
+//!   prefers what DHCP offered, and failing that its own built-in
+//!   public-pool fallback.
 //! * `time.refresh` — `6h`, `12h`, `1d` (default), `2d`, or `7d`: how much
 //!   *uptime* passes between steady-state re-queries. A closed set rather
 //!   than a free-form span, so no configuration can ask for a cadence that
@@ -119,7 +119,7 @@ pub const CONFIG_PATH: &str = SystemConfigFile::System.path();
 /// A longer entry is refused rather than truncated.
 pub const MAX_TIME_SERVER_LEN: usize = 253;
 
-/// The `time.servers` spelling for "no servers configured", so an empty list
+/// The `time.servers` spelling for "the operator named none", so an empty list
 /// still has a canonical value and the render/parse round trip stays exact.
 pub const NO_TIME_SERVERS: &str = "none";
 
@@ -484,7 +484,8 @@ pub enum Key {
     NetTcpKeepalive,
     /// `net.tcp.ecn` — the stack-wide RFC 3168 TCP ECN switch.
     NetTcpEcn,
-    /// `time.servers` — the network time servers the clock is set from.
+    /// `time.servers` — the network time servers the operator named, which
+    /// outrank every other source the clock service would otherwise use.
     TimeServers,
     /// `time.refresh` — the steady-state clock re-query cadence.
     TimeRefresh,
@@ -663,9 +664,11 @@ pub struct SystemConfig {
     /// Notification (`net.tcp.ecn`). Disabled by default: connections are
     /// Not-ECT unless the operator opts in.
     pub net_tcp_ecn: NetToggle,
-    /// The network time servers the clock is set from (`time.servers`), in
-    /// configured order. Empty by default, which is a machine that never
-    /// queries — see the module documentation for why.
+    /// The network time servers the operator named (`time.servers`), in
+    /// configured order. Empty by default, meaning no operator preference —
+    /// the clock service then prefers what DHCP offered and falls back to its
+    /// own built-in servers, so an empty list is not a machine that never
+    /// queries.
     ///
     /// A store document's list is validated as it is parsed or `set`; a
     /// programmatic caller assembling one directly is responsible for the

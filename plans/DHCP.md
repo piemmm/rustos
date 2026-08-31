@@ -31,8 +31,8 @@ Stage 1): the ABI/config additions here are ordinary pre-release changes
   harness, and the live stack all exercise the *same* engine.
 - **The server and every neighbour are hostile (§26.4).** Every server
   message is attacker-controlled: the codec is total, bounded (§24.4 fixed
-  validation bounds — capped option-region walk, fixed-capacity router/DNS
-  lists), fuzzed (§19.6), and fails closed. A malformed or inconsistent reply
+  validation bounds — capped option-region walk, fixed-capacity
+  router/DNS/time-server lists), fuzzed (§19.6), and fails closed. A malformed or inconsistent reply
   is dropped whole; nothing partial is applied. Off-path spoofing is bounded
   by the randomised transaction id and by matching the reply's `xid`/`chaddr`
   against the outstanding request (the engine rejects a mismatch).
@@ -53,8 +53,8 @@ Stage 1): the ABI/config additions here are ordinary pre-release changes
   - **Codec** — the BOOTP fixed header (RFC 2131 §2, the 236-byte header +
     the 4-byte magic cookie) and the RFC 2132 option TLVs. Parse surfaces a
     `DhcpReply` (message type, `xid`, `yiaddr`, server identifier, subnet
-    mask, routers, DNS servers, lease/T1/T2 times) from the recognised
-    options and skips unknown ones; RFC 2131 §4.1 option-overload (`file` /
+    mask, routers, DNS servers, time servers, lease/T1/T2 times) from the
+    recognised options and skips unknown ones; RFC 2131 §4.1 option-overload (`file` /
     `sname` carrying options) is honoured. Emit is a single `write_message`
     core over a `MessageSpec` describing the fields, so DISCOVER / REQUEST
     (selecting + renew/rebind forms) / DECLINE / RELEASE share one encoder
@@ -178,7 +178,8 @@ Elapsed Time, Status Code) and the RFC 8415 §18.2.1 client state machine
 (Solicit → Request → Bound → Renew → Rebind, plus Release/Decline and
 lease-expiry / Reply-Status restart). Pure, `no_std`,
 `#![forbid(unsafe_code)]`, allocation-bounded: a fixed-capacity IAADDR /
-DNS list, a capped option-region walk, total/bounded/fail-closed decode.
+DNS / time-server list, a capped option-region walk, total/bounded/fail-closed
+decode.
 Injected monotonic time and caller-supplied CSPRNG values (the 24-bit
 transaction id, the RFC 8415 §15 randomised-RT jitter); the engine never
 generates randomness itself (the `dhcp`/`tcp::conn` precedent). Host unit

@@ -480,8 +480,8 @@ const INFO_SELECTORS: &[SelectorEntry] = &[
 ];
 
 /// The `state:` catalogue: the mutable state `lib/procinfo`'s userspace
-/// resolver serves. `net/resolver` is a reserved first segment, so no
-/// interface may take that name here.
+/// resolver serves. `net/resolver` and `net/time` are reserved first
+/// segments, so no interface may take either name here.
 const STATE_SELECTORS: &[SelectorEntry] = &[
     SelectorEntry::bare("irq/<irq>/quarantined"),
     SelectorEntry::bare("net/<bond>/active-member"),
@@ -489,6 +489,7 @@ const STATE_SELECTORS: &[SelectorEntry] = &[
     SelectorEntry::bare("net/<iface>/address"),
     SelectorEntry::bare("net/<iface>/link"),
     SelectorEntry::bare("net/resolver/servers"),
+    SelectorEntry::bare("net/time/servers"),
 ];
 
 /// The `stats:` catalogue: the measurements `lib/procinfo`'s userspace

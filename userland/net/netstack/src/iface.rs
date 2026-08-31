@@ -19,10 +19,10 @@ use tairix_abi::net_ipc::{
     validate_if_name, NetAddrFamily, NetAddrState, NetBondConfigMsg, NetBondMemberRecord,
     NetBondMode, NetCounters, NetIfAddr, NetIfKind, NetInterfaceConfigMsg,
     NetInterfaceCountersRecord, NetInterfaceFactsRecord, NetInterfaceRatesRecord,
-    NetInterfaceStateRecord, NetIpv4Config, NetIpv6Config, NetResolverServer, NetworkSettings,
+    NetInterfaceStateRecord, NetIpv4Config, NetIpv6Config, NetServerAddr, NetworkSettings,
     IF_NAME_LEN, MAX_RESOLVER_SERVERS, NET_IF_MAX_ADDRS,
 };
-use tairix_abi::{Duration64, Errno};
+use tairix_abi::{Duration64, Errno, MAX_TIME_SERVERS};
 use tairix_net::addr::{Ecn, IpAddr, Ipv4Addr, Ipv6Addr};
 use tairix_net::bond::{flow_hash, Bond, BondConfig, BondEvent, BondMode, MemberId};
 use tairix_net::iface::{eui64_interface_id, AddrError, TempAddrSource};
@@ -199,7 +199,7 @@ pub struct Interface {
     /// (`<iface>.dns.servers`), in declared order — the last value the
     /// device manager delivered, empty when none. They join this
     /// interface's DHCP-learned servers in [`Netstack::resolver_servers`].
-    static_dns: Vec<NetResolverServer>,
+    static_dns: Vec<NetServerAddr>,
     /// The engine multicast revision last successfully programmed into the
     /// device's group filter, or [`None`] while nothing has been programmed.
     /// The pump reprograms only when the engine's revision moves off this.
@@ -1154,9 +1154,9 @@ impl Netstack {
     /// part is the last `network.conf` DNS list the device manager
     /// delivered. Static servers rank first as the admin's explicit choice.
     #[must_use]
-    pub fn resolver_servers(&self) -> Vec<NetResolverServer> {
-        let mut out: Vec<NetResolverServer> = Vec::new();
-        let mut push = |record: NetResolverServer| {
+    pub fn resolver_servers(&self) -> Vec<NetServerAddr> {
+        let mut out: Vec<NetServerAddr> = Vec::new();
+        let mut push = |record: NetServerAddr| {
             if out.len() < MAX_RESOLVER_SERVERS && !out.contains(&record) {
                 out.push(record);
             }
@@ -1168,7 +1168,34 @@ impl Netstack {
                 push(*record);
             }
             for server in iface.stack.dhcp_dns_servers() {
-                push(resolver_server_of(server));
+                push(server_addr_of(server));
+            }
+        }
+        out
+    }
+
+    /// The network time servers the host's DHCP client(s) learned, in table
+    /// order, deduplicated, and bounded by [`MAX_TIME_SERVERS`].
+    ///
+    /// The one source of truth the `TimeServers` broker read serves — to the
+    /// system-information `net_time_servers` query and so to the clock
+    /// service (`plans/TIMESYNC.md` §3). Derived on demand from each
+    /// interface's *current* lease, so it tracks acquisition and withdrawal
+    /// exactly and holds no stored copy to drift.
+    ///
+    /// Unlike the resolver set this one has no static tier: a statically
+    /// chosen time server is the clock service's own configuration, which
+    /// outranks what the network offers rather than joining it — so mixing
+    /// the two here would destroy the distinction the service needs.
+    #[must_use]
+    pub fn time_servers(&self) -> Vec<NetServerAddr> {
+        let mut out: Vec<NetServerAddr> = Vec::new();
+        for iface in &self.interfaces {
+            for server in iface.stack.dhcp_ntp_servers() {
+                let record = server_addr_of(server);
+                if out.len() < MAX_TIME_SERVERS && !out.contains(&record) {
+                    out.push(record);
+                }
             }
         }
         out
@@ -2026,16 +2053,16 @@ fn flow_of(dest: IpAddr, port_a: u16, port_b: u16) -> u32 {
     }
 }
 
-/// Project a resolved [`IpAddr`] onto the ABI [`NetResolverServer`] wire
+/// Project a resolved [`IpAddr`] onto the ABI [`NetServerAddr`] wire
 /// shape (family plus the sixteen address bytes, a V4 server using the
 /// first four).
-fn resolver_server_of(addr: IpAddr) -> NetResolverServer {
+fn server_addr_of(addr: IpAddr) -> NetServerAddr {
     match addr {
-        IpAddr::V4(a) => NetResolverServer {
+        IpAddr::V4(a) => NetServerAddr {
             family: NetAddrFamily::V4,
             addr: v4_bytes(a),
         },
-        IpAddr::V6(a) => NetResolverServer {
+        IpAddr::V6(a) => NetServerAddr {
             family: NetAddrFamily::V6,
             addr: a.octets(),
         },

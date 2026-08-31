@@ -394,7 +394,7 @@ pub enum NetstackRequest {
     /// statically configured ones, aggregated across every managed
     /// interface, deduplicated, and bounded by [`MAX_RESOLVER_SERVERS`].
     /// The reply is the shared paged frame
-    /// ([`crate::reply::encode_page_reply`]) of [`NetResolverServer`]
+    /// ([`crate::reply::encode_page_reply`]) of [`NetServerAddr`]
     /// records — the same count-plus-records shape every broker read
     /// uses, so no second reply codec exists; the small,
     /// closed set fits one page. Both the system-information
@@ -403,6 +403,27 @@ pub enum NetstackRequest {
     /// DNS2). It carries no argument: the caller names no interface, the
     /// stack answers with the whole host's active set.
     ResolverServers,
+    /// Report the network time servers the host's DHCP client(s) learned
+    /// (broker read).
+    ///
+    /// The DHCPv4 option 42 / DHCPv6 option 56 (or the RFC 4075 option 31
+    /// it supersedes) servers of every managed interface's *current* lease,
+    /// aggregated in table order, deduplicated, and bounded by
+    /// [`MAX_TIME_SERVERS`](crate::MAX_TIME_SERVERS). The reply is the same
+    /// paged frame of [`NetServerAddr`] records
+    /// [`Self::ResolverServers`] uses, and it carries no argument for the
+    /// same reason: the caller names no interface, the stack answers with
+    /// the whole host's set.
+    ///
+    /// Unlike the resolver set this one is **purely** DHCP-learned: a
+    /// statically configured time server is the clock service's own
+    /// `time.servers` configuration, which outranks this set rather than
+    /// joining it (`plans/TIMESYNC.md` §3). What the network says is advice
+    /// the clock service *prefers* over its built-in fallback, never
+    /// authority — every sample a named server returns is still validated
+    /// against the request's nonce and the plausibility window before any
+    /// clock moves.
+    TimeServers,
     /// Read the stack-wide TCP connection-defence counters (sysinfo
     /// broker; `stats:net/stack/…`, `plans/NETWORK.md` §5).
     ///
@@ -440,6 +461,8 @@ const OP_BOND_MEMBERS: u16 = 11;
 const OP_RESOLVER_SERVERS: u16 = 12;
 /// Wire operation discriminant of [`NetstackRequest::StackDefence`].
 const OP_STACK_DEFENCE: u16 = 13;
+/// Wire operation discriminant of [`NetstackRequest::TimeServers`].
+const OP_TIME_SERVERS: u16 = 14;
 
 impl NetstackRequest {
     /// Encoded size on the wire: magic (4), version (2), op (2), and a
@@ -486,39 +509,27 @@ impl NetstackRequest {
                 }
             }
             Self::InterfaceCounters { offset, limit } => {
-                put_u16(&mut out, 6, OP_IF_COUNTERS);
-                put_u32(&mut out, 8, offset);
-                put_u16(&mut out, 12, limit);
+                put_paged(&mut out, OP_IF_COUNTERS, offset, limit);
             }
             Self::InterfaceFacts { offset, limit } => {
-                put_u16(&mut out, 6, OP_IF_FACTS);
-                put_u32(&mut out, 8, offset);
-                put_u16(&mut out, 12, limit);
+                put_paged(&mut out, OP_IF_FACTS, offset, limit);
             }
             Self::InterfaceState { offset, limit } => {
-                put_u16(&mut out, 6, OP_IF_STATE);
-                put_u32(&mut out, 8, offset);
-                put_u16(&mut out, 12, limit);
+                put_paged(&mut out, OP_IF_STATE, offset, limit);
             }
             Self::InterfaceRates {
                 offset,
                 limit,
                 window,
             } => {
-                put_u16(&mut out, 6, OP_IF_RATES);
-                put_u32(&mut out, 8, offset);
-                put_u16(&mut out, 12, limit);
+                put_paged(&mut out, OP_IF_RATES, offset, limit);
                 out[14..26].copy_from_slice(&window.to_le_bytes());
             }
             Self::Sockets { offset, limit } => {
-                put_u16(&mut out, 6, OP_SOCKETS);
-                put_u32(&mut out, 8, offset);
-                put_u16(&mut out, 12, limit);
+                put_paged(&mut out, OP_SOCKETS, offset, limit);
             }
             Self::BondMembers { offset, limit } => {
-                put_u16(&mut out, 6, OP_BOND_MEMBERS);
-                put_u32(&mut out, 8, offset);
-                put_u16(&mut out, 12, limit);
+                put_paged(&mut out, OP_BOND_MEMBERS, offset, limit);
             }
             Self::BindDriver {
                 endpoint_id,
@@ -541,6 +552,9 @@ impl NetstackRequest {
             }
             Self::ResolverServers => {
                 put_u16(&mut out, 6, OP_RESOLVER_SERVERS);
+            }
+            Self::TimeServers => {
+                put_u16(&mut out, 6, OP_TIME_SERVERS);
             }
             Self::StackDefence => {
                 put_u16(&mut out, 6, OP_STACK_DEFENCE);
@@ -621,13 +635,15 @@ impl NetstackRequest {
                     next_hop,
                 })
             }
-            OP_IF_FACTS | OP_IF_STATE | OP_IF_COUNTERS => {
+            OP_IF_FACTS | OP_IF_STATE | OP_IF_COUNTERS | OP_SOCKETS | OP_BOND_MEMBERS => {
                 reserved_zero(bytes, 14)?;
                 let (offset, limit) = paged_offset_limit(bytes)?;
                 Ok(match op {
                     OP_IF_FACTS => Self::InterfaceFacts { offset, limit },
                     OP_IF_STATE => Self::InterfaceState { offset, limit },
-                    _ => Self::InterfaceCounters { offset, limit },
+                    OP_IF_COUNTERS => Self::InterfaceCounters { offset, limit },
+                    OP_SOCKETS => Self::Sockets { offset, limit },
+                    _ => Self::BondMembers { offset, limit },
                 })
             }
             OP_IF_RATES => {
@@ -640,29 +656,29 @@ impl NetstackRequest {
                     window,
                 })
             }
-            OP_SOCKETS => {
-                reserved_zero(bytes, 14)?;
-                let (offset, limit) = paged_offset_limit(bytes)?;
-                Ok(Self::Sockets { offset, limit })
-            }
-            OP_BOND_MEMBERS => {
-                reserved_zero(bytes, 14)?;
-                let (offset, limit) = paged_offset_limit(bytes)?;
-                Ok(Self::BondMembers { offset, limit })
-            }
             OP_BIND_DRIVER => decode_bind_driver(bytes),
             OP_APPLY_NET_SETTINGS => Ok(Self::ApplyNetworkSettings(decode_settings(bytes)?)),
-            OP_RESOLVER_SERVERS => {
+            // The argument-free reads: nothing but the op word, so any byte
+            // past it is a smuggled payload.
+            OP_RESOLVER_SERVERS | OP_TIME_SERVERS | OP_STACK_DEFENCE => {
                 reserved_zero(bytes, 8)?;
-                Ok(Self::ResolverServers)
-            }
-            OP_STACK_DEFENCE => {
-                reserved_zero(bytes, 8)?;
-                Ok(Self::StackDefence)
+                Ok(match op {
+                    OP_RESOLVER_SERVERS => Self::ResolverServers,
+                    OP_TIME_SERVERS => Self::TimeServers,
+                    _ => Self::StackDefence,
+                })
             }
             _ => Err(Errno::OutOfRange),
         }
     }
+}
+
+/// Write a paged read's operation block: the op word and the `offset`/`limit`
+/// page window every one of them carries in the same two slots.
+fn put_paged(out: &mut [u8; NetstackRequest::WIRE_LEN], op: u16, offset: u32, limit: u16) {
+    put_u16(out, 6, op);
+    put_u32(out, 8, offset);
+    put_u16(out, 12, limit);
 }
 
 /// Read and validate the interface-name field at bytes `8..24`.
@@ -1068,7 +1084,7 @@ impl NetInterfaceConfigMsg {
         // address, any multicast group, and the IPv4 limited broadcast are
         // refused (loopback is allowed — a local resolver).
         for server in self.dns.as_slice() {
-            if !resolver_addr_is_unicast(server) {
+            if !server_addr_is_unicast(server) {
                 return Err(Errno::OutOfRange);
             }
         }
@@ -1076,10 +1092,10 @@ impl NetInterfaceConfigMsg {
     }
 }
 
-/// Whether a [`NetResolverServer`] names a plausible recursive-resolver
-/// host: a unicast address, not the unspecified address, a multicast group,
-/// or the IPv4 limited broadcast. Loopback is permitted.
-fn resolver_addr_is_unicast(server: &NetResolverServer) -> bool {
+/// Whether a [`NetServerAddr`] names a plausible service host: a unicast
+/// address, not the unspecified address, a multicast group, or the IPv4
+/// limited broadcast. Loopback is permitted.
+fn server_addr_is_unicast(server: &NetServerAddr) -> bool {
     match server.family {
         NetAddrFamily::V4 => {
             let a = core::net::Ipv4Addr::new(
@@ -2338,17 +2354,20 @@ impl NetBondMemberRecord {
     }
 }
 
-/// One recursive-resolver server in the host's active resolver set: the
-/// address family and the address (`plans/DNS.md` DNS2).
+/// The address of one network service the host holds a set of: an address
+/// family and an address.
 ///
-/// A record of the [`NetstackRequest::ResolverServers`] broker read,
-/// carried in the shared paged reply ([`crate::reply::encode_page_reply`])
-/// exactly like every other broker record — there is no bespoke reply
-/// codec. The value is the recursive DNS server a stub resolver sends
-/// its queries to; it is public host configuration (the resolv.conf
-/// analogue), never a secret.
+/// The record of both server-set broker reads — the recursive resolvers
+/// ([`NetstackRequest::ResolverServers`], `plans/DNS.md` DNS2) and the
+/// network time servers ([`NetstackRequest::TimeServers`],
+/// `plans/TIMESYNC.md` §3) — because an address is an address: one codec
+/// and one unicast check serve both rather than a second copy per set.
+/// Each is carried in the shared paged reply
+/// ([`crate::reply::encode_page_reply`]) exactly like every other broker
+/// record, so there is no bespoke reply codec either. Both sets are public
+/// host configuration (the `resolv.conf` analogue), never a secret.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct NetResolverServer {
+pub struct NetServerAddr {
     /// The address family of [`addr`](Self::addr).
     pub family: NetAddrFamily,
     /// The server address; a [`NetAddrFamily::V4`] server uses the first
@@ -2356,7 +2375,7 @@ pub struct NetResolverServer {
     pub addr: [u8; 16],
 }
 
-impl NetResolverServer {
+impl NetServerAddr {
     /// Encoded size: the family byte followed by the sixteen address
     /// bytes.
     pub const WIRE_LEN: usize = 17;
@@ -2407,7 +2426,7 @@ impl NetResolverServer {
 /// static list can never overflow it.
 ///
 /// The significant entries occupy the first [`Self::len`] slots in order;
-/// the remainder are [`NetResolverServer::UNSPECIFIED`] filler and are
+/// the remainder are [`NetServerAddr::UNSPECIFIED`] filler and are
 /// never read. This is a `Copy` inline value (no allocation) so it lives
 /// directly in the fixed-width [`NetInterfaceConfigMsg`] frame.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -2416,8 +2435,8 @@ pub struct NetDnsServers {
     /// [`MAX_RESOLVER_SERVERS`].
     count: u8,
     /// The servers, front-packed: `servers[..count]` are significant, the
-    /// rest are [`NetResolverServer::UNSPECIFIED`].
-    servers: [NetResolverServer; MAX_RESOLVER_SERVERS],
+    /// rest are [`NetServerAddr::UNSPECIFIED`].
+    servers: [NetServerAddr; MAX_RESOLVER_SERVERS],
 }
 
 impl Default for NetDnsServers {
@@ -2428,13 +2447,13 @@ impl Default for NetDnsServers {
 
 impl NetDnsServers {
     /// Encoded size: the count byte followed by [`MAX_RESOLVER_SERVERS`]
-    /// fixed-width [`NetResolverServer`] records (unused ones zeroed).
-    pub const WIRE_LEN: usize = 1 + MAX_RESOLVER_SERVERS * NetResolverServer::WIRE_LEN;
+    /// fixed-width [`NetServerAddr`] records (unused ones zeroed).
+    pub const WIRE_LEN: usize = 1 + MAX_RESOLVER_SERVERS * NetServerAddr::WIRE_LEN;
 
     /// The empty list (no statically configured servers).
     pub const EMPTY: Self = Self {
         count: 0,
-        servers: [NetResolverServer::UNSPECIFIED; MAX_RESOLVER_SERVERS],
+        servers: [NetServerAddr::UNSPECIFIED; MAX_RESOLVER_SERVERS],
     };
 
     /// Build a list from `servers`, preserving order.
@@ -2443,7 +2462,7 @@ impl NetDnsServers {
     ///
     /// [`Errno::LengthOutOfRange`] if `servers` holds more than
     /// [`MAX_RESOLVER_SERVERS`] entries (fail closed).
-    pub fn from_servers(servers: &[NetResolverServer]) -> Result<Self, Errno> {
+    pub fn from_servers(servers: &[NetServerAddr]) -> Result<Self, Errno> {
         if servers.len() > MAX_RESOLVER_SERVERS {
             return Err(Errno::LengthOutOfRange);
         }
@@ -2471,7 +2490,7 @@ impl NetDnsServers {
 
     /// The significant servers, in order.
     #[must_use]
-    pub fn as_slice(&self) -> &[NetResolverServer] {
+    pub fn as_slice(&self) -> &[NetServerAddr] {
         &self.servers[..self.len()]
     }
 
@@ -2484,9 +2503,8 @@ impl NetDnsServers {
         out[0] = self.count;
         let mut cursor = 1;
         for server in self.as_slice() {
-            out[cursor..cursor + NetResolverServer::WIRE_LEN]
-                .copy_from_slice(&server.to_le_bytes());
-            cursor += NetResolverServer::WIRE_LEN;
+            out[cursor..cursor + NetServerAddr::WIRE_LEN].copy_from_slice(&server.to_le_bytes());
+            cursor += NetServerAddr::WIRE_LEN;
         }
         out
     }
@@ -2498,8 +2516,8 @@ impl NetDnsServers {
     /// * [`Errno::BufferTooSmall`] — `bytes` cannot hold the list.
     /// * [`Errno::OutOfRange`] — a count above [`MAX_RESOLVER_SERVERS`].
     /// * [`Errno::BadMagic`] — a slot past the count is not the zeroed
-    ///   [`NetResolverServer::UNSPECIFIED`] filler (smuggled data).
-    /// * A [`NetResolverServer`] decode error for a significant slot.
+    ///   [`NetServerAddr::UNSPECIFIED`] filler (smuggled data).
+    /// * A [`NetServerAddr`] decode error for a significant slot.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() < Self::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
@@ -2512,15 +2530,15 @@ impl NetDnsServers {
         out.count = count;
         let mut cursor = 1;
         for index in 0..MAX_RESOLVER_SERVERS {
-            let record = &bytes[cursor..cursor + NetResolverServer::WIRE_LEN];
+            let record = &bytes[cursor..cursor + NetServerAddr::WIRE_LEN];
             if index < usize::from(count) {
-                out.servers[index] = NetResolverServer::from_bytes(record)?;
+                out.servers[index] = NetServerAddr::from_bytes(record)?;
             } else if record.iter().any(|&b| b != 0) {
                 // An unused slot must be the zeroed filler; anything else is
                 // smuggled data.
                 return Err(Errno::BadMagic);
             }
-            cursor += NetResolverServer::WIRE_LEN;
+            cursor += NetServerAddr::WIRE_LEN;
         }
         Ok(out)
     }
@@ -2652,6 +2670,7 @@ mod tests {
                 node_location: 0x1_0a00_0000,
             },
             NetstackRequest::ResolverServers,
+            NetstackRequest::TimeServers,
             NetstackRequest::StackDefence,
         ] {
             let bytes = request.to_le_bytes();
@@ -2695,63 +2714,77 @@ mod tests {
     }
 
     #[test]
-    fn resolver_servers_fails_closed_on_a_dirty_reserved_tail() {
-        let mut bytes = NetstackRequest::ResolverServers.to_le_bytes();
-        // The request carries no operation block, so any non-zero byte
+    fn argument_free_reads_fail_closed_on_a_dirty_reserved_tail() {
+        // These requests carry no operation block, so any non-zero byte
         // past the op word is a smuggled payload and must be refused.
-        bytes[8] = 1;
-        assert_eq!(
-            NetstackRequest::from_bytes(&bytes),
-            Err(Errno::BadMagic),
-            "a dirty reserved tail must fail closed"
+        for request in [
+            NetstackRequest::ResolverServers,
+            NetstackRequest::TimeServers,
+        ] {
+            let mut bytes = request.to_le_bytes();
+            bytes[8] = 1;
+            assert_eq!(
+                NetstackRequest::from_bytes(&bytes),
+                Err(Errno::BadMagic),
+                "a dirty reserved tail must fail closed: {request:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_two_server_set_reads_are_distinct_on_the_wire() {
+        assert_ne!(
+            NetstackRequest::ResolverServers.to_le_bytes(),
+            NetstackRequest::TimeServers.to_le_bytes(),
+            "a stack must never answer one server set for the other"
         );
     }
 
     #[test]
     fn resolver_server_record_round_trips_and_fails_closed() {
         for record in [
-            NetResolverServer {
+            NetServerAddr {
                 family: NetAddrFamily::V4,
                 addr: v4(10, 0, 2, 3),
             },
-            NetResolverServer {
+            NetServerAddr {
                 family: NetAddrFamily::V6,
                 addr: [0x20; 16],
             },
         ] {
             let bytes = record.to_le_bytes();
-            assert_eq!(NetResolverServer::from_bytes(&bytes), Ok(record));
+            assert_eq!(NetServerAddr::from_bytes(&bytes), Ok(record));
         }
         // Too short.
         assert_eq!(
-            NetResolverServer::from_bytes(&[4u8; NetResolverServer::WIRE_LEN - 1]),
+            NetServerAddr::from_bytes(&[4u8; NetServerAddr::WIRE_LEN - 1]),
             Err(Errno::BufferTooSmall)
         );
         // Unknown family byte.
-        let mut bad = [0u8; NetResolverServer::WIRE_LEN];
+        let mut bad = [0u8; NetServerAddr::WIRE_LEN];
         bad[0] = 7;
-        assert_eq!(NetResolverServer::from_bytes(&bad), Err(Errno::OutOfRange));
+        assert_eq!(NetServerAddr::from_bytes(&bad), Err(Errno::OutOfRange));
         // A V4 server with a dirty address tail.
-        let mut dirty = NetResolverServer {
+        let mut dirty = NetServerAddr {
             family: NetAddrFamily::V4,
             addr: v4(1, 1, 1, 1),
         }
         .to_le_bytes();
         dirty[16] = 0xFF;
-        assert_eq!(NetResolverServer::from_bytes(&dirty), Err(Errno::BadMagic));
+        assert_eq!(NetServerAddr::from_bytes(&dirty), Err(Errno::BadMagic));
     }
 
     #[test]
     fn resolver_servers_reply_reuses_the_page_codec() {
         // The resolver-servers reply is the shared paged frame of
-        // `NetResolverServer` records — no bespoke codec.
+        // `NetServerAddr` records — no bespoke codec.
         let servers = [
-            NetResolverServer {
+            NetServerAddr {
                 family: NetAddrFamily::V4,
                 addr: v4(9, 9, 9, 9),
             }
             .to_le_bytes(),
-            NetResolverServer {
+            NetServerAddr {
                 family: NetAddrFamily::V6,
                 addr: [0x26; 16],
             }
@@ -2762,22 +2795,22 @@ mod tests {
             encode_page_reply(&servers, NETSTACK_LIST_LIMIT_MAX, &mut out).expect("encode");
         let (count, body) = decode_page_reply(
             &out[..written],
-            NetResolverServer::WIRE_LEN,
+            NetServerAddr::WIRE_LEN,
             NETSTACK_LIST_LIMIT_MAX,
         )
         .expect("decode");
         assert_eq!(count, 2);
-        let mut chunks = body.as_chunks::<{ NetResolverServer::WIRE_LEN }>().0.iter();
+        let mut chunks = body.as_chunks::<{ NetServerAddr::WIRE_LEN }>().0.iter();
         assert_eq!(
-            NetResolverServer::from_bytes(chunks.next().expect("first")),
-            Ok(NetResolverServer {
+            NetServerAddr::from_bytes(chunks.next().expect("first")),
+            Ok(NetServerAddr {
                 family: NetAddrFamily::V4,
                 addr: v4(9, 9, 9, 9)
             })
         );
         assert_eq!(
-            NetResolverServer::from_bytes(chunks.next().expect("second")),
-            Ok(NetResolverServer {
+            NetServerAddr::from_bytes(chunks.next().expect("second")),
+            Ok(NetServerAddr {
                 family: NetAddrFamily::V6,
                 addr: [0x26; 16]
             })
@@ -2821,11 +2854,11 @@ mod tests {
                 },
                 mtu: 1500,
                 dns: NetDnsServers::from_servers(&[
-                    NetResolverServer {
+                    NetServerAddr {
                         family: NetAddrFamily::V4,
                         addr: v4(9, 9, 9, 9),
                     },
-                    NetResolverServer {
+                    NetServerAddr {
                         family: NetAddrFamily::V6,
                         addr: [0x26; 16],
                     },
@@ -2889,11 +2922,11 @@ mod tests {
     fn interface_config_dns_servers_round_trip_and_fail_closed() {
         // A DNS list round-trips, validates, and surfaces its servers.
         let dns = NetDnsServers::from_servers(&[
-            NetResolverServer {
+            NetServerAddr {
                 family: NetAddrFamily::V4,
                 addr: v4(1, 1, 1, 1),
             },
-            NetResolverServer {
+            NetServerAddr {
                 family: NetAddrFamily::V6,
                 addr: [0x20; 16],
             },
@@ -2916,7 +2949,7 @@ mod tests {
         decoded.validate().expect("unicast servers are valid");
 
         // A list bounded at MAX_RESOLVER_SERVERS: one more is refused.
-        let too_many = [NetResolverServer {
+        let too_many = [NetServerAddr {
             family: NetAddrFamily::V4,
             addr: v4(1, 1, 1, 1),
         }; MAX_RESOLVER_SERVERS + 1];
@@ -2927,7 +2960,7 @@ mod tests {
 
         // A non-unicast server (multicast) fails validation, not decode.
         let mc = NetInterfaceConfigMsg {
-            dns: NetDnsServers::from_servers(&[NetResolverServer {
+            dns: NetDnsServers::from_servers(&[NetServerAddr {
                 family: NetAddrFamily::V4,
                 addr: v4(224, 0, 0, 1),
             }])
@@ -2940,7 +2973,7 @@ mod tests {
         let mut bad = msg.to_le_bytes();
         // The count byte is at offset 88; slots follow. Dirty the third
         // slot (index 2, past the count of 2).
-        let third = 88 + 1 + 2 * NetResolverServer::WIRE_LEN;
+        let third = 88 + 1 + 2 * NetServerAddr::WIRE_LEN;
         bad[third] = NetAddrFamily::V4.as_u8();
         bad[third + 1] = 8;
         assert_eq!(

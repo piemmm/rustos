@@ -70,11 +70,11 @@ set by hand.
 - **Automatic time-setting is enabled by default and the user can turn it
   off.** That switch is service enrolment, owned by the service manager, and
   is reachable from both a command line and the desktop (§6).
-- **The default server list is empty.** TAIRiX has no NTP-pool vendor zone and
-  RFC 8633 §3.1 asks a vendor not to point a fleet at the public pool without
-  one, so the *service* is enabled by default while the *servers* are the
-  operator's or the installer's choice. An unconfigured machine records that it
-  has no server rather than querying somebody else's service uninvited.
+- **A machine always has somewhere to ask: three ordered server tiers, first
+  non-empty wins outright (§3.1).** An operator's `time.servers` outranks a
+  DHCP-supplied server, which outranks the built-in public-pool fallback. The
+  tiers are never merged. A machine that asks nobody has no clock, so the
+  default cannot be "no servers".
 
 ## 1. Target architecture (binding)
 
@@ -202,6 +202,44 @@ retry-until-it-works. The reference is RFC 8633 (NTP BCP).
   fail-closed engine — an unknown key is refused as it already is for `net.*`.
   Server names resolve through `lib/resolver`.
 
+### 3.1 Where the server list comes from
+
+Three tiers, worst to best, in `lib/timesync::select_servers`. The first
+non-empty tier wins **outright**; tiers are never merged.
+
+| `ServerSource` | Source |
+|---|---|
+| `Fallback` | `FALLBACK_TIME_SERVERS` — `0.pool.ntp.org` … `3.pool.ntp.org`. |
+| `Network` | DHCPv4 option 42 / DHCPv6 option 56 (or the RFC 4075 option 31 it supersedes), from the *current* lease. |
+| `Configured` | The `time.servers` key an operator or installer wrote. |
+
+- **Why not merge them.** A machine whose network named a server must not keep
+  querying the public pool as well, and an operator who named one must not have
+  a DHCP server's choice mixed into their list. Merging would make the
+  configuration key advisory rather than authoritative.
+- **Why a fallback exists at all.** RFC 8633 §3.1 asks a vendor shipping a
+  fleet to obtain its own pool vendor zone rather than point every device at
+  the generic names, and TAIRiX has none yet — but a machine that never queries
+  has no clock, which is worse. The generic names are what it can honestly use,
+  and what makes that acceptable is the §3 politeness policy applying to every
+  tier alike plus the pool's own per-lookup DNS rotation. Registering a vendor
+  zone changes only those four names.
+- **A network-supplied server carries its address**, so it needs no resolver:
+  a machine whose only DNS advice would have come from the same lease still
+  keeps time. Its audit name is the address's text, never parsed back.
+- **`ServerSource` is `Ord`ered worst-to-best**, so a caller compares tiers
+  rather than re-deriving the precedence, and a running engine's servers are
+  replaced only by a *strictly better* tier. An equal-tier change (a renewed
+  lease naming a different server) would reset the rotation and backoff and
+  forget which servers had refused, which costs more than it buys; the
+  re-selection ladder's finite length bounds that churn instead.
+- **The learned set is advice, not authority.** It reaches `timed` through the
+  ungated `NET_TIME_SERVERS` system-information query (`netstack`'s
+  `TimeServers` broker read, fronted by `sysinfod`) and is a set of addresses
+  to *ask*. Every sample one returns is still nonce-gated and
+  plausibility-checked in the §4 sandbox before any clock moves, so a hostile
+  DHCP server can misdirect a query but cannot set a clock.
+
 ## 4. Security: the authority split
 
 `timed` holds `CAP_TIME_SET`. Setting the machine clock arbitrarily is a real
@@ -227,6 +265,21 @@ through `sandbox::loopback`, so the containment is covered without processes.
 
 Every sync applied, sample rejected, and server retired is audited through
 `lib/log` with a stable event id (§19.4).
+
+**What a hostile DHCP server can and cannot do (accepted, §3.1).** Honouring
+option 42 lets whoever controls DHCP name the server this machine asks. That is
+a real exposure and it is accepted, because it adds nothing to what such an
+attacker already holds: the same lease names the DNS servers every pool name
+would resolve through and the router every NTP packet would traverse, so a
+hostile DHCP server can redirect or intercept the query on any tier. The bound
+on the damage is therefore the same on all three: the nonce echo (off-path
+spoofing), the plausibility window and round-trip/stratum ceilings (an absurd
+instant), the sandboxed decode (a hostile *packet*), and the provenance ladder
+(a local counter cannot undo a sync). A *named* server can still move the clock
+anywhere inside the plausibility window — that is inherent to unauthenticated
+NTP, and the answer to it is authentication (NTS, RFC 8915), which §0 places
+out of scope. An operator who cannot accept it sets `time.servers`, which
+outranks the network's offer.
 
 ## 5. RTC support
 
@@ -396,16 +449,13 @@ Each stage leaves the whole-project §7 gate green before it is reported done.
   service account (`timed`, uid 18, `TIMED_CEILING`), `TIMED_MANIFEST`, the
   `AppInfo.toml`, and the boot-floor registration in PID 1's startup config
   and the x86_64/riscv64 embedded spawn floor.
-- **The default server list is empty, deliberately.** TAIRiX has no NTP-pool
-  vendor zone and RFC 8633 §3.1 asks a vendor not to point a fleet at the
-  public pool without one, so an unconfigured machine never queries and
-  records that it has no server. The installer or the operator names one.
 - **Config availability is a boot-order fact, not a bug.** The store lives on
   the encrypted root and this is a boot-floor service, so the first read
   normally precedes the mount. With no userland "root mounted" event, the
-  reactor re-reads on a bounded doubling one-shot ladder (8 attempts, ~17
-  minutes, parking between them) and then either has a server or parks saying
-  it has none. Configuring a server later means restarting the service.
+  reactor re-selects on a bounded doubling one-shot ladder (8 attempts, ~17
+  minutes, parking between them). TS-7 made that ladder also the mechanism
+  that picks up a DHCP lease acquired after start-up; configuring a server
+  after the ladder is spent means restarting the service.
 - **`lib/resolver`'s delivery port is now process-private.** The kernel's port
   registry is machine-wide, so the fixed well-known id would have let this
   long-lived client deny name resolution to every later process for the boot;
@@ -421,7 +471,8 @@ Each stage leaves the whole-project §7 gate green before it is reported done.
   had no positive witness, because a spoofed packet is deliberately not
   audited (per-packet audit of an injected flood is itself a denial of
   service).
-- The configuration re-read ladder arms on *any* read that finds no server.
+- The configuration re-read ladder arms on any selection below the
+  `Configured` tier (originally: on any read that finds no server).
   An earlier attempt to disarm it when the store's path had no VFS backing —
   meaning to spare a volume-less guest a pointless timer — stranded the
   service on every ordinary boot instead: an unmounted encrypted root is
@@ -595,6 +646,53 @@ vertical: a live `servicectl disable timed` survives a reboot.
 The taskbar clock menu row and the Date & Time settings pane entry over the
 one control path, through the existing elevation broker. QEMU desktop
 vertical: toggle off, confirm `timed` is disabled.
+
+### TS-7 — The server tiers: a built-in default and the DHCP-supplied server — DONE
+
+Replaced TS-2's empty default server list with the three-tier §3.1 policy, so
+a stock installation keeps time with no configuration.
+
+- **`lib/net::dhcp`** learns DHCPv4 option 42 (`DhcpReply.ntp_servers`,
+  `Lease.ntp_servers`) and asks for it in the parameter request list — a server
+  only supplies an option it was asked for. **`lib/net::dhcpv6`** learns
+  RFC 5908 option 56's `SRV_ADDR` sub-options and the RFC 4075 option 31 list
+  it supersedes, requesting both in the ORO since either may be deployed; a
+  reply carrying both is taken at its option-56 word rather than merged. Both
+  are bounded by the same fixed `MAX_ADDRESSES` the router/DNS lists are, and
+  the fuzz harnesses assert it.
+- **`Stack::dhcp_ntp_servers()`** is the twin of `dhcp_dns_servers()` over one
+  shared walk of the two live leases (`dhcp_learned`), so acquisition and
+  withdrawal track exactly and neither accessor can drift from the other.
+- **One record type for both server sets.** `NetResolverServer` became
+  `NetServerAddr`: an address is an address, so the resolver and time-server
+  broker reads share one wire record, one codec, and one unicast check rather
+  than a copied pair. `NetstackRequest::TimeServers` (op 14) is the read,
+  `Interfaces::time_servers()` the source, `SysinfoQueryId::NET_TIME_SERVERS`
+  (37) the ungated client query `sysinfod` fronts, and
+  `procinfo::for_each_time_server` the client walk — beside
+  `for_each_resolver_server` over one private paging helper in the renamed
+  `procinfo::netservers`. `state:net/time/servers` renders it.
+- **The time set has no static tier, deliberately.** A statically chosen time
+  server is `time.servers`, which *outranks* the network's offer; mixing them
+  in the stack would destroy the distinction `select_servers` needs.
+- **`lib/timesync::servers`** holds the policy: `FALLBACK_TIME_SERVERS`,
+  `ServerSource` (`Ord`ered worst-to-best), `TimeServer` (a spelling plus the
+  address a source already supplied), and `select_servers`. Pure and host
+  tested; the crate gained `alloc` for the owned result.
+- **`timed`** takes a `ServerSelection` and a refresh cadence rather than a
+  `SystemConfig`, drops the `tairix-sysconfig` edge from its engine half, and
+  audits the tier as a `source` field on its start-up record. Its reactor
+  re-selects on the existing ladder — one mechanism for both "the root is not
+  mounted yet" and "no lease yet" — replacing servers only on a strictly
+  better tier and disarming at `Configured`. Event 23_003 became
+  `SERVERS_FROM_FALLBACK`: the fact worth recording is no longer "no server
+  was configured" but "the search ended and the fallback stands".
+- The QEMU witness is `tairix-test-timed-dhcp-qemu-aarch64`, with **no**
+  configured server: the peer's DHCP lease carries option 42 naming itself,
+  and the guest must apply the fixture instant. Only a guest that read the
+  option finds a reachable server, because the fallback names cannot resolve
+  on an isolated wire — so ignoring option 42 fails the run rather than
+  quietly falling back.
 
 ## 8. Cross-references
 

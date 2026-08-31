@@ -305,7 +305,7 @@ impl SysinfoQueryId {
     pub const CPU_INFO: Self = Self(25);
 
     /// Report the host's active recursive-resolver server set: one
-    /// [`NetResolverServer`](crate::net_ipc::NetResolverServer) per server
+    /// [`NetServerAddr`](crate::net_ipc::NetServerAddr) per server
     /// (family and address), paged by a [`NetInterfaceListRequest`]. The
     /// aggregated, deduplicated DHCP-learned ∪ statically-configured DNS
     /// servers the stack maintains (`plans/DNS.md` DNS2), the one source
@@ -500,6 +500,20 @@ impl SysinfoQueryId {
     /// [`Self::GLOBAL_PROCESS_LIST`] and [`Self::NET_STACK_DEFENCE`] are,
     /// not a self-scoped observer.
     pub const DESKTOP_FRAME_STATS: Self = Self(36);
+
+    /// Report the network time servers the host's DHCP client(s) learned:
+    /// one [`NetServerAddr`](crate::net_ipc::NetServerAddr) per server,
+    /// paged by a [`NetInterfaceListRequest`]. The aggregated, deduplicated
+    /// DHCPv4 option 42 / DHCPv6 option 56 servers of every managed
+    /// interface's current lease (`plans/TIMESYNC.md` §3).
+    ///
+    /// Ungated for the same reason as [`Self::NET_RESOLVER_SERVERS`]:
+    /// which time server the network *offers* a host is public network
+    /// configuration and exposes no per-principal secret. It confers no
+    /// authority — the answer is a set of addresses, and only the clock
+    /// service (the sole `CAP_TIME_SET` holder) can act on a sample from
+    /// one, after validating it.
+    pub const NET_TIME_SERVERS: Self = Self(37);
 
     /// Inclusive upper bound on the query identifier space in `sysinfo-v1`.
     ///
@@ -926,6 +940,12 @@ pub const SYSINFO_QUERIES: &[SysinfoQuerySpec] = &[
         name: "desktop_frame_stats",
         required_capability: Some(CapabilityId::SYSINFO_GLOBAL),
         audit: true,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::NET_TIME_SERVERS,
+        name: "net_time_servers",
+        required_capability: None,
+        audit: false,
     },
 ];
 
@@ -6069,6 +6089,16 @@ mod tests {
                 .unwrap()
                 .audit
         );
+        assert_eq!(SysinfoQueryId::NET_TIME_SERVERS.as_u16(), 37);
+        // The DHCP-learned time servers are public network configuration on
+        // the same footing, and confer no authority: ungated, unaudited.
+        assert_eq!(
+            spec_for(SysinfoQueryId::NET_TIME_SERVERS)
+                .unwrap()
+                .required_capability,
+            None
+        );
+        assert!(!spec_for(SysinfoQueryId::NET_TIME_SERVERS).unwrap().audit);
         assert_eq!(SysinfoQueryId::VOLUME_IO_HEALTH.as_u16(), 27);
         // Per-device storage I/O health is kernel-wide operational state:
         // gated on `CAP_SYSINFO_KERNEL` and audited, like the memory-pressure

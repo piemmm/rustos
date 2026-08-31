@@ -34,8 +34,9 @@
 //! * [`for_each_raid_array`] and [`for_each_raid_member`], the paged
 //!   composed-array and member-device walks the `sysinfo raid` listing and
 //!   the `mdadm` array administrator render.
-//! * [`for_each_resolver_server`], the active recursive-resolver-server walk
-//!   the `state:net/resolver/servers` read renders.
+//! * [`for_each_resolver_server`] and [`for_each_time_server`], the
+//!   recursive-resolver and network-time server walks the
+//!   `state:net/resolver/servers` and `state:net/time/servers` reads render.
 //! * [`kstats`] — the shared kernel-statistics fetches (memory pressure,
 //!   reclaim ledger, `ramzip` counters, per-CPU load) consumed by both the
 //!   resolver and the `sysmon` monitor, plus [`for_each_net_interface`] and
@@ -74,7 +75,8 @@
 //! * [`mount`] — the mount-table paging walk and row rendering.
 //! * [`netsock`] — the open-socket-table paging walk.
 //! * [`raid`] — the composed-array and member-device paging walks.
-//! * [`resolver`] — the active recursive-resolver-server paging walk.
+//! * [`netservers`] — the recursive-resolver and network-time server paging
+//!   walks.
 //! * [`resinfo`] — the structured `info:`/`stats:` response records
 //!   ([`ResourceResponse`], [`InfoValue`], [`Metric`]).
 //! * [`mod@resolve`] — the `info:`/`stats:` resource-reference resolver.
@@ -108,6 +110,7 @@ pub mod hwtree;
 pub mod kstats;
 pub mod list;
 pub mod mount;
+pub mod netservers;
 pub mod netsock;
 pub mod pressure;
 pub mod process;
@@ -115,7 +118,6 @@ pub mod raid;
 pub mod request;
 pub mod resinfo;
 pub mod resolve;
-pub mod resolver;
 pub mod transport;
 pub mod users;
 pub mod valueread;
@@ -135,6 +137,9 @@ pub use kstats::{
 };
 pub use list::{field_lossy, walk_pages, ListError, WalkStep};
 pub use mount::{for_each_mount, render_mount, render_options, MOUNT_PAGE};
+pub use netservers::{
+    for_each_resolver_server, for_each_time_server, RESOLVER_SERVER_PAGE, TIME_SERVER_PAGE,
+};
 pub use netsock::{for_each_net_socket, NET_SOCKET_PAGE};
 pub use process::{
     emit_self_scope_omission, for_each_process, render_process, state_char, PROCESS_HEADER,
@@ -150,7 +155,6 @@ pub use resinfo::{
     MAX_METRIC_NAME_LEN, MAX_QUERY_LEN, RESINFO_VERSION_CURRENT, RESINFO_VERSION_V1,
 };
 pub use resolve::{cpu_info, resolve, ResolveInfoError};
-pub use resolver::{for_each_resolver_server, RESOLVER_SERVER_PAGE};
 pub use transport::{Output, Transport};
 pub use users::{for_each_user, user_name, user_names, USER_DIRECTORY_PAGE};
 pub use valueread::{read_value, MAX_VALUE_LEN};

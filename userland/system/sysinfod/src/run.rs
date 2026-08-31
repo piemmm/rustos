@@ -50,7 +50,7 @@ mod program {
 
     use tairix_abi::net_ipc::{
         NetBondMemberRecord, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
-        NetInterfaceRatesRecord, NetInterfaceStateRecord, NetResolverServer, NetSocketRecord,
+        NetInterfaceRatesRecord, NetInterfaceStateRecord, NetServerAddr, NetSocketRecord,
         NetStackDefenceCounters, NetstackRequest, NETSTACK_ENDPOINT, NETSTACK_LIST_LIMIT_MAX,
         NETSTACK_MAX_REPLY,
     };
@@ -317,8 +317,12 @@ mod program {
             page_netstack(&NetstackBondMembersPage)
         }
 
-        fn net_resolver_servers(&self, _caller: &Caller) -> Result<Vec<NetResolverServer>, Errno> {
+        fn net_resolver_servers(&self, _caller: &Caller) -> Result<Vec<NetServerAddr>, Errno> {
             page_netstack(&NetstackResolverServersPage)
+        }
+
+        fn net_time_servers(&self, _caller: &Caller) -> Result<Vec<NetServerAddr>, Errno> {
+            page_netstack(&NetstackTimeServersPage)
         }
 
         fn irqs(&self, _caller: &Caller) -> Result<Vec<IrqRecord>, Errno> {
@@ -495,13 +499,27 @@ mod program {
     /// generic pager still terminates after the single short page.
     struct NetstackResolverServersPage;
     impl NetstackPage for NetstackResolverServersPage {
-        type Record = NetResolverServer;
-        const RECORD_LEN: usize = NetResolverServer::WIRE_LEN;
+        type Record = NetServerAddr;
+        const RECORD_LEN: usize = NetServerAddr::WIRE_LEN;
         fn request(&self, _offset: u32, _limit: u16) -> NetstackRequest {
             NetstackRequest::ResolverServers
         }
         fn decode(chunk: &[u8]) -> Result<Self::Record, Errno> {
-            NetResolverServer::from_bytes(chunk)
+            NetServerAddr::from_bytes(chunk)
+        }
+    }
+
+    /// The time-servers page: the same closed-set shape as the resolver
+    /// page, over the stack's own DHCP-learned set.
+    struct NetstackTimeServersPage;
+    impl NetstackPage for NetstackTimeServersPage {
+        type Record = NetServerAddr;
+        const RECORD_LEN: usize = NetServerAddr::WIRE_LEN;
+        fn request(&self, _offset: u32, _limit: u16) -> NetstackRequest {
+            NetstackRequest::TimeServers
+        }
+        fn decode(chunk: &[u8]) -> Result<Self::Record, Errno> {
+            NetServerAddr::from_bytes(chunk)
         }
     }
 

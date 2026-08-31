@@ -14,7 +14,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::net_ipc::{
     NetBondMemberRecord, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
-    NetInterfaceRatesRecord, NetInterfaceStateRecord, NetResolverServer, NetSocketRecord,
+    NetInterfaceRatesRecord, NetInterfaceStateRecord, NetServerAddr, NetSocketRecord,
     NetStackDefenceCounters,
 };
 use tairix_abi::raid_admin::{RaidArrayRecord, RaidMemberRecord};
@@ -379,7 +379,17 @@ pub trait SysinfoSource {
     /// broker read (itself gated on this broker's `CAP_SYSINFO_INTROSPECT`
     /// grant); the owned list is returned whole and [`crate::serve`]
     /// applies the `offset`/`limit` paging (the small set fits one page).
-    fn net_resolver_servers(&self, caller: &Caller) -> Result<Vec<NetResolverServer>, Errno>;
+    fn net_resolver_servers(&self, caller: &Caller) -> Result<Vec<NetServerAddr>, Errno>;
+
+    /// Return the network time servers the host's DHCP client(s) learned, in
+    /// the stack's stable order (`plans/TIMESYNC.md` §3).
+    ///
+    /// Ungated for the same reason as
+    /// [`net_resolver_servers`](Self::net_resolver_servers): which time
+    /// server the network offers is public network configuration and confers
+    /// no authority. The source forwards to the `netstack` broker read and
+    /// returns the owned list whole; [`crate::serve`] applies the paging.
+    fn net_time_servers(&self, caller: &Caller) -> Result<Vec<NetServerAddr>, Errno>;
 
     /// Return the kernel IRQ table: one record per bound interrupt line,
     /// in ascending line order.

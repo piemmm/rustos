@@ -1193,7 +1193,8 @@ mod tests {
         );
         assert_eq!(inserts(&narrowed.candidates), ["info:net/lan0/"]);
 
-        // A literal sibling still claims its own position beside the names.
+        // Every literal sibling still claims its own position beside the
+        // names.
         let one_iface = MapResources::new(&[(SelectorDomain::Interface, &["wan"])]);
         let both = super::complete(
             "cat state:net/",
@@ -1204,7 +1205,7 @@ mod tests {
         );
         assert_eq!(
             inserts(&both.candidates),
-            ["state:net/resolver/", "state:net/wan/"]
+            ["state:net/resolver/", "state:net/time/", "state:net/wan/"]
         );
     }
 

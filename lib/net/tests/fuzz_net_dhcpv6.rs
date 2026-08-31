@@ -37,6 +37,7 @@ fn exercise_parse(bytes: &[u8], xid: u32, client: &Duid) {
         assert_eq!(reply.transaction_id, xid & 0x00FF_FFFF);
         assert!(reply.addresses.len() <= MAX_ADDRESSES);
         assert!(reply.dns_servers.len() <= MAX_ADDRESSES);
+        assert!(reply.ntp_servers.len() <= MAX_ADDRESSES);
     }
 }
 
