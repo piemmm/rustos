@@ -141,14 +141,17 @@ when the effects are off.
 
 ## Menu and settings (`menu`, `settings`, `swatch`)
 
-A secondary press opens a context menu of six typed `Command`s, built from one
-ordered list and read back through the same list so a reordering cannot re-map
-a row; every advertised shortcut is really honoured by `Command::accelerator`.
-The popup is the shared `lib/controls` `Menu` placed by that control's own
-`anchored_rect` rule. `Settings` is an in-window modal sheet composed from the
-shared Reactive Alloy controls plus the app-local `SwatchGrid` colour wells;
-every edit clamps through `Profile::clamp`, so the sheet can never produce an
-invalid profile.
+A secondary press asks the **desktop** to open this window's menu: `menu::model`
+builds the row model of six typed `Command`s from one ordered list, and
+`Command::from_item` reads the chosen row back through that same list so a
+reordering cannot re-map a row. Every advertised shortcut is really honoured by
+`Command::accelerator`, checked by parsing each row's own caption rather than
+restating it. The plate, its placement, the grab and the dismissal are the
+session's (`plans/NEW-MENUS.md`); this app draws no menu pixel and a refused
+menu is reported and carried on from. `Settings` is a modal sheet on its own
+popup surface, composed from the shared Reactive Alloy controls plus the
+app-local `SwatchGrid` colour wells; every edit clamps through
+`Profile::clamp`, so the sheet can never produce an invalid profile.
 
 ## Rendering (`render`)
 

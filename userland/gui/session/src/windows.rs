@@ -519,6 +519,19 @@ impl ShellWindowHost<'_> {
     }
 }
 
+/// The side a window's menu opens on, and the clearance it leaves.
+///
+/// Trailing with no clearance is what makes the press point a *corner* of the
+/// plate rather than a point inside it, and edge-adjacency is what a chain
+/// needs so travelling from a parent row into its own child crosses no dead
+/// space. Named here because two independent readers need the same values:
+/// the session, which places the chain, and the QEMU vertical, which
+/// reconstructs where a row was drawn in order to click it.
+pub const MENU_SIDE: PlateSide = PlateSide::Trailing;
+
+/// The clearance a window's menu leaves between the anchor and its plate.
+pub const MENU_GAP_PX: u32 = 0;
+
 /// The scale, theme and screen every menu-chain geometry answer resolves at.
 ///
 /// Taken from the shell and the compositor rather than a copy of its own, so
@@ -812,7 +825,7 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         let model = ChainModel::from_app_menu(menu.title(), menu, facts.as_ref());
         let geom = chain_geometry(self.shell, self.compositor);
         self.menu
-            .open(owner, model, anchor, PlateSide::Trailing, 0, &geom)
+            .open(owner, model, anchor, MENU_SIDE, MENU_GAP_PX, &geom)
             .map_err(|ModelRefused::NoRows| Errno::OutOfRange)
     }
 

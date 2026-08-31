@@ -53,6 +53,52 @@ fn render(menu: &Menu, theme: &Theme, height: u32) -> Surface {
     surface
 }
 
+/// The chain lays one plate for a band and its rows together, so the rows
+/// must take that ground rather than rimming and rounding a second plate
+/// inside it — which would notch the outer ground at the rows' top corners
+/// and draw the Signal Rim twice.
+#[test]
+fn painting_rows_alone_lays_no_plate_and_places_them_where_render_does() {
+    let theme = Theme::dark();
+    let menu = three_item_menu();
+    let height = BORDER * 2 + ROW_H * 3;
+    let bounds = Rect::new(0, 0, W, height);
+
+    // The corner of a laid plate is rounded away from the ground, so it is
+    // where a second plate's rim and its notch would show.
+    let mut rows_only = Surface::new(W, height).expect("surface");
+    menu.render_rows(&mut rows_only, bounds, Scale::ONE, &theme);
+    assert_eq!(
+        rows_only.get(0, 0),
+        Some(Color::TRANSPARENT.premultiply()),
+        "rows alone leave the plate's own corner untouched"
+    );
+    assert!(
+        !has_pixel(&rows_only, premul(theme.palette().surface_raised)),
+        "rows alone lay no ground of their own"
+    );
+
+    // Row geometry is the control's either way, so the chain hit-tests and
+    // draws the same rectangles a standalone menu does.
+    for index in 0..menu.len() {
+        let rect = menu
+            .row_rect(index, bounds, Scale::ONE, &theme)
+            .expect("row in range");
+        let top = u32::try_from(rect.top()).expect("non-negative");
+        let painted = (0..W)
+            .flat_map(|x| (top..top + rect.height).map(move |y| (x, y)))
+            .any(|(x, y)| rows_only.get(x, y) != Some(Color::TRANSPARENT.premultiply()));
+        assert!(painted, "row {index} is drawn where row_rect reports it");
+    }
+    assert!(
+        has_pixel(
+            &render(&menu, &theme, height),
+            premul(theme.palette().surface_raised)
+        ),
+        "a standalone menu still lays its own plate"
+    );
+}
+
 /// A floating surface must come out **actually** see-through. The trap is
 /// that the plate's rim is drawn across the whole shape first: compositing a
 /// half-opaque ground over it returns an opaque pixel, and the popup then

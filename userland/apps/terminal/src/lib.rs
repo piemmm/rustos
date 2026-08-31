@@ -44,8 +44,8 @@
 //! (including one of their own), the text size, translucency, backdrop blur,
 //! and the scan-line / fuzz / phosphor / wobble effects — is one
 //! [`Profile`], stored as a plain text document under their own home and
-//! edited through the right-click [`ContextMenu`] and the [`Settings`]
-//! sheet. The staged design is `plans/GUI-TERMINAL.md`.
+//! edited through the window menu and the [`Settings`] sheet. The staged
+//! design is `plans/GUI-TERMINAL.md`.
 //!
 //! # The shell seam
 //!
@@ -83,7 +83,7 @@
 //! * [`effects`] — the ordered screen-effect pipeline a frame passes through.
 //! * [`render`](mod@render) — the retained [`Screen`] the grid is painted
 //!   into, and the cell diff that decides what a frame redraws.
-//! * [`menu`] — the right-click context menu and its keyboard shortcuts.
+//! * [`menu`] — the window menu's rows and its keyboard shortcuts.
 //! * [`settings`] — the in-window settings sheet.
 //! * [`swatch`] — the colour-well grid the custom scheme is edited with.
 //!
@@ -121,7 +121,7 @@ pub use appbar::{BarCommand, DEFAULT_ACTION as BAR_DEFAULT_ACTION};
 pub use effects::{Afterglow, Effects, Phase};
 pub use grid::Grid;
 pub use layout::{COLS, ROWS};
-pub use menu::{Command, ContextMenu};
+pub use menu::Command;
 pub use parser::Parser;
 pub use profile::Profile;
 pub use render::Screen;
@@ -133,6 +133,12 @@ pub use terminal::Terminal;
 // The cell and rendition vocabulary the emulator consumes is `lib/vt`'s, not a
 // second definition; re-export it so callers name one type.
 pub use tairix_vt::{Attributes, Cell, Color};
+
+/// The application's own name, as the user sees it.
+///
+/// One value: the window title the emulator opens with and the title of the
+/// plate its window menu opens on are the same name by definition.
+pub const APP_NAME: &str = "Terminal";
 
 /// The terminal type this emulator honestly advertises for itself.
 ///

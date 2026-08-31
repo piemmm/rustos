@@ -3,7 +3,8 @@
 Binding under `AGENTS.md`. This plan owns everything about `terminal.app` as a
 *graphical* program: how large it opens, that it is **one process with many
 windows** and what that costs, its icon-bar presence, the user profile behind
-it, the right-click menu, the settings sheet, the colour schemes, and the
+it, the window menu it asks the desktop for, the settings sheet, the colour
+schemes, and the
 screen effects. The emulator itself — the VT parser, the grid, the pty seam —
 belongs to `plans/APPWIN.md` AW4, `plans/PTY.md`, and `plans/CURSES.md`;
 nothing here restates them.
@@ -146,18 +147,20 @@ between frames and exists only while an effect is on. Translucency and
 backdrop blur are not passes, so a see-through, frosted terminal keeps the
 cell-diff repaint cost.
 
-The overlay surfaces (menu, settings sheet) are drawn **after** the effects: a
+The settings sheet is drawn **after** the effects: a
 settings sheet that wobbled with the screen behind it would be unusable, and
 its controls must read exactly as they do everywhere else on the desktop.
 
 ---
 
-## 5. The right-click menu
+## 5. The window menu
 
-**Status: done.**
+**Status: done.** The terminal is a client of the desktop's one menu service
+(`plans/NEW-MENUS.md` M3.1); it keeps no menu shell of its own.
 
-`userland/apps/terminal/src/menu.rs`. Six typed commands built from one ordered
-`Command::ALL` list and read back through the same list, so a reordering cannot
+`userland/apps/terminal/src/menu.rs` builds the **row model** and reads a
+chosen row back. Six typed commands from one ordered `Command::ALL` list, read
+back through that same list by `Command::from_item`, so a reordering cannot
 re-map a row:
 
 | Row | Shortcut |
@@ -170,20 +173,28 @@ re-map a row:
 | Close | `Ctrl Shift W` |
 
 Every advertised shortcut is really honoured by `Command::accelerator`; a row
-never shows a key combination that does nothing. Only combinations a shell
-would not otherwise receive as a control byte are claimed, so intercepting one
-never swallows input a program was waiting for.
+never shows a key combination that does nothing — checked by parsing each row's
+own caption out of the built model rather than restating it beside the matcher.
+Only combinations a shell would not otherwise receive as a control byte are
+claimed, so intercepting one never swallows input a program was waiting for.
 
-The popup is the shared `lib/controls` `Menu`, placed by that control's own
-`anchored_rect` rule, so the directory browser and the terminal share one
-definition. While it is open it is modal: a press away dismisses it without
-acting on what it landed on, and `Escape` dismisses from the keyboard.
+**The desktop owns every pixel.** A secondary press sends `OpenMenu` with the
+model and the window-local point the press was reported at — the only space the
+terminal can speak truthfully, since it is never told where its window sits —
+and the session titles, places, draws, grabs, routes and dismisses. The answer
+is one `MenuClosed` naming the session-minted open id, matched against the id
+this window is waiting on so an answer to a settled gesture can never run a
+stale command. The terminal never learns a pointer position inside the plate
+and cannot hold one open.
 
-It draws in the **desktop's** interface face, never the terminal's grid face.
-The control resolves the theme's text role itself and accepts no typeface from
-the app, so the menu reads as desktop furniture wherever it opens and its rows
-neither turn monospace nor grow and shrink with the user's terminal text-size
-setting. The same holds for the settings sheet below.
+**A refused menu is an answer, not a death.** The refusal is reported on
+`stderr` and the terminal carries on with no menu; it never falls back to
+drawing its own.
+
+Because the plate is the desktop's, it draws in the desktop's interface face
+and cannot turn monospace or grow with the user's terminal text-size setting.
+The settings sheet below keeps that property through the shared controls, which
+accept no typeface from the app.
 
 ---
 
@@ -267,13 +278,14 @@ gone.
 
 ---
 
-## 9. The overlays are their own surfaces
+## 9. The settings sheet is its own surface
 
 **Status: done.**
 
-The context menu and the settings sheet are **popup windows**, not pixels drawn
-inside the terminal's own surface, so shrinking the terminal no longer clips
-them: each opens at its own preferred size.
+The settings sheet is a **popup window**, not pixels drawn inside the
+terminal's own surface, so shrinking the terminal no longer clips it: it opens
+at its own preferred size. The window menu is not a popup at all — it is the
+desktop's chain (§5).
 
 `WindowRequest::CreatePopup` is the protocol addition — an undecorated,
 parent-anchored, app-positioned surface any app may open (offsets are relative
@@ -457,7 +469,7 @@ Nothing in the sections above. Recognised later work, none of it blocking:
   a correct, complete answer today, but a scrollback buffer would give the
   wheel and a scrollbar something to do.
 - **Selection and clipboard.** There is no system clipboard yet; when one
-  exists the terminal gains select/copy/paste and the menu gains its rows.
+  exists the terminal gains select/copy/paste and the model gains its rows.
 - **A profile per window.** Today one document serves every terminal window,
   and a change in one window's sheet reaches them all — which is right for a
   *user's* profile. Named profiles a user could switch a single window to

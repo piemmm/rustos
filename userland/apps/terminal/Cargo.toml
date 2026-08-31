@@ -33,10 +33,11 @@ tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
 # blitter, lifted to `lib/*` so the app draws its cells without
 # depending on the window manager.
 tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
-# The shared Reactive Alloy control family: the context menu and its anchoring
-# rule, the settings sheet's panel/tabs/sliders/selectors/buttons, and the one
-# window-furniture inset definition the app sizes its window against — never a
-# second copy of a control or of the frame arithmetic.
+# The shared Reactive Alloy control family: the settings sheet's
+# panel/tabs/sliders/selectors/buttons, and the one window-furniture inset
+# definition the app sizes its window against — never a second copy of a
+# control or of the frame arithmetic. The window menu is the desktop's, so
+# this app draws no menu row itself.
 tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
 # The shared pointer and keyboard vocabulary the control family is driven with,
 # so the app routes input through one definition rather than its own.

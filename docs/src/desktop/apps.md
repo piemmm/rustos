@@ -78,8 +78,9 @@ Uniformly, for every app:
   stated on `stderr` and simply not shown — never a crash, and never a
   fallback to a clipped in-window draw (`AGENTS.md` §2.24, §5.4).
 
-The graphical terminal is the first consumer: its right-click menu and its
-settings sheet are each a popup (`plans/GUI-TERMINAL.md` §9).
+The graphical terminal is the first consumer: its settings sheet is a popup
+(`plans/GUI-TERMINAL.md` §9). Its window menu is not — that is the desktop's
+one menu chain ([Menus](menus.md)).
 
 ## Filesystem browser (`tairix-files` over `lib/browse`)
 
@@ -1799,25 +1800,23 @@ cost.
 
 ### The menu and the settings sheet
 
-A secondary (right) press opens the terminal's context menu: *Settings…*,
-*Larger text*, *Smaller text*, *Actual size*, *Clear screen*, and *Close*,
-each with a keyboard shortcut that really works whether or not the menu is
-open. The popup is the shared `lib/controls` `Menu`, placed by that control's
-own `anchored_rect` rule — the same placement the file manager's context menu
-uses.
+A secondary (right) press asks the **desktop** for this window's menu:
+*Settings…*, *Larger text*, *Smaller text*, *Actual size*, *Clear screen*, and
+*Close*, each with a keyboard shortcut that really works whether or not the
+menu is open. The terminal sends a row model and the window-local point it was
+handed, and receives one outcome ([Menus](menus.md)); it draws no plate pixel,
+never learns where the pointer is inside one, and cannot hold one open. A
+refused menu is reported on `stderr` and the terminal carries on with none —
+never a fallback to drawing its own.
 
-Hovering it costs what it changes. The shared control reports the rows it
-redraws into a damage sink, and reports **nothing** for a sample that leaves
-the highlight where it already was, so `ContextMenu` answers `Ignored` for it
-and the program neither re-renders its plate nor republishes the popup's
-window. Sliding the pointer within one row is therefore free; crossing into
-another repaints once. The settings sheet answers the same way on the same
-seam, so resting the pointer on a control is free too — and a round that *did*
-report keeps its whole-plate repaint, because a change the sheet composes above
-its controls (a switched tab's body) is wider than the rectangle the control
-that caused it reports.
+The settings sheet reports what it changes. The shared controls report the
+fields they redraw into a damage sink and report **nothing** for a sample that
+leaves a control where it already was, so resting the pointer on one costs no
+frame — and a round that *did* report keeps its whole-plate repaint, because a
+change the sheet composes above its controls (a switched tab's body) is wider
+than the rectangle the control that caused it reports.
 
-*Settings…* opens an in-window modal sheet built from the shared Reactive
+*Settings…* opens a modal sheet built from the shared Reactive
 Alloy controls: an **Appearance** tab (the scheme chooser, the text-size
 slider, and the custom scheme's twenty colour wells with red/green/blue
 sliders) and an **Effects** tab (one slider per effect). Every edit clamps

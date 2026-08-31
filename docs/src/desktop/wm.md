@@ -1316,8 +1316,10 @@ parent, which any app can open for any transient overlay
   popup's own viewport. One event mailbox serves both windows; the app
   demultiplexes on `WindowEvent::window_id`.
 
-The first consumer is the graphical terminal, whose context menu and
-settings sheet are each a popup (`plans/GUI-TERMINAL.md` §9).
+The first consumer is the graphical terminal, whose settings sheet is a popup
+(`plans/GUI-TERMINAL.md` §9). Its window menu is not: a menu is the desktop's
+one chain, opened through `OpenMenu` rather than drawn by the application
+([Menus](menus.md)).
 
 ## Failing closed
 

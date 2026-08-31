@@ -623,7 +623,8 @@ impl MenuChain {
     /// own rectangle.
     ///
     /// The band and the rows are the two shared controls over one shared plate
-    /// ground; nothing here is a second recipe for any of the three.
+    /// ground; nothing here is a second recipe for any of the three, and the
+    /// rows take that ground rather than laying one of their own.
     pub fn render_plate(
         &self,
         depth: usize,
@@ -663,7 +664,10 @@ impl MenuChain {
             geom.theme,
             None,
         );
-        plate.menu.render(
+        // Rows only: the ground and rim under them are the plate's, laid
+        // once above, so a second plate here would rim and round the rows
+        // inside the one they already sit on.
+        plate.menu.render_rows(
             surface,
             Rect::new(
                 0,

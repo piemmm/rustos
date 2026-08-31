@@ -71,7 +71,9 @@ mod program {
     use alloc::vec::Vec;
 
     use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
-    use tairix_abi::window_ipc::{AppMenuItemId, PointerAction, WindowEvent, WINDOW_ENDPOINT};
+    use tairix_abi::window_ipc::{
+        AppMenuItemId, MenuAnchor, MenuOutcome, PointerAction, WindowEvent, WINDOW_ENDPOINT,
+    };
     use tairix_abi::{
         Errno, Origin, ProcId, WaitSetOp, WaitSourceKind, WaitStatus, ORIGIN_WIRE_LEN,
     };
@@ -88,7 +90,7 @@ mod program {
     use tairix_terminal::layout::{
         fit_font_size, grid_dims, grid_size, snap_to_cells, window_size,
     };
-    use tairix_terminal::menu::{Command, ContextMenu, MenuOutcome};
+    use tairix_terminal::menu::{self, Command};
     // `Settings` here is the sheet UI; the app-data handle is `SettingsStore`.
     use tairix_appdata::{RtHost, Settings as SettingsStore};
     use tairix_terminal::profile::Profile;
@@ -307,28 +309,18 @@ mod program {
         *profile = load_profile(settings);
     }
 
-    /// Which overlay is open.
+    /// The settings sheet and the popup window it is drawn in.
     ///
-    /// The sheet dwarfs the menu, so it is boxed: an [`Overlay`] costs the
-    /// same either way, and the one allocation happens when Settings opens.
-    enum Content {
-        /// The right-click context menu.
-        Menu(ContextMenu),
-        /// The settings sheet.
-        Sheet(Box<Settings>),
-    }
-
-    /// The one open overlay and the popup window it is drawn in.
-    ///
-    /// An overlay is never drawn into the terminal's own window: it lives in
+    /// The sheet is never drawn into the terminal's own window: it lives in
     /// its own undecorated popup surface stacked directly above it, so
-    /// shrinking the terminal cannot clip a menu or the settings sheet. At
-    /// most one overlay exists at a time and it is modal — every event
-    /// delivered for the popup's own window id routes to it, and a press that
-    /// lands on the terminal instead dismisses it without reaching the shell.
+    /// shrinking the terminal cannot clip it. At most one is open at a time
+    /// and it is modal — every event delivered for the popup's own window id
+    /// routes to it, and a press that lands on the terminal instead dismisses
+    /// it without reaching the shell.
     struct Overlay {
-        /// The overlay's own state.
-        content: Content,
+        /// The sheet itself. Boxed because it dwarfs everything around it,
+        /// so the one allocation happens when Settings opens.
+        sheet: Box<Settings>,
         /// The popup's window-channel id, which its events arrive under.
         window: u64,
         /// The popup's own shared frame region.
@@ -343,13 +335,11 @@ mod program {
     }
 
     impl Overlay {
-        /// Hand a settings sheet a profile that came from somewhere other than
-        /// its own widgets — the store's lower layers, after a restore — so the
-        /// controls show what actually applies. Any other overlay ignores it.
+        /// Hand the sheet a profile that came from somewhere other than its
+        /// own widgets — the store's lower layers, after a restore — so the
+        /// controls show what actually applies.
         fn adopt_profile(&mut self, profile: &Profile) {
-            if let Content::Sheet(sheet) = &mut self.content {
-                sheet.adopt(*profile);
-            }
+            self.sheet.adopt(*profile);
         }
 
         /// The popup-local viewport the overlay occupies.
@@ -421,16 +411,38 @@ mod program {
         }
     }
 
-    /// Which overlay to open, and where.
-    enum OverlayRequest {
-        /// The context menu, anchored at this client-local point.
-        Menu {
-            /// Where the press that asked for it landed.
-            at: Point,
-        },
-        /// The settings sheet, at its own preferred size. Boxed, and moved
-        /// straight into [`Content::Sheet`], so the sheet is allocated once.
-        Sheet(Box<Settings>),
+    /// Ask the desktop to open this window's menu at the press that asked
+    /// for it.
+    ///
+    /// The anchor is the client-local point the press was reported at, which
+    /// is the only space the terminal can speak truthfully: it is never told
+    /// where its window sits. The desktop places, draws, grabs and dismisses;
+    /// the answer arrives later as one `MenuClosed` naming the id minted
+    /// here. A refusal is an answer — it is reported and the terminal carries
+    /// on with no menu, never drawing one of its own.
+    fn open_window_menu(
+        client: &mut WindowClient<RtWindowTransport>,
+        open: &mut TerminalWindow,
+        at: Point,
+    ) {
+        let model = match menu::model() {
+            Ok(model) => model,
+            Err(err) => {
+                report(&alloc::format!("menu model refused ({err}); not shown"));
+                return;
+            }
+        };
+        let anchor = match MenuAnchor::new(at.x, at.y, 0, 0) {
+            Ok(anchor) => anchor,
+            Err(err) => {
+                report(&alloc::format!("menu anchor refused ({err}); not shown"));
+                return;
+            }
+        };
+        match client.open_menu(open.window, anchor, &model) {
+            Ok(open_id) => open.menu = Some(open_id),
+            Err(err) => report(&alloc::format!("menu refused ({err}); not shown")),
+        }
     }
 
     /// The offset that centres an `inner` extent within an `outer` one,
@@ -441,14 +453,13 @@ mod program {
         i32::try_from((i64::from(outer) - i64::from(inner)) / 2).unwrap_or(0)
     }
 
-    /// Open `request` in its own popup window above `parent`, drawn once.
+    /// Open `sheet` in its own popup window above `parent`, drawn once.
     ///
-    /// Each popup is exactly the size the overlay wants, measured against the
-    /// screen rather than the parent window, so neither is ever shrunk by its
-    /// owner: the menu's popup is its own plate at the pressed point, and the
-    /// sheet's is its full preferred panel centred over the parent's client.
-    /// A window smaller than the sheet therefore yields a negative offset,
-    /// which is a legitimate request — the session resolves it against the
+    /// The popup is exactly the size the sheet wants — its full preferred
+    /// panel, measured against the screen rather than the parent window, so
+    /// it is never shrunk by its owner — centred over the parent's client. A
+    /// window smaller than the sheet therefore yields a negative offset,
+    /// which is a legitimate request: the session resolves it against the
     /// parent's screen position and clamps the whole popup on screen, so the
     /// entire sheet stays visible however small the terminal is.
     ///
@@ -460,50 +471,36 @@ mod program {
         parent: u64,
         server: ProcId,
         event_endpoint: u64,
-        request: OverlayRequest,
+        sheet: Box<Settings>,
         parent_mode: &DisplayMode,
         theme: &Theme,
         desktop: &Desktop,
     ) -> Option<Overlay> {
         let scale = desktop.scale();
-        let (content, offset, extent) = match request {
-            OverlayRequest::Menu { at } => {
-                let menu = ContextMenu::open(Point::new(0, 0));
-                let plate = menu.bounds(desktop.screen(), scale, theme);
-                (
-                    Content::Menu(menu),
-                    (at.x, at.y),
-                    (plate.width, plate.height),
-                )
-            }
-            OverlayRequest::Sheet(sheet) => {
-                let screen = desktop.screen();
-                let (want_w, want_h) = preferred_extent(scale);
-                // Its own preferred size, capped only by the screen it must
-                // fit on; the sheet's panel fills whatever the popup is.
-                let extent = (want_w.min(screen.width), want_h.min(screen.height));
-                let offset = (
-                    centre_offset(parent_mode.width_px, extent.0),
-                    centre_offset(parent_mode.height_px, extent.1),
-                );
-                (Content::Sheet(sheet), offset, extent)
-            }
-        };
+        let screen = desktop.screen();
+        let (want_w, want_h) = preferred_extent(scale);
+        // Its own preferred size, capped only by the screen it must fit on;
+        // the sheet's panel fills whatever the popup is.
+        let extent = (want_w.min(screen.width), want_h.min(screen.height));
+        let offset = (
+            centre_offset(parent_mode.width_px, extent.0),
+            centre_offset(parent_mode.height_px, extent.1),
+        );
         if extent.0 == 0 || extent.1 == 0 {
-            report("overlay has no drawable extent; not shown");
+            report("settings sheet has no drawable extent; not shown");
             return None;
         }
         let mode = mode_for(extent.0, extent.1);
         let (window, frames) = open_popup(client, parent, server, event_endpoint, &mode, offset)?;
         let mut overlay = Overlay {
-            content,
+            sheet,
             window,
             frames,
             mode,
             dismissed: false,
         };
         if present_overlay(&mut overlay, theme, scale, client).is_err() {
-            report("overlay present refused; not shown");
+            report("settings sheet present refused; not shown");
             overlay.close(client);
             return None;
         }
@@ -524,10 +521,7 @@ mod program {
         let viewport = overlay.viewport();
         let mut surface =
             Surface::new(viewport.width, viewport.height).ok_or(Errno::LengthOutOfRange)?;
-        match &overlay.content {
-            Content::Menu(menu) => menu.render(&mut surface, viewport, scale, theme),
-            Content::Sheet(sheet) => sheet.render(&mut surface, viewport, scale, theme),
-        }
+        overlay.sheet.render(&mut surface, viewport, scale, theme);
         let frame = client
             .frame_pixels(
                 &mut overlay.frames,
@@ -692,11 +686,33 @@ mod program {
         /// Its shared frame region, released when the session releases its
         /// side and re-attached by the next present.
         frames: WindowFrames,
-        /// Its one open overlay, if any.
+        /// Its one open settings sheet, if any.
         overlay: Option<Overlay>,
+        /// The open id of this window's unanswered menu, if one is up.
+        ///
+        /// The desktop mints one per gesture and never reuses it, so an
+        /// answer that names anything else belongs to a gesture already
+        /// settled and is not acted on.
+        menu: Option<u64>,
     }
 
     impl TerminalWindow {
+        /// Install `overlay` as this window's one sheet, closing whatever it
+        /// replaces.
+        ///
+        /// Assigning over a live one would drop it without closing its popup,
+        /// leaving a session-side window on screen for ever.
+        fn set_overlay(
+            &mut self,
+            client: &mut WindowClient<RtWindowTransport>,
+            overlay: Option<Overlay>,
+        ) {
+            if let Some(held) = self.overlay.take() {
+                held.close(client);
+            }
+            self.overlay = overlay;
+        }
+
         /// The wait-set token of this window's shell-output stream member.
         const fn shell_token(&self) -> u64 {
             WINDOW_TOKEN_BASE + self.slot * 2
@@ -727,7 +743,7 @@ mod program {
             )
         }
 
-        /// Close this window, its overlay, and its shell; the frame regions
+        /// Close this window, its sheet, and its shell; the frame regions
         /// are unmapped by their own drops.
         ///
         /// The pty master is closed here rather than left to process exit,
@@ -896,6 +912,7 @@ mod program {
             mode,
             frames,
             overlay: None,
+            menu: None,
         };
         let members = [
             (
@@ -1426,17 +1443,7 @@ mod program {
                 let Some(index) = index(windows, window) else {
                     return Applied::Running;
                 };
-                let mode = windows[index].mode;
-                windows[index].overlay = open_overlay(
-                    client,
-                    window,
-                    ctx.server,
-                    ctx.event_endpoint,
-                    OverlayRequest::Menu { at },
-                    &mode,
-                    ctx.themes.active(),
-                    ctx.desktop,
-                );
+                open_window_menu(client, &mut windows[index], at);
                 Applied::Running
             }
             EventOutcome::OpenSheet { window } => {
@@ -1445,16 +1452,17 @@ mod program {
                 };
                 let mode = windows[index].mode;
                 let sheet = Box::new(Settings::new(ctx.profile));
-                windows[index].overlay = open_overlay(
+                let opened = open_overlay(
                     client,
                     window,
                     ctx.server,
                     ctx.event_endpoint,
-                    OverlayRequest::Sheet(sheet),
+                    sheet,
                     &mode,
                     ctx.themes.active(),
                     ctx.desktop,
                 );
+                windows[index].set_overlay(client, opened);
                 Applied::Running
             }
             EventOutcome::OverlayChanged { window } => {
@@ -1631,8 +1639,8 @@ mod program {
             /// The window whose overlay moved.
             window: u64,
         },
-        /// A secondary press asked for this window's context menu at this
-        /// client-local point; the caller opens its popup there.
+        /// A secondary press asked for this window's menu at this
+        /// client-local point; the caller asks the desktop to open it there.
         OpenMenu {
             /// The window the press landed on.
             window: u64,
@@ -1709,10 +1717,10 @@ mod program {
         }
     }
 
-    /// Route one pointer event delivered for the open overlay's own popup
-    /// window into that overlay.
+    /// Route one pointer event delivered for the open sheet's own popup
+    /// window into that sheet.
     ///
-    /// The coordinates in a popup's events are popup-local, so the overlay is
+    /// The coordinates in a popup's events are popup-local, so the sheet is
     /// hit-tested against the popup's own viewport — the extent it was opened
     /// at — and never against the terminal window's.
     fn route_overlay_pointer(
@@ -1726,40 +1734,27 @@ mod program {
         let viewport = overlay.viewport();
         let mut routing = OverlayRouting::Nothing;
         let mut damage = damage::sink();
-        match &mut overlay.content {
-            Content::Menu(menu) => {
-                for event in pointer_input_events(action, at) {
-                    match menu.on_pointer(&event, viewport, scale, theme, &mut damage) {
-                        MenuOutcome::Ignored => {}
-                        MenuOutcome::Changed => routing = OverlayRouting::Redraw,
-                        MenuOutcome::Dismissed => return OverlayRouting::Dismissed,
-                        MenuOutcome::Chose(command) => return OverlayRouting::Chose(command),
-                    }
+        let sheet = &mut overlay.sheet;
+        for event in pointer_input_events(action, at) {
+            match sheet.on_pointer(&event, viewport, scale, theme, &mut damage) {
+                SheetOutcome::Ignored => {}
+                SheetOutcome::Changed => routing = OverlayRouting::Redraw,
+                SheetOutcome::Edited => {
+                    *profile = *sheet.profile();
+                    routing = OverlayRouting::Edited;
                 }
-            }
-            Content::Sheet(sheet) => {
-                for event in pointer_input_events(action, at) {
-                    match sheet.on_pointer(&event, viewport, scale, theme, &mut damage) {
-                        SheetOutcome::Ignored => {}
-                        SheetOutcome::Changed => routing = OverlayRouting::Redraw,
-                        SheetOutcome::Edited => {
-                            *profile = *sheet.profile();
-                            routing = OverlayRouting::Edited;
-                        }
-                        SheetOutcome::Restore => return OverlayRouting::Restore,
-                        SheetOutcome::Dismissed => {
-                            *profile = *sheet.profile();
-                            return OverlayRouting::Closed;
-                        }
-                    }
+                SheetOutcome::Restore => return OverlayRouting::Restore,
+                SheetOutcome::Dismissed => {
+                    *profile = *sheet.profile();
+                    return OverlayRouting::Closed;
                 }
             }
         }
         routing
     }
 
-    /// Route one key press delivered for the open overlay's own popup window
-    /// into that overlay.
+    /// Route one key press delivered for the open sheet's own popup window
+    /// into that sheet.
     fn route_overlay_key(
         overlay: &mut Overlay,
         profile: &mut Profile,
@@ -1767,58 +1762,38 @@ mod program {
         scale: Scale,
         theme: &Theme,
     ) -> OverlayRouting {
-        let input = key_input_event(key);
+        let InputEvent::KeyPressed { key, modifiers } = key_input_event(key) else {
+            return OverlayRouting::Nothing;
+        };
         let viewport = overlay.viewport();
         let mut damage = damage::sink();
-        match &mut overlay.content {
-            Content::Menu(menu) => {
-                let InputEvent::KeyPressed { key, .. } = input else {
-                    return OverlayRouting::Nothing;
-                };
-                match menu.on_key(key, viewport, scale, theme, &mut damage) {
-                    MenuOutcome::Ignored => OverlayRouting::Nothing,
-                    MenuOutcome::Changed => OverlayRouting::Redraw,
-                    MenuOutcome::Dismissed => OverlayRouting::Dismissed,
-                    MenuOutcome::Chose(command) => OverlayRouting::Chose(command),
-                }
-            }
-            Content::Sheet(sheet) => {
-                let InputEvent::KeyPressed { key, modifiers } = input else {
-                    return OverlayRouting::Nothing;
-                };
-                let outcome = sheet.on_key(key, modifiers, viewport, scale, theme, &mut damage);
-                if matches!(outcome, SheetOutcome::Edited | SheetOutcome::Dismissed) {
-                    *profile = *sheet.profile();
-                }
-                match outcome {
-                    SheetOutcome::Ignored => OverlayRouting::Nothing,
-                    SheetOutcome::Changed => OverlayRouting::Redraw,
-                    SheetOutcome::Edited => OverlayRouting::Edited,
-                    SheetOutcome::Restore => OverlayRouting::Restore,
-                    SheetOutcome::Dismissed => OverlayRouting::Closed,
-                }
-            }
+        let sheet = &mut overlay.sheet;
+        let outcome = sheet.on_key(key, modifiers, viewport, scale, theme, &mut damage);
+        if matches!(outcome, SheetOutcome::Edited | SheetOutcome::Dismissed) {
+            *profile = *sheet.profile();
+        }
+        match outcome {
+            SheetOutcome::Ignored => OverlayRouting::Nothing,
+            SheetOutcome::Changed => OverlayRouting::Redraw,
+            SheetOutcome::Edited => OverlayRouting::Edited,
+            SheetOutcome::Restore => OverlayRouting::Restore,
+            SheetOutcome::Dismissed => OverlayRouting::Closed,
         }
     }
 
-    /// What routing an event into the open overlay concluded.
+    /// What routing an event into the open settings sheet concluded.
     enum OverlayRouting {
         /// Nothing to do.
         Nothing,
-        /// The overlay's own pixels changed; re-present its popup.
+        /// The sheet's own pixels changed; re-present its popup.
         Redraw,
-        /// The settings sheet edited the profile.
+        /// The sheet edited the profile.
         Edited,
-        /// The settings sheet asked for *Restore defaults*: the user's own
-        /// opinions are to be removed and the profile the remaining store
-        /// layers imply read back.
+        /// The sheet asked for *Restore defaults*: the user's own opinions
+        /// are to be removed and the profile the remaining store layers
+        /// imply read back.
         Restore,
-        /// A menu row or accelerator named this command; the overlay is done.
-        Chose(Command),
-        /// The overlay asked to go.
-        Dismissed,
-        /// The settings sheet asked to close, having possibly edited the
-        /// profile.
+        /// The sheet asked to close, having possibly edited the profile.
         Closed,
     }
 
@@ -1925,17 +1900,6 @@ mod program {
                                 OverlayRouting::Restore => {
                                     return EventOutcome::ProfileRestored { window }
                                 }
-                                OverlayRouting::Chose(command) => {
-                                    held.dismissed = true;
-                                    return finish(
-                                        run_command(command, window, &mut open.terminal, profile),
-                                        redrawn,
-                                    );
-                                }
-                                OverlayRouting::Dismissed => {
-                                    held.dismissed = true;
-                                    return EventOutcome::Continue;
-                                }
                                 OverlayRouting::Closed => {
                                     held.dismissed = true;
                                     return EventOutcome::ProfileChanged { window };
@@ -1966,31 +1930,52 @@ mod program {
                                 OverlayRouting::Restore => {
                                     return EventOutcome::ProfileRestored { window }
                                 }
-                                OverlayRouting::Chose(command) => {
-                                    held.dismissed = true;
-                                    return finish(
-                                        run_command(command, window, &mut open.terminal, profile),
-                                        redrawn,
-                                    );
-                                }
-                                OverlayRouting::Dismissed => {
-                                    held.dismissed = true;
-                                    return EventOutcome::Continue;
-                                }
                                 OverlayRouting::Closed => {
                                     held.dismissed = true;
                                     return EventOutcome::ProfileChanged { window };
                                 }
                             }
                         }
+                        // The one answer the desktop owes an open. An id
+                        // that names anything else answers a gesture already
+                        // settled, so acting on it would run a stale command.
+                        WindowEvent::MenuClosed {
+                            open_id, outcome, ..
+                        } if !for_popup && open.menu == Some(open_id) => {
+                            open.menu = None;
+                            match outcome {
+                                MenuOutcome::Chosen(item) => {
+                                    // A row id this terminal never declared
+                                    // names no command and is dropped.
+                                    if let Some(command) = Command::from_item(item) {
+                                        return finish(
+                                            run_command(
+                                                command,
+                                                window,
+                                                &mut open.terminal,
+                                                profile,
+                                            ),
+                                            redrawn,
+                                        );
+                                    }
+                                }
+                                MenuOutcome::Dismissed => {}
+                                MenuOutcome::Refused(reason) => {
+                                    report(&alloc::format!(
+                                        "the desktop showed no menu ({reason:?})"
+                                    ));
+                                }
+                            }
+                        }
                         WindowEvent::Pointer { x, y, action, .. } => {
-                            // An overlay is modal, so a press that lands on
+                            // The sheet is modal, so a press that lands on
                             // the terminal instead dismisses it and reaches
                             // nothing else. Otherwise a secondary press asks
-                            // for the context menu at that point, and every
-                            // other pointer event is a no-op: the screen is
-                            // shell-driven and the emulator keeps no
-                            // scrollback for a wheel to move.
+                            // the desktop for this window's menu at that
+                            // point, and every other pointer event is a
+                            // no-op: the screen is shell-driven and the
+                            // emulator keeps no scrollback for a wheel to
+                            // move.
                             if let Some(held) = open.overlay.as_mut() {
                                 if matches!(action, PointerAction::Pressed(_)) {
                                     held.dismissed = true;
@@ -2082,9 +2067,13 @@ mod program {
                         // A secondary press on Close asks to leave what the
                         // window is showing; the terminal has nothing to leave
                         // but the window itself, and a primary press already
-                        // closes it. Its own menus are still popup windows it
-                        // draws, so it asks for no chain and receives no
-                        // outcome.
+                        // closes it.
+                        //
+                        // A `MenuClosed` reaching here failed the guard above
+                        // — it names no open this window is waiting on — and a
+                        // stale answer is dropped rather than acted on. The
+                        // terminal's menu declares no panel row, so no chain
+                        // of its own ever asks it for a surface.
                         WindowEvent::AlternateCloseRequested { .. }
                         | WindowEvent::AppBarDefault
                         | WindowEvent::AppBarMenu { .. }

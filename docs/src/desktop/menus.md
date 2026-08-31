@@ -32,6 +32,12 @@ A plate's title is derived, never a new field on the wire:
 - a per-window menu's root title is the application's, bounded and sanitised
   exactly as its row labels are.
 
+A plate is **one** ground: the chain lays it once for the band and the rows
+together, and the rows are painted into it (`Menu::render_rows`) rather than
+laying a second plate of their own — which would rim the plate twice and notch
+its ground where the rows' own corners rounded. A menu drawn on its own still
+lays its plate and its rows in the one call.
+
 The band is `lib/controls`' `TitleBar` seating no commands
 (`TitleBarCommands::Empty`), never a second title-bar control. Two properties
 follow from that emptiness rather than from knobs of their own: with no command

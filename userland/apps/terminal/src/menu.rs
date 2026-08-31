@@ -1,30 +1,29 @@
-//! The terminal's right-click context menu: the commands it offers, the
-//! keyboard shortcuts that reach the same commands without it, and the popup
-//! itself.
+//! The terminal's window menu: the rows a secondary press offers, and the
+//! keyboard shortcuts that reach the same commands without one.
 //!
-//! The menu is presentation over a typed [`Command`]: choosing a row only
-//! *reports* which command was chosen, and the program carries it out. The
-//! rows are built from one ordered [`Command::ALL`] list, and an activated
-//! row is read back through that same list, so a reordering cannot silently
-//! re-map what a row does.
+//! The terminal describes and the desktop decides. This module builds the row
+//! model (`plans/NEW-MENUS.md`) and reads a chosen row back; the plates, the
+//! placement, the grab and the dismissal are the session's, and the terminal
+//! never draws a menu pixel.
 //!
-//! The popup is the shared `lib/controls` [`Menu`] placed by that control's
-//! own anchoring rule, so the terminal's menu appears and behaves exactly
-//! like every other context menu on the desktop.
+//! Rows are built from one ordered [`Command::ALL`] list and read back through
+//! [`Command::from_item`] against that same list, so a reordering cannot
+//! re-map what a row does. No row declares a submenu or a panel, so the chain
+//! this opens is one plate and hangs no window of its own.
 
-use alloc::vec::Vec;
+use tairix_abi::window_ipc::{
+    AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow, AppMenuShortcut,
+};
+use tairix_abi::Errno;
+use tairix_input::{Key, Modifiers};
 
-use tairix_controls::{Menu, MenuAction, MenuItem};
-use tairix_geometry::{Point, Rect, Region, Scale};
-use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
-use tairix_raster::Surface;
-use tairix_theme::Theme;
+use crate::APP_NAME;
 
-/// One command the context menu offers.
+/// One command the window menu offers.
 ///
 /// Adding a command means adding a variant, its row in [`Command::ALL`], and
-/// its arms in [`Command::label`] / [`Command::shortcut`] — the compiler then
-/// forces every consumer to state what the new command does.
+/// its arm in each of the label, caption, group and accelerator matches — the
+/// compiler then forces every consumer to state what the new command does.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Command {
     /// Open the settings sheet.
@@ -52,9 +51,18 @@ impl Command {
         Self::Close,
     ];
 
-    /// The row label.
+    /// The command the chosen row `item` names, or `None` for an id this
+    /// terminal never declared (fail closed — an outcome is never guessed at).
+    ///
+    /// The inverse of the one-based numbering [`model`] gives each row.
     #[must_use]
-    pub const fn label(self) -> &'static str {
+    pub fn from_item(item: AppMenuItemId) -> Option<Self> {
+        let index = usize::from(item.get().checked_sub(1)?);
+        Self::ALL.get(index).copied()
+    }
+
+    /// The row label.
+    const fn label(self) -> &'static str {
         match self {
             Self::Settings => "Settings…",
             Self::Larger => "Larger text",
@@ -65,13 +73,12 @@ impl Command {
         }
     }
 
-    /// The keyboard shortcut shown on the row, as the user must type it.
+    /// The accelerator caption the row states, as the user must type it.
     ///
-    /// Every shortcut listed here is really honoured by
+    /// Every caption here is really honoured by
     /// [`accelerator`](Self::accelerator); a row never advertises a key
     /// combination that does nothing.
-    #[must_use]
-    pub const fn shortcut(self) -> &'static str {
+    const fn shortcut(self) -> &'static str {
         match self {
             Self::Settings => "Ctrl ,",
             Self::Larger => "Ctrl +",
@@ -114,148 +121,46 @@ impl Command {
     }
 }
 
-/// What routing one input event into an open menu concluded.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum MenuOutcome {
-    /// Claimed with no state change.
-    Ignored,
-    /// Claimed; only pixels changed (a hover or keyboard highlight moved).
-    Changed,
-    /// A row was chosen; the menu should close and the command run.
-    Chose(Command),
-    /// The menu was dismissed without choosing.
-    Dismissed,
-}
-
-/// The open right-click context menu: where it was opened and the rows it
-/// shows.
+/// The row id for the command at `index` of [`Command::ALL`].
 ///
-/// While one exists it is modal — the program routes every pointer and key
-/// event here first, and a click away dismisses it without acting on
-/// whatever it landed on.
-#[derive(Clone, Debug)]
-pub struct ContextMenu {
-    /// The window-local point the menu was opened at.
-    anchor: Point,
-    /// The shared control the rows are drawn and hit-tested through.
-    menu: Menu,
-    /// The last pointer position seen, so a press can be tested against the
-    /// plate: the shared control tracks its own copy but does not publish it.
-    pointer: Point,
+/// One-based, because a menu id is never zero; [`Command::from_item`] is the
+/// inverse, so the two are one rule rather than two tables to keep in step.
+///
+/// # Errors
+///
+/// [`Errno::OutOfRange`] for an index no id can number, which the fixed
+/// [`Command::ALL`] cannot reach.
+fn row_id(index: usize) -> Result<AppMenuItemId, Errno> {
+    let raw = u16::try_from(index)
+        .ok()
+        .and_then(|position| position.checked_add(1))
+        .ok_or(Errno::OutOfRange)?;
+    AppMenuItemId::new(raw)
 }
 
-impl ContextMenu {
-    /// Open a menu whose top-left starts at window-local `anchor`.
-    #[must_use]
-    pub fn open(anchor: Point) -> Self {
-        let items: Vec<MenuItem> = Command::ALL
-            .into_iter()
-            .map(|command| {
-                MenuItem::new(command.label())
-                    .with_shortcut(command.shortcut())
-                    .with_group_break(command.opens_group())
-            })
-            .collect();
-        Self {
-            anchor,
-            menu: Menu::new(items),
-            pointer: anchor,
+/// The menu model a secondary press asks the desktop to open.
+///
+/// A declared separator is the divider above the row that follows it; the
+/// chain folds it into that row's group break rather than drawing a row of
+/// its own.
+///
+/// # Errors
+///
+/// Any [`Errno`] the shared bounds refuse. The rows are fixed, so a refusal
+/// can only mean those bounds changed under this menu; the caller reports it
+/// and opens nothing rather than showing a menu it could not describe.
+pub fn model() -> Result<AppMenu, Errno> {
+    let mut menu = AppMenu::titled(AppMenuLabel::new(APP_NAME)?);
+    for (index, command) in Command::ALL.into_iter().enumerate() {
+        if command.opens_group() {
+            menu.push(AppMenuRow::Separator)?;
         }
+        menu.push(AppMenuRow::Item(
+            AppMenuItem::new(row_id(index)?, AppMenuLabel::new(command.label())?)
+                .with_shortcut(AppMenuShortcut::new(command.shortcut())?),
+        ))?;
     }
-
-    /// The point the menu was opened at.
-    #[must_use]
-    pub const fn anchor(&self) -> Point {
-        self.anchor
-    }
-
-    /// The plate rectangle the menu occupies inside `viewport`.
-    #[must_use]
-    pub fn bounds(&self, viewport: Rect, scale: Scale, theme: &Theme) -> Rect {
-        self.menu.anchored_rect(self.anchor, viewport, scale, theme)
-    }
-
-    /// Draw the menu over whatever is already in `surface`.
-    pub fn render(&self, surface: &mut Surface, viewport: Rect, scale: Scale, theme: &Theme) {
-        let bounds = self.bounds(viewport, scale, theme);
-        self.menu.render(surface, bounds, scale, theme);
-    }
-
-    /// Route one pointer event.
-    ///
-    /// A primary press outside the plate dismisses without acting on what it
-    /// landed on, so a click meant for the screen behind never runs a command
-    /// by accident.
-    ///
-    /// A sample that leaves the highlight on the row it was already on reports
-    /// [`MenuOutcome::Ignored`]: it changes no pixel, and the caller must not
-    /// re-render and re-publish the plate for it. Sweeping the pointer across
-    /// a row would otherwise cost a frame's work per sample.
-    pub fn on_pointer(
-        &mut self,
-        event: &InputEvent,
-        viewport: Rect,
-        scale: Scale,
-        theme: &Theme,
-        damage: &mut Region,
-    ) -> MenuOutcome {
-        if let InputEvent::PointerMoved { to } = event {
-            self.pointer = *to;
-        }
-        let bounds = self.bounds(viewport, scale, theme);
-        if matches!(event, InputEvent::PointerPressed { .. }) && !bounds.contains(self.pointer) {
-            return MenuOutcome::Dismissed;
-        }
-        let action = self.menu.on_pointer(event, bounds, scale, theme, damage);
-        Self::outcome(action, damage)
-    }
-
-    /// Route one key press.
-    ///
-    /// A row-highlight move (Up/Down/Home/End) reports [`MenuOutcome::Changed`]
-    /// just as a pointer hover does in [`Self::on_pointer`], so the caller
-    /// repaints and the moved highlight is actually shown. A key that moves it
-    /// nowhere — Down on the last row of a menu that does not wrap, a key the
-    /// menu has no use for — reports [`MenuOutcome::Ignored`].
-    pub fn on_key(
-        &mut self,
-        key: Key,
-        viewport: Rect,
-        scale: Scale,
-        theme: &Theme,
-        damage: &mut Region,
-    ) -> MenuOutcome {
-        if key == Key::Named(NamedKey::Escape) {
-            return MenuOutcome::Dismissed;
-        }
-        let bounds = self.bounds(viewport, scale, theme);
-        let action = self.menu.on_key(key, bounds, scale, theme, damage);
-        Self::outcome(action, damage)
-    }
-
-    /// What the shared control's `action` and the pixels it reported into
-    /// `damage` amount to for the caller.
-    ///
-    /// The shared control reports the rows it redraws, and reports nothing at
-    /// all for an event that leaves every drawn field where it was — that is
-    /// the difference between [`MenuOutcome::Changed`] and
-    /// [`MenuOutcome::Ignored`], so a caller that repaints on `Changed`
-    /// repaints exactly when something moved. The sink covers one round of
-    /// input, so an event that changes nothing after one that did keeps the
-    /// round's answer.
-    fn outcome(action: Option<MenuAction>, damage: &Region) -> MenuOutcome {
-        match action {
-            Some(MenuAction::Activated { index }) => Command::ALL
-                .get(index)
-                .copied()
-                .map_or(MenuOutcome::Dismissed, MenuOutcome::Chose),
-            // No row owns a submenu, so a submenu request cannot arise; a
-            // dismissal closes the menu.
-            Some(MenuAction::OpenSubmenu { .. } | MenuAction::Dismissed) => MenuOutcome::Dismissed,
-            None if damage.is_empty() => MenuOutcome::Ignored,
-            None => MenuOutcome::Changed,
-        }
-    }
+    Ok(menu)
 }
 
 #[cfg(test)]

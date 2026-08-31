@@ -388,9 +388,9 @@ Done. What now holds:
   `client_exited`) tears down every popup keyed to it; closing a popup's
   own id tears down only the popup. The session clears the link on both
   paths.
-- **Consumer**: the terminal's context menu and settings sheet are each a
-  popup, sized from the overlay's own preferred extent rather than the
-  window's, with popup-local event coordinates demultiplexed on
+- **Consumer**: the terminal's settings sheet is a popup, sized from the
+  sheet's own preferred extent rather than the window's, with popup-local
+  event coordinates demultiplexed on
   `WindowEvent::window_id` (`plans/GUI-TERMINAL.md` §9) — which, since the
   terminal became one process with many windows, is also how a delivery is
   attributed to the *window* it belongs to.

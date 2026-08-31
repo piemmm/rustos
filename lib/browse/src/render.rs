@@ -2208,8 +2208,7 @@ pub fn build_context_menu(model: ContextMenuModel) -> Menu {
 ///
 /// Delegates to [`Menu::anchored_rect`], the one shared placement rule every
 /// popup-menu owner uses, so [`draw_context_menu`] and
-/// [`context_menu_command_at`] place and hit-test the same rectangle a
-/// terminal's own context menu would.
+/// [`context_menu_command_at`] place and hit-test the same rectangle.
 #[must_use]
 pub fn context_menu_rect(
     menu: &Menu,

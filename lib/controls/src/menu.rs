@@ -866,7 +866,8 @@ impl Menu {
         ))
     }
 
-    /// Paint the menu into `surface` at `bounds` for the active theme.
+    /// Paint the menu — its plate and then its rows — into `surface` at
+    /// `bounds` for the active theme.
     pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
@@ -874,22 +875,48 @@ impl Menu {
         if w == 0 || h == 0 {
             return;
         }
-        let font = role_font(theme, scale, TextRole::Body);
-        let palette = theme.palette();
-        let border = plate_border(theme, scale);
         let radius = scale
             .scale_length(theme.metrics().popup_corner_radius)
             .min(w / 2)
             .min(h / 2);
 
         // The elevated command plate: Signal Rim then the ground.
-        let plate = (palette.surface_raised, ChromeLayer::Ground);
-        let Some((ix, iy, iw, ih)) =
-            paint_surface_plate(surface, (x, y, w, h), (radius, border), theme, plate)
-        else {
+        let plate = (theme.palette().surface_raised, ChromeLayer::Ground);
+        let Some(inner) = paint_surface_plate(
+            surface,
+            (x, y, w, h),
+            (radius, plate_border(theme, scale)),
+            theme,
+            plate,
+        ) else {
             return;
         };
+        self.paint_rows(surface, inner, scale, theme);
+    }
 
+    /// Paint only the rows, taking the plate beneath them as already laid.
+    ///
+    /// A menu chain lays one plate for a band and its rows together, so
+    /// painting a second one here would rim and round the rows inside the
+    /// plate already under them. The rows land exactly where
+    /// [`row_rect`](Self::row_rect) reports them either way.
+    pub fn render_rows(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        let Some(inner) = Self::inner(bounds, scale, theme) else {
+            return;
+        };
+        self.paint_rows(surface, inner, scale, theme);
+    }
+
+    /// Paint the rows into the plate interior `(ix, iy, iw, ih)`.
+    fn paint_rows(
+        &self,
+        surface: &mut Surface,
+        (ix, iy, iw, ih): (u32, u32, u32, u32),
+        scale: Scale,
+        theme: &Theme,
+    ) {
+        let font = role_font(theme, scale, TextRole::Body);
+        let palette = theme.palette();
         let rule = Self::divider_rule(scale, theme);
         let gap = Self::divider_gap(scale, theme);
         for band in self.layout(scale, theme) {

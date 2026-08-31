@@ -24,9 +24,8 @@ button, or dialog reads as the desktop's own furniture wherever it is drawn:
 inside the file manager, on the pinboard, or inside a terminal whose screen is
 monospace. Passing the face in would have made the desktop's typography a
 convention each application could break, and one of them did — the graphical
-terminal drew the shared context menu and settings sheet in its own monospace
-grid face at the user's terminal text size, because that was the face it had
-to hand.
+terminal drew the shared menu and settings sheet in its own monospace grid face
+at the user's terminal text size, because that was the face it had to hand.
 
 An application still draws *its own* content — a document, a terminal grid, a
 label the shared controls do not own — in whatever face it needs. The rule
