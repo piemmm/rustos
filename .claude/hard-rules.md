@@ -44,7 +44,6 @@ GENERAL
 - Remember that abi-v1 is *NOT* frozen (despite what AGENTS.md and/or PLAN.md may say)
 - The work and design must be first class and able to survive a review by someone like Linus Torvalds
 - Do not poll when waiting for a long command or process to complete, use a monitor.
-- You are not barred from calling the AgentTool - You can use it if required.
 
 TRAPS THAT WILL COST YOU AN HOUR EACH
 - **`target/debug/xtask` does not rebuild.** `cargo xtask …` is an alias for
