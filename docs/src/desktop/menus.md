@@ -37,6 +37,25 @@ laying a second plate of their own — which would rim the plate twice and notch
 its ground where the rows' own corners rounded. A menu drawn on its own still
 lays its plate and its rows in the one call.
 
+## A plate is floating chrome
+
+A plate is the desktop's own chrome, like the taskbar and the popups it opens,
+so it is drawn on the *floating* theme: its `surface_raised` ground takes the
+palette's `chrome_alpha` (four fifths) and the compositor frosts what is behind
+it by `chrome_backdrop_blur`. Opacity and blur are one decision, not two — blur
+behind an opaque surface is per-frame work nothing shows through, and
+translucency without it leaves sharp detail competing with the rows on top — so
+a plate takes both, from the shared theme values every other floating surface
+takes. Rows read as *part* of the plate and take the same alpha, which is what
+keeps a resting row exactly its ground.
+
+The floating form is derived **once** per desktop
+(`DesktopSession::floating_theme`) and handed to every surface that grounds
+itself in it, so a runtime theme switch cannot leave one behind, and a plate's
+pixels and the row rectangles it is hit-tested against cannot come from two
+themes. Grounding a theme floating flips nothing but the ground, so no
+rectangle moves.
+
 The band is `lib/controls`' `TitleBar` seating no commands
 (`TitleBarCommands::Empty`), never a second title-bar control. Two properties
 follow from that emptiness rather than from knobs of their own: with no command

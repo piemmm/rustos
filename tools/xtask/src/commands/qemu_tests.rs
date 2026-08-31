@@ -8360,7 +8360,7 @@ fn taskbar_bar_rect(theme: &tairix_theme::Theme) -> tairix_geometry::Rect {
             tairix_fwcfg::RAMFB_CONSOLE_WIDTH_PX,
             tairix_fwcfg::RAMFB_CONSOLE_HEIGHT_PX,
         ),
-        theme,
+        &theme.clone().floating(),
     );
     taskbar.layout(tairix_geometry::Scale::ONE).bar
 }
@@ -8901,7 +8901,7 @@ fn appbar_slot_rect(
             tairix_fwcfg::RAMFB_CONSOLE_WIDTH_PX,
             tairix_fwcfg::RAMFB_CONSOLE_HEIGHT_PX,
         ),
-        theme,
+        &theme.clone().floating(),
     );
     taskbar.set_apps(
         (0..=index)
@@ -10044,7 +10044,9 @@ const MENU_TERMINAL_CASCADE_SLOT: u64 = 0;
 /// The geometry the production menu chain resolves at on this guest's screen.
 ///
 /// The session composites at the reference density with the shipped theme, so
-/// the chrome epoch a chain is placed against is that pair.
+/// the chrome epoch a chain is placed against is that pair. The theme is its
+/// *floating* form, as the session grounds a plate in, so the reconstruction
+/// resolves against exactly what the guest drew.
 fn reconstruction_chain_geometry(
     theme: &tairix_theme::Theme,
 ) -> tairix_desktop_session::menu::ChainGeometry<'_> {
@@ -10080,7 +10082,7 @@ fn chain_plate_and_row(
 ) -> Result<(tairix_geometry::Rect, tairix_geometry::Rect), String> {
     use tairix_desktop_session::menu::{ChainOwner, MenuChain};
 
-    let theme = tairix_theme::Theme::dark();
+    let theme = tairix_theme::Theme::dark().floating();
     let geom = reconstruction_chain_geometry(&theme);
     let row = model
         .rows()
@@ -10204,21 +10206,32 @@ fn assert_menu_window_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), S
 ///
 /// Two independent facts, because either alone is weak. The plate rectangle
 /// differs from the same rectangle in the window-only frame, so *something* was
-/// drawn there by this gesture; and a large share of its interior is exactly the
-/// theme's own raised-surface colour, so what was drawn is a plate rather than
-/// whatever the terminal happened to repaint. The rectangle is the one the
-/// production chain reports, so a placement regression moves the probe off the
-/// plate and fails here rather than passing on a menu drawn somewhere else.
+/// drawn there by this gesture; and a large share of its interior is the theme's
+/// own raised-surface colour laid over that frame at the palette's
+/// `chrome_alpha` — a plate is floating chrome, so what is behind it reads
+/// through as a wash rather than being covered. Predicting each pixel from what
+/// the earlier frame showed at the same point is what keeps the second fact
+/// strong now that a plate is translucent: it holds a plate to the exact
+/// composite the theme asks for, over the terminal and over the wallpaper alike,
+/// where a bare distance from the ground colour would admit any dark repaint.
+/// The rectangle is the one the production chain reports, so a placement
+/// regression moves the probe off the plate and fails here rather than passing
+/// on a menu drawn somewhere else.
 fn assert_menu_plate_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
     /// The share of the plate rectangle that must differ from the frame before
-    /// the menu opened. Measured at 0.922 on the board.
+    /// the menu opened. Measured at 0.922 on the board while the plate was
+    /// opaque; four fifths of the ground still moves a dark backdrop well clear
+    /// of itself, so the floor stands.
     const MIN_PLATE_DRIFT: f64 = 0.75;
-    /// The share of the plate's interior that must be the plate's own ground.
+    /// The share of the plate's interior that must be its ground composited over
+    /// what was behind it.
     ///
     /// Well under one, because the band, its title text, the row labels, the
-    /// group dividers and the rim all sit on that ground: measured at 0.844,
-    /// with the floor left low enough that a highlighted row or a heavier face
-    /// cannot turn a drawn plate into a failure.
+    /// group dividers and the rim all sit on that ground, and because a pixel
+    /// over *detail* behind the plate is composited over the blurred
+    /// neighbourhood rather than the one point predicted here: measured at 0.844
+    /// with an opaque plate, with the floor left low enough that a highlighted
+    /// row or a heavier face cannot turn a drawn plate into a failure.
     const MIN_PLATE_GROUND: f64 = 0.55;
     /// How far inside the plate the probe reads, in pixels: clear of the rim
     /// and of the anti-aliasing on its rounded corners.
@@ -10237,6 +10250,17 @@ fn assert_menu_plate_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), St
     );
     let (plate, _) = menu_plate_and_row(press, MENU_SETTINGS_ROW_LABEL)?;
     let ground = theme.palette().surface_raised;
+    let alpha = u32::from(theme.palette().chrome_alpha);
+    let backdrop = 255 - alpha;
+    // The compositor lays the plate over a *blurred* backdrop, so a pixel is
+    // its ground over the neighbourhood behind it rather than over the one
+    // point below. Half of what the backdrop is allowed to contribute is the
+    // room that leaves for local detail, and it absorbs the rounding of the
+    // two divisions that carry the composite.
+    let tolerance = backdrop / 2;
+    let composite = |ground: u8, behind: u8| {
+        tairix_raster::div255(u32::from(ground) * alpha + u32::from(behind) * backdrop)
+    };
 
     #[allow(clippy::cast_sign_loss)] // A plate is placed at positive screen offsets.
     let (left, top) = (
@@ -10260,11 +10284,18 @@ fn assert_menu_plate_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), St
                 })
             };
             let pixel = read(&image)?;
+            let behind = read(&before)?;
             total += 1;
-            if pixel != read(&before)? {
+            if pixel != behind {
                 drifted += 1;
             }
-            if pixel == (ground.r, ground.g, ground.b) {
+            let near = |drawn: u8, ground: u8, behind: u8| {
+                u32::from(drawn).abs_diff(u32::from(composite(ground, behind))) <= tolerance
+            };
+            if near(pixel.0, ground.r, behind.0)
+                && near(pixel.1, ground.g, behind.1)
+                && near(pixel.2, ground.b, behind.2)
+            {
                 on_ground += 1;
             }
         }
@@ -10290,8 +10321,8 @@ fn assert_menu_plate_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), St
     if ground_share < MIN_PLATE_GROUND {
         return Err(format!(
             "test --qemu ({}): screendump {} draws something at {plate:?} that is not a plate: \
-             only {ground_share:.3} of it is the theme's raised-surface colour (expected >= \
-             {MIN_PLATE_GROUND})",
+             only {ground_share:.3} of it is the theme's raised-surface colour over what was \
+             behind it at the palette's chrome alpha (expected >= {MIN_PLATE_GROUND})",
             t.package,
             path.display(),
         ));

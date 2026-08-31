@@ -21,7 +21,7 @@ use tairix_abi::{
     AppInfoHeader, DriverError, Errno, ProcId, ABI_VERSION_CURRENT, APPINFO_MAGIC, BUNDLE_ID_MAX,
     BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX, SYSCALL_TABLE_HASH_LEN,
 };
-use tairix_controls::PointerState;
+use tairix_controls::{ChainModel, Fact, FactList, PointerState};
 use tairix_cursor::CursorTheme;
 use tairix_greeter::{Verdict, Verifier, UNNAMED_ACCOUNT};
 use tairix_icon::{
@@ -39,7 +39,8 @@ use tairix_taskbar::{
     TaskbarRepaint, TaskbarResponse, PICKER_CLOSE_GRACE_NS, PICKER_OPEN_DELAY_NS,
 };
 use tairix_theme::{
-    Appearance, CursorKind, Metrics, MotionInteraction, Theme, ThemeError, ThemeId, Timeline,
+    Appearance, CursorKind, Metrics, MotionInteraction, SurfaceGround, Theme, ThemeError, ThemeId,
+    Timeline,
 };
 use tairix_wm::{
     chrome_cache, cursor_cache, frost_cache, ChromeEpoch, Color, Compositor, Corners, FrostEpoch,
@@ -48,7 +49,7 @@ use tairix_wm::{
 };
 
 use crate::artwork::ArtworkDesk;
-use crate::menu::{ChainAction, ChainGeometry, ChainOutcome, ChainOwner, MenuChain};
+use crate::menu::{ChainAction, ChainGeometry, ChainOutcome, ChainOwner, MenuChain, SurfaceKind};
 use crate::shell::SettleWork;
 use crate::{
     deliver_pending_open, desktop_info, drop_is_noteworthy, ensure_switchboard, load_icon_set,
@@ -3156,7 +3157,9 @@ fn choose_bar_menu_row(
     request: tairix_taskbar::MenuRequest,
     label: &str,
 ) -> Option<TaskbarResponse> {
-    let theme = shell.session().active_theme().clone();
+    // The chain's own ground, cloned because the borrow it comes from cannot
+    // outlive the presents below.
+    let theme = shell.session().floating_theme().clone();
     let geom = ChainGeometry {
         screen: comp.screen_rect(),
         scale: comp.scale(),
@@ -3977,7 +3980,7 @@ fn a_thumbnail_scales_a_windows_frame_to_the_cell() {
 fn picker_cells_caption_each_window_and_refuse_below_a_choice() {
     let mut bar = tairix_taskbar::Taskbar::new(
         TaskbarConfig::bottom_bar(1000, 800),
-        &tairix_theme::Theme::dark(),
+        &tairix_theme::Theme::dark().floating(),
     );
     bar.tasks_mut().add(TaskId(1), "Shell");
     bar.tasks_mut().add(TaskId(2), "Logs");
@@ -8450,7 +8453,7 @@ fn the_backdrop_menu_is_drawn_as_chain_plates_and_taken_down_when_it_closes() {
     shell.present(&mut comp);
     let before = comp.window_count();
     let mut chain = MenuChain::new();
-    let theme = shell.session().active_theme().clone();
+    let theme = shell.session().floating_theme().clone();
     let (screen, scale, epoch) = (comp.screen_rect(), comp.scale(), comp.chrome_epoch());
     let geom = ChainGeometry {
         screen,
@@ -8529,14 +8532,11 @@ fn blur_of(comp: &Compositor, window: Option<WindowId>, what: &str) -> u16 {
         .blur_radius()
 }
 
-/// The blur the active theme asks for behind its floating chrome.
+/// The blur the active theme asks for behind its floating chrome — read through
+/// the production rule, so a test cannot assert a frosting the desktop does not
+/// ask for, and guarded against zero so no assertion below is vacuous.
 fn chrome_blur(shell: &DesktopShell) -> u16 {
-    let radius = shell
-        .session()
-        .active_theme()
-        .metrics()
-        .chrome_backdrop_blur;
-    let blur = u16::try_from(radius).expect("a desktop length fits");
+    let blur = crate::presenter::chrome_blur(shell.session().floating_theme());
     assert!(blur > 0, "the theme asks for no frosting at all");
     blur
 }
@@ -8607,43 +8607,135 @@ fn the_bars_popover_and_readout_frost_what_is_behind_them() {
     );
 }
 
-/// A menu plate is not the bar's chrome: it covers what it opens over, so
-/// nothing behind it is blurred for it.
+/// A menu plate is the desktop's floating chrome like the bar and its popups:
+/// it is translucent, so it asks the compositor to frost what it opens over —
+/// every surface of the chain, the information panel included.
 ///
-/// `plans/NEW-MENUS.md` M5 supersedes this: menus are to become floating
-/// chrome, translucent over a blurred backdrop like the program-library
-/// popup, and this test inverts with that stage.
+/// The chain is reconciled surface by surface and its windows are obtained
+/// three ways (created standalone, re-surfaced on a later present, and — in the
+/// sibling test — created as an owner's transient), so a look applied on only
+/// one of those paths would leave a surface sharp for as long as it lived.
 #[test]
-fn a_menu_plate_frosts_nothing() {
+fn every_menu_chain_surface_frosts_what_is_behind_it() {
     let (mut shell, mut comp) = headless_desktop();
+    let blur = chrome_blur(&shell);
+    let theme = shell.session().floating_theme().clone();
+    let geom = ChainGeometry {
+        screen: comp.screen_rect(),
+        scale: comp.scale(),
+        theme: &theme,
+        epoch: comp.chrome_epoch(),
+    };
+    let facts = FactList::new(vec![Fact::new("Name", "App")]);
+    let mut wire = app_bar(false).menu;
+    wire.push(AppMenuRow::Info)
+        .expect("an information row fits");
     let mut chain = MenuChain::new();
-    let theme = shell.session().active_theme().clone();
+    chain
+        .open(
+            ChainOwner::Backdrop,
+            ChainModel::from_app_menu("App", &wire, Some(&facts)),
+            crate::windows::window_menu_placement(Rect::new(100, 100, 0, 0)),
+            &geom,
+        )
+        .expect("an attested model opens");
+    // Hover the information row so the panel hangs: the chain then lists a
+    // plate and a panel, which are painted by two different arms.
+    let info = chain.row_rect(0, 1, &geom).expect("the information row");
+    let at = Point::new(
+        info.left() + i32::try_from(info.width / 2).expect("small"),
+        info.top() + i32::try_from(info.height / 2).expect("small"),
+    );
+    chain.handle(&moved(at.x, at.y), at, &geom);
+    assert!(chain.info_panel().is_some(), "the panel hangs");
+
+    // Once to create the windows, again to re-surface the ones it kept.
+    for round in ["created", "re-used"] {
+        assert!(shell.present_menu_chain(&mut comp, &chain, None));
+        let surfaces = chain.surfaces();
+        assert!(
+            surfaces
+                .iter()
+                .any(|placed| placed.kind == SurfaceKind::Info),
+            "the panel is one of the surfaces presented"
+        );
+        for placed in surfaces {
+            let id = comp
+                .window_at(centre(placed.rect))
+                .expect("a chain surface is the window over its own centre");
+            assert_eq!(
+                comp.window(id).expect("live").blur_radius(),
+                blur,
+                "{round}: a translucent {:?} over a sharp backdrop has its text on detail",
+                placed.kind
+            );
+        }
+    }
+}
+
+/// A plate the chain hangs on an owner window is composited as that window's
+/// transient, which is a different path to a compositor window — and it is the
+/// same chrome.
+#[test]
+fn an_owned_menu_plate_frosts_what_is_behind_it() {
+    let (mut shell, mut comp) = headless_desktop();
+    let blur = chrome_blur(&shell);
+    let owner = comp.add_window(
+        Point::new(0, 0),
+        Surface::new(400, 300).expect("an owner surface"),
+    );
+    let mut chain = MenuChain::new();
+    let geom = crate::windows::chain_geometry(shell.session(), &comp);
     chain
         .open(
             ChainOwner::Backdrop,
             crate::pinboard::model(true, &PinboardSettings::default()),
             crate::windows::window_menu_placement(Rect::new(100, 100, 0, 0)),
-            &ChainGeometry {
-                screen: comp.screen_rect(),
-                scale: comp.scale(),
-                theme: &theme,
-                epoch: comp.chrome_epoch(),
-            },
+            &geom,
         )
         .expect("the backdrop model opens");
-    assert!(shell.present_menu_chain(&mut comp, &chain, None));
+    assert!(shell.present_menu_chain(&mut comp, &chain, Some(owner)));
     let plate = chain.surfaces().first().expect("the root plate").rect;
     let id = comp
-        .window_at(Point::new(
-            plate.left() + i32::try_from(plate.width / 2).expect("small"),
-            plate.top() + i32::try_from(plate.height / 2).expect("small"),
-        ))
+        .window_at(centre(plate))
         .expect("the plate is the window over its own centre");
-    assert_eq!(
-        comp.window(id).expect("live").blur_radius(),
-        0,
-        "an opaque plate paid for a blur nothing shows through"
-    );
+    assert_ne!(id, owner, "the plate is its own window over the owner");
+    assert_eq!(comp.window(id).expect("live").blur_radius(), blur);
+}
+
+/// The bar and every menu plate ground themselves in **one** floating theme the
+/// session derives, and a theme switch moves that one value — so no surface can
+/// be left on the ground it had before, and a plate's pixels and the row
+/// rectangles it is hit-tested against cannot come from two themes.
+#[test]
+fn one_floating_theme_grounds_the_bar_and_every_plate() {
+    let mut shell = shell();
+    let comp = compositor();
+    for appearance in [Appearance::Light, Appearance::Dark] {
+        shell.session_mut().set_appearance(appearance);
+        let session = shell.session();
+        let floating = session.floating_theme();
+        assert_eq!(
+            floating.ground(),
+            SurfaceGround::Floating,
+            "the desktop's chrome theme is the floating one"
+        );
+        assert_eq!(
+            floating.appearance(),
+            appearance,
+            "and it followed the switch"
+        );
+        assert_eq!(
+            session.taskbar().theme(),
+            floating,
+            "the bar grounds itself in it"
+        );
+        assert_eq!(
+            crate::windows::chain_geometry(session, &comp).theme,
+            floating,
+            "and so does every plate"
+        );
+    }
 }
 
 /// The bar stands clear of the screen edges it faces, and the band it

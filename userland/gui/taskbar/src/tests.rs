@@ -173,7 +173,10 @@ fn identity(name: &str) -> AppIdentity {
 /// handed back settled: seeding the catalog latches the popup and the bar,
 /// and that is the fixture's own doing, never what a test measures.
 fn bottom_bar() -> Taskbar {
-    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &Theme::dark());
+    let mut bar = Taskbar::new(
+        TaskbarConfig::bottom_bar(1000, 800),
+        &Theme::dark().floating(),
+    );
     bar.library_mut().set_catalog(office_and_games());
     let _ = bar.take_repaint();
     bar
@@ -611,7 +614,7 @@ fn the_launcher_hits_on_every_edge() {
             edge,
             ..TaskbarConfig::bottom_bar(1000, 800)
         };
-        let bar = Taskbar::new(config, &Theme::dark());
+        let bar = Taskbar::new(config, &Theme::dark().floating());
         let layout = bar.layout(Scale::ONE);
         assert_eq!(
             layout.hit_test(centre_of(layout.library)),
@@ -631,7 +634,7 @@ fn vertical_bar_places_the_launcher_at_the_top() {
         edge: Edge::Left,
         ..TaskbarConfig::bottom_bar(1000, 800)
     };
-    let bar = Taskbar::new(config, &Theme::dark());
+    let bar = Taskbar::new(config, &Theme::dark().floating());
     let layout = bar.layout(Scale::ONE);
     // A left bar floats off the top, bottom, and left screen edges by the
     // 5 px margin; its 40 px thickness is untouched. The launcher sits inside
@@ -661,7 +664,7 @@ fn the_separator_divides_the_library_from_everything_after_it() {
             edge,
             ..TaskbarConfig::bottom_bar(1000, 800)
         };
-        let bar = Taskbar::new(config, &theme);
+        let bar = Taskbar::new(config, &theme.clone().floating());
         let layout = bar.layout(Scale::ONE);
         let orientation = edge.orientation();
         let (rule_start, rule_end, rule_near, rule_far) = axes(layout.separator, orientation);
@@ -717,7 +720,7 @@ fn a_press_on_the_separator_reaches_the_bare_bar() {
             edge,
             ..TaskbarConfig::bottom_bar(1000, 800)
         };
-        let mut bar = Taskbar::new(config, &Theme::dark());
+        let mut bar = Taskbar::new(config, &Theme::dark().floating());
         let point = centre_of(bar.layout(Scale::ONE).separator);
         assert_eq!(
             bar.hit_test(point, Scale::ONE),
@@ -764,7 +767,7 @@ fn a_bar_too_thin_to_inset_the_rule_drops_it_and_keeps_the_flow() {
         thickness: 12,
         ..TaskbarConfig::bottom_bar(1000, 800)
     };
-    let bar = Taskbar::new(config, &Theme::dark());
+    let bar = Taskbar::new(config, &Theme::dark().floating());
     let layout = bar.layout(Scale::ONE);
     assert!(layout.separator.is_empty());
     assert_eq!(
@@ -789,7 +792,7 @@ fn the_launcher_outranks_everything_after_it_on_a_tiny_screen() {
     // clips last, so it is whole and the strip is what collapses; of the
     // trailing regions the Switchboard capsule outranks the clock and the
     // icons, so the 2 px that remain are its.
-    let bar = Taskbar::new(TaskbarConfig::bottom_bar(79, 50), &Theme::dark());
+    let bar = Taskbar::new(TaskbarConfig::bottom_bar(79, 50), &Theme::dark().floating());
     let layout = bar.layout(Scale::ONE);
     assert_eq!(layout.library.width, 48);
     assert_eq!(layout.separator, Rect::new(62, 16, 1, 18));
@@ -799,7 +802,7 @@ fn the_launcher_outranks_everything_after_it_on_a_tiny_screen() {
 
     // No room for the rule or anything after it: every region past the
     // launcher is empty and none can ever be hit.
-    let bar = Taskbar::new(TaskbarConfig::bottom_bar(30, 50), &Theme::dark());
+    let bar = Taskbar::new(TaskbarConfig::bottom_bar(30, 50), &Theme::dark().floating());
     let layout = bar.layout(Scale::ONE);
     assert_eq!(layout.library.width, 18);
     assert!(layout.separator.is_empty());
@@ -808,7 +811,7 @@ fn the_launcher_outranks_everything_after_it_on_a_tiny_screen() {
     assert_eq!(layout.hit_test(Point::new(20, 30)), Some(Hit::Library));
 
     // A zero-sized screen yields empty regions and no hits anywhere.
-    let bar = Taskbar::new(TaskbarConfig::bottom_bar(0, 0), &Theme::dark());
+    let bar = Taskbar::new(TaskbarConfig::bottom_bar(0, 0), &Theme::dark().floating());
     let layout = bar.layout(Scale::ONE);
     assert!(layout.library.is_empty());
     assert!(layout.separator.is_empty());
@@ -831,7 +834,7 @@ fn a_bar_too_small_for_its_rim_keeps_its_content_inside_itself() {
                     edge,
                     ..TaskbarConfig::bottom_bar(screen_w, screen_h)
                 };
-                let mut bar = Taskbar::new(config, &theme);
+                let mut bar = Taskbar::new(config, &theme.clone().floating());
                 bar.set_apps(alloc::vec![app("Editor")]);
                 let layout = bar.layout(scale);
                 let frame = layout.bar;
@@ -931,7 +934,10 @@ fn the_app_strip_spans_the_launcher_to_the_trailing_end() {
 
 #[test]
 fn app_slots_clip_fail_closed_on_a_tiny_screen() {
-    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(213, 40), &Theme::dark());
+    let mut bar = Taskbar::new(
+        TaskbarConfig::bottom_bar(213, 40),
+        &Theme::dark().floating(),
+    );
     // The Library launcher (48) plus the separator gutter (17) takes 65.
     // Switchboard (44) plus clock (80) take 124. Screen 213, less the two
     // 5 px margins the bar floats in and the two 1 px rims its content sits
@@ -942,7 +948,10 @@ fn app_slots_clip_fail_closed_on_a_tiny_screen() {
     assert_eq!(layout.apps[0].width, 12, "the slot clips to fit");
 
     // Even smaller: the slot is empty and can never be hit.
-    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(201, 40), &Theme::dark());
+    let mut bar = Taskbar::new(
+        TaskbarConfig::bottom_bar(201, 40),
+        &Theme::dark().floating(),
+    );
     bar.set_apps(alloc::vec![app("App")]);
     let layout = bar.layout(Scale::ONE);
     assert!(layout.apps[0].is_empty());
@@ -963,7 +972,7 @@ fn app_strip_positions_on_all_four_edges() {
             edge,
             ..TaskbarConfig::bottom_bar(1000, 800)
         };
-        let mut bar = Taskbar::new(config, &theme);
+        let mut bar = Taskbar::new(config, &theme.clone().floating());
         bar.set_apps(alloc::vec![app("App")]);
         let layout = bar.layout(Scale::ONE);
         assert!(!layout.app_strip.is_empty(), "{edge:?}");
@@ -996,7 +1005,7 @@ fn bar_pins_to_all_four_edges() {
             edge,
             ..TaskbarConfig::bottom_bar(1000, 800)
         };
-        let bar = Taskbar::new(config, &Theme::dark());
+        let bar = Taskbar::new(config, &Theme::dark().floating());
         assert_eq!(bar.layout(Scale::ONE).bar, expect, "{edge:?}");
     }
 }
@@ -1021,7 +1030,9 @@ fn the_bar_stands_off_the_screen_edges_it_faces_at_every_scale() {
                 ..TaskbarConfig::bottom_bar(screen_w, screen_h)
             };
             let thickness = scale.scale_length(config.thickness);
-            let bar = Taskbar::new(config, &theme).layout(scale).bar;
+            let bar = Taskbar::new(config, &theme.clone().floating())
+                .layout(scale)
+                .bar;
             let at = |side: i32, want: i32, which: &str| {
                 assert_eq!(side, want, "{edge:?} at {percent}%: the {which} side");
             };
@@ -1114,7 +1125,7 @@ fn a_side_bar_readout_stays_within_the_bars_span() {
             edge,
             ..TaskbarConfig::bottom_bar(1000, 800)
         };
-        let mut bar = Taskbar::new(config, &Theme::dark());
+        let mut bar = Taskbar::new(config, &Theme::dark().floating());
         let mut summary = tray_summary(0, 0, 300);
         summary.top_task = Some(tray_task("editor", 250));
         bar.set_tray_summary(Some(summary));
@@ -1139,7 +1150,7 @@ fn a_screen_too_small_for_the_margin_keeps_the_bar_rather_than_the_gap() {
     for percent in [100, 400] {
         let scale = Scale::from_percent(percent).expect("a valid scale");
         for (w, h) in [(0, 0), (1, 1), (8, 8), (30, 50), (77, 50)] {
-            let bar = Taskbar::new(TaskbarConfig::bottom_bar(w, h), &Theme::dark());
+            let bar = Taskbar::new(TaskbarConfig::bottom_bar(w, h), &Theme::dark().floating());
             let layout = bar.layout(scale);
             let rect = layout.bar;
             let at = alloc::format!("{w}x{h} at {percent}%");
@@ -1210,7 +1221,7 @@ fn corner_radius_comes_from_the_theme() {
 fn apply_theme_swaps_the_owned_theme_and_latches_every_surface() {
     let mut bar = bottom_bar();
     assert!(!bar.take_repaint().any(), "a fresh bar has nothing pending");
-    bar.apply_theme(&Theme::light());
+    bar.apply_theme(&Theme::light().floating());
     assert_eq!(bar.theme().id(), Theme::light().id());
     assert_eq!(
         bar.take_repaint(),
@@ -2367,7 +2378,10 @@ fn every_window_is_reachable_however_many_there_are() {
 /// nobody can click.
 #[test]
 fn a_grid_too_big_for_the_screen_scrolls_instead_of_clipping() {
-    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(300, 400), &Theme::dark());
+    let mut bar = Taskbar::new(
+        TaskbarConfig::bottom_bar(300, 400),
+        &Theme::dark().floating(),
+    );
     let windows: Vec<TaskId> = (1..=6).map(TaskId).collect();
     for &id in &windows {
         bar.tasks_mut().add(id, "W");
@@ -3123,7 +3137,10 @@ fn clicking_a_folder_toggles_its_expansion() {
 
 #[test]
 fn wheel_scrolls_the_overflowing_popup() {
-    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 300), &Theme::dark());
+    let mut bar = Taskbar::new(
+        TaskbarConfig::bottom_bar(1000, 300),
+        &Theme::dark().floating(),
+    );
     let mut entries: Vec<(String, String)> = Vec::new();
     for index in 0..30 {
         entries.push((format!("app{index:02}"), format!("App {index:02}")));
@@ -3218,7 +3235,10 @@ fn every_folder_has_a_label() {
 
 #[test]
 fn an_empty_catalog_shows_the_calm_placeholder() {
-    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &Theme::dark());
+    let mut bar = Taskbar::new(
+        TaskbarConfig::bottom_bar(1000, 800),
+        &Theme::dark().floating(),
+    );
     bar.library_mut().set_catalog(Catalog::new());
     let mut input = TaskbarInput::new();
     open_library(&mut input, &mut bar);
@@ -3463,7 +3483,10 @@ fn tab_cycles_focus_and_typing_returns_to_the_search() {
 
 #[test]
 fn keyboard_navigation_keeps_the_cursor_visible() {
-    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 300), &Theme::dark());
+    let mut bar = Taskbar::new(
+        TaskbarConfig::bottom_bar(1000, 300),
+        &Theme::dark().floating(),
+    );
     let mut cat = Catalog::new();
     for index in 0..30 {
         cat.insert(entry(
@@ -3513,7 +3536,7 @@ fn popup_opens_outward_on_every_edge() {
             edge,
             ..TaskbarConfig::bottom_bar(1000, 800)
         };
-        let mut bar = Taskbar::new(config, &Theme::dark());
+        let mut bar = Taskbar::new(config, &Theme::dark().floating());
         bar.library_mut().set_catalog(office_and_games());
         let mut input = TaskbarInput::new();
         open_library(&mut input, &mut bar);
@@ -3729,7 +3752,7 @@ fn background_is_the_floating_chrome_fill() {
 fn the_bar_edge_is_the_rim_and_its_interior_the_ground() {
     for theme in [Theme::dark(), Theme::light()] {
         let mut bar = bottom_bar();
-        bar.apply_theme(&theme);
+        bar.apply_theme(&theme.clone().floating());
         let surface = TaskbarRenderer::new(test_icon_cache())
             .render(&bar, Scale::ONE, &mut NoArtwork)
             .expect("bar renders");
@@ -3780,7 +3803,7 @@ fn the_bar_rim_lightens_a_dark_theme_and_darkens_a_light_one() {
     // which is the one "lightened" edge read correctly either way.
     for (theme, lighter) in [(Theme::dark(), true), (Theme::light(), false)] {
         let mut bar = bottom_bar();
-        bar.apply_theme(&theme);
+        bar.apply_theme(&theme.clone().floating());
         let surface = TaskbarRenderer::new(test_icon_cache())
             .render(&bar, Scale::ONE, &mut NoArtwork)
             .expect("bar renders");
@@ -3812,7 +3835,7 @@ fn the_bar_rim_lightens_a_dark_theme_and_darkens_a_light_one() {
 fn the_bar_rim_stays_see_through() {
     for theme in [Theme::dark(), Theme::light()] {
         let mut bar = bottom_bar();
-        bar.apply_theme(&theme);
+        bar.apply_theme(&theme.clone().floating());
         let surface = TaskbarRenderer::new(test_icon_cache())
             .render(&bar, Scale::ONE, &mut NoArtwork)
             .expect("bar renders");
@@ -3931,7 +3954,7 @@ fn a_hovered_or_pressed_slot_never_washes_over_the_bar_rim() {
                 ("pressed", floating_plate(&theme, held)),
             ] {
                 let mut bar = bottom_bar();
-                bar.apply_theme(&theme);
+                bar.apply_theme(&theme.clone().floating());
                 bar.set_apps(alloc::vec![app("App")]);
                 let layout = bar.layout(Scale::ONE);
                 let frame = layout.bar;
@@ -4352,7 +4375,7 @@ fn theme_switch_repaints_the_bar() {
     let dark = renderer
         .render(&bar, Scale::ONE, &mut NoArtwork)
         .expect("bar renders");
-    bar.apply_theme(&Theme::light());
+    bar.apply_theme(&Theme::light().floating());
     let light = renderer
         .render(&bar, Scale::ONE, &mut NoArtwork)
         .expect("bar renders");
@@ -4851,7 +4874,10 @@ fn hovered_and_current_rows_show_their_states() {
 #[test]
 fn empty_library_renders_the_placeholder_ink() {
     let theme = Theme::dark();
-    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &Theme::dark());
+    let mut bar = Taskbar::new(
+        TaskbarConfig::bottom_bar(1000, 800),
+        &Theme::dark().floating(),
+    );
     bar.library_mut().set_catalog(Catalog::new());
     let mut input = TaskbarInput::new();
     open_library(&mut input, &mut bar);
@@ -4872,7 +4898,10 @@ fn empty_library_renders_the_placeholder_ink() {
 #[test]
 fn overflowing_popup_paints_its_scrollbar() {
     let theme = Theme::dark();
-    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 300), &Theme::dark());
+    let mut bar = Taskbar::new(
+        TaskbarConfig::bottom_bar(1000, 300),
+        &Theme::dark().floating(),
+    );
     let mut cat = Catalog::new();
     for index in 0..30 {
         cat.insert(entry(
@@ -4914,7 +4943,10 @@ fn popup_renders_under_both_themes_and_high_contrast() {
         Theme::light(),
         dark_with_contrast(Contrast::High),
     ] {
-        let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme);
+        let mut bar = Taskbar::new(
+            TaskbarConfig::bottom_bar(1000, 800),
+            &theme.clone().floating(),
+        );
         bar.library_mut().set_catalog(office_and_games());
         let mut input = TaskbarInput::new();
         open_library(&mut input, &mut bar);
@@ -4947,7 +4979,7 @@ fn popup_repaints_after_a_theme_switch() {
     let dark = renderer
         .render_library(&bar, Scale::ONE)
         .expect("popup renders");
-    bar.apply_theme(&Theme::light());
+    bar.apply_theme(&Theme::light().floating());
     let light = renderer
         .render_library(&bar, Scale::ONE)
         .expect("popup renders");
@@ -4962,7 +4994,10 @@ fn popup_repaints_after_a_theme_switch() {
 /// An open popup over `count` Utilities entries on a short screen, so the
 /// list overflows its viewport and only some rows are shown.
 fn overflowing_library(count: usize) -> Taskbar {
-    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 300), &Theme::dark());
+    let mut bar = Taskbar::new(
+        TaskbarConfig::bottom_bar(1000, 300),
+        &Theme::dark().floating(),
+    );
     let mut cat = Catalog::new();
     for index in 0..count {
         cat.insert(entry(
@@ -5192,7 +5227,10 @@ fn popover_caps_the_shown_cards() {
 #[test]
 fn popover_fails_closed_on_a_degenerate_screen() {
     // A bar that fills the whole screen leaves no room above it for a card.
-    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(200, 40), &Theme::dark());
+    let mut bar = Taskbar::new(
+        TaskbarConfig::bottom_bar(200, 40),
+        &Theme::dark().floating(),
+    );
     let _ = bar.raise_notification(TransientNotification::new(
         1,
         1,
@@ -5277,7 +5315,10 @@ fn render_notifications_paints_a_card_in_every_theme() {
         dark_with_contrast(Contrast::High),
         dark_reduced_motion(),
     ] {
-        let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme);
+        let mut bar = Taskbar::new(
+            TaskbarConfig::bottom_bar(1000, 800),
+            &theme.clone().floating(),
+        );
         let _ = bar.raise_notification(TransientNotification::new(
             2,
             5,
@@ -5458,7 +5499,7 @@ fn switchboard_is_trailing_most_on_every_edge() {
             edge,
             ..TaskbarConfig::bottom_bar(1000, 800)
         };
-        let bar = Taskbar::new(config, &theme);
+        let bar = Taskbar::new(config, &theme.clone().floating());
         let layout = bar.layout(Scale::ONE);
         // Trailing-most on the *bar*, which stands off the screen by the
         // margin it floats in and seats its regions inside its own rim —
@@ -5502,7 +5543,10 @@ fn narrow_screen_collapses_clock_and_icons_before_the_switchboard() {
     // capsule. The clock and the notification area collapse to nothing
     // first, and the capsule clips into the leftover 32 px rather than
     // overlaying the launcher.
-    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(109, 800), &Theme::dark());
+    let mut bar = Taskbar::new(
+        TaskbarConfig::bottom_bar(109, 800),
+        &Theme::dark().floating(),
+    );
     bar.set_status_signals(alloc::vec![StatusSignal::new(
         IconId(1),
         StatusKind::Network
@@ -5523,7 +5567,10 @@ fn tiny_screen_clips_the_switchboard_against_the_launcher() {
     // 77 px is exactly the permanent launcher and the separator gutter after
     // it: every region beyond, the capsule included, fails closed to empty
     // rather than overlaying it.
-    let bar = Taskbar::new(TaskbarConfig::bottom_bar(77, 800), &Theme::dark());
+    let bar = Taskbar::new(
+        TaskbarConfig::bottom_bar(77, 800),
+        &Theme::dark().floating(),
+    );
     let layout = bar.layout(Scale::ONE);
     assert!(layout.switchboard.is_empty());
     assert!(layout.clock.is_empty());
@@ -5532,7 +5579,10 @@ fn tiny_screen_clips_the_switchboard_against_the_launcher() {
 
     // An absurd sliver clips into the launcher itself; nothing panics and
     // neither the empty capsule slot nor the empty rule can be hit.
-    let sliver = Taskbar::new(TaskbarConfig::bottom_bar(10, 800), &Theme::dark());
+    let sliver = Taskbar::new(
+        TaskbarConfig::bottom_bar(10, 800),
+        &Theme::dark().floating(),
+    );
     let slim = sliver.layout(Scale::ONE);
     assert!(slim.switchboard.is_empty());
     assert!(slim.separator.is_empty());
@@ -6095,7 +6145,7 @@ fn readout_opens_outward_on_every_edge_and_stays_on_screen() {
             edge,
             ..TaskbarConfig::bottom_bar(1000, 800)
         };
-        let mut bar = Taskbar::new(config, &Theme::dark());
+        let mut bar = Taskbar::new(config, &Theme::dark().floating());
         let mut input = TaskbarInput::new();
         hover_switchboard(&mut input, &mut bar);
         let bar_rect = bar.layout(Scale::ONE).bar;
@@ -6237,7 +6287,10 @@ fn capsule_renders_across_themes_and_high_contrast() {
         dark_with_contrast(Contrast::High),
         dark_reduced_motion(),
     ] {
-        let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme);
+        let mut bar = Taskbar::new(
+            TaskbarConfig::bottom_bar(1000, 800),
+            &theme.clone().floating(),
+        );
         let mut summary = tray_summary(2, 0, 400);
         summary.pressure = Some(tray_pressure(TrayPressureKind::Memory, 600, 2));
         bar.set_tray_summary(Some(summary));
@@ -6596,7 +6649,10 @@ fn routing_a_pointer_sample_over_the_open_popup_latches_only_what_changed() {
 /// A taskbar whose catalog holds the terminal bundle the *Task Shell* row
 /// launches, so that row is actionable.
 fn bar_with_task_shell() -> Taskbar {
-    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &Theme::dark());
+    let mut bar = Taskbar::new(
+        TaskbarConfig::bottom_bar(1000, 800),
+        &Theme::dark().floating(),
+    );
     let mut catalog = office_and_games();
     catalog
         .insert(entry("terminal", "Terminal", LibraryCategory::Utilities))
@@ -6724,7 +6780,8 @@ fn the_active_appearance_row_is_the_groups_chosen_member_and_is_not_actionable()
                 Theme::dark()
             } else {
                 Theme::light()
-            },
+            }
+            .floating(),
         );
         let mut input = TaskbarInput::new();
         let request = ask_system_menu(&mut input, &mut bar);

@@ -593,10 +593,12 @@ none can be forgotten and left an opaque patch.
 | Floating | The same colours at the palette's chrome alphas (§6), over a backdrop the compositor blurs by `chrome_backdrop_blur`. The wallpaper and the windows behind read through as a wash of their colours. |
 
 A floating surface keeps whichever colour role it wears solid and takes only
-the alpha, so every relationship the theme authored survives: the taskbar, the
-bar's context menu and the tray readout ground in `surface_raised`, a panel in
+the alpha, so every relationship the theme authored survives: the taskbar, a
+menu plate and the tray readout ground in `surface_raised`, a panel in
 `surface`, and a resting row — `surface` too — is therefore exactly its panel
-rather than a patch on it. There are two alphas, one step apart:
+rather than a patch on it. There are two alphas, and the raised one is *derived*
+from the ground — half of what is left between it and solid — so raising the
+chrome opacity cannot narrow the step to nothing:
 
 | Layer | Alpha | What takes it |
 |---|---|---|
@@ -604,11 +606,13 @@ rather than a patch on it. There are two alphas, one step apart:
 | `ChromeLayer::Plate` | `chrome_plate_alpha` | A plate raised on it: a button, a text field, a notification card — furniture standing on the glass rather than a hole cut in it. |
 
 The choice belongs to whoever puts the surface on screen — the only party that
-knows what is behind it. The desktop's floating chrome is the taskbar and
-**every** popup the bar opens: the program-library launcher, the bar's context
-menu, the notification popover, and the Switchboard capsule's readout. A
-window's own menus and the pinboard's backdrop menu are not: they cover what
-they open over.
+knows what is behind it. On the desktop that is the session, which derives the
+floating form **once** (`DesktopSession::floating_theme`) and hands it to
+everything it grounds in it: the taskbar, every popup the bar opens (the
+program-library launcher, the hover window picker, the notification popover, and
+the Switchboard capsule's readout), and every surface of an open menu chain —
+every menu on the desktop is one (`plans/NEW-MENUS.md` M5). One derivation is
+what stops a runtime theme switch leaving a surface on the ground it had before.
 
 Three rules keep the look honest:
 

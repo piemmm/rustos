@@ -357,24 +357,26 @@ pub(crate) const COMMAND_ALPHA: u8 = 128;
 /// much: a hue that has to be looked for is not identifying anything.
 pub(crate) const TITLE_HUE_ALPHA: u8 = 82;
 
-/// The opacity both built-in themes give their floating chrome: seven tenths.
+/// The opacity both built-in themes give their floating chrome: four fifths.
 ///
-/// The bar and its popups sit over the wallpaper and over whatever windows
-/// are open, and the desktop reads better when they are part of that picture
-/// rather than a solid band across it. Three tenths through is as far as it
-/// goes: the icons and text on top need a settled ground to read against, and
-/// the backdrop they are laid over is blurred first, which is what carries
-/// the separation the missing opacity would otherwise have to.
-pub(crate) const CHROME_ALPHA: u8 = 179;
+/// The bar, its popups and every menu plate sit over the wallpaper and over
+/// whatever windows are open, and the desktop reads better when they are part
+/// of that picture rather than solid cards on top of it. One fifth through is
+/// as far as it goes: the icons and text on top need a settled ground to read
+/// against, and the backdrop they are laid over is blurred first, which is
+/// what carries the separation the missing opacity would otherwise have to.
+pub(crate) const CHROME_ALPHA: u8 = 204;
 
 /// The opacity both built-in themes give a plate raised on floating chrome:
-/// a further fifteen hundredths of the way to solid.
+/// half of what is left between its ground and solid.
 ///
 /// A button or a text field is furniture standing on the glass, so it reads
 /// as a distinct object rather than a hole cut in the surface — while still
 /// letting the blurred backdrop through, which is what keeps a popup one
-/// piece of glass instead of a frosted sheet with solid patches on it.
-pub(crate) const CHROME_PLATE_ALPHA: u8 = 217;
+/// piece of glass instead of a frosted sheet with solid patches on it. Derived
+/// from the ground rather than authored beside it, so raising the chrome
+/// opacity cannot quietly narrow the step to nothing.
+pub(crate) const CHROME_PLATE_ALPHA: u8 = CHROME_ALPHA + (u8::MAX - CHROME_ALPHA) / 2;
 
 /// The metrics shared by both built-in themes. Corner radii and border
 /// thickness are an appearance-independent house style, so the dark and

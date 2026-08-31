@@ -28,8 +28,11 @@ const APP: ChainOwner = ChainOwner::Window {
     open_id: 42,
 };
 
+/// The ground the desktop opens a chain on: a plate is floating chrome, so the
+/// rectangles a row is hit-tested against are resolved against the same form
+/// its pixels are painted with.
 fn theme() -> Theme {
-    Theme::dark()
+    Theme::dark().floating()
 }
 
 fn geom(theme: &Theme) -> ChainGeometry<'_> {
@@ -992,17 +995,20 @@ fn a_highlight_moving_on_one_plate_disturbs_no_other() {
 
 // --- what a plate is painted with -----------------------------------------
 
-/// A plate lays the raised ground it covers what is behind it with, and
-/// repaints with the theme.
+/// A plate lays the raised ground, at the opacity floating chrome is drawn at,
+/// and repaints with the theme.
 ///
-/// The pixels are what no state test can state. It is deliberately *opaque*:
-/// a plate is not the bar's floating chrome, so nothing behind it is blurred
-/// for it (`tests::a_menu_plate_frosts_nothing` holds the other half of that
-/// pair — the compositor window asks for no blur).
+/// The pixels are what no state test can state. A plate is the desktop's
+/// floating chrome like the bar and its popups, so its ground takes the
+/// palette's `chrome_alpha` through the one shared rule rather than a weight of
+/// its own — and what it opened over reads through it
+/// (`tests::every_menu_chain_surface_frosts_what_is_behind_it` holds the other
+/// half of that pair: the compositor window asks for the theme's chrome blur,
+/// without which the rows would sit on detail).
 #[test]
 fn a_plate_lays_the_raised_ground_and_follows_the_theme() {
-    let dark = Theme::dark();
-    let light = Theme::light();
+    let dark = Theme::dark().floating();
+    let light = Theme::light().floating();
     let mut chain = MenuChain::new();
 
     let painted = |chain: &MenuChain, theme: &Theme| -> tairix_raster::Surface {
@@ -1022,12 +1028,22 @@ fn a_plate_lays_the_raised_ground_and_follows_the_theme() {
         &geom(&dark),
     );
     let on_dark = painted(&chain, &dark);
-    let ground = tairix_raster::Color::from(dark.palette().surface_raised).premultiply();
+    let fill = tairix_controls::ground_fill(
+        &dark,
+        dark.palette().surface_raised,
+        tairix_controls::ChromeLayer::Ground,
+    );
+    let ground = tairix_raster::Color::from(fill).premultiply();
     assert!(
         on_dark.pixels().contains(&ground),
         "a plate lays the raised ground"
     );
-    assert_eq!(ground.a, 255, "and covers what it opened over");
+    assert_eq!(
+        ground.a,
+        dark.palette().chrome_alpha,
+        "and lets what it opened over read through it"
+    );
+    assert!(ground.a < 255, "a plate that covers frosts nothing");
 
     let on_light = painted(&chain, &light);
     assert_eq!(

@@ -8102,7 +8102,7 @@ thread costs the RAM of its working set rather than of its `stack-bytes` bound.
 
 ---
 
-## NEW-MENUS — menus owned by the desktop, not by the app (`plans/NEW-MENUS.md`)  **[M0–M3 DONE, M4 PLANNED]**
+## NEW-MENUS — menus owned by the desktop, not by the app (`plans/NEW-MENUS.md`)  **[M0–M3 DONE, M5 DONE, M4 PLANNED]**
 
 **Dependencies:** Stage 7 (compositor, session, controls). Independent of
 `plans/FIX-DESKTOP-SPEEDUP.md`, which closed the performance reason for it
@@ -8118,15 +8118,25 @@ the file manager's, the pinboard's and the bar's are all deleted, and one
 renderer (`lib/controls`' `Menu`/`TitleBar`), one placement rule (`plate_rect`),
 one model (`ChainModel`) and one grab serve all of them.
 
+A plate is the desktop's **floating chrome** (M5), not a solid card: it grounds
+in the floating theme so its fill takes the palette's `chrome_alpha` and the
+compositor frosts what is behind it by `chrome_backdrop_blur`, taking both from
+the shared values every other floating surface takes. That floating form is
+derived **once** for the desktop (`DesktopSession::floating_theme`) and handed to
+the bar as well, so a theme switch cannot leave a surface on the ground it had
+before.
+
 **What is left.** M4 alone: the plate becomes a cached damage-reporting
 surface like the window furniture, so moving a highlight repaints two rows
 rather than the plate. It was meaningless while applications owned menu
 pixels, and is now unblocked.
 
-All three escalated decisions are settled in the plan's §6: variable-length
+All four escalated decisions are settled in the plan's §6: variable-length
 request framing (M1a), Open With… as one row plus the application's own chooser
-(M3.3), and the program-library popup staying a bespoke searchable list rather
-than a menu (M3.4).
+(M3.3), the program-library popup staying a bespoke searchable list rather
+than a menu (M3.4), and the owner's opacity/blur figures — 80% as one shared
+alpha, the blur unchanged at the value the right-hand icon-bar surfaces already
+use (M5).
 
 ---
 

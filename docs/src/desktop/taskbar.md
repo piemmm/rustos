@@ -343,9 +343,10 @@ popup painter) needs no cache of its own, so it stays a `&self` method.
 
 The bar and every popup it opens — the program-library panel, the hover window
 picker, the notification popover, and the Switchboard readout — are drawn with
-the floating theme the bar adopted, and the session asks the compositor for the theme's
-`chrome_backdrop_blur` — `7` logical pixels in both built-in themes — behind
-each surface. Along-bar popup placement is clamped to the bar's own span, so
+the floating theme the session derived once for all of its chrome
+(`DesktopSession::floating_theme`, which also grounds every menu plate), and the
+session asks the compositor for the theme's `chrome_backdrop_blur` — `7` logical
+pixels in both built-in themes — behind each surface. Along-bar popup placement is clamped to the bar's own span, so
 no popup enters the wallpaper gap.
 
 Every *background* on those surfaces therefore lets the backdrop through: the

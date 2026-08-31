@@ -3737,7 +3737,7 @@ mod program {
                     }
                     let at = shell.router().pointer();
                     let acted = {
-                        let geom = chain_geometry(shell, compositor);
+                        let geom = chain_geometry(shell.session(), compositor);
                         menu.handle(&event, at, &geom)
                     };
                     settle_menu_chain(
@@ -3760,7 +3760,7 @@ mod program {
                 Ok(Some((event @ tairix_wm::InputEvent::KeyPressed { .. }, _))) => {
                     let at = shell.router().pointer();
                     let acted = {
-                        let geom = chain_geometry(shell, compositor);
+                        let geom = chain_geometry(shell.session(), compositor);
                         menu.handle(&event, at, &geom)
                     };
                     settle_menu_chain(
@@ -3829,7 +3829,7 @@ mod program {
         // an answer of its own, and settling once the queue is empty would
         // leave it sitting there until the next event.
         {
-            let geom = chain_geometry(shell, compositor);
+            let geom = chain_geometry(shell.session(), compositor);
             menu.settle_mode(&geom);
         }
         for (owner, outcome) in menu.take_answers() {
@@ -3913,7 +3913,7 @@ mod program {
         compositor: &mut Compositor,
         windows: &SessionWindows,
     ) {
-        let geom = chain_geometry(shell, compositor);
+        let geom = chain_geometry(shell.session(), compositor);
         match open_desktop_menu(
             menu,
             ChainOwner::Bar(request.subject),
@@ -5081,7 +5081,7 @@ mod program {
         windows: &SessionWindows,
     ) {
         let model = pinboard::model(on_icon, desktop.settings());
-        let geom = chain_geometry(shell, compositor);
+        let geom = chain_geometry(shell.session(), compositor);
         match open_desktop_menu(
             menu,
             ChainOwner::Backdrop,

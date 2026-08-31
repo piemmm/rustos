@@ -10,13 +10,15 @@ use crate::assets::{load_cursor_theme, load_icon_set, SessionFileReader};
 /// The desktop session: the shared theme registry plus the taskbar model.
 ///
 /// It owns both so a runtime theme switch is a single in-place operation: the
-/// registry's active theme changes and the taskbar is re-themed to match.
-/// The taskbar holds no authority — its responses are typed reports the
+/// registry's active theme changes, the floating form every piece of desktop
+/// chrome grounds itself in is re-derived, and the taskbar is re-themed to
+/// match. The taskbar holds no authority — its responses are typed reports the
 /// embedder (which holds the window-manager, filesystem, and spawn
 /// capabilities) acts on.
 #[derive(Clone, Debug)]
 pub struct DesktopSession {
     themes: ThemeRegistry,
+    floating: Theme,
     taskbar: Taskbar,
 }
 
@@ -31,8 +33,13 @@ impl DesktopSession {
     #[must_use]
     pub fn new(config: TaskbarConfig) -> Self {
         let themes = ThemeRegistry::with_builtins();
-        let taskbar = Taskbar::new(config, themes.active());
-        Self { themes, taskbar }
+        let floating = themes.active().clone().floating();
+        let taskbar = Taskbar::new(config, &floating);
+        Self {
+            themes,
+            floating,
+            taskbar,
+        }
     }
 
     /// The theme registry.
@@ -45,6 +52,20 @@ impl DesktopSession {
     #[must_use]
     pub fn active_theme(&self) -> &Theme {
         self.themes.active()
+    }
+
+    /// The active theme in the *floating* form every piece of desktop chrome is
+    /// drawn with: the taskbar, the popups it opens, and every menu plate.
+    ///
+    /// Derived once here rather than per surface, because the ground is a
+    /// property of where a surface is put on screen and the session is what puts
+    /// all of these there. One derivation is also what makes a theme switch
+    /// unable to leave a surface behind on the ground it had before, and what
+    /// keeps a plate's pixels and the row rectangles it is hit-tested against
+    /// coming from one theme rather than two.
+    #[must_use]
+    pub const fn floating_theme(&self) -> &Theme {
+        &self.floating
     }
 
     /// The taskbar model.
@@ -68,7 +89,7 @@ impl DesktopSession {
     /// active theme nor the taskbar) if no registered theme has that id.
     pub fn set_theme(&mut self, id: ThemeId) -> Result<(), ThemeError> {
         self.themes.set_active(id)?;
-        self.taskbar.apply_theme(self.themes.active());
+        self.reground();
         Ok(())
     }
 
@@ -82,7 +103,7 @@ impl DesktopSession {
     /// which can name an unregistered id). Returns the now-active id.
     pub fn set_appearance(&mut self, appearance: Appearance) -> ThemeId {
         let id = self.themes.set_appearance(appearance);
-        self.taskbar.apply_theme(self.themes.active());
+        self.reground();
         id
     }
 
@@ -113,6 +134,14 @@ impl DesktopSession {
         R: SessionFileReader + ?Sized,
     {
         load_icon_set(reader)
+    }
+
+    /// Re-derive the floating chrome theme from the now-active theme and hand it
+    /// to the taskbar: the one path every theme switch takes, so no switch can
+    /// move one and not the other.
+    fn reground(&mut self) {
+        self.floating = self.themes.active().clone().floating();
+        self.taskbar.apply_theme(&self.floating);
     }
 
     /// Register a custom theme so it can later be made active.

@@ -67,11 +67,12 @@ use crate::apps::{picker_cells, prefetch_bar_icons, resolve_library_icons, thumb
 use crate::desktop::Desktop;
 use crate::fade::BackdropFade;
 use crate::input::{SessionInputResponse, SessionInputRouter};
-use crate::menu::{ChainGeometry, MenuChain, SurfaceKind};
-use crate::presenter::{place, TaskbarPresenter};
+use crate::menu::{MenuChain, SurfaceKind};
+use crate::presenter::{chrome_blur, TaskbarPresenter};
 use crate::session::DesktopSession;
 use crate::tasks::TaskBridge;
 use crate::thumbs::WindowThumbnails;
+use crate::windows::chain_geometry;
 
 /// A source of live pointer/keyboard events for the desktop.
 ///
@@ -1014,6 +1015,13 @@ impl DesktopShell {
     /// arrangement per frame. A chain the desktop opened for itself has no
     /// owner and its plates are ordinary session surfaces.
     ///
+    /// Every surface of the chain is desktop chrome like the bar and its
+    /// popups: it is painted on the session's floating theme and asks the
+    /// compositor to frost what is behind it by the same
+    /// `chrome_backdrop_blur`. The rounding and the frosting are applied to
+    /// every surface on one path, whichever way its window was obtained, so a
+    /// re-used plate cannot keep a look the chain no longer asks for.
+    ///
     /// Fails closed: a plate surface the heap will not give back leaves what
     /// is on screen untouched rather than showing an empty window.
     /// Returns `false` when a plate could not be given a surface, which the
@@ -1026,14 +1034,10 @@ impl DesktopShell {
         owner: Option<WindowId>,
     ) -> bool {
         let scale = compositor.scale();
-        let theme = self.session.active_theme().clone();
-        let geom = ChainGeometry {
-            screen: compositor.screen_rect(),
-            scale,
-            theme: &theme,
-            epoch: compositor.chrome_epoch(),
-        };
+        let geom = chain_geometry(&self.session, compositor);
+        let theme = geom.theme;
         let corners = Corners::from_radius(scale.scale_length(theme.metrics().popup_corner_radius));
+        let blur = chrome_blur(theme);
         let mut kept: Vec<(SurfaceKind, WindowId)> = Vec::new();
         let mut drawn = true;
         for placed in chain.surfaces() {
@@ -1069,15 +1073,15 @@ impl DesktopShell {
                         (0, 0, local.width, local.height),
                         (
                             scale.scale_length(theme.metrics().popup_corner_radius),
-                            tairix_controls::plate_border(&theme, scale),
+                            tairix_controls::plate_border(theme, scale),
                         ),
-                        &theme,
+                        theme,
                         (
                             theme.palette().surface_raised,
                             tairix_controls::ChromeLayer::Ground,
                         ),
                     );
-                    facts.render(&mut pixels, local, scale, &theme);
+                    facts.render(&mut pixels, local, scale, theme);
                     pixels
                 }
             };
@@ -1085,7 +1089,6 @@ impl DesktopShell {
                 (Some(id), _) if compositor.window(id).is_some() => {
                     compositor.set_surface(id, pixels);
                     compositor.move_window(id, placed.rect.origin);
-                    compositor.set_corners(id, corners);
                     id
                 }
                 (_, Some(parent)) => {
@@ -1095,11 +1098,12 @@ impl DesktopShell {
                         drawn = false;
                         continue;
                     };
-                    compositor.set_corners(id, corners);
                     id
                 }
-                (_, None) => place(compositor, None, placed.rect.origin, pixels, (corners, 0)),
+                (_, None) => compositor.add_window(placed.rect.origin, pixels),
             };
+            compositor.set_corners(id, corners);
+            compositor.set_backdrop_blur(id, blur);
             kept.push((placed.kind, id));
         }
         for (kind, id) in core::mem::take(&mut self.menu_windows) {

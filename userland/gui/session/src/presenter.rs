@@ -388,11 +388,11 @@ impl TaskbarPresenter {
 /// How far the backdrop behind the desktop's floating chrome is blurred, in
 /// the *logical* pixels the compositor resolves against the output's density.
 ///
-/// The bar and every popup it opens are drawn with the theme's floating
-/// ground, which only reads as frosted glass over a blurred backdrop — so the
-/// two are the same theme's decision and are taken from it here rather than
-/// restated per surface.
-fn chrome_blur(theme: &Theme) -> u16 {
+/// The bar, every popup it opens and every menu plate are drawn with the
+/// theme's floating ground, which only reads as frosted glass over a blurred
+/// backdrop — so the two are the same theme's decision and are taken from it
+/// here rather than restated per surface.
+pub(crate) fn chrome_blur(theme: &Theme) -> u16 {
     u16::try_from(theme.metrics().chrome_backdrop_blur).unwrap_or(u16::MAX)
 }
 
@@ -407,11 +407,7 @@ fn chrome_blur(theme: &Theme) -> u16 {
 /// The blur is in logical pixels, `0` for a surface that covers what is behind
 /// it. A caller states it here rather than after placing, so a surface can
 /// never be shown for a frame wearing the frosting of whatever was last placed.
-///
-/// Shared with the shell's own popup surfaces (the pinboard's context menu), so
-/// every menu and popup window in the session is placed, re-surfaced, rounded,
-/// and frosted by one definition.
-pub(crate) fn place(
+fn place(
     compositor: &mut Compositor,
     existing: Option<WindowId>,
     origin: Point,

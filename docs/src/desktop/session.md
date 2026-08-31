@@ -917,10 +917,15 @@ panel, and presents each as a compositor window:
 - while the popup is open its panel is placed above the bar at
   `LibraryLayout::panel`'s origin and rounded with its `corner_radius`;
   closing the popup removes the popup window;
-- the bar's context menu, the notification popover, and the Switchboard
+- the hover window picker, the notification popover, and the Switchboard
   capsule's instrument readout are presented the same way while each is
-  open (`MenuLayout` / `NotificationsLayout` / `TrayReadoutLayout`), and
+  open (`PickerLayout` / `NotificationsLayout` / `TrayReadoutLayout`), and
   each window is removed the moment its surface closes.
+
+Every one of them is placed asking for the theme's `chrome_backdrop_blur`,
+because each is drawn on the session's floating ground — as is every surface of
+an open menu chain, which `DesktopShell::present_menu_chain` reconciles rather
+than the presenter ([menus](menus.md)).
 
 `present` repaints **only the surfaces the taskbar latched as changed**. It
 takes the `tairix_taskbar::TaskbarRepaint` that `DesktopShell::present`
@@ -1206,7 +1211,7 @@ The desktop has two input routers — the window manager's
 `tairix_wm::InputRouter` (focus, click-to-activate, interactive move- and
 resize-grabs, every application window and the desktop layer behind them) and
 the taskbar's `tairix_taskbar::TaskbarInput` (the bar, its program-library
-popup, its context menus, the hover window picker, the notification popover,
+popup, the hover window picker, the notification popover,
 and the Switchboard capsule's readout) — and both consume the **same** shared
 `tairix_input` event vocabulary (`AGENTS.md` §17.4, §2.2). A real input source
 produces one stream, so `SessionInputRouter` is the glue that fans it to the

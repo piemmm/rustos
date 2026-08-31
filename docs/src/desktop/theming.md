@@ -56,27 +56,30 @@ bundles, under a stable `ThemeId`:
     the selection instead of being replaced by a block of accent. It is
     authored per theme rather than derived from `accent` at the draw site, so
     a theme can tune the fill's weight against its own surfaces.
-  - `chrome_alpha` (`179`) and `chrome_plate_alpha` (`217`) are opacities, not
-    colours, and they are what a *floating* desktop-chrome surface is drawn at:
-    the taskbar and every popup it opens — the program-library launcher, the
-    bar's context menu, the notification popover, the Switchboard capsule's
-    readout. Such a surface keeps whichever colour role it wears when solid and
-    takes `chrome_alpha`, so a frosted bar is recognisably the same grey a solid
-    one was, what is behind it — the wallpaper, an open window — reads through
-    instead of being replaced by a band across the screen, and every
-    relationship the theme authored survives. Anything that reads as *part* of
-    the surface — a list row, a menu row, a scrollbar channel, and the surface's
-    own `rim`, which is its edge rather than a mark on it — takes the same
-    alpha, which is what keeps a resting row exactly its ground rather than a
-    patch on it; a control *plate* raised on it — a button, a text field, a
-    notification card — takes `chrome_plate_alpha`, a step more solid, so it
-    reads as furniture standing on the glass rather than a hole cut in it. `255`
-    draws chrome solid. Like `selection_fill` neither works alone: the backdrop
-    is blurred by `chrome_backdrop_blur` first, which is what lets opaque icons
-    and text sit legibly on a translucent ground. Exactly one such fill is laid
-    down per surface — a second translucent layer over the first would compound
-    into an opacity no theme authored, so a floating panel drops its header band
-    and states the header with its rail and title instead.
+  - `chrome_alpha` (`204`, four fifths) and `chrome_plate_alpha` (`229`) are
+    opacities, not colours, and they are what a *floating* desktop-chrome
+    surface is drawn at: the taskbar and every popup it opens — the
+    program-library launcher, the notification popover, the Switchboard
+    capsule's readout — and every menu plate the desktop puts on screen.
+    `chrome_plate_alpha` is *derived* from `chrome_alpha`, half of what is left
+    between it and solid, so raising the chrome opacity cannot narrow the step
+    a raised plate reads by. Such a surface keeps whichever colour role it
+    wears when solid and takes `chrome_alpha`, so a frosted bar is recognisably
+    the same grey a solid one was, what is behind it — the wallpaper, an open
+    window — reads through instead of being replaced by a band across the
+    screen, and every relationship the theme authored survives. Anything that
+    reads as *part* of the surface — a list row, a menu row, a scrollbar
+    channel, and the surface's own `rim`, which is its edge rather than a mark
+    on it — takes the same alpha, which is what keeps a resting row exactly its
+    ground rather than a patch on it; a control *plate* raised on it — a button,
+    a text field, a notification card — takes `chrome_plate_alpha`, a step more
+    solid, so it reads as furniture standing on the glass rather than a hole cut
+    in it. `255` draws chrome solid. Like `selection_fill` neither works alone:
+    the backdrop is blurred by `chrome_backdrop_blur` first, which is what lets
+    opaque icons and text sit legibly on a translucent ground. Exactly one such
+    fill is laid down per surface — a second translucent layer over the first
+    would compound into an opacity no theme authored, so a floating panel drops
+    its header band and states the header with its rail and title instead.
   - `frame` is a single *neutral* tone — a step lighter than `surface` on dark,
     a step deeper on light — and it is deliberately **not** a focus signal.
     Every window wears the same quiet rim at every activation, because the rim

@@ -163,7 +163,7 @@ impl Taskbar {
     pub fn new(config: TaskbarConfig, theme: &Theme) -> Self {
         Self {
             config,
-            theme: theme.clone().floating(),
+            theme: theme.clone(),
             library_button: IconButton::new(IconKind::Library, ControlRole::Neutral)
                 .seated(PlateSeating::Bar),
             library: LibraryPopup::new(),
@@ -187,11 +187,12 @@ impl Taskbar {
 
     /// The active theme the bar lays out and paints with.
     ///
-    /// It is the desktop theme in its *floating* form: the bar and every popup
-    /// it opens are chrome over a blurred backdrop, so their backgrounds let
-    /// what is behind them through. Adopting it once here is what makes that
-    /// true of everything the bar draws — no control is told separately, and
-    /// none can be left an opaque patch.
+    /// It is the theme its embedder handed it, ground and all: whoever puts a
+    /// surface on screen is the only party that knows what is behind it, so the
+    /// desktop hands the bar the *floating* form it derives once for all of its
+    /// chrome, and the bar adopts it whole. Holding one theme for the bar and
+    /// every popup it opens is what makes that true of everything it draws — no
+    /// control is told separately, and none can be left an opaque patch.
     #[must_use]
     pub const fn theme(&self) -> &Theme {
         &self.theme
@@ -477,11 +478,12 @@ impl Taskbar {
         action
     }
 
-    /// Adopt a new theme. The rest of the taskbar's state is unchanged, so a
-    /// runtime dark/light switch needs no relayout of the model. Every
-    /// surface draws from the theme's palette, so every surface repaints.
+    /// Adopt a new theme, ground and all (see [`theme`](Self::theme)). The rest
+    /// of the taskbar's state is unchanged, so a runtime dark/light switch needs
+    /// no relayout of the model. Every surface draws from the theme's palette,
+    /// so every surface repaints.
     pub fn apply_theme(&mut self, theme: &Theme) {
-        self.theme = theme.clone().floating();
+        self.theme = theme.clone();
         self.repaint = TaskbarRepaint::ALL;
     }
 
@@ -494,10 +496,10 @@ impl Taskbar {
     }
 
     /// Take the repaint latch: which of the bar's five rendered surfaces
-    /// (the bar strip, the library popup, the context menu, the notification
-    /// popover, and the Switchboard readout) changed since the last take, so
-    /// the embedder re-presents exactly those and none of the rest. Reading
-    /// it clears it.
+    /// (the bar strip, the library popup, the hover window picker, the
+    /// notification popover, and the Switchboard readout) changed since the
+    /// last take, so the embedder re-presents exactly those and none of the
+    /// rest. Reading it clears it.
     ///
     /// The contract every mutator on this type upholds: a change that alters
     /// what a surface draws latches that surface, and a change touching more
@@ -533,9 +535,9 @@ impl Taskbar {
     /// embedder whose icon artwork arrived after they were last painted.
     ///
     /// The bar (its application slots) and the library popup (its rows) are
-    /// the two that do; the context menu, the notification
-    /// popover, and the instrument readout draw no application artwork at all,
-    /// so a decode landing must not cost their pixels. Which surfaces those are
+    /// the two that do; the hover window picker, the notification popover, and
+    /// the instrument readout draw no application artwork at all, so a decode
+    /// landing must not cost their pixels. Which surfaces those are
     /// is the bar's own knowledge, so it says so here rather than an embedder
     /// guessing at a flag set.
     pub fn request_icon_repaint(&mut self) {

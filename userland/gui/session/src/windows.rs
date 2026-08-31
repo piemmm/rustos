@@ -35,6 +35,7 @@ use crate::apps::{AppBarBridge, BUNDLE_RUN_SUFFIX};
 use crate::launch::LaunchTable;
 use crate::menu::{ChainGeometry, ChainOwner, MenuChain, ModelRefused};
 use crate::picker::PickerSlot;
+use crate::session::DesktopSession;
 use crate::shell::DesktopShell;
 
 /// Event id of the one-shot announcement that a served window's first
@@ -558,16 +559,24 @@ pub const fn window_menu_placement(anchor: Rect) -> PlatePlacement {
 
 /// The scale, theme and screen every menu-chain geometry answer resolves at.
 ///
-/// Taken from the shell and the compositor rather than a copy of its own, so
-/// a chain is placed at exactly the density and theme the desktop is drawn at.
-/// A free function rather than a method, because the caller holds the chain
-/// mutably while it reads these.
+/// Taken from the session and the compositor rather than a copy of its own, so
+/// a chain is placed at exactly the density and theme the desktop is drawn at —
+/// the *floating* theme, since a plate is desktop chrome over a blurred
+/// backdrop like the bar and its popups. One definition, so the pixels a plate
+/// is painted with and the row rectangles it is hit-tested against can never
+/// come from two themes.
+///
+/// It takes the session rather than the whole shell so the caller can hold the
+/// chain, or the shell's own window records, mutably while it reads these.
 #[must_use]
-pub fn chain_geometry<'a>(shell: &'a DesktopShell, compositor: &Compositor) -> ChainGeometry<'a> {
+pub fn chain_geometry<'a>(
+    session: &'a DesktopSession,
+    compositor: &Compositor,
+) -> ChainGeometry<'a> {
     ChainGeometry {
         screen: compositor.screen_rect(),
         scale: compositor.scale(),
-        theme: shell.session().active_theme(),
+        theme: session.floating_theme(),
         epoch: compositor.chrome_epoch(),
     }
 }
@@ -847,7 +856,7 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
             .and_then(|owner| self.apps.attested_identity(owner))
             .map(|identity| info_facts(&identity));
         let model = ChainModel::from_app_menu(menu.title(), menu, facts.as_ref());
-        let geom = chain_geometry(self.shell, self.compositor);
+        let geom = chain_geometry(self.shell.session(), self.compositor);
         self.menu
             .open(owner, model, window_menu_placement(anchor), &geom)
             .map_err(|ModelRefused::NoRows| Errno::OutOfRange)

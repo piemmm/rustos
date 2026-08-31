@@ -338,17 +338,16 @@ window's radius over the window channel
 per-frame work, not a capacity that grows.
 
 The desktop's own chrome is the standing consumer: the session places the
-taskbar and every popup it opens — the program-library launcher, the bar's
-context menu, the notification popover, the Switchboard capsule's readout —
-with the theme's `chrome_backdrop_blur`, because each is drawn on a
-translucent ground that only reads as frosted glass over a blurred backdrop
-(`plans/GUI-CONTROLS-DESIGN.md`, "Surface ground"). It is asked for as the
-surface is placed, so a chrome window is never shown for a frame wearing the
-frosting of whatever was placed before it. The pinboard's own backdrop menu
-asks for none: it covers what it opens over. A desktop session therefore
-always has at least one frosted window, which is why the accelerated layer
-path — a hardware plane cannot read what is beneath it — currently falls back
-to this software composite for the whole frame
+taskbar, every popup it opens — the program-library launcher, the hover window
+picker, the notification popover, the Switchboard capsule's readout — and every
+surface of an open menu chain with the theme's `chrome_backdrop_blur`, because
+each is drawn on a translucent ground that only reads as frosted glass over a
+blurred backdrop (`plans/GUI-CONTROLS-DESIGN.md`, "Surface ground"). It is asked
+for as the surface is placed, so a chrome window is never shown for a frame
+wearing the frosting of whatever was placed before it. A desktop session
+therefore always has at least one frosted window, which is why the accelerated
+layer path — a hardware plane cannot read what is beneath it — currently falls
+back to this software composite for the whole frame
 (`plans/FIX-DISPLAY-ACCELERATION.md`).
 
 The radius is a desktop length, so it is authored once and converted to

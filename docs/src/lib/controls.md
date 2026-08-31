@@ -263,12 +263,12 @@ patch.
   read through as a wash of their colours.
 
 Adopting it belongs to whoever puts the surface on screen, the only party that
-knows what is behind it. On the desktop that is the taskbar, which takes the
-floating theme once, so the bar, the four popups it opens, and every control on
-them are translucent by construction; a window's own menus and the pinboard's
-backdrop menu stay opaque, because they cover what they open over. A floating
-surface keeps the role it wears when solid — the bar, its context menu and the
-tray readout ground in `surface_raised`, a `Panel` in `surface` — which is what
+knows what is behind it. On the desktop that is the session, which derives the
+floating theme once and hands it to everything it grounds in it, so the bar, the
+four popups it opens, every menu plate, and every control on them are
+translucent by construction. A floating surface keeps the role it wears when
+solid — the bar, a menu plate and the tray readout ground in `surface_raised`, a
+`Panel` in `surface` — which is what
 preserves the relationships the theme authored: a resting row still matches its
 panel, a hover wash still steps away from it.
 

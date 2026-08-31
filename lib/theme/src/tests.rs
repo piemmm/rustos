@@ -441,6 +441,12 @@ fn floating_chrome_lets_the_desktop_through_and_raises_its_plates() {
         assert_eq!(p.chrome_alpha, CHROME_ALPHA);
         assert_eq!(p.chrome_plate_alpha, CHROME_PLATE_ALPHA);
         assert!(
+            p.chrome_alpha < 255,
+            "{}: a floating ground that covers frosts nothing, and leaves a \
+             raised plate no room to be a step",
+            theme.name()
+        );
+        assert!(
             p.chrome_alpha < p.chrome_plate_alpha,
             "{}: a raised plate is no more solid than its ground",
             theme.name()

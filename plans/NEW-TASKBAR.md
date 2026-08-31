@@ -177,12 +177,13 @@ plate cannot wash over the surface's edge. `BarLayout::bar` is still the whole
 rectangle, rim included. A bar too thin to spare two rims keeps its content
 rather than the inset.
 
-The bar adopts its theme's floating form (`Theme::floating`, in `Taskbar::new`
-and `apply_theme`), so the bar, its program-library panel, context menu,
+The bar is handed its theme already in the floating form the session derives
+once for all of its chrome (`DesktopSession::floating_theme`, which grounds every
+menu plate too), so the bar, its program-library panel, hover window picker,
 notification popover, and Switchboard readout — and every control drawn on any
 of them — are floating chrome by construction, with nothing told separately and
 nothing left an opaque patch. Each surface keeps the colour role it wears solid
-and takes the palette's `chrome_alpha`: the bar, the menu, and the readout
+and takes the palette's `chrome_alpha` (four fifths): the bar and the readout
 ground in `surface_raised`, the two panels in `surface`. A plate raised on one
 — a launcher's hover wash, the library's search field, the readout's *Open
 Switchboard* button, a notification card — takes the step-more-solid

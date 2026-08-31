@@ -3971,3 +3971,60 @@ arrive at the link mapping), refuses a directory operand itself, and never
 passes `NodeKind::Symlink` to `create`. `mount`/`unmount` keep `Busy` — an
 already-mounted volume and one with open files are the resource-in-use `EBUSY`
 the code is for.
+
+## D68 — the spawn/reap/park/list cycle retains kernel memory permanently (OPEN)
+
+**Mechanism.** `tests/integration/memsoak_program` drives an identical
+four-step cycle — spawn and reap a `true.app` child, park on a timed
+`stream_read` whose bound elapses, walk the self-scoped process list, ride a
+sysinfod IPC round trip — and compares the system-wide
+`KernelMemoryStats.free_bytes` before and after the measured window. The
+window loses memory, deterministically, on `aarch64`.
+
+**Evidence.** Three runs of `cargo xtask test --qemu --only memsoak`, the
+first two on trees differing by an unrelated change and producing
+byte-identical numbers:
+
+| `WARMUP_CYCLES` | `MEASURED_CYCLES` | baseline | final | lost |
+|---|---|---|---|---|
+| 4 | 32 | 181182464 | 181174272 | 8192 (2 pages) |
+| 4 | 32 | 181182464 | 181174272 | 8192 (identical, second tree) |
+| 48 | 32 | 181174272 | 179077120 | 2097152 (2 MiB) |
+
+Two things follow. It is **not flaky** — the same tree and a tree without the
+change under test give the same figures to the byte. And it is **not a
+one-off amortised growth the warmup is meant to absorb**: twelve times the
+warmup made the measured loss *worse*, and the warmup-48 baseline is exactly
+the warmup-4 final, so retention is monotonic in cycles rather than a boundary
+crossed once. A workload that repeats one identical cycle must reach a steady
+high-water mark; this one does not, which is the definition of a leak rather
+than of capacity.
+
+The step sizes are frame-granular because `free_bytes` counts frames: a
+sub-page retention per cycle is invisible until the kernel heap draws its next
+block from the frame allocator, which is what turns a small per-cycle loss
+into an 8 KiB step and then a 2 MiB one.
+
+**Why it is recorded rather than fixed here.** The leak is in one of four
+independent kernel paths, and `kernel/core` holds many task-keyed maps
+(`fswatch` waiters, `sharedreg` mappings, `procsignal` intake/pending/stopped,
+and others) any one of which could fail to prune on exit. Naming the culprit
+needs a per-step bisect — a fixture variant per cycle step, one QEMU run
+each — not a guess, and the fixture parks forever on failure by design so each
+run costs the vertical's full 600 s ceiling. Guessing at the map would be the
+hack the charter forbids.
+
+**Localising it.** Split `cycle` into four fixtures, each repeating one step,
+and run each: the one whose `free_bytes` drifts owns the leak. Then instrument
+that path's allocations across the window. Prime suspects, in order: a
+task-keyed kernel map not pruned by the reap path; a one-shot timer node
+allocated per timed park and not freed on expiry; a per-query snapshot
+retained by the sysinfo path.
+
+**What it blocks.** `cargo xtask ci` cannot go green while this stands: the
+fixture's strict byte-equality verdict is deliberate (tolerating "small" drift
+would let a slow leak pass N cycles and fail N+M), so the vertical fails and
+takes the pipeline with it. Any change whose gate run reports
+`tairix-test-memsoak-qemu-aarch64` UNFINISHED at the 600 s ceiling should read
+its serial log for the `MEMSOAK FAIL` line before concluding anything about
+timeouts.

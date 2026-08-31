@@ -18,10 +18,11 @@ Binding under `AGENTS.md` (§3, §15.18).
 | M3.4 | Migrate the bar's four menu subjects, delete `BarMenu` | **landed** |
 | M3.5 | ~~The bar's start menu~~ — **not in scope** (decision 3) | **settled** |
 | M4 | Plate as a cached damage-reporting surface | planned |
-| M5 | Plates are floating chrome: 80% opacity over a 50% backdrop blur | planned |
+| M5 | Plates are floating chrome: 80% opacity over the shared chrome blur | **landed** |
 
-Open decisions: 4 (binds M5 — what the owner's "80% opacity and 50% blur"
-means in the theme, whose shared values every other floating surface takes).
+Open decisions: none. Decision 4 is **settled** by the owner — floating chrome
+moves to 80% opacity as one shared value, and the blur stays the one the
+right-hand icon-bar surfaces already use; landed as M5.
 Decision 1 is **settled** — variable-length framing, landed
 as M1a. Decision 2 is **settled** — Open With… is one row that concludes the
 chain, and the chooser is the application's own list surface; landed as M3.3.
@@ -59,6 +60,8 @@ stage that closes it carries its regression test (§2.18, §7).
 | D22 | The one-based `index ↔ AppMenuItemId` numbering every command-list menu uses was spelled twice — `lib/browse::chrome`'s `row_id`/`context_command_from_item` and `session::pinboard`'s `PinboardCommand::row_id`/`from_item` — and M3.4 needed it a third time for the bar's three table-driven menus. **Closed**: `AppMenuItemId::for_index` / `AppMenuItemId::index` are the one definition, beside the id type whose non-zero invariant is the reason the numbering is one-based at all. | **closed in M3.4** |
 | D23 | The bar's own menus were reachable only through the bar: no host test could open one *and* read its answer back, because the plate and the grab were the bar's own shell and the answer never left it. Migrating them made the round trip host-testable in two halves — the model and the id→response inverse in the taskbar suite, the plate, grab and one answer in the session suite (`choose_bar_menu_row` drives the whole path the serve loop drives). The end-to-end wiring stays witnessed by the two QEMU verticals that already click a bar menu row: `appbar_qemu_aarch64` (a slot's declared *New window*) and `datetime_elevate_qemu_aarch64` (the clock's *Set Date & Time…*), both of which now pass only if the chain path is right. | **closed in M3.4** |
 | D10 | The bar's own menus state two things the model cannot carry: a row denied for want of a capability (`AuthorityState::NeedsCapability`, which draws an Authority Mark rather than merely greying) and a row whose setting is already in effect (`ActivityState::Complete`). **Answered.** The Authority Mark says *the system* refused a command, and only the system may say it, so it is in-process-only — and structurally, not by a check: the wire model has no field for an authority state, so a decoded row is always `Allowed` and an application cannot paint the mark on its own row. §1.6's "bounded subset" means an absent field, never a validated one. `ActivityState::Complete` ("work finished successfully") is a *misuse* on an appearance row and is deleted rather than carried: the alternatives are a radio group, which the wire already spells `AppMenuMark::Radio` plus disabled plus a reason. The bar's own rows keep `NeedsCapability`, because they are the desktop's. **Closed in M3.4**: `system.rs`'s in-force appearance row is now `MenuMark::Radio` plus disabled plus its reason, as the pinboard's sort and arrangement rows became in M3.2, and no menu row anywhere states an activity. (`render.rs`'s remaining `ActivityState::Complete` is a *notification card* for a `Success` severity — "work finished successfully" about work that did — and is correct.) | **closed in M3.4** |
+| D24 | The chain's geometry rule was stated twice: `windows::chain_geometry` for every open/settle path, and an inline copy in `shell::present_menu_chain` — which also cloned the whole active `Theme` on **every** present, so hovering a row allocated a `String`, a font set and a cursor set per repaint. M5 could not leave it: the two copies would have had to agree on the *floating* ground or a plate's pixels and its hit-test rectangles would come from two themes. **Closed**: one definition, taking the session rather than the whole shell so a caller can hold the chain (or the shell's window records) mutably while it reads it, and the clone is gone. | **closed in M5** |
+| D25 | Two `Taskbar` rustdoc comments still named "the context menu" as one of the bar's five rendered surfaces — a leftover from M3.4's deletion of `BarMenu`; the fifth surface is the hover window picker, which `TaskbarRepaint` has always spelled. Stale docs mislead a reader into looking for a surface the bar no longer draws. **Closed**: both name the picker. | **closed in M5** |
 
 **This is an architecture change, not a performance one.** The ~300 ms
 context-menu stall that first prompted it was a kernel defect and is closed
@@ -696,47 +699,57 @@ than the plate.
 
 ### M5 — a plate is floating chrome, not a solid card
 
-**Owner requirement.** Every menu is to read like the program-library popup and
-the Switchboard capsule's own menu already do: **80% opacity over a 50%
-backdrop blur**. A plate today is *opaque* and asks for no blur — M2 decided it
-"covers what it opens over" — so this **supersedes that decision**, and the two
-tests in the session crate that state it — the one asserting a plate asks for no
-blur, and the one asserting it lays the opaque raised ground — invert with the
-stage.
+**Landed.** Every menu reads like the taskbar and the popups it opens: a plate
+is drawn on the *floating* theme, so its `surface_raised` ground takes the
+palette's `chrome_alpha` and the compositor frosts what is behind it by
+`chrome_backdrop_blur`. This superseded M2's "a plate covers what it opens
+over", and the two tests stating that inverted with the stage.
 
-Opacity and blur are **one decision, not two.** Blur behind an opaque surface
-is per-frame work nothing shows through; translucency without blur is sharp
-detail competing with the rows on top. The theme already pairs them
-(`Palette::chrome_alpha` with `Metrics::chrome_backdrop_blur`) and every other
-floating surface takes both, so a plate takes both or neither.
+Opacity and blur are **one decision, not two**: blur behind an opaque surface is
+per-frame work nothing shows through, and translucency without blur is sharp
+detail competing with the rows on top. A plate therefore takes both from the
+shared theme values, never a weight of its own.
 
-**The numbers do not match the reference surfaces, and that is the decision to
-settle first** (decision 4 below). Today's shared floating chrome is
-`CHROME_ALPHA = 179` (70%) over `chrome_backdrop_blur = 7` logical pixels — so
-the popup the requirement cites as correct is at 70%, not 80%, and 7 px is not
-readily "50%" of anything but the `WINDOW_BACKDROP_BLUR_MAX_PX` (64) wire
-ceiling, of which it would be 32.
+The values decision 4 fixed: `CHROME_ALPHA` is **204** (four fifths), and
+`chrome_backdrop_blur` stays **7** logical pixels. Because the alpha is shared,
+this re-skinned every floating surface — the bar, its popups, the notification
+popover, the Switchboard readout, and every control plate standing on them.
+`CHROME_PLATE_ALPHA` is now *derived* from it (half of what is left between the
+ground and solid, which reproduced the authored 217 exactly at the old 179), so
+raising the chrome opacity cannot narrow the step a raised plate reads by — at a
+hand-authored 217 that step would have collapsed from 38 to 13.
 
-What the stage does, once decision 4 fixes the values:
+What the chain does with it:
 
-- The chain grounds its plates in the **floating** theme
-  (`Theme::floating()`, which flips `SurfaceGround` and touches no metric, so
-  no rectangle moves) and asks the compositor for the theme's
-  `chrome_backdrop_blur` where it places each surface — the plate, the
-  information panel, and every child.
-- The floating form is derived **once** for the desktop rather than per surface
-  (the bar clones its own today), so the bar, its popups and every plate ground
-  themselves identically and a theme switch cannot leave one behind.
-- One theme for the whole chain: the plate's pixels and the rectangles its rows
-  are hit-tested against must not come from two.
-- The plate's own **rows** already take `chrome_alpha` when the ground is
-  floating (`Palette::chrome_alpha`'s rule — anything reading as part of the
-  surface takes it), so a resting row stays exactly its ground with no second
-  rule.
+- The chain's geometry is the **one** `chain_geometry(session, compositor)`
+  definition, and it carries the floating theme. The shell's own inline copy is
+  gone (D24), so the pixels a plate is painted with and the row rectangles it is
+  hit-tested against cannot come from two themes. Grounding a theme floating
+  flips nothing but the ground, so no rectangle moved.
+- The floating form is derived **once** for the desktop
+  (`DesktopSession::floating_theme`), and the taskbar takes it rather than
+  flipping its own: the ground is a property of where a surface is put on
+  screen, and the session is what puts the bar, its popups and every plate
+  there. One derivation is what makes a theme switch unable to leave a surface
+  behind (`reground` is the single path both take).
+- Every surface of the chain — each plate and the information panel — is
+  rounded and frosted on **one** path in `present_menu_chain`, whichever of the
+  three ways its compositor window was obtained (re-surfaced, created as the
+  owner's transient, created standalone). Before, only the standalone path
+  stated a look.
+- A plate's own **rows** take `chrome_alpha` through the shared `ChromeLayer`
+  rule, so a resting row stays exactly its ground with no second rule.
 
 Untouched by it: the plate is still one ground for the band and the rows
 together (D15), and the corner radius and rim are still the shared popup
 recipe's.
+
+The QEMU vertical's plate dump could no longer compare against an exact
+`surface_raised`, so it now predicts each pixel as the ground composited over
+what the pre-menu frame showed at that point, at the palette's alpha — which
+holds a translucent plate to the exact composite the theme asks for, over the
+terminal and over the wallpaper alike, where a bare distance from the ground
+colour would have admitted any dark repaint.
 
 ---
 
@@ -828,36 +841,36 @@ recipe's.
    of its rows (`MenuSubject::Entry`) — is the desktop's chain like every other,
    migrated in M3.4.
 
-4. **What "80% opacity and 50% blur" means in the theme** (binds M5). The
-   requirement names two figures and two reference surfaces, and they disagree:
-   the program-library popup and the Switchboard capsule's menu are drawn at
-   `CHROME_ALPHA` = 179 (**70%**) over `chrome_backdrop_blur` = **7 logical
-   pixels**. So either the figures are a description of that existing look, or
-   they are new values — and the difference is not a detail, because
-   `chrome_alpha` and `chrome_backdrop_blur` are **shared by every floating
-   surface**: changing them re-skins the bar, the library popup, the
-   notification popover, the Switchboard readout and every control plate
-   standing on them, including the two surfaces the requirement cites as
-   already right.
-   - **Reading A — match the reference surfaces.** Menus adopt the existing
-     shared values; no theme constant moves and nothing else on the desktop
-     changes appearance. The figures are read as the owner's description of the
-     look, not as literals.
-   - **Reading B — the figures are literal.** `CHROME_ALPHA` becomes 204
-     (80%) and the blur becomes half the wire ceiling, 32 logical pixels — a
-     four-and-a-half-fold increase in blur radius. Both are shared, so this is
-     a deliberate re-skin of all floating chrome, and it wants a look at the
-     cost: the blur is a separable box blur whose cost is proportional to the
-     blurred *area* rather than the radius, but a wider radius still widens the
-     window-sum build at each backdrop's edges, and the physical radius scales
-     with the desktop's UI scale.
-   - **Reading C — menus alone take new figures.** Rejected unless the owner
-     asks for it: a second alpha and a second blur for menus would be two more
-     theme values saying what `chrome_alpha` and `chrome_backdrop_blur` already
-     say, and the requirement's own wording ("as per the program library list")
-     asks for menus to match those surfaces rather than to differ from them.
-   **Stop and ask before implementing** (§15.7): every reading changes what is
-   touched, and B changes how the whole desktop looks.
+4. **What "80% opacity and 50% blur" means in the theme — settled by the
+   owner** (bound M5, landed with it). The requirement named two figures and two
+   reference surfaces that disagreed: the program-library popup and the
+   Switchboard capsule's menu were drawn at `CHROME_ALPHA` = 179 (70%) over
+   `chrome_backdrop_blur` = 7 logical pixels. The owner's answer splits the two:
+   - **The opacity is literal, and it is the shared value that moves.** 80%,
+     i.e. `CHROME_ALPHA` = **204** — and the 70% every *other* floating surface
+     was drawn at moves with it, rather than menus taking a second alpha of
+     their own. So this is a deliberate re-skin of all floating chrome: the bar,
+     the library popup, the notification popover, the Switchboard readout and
+     every control plate standing on them, including the two surfaces the
+     requirement cited as already right.
+   - **The blur matches the right-hand icon-bar surface**, which is the shared
+     `chrome_backdrop_blur` = **7** logical pixels. It does not move. The "50%"
+     reading — half the `WINDOW_BACKDROP_BLUR_MAX_PX` (64) wire ceiling, i.e.
+     32 — is **not** taken: that would have been a four-and-a-half-fold radius
+     increase on every frosted surface, and the surface the owner points at is
+     the one already at 7.
+   - **A second alpha or blur for menus alone was rejected**, and stays
+     rejected: two more theme values would say what `chrome_alpha` and
+     `chrome_backdrop_blur` already say, and the requirement asks for menus to
+     *match* those surfaces rather than differ from them.
+   One consequence the requirement did not name and M5 therefore had to settle:
+   `CHROME_PLATE_ALPHA` was hand-authored at 217, a step of 38 above the old
+   ground. Left alone at an 80% ground it would have become a step of 13, so a
+   button would have stopped reading as furniture standing on the glass. It is
+   now *derived* — half of what is left between the ground and solid — which
+   reproduces 217 exactly at the old 179, so this names the authored rule rather
+   than changing it, and no future change to the chrome opacity can narrow the
+   step to nothing.
 
 ---
 
