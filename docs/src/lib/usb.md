@@ -65,6 +65,13 @@ build on the *same* engine without depending on each other — exactly the split
   report protocol, `wMaxPacketSize`, armed capture length) at node publish — so
   a metal boot shows how each device's reports are read (a keyboard as
   boot-protocol, a mouse as report-protocol); it carries no report payload.
+  The descriptor that decision was made from is retained
+  (`hid_report_descriptor`) and logged beside it, because a map is only as right
+  as its input. `SET_PROTOCOL` being optional, the mode in force is read back
+  with `GET_PROTOCOL`, and reports are read one of three ways — boot layout,
+  rewritten through the parsed map, or *refused* when the device is in report
+  protocol with no usable map, so nothing is delivered rather than
+  boot-decoding an ID-prefixed report into phantom modifiers and keys.
   Enumeration decode
   → Configure Endpoint, into a
   growable table of concurrently served **interfaces**, each with its own

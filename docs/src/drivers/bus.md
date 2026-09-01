@@ -514,9 +514,32 @@ at node publish (`usb-hcd: HID interface report protocol` /
 `… boot-protocol fallback`, event id 4150). It carries no report payload, so
 no keystroke ever reaches the log.
 
+The descriptor that decision was derived from is logged beside it
+(`usb-hcd: HID interface report descriptor`, the same event id, 64 bytes of hex
+per record with the byte offset each starts at). A map is only as right as its
+input: an interface whose descriptor declares Report IDs the parser did not pin
+to reads its sibling collections' reports as its own, and the located layout
+alone cannot show that — only the bytes can. `GET_DESCRIPTOR(Report)` is
+therefore issued for every HID interface, a keyboard's included, even though a
+keyboard runs boot protocol whatever its descriptor says. A Report Descriptor
+is a device capability blob, not report data, so this too carries no keystroke
+or pointer movement.
+
+Because `SET_PROTOCOL` is optional, the protocol actually in force is read
+back with `GET_PROTOCOL` rather than assumed. A device that accepts the request
+and stays in report protocol still sends Report-ID-prefixed reports, and
+boot-decoding those reads each leading ID byte as the boot modifier byte —
+fabricating held modifiers and key usages out of a sibling collection's
+traffic. So a served interface's reports are read one of three ways: as the
+boot layout, rewritten through the parsed map (which demuxes its own Report ID
+from its siblings'), or **refused** when the device is in report protocol and
+its descriptor yields no map. A refused interface delivers nothing and logs at
+`Warn`: a silent interface is honest, fabricated input is not.
+
 These class requests are optional (a device that STALLs
 one keeps its current mode; a STALLed `GET_DESCRIPTOR(Report)` simply
-selects the boot fallback). The endpoint is not
+selects the boot fallback, and a STALLed `GET_PROTOCOL` is taken as the boot
+protocol that was asked for). The endpoint is not
 primed during enumeration: `next_report` arms one transfer only when the
 class driver has submitted a URB and is waiting for that report. A hub
 reports interface class `0x09`, not HID: it keeps only its control endpoint,

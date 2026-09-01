@@ -36,7 +36,14 @@ dependency (`AGENTS.md` §17.4 /
   stream a duplicate report every polling interval — while the class drivers
   and the URB ABI keep seeing boot-format reports. It handles a device that
   declares a **Report ID** (reports carry a leading ID byte, so the boot fields
-  sit one byte later), and `normalize` is fail-soft — a report captured a byte
+  sit one byte later). That id is an `Option`, never `0`-as-"none": a device
+  with no Report IDs needs no demux, while one with them must have every report
+  *matched*, and spelling the first as id `0` made `normalize` skip the demux
+  entirely — normalising every sibling collection's report as this interface's
+  own, its ID byte landing where the button bitmap is read from. A boot field
+  located before the descriptor's first Report ID item, in a descriptor that
+  does declare IDs, is undemuxable and refuses the whole map. `normalize` is
+  otherwise fail-soft — a report captured a byte
   short (a longer report clipped to the capture buffer) still delivers the
   fields that arrived rather than dropping the whole report, which had silenced
   every keypress on a Report-ID keyboard. Pure, `no_std`, alloc-free;

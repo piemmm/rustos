@@ -1178,7 +1178,8 @@ the live controller behaviour is host- and CI-proven first.
   idle no-op, keeping the URB parked.
   - A **keyboard** (`InterfaceInfo::is_keyboard`, HID `bInterfaceProtocol` = 1)
     is driven in the standardised **boot protocol** (`SET_PROTOCOL(boot)` +
-    `SET_IDLE`) and its Report Descriptor is not read: it reports only on a
+    `SET_IDLE`) and its Report Descriptor decides nothing (it is read only as
+    diagnostic evidence, below): it reports only on a
     key-state change and so never causes the idle interrupt storm a mouse does,
     and the fixed 8-byte boot report the boot decoder consumes directly avoids
     a report-descriptor parse a composite keyboard's multiple Report IDs (or an
@@ -1188,6 +1189,41 @@ the live controller behaviour is host- and CI-proven first.
     collection's ID = 1, but the device reported under ID 6), so
     `report_body_offset` (raw[0] ≠ 1) dropped every keypress. Boot protocol
     makes the device emit the report the boot decoder is built for.
+  - **`SET_PROTOCOL` is optional, so the protocol in force is read back, never
+    assumed.** A device may accept the request and carry on in report protocol
+    — the on-metal shape is a composite interface that declares boot-keyboard
+    while its keyboard collection sits behind a vendor one under a Report ID.
+    Boot-decoding such an interface reads each report's leading Report ID byte
+    as the boot *modifier* byte, so a vendor or consumer report becomes phantom
+    held modifiers (`0x01` = LeftControl, `0x04` = LeftAlt) and garbage key
+    usages — input fabricated out of unrelated traffic. `GET_PROTOCOL`
+    (HID 1.11 §7.2.5, `EnumStage::GetProtocol`) therefore reads the mode back,
+    and `DeviceState::report_decode` carries three states rather than two:
+    `Boot` (reports already are the boot layout), `Mapped` (rewrite through the
+    parsed map, which also demuxes this interface's Report ID from its
+    siblings'), and `Refused` (the device is in report protocol and its
+    descriptor yields no map — nothing is delivered, because a silent interface
+    is honest and fabricated input is not). A refused interface logs at `Warn`
+    so it is never mistaken for a working boot device. The read-back is issued
+    *before* `SET_IDLE` so a healthy enumeration still closes on that request's
+    Success, and a STALL or unreadable answer is treated as boot protocol —
+    what was asked for, and the mode every HID boot device must implement.
+    Regressions: `a_keyboard_that_ignored_set_protocol_is_normalised_not_boot_decoded`,
+    `an_interface_in_report_protocol_with_no_map_delivers_nothing`
+    (mock knob `ignores_set_protocol`).
+  - **A Report ID of `0` no longer means "no Report IDs".** `MouseMap` /
+    `KeyboardMap` carry `Option<u8>`, and the parser pins each boot field to a
+    `FieldReport` (`Unprefixed` / `Prefixed(id)`). The two were
+    indistinguishable while "none" was spelled `0`, and `report_body_offset`
+    read that as "skip the demux" — so *every* sibling collection's report on
+    the endpoint was normalised as this interface's own, its Report ID byte
+    landing where the button bitmap is read from and fabricating button edges.
+    A field located before the descriptor's first Report ID item in a
+    descriptor that *does* declare IDs is undemuxable (its offsets are a byte
+    out and its report is indistinguishable from a sibling's), so the map is
+    refused and the caller falls back to boot protocol. Regressions:
+    `fields_located_before_the_first_report_id_refuse_the_map`,
+    `a_descriptor_with_no_report_ids_still_maps_and_needs_no_demux`.
   - The interrupt-IN transfer lands in a `CAPTURE_LEN`-byte (64) buffer (a
     report-protocol mouse report can exceed the 8-byte boot `REPORT_LEN`), but
     is **armed** to the endpoint's own `wMaxPacketSize`
@@ -1224,6 +1260,44 @@ the live controller behaviour is host- and CI-proven first.
   keystroke ever reaches the log). Coverage:
   `a_keyboard_runs_boot_protocol_even_when_its_report_descriptor_parses`,
   `a_report_protocol_mouse_is_configured_and_normalizes_reports`.
+
+- **The Report Descriptor itself is logged beside that decision.** The
+  enumeration diagnostic reports what the parsed map *says*; a map is only as
+  right as its input, and the located layout alone cannot show a *wrong* map.
+  The failure mode that needs the bytes: an interface whose descriptor declares
+  Report IDs the parser did not pin to. Pinning too high over-filters and drops
+  every report (the keyboard defect above); pinning `0` is worse, because
+  `report_body_offset` reads `0` as "this device declares no Report IDs" and
+  skips the demux entirely — every sibling collection's report on that endpoint
+  is then normalised as this interface's own, with the Report ID byte read as
+  the mouse button bitmap, fabricating button edges from unrelated traffic.
+  `UsbDevice::hid_report_descriptor(index)` therefore retains the delivered
+  bytes (bounded by `REPORT_DESCRIPTOR_LEN`, the parser's own
+  `MAX_REPORT_DESCRIPTOR` bound against one control transfer's buffer) and the
+  HCD logs them at node publish as `usb-hcd: HID interface report descriptor`
+  under the same event id, `HID_DESC_CHUNK` (64) bytes of hex per record, each
+  naming its byte offset, so a record's value stays inside
+  `LOG_FIELD_VALUE_MAX`. `GET_DESCRIPTOR(Report)` is issued for **every** HID
+  interface, a keyboard's included — it is the only evidence of what an
+  interface really is, and a metal capture cannot otherwise tell a genuine boot
+  keyboard from a sibling collection that merely declares the boot protocol.
+  Reading it decides nothing: a keyboard still runs boot protocol whatever its
+  descriptor says. A Report Descriptor is a device *capability* blob, not report
+  data, so unlike a report it carries no keystroke or pointer movement.
+  - **A diagnostic read must not cost a bring-up.** Because a keyboard's read
+    is purely observational, a non-STALL fault reading it is tolerated and the
+    interface enumerates with no retained descriptor — otherwise a device that
+    faults that one request would be left with no keyboard at all, which is
+    exactly what extending the read to keyboards must not cause. A *pointer's*
+    read is load bearing (it selects report protocol), so a non-STALL fault
+    there still fails closed. A real controller fault is not hidden either way:
+    it surfaces on the `SET_PROTOCOL`/`SET_IDLE` transfers that follow.
+  - Coverage: the two tests above assert the retained bytes for a
+    report-protocol mouse and for a boot-protocol keyboard;
+    `a_keyboard_whose_descriptor_read_faults_still_enumerates` and
+    `a_mouse_whose_descriptor_read_faults_fails_closed` pin the asymmetry (mock
+    knob `fault_report_descriptor_request`); `tairix_util`'s
+    `format_hex_bytes` tests cover the shared renderer.
 
 - **The boot-keyboard decoder tolerates a short native report.** A real
   Raspberry Pi 4B composite keyboard that ignores `SET_PROTOCOL(boot)`

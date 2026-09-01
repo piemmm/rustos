@@ -79,12 +79,38 @@ struct FieldLoc {
     count: u8,
 }
 
+/// Which report a located field belongs to, as the descriptor declared it.
+///
+/// The distinction is load bearing and must not collapse to a sentinel id:
+/// `Unprefixed` means every report on the endpoint is this one, so there is
+/// nothing to demux, while `Prefixed` means a report must be *matched* or it
+/// belongs to a sibling collection. Spelling "no IDs" as id `0` made those two
+/// indistinguishable, and read a sibling's report — its ID byte landing where
+/// the button bitmap is read from — as this interface's own.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum FieldReport {
+    /// No Report ID item preceded this field, so its report carries no prefix.
+    Unprefixed,
+    /// The field belongs to the report this ID prefixes.
+    Prefixed(u8),
+}
+
+impl FieldReport {
+    /// The Report ID the field's reports carry, `None` when they carry none.
+    const fn id(self) -> Option<u8> {
+        match self {
+            Self::Unprefixed => None,
+            Self::Prefixed(id) => Some(id),
+        }
+    }
+}
+
 /// Where a report-protocol **mouse** report keeps the boot fields.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct MouseMap {
-    /// Report ID prefixing this device's mouse report, or `0` when the
+    /// Report ID prefixing this device's mouse report, or `None` when the
     /// device declares no report IDs (the report has no prefix byte).
-    report_id: u8,
+    report_id: Option<u8>,
     /// The button bits (each 1 bit; `count` of them from bit 0 = left).
     buttons: FieldLoc,
     /// The signed X displacement field.
@@ -98,8 +124,9 @@ pub struct MouseMap {
 /// Where a report-protocol **keyboard** report keeps the boot fields.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct KeyboardMap {
-    /// Report ID prefixing this device's keyboard report, or `0` for none.
-    report_id: u8,
+    /// Report ID prefixing this device's keyboard report, or `None` when the
+    /// device declares no report IDs.
+    report_id: Option<u8>,
     /// The eight 1-bit modifier flags (`LeftControl`..`RightGUI`).
     modifiers: FieldLoc,
     /// The key-array field: `count` usage-ID slots of `size_bits` each.
@@ -144,8 +171,8 @@ pub struct ReportFieldSummary {
 pub enum ReportMapSummary {
     /// A pointer map: buttons, X, Y, and the wheel when the device has one.
     Mouse {
-        /// Report ID prefixing this device's reports (`0` = no report IDs).
-        report_id: u8,
+        /// Report ID prefixing this device's reports (`None` = no report IDs).
+        report_id: Option<u8>,
         /// The button bits.
         buttons: ReportFieldSummary,
         /// The signed X displacement field.
@@ -157,8 +184,8 @@ pub enum ReportMapSummary {
     },
     /// A keyboard map: the modifier flags and the key array.
     Keyboard {
-        /// Report ID prefixing this device's reports (`0` = no report IDs).
-        report_id: u8,
+        /// Report ID prefixing this device's reports (`None` = no report IDs).
+        report_id: Option<u8>,
         /// The eight 1-bit modifier flags.
         modifiers: ReportFieldSummary,
         /// The key-array field.
@@ -248,8 +275,12 @@ struct Parser {
     global: GlobalState,
     stack: [GlobalState; MAX_PUSH_DEPTH],
     stack_len: usize,
-    /// `0` until a Report ID is declared; reports then carry a 1-byte prefix.
-    report_id: u8,
+    /// The report in force: `Unprefixed` until a Report ID is declared, after
+    /// which every report the device sends carries a 1-byte prefix.
+    report: FieldReport,
+    /// Whether the descriptor declared a Report ID anywhere, which is what
+    /// makes a field pinned *before* the first one unusable rather than
+    /// merely unprefixed.
     report_ids_used: bool,
     /// Next field's bit offset within the current report.
     bit_offset: u32,
@@ -258,12 +289,12 @@ struct Parser {
     usage_min: Option<u32>,
     usage_max: Option<u32>,
     // Boot fields captured on first sight, each pinned to its report ID.
-    mouse_report_id: Option<u8>,
+    mouse_report: Option<FieldReport>,
     buttons: Option<FieldLoc>,
     x: Option<FieldLoc>,
     y: Option<FieldLoc>,
     wheel: Option<FieldLoc>,
-    kbd_report_id: Option<u8>,
+    kbd_report: Option<FieldReport>,
     modifiers: Option<FieldLoc>,
     keys: Option<FieldLoc>,
 }
@@ -274,19 +305,19 @@ impl Parser {
             global: GlobalState::default(),
             stack: [GlobalState::default(); MAX_PUSH_DEPTH],
             stack_len: 0,
-            report_id: 0,
+            report: FieldReport::Unprefixed,
             report_ids_used: false,
             bit_offset: 0,
             usages: [0; MAX_USAGES],
             usages_len: 0,
             usage_min: None,
             usage_max: None,
-            mouse_report_id: None,
+            mouse_report: None,
             buttons: None,
             x: None,
             y: None,
             wheel: None,
-            kbd_report_id: None,
+            kbd_report: None,
             modifiers: None,
             keys: None,
         }
@@ -396,28 +427,48 @@ impl Parser {
     /// Pin the mouse fields to the report ID active when the first was seen;
     /// a later report ID's pointer fields (a second collection) are ignored.
     fn pin_mouse(&mut self) {
-        self.mouse_report_id.get_or_insert(self.report_id);
+        self.mouse_report.get_or_insert(self.report);
     }
 
     fn pin_keyboard(&mut self) {
-        self.kbd_report_id.get_or_insert(self.report_id);
+        self.kbd_report.get_or_insert(self.report);
+    }
+
+    /// Whether a pinned field's reports can be told from a sibling
+    /// collection's at all.
+    ///
+    /// A field located before the descriptor's first Report ID item, in a
+    /// descriptor that *does* declare IDs, describes a report shape the device
+    /// never sends: every report is ID-prefixed, so the field's recorded
+    /// offsets are a byte out and nothing distinguishes its report from a
+    /// sibling's. The map is refused and the caller falls back to boot
+    /// protocol — reading a sibling collection's reports as this interface's
+    /// own is what fabricates input out of unrelated traffic.
+    fn demuxable(&self, pin: FieldReport) -> bool {
+        !(self.report_ids_used && pin == FieldReport::Unprefixed)
     }
 
     /// Assemble the parsed map, preferring a complete keyboard, then a
     /// complete mouse (X and Y are the minimum a pointer map needs).
     fn finish(self) -> Option<HidReportMap> {
-        if let (Some(modifiers), Some(keys), Some(report_id)) =
-            (self.modifiers, self.keys, self.kbd_report_id)
+        if let (Some(modifiers), Some(keys), Some(pin)) =
+            (self.modifiers, self.keys, self.kbd_report)
         {
+            if !self.demuxable(pin) {
+                return None;
+            }
             return Some(HidReportMap::Keyboard(KeyboardMap {
-                report_id,
+                report_id: pin.id(),
                 modifiers,
                 keys,
             }));
         }
-        if let (Some(x), Some(y), Some(report_id)) = (self.x, self.y, self.mouse_report_id) {
+        if let (Some(x), Some(y), Some(pin)) = (self.x, self.y, self.mouse_report) {
+            if !self.demuxable(pin) {
+                return None;
+            }
             return Some(HidReportMap::Mouse(MouseMap {
-                report_id,
+                report_id: pin.id(),
                 // A pointer with no button field reports a zero button byte.
                 buttons: self.buttons.unwrap_or(FieldLoc {
                     offset_bits: 0,
@@ -478,7 +529,7 @@ pub fn parse(desc: &[u8]) -> Option<HidReportMap> {
                 GLOBAL_REPORT_SIZE => p.global.report_size = data,
                 GLOBAL_REPORT_COUNT => p.global.report_count = data,
                 GLOBAL_REPORT_ID => {
-                    p.report_id = u8::try_from(data & 0xFF).unwrap_or(0);
+                    p.report = FieldReport::Prefixed(u8::try_from(data & 0xFF).unwrap_or(0));
                     p.report_ids_used = true;
                     // Each report ID's fields start after its 1-byte prefix.
                     p.bit_offset = 8;
@@ -510,7 +561,6 @@ pub fn parse(desc: &[u8]) -> Option<HidReportMap> {
             _ => {}
         }
     }
-    let _ = p.report_ids_used;
     p.finish()
 }
 
@@ -558,13 +608,13 @@ impl HidReportMap {
 }
 
 /// Strip and check the report-ID prefix, returning the body offset in bits.
-fn report_body_offset(report_id: u8, raw: &[u8]) -> Option<u32> {
-    if report_id == 0 {
+fn report_body_offset(report_id: Option<u8>, raw: &[u8]) -> Option<u32> {
+    let Some(id) = report_id else {
         return Some(0);
-    }
+    };
     // A device with report IDs prefixes every report with its ID byte; a
     // report whose ID is not ours belongs to another collection — skip it.
-    if raw.first().copied()? != report_id {
+    if raw.first().copied()? != id {
         return None;
     }
     Some(0)
@@ -686,7 +736,7 @@ mod tests {
         let map = parse(BOOT_MOUSE_DESC).expect("a boot mouse descriptor parses");
         match map {
             HidReportMap::Mouse(m) => {
-                assert_eq!(m.report_id, 0);
+                assert_eq!(m.report_id, None, "the descriptor declares no Report IDs");
                 assert_eq!(m.buttons.offset_bits, 0);
                 assert_eq!(m.buttons.count, 3);
                 assert_eq!(m.buttons.size_bits, 1);
@@ -713,7 +763,7 @@ mod tests {
                 y,
                 wheel,
             } => {
-                assert_eq!(report_id, 0);
+                assert_eq!(report_id, None);
                 assert_eq!(
                     (buttons.offset_bits, buttons.size_bits, buttons.count),
                     (0, 1, 3)
@@ -745,7 +795,7 @@ mod tests {
                 modifiers,
                 keys,
             } => {
-                assert_eq!(report_id, 0);
+                assert_eq!(report_id, None);
                 assert_eq!((modifiers.offset_bits, modifiers.size_bits), (0, 1));
                 assert_eq!((keys.offset_bits, keys.size_bits, keys.count), (16, 8, 6));
             }
@@ -799,7 +849,7 @@ mod tests {
         let HidReportMap::Keyboard(k) = map else {
             panic!("expected a keyboard map");
         };
-        assert_eq!(k.report_id, 0);
+        assert_eq!(k.report_id, None);
         assert_eq!(k.modifiers.offset_bits, 0);
         // The reserved byte (bits 8..16) is skipped; the key array starts at
         // byte 2, so the LED output report never shifts the input layout.
@@ -820,6 +870,53 @@ mod tests {
     }
 
     #[test]
+    fn fields_located_before_the_first_report_id_refuse_the_map() {
+        // A mouse collection with no Report ID, followed by a consumer
+        // collection that declares one. Every report the device sends is then
+        // ID-prefixed, so the pointer fields' recorded offsets are a byte out
+        // *and* nothing distinguishes the consumer collection's reports from
+        // the pointer's. Pinning such a field to id `0` used to read "this
+        // device declares no Report IDs" and skip the demux entirely, so a
+        // consumer report's ID byte was decoded as the button bitmap —
+        // fabricating button edges from unrelated traffic. Refuse the map; the
+        // caller falls back to boot protocol.
+        let desc: &[u8] = &[
+            0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x05, 0x09, 0x19, 0x01, 0x29, 0x03, 0x15, 0x00,
+            0x25, 0x01, 0x95, 0x03, 0x75, 0x01, 0x81, 0x02, 0x95, 0x01, 0x75, 0x05, 0x81, 0x03,
+            0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x15, 0x81, 0x25, 0x7F, 0x95, 0x02, 0x75, 0x08,
+            0x81, 0x06, 0xC0, 0x05, 0x0C, 0x09, 0x01, 0xA1, 0x01, 0x85, 0x02, 0x19, 0x00, 0x2A,
+            0xFF, 0x00, 0x15, 0x00, 0x26, 0xFF, 0x00, 0x95, 0x01, 0x75, 0x08, 0x81, 0x00, 0xC0,
+        ];
+        assert_eq!(
+            parse(desc),
+            None,
+            "a field pinned before the first Report ID cannot be demuxed, so no map"
+        );
+    }
+
+    #[test]
+    fn a_descriptor_with_no_report_ids_still_maps_and_needs_no_demux() {
+        // The counterpart the refusal above must not catch: a real pointer whose
+        // descriptor declares no Report ID at all (the on-metal mouse). Its one
+        // report carries no prefix byte, so there is nothing to demux and every
+        // report on the endpoint is genuinely its own.
+        let map = parse(BOOT_MOUSE_DESC).expect("an unprefixed mouse still maps");
+        let HidReportMap::Mouse(m) = map else {
+            panic!("expected a mouse map");
+        };
+        assert_eq!(
+            m.report_id, None,
+            "no Report ID item means no prefix, not id zero"
+        );
+        let mut out = [0u8; 8];
+        assert!(
+            map.normalize(&[0x01, 3, 0xFE], &mut out).is_some(),
+            "an unprefixed report is this interface's by construction"
+        );
+        assert_eq!(out[0], 0x01);
+    }
+
+    #[test]
     fn report_id_prefixed_mouse_demuxes_by_id() {
         // A mouse whose reports carry Report ID 2: buttons + X + Y, each field
         // shifted one byte past the leading ID byte.
@@ -833,7 +930,7 @@ mod tests {
         let HidReportMap::Mouse(m) = map else {
             panic!("expected a mouse map");
         };
-        assert_eq!(m.report_id, 2);
+        assert_eq!(m.report_id, Some(2));
         assert_eq!(m.buttons.offset_bits, 8);
         assert_eq!(m.x.offset_bits, 16);
         let mut out = [0u8; 8];
@@ -929,7 +1026,7 @@ mod tests {
         let HidReportMap::Keyboard(k) = map else {
             panic!("expected a keyboard map");
         };
-        assert_eq!(k.report_id, 1);
+        assert_eq!(k.report_id, Some(1));
         assert_eq!(k.modifiers.offset_bits, 8);
         assert_eq!(k.keys.offset_bits, 24);
         assert_eq!(k.keys.count, 6);

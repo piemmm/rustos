@@ -4214,3 +4214,70 @@ identity window, so those genuinely need a narrow root. Consequently:
 exercises a root carrying the real window, so the fault the two hit is
 foreclosed for all of them, and a future fixture cannot reintroduce it without
 reaching for a constructor whose name says it must never run.
+
+---
+
+## D72 — one iconbar click opened two terminal windows on a Pi 4B; unreproduced, mechanism unidentified
+
+**State:** open, **unreproduced**. Not fixed — the symptom stopped, nothing was
+shown to have caused it to stop.
+
+**Symptom as reported.** Early in a graphical session on a Raspberry Pi 4B,
+with `terminal.app` already running, a single primary click on its icon-bar
+slot opened *two* windows. A deliberate long press separated them: one window
+appeared on the mouse-down, a second on the release. It settled after a while
+within the same session, and a quick click sometimes produced one window and
+sometimes two. QEMU never showed it.
+
+**Ruled out by reading the code.** The bar acts on an app slot from
+`press_primary` alone (`taskbar/src/input.rs`); `release_primary` resolves only
+the Switchboard capsule gesture. The seat routes each event to exactly one
+router and pins the release to the surface that took the press. `fold_outcome`
+folds only motion and scroll. `relay_app_bar` → `deliver_app_event` resolves one
+endpoint. `Port::send` is atomic. The terminal turns one `AppBarDefault` into
+one `open_window`. Every stage is exactly-once.
+
+**Ruled out by the device's own Report Descriptor.** The pointer interface
+declares **no Report ID** and one 7-byte input report (buttons 8×1 @0, X/Y 16
+bits @8/@24, wheel @40, AC Pan @48), so the parsed map matches the descriptor
+field for field and there is no sibling collection on that endpoint to
+mis-demux. The button diff emits a press only on a `0→1` transition, so a
+single driver instance over that report stream cannot emit two presses for one
+hold, whatever is dropped, delayed, or duplicated. Exactly one `usb_mouse`
+process is loaded, and each interface holds its own `shm_create` region, so
+there is no second injector and no cross-interface buffer sharing.
+
+**Ruled out for the sibling interface.** The mouse's companion interface
+(vendor `0xFF18` + consumer + a 10-slot keyboard collection under Report IDs
+1/3/4) is bound by `usb_kbd`. Boot-decoding its ID-prefixed reports would
+fabricate held modifiers and key usages — the fail-open D-class hazard the
+`GET_PROTOCOL` read-back now closes — but fabricated *keys* cannot open a
+terminal window: `EventOutcome::NewWindow` has exactly two producers,
+`WindowEvent::AppBarDefault` and an `AppBarMenu` row resolving to
+`BarCommand::NewWindow`, and the terminal binds no keyboard shortcut to it.
+
+**Why it is not closed.** Two later sessions on the same hardware, tested
+within seconds of the desktop appearing and including deliberate long presses,
+produced one relay and one window per click (4 clicks → 4 relays → 4 windows;
+6 → 6 → 6). But no change in the tree has an identified causal path to the
+symptom: the Report-ID demux fix is provably a no-op for a descriptor with no
+Report IDs, and the read-back never runs for an interface whose descriptor
+yields a map. What the same work *did* add is roughly six extra control
+transfers during HID enumeration, which shifts timing — and the original
+symptom was explicitly time-limited within a session, the profile of a race a
+timing shift can mask without repairing.
+
+**Standing detector.** `APP_BAR_RELAYED` (`20_007`, "icon-bar action relayed to
+its application") is emitted once per relay with the target's `ProcId` and
+whether the action was `default` or `menu`. It instruments the *whole*
+window-opening surface: both producers route through `relay_app_bar`, so a
+recurrence is self-diagnosing. Two relays a few milliseconds apart mean two
+presses reached the bar and the duplication is upstream of it; one relay
+against two windows would mean the duplication is inside the application. An
+`action=menu` line would mean a secondary press opened the app menu and the
+release of that same press chose a row.
+
+**Fix direction.** None to implement until it recurs and the detector says
+which side of the relay the duplication is on. Do not close this on a further
+absence of reproduction: a defect that stops appearing is not a defect that has
+been explained.

@@ -4887,6 +4887,29 @@ mod program {
         let Some(owner) = apps.strip.get(app).map(|group| group.owner) else {
             return;
         };
+        let mut owner_hex = [0u8; tairix_abi::PROC_ID_HEX_LEN];
+        log(
+            &LOG_SINK,
+            &LogEvent {
+                level: LogLevel::Info,
+                id: tairix_desktop_session::APP_BAR_RELAYED,
+                message: "desktop: icon-bar action relayed to its application",
+                fields: &[
+                    LogField {
+                        key: "owner",
+                        value: LogFieldValue::Str(owner.write_hex(&mut owner_hex)),
+                    },
+                    LogField {
+                        key: "action",
+                        value: LogFieldValue::Str(match event {
+                            WindowEvent::AppBarDefault => "default",
+                            WindowEvent::AppBarMenu { .. } => "menu",
+                            _ => "other",
+                        }),
+                    },
+                ],
+            },
+        );
         if let Err(Errno::NotFound) = server.deliver_app_event(sink, owner, event) {
             // The declaration is gone with the process: its windows go too,
             // exactly as a refused window-scoped send tears them down.

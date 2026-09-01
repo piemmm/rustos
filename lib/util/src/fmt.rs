@@ -1,8 +1,8 @@
 //! No-allocation numeric formatters used to attach numeric identifiers
 //! to structured log records.
 //!
-//! Per, these helpers were extracted from
-//! `kernel/sec` once a second consumer (`kernel/ipc`) needed them.
+//! These helpers were extracted from `kernel/sec` once a second
+//! consumer (`kernel/ipc`) needed them.
 //! Both crates render task / port / capability identifiers into
 //! `lib/log`'s structured field values without touching an
 //! allocator on the hot path; the helpers therefore live here so the
@@ -128,18 +128,47 @@ pub fn format_hex_u64(value: u64, buf: &mut [u8; 16]) -> &str {
         // `(value >> shift) & 0xF` is in `0..=15`; cast to `u8` is lossless.
         #[allow(clippy::cast_possible_truncation)]
         let nibble = ((value >> ((15 - i) * 4)) & 0xF) as u8;
-        *slot = if nibble < 10 {
-            b'0' + nibble
-        } else {
-            b'a' + (nibble - 10)
-        };
+        *slot = hex_nibble(nibble);
     }
     core::str::from_utf8(&buf[..]).unwrap_or("?")
 }
 
+/// Render `bytes` into `buf` as lowercase hex, two characters per byte, and
+/// return the populated sub-slice.
+///
+/// Used to attach an opaque byte blob — a device descriptor, a wire header —
+/// to a diagnostic record. Renders as many whole bytes as `buf` holds and
+/// stops, so a caller with a fixed field buffer gets a prefix rather than
+/// nothing; the caller chunks a longer blob across records.
+#[must_use]
+pub fn format_hex_bytes<'b>(bytes: &[u8], buf: &'b mut [u8]) -> &'b str {
+    // The two-character slots number `buf.len() / 2`, so the zip stops at
+    // whichever of the two runs out and `rendered` is exactly its length.
+    let rendered = bytes.len().min(buf.len() / 2);
+    let (slots, _odd_trailing_byte) = buf.as_chunks_mut::<2>();
+    for (byte, slot) in bytes.iter().zip(slots.iter_mut()) {
+        slot[0] = hex_nibble(byte >> 4);
+        slot[1] = hex_nibble(byte & 0xF);
+    }
+    core::str::from_utf8(&buf[..rendered * 2]).unwrap_or("?")
+}
+
+/// One nibble as its lowercase hex digit — the single hex spelling both
+/// renderers above share.
+///
+/// A value above `0xF` cannot reach here from a masked shift; answering `?`
+/// rather than indexing past the digits keeps the function total.
+const fn hex_nibble(nibble: u8) -> u8 {
+    match nibble {
+        0..=9 => b'0' + nibble,
+        0xA..=0xF => b'a' + (nibble - 0xA),
+        _ => b'?',
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{format_hex_u64, format_i32, format_u64, format_usize};
+    use super::{format_hex_bytes, format_hex_u64, format_i32, format_u64, format_usize};
 
     #[test]
     fn format_i32_zero() {
@@ -233,5 +262,42 @@ mod tests {
     fn format_hex_u64_high_bit_set() {
         let mut buf = [0u8; 16];
         assert_eq!(format_hex_u64(u64::MAX, &mut buf), "ffffffffffffffff");
+    }
+
+    #[test]
+    fn format_hex_bytes_renders_two_lowercase_characters_per_byte() {
+        let mut buf = [0u8; 8];
+        assert_eq!(
+            format_hex_bytes(&[0x05, 0x01, 0x09, 0xff], &mut buf),
+            "050109ff"
+        );
+    }
+
+    #[test]
+    fn format_hex_bytes_of_nothing_is_empty() {
+        let mut buf = [0u8; 8];
+        assert_eq!(format_hex_bytes(&[], &mut buf), "");
+    }
+
+    #[test]
+    fn format_hex_bytes_renders_whole_bytes_only_when_the_buffer_runs_out() {
+        // Five characters hold two whole bytes; the third is not half-rendered.
+        let mut buf = [0u8; 5];
+        assert_eq!(format_hex_bytes(&[0xde, 0xad, 0xbe], &mut buf), "dead");
+    }
+
+    #[test]
+    fn format_hex_bytes_covers_every_nibble() {
+        let mut buf = [0u8; 16];
+        assert_eq!(
+            format_hex_bytes(&[0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef], &mut buf),
+            "0123456789abcdef"
+        );
+    }
+
+    #[test]
+    fn format_hex_bytes_into_an_unusable_buffer_is_empty() {
+        let mut buf = [0u8; 1];
+        assert_eq!(format_hex_bytes(&[0xaa], &mut buf), "");
     }
 }

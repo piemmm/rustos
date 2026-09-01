@@ -52,6 +52,16 @@ use crate::assets::SessionFileReader;
 /// recorded launch back into the bundle it came from.
 pub const BUNDLE_RUN_SUFFIX: &str = "/Run";
 
+/// One icon-bar action was relayed to the application that declared it.
+///
+/// Emitted once per relay, so a capture shows how many actions one gesture
+/// produced. That is the fact a duplicated action turns on and the one the
+/// bar's own state cannot answer: the bar reports an action per press, and
+/// whether the *press* arrived twice is only visible from the count of relays
+/// a single click produces. It names the target and the action kind, never a
+/// pointer position or a key, so it carries no input content.
+pub const APP_BAR_RELAYED: tairix_log::EventId = tairix_log::EventId(20_007);
+
 /// One application's icon-bar declaration, exactly as the window engine
 /// attested and bounded it.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

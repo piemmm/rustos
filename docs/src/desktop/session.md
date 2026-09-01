@@ -1038,6 +1038,16 @@ same grant is what finally lets the session's cache ledgers reach the log:
 they were wired to it long before any account could hold it, and were
 silently discarded until now.
 
+### Each icon-bar action the session relays
+
+`APP_BAR_RELAYED` ("icon-bar action relayed to its application") is emitted
+once per relay, naming the target's opaque `ProcId` and whether the action was
+the slot's `default` or a `menu` row. It exists because the count of relays a
+*single* gesture produces is a fact the bar's own state cannot answer: the
+router reports one action per press, so whether a press arrived twice shows up
+only here. It names no pointer position and no key, so it carries no input
+content.
+
 ### Each served window's own visible witness
 
 `DESKTOP_REVEALED` says the desktop is visible; `WINDOW_SHOWN` ("served

@@ -247,6 +247,20 @@ const HUB_REPORT_LEN: usize = 8;
 /// [`CTRL_DATA_LEN`] bytes only.
 const CTRL_DATA_LEN: usize = 512;
 
+/// Byte length of HID Report Descriptor the engine reads and retains: the
+/// parser's own validation bound on device-supplied data, never more than one
+/// control transfer's data buffer can deliver. One definition, so the read
+/// length and the retained length cannot diverge.
+const REPORT_DESCRIPTOR_LEN: usize = if tairix_hid::MAX_REPORT_DESCRIPTOR < CTRL_DATA_LEN {
+    tairix_hid::MAX_REPORT_DESCRIPTOR
+} else {
+    CTRL_DATA_LEN
+};
+
+/// A retained length is held as a `u16`, so a bound that outgrew one would
+/// truncate a descriptor to nothing instead of keeping it.
+const _: () = assert!(REPORT_DESCRIPTOR_LEN <= u16::MAX as usize);
+
 /// Interfaces decoded from one configuration descriptor: the servable
 /// working set of one device. A composite device (a wireless
 /// keyboard+mouse receiver) carries two or three interfaces; further
@@ -750,6 +764,23 @@ const fn setup_set_protocol_boot(interface: u8) -> [u8; 8] {
 const fn setup_set_protocol_report(interface: u8) -> [u8; 8] {
     [0x21, 0x0B, 0x01, 0x00, interface, 0x00, 0x00, 0x00]
 }
+
+/// The 8-byte SETUP payload of the HID `GET_PROTOCOL` class request to
+/// `interface` (USB HID 1.11 §7.2.5): one byte back, `0` = boot protocol,
+/// `1` = report protocol.
+///
+/// `SET_PROTOCOL` is an *optional* request — a device may STALL it, or accept
+/// and ignore it — so the mode a device is actually in is a thing to read, not
+/// to assume. Boot-decoding an interface that stayed in report protocol reads
+/// each report's leading Report ID byte as the boot report's modifier byte,
+/// fabricating held modifiers and key usages out of unrelated collections'
+/// traffic.
+const fn setup_get_protocol(interface: u8) -> [u8; 8] {
+    [0xA1, 0x03, 0x00, 0x00, interface, 0x00, 0x01, 0x00]
+}
+
+/// `GET_PROTOCOL`'s answer for boot protocol (USB HID 1.11 §7.2.5).
+const HID_PROTOCOL_BOOT: u8 = 0;
 
 /// The 8-byte SETUP payload of the standard `GET_DESCRIPTOR(Report)` request
 /// to `interface` for `len` bytes (USB HID 1.11 §7.1.1): `bmRequestType`
@@ -1892,6 +1923,10 @@ pub enum EnumStage {
     SetProtocol = 9,
     /// HID `SET_IDLE(indefinite)` class request (HID 1.11 §7.2.4).
     SetIdle = 10,
+    /// HID `GET_PROTOCOL` class request (HID 1.11 §7.2.5), reading back which
+    /// protocol the device is actually in rather than assuming the optional
+    /// `SET_PROTOCOL` took effect.
+    GetProtocol = 12,
     /// Enumeration completed: the device is configured and ready for a class URB.
     Configured = 11,
 }
@@ -2153,7 +2188,7 @@ struct DeviceState {
     /// so the class drivers keep seeing boot-format reports. `None` when the
     /// interface fell back to boot protocol (the descriptor was unreadable or
     /// unparsable), in which case reports are buffered as delivered.
-    report_map: Option<tairix_hid::HidReportMap>,
+    report_decode: ReportDecode,
     /// Interrupt-IN reports captured off the controller's ring, buffered
     /// until a class-driver URB collects them. Filled by
     /// [`UsbDevice::capture_report_event`] on every controller interrupt
@@ -2242,6 +2277,101 @@ struct DeviceState {
     /// `0` when the interface declared none (a bulk interface, or a HID device
     /// with no report descriptor → boot-protocol fallback).
     report_descriptor_len: u16,
+    /// The Report Descriptor bytes the interface actually delivered, for the
+    /// metal report diagnostic ([`UsbDevice::hid_report_descriptor`]). Shorter
+    /// than [`Self::report_descriptor_len`] when the device delivered less
+    /// than it declared, empty when it declared none or refused the read.
+    report_descriptor: ReportDescriptor,
+}
+
+/// A HID interface's Report Descriptor as the device delivered it, bounded by
+/// [`REPORT_DESCRIPTOR_LEN`].
+///
+/// Retained because it is the sole input the report map is derived from: on
+/// hardware QEMU cannot model, a map that reads a device's reports at the
+/// wrong offsets — or accepts a sibling collection's report as its own — is
+/// otherwise undiagnosable from the map alone. It is a device *capability*
+/// blob, so unlike a report it carries no keystroke or pointer movement and
+/// may be logged.
+struct ReportDescriptor {
+    bytes: [u8; REPORT_DESCRIPTOR_LEN],
+    len: u16,
+}
+
+impl ReportDescriptor {
+    /// The descriptor of an interface that declared none, or refused the read.
+    const fn none() -> Self {
+        Self {
+            bytes: [0; REPORT_DESCRIPTOR_LEN],
+            len: 0,
+        }
+    }
+
+    /// Retain `bytes`, truncated to the bound.
+    fn new(bytes: &[u8]) -> Self {
+        let kept = bytes.len().min(REPORT_DESCRIPTOR_LEN);
+        let mut descriptor = Self::none();
+        descriptor.bytes[..kept].copy_from_slice(&bytes[..kept]);
+        descriptor.len = u16::try_from(kept).unwrap_or(0);
+        descriptor
+    }
+
+    /// The delivered bytes, empty when the interface declared no descriptor.
+    fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..usize::from(self.len).min(REPORT_DESCRIPTOR_LEN)]
+    }
+}
+
+/// How a served HID interface's captured reports are read.
+///
+/// Three states, not two, because "the device is in boot protocol" and "the
+/// device is in report protocol and we have no map for it" are different
+/// facts with different safe answers. Collapsing the second into the first is
+/// what boot-decodes an ID-prefixed report — reading its leading Report ID
+/// byte as the boot modifier byte — and invents held modifiers and key usages
+/// out of a sibling collection's traffic.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum ReportDecode {
+    /// Boot protocol: the reports already carry the fixed boot layout, so they
+    /// are buffered as delivered.
+    Boot,
+    /// Report protocol: each report is rewritten through this map, which also
+    /// demuxes the interface's own Report ID from its siblings'.
+    Mapped(tairix_hid::HidReportMap),
+    /// Neither is safe — the device answered that it is in report protocol and
+    /// its descriptor yields no map — so nothing is delivered. A silent
+    /// interface is the honest outcome; fabricated input is not.
+    Refused,
+}
+
+impl ReportDecode {
+    /// The map reports are rewritten through, `None` unless mapped.
+    const fn map(self) -> Option<tairix_hid::HidReportMap> {
+        match self {
+            Self::Mapped(map) => Some(map),
+            Self::Boot | Self::Refused => None,
+        }
+    }
+}
+
+/// What bringing one HID interface up established: how its reports are read,
+/// and the descriptor that decision was made from.
+///
+/// Grouped because both come from the one `configure_hid_protocol` step and
+/// both are recorded on the installed device.
+struct HidSetup {
+    decode: ReportDecode,
+    descriptor: ReportDescriptor,
+}
+
+impl HidSetup {
+    /// The setup of a non-HID interface: no descriptor, boot layout.
+    const fn none() -> Self {
+        Self {
+            decode: ReportDecode::Boot,
+            descriptor: ReportDescriptor::none(),
+        }
+    }
 }
 
 /// One-shot view of an interface's HID enumeration decision, for the
@@ -2255,6 +2385,10 @@ pub struct HidEnumDiag {
     /// `true` when the interface runs in **report protocol** (a report map was
     /// parsed); `false` on the boot-protocol fallback.
     pub report_protocol: bool,
+    /// `true` when the device answered that it is in report protocol but its
+    /// descriptor yields no map, so no report is delivered at all: neither
+    /// reading is safe and a silent interface beats fabricated input.
+    pub reports_refused: bool,
     /// The parsed report-map summary, `None` on the boot fallback.
     pub map: Option<tairix_hid::ReportMapSummary>,
     /// The interrupt-IN endpoint's `wMaxPacketSize`.
@@ -3849,12 +3983,12 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
         // or parsed falls back to boot protocol, unchanged. The parsed map is
         // kept per plan slot so the installed device normalises its
         // report-protocol reports back into the boot layout the class drivers
-        // consume.
-        let mut maps: [Option<tairix_hid::HidReportMap>; MAX_INTERFACES] = [None; MAX_INTERFACES];
+        // consume, and its descriptor beside it for the metal diagnostic.
+        let mut setups: [Option<HidSetup>; MAX_INTERFACES] = [const { None }; MAX_INTERFACES];
         for (slot_pos, entry) in plan.iter().enumerate() {
             if let Some((_, iface)) = entry {
                 if iface.is_hid() {
-                    maps[slot_pos] = self.configure_hid_protocol(iface)?;
+                    setups[slot_pos] = Some(self.configure_hid_protocol(iface)?);
                 }
             }
         }
@@ -3884,7 +4018,7 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
                 iface,
                 int_dci,
                 configured.int_ring,
-                maps[slot_pos],
+                setups[slot_pos].take().unwrap_or_else(HidSetup::none),
                 configured.bulk_rings,
             );
             installed = true;
@@ -3923,6 +4057,15 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
     /// on-metal keyboard whose native report arrived under a Report ID our
     /// parser had not pinned to, dropping every keypress).
     ///
+    /// The descriptor is read for **every** HID interface, a keyboard's
+    /// included, because it is the only evidence of what an interface really
+    /// is and a metal capture is undiagnosable without it. Reading it does not
+    /// decide the protocol: a keyboard runs boot protocol whatever its
+    /// descriptor says, so for a keyboard the read is purely observational and
+    /// a fault reading it cannot fail the bring-up. A pointer's read *is* load
+    /// bearing — it selects report protocol — so there a non-STALL fault still
+    /// fails closed.
+    ///
     /// In every case `SET_IDLE(indefinite)` is issued so an idle device
     /// reports only when its report data changes. All class requests are
     /// optional (a device that STALLs one simply keeps its current mode);
@@ -3935,13 +4078,22 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
     fn configure_hid_protocol(
         &mut self,
         interface: &InterfaceInfo,
-    ) -> Result<Option<tairix_hid::HidReportMap>, DriverError> {
-        // A keyboard stays in boot protocol; only a pointer is driven in
-        // report protocol (and only then is its Report Descriptor read).
-        let map = if interface.is_keyboard() {
+    ) -> Result<HidSetup, DriverError> {
+        let keyboard = interface.is_keyboard();
+        let descriptor = match self.read_report_descriptor(interface) {
+            Ok(descriptor) => descriptor,
+            // A keyboard's descriptor decides nothing, so a diagnostic read of
+            // it must never cost a bring-up that would otherwise succeed — the
+            // device would be left with no keyboard at all. A real controller
+            // fault is not hidden: it surfaces on the SET_PROTOCOL/SET_IDLE
+            // transfers immediately below.
+            Err(_) if keyboard => ReportDescriptor::none(),
+            Err(fault) => return Err(fault),
+        };
+        let map = if keyboard {
             None
         } else {
-            self.read_and_parse_report_descriptor(interface)?
+            tairix_hid::parse_report_descriptor(descriptor.as_bytes())
         };
         self.stage = EnumStage::SetProtocol;
         let protocol = if map.is_some() {
@@ -3950,33 +4102,74 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
             setup_set_protocol_boot(interface.interface_number)
         };
         self.control_optional(protocol)?;
+        // Read back before `SET_IDLE` so a healthy enumeration still closes on
+        // that request's Success: this read is optional and a device that
+        // STALLs it must not leave a stall as the last completion the
+        // fault-localising diagnostic reports.
+        // Boot decoding is only safe if the device really is in boot protocol,
+        // and `SET_PROTOCOL` is optional — a device may accept it and ignore
+        // it. Where the answer says the device stayed in report protocol, its
+        // reports are ID-prefixed, so the boot decoder would read each leading
+        // Report ID byte as the modifier byte and invent held modifiers and
+        // keys from sibling collections. Normalise through the parsed map
+        // instead, and where there is no map deliver nothing rather than
+        // fabricated input.
+        let decode = match map {
+            Some(map) => ReportDecode::Mapped(map),
+            None if self.in_boot_protocol(interface) => ReportDecode::Boot,
+            None => match tairix_hid::parse_report_descriptor(descriptor.as_bytes()) {
+                Some(map) => ReportDecode::Mapped(map),
+                None => ReportDecode::Refused,
+            },
+        };
         self.stage = EnumStage::SetIdle;
         self.control_optional(setup_set_idle_indefinite(interface.interface_number))?;
-        Ok(map)
+        Ok(HidSetup { decode, descriptor })
     }
 
-    /// Read the HID `interface`'s Report Descriptor over EP0 and parse it into
-    /// the boot vocabulary, or `None` when the interface declares no HID
-    /// descriptor, the standard `GET_DESCRIPTOR(Report)` read faults/STALLs,
-    /// or the descriptor is unparsable — the caller then uses boot protocol.
-    /// A refused descriptor never fails the enumeration; only a non-STALL
-    /// controller fault does.
+    /// Whether `interface` reports itself in boot protocol, so the fixed boot
+    /// report layout is what its reports actually carry.
+    ///
+    /// A device that STALLs `GET_PROTOCOL` (the request is optional) cannot
+    /// answer, and one whose answer will not read is no better: both are
+    /// treated as boot protocol, which is what was asked for and is the mode
+    /// every HID boot device must implement. Only an explicit "report
+    /// protocol" answer contradicts the request.
+    fn in_boot_protocol(&mut self, interface: &InterfaceInfo) -> bool {
+        self.stage = EnumStage::GetProtocol;
+        let setup = setup_get_protocol(interface.interface_number);
+        let Ok(transferred) = self.control(setup, 1) else {
+            return true;
+        };
+        if transferred == 0 {
+            return true;
+        }
+        let mut answer = [0u8; 1];
+        if self.dma.read(self.layout.ctrl_data, &mut answer).is_err() {
+            return true;
+        }
+        answer[0] == HID_PROTOCOL_BOOT
+    }
+
+    /// Read the HID `interface`'s Report Descriptor over EP0, or an empty
+    /// descriptor when the interface declares none or the standard
+    /// `GET_DESCRIPTOR(Report)` read STALLs — the caller then has nothing to
+    /// parse and uses boot protocol. A refused descriptor never fails the
+    /// enumeration; only a non-STALL controller fault does.
     ///
     /// # Errors
     ///
     /// A non-STALL controller/device fault, or a register-window fault
     /// reading the delivered bytes.
-    fn read_and_parse_report_descriptor(
+    fn read_report_descriptor(
         &mut self,
         interface: &InterfaceInfo,
-    ) -> Result<Option<tairix_hid::HidReportMap>, DriverError> {
+    ) -> Result<ReportDescriptor, DriverError> {
         let declared = usize::from(interface.report_descriptor_len);
         if declared == 0 {
-            return Ok(None);
+            return Ok(ReportDescriptor::none());
         }
-        let want = declared
-            .min(tairix_hid::MAX_REPORT_DESCRIPTOR)
-            .min(CTRL_DATA_LEN);
+        let want = declared.min(REPORT_DESCRIPTOR_LEN);
         let want_u16 = u16::try_from(want).map_err(|_| DriverError::LengthOutOfRange)?;
         let want_u32 = u32::try_from(want).map_err(|_| DriverError::LengthOutOfRange)?;
         self.stage = EnumStage::GetReportDescriptor;
@@ -3984,16 +4177,16 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
         // A device that refuses the request (a STALL) keeps boot protocol.
         let transferred = match self.control(setup, want_u32) {
             Ok(transferred) => usize::try_from(transferred).unwrap_or(0),
-            Err(DriverError::EndpointStalled) => return Ok(None),
+            Err(DriverError::EndpointStalled) => return Ok(ReportDescriptor::none()),
             Err(other) => return Err(other),
         };
         let read = transferred.min(want);
         if read == 0 {
-            return Ok(None);
+            return Ok(ReportDescriptor::none());
         }
-        let mut buf = [0u8; CTRL_DATA_LEN];
+        let mut buf = [0u8; REPORT_DESCRIPTOR_LEN];
         self.dma.read(self.layout.ctrl_data, &mut buf[..read])?;
-        Ok(tairix_hid::parse_report_descriptor(&buf[..read]))
+        Ok(ReportDescriptor::new(&buf[..read]))
     }
 
     /// Plan which interfaces of the decoded set are served and at which
@@ -4155,7 +4348,7 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
         interface: &InterfaceInfo,
         int_dci: u8,
         int_ring: Option<ProducerRing>,
-        report_map: Option<tairix_hid::HidReportMap>,
+        hid: HidSetup,
         bulk_rings: Option<BulkRings>,
     ) {
         let (bulk_in_ring, bulk_out_ring, bulk_in2_ring, bulk_out2_ring) = match bulk_rings {
@@ -4193,7 +4386,7 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
             int_dci,
             int_max_packet: interface.int_max_packet,
             int_ring,
-            report_map,
+            report_decode: hid.decode,
             reports: Fifo::new(),
             report_fault: None,
             dropped_reports: 0,
@@ -4215,6 +4408,7 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
             aborted_bulk: Fifo::new(),
             last_report_fault_code: 0,
             report_descriptor_len: interface.report_descriptor_len,
+            report_descriptor: hid.descriptor,
         });
     }
 
@@ -6452,11 +6646,26 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
         let capture_len = u16::try_from(device.int_capture_len()).unwrap_or(u16::MAX);
         Some(HidEnumDiag {
             report_descriptor_len: device.report_descriptor_len,
-            report_protocol: device.report_map.is_some(),
-            map: device.report_map.map(|map| map.summary()),
+            report_protocol: matches!(device.report_decode, ReportDecode::Mapped(_)),
+            reports_refused: matches!(device.report_decode, ReportDecode::Refused),
+            map: device.report_decode.map().map(|map| map.summary()),
             int_max_packet: device.int_max_packet,
             capture_len,
         })
+    }
+
+    /// The Report Descriptor bytes interface `index` delivered, empty when it
+    /// declared none or refused the read.
+    ///
+    /// The companion of [`Self::hid_enum_diag`]: the diagnostic reports what
+    /// the map *says*, this reports what it was derived *from*, which is the
+    /// only way a mis-parse is diagnosable on hardware QEMU cannot model. A
+    /// Report Descriptor is a device capability blob and carries no report
+    /// payload, so a log of it discloses no keystroke or pointer movement.
+    #[must_use]
+    pub fn hid_report_descriptor(&self, index: usize) -> &[u8] {
+        self.device(index)
+            .map_or(&[], |device| device.report_descriptor.as_bytes())
     }
 
     /// Read the controller's `USBCMD` for a one-shot bring-up diagnostic
@@ -7464,24 +7673,29 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
         }
     }
 
-    /// Buffer a captured interrupt-IN report for device `index`, first
-    /// normalising a report-protocol report into the fixed boot layout the
-    /// class drivers consume when the interface runs in report protocol
-    /// ([`DeviceState::report_map`]).
+    /// Buffer a captured interrupt-IN report for device `index`, read the way
+    /// this interface's [`ReportDecode`] says.
     ///
     /// A report that does not match this interface's map — a different Report
     /// ID (a sibling collection sharing the endpoint) or one truncated below
     /// the fields the map names — is dropped, exactly like an idle no-op
     /// report: it is not this interface's mouse/keyboard report, so nothing is
     /// buffered and the class driver's URB stays parked. An interface on the
-    /// boot-protocol fallback (`report_map` `None`) buffers the report as
-    /// delivered.
+    /// boot-protocol fallback buffers the report as delivered, and a refused
+    /// one buffers nothing at all.
     fn enqueue_captured_report(&mut self, index: usize, raw: &[u8]) {
-        let map = self.device(index).and_then(|device| device.report_map);
-        let Some(map) = map else {
+        let decode = self
+            .device(index)
+            .map_or(ReportDecode::Boot, |d| d.report_decode);
+        let map = match decode {
             // Boot-protocol fallback: the report is buffered as delivered.
-            self.enqueue_report(index, raw);
-            return;
+            ReportDecode::Boot => {
+                self.enqueue_report(index, raw);
+                return;
+            }
+            // No safe reading of this device's reports, so none is delivered.
+            ReportDecode::Refused => return,
+            ReportDecode::Mapped(map) => map,
         };
         // Report-protocol normalisation may drop a report (a report-ID
         // mismatch — a sibling collection sharing the endpoint — or a field

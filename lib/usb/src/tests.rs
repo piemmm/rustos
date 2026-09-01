@@ -754,6 +754,14 @@ struct MockXhci {
     /// transaction error — a genuine fault `control_optional` must
     /// still surface.
     fault_class_requests: bool,
+    /// When set, `GET_DESCRIPTOR(Report)` alone answers a non-STALL
+    /// transaction error while every other class request succeeds — the
+    /// device that faults the diagnostic descriptor read but is otherwise
+    /// perfectly serviceable.
+    fault_report_descriptor_request: bool,
+    /// When set, `SET_PROTOCOL` is accepted but `GET_PROTOCOL` still answers
+    /// report protocol: the device ignored the request.
+    ignores_set_protocol: bool,
     /// When set, report completions forge a residual above the TRB
     /// length (a hostile controller claim).
     forge_report_residual: bool,
@@ -1225,6 +1233,8 @@ impl MockXhci {
             pending_reports: VecDeque::new(),
             stall_class_requests: false,
             fault_class_requests: false,
+            fault_report_descriptor_request: false,
+            ignores_set_protocol: false,
             forge_report_residual: false,
             fault_one_report_completion: None,
             fault_next_address_device: None,
@@ -2395,6 +2405,15 @@ impl MockXhci {
             // serves no report descriptor, for which the driver falls back to
             // boot protocol.
             (0x81, 0x06) if setup[3] == 0x22 => {
+                if self.fault_report_descriptor_request {
+                    self.post_transfer_event(
+                        status_addr,
+                        CompletionCode::UsbTransactionError,
+                        1,
+                        0,
+                    );
+                    return;
+                }
                 let Some(report_descriptor) = self.report_descriptor else {
                     self.ep0_halted = true;
                     self.post_transfer_event(status_addr, CompletionCode::StallError, 1, 0);
@@ -2462,21 +2481,12 @@ impl MockXhci {
                 let block = self.read_mem(buffer, len as usize);
                 self.adsc_blocks.push(block);
             }
-            // SET_PROTOCOL (HID class)
-            (0x21, 0x0B) => {
-                if self.reject_hid_class_request(status_addr) {
+            // The HID class protocol/idle requests, which share the same
+            // STALL/fault knobs.
+            (0x21, 0x0A | 0x0B) | (0xA1, 0x03) => {
+                if !self.execute_hid_class(setup, data, w_length, status_addr) {
                     return;
                 }
-                self.protocol = Some(setup[2]);
-            }
-            // SET_IDLE (HID class): quiesce an idle endpoint so it reports
-            // only when its report data changes. Honours the same STALL/fault
-            // knobs as SET_PROTOCOL, and records the requested idle value.
-            (0x21, 0x0A) => {
-                if self.reject_hid_class_request(status_addr) {
-                    return;
-                }
-                self.idle_value = Some(u16::from_le_bytes([setup[2], setup[3]]));
             }
             _ => {
                 self.ep0_halted = true;
@@ -2485,6 +2495,39 @@ impl MockXhci {
             }
         }
         self.post_transfer_event(status_addr, CompletionCode::Success, 1, 0);
+    }
+
+    /// Answer one HID class request — `SET_PROTOCOL`, `GET_PROTOCOL`, or
+    /// `SET_IDLE`. Returns `false` when it posted its own (STALL/fault or data)
+    /// transfer event and the caller must not post the standard Success.
+    ///
+    /// A scripted `ignores_set_protocol` accepts `SET_PROTOCOL` and then
+    /// answers report protocol from `GET_PROTOCOL` anyway: the composite
+    /// interface whose keyboard collection sits behind a vendor one and never
+    /// implements the boot layout.
+    fn execute_hid_class(
+        &mut self,
+        setup: [u8; 8],
+        data: Option<(u64, u64, u32, bool)>,
+        w_length: usize,
+        status_addr: u64,
+    ) -> bool {
+        if self.reject_hid_class_request(status_addr) {
+            return false;
+        }
+        match (setup[0], setup[1]) {
+            (0x21, 0x0B) => self.protocol = Some(setup[2]),
+            (0xA1, 0x03) => {
+                let answer = if self.ignores_set_protocol {
+                    [HID_PROTOCOL_REPORT]
+                } else {
+                    [self.protocol.unwrap_or(HID_PROTOCOL_BOOT)]
+                };
+                return self.deliver_in_data(data, &answer, w_length, status_addr);
+            }
+            _ => self.idle_value = Some(u16::from_le_bytes([setup[2], setup[3]])),
+        }
+        true
     }
 
     /// Model a device-side `CLEAR_FEATURE(ENDPOINT_HALT)` (USB 2.0 §9.4.1),
@@ -4199,6 +4242,10 @@ fn root_attach_tolerates_a_stalled_set_protocol() {
     );
 }
 
+/// `GET_PROTOCOL`'s answers (USB HID 1.11 §7.2.5), as the mock returns them.
+const HID_PROTOCOL_BOOT: u8 = 0;
+const HID_PROTOCOL_REPORT: u8 = 1;
+
 #[test]
 fn root_attach_records_the_configured_stage_on_success() {
     // A clean enumeration walks the breadcrumb to `Configured`, and the
@@ -4670,6 +4717,17 @@ fn a_report_protocol_mouse_is_configured_and_normalizes_reports() {
     assert_eq!(buf[1], 3, "the X delta");
     assert_eq!(i8::from_le_bytes([buf[2]]), -2, "the Y delta");
     assert_eq!(buf[3], 0, "no wheel field, so a zero wheel byte");
+
+    // The descriptor the map was parsed from is retained beside it. A map is
+    // only as right as its input, so a metal capture that disagrees with the
+    // located layout — a device reporting under a Report ID the parser did not
+    // pin to, whose sibling collections are then read as this interface's own
+    // reports — is diagnosable from the bytes rather than by guesswork.
+    assert_eq!(
+        device.hid_report_descriptor(0),
+        &MOCK_MOUSE_REPORT_DESCRIPTOR[..],
+        "the delivered Report Descriptor is retained exactly"
+    );
 }
 
 #[test]
@@ -4728,6 +4786,167 @@ fn a_keyboard_runs_boot_protocol_even_when_its_report_descriptor_parses() {
         device.host_mut().int_armed_len,
         9,
         "armed to the endpoint max packet, not the capture buffer"
+    );
+
+    // A keyboard's descriptor is read and retained even though it decides
+    // nothing here: it is the only evidence of what the interface really is,
+    // and without it a metal capture cannot tell a genuine boot keyboard from
+    // a sibling collection that merely declares the boot protocol.
+    assert_eq!(
+        device.hid_report_descriptor(0),
+        &MOCK_REPORT_ID_KEYBOARD_DESCRIPTOR[..],
+        "the keyboard's Report Descriptor is retained despite boot protocol"
+    );
+}
+
+#[test]
+fn a_keyboard_whose_descriptor_read_faults_still_enumerates() {
+    // The descriptor read is diagnostic for a keyboard — boot protocol is
+    // chosen whatever it says — so a device that faults that one request while
+    // answering everything else must not lose its keyboard over it. Before the
+    // read was extended to keyboards this request was never issued for one, so
+    // tolerating its fault is what keeps that unchanged.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_report_id_keyboard(&mem);
+    mock.fault_report_descriptor_request = true;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+    device
+        .bring_up(&delay)
+        .expect("the keyboard enumerates despite the faulting descriptor read");
+    assert_eq!(
+        device.host_mut().protocol,
+        Some(0),
+        "still boot protocol, chosen without the descriptor"
+    );
+    assert!(
+        device.hid_report_descriptor(0).is_empty(),
+        "a faulted read retains nothing rather than a partial descriptor"
+    );
+
+    // The keyboard is fully serviceable: its reports still reach the class
+    // driver, which is the whole point of not failing the bring-up.
+    arm_report_request(&mut device);
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0x02, 0x00, 0x04, 0, 0, 0, 0, 0]);
+    device.host_mut().process_int_ring();
+    let mut buf = [0u8; REPORT_LEN];
+    let len = device
+        .next_report(0, &mut buf)
+        .expect("a report drains")
+        .expect("the keyboard report is delivered");
+    assert!(len >= 3, "a boot keyboard report");
+    assert_eq!(buf[2], 0x04, "key A reaches the class driver");
+}
+
+#[test]
+fn a_keyboard_that_ignored_set_protocol_is_normalised_not_boot_decoded() {
+    // The metal shape this exists for: a composite interface that declares the
+    // boot keyboard protocol but whose keyboard collection sits behind a vendor
+    // one under a Report ID. `SET_PROTOCOL(boot)` is optional and such a device
+    // accepts it and carries on sending ID-prefixed reports. Boot-decoding
+    // those reads each leading Report ID byte as the boot modifier byte, so a
+    // vendor report becomes phantom held modifiers and garbage key usages.
+    // Reading the protocol back is what catches it; the parsed map then
+    // demuxes the interface's own reports and drops its siblings'.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_report_id_keyboard(&mem);
+    mock.ignores_set_protocol = true;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+    device.bring_up(&delay).expect("the keyboard enumerates");
+    let diag = device
+        .hid_enum_diag(0)
+        .expect("a HID enumeration diagnostic");
+    assert!(
+        diag.report_protocol,
+        "the device said it stayed in report protocol, so its map is used"
+    );
+    assert!(!diag.reports_refused, "a map was available, so not refused");
+
+    // A report under the map's own Report ID normalises to the boot layout.
+    arm_report_request(&mut device);
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0x01, 0x02, 0x00, 0x04, 0, 0, 0, 0]);
+    device.host_mut().process_int_ring();
+    let mut buf = [0u8; REPORT_LEN];
+    let len = device
+        .next_report(0, &mut buf)
+        .expect("a report drains")
+        .expect("the mapped report is delivered");
+    assert!(len >= 3, "a normalised boot keyboard report");
+    assert_eq!(buf[0], 0x02, "the real modifier byte, not the Report ID");
+    assert_eq!(buf[2], 0x04, "key A");
+
+    // A sibling collection's report carries a different Report ID and is
+    // dropped rather than decoded as this interface's own.
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0x09, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0]);
+    device.host_mut().process_int_ring();
+    assert_eq!(
+        device.next_report(0, &mut buf),
+        Ok(None),
+        "another collection's report is not this keyboard's"
+    );
+}
+
+#[test]
+fn an_interface_in_report_protocol_with_no_map_delivers_nothing() {
+    // The same read-back, with no map to fall back on: neither reading is
+    // safe, so no report is delivered. A silent interface is the honest
+    // outcome — boot-decoding would fabricate modifiers and keys from
+    // whatever the device happens to send.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_device(&mem);
+    mock.ignores_set_protocol = true;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+    device
+        .bring_up(&delay)
+        .expect("the device still enumerates");
+    let diag = device
+        .hid_enum_diag(0)
+        .expect("a HID enumeration diagnostic");
+    assert!(!diag.report_protocol, "no map, so not report protocol");
+    assert!(
+        diag.reports_refused,
+        "report protocol with no map refuses every report"
+    );
+
+    arm_report_request(&mut device);
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0x02, 0x00, 0x04, 0, 0, 0, 0, 0]);
+    device.host_mut().process_int_ring();
+    let mut buf = [0u8; REPORT_LEN];
+    assert_eq!(
+        device.next_report(0, &mut buf),
+        Ok(None),
+        "nothing is delivered rather than a boot-decoded guess"
+    );
+}
+
+#[test]
+fn a_mouse_whose_descriptor_read_faults_fails_closed() {
+    // A pointer's descriptor read *is* load bearing — it selects report
+    // protocol — so a non-STALL fault there still fails the bring-up rather
+    // than silently running a mouse the engine could not characterise. Only
+    // the keyboard's observational read is tolerated.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_report_mouse(&mem);
+    mock.fault_report_descriptor_request = true;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+    assert!(
+        device.bring_up(&delay).is_err(),
+        "a pointer's faulting descriptor read fails closed"
     );
 }
 
