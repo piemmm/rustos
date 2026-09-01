@@ -17,7 +17,7 @@ Binding under `AGENTS.md` (§3, §15.18).
 | M3.3 | Migrate `userland/apps/files`, delete its shell | **landed** |
 | M3.4 | Migrate the bar's four menu subjects, delete `BarMenu` | **landed** |
 | M3.5 | ~~The bar's start menu~~ — **not in scope** (decision 3) | **settled** |
-| M4 | Plate as a cached damage-reporting surface | planned |
+| M4 | Plate as a cached damage-reporting surface | **landed** |
 | M5 | Plates are floating chrome: 80% opacity over the shared chrome blur | **landed** |
 
 Open decisions: none. Decision 4 is **settled** by the owner — floating chrome
@@ -61,6 +61,8 @@ stage that closes it carries its regression test (§2.18, §7).
 | D23 | The bar's own menus were reachable only through the bar: no host test could open one *and* read its answer back, because the plate and the grab were the bar's own shell and the answer never left it. Migrating them made the round trip host-testable in two halves — the model and the id→response inverse in the taskbar suite, the plate, grab and one answer in the session suite (`choose_bar_menu_row` drives the whole path the serve loop drives). The end-to-end wiring stays witnessed by the two QEMU verticals that already click a bar menu row: `appbar_qemu_aarch64` (a slot's declared *New window*) and `datetime_elevate_qemu_aarch64` (the clock's *Set Date & Time…*), both of which now pass only if the chain path is right. | **closed in M3.4** |
 | D10 | The bar's own menus state two things the model cannot carry: a row denied for want of a capability (`AuthorityState::NeedsCapability`, which draws an Authority Mark rather than merely greying) and a row whose setting is already in effect (`ActivityState::Complete`). **Answered.** The Authority Mark says *the system* refused a command, and only the system may say it, so it is in-process-only — and structurally, not by a check: the wire model has no field for an authority state, so a decoded row is always `Allowed` and an application cannot paint the mark on its own row. §1.6's "bounded subset" means an absent field, never a validated one. `ActivityState::Complete` ("work finished successfully") is a *misuse* on an appearance row and is deleted rather than carried: the alternatives are a radio group, which the wire already spells `AppMenuMark::Radio` plus disabled plus a reason. The bar's own rows keep `NeedsCapability`, because they are the desktop's. **Closed in M3.4**: `system.rs`'s in-force appearance row is now `MenuMark::Radio` plus disabled plus its reason, as the pinboard's sort and arrangement rows became in M3.2, and no menu row anywhere states an activity. (`render.rs`'s remaining `ActivityState::Complete` is a *notification card* for a `Success` severity — "work finished successfully" about work that did — and is correct.) | **closed in M3.4** |
 | D24 | The chain's geometry rule was stated twice: `windows::chain_geometry` for every open/settle path, and an inline copy in `shell::present_menu_chain` — which also cloned the whole active `Theme` on **every** present, so hovering a row allocated a `String`, a font set and a cursor set per repaint. M5 could not leave it: the two copies would have had to agree on the *floating* ground or a plate's pixels and its hit-test rectangles would come from two themes. **Closed**: one definition, taking the session rather than the whole shell so a caller can hold the chain (or the shell's window records) mutably while it reads it, and the clone is gone. | **closed in M5** |
+| D26 | A chain that displaced another under a **different owner** inherited its compositor windows. `menu_windows` is keyed by `SurfaceKind` alone, so the new chain's root plate re-used a window created as the *previous* owner's transient: it rode the wrong family's stacking, rising with a window it does not belong to and able to end up underneath its own. Reachable without a press, because an application's `OpenMenu` arrives on the wire while another chain holds the grab. **Closed**: the shell records the owner its surfaces were opened under and takes them all down when it changes, so a displaced chain's windows are never inherited across owners. | **closed in M4** |
+| D27 | `TaskbarPresenter`'s module and type rustdoc still named "its context menu" and a "menu window" among the surfaces it presents — D25's leftover in a second file, naming a surface the presenter has had no field for since `BarMenu` was deleted. **Closed**: every mention names the hover window picker, which is the surface actually there. | **closed in M4** |
 | D25 | Two `Taskbar` rustdoc comments still named "the context menu" as one of the bar's five rendered surfaces — a leftover from M3.4's deletion of `BarMenu`; the fifth surface is the hover window picker, which `TaskbarRepaint` has always spelled. Stale docs mislead a reader into looking for a surface the bar no longer draws. **Closed**: both name the picker. | **closed in M5** |
 
 **This is an architecture change, not a performance one.** The ~300 ms
@@ -497,10 +499,10 @@ rather than leaving untested:
   surviving path on which a `MenuClosed` could be delivered. The chain's
   lifetime rules cover owner death and the mode change; seat loss is the
   session's own end.
-- **Damage confinement** is M4's, not this stage's: a plate is not yet a
-  cached damage-reporting surface. What M2 does guarantee, and tests, is that
-  a pointer travelling *within* a row costs no repaint at all, and that moving
-  a highlight on one plate opens, closes and moves nothing else.
+- **Damage confinement** is M4's, not this stage's. What M2 guarantees, and
+  tests, is that a pointer travelling *within* a row costs no repaint at all,
+  and that moving a highlight on one plate opens, closes and moves nothing
+  else; what a repaint of the plate itself *costs* is M4's, and landed there.
 
 The desktop's own surfaces are **not** clients yet: the pinboard's backdrop
 menu is M3.2 and the bar's four subjects are M3.4, which is where those
@@ -690,12 +692,59 @@ Every menu-shell helper in `lib/controls` has two or more consumers (§15.5):
 them, and `ChainModel` is built by the bar, by the pinboard and by the wire
 decode.
 
-### M4 — what the compositor can then do
+### M4 — a plate is a retained, damage-reporting surface (landed)
 
-Only after M3, because it is meaningless while apps own menu pixels: a plate
-becomes a cached, damage-reporting surface like the window furniture
-(`plans/COMPOSITOR-WORK.md`), so moving a highlight repaints two rows rather
-than the plate.
+Only meaningful after M3, because while an application owned menu pixels the
+desktop had nothing to retain. A plate is now cached chrome like the window
+furniture (`plans/COMPOSITOR-WORK.md`): its compositor window keeps its pixels
+between presents, and moving a highlight repaints and marks the two rows the
+mark moved between rather than the plate.
+
+Before it, every `Redraw` allocated a fresh surface for **every** plate and the
+information panel, painted each whole, and handed them all to `set_surface` —
+so one pointer sample crossing a row boundary cost a plate-sized allocation per
+surface, a full paint of each, and a whole-rectangle mark on all of them. On
+frosted, translucent chrome that mark is the expensive part: the plate has to
+be re-blended against what it stands over, everywhere it covers.
+
+- **The chain says what it owes, per surface.** Each plate and the information
+  panel carries a `Repaint` — `Whole`, or the rectangles it owes in its own
+  local pixels — and `ChainSurface` reports it. `Whole` is the state a surface
+  is *born* in, which is what makes a plate rebuilt at a depth another plate
+  held (a different submenu, possibly the same size, re-using that depth's
+  window) repaint completely rather than showing the previous menu's rows.
+  Row damage comes from the shared controls themselves: `Menu`'s highlight
+  already reports the row the mark left and the row it arrived on, and the
+  chain folds those screen rectangles into the plate's own space. `presented`
+  clears what a surface owed, called per surface the session actually painted,
+  so a heap refusal keeps its debt rather than reporting stale pixels current.
+- **The compositor grew the window mirror of `repaint_desktop`.**
+  `Compositor::repaint_window(id, size, area, paint)` hands back the window's
+  retained content buffer with the rectangles of `area` clipped to it and marks
+  only those; a window whose content is absent or is not `size` is given a
+  fresh buffer, painted whole, and its geometry follows. The embedder *declares*
+  its damage where a client's `present_window_content` has it *discovered* by
+  the conversion, and that is the honest split: an embedder painting its own
+  model knows what changed before it paints.
+- **One paint, run under a clip.** The session clips the surface to each
+  rectangle and calls `MenuChain::render_surface`, so there is no second
+  "paint just this row" recipe to disagree with the first — only the writes are
+  withheld. `render_surface` is also now the *only* entry point for a chain's
+  pixels: the shell's own information-panel recipe is gone, and plate and panel
+  share one `lay_plate` ground.
+- **The paint starts from nothing, and has to.** Laying the plate ground
+  *replaces* a pixel the shape fully covers but mixes an **arc** pixel toward it
+  by that pixel's coverage, so a rounded corner would keep a tint of the
+  highlight that last passed over it. `lay_plate` therefore clears before it
+  lays, which is what a whole paint into a fresh buffer does anyway — and what
+  makes "a partial repaint lands the pixels a whole one would" true by
+  construction rather than by inspection. A test drives two chains identically,
+  one repainted whole at every step and one only where it said it had changed,
+  and compares the surfaces pixel for pixel.
+- **What it costs now.** A highlight move: two rows re-derived, two rectangles
+  marked, and no other surface of the chain touched. A drag: a move, and no
+  repaint at all — the same pixels are simply somewhere else. A pointer
+  travelling within one row: nothing, as M2 already guaranteed.
 
 ### M5 — a plate is floating chrome, not a solid card
 

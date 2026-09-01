@@ -1,12 +1,12 @@
-//! Presenting the taskbar, its program-library popup, its context menu, its
-//! hover window picker, and its popovers through the window manager.
+//! Presenting the taskbar, its program-library popup, its hover window
+//! picker, and its popovers through the window manager.
 //!
 //! The taskbar models the desktop's bar and produces a *rectangular* pixel
 //! [`Surface`], and the window manager composites and
 //! rounds windows; neither knows about the other. Joining
 //! them is session glue, and [`TaskbarPresenter`] is that join: it paints the
-//! bar (and, while open, the program-library popup and the bar's context
-//! menu) with the taskbar's own [`TaskbarRenderer`] and presents each as a
+//! bar (and, while open, the program-library popup and the hover window
+//! picker) with the taskbar's own [`TaskbarRenderer`] and presents each as a
 //! window in the [`Compositor`], placed at its computed screen origin
 //! and rounded with the theme's corner radius through the compositor's single
 //! anti-aliased rounded-corner path — the same path it uses for application
@@ -20,7 +20,7 @@
 //!
 //! It is **total and fails closed**: a render that cannot
 //! allocate its surface leaves whatever is already on screen untouched rather
-//! than blanking the bar or panicking, and the popup and menu windows are
+//! than blanking the bar or panicking, and the popup and picker windows are
 //! removed from the compositor the moment each closes. If a presented window
 //! has disappeared from the compositor (an embedder removed it), the next
 //! present re-creates it rather than silently doing nothing.
@@ -30,15 +30,15 @@ use tairix_taskbar::{Taskbar, TaskbarRenderer, TaskbarRepaint};
 use tairix_theme::Theme;
 use tairix_wm::{Compositor, Corners, Point, Scale, Surface, WindowId};
 
-/// Presents a taskbar, its program-library popup, its context menu, its
-/// hover window picker, the notification popover, and the Switchboard
-/// capsule's instrument readout as window-manager windows.
+/// Presents a taskbar, its program-library popup, its hover window picker,
+/// the notification popover, and the Switchboard capsule's instrument readout
+/// as window-manager windows.
 ///
 /// Build one with [`TaskbarPresenter::new`], then call
 /// [`present`](Self::present) whenever the taskbar's model or the active theme
 /// changes, naming the surfaces that changed; the presenter creates the bar,
-/// popup, and menu windows on first sight and keeps their surface, position,
-/// and corner radius in step thereafter.
+/// popup, and picker windows on first sight and keeps their surface,
+/// position, and corner radius in step thereafter.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct TaskbarPresenter {
     bar: Option<WindowId>,
@@ -140,9 +140,9 @@ impl TaskbarPresenter {
     /// window is removed.
     ///
     /// Repainting only the latched surfaces is what keeps a pointer moving
-    /// over one small open menu cheap: re-rendering every surface and
+    /// over one small open popup cheap: re-rendering every surface and
     /// pushing them all back into the compositor costs milliseconds and
-    /// damages a window rectangle each, where the menu alone costs a
+    /// damages a window rectangle each, where the popup alone costs a
     /// fraction of that and damages one. A surface with no window yet is always
     /// presented, whatever the latch says, so the first paint after startup
     /// (or after a [`teardown`](Self::teardown)) puts everything on screen.
@@ -198,7 +198,7 @@ impl TaskbarPresenter {
         }
     }
 
-    /// Remove the bar, popup, menu, and popover windows from `compositor`
+    /// Remove the bar, popup, picker, and popover windows from `compositor`
     /// and forget them, so a later [`present`](Self::present) starts fresh.
     /// Tearing the desktop session down leaves no orphaned windows behind.
     pub fn teardown(&mut self, compositor: &mut Compositor) {

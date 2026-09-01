@@ -1420,6 +1420,84 @@ impl Compositor {
         Some(out)
     }
 
+    /// Repaint part of a window the **embedder** paints itself — a menu
+    /// plate, a session panel — keeping the pixels already there and marking
+    /// only what `paint` was given to write.
+    ///
+    /// The window-content mirror of
+    /// [`repaint_desktop`](Self::repaint_desktop), and it exists for the same
+    /// two reasons: handing the retained buffer back means a repaint costs a
+    /// paint rather than a paint plus an allocation the heap may refuse, and
+    /// marking only `area` means a menu row taking the highlight costs that
+    /// row instead of the plate — which on a frosted surface is the
+    /// difference between re-blending two rows and re-blending, then
+    /// re-blurring behind, all of it.
+    ///
+    /// The embedder declares the damage here where a client
+    /// ([`present_window_content`](Self::present_window_content)) has it
+    /// discovered by the conversion: an embedder painting its own model knows
+    /// what changed before it paints, and a client does not.
+    ///
+    /// `paint` receives the content surface and the rectangles to paint,
+    /// already clipped to it and disjoint, in the surface's own local
+    /// coordinates; it must write inside them and nowhere else, since nothing
+    /// outside them is marked. It sees the surface exactly as the last paint
+    /// left it, so it lays its own background over each rectangle rather than
+    /// relying on a clear this method cannot know is redundant.
+    ///
+    /// A window whose content is absent or is not `size` is repainted whole
+    /// into a fresh buffer of that size, however little `area` asked for: a
+    /// buffer with no pixels worth keeping has nothing for a partial paint to
+    /// preserve, and its size is what the window's geometry then follows.
+    ///
+    /// Returns `false` — having changed and damaged nothing — for an unknown
+    /// `id` or a buffer the heap will not give back, so an exhausted machine
+    /// leaves the window exactly as it was rather than blanking it.
+    pub fn repaint_window(
+        &mut self,
+        id: WindowId,
+        size: (u32, u32),
+        area: &Region,
+        paint: impl FnOnce(&mut Surface, &[Rect]),
+    ) -> bool {
+        let (width, height) = size;
+        let Some(index) = self.index_of(id) else {
+            return false;
+        };
+        let local = Rect::new(0, 0, width, height);
+        let fits = self.windows.get(index).is_some_and(|window| {
+            window
+                .content()
+                .is_some_and(|held| held.width() == width && held.height() == height)
+        });
+        if !fits {
+            let Some(mut fresh) = Surface::new(width, height) else {
+                return false;
+            };
+            paint(&mut fresh, &[local]);
+            return self.set_surface(id, fresh);
+        }
+        let mut painted = area.clone();
+        painted.clip(local);
+        if painted.is_empty() {
+            return true;
+        }
+        let Some(window) = self.windows.get_mut(index) else {
+            return false;
+        };
+        let Some(content) = window.content_mut() else {
+            return false;
+        };
+        paint(content, painted.rects());
+        let client = window.client_rect();
+        painted.translate(client.left(), client.top());
+        painted.clip(client);
+        for rect in painted.rects() {
+            self.mark_layer(id, *rect);
+        }
+        true
+    }
+
     /// Raise a window to the top of the z-order; its bounds are marked
     /// dirty. Raising a window whose family already holds the front marks no
     /// damage and still returns `true` (only an unknown `id` returns

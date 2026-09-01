@@ -8102,7 +8102,7 @@ thread costs the RAM of its working set rather than of its `stack-bytes` bound.
 
 ---
 
-## NEW-MENUS — menus owned by the desktop, not by the app (`plans/NEW-MENUS.md`)  **[M0–M3 DONE, M5 DONE, M4 PLANNED]**
+## NEW-MENUS — menus owned by the desktop, not by the app (`plans/NEW-MENUS.md`)  **[DONE]**
 
 **Dependencies:** Stage 7 (compositor, session, controls). Independent of
 `plans/FIX-DESKTOP-SPEEDUP.md`, which closed the performance reason for it
@@ -8126,10 +8126,15 @@ derived **once** for the desktop (`DesktopSession::floating_theme`) and handed t
 the bar as well, so a theme switch cannot leave a surface on the ground it had
 before.
 
-**What is left.** M4 alone: the plate becomes a cached damage-reporting
-surface like the window furniture, so moving a highlight repaints two rows
-rather than the plate. It was meaningless while applications owned menu
-pixels, and is now unblocked.
+A plate is also **retained, damage-reporting chrome** (M4), like the window
+furniture: its compositor window keeps its pixels between presents, the chain
+records what each surface still owes a paint, and the session repaints only
+that through `Compositor::repaint_window` — the window-content mirror of
+`repaint_desktop`. Moving a highlight costs the two rows the mark moved
+between; dragging a plate costs a move and no repaint at all; a surface that
+did not change is not touched.
+
+**What is left.** Nothing: M0–M5 are done.
 
 All four escalated decisions are settled in the plan's §6: variable-length
 request framing (M1a), Open With… as one row plus the application's own chooser

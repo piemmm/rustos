@@ -23,8 +23,8 @@ use alloc::vec::Vec;
 
 use tairix_abi::window_ipc::{AppMenuItemId, MenuRefusal};
 use tairix_controls::{
-    plate_rect, ChainChild, ChainModel, FactList, Menu, MenuAction, PlatePlacement, TitleBar,
-    TitleBarCommands, TitleBarEvent,
+    damage, plate_rect, ChainChild, ChainModel, FactList, Menu, MenuAction, PlatePlacement,
+    TitleBar, TitleBarCommands, TitleBarEvent,
 };
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_taskbar::MenuSubject;
@@ -87,12 +87,49 @@ pub enum ChainAction {
 }
 
 /// One surface the chain occupies on screen.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChainSurface {
     /// Where it sits, in screen pixels.
     pub rect: Rect,
     /// What it is.
     pub kind: SurfaceKind,
+    /// What of it the session has still to paint.
+    pub repaint: Repaint,
+}
+
+/// What of a chain surface has still to be painted.
+///
+/// A surface is born whole and thereafter only the two rows a highlight moves
+/// between change, so a pointer crossing a plate costs those rows rather than
+/// the plate — and on a frosted surface that is the difference between
+/// re-blending two rows and re-blending, then re-blurring behind, all of it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Repaint {
+    /// Every pixel: the surface is new, or the rows on it were rebuilt, so
+    /// nothing of what is on screen can be kept.
+    Whole,
+    /// Only these rectangles, in the surface's own local pixels. Empty is a
+    /// surface whose pixels on screen are already current.
+    Parts(Region),
+}
+
+impl Repaint {
+    /// A surface whose pixels on screen are current.
+    ///
+    /// Budgeted like any control's damage: past a handful of rectangles a
+    /// repaint costs more to describe than to widen, so the region degrades
+    /// to its bounding box rather than growing without bound.
+    fn clean() -> Self {
+        Self::Parts(damage::sink())
+    }
+
+    /// Fold in a rectangle that changed. A surface already owing every pixel
+    /// owes no more for it.
+    fn add(&mut self, rect: Rect) {
+        if let Self::Parts(parts) = self {
+            parts.add(rect);
+        }
+    }
 }
 
 /// Which of the chain's surfaces a rectangle is.
@@ -120,6 +157,8 @@ struct Plate {
     pinned: bool,
     /// The row of this plate whose child is open, if any.
     open_row: Option<usize>,
+    /// What of the plate the session has still to paint.
+    repaint: Repaint,
 }
 
 /// Logical width of the information panel at the reference density: wide
@@ -138,6 +177,9 @@ struct InfoPanel {
     facts: FactList,
     /// Where it sits.
     rect: Rect,
+    /// What of the panel the session has still to paint. It states facts that
+    /// never change, so after its first paint it owes nothing.
+    repaint: Repaint,
 }
 
 /// A drag in flight: which plate the band press landed on, and where the
@@ -347,15 +389,38 @@ impl MenuChain {
             .map(|(depth, plate)| ChainSurface {
                 rect: plate.rect,
                 kind: SurfaceKind::Plate(depth),
+                repaint: plate.repaint.clone(),
             })
             .collect();
         if let Some(panel) = chain.info.as_ref() {
             out.push(ChainSurface {
                 rect: panel.rect,
                 kind: SurfaceKind::Info,
+                repaint: panel.repaint.clone(),
             });
         }
         out
+    }
+
+    /// Record that the surface `kind` now carries what the chain last asked
+    /// for, so what it owes from here is only what changes after this.
+    ///
+    /// Called per surface the session actually painted. A surface the heap
+    /// refused keeps what it owes and is painted on the next pass instead, so
+    /// a refusal can never leave stale pixels reported as current.
+    pub fn presented(&mut self, kind: SurfaceKind) {
+        let Some(chain) = self.open.as_mut() else {
+            return;
+        };
+        let owed = match kind {
+            SurfaceKind::Plate(depth) => {
+                chain.plates.get_mut(depth).map(|plate| &mut plate.repaint)
+            }
+            SurfaceKind::Info => chain.info.as_mut().map(|panel| &mut panel.repaint),
+        };
+        if let Some(owed) = owed {
+            *owed = Repaint::clean();
+        }
     }
 
     /// The screen rectangle row `row` of the plate at `depth` occupies.
@@ -368,13 +433,33 @@ impl MenuChain {
         row_rect(self.open.as_ref()?.plates.get(depth)?, row, geom)
     }
 
-    /// Paint the plate at `depth` into `surface`, whose extent is that plate's
-    /// own rectangle.
+    /// Paint the surface `kind` into `surface`, whose extent is that
+    /// surface's own rectangle.
+    ///
+    /// The one entry point for a chain's pixels, so the session supplies a
+    /// surface and never a recipe. A caller repainting part of a surface
+    /// clips `surface` to the rectangles it means to write and calls this:
+    /// every pixel inside the clip is re-derived exactly as a whole paint
+    /// would have laid it, so a partial repaint and a whole one cannot
+    /// disagree.
+    pub fn render_surface(
+        &self,
+        kind: SurfaceKind,
+        surface: &mut tairix_raster::Surface,
+        geom: &ChainGeometry<'_>,
+    ) {
+        match kind {
+            SurfaceKind::Plate(depth) => self.render_plate(depth, surface, geom),
+            SurfaceKind::Info => self.render_info(surface, geom),
+        }
+    }
+
+    /// Paint the plate at `depth`.
     ///
     /// The band and the rows are the two shared controls over one shared plate
     /// ground; nothing here is a second recipe for any of the three, and the
     /// rows take that ground rather than laying one of their own.
-    pub fn render_plate(
+    fn render_plate(
         &self,
         depth: usize,
         surface: &mut tairix_raster::Surface,
@@ -388,24 +473,8 @@ impl MenuChain {
         };
         let local = Rect::new(0, 0, plate.rect.width, plate.rect.height);
         let band_h = TitleBar::band_height(geom.scale, geom.theme).min(local.height);
-        let radius = geom
-            .scale
-            .scale_length(geom.theme.metrics().popup_corner_radius);
-        // The band lays no ground of its own, so the plate's is laid first —
-        // through the one shared plate recipe, never a second wash here.
-        let _ = tairix_controls::paint_surface_plate(
-            surface,
-            (0, 0, local.width, local.height),
-            (
-                radius.min(local.width / 2).min(local.height / 2),
-                tairix_controls::plate_border(geom.theme, geom.scale),
-            ),
-            geom.theme,
-            (
-                geom.theme.palette().surface_raised,
-                tairix_controls::ChromeLayer::Ground,
-            ),
-        );
+        // The band lays no ground of its own, so the plate's is laid first.
+        lay_plate(surface, (local.width, local.height), geom);
         plate.band.render(
             surface,
             Rect::new(0, 0, local.width, band_h),
@@ -429,12 +498,15 @@ impl MenuChain {
         );
     }
 
-    /// The information panel the chain has open, if it has one: the attested
-    /// facts it states and the rectangle it occupies.
-    #[must_use]
-    pub fn info_panel(&self) -> Option<(&FactList, Rect)> {
-        let panel = self.open.as_ref()?.info.as_ref()?;
-        Some((&panel.facts, panel.rect))
+    /// Paint the information panel: the attested facts on the same floating
+    /// ground every plate stands on.
+    fn render_info(&self, surface: &mut tairix_raster::Surface, geom: &ChainGeometry<'_>) {
+        let Some(panel) = self.open.as_ref().and_then(|chain| chain.info.as_ref()) else {
+            return;
+        };
+        let local = Rect::new(0, 0, panel.rect.width, panel.rect.height);
+        lay_plate(surface, (local.width, local.height), geom);
+        panel.facts.render(surface, local, geom.scale, geom.theme);
     }
 
     /// Close the chain, answering its owner `Dismissed`.
@@ -720,11 +792,12 @@ impl OpenChain {
             plate.rect.width,
             TitleBar::band_height(geom.scale, geom.theme).min(plate.rect.height),
         );
-        let mut damage = Region::new();
+        let mut damage = damage::sink();
         if band.contains(pointer) {
             let acted = plate
                 .band
                 .on_pointer(event, band, geom.scale, geom.theme, &mut damage);
+            self.mark_plate(depth, &damage);
             return self.band_event(depth, acted, pointer, geom);
         }
         let rows = rows_rect(plate, geom);
@@ -732,6 +805,7 @@ impl OpenChain {
             .menu
             .on_pointer(event, rows, geom.scale, geom.theme, &mut damage);
         let over = plate.menu.row_at(rows, geom.scale, geom.theme, pointer);
+        self.mark_plate(depth, &damage);
         match acted {
             Some(MenuAction::Activated { index }) => self.choose(depth, index),
             // A click on a row that opens a child keeps its child open
@@ -758,6 +832,27 @@ impl OpenChain {
                 }
                 acted
             }
+        }
+    }
+
+    /// Fold a control's reported damage — screen rectangles, because that is
+    /// the space a plate's rows are laid out and hit-tested in — into what the
+    /// plate at `depth` owes, in that plate's own local pixels.
+    fn mark_plate(&mut self, depth: usize, damage: &Region) {
+        if damage.is_empty() {
+            return;
+        }
+        let Some(plate) = self.plates.get_mut(depth) else {
+            return;
+        };
+        let origin = plate.rect.origin;
+        for rect in damage.rects() {
+            plate.repaint.add(Rect::new(
+                rect.left().saturating_sub(origin.x),
+                rect.top().saturating_sub(origin.y),
+                rect.width,
+                rect.height,
+            ));
         }
     }
 
@@ -944,6 +1039,7 @@ impl OpenChain {
                 self.info = Some(InfoPanel {
                     facts,
                     rect: self.hang(width, height, geom),
+                    repaint: Repaint::Whole,
                 });
                 ChainAction::Redraw
             }
@@ -998,10 +1094,11 @@ impl OpenChain {
             return ChainAction::Consumed;
         };
         let rows = rows_rect(plate, geom);
-        let mut damage = Region::new();
+        let mut damage = damage::sink();
         let acted = plate
             .menu
             .on_key(key, rows, geom.scale, geom.theme, &mut damage);
+        self.mark_plate(deepest, &damage);
         match acted {
             Some(MenuAction::Activated { index }) => self.choose(deepest, index),
             Some(MenuAction::OpenSubmenu { index }) => self.arrive(deepest, Some(index), geom),
@@ -1080,7 +1177,36 @@ fn plate_for(
         rect: Rect::EMPTY,
         pinned: false,
         open_row: None,
+        repaint: Repaint::Whole,
     })
+}
+
+/// Lay the shared floating-plate ground over a `size` surface: the recipe
+/// every chain surface stands on, plate and information panel alike.
+///
+/// It clears first, because a plate is translucent and its corners are
+/// anti-aliased: laying the ground *replaces* a pixel the shape fully covers
+/// but mixes an arc pixel toward it by that pixel's coverage, so what an arc
+/// pixel already held would tint the corner. Starting from nothing is what a
+/// whole paint into a fresh buffer does, and it is what lets a repaint of part
+/// of a retained plate land the same pixels.
+fn lay_plate(surface: &mut tairix_raster::Surface, size: (u32, u32), geom: &ChainGeometry<'_>) {
+    let (width, height) = size;
+    surface.fill_rect(0, 0, width, height, tairix_raster::Color::TRANSPARENT);
+    let _ = tairix_controls::paint_surface_plate(
+        surface,
+        (0, 0, width, height),
+        (
+            geom.scale
+                .scale_length(geom.theme.metrics().popup_corner_radius),
+            tairix_controls::plate_border(geom.theme, geom.scale),
+        ),
+        geom.theme,
+        (
+            geom.theme.palette().surface_raised,
+            tairix_controls::ChromeLayer::Ground,
+        ),
+    );
 }
 
 /// A plate's preferred extent: the band over the rows, never narrower than a

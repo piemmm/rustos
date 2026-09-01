@@ -540,6 +540,26 @@ conversion — having compared each pixel it wrote against the one already
 there — knows what truly changed; a conservative rectangle handed down
 beforehand would repaint pixels that never moved.
 
+**An embedder-painted window declares its own damage.**
+`Compositor::repaint_window(id, size, area, paint)` is the window-content
+mirror of `repaint_desktop`, for the surfaces the session paints itself — a
+menu plate, a session panel. The window keeps the buffer it already has and
+`paint` receives it with the rectangles of `area` clipped to it, in the
+surface's own local pixels; only those are marked. The damage is declared
+rather than discovered because an embedder painting its own model knows what
+changed before it paints, where a client does not. A window whose content is
+absent or is not `size` is given a fresh buffer and painted whole, and its
+geometry follows that size; an unknown window, or a heap that will not give a
+buffer back, changes and damages nothing.
+
+The painter's obligation is the same as the desktop layer's, with one extra
+edge: it must lay its own background over each rectangle, and where that
+background is *translucent* and *rounded* it must clear first. A laid colour
+replaces a pixel the shape fully covers but mixes an arc pixel toward it by
+that pixel's coverage, so a corner would otherwise keep a tint of whatever the
+previous paint left there. `MenuChain::render_surface` does exactly that, which
+is what makes a plate's partial repaint land the pixels a whole one would.
+
 **A window cannot be dragged smaller than its own furniture, or than its
 application declared.** `Compositor::window_min_outer_size` is the greater
 of two real floors, and an interactive resize captures it at grab start:

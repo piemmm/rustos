@@ -67,7 +67,7 @@ use crate::apps::{picker_cells, prefetch_bar_icons, resolve_library_icons, thumb
 use crate::desktop::Desktop;
 use crate::fade::BackdropFade;
 use crate::input::{SessionInputResponse, SessionInputRouter};
-use crate::menu::{MenuChain, SurfaceKind};
+use crate::menu::{ChainGeometry, MenuChain, Repaint, SurfaceKind};
 use crate::presenter::{chrome_blur, TaskbarPresenter};
 use crate::session::DesktopSession;
 use crate::tasks::TaskBridge;
@@ -167,6 +167,9 @@ pub struct DesktopShell {
     /// the chain no longer has cannot be left on the screen and none has to
     /// be taken down by a second path.
     menu_windows: Vec<(SurfaceKind, WindowId)>,
+    /// The owner window those surfaces were opened under, so a chain that
+    /// displaced another under a different owner cannot inherit them.
+    menu_owner: Option<WindowId>,
     /// The hover window picker's thumbnails, scaled a window at a time while
     /// the pointer rests out the picker's opening dwell.
     thumbs: WindowThumbnails,
@@ -298,6 +301,7 @@ impl DesktopShell {
             wallpaper: None,
             backdrop_fade: BackdropFade::default(),
             menu_windows: Vec::new(),
+            menu_owner: None,
             thumbs: WindowThumbnails::new(),
             #[cfg(test)]
             settled: SettleWork::default(),
@@ -1022,101 +1026,104 @@ impl DesktopShell {
     /// every surface on one path, whichever way its window was obtained, so a
     /// re-used plate cannot keep a look the chain no longer asks for.
     ///
+    /// **A surface already on screen keeps its pixels and is repainted only
+    /// where the chain says they changed.** A plate is retained chrome, so
+    /// moving a highlight costs the row the mark left and the row it arrived
+    /// on — two rows re-derived and two rectangles marked — where re-handing
+    /// the compositor a freshly rendered plate would allocate one, paint all
+    /// of it, and mark the whole rectangle for recomposition over a frosted
+    /// backdrop. A surface that has not changed at all is not touched, which
+    /// is what keeps a highlight moving on the root plate from repainting its
+    /// open submenu and the information panel beside it.
+    ///
     /// Fails closed: a plate surface the heap will not give back leaves what
-    /// is on screen untouched rather than showing an empty window.
+    /// is on screen untouched rather than showing an empty window, and the
+    /// chain keeps what that surface owed so the next pass paints it.
     /// Returns `false` when a plate could not be given a surface, which the
     /// caller answers the chain's owner `NoResources` for: a chain the desktop
     /// cannot draw is refused honestly rather than left half on the screen.
     pub fn present_menu_chain(
         &mut self,
         compositor: &mut Compositor,
-        chain: &MenuChain,
+        chain: &mut MenuChain,
         owner: Option<WindowId>,
     ) -> bool {
+        // A plate is composited as its owner's transient, so a chain opened
+        // under a different owner cannot inherit the displaced chain's
+        // windows: re-used, they would ride the wrong family's stacking.
+        if self.menu_owner != owner {
+            for (_, id) in core::mem::take(&mut self.menu_windows) {
+                self.drop_menu_window(compositor, id);
+            }
+            self.menu_owner = owner;
+        }
         let scale = compositor.scale();
         let geom = chain_geometry(&self.session, compositor);
-        let theme = geom.theme;
-        let corners = Corners::from_radius(scale.scale_length(theme.metrics().popup_corner_radius));
-        let blur = chrome_blur(theme);
+        let corners =
+            Corners::from_radius(scale.scale_length(geom.theme.metrics().popup_corner_radius));
+        let blur = chrome_blur(geom.theme);
         let mut kept: Vec<(SurfaceKind, WindowId)> = Vec::new();
         let mut drawn = true;
         for placed in chain.surfaces() {
-            let existing = self
+            let size = (placed.rect.width, placed.rect.height);
+            let live = self
                 .menu_windows
                 .iter()
                 .find(|(kind, _)| *kind == placed.kind)
-                .map(|(_, id)| *id);
-            let pixels = match placed.kind {
-                SurfaceKind::Plate(depth) => {
-                    let Some(mut pixels) = Surface::new(placed.rect.width, placed.rect.height)
-                    else {
-                        drawn = false;
-                        continue;
-                    };
-                    chain.render_plate(depth, &mut pixels, &geom);
-                    pixels
-                }
-                SurfaceKind::Info => {
-                    let Some((facts, _)) = chain.info_panel() else {
-                        continue;
-                    };
-                    let Some(mut pixels) = Surface::new(placed.rect.width, placed.rect.height)
-                    else {
-                        drawn = false;
-                        continue;
-                    };
-                    let local = Rect::new(0, 0, placed.rect.width, placed.rect.height);
-                    // A panel of facts is not a menu, so it wears the shared
-                    // floating-surface recipe and states its facts on it.
-                    let _ = tairix_controls::paint_surface_plate(
-                        &mut pixels,
-                        (0, 0, local.width, local.height),
-                        (
-                            scale.scale_length(theme.metrics().popup_corner_radius),
-                            tairix_controls::plate_border(theme, scale),
-                        ),
-                        theme,
-                        (
-                            theme.palette().surface_raised,
-                            tairix_controls::ChromeLayer::Ground,
-                        ),
-                    );
-                    facts.render(&mut pixels, local, scale, theme);
-                    pixels
+                .map(|(_, id)| *id)
+                .filter(|id| compositor.window(*id).is_some());
+            let painted = if let Some(id) = live {
+                // Moved before it is painted, so the rectangles the repaint
+                // marks are the ones the surface now occupies.
+                compositor.move_window(id, placed.rect.origin);
+                let area = match placed.repaint {
+                    Repaint::Whole => Region::from(Rect::new(0, 0, size.0, size.1)),
+                    Repaint::Parts(parts) => parts,
+                };
+                compositor
+                    .repaint_window(id, size, &area, |surface, rects| {
+                        paint_chain_area(chain, placed.kind, surface, rects, &geom);
+                    })
+                    .then_some(id)
+            } else {
+                let Some(mut pixels) = Surface::new(size.0, size.1) else {
+                    drawn = false;
+                    continue;
+                };
+                chain.render_surface(placed.kind, &mut pixels, &geom);
+                match owner {
+                    Some(parent) => {
+                        compositor.add_transient_window(parent, placed.rect.origin, pixels)
+                    }
+                    None => Some(compositor.add_window(placed.rect.origin, pixels)),
                 }
             };
-            let id = match (existing, owner) {
-                (Some(id), _) if compositor.window(id).is_some() => {
-                    compositor.set_surface(id, pixels);
-                    compositor.move_window(id, placed.rect.origin);
-                    id
-                }
-                (_, Some(parent)) => {
-                    let Some(id) =
-                        compositor.add_transient_window(parent, placed.rect.origin, pixels)
-                    else {
-                        drawn = false;
-                        continue;
-                    };
-                    id
-                }
-                (_, None) => compositor.add_window(placed.rect.origin, pixels),
+            let Some(id) = painted else {
+                drawn = false;
+                continue;
             };
             compositor.set_corners(id, corners);
             compositor.set_backdrop_blur(id, blur);
             kept.push((placed.kind, id));
+            chain.presented(placed.kind);
         }
         for (kind, id) in core::mem::take(&mut self.menu_windows) {
             if !kept.iter().any(|(live, _)| *live == kind) {
-                compositor.remove(id);
-                if self.router.focused() == Some(id) {
-                    self.router.unfocus();
-                }
+                self.drop_menu_window(compositor, id);
             }
         }
         self.menu_windows = kept;
         self.sync_active_frame(compositor);
         drawn
+    }
+
+    /// Take one of the chain's compositor windows down, giving the keyboard
+    /// back if the router was pointing at it.
+    fn drop_menu_window(&mut self, compositor: &mut Compositor, id: WindowId) {
+        compositor.remove(id);
+        if self.router.focused() == Some(id) {
+            self.router.unfocus();
+        }
     }
 
     /// The grid the desktop's icons occupy on this output: the shared column
@@ -1760,6 +1767,32 @@ impl DesktopShell {
         compositor.teardown_chrome();
         compositor.teardown_frost();
         compositor.teardown_content();
+    }
+}
+
+/// Paint the rectangles `rects` of the chain surface `kind`, each confined to
+/// its own clip so nothing outside what the compositor marked is written.
+///
+/// The whole surface is re-derived under each clip rather than a second
+/// "paint just this row" recipe existing beside the first: only the writes are
+/// withheld, so a partial repaint lands the pixels a whole one would have.
+fn paint_chain_area(
+    chain: &MenuChain,
+    kind: SurfaceKind,
+    surface: &mut Surface,
+    rects: &[Rect],
+    geom: &ChainGeometry<'_>,
+) {
+    for rect in rects {
+        // Already clipped to the surface, so a corner that is not addressable
+        // cannot be one of these; skipping keeps that so rather than painting
+        // it somewhere else.
+        let (Ok(x), Ok(y)) = (u32::try_from(rect.left()), u32::try_from(rect.top())) else {
+            continue;
+        };
+        surface.with_clip(x, y, rect.width, rect.height, |surface| {
+            chain.render_surface(kind, surface, geom);
+        });
     }
 }
 

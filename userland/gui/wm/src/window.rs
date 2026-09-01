@@ -296,6 +296,18 @@ impl Window {
         self.content.as_ref()
     }
 
+    /// Borrow the window's content pixels to repaint part of them in place,
+    /// or `None` while they are released.
+    ///
+    /// Unlike [`content_for_present`](Self::content_for_present) this never
+    /// establishes a buffer: a caller repainting a rectangle of what is
+    /// already there has nothing to say about a buffer that carried nothing
+    /// over, and the geometry a fresh one implies is the compositor's to
+    /// apply.
+    pub(crate) const fn content_mut(&mut self) -> Option<&mut Surface> {
+        self.content.as_mut()
+    }
+
     /// The client content extent in physical pixels.
     ///
     /// This is retained independently of the pixels, so it answers the

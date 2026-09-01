@@ -133,6 +133,39 @@ A dragged chain is still the seat's one chain, still holds the grab, and still
 closes on an outside press. Nothing an application sends can pin a menu open;
 the only thing that moves a plate is the user's own drag.
 
+## What a repaint costs
+
+A plate is **retained chrome**, not a picture re-rendered per pointer sample.
+Each surface of the chain — every plate and the information panel — owns a
+compositor window whose pixels persist between presents, and the chain records
+what of each still has to be painted: all of it for a surface that is new or
+whose rows were rebuilt at a depth another plate held, and otherwise the
+rectangles its own controls reported changing.
+
+Moving the highlight therefore costs the row the mark left and the row it
+arrived on, in that plate's own pixels, and nothing else: the parent plate, the
+open submenu, and the information panel beside it are not touched at all, and a
+pointer travelling *within* one row reports nothing and presents nothing.
+Dragging a plate costs a move rather than a repaint, since the same pixels are
+simply somewhere else. On a frosted, translucent surface that is the whole
+difference between re-blending two rows and re-blending all of a plate against
+what it stands over, once per sample that crosses a row boundary.
+
+The session paints those rectangles into the buffer the window already holds
+(`Compositor::repaint_window`), clipping the surface to each and running the
+**one** paint — `MenuChain::render_surface` — under the clip. There is no
+second "paint just this row" recipe to disagree with the first: only the writes
+are withheld, so a partial repaint lands exactly the pixels a whole one would.
+That holds because the paint begins by clearing what it is about to lay: a
+plate's ground is translucent and its corners anti-aliased, so an arc pixel's
+laid colour mixes with what is under it, and a corner would otherwise keep a
+tint of the highlight that last passed over it.
+
+A surface the heap refuses keeps what it owed and is painted on the next pass,
+so a refusal can never leave stale pixels reported as current — and a chain the
+session cannot give a surface at all is refused `NoResources` rather than left
+half on the screen.
+
 ## The model, and what an application may say
 
 The service renders one model. The wire model an application sends
@@ -241,9 +274,11 @@ the session could not give a surface is refused rather than announced.
 ## Where it lives
 
 - `userland/gui/session/src/menu.rs` — the chain: the model, the plates, the
-  placement, the grab, traversal, dismissal and lifetime. It touches no
-  compositor; the session presents what it lists and takes down what it no
-  longer has.
+  placement, the grab, traversal, dismissal, lifetime, and what of each surface
+  is still owed a paint. It touches no compositor; the session presents what it
+  lists and takes down what it no longer has.
+- `userland/gui/session/src/shell.rs` — `present_menu_chain`, which reconciles
+  the compositor against that list and repaints only what is owed.
 - `lib/controls` — `ChainModel` (the one model every menu is built as, which
   the wire model decodes into), `Menu` and `MenuItem` for rows, `TitleBar` for
   bands, `plate_rect` and `PlatePlacement` for placement.

@@ -3183,7 +3183,7 @@ fn choose_bar_menu_row(
         )
         .expect("the bar's model opens");
     assert!(
-        shell.present_menu_chain(comp, &chain, None),
+        shell.present_menu_chain(comp, &mut chain, None),
         "a plate drawn"
     );
     let at = centre(chain.row_rect(0, row, &geom).expect("the row lays out"));
@@ -8462,7 +8462,7 @@ fn the_backdrop_menu_is_drawn_as_chain_plates_and_taken_down_when_it_closes() {
         epoch,
     };
 
-    assert!(shell.present_menu_chain(&mut comp, &chain, None));
+    assert!(shell.present_menu_chain(&mut comp, &mut chain, None));
     assert_eq!(
         comp.window_count(),
         before,
@@ -8478,7 +8478,7 @@ fn the_backdrop_menu_is_drawn_as_chain_plates_and_taken_down_when_it_closes() {
             &geom,
         )
         .expect("the backdrop model opens");
-    assert!(shell.present_menu_chain(&mut comp, &chain, None));
+    assert!(shell.present_menu_chain(&mut comp, &mut chain, None));
     assert_eq!(comp.window_count(), before + 1, "one plate, one window");
     let plate = chain.row_rect(0, 0, &geom).expect("the plate has a row");
     assert!(
@@ -8486,7 +8486,7 @@ fn the_backdrop_menu_is_drawn_as_chain_plates_and_taken_down_when_it_closes() {
         "the plate opens at the pointer, got {plate:?}"
     );
 
-    assert!(shell.present_menu_chain(&mut comp, &chain, None));
+    assert!(shell.present_menu_chain(&mut comp, &mut chain, None));
     assert_eq!(
         comp.window_count(),
         before + 1,
@@ -8507,7 +8507,7 @@ fn the_backdrop_menu_is_drawn_as_chain_plates_and_taken_down_when_it_closes() {
             &geom,
         )
         .expect("the backdrop model opens");
-    assert!(shell.present_menu_chain(&mut comp, &chain, None));
+    assert!(shell.present_menu_chain(&mut comp, &mut chain, None));
     assert_eq!(comp.window_count(), before + 1);
     let corner = chain.surfaces().first().expect("the root plate").rect;
     assert!(
@@ -8516,11 +8516,138 @@ fn the_backdrop_menu_is_drawn_as_chain_plates_and_taken_down_when_it_closes() {
     );
 
     assert!(chain.dismiss());
-    assert!(shell.present_menu_chain(&mut comp, &chain, None));
+    assert!(shell.present_menu_chain(&mut comp, &mut chain, None));
     assert_eq!(
         comp.window_count(),
         before,
         "dismissing the chain takes its plates down"
+    );
+}
+
+/// A chain that displaces another under a different owner opens fresh
+/// windows. A plate is composited as its owner's transient, so a re-used
+/// window would leave the new menu riding the displaced owner's family: raised
+/// with it, and stacked under whatever was raised between them.
+#[test]
+fn a_chain_under_a_new_owner_does_not_inherit_the_displaced_chains_windows() {
+    let (mut shell, mut comp) = headless_desktop();
+    let first = comp.add_window(
+        Point::new(0, 0),
+        Surface::new(200, 150).expect("an owner surface"),
+    );
+    let second = comp.add_window(
+        Point::new(220, 0),
+        Surface::new(200, 150).expect("a second owner surface"),
+    );
+    let theme = shell.session().floating_theme().clone();
+    let geom = ChainGeometry {
+        screen: comp.screen_rect(),
+        scale: comp.scale(),
+        theme: &theme,
+        epoch: comp.chrome_epoch(),
+    };
+    let mut chain = MenuChain::new();
+    let open = |chain: &mut MenuChain| {
+        chain
+            .open(
+                ChainOwner::Backdrop,
+                crate::pinboard::model(true, &PinboardSettings::default()),
+                crate::windows::window_menu_placement(Rect::new(100, 100, 0, 0)),
+                &geom,
+            )
+            .expect("the backdrop model opens");
+    };
+
+    open(&mut chain);
+    assert!(shell.present_menu_chain(&mut comp, &mut chain, Some(first)));
+    let plate = chain.surfaces().first().expect("the root plate").rect;
+    let owned = comp
+        .window_at(centre(plate))
+        .expect("the plate is on screen");
+    assert_eq!(comp.window(owned).expect("live").parent(), Some(first));
+
+    // The next open is another window's, and the plate it puts on screen
+    // hangs from that window instead.
+    open(&mut chain);
+    assert!(shell.present_menu_chain(&mut comp, &mut chain, Some(second)));
+    let plate = chain.surfaces().first().expect("the root plate").rect;
+    let owned = comp
+        .window_at(centre(plate))
+        .expect("the plate is on screen");
+    assert_eq!(
+        comp.window(owned).expect("live").parent(),
+        Some(second),
+        "the plate is the new owner's transient, not the displaced one's"
+    );
+
+    // And a chain the desktop opens for itself hangs from nothing.
+    open(&mut chain);
+    assert!(shell.present_menu_chain(&mut comp, &mut chain, None));
+    let plate = chain.surfaces().first().expect("the root plate").rect;
+    let owned = comp
+        .window_at(centre(plate))
+        .expect("the plate is on screen");
+    assert_eq!(comp.window(owned).expect("live").parent(), None);
+}
+
+/// A plate on screen is retained chrome: moving the highlight recomposites the
+/// row the mark left and the row it arrived on, never the plate. On a frosted,
+/// translucent surface the difference is the whole plate re-blended against
+/// what it stands over, once per pointer sample that crosses a row boundary.
+#[test]
+fn moving_a_menu_highlight_recomposites_two_rows_and_not_the_plate() {
+    let (mut shell, mut comp) = headless_desktop();
+    shell.present(&mut comp);
+    let mut chain = MenuChain::new();
+    let theme = shell.session().floating_theme().clone();
+    let geom = ChainGeometry {
+        screen: comp.screen_rect(),
+        scale: comp.scale(),
+        theme: &theme,
+        epoch: comp.chrome_epoch(),
+    };
+    chain
+        .open(
+            ChainOwner::Backdrop,
+            crate::pinboard::model(true, &PinboardSettings::default()),
+            crate::windows::window_menu_placement(Rect::new(100, 100, 0, 0)),
+            &geom,
+        )
+        .expect("the backdrop model opens");
+    assert!(shell.present_menu_chain(&mut comp, &mut chain, None));
+    comp.composite();
+    assert!(!comp.has_damage(), "the plate is on screen and settled");
+    let plate = chain.surfaces().first().expect("the root plate").rect;
+
+    let first = chain.row_rect(0, 0, &geom).expect("the first row");
+    let at = centre(first);
+    assert_eq!(
+        chain.handle(&moved(at.x, at.y), at, &geom),
+        ChainAction::Redraw
+    );
+    assert!(shell.present_menu_chain(&mut comp, &mut chain, None));
+    comp.composite();
+
+    let third = chain.row_rect(0, 2, &geom).expect("the third row");
+    let at = centre(third);
+    assert_eq!(
+        chain.handle(&moved(at.x, at.y), at, &geom),
+        ChainAction::Redraw
+    );
+    assert!(shell.present_menu_chain(&mut comp, &mut chain, None));
+
+    let mut rows = Region::new();
+    rows.add(first);
+    rows.add(third);
+    assert_eq!(
+        comp.composite().rects(),
+        rows.rects(),
+        "the two rows the mark moved between, and nothing else"
+    );
+    assert!(
+        rows.bounds().height < plate.height,
+        "and not the plate: {:?} of {plate:?}",
+        rows.bounds()
     );
 }
 
@@ -8647,11 +8774,17 @@ fn every_menu_chain_surface_frosts_what_is_behind_it() {
         info.top() + i32::try_from(info.height / 2).expect("small"),
     );
     chain.handle(&moved(at.x, at.y), at, &geom);
-    assert!(chain.info_panel().is_some(), "the panel hangs");
+    assert!(
+        chain
+            .surfaces()
+            .iter()
+            .any(|placed| placed.kind == SurfaceKind::Info),
+        "the panel hangs"
+    );
 
     // Once to create the windows, again to re-surface the ones it kept.
     for round in ["created", "re-used"] {
-        assert!(shell.present_menu_chain(&mut comp, &chain, None));
+        assert!(shell.present_menu_chain(&mut comp, &mut chain, None));
         let surfaces = chain.surfaces();
         assert!(
             surfaces
@@ -8694,7 +8827,7 @@ fn an_owned_menu_plate_frosts_what_is_behind_it() {
             &geom,
         )
         .expect("the backdrop model opens");
-    assert!(shell.present_menu_chain(&mut comp, &chain, Some(owner)));
+    assert!(shell.present_menu_chain(&mut comp, &mut chain, Some(owner)));
     let plate = chain.surfaces().first().expect("the root plate").rect;
     let id = comp
         .window_at(centre(plate))

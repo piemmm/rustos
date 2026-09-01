@@ -11,12 +11,12 @@ use tairix_abi::window_ipc::{
     AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow, MenuRefusal, APP_MENU_MAX_DEPTH,
 };
 use tairix_controls::{ChainChild, ChainModel, ChainRow, Fact, FactList, MenuItem, PlatePlacement};
-use tairix_geometry::{Point, Rect, Scale};
+use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_theme::Theme;
 use tairix_wm::{InputEvent, Key, NamedKey, PointerButton};
 
 use crate::menu::{
-    ChainAction, ChainGeometry, ChainOutcome, ChainOwner, ChainSurface, MenuChain, ModelRefused,
+    ChainAction, ChainGeometry, ChainOutcome, ChainOwner, MenuChain, ModelRefused, Repaint,
     SurfaceKind,
 };
 
@@ -137,6 +137,62 @@ fn plate(chain: &MenuChain, depth: usize) -> Rect {
             _ => None,
         })
         .unwrap_or_else(|| panic!("no plate at depth {depth}"))
+}
+
+/// The information panel's rectangle, if one hangs off the chain.
+fn info(chain: &MenuChain) -> Option<Rect> {
+    chain
+        .surfaces()
+        .into_iter()
+        .find(|surface| surface.kind == SurfaceKind::Info)
+        .map(|surface| surface.rect)
+}
+
+/// What the chain says the surface `kind` has still to be painted.
+fn owed(chain: &MenuChain, kind: SurfaceKind) -> Repaint {
+    chain
+        .surfaces()
+        .into_iter()
+        .find(|surface| surface.kind == kind)
+        .unwrap_or_else(|| panic!("no {kind:?} surface"))
+        .repaint
+}
+
+/// Mark every surface the chain lists as painted, as the session does once it
+/// has presented them.
+fn present_all(chain: &mut MenuChain) {
+    for kind in chain
+        .surfaces()
+        .into_iter()
+        .map(|surface| surface.kind)
+        .collect::<Vec<_>>()
+    {
+        chain.presented(kind);
+    }
+}
+
+/// The region covering `rects`, to compare against what a surface owes.
+fn covering(rects: &[Rect]) -> Repaint {
+    let mut region = Region::new();
+    for rect in rects {
+        region.add(*rect);
+    }
+    Repaint::Parts(region)
+}
+
+/// Row `row` of the plate at `depth`, in that plate's own local pixels — the
+/// space a surface's repaint is reported in.
+fn local_row(chain: &MenuChain, depth: usize, row: usize, g: &ChainGeometry<'_>) -> Rect {
+    let plate = plate(chain, depth);
+    let rect = chain
+        .row_rect(depth, row, g)
+        .unwrap_or_else(|| panic!("no row {row} on plate {depth}"));
+    Rect::new(
+        rect.left() - plate.left(),
+        rect.top() - plate.top(),
+        rect.width,
+        rect.height,
+    )
 }
 
 /// How many plates the chain has up.
@@ -538,18 +594,14 @@ fn the_information_panel_hangs_where_a_submenu_would_and_dies_with_the_chain() {
     let row = chain.row_rect(0, 1, &g).expect("the information row");
     let (acted, _) = settle_on(&mut chain, 0, 1, &g);
     assert_eq!(acted, ChainAction::Redraw);
-    let (_, placed) = chain.info_panel().expect("the panel hangs");
+    let placed = info(&chain).expect("the panel hangs");
     assert_eq!(placed.left(), plate(&chain, 0).right(), "edge-adjacent");
     assert_eq!(placed.top(), row.top(), "at its own row's height");
-    assert!(chain.surfaces().contains(&ChainSurface {
-        rect: placed,
-        kind: SurfaceKind::Info,
-    }));
 
     // Settling on another row of the same plate takes it down with the rest
     // of what hung there.
     settle_on(&mut chain, 0, 0, &g);
-    assert!(chain.info_panel().is_none(), "the panel went with its row");
+    assert!(info(&chain).is_none(), "the panel went with its row");
 }
 
 #[test]
@@ -568,7 +620,7 @@ fn choosing_the_information_row_answers_nothing_and_keeps_its_panel() {
         "the row states an identity; it names no command to answer with"
     );
     assert!(chain.take_answers().is_empty());
-    assert!(chain.info_panel().is_some(), "and its panel stays up");
+    assert!(info(&chain).is_some(), "and its panel stays up");
 }
 
 #[test]
@@ -620,7 +672,7 @@ fn a_press_on_the_information_panel_is_claimed_and_acts_on_nothing() {
     let mut chain = MenuChain::new();
     open(&mut chain, APP, info_model(), Point::new(40, 40), &g);
     settle_on(&mut chain, 0, 1, &g);
-    let (_, placed) = chain.info_panel().expect("the panel hangs");
+    let placed = info(&chain).expect("the panel hangs");
 
     let inside = Point::new(placed.left() + 8, placed.top() + 8);
     let acted = chain.handle(&PRESS, inside, &g);
@@ -708,7 +760,7 @@ fn escape_closes_the_information_panel_before_the_menu_that_opened_it() {
 
     let acted = chain.handle(&key(NamedKey::Escape), Point::ORIGIN, &g);
     assert_eq!(acted, ChainAction::Redraw);
-    assert!(chain.info_panel().is_none(), "the panel closed first");
+    assert!(info(&chain).is_none(), "the panel closed first");
     assert!(chain.is_open(), "and the chain it hung on survived");
 }
 
@@ -993,6 +1045,230 @@ fn a_highlight_moving_on_one_plate_disturbs_no_other() {
     assert_eq!(plates(&chain), 2, "and no plate opened or closed");
 }
 
+/// A surface the session has never drawn owes every pixel of it; one it has
+/// just drawn owes none. That pair is what lets a plate be retained chrome
+/// rather than a fresh render per pointer sample.
+#[test]
+fn a_new_surface_owes_every_pixel_and_a_presented_one_owes_none() {
+    let theme = theme();
+    let g = geom(&theme);
+    let mut chain = MenuChain::new();
+    open(&mut chain, APP, nested_model(), Point::new(40, 40), &g);
+    assert_eq!(owed(&chain, SurfaceKind::Plate(0)), Repaint::Whole);
+
+    present_all(&mut chain);
+    assert_eq!(owed(&chain, SurfaceKind::Plate(0)), covering(&[]));
+
+    // A child opening is a surface of its own, and it too owes all of itself.
+    settle_on(&mut chain, 0, 1, &g);
+    assert_eq!(owed(&chain, SurfaceKind::Plate(1)), Repaint::Whole);
+}
+
+/// The whole point of M4: a highlight crossing a plate owes the row the mark
+/// left and the row it arrived on, in that plate's own pixels — not the plate,
+/// which on frosted chrome would mean re-blending all of it.
+#[test]
+fn moving_the_highlight_owes_the_two_rows_it_moved_between() {
+    let theme = theme();
+    let g = geom(&theme);
+    let mut chain = MenuChain::new();
+    open(&mut chain, APP, flat_model(), Point::new(40, 40), &g);
+    present_all(&mut chain);
+
+    settle_on(&mut chain, 0, 0, &g);
+    assert_eq!(
+        owed(&chain, SurfaceKind::Plate(0)),
+        covering(&[local_row(&chain, 0, 0, &g)]),
+        "arriving from nowhere lights one row"
+    );
+
+    present_all(&mut chain);
+    settle_on(&mut chain, 0, 2, &g);
+    let moved_between = [local_row(&chain, 0, 0, &g), local_row(&chain, 0, 2, &g)];
+    assert_eq!(
+        owed(&chain, SurfaceKind::Plate(0)),
+        covering(&moved_between),
+        "the row the mark left and the row it arrived on"
+    );
+    let owes = owed(&chain, SurfaceKind::Plate(0));
+    let Repaint::Parts(parts) = owes else {
+        panic!("a plate on screen owes rectangles, not all of itself");
+    };
+    assert!(
+        parts.bounds().height < plate(&chain, 0).height,
+        "and not the plate: {:?} of {:?}",
+        parts.bounds(),
+        plate(&chain, 0)
+    );
+}
+
+/// Keyboard traversal is the same two rows: the service owns the mark, so how
+/// it was moved cannot change what a move costs.
+#[test]
+fn traversing_by_keyboard_owes_the_two_rows_too() {
+    let theme = theme();
+    let g = geom(&theme);
+    let mut chain = MenuChain::new();
+    open(&mut chain, APP, flat_model(), Point::new(40, 40), &g);
+    chain.handle(&key(NamedKey::Down), Point::ORIGIN, &g);
+    present_all(&mut chain);
+
+    assert_eq!(
+        chain.handle(&key(NamedKey::Down), Point::ORIGIN, &g),
+        ChainAction::Redraw
+    );
+    assert_eq!(
+        owed(&chain, SurfaceKind::Plate(0)),
+        covering(&[local_row(&chain, 0, 0, &g), local_row(&chain, 0, 1, &g)])
+    );
+}
+
+/// A pointer moving on a child plate leaves its parent — and the information
+/// panel, when one is up — owing nothing. Without that, one highlight would
+/// re-render every surface of the chain.
+#[test]
+fn a_highlight_moving_on_one_plate_owes_no_other_surface_a_pixel() {
+    let theme = theme();
+    let g = geom(&theme);
+    let mut chain = MenuChain::new();
+    open(&mut chain, APP, nested_model(), Point::new(40, 40), &g);
+    settle_on(&mut chain, 0, 1, &g);
+    settle_on(&mut chain, 1, 0, &g);
+    present_all(&mut chain);
+
+    settle_on(&mut chain, 1, 1, &g);
+    assert_eq!(
+        owed(&chain, SurfaceKind::Plate(1)),
+        covering(&[local_row(&chain, 1, 0, &g), local_row(&chain, 1, 1, &g)])
+    );
+    assert_eq!(
+        owed(&chain, SurfaceKind::Plate(0)),
+        covering(&[]),
+        "the parent plate's pixels did not change"
+    );
+}
+
+/// A plate rebuilt at a depth another plate held owes all of it: its rows are
+/// a different menu, and the session re-uses that depth's window, so anything
+/// less would leave the previous submenu's rows on screen.
+#[test]
+fn a_plate_rebuilt_at_a_depth_owes_every_pixel_of_it() {
+    let theme = theme();
+    let g = geom(&theme);
+    let mut chain = MenuChain::new();
+    open(&mut chain, APP, nested_model(), Point::new(40, 40), &g);
+    settle_on(&mut chain, 0, 1, &g);
+    settle_on(&mut chain, 1, 0, &g);
+    present_all(&mut chain);
+    assert_eq!(plates(&chain), 3);
+
+    // "Inner" has no child, so the grandchild plate closes; going back to
+    // "Deeper" builds a fresh one at that same depth.
+    settle_on(&mut chain, 1, 1, &g);
+    assert_eq!(plates(&chain), 2);
+    settle_on(&mut chain, 1, 0, &g);
+    assert_eq!(owed(&chain, SurfaceKind::Plate(2)), Repaint::Whole);
+}
+
+/// Dragging moves a plate; it does not repaint one. The plate's pixels are the
+/// same pixels somewhere else, so a drag costs the compositor a move and the
+/// chain nothing.
+#[test]
+fn dragging_a_plate_owes_no_repaint() {
+    let theme = theme();
+    let g = geom(&theme);
+    let mut chain = MenuChain::new();
+    open(&mut chain, APP, flat_model(), Point::new(200, 200), &g);
+    present_all(&mut chain);
+
+    let root = plate(&chain, 0);
+    let band = Point::new(root.left() + 20, root.top() + 2);
+    chain.handle(&moved(band.x, band.y), band, &g);
+    chain.handle(&PRESS, band, &g);
+    let to = Point::new(band.x + 60, band.y + 40);
+    chain.handle(&moved(to.x, to.y), to, &g);
+
+    assert_ne!(plate(&chain, 0), root, "the plate moved");
+    assert_eq!(
+        owed(&chain, SurfaceKind::Plate(0)),
+        covering(&[]),
+        "and not one pixel of it was redrawn"
+    );
+}
+
+/// The information panel states facts that never change, so it owes its pixels
+/// once and nothing after that.
+#[test]
+fn the_information_panel_owes_its_pixels_once() {
+    let theme = theme();
+    let g = geom(&theme);
+    let mut chain = MenuChain::new();
+    open(&mut chain, APP, info_model(), Point::new(40, 40), &g);
+    settle_on(&mut chain, 0, 1, &g);
+    assert_eq!(owed(&chain, SurfaceKind::Info), Repaint::Whole);
+
+    present_all(&mut chain);
+    let inside = {
+        let panel = info(&chain).expect("the panel hangs");
+        Point::new(panel.left() + 8, panel.top() + 8)
+    };
+    chain.handle(&moved(inside.x, inside.y), inside, &g);
+    assert_eq!(
+        owed(&chain, SurfaceKind::Info),
+        covering(&[]),
+        "a pointer over facts changes nothing"
+    );
+}
+
+/// A partial repaint lands exactly the pixels a whole one would. The session
+/// paints a plate's damaged rectangles into the buffer it already holds, so
+/// anything else would leave the highlight smeared across the rows it crossed.
+#[test]
+fn repainting_a_plates_damaged_rows_lands_what_a_whole_paint_would() {
+    let theme = theme();
+    let g = geom(&theme);
+    let paint_whole = |chain: &MenuChain| -> tairix_raster::Surface {
+        let plate = plate(chain, 0);
+        let mut surface =
+            tairix_raster::Surface::new(plate.width, plate.height).expect("a plate surface");
+        chain.render_surface(SurfaceKind::Plate(0), &mut surface, &g);
+        surface
+    };
+
+    // Two chains driven identically: one repainted whole at every step, the
+    // other keeping its buffer and painting only what it said had changed.
+    let mut whole = MenuChain::new();
+    open(&mut whole, APP, flat_model(), Point::new(40, 40), &g);
+    let mut partial = MenuChain::new();
+    open(&mut partial, APP, flat_model(), Point::new(40, 40), &g);
+    let mut retained = paint_whole(&partial);
+    present_all(&mut partial);
+
+    for row in [0, 2, 1] {
+        settle_on(&mut whole, 0, row, &g);
+        settle_on(&mut partial, 0, row, &g);
+        let Repaint::Parts(parts) = owed(&partial, SurfaceKind::Plate(0)) else {
+            panic!("a plate on screen owes rectangles, not all of itself");
+        };
+        assert!(!parts.is_empty(), "settling on row {row} moved the mark");
+        for rect in parts.rects() {
+            retained.with_clip(
+                rect.left().unsigned_abs(),
+                rect.top().unsigned_abs(),
+                rect.width,
+                rect.height,
+                |surface| partial.render_surface(SurfaceKind::Plate(0), surface, &g),
+            );
+        }
+        present_all(&mut partial);
+        assert_eq!(
+            retained,
+            paint_whole(&whole),
+            "the plate after settling on row {row}"
+        );
+    }
+}
+
 // --- what a plate is painted with -----------------------------------------
 
 /// A plate lays the raised ground, at the opacity floating chrome is drawn at,
@@ -1016,7 +1292,7 @@ fn a_plate_lays_the_raised_ground_and_follows_the_theme() {
         let plate = chain.surfaces().first().expect("the root plate").rect;
         let mut surface =
             tairix_raster::Surface::new(plate.width, plate.height).expect("a plate surface");
-        chain.render_plate(0, &mut surface, &g);
+        chain.render_surface(SurfaceKind::Plate(0), &mut surface, &g);
         surface
     };
 
