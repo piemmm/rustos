@@ -91,7 +91,7 @@ That read, decode, and cache are the shared artwork layer's, not this
 module's: `DesktopShell` owns exactly one `tairix_icon::ArtworkCache` for the
 seat plus the one `ArtworkResolver` its misses are produced through, and every
 icon on the bar comes out of it — an application slot, a picker cell, a
-program-library row, and the shipped raster masters behind the two launcher
+program-library row, and the shipped class masters behind the two launcher
 buttons (`AGENTS.md` §2.2).
 
 - `set_artwork_resolver(resolver)` installs the live one. On a running desktop

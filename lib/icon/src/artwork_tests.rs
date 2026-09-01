@@ -610,23 +610,19 @@ fn layers_painted(icon: &crate::vector::VectorIcon, color: tairix_raster::Color)
         .count()
 }
 
-/// The two launcher icons are the designer's own drawings rather than traced
-/// approximations: they are built from rounded rectangles, circles, and
-/// strokes. Pinning what they decode to is what would catch the decoder
+/// The Switchboard launcher icon is the designer's own drawing rather than a
+/// traced approximation: it is built from rounded rectangles, circles, and
+/// strokes. Pinning what it decodes to is what would catch the decoder
 /// quietly dropping one of those and leaving a wrong picture on the taskbar.
+///
+/// Its Program Library neighbour is an illustrative raster master, so nothing
+/// here decodes it; the image build proves it is artwork the desktop will
+/// draw.
 #[test]
-fn the_launcher_icons_draw_the_artwork_they_were_authored_with() {
+fn the_launcher_icon_draws_the_artwork_it_was_authored_with() {
     let ink = tairix_raster::Color::rgb(0x17, 0x14, 0x12);
     let paper = tairix_raster::Color::rgb(0xFF, 0xF4, 0xEA);
     let accent = tairix_raster::Color::rgb(0xB8, 0x5C, 0x2E);
-
-    // Nine tiles in a three-by-three grid, the centre one accented, each a
-    // rounded fill under its own outline.
-    let library = shipped_vector("library.svg");
-    assert_eq!(library.layers().len(), 18);
-    assert_eq!(layers_painted(&library, paper), 8);
-    assert_eq!(layers_painted(&library, accent), 1);
-    assert_eq!(layers_painted(&library, ink), 9);
 
     // Three faders, each a rounded track carrying a round knob.
     let switchboard = shipped_vector("switchboard.svg");
@@ -635,17 +631,15 @@ fn the_launcher_icons_draw_the_artwork_they_were_authored_with() {
     assert_eq!(layers_painted(&switchboard, accent), 3);
     assert_eq!(layers_painted(&switchboard, ink), 6);
 
-    // Both cover a substantial part of their slot: a silhouette that decoded
-    // but drew almost nothing would still pass a "not empty" check.
-    for (name, icon) in [("library", &library), ("switchboard", &switchboard)] {
-        let image = icon.rasterise(64).expect("renderable");
-        let drawn = image.pixels().iter().filter(|pixel| pixel.a > 0).count();
-        assert!(
-            drawn > 64 * 64 / 4,
-            "{name} covers only {drawn} of {} pixels",
-            64 * 64
-        );
-    }
+    // It covers a substantial part of its slot: a silhouette that decoded but
+    // drew almost nothing would still pass a "not empty" check.
+    let image = switchboard.rasterise(64).expect("renderable");
+    let drawn = image.pixels().iter().filter(|pixel| pixel.a > 0).count();
+    assert!(
+        drawn > 64 * 64 / 4,
+        "switchboard covers only {drawn} of {} pixels",
+        64 * 64
+    );
 }
 
 // ---------------------------------------------------------------------
