@@ -79,8 +79,14 @@ AD5 migrated it.
 - Colours are bare `rrggbb`, never `#rrggbb`: the grammar's comment marker
   would cut the line at the `#`.
 
-Defaults: system scheme, 14 px text, fully opaque, every effect off — a plain,
-fast terminal until the user asks for otherwise.
+Defaults: system scheme, 14 px text, 80% opacity, and every other effect —
+backdrop blur included — off. Translucency is free (it is the alpha the
+background is filled at, and it is not a pass), so the shipped look keeps the
+cell-diff present. The blur is off by default because the compositor frosts
+each blurred window's whole rectangle every frame and retains it in a
+reclaim-governed cache: a screenful of frosted terminals costs one blur apiece
+and outgrows that budget. `plans/FIX-DESKTOP-SPEEDUP.md` holds the measurement
+and the transmittance bound that would let it ship on.
 
 ---
 
@@ -433,16 +439,22 @@ The terminal declares one presence on the desktop's icon bar
 (`tairix_terminal::appbar`, `plans/NEW-TASKBAR.md` T7) whose slot stands for
 the emulator, not for any one window:
 
-- **`default_action: true`** — a primary click on the slot is the terminal's
-  to handle, and means *New window*. A terminal's windows are
-  interchangeable, so raising one of them is less use than making another.
+- **`AppBarClick::Open`** (`appbar::SLOT_CLICK`) — every primary click on the
+  slot is the terminal's to handle, and means *New window*. A terminal's
+  windows are interchangeable, so raising one of them is less use than making
+  another, and a terminal left on the bar with none is opened by the same
+  click.
+- **Closing the last window does not end it.** The terminal keeps its slot
+  with no window open; only *Quit* closes them all and ends the process. That
+  is the desktop-wide rule for every application on the bar, which is why the
+  slot's click has to be able to produce a window.
 - **It is declared before the first window is opened.** A declared presence
   belongs to the *process*, so the declaration goes out first and the slot
-  carries this menu and this default action from the moment it appears.
+  carries this menu and this click behaviour from the moment it appears.
   Declared after a window, the session meanwhile derives a slot from that
-  window alone — one that opens no menu and does nothing when clicked — so
-  for as long as the gap lasts the bar shows a slot that answers nothing.
-  Every application that declares a presence does it in this order.
+  window alone — one that opens no menu — so for as long as the gap lasts the
+  bar shows a slot that answers less. Every application that declares a
+  presence does it in this order.
 - **The menu** follows the desktop's one icon-bar convention
   (`tairix_window::declaration`): the session-drawn *Info* row, then the
   terminal's own *New window* row, then a separator and *Quit*. The terminal

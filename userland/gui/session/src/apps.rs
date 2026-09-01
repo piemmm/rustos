@@ -10,8 +10,18 @@
 //!   process whether it owns a window or not — so *Quit* stays meaningful
 //!   and "open a fresh window" stays reachable;
 //! * it **owns a window**, which gives it a slot even with no declaration,
-//!   so no window is ever unreachable. Such a slot has no menu and no
-//!   default action: the session invents neither on an application's behalf.
+//!   so no window is ever unreachable. Such a slot has no menu, and its
+//!   click is one the session answers by raising: it invents neither on an
+//!   application's behalf.
+//!
+//! A bundle whose *signed* manifest sets `APPINFO_FLAG_NO_ICON_BAR` is the
+//! one exception, and it overrides both: the desktop already reaches it
+//! another way — the Switchboard through the bar's own permanent capsule,
+//! the wallpaper chooser through the backdrop menu — so a slot would be a
+//! second route to the same window. The claim lives in the manifest and not
+//! on the window channel because a running process must not be able to hide
+//! itself from the bar; and its windows stay ordinary tasks, so the capsule's
+//! task cycling still reaches one that was minimised.
 //!
 //! Slots keep the order the session first saw each process in, so the strip
 //! never reshuffles under the pointer. A process leaves the bar when it has
@@ -32,7 +42,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use tairix_abi::window_ipc::{AppBar, AppMenu};
+use tairix_abi::window_ipc::{AppBar, AppBarClick, AppMenu};
 use tairix_abi::{AppInfoHeader, Errno, ProcId, APPINFO_WIRE_MAX};
 use tairix_geometry::Scale;
 use tairix_icon::{
@@ -66,11 +76,21 @@ pub const APP_BAR_RELAYED: tairix_log::EventId = tairix_log::EventId(20_007);
 /// attested and bounded it.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Declaration {
-    /// Whether a primary click on the slot is the application's to handle.
-    pub default_action: bool,
+    /// What a primary click on the slot does.
+    pub click: AppBarClick,
     /// The menu a secondary press opens. Empty means the application offers
     /// none, which the bar honours by opening nothing.
     pub menu: AppMenu,
+}
+
+/// What one bundle's signed manifest attests to the icon bar, read once and
+/// kept for as long as an application from that bundle is on the strip.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BundleFacts {
+    /// The identity a slot and its information panel state.
+    identity: AppIdentity,
+    /// Whether the bar gives this bundle a slot at all.
+    icon_bar: bool,
 }
 
 /// One application holding a slot, before its identity is resolved: the
@@ -97,12 +117,16 @@ pub struct AppBarService {
     /// The processes that have held a slot, in the order they first did —
     /// the strip's display order, so a slot never moves while it lives.
     order: Vec<ProcId>,
-    /// Manifest-attested identity per bundle directory, resolved once.
-    identities: BTreeMap<String, AppIdentity>,
+    /// What each bundle directory's signed manifest attests, resolved once.
+    facts: BTreeMap<String, BundleFacts>,
     /// Which bundle each process on the strip was launched from, so an
     /// identity already resolved can be found by the process that owns a
     /// window without a second manifest read.
     bundles: BTreeMap<ProcId, String>,
+    /// The processes the last [`Self::strip`] deliberately left off the bar,
+    /// so an embedder comparing live windows against the strip does not read
+    /// their absence as a strip that has gone stale.
+    iconless: BTreeSet<ProcId>,
     dirty: bool,
 }
 
@@ -129,7 +153,7 @@ impl AppBarService {
         self.declared.insert(
             owner,
             Declaration {
-                default_action: bar.default_action,
+                click: bar.click,
                 menu: bar.menu,
             },
         );
@@ -152,6 +176,17 @@ impl AppBarService {
         self.declared.get(&owner)
     }
 
+    /// Whether the last [`Self::strip`] deliberately gave `owner` no slot
+    /// because its bundle's manifest presents none.
+    ///
+    /// An embedder deciding whether the strip still describes the live
+    /// windows must discount those windows, or the strip would read as
+    /// permanently stale and be re-resolved on every wake.
+    #[must_use]
+    pub fn is_iconless(&self, owner: ProcId) -> bool {
+        self.iconless.contains(&owner)
+    }
+
     /// Take the dirty latch: `true` when a declaration changed since the
     /// last take, so the embedder re-pushes the strip exactly when needed.
     pub fn take_dirty(&mut self) -> bool {
@@ -166,9 +201,19 @@ impl AppBarService {
     /// process with a declaration or a window is on the strip; one with
     /// neither is forgotten, so a process that exits without the engine
     /// having withdrawn anything still leaves.
-    pub fn strip<F>(&mut self, windows: &[(ProcId, TaskId)], bundle_of: F) -> Vec<AppGroup>
+    ///
+    /// A process whose bundle's signed manifest presents no icon-bar slot is
+    /// dropped whichever of the two put it here — the manifest is what the
+    /// bar believes, not the declaration a process makes about itself.
+    pub fn strip<F, R>(
+        &mut self,
+        windows: &[(ProcId, TaskId)],
+        bundle_of: F,
+        reader: &mut R,
+    ) -> Vec<AppGroup>
     where
         F: Fn(ProcId) -> Option<String>,
+        R: SessionFileReader + ?Sized,
     {
         let mut owned: BTreeMap<ProcId, Vec<TaskId>> = BTreeMap::new();
         for &(owner, task) in windows {
@@ -184,7 +229,7 @@ impl AppBarService {
             .chain(owned.keys().copied())
             .collect();
         self.order.retain(|owner| live.contains(owner));
-        let groups: Vec<AppGroup> = self
+        let candidates: Vec<AppGroup> = self
             .order
             .iter()
             .map(|&owner| AppGroup {
@@ -193,15 +238,27 @@ impl AppBarService {
                 windows: owned.remove(&owner).unwrap_or_default(),
             })
             .collect();
-        // An identity is cached per bundle for as long as an application
-        // from it is on the bar; a bundle no application still runs from is
-        // dropped rather than held for a process that will never return.
-        let named: BTreeSet<&str> = groups
+        // Cached per bundle for as long as an application from it is running,
+        // whether or not that application takes a slot — dropping an iconless
+        // bundle's record here would re-read its manifest on every wake. A
+        // bundle no application still runs from is dropped rather than held
+        // for a process that will never return.
+        for bundle in candidates
+            .iter()
+            .filter_map(|group| group.bundle.as_deref())
+        {
+            self.learn(bundle, reader);
+        }
+        let running: BTreeSet<&str> = candidates
             .iter()
             .filter_map(|group| group.bundle.as_deref())
             .collect();
-        self.identities
-            .retain(|bundle, _| named.contains(bundle.as_str()));
+        self.facts
+            .retain(|bundle, _| running.contains(bundle.as_str()));
+        let (groups, dropped): (Vec<AppGroup>, Vec<AppGroup>) = candidates
+            .into_iter()
+            .partition(|group| self.presents_slot(group.bundle.as_deref()));
+        self.iconless = dropped.iter().map(|group| group.owner).collect();
         self.bundles = groups
             .iter()
             .filter_map(|group| group.bundle.clone().map(|bundle| (group.owner, bundle)))
@@ -218,7 +275,9 @@ impl AppBarService {
     /// never one it did not.
     #[must_use]
     pub fn attested_identity(&self, owner: ProcId) -> Option<&AppIdentity> {
-        self.identities.get(self.bundles.get(&owner)?)
+        self.facts
+            .get(self.bundles.get(&owner)?)
+            .map(|facts| &facts.identity)
     }
 
     /// Build the taskbar's slots from `groups`, resolving each
@@ -259,7 +318,7 @@ impl AppBarService {
                     }
                 }
                 if let Some(declared) = self.declared.get(&group.owner) {
-                    slot = slot.with_declaration(declared.menu, declared.default_action);
+                    slot = slot.with_declaration(declared.menu, declared.click);
                 }
                 slot
             })
@@ -282,12 +341,29 @@ impl AppBarService {
                 ..AppIdentity::default()
             };
         };
-        if let Some(identity) = self.identities.get(bundle) {
-            return identity.clone();
+        self.learn(bundle, reader);
+        self.facts
+            .get(bundle)
+            .map_or_else(AppIdentity::default, |facts| facts.identity.clone())
+    }
+
+    /// Read and remember what `bundle`'s signed manifest attests, unless it
+    /// is already known.
+    fn learn<R>(&mut self, bundle: &str, reader: &mut R)
+    where
+        R: SessionFileReader + ?Sized,
+    {
+        if !self.facts.contains_key(bundle) {
+            let facts = read_facts(reader, bundle);
+            self.facts.insert(bundle.to_string(), facts);
         }
-        let identity = read_identity(reader, bundle);
-        self.identities.insert(bundle.to_string(), identity.clone());
-        identity
+    }
+
+    /// Whether the bar gives `bundle` a slot: what its manifest attested, or
+    /// yes for a process the desktop did not launch, which has no manifest
+    /// to opt out in.
+    fn presents_slot(&self, bundle: Option<&str>) -> bool {
+        bundle.is_none_or(|bundle| self.facts.get(bundle).is_none_or(|facts| facts.icon_bar))
     }
 
     /// Note that `owner` holds a slot, appending it to the display order the
@@ -316,13 +392,14 @@ pub const MAX_BAR_APPS: usize = 100;
 /// exactly the identity spoof the manifest attestation exists to stop.
 const UNATTRIBUTED_LABEL: &str = "Application";
 
-/// The identity `bundle`'s own signed manifest states.
+/// What `bundle`'s own signed manifest attests to the icon bar.
 ///
 /// Bounded by the shared ABI manifest cap and decoded by the shared
 /// fail-closed header decoder; an absent, over-long, or undecodable
 /// manifest yields the bundle's leaf name and nothing else, so a panel can
-/// state a name it read but never a version it did not.
-fn read_identity<R>(reader: &mut R, bundle: &str) -> AppIdentity
+/// state a name it read but never a version it did not. Such a bundle keeps
+/// its slot: only a manifest that decoded and *said* so gives one up.
+fn read_facts<R>(reader: &mut R, bundle: &str) -> BundleFacts
 where
     R: SessionFileReader + ?Sized,
 {
@@ -332,16 +409,22 @@ where
         .as_deref()
         .and_then(decode_bundle_manifest);
     let Some(header) = header else {
-        return AppIdentity {
-            name: bundle_leaf_label(bundle),
-            ..AppIdentity::default()
+        return BundleFacts {
+            identity: AppIdentity {
+                name: bundle_leaf_label(bundle),
+                ..AppIdentity::default()
+            },
+            icon_bar: true,
         };
     };
-    AppIdentity {
-        name: header.bundle_name().to_string(),
-        version: header.bundle_version().to_string(),
-        purpose: header.bundle_purpose().map(ToString::to_string),
-        author: header.bundle_author().map(ToString::to_string),
+    BundleFacts {
+        identity: AppIdentity {
+            name: header.bundle_name().to_string(),
+            version: header.bundle_version().to_string(),
+            purpose: header.bundle_purpose().map(ToString::to_string),
+            author: header.bundle_author().map(ToString::to_string),
+        },
+        icon_bar: header.presents_icon_bar_slot(),
     }
 }
 

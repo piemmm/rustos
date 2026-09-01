@@ -2085,6 +2085,42 @@ fn desired_cursor_reflects_the_window_under_the_pointer() {
     );
 }
 
+/// The outward half of the grab band draws nothing, so the *pointer* is what
+/// makes it discoverable — and a press there begins the resize rather than
+/// falling through to the desktop.
+#[test]
+fn the_overhang_announces_itself_and_a_press_there_resizes() {
+    let (mut c, id) = decorated_compositor();
+    let bounds = c.window(id).unwrap().bounds();
+    let mid_y = i32::midpoint(bounds.top(), bounds.bottom());
+    let mut router = InputRouter::new();
+
+    router.handle(moved(bounds.left() - 1, mid_y), &mut c);
+    assert_eq!(
+        desired_cursor(router.pointer(), &router, &c),
+        CursorKind::ResizeHorizontal,
+        "the band beside the edge shows the axis it moves along"
+    );
+    assert_eq!(
+        router.handle(press_primary(), &mut c),
+        InputResponse::FurniturePressed { window: id },
+        "and the press is the frame's, not the desktop's"
+    );
+    assert_eq!(router.resizing_edge(), Some(ResizeEdge::Left));
+
+    // Clear of the band the desktop has it back.
+    let mut router = InputRouter::new();
+    router.handle(moved(bounds.left() - 64, mid_y), &mut c);
+    assert_eq!(
+        desired_cursor(router.pointer(), &router, &c),
+        CursorKind::Arrow
+    );
+    assert_eq!(
+        router.handle(press_primary(), &mut c),
+        InputResponse::DesktopPressed
+    );
+}
+
 #[test]
 fn move_grab_outranks_the_window_hint() {
     let mut c = new_compositor(mode(80, 80), BLUE).expect("compositor");
@@ -3662,22 +3698,71 @@ fn scan_title(c: &Compositor, id: WindowId, pred: impl Fn(FurniturePart) -> bool
     })
 }
 
+/// The outward half of a straddling grab band is reachable, but only where
+/// nothing else is drawn: it exists so an edge stays easy to hit without
+/// eating into the client, not so a window can take presses from one in front
+/// of it.
+#[test]
+fn resize_target_claims_the_overhang_only_where_no_window_is_drawn() {
+    let (mut c, id) = decorated_compositor();
+    let bounds = c.window(id).unwrap().bounds();
+    let mid_y = i32::midpoint(bounds.top(), bounds.bottom());
+    let just_outside = Point::new(bounds.left() - 1, mid_y);
+
+    assert_eq!(c.window_at(just_outside), None, "nothing is drawn there");
+    assert_eq!(
+        c.resize_target(just_outside),
+        Some((id, ResizeEdge::Left)),
+        "the band reaches out over the bare desktop"
+    );
+    assert_eq!(
+        c.resize_target(Point::new(bounds.left() - 64, mid_y)),
+        None,
+        "and no further than the band"
+    );
+
+    // A second window covering that column: its own pixels are what the
+    // pointer is on, so the pick never reaches the band behind it.
+    let over = c.add_window(
+        Point::new(bounds.left() - 30, bounds.top()),
+        opaque(40, 100, BLUE),
+    );
+    assert_eq!(c.window_at(just_outside), Some(over));
+
+    // A fixed-size window has no band at all.
+    let (mut fixed_c, fixed) = decorated_compositor();
+    assert!(fixed_c.set_window_frame(
+        fixed,
+        WindowFrame::new(tairix_controls::WindowFurnitureState {
+            resizable: false,
+            ..decorated()
+        })
+    ));
+    assert_eq!(fixed_c.resize_target(just_outside), None);
+}
+
 #[test]
 fn frame_hit_classifies_furniture_and_never_the_client() {
     let (c, id) = decorated_compositor();
     let bounds = c.window(id).unwrap().bounds();
     let client = c.window_client_rect(id).unwrap();
 
-    // A client interior point is the client; a point beyond the window is
-    // outside; the bottom-right corner is a resize edge on a resizable window.
+    // A client interior point is the client; the bottom-right corner is a
+    // resize edge on a resizable window, and so is a point just *outside* it
+    // — the band straddles the edge. Clear of the band it is outside again.
     assert_eq!(c.frame_hit(id, centre(client)), Some(FurniturePart::Client));
-    assert_eq!(
-        c.frame_hit(id, Point::new(bounds.right() + 5, bounds.bottom() + 5)),
-        Some(FurniturePart::Outside)
-    );
     assert_eq!(
         c.frame_hit(id, Point::new(bounds.right() - 1, bounds.bottom() - 1)),
         Some(FurniturePart::ResizeEdge(ResizeEdge::BottomRight))
+    );
+    assert_eq!(
+        c.frame_hit(id, Point::new(bounds.right() + 1, bounds.bottom() + 1)),
+        Some(FurniturePart::ResizeEdge(ResizeEdge::BottomRight)),
+        "the outward half of the corner band is reachable"
+    );
+    assert_eq!(
+        c.frame_hit(id, Point::new(bounds.right() + 64, bounds.bottom() + 64)),
+        Some(FurniturePart::Outside)
     );
 
     // The title band carries both a draggable region and command controls, and

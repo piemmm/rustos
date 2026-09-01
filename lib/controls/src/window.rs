@@ -1671,30 +1671,36 @@ pub enum ResizeEdge {
     BottomRight,
 }
 
-/// How far a resizable window's resize zones reach in from its outer edges,
-/// in physical pixels at a given scale and theme.
+/// How thick a resizable window's resize bands are, in physical pixels at a
+/// given scale and theme.
 ///
-/// Two reaches, not one: an *edge* zone only has to be wide enough to grab,
-/// while a *corner* zone is a square where two edges meet and would otherwise
-/// shrink to that width at its tip — the hardest thing on the frame to hit,
-/// and the one that resizes both axes at once. The corner is therefore the
-/// wider of the two, and is clamped never to fall below the edge reach so the
-/// very corner can never classify as a plain edge.
+/// Two thicknesses, not one: an *edge* band only has to be wide enough to
+/// grab, while a *corner* band is a square where two edges meet and would
+/// otherwise shrink to that width at its tip — the hardest thing on the frame
+/// to hit, and the one that resizes both axes at once. The corner is
+/// therefore the wider of the two, and is clamped never to fall below the
+/// edge band so the very corner can never classify as a plain edge.
 ///
-/// Measured from the **outer** rectangle, so the thin drawn furniture band and
-/// the client pixels the zone reaches over are one continuous region rather
-/// than two zones that could disagree about where a corner ends.
+/// **A band straddles the window edge rather than lying inside it.** Half
+/// reaches out past the outer rectangle and half in over the frame rim and
+/// the client's outermost pixels, so the band stays as easy to hit while
+/// costing the client half what an inward-only reach would: a scrollbar
+/// against the window edge keeps most of its width. The outward half is
+/// claimed only where nothing else is drawn (see
+/// [`WindowFrame::hit`](WindowFrame::hit) and the window manager's pointer
+/// resolution), so reaching for an edge never takes a press from the window
+/// behind.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct GrabReach {
-    /// The left/right/bottom edge reach, at least one pixel so a resizable
-    /// window always has a grabbable edge.
+    /// The left/right/bottom band's whole thickness, at least one pixel so a
+    /// resizable window always has a grabbable edge.
     pub edge: u32,
-    /// The bottom-left/bottom-right corner reach along each axis.
+    /// The bottom-left/bottom-right corner band's thickness along each axis.
     pub corner: u32,
 }
 
 impl GrabReach {
-    /// The reaches a resizable window's frame grabs by at `scale` under
+    /// The bands a resizable window's frame grabs by at `scale` under
     /// `theme`.
     #[must_use]
     pub fn of(scale: Scale, theme: &Theme) -> Self {
@@ -1706,16 +1712,53 @@ impl GrabReach {
         }
     }
 
-    /// The resize edge (or corner) `point` falls in within the outer
-    /// rectangle `bounds`, or `None` when it is clear of every edge.
+    /// How far a `band`-thick zone reaches out past the window edge.
+    ///
+    /// The one definition of the split, so the inward and outward halves can
+    /// never disagree about where the band ends. The odd pixel goes inward,
+    /// which is what leaves a one-pixel band exactly on the edge itself.
+    pub(crate) const fn outward(band: u32) -> u32 {
+        band / 2
+    }
+
+    /// How far a `band`-thick zone reaches in from the window edge.
+    pub(crate) const fn inward(band: u32) -> u32 {
+        band - Self::outward(band)
+    }
+
+    /// The resize edge (or corner) `point` falls in around the outer
+    /// rectangle `bounds`, or `None` when it is clear of every band.
+    ///
+    /// `title_bottom` is where the title bar ends: the side bands start
+    /// below it, on both sides of the edge, because a window is dragged from
+    /// its title bar far more often than it is resized from the sliver
+    /// beside one.
     ///
     /// A corner wins over the two edges that form it, and the top edge is
-    /// never a resize edge — the title bar lives there, and it is resolved
-    /// before this is reached.
-    fn edge_at(self, bounds: Rect, point: Point) -> Option<ResizeEdge> {
-        let near_left = |reach: u32| point.x < bounds.left().saturating_add(to_i32(reach));
-        let near_right = |reach: u32| point.x >= bounds.right().saturating_sub(to_i32(reach));
-        let near_bottom = |reach: u32| point.y >= bounds.bottom().saturating_sub(to_i32(reach));
+    /// never a resize edge.
+    fn edge_at(self, bounds: Rect, title_bottom: i32, point: Point) -> Option<ResizeEdge> {
+        let near_left = |band: u32| {
+            point.x >= bounds.left().saturating_sub(to_i32(Self::outward(band)))
+                && point.x < bounds.left().saturating_add(to_i32(Self::inward(band)))
+        };
+        let near_right = |band: u32| {
+            point.x >= bounds.right().saturating_sub(to_i32(Self::inward(band)))
+                && point.x < bounds.right().saturating_add(to_i32(Self::outward(band)))
+        };
+        let near_bottom = |band: u32| {
+            point.y >= bounds.bottom().saturating_sub(to_i32(Self::inward(band)))
+                && point.y < bounds.bottom().saturating_add(to_i32(Self::outward(band)))
+        };
+        // A side band spans from the title bar's foot to the bottom band's
+        // own outward reach, so the two meet without either overhanging the
+        // silhouette above or below.
+        let beside = point.y >= title_bottom
+            && point.y
+                < bounds
+                    .bottom()
+                    .saturating_add(to_i32(Self::outward(self.edge)));
+        // A corner band spans the corner itself, so it is bounded by its own
+        // two tests rather than by the side band's vertical span.
         if near_bottom(self.corner) {
             if near_left(self.corner) {
                 return Some(ResizeEdge::BottomLeft);
@@ -1724,13 +1767,22 @@ impl GrabReach {
                 return Some(ResizeEdge::BottomRight);
             }
         }
-        if near_bottom(self.edge) {
+        if near_bottom(self.edge)
+            && point.x
+                >= bounds
+                    .left()
+                    .saturating_sub(to_i32(Self::outward(self.edge)))
+            && point.x
+                < bounds
+                    .right()
+                    .saturating_add(to_i32(Self::outward(self.edge)))
+        {
             return Some(ResizeEdge::Bottom);
         }
-        if near_left(self.edge) {
+        if beside && near_left(self.edge) {
             return Some(ResizeEdge::Left);
         }
-        if near_right(self.edge) {
+        if beside && near_right(self.edge) {
             return Some(ResizeEdge::Right);
         }
         None
@@ -2049,23 +2101,36 @@ impl WindowFrame {
     ///
     /// The client *viewport* stays exactly [`Self::layout`]'s `client` rect —
     /// an app's content is never inset further than the plain frame band. The
-    /// resize **hit** zone is deliberately wider: on a resizable window it
-    /// reaches in from the outer edge far enough to grab
-    /// ([`GrabReach`]), which over a thin band means it overlaps the client's
-    /// outermost pixels. A press landing there is reported as
+    /// resize **hit** zone is deliberately wider: on a resizable window its
+    /// band straddles the outer edge ([`GrabReach`]), so half of it lies over
+    /// the frame rim and the client's outermost pixels and half reaches out
+    /// past the window. A press landing on the inner half is reported as
     /// [`FurniturePart::ResizeEdge`], not [`FurniturePart::Client`] — those
     /// outermost app pixels are still drawn by the app but no longer deliver
     /// pointer input to it, the accepted trade-off for an invisible border.
     ///
+    /// A point *outside* `bounds` is classified too, so the outward half is
+    /// reachable at all: it is a `ResizeEdge` when it falls in the band and
+    /// [`FurniturePart::Outside`] beyond it. Which window owns such a point
+    /// is the window manager's to decide — it consults this only where
+    /// nothing else is drawn — so a frame can never take a press from a
+    /// window in front of it.
+    ///
     /// The title bar is resolved first and keeps its whole band: a window is
     /// dragged from its title bar far more often than it is resized from the
-    /// sliver of edge beside one, so the resize zones start below it.
+    /// sliver of edge beside one, so the side bands start below it.
     #[must_use]
     pub fn hit(&self, bounds: Rect, scale: Scale, theme: &Theme, point: Point) -> FurniturePart {
-        if !bounds.contains(point) {
-            return FurniturePart::Outside;
-        }
         let layout = self.layout(bounds, scale, theme);
+        let grab = self
+            .furniture
+            .resizable
+            .then(|| GrabReach::of(scale, theme).edge_at(bounds, layout.title_bar.bottom(), point));
+        if !bounds.contains(point) {
+            return grab
+                .flatten()
+                .map_or(FurniturePart::Outside, FurniturePart::ResizeEdge);
+        }
         if layout.title_bar.contains(point) {
             return match self.title_bar.hit(layout.title_bar, scale, theme, point) {
                 TitleHit::Control(kind) => FurniturePart::WindowControl(kind),
@@ -2077,12 +2142,7 @@ impl WindowFrame {
         } else {
             FurniturePart::Frame
         };
-        if !self.furniture.resizable {
-            return inside;
-        }
-        GrabReach::of(scale, theme)
-            .edge_at(bounds, point)
-            .map_or(inside, FurniturePart::ResizeEdge)
+        grab.flatten().map_or(inside, FurniturePart::ResizeEdge)
     }
 
     /// Paint the frame chrome (rim, body background, title bar) into `surface`

@@ -40,7 +40,7 @@ mod program {
     use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
     use tairix_abi::input::KeyInput;
     use tairix_abi::time::WallTimeState;
-    use tairix_abi::window_ipc::{WindowEvent, WINDOW_ENDPOINT};
+    use tairix_abi::window_ipc::{AppBarClick, WindowEvent, WINDOW_ENDPOINT};
     use tairix_abi::{Errno, Origin, ProcId, WaitSetOp, WaitSourceKind, ORIGIN_WIRE_LEN};
     use tairix_datetime::view;
     use tairix_datetime::{Editor, Status};
@@ -102,13 +102,16 @@ mod program {
     /// Declare this application's presence on the desktop's icon bar: the
     /// shared convention's two rows — the session-drawn information row and
     /// *Quit* — with the primary click left to the session so it raises the
-    /// window.
+    /// window. The app ends with that window, so a click can never find it
+    /// with none to raise: it holds the clock-setting authority it was
+    /// elevated for, which is not something to leave resident behind an
+    /// empty slot.
     ///
     /// A refused declaration is an answer, not a death: the app says so and
     /// carries on with no slot of its own — its window is still reachable
     /// through the one the session derives from it.
     fn declare_app_bar(client: &mut WindowClient<RtWindowTransport>, endpoint: u64) {
-        match tairix_window::info_and_quit(endpoint) {
+        match tairix_window::info_and_quit(endpoint, AppBarClick::Raise) {
             Ok(bar) => {
                 if let Err(err) = client.set_app_bar(&bar) {
                     report(&alloc::format!(
@@ -478,8 +481,12 @@ mod program {
                         }
                     }
                 }
-                // The session asked the window to close: a clean end.
+                // The session asked the window to close, or *Quit* was
+                // chosen on this application's own icon-bar slot: a clean
+                // end either way. A row the declaration never carried names
+                // no command and is ignored (fail closed).
                 WindowEvent::CloseRequested { .. } => return 0,
+                WindowEvent::AppBarMenu { item } if tairix_window::is_quit(item) => return 0,
                 // Nobody can see the window, so the session gave its copy of
                 // the pixels back and unmapped the region. Let go of this side
                 // too — the pages go only when both do — and paint nothing

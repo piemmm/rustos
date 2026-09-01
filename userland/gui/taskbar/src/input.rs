@@ -88,7 +88,7 @@
 //! previous task.
 
 use tairix_abi::switchboard_ipc::CommandSection;
-use tairix_abi::window_ipc::AppMenuItemId;
+use tairix_abi::window_ipc::{AppBarClick, AppMenuItemId};
 use tairix_abi::PowerAction;
 use tairix_controls::{damage, TraySignalAction};
 use tairix_geometry::{Point, Rect, Region, Scale};
@@ -948,12 +948,14 @@ impl TaskbarInput {
         }
     }
 
-    /// Apply a primary click to the running application at `index`.
+    /// Apply a primary click to the running application at `index`, as its
+    /// own declaration says a click is answered.
     ///
-    /// An application that declared it handles the click gets it; one that
-    /// did not has its most recently used window raised instead, and an
-    /// application with neither a declaration nor a window does nothing —
-    /// the honest outcome, never a guessed one.
+    /// [`AppBarClick::Open`] hands every click over. The other two raise the
+    /// most recently used window, and differ only over an application with
+    /// none: [`AppBarClick::RaiseOrOpen`] hands the click over so the slot
+    /// can bring a window back, while [`AppBarClick::Raise`] does nothing at
+    /// all — the honest outcome, never a guessed one.
     fn activate_app(taskbar: &mut Taskbar, index: usize) -> TaskbarResponse {
         // A click closes the hover picker: the user has decided on the
         // application rather than on one of its windows.
@@ -961,13 +963,16 @@ impl TaskbarInput {
         let Some(app) = taskbar.apps().get(index) else {
             return TaskbarResponse::Ignored;
         };
-        if app.handles_default() {
+        if app.click() == AppBarClick::Open {
             return TaskbarResponse::AppDefault { app: index };
         }
-        if app.windows().is_empty() {
-            return TaskbarResponse::Ignored;
+        if !app.windows().is_empty() {
+            return TaskbarResponse::AppRaise { app: index };
         }
-        TaskbarResponse::AppRaise { app: index }
+        if app.click().opens_when_windowless() {
+            return TaskbarResponse::AppDefault { app: index };
+        }
+        TaskbarResponse::Ignored
     }
 
     /// Route one event into the open program-library popup.

@@ -5,19 +5,19 @@
 //! # One binary, two roles
 //!
 //! Launched plainly — from a shell, or by the desktop opening a folder — this
-//! is an ordinary application: one window at the location it was given, the
-//! shared icon-bar menu convention on its slot, and the process ends when that
-//! window closes.
+//! is an ordinary application: one window at the location it was given, and
+//! the shared icon-bar menu convention on its slot. Closing every window
+//! puts it away rather than ending it: the slot stays, a click there opens a
+//! window at the user's home, and *Quit* is what ends the process.
 //!
 //! Launched by the desktop session with `tairix_window::DESKTOP_ROLE_SWITCH`
 //! it is instead a **component of the desktop**
 //! ([`Role::Desktop`](command::Role::Desktop)): it comes up with the session,
 //! holds a permanent icon-bar slot offering the user's places and whatever is
 //! mounted, opens a window per place the user chooses (bounded by the
-//! session's per-client frame budget), and cannot be quit — closing every
-//! window puts it away rather than ending it, and its menu carries neither an
-//! information row nor *Quit*. Only the session passes the switch, so a second
-//! component can never appear.
+//! session's per-client frame budget), and cannot be quit at all — its menu
+//! carries neither an information row nor *Quit*. Only the session passes the
+//! switch, so a second component can never appear.
 //!
 //! # What the program wires (and what stays in the libraries)
 //!
@@ -316,9 +316,9 @@ mod program {
     /// bar, as its `role` decides.
     ///
     /// An ordinary file manager makes the shared declaration — the
-    /// session-drawn information row and *Quit*, the primary click left to the
-    /// session so it raises the window. A component offers its places instead
-    /// and neither of those rows ([`appbar`]).
+    /// session-drawn information row and *Quit*, with the session raising a
+    /// window it has and asking for one when it has none. A component offers
+    /// its places instead and neither of those rows ([`appbar`]).
     ///
     /// A refused declaration is an answer, not a death: the application says
     /// so and carries on with no slot of its own — a window it owns is still
@@ -332,7 +332,8 @@ mod program {
         places: &Places,
     ) {
         let declared = match role {
-            Role::Window => tairix_window::info_and_quit(endpoint).map(|bar| (bar, 0)),
+            Role::Window => tairix_window::info_and_quit(endpoint, appbar::WINDOW_SLOT_CLICK)
+                .map(|bar| (bar, 0)),
             Role::Desktop => appbar::component_declaration(endpoint, places),
         };
         match declared {
@@ -588,26 +589,23 @@ mod program {
         })
     }
 
-    /// Close the window at `index` and answer the exit code the process owes,
-    /// or `None` to carry on.
+    /// Close the window at `index`, which never ends the process.
     ///
-    /// An ordinary file manager *is* its window, so closing the last one ends
-    /// it cleanly. A component is not: it keeps its slot, and an empty window
-    /// list is simply the state it started in — closing every window is the
-    /// user putting it away, not quitting it, and there is no row on its menu
-    /// that would.
+    /// Neither role *is* its windows: both keep an icon-bar slot with none
+    /// open, so closing every window is the user putting the file manager
+    /// away rather than quitting it. An ordinary one is ended by the *Quit*
+    /// row its slot carries and a component by nothing at all — the
+    /// desktop's own parts are not the user's to close.
     fn close_window(
         windows: &mut alloc::vec::Vec<OpenWindow>,
         index: usize,
         client: &mut WindowClient<RtWindowTransport>,
-        role: Role,
-    ) -> Option<i32> {
+    ) {
         if index >= windows.len() {
-            return None;
+            return;
         }
         let closed = windows.remove(index);
         let _ = client.close(closed.window);
-        (windows.is_empty() && role == Role::Window).then_some(0)
     }
 
     /// What routing an icon-bar event did.
@@ -641,10 +639,10 @@ mod program {
     ) -> BarRouted {
         match *event {
             WindowEvent::AppBarDefault => {
-                // The component handles its own click, and what it opens is a
-                // window at the user's home — the readiest thing a file
-                // manager can offer. An ordinary window declares no default
-                // action, so this cannot reach one.
+                // A window at the user's home — the readiest thing a file
+                // manager can offer. A component takes every click; an
+                // ordinary one is told only when it has no window left, and
+                // this is the way back to one.
                 open_more(
                     windows,
                     client,
@@ -826,7 +824,8 @@ mod program {
             &mut damage,
         );
         if close {
-            return close_window(windows, index, client, role);
+            close_window(windows, index, client);
+            return None;
         }
         if present_window(win, client, theme, icons, desktop.scale(), repaint, &damage).is_err() {
             return Some(fail(EXIT_CHANNEL_LOST, "present refused"));
@@ -1991,10 +1990,9 @@ mod program {
             // repainted by the event loop itself (through `desktop.apply`)
             // before `apply_event` is called; nothing here needs to react to
             // it a second time.
-            // The file manager declares no default action, so the session
-            // raises its window on a click rather than telling it — an
-            // `AppBarDefault` therefore cannot arrive, and a bar menu row was
-            // resolved before this dispatch.
+            // Both icon-bar events were resolved before this dispatch, by
+            // the routing that owns the whole application's windows rather
+            // than by one of them.
             //
             // A `MenuClosed` was resolved before this dispatch too, against the
             // open id the window is waiting on; one reaching here named no such
@@ -4818,10 +4816,11 @@ mod program {
             ))
         };
 
-        // --- The windows. An ordinary file manager *is* its window, so a
-        // first one that will not open leaves it nothing to be; a component
-        // opens none until the user asks, and an empty list is a perfectly
-        // good state for it to sit in.
+        // --- The windows. An ordinary file manager was started to show a
+        // location, so a first window that will not open leaves it nothing to
+        // do and it says so; a component opens none until the user asks, and
+        // an empty list is a perfectly good state for either to sit in
+        // afterwards.
         let mut windows: alloc::vec::Vec<OpenWindow> = alloc::vec::Vec::new();
         if start.role == Role::Window {
             let mut win = match open_window(
@@ -4962,11 +4961,7 @@ mod program {
                                     }
                                 }
                                 OperationControl::Close => {
-                                    if let Some(code) =
-                                        close_window(&mut windows, busy, &mut client, start.role)
-                                    {
-                                        return code;
-                                    }
+                                    close_window(&mut windows, busy, &mut client);
                                 }
                                 OperationControl::Ignore => {}
                             }

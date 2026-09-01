@@ -11,9 +11,18 @@ fn surface(width: u32, height: u32) -> Surface {
 // --- Effects::default -------------------------------------------------------
 
 #[test]
-fn default_is_fully_opaque_with_no_passes_and_not_animated() {
+fn default_is_see_through_with_no_blur_no_passes_and_not_animated() {
     let effects = Effects::default();
-    assert_eq!(effects.background_alpha(), 255);
+    assert!(
+        effects.background_alpha() < 255,
+        "the default is see-through"
+    );
+    assert_eq!(
+        effects.blur_radius_px(),
+        0,
+        "translucency is free; a backdrop blur costs the compositor a frost \
+         per frosted window, so it is opt-in"
+    );
     let (_, len) = effects.passes(100);
     assert_eq!(len, 0);
     assert!(!effects.is_animated(100));

@@ -788,22 +788,68 @@ impl AppMenu {
     }
 }
 
+/// What a primary click on an application's icon-bar slot does.
+///
+/// The closed set of answers, declared by the application because only it
+/// knows whether a second window means anything to it. Raising is the
+/// session's to do — an application cannot restack its own window — so the
+/// two mixed answers differ in *when* the click is handed over, not in who
+/// raises.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum AppBarClick {
+    /// The session raises the application's most recently used window. With
+    /// no window there is nothing to raise, and the click does nothing.
+    Raise,
+    /// The session raises the most recently used window; with none it
+    /// delivers [`WindowEvent::AppBarDefault`], so the slot of an
+    /// application still resident with its last window closed is the way
+    /// back to one.
+    RaiseOrOpen,
+    /// Every primary click is delivered to the application, window or not —
+    /// what an application whose slot means "another one of these" wants.
+    Open,
+}
+
+impl AppBarClick {
+    /// Decode the wire byte, or `None` for a value no declaration could
+    /// have carried (fail closed).
+    #[must_use]
+    pub const fn from_wire(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Raise),
+            1 => Some(Self::RaiseOrOpen),
+            2 => Some(Self::Open),
+            _ => None,
+        }
+    }
+
+    /// The wire byte for this behaviour.
+    #[must_use]
+    pub const fn to_wire(self) -> u8 {
+        match self {
+            Self::Raise => 0,
+            Self::RaiseOrOpen => 1,
+            Self::Open => 2,
+        }
+    }
+
+    /// Whether a click reaches the application when it owns **no** window.
+    #[must_use]
+    pub const fn opens_when_windowless(self) -> bool {
+        matches!(self, Self::RaiseOrOpen | Self::Open)
+    }
+}
+
 /// An application's whole icon-bar declaration: where the bar's events
-/// reach it, whether it handles the primary click itself, and its menu.
+/// reach it, what its slot's primary click does, and its menu.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct AppBar {
     /// The declaring application's own endpoint the session delivers
     /// [`WindowEvent::AppBarDefault`] and [`WindowEvent::AppBarMenu`] to.
     /// Never a reserved endpoint.
     pub event_endpoint: u64,
-    /// Whether a primary click on the application's slot is delivered to
-    /// the application ([`WindowEvent::AppBarDefault`]).
-    ///
-    /// `false` leaves the click to the session's own default — raise and
-    /// focus the application's most recently used window, and do nothing
-    /// at all when it has none — which is what an application whose slot
-    /// simply fronts one window wants.
-    pub default_action: bool,
+    /// What a primary click on the application's slot does.
+    pub click: AppBarClick,
     /// The menu a secondary press on the slot opens. Empty means the
     /// application offers no menu, which the session honours by opening
     /// nothing.
@@ -1476,11 +1522,11 @@ const SET_TITLE_TEXT_OFFSET: usize = SET_TITLE_LEN_OFFSET + 1;
 /// Encoded size of a [`WindowRequest::SetTitle`].
 const SET_TITLE_WIRE_LEN: usize = SET_TITLE_TEXT_OFFSET + WINDOW_TITLE_MAX;
 
-/// Byte offset of a [`WindowRequest::SetAppBar`]'s flag byte, immediately
-/// after the event endpoint it routes to.
-const APP_BAR_FLAGS_OFFSET: usize = 16;
+/// Byte offset of a [`WindowRequest::SetAppBar`]'s [`AppBarClick`] byte,
+/// immediately after the event endpoint it routes to.
+const APP_BAR_CLICK_OFFSET: usize = 16;
 /// Byte offset of a [`WindowRequest::SetAppBar`]'s declared row count.
-const APP_BAR_ROW_COUNT_OFFSET: usize = APP_BAR_FLAGS_OFFSET + 1;
+const APP_BAR_ROW_COUNT_OFFSET: usize = APP_BAR_CLICK_OFFSET + 1;
 /// Byte offset of the length of a declaration's trailing text block.
 const APP_BAR_TEXT_LEN_OFFSET: usize = APP_BAR_ROW_COUNT_OFFSET + 1;
 /// Byte offset of the first of a [`WindowRequest::SetAppBar`]'s fixed-width
@@ -1575,9 +1621,6 @@ const fn longer(a: usize, b: usize) -> usize {
     }
 }
 
-/// The only flag bit [`WindowRequest::SetAppBar`]'s flag byte defines:
-/// the application handles the primary click itself.
-const APP_BAR_FLAG_DEFAULT_ACTION: u8 = 1 << 0;
 /// Bit of a menu row's flag byte meaning "this row is enabled".
 const APP_MENU_ROW_FLAG_ENABLED: u8 = 1 << 0;
 /// Bits of a menu row's flag byte holding its [`AppMenuMark`].
@@ -2033,19 +2076,15 @@ fn read_menu_block(
     Ok(())
 }
 
-/// Write an icon-bar declaration's operand block: the event route, the flag
-/// byte, the declared row count and text length, then the shared menu block
-/// (mirrors [`read_app_bar`]).
+/// Write an icon-bar declaration's operand block: the event route, the
+/// click behaviour, the declared row count and text length, then the shared
+/// menu block (mirrors [`read_app_bar`]).
 ///
 /// The block ends with the last text byte, so the counts and the frame
 /// length state the same thing and one menu has exactly one encoding.
 fn write_app_bar(out: &mut [u8], bar: &AppBar) {
     put_u64(out, 8, bar.event_endpoint);
-    out[APP_BAR_FLAGS_OFFSET] = if bar.default_action {
-        APP_BAR_FLAG_DEFAULT_ACTION
-    } else {
-        0
-    };
+    out[APP_BAR_CLICK_OFFSET] = bar.click.to_wire();
     out[APP_BAR_ROW_COUNT_OFFSET] = bar.menu.len;
     put_u16(out, APP_BAR_TEXT_LEN_OFFSET, bar.menu.text_len);
     write_menu_block(out, APP_BAR_ROWS_OFFSET, &bar.menu);
@@ -2069,15 +2108,12 @@ fn read_app_bar(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     if crate::ipc::is_reserved_endpoint(event_endpoint) {
         return Err(Errno::OutOfRange);
     }
-    let flags = bytes[APP_BAR_FLAGS_OFFSET];
-    if flags & !APP_BAR_FLAG_DEFAULT_ACTION != 0 {
-        return Err(Errno::OutOfRange);
-    }
+    let click = AppBarClick::from_wire(bytes[APP_BAR_CLICK_OFFSET]).ok_or(Errno::OutOfRange)?;
     let mut menu = AppMenu::EMPTY;
     read_menu_block(&mut menu, bytes, APP_BAR_ROWS_OFFSET, count, text_len)?;
     Ok(WindowRequest::SetAppBar(AppBar {
         event_endpoint,
-        default_action: flags & APP_BAR_FLAG_DEFAULT_ACTION != 0,
+        click,
         menu,
     }))
 }
@@ -2824,13 +2860,14 @@ pub enum WindowEvent {
         /// The desktop as it now is.
         desktop: DesktopInfo,
     },
-    /// A primary click landed on the application's icon-bar slot, and the
-    /// application declared that it handles that click itself
-    /// ([`AppBar::default_action`]).
+    /// A primary click landed on the application's icon-bar slot and the
+    /// click was the application's to handle ([`AppBar::click`]).
     ///
     /// Addressed to the **application**, not to a window: an application
-    /// whose default action is "open a new window" has no window to
-    /// address it to. The application decides what the click means.
+    /// that declared [`AppBarClick::RaiseOrOpen`] is told only when it has
+    /// no window, and one that declared [`AppBarClick::Open`] may have
+    /// none, so there is no window to address it to. The application
+    /// decides what the click means.
     AppBarDefault,
     /// The user chose a row of the application's own icon-bar menu.
     ///
@@ -3222,17 +3259,18 @@ mod tests {
     use super::{
         app_bar_wire_len, decode_create_reply, decode_desktop_reply, decode_minted_id_reply,
         encode_create_reply, encode_desktop_reply, encode_minted_id_reply, open_menu_wire_len,
-        put_i32, put_u16, put_u64, read_u16, AppBar, AppMenu, AppMenuItem, AppMenuItemId,
-        AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole, AppMenuRow, AppMenuRowView,
-        AppMenuShortcut, MenuAnchor, MenuOutcome, MenuRefusal, PointerAction, WindowEvent,
-        WindowRequest, WindowSizing, WindowTitle, APP_BAR_FLAGS_OFFSET, APP_BAR_MAX_WIRE_LEN,
-        APP_BAR_ROWS_OFFSET, APP_BAR_ROW_COUNT_OFFSET, APP_BAR_TEXT_LEN_OFFSET,
-        APP_MENU_KIND_SEPARATOR, APP_MENU_KIND_SUBMENU, APP_MENU_LABEL_MAX, APP_MENU_MAX_DEPTH,
-        APP_MENU_MAX_ROWS, APP_MENU_MAX_TOTAL_ROWS, APP_MENU_REASON_MAX, APP_MENU_ROW_FLAGS_OFFSET,
-        APP_MENU_ROW_FLAG_ENABLED, APP_MENU_ROW_ID_OFFSET, APP_MENU_ROW_LABEL_LEN_OFFSET,
-        APP_MENU_ROW_PARENT_OFFSET, APP_MENU_ROW_SHORTCUT_LEN_OFFSET, APP_MENU_ROW_WIRE_LEN,
-        APP_MENU_SHORTCUT_MAX, APP_MENU_TEXT_BYTES, CREATE_MIN_HEIGHT_OFFSET,
-        CREATE_MIN_WIDTH_OFFSET, CREATE_POPUP_WIRE_LEN, CREATE_RESIZABLE_OFFSET, CREATE_WIRE_LEN,
+        put_i32, put_u16, put_u64, read_u16, AppBar, AppBarClick, AppMenu, AppMenuItem,
+        AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole, AppMenuRow,
+        AppMenuRowView, AppMenuShortcut, MenuAnchor, MenuOutcome, MenuRefusal, PointerAction,
+        WindowEvent, WindowRequest, WindowSizing, WindowTitle, APP_BAR_CLICK_OFFSET,
+        APP_BAR_MAX_WIRE_LEN, APP_BAR_ROWS_OFFSET, APP_BAR_ROW_COUNT_OFFSET,
+        APP_BAR_TEXT_LEN_OFFSET, APP_MENU_KIND_SEPARATOR, APP_MENU_KIND_SUBMENU,
+        APP_MENU_LABEL_MAX, APP_MENU_MAX_DEPTH, APP_MENU_MAX_ROWS, APP_MENU_MAX_TOTAL_ROWS,
+        APP_MENU_REASON_MAX, APP_MENU_ROW_FLAGS_OFFSET, APP_MENU_ROW_FLAG_ENABLED,
+        APP_MENU_ROW_ID_OFFSET, APP_MENU_ROW_LABEL_LEN_OFFSET, APP_MENU_ROW_PARENT_OFFSET,
+        APP_MENU_ROW_SHORTCUT_LEN_OFFSET, APP_MENU_ROW_WIRE_LEN, APP_MENU_SHORTCUT_MAX,
+        APP_MENU_TEXT_BYTES, CREATE_MIN_HEIGHT_OFFSET, CREATE_MIN_WIDTH_OFFSET,
+        CREATE_POPUP_WIRE_LEN, CREATE_RESIZABLE_OFFSET, CREATE_WIRE_LEN,
         DESKTOP_REPLY_SERVER_OFFSET, MENU_CLOSED_ITEM_OFFSET, MENU_CLOSED_OUTCOME_OFFSET,
         MENU_CLOSED_REFUSAL_OFFSET, MENU_CLOSED_WIRE_END, OPEN_MENU_ANCHOR_OFFSET,
         OPEN_MENU_MAX_WIRE_LEN, OPEN_MENU_ROW_COUNT_OFFSET, OPEN_MENU_TEXT_LEN_OFFSET,
@@ -3470,11 +3508,11 @@ mod tests {
     }
 
     /// The sample declaration: the sample menu, delivered to a plain
-    /// (non-reserved) endpoint, with the application handling the click.
+    /// (non-reserved) endpoint, with every click the application's.
     fn sample_app_bar() -> AppBar {
         AppBar {
             event_endpoint: 0xE117_0000_0000_0009,
-            default_action: true,
+            click: AppBarClick::Open,
             menu: sample_menu(),
         }
     }
@@ -3483,7 +3521,7 @@ mod tests {
     fn declaring(menu: &AppMenu) -> WindowRequest {
         WindowRequest::SetAppBar(AppBar {
             event_endpoint: 0xE117_0000_0000_0009,
-            default_action: true,
+            click: AppBarClick::Open,
             menu: *menu,
         })
     }
@@ -4299,10 +4337,11 @@ mod tests {
         reserved[8..16].copy_from_slice(&WINDOW_ENDPOINT.to_le_bytes());
         assert_eq!(WindowRequest::from_bytes(&reserved), Err(Errno::OutOfRange));
 
-        // Undefined flag bits are refused rather than ignored.
-        let mut flags = base;
-        flags[APP_BAR_FLAGS_OFFSET] |= 0b10;
-        assert_eq!(WindowRequest::from_bytes(&flags), Err(Errno::OutOfRange));
+        // A click behaviour outside the closed set is refused rather than
+        // read as one of them.
+        let mut click = base;
+        click[APP_BAR_CLICK_OFFSET] = 3;
+        assert_eq!(WindowRequest::from_bytes(&click), Err(Errno::OutOfRange));
 
         // A row count or a text length past its bound is refused.
         let mut over = base;
@@ -4365,6 +4404,28 @@ mod tests {
         // The widest declaration is not quite the endpoint's receive bound:
         // a menu open carries the same menu under a title.
         const { assert!(APP_BAR_MAX_WIRE_LEN < WindowRequest::MAX_WIRE_LEN) };
+    }
+
+    #[test]
+    fn every_app_bar_click_round_trips_and_names_who_takes_a_windowless_click() {
+        for (click, opens) in [
+            (AppBarClick::Raise, false),
+            (AppBarClick::RaiseOrOpen, true),
+            (AppBarClick::Open, true),
+        ] {
+            assert_eq!(AppBarClick::from_wire(click.to_wire()), Some(click));
+            assert_eq!(click.opens_when_windowless(), opens);
+            let declared = WindowRequest::SetAppBar(AppBar {
+                click,
+                ..sample_app_bar()
+            });
+            assert_eq!(
+                WindowRequest::from_bytes(&declared.frame()),
+                Ok(declared),
+                "the declared behaviour survives the wire"
+            );
+        }
+        assert_eq!(AppBarClick::from_wire(3), None, "the set is closed");
     }
 
     /// A decoded row is exactly a row the builder could have made: an

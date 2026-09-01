@@ -163,11 +163,19 @@ pub struct Effects {
 }
 
 impl Default for Effects {
-    /// Every effect off and the window fully opaque: a plain, fast terminal
-    /// until the user asks for otherwise.
+    /// A see-through window, and every effect that costs a frame off.
+    ///
+    /// Translucency is free: it is the alpha the background is filled at
+    /// while the cells are painted, so the compositor's own blend does the
+    /// work. Backdrop blur is not — the compositor blurs each frosted
+    /// window's whole rectangle every frame, so a stack of them costs one
+    /// blur apiece and the retained frosts outgrow their reclaim budget.
+    /// It stays off by default and one slider away
+    /// (`plans/FIX-DESKTOP-SPEEDUP.md` records the measurement and the
+    /// transmittance bound that would make it affordable).
     fn default() -> Self {
         Self {
-            opacity: FULL,
+            opacity: 800,
             blur: 0,
             scanlines: 0,
             fuzz: 0,

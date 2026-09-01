@@ -44,3 +44,7 @@ capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_SHM", "CAP_PROC_SPAWN
 library = "SystemTools"
 # This bundle's own icon master in its Resources/, authored as SVG.
 library-icon = "wallpaper.svg"
+# No icon-bar slot of its own: the chooser is part of the desktop rather than
+# an application the user manages, opened from the backdrop menu's *Change
+# Background* row and closed when the choice is made.
+icon-bar = false

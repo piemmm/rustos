@@ -108,7 +108,12 @@ pub fn desired_cursor(at: Point, router: &InputRouter, compositor: &Compositor) 
         return CursorKind::Move;
     }
     let Some(id) = compositor.window_at(at) else {
-        return CursorKind::Arrow;
+        // Nothing is drawn here, but a resizable window's grab band may still
+        // straddle its edge onto this point. Announcing it is what makes the
+        // outward half discoverable at all: it draws nothing of its own.
+        return compositor
+            .resize_target(at)
+            .map_or(CursorKind::Arrow, |(_, edge)| resize_cursor(edge));
     };
     if let Some(FurniturePart::ResizeEdge(edge)) = compositor.frame_hit(id, at) {
         return resize_cursor(edge);

@@ -17,9 +17,9 @@ use tairix_abi::input::{KeyInput, KeyValue, Modifiers, PointerButtonCode};
 use tairix_abi::origin::{ProcId, PROC_ID_LEN};
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::window_ipc::{
-    AppBar, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow, AppMenuRowView,
-    MenuAnchor, MenuOutcome, MenuRefusal, PointerAction, WindowEvent, WindowRequest,
-    WINDOW_TITLE_MAX,
+    AppBar, AppBarClick, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow,
+    AppMenuRowView, MenuAnchor, MenuOutcome, MenuRefusal, PointerAction, WindowEvent,
+    WindowRequest, WINDOW_TITLE_MAX,
 };
 use tairix_abi::Errno;
 use tairix_display::{FrameRegion, ShmMapper};
@@ -2040,7 +2040,7 @@ fn sample_app_bar(endpoint: u64) -> AppBar {
     menu.push(AppMenuRow::Info).expect("room");
     AppBar {
         event_endpoint: endpoint,
-        default_action: true,
+        click: AppBarClick::Open,
         menu,
     }
 }

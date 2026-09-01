@@ -17,8 +17,10 @@
 //! applications, so the terminal declares **one** presence
 //! ([`tairix_terminal::appbar`]) whose slot stands for the emulator: a
 //! primary click on it opens a fresh window, its menu offers *New window*
-//! and *Quit*, and hovering it picks between the windows it owns. The last
-//! window closing ends the process; *Quit* closes them all.
+//! and *Quit*, and hovering it picks between the windows it owns. Closing
+//! the last window puts the terminal away rather than ending it — the slot
+//! stays, and a click there opens the next; only *Quit* closes them all and
+//! ends the process.
 //!
 //! # What the program wires (and what stays in the libraries)
 //!
@@ -1246,10 +1248,6 @@ mod program {
                         Applied::Ended => return 0,
                         Applied::Lost(reason) => return fail(EXIT_CHANNEL_LOST, reason),
                     }
-                    if windows.is_empty() {
-                        // The last window closed: the application is done.
-                        return 0;
-                    }
                 }
                 PRESSURE_TOKEN if tairix_procinfo::pressure::refresh() => {
                     tairix_font::trim_glyph_cache();
@@ -1287,9 +1285,6 @@ mod program {
                             if let Some(reason) = reason {
                                 let _ =
                                     writeln!(Stderr, "terminal: shell failed to launch: {reason}");
-                            }
-                            if windows.is_empty() {
-                                return 0;
                             }
                         }
                     }
@@ -1374,7 +1369,7 @@ mod program {
     enum Applied {
         /// Keep serving.
         Running,
-        /// Every window is gone (or *Quit* was chosen): end cleanly.
+        /// *Quit* was chosen: end cleanly.
         Ended,
         /// A channel died: end fail-loud with this reason.
         Lost(&'static str),
@@ -1433,11 +1428,10 @@ mod program {
                     return Applied::Running;
                 };
                 windows.remove(index).close(client, ctx.set);
-                if windows.is_empty() {
-                    Applied::Ended
-                } else {
-                    Applied::Running
-                }
+                // The terminal is not its windows: it keeps its icon-bar
+                // slot with none open, and a click there opens the next.
+                // Only *Quit* ends it.
+                Applied::Running
             }
             EventOutcome::OpenMenu { window, at } => {
                 let Some(index) = index(windows, window) else {
@@ -1621,8 +1615,8 @@ mod program {
         /// *Quit* row.
         Quit,
         /// This window is done — the desktop asked, the user chose *Close*,
-        /// or its shell's stdin is gone. Its siblings keep running; the
-        /// process ends when the last of them goes.
+        /// or its shell's stdin is gone. Its siblings keep running, and so
+        /// does the process when it was the last.
         CloseWindow {
             /// The window that is closing.
             window: u64,

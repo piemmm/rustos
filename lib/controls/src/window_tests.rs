@@ -2056,40 +2056,50 @@ fn a_resizable_window_gives_up_no_client_space() {
 }
 
 #[test]
-fn the_resize_zone_overlaps_the_clients_outer_pixels() {
-    // The invisible border: the edge reach is measured from the *outer* edge,
-    // so everything past the thin band lies over the client's own columns, and
-    // the very next column inward reaches the app.
+fn the_resize_band_straddles_the_edge_and_costs_the_client_only_its_inner_half() {
+    // The invisible border: the band is centred on the outer edge, so its
+    // inner half lies over the thin frame rim and then the client's own
+    // outermost columns, its outer half reaches out past the window, and the
+    // next column inward of either belongs to the app.
     let theme = Theme::dark();
     let bounds = frame_bounds();
     let frame = WindowFrame::new(furniture());
     let client = frame.layout(bounds, Scale::ONE, &theme).client;
     let reach = GrabReach::of(Scale::ONE, &theme);
+    let inward = i32::try_from(GrabReach::inward(reach.edge)).expect("inward");
+    let outward = i32::try_from(GrabReach::outward(reach.edge)).expect("outward");
     let band = client.left() - bounds.left();
-    let overlap = i32::try_from(reach.edge).expect("reach") - band;
+    let overlap = inward - band;
     assert!(overlap > 0, "an invisible border needs some depth");
+    assert!(
+        inward < i32::try_from(reach.edge).expect("band"),
+        "centring the band is what gives the client back the other half"
+    );
     let y = client.top() + half(client.height);
+    let hit = |x: i32| frame.hit(bounds, Scale::ONE, &theme, Point::new(x, y));
     for step in 0..overlap {
         assert_eq!(
-            frame.hit(
-                bounds,
-                Scale::ONE,
-                &theme,
-                Point::new(client.left() + step, y)
-            ),
+            hit(client.left() + step),
             FurniturePart::ResizeEdge(ResizeEdge::Left),
             "client column {step} in from the left must still resize"
         );
     }
     assert_eq!(
-        frame.hit(
-            bounds,
-            Scale::ONE,
-            &theme,
-            Point::new(client.left() + overlap, y)
-        ),
+        hit(client.left() + overlap),
         FurniturePart::Client,
         "one column further in belongs to the app"
+    );
+    for step in 1..=outward {
+        assert_eq!(
+            hit(bounds.left() - step),
+            FurniturePart::ResizeEdge(ResizeEdge::Left),
+            "column {step} out from the left edge must resize"
+        );
+    }
+    assert_eq!(
+        hit(bounds.left() - outward - 1),
+        FurniturePart::Outside,
+        "one column further out is clear of the band"
     );
 }
 
@@ -2107,8 +2117,10 @@ fn a_corner_grabs_further_than_the_edges_that_form_it() {
         "a corner must be easier to hit than an edge"
     );
     let hit = |x: i32, y: i32| frame.hit(bounds, Scale::ONE, &theme, Point::new(x, y));
-    let corner = i32::try_from(reach.corner).expect("corner");
-    let edge = i32::try_from(reach.edge).expect("edge");
+    // The inward halves: what each band costs the client, which is where the
+    // corner-beats-edge rule is observable against the app's own pixels.
+    let corner = i32::try_from(GrabReach::inward(reach.corner)).expect("corner");
+    let edge = i32::try_from(GrabReach::inward(reach.edge)).expect("edge");
 
     // Along the bottom, out past the edge reach but inside the corner reach:
     // both bottom corners still answer as corners.
@@ -2149,7 +2161,7 @@ fn a_scaled_frame_grabs_by_the_scaled_reach() {
     // as many of them and covers the same apparent distance.
     let bounds = frame_bounds();
     let frame = WindowFrame::new(furniture());
-    let deep = i32::try_from(one.edge).expect("reach");
+    let deep = i32::try_from(GrabReach::inward(one.edge)).expect("reach");
     let mid_y = i32::midpoint(bounds.top(), bounds.bottom());
     assert_eq!(
         frame.hit(
@@ -2161,6 +2173,108 @@ fn a_scaled_frame_grabs_by_the_scaled_reach() {
         FurniturePart::ResizeEdge(ResizeEdge::Left),
         "a column the reference density had released is still the border at 200%"
     );
+}
+
+/// The side bands start at the title bar's foot on *both* sides of the edge:
+/// a window is dragged from its title bar far more often than it is resized
+/// from the sliver beside one, and the outward half must not quietly claim a
+/// column beside a band it does not reach on the inside.
+#[test]
+fn a_side_band_starts_below_the_title_bar_outside_the_window_too() {
+    let theme = Theme::dark();
+    let bounds = frame_bounds();
+    let frame = WindowFrame::new(furniture());
+    let layout = frame.layout(bounds, Scale::ONE, &theme);
+    let reach = GrabReach::of(Scale::ONE, &theme);
+    let outward = i32::try_from(GrabReach::outward(reach.edge)).expect("outward");
+    let corner_out = i32::try_from(GrabReach::outward(reach.corner)).expect("corner");
+    let hit = |x: i32, y: i32| frame.hit(bounds, Scale::ONE, &theme, Point::new(x, y));
+    let beside = bounds.left() - 1;
+    assert!(outward >= 1, "there is an outward half to test");
+
+    assert_eq!(
+        hit(beside, layout.title_bar.top()),
+        FurniturePart::Outside,
+        "beside the title bar is not a resize edge"
+    );
+    assert_eq!(
+        hit(beside, layout.title_bar.bottom()),
+        FurniturePart::ResizeEdge(ResizeEdge::Left),
+        "the band begins where the title bar ends"
+    );
+    // Walking down the outward column past the window's foot: the corner band
+    // takes over — it is the wider of the two and legitimately reaches
+    // further out — and past that nothing claims the point.
+    assert_eq!(
+        hit(beside, bounds.bottom() + outward),
+        FurniturePart::ResizeEdge(ResizeEdge::BottomLeft)
+    );
+    assert_eq!(
+        hit(beside, bounds.bottom() + corner_out),
+        FurniturePart::Outside,
+        "and no band reaches below the corner's own outward half"
+    );
+}
+
+/// A fixed-size window has no band at all, so it claims nothing outside
+/// itself and cannot be dragged larger from beside its own edge.
+#[test]
+fn a_fixed_window_claims_nothing_outside_itself() {
+    let theme = Theme::dark();
+    let bounds = frame_bounds();
+    let fixed = WindowFrame::new(WindowFurnitureState {
+        resizable: false,
+        ..furniture()
+    });
+    let mid_y = i32::midpoint(bounds.top(), bounds.bottom());
+    for at in [
+        Point::new(bounds.left() - 1, mid_y),
+        Point::new(bounds.right(), mid_y),
+        Point::new(
+            i32::midpoint(bounds.left(), bounds.right()),
+            bounds.bottom(),
+        ),
+    ] {
+        assert_eq!(
+            fixed.hit(bounds, Scale::ONE, &theme, at),
+            FurniturePart::Outside
+        );
+    }
+}
+
+/// A one-pixel band cannot be halved, so the whole of it stays on the
+/// window's own outermost pixel: the split gives the odd pixel inward, which
+/// is what keeps a degenerate theme from having no grabbable edge at all.
+#[test]
+fn a_one_pixel_band_sits_entirely_on_the_windows_own_edge() {
+    assert_eq!(GrabReach::outward(1), 0);
+    assert_eq!(GrabReach::inward(1), 1);
+
+    let base = Theme::dark();
+    let mut metrics = *base.metrics();
+    metrics.resize_edge_grab = 1;
+    metrics.resize_corner_grab = 1;
+    let theme = Theme::new(
+        base.id(),
+        "Test One Pixel Band",
+        base.appearance(),
+        *base.palette(),
+        metrics,
+        *base.fonts(),
+        base.cursors().clone(),
+        base.motion(),
+        base.density(),
+        base.contrast(),
+    );
+    let bounds = frame_bounds();
+    let frame = WindowFrame::new(furniture());
+    let mid_y = i32::midpoint(bounds.top(), bounds.bottom());
+    let hit = |x: i32| frame.hit(bounds, Scale::ONE, &theme, Point::new(x, mid_y));
+    assert_eq!(
+        hit(bounds.left()),
+        FurniturePart::ResizeEdge(ResizeEdge::Left)
+    );
+    assert_eq!(hit(bounds.left() - 1), FurniturePart::Outside);
 }
 
 #[test]

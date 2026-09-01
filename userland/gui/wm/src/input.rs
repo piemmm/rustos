@@ -701,6 +701,15 @@ impl InputRouter {
         // only when this press lands on client content.
         self.client_grab = None;
         let Some(window) = compositor.window_at(self.pointer) else {
+            // Nothing is drawn here, but a resizable window's grab band may
+            // still straddle its edge onto this point — the outward half of
+            // an invisible border, which exists so the edge stays easy to hit
+            // without eating into the client behind it.
+            if let Some((window, edge)) = compositor.resize_target(self.pointer) {
+                compositor.raise(window);
+                self.focused = Some(window);
+                return self.begin_resize_grab(window, edge, compositor);
+            }
             self.focused = None;
             return InputResponse::DesktopPressed;
         };

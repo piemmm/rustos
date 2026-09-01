@@ -98,8 +98,9 @@ on the bar, either alone being enough:
   previous declaration whole, which is how an application changes a row's
   enablement or its mark.
 - it **owns a window**, which gives it a slot even with no declaration, so no
-  window is ever unreachable. Such a slot has no menu and no default action:
-  the session invents neither on an application's behalf.
+  window is ever unreachable. Such a slot has no menu, and its click is one
+  the session answers by raising: it invents neither on an application's
+  behalf.
 
 Slots keep the order the session first saw each process in, so the strip never
 reshuffles under the pointer. A process leaves the bar when it has neither a
@@ -107,6 +108,39 @@ declaration nor a window left — which, for a declaring application, is when
 the window engine proved the process gone and withdrew its declaration.
 `MAX_BAR_APPS` bounds the strip, so a process that declares from every fork it
 makes is refused rather than admitted to a slot nothing will draw.
+
+### A bundle may present no slot at all
+
+A bundle whose **signed** manifest sets `APPINFO_FLAG_NO_ICON_BAR`
+(`icon-bar = false` in its `AppInfo.toml`) is dropped from the strip whichever
+of the two facts above put it there. Two ship that way, both because the
+desktop already reaches them another route, so a slot would be a duplicate:
+the **Switchboard**, which the bar's own permanent trailing capsule stands
+for, and the **wallpaper chooser**, which the backdrop menu's *Change
+Background* row opens.
+
+The claim lives in the manifest rather than on the window channel because a
+*running process* must not be able to hide itself from the bar: the manifest
+is signed, so a bundle opts out and a program cannot. `AppBarService::strip`
+reads it from the same per-bundle record it already reads the slot's identity
+from, so it costs no extra manifest read, and it keeps that record for a
+dropped bundle too — evicting it would re-read the manifest on every wake.
+`AppBarService::is_iconless` tells the embedder which processes were dropped,
+so a window absent from the strip by design does not read as a strip gone
+stale.
+
+Such a window is still an ordinary entry in the task list, so a minimised one
+is reached by cycling that list from the Switchboard capsule.
+
+### An application on the bar outlives its windows
+
+Closing the last window puts a declaring application away rather than ending
+it; *Quit* on its slot is what ends the process. A slot must therefore be able
+to produce a window, which is what the declaration's `AppBarClick` states —
+`Open` for every click, `RaiseOrOpen` to be asked only when there is nothing
+to raise, or `Raise` for an application that ends with its window and so can
+never be clicked windowless. The bar resolves that into `AppDefault` /
+`AppRaise` / nothing; the session only relays.
 
 ### Identity is the manifest's, never the process's
 
@@ -1488,8 +1522,7 @@ focus. Each operation is total and fails closed (`AGENTS.md` §2.9):
   dropping focus if the closed window held it; an untracked window is a no-op;
 - `raise` shows, raises, and focuses a window — what choosing a cell in the
   bar's hover picker asks for, and what a click on the slot of an application
-  that declared no default action asks for — and is a no-op for an unknown
-  window;
+  with a window to raise asks for — and is a no-op for an unknown window;
 - `minimize` is the title bar's own control's counterpart: it marks the entry
   minimised, hides the window, and drops focus if it held it;
 - `sync_focus` mirrors a window-manager focus change (the user clicked a window
@@ -1729,12 +1762,14 @@ oversized / non-UTF-8 stores each yielding an empty catalog plus one warning
 line. It covers the icon bar's service: windows grouped under the process that
 owns them rather than one slot per window, a declaration holding a slot with
 no windows and leaving on withdrawal, a window alone holding a slot with no
-menu and no default action, a slot keeping its place while it lives, the
+menu and a raising click, a slot keeping its place while it lives, the
 strip's bound refusing a further declaration, the manifest-attested identity
 (and a bundle with no readable manifest stating only a name, and a process the
 desktop did not launch stating not even a version), one manifest read per
-bundle with the identity forgotten when nothing runs from it, and each slot
-carrying only its own process's declaration. It covers the picker's cells (one
+bundle with the identity forgotten when nothing runs from it, each slot
+carrying only its own process's declaration, and a bundle whose manifest
+presents no slot being off the strip by either route — while a manifest that
+is absent or will not decode never gives a slot up. It covers the picker's cells (one
 per window, captioned, a window with no frame yet carrying no thumbnail, and
 the refusal below a choice) and the thumbnail scaler itself. It covers the
 shared artwork store (rasterised artwork reaching a slot, refusals cached,

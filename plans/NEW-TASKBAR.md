@@ -11,8 +11,8 @@ Binding under `AGENTS.md`. This plan records the completed Stage 7 taskbar
   on its default view;
 - then the **application strip**: one icon-only slot per *running
   application*, each slot standing for one kernel-attested process. A primary
-  click performs the application's own declared default action (or, for one
-  that declared none, raises its most recently used window); hovering a slot
+  click performs what the application's declaration says (its own action, or
+  a raise of its most recently used window); hovering a slot
   whose application owns more than one window opens the window picker; and a
   secondary press opens the menu that **the application itself** declared,
   whose *Info* row shows a session-drawn information panel of its bundle's
@@ -697,16 +697,20 @@ application is one kernel-attested process. What now stands:
   Its click-to-activate/minimise toggle and its per-window artwork are gone
   with the per-window slots they served; focusing a window restores it, and
   minimising is the title bar's own control.
-- **The three left-click cases**, resolved from the declaration alone:
-  `AppDefault { app }` when the application declared it handles the click,
-  `AppRaise { app }` when it declared none but owns a window, and nothing at
-  all when it has neither — the honest answer, never a guessed one.
+- **The left-click cases**, resolved from the declaration alone: `AppDefault
+  { app }` when the click is the application's (`Open` always, `RaiseOrOpen`
+  with no window to raise), `AppRaise { app }` when it owns a window and did
+  not claim the click, and nothing at all otherwise — the honest answer, never
+  a guessed one.
 - **The session** (`tairix-desktop-session`, `apps.rs`) owns the strip:
   `AppBarService` holds every application's declaration as the window engine
   attested it, groups each live served window under the process that owns it
   (the existing launch table + the engine's attested owner records, never a
   window title), keeps a declaring application's slot for the life of its
-  process, drops a slot only when it has neither a declaration nor a window,
+  process, drops a slot when it has neither a declaration nor a window — and
+  whenever the bundle's *signed* manifest sets `APPINFO_FLAG_NO_ICON_BAR`
+  (`icon-bar = false`), which the Switchboard and the wallpaper chooser do
+  because the trailing capsule and the backdrop menu already reach them,
   bounds the strip at `MAX_BAR_APPS`, and resolves each slot's label, icon,
   and information-panel identity from the **signed** `AppInfo` of the bundle
   the desktop launched that process from — read once per bundle. A process
@@ -747,8 +751,10 @@ What now stands:
 
 - **The wire**: the app-window channel gained one caller-scoped request,
   evolved in place (`abi-v1` unfrozen): `WindowRequest::SetAppBar(AppBar)`
-  (op 13), carrying the event route, whether the application handles the
-  slot's primary click, and a bounded `AppMenu`. It is idempotent-replace, so
+  (op 13), carrying the event route, what a primary press on the slot does
+  (`AppBarClick`: `Raise`, `RaiseOrOpen`, or `Open` — the closed set of
+  answers, since only the application knows whether a second window means
+  anything to it), and a bounded `AppMenu`. It is idempotent-replace, so
   an application re-declares to change a row's enablement or its mark. Two
   application-scoped events answer it: `WindowEvent::AppBarDefault` and
   `AppBarMenu { item }`, which is why `WindowEvent::window_id()` is now
@@ -782,13 +788,12 @@ What now stands:
   `BUNDLE_AUTHOR_MAX = 64`; `AppInfoHeader::WIRE_LEN` 408 → 568). An
   application therefore cannot state an identity that is not its own inside
   system-drawn chrome, and an omitted field is absent rather than blank.
-- **A declaration precedes its declarer's first window.** All five declaring
-  applications call `set_app_bar` before they open a window, because a
+- **A declaration precedes its declarer's first window.** Every declaring
+  application calls `set_app_bar` before it opens a window, because a
   declared presence belongs to the process: declared first, the slot carries
-  the application's menu and default action from the moment it appears.
+  the application's menu and click behaviour from the moment it appears.
   Declared after a window, the session meanwhile derives a slot from that
-  window alone — no menu, no default action — so the bar briefly shows a slot
-  that answers nothing. The icon-bar QEMU vertical (T15) is what covers the
+  window alone — no menu, and a click the session answers by raising. The icon-bar QEMU vertical (T15) is what covers the
   ordering: its bar gestures are gated on the session's own witness that the
   first window is on screen, which the declaration now strictly precedes.
 - **The engine** (`lib/window`) attests the caller, validates the model on
@@ -803,9 +808,10 @@ What now stands:
   **menu convention**: the `Info` row first, the application's own rows next,
   then a rule and *Quit* last. An application supplies only the middle, so it
   cannot place the two ends and cannot get them wrong; `appbar::info_and_quit`
-  names the commonest case (the convention's two rows, no default action)
-  that `viewer`, `wallpaper`, and `widgets` share, and `terminal` composes its
-  *New window* row through the same builder. A submenu row is refused there
+  names the commonest case (the convention's two rows and nothing else) that
+  `viewer`, `widgets`, `datetime`, and the ordinary file manager share, and
+  `terminal` composes its *New window* row through the same builder. Each
+  passes the `AppBarClick` its slot answers with. A submenu row is refused there
   rather than drawn childless — a flat list cannot express parented children,
   so an application needing one builds its own `AppMenu`.
 - **The bar states exactly what was declared.** `MenuSubject::App` is the
@@ -852,7 +858,7 @@ What now stands:
 - **`terminal.app` is now one process with many windows.** Each window
   carries its own pty, shell child, screen model, retained picture, look, and
   overlay, over one wait-set with one event mailbox for the process plus a
-  shell-output and child member per window. It declares `default_action: true`
+  shell-output and child member per window. It declares `AppBarClick::Open`
   and its own *New window* row through the shared convention
   (`tairix_terminal::appbar` over `appbar::declaration`), so the menu reads
   *Info*, *New window*, a rule, *Quit* — its slot opens a fresh window on a
@@ -862,7 +868,8 @@ What now stands:
   each derived from the machine and each refusing with a stated reason. Its
   bring-up asks the desktop for the window **before** creating the pty and
   spawning the shell, so a refused window costs one round trip instead of a
-  whole process load and teardown. The last window closing ends it.
+  whole process load and teardown. The last window closing leaves it on the
+  bar rather than ending it; *Quit* is what ends it.
 
 Tested in the `lib/abi` window-IPC suites (the builder's and the decoder's
 shared shape rule, every refusal, the reserved tail, fuzz), the `lib/window`

@@ -89,6 +89,22 @@ pub const APPINFO_WIRE_MAX: usize = AppInfoHeader::WIRE_LEN
 /// directory, so a short bound is ample and keeps the fixed header small.
 pub const LIBRARY_ICON_MAX: usize = 64;
 
+/// [`AppInfoHeader::flags`] bit: this bundle presents **no** slot of its own
+/// on the desktop's icon bar.
+///
+/// The bar otherwise gives a slot to any process that owns a window, so a
+/// window is always reachable from it. A bundle the desktop already reaches
+/// by another route — the Switchboard, which the bar's own permanent capsule
+/// stands for, or the wallpaper chooser, which the backdrop menu opens —
+/// would get a second, duplicate route, so it says so here. The claim is in
+/// the *signed* manifest rather than on the window channel because a running
+/// process must not be able to hide itself from the bar.
+pub const APPINFO_FLAG_NO_ICON_BAR: u32 = 1 << 0;
+
+/// Every [`AppInfoHeader::flags`] bit `abi-v1` defines. A manifest setting
+/// any other bit is refused rather than read as if the bit were clear.
+pub const APPINFO_FLAG_MASK: u32 = APPINFO_FLAG_NO_ICON_BAR;
+
 /// A bundle identifier as a validated, inline, fixed-width field.
 ///
 /// The identifier is the *name of a directory* in every user's per-app store,
@@ -797,7 +813,8 @@ pub struct AppInfoHeader {
     /// ABI version this bundle targets; rejected unless it equals
     /// [`crate::ABI_VERSION_CURRENT`].
     pub abi_version: u32,
-    /// Implementation-defined flag bits; unknown bits must be zero.
+    /// Manifest flag bits ([`APPINFO_FLAG_MASK`]); a bit outside the mask is
+    /// refused on decode.
     pub flags: u32,
     /// Number of requested capability ids in the body. Capped at
     /// [`APPINFO_MAX_CAPABILITIES`].
@@ -958,8 +975,9 @@ impl AppInfoHeader {
     /// # Errors
     ///
     /// * [`Errno::BufferTooSmall`] if `bytes.len() < WIRE_LEN`.
-    /// * [`Errno::BadMagic`] if the magic word does not match, or if
-    ///   `reserved0` is non-zero.
+    /// * [`Errno::BadMagic`] if the magic word does not match, if `flags`
+    ///   sets a bit outside [`APPINFO_FLAG_MASK`], or if `reserved0` is
+    ///   non-zero.
     /// * [`Errno::AbiVersionUnsupported`] if `abi_version` is not
     ///   [`crate::ABI_VERSION_CURRENT`].
     /// * [`Errno::LengthOutOfRange`] if `capability_count`, `mime_count`, or
@@ -987,6 +1005,9 @@ impl AppInfoHeader {
             return Err(Errno::AbiVersionUnsupported);
         }
         let flags = read_u32(bytes, 8);
+        if flags & !APPINFO_FLAG_MASK != 0 {
+            return Err(Errno::BadMagic);
+        }
         let capability_count = read_u16(bytes, Self::OFF_CAP_COUNT);
         if capability_count > APPINFO_MAX_CAPABILITIES {
             return Err(Errno::LengthOutOfRange);
@@ -1111,6 +1132,16 @@ impl AppInfoHeader {
             return None;
         }
         Some(inline_str(&self.author, self.author_len))
+    }
+
+    /// Whether the desktop's icon bar gives this bundle a slot of its own.
+    ///
+    /// `false` only for a bundle whose manifest sets
+    /// [`APPINFO_FLAG_NO_ICON_BAR`], which the bar honours however the
+    /// bundle's process came to own a window.
+    #[must_use]
+    pub const fn presents_icon_bar_slot(&self) -> bool {
+        self.flags & APPINFO_FLAG_NO_ICON_BAR == 0
     }
 
     /// Classify how this manifest binds its build signing key to its
@@ -1373,10 +1404,11 @@ mod tests {
     use super::{
         body_len, digest_bundle_contents, mime_type_at, resolve_library, validate_bundle_layout,
         AppInfoHeader, BundleEntry, BundleFileDigest, BundleLayoutError, LibraryCategory,
-        LibraryError, LibraryScope, ProgramKind, PublisherBinding, PublisherId, APPINFO_MAGIC,
-        APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_CONTENT_DIGEST_MAGIC, BUNDLE_ID_MAX,
-        HOME_APPLICATION_STORE_DIR, HOME_COMMAND_STORE_DIR, MIME_ENTRY_LEN, MIME_TYPE_MAX,
-        PUBLISHER_CERT_CONTEXT, PUBLISHER_CERT_MESSAGE_LEN, PUBLISHER_ID_CONTEXT, PUBLISHER_ID_LEN,
+        LibraryError, LibraryScope, ProgramKind, PublisherBinding, PublisherId, APPINFO_FLAG_MASK,
+        APPINFO_FLAG_NO_ICON_BAR, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME,
+        BUNDLE_CONTENT_DIGEST_MAGIC, BUNDLE_ID_MAX, HOME_APPLICATION_STORE_DIR,
+        HOME_COMMAND_STORE_DIR, MIME_ENTRY_LEN, MIME_TYPE_MAX, PUBLISHER_CERT_CONTEXT,
+        PUBLISHER_CERT_MESSAGE_LEN, PUBLISHER_ID_CONTEXT, PUBLISHER_ID_LEN,
         PUBLISHER_ID_PREIMAGE_LEN, SYSTEM_APPLICATION_STORE, SYSTEM_COMMAND_STORE,
         SYSTEM_LIBRARIES_DIR, SYSTEM_SERVICE_STORE,
     };
@@ -1727,6 +1759,40 @@ mod tests {
             AppInfoHeader::from_bytes(&h.to_le_bytes()),
             Err(Errno::BadMagic)
         );
+    }
+
+    #[test]
+    fn header_rejects_a_flag_bit_it_does_not_define() {
+        let mut h = sample();
+        h.flags = APPINFO_FLAG_MASK | (1 << 31);
+        assert_eq!(
+            AppInfoHeader::from_bytes(&h.to_le_bytes()),
+            Err(Errno::BadMagic),
+            "an undefined bit is refused, never read as though it were clear"
+        );
+    }
+
+    #[test]
+    fn the_icon_bar_flag_round_trips_and_is_signed_over() {
+        let plain = sample();
+        assert!(plain.presents_icon_bar_slot());
+        assert_eq!(
+            AppInfoHeader::from_bytes(&plain.to_le_bytes()),
+            Ok(plain),
+            "a bundle that sets no flag keeps its slot"
+        );
+
+        let mut iconless = sample();
+        iconless.flags = APPINFO_FLAG_NO_ICON_BAR;
+        assert!(!iconless.presents_icon_bar_slot());
+        let bytes = iconless.to_le_bytes();
+        assert_eq!(AppInfoHeader::from_bytes(&bytes), Ok(iconless));
+        assert!(
+            AppInfoHeader::signed_range().contains(&8),
+            "the flag word is inside the signed prefix, so the claim cannot be flipped \
+             behind a valid signature"
+        );
+        assert_ne!(bytes[8], plain.to_le_bytes()[8]);
     }
 
     #[test]

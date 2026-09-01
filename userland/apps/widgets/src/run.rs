@@ -18,9 +18,10 @@
 //! Delivered pointer and key events are mapped onto the shared desktop input
 //! vocabulary and routed into the gallery, which draws the tab strip and the
 //! selected family's panel of demo widgets and reflects each control's own
-//! action back into it. A `CloseRequested` from the desktop closes the window
-//! and ends the program cleanly; every bring-up refusal exits fail-loud with a
-//! reserved code and a stated reason on `stderr`.
+//! action back into it. A `CloseRequested` from the desktop closes the
+//! window and leaves the gallery on the icon bar, where a click on its slot
+//! opens the next one and *Quit* ends the program; every bring-up refusal
+//! exits fail-loud with a reserved code and a stated reason on `stderr`.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy, and
 //! fmt still cover the file.
@@ -34,7 +35,7 @@
 mod program {
     use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
     use tairix_abi::input::KeyInput;
-    use tairix_abi::window_ipc::{PointerAction, WindowEvent, WINDOW_ENDPOINT};
+    use tairix_abi::window_ipc::{AppBarClick, PointerAction, WindowEvent, WINDOW_ENDPOINT};
     use tairix_abi::{Errno, Origin, ProcId, ORIGIN_WIRE_LEN};
     use tairix_display::{winframe, SERIAL};
     use tairix_font::BitmapFont;
@@ -79,14 +80,15 @@ mod program {
 
     /// Declare this application's presence on the desktop's icon bar: the
     /// shared convention's two rows — the session-drawn information row and
-    /// *Quit* — with the primary click left to the session so it raises the
-    /// window.
+    /// *Quit* — with the session raising the window when there is one and
+    /// asking the gallery for one when there is not.
     ///
     /// A refused declaration is an answer, not a death: the application says
     /// so and carries on with no slot of its own — its window is still
-    /// reachable through the one the session derives from it.
+    /// reachable through the one the session derives from it, though closing
+    /// that one then leaves nothing to click.
     fn declare_app_bar(client: &mut WindowClient<RtWindowTransport>, endpoint: u64) {
-        match tairix_window::info_and_quit(endpoint) {
+        match tairix_window::info_and_quit(endpoint, AppBarClick::RaiseOrOpen) {
             Ok(bar) => {
                 if let Err(err) = client.set_app_bar(&bar) {
                     let _ = writeln!(
@@ -165,27 +167,99 @@ mod program {
         }
     }
 
-    /// The live window channel this app owns: the transport to the desktop
-    /// session, its session-assigned window id, and the surface it draws into.
-    /// Grouped so the event loop and the first present take one receiver
-    /// instead of scattering the same parameters through every call.
+    /// One open gallery window: its session-assigned id, the shared frame
+    /// region granted at create, and the surface it draws into.
     ///
     /// The surface is held rather than built per frame: a window-sized buffer
     /// allocated and zeroed on every pointer sample is a whole-window pass of
     /// its own, and holding it is what makes a clipped repaint sound — every
     /// pixel outside the clip is the one already on screen.
-    struct GalleryWindow {
-        /// The synchronous channel to the desktop session.
-        client: WindowClient<RtWindowTransport>,
+    struct Pane {
         /// This app's window id, assigned by the session at create.
         window: u64,
+        /// The shared region the session maps and this app paints through.
+        frames: WindowFrames,
         /// The window-sized surface every frame is drawn into.
         surface: Surface,
     }
 
+    /// The app's channel to the desktop and the window it may or may not
+    /// have open.
+    ///
+    /// The gallery is on the icon bar whether or not a window is open:
+    /// closing one puts the app away and a click on its slot opens the next,
+    /// so the channel outlives every window that crosses it.
+    struct GalleryWindow {
+        /// The synchronous channel to the desktop session.
+        client: WindowClient<RtWindowTransport>,
+        /// The open window, or `None` while the gallery sits on the bar.
+        pane: Option<Pane>,
+    }
+
     impl GalleryWindow {
-        /// Draw the gallery, convert `damage` into `frames` (the shared window
-        /// region, shaped as `mode`) and present that rectangle.
+        /// Open a `mode`-shaped window and present the gallery's first frame,
+        /// answering the desktop session's [`ProcId`] from the create reply
+        /// or the reserved exit code for the refusal.
+        ///
+        /// Every refusal is stated on `stderr`, so a caller that carries on
+        /// with no window has already reported it — the slot is still there
+        /// to try again from.
+        fn open(
+            &mut self,
+            event_endpoint: u64,
+            mode: &DisplayMode,
+            gallery: &Gallery,
+            theme: &Theme,
+            scale: Scale,
+        ) -> Result<ProcId, i32> {
+            if self.pane.is_some() {
+                return Err(EXIT_NO_WINDOW);
+            }
+            let (mut frames, grant) = create_frame_region(mode)?;
+            // Fixed size: the gallery is never resized, so it declares no
+            // floor.
+            let Ok((window, server)) = self.client.create(
+                grant,
+                event_endpoint,
+                FRAME_COUNT,
+                mode,
+                "widgets",
+                WindowSizing::default(),
+            ) else {
+                return Err(fail(EXIT_NO_WINDOW, "desktop session refused the window"));
+            };
+            let Some(surface) = Surface::new(mode.width_px, mode.height_px) else {
+                let _ = self.client.close(window);
+                return Err(fail(EXIT_NO_WINDOW, "no memory for the window surface"));
+            };
+            frames.release();
+            self.pane = Some(Pane {
+                window,
+                frames,
+                surface,
+            });
+            // The release above left the region detached, so the first
+            // present re-attaches it and carries the whole frame.
+            if self
+                .present(gallery, theme, scale, mode, DamageRect::full(mode))
+                .is_err()
+            {
+                self.close();
+                return Err(fail(EXIT_CHANNEL_LOST, "present refused"));
+            }
+            Ok(server)
+        }
+
+        /// Close the open window, if any, leaving the app on the icon bar.
+        fn close(&mut self) {
+            if let Some(pane) = self.pane.take() {
+                let _ = self.client.close(pane.window);
+            }
+        }
+
+        /// Draw the gallery, convert `damage` into the shared window region
+        /// (shaped as `mode`) and present that rectangle. With no window
+        /// open there is nothing to draw and nothing to report.
         ///
         /// The draw is clipped to `damage` too: everything outside it is already
         /// in the surface from the last frame, and neither the conversion nor
@@ -197,19 +271,20 @@ mod program {
             gallery: &Gallery,
             theme: &Theme,
             scale: Scale,
-            frames: &mut WindowFrames,
             mode: &DisplayMode,
             damage: DamageRect,
         ) -> Result<(), Errno> {
-            let reattached = frames.is_released();
-            let damage = if reattached {
+            let Some(pane) = self.pane.as_mut() else {
+                return Ok(());
+            };
+            let damage = if pane.frames.is_released() {
                 DamageRect::full(mode)
             } else {
                 damage
             };
             let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
             let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
-            self.surface.with_clip(
+            pane.surface.with_clip(
                 damage.x,
                 damage.y,
                 damage.width_px,
@@ -218,10 +293,10 @@ mod program {
             );
             let pixels = self
                 .client
-                .frame_pixels(frames, self.window, FRAME_COUNT, mode)
+                .frame_pixels(&mut pane.frames, pane.window, FRAME_COUNT, mode)
                 .ok_or(Errno::NotAttached)?;
-            winframe::encode(&self.surface, pixels, mode, damage, &SERIAL)?;
-            self.client.present(self.window, 0, damage)
+            winframe::encode(&pane.surface, pixels, mode, damage, &SERIAL)?;
+            self.client.present(pane.window, 0, damage)
         }
     }
 
@@ -238,56 +313,56 @@ mod program {
         mode: &DisplayMode,
         event: &WindowEvent,
         damage: &mut Region,
-    ) -> (bool, bool) {
+    ) -> Acted {
         let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
+        let changed = |acted: bool| {
+            if acted {
+                Acted::Changed
+            } else {
+                Acted::Idle
+            }
+        };
         match event {
             // The desktop asked, or *Quit* was chosen on the gallery's own
             // icon-bar slot. A row the declaration never carried names no
             // command and is ignored (fail closed).
-            WindowEvent::CloseRequested { .. } => (false, true),
-            WindowEvent::AppBarMenu { item } if tairix_window::is_quit(*item) => (false, true),
+            WindowEvent::CloseRequested { .. } => Acted::Close,
+            WindowEvent::AppBarMenu { item } if tairix_window::is_quit(*item) => Acted::Quit,
+            // The slot was clicked with no window open: the way back to one.
+            WindowEvent::AppBarDefault => Acted::Open,
             WindowEvent::Key {
                 key: pressed @ KeyInput::Pressed { .. },
                 ..
             } => match key_input_event(*pressed) {
-                InputEvent::KeyPressed { key, modifiers } => (
-                    gallery.on_key(key, modifiers, viewport, scale, theme, damage),
-                    false,
-                ),
-                _ => (false, false),
+                InputEvent::KeyPressed { key, modifiers } => {
+                    changed(gallery.on_key(key, modifiers, viewport, scale, theme, damage))
+                }
+                _ => Acted::Idle,
             },
-            WindowEvent::Pointer { x, y, action, .. } => (
-                apply_pointer(
-                    gallery,
-                    pointer_point(*x, *y),
-                    *action,
-                    viewport,
-                    scale,
-                    theme,
-                    damage,
-                ),
-                false,
-            ),
+            WindowEvent::Pointer { x, y, action, .. } => changed(apply_pointer(
+                gallery,
+                pointer_point(*x, *y),
+                *action,
+                viewport,
+                scale,
+                theme,
+                damage,
+            )),
             WindowEvent::Scrolled { dx, dy, .. } => {
                 let scroll = InputEvent::PointerScrolled { dx: *dx, dy: *dy };
-                (
-                    gallery.on_pointer(&scroll, viewport, scale, theme, damage),
-                    false,
-                )
+                changed(gallery.on_pointer(&scroll, viewport, scale, theme, damage))
             }
             // A redraw request needs nothing here: the client library
             // re-presents the last frame, and the gallery it drew has not
             // changed. The rest are events the gallery does not act on: a
             // secondary press on Close asks to leave what the window is
-            // showing, and the gallery has nothing to leave but itself.
-            // The gallery declares no default action, so the session raises
-            // its one window on a click rather than telling it — an
-            // `AppBarDefault` therefore cannot arrive, and an `AppBarMenu`
-            // naming any other row names no command of the gallery's. The
-            // gallery draws a `Menu` as a sample, never asking the desktop to
-            // open a chain, so no outcome can arrive.
+            // showing, and the gallery has nothing to leave but itself. An
+            // `AppBarMenu` naming any other row names no command of the
+            // gallery's. The gallery draws a `Menu` as a sample, never
+            // asking the desktop to open a chain, so no outcome can arrive.
+            // `ContentReleased` is handled by the caller, which owns the
+            // region it lets go of.
             WindowEvent::AlternateCloseRequested { .. }
-            | WindowEvent::AppBarDefault
             | WindowEvent::AppBarMenu { .. }
             | WindowEvent::MenuClosed { .. }
             | WindowEvent::Key { .. }
@@ -300,8 +375,23 @@ mod program {
             | WindowEvent::PickCancelled { .. }
             // The desktop change is adopted by the caller before this match,
             // which is also where the repaint it needs is decided.
-            | WindowEvent::DesktopChanged { .. } => (false, false),
+            | WindowEvent::DesktopChanged { .. } => Acted::Idle,
         }
+    }
+
+    /// What one delivered event concluded.
+    #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+    enum Acted {
+        /// Nothing on screen changed.
+        Idle,
+        /// The gallery changed and must be re-presented.
+        Changed,
+        /// Close the window, leaving the gallery on the icon bar.
+        Close,
+        /// Open a window, the gallery having none.
+        Open,
+        /// End the program.
+        Quit,
     }
 
     /// Route one wire pointer event: a move to `at` to sync the pointer, then
@@ -408,55 +498,6 @@ mod program {
         Ok((frames, grant))
     }
 
-    /// Open the gallery's window and present its first frame.
-    ///
-    /// Returns the window channel, the desktop session's [`ProcId`], and
-    /// the initialised [`Gallery`], or the reserved exit code for `main`
-    /// when the session refuses the create or the first present.
-    fn open_gallery_window(
-        mut client: WindowClient<RtWindowTransport>,
-        grant: u64,
-        event_endpoint: u64,
-        mode: &DisplayMode,
-        theme: &Theme,
-        scale: Scale,
-        frames: &mut WindowFrames,
-    ) -> Result<(GalleryWindow, ProcId, Gallery), i32> {
-        // The icon-bar presence first: a declared presence belongs to the
-        // process, so declaring it before this process owns a window is what
-        // makes its slot carry this menu from the moment it appears rather
-        // than being a slot the session derived from a window, which opens
-        // nothing.
-        declare_app_bar(&mut client, event_endpoint);
-        // Fixed size: the gallery is never resized, so it declares no floor.
-        let Ok((window, server)) = client.create(
-            grant,
-            event_endpoint,
-            FRAME_COUNT,
-            mode,
-            "widgets",
-            WindowSizing::default(),
-        ) else {
-            return Err(fail(EXIT_NO_WINDOW, "desktop session refused the window"));
-        };
-        let Some(pixels) = Surface::new(mode.width_px, mode.height_px) else {
-            return Err(fail(EXIT_NO_WINDOW, "no memory for the window surface"));
-        };
-        let gallery = Gallery::new();
-        let mut surface = GalleryWindow {
-            client,
-            window,
-            surface: pixels,
-        };
-        if surface
-            .present(&gallery, theme, scale, frames, mode, DamageRect::full(mode))
-            .is_err()
-        {
-            return Err(fail(EXIT_CHANNEL_LOST, "first present refused"));
-        }
-        Ok((surface, server, gallery))
-    }
-
     /// The event loop: park, apply, repaint. A dead channel ends the app
     /// fail-loud; a clean close ends it at zero.
     fn run_event_loop(
@@ -464,7 +505,7 @@ mod program {
         desktop: &mut Desktop,
         themes: &mut ThemeRegistry,
         gallery: &mut Gallery,
-        frames: &mut WindowFrames,
+        event_endpoint: u64,
         mode: &DisplayMode,
         mut events: WindowEvents<RtEventSource>,
     ) -> i32 {
@@ -495,7 +536,7 @@ mod program {
             // One sink per round: every control the event reaches, and the
             // gallery for what it changes itself, reports into this one.
             let mut damage = tairix_controls::damage::sink();
-            let (changed, close) = apply_event(
+            let acted = apply_event(
                 gallery,
                 themes.active(),
                 desktop.scale(),
@@ -503,21 +544,42 @@ mod program {
                 &event,
                 &mut damage,
             );
-            if close {
-                let _ = surface.client.close(surface.window);
-                return 0;
+            match acted {
+                Acted::Quit => {
+                    surface.close();
+                    return 0;
+                }
+                Acted::Close => {
+                    surface.close();
+                    continue;
+                }
+                Acted::Open => {
+                    // A refusal is already stated; the slot is still there
+                    // to try again from.
+                    let _ = surface.open(
+                        event_endpoint,
+                        mode,
+                        gallery,
+                        themes.active(),
+                        desktop.scale(),
+                    );
+                    continue;
+                }
+                Acted::Idle | Acted::Changed => {}
             }
             // Nobody can see the window, so the session gave its copy of the
             // pixels back and unmapped the region. Let go of this side too —
             // the pages go only when both do — and paint nothing until the
             // redraw request that follows the window being shown again.
             if matches!(event, WindowEvent::ContentReleased { .. }) {
-                frames.release();
+                if let Some(pane) = surface.pane.as_mut() {
+                    pane.frames.release();
+                }
                 continue;
             }
             // An adopted desktop change re-themes and re-densifies every pixel,
             // so no report could describe it.
-            let repaint = match (redraw, changed) {
+            let repaint = match (redraw, acted == Acted::Changed) {
                 (true, _) => Repaint::Whole,
                 (false, true) => Repaint::Reported,
                 (false, false) => Repaint::Nothing,
@@ -526,14 +588,7 @@ mod program {
                 continue;
             };
             if surface
-                .present(
-                    gallery,
-                    themes.active(),
-                    desktop.scale(),
-                    frames,
-                    mode,
-                    damage,
-                )
+                .present(gallery, themes.active(), desktop.scale(), mode, damage)
                 .is_err()
             {
                 return fail(EXIT_CHANNEL_LOST, "present refused");
@@ -561,26 +616,31 @@ mod program {
             stride_bytes: initial_w * 4,
             format: DisplayFormat::Rgba8888,
         };
-        let (mut frames, grant) = match create_frame_region(&mode) {
-            Ok(pair) => pair,
-            Err(code) => return code,
-        };
 
         let (event_endpoint, set) = match bind_event_mailbox() {
             Ok(pair) => pair,
             Err(code) => return code,
         };
 
-        let (mut surface, server, mut gallery) = match open_gallery_window(
-            client,
-            grant,
+        // The icon-bar presence first: a declared presence belongs to the
+        // process, so declaring it before this process owns a window is what
+        // makes its slot carry this menu from the moment it appears rather
+        // than being a slot the session derived from a window, which opens
+        // nothing.
+        declare_app_bar(&mut client, event_endpoint);
+        let mut surface = GalleryWindow { client, pane: None };
+        let mut gallery = Gallery::new();
+        // The gallery was started to be looked at, so a first window that
+        // will not open leaves it nothing to be and it ends fail-loud; every
+        // later one is a click on its slot, which reports and carries on.
+        let server = match surface.open(
             event_endpoint,
             &mode,
+            &gallery,
             themes.active(),
             desktop.scale(),
-            &mut frames,
         ) {
-            Ok(triple) => triple,
+            Ok(server) => server,
             Err(code) => return code,
         };
 
@@ -594,7 +654,7 @@ mod program {
             &mut desktop,
             &mut themes,
             &mut gallery,
-            &mut frames,
+            event_endpoint,
             &mode,
             events,
         )

@@ -29,7 +29,7 @@
 //! the one thing that tells them apart.
 
 use tairix_abi::window_ipc::{
-    AppBar, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow,
+    AppBar, AppBarClick, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow,
 };
 use tairix_abi::Errno;
 
@@ -59,9 +59,8 @@ pub const DESKTOP_ROLE_SWITCH: &str = "--desktop";
 ///
 /// The menu is always the information row, then `rows`, then a rule and
 /// *Quit*. `endpoint` is the application's own event mailbox, where the
-/// session delivers the chosen row; `default_action` is `true` when a primary
-/// click on the slot is the application's to handle and `false` to leave the
-/// session raising its most recently used window.
+/// session delivers the chosen row; `click` is what a primary press on the
+/// slot does ([`AppBarClick`]).
 ///
 /// # Errors
 ///
@@ -76,7 +75,7 @@ pub const DESKTOP_ROLE_SWITCH: &str = "--desktop";
 /// and runs without a bar rather than showing one it could not describe.
 pub fn declaration(
     endpoint: u64,
-    default_action: bool,
+    click: AppBarClick,
     rows: &[AppMenuRow],
 ) -> Result<AppBar, Errno> {
     if rows
@@ -97,24 +96,25 @@ pub fn declaration(
     )))?;
     Ok(AppBar {
         event_endpoint: endpoint,
-        default_action,
+        click,
         menu,
     })
 }
 
 /// The commonest icon-bar declaration: the convention's two rows and nothing
-/// else, with no default action of the application's own.
+/// else, with the slot's click doing what `click` says.
 ///
-/// No default action means a primary click on the slot raises the
-/// application's most recently used window, which is what an application
-/// whose slot simply fronts its window wants.
+/// An application that stays on the bar with its last window closed declares
+/// [`AppBarClick::RaiseOrOpen`], so the slot is the way back to a window; one
+/// that ends with its window has nothing to reopen and declares
+/// [`AppBarClick::Raise`].
 ///
 /// # Errors
 ///
 /// As [`declaration`]. The rows are fixed, so a refusal can only mean the
 /// shared bounds changed under this declaration.
-pub fn info_and_quit(endpoint: u64) -> Result<AppBar, Errno> {
-    declaration(endpoint, false, &[])
+pub fn info_and_quit(endpoint: u64, click: AppBarClick) -> Result<AppBar, Errno> {
+    declaration(endpoint, click, &[])
 }
 
 /// Whether `item` is the convention's *Quit* row.
@@ -141,11 +141,12 @@ mod tests {
 
     #[test]
     fn the_convention_puts_the_information_row_first_and_quit_last() {
-        let bar = info_and_quit(7).expect("the fixed rows fit");
+        let bar = info_and_quit(7, AppBarClick::RaiseOrOpen).expect("the fixed rows fit");
         assert_eq!(bar.event_endpoint, 7);
-        assert!(
-            !bar.default_action,
-            "the session raises the application's window rather than telling it about the click"
+        assert_eq!(
+            bar.click,
+            AppBarClick::RaiseOrOpen,
+            "the session raises the window it has, and asks for one when it has none"
         );
         let rows: alloc::vec::Vec<AppMenuRowView<'_>> =
             bar.menu.rows().map(|(row, _)| row).collect();
@@ -160,9 +161,9 @@ mod tests {
 
     #[test]
     fn an_applications_own_rows_land_between_the_conventions_ends() {
-        let bar = declaration(9, true, &[row(QUIT_ROW + 1, "New window")])
+        let bar = declaration(9, AppBarClick::Open, &[row(QUIT_ROW + 1, "New window")])
             .expect("the declared rows fit");
-        assert!(bar.default_action);
+        assert_eq!(bar.click, AppBarClick::Open);
         let rows: alloc::vec::Vec<AppMenuRowView<'_>> =
             bar.menu.rows().map(|(row, _)| row).collect();
         assert_eq!(rows.len(), 4);
@@ -184,7 +185,10 @@ mod tests {
             label: AppMenuLabel::new("Profile").expect("within bounds"),
             enabled: true,
         };
-        assert_eq!(declaration(9, false, &[submenu]), Err(Errno::OutOfRange));
+        assert_eq!(
+            declaration(9, AppBarClick::Raise, &[submenu]),
+            Err(Errno::OutOfRange)
+        );
     }
 
     #[test]

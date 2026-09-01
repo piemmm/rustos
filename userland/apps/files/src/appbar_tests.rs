@@ -13,7 +13,7 @@ use tairix_abi::window_ipc::{
 };
 use tairix_browse::{Places, Volume};
 
-use super::{component_declaration, place_of, DESKTOP_DEFAULT_ACTION};
+use super::{component_declaration, place_of, DESKTOP_SLOT_CLICK, WINDOW_SLOT_CLICK};
 
 /// A home whose three derived places (Home, Desktop, Documents) join the two
 /// machine roots, so the fixed rail is five rows long.
@@ -77,13 +77,29 @@ impl AppMenuRowKind {
     }
 }
 
+/// Both roles keep their slot with every window closed, so a click on it
+/// must be able to bring one back — an ordinary file manager by being asked
+/// only when it has none, a component every time.
+#[test]
+fn each_roles_slot_can_always_produce_a_window() {
+    assert!(
+        WINDOW_SLOT_CLICK.opens_when_windowless(),
+        "an ordinary file manager left on the bar with no window is reopened from its slot"
+    );
+    assert!(DESKTOP_SLOT_CLICK.opens_when_windowless());
+    assert_ne!(
+        WINDOW_SLOT_CLICK, DESKTOP_SLOT_CLICK,
+        "only the component takes the click away from a window it could raise"
+    );
+}
+
 #[test]
 fn the_component_offers_the_places_and_neither_of_the_conventions_rows() {
     let places = Places::new(&home(), &[]);
     let (bar, skipped) = component_declaration(7, &places).expect("the rows fit");
     assert_eq!(bar.event_endpoint, 7);
     assert_eq!(
-        bar.default_action, DESKTOP_DEFAULT_ACTION,
+        bar.click, DESKTOP_SLOT_CLICK,
         "a click on a component's slot opens a window rather than raising one"
     );
     assert_eq!(skipped, 0);

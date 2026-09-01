@@ -28,8 +28,10 @@
 //! canonical `CAP_*` names); and the optional keys `associations` (the
 //! declared file-type hints), `library` (the program-library folder a
 //! graphical application lists itself under — absence means the library
-//! never shows the bundle), and `library-icon` (an icon asset inside the
-//! bundle's `Resources/`, legal only beside `library`). Each key appears
+//! never shows the bundle), `library-icon` (an icon asset inside the
+//! bundle's `Resources/`), `purpose`, `author`, and `icon-bar` (a bare
+//! `true`/`false`; `false` for a bundle the desktop's icon bar gives no slot
+//! of its own, because it already reaches it another way). Each key appears
 //! at most once. Anything else — an unknown key, a duplicate, a multi-line
 //! value, an unknown capability or folder name — is a packaging defect
 //! that fails the build, never a guessed default.
@@ -40,9 +42,10 @@ use std::path::{Path, PathBuf};
 use ed25519_dalek::{Signer, SigningKey};
 use tairix_abi::{
     digest_bundle_contents, AppInfoHeader, BundleFileDigest, CapabilityId, LibraryCategory,
-    ProgramKind, ABI_VERSION_CURRENT, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME,
-    BUNDLE_AUTHOR_MAX, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_PURPOSE_MAX, BUNDLE_SUFFIX,
-    BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX, MIME_ENTRY_LEN, MIME_TYPE_MAX,
+    ProgramKind, ABI_VERSION_CURRENT, APPINFO_FLAG_NO_ICON_BAR, APPINFO_MAGIC,
+    APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_AUTHOR_MAX, BUNDLE_ID_MAX, BUNDLE_NAME_MAX,
+    BUNDLE_PURPOSE_MAX, BUNDLE_SUFFIX, BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX, MIME_ENTRY_LEN,
+    MIME_TYPE_MAX,
 };
 use tairix_crypto::sha256;
 
@@ -113,6 +116,11 @@ pub struct AppManifestSource {
     /// The bundle's author attribution, shown in the same panel. `None`
     /// means the panel omits it.
     pub author: Option<String>,
+    /// Whether the desktop's icon bar gives this bundle a slot of its own.
+    /// Absent means it does; `icon-bar = false` is for a bundle the desktop
+    /// already reaches another way, whose slot would be a duplicate route
+    /// (`plans/NEW-TASKBAR.md`).
+    pub icon_bar: bool,
 }
 
 impl AppManifestSource {
@@ -126,7 +134,8 @@ impl AppManifestSource {
     /// command word, an unknown `kind`, an unknown or duplicate `CAP_*`
     /// name, a capability list exceeding the manifest bound, an unknown
     /// library folder, an over-long `library-icon`, `purpose`, or `author`,
-    /// or a `library` on a `service`.
+    /// an `icon-bar` that is not a bare `true`/`false`, or a `library` on a
+    /// `service`.
     pub fn parse(text: &str) -> Result<Self, AppImageError> {
         let ctx = APP_MANIFEST_SOURCE;
         let mut id = None;
@@ -139,6 +148,7 @@ impl AppManifestSource {
         let mut library_icon = None;
         let mut purpose = None;
         let mut author = None;
+        let mut icon_bar = None;
         for (index, raw) in text.lines().enumerate() {
             let line = raw.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -166,6 +176,7 @@ impl AppManifestSource {
                 }
                 "purpose" => set(&at, key, &mut purpose, parse_string(&at, value)?)?,
                 "author" => set(&at, key, &mut author, parse_string(&at, value)?)?,
+                "icon-bar" => set(&at, key, &mut icon_bar, parse_bool(&at, value)?)?,
                 other => {
                     return Err(AppImageError::new(&at, format!("unknown key `{other}`")));
                 }
@@ -187,6 +198,10 @@ impl AppManifestSource {
             library_icon,
             purpose,
             author,
+            // A bundle is on the icon bar unless it says otherwise, so the
+            // opt-out is a deliberate line in a manifest rather than the
+            // default a forgotten key falls into.
+            icon_bar: icon_bar.unwrap_or(true),
         };
         manifest.validate()?;
         Ok(manifest)
@@ -280,6 +295,19 @@ fn parse_string(at: &str, value: &str) -> Result<String, AppImageError> {
         return Err(AppImageError::new(at, "quotes/escapes are not supported"));
     }
     Ok(inner.to_string())
+}
+
+/// Parse a bare `true`/`false`. Anything else is a packaging defect rather
+/// than a value to coerce.
+fn parse_bool(at: &str, value: &str) -> Result<bool, AppImageError> {
+    match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        other => Err(AppImageError::new(
+            at,
+            format!("expected `true` or `false`, got `{other}`"),
+        )),
+    }
 }
 
 /// Parse the closed `kind` vocabulary — the shared
@@ -571,7 +599,11 @@ pub fn compose_signed_appinfo(
     let header = AppInfoHeader {
         magic: APPINFO_MAGIC,
         abi_version: ABI_VERSION_CURRENT,
-        flags: 0,
+        flags: if manifest.icon_bar {
+            0
+        } else {
+            APPINFO_FLAG_NO_ICON_BAR
+        },
         capability_count,
         mime_count,
         id_len: inline_len(ctx, "id", &manifest.id, BUNDLE_ID_MAX)?,
@@ -700,6 +732,50 @@ mod tests {
         assert_eq!(manifest.bundle_dir(), "example.app");
         assert_eq!(manifest.library, None, "listing is an explicit opt-in");
         assert_eq!(manifest.library_icon, None);
+        assert!(manifest.icon_bar, "the icon bar is the default");
+    }
+
+    #[test]
+    fn a_bundle_may_declare_that_it_presents_no_icon_bar_slot() {
+        let iconless =
+            AppManifestSource::parse(&format!("{GOOD}icon-bar = false\n")).expect("valid");
+        assert!(!iconless.icon_bar);
+
+        let stated = AppManifestSource::parse(&format!("{GOOD}icon-bar = true\n")).expect("valid");
+        assert!(stated.icon_bar, "the default may also be stated");
+
+        for bad in ["\"false\"", "0", "no", "False"] {
+            assert!(
+                AppManifestSource::parse(&format!("{GOOD}icon-bar = {bad}\n")).is_err(),
+                "`{bad}` is a packaging defect, not a value to coerce"
+            );
+        }
+    }
+
+    #[test]
+    fn the_icon_bar_declaration_reaches_the_signed_header() {
+        let composed = compose_signed_appinfo(
+            &[7u8; 32],
+            PublisherSource::SelfPublished,
+            &AppManifestSource::parse(&format!("{GOOD}icon-bar = false\n")).expect("valid"),
+            [0u8; 32],
+            &[],
+        )
+        .expect("composes");
+        let header = AppInfoHeader::from_bytes(&composed.bytes).expect("decodes");
+        assert!(!header.presents_icon_bar_slot());
+
+        let plain = compose_signed_appinfo(
+            &[7u8; 32],
+            PublisherSource::SelfPublished,
+            &AppManifestSource::parse(GOOD).expect("valid"),
+            [0u8; 32],
+            &[],
+        )
+        .expect("composes");
+        assert!(AppInfoHeader::from_bytes(&plain.bytes)
+            .expect("decodes")
+            .presents_icon_bar_slot());
     }
 
     #[test]

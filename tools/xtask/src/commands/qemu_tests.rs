@@ -10001,7 +10001,7 @@ fn reconstruct_bar_launch() -> Result<BarLaunch, String> {
         .collect::<Vec<_>>();
     seated.push(
         AppSlot::new(BAR_APP_NAME, tairix_icon::IconKind::AppBundle)
-            .with_declaration(declared.menu, declared.default_action),
+            .with_declaration(declared.menu, declared.click),
     );
     shell.session_mut().taskbar_mut().set_apps(seated);
 

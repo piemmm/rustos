@@ -4058,13 +4058,17 @@ mod program {
         launched: &LaunchTable,
     ) {
         let owners = window_owners(shell, server, windows);
-        apps.strip = apps.service.strip(&owners, |owner| {
-            identity
-                .pid_of(owner)
-                .and_then(|pid| launched.get(pid))
-                .and_then(|app| app.run_path.strip_suffix(BUNDLE_RUN_SUFFIX))
-                .map(alloc::string::String::from)
-        });
+        apps.strip = apps.service.strip(
+            &owners,
+            |owner| {
+                identity
+                    .pid_of(owner)
+                    .and_then(|pid| launched.get(pid))
+                    .and_then(|app| app.run_path.strip_suffix(BUNDLE_RUN_SUFFIX))
+                    .map(alloc::string::String::from)
+            },
+            &mut VfsFileReader,
+        );
         let side = shell.session().taskbar().app_icon_side(compositor.scale());
         let slots = {
             let strip = core::mem::take(&mut apps.strip);
@@ -4111,13 +4115,18 @@ mod program {
         server: &WindowServer<RtShmMapper>,
         windows: &SessionWindows,
     ) -> bool {
-        let owners = window_owners(shell, server, windows);
         let held: alloc::vec::Vec<(tairix_abi::ProcId, TaskId)> = apps
             .strip
             .iter()
             .flat_map(|group| group.windows.iter().map(move |&task| (group.owner, task)))
             .collect();
-        let mut sorted = owners;
+        // A window whose application the bar deliberately shows no slot for
+        // is absent from the strip by design, not because the strip aged.
+        let mut sorted: alloc::vec::Vec<(tairix_abi::ProcId, TaskId)> =
+            window_owners(shell, server, windows)
+                .into_iter()
+                .filter(|&(owner, _)| !apps.service.is_iconless(owner))
+                .collect();
         sorted.sort_unstable();
         let mut held = held;
         held.sort_unstable();

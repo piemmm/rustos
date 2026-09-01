@@ -445,21 +445,27 @@ Two gaps that made resizable windows only nominally resizable are closed:
   resizable or not (`band_inset`, consumed by `insets`/`layout`): a band wide
   enough to grab showed as dead space around every resizable app's content.
   The grab room lives in the hit map instead — `WindowFrame::hit` reports
-  `ResizeEdge` for a reach measured from the **outer** rectangle, so the thin
-  band and the client pixels beyond it are one continuous zone rather than two
-  that could disagree about where a corner ends. `GrabReach::of` resolves it
-  from the theme: `resize_edge_grab` for the left/right/bottom edges and the
-  wider `resize_corner_grab` for the two bottom corners, whose square would
-  otherwise narrow to the edge width at its tip and be the hardest thing on
-  the frame to hit; a corner wins over the two edges that form it, and the
-  corner reach is clamped never to fall below the edge reach so the very corner
-  can never classify as a plain edge. The title bar is resolved first and keeps
-  its whole band, so the zones start below it. An edge is grabbable while the
-  client stays as large as a fixed window's; the app still draws those pixels
-  but does not receive presses on them, the accepted trade macOS, GNOME, and
-  Windows make. The frame therefore draws no corner grip (there is no band to
-  hold one), and a fixed-size window trades nothing: every client pixel
-  reaches it.
+  `ResizeEdge` for a band **centred on** the outer edge. `GrabReach::of`
+  resolves the thickness from the theme: `resize_edge_grab` for the
+  left/right/bottom edges and the wider `resize_corner_grab` for the two
+  bottom corners, whose square would otherwise narrow to the edge width at its
+  tip and be the hardest thing on the frame to hit; a corner wins over the two
+  edges that form it, and the corner band is clamped never to fall below the
+  edge band so the very corner can never classify as a plain edge.
+  `GrabReach::outward`/`inward` are the one definition of the split (half out,
+  the odd pixel in), so a band stays as easy to hit while costing the client
+  only its inner half — which is what leaves a scrollbar hard against the
+  window edge usable. The title bar is resolved first and keeps its whole
+  band, and the side bands are explicitly bounded to start at its foot on both
+  sides of the edge. The app still draws the pixels the inner half covers but
+  does not receive presses on them, the accepted trade macOS, GNOME, and
+  Windows make. The outer half is reached through
+  `Compositor::resize_target`, consulted **only** where `window_at` finds
+  nothing, so a band never takes a press from a window drawn in front of it;
+  only the primary press and the cursor consult it, leaving the backdrop menu
+  reachable wherever it was. The frame therefore draws no corner grip (there is
+  no band to hold one), and a fixed-size window trades nothing and claims
+  nothing outside itself: every client pixel reaches it.
 - **A secondary title-bar drag moves the window without restacking it.** A
   right-press on the drag region begins the same move-grab a primary press
   does — one clamp, one motion path — but skips the raise, so a window can be

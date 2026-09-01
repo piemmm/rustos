@@ -40,3 +40,7 @@ kind = "service"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_SYSINFO_GLOBAL", "CAP_SYSINFO_KERNEL", "CAP_SYSINFO_HW", "CAP_SHM", "CAP_PROC_CONTROL", "CAP_SYSTEM_POWER", "CAP_LOG_EMIT"]
 # This bundle's own 256x256 icon master in its Resources/ (plans/ICONS.md).
 library-icon = "switchboard.png"
+# No icon-bar slot of its own: the bar carries a permanent Switchboard capsule
+# at its trailing end, which is already the route to this window, so a slot
+# beside it would be a second one to the same place.
+icon-bar = false

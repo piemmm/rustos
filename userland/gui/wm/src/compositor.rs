@@ -26,7 +26,7 @@ use tairix_abi::sysinfo::DesktopFrameTotals;
 use tairix_abi::DriverError;
 use tairix_display::{damage_list, scanout_len, ChannelOrder};
 
-use tairix_controls::{damage, FurniturePart, TitleBarEvent, WindowFrame};
+use tairix_controls::{damage, FurniturePart, ResizeEdge, TitleBarEvent, WindowFrame};
 use tairix_cursor::{CursorImage, PlacedCursor};
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key};
@@ -1968,6 +1968,34 @@ impl Compositor {
         let window = self.window(id)?;
         let frame = window.frame()?;
         Some(frame.hit(window.bounds(), self.scale, &self.theme, point))
+    }
+
+    /// The window whose resize band claims the screen `point`, and which
+    /// edge, when nothing else is drawn there.
+    ///
+    /// A resizable frame's grab band straddles its outer edge
+    /// ([`GrabReach`](tairix_controls::GrabReach)), so its outer half falls
+    /// outside the window: this is how that half is reached. It is
+    /// deliberately consulted **only** where [`window_at`](Self::window_at)
+    /// finds nothing — over the desktop, in the gap between windows — so a
+    /// band can never take a press from a window whose own pixels are under
+    /// the pointer. The topmost claimant wins, as it would for any other
+    /// pointer question.
+    #[must_use]
+    pub fn resize_target(&self, point: Point) -> Option<(WindowId, ResizeEdge)> {
+        self.windows.iter().rev().find_map(|window| {
+            if !window.is_visible() {
+                return None;
+            }
+            let FurniturePart::ResizeEdge(edge) =
+                window
+                    .frame()?
+                    .hit(window.bounds(), self.scale, &self.theme, point)
+            else {
+                return None;
+            };
+            Some((window.id(), edge))
+        })
     }
 
     /// Feed a pointer `event` to the decoration furniture of the window named

@@ -147,23 +147,25 @@ pub struct Metrics {
     /// The square extent of the resize grabber's visible affordance, in
     /// logical pixels.
     pub resize_grabber_extent: u32,
-    /// How far a resizable window's **edge** resize zone reaches in from the
-    /// outer frame edge, in logical pixels.
+    /// How thick a resizable window's **edge** resize band is, in logical
+    /// pixels, measured across the outer frame edge it is centred on.
     ///
-    /// A hit reach, not a drawn width: the frame band stays thin, so most of
-    /// this lies over the client's own outermost pixels — a border that costs
+    /// A hit width, not a drawn one: the frame band stays thin, so the inner
+    /// half lies over the client's own outermost pixels — a border that costs
     /// no visible space, at the price of a few app pixels that draw but do not
     /// click. Wide enough to hit without aiming, which is the whole point of
     /// an invisible border; the same trade-off macOS, GNOME, and Windows make.
+    /// Centring it halves what the client gives up, which is what leaves a
+    /// scrollbar against the window edge usable.
     pub resize_edge_grab: u32,
-    /// How far a resizable window's **corner** resize zone reaches in from
-    /// each of the two outer edges that meet there, in logical pixels.
+    /// How thick a resizable window's **corner** resize band is along each of
+    /// the two outer edges that meet there, in logical pixels.
     ///
     /// Larger than [`resize_edge_grab`](Self::resize_edge_grab): a corner
     /// resizes both axes at once, so it is the zone a user aims for most and
     /// the one an edge-width zone makes hardest to hit — it shrinks to a
     /// few pixels square at the very tip. Never taken as smaller than the
-    /// edge reach.
+    /// edge band.
     pub resize_corner_grab: u32,
     /// The invisible slop added around a furniture hit target so it stays
     /// grabbable, in logical pixels. Never extends over another control.

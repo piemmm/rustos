@@ -20,7 +20,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::window_ipc::AppMenu;
+use tairix_abi::window_ipc::{AppBarClick, AppMenu};
 use tairix_controls::{ControlState, PointerState, TaskbarItem};
 use tairix_icon::IconKind;
 use tairix_raster::Surface;
@@ -54,7 +54,7 @@ pub struct AppSlot {
     artwork: Option<Surface>,
     windows: Vec<TaskId>,
     menu: AppMenu,
-    handles_default: bool,
+    click: AppBarClick,
     identity: AppIdentity,
 }
 
@@ -75,7 +75,9 @@ impl AppSlot {
             artwork: None,
             windows: Vec::new(),
             menu: AppMenu::EMPTY,
-            handles_default: false,
+            // Nothing declared: the session raises the window this slot was
+            // derived from, and an application with none is asked nothing.
+            click: AppBarClick::Raise,
         }
     }
 
@@ -94,12 +96,11 @@ impl AppSlot {
     }
 
     /// This slot carrying the application's icon-bar declaration: the menu a
-    /// secondary press opens, and whether the application handles the
-    /// primary click itself.
+    /// secondary press opens, and what a primary click does.
     #[must_use]
-    pub fn with_declaration(mut self, menu: AppMenu, handles_default: bool) -> Self {
+    pub fn with_declaration(mut self, menu: AppMenu, click: AppBarClick) -> Self {
         self.menu = menu;
-        self.handles_default = handles_default;
+        self.click = click;
         self
     }
 
@@ -142,14 +143,10 @@ impl AppSlot {
         &self.menu
     }
 
-    /// Whether a primary click on the slot is the application's to handle.
-    ///
-    /// `false` leaves the click to the session's own default — raise the
-    /// application's most recently used window, and do nothing at all when
-    /// it has none.
+    /// What a primary click on the slot does.
     #[must_use]
-    pub fn handles_default(&self) -> bool {
-        self.handles_default
+    pub fn click(&self) -> AppBarClick {
+        self.click
     }
 
     /// The identity the application's information panel states.

@@ -31,6 +31,10 @@ The session ends when the shell exits (for example with `exit`) or when
 the window is closed from the desktop; closing the window ends the shell
 with end-of-file on its input.
 
+Closing the last window does not end the terminal. Its icon stays on the
+desktop's icon bar, and clicking it opens a fresh window; *Quit* on that
+icon's menu closes every window and ends the program.
+
 Pressing the secondary (right) mouse button anywhere on the screen opens
 the terminal's menu. Every row has a keyboard shortcut that works
 whether or not the menu is open, and `Escape` — or a click away from the
@@ -55,7 +59,12 @@ from — the background, foreground, cursor, cursor text, and the sixteen
 ANSI colours — with red, green, and blue sliders for whichever one is
 selected.
 
-**Effects** sets how the screen is drawn.
+**Effects** sets how the screen is drawn. A new terminal opens at 80%
+opacity with every other effect off, so the desktop shows through behind
+the text. The backdrop blur is off by default because the compositor
+blurs each see-through window separately every frame, which a screenful
+of them makes expensive; turn it on for one terminal and it costs only
+that one.
 
 | Effect | What it does |
 | --- | --- |

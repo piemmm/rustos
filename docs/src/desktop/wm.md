@@ -1019,27 +1019,47 @@ as its colour. See [theming](./theming.md) for the four roles.
   larger and every pixel of its client reaches it. The client-press position
   the app receives is reported relative to the inset **client** rectangle, so
   decorating a window never shifts its content coordinates.
-- **The resize zone is invisible (it overlaps the client).** Because the band
-  is only the thin rim, a resizable window's resize edges reach *inward* over
-  the client's outermost pixels — the invisible resize border macOS, GNOME, and
-  Windows use. The reach is measured from the **outer** rectangle, so the thin
-  band and the client pixels beyond it are one continuous zone: `GrabReach`
-  resolves the theme's `resize_edge_grab` for the left, right, and bottom edges
-  and the wider `resize_corner_grab` for the two bottom corners, whose square
-  would otherwise narrow to the edge width at its very tip and be the hardest
-  thing on the frame to hit. The corner wins over the two edges that form it
-  and is clamped never to fall below the edge reach. The title bar keeps its
-  whole band — it is resolved first — so the zones start below it. A press
-  there is `ResizeEdge`, not `Client`:
-  the app still draws those pixels but does not receive presses on them, the
-  accepted trade for a border that costs no visible space. Since the router
-  consults the frame first, that outer strip also wins over a window's
-  root-viewport scrollbar furniture. Drawing stays strictly separated even
-  so — the frame paints no furniture mark inside the client. What makes the
-  invisible border discoverable is the **pointer**: the same hit map drives
-  cursor selection, so crossing into the zone swaps the arrow for the double
-  arrow of the axis that edge moves along, and a grab keeps that shape for the
-  whole gesture (see [Pointer cursors](./cursors.md)).
+- **The resize band is invisible, and it straddles the window edge.** Because
+  the drawn band is only the thin rim, a resizable window's resize zones are a
+  hit region with no pixels of their own — the invisible resize border macOS,
+  GNOME, and Windows use. `GrabReach` resolves the theme's `resize_edge_grab`
+  for the left, right, and bottom edges and the wider `resize_corner_grab` for
+  the two bottom corners, whose square would otherwise narrow to the edge width
+  at its very tip and be the hardest thing on the frame to hit. The corner wins
+  over the two edges that form it and is clamped never to fall below the edge
+  band.
+  - **Centred, not inward-only.** Each band is that thickness measured *across*
+    the outer edge: `GrabReach::outward` is half of it (rounding down) and
+    `GrabReach::inward` the rest, so the odd pixel goes inward and a one-pixel
+    band sits exactly on the window's own outermost pixel. The band stays as
+    easy to hit while costing the client half what an inward-only reach would,
+    which is what leaves a scrollbar hard against the window edge usable
+    instead of mostly swallowed.
+  - **A press on the inner half is `ResizeEdge`, not `Client`:** the app still
+    draws those pixels but does not receive presses on them, the accepted trade
+    for a border that costs no visible space. Since the router consults the
+    frame first, that inner strip also wins over a window's root-viewport
+    scrollbar furniture. Drawing stays strictly separated even so — the frame
+    paints no furniture mark inside the client.
+  - **The outer half is claimed only where nothing else is drawn.**
+    `WindowFrame::hit` classifies a point outside `bounds` too, but *which*
+    window owns such a point is the window manager's call:
+    `Compositor::resize_target` is consulted only where `Compositor::window_at`
+    finds nothing — over the desktop, or in the gap between windows — and then
+    the topmost claimant wins. So reaching for an edge can never take a press
+    from a window whose own pixels are under the pointer, and the change is
+    purely additive over bare desktop. Only the primary press and the cursor
+    consult it; a secondary press, a wheel, and pointer-move still belong to
+    the desktop there, so the backdrop menu stays reachable everywhere it was.
+  - **The title bar keeps its whole band** — it is resolved first, and the side
+    bands are explicitly bounded to start at its foot on *both* sides of the
+    edge, so the outward half never claims a column beside a band it does not
+    reach on the inside.
+  - What makes the invisible border discoverable is the **pointer**: the same
+    hit map drives cursor selection, so crossing into the band — inside or
+    outside the window — swaps the arrow for the double arrow of the axis that
+    edge moves along, and a grab keeps that shape for the whole gesture (see
+    [Pointer cursors](./cursors.md)).
 - **A secondary title-bar drag moves the window without restacking it.** A
   right-press on the title-bar drag region begins the *same* move-grab a
   primary press does — one clamp, one motion path, one `Moved` response — but

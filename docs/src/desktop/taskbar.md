@@ -543,29 +543,43 @@ pointer's own wash distinguishes one slot from another.
 (see [the session's icon bar](session.md#the-icon-bar)): an application that
 declared a presence keeps its slot for the life of its process, windows or
 not, and one that declared nothing but owns a window still gets a slot — with
-no menu and no default action — so no window is ever unreachable.
+no menu and a click the session answers by raising — so no window is ever
+unreachable. A bundle whose *signed* manifest sets `APPINFO_FLAG_NO_ICON_BAR`
+has no slot either way: it is one the desktop already reaches another way, so
+a slot would be a second route to the same window.
 
 Because those two cases differ, an application declares its presence
 **before** it opens its first window. A declared presence belongs to the
 process, so declaring it first is what makes the slot carry the
-application's menu and default action from the moment it appears. Declared
+application's menu and click behaviour from the moment it appears. Declared
 after a window, the session meanwhile derives a slot from that window alone,
-and for as long as the gap lasts the bar shows a slot that opens no menu and
-does nothing when clicked. All five shipped declaring applications go in this
-order.
+and for as long as the gap lasts the bar shows a slot that opens no menu.
 
-A primary press on a slot reports one of three things:
+**An application on the bar outlives its windows.** Closing the last one puts
+it away rather than ending it: the slot stays, and *Quit* on that slot's menu
+is what ends the process. So a slot must be able to produce a window, which
+is what the declaration's `AppBarClick` says:
 
-- `AppDefault { app }` when the application declared that it handles the
-  click. The session relays it as an `AppBarDefault` event and does nothing
-  else — one click, one actor. (The terminal opens a fresh window here.)
-- `AppRaise { app }` when it declared no default action but owns a window: the
-  session raises and focuses its most recently used one.
-- `Ignored` when it has neither — the honest answer, never a guessed one.
+- `AppBarClick::Open` — every click is the application's. The session relays
+  an `AppBarDefault` event and does nothing else, one click one actor. (The
+  terminal opens a fresh window; the file-manager component opens one at the
+  user's home.)
+- `AppBarClick::RaiseOrOpen` — the session raises and focuses the most
+  recently used window, and with none relays the click so the application can
+  bring one back. This is what an ordinary single-window application declares.
+- `AppBarClick::Raise` — raise the most recently used window and, with none,
+  nothing. Only for an application that ends with its window and so can never
+  be clicked windowless: the Date & Time app runs under an elevated account,
+  and a resident windowless instance would keep that authority alive behind an
+  empty slot.
+
+A press reports `AppDefault { app }`, `AppRaise { app }`, or `Ignored`
+accordingly.
 
 The old click-to-minimise toggle is deliberately gone: a slot is an
 application, not a window. Minimising lives on the title bar, and a minimised
-window comes back by being chosen in the hover picker.
+window comes back by being chosen in the hover picker — or, for an application
+with no slot at all, by cycling the task list from the Switchboard capsule.
 
 ## The hover window picker
 
@@ -739,7 +753,7 @@ it acts only on a primary or secondary press, hit-tested against the current
 - a primary press on the **Library button** opens the program-library popup
   (`OpenLibrary`);
 - a primary press on an **application slot** performs that application's
-  default action, or raises its most recently used window (see *The
+  declared click behaviour, or raises its most recently used window (see *The
   application strip*). The leading slot — the autostarted **file manager** —
   resolves idempotently: a press raises its window forward rather than
   launching a second copy;
@@ -933,10 +947,10 @@ out of an open child before dismissing, an application that declared no menu
 opening nothing at all, and the information panel: the manifest-attested facts
 in order, an omitted purpose or author absent rather than blank, a pointer over
 the panel claimed and inert, and the panel disappearing with the menu that
-carried it. The click tests cover all three left-click cases (a declared
-default action reaching the application, a raise for an application that
-declared none, nothing at all for one with neither) and that a second click
-never minimises. The picker tests cover the refusal below two windows, the
+carried it. The click tests cover the whole matrix — each of the
+three declared `AppBarClick` behaviours with and without a window, so the
+resident-application case cannot drift from the two that were always there —
+and that a second click never minimises. The picker tests cover the refusal below two windows, the
 open at two, the cell layout on every edge with a clipped cell that can never
 be hit, the highlight latching the picker alone, a cell choice raising (and
 restoring) that window, a press on the plate's own chrome, the absence of a

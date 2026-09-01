@@ -53,7 +53,7 @@ mod program {
 
     use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
     use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode};
-    use tairix_abi::window_ipc::{PointerAction, WindowEvent, WINDOW_ENDPOINT};
+    use tairix_abi::window_ipc::{AppBarClick, PointerAction, WindowEvent, WINDOW_ENDPOINT};
     use tairix_abi::{
         Errno, Origin, ProcId, WaitSetOp, WaitSourceKind, DOCUMENT_ROLE_ARG, ORIGIN_WIRE_LEN, STDIN,
     };
@@ -112,13 +112,14 @@ mod program {
 
     /// Declare this viewer's presence on the desktop's icon bar: the shared
     /// convention's two rows — the session-drawn information row and *Quit* —
-    /// with the primary click left to the session so it raises the window.
+    /// with the session raising the window when there is one and asking the
+    /// viewer to open another when there is not.
     ///
     /// A refused declaration is an answer, not a death: the viewer says so
     /// and carries on with no slot of its own — its window is still reachable
     /// through the one the session derives from it.
     fn declare_app_bar(client: &mut WindowClient<RtWindowTransport>, endpoint: u64) {
-        match tairix_window::info_and_quit(endpoint) {
+        match tairix_window::info_and_quit(endpoint, AppBarClick::RaiseOrOpen) {
             Ok(bar) => {
                 if let Err(err) = client.set_app_bar(&bar) {
                     let _ = writeln!(
@@ -259,15 +260,10 @@ mod program {
         (mode.stride_bytes as usize) * (mode.height_px as usize) * FRAME_COUNT as usize
     }
 
-    /// The live window channel this app owns: the transport to the desktop
-    /// session, the session-assigned window id, the shared frame region,
-    /// and the negotiated display mode. Grouped because the present and
-    /// resize paths always need every one of these together; a method on
-    /// this type reads at the call site rather than scattering the same
-    /// four parameters through every call.
-    struct WindowSurface {
-        /// The synchronous channel to the desktop session.
-        client: WindowClient<RtWindowTransport>,
+    /// One open viewer window: the session-assigned id, the shared frame
+    /// region, and the negotiated display mode. Grouped because the present
+    /// and resize paths always need every one of these together.
+    struct Pane {
         /// This app's window id, assigned by the session at create.
         window: u64,
         /// The shared frame region the app paints into.
@@ -281,6 +277,19 @@ mod program {
         /// clipped repaint sound — every pixel outside the clip is the one
         /// already on screen.
         surface: Surface,
+    }
+
+    /// The live window channel this app owns and the window it may or may
+    /// not have open.
+    ///
+    /// The viewer is on the icon bar whether or not a window is open:
+    /// closing one puts it away and a click on its slot picks another file,
+    /// so the channel outlives every window that crosses it.
+    struct WindowSurface {
+        /// The synchronous channel to the desktop session.
+        client: WindowClient<RtWindowTransport>,
+        /// The open window, or `None` while the viewer sits on the bar.
+        pane: Option<Pane>,
     }
 
     impl WindowSurface {
@@ -297,12 +306,15 @@ mod program {
             scale: Scale,
             damage: DamageRect,
         ) -> Result<(), Errno> {
-            let damage = if self.frames.is_released() {
-                DamageRect::full(&self.mode)
+            let Some(pane) = self.pane.as_mut() else {
+                return Ok(());
+            };
+            let damage = if pane.frames.is_released() {
+                DamageRect::full(&pane.mode)
             } else {
                 damage
             };
-            self.surface.with_clip(
+            pane.surface.with_clip(
                 damage.x,
                 damage.y,
                 damage.width_px,
@@ -311,10 +323,27 @@ mod program {
             );
             let pixels = self
                 .client
-                .frame_pixels(&mut self.frames, self.window, FRAME_COUNT, &self.mode)
+                .frame_pixels(&mut pane.frames, pane.window, FRAME_COUNT, &pane.mode)
                 .ok_or(Errno::NotAttached)?;
-            winframe::encode(&self.surface, pixels, &self.mode, damage, &SERIAL)?;
-            self.client.present(self.window, 0, damage)
+            winframe::encode(&pane.surface, pixels, &pane.mode, damage, &SERIAL)?;
+            self.client.present(pane.window, 0, damage)
+        }
+
+        /// The open window's current shape, or `None` with none open.
+        const fn mode(&self) -> Option<&DisplayMode> {
+            match &self.pane {
+                Some(pane) => Some(&pane.mode),
+                None => None,
+            }
+        }
+
+        /// Close the open window, if any, leaving the viewer on the icon
+        /// bar. The frame region is unmapped by its own drop, so nothing is
+        /// left pinned.
+        fn close(&mut self) {
+            if let Some(pane) = self.pane.take() {
+                let _ = self.client.close(pane.window);
+            }
         }
 
         /// Re-map the frame region onto `new_mode` and repaint at the new
@@ -337,6 +366,9 @@ mod program {
             scale: Scale,
             viewer: &mut Viewer,
         ) {
+            let Some(pane) = self.pane.as_mut() else {
+                return;
+            };
             let Some(spare) = WindowFrames::create(region_bytes(&new_mode)) else {
                 // Out of memory for a new region: honestly keep the
                 // current window rather than fail the whole app.
@@ -350,7 +382,7 @@ mod program {
             };
             if self
                 .client
-                .resize(self.window, grant, FRAME_COUNT, &new_mode)
+                .resize(pane.window, grant, FRAME_COUNT, &new_mode)
                 .is_err()
             {
                 // The session refused the re-map: the spare drops here, which
@@ -360,13 +392,13 @@ mod program {
             }
             // The session adopted the new region; adopting it here drops the
             // old one, which unmaps it.
-            self.frames = spare;
-            self.mode = new_mode;
-            self.surface = canvas;
+            pane.frames = spare;
+            pane.mode = new_mode;
+            pane.surface = canvas;
             // Re-wrap the open file (if any) to the new width, keeping the
             // reader near their place; a status message needs no
             // re-wrapping.
-            viewer.relayout(self.mode.width_px, self.mode.height_px, theme, scale);
+            viewer.relayout(pane.mode.width_px, pane.mode.height_px, theme, scale);
         }
     }
 
@@ -451,63 +483,87 @@ mod program {
     /// trusted picker. The title names the handed-over document, else the
     /// generic app name.
     ///
-    /// Returns the created window's id, the desktop session's [`ProcId`],
-    /// and the initialised [`Viewer`], or the reserved [`EXIT_NO_WINDOW`]
-    /// code for `main` when the session refuses the create itself.
-    fn open_initial_view(
-        client: &mut WindowClient<RtWindowTransport>,
-        grant: u64,
+    /// Returns the desktop session's [`ProcId`] from the create reply, or
+    /// the reserved exit code for the refusal — stated on `stderr` either
+    /// way, so a caller that carries on has already reported it.
+    ///
+    /// Only the *first* window carries a handed-over document; a later one
+    /// is the icon-bar slot asking for another file, so it starts on the
+    /// picker exactly as a plain launch does.
+    fn open_view(
+        surface: &mut WindowSurface,
         event_endpoint: u64,
         mode: &DisplayMode,
+        viewer: &mut Viewer,
         theme: &tairix_theme::Theme,
         scale: Scale,
-    ) -> Result<(u64, ProcId, Viewer), i32> {
-        let document_mode = tairix_rt::arg(1).is_some_and(|arg| arg == DOCUMENT_ROLE_ARG);
-        let title = if document_mode {
-            tairix_rt::arg(2)
+        document: Document,
+    ) -> Result<ProcId, i32> {
+        if surface.pane.is_some() {
+            return Err(EXIT_NO_WINDOW);
+        }
+        let title = match document {
+            Document::HandedOver => tairix_rt::arg(2)
                 .and_then(|name| core::str::from_utf8(name).ok())
-                .unwrap_or("Viewer")
-        } else {
-            "Viewer"
+                .unwrap_or("Viewer"),
+            Document::Pick => "Viewer",
         };
-        // The icon-bar presence first: a declared presence belongs to the
-        // process, so declaring it before this process owns a window is what
-        // makes its slot carry this menu from the moment it appears rather
-        // than being a slot the session derived from a window, which opens
-        // nothing.
-        declare_app_bar(client, event_endpoint);
+        let Some(frames) = WindowFrames::create(region_bytes(mode)) else {
+            return Err(fail(EXIT_NO_FRAMES, "shared frame region refused"));
+        };
+        let Some(grant) = frames.grant() else {
+            return Err(fail(EXIT_NO_FRAMES, "shared frame region refused"));
+        };
+        let Some(canvas) = Surface::new(mode.width_px, mode.height_px) else {
+            return Err(fail(EXIT_NO_WINDOW, "no memory for the window surface"));
+        };
         let sizing = WindowSizing::Resizable {
             min_width_px: MIN_WIN_WIDTH,
             min_height_px: MIN_WIN_HEIGHT,
         };
         let Ok((window, server)) =
-            client.create(grant, event_endpoint, FRAME_COUNT, mode, title, sizing)
+            surface
+                .client
+                .create(grant, event_endpoint, FRAME_COUNT, mode, title, sizing)
         else {
             return Err(fail(EXIT_NO_WINDOW, "desktop session refused the window"));
         };
+        surface.pane = Some(Pane {
+            window,
+            frames,
+            mode: *mode,
+            surface: canvas,
+        });
 
-        // The whole window's pointer- and keyboard-driven state: the
-        // current file view (or the status message shown in its place),
-        // the "Open…" button, and the scrollbar, all composed in the
-        // host-tested engine.
-        let mut viewer = Viewer::new();
-        if document_mode {
+        match document {
             // The launcher handed us the file on STDIN; display it now
             // instead of prompting. A refused read is stated honestly,
             // never faked.
-            match read_document() {
+            Document::HandedOver => match read_document() {
                 Some(bytes) => {
                     viewer.open(bytes, mode.width_px, mode.height_px, theme, scale);
                 }
                 None => viewer.show_status("Document read refused."),
-            }
-        } else if client.pick_file(window).is_err() {
+            },
             // A refused pick (another pick showing, or a session without
             // filesystem reach) is not fatal: the viewer stays open and
             // the "Open…" button or Enter asks again.
-            viewer.show_status("Pick refused.");
+            Document::Pick => {
+                if surface.client.pick_file(window).is_err() {
+                    viewer.show_status("Pick refused.");
+                }
+            }
         }
-        Ok((window, server, viewer))
+        Ok(server)
+    }
+
+    /// Where a fresh window's content comes from.
+    #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+    enum Document {
+        /// The file manager handed a document over on `STDIN`.
+        HandedOver,
+        /// Ask the session's trusted picker.
+        Pick,
     }
 
     /// What handling one delivered window event concluded: whether the
@@ -524,9 +580,21 @@ mod program {
         /// The "Open…" button or Enter asked for a fresh pick; a refusal
         /// is not fatal, so the caller issues it and moves on.
         request_pick: bool,
-        /// The window is already closed and unmapped; the caller ends the
-        /// program at exit code `0`.
-        close: bool,
+        /// What the event asks the program to do with its window.
+        then: Next,
+    }
+
+    /// What one delivered event asks of the window, beyond repainting it.
+    #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+    enum Next {
+        /// Nothing; carry on with the window as it is.
+        Carry,
+        /// Close the window, leaving the viewer on the icon bar.
+        Close,
+        /// Open a window, the viewer having none.
+        Open,
+        /// End the program.
+        Quit,
     }
 
     impl ViewerOutcome {
@@ -534,7 +602,7 @@ mod program {
         const IDLE: Self = Self {
             repaint: Repaint::Nothing,
             request_pick: false,
-            close: false,
+            then: Next::Carry,
         };
 
         /// A model refresh no control round could describe — new file
@@ -543,21 +611,35 @@ mod program {
         const WHOLE: Self = Self {
             repaint: Repaint::Whole,
             request_pick: false,
-            close: false,
+            then: Next::Carry,
         };
 
         /// Ask for a fresh pick; the outcome arrives as a later event.
         const REQUEST_PICK: Self = Self {
             repaint: Repaint::Nothing,
             request_pick: true,
-            close: false,
+            then: Next::Carry,
         };
 
-        /// The window is closed; end the program.
+        /// Close the window; the viewer stays on the icon bar.
         const CLOSE: Self = Self {
             repaint: Repaint::Nothing,
             request_pick: false,
-            close: true,
+            then: Next::Close,
+        };
+
+        /// Open a window: the icon-bar slot was clicked with none open.
+        const OPEN: Self = Self {
+            repaint: Repaint::Nothing,
+            request_pick: false,
+            then: Next::Open,
+        };
+
+        /// End the program: *Quit* was chosen.
+        const QUIT: Self = Self {
+            repaint: Repaint::Nothing,
+            request_pick: false,
+            then: Next::Quit,
         };
 
         /// Present what the round reported, but only when it changed
@@ -570,7 +652,7 @@ mod program {
                     Repaint::Nothing
                 },
                 request_pick: false,
-                close: false,
+                then: Next::Carry,
             }
         }
     }
@@ -590,19 +672,32 @@ mod program {
         scale: Scale,
         damage: &mut Region,
     ) -> ViewerOutcome {
-        let layout =
-            ViewerLayout::for_window(surface.mode.width_px, surface.mode.height_px, theme, scale);
+        // The two application-scoped events are addressed to the process
+        // rather than to a window, so they arrive whether or not one is open
+        // and are answered before anything is laid out. A row the
+        // declaration never carried names no command (fail closed).
+        match event {
+            WindowEvent::AppBarDefault => return ViewerOutcome::OPEN,
+            WindowEvent::AppBarMenu { item } => {
+                return if tairix_window::is_quit(item) {
+                    ViewerOutcome::QUIT
+                } else {
+                    ViewerOutcome::IDLE
+                };
+            }
+            _ => {}
+        }
+        // Every remaining event is window-scoped, so with none open there is
+        // nothing to lay out and nothing to apply it to.
+        let Some(mode) = surface.mode().copied() else {
+            return ViewerOutcome::IDLE;
+        };
+        let layout = ViewerLayout::for_window(mode.width_px, mode.height_px, theme, scale);
         match event {
             WindowEvent::FilePicked { handle, .. } => {
                 match read_picked(handle) {
                     Some(bytes) => {
-                        viewer.open(
-                            bytes,
-                            surface.mode.width_px,
-                            surface.mode.height_px,
-                            theme,
-                            scale,
-                        );
+                        viewer.open(bytes, mode.width_px, mode.height_px, theme, scale);
                     }
                     // A refused redemption or read delegated nothing the
                     // viewer can show; state it honestly.
@@ -651,7 +746,7 @@ mod program {
                         Repaint::Nothing
                     },
                     request_pick: outcome.open_requested,
-                    close: false,
+                    then: Next::Carry,
                 }
             }
             // The window manager resized (or maximized/restored) the
@@ -670,19 +765,10 @@ mod program {
                 surface.resize(mode_for(width_px, height_px), theme, scale, viewer);
                 ViewerOutcome::WHOLE
             }
-            // The desktop asked, or *Quit* was chosen on the viewer's own
-            // icon-bar slot: close the window and end; the frame region is
-            // unmapped by its own drop, so nothing is left pinned. A row the
-            // declaration never carried names no command and is ignored (fail
-            // closed).
-            WindowEvent::CloseRequested { .. } => {
-                let _ = surface.client.close(surface.window);
-                ViewerOutcome::CLOSE
-            }
-            WindowEvent::AppBarMenu { item } if tairix_window::is_quit(item) => {
-                let _ = surface.client.close(surface.window);
-                ViewerOutcome::CLOSE
-            }
+            // The desktop asked: close the window, which leaves the viewer
+            // on the icon bar rather than ending it. *Quit* on that slot is
+            // what ends it.
+            WindowEvent::CloseRequested { .. } => ViewerOutcome::CLOSE,
             // `DesktopChanged` is adopted by the caller before this
             // dispatch runs, which is also where the repaint a real
             // change needs is decided, so it asks for nothing further
@@ -695,13 +781,9 @@ mod program {
             //
             // A secondary press on Close asks to leave what the window is
             // showing; the viewer has nothing to leave but itself, and a
-            // primary press already closes it.
-            // The viewer declares no default action, so the session raises
-            // its window on a click rather than telling it — an
-            // `AppBarDefault` therefore cannot arrive, and an `AppBarMenu`
-            // naming any other row names no command of the viewer's. No menu
-            // outcome can arrive either: it answers an open the viewer never
-            // asks for.
+            // primary press already closes it. No menu outcome can arrive:
+            // it answers an open the viewer never asks for. The two
+            // application-scoped events were answered above.
             WindowEvent::AlternateCloseRequested { .. }
             | WindowEvent::AppBarDefault
             | WindowEvent::AppBarMenu { .. }
@@ -717,19 +799,23 @@ mod program {
             // redraw request that follows the window being shown again is
             // what re-attaches a fresh region and fills it.
             WindowEvent::ContentReleased { .. } => {
-                surface.frames.release();
+                if let Some(pane) = surface.pane.as_mut() {
+                    pane.frames.release();
+                }
                 ViewerOutcome::IDLE
             }
         }
     }
 
     /// The event loop: park, apply, repaint. A dead channel ends the app
-    /// fail-loud; a clean close ends it at zero.
+    /// fail-loud; *Quit* on its icon-bar slot ends it at zero.
     fn run_event_loop(
         surface: &mut WindowSurface,
         desktop: &mut Desktop,
         themes: &mut ThemeRegistry,
         viewer: &mut Viewer,
+        event_endpoint: u64,
+        initial_mode: DisplayMode,
         mut events: WindowEvents<RtEventSource>,
     ) -> i32 {
         loop {
@@ -748,12 +834,14 @@ mod program {
             let re_themed = match desktop.apply(&event) {
                 Ok(true) => {
                     themes.set_appearance(desktop.appearance());
-                    viewer.relayout(
-                        surface.mode.width_px,
-                        surface.mode.height_px,
-                        themes.active(),
-                        desktop.scale(),
-                    );
+                    if let Some(mode) = surface.mode().copied() {
+                        viewer.relayout(
+                            mode.width_px,
+                            mode.height_px,
+                            themes.active(),
+                            desktop.scale(),
+                        );
+                    }
                     true
                 }
                 Ok(false) => false,
@@ -775,14 +863,42 @@ mod program {
                 desktop.scale(),
                 &mut damage,
             );
-            if event_outcome.close {
-                return 0;
+            match event_outcome.then {
+                Next::Quit => {
+                    surface.close();
+                    return 0;
+                }
+                Next::Close => {
+                    surface.close();
+                    continue;
+                }
+                Next::Open => {
+                    // A fresh window is the slot asking for another file, so
+                    // it starts on the picker whatever this process was
+                    // handed at launch, and at the size a launch would give.
+                    // A refusal is already stated; the slot is still there
+                    // to try again from.
+                    let _ = open_view(
+                        surface,
+                        event_endpoint,
+                        &initial_mode,
+                        viewer,
+                        themes.active(),
+                        desktop.scale(),
+                        Document::Pick,
+                    );
+                    continue;
+                }
+                Next::Carry => {}
             }
             if event_outcome.request_pick {
                 // A refused pick (another pick showing) leaves the
                 // current content on screen; the outcome arrives as a
                 // later event.
-                let _ = surface.client.pick_file(surface.window);
+                if let Some(pane) = surface.pane.as_ref() {
+                    let window = pane.window;
+                    let _ = surface.client.pick_file(window);
+                }
             }
 
             // An adopted desktop change re-themes and re-densifies every
@@ -792,7 +908,10 @@ mod program {
             } else {
                 event_outcome.repaint
             };
-            let Some(damage) = present_damage(&surface.mode, repaint, &damage) else {
+            let Some(mode) = surface.mode().copied() else {
+                continue;
+            };
+            let Some(damage) = present_damage(&mode, repaint, &damage) else {
                 continue;
             };
             if surface
@@ -818,18 +937,12 @@ mod program {
             Err(code) => return code,
         };
 
-        // --- The shared window surface: FRAME_COUNT frames shaped as the
-        // initial window mode, created here and granted to the session. The
-        // viewer is resizable, so the region is re-created (and the old one
-        // unmapped) whenever the window manager reports a new client size.
+        // --- The window's shape. The viewer is resizable, so the frame
+        // region is re-created (and the old one unmapped) whenever the
+        // window manager reports a new client size; this is the size every
+        // window it opens starts at.
         let (initial_w, initial_h) = desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
         let mode = mode_for(initial_w, initial_h);
-        let Some(frames) = WindowFrames::create(region_bytes(&mode)) else {
-            return fail(EXIT_NO_FRAMES, "shared frame region refused");
-        };
-        let Some(grant) = frames.grant() else {
-            return fail(EXIT_NO_FRAMES, "shared frame region refused");
-        };
 
         // --- The event mailbox the app parks on.
         let (event_endpoint, set) = match bind_event_mailbox() {
@@ -837,31 +950,42 @@ mod program {
             Err(code) => return code,
         };
 
-        // --- Open the window (resizable: the viewer re-lays-out its text to
-        // each new client size) and load its initial content.
-        let (window, server, mut viewer) = match open_initial_view(
-            &mut client,
-            grant,
+        // The icon-bar presence first: a declared presence belongs to the
+        // process, so declaring it before this process owns a window is what
+        // makes its slot carry this menu from the moment it appears rather
+        // than being a slot the session derived from a window, which opens
+        // nothing.
+        declare_app_bar(&mut client, event_endpoint);
+        let mut surface = WindowSurface { client, pane: None };
+        // The whole window's pointer- and keyboard-driven state: the current
+        // file view (or the status message shown in its place), the "Open…"
+        // button, and the scrollbar, all composed in the host-tested engine.
+        let mut viewer = Viewer::new();
+        // How the viewer starts depends on how it was launched: handed a
+        // document on `STDIN` (the file manager's open hand-off), it shows
+        // that file at once; launched on its own, it asks the session's
+        // trusted picker.
+        let document = if tairix_rt::arg(1).is_some_and(|arg| arg == DOCUMENT_ROLE_ARG) {
+            Document::HandedOver
+        } else {
+            Document::Pick
+        };
+        // The viewer was started to show something, so a first window that
+        // will not open leaves it nothing to do and it ends fail-loud; every
+        // later one is a click on its slot, which reports and carries on.
+        let server = match open_view(
+            &mut surface,
             event_endpoint,
             &mode,
+            &mut viewer,
             themes.active(),
             desktop.scale(),
+            document,
         ) {
-            Ok(triple) => triple,
+            Ok(server) => server,
             Err(code) => return code,
         };
-
-        let Some(canvas) = Surface::new(mode.width_px, mode.height_px) else {
-            return fail(EXIT_NO_WINDOW, "no memory for the window surface");
-        };
-        let mut surface = WindowSurface {
-            client,
-            window,
-            frames,
-            mode,
-            surface: canvas,
-        };
-        let first = DamageRect::full(&surface.mode);
+        let first = DamageRect::full(&mode);
         if surface
             .present(&viewer, themes.active(), desktop.scale(), first)
             .is_err()
@@ -870,13 +994,21 @@ mod program {
         }
 
         // --- The event loop: park, apply, repaint. A dead channel ends
-        // the app fail-loud; a clean close ends it at zero.
+        // the app fail-loud; *Quit* ends it at zero.
         let events = WindowEvents::new(RtEventSource {
             endpoint: event_endpoint,
             set,
             server,
         });
-        run_event_loop(&mut surface, &mut desktop, &mut themes, &mut viewer, events)
+        run_event_loop(
+            &mut surface,
+            &mut desktop,
+            &mut themes,
+            &mut viewer,
+            event_endpoint,
+            mode,
+            events,
+        )
     }
 
     /// Route one wire pointer event into the viewer through the one shared

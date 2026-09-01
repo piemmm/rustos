@@ -56,8 +56,9 @@ A.4 gate found on its first run, which is the one open per-control damage gap
 and the reason A.4's damage bound sits where it does — **Stage F.2**'s packed
 candidates, which F.1's measurements narrow to the blur window and the resample
 row filter and which are aarch64-only until Stage G, **D.5**'s approved
-half-resolution blur (visual comparison first), and **Stage G**, still behind a
-User decision. `plans/OPEN-DEFECTS.md` D37 is a confirmed defect fixed
+half-resolution blur (visual comparison first), **D.13**'s transmittance bound
+(the measured reason the terminal ships with its backdrop blur off), and
+**Stage G**, still behind a User decision. `plans/OPEN-DEFECTS.md` D37 is a confirmed defect fixed
 independently of this schedule.
 
 Closed: **the A.4 hover gate's frost bound is now normalised against the
@@ -616,7 +617,7 @@ measuring this stage no longer has a 0.5 Hz whole-bar repaint underneath it.
 
 ---
 
-## Stage D — Make blur cost what it changes  **[done; D.5 is a User decision]**
+## Stage D — Make blur cost what it changes  **[done; D.5 is a User decision, D.13 not started]**
 
 ### D.1 Four damage funnels, because the kind of change decides what a frame owes
 There is no bare `damage.add` in the compositor. A mutation uses the **narrowest
@@ -885,6 +886,55 @@ crosses the bar, and the bar's own `keep_topmost` re-assert crosses back. Both
 crossings used to mark a large translucent window in full and drop its frost.
 
 ---
+
+### D.13 A frost that cannot change an output pixel — **not started**
+Stage D makes a frost cost what it *changes*; it does not yet ask whether the
+frost is **seen at all**. Every blurred window is frosted over its whole
+rectangle each frame it is recomputed, however deeply it is buried.
+
+Measured on `tairix-test-desktop-pressure-qemu-aarch64` (aarch64, 1 CPU,
+ramfb), which cascades 32 terminal windows. With the terminal defaulting to
+80% opacity **and a half-strength backdrop blur** the run never finished: cost
+per window climbed linearly (+0.22 s for window 2, +3.5 s for 16, +8.6 s for
+26) and the guest stalled at 26 of 32, killed at the 600 s ceiling. With the
+same tree and the blur default off it passed in **37 s**. The translucency is
+free; the blur is the whole cost. `CASCADE_WRAP` puts those windows on eight
+positions, so the scene is genuinely ~26 overlapping frosted layers, and the
+retained frosts are ~22 screenfuls against a `screenful_ui_cache` budget the
+test is simultaneously driving down — so they thrash and every frame re-blurs.
+
+Ordinary occlusion cannot help: `Window::opaque_run` requires `alpha == 255`
+and a translucent terminal yields no opaque runs, so nothing culls.
+
+**The exact bound.** Compositing is `over`, so a frost's contribution to the
+final pixel is `T = ∏(1 − α)` across its own window and every one above it.
+An 8-bit channel cannot record a contribution below half an LSB, so a frost
+with `255·T < 0.5` is *provably* invisible and need not be computed. At 80%
+opacity that is four layers deep, turning per-frame blur cost from O(windows)
+into O(1).
+
+What it needs, none of which exists yet:
+
+- **A sound per-window alpha lower bound.** Content is painted in place over
+  the damaged region only, so a full scan per present would turn the dominant
+  interaction (typing) from O(damage) into O(area). Instead `Surface` keeps a
+  `min_alpha` that partial writes *lower* (always sound — under-estimating
+  opacity can only fail to skip, never wrongly skip) and that a full rescan
+  refreshes once the written area since the last refresh reaches the surface
+  area, which is amortised free.
+- **A transmittance walk** per blurred window: from its own layer upward,
+  accumulate `T *= 1 − min_alpha_j` over the shrinking intersection of
+  `inset(bounds_j, corner_reach_j)`, stopping at `255·T < 0.5`.
+- **A partial frost.** The resulting rectangle is fed to the existing
+  `blur_backdrop(index, keep)` core mechanism, and a frost computed with a
+  skipped core is *not* retained — the occluders above it may move away, and
+  the retained-frost contract records a whole rectangle.
+
+Verified against the byte-for-byte equivalence harness that already composes a
+scene both ways (`set_opaque_runs`, `frost_reuse`), since this changes which
+pixels are computed. Until it lands the terminal ships translucent with the
+blur off (`plans/GUI-TERMINAL.md` §2) — the blur is one slider away and costs
+only the window that asks for it.
 
 ## Stage E — One present per frame, and a frame deadline  **[done]**
 

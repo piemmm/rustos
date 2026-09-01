@@ -15,7 +15,7 @@ use tairix_abi::switchboard_ipc::{
 };
 use tairix_abi::sysinfo::CACHE_LABEL_MAX;
 use tairix_abi::window_ipc::{
-    AppBar, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow,
+    AppBar, AppBarClick, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow,
 };
 use tairix_abi::{
     AppInfoHeader, DriverError, Errno, ProcId, ABI_VERSION_CURRENT, APPINFO_MAGIC, BUNDLE_ID_MAX,
@@ -185,8 +185,8 @@ fn window_owner_wide(index: usize) -> ProcId {
     ProcId::from_raw(raw)
 }
 
-/// An icon-bar declaration offering *Quit*, with `default_action` as given.
-fn app_bar(default_action: bool) -> AppBar {
+/// An icon-bar declaration offering *Quit*, answering a click as given.
+fn app_bar(click: AppBarClick) -> AppBar {
     let mut menu = AppMenu::EMPTY;
     menu.push(AppMenuRow::Item(AppMenuItem::new(
         AppMenuItemId::new(1).expect("non-zero"),
@@ -195,7 +195,7 @@ fn app_bar(default_action: bool) -> AppBar {
     .expect("fits");
     AppBar {
         event_endpoint: 4,
-        default_action,
+        click,
         menu,
     }
 }
@@ -214,7 +214,7 @@ fn with_artwork<T>(resolve: impl FnOnce(&mut dyn ArtworkResolver, &mut ArtworkCa
 /// The processes the strip holds, in display order.
 fn owners(service: &mut AppBarService, windows: &[(ProcId, TaskId)]) -> Vec<ProcId> {
     service
-        .strip(windows, |_| None)
+        .strip(windows, |_| None, &mut MemoryAssets::default())
         .into_iter()
         .map(|group| group.owner)
         .collect()
@@ -3751,9 +3751,11 @@ fn the_strip_groups_windows_under_the_process_that_owns_them() {
     let one = window_owner(1);
     let two = window_owner(2);
     let windows = vec![(one, TaskId(0)), (two, TaskId(1)), (one, TaskId(2))];
-    let strip = service.strip(&windows, |owner| {
-        (owner == one).then(|| String::from("/Apps/terminal.app"))
-    });
+    let strip = service.strip(
+        &windows,
+        |owner| (owner == one).then(|| String::from("/Apps/terminal.app")),
+        &mut MemoryAssets::default(),
+    );
     assert_eq!(strip.len(), 2, "one slot per process, not per window");
     assert_eq!(strip[0].owner, one);
     assert_eq!(strip[0].bundle.as_deref(), Some("/Apps/terminal.app"));
@@ -3771,13 +3773,15 @@ fn a_declaration_holds_a_slot_with_no_windows_and_leaves_on_withdrawal() {
     let mut service = AppBarService::new();
     let owner = window_owner(1);
     assert!(!service.take_dirty());
-    service.declare(owner, &app_bar(true)).expect("declared");
+    service
+        .declare(owner, &app_bar(AppBarClick::Open))
+        .expect("declared");
     assert!(
         service.take_dirty(),
         "a declaration latches the strip dirty"
     );
 
-    let strip = service.strip(&[], |_| None);
+    let strip = service.strip(&[], |_| None, &mut MemoryAssets::default());
     assert_eq!(strip.len(), 1, "a declaring application keeps its slot");
     assert_eq!(strip[0].windows, Vec::new());
     assert!(service.declaration(owner).is_some());
@@ -3790,28 +3794,39 @@ fn a_declaration_holds_a_slot_with_no_windows_and_leaves_on_withdrawal() {
             owner,
             &AppBar {
                 event_endpoint: 9,
-                default_action: false,
+                click: AppBarClick::Raise,
                 menu,
             },
         )
         .expect("re-declared");
-    assert_eq!(service.strip(&[], |_| None).len(), 1);
+    assert_eq!(
+        service
+            .strip(&[], |_| None, &mut MemoryAssets::default())
+            .len(),
+        1
+    );
     let declared = service.declaration(owner).expect("held");
-    assert!(!declared.default_action);
+    assert_eq!(declared.click, AppBarClick::Raise);
     assert_eq!(declared.menu.len(), 1);
 
     // The window engine proved the process gone: the slot goes with it.
     service.withdraw(owner);
     assert!(service.take_dirty());
     assert!(service.declaration(owner).is_none());
-    assert!(service.strip(&[], |_| None).is_empty());
+    assert!(service
+        .strip(&[], |_| None, &mut MemoryAssets::default())
+        .is_empty());
 }
 
 #[test]
-fn a_window_alone_holds_a_slot_with_no_menu_and_no_default_action() {
+fn a_window_alone_holds_a_slot_with_no_menu_and_a_raising_click() {
     let mut service = AppBarService::new();
     let owner = window_owner(1);
-    let strip = service.strip(&[(owner, TaskId(0))], |_| None);
+    let strip = service.strip(
+        &[(owner, TaskId(0))],
+        |_| None,
+        &mut MemoryAssets::default(),
+    );
     assert_eq!(strip.len(), 1, "no window is ever unreachable");
     let mut reader = MemoryAssets::default();
     let slots =
@@ -3820,15 +3835,19 @@ fn a_window_alone_holds_a_slot_with_no_menu_and_no_default_action() {
         slots[0].menu().is_empty(),
         "the session invents no menu on an application's behalf"
     );
-    assert!(!slots[0].handles_default());
+    assert_eq!(slots[0].click(), AppBarClick::Raise);
 }
 
 #[test]
 fn a_slot_keeps_its_place_while_it_lives() {
     let mut service = AppBarService::new();
     let (first, second, third) = (window_owner(1), window_owner(2), window_owner(3));
-    service.declare(first, &app_bar(true)).expect("declared");
-    service.declare(second, &app_bar(true)).expect("declared");
+    service
+        .declare(first, &app_bar(AppBarClick::Open))
+        .expect("declared");
+    service
+        .declare(second, &app_bar(AppBarClick::Open))
+        .expect("declared");
     assert_eq!(
         owners(&mut service, &[]),
         vec![first, second],
@@ -3839,7 +3858,9 @@ fn a_slot_keeps_its_place_while_it_lives() {
     // its place and the newcomer joins the end, so the strip never
     // reshuffles under the pointer.
     service.withdraw(first);
-    service.declare(third, &app_bar(false)).expect("declared");
+    service
+        .declare(third, &app_bar(AppBarClick::Raise))
+        .expect("declared");
     assert_eq!(owners(&mut service, &[]), vec![second, third]);
 }
 
@@ -3848,17 +3869,20 @@ fn a_declaration_is_refused_past_the_strips_bound() {
     let mut service = AppBarService::new();
     for index in 0..MAX_BAR_APPS {
         service
-            .declare(window_owner_wide(index), &app_bar(false))
+            .declare(window_owner_wide(index), &app_bar(AppBarClick::Raise))
             .expect("fits");
     }
     assert_eq!(
-        service.declare(window_owner_wide(MAX_BAR_APPS), &app_bar(false)),
+        service.declare(
+            window_owner_wide(MAX_BAR_APPS),
+            &app_bar(AppBarClick::Raise)
+        ),
         Err(Errno::NoSpace),
         "a fork bomb cannot grow the strip without bound"
     );
     // An application already on the bar may still re-declare at the bound.
     assert_eq!(
-        service.declare(window_owner_wide(0), &app_bar(true)),
+        service.declare(window_owner_wide(0), &app_bar(AppBarClick::Open)),
         Ok(())
     );
 }
@@ -3882,6 +3906,7 @@ fn a_slots_identity_is_the_signed_manifests_and_a_missing_one_states_only_a_name
                 None
             }
         },
+        &mut reader,
     );
     let slots =
         with_artwork(|resolver, cache| service.slots(&strip, &mut reader, (resolver, cache, 24)));
@@ -3914,7 +3939,7 @@ fn a_manifest_is_read_once_per_bundle_and_forgotten_when_nothing_runs_from_it() 
     );
     let bundle = |_| Some(String::from("/Apps/terminal.app"));
 
-    let strip = service.strip(&[(one, TaskId(0)), (two, TaskId(1))], bundle);
+    let strip = service.strip(&[(one, TaskId(0)), (two, TaskId(1))], bundle, &mut reader);
     let _ =
         with_artwork(|resolver, cache| service.slots(&strip, &mut reader, (resolver, cache, 24)));
     assert_eq!(
@@ -3925,9 +3950,9 @@ fn a_manifest_is_read_once_per_bundle_and_forgotten_when_nothing_runs_from_it() 
 
     // The bundle's last application leaves, so its identity is dropped
     // rather than held for a process that will never return.
-    let strip = service.strip(&[], bundle);
+    let strip = service.strip(&[], bundle, &mut reader);
     assert!(strip.is_empty());
-    let strip = service.strip(&[(one, TaskId(0))], bundle);
+    let strip = service.strip(&[(one, TaskId(0))], bundle, &mut reader);
     let _ =
         with_artwork(|resolver, cache| service.slots(&strip, &mut reader, (resolver, cache, 24)));
     assert_eq!(reader.reads("/Apps/terminal.app/AppInfo"), 2);
@@ -3938,20 +3963,118 @@ fn a_slot_carries_the_declaration_its_own_process_made() {
     let mut service = AppBarService::new();
     let (declaring, silent) = (window_owner(1), window_owner(2));
     service
-        .declare(declaring, &app_bar(true))
+        .declare(declaring, &app_bar(AppBarClick::Open))
         .expect("declared");
-    let strip = service.strip(&[(silent, TaskId(0))], |_| None);
+    let strip = service.strip(
+        &[(silent, TaskId(0))],
+        |_| None,
+        &mut MemoryAssets::default(),
+    );
     let mut reader = MemoryAssets::default();
     let slots =
         with_artwork(|resolver, cache| service.slots(&strip, &mut reader, (resolver, cache, 24)));
     assert_eq!(slots.len(), 2);
-    assert!(slots[0].handles_default(), "the declaring process's slot");
+    assert_eq!(
+        slots[0].click(),
+        AppBarClick::Open,
+        "the declaring process's slot"
+    );
     assert!(!slots[0].menu().is_empty());
-    assert!(
-        !slots[1].handles_default(),
+    assert_eq!(
+        slots[1].click(),
+        AppBarClick::Raise,
         "one process's declaration never reaches another's slot"
     );
     assert!(slots[1].menu().is_empty());
+}
+
+/// A bundle whose signed manifest presents no icon-bar slot gets none, by
+/// either of the two routes onto the strip — the Switchboard and the
+/// wallpaper chooser are already reached another way, so a slot would be a
+/// duplicate.
+#[test]
+fn a_bundle_that_presents_no_icon_bar_slot_is_off_the_strip_either_way() {
+    const ICONLESS: &str = "/System/Services/switchboard.app";
+    const ORDINARY: &str = "/Apps/terminal.app";
+    let mut reader = MemoryAssets::default()
+        .with(
+            &format!("{ICONLESS}/AppInfo"),
+            &iconless_manifest_fixture("Switchboard"),
+        )
+        .with(
+            &format!("{ORDINARY}/AppInfo"),
+            &manifest_fixture("Terminal", None),
+        );
+    let (quiet, ordinary) = (window_owner(1), window_owner(2));
+    let bundle = move |owner: ProcId| {
+        Some(String::from(if owner == quiet {
+            ICONLESS
+        } else {
+            ORDINARY
+        }))
+    };
+
+    // A window alone would otherwise be enough, and so would a declaration.
+    let mut service = AppBarService::new();
+    service
+        .declare(quiet, &app_bar(AppBarClick::Open))
+        .expect("declared");
+    let strip = service.strip(
+        &[(quiet, TaskId(0)), (ordinary, TaskId(1))],
+        bundle,
+        &mut reader,
+    );
+    assert_eq!(
+        strip.len(),
+        1,
+        "only the ordinary application is on the bar"
+    );
+    assert_eq!(strip[0].owner, ordinary);
+    assert!(
+        service.is_iconless(quiet),
+        "and the embedder is told, so the absent window does not read as a stale strip"
+    );
+    assert!(!service.is_iconless(ordinary));
+
+    // Its manifest is remembered rather than re-read on every refresh, even
+    // though it never appears on the strip.
+    let before = reader.reads(&format!("{ICONLESS}/AppInfo"));
+    let _ = service.strip(
+        &[(quiet, TaskId(0)), (ordinary, TaskId(1))],
+        bundle,
+        &mut reader,
+    );
+    assert_eq!(reader.reads(&format!("{ICONLESS}/AppInfo")), before);
+}
+
+/// A manifest a *process* could not have forged: the claim is a signed
+/// header bit, so a bundle opts out of the bar and a running program cannot.
+#[test]
+fn only_the_manifest_takes_a_bundle_off_the_bar_not_an_unreadable_one() {
+    let bundle = |_| Some(String::from("/Apps/ghost.app"));
+    let mut service = AppBarService::new();
+    let strip = service.strip(
+        &[(window_owner(1), TaskId(0))],
+        bundle,
+        &mut MemoryAssets::default(),
+    );
+    assert_eq!(
+        strip.len(),
+        1,
+        "an absent or undecodable manifest never gives a slot up"
+    );
+
+    let mut service = AppBarService::new();
+    let strip = service.strip(
+        &[(window_owner(1), TaskId(0))],
+        |_| None,
+        &mut MemoryAssets::default(),
+    );
+    assert_eq!(
+        strip.len(),
+        1,
+        "and a process the desktop did not launch has no manifest to opt out in"
+    );
 }
 
 #[test]
@@ -4035,7 +4158,7 @@ fn the_window_host_relays_a_declaration_and_its_withdrawal() {
             menu: &mut MenuChain::new(),
             seat_held: false,
         };
-        tairix_window::WindowHost::app_bar_declared(&mut host, owner, &app_bar(true))
+        tairix_window::WindowHost::app_bar_declared(&mut host, owner, &app_bar(AppBarClick::Open))
             .expect("the session lists it");
         tairix_window::WindowHost::app_bar_withdrawn(&mut host, window_owner(9));
     }
@@ -4073,7 +4196,7 @@ fn secondary_press_over_an_app_slot_opens_the_menu_it_declared() {
         &mut comp,
         vec![
             tairix_taskbar::AppSlot::new("Terminal", IconKind::AppBundle)
-                .with_declaration(menu, true),
+                .with_declaration(menu, AppBarClick::Open),
         ],
     );
 
@@ -4639,6 +4762,14 @@ pub(crate) fn manifest_fixture(name: &str, icon: Option<&str>) -> Vec<u8> {
         h.library_icon[..icon.len()].copy_from_slice(icon.as_bytes());
     }
     h.to_le_bytes().to_vec()
+}
+
+/// A manifest whose signed header says the bundle presents no icon-bar slot.
+fn iconless_manifest_fixture(name: &str) -> Vec<u8> {
+    let bytes = manifest_fixture(name, None);
+    let mut header = AppInfoHeader::from_bytes(&bytes).expect("the fixture decodes");
+    header.flags |= tairix_abi::APPINFO_FLAG_NO_ICON_BAR;
+    header.to_le_bytes().to_vec()
 }
 
 // ---- notification relay ---------------------------------------------
@@ -7582,9 +7713,11 @@ fn a_bundle_icon_is_read_and_decoded_once_and_reused_by_the_shared_cache() {
         &manifest_fixture("One", Some("icon.svg")),
     );
     let mut service = AppBarService::new();
-    let strip = service.strip(&[(window_owner(1), TaskId(0))], |_| {
-        Some(String::from(bundle))
-    });
+    let strip = service.strip(
+        &[(window_owner(1), TaskId(0))],
+        |_| Some(String::from(bundle)),
+        &mut manifests,
+    );
 
     let mut resolve = || {
         let mut inline = InlineArtwork::new(&mut reader, &mut rasteriser);
@@ -7876,10 +8009,12 @@ fn a_desktop_with_no_artwork_at_all_still_draws_every_icon_from_its_glyphs() {
     // The application strip: a slot whose bundle declares an icon nothing
     // will serve still exists, so the strip keeps it.
     let mut service = AppBarService::new();
-    let strip = service.strip(&[(window_owner(1), TaskId(0))], |_| {
-        Some(String::from("/Apps/one.app"))
-    });
     let mut manifests = MemoryAssets::default();
+    let strip = service.strip(
+        &[(window_owner(1), TaskId(0))],
+        |_| Some(String::from("/Apps/one.app")),
+        &mut manifests,
+    );
     let slots = {
         let mut inline = InlineArtwork::new(&mut reader, &mut rasteriser);
         service.slots(&strip, &mut manifests, (&mut inline, &mut cache, 24))
@@ -8754,7 +8889,7 @@ fn every_menu_chain_surface_frosts_what_is_behind_it() {
         epoch: comp.chrome_epoch(),
     };
     let facts = FactList::new(vec![Fact::new("Name", "App")]);
-    let mut wire = app_bar(false).menu;
+    let mut wire = app_bar(AppBarClick::Raise).menu;
     wire.push(AppMenuRow::Info)
         .expect("an information row fits");
     let mut chain = MenuChain::new();

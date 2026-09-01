@@ -8,9 +8,9 @@
 //! above it and *Quit* below, so this menu reads in the same order as every
 //! other application's.
 //!
-//! A primary click on the slot is the terminal's to handle
-//! ([`DEFAULT_ACTION`]), and means the same as *New window*: the readiest
-//! thing a terminal can do for you is give you another one.
+//! A primary click on the slot is the terminal's to handle ([`SLOT_CLICK`]),
+//! and means the same as *New window*: the readiest thing a terminal can do
+//! for you is give you another one.
 //!
 //! The row ids live here rather than in the program body because two
 //! independent readers need them: the running program, which matches the
@@ -18,7 +18,9 @@
 //! reconstructs the menu to know where to click. Naming them once is what
 //! stops the two from drifting.
 
-use tairix_abi::window_ipc::{AppBar, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow};
+use tairix_abi::window_ipc::{
+    AppBar, AppBarClick, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow,
+};
 use tairix_abi::Errno;
 use tairix_window::QUIT_ROW;
 
@@ -29,13 +31,13 @@ use tairix_window::QUIT_ROW;
 /// naming the same id.
 pub const ROW_NEW_WINDOW: u16 = QUIT_ROW + 1;
 
-/// Whether a primary click on the terminal's icon-bar slot is delivered to
-/// the terminal rather than raising a window.
+/// What a primary click on the terminal's icon-bar slot does.
 ///
-/// `true`: a click opens a fresh window, exactly as the *New window* row
-/// does. A terminal's windows are interchangeable, so raising one of them is
-/// less use than making another.
-pub const DEFAULT_ACTION: bool = true;
+/// Every click opens a fresh window, exactly as the *New window* row does —
+/// including when the terminal already has windows. They are
+/// interchangeable, so raising one of them is less use than making another,
+/// and a terminal left on the bar with none is opened by the same click.
+pub const SLOT_CLICK: AppBarClick = AppBarClick::Open;
 
 /// Which command a chosen icon-bar row names.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -74,7 +76,7 @@ pub fn declaration(endpoint: u64) -> Result<AppBar, Errno> {
         AppMenuItemId::new(ROW_NEW_WINDOW)?,
         AppMenuLabel::new("New window")?,
     ));
-    tairix_window::declaration(endpoint, DEFAULT_ACTION, &[new_window])
+    tairix_window::declaration(endpoint, SLOT_CLICK, &[new_window])
 }
 
 #[cfg(test)]
@@ -86,7 +88,7 @@ mod tests {
     fn the_declaration_reads_information_new_window_then_quit() {
         let bar = declaration(42).expect("the fixed rows fit");
         assert_eq!(bar.event_endpoint, 42);
-        assert!(bar.default_action);
+        assert_eq!(bar.click, AppBarClick::Open);
         let rows: alloc::vec::Vec<AppMenuRowView<'_>> =
             bar.menu.rows().map(|(row, _)| row).collect();
         assert_eq!(rows.len(), 4);

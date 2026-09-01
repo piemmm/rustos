@@ -9,8 +9,8 @@ use tairix_abi::switchboard_ipc::{
     TrayTask, TrayTaskName,
 };
 use tairix_abi::window_ipc::{
-    AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole,
-    AppMenuRow, AppMenuShortcut, APP_MENU_MAX_ROWS,
+    AppBarClick, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason,
+    AppMenuRole, AppMenuRow, AppMenuShortcut, APP_MENU_MAX_ROWS,
 };
 use tairix_controls::{
     damage, ground_fill, plate_border, ActivityState, ChromeLayer, ControlRole, ControlState,
@@ -1267,7 +1267,7 @@ fn app_slot_accessors_report_what_the_session_resolved() {
     bar.set_apps(alloc::vec![app("Editor")
         .with_artwork(art)
         .with_windows(alloc::vec![TaskId(1), TaskId(2)])
-        .with_declaration(declared_menu(), true)
+        .with_declaration(declared_menu(), AppBarClick::Open)
         .with_identity(identity("Editor"))]);
 
     assert_eq!(bar.apps().len(), 1);
@@ -1277,7 +1277,7 @@ fn app_slot_accessors_report_what_the_session_resolved() {
     assert_eq!(slot.icon(), IconKind::AppBundle);
     assert!(slot.artwork().is_some());
     assert_eq!(slot.windows(), &[TaskId(1), TaskId(2)]);
-    assert!(slot.handles_default());
+    assert_eq!(slot.click(), AppBarClick::Open);
     assert_eq!(slot.menu(), &declared_menu());
     assert_eq!(slot.identity(), &identity("Editor"));
 }
@@ -1285,11 +1285,12 @@ fn app_slot_accessors_report_what_the_session_resolved() {
 #[test]
 fn an_undeclared_app_slot_carries_its_label_as_its_whole_identity() {
     // A process the session gave a slot because it owns a window, without a
-    // declaration of its own: no menu, no default action, and an identity
-    // that states only the name — never a fabricated version or author.
+    // declaration of its own: no menu, a click the session answers by
+    // raising, and an identity that states only the name — never a
+    // fabricated version or author.
     let slot = app("Unattributed");
     assert!(slot.menu().is_empty());
-    assert!(!slot.handles_default());
+    assert_eq!(slot.click(), AppBarClick::Raise);
     assert!(slot.windows().is_empty());
     assert_eq!(slot.identity().name, "Unattributed");
     assert_eq!(slot.identity().version, "");
@@ -1325,7 +1326,7 @@ fn a_click_on_a_declared_default_action_reaches_the_application() {
     let mut bar = bottom_bar();
     bar.set_apps(alloc::vec![app("Terminal")
         .with_windows(alloc::vec![TaskId(1)])
-        .with_declaration(declared_menu(), true)]);
+        .with_declaration(declared_menu(), AppBarClick::Open)]);
     let mut input = TaskbarInput::new();
     let slot = centre_of(bar.layout(Scale::ONE).apps[0]);
     assert_eq!(
@@ -1341,12 +1342,12 @@ fn a_click_on_a_declared_default_action_reaches_the_application() {
 }
 
 #[test]
-fn a_click_with_no_default_action_raises_the_applications_window() {
+fn a_click_on_a_raising_declaration_raises_the_applications_window() {
     let mut bar = bottom_bar();
     bar.tasks_mut().add(TaskId(4), "Widgets");
     bar.set_apps(alloc::vec![app("Widgets")
         .with_windows(alloc::vec![TaskId(4)])
-        .with_declaration(declared_menu(), false)]);
+        .with_declaration(declared_menu(), AppBarClick::Raise)]);
     let mut input = TaskbarInput::new();
     let slot = centre_of(bar.layout(Scale::ONE).apps[0]);
     assert_eq!(
@@ -1359,7 +1360,7 @@ fn a_click_with_no_default_action_raises_the_applications_window() {
 fn a_click_on_an_application_with_no_windows_and_no_action_does_nothing() {
     let mut bar = bottom_bar();
     bar.set_apps(alloc::vec![
-        app("Idle").with_declaration(declared_menu(), false)
+        app("Idle").with_declaration(declared_menu(), AppBarClick::Raise)
     ]);
     let mut input = TaskbarInput::new();
     let slot = centre_of(bar.layout(Scale::ONE).apps[0]);
@@ -1368,6 +1369,49 @@ fn a_click_on_an_application_with_no_windows_and_no_action_does_nothing() {
         TaskbarResponse::Ignored,
         "nothing to raise and nothing declared: the honest answer is nothing"
     );
+}
+
+/// The whole click matrix in one place: each declared behaviour, with and
+/// without a window, so the resident-application case cannot drift from the
+/// two that were always here.
+#[test]
+fn each_declared_click_answers_the_same_way_with_and_without_a_window() {
+    for (click, with_window, without_window) in [
+        (
+            AppBarClick::Raise,
+            TaskbarResponse::AppRaise { app: 0 },
+            TaskbarResponse::Ignored,
+        ),
+        (
+            AppBarClick::RaiseOrOpen,
+            TaskbarResponse::AppRaise { app: 0 },
+            TaskbarResponse::AppDefault { app: 0 },
+        ),
+        (
+            AppBarClick::Open,
+            TaskbarResponse::AppDefault { app: 0 },
+            TaskbarResponse::AppDefault { app: 0 },
+        ),
+    ] {
+        for (windows, expected) in [
+            (alloc::vec![TaskId(1)], with_window),
+            (alloc::vec![], without_window),
+        ] {
+            let mut bar = bottom_bar();
+            bar.tasks_mut().add(TaskId(1), "Resident");
+            bar.set_apps(alloc::vec![app("Resident")
+                .with_windows(windows.clone())
+                .with_declaration(declared_menu(), click)]);
+            let mut input = TaskbarInput::new();
+            let slot = centre_of(bar.layout(Scale::ONE).apps[0]);
+            assert_eq!(
+                press_at(&mut input, &mut bar, slot.x, slot.y),
+                expected,
+                "{click:?} with {} window(s)",
+                windows.len()
+            );
+        }
+    }
 }
 
 #[test]
@@ -1445,7 +1489,7 @@ fn ask_app_menu(input: &mut TaskbarInput, bar: &mut Taskbar) -> Option<MenuReque
 fn bar_with_declared_app() -> Taskbar {
     let mut bar = bottom_bar();
     bar.set_apps(alloc::vec![app("Terminal")
-        .with_declaration(declared_menu(), true)
+        .with_declaration(declared_menu(), AppBarClick::Open)
         .with_identity(identity("Terminal"))]);
     let _ = bar.take_repaint();
     bar
@@ -1545,7 +1589,7 @@ fn the_menu_states_exactly_the_rows_the_application_declared() {
 
     let mut bar = bottom_bar();
     bar.set_apps(alloc::vec![app("Terminal")
-        .with_declaration(menu, true)
+        .with_declaration(menu, AppBarClick::Open)
         .with_identity(identity("Terminal"))]);
     let mut input = TaskbarInput::new();
     let request = ask_app_menu(&mut input, &mut bar).expect("the slot asks for its menu");
@@ -1601,7 +1645,7 @@ fn a_menu_at_the_row_cap_states_every_row_it_declared() {
 
     let mut bar = bottom_bar();
     bar.set_apps(alloc::vec![app("Busy")
-        .with_declaration(menu, false)
+        .with_declaration(menu, AppBarClick::Raise)
         .with_identity(identity("Busy"))]);
     let mut input = TaskbarInput::new();
     let request = ask_app_menu(&mut input, &mut bar).expect("the slot asks for its menu");
@@ -1631,7 +1675,7 @@ fn a_disabled_declared_row_is_stated_disabled_with_its_reason() {
     .expect("fits");
     let mut bar = bottom_bar();
     bar.set_apps(alloc::vec![app("Terminal")
-        .with_declaration(menu, true)
+        .with_declaration(menu, AppBarClick::Open)
         .with_identity(identity("Terminal"))]);
     let mut input = TaskbarInput::new();
     let request = ask_app_menu(&mut input, &mut bar).expect("the slot asks for its menu");
@@ -1670,7 +1714,7 @@ fn a_declared_submenu_becomes_a_child_plate_whose_rows_keep_their_own_ids() {
     menu.push_under(item(8, "Green"), 0).expect("fits");
     let mut bar = bottom_bar();
     bar.set_apps(alloc::vec![app("Terminal")
-        .with_declaration(menu, true)
+        .with_declaration(menu, AppBarClick::Open)
         .with_identity(identity("Terminal"))]);
     let mut input = TaskbarInput::new();
     let request = ask_app_menu(&mut input, &mut bar).expect("the slot asks for its menu");
@@ -1710,7 +1754,7 @@ fn a_separator_inside_a_declared_submenu_opens_a_group_rather_than_a_blank_row()
     menu.push_under(item(8, "Green"), 0).expect("fits");
     let mut bar = bottom_bar();
     bar.set_apps(alloc::vec![app("Terminal")
-        .with_declaration(menu, true)
+        .with_declaration(menu, AppBarClick::Open)
         .with_identity(identity("Terminal"))]);
     let mut input = TaskbarInput::new();
     let request = ask_app_menu(&mut input, &mut bar).expect("the slot asks for its menu");
@@ -1765,7 +1809,7 @@ fn the_information_row_states_the_manifest_attested_identity() {
 fn a_manifest_without_purpose_or_author_states_only_what_it_has() {
     let mut bar = bottom_bar();
     bar.set_apps(alloc::vec![app("Sparse")
-        .with_declaration(declared_menu(), false)
+        .with_declaration(declared_menu(), AppBarClick::Raise)
         .with_identity(AppIdentity {
             name: String::from("Sparse"),
             version: String::from("0.1"),
@@ -2745,7 +2789,7 @@ fn a_modal_surface_keeps_the_picker_from_opening_underneath_it() {
     }
     bar.set_apps(alloc::vec![app("Terminal")
         .with_windows(alloc::vec![TaskId(1), TaskId(2)])
-        .with_declaration(declared_menu(), true)]);
+        .with_declaration(declared_menu(), AppBarClick::Open)]);
     let mut input = TaskbarInput::new();
     let slot = centre_of(bar.layout(Scale::ONE).apps[0]);
 
@@ -2769,7 +2813,7 @@ fn clicking_the_slot_closes_the_picker_and_acts_on_the_application() {
     }
     bar.set_apps(alloc::vec![app("Terminal")
         .with_windows(alloc::vec![TaskId(1), TaskId(2)])
-        .with_declaration(declared_menu(), true)]);
+        .with_declaration(declared_menu(), AppBarClick::Open)]);
     bar.show_window_picker(0, cells(&bar, 0), Scale::ONE);
     let mut input = TaskbarInput::new();
     let slot = centre_of(bar.layout(Scale::ONE).apps[0]);
@@ -2868,7 +2912,7 @@ fn click_away_dismisses_without_acting_on_what_it_hit() {
     bar.tasks_mut().add(TaskId(1), "Editor");
     bar.set_apps(alloc::vec![app("Editor")
         .with_windows(alloc::vec![TaskId(1)])
-        .with_declaration(declared_menu(), true)]);
+        .with_declaration(declared_menu(), AppBarClick::Open)]);
     let mut input = TaskbarInput::new();
     open_library(&mut input, &mut bar);
 
@@ -4394,7 +4438,7 @@ fn app_strip_and_menu_actions_latch_repaints() {
 
     // set_apps draws on the bar's own strip: bar only.
     bar.set_apps(alloc::vec![
-        app("App").with_declaration(declared_menu(), true)
+        app("App").with_declaration(declared_menu(), AppBarClick::Open)
     ]);
     assert_eq!(bar.take_repaint(), TaskbarRepaint::BAR);
 

@@ -366,8 +366,12 @@ fn every_effect_slider_edits_only_its_own_profile_field() {
         select_effects_tab(&mut sheet, CLIENT);
         let row = visible_row(&sheet, CLIENT, Focus::Effect(index));
 
+        // The end of travel furthest from this effect's own default, so the
+        // press is an edit for every slider — one whose default already sits
+        // mid-travel included.
+        let to = if defaults[index] >= 500 { 0 } else { 1000 };
         assert_eq!(
-            press_at(&mut sheet, CLIENT, slider_point(row, 500)),
+            press_at(&mut sheet, CLIENT, slider_point(row, to)),
             SheetOutcome::Edited,
             "effect {index} reports the edit"
         );

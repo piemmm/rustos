@@ -117,7 +117,7 @@ pub mod spawned;
 pub mod swatch;
 pub mod terminal;
 
-pub use appbar::{BarCommand, DEFAULT_ACTION as BAR_DEFAULT_ACTION};
+pub use appbar::BarCommand;
 pub use effects::{Afterglow, Effects, Phase};
 pub use grid::Grid;
 pub use layout::{COLS, ROWS};

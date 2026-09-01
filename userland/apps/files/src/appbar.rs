@@ -15,8 +15,8 @@
 //!
 //! In the ordinary [`Role::Window`](crate::command::Role::Window) role the app
 //! is an application like any other and makes the shared declaration — the
-//! information row and *Quit*, the click left to the session so it raises the
-//! window.
+//! information row and *Quit*, with the session raising a window it has and
+//! asking for one when it has none ([`WINDOW_SLOT_CLICK`]).
 //!
 //! In the [`Role::Desktop`](crate::command::Role::Desktop) role it is a
 //! component of the desktop, and the slot is the user's way *into* the
@@ -26,7 +26,7 @@
 //! rail lists: the user's home and folders, the machine's roots, then whatever
 //! is mounted right now. Choosing one opens a window there, and a primary
 //! click on the slot opens one at the user's home
-//! ([`DESKTOP_DEFAULT_ACTION`]).
+//! ([`DESKTOP_SLOT_CLICK`]).
 //!
 //! # The row cap is a display cap, and it is stated
 //!
@@ -37,18 +37,26 @@
 //! short one that admits it.
 
 use tairix_abi::window_ipc::{
-    AppBar, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow, APP_MENU_MAX_ROWS,
+    AppBar, AppBarClick, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow,
+    APP_MENU_MAX_ROWS,
 };
 use tairix_abi::Errno;
 use tairix_browse::{PlaceKind, Places};
 
-/// Whether a primary click on the component's slot is the app's to handle.
+/// What a primary click on the component's slot does.
 ///
-/// `true`: a click opens a window at the user's home, rather than raising one
-/// of the windows already open. A component may hold no window at all, so
-/// there is often nothing to raise; and when there is, "another window, where
-/// I keep my things" is the readier thing to offer.
-pub const DESKTOP_DEFAULT_ACTION: bool = true;
+/// Every click opens a window at the user's home rather than raising one of
+/// the windows already open. A component may hold no window at all, so there
+/// is often nothing to raise; and when there is, "another window, where I
+/// keep my things" is the readier thing to offer.
+pub const DESKTOP_SLOT_CLICK: AppBarClick = AppBarClick::Open;
+
+/// What a primary click on an ordinary file manager's slot does.
+///
+/// It fronts the windows it opened, so a click raises the most recent one.
+/// Closing them all leaves the app on the bar rather than ending it, and
+/// then the same click asks it for a window instead.
+pub const WINDOW_SLOT_CLICK: AppBarClick = AppBarClick::RaiseOrOpen;
 
 /// The component's declaration for `places`, addressed to its own `endpoint`,
 /// together with the number of places that did not fit the row cap.
@@ -109,7 +117,7 @@ pub fn component_declaration(endpoint: u64, places: &Places) -> Result<(AppBar, 
     Ok((
         AppBar {
             event_endpoint: endpoint,
-            default_action: DESKTOP_DEFAULT_ACTION,
+            click: DESKTOP_SLOT_CLICK,
             menu,
         },
         skipped,

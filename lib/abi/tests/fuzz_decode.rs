@@ -80,9 +80,9 @@ use tairix_abi::users_admin::{
     decode_group_list, decode_user_list, UsersAdminRequest, USERS_ADMIN_MAX_REQUEST,
 };
 use tairix_abi::window_ipc::{
-    decode_create_reply, decode_desktop_reply, decode_minted_id_reply, AppBar, AppMenu,
-    AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole, AppMenuRow,
-    AppMenuShortcut, MenuAnchor, MenuOutcome, MenuRefusal, WindowEvent, WindowRequest,
+    decode_create_reply, decode_desktop_reply, decode_minted_id_reply, AppBar, AppBarClick,
+    AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole,
+    AppMenuRow, AppMenuShortcut, MenuAnchor, MenuOutcome, MenuRefusal, WindowEvent, WindowRequest,
     WindowSizing, WindowTitle,
 };
 use tairix_abi::{
@@ -1382,7 +1382,7 @@ fn structured_icon_bar_inputs_with_corrupted_fields_never_panic() {
     // block itself as on the header, and every one of them must fail closed.
     let declare = WindowRequest::SetAppBar(AppBar {
         event_endpoint: 0xE117_0000_0000_0009,
-        default_action: true,
+        click: AppBarClick::Open,
         menu: fuzz_menu(AppMenu::EMPTY),
     });
     // The seed is the frame a client actually sends — exactly the
