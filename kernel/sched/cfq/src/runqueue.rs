@@ -32,6 +32,21 @@ use crate::TaskId;
 /// uses.
 pub(crate) const SCALE: u64 = 1 << 20;
 
+/// Virtual-runtime head start a task joining the competition is placed
+/// ahead of the CPU's timeline floor by.
+///
+/// Placing a joiner *level* with the leftmost ready entry leaves the
+/// `(vruntime, id)` tie-break to settle the pick, which hands the CPU to the
+/// lower id every time: a task that wakes among a CPU-bound population it was
+/// spawned after then loses a full scheduling round on every wake, so an
+/// I/O-bound task pays that round per round trip. One unit of service — the
+/// smallest increment [`vslice`] can charge — settles the pick instead, and
+/// every dispatch charges at least that much back, so a task that wakes
+/// repeatedly cannot outrun one that has been ready all along. The placement
+/// is absolute against the monotonic floor, so the head start can never
+/// accumulate past this bound (the CFS `place_entity` sleeper credit).
+pub(crate) const SLEEPER_CREDIT: u64 = SCALE;
+
 /// Weighted virtual-runtime increment `service_ticks` of execution costs a
 /// task of `weight`.
 ///
@@ -79,10 +94,10 @@ struct Inner {
     /// determinism — no flaky ordering). The CFS red-black tree analog.
     ready: BTreeSet<(u64, TaskId)>,
     /// Monotonic floor tracking the front of the CPU's timeline. A task
-    /// joining or re-joining this CPU adopts this value as its vruntime
-    /// so a task that slept at a low vruntime cannot leap ahead of the
-    /// running population and monopolise the CPU (the CFS
-    /// `place_entity` / min-vruntime rule).
+    /// joining or re-joining this CPU is placed one [`SLEEPER_CREDIT`] ahead
+    /// of it, so a task that slept at a low vruntime gets a bounded head
+    /// start rather than leaping the running population and monopolising the
+    /// CPU (the CFS `place_entity` / min-vruntime rule).
     min_vruntime: u64,
     /// Sum of the weights of every task this CPU currently owns (queued
     /// here or running off it). Read by the placement path to balance
@@ -120,19 +135,18 @@ impl RunQueue {
         })
     }
 
-    /// Account a task joining this CPU's competition: add its `weight`
-    /// and return the vruntime it should adopt — the front of this CPU's
-    /// timeline (the smaller of the stored floor and the smallest ready
-    /// entry, never below the monotonic floor), so a joiner gets no unfair
-    /// head start and a task that slept at a low vruntime cannot leap the
-    /// running population (the CFS `place_entity` rule).
+    /// Account a task joining this CPU's competition: add its `weight` and
+    /// return the vruntime it should adopt — one [`SLEEPER_CREDIT`] ahead of
+    /// this CPU's monotonic timeline floor, so it sorts strictly before the
+    /// population that has been running rather than tying with it.
+    ///
+    /// The floor advances only to a *picked* task's vruntime, so the head
+    /// start is bounded by that one credit however long the joiner slept: it
+    /// cannot leap the running population (the CFS `place_entity` rule).
     pub(crate) fn admit_weight(&self, weight: u64) -> u64 {
         let mut g = self.inner.lock();
         g.total_weight = g.total_weight.saturating_add(weight);
-        g.ready
-            .iter()
-            .next()
-            .map_or(g.min_vruntime, |&(v, _)| v.max(g.min_vruntime))
+        g.min_vruntime.saturating_sub(SLEEPER_CREDIT)
     }
 
     /// Account a real-time task joining this CPU's competition: add its
@@ -276,14 +290,40 @@ mod tests {
     }
 
     #[test]
-    fn floor_is_monotonic_and_places_joiners_at_the_front() {
+    fn floor_is_monotonic_and_places_joiners_just_ahead_of_it() {
         let q = RunQueue::try_new(8).expect("q");
-        q.push(e(1, 100)).expect("push");
-        // Picking 100 advances the floor to 100.
-        assert_eq!(q.pick().map(|x| x.vruntime), Some(100));
-        // A joiner adopts the front (100), never a stale zero — the
-        // monotonic floor advanced when 100 was dispatched.
-        assert_eq!(q.admit_weight(1), 100);
+        q.push(e(1, 100 * SCALE)).expect("push");
+        // Picking advances the floor to the picked task's vruntime.
+        assert_eq!(q.pick().map(|x| x.vruntime), Some(100 * SCALE));
+        // A joiner lands one credit ahead of that floor — never a stale zero,
+        // and never level with it, which would leave the id tie-break to
+        // decide the pick.
+        assert_eq!(q.admit_weight(1), 100 * SCALE - SLEEPER_CREDIT);
+    }
+
+    #[test]
+    fn a_joiner_sorts_ahead_of_every_ready_entry_at_the_floor() {
+        let q = RunQueue::try_new(8).expect("q");
+        // A population parked at the floor, each with a lower id than the
+        // joiner below.
+        for id in 1..=4 {
+            q.push(e(id, 100 * SCALE)).expect("push");
+        }
+        q.push(e(0, 100 * SCALE)).expect("push");
+        assert_eq!(q.pick().map(|x| x.id), Some(0), "the floor is established");
+        let joiner = q.admit_weight(1);
+        q.push(e(9, joiner)).expect("push");
+        assert_eq!(
+            q.pick().map(|x| x.id),
+            Some(9),
+            "a joiner outranks entries level with the floor whatever its id"
+        );
+    }
+
+    #[test]
+    fn an_empty_queues_floor_cannot_underflow() {
+        let q = RunQueue::try_new(8).expect("q");
+        assert_eq!(q.admit_weight(1), 0, "a zero floor saturates, never wraps");
     }
 
     #[test]

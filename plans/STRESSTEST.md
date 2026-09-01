@@ -771,7 +771,7 @@ implementation fixed):
   must be a line some process prints and leaves standing, and the controller's
   exit line is a transient one from a concurrent process — gating on it hung
   the run whenever the monitor dialogue outlasted the load, because the line
-  had already passed the search cursor. Under D68 that dialogue can take the
+  had already passed the search cursor. Under D73 that dialogue could take the
   whole 120 s, so the ordering was never one the script could guarantee. The QEMU matrix retains
   emulator/I/O headroom for one-vCPU guests and admits an SMP TCG guest alone,
   so mutually synchronising guest CPUs cannot be starved by another emulator

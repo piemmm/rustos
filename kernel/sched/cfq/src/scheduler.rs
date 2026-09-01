@@ -229,17 +229,17 @@ impl<A: SchedulerArch> Scheduler<A> {
     }
 
     /// Admit `task` to `rq`'s competition and place its vruntime at
-    /// `max(its own vruntime, the queue's current front)` — the CFS
-    /// `place_entity` rule.
+    /// `max(its own vruntime, the queue's front)` — the CFS `place_entity`
+    /// rule, where the front is one sleeper credit ahead of the monotonic
+    /// floor.
     ///
-    /// A brand-new task (vruntime `0`) or one that slept long enough for
-    /// the front to pass it lands at the front, so it is neither penalised
-    /// for sleeping nor given an unfair head start. A task that woke with
+    /// A brand-new task (vruntime `0`) or one that slept long enough for the
+    /// floor to pass it lands at that front, so it is neither penalised for
+    /// sleeping nor given more than the bounded credit. A task that woke with
     /// an accumulated vruntime *above* the front keeps it, so a task that
-    /// sleeps and wakes rapidly cannot keep re-entering at the low front
-    /// and starve a task that has been ready all along (the front only
-    /// advances to the *picked* task's vruntime, so resetting every
-    /// re-admission to it would let a frequent waker monopolise the CPU).
+    /// sleeps and wakes rapidly cannot keep re-entering ahead of a task that
+    /// has been ready all along (the floor only advances to the *picked*
+    /// task's vruntime, and every dispatch charges at least one credit back).
     fn admit(task: &TaskInner, rq: &RunQueue) -> Entry {
         let weight = task.weight();
         let front = rq.admit_weight(weight);
@@ -1814,11 +1814,74 @@ mod tests {
         );
     }
 
+    /// A task woken from a park is dispatched ahead of an already-running
+    /// CPU-bound population *whatever its task id*.
+    ///
+    /// Placing a waker level with the leftmost ready entry leaves the
+    /// `(vruntime, id)` tie-break to settle the pick, so a task spawned after
+    /// a set of hogs loses the CPU to every one of them on every wake. An
+    /// I/O-bound task then pays a full scheduling round per round trip; the
+    /// spawn order below is the control, since only the id differs.
+    #[test]
+    fn a_woken_task_outranks_cpu_hogs_whatever_its_task_id() {
+        const HOGS: usize = 10;
+        const HOG_TICKS: u64 = 100;
+        const WAKE_CYCLES: usize = 16;
+
+        for sleeper_first in [true, false] {
+            let (arch, sched) = mk(1);
+            arch.set_current_cpu(0);
+
+            let spawn_sleeper = |sched: &Scheduler<TestArch>| {
+                let a = Arc::clone(&arch);
+                sched
+                    .spawn(0, Priority::Normal, move |_| {
+                        a.advance_ticks(1);
+                        TaskAction::Park
+                    })
+                    .expect("spawn sleeper")
+            };
+
+            let early = sleeper_first.then(|| spawn_sleeper(&sched));
+            for _ in 0..HOGS {
+                let a = Arc::clone(&arch);
+                sched
+                    .spawn(0, Priority::Normal, move |_| {
+                        a.advance_ticks(HOG_TICKS);
+                        TaskAction::Yield
+                    })
+                    .expect("spawn CPU hog");
+            }
+            let sleeper = early.unwrap_or_else(|| spawn_sleeper(&sched));
+
+            while sched.state_of(sleeper) != TaskState::Parked {
+                let _ = sched.step(0).expect("initial dispatch");
+            }
+
+            for cycle in 0..WAKE_CYCLES {
+                // Let the hogs spread their virtual runtimes first, so the
+                // wake lands into a populated, actively-running queue.
+                for _ in 0..HOGS {
+                    let _ = sched.step(0).expect("hog dispatch");
+                }
+                sched.unpark(sleeper).expect("wake the sleeper");
+                assert_eq!(
+                    sched.step(0).expect("post-wake dispatch"),
+                    StepOutcome::Ran(sleeper),
+                    "sleeper_first={sleeper_first} cycle {cycle}: a woken task must be \
+                     dispatched next, never behind the CPU-bound population"
+                );
+            }
+        }
+    }
+
     #[test]
     fn short_interactive_wakes_stay_responsive_among_cpu_hogs() {
         const HOGS: u64 = 10;
         const HOG_TICKS: u64 = 100;
-        const MAX_WAKE_TICKS: u64 = HOG_TICKS * HOGS + 1;
+        // At most one hog's slice: a woken task is placed ahead of the ready
+        // population, so it is dispatched next rather than after the round.
+        const MAX_WAKE_TICKS: u64 = HOG_TICKS + 1;
         const WAKE_CYCLES: usize = 64;
 
         let (arch, sched) = mk(1);

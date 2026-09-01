@@ -105,26 +105,26 @@ The open items, in priority order:
   starving every concurrent reader — OPEN.** It is the measured whole of the
   read-throughput gap `plans/FIX-KHEAP.md` reported: bundle load rate tracks
   overlap with this burst, not bundle size. Desktop-side, not block-layer.
-- **D68 — an interactive program's asynchronous bundle load takes 59–120 s
-  while ten CPU-bound tasks saturate four CPUs — OPEN (to root-cause).**
-  Measured on `stress_qemu_aarch64`: the shell spawns `sysmon` at t≈6.4 s and
-  the child's loading body does not reach its image-verified capability
-  derivation (audit 1020) until t≈66 s run alone, or t≈126.6 s with the `ci`
-  matrix in flight — the latter being the entire 120 s of the load, so the
-  monitor first renders only once the workers have gone. Not a preemption
-  failure: that run's own `sysmon` frame reports 20 490 preemptions and
-  25 415 switches across 4 CPUs at 90.5% busy, and `timed`'s timer wakes keep
-  landing throughout. Not the placement rule either — `RunQueue::admit_weight`
-  seats a joiner level with the leftmost ready entry. The unapportioned cost
-  is in the three stages the child's own loading body runs before that
-  derivation: waiting to be picked, `wait_app_store`, and `load_store_bundle`
-  reading the bundle off the encrypted root. Separating them needs per-stage
-  instrumentation, not more log reading; suspect the read, since D54 starves
-  concurrent readers by the same shape. A user who starts a load generator
-  and then a monitor must not wait a minute for the monitor. Found while
-  diagnosing the `stress_qemu_aarch64` gate failure under
-  `plans/TIMESYNC.md` TS-5c; escalated rather than fixed inline because
-  apportioning it is a launch-path/block-layer investigation of its own.
+- **D73 — a woken task was placed *level* with the ready population, so the
+  `(vruntime, id)` tie-break starved every task spawned after a set of CPU
+  hogs — FIXED.** An interactive program's asynchronous bundle load took
+  59–120 s while ten CPU-bound tasks saturated four CPUs. `admit_weight`
+  returned the *leftmost ready entry*, which guarantees a tie with the task
+  that would be picked next, and the ready set is keyed `(vruntime, TaskId)` —
+  so the lower id won every time and a later-spawned task lost a full
+  scheduling round on every wake. Recorded first as a second D68; renumbered
+  here because the guard-arena D68 owns that id in code and docs. Detail
+  below.
+- **D74 — EEVDF charges every dispatch a fixed service quantum regardless of
+  how long it ran — OPEN.** The D73 inversion in a different shape, in the
+  sibling policy: actual runtime never enters the accounting, so a task doing
+  many short dispatches is charged far more than one doing few long ones.
+  Noticed while confirming D73's scope; not folded in because it changes
+  EEVDF's core clock. Detail below.
+- **D75 — EEVDF's ready set is a `Vec` scanned linearly on the dispatch
+  path — OPEN.** An O(n) scan of a growable list to pick the
+  earliest-deadline eligible entry, where CFQ keys a `BTreeSet`. Detail
+  below.
 - **D50 — the flake hunt's concurrent replicas re-planted one guest's backing
   image underneath itself — DONE.** Up to four simultaneous runs of one
   enrolment shared a planted-image path, so a replica rewrote a live sibling's
@@ -4422,3 +4422,114 @@ frame latency was normal throughout the capture that doubled.
 
 Do not close this on a further absence of reproduction: a defect that stops
 appearing is not a defect that has been explained.
+
+---
+
+## D73 — a woken task was placed level with the ready population, so the id tie-break starved every task spawned after a set of CPU hogs (FIXED)
+
+**Symptom.** On `stress_qemu_aarch64` the shell spawns `sysmon` while
+`stress --cpu 10 --timeout 120s` saturates four CPUs, and the monitor first
+renders 59–120 s later. Measured, from one transcript's own `APP_LOADED`
+records:
+
+```
+[  0.485] bundle loaded netstack.app  load=0.206358144s   read_bytes=599876
+[126.677] bundle loaded sysmon.app    load=120.206524624s read_bytes=591615
+```
+
+Two near-identical byte counts, a 583x difference. `verify` was 1.2 ms in
+both, so the whole cost was the read; the read began at t≈6.47 s and ended
+0.2 s after the load generator exited — i.e. it made *no* progress while the
+hogs ran and then took its normal unloaded time.
+
+**Mechanism.** `RunQueue::admit_weight` returned
+`max(smallest ready vruntime, min_vruntime)` — deliberately the **leftmost
+ready entry**. That guarantees the joiner *ties* with the very task that
+would otherwise be picked next, and the ready set is a
+`BTreeSet<(vruntime, TaskId)>`, so a tie is settled by **task id**. A task
+that wakes among a CPU-bound population it was spawned after therefore has a
+higher id than all of them and loses the pick to every one of them, on every
+single wake. It is deterministic, not probabilistic: the same transcript
+shows the ten hogs at ids `0x0f`–`0x18`, the `sysmon` loading child at
+`0x19` (behind all ten), and `timed` at `0x0a` — which is why `timed`'s IPC
+round trips kept completing in ~10 ms throughout while the child starved.
+
+A bundle load reads every file in the bundle to hash it (`AppInfo`, `Run`,
+the whole `Help/` tree across 13 locales, `Resources/`), so it is on the
+order of a thousand serial block round trips, each parking and waking. At
+one full scheduling round per wake (~10 hogs x ~12 ms) that is the observed
+~120 s. Nothing about it is specific to bundle loading: any I/O-bound task
+that wakes repeatedly paid a full round per round trip.
+
+**Why the existing tests missed it.** `short_interactive_wakes_stay_
+responsive_among_cpu_hogs` bounded the wake latency at
+`HOG_TICKS * HOGS + 1` — a full round behind every hog — so it *documented*
+the defect as acceptable. The bound is now one hog's slice.
+
+**Fix.** `admit_weight` returns `min_vruntime.saturating_sub(SLEEPER_CREDIT)`
+— one unit of service ahead of the monotonic floor, the CFS `place_entity`
+sleeper credit — so a joiner sorts **strictly** before the running
+population and the id tie-break never decides the pick. The head start
+cannot accumulate: the floor advances only to a *picked* task's vruntime,
+placement is absolute against it, every dispatch charges at least one credit
+back, and `admit`'s existing `front.max(task.vruntime())` still lets a task
+that has earned a higher vruntime keep it. A task migrating on yield is
+unaffected for that reason — its own charged vruntime already exceeds the
+front.
+
+**Measured result.** Same vertical, same bundle, after the fix:
+
+```
+before  sysmon.app load=120.206524624s read_bytes=591615  (first frame t=126.7s)
+after   sysmon.app load=3.075388944s   read_bytes=591615  (first frame t=9.4s)
+```
+
+39x, on an identical byte count. The residual ~3 s over the 0.2 s unloaded
+read is fair-share cost — eleven runnable tasks on four CPUs, each round trip
+waiting out the running task's remaining slice — not starvation, and it is
+the shape a proportional-share policy is supposed to produce.
+
+**Regression test.** `a_woken_task_outranks_cpu_hogs_whatever_its_task_id`
+runs the identical workload twice, varying only whether the sleeper is
+spawned before or after the hogs, and requires it to be dispatched next in
+both. Before the fix the spawned-after case failed with `Ran(1)` where
+`Ran(11)` was required; the spawn order was the control that isolated the id
+as the cause.
+
+**Scope.** CFQ only, which is the default and what production runs. The
+EEVDF sibling admits at zero lag and orders by deadline, so a woken task's
+deadline is genuinely earlier and no tie-break decides; MLFQ re-enters a
+waker at high priority. Two *separate* EEVDF defects noticed while
+confirming that are recorded as D74 and D75.
+
+---
+
+## D74 — EEVDF charges every dispatch a fixed service quantum regardless of how long it ran (OPEN)
+
+`kernel/sched/eevdf`'s `request()`/`advance()` pair charges
+`SERVICE_PER_DISPATCH` per dispatch and advances virtual time by the same
+constant, so actual runtime never enters the accounting. A task that runs a
+brief slice and parks is charged exactly what a task that consumes a whole
+quantum is charged, so an I/O-bound task doing a thousand short dispatches
+is charged a thousand quanta while a CPU-bound one doing ten long dispatches
+is charged ten — the fairness inversion D73 fixed in CFQ, in a different
+shape. CFQ charges measured ticks (`vslice(service_ticks, weight)`) and
+EEVDF has the same `ticks_now()`/`last_run_tick` bracket available to do so.
+
+Not folded into D73: correcting it changes EEVDF's core clock (the coupling
+between the per-dispatch charge, the eligibility test, and the `V` advance),
+which is that policy's central invariant and needs its own conformance work.
+The charter's own carve-out applies — the fix lands with a test that fails
+before and passes after, and the defect is not closed until it does.
+
+---
+
+## D75 — EEVDF's ready set is a `Vec` scanned linearly on the dispatch path (OPEN)
+
+`kernel/sched/eevdf`'s `Inner::ready` is a `Vec<Entry>`, so selecting the
+earliest-deadline eligible entry is an O(n) scan of a growable list on the
+dispatch hot path — the structure the charter names explicitly as the wrong
+one for a foundational primitive, and the one CFQ's own module docs cite as
+what CFQ avoids by keying a `BTreeSet`. It is bounded only by the queue
+capacity, so the cost grows with the runnable population exactly where it
+must not.

@@ -54,10 +54,19 @@ heavier-weighted task's `vruntime` rises more slowly for the same elapsed
 service. The result is proportional CPU-time share, with no band ever
 starved (every `vruntime` advances monotonically). The three `Priority`
 bands map to a 4:2:1 weight ratio (the CFS "nice level" analog). A per-CPU
-monotonic `min_vruntime` floor places a joining or migrated task at the
-front of the CPU's timeline, so a task that slept at a low `vruntime`
-cannot leap the running population, and a stolen task carries no lag
-across CPUs. Per-CPU run queues, work-stealing, class-based placement, the
+monotonic `min_vruntime` floor places a joining or migrated task one
+`SLEEPER_CREDIT` (a single unit of service) *ahead* of the front of the
+CPU's timeline — the CFS `place_entity` sleeper credit. The credit is what
+makes a woken task sort **strictly** before the population that has been
+running: placing it merely level with the leftmost ready entry leaves the
+`(vruntime, TaskId)` tie-break to settle the pick, which hands the CPU to
+the lower id, so a task that wakes among CPU-bound tasks it was spawned
+after loses a full scheduling round on *every* wake and an I/O-bound task
+pays that round per round trip. Because the floor advances only to a
+*picked* task's `vruntime` and every dispatch charges at least one credit
+back, the head start stays bounded by that one unit however long the task
+slept: it cannot leap the running population, and a stolen task carries no
+lag across CPUs. Per-CPU run queues, work-stealing, class-based placement, the
 overflow list, and the park/unpark lost-wakeup token are all shared with
 the sibling policies' mechanics.
 
