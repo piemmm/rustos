@@ -104,15 +104,13 @@ lib/i2c + drivers/bus/i2c/bcm2835/   the transfer path the I2C chips are reached
   signed `AppInfo` at load. It holds `CAP_TIME_SET`, `CAP_NET`,
   `CAP_SANDBOX_SPAWN`, `CAP_FS_ACCESS`, and `CAP_LOG_EMIT` — no endpoint bind,
   no raw or admin network authority, no general spawn.
-  - It is registered in PID 1's compiled-in startup floor. The SUM1 unit
-    metadata (`requires: network-up`, `activation: permanent`,
-    `restart: on-failure`) and enrolment in
-    `/System/Settings/Services/enabled` are **TS-5** work: neither has a live
-    reader until the control transport lands, and authoring metadata nothing
-    consumes would be speculative surface.
+  - It is an **enrolled** service, not part of PID 1's compiled-in startup
+    floor: its SUM1 unit metadata travels in its own signed `AppInfo` and the
+    image's vendor enrolment layer names it (TS-5b).
   - It needs no readiness gate: a query it cannot send simply fails, and the
     engine's bounded backoff paces the retry, so an interface that appears
-    late costs nothing.
+    late costs nothing. That is why its unit metadata declares no `requires` —
+    a board with no NIC still needs its clock service to read its RTC.
 - An RTC driver is an ordinary `drivers/` module: matched by its
   hardware-tree `compatible` key through `lib/devmatch`, autoloaded by
   `devmgr` under `CAP_DRV_LOAD`, granted only the resources its matched node
@@ -337,18 +335,18 @@ the first tier.
 
 ## 6. Enable and disable
 
-Automatic time-setting is on by default: `timed` ships enrolled in
-`/System/Settings/Services/enabled`. Turning it off is *unenrolment*, which is
-the service manager's job, so both surfaces drive the one control path rather
-than inventing a second switch (§2.2).
+Automatic time-setting is on by default: the image's vendor enrolment layer
+names `timed`. Turning it off is *unenrolment*, which is the service manager's
+job, so both surfaces drive the one control path rather than inventing a second
+switch (§2.2).
 
-- **Command line.** `lib/abi/src/service_control.rs` gains `Enable`,
-  `Disable`, and `Status` beside the existing `Start`/`Stop`, and
-  `userland/shell/servicectl` is the tool — the `systemctl` analogue this
-  plan's dependency (`plans/NEW-SERVICEMANAGER.md` SVC-8) specifies and
-  leaves unlanded. Enable and disable write through the existing pure
-  `registry::enrol` / `unenrol` record transforms, so the enroller's ceiling
-  check cannot be bypassed and enrolment can never widen authority.
+- **Command line.** `userland/shell/servicectl` is the tool — the `systemctl`
+  analogue this plan's dependency (`plans/NEW-SERVICEMANAGER.md` SVC-8)
+  specifies. `enable`/`disable` reach PID 1 on its own reserved enrolment
+  endpoint (TS-5b: deliberately *not* the running-state control one) and write
+  through the existing pure `registry::enrol` / `unenrol` record transforms,
+  so the enroller's ceiling check cannot be bypassed and enrolment can never
+  widen authority.
 - **Desktop.** The taskbar clock's menu gains a *Set Date & Time
   Automatically* toggle, derived from `clock_menu::ROWS` like every other row
   so a row cannot exist without a command behind it. The session holds no
@@ -784,10 +782,108 @@ The remaining ops, over the *enrolment* path rather than the control endpoint:
 `Enable`/`Disable` write through the existing pure `registry::enrol`/`unenrol`
 transforms so the enroller's ceiling check cannot be bypassed, and `Status` is
 served through the System Information API (§16.6), never a control-reply
-scrape. This is also where `timed`'s SUM1 unit metadata (`requires:
-network-up`, `activation: permanent`, `restart: on-failure`) is authored —
-once something reads it — and where `timed` moves out of the compiled-in boot
+scrape. This is also where `timed`'s SUM1 unit metadata is authored — once
+something reads it — and where `timed` moves out of the compiled-in boot
 floor. QEMU vertical: a live `servicectl disable timed` survives a reboot.
+
+**The enrolment record is two layers, and that shape is forced by
+`plans/NEW-NAMESPACE.md` §5.** PID 1 must know what is enrolled *before* the
+encrypted root is unlocked — the RTC verticals boot with no unlock at all, and
+a machine's clock service must reach its chip without one — yet an
+administrator must be able to change enrolment at runtime. The target
+namespace policy pins `attach.system.flags = ro` and
+`project./System/Settings = root:/System/Settings`, so the pre-unlock volume
+can never become the mutable store and the mutable path can never be read
+pre-unlock. One document cannot be both, so there are two, layered exactly as
+a bundle's `DefaultSettings/` layers under its own store (§16.5) — never
+copied, never merged into a third place:
+
+| Layer | Where | Written by |
+|---|---|---|
+| Vendor | the `enrolled` directives of PID 1's startup configuration | the build |
+| Administrator | `/System/Settings/Services/overrides` on the encrypted root | PID 1, on a control request |
+
+- **The vendor layer is not on disk, and a QEMU run is what settled that.** An
+  earlier shape put it at `/System/Services/enabled` on the read-only volume.
+  The vertical failed with `SERVICE_NOT_ENROLLED`: no document under `/System`
+  is reliably readable at the instant PID 1 must decide what to bring up — the
+  writable root is not mounted, and the read-only volume's availability at that
+  point is a boot-order fact PID 1 has no userland event for. The only
+  sanctioned pre-unlock read is the store service's whitelist, gated on
+  `CAP_DRV_LOAD`, which PID 1 must not hold to read a configuration file. So the
+  image's decision travels the way the rest of the boot set already does — in
+  the startup configuration — and the on-disk vendor document waits for the
+  `/System/Services` discovery scan (`plans/NEW-SERVICEMANAGER.md` SVC-5), which
+  needs that same pre-unlock read path and will have to answer this question
+  properly. This also retires the `SystemConfigFile::SystemServices` whitelist
+  entry, which named a path the mount table makes unreachable and never had a
+  reader (§2.14).
+- **The administrator layer holds only what was changed**, as
+  `<name> enabled|disabled` lines, so a system update that ships a different
+  vendor default takes effect at once for every service the administrator has
+  not spoken about.
+- **`effective` = vendor with the overrides applied**, one pure function
+  (`registry::effective`), so no consumer re-derives the precedence.
+- **Applying the administrator layer is bounded by the unlock, and that is
+  stated rather than hidden.** Pre-unlock, PID 1 obeys the vendor layer alone;
+  the moment the override document becomes readable — on a bounded doubling
+  one-shot ladder, since nothing announces the unlock — it re-derives the
+  effective set and *stops* a service the administrator disabled, through the
+  existing reverse-dependency `stop`, with an audit record. So a disabled
+  service does run for the few seconds before the unlock, every boot. Closing
+  that window would need the override readable pre-unlock, which the volume
+  layout forbids; deferring the whole enrolled tier until the ladder resolves
+  would instead deny a never-unlocking machine (a recovery session, an RTC
+  vertical) its clock for the ladder's whole length. The bounded run is the
+  lesser cost and is not a fail-open: nothing is *granted* by the document being
+  unreadable, and the vendor default is a positive build-time decision — this is
+  a narrowing that arrives late.
+
+**`Enable`/`Disable` arrive on PID 1's own reserved endpoint, not the control
+one.** `SERVICE_ENROL_ENDPOINT` is a second reserved id beside
+`SERVICE_CONTROL_ENDPOINT`, sharing that module's request framing (one codec,
+§2.2) but carrying its own op set and its own reply, because the answers differ
+in kind: control answers with a `ServiceState`, enrolment with an enabled or
+disabled disposition and whether it changed. Keeping them apart is
+`plans/NEW-SERVICEMANAGER.md` SVC-8's decision and it is not reversed here; the
+endpoint, not the module, is what that decision is about. Both are gated by the
+existing `CAP_SERVICE_CONTROL` — no new capability, because nothing yet needs
+to grant a principal the power to restart a wedged service without also
+trusting it to disable one (§5.2), and the *durable* form of an administrative
+act is not a different authority from the transient form. Both will become
+scope-derived together when the per-user manager lands (SVC-8's open item).
+
+- **The authority is the identity boundary, not a capability computation.**
+  `plans/NEW-SERVICEMANAGER.md` SVC-8 records why `registry::enrol`'s
+  never-called manifest/ceiling refusal is removed rather than wired: an
+  administrator's ceiling carries none of the service-scoped capabilities a
+  system service holds, `CAP_SANDBOX_SPAWN` among them, so the check would
+  refuse enabling `timed` itself.
+- **A service must be *known* to be enrolled.** The request names a service PID
+  1 has a spec for; a typo can never record a phantom enrolment that a later
+  image would silently activate (fail closed).
+- **PID 1 gains `CAP_FS_ACCESS`** to read the layer it obeys and write the
+  administrator's override. Per-inode authorisation still applies under its
+  attested identity, and the vendor layer's volume is mounted read-only, so its
+  reach there can never write.
+
+**`timed`'s SUM1 metadata carries no readiness requirement, and that corrects
+this plan's own earlier `requires: network-up`.** §1 recorded both that and
+"needs no readiness gate"; the RTC work settled it — a machine with no NIC
+still needs its clock service to read its chip, and TS-3/TS-4's verticals boot
+exactly that machine, so gating admission on the network would deny a
+no-NIC board its `Firmware` clock. The metadata is
+`activation: permanent`, `restart: on-failure`, no `requires`.
+
+**Open, and deliberately not answered here: what the desktop row *means* now
+that `timed` also reads the RTC.** §6 fixed the switch as `timed`'s enrolment
+while `timed` was purely an NTP client, so "disable automatic time-setting"
+and "unenrol `timed`" were the same act. TS-3/TS-4 gave the same service the
+RTC, so unenrolling it now also stops the chip being read and written back —
+a machine with a healthy battery-backed clock would boot `Unset`. The switch
+stays enrolment (a `time.*` key would be the second switch §2.2 and §6
+forbid), and whether the row should instead mean "network time only" is a
+product question for TS-6 to settle, not a defect in the mechanism.
 
 **TS-6 depends on TS-5b, not TS-5a.** The desktop toggle is *automatic
 time-setting on or off*, which is enrolment; the running-state control TS-5a

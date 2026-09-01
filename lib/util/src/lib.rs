@@ -24,6 +24,11 @@
 //!   (`lib/fontface`) and the SVG decoder (`lib/svg`), so an external libm
 //!   stays out of the trusted computing base and both round and rotate
 //!   identically.
+//! * [`retry`] — the bounded, doubling one-shot schedule a reader climbs when
+//!   the thing it needs appears after it starts and no readiness event says
+//!   so, consumed by the clock service (its configuration store and RTC) and
+//!   by the service manager (the administrator enrolment overrides on the
+//!   encrypted root), so one boot-order problem has one schedule.
 //! * [`fmt`] — no-allocation numeric formatters for audit-log fields.
 //!   Promoted from `kernel/sec` in Stage 2.5 (`kernel/ipc`) once a second
 //!   caller materialised; consumed by `kernel/sec` and `kernel/ipc`.
@@ -64,6 +69,7 @@ pub mod conf;
 pub mod count;
 pub mod fmt;
 pub mod mathf;
+pub mod retry;
 pub mod secret;
 pub mod size;
 pub mod tailwindow;

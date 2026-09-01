@@ -5,7 +5,7 @@
 //! record, and the audit records — with no processes and no sockets.
 
 use super::{
-    events, Clock, RecordStore, RetryLadder, RtcSource, Step, Timed, TimedConfig, Transport,
+    events, Clock, RecordStore, RtcSource, Step, Timed, TimedConfig, Transport,
     CONFIG_RETRY_ATTEMPTS, CONFIG_RETRY_BASE_NANOS, RTC_RETRY_ATTEMPTS, RTC_RETRY_BASE_NANOS,
 };
 use alloc::rc::Rc;
@@ -25,6 +25,7 @@ use tairix_sandbox::loopback::LoopbackLauncher;
 use tairix_sandbox::timesync::TimeSyncService;
 use tairix_sysconfig::RefreshCadence;
 use tairix_timesync::{select_servers, ServerSelection, SyncRecord, STALE_BOOT_GAP};
+use tairix_util::retry::RetryLadder;
 
 /// One captured record: its event id and its string fields.
 type Recorded = (EventId, Vec<(String, String)>);

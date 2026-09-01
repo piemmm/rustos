@@ -130,15 +130,37 @@ lifecycle is therefore split into three distinct steps (the systemd
 3. **Activation** — actually starting an eligible service, through the
    bring-up engine above.
 
-The enrolment registry (`registry::Enrolment`) is the parsed set of
-enabled service names for one scope. The **system** store is read from
-`/System/Settings/Services/enabled`
-(`tairix_abi::driver_store::SystemConfigFile::SystemServices`) off the
-always-mounted read-only `/System` through the same confined, fail-closed
-pre-unlock read path the device manager already uses for its
-configuration — no new read primitive (`AGENTS.md` §16.2). A **per-user**
-store lives under the user's own `/Users/<u>/Settings/Services/` and parses
-identically.
+The enrolment registry is **two layers**, folded by `registry::effective`:
+
+| Layer | Type | Where | Written by |
+|---|---|---|---|
+| Vendor | `registry::Enrolment` | the `enrolled` directives of the startup configuration | the build |
+| Administrator | `registry::EnrolmentOverride` | `/System/Settings/Services/overrides` on the encrypted root | PID 1, on a request |
+
+The split is forced by the volume layout rather than chosen. The whole
+`/System/Settings` subtree resolves to the writable encrypted root, so nothing
+there is readable before the unlock — and PID 1 must know what to bring up
+before then; while the pre-unlock volume is read-only, so nothing there can be
+written at runtime. The vendor layer is therefore not a document: no file under
+`/System` is reliably readable at the instant the manager decides, and the only
+sanctioned pre-unlock read is the store service's `CAP_DRV_LOAD`-gated
+whitelist, which PID 1 must not hold to read a configuration file. An on-disk
+vendor record waits for the `/System/Services` discovery scan, which needs that
+same read path. The administrator's layer holds only what *differs* from the
+image's, so a system update shipping a different default reaches every service
+the administrator has not spoken about. `registry::overrides_for` derives that document from the
+desired effective set, so re-enabling something empties its entry rather than
+pinning the old default. A **per-user** store lives under the user's own
+`/Users/<u>/Settings/Services/` and parses identically.
+
+PID 1 boots on the vendor layer alone and calls `Init::adopt_overrides` the
+moment the administrator's document becomes readable — on a bounded doubling
+one-shot ladder (`lib/util::retry`, shared with the clock service, which waits
+the same way for the same reason), because no userland event says when the root
+was unlocked — stopping anything it disables and recording
+`SERVICE_ENROLMENT_REVOKED`. A disabled service therefore runs for the few
+seconds before the unlock; nothing is *granted* by the document being
+unreadable, so this is a narrowing that arrives late, not a fail-open.
 
 - **The store holds only enrolment records — not unit metadata.** A
   service's restart policy, activation mode, linger, dependencies,
@@ -150,27 +172,30 @@ identically.
   `AGENTS.md` §2.2 forbids and a place authority could be raised.
 - **`Init::register_enrolled` registers only enrolled bundles.** Given the
   discovered set (each parsed into a `ServiceSpec` by the loader seam) and
-  the enrolment record, it registers a bundle for bring-up **only** if it
-  is enabled; a present-but-unenrolled bundle is never registered and its
-  skip is audited (`SERVICE_NOT_ENROLLED`). Presence on disk grants no
-  eligibility (`AGENTS.md` §4).
+  the two enrolment layers, it registers a bundle for bring-up **only** if the
+  effective enrolment enables it; a present-but-unenrolled bundle is never
+  registered and its skip is audited (`SERVICE_NOT_ENROLLED`). Presence on
+  disk grants no eligibility (`AGENTS.md` §4). Its spec is *retained* as known
+  but unenrolled, which is what lets an administrator enable it later by name
+  instead of the manager having forgotten it exists.
 - **Fail closed.** The store text is untrusted input: parsing rejects a
   malformed name (a strict lowercase-`[a-z0-9._-]` bundle identifier, so a
   `..`- or path-traversal-shaped token can never be enrolled) or a
   duplicate, and the caller resolves both a **corrupt** and a **missing**
   store to the empty enrolment — nothing is eligible, never a guess
   (`AGENTS.md` §5.4, §2.9).
-- **`enable` / `disable` never widen authority.** `registry::enrol` takes
-  the enroller's capability ceiling and the service's signed manifest and
-  **refuses** (`CapabilityEscalation`) to enable a service whose manifest
-  requests authority beyond that ceiling, so a user enabling a service in
-  their own scope can never make it eligible to run with more authority
-  than they hold (`AGENTS.md` §5.2). `disable` (`registry::unenrol`) needs
-  no capability — removing eligibility only narrows authority — but fails
-  closed if the service was not enrolled. Both are pure transforms that
-  return the new record for the caller to write back through the
-  appropriate trusted-path store; the kernel still derives the grant
-  (`manifest ∩ account-ceiling`) from the signed bundle at start regardless
+- **`enable` / `disable` never widen authority, and the boundary is
+  identity.** `registry::enrol` and `registry::unenrol` are pure record
+  transforms that return the new set for the caller to persist; `unenrol`
+  fails closed if the service was not enrolled, so a control tool reports
+  honestly that nothing changed. Authority is decided by three things that are
+  *not* a capability computation in the engine: the kernel's
+  `CAP_SERVICE_CONTROL` gate on the endpoint, the service being **known** to
+  this manager (so a typo cannot record a phantom enrolment a later image would
+  activate), and `AuthorityScope::permits_account` — the same identity boundary
+  the launch path uses, which is what stops a per-user manager enrolling a
+  system-authority service. Authority itself is unwidenable regardless: the
+  kernel derives `manifest ∩ account-ceiling` from the signed bundle at start
   (below).
 
 ## Capability authority (`AGENTS.md` §5.2)
@@ -186,13 +211,15 @@ no ambient authority (`AGENTS.md` §4). A load the kernel refuses (a bad
 manifest, or a request beyond the account's ceiling) surfaces to init as a
 `SpawnFailed`, exactly like any other refused load.
 
-The one place init decodes a manifest is the **enrolment** path
-(`registry::enrol`, the registered/user tier): it refuses to *enable* a
-service whose request exceeds the enroller's ceiling, using the single
-shared decoder `tairix_abi::decode_capability_ids` (the same decoder
-`drvhost` uses — one implementation of the manifest-body format,
-`AGENTS.md` §2.2). That is a decision about *eligibility*, recorded ahead
-of time; the authoritative grant is still the kernel's at load.
+init decodes **no** manifest anywhere, on the launch path or the enrolment
+path. An earlier design gave `registry::enrol` a "requested ⊆ the enroller's
+ceiling" refusal; it was removed rather than wired, because it is not merely
+unused but unusable — every system service holds service-scoped capabilities no
+human account's ceiling carries (`CAP_SANDBOX_SPAWN` for `timed`,
+`CAP_SYSINFO_INTROSPECT` for `sysinfod`, `CAP_DRV_LOAD` for `devmgr`), so it
+would have refused an administrator enabling any of them. It was also the
+second capability-derivation path the scope model states the engine must not
+grow.
 
 ## Authority scope (`NEW-SERVICEMANAGER.md` SVC-6)
 

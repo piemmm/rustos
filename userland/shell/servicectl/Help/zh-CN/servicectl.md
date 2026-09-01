@@ -1,10 +1,10 @@
 ## NAME
 
-servicectl — 启动和停止系统服务
+servicectl — 启动、停止、启用和停用系统服务
 
 ## SYNOPSIS
 
-`servicectl [-h | -?] start|stop SERVICE`
+`servicectl [-h | -?] start|stop|enable|disable SERVICE`
 
 ## DESCRIPTION
 
@@ -20,11 +20,16 @@ servicectl — 启动和停止系统服务
   系统里。
 - `stop SERVICE` — 优雅地停止一个正在运行的服务，并按依赖的反序停止其依赖
   方。先请求服务自行退出，只有在其宽限期过后才强制结束。
+- `enable SERVICE` — 将服务记录为已登记，使管理器在每次启动时都将其拉起，
+  并立即启动它。
+- `disable SERVICE` — 将其记录为未登记，使此后任何启动都不再拉起它，
+  并立即停止它。
 
 成功时会有一行指明管理器将该服务留在了哪个状态。
 
-停止服务会影响机器上的每一个主体，而不只是您自己的会话；已登记的服务会在
-下次启动时回来：本工具改变的是*正在运行*的系统，而不是已启用的内容。
+两类改变都会影响机器上的每一个主体，而不只是您自己的会话。`start` 与 `stop`
+只改变*正在运行*的系统，因此已登记的服务会在下次启动时回来；`enable` 与
+`disable` 改变的是登记本身，因此可以跨越启动。
 
 ## OPTIONS
 

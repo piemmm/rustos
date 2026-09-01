@@ -1,10 +1,10 @@
 ## NAME
 
-servicectl — Systemdienste starten und stoppen
+servicectl — Systemdienste starten, stoppen, ein- und austragen
 
 ## SYNOPSIS
 
-`servicectl [-h | -?] start|stop SERVICE`
+`servicectl [-h | -?] start|stop|enable|disable SERVICE`
 
 ## DESCRIPTION
 
@@ -25,14 +25,18 @@ also nicht einmal fragen.
 - `stop SERVICE` — einen laufenden Dienst geordnet stoppen, samt seiner
   Abhängigen in umgekehrter Abhängigkeitsreihenfolge. Der Dienst wird zum
   Beenden aufgefordert und erst nach seiner Nachfrist erzwungen beendet.
+- `enable SERVICE` — den Dienst als eingetragen vermerken, sodass der
+  Verwalter ihn bei jedem Start hochfährt, und ihn jetzt starten.
+- `disable SERVICE` — ihn als nicht eingetragen vermerken, sodass kein
+  späterer Start ihn hochfährt, und ihn jetzt stoppen.
 
 Bei Erfolg nennt eine Zeile den Zustand, in dem der Verwalter den Dienst
 hinterlassen hat.
 
-Einen Dienst zu stoppen betrifft jeden Prinzipal der Maschine, nicht nur
-Ihre eigene Sitzung, und ein eingetragener Dienst kommt beim nächsten Start
-wieder: dieses Werkzeug ändert das *laufende* System, nicht das, was
-aktiviert ist.
+Beide Arten von Änderung betreffen jeden Prinzipal der Maschine, nicht nur
+Ihre eigene Sitzung. `start` und `stop` ändern nur das *laufende* System, ein
+eingetragener Dienst kommt also beim nächsten Start wieder; `enable` und
+`disable` ändern den Eintrag selbst und überdauern ihn daher.
 
 ## OPTIONS
 

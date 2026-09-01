@@ -1,16 +1,26 @@
 //! The service-manager control IPC protocol (`plans/NEW-SERVICEMANAGER.md`
 //! SVC-8).
 //!
-//! The service manager (PID 1, and a per-user manager instance) owns a reserved
-//! synchronous call endpoint, [`SERVICE_CONTROL_ENDPOINT`], through which a
-//! control tool (`servicectl`, the `systemctl` analogue) drives a registered
-//! service's runtime lifecycle: `start` a down service now, or `stop` a running
-//! one. Persistent enablement (`enable`/`disable`) and observability (`status`)
-//! are separate concerns — enablement mutates the registration store and status
-//! is served through the System Information API, never a control-reply scrape —
-//! so they are not carried here.
+//! The service manager (PID 1, and a per-user manager instance) owns two
+//! reserved synchronous call endpoints, through which a control tool
+//! (`servicectl`, the `systemctl` analogue) reaches it:
 //!
-//! This module is the wire contract for that endpoint, modelled on the
+//! * [`SERVICE_CONTROL_ENDPOINT`] drives a registered service's **runtime**
+//!   lifecycle — `start` a down service now, or `stop` a running one;
+//! * [`SERVICE_ENROL_ENDPOINT`] changes its **persistent** enrolment —
+//!   `enable` or `disable`, which the manager records in the registration
+//!   store and obeys on the next boot.
+//!
+//! They are two endpoints rather than two operations on one, because the acts
+//! differ in durability and the answers differ in kind: control answers with a
+//! [`ServiceState`], enrolment with a [`ServiceEnrolment`] and whether the
+//! request changed anything. Both are gated by the same capability today; the
+//! separation is what lets that diverge without reshaping either protocol, and
+//! both become scope-derived together when a per-user manager is spawned.
+//! Observability (`status`) is on neither: it is served through the System
+//! Information API, never a control-reply scrape.
+//!
+//! This module is the wire contract for both, modelled on the
 //! read-only mailbox and font protocols ([`crate::mailbox_ipc`],
 //! [`crate::font_ipc`]): a fixed-size, bounds-checked request framing and a
 //! status-framed reply, both little-endian, `no_std` and allocation-free (the
@@ -26,21 +36,26 @@
 //! against its own strict service-name policy before it touches any state (fail
 //! closed).
 //!
-//! The wire layout (little-endian) of a request is a fixed
-//! [`REQUEST_LEN`]-byte frame:
+//! Both requests share one fixed [`REQUEST_LEN`]-byte frame (little-endian),
+//! so there is a single framing to audit and fuzz; only the magic and the
+//! operation vocabulary differ:
 //!
 //! ```text
-//!  0  magic u32     = SERVICE_CONTROL_MAGIC
+//!  0  magic u32     = SERVICE_CONTROL_MAGIC | SERVICE_ENROL_MAGIC
 //!  4  version u16   = SERVICE_CONTROL_VERSION_V1
-//!  6  op u16        (ServiceControlOp)
+//!  6  op u16        (ServiceControlOp | ServiceEnrolOp)
 //!  8  name_len u16  (0..=SERVICE_MANIFEST_MAX_NAME_LEN)
 //! 10  reserved u16  = 0
 //! 12  name [SERVICE_MANIFEST_MAX_NAME_LEN] (name_len bytes, rest zero)
 //! ```
+//!
+//! A frame carrying one endpoint's magic can therefore never be accepted by
+//! the other's decoder, so an operation cannot be smuggled onto the endpoint
+//! whose authority it was not meant for.
 
 use crate::le::{put_u16, put_u32, read_u16, read_u32};
 use crate::service::SERVICE_MANIFEST_MAX_NAME_LEN;
-use crate::{Errno, ServiceState};
+use crate::{Errno, ServiceEnrolment, ServiceState};
 
 /// Well-known kernel-owned call-endpoint id of the service manager's control
 /// surface (`"SVC\0"` little-endian).
@@ -57,6 +72,23 @@ pub const SERVICE_CONTROL_ENDPOINT: u64 = 0x5356_4300;
 /// Magic number identifying an `abi-v1` service-control request
 /// (`"SVCC"` little-endian).
 pub const SERVICE_CONTROL_MAGIC: u32 = u32::from_le_bytes(*b"SVCC");
+
+/// Well-known kernel-owned call-endpoint id of the service manager's
+/// **enrolment** surface (`"SVE\0"` little-endian).
+///
+/// The sibling of [`SERVICE_CONTROL_ENDPOINT`], bound by the same manager and
+/// reserved the same way. It is a second id rather than a second operation on
+/// the first because a persistent enrolment change and a runtime start/stop are
+/// different acts with different answers; keeping the endpoints apart is what
+/// lets their gates diverge later without reshaping either protocol.
+pub const SERVICE_ENROL_ENDPOINT: u64 = 0x5356_4500;
+
+/// Magic number identifying an `abi-v1` service-enrolment request
+/// (`"SVCE"` little-endian).
+///
+/// Distinct from [`SERVICE_CONTROL_MAGIC`], so a frame built for one endpoint
+/// is refused by the other's decoder before its operation is even classified.
+pub const SERVICE_ENROL_MAGIC: u32 = u32::from_le_bytes(*b"SVCE");
 
 /// Version of the service-control protocol carried in every request.
 pub const SERVICE_CONTROL_VERSION_V1: u16 = 1;
@@ -81,6 +113,82 @@ const REPLY_STATUS_LEN: usize = 4;
 /// [`ServiceState`] byte, and a reserved tail. This is also the endpoint's
 /// maximum reply size.
 pub const REPLY_LEN: usize = REPLY_STATUS_LEN + 4;
+
+/// Encode a request frame: the shared prefix, `op`, and the bounded `name`.
+///
+/// # Errors
+///
+/// [`Errno::BufferTooSmall`] for a short buffer, [`Errno::LengthOutOfRange`]
+/// for an over-bound name.
+fn encode_frame(buf: &mut [u8], magic: u32, op: u16, name: &str) -> Result<usize, Errno> {
+    if buf.len() < REQUEST_LEN {
+        return Err(Errno::BufferTooSmall);
+    }
+    let name = name.as_bytes();
+    if name.len() > SERVICE_MANIFEST_MAX_NAME_LEN {
+        return Err(Errno::LengthOutOfRange);
+    }
+    // Zero the whole frame first so the unused name tail and reserved field
+    // are canonical (all-zero), matching the decoder's checks.
+    buf[..REQUEST_LEN].fill(0);
+    put_u32(buf, OFF_MAGIC, magic);
+    put_u16(buf, OFF_VERSION, SERVICE_CONTROL_VERSION_V1);
+    put_u16(buf, OFF_OP, op);
+    // `name.len() <= SERVICE_MANIFEST_MAX_NAME_LEN` fits u16 by construction.
+    #[allow(clippy::cast_possible_truncation)]
+    put_u16(buf, OFF_NAME_LEN, name.len() as u16);
+    // OFF_RESERVED stays zero from the wipe above.
+    buf[OFF_NAME..OFF_NAME + name.len()].copy_from_slice(name);
+    Ok(REQUEST_LEN)
+}
+
+/// Decode a request frame, validating the whole of it up front, and return the
+/// raw operation discriminant and the borrowed name.
+///
+/// The caller classifies the discriminant against its own operation set, so a
+/// frame addressed to the sibling endpoint is refused by its `magic` before any
+/// operation is considered.
+///
+/// # Errors
+///
+/// [`Errno::LengthOutOfRange`] for a short frame or an over-bound `name_len`,
+/// [`Errno::AbiVersionUnsupported`] for a wrong version, or
+/// [`Errno::BadMagic`] for a wrong magic, a dirty reserved field, a non-zero
+/// name tail, or a non-UTF-8 name.
+fn decode_frame(bytes: &[u8], magic: u32) -> Result<(u16, &str), Errno> {
+    if bytes.len() < REQUEST_LEN {
+        return Err(Errno::LengthOutOfRange);
+    }
+    if read_u32(bytes, OFF_MAGIC) != magic {
+        return Err(Errno::BadMagic);
+    }
+    if read_u16(bytes, OFF_VERSION) != SERVICE_CONTROL_VERSION_V1 {
+        return Err(Errno::AbiVersionUnsupported);
+    }
+    if read_u16(bytes, OFF_RESERVED) != 0 {
+        return Err(Errno::BadMagic);
+    }
+    let name_len = read_u16(bytes, OFF_NAME_LEN) as usize;
+    if name_len > SERVICE_MANIFEST_MAX_NAME_LEN {
+        return Err(Errno::LengthOutOfRange);
+    }
+    // The unused tail of the name field must be zero (canonical framing), so a
+    // request has exactly one encoding.
+    if bytes[OFF_NAME + name_len..REQUEST_LEN]
+        .iter()
+        .any(|&b| b != 0)
+    {
+        return Err(Errno::BadMagic);
+    }
+    let name =
+        core::str::from_utf8(&bytes[OFF_NAME..OFF_NAME + name_len]).map_err(|_| Errno::BadMagic)?;
+    Ok((read_u16(bytes, OFF_OP), name))
+}
+
+/// Encoded length of a service-enrolment reply: the status word, the resulting
+/// [`ServiceEnrolment`] byte, a `changed` flag, and a reserved tail. This is
+/// also the enrolment endpoint's maximum reply size.
+pub const ENROL_REPLY_LEN: usize = REPLY_STATUS_LEN + 4;
 
 /// The runtime-control operation a request names.
 ///
@@ -137,25 +245,7 @@ impl<'a> ServiceControlRequest<'a> {
     /// * [`Errno::LengthOutOfRange`] if the name exceeds
     ///   [`SERVICE_MANIFEST_MAX_NAME_LEN`] bytes.
     pub fn encode(&self, buf: &mut [u8]) -> Result<usize, Errno> {
-        if buf.len() < REQUEST_LEN {
-            return Err(Errno::BufferTooSmall);
-        }
-        let name = self.name.as_bytes();
-        if name.len() > SERVICE_MANIFEST_MAX_NAME_LEN {
-            return Err(Errno::LengthOutOfRange);
-        }
-        // Zero the whole frame first so the unused name tail and reserved
-        // field are canonical (all-zero), matching the decoder's checks.
-        buf[..REQUEST_LEN].fill(0);
-        put_u32(buf, OFF_MAGIC, SERVICE_CONTROL_MAGIC);
-        put_u16(buf, OFF_VERSION, SERVICE_CONTROL_VERSION_V1);
-        put_u16(buf, OFF_OP, self.op.as_u16());
-        // `name.len() <= SERVICE_MANIFEST_MAX_NAME_LEN` fits u16 by construction.
-        #[allow(clippy::cast_possible_truncation)]
-        put_u16(buf, OFF_NAME_LEN, name.len() as u16);
-        // OFF_RESERVED stays zero from the wipe above.
-        buf[OFF_NAME..OFF_NAME + name.len()].copy_from_slice(name);
-        Ok(REQUEST_LEN)
+        encode_frame(buf, SERVICE_CONTROL_MAGIC, self.op.as_u16(), self.name)
     }
 
     /// Decode a service-control request from `bytes`.
@@ -174,33 +264,8 @@ impl<'a> ServiceControlRequest<'a> {
     /// wrong version, [`Errno::OutOfRange`] for an unknown operation, or
     /// [`Errno::BadMagic`] for a non-UTF-8 name (malformed wire content).
     pub fn decode(bytes: &'a [u8]) -> Result<Self, Errno> {
-        if bytes.len() < REQUEST_LEN {
-            return Err(Errno::LengthOutOfRange);
-        }
-        if read_u32(bytes, OFF_MAGIC) != SERVICE_CONTROL_MAGIC {
-            return Err(Errno::BadMagic);
-        }
-        if read_u16(bytes, OFF_VERSION) != SERVICE_CONTROL_VERSION_V1 {
-            return Err(Errno::AbiVersionUnsupported);
-        }
-        let op = ServiceControlOp::from_u16(read_u16(bytes, OFF_OP)).ok_or(Errno::OutOfRange)?;
-        if read_u16(bytes, OFF_RESERVED) != 0 {
-            return Err(Errno::BadMagic);
-        }
-        let name_len = read_u16(bytes, OFF_NAME_LEN) as usize;
-        if name_len > SERVICE_MANIFEST_MAX_NAME_LEN {
-            return Err(Errno::LengthOutOfRange);
-        }
-        // The unused tail of the name field must be zero (canonical framing),
-        // so a request has exactly one encoding.
-        if bytes[OFF_NAME + name_len..REQUEST_LEN]
-            .iter()
-            .any(|&b| b != 0)
-        {
-            return Err(Errno::BadMagic);
-        }
-        let name = core::str::from_utf8(&bytes[OFF_NAME..OFF_NAME + name_len])
-            .map_err(|_| Errno::BadMagic)?;
+        let (op, name) = decode_frame(bytes, SERVICE_CONTROL_MAGIC)?;
+        let op = ServiceControlOp::from_u16(op).ok_or(Errno::OutOfRange)?;
         Ok(Self { op, name })
     }
 }
@@ -245,11 +310,7 @@ pub fn encode_error_reply(buf: &mut [u8], err: Errno) -> Result<usize, Errno> {
 /// (wire corruption — fail closed); or [`Errno::BufferTooSmall`] if `reply`
 /// is shorter than the status word.
 pub fn decode_reply(reply: &[u8]) -> Result<ServiceState, Errno> {
-    if reply.len() < REPLY_STATUS_LEN {
-        return Err(Errno::BufferTooSmall);
-    }
-    let status = i32::from_le_bytes([reply[0], reply[1], reply[2], reply[3]]);
-    match status {
+    match reply_status(reply)? {
         0 => {
             if reply.len() < REPLY_LEN {
                 return Err(Errno::BadMagic);
@@ -265,6 +326,158 @@ pub fn decode_reply(reply: &[u8]) -> Result<ServiceState, Errno> {
         }
         negative => Err(Errno::try_from_status(negative).unwrap_or(Errno::BadMagic)),
     }
+}
+
+/// The persistent-enrolment operation a request names.
+///
+/// A closed set: `enable` and `disable` are the two enrolment changes the
+/// enrolment endpoint brokers. An unknown discriminant fails the decode closed.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u16)]
+pub enum ServiceEnrolOp {
+    /// Record the service as eligible to be brought up, and start it now if
+    /// its readiness conditions allow.
+    Enable = 1,
+    /// Record the service as ineligible, and stop it if it is running.
+    Disable = 2,
+}
+
+impl ServiceEnrolOp {
+    /// Raw on-wire discriminant.
+    #[must_use]
+    pub const fn as_u16(self) -> u16 {
+        self as u16
+    }
+
+    /// Decode a discriminant, failing closed on any unknown value.
+    #[must_use]
+    pub const fn from_u16(value: u16) -> Option<Self> {
+        match value {
+            1 => Some(Self::Enable),
+            2 => Some(Self::Disable),
+            _ => None,
+        }
+    }
+
+    /// The enrolment this operation asks for.
+    #[must_use]
+    pub const fn wanted(self) -> ServiceEnrolment {
+        match self {
+            Self::Enable => ServiceEnrolment::Enabled,
+            Self::Disable => ServiceEnrolment::Disabled,
+        }
+    }
+}
+
+/// A decoded service-enrolment request: an operation and the name of the
+/// service it targets, borrowed from the request buffer.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ServiceEnrolRequest<'a> {
+    /// The enrolment change to record.
+    pub op: ServiceEnrolOp,
+    /// The target service name (bounded, validated as UTF-8; the manager
+    /// re-validates it against its strict service-name policy).
+    pub name: &'a str,
+}
+
+impl<'a> ServiceEnrolRequest<'a> {
+    /// Encode this request into `buf`, returning the number of bytes written.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] if `buf` cannot hold [`REQUEST_LEN`] bytes.
+    /// * [`Errno::LengthOutOfRange`] if the name exceeds
+    ///   [`SERVICE_MANIFEST_MAX_NAME_LEN`] bytes.
+    pub fn encode(&self, buf: &mut [u8]) -> Result<usize, Errno> {
+        encode_frame(buf, SERVICE_ENROL_MAGIC, self.op.as_u16(), self.name)
+    }
+
+    /// Decode a service-enrolment request from `bytes`.
+    ///
+    /// Validates the whole frame up front, so an accepted request is
+    /// well-formed and canonical and a malformed one fails closed.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] for a short frame or an over-bound
+    /// `name_len`, [`Errno::BadMagic`] for a wrong magic (including a frame
+    /// built for the control endpoint), a dirty reserved field, a non-zero
+    /// name tail, or a non-UTF-8 name, [`Errno::AbiVersionUnsupported`] for a
+    /// wrong version, or [`Errno::OutOfRange`] for an unknown operation.
+    pub fn decode(bytes: &'a [u8]) -> Result<Self, Errno> {
+        let (op, name) = decode_frame(bytes, SERVICE_ENROL_MAGIC)?;
+        let op = ServiceEnrolOp::from_u16(op).ok_or(Errno::OutOfRange)?;
+        Ok(Self { op, name })
+    }
+}
+
+/// Encode a successful enrolment reply: the resulting `enrolment` and whether
+/// the request `changed` anything.
+///
+/// `changed` is what lets a tool distinguish "enabled it" from "it was already
+/// enabled" without a second query, so an idempotent request reports honestly
+/// instead of claiming work it did not do.
+///
+/// # Errors
+///
+/// [`Errno::BufferTooSmall`] if `buf` cannot hold [`ENROL_REPLY_LEN`] bytes.
+pub fn encode_enrol_reply(
+    buf: &mut [u8],
+    enrolment: ServiceEnrolment,
+    changed: bool,
+) -> Result<usize, Errno> {
+    if buf.len() < ENROL_REPLY_LEN {
+        return Err(Errno::BufferTooSmall);
+    }
+    buf[..ENROL_REPLY_LEN].fill(0);
+    // Status word 0 = success; the enrolment byte and the flag follow.
+    buf[REPLY_STATUS_LEN] = enrolment.as_u8();
+    buf[REPLY_STATUS_LEN + 1] = u8::from(changed);
+    Ok(ENROL_REPLY_LEN)
+}
+
+/// Decode an enrolment reply, returning the resulting enrolment and whether
+/// the request changed anything.
+///
+/// # Errors
+///
+/// The carried [`Errno`] for an error frame; [`Errno::BadMagic`] for a
+/// truncated success frame, an unknown enrolment byte, a `changed` flag that is
+/// neither 0 nor 1, or a dirty reserved tail (wire corruption — fail closed);
+/// or [`Errno::BufferTooSmall`] if `reply` is shorter than the status word.
+pub fn decode_enrol_reply(reply: &[u8]) -> Result<(ServiceEnrolment, bool), Errno> {
+    let status = reply_status(reply)?;
+    if status != 0 {
+        return Err(Errno::try_from_status(status).unwrap_or(Errno::BadMagic));
+    }
+    if reply.len() < ENROL_REPLY_LEN {
+        return Err(Errno::BadMagic);
+    }
+    let enrolment = ServiceEnrolment::from_u8(reply[REPLY_STATUS_LEN]).ok_or(Errno::BadMagic)?;
+    let changed = match reply[REPLY_STATUS_LEN + 1] {
+        0 => false,
+        1 => true,
+        _ => return Err(Errno::BadMagic),
+    };
+    if reply[REPLY_STATUS_LEN + 2..ENROL_REPLY_LEN]
+        .iter()
+        .any(|&b| b != 0)
+    {
+        return Err(Errno::BadMagic);
+    }
+    Ok((enrolment, changed))
+}
+
+/// The status word of a reply frame, shared by both endpoints' decoders.
+///
+/// # Errors
+///
+/// [`Errno::BufferTooSmall`] if `reply` is shorter than the status word.
+fn reply_status(reply: &[u8]) -> Result<i32, Errno> {
+    if reply.len() < REPLY_STATUS_LEN {
+        return Err(Errno::BufferTooSmall);
+    }
+    Ok(i32::from_le_bytes([reply[0], reply[1], reply[2], reply[3]]))
 }
 
 #[cfg(test)]
@@ -391,6 +604,122 @@ mod tests {
         put_u16(&mut buf, OFF_NAME_LEN, 1);
         buf[OFF_NAME] = 0xFF; // not valid UTF-8
         assert_eq!(ServiceControlRequest::decode(&buf), Err(Errno::BadMagic));
+    }
+
+    #[test]
+    fn enrol_request_round_trips_both_ops() {
+        for op in [ServiceEnrolOp::Enable, ServiceEnrolOp::Disable] {
+            let req = ServiceEnrolRequest { op, name: "timed" };
+            let mut buf = [0u8; REQUEST_LEN];
+            let n = req.encode(&mut buf).expect("encodes");
+            assert_eq!(n, REQUEST_LEN);
+            assert_eq!(ServiceEnrolRequest::decode(&buf[..n]), Ok(req));
+        }
+    }
+
+    #[test]
+    fn the_two_endpoints_frames_are_not_interchangeable() {
+        // A control frame must not decode as an enrolment request and vice
+        // versa: the magic separates them before any operation is classified,
+        // so an operation cannot be smuggled onto the endpoint whose authority
+        // it was not meant for.
+        let mut control = [0u8; REQUEST_LEN];
+        ServiceControlRequest {
+            op: ServiceControlOp::Stop,
+            name: "timed",
+        }
+        .encode(&mut control)
+        .expect("encodes");
+        assert_eq!(ServiceEnrolRequest::decode(&control), Err(Errno::BadMagic));
+
+        let mut enrol = [0u8; REQUEST_LEN];
+        ServiceEnrolRequest {
+            op: ServiceEnrolOp::Disable,
+            name: "timed",
+        }
+        .encode(&mut enrol)
+        .expect("encodes");
+        assert_eq!(ServiceControlRequest::decode(&enrol), Err(Errno::BadMagic));
+        assert_ne!(SERVICE_CONTROL_MAGIC, SERVICE_ENROL_MAGIC);
+    }
+
+    #[test]
+    fn enrol_endpoint_and_magic_are_frozen() {
+        assert_eq!(SERVICE_ENROL_ENDPOINT, 0x5356_4500);
+        assert_ne!(SERVICE_ENROL_ENDPOINT, SERVICE_CONTROL_ENDPOINT);
+        assert!(crate::ipc::is_reserved_endpoint(SERVICE_ENROL_ENDPOINT));
+        assert_eq!(SERVICE_ENROL_MAGIC, u32::from_le_bytes(*b"SVCE"));
+    }
+
+    #[test]
+    fn enrol_op_discriminants_round_trip_and_reject_unknown() {
+        assert_eq!(ServiceEnrolOp::Enable.as_u16(), 1);
+        assert_eq!(ServiceEnrolOp::Disable.as_u16(), 2);
+        assert_eq!(ServiceEnrolOp::from_u16(1), Some(ServiceEnrolOp::Enable));
+        assert_eq!(ServiceEnrolOp::from_u16(2), Some(ServiceEnrolOp::Disable));
+        assert_eq!(ServiceEnrolOp::from_u16(0), None);
+        assert_eq!(ServiceEnrolOp::from_u16(3), None);
+        assert_eq!(ServiceEnrolOp::Enable.wanted(), ServiceEnrolment::Enabled);
+        assert_eq!(ServiceEnrolOp::Disable.wanted(), ServiceEnrolment::Disabled);
+    }
+
+    #[test]
+    fn enrol_reply_round_trips_and_fails_closed() {
+        for (enrolment, changed) in [
+            (ServiceEnrolment::Enabled, true),
+            (ServiceEnrolment::Enabled, false),
+            (ServiceEnrolment::Disabled, true),
+            (ServiceEnrolment::Disabled, false),
+        ] {
+            let mut buf = [0u8; ENROL_REPLY_LEN];
+            let n = encode_enrol_reply(&mut buf, enrolment, changed).expect("encodes");
+            assert_eq!(n, ENROL_REPLY_LEN);
+            assert_eq!(decode_enrol_reply(&buf[..n]), Ok((enrolment, changed)));
+        }
+
+        // An error frame carries its errno.
+        let mut buf = [0u8; ENROL_REPLY_LEN];
+        let n = encode_error_reply(&mut buf, Errno::NotFound).expect("encodes");
+        assert_eq!(decode_enrol_reply(&buf[..n]), Err(Errno::NotFound));
+
+        // Success status but truncated (no enrolment byte).
+        let mut buf = [0u8; REPLY_STATUS_LEN];
+        buf.copy_from_slice(&0i32.to_le_bytes());
+        assert_eq!(decode_enrol_reply(&buf), Err(Errno::BadMagic));
+
+        // Unknown enrolment byte, a non-boolean flag, and a dirty tail each
+        // fail closed rather than being read as a plausible answer.
+        let mut buf = [0u8; ENROL_REPLY_LEN];
+        buf[REPLY_STATUS_LEN] = 0xEE;
+        assert_eq!(decode_enrol_reply(&buf), Err(Errno::BadMagic));
+
+        let mut buf = [0u8; ENROL_REPLY_LEN];
+        encode_enrol_reply(&mut buf, ServiceEnrolment::Enabled, false).expect("encodes");
+        buf[REPLY_STATUS_LEN + 1] = 2;
+        assert_eq!(decode_enrol_reply(&buf), Err(Errno::BadMagic));
+
+        let mut buf = [0u8; ENROL_REPLY_LEN];
+        encode_enrol_reply(&mut buf, ServiceEnrolment::Enabled, true).expect("encodes");
+        buf[ENROL_REPLY_LEN - 1] = 1;
+        assert_eq!(decode_enrol_reply(&buf), Err(Errno::BadMagic));
+
+        // `i32::MIN` status word: negating it would overflow, so fail closed.
+        let mut buf = [0u8; ENROL_REPLY_LEN];
+        buf[..REPLY_STATUS_LEN].copy_from_slice(&i32::MIN.to_le_bytes());
+        assert_eq!(decode_enrol_reply(&buf), Err(Errno::BadMagic));
+    }
+
+    #[test]
+    fn enrolment_discriminants_and_words_round_trip() {
+        for e in [ServiceEnrolment::Enabled, ServiceEnrolment::Disabled] {
+            assert_eq!(ServiceEnrolment::from_u8(e.as_u8()), Some(e));
+            assert_eq!(ServiceEnrolment::from_name(e.as_str()), Some(e));
+        }
+        assert_eq!(ServiceEnrolment::from_u8(0), None);
+        assert_eq!(ServiceEnrolment::from_u8(3), None);
+        assert_eq!(ServiceEnrolment::from_name("off"), None);
+        assert!(ServiceEnrolment::Enabled.is_enabled());
+        assert!(!ServiceEnrolment::Disabled.is_enabled());
     }
 
     #[test]

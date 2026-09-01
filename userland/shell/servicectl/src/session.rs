@@ -4,8 +4,11 @@
 //! endpoint and [`ToolIo`] for the inherited streams — so every path,
 //! including each refusal, is host-tested without a kernel.
 
-use tairix_abi::service_control::{decode_reply, ServiceControlRequest, REPLY_LEN, REQUEST_LEN};
-use tairix_abi::{Errno, ServiceControlOp, ServiceState};
+use tairix_abi::service_control::{
+    decode_enrol_reply, decode_reply, ServiceControlRequest, ServiceEnrolRequest, ENROL_REPLY_LEN,
+    REPLY_LEN, REQUEST_LEN, SERVICE_CONTROL_ENDPOINT, SERVICE_ENROL_ENDPOINT,
+};
+use tairix_abi::{Errno, ServiceControlOp, ServiceEnrolOp, ServiceEnrolment, ServiceState};
 
 use crate::command::{Command, UsageError, USAGE};
 
@@ -33,15 +36,15 @@ impl Exit {
     }
 }
 
-/// The control endpoint, as a seam.
+/// The manager's two reserved endpoints, as one seam.
 pub trait ControlChannel {
-    /// Post an encoded request frame and return the reply frame's length,
-    /// or the raw negative kernel result (`-errno`).
+    /// Post an encoded request frame to `endpoint` and return the reply
+    /// frame's length, or the raw negative kernel result (`-errno`).
     ///
     /// The tool never interprets the kernel's refusal beyond reporting it: a
-    /// missing `CAP_SERVICE_CONTROL` is the kernel's answer to reaching the
+    /// missing `CAP_SERVICE_CONTROL` is the kernel's answer to reaching either
     /// endpoint at all, not something the tool checks for itself.
-    fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, i64>;
+    fn call(&mut self, endpoint: u64, request: &[u8], reply: &mut [u8]) -> Result<usize, i64>;
 }
 
 /// The inherited standard streams, as a seam.
@@ -88,7 +91,7 @@ pub fn run<C: ControlChannel, I: ToolIo>(
     };
 
     let mut reply = [0u8; REPLY_LEN];
-    let length = match channel.call(&frame[..written], &mut reply) {
+    let length = match channel.call(SERVICE_CONTROL_ENDPOINT, &frame[..written], &mut reply) {
         Ok(length) => length,
         Err(err) => {
             io.write_error(&unreachable_message(err));
@@ -105,6 +108,90 @@ pub fn run<C: ControlChannel, I: ToolIo>(
             io.write_error(&refused_message(op, service, err));
             Exit::Failed
         }
+    }
+}
+
+/// Drive one parsed enrolment command over `channel`, reporting the outcome.
+///
+/// The durable sibling of [`run`]: it records a decision the manager obeys on
+/// the next boot as well as applying it now. An idempotent request — enabling
+/// what is already enabled — succeeds and says so rather than claiming work,
+/// which is what lets a provisioning script run twice.
+pub fn run_enrol<C: ControlChannel, I: ToolIo>(
+    channel: &mut C,
+    io: &mut I,
+    op: ServiceEnrolOp,
+    service: &str,
+) -> Exit {
+    let mut frame = [0u8; REQUEST_LEN];
+    let request = ServiceEnrolRequest { op, name: service };
+    let Ok(written) = request.encode(&mut frame) else {
+        io.write_error("servicectl: the request could not be encoded");
+        return Exit::Failed;
+    };
+
+    let mut reply = [0u8; ENROL_REPLY_LEN];
+    let length = match channel.call(SERVICE_ENROL_ENDPOINT, &frame[..written], &mut reply) {
+        Ok(length) => length,
+        Err(err) => {
+            io.write_error(&unreachable_message(err));
+            return Exit::Failed;
+        }
+    };
+
+    match decode_enrol_reply(&reply[..length]) {
+        Ok((enrolment, changed)) => {
+            io.write_line(&enrolled_message(service, enrolment, changed));
+            Exit::Ok
+        }
+        Err(err) => {
+            io.write_error(&enrol_refused_message(op, service, err));
+            Exit::Failed
+        }
+    }
+}
+
+/// One line stating the enrolment the manager recorded, and whether the
+/// request changed anything.
+fn enrolled_message(
+    service: &str,
+    enrolment: ServiceEnrolment,
+    changed: bool,
+) -> alloc::string::String {
+    if changed {
+        alloc::format!("{service} is now {}", enrolment.as_str())
+    } else {
+        alloc::format!("{service} was already {}", enrolment.as_str())
+    }
+}
+
+/// One line stating that a reachable enrolment request was refused, and why.
+///
+/// A refusal here is never the *caller's* authority: reaching a gated endpoint
+/// already proved that, so the codes a failed store write surfaces are reported
+/// as the manager failing to record the decision rather than as a permission
+/// problem an administrator would go hunting in the wrong place.
+fn enrol_refused_message(op: ServiceEnrolOp, service: &str, err: Errno) -> alloc::string::String {
+    let reason = match err {
+        Errno::NotFound => "no such service is installed",
+        Errno::Busy => "the service could not be stopped",
+        Errno::NotSupported => "the service could not be launched",
+        // The record is only durable once it is on disk, so a manager that
+        // could not write it refuses rather than acknowledging. These are the
+        // codes that write surfaces; none of them is about the caller.
+        Errno::PermissionDenied | Errno::BufferTooSmall | Errno::NoSpace => {
+            "the manager could not write the enrolment record"
+        }
+        other => return alloc::format!("servicectl: {} {service}: {other}", enrol_verb(op)),
+    };
+    alloc::format!("servicectl: {} {service}: {reason}", enrol_verb(op))
+}
+
+/// The verb an enrolment message names an operation by.
+const fn enrol_verb(op: ServiceEnrolOp) -> &'static str {
+    match op {
+        ServiceEnrolOp::Enable => "enable",
+        ServiceEnrolOp::Disable => "disable",
     }
 }
 
@@ -184,6 +271,7 @@ pub fn dispatch<C: ControlChannel, I: ToolIo>(
 ) -> Option<Exit> {
     match command {
         Command::Control { op, service } => Some(run(channel, io, op, service)),
+        Command::Enrol { op, service } => Some(run_enrol(channel, io, op, service)),
         // The caller renders its own bundle's help.
         Command::Help => None,
     }

@@ -33,7 +33,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_abi::driver::block::{Block, BlockGeometry};
-use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
+use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeId, NodeKind};
 use tairix_abi::DriverError;
 use tairix_drv_fs_arxfs::{EntropySource, Security, VolumeKey, ARXFS, VOLUME_KEY_LEN};
 use tairix_users::{
@@ -301,6 +301,32 @@ pub fn build_users_root_image() -> Result<Vec<u8>, DriverError> {
     build_users_root_image_with_key(&FIXTURE_VOLUME_KEY, &[])
 }
 
+/// Create PID 1's enrolment-override directory under `settings`, owned by the
+/// system user exactly as `tools/mkimage` provisions it.
+///
+/// Without it every `servicectl enable`/`disable` would be refused rather than
+/// recorded: `/System/Settings` is system-user-owned, so the manager cannot
+/// create the directory its own document lives in.
+fn create_service_overrides_dir(
+    fs: &mut ARXFS<VecBlock>,
+    settings: NodeId,
+) -> Result<(), DriverError> {
+    let leaf = tairix_abi::SERVICE_OVERRIDES_DIR
+        .rsplit('/')
+        .next()
+        .unwrap_or(tairix_abi::SERVICE_OVERRIDES_DIR);
+    let dir = fs.create(settings, leaf.as_bytes(), NodeKind::Directory)?;
+    fs.set_security(
+        dir,
+        Security::new(
+            0o755,
+            tairix_users::SYSTEM_UID.0,
+            tairix_users::SYSTEM_GID.0,
+        ),
+    )
+    .map(drop)
+}
+
 /// Build the users-root volume under an arbitrary `volume_key` — the same
 /// layout as [`build_users_root_image`] but keyed by the caller's key, so
 /// a consumer can exercise the production passphrase-derived-key mount
@@ -359,6 +385,7 @@ pub fn build_users_root_image_with_key(
                     tairix_users::SERVICES_GID.0,
                 ),
             )?;
+            create_service_overrides_dir(&mut fs, settings)?;
         }
         if name == "Users" {
             // The planted account's recorded home directory, owned by the

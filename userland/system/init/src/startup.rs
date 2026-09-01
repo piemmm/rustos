@@ -33,7 +33,14 @@
 //!   service `init` launches once at startup and supervises for the life of
 //!   the system, and the compiled-in system account it runs as. Optional and
 //!   **repeatable**, up to [`MAX_SERVICES`]; the directives' order is the
-//!   launch order.
+//!   launch order. These are the irreducible **bootstrap floor**: services
+//!   the machine needs before the registration store can mean anything, so
+//!   enrolment does not govern them.
+//! * `enrolled <path> <account>` — the same, for a service the **enrolment
+//!   record** governs. It is registered only if the effective enrolment (the
+//!   image's layer with the administrator's overrides applied) enables it, so
+//!   an administrator can turn it off durably. Optional and **repeatable**,
+//!   up to [`MAX_ENROLLED_SERVICES`].
 //!
 //! Every `session`/`service` directive names its account, and the parser
 //! resolves the name onto its uid **at parse time** through the compiled-in
@@ -62,7 +69,7 @@ pub const MAX_CONFIG_LEN: usize = 4096;
 /// still staged).
 ///
 /// This is a **bound dictated by the floor**, not a hand-picked cap: it is
-/// derived from the floor text itself by [`count_service_directives`], so
+/// derived from the floor text itself by [`count_keyword_directives`], so
 /// adding a `service` directive to [`DEFAULT_CONFIG`] grows the bound with it
 /// — the floor can never overrun the array nor be silently truncated by a
 /// stale magic number. A config that declares *more* `service` directives
@@ -70,7 +77,14 @@ pub const MAX_CONFIG_LEN: usize = 4096;
 /// than overrunning the array; the growable, discovery-registered tier past
 /// the floor lands with the userland heap (`plans/NEW-SERVICEMANAGER.md`
 /// §3.10).
-pub const MAX_SERVICES: usize = count_service_directives(DEFAULT_CONFIG);
+pub const MAX_SERVICES: usize = count_keyword_directives(DEFAULT_CONFIG, b"service");
+
+/// The enrolment-governed tier's size: how many `enrolled` directives the
+/// compiled-in [`DEFAULT_CONFIG`] declares.
+///
+/// Derived from the floor text exactly as [`MAX_SERVICES`] is, so adding an
+/// `enrolled` directive grows the bound with it.
+pub const MAX_ENROLLED_SERVICES: usize = count_keyword_directives(DEFAULT_CONFIG, b"enrolled");
 
 /// The startup configuration compiled into the `init` `Run` binary.
 ///
@@ -94,19 +108,22 @@ pub const DEFAULT_CONFIG: &str = "\
 # store and is a boot-floor service because a headless machine needs it as
 # much as a desktop does — it binds its endpoint straight away and answers a
 # typed refusal until the encrypted root is unlocked. `timed`
-# (plans/TIMESYNC.md) is last of the services: a machine with no RTC boots
-# knowing nothing about the time, and every audit-log hash chain, filesystem
-# timestamp, and certificate lifetime rests on the clock it establishes. It
-# starts after `netstack` so the interfaces exist by the time its first query
-# is due, and needs no readiness gate of its own — a query it cannot send
-# simply fails and its bounded backoff paces the retry.
+# (plans/TIMESYNC.md) is last, and is the one entry the enrolment record
+# governs rather than the bootstrap floor: a machine with no RTC boots knowing
+# nothing about the time, and every audit-log hash chain, filesystem timestamp,
+# and certificate lifetime rests on the clock it establishes, but automatic
+# time-setting is a thing a user may turn off, so it is `enrolled` and an
+# administrator's `disable` survives a reboot. It starts after `netstack` so
+# the interfaces exist by the time its first query is due, and needs no
+# readiness gate of its own — a query it cannot send simply fails and its
+# bounded backoff paces the retry.
 console
 service /System/Services/sysinfod.app/Run sysinfod
 service /System/Services/netstack.app/Run netstack
 service /System/Services/devmgr.app/Run devmgr
 service /System/Services/seatmgr.app/Run seatmgr
 service /System/Services/confd.app/Run confd
-service /System/Services/timed.app/Run timed
+enrolled /System/Services/timed.app/Run timed
 session /System/Services/login.app/Run login
 ";
 
@@ -271,6 +288,11 @@ pub struct StartupConfig<'a> {
     services: [Launch<'a>; MAX_SERVICES],
     /// How many of [`services`](Self::services) are populated.
     service_count: usize,
+    /// The declared `enrolled` entries in declaration order; only the first
+    /// [`enrolled_count`](Self::enrolled_count) entries are populated.
+    enrolled: [Launch<'a>; MAX_ENROLLED_SERVICES],
+    /// How many of [`enrolled`](Self::enrolled) are populated.
+    enrolled_count: usize,
 }
 
 impl<'a> StartupConfig<'a> {
@@ -296,6 +318,8 @@ impl<'a> StartupConfig<'a> {
         let mut session: Option<Launch<'a>> = None;
         let mut services: [Launch<'a>; MAX_SERVICES] = [EMPTY; MAX_SERVICES];
         let mut service_count = 0usize;
+        let mut enrolled: [Launch<'a>; MAX_ENROLLED_SERVICES] = [EMPTY; MAX_ENROLLED_SERVICES];
+        let mut enrolled_count = 0usize;
 
         for raw in text.lines() {
             let line = strip_comment(raw).trim();
@@ -334,6 +358,14 @@ impl<'a> StartupConfig<'a> {
                     services[service_count] = launch;
                     service_count += 1;
                 }
+                "enrolled" => {
+                    let launch = parse_launch(argument.ok_or(ConfigError::MissingArgument)?)?;
+                    if enrolled_count >= MAX_ENROLLED_SERVICES {
+                        return Err(ConfigError::TooManyServices);
+                    }
+                    enrolled[enrolled_count] = launch;
+                    enrolled_count += 1;
+                }
                 _ => return Err(ConfigError::UnknownDirective),
             }
         }
@@ -346,6 +378,8 @@ impl<'a> StartupConfig<'a> {
             session,
             services,
             service_count,
+            enrolled,
+            enrolled_count,
         })
     }
 
@@ -363,6 +397,15 @@ impl<'a> StartupConfig<'a> {
     #[must_use]
     pub fn services(&self) -> &[Launch<'a>] {
         &self.services[..self.service_count]
+    }
+
+    /// The enrolment-governed services, in declaration order. Each is
+    /// registered only if the effective enrolment enables it, so an
+    /// administrator's `disable` survives a reboot. Empty when the config
+    /// declares none.
+    #[must_use]
+    pub fn enrolled(&self) -> &[Launch<'a>] {
+        &self.enrolled[..self.enrolled_count]
     }
 }
 
@@ -419,7 +462,7 @@ fn parse_launch(argument: &str) -> Result<Launch<'_>, ConfigError> {
 /// number; a unit test asserts it agrees with the real parser on
 /// [`DEFAULT_CONFIG`], so the two tokenisers can never silently drift for the
 /// floor.
-const fn count_service_directives(text: &str) -> usize {
+const fn count_keyword_directives(text: &str, keyword: &[u8]) -> usize {
     let bytes = text.as_bytes();
     let len = bytes.len();
     let mut count = 0;
@@ -427,7 +470,7 @@ const fn count_service_directives(text: &str) -> usize {
     let mut i = 0;
     while i <= len {
         if i == len || bytes[i] == b'\n' {
-            if line_keyword_is_service(bytes, line_start, i) {
+            if line_keyword_is(bytes, line_start, i, keyword) {
                 count += 1;
             }
             line_start = i + 1;
@@ -437,11 +480,10 @@ const fn count_service_directives(text: &str) -> usize {
     count
 }
 
-/// Whether the config line `bytes[start..end]` is a `service` directive: its
+/// Whether the config line `bytes[start..end]`'s keyword is `keyword`: its
 /// keyword — the first whitespace-delimited token, after a `#`-comment is
 /// stripped and surrounding whitespace trimmed — is exactly `service`.
-const fn line_keyword_is_service(bytes: &[u8], start: usize, end: usize) -> bool {
-    const SERVICE: &[u8] = b"service";
+const fn line_keyword_is(bytes: &[u8], start: usize, end: usize, keyword: &[u8]) -> bool {
     let mut lo = start;
     let mut hi = end;
     // Strip an inline or whole-line comment beginning at the first `#`.
@@ -465,12 +507,12 @@ const fn line_keyword_is_service(bytes: &[u8], start: usize, end: usize) -> bool
     while keyword_end < hi && !is_ascii_whitespace(bytes[keyword_end]) {
         keyword_end += 1;
     }
-    if keyword_end - lo != SERVICE.len() {
+    if keyword_end - lo != keyword.len() {
         return false;
     }
     let mut k = 0;
-    while k < SERVICE.len() {
-        if bytes[lo + k] != SERVICE[k] {
+    while k < keyword.len() {
+        if bytes[lo + k] != keyword[k] {
             return false;
         }
         k += 1;
@@ -488,7 +530,7 @@ const fn is_ascii_whitespace(b: u8) -> bool {
 mod tests {
     use super::{
         service_name, ConfigError, Launch, StartupConfig, DEFAULT_CONFIG, MAX_CONFIG_LEN,
-        MAX_SERVICES,
+        MAX_ENROLLED_SERVICES, MAX_SERVICES,
     };
 
     extern crate alloc;
@@ -514,10 +556,9 @@ mod tests {
         // introspection endpoint is published before any client queries it;
         // `netstack` is launched before `devmgr` so it is ready when `devmgr`
         // binds discovered NIC device channels to it. `confd` needs nothing
-        // from the others and nothing needs it before an application runs;
-        // `timed` comes last because it needs `netstack`'s interfaces to
-        // exist before its first query is due and nothing needs it to have
-        // finished.
+        // from the others and nothing needs it before an application runs.
+        // `timed` is not here: it is the enrolment-governed tier, asserted
+        // separately below.
         assert_eq!(
             config.services(),
             &[
@@ -541,11 +582,16 @@ mod tests {
                     path: "/System/Services/confd.app/Run",
                     uid: tairix_users::CONFD_UID.0,
                 },
-                Launch {
-                    path: "/System/Services/timed.app/Run",
-                    uid: tairix_users::TIMED_UID.0,
-                },
             ],
+        );
+        // The enrolment-governed tier: `timed` alone, so a user who turns
+        // automatic time-setting off keeps it off across a reboot.
+        assert_eq!(
+            config.enrolled(),
+            &[Launch {
+                path: "/System/Services/timed.app/Run",
+                uid: tairix_users::TIMED_UID.0,
+            }],
         );
     }
 
@@ -651,10 +697,28 @@ mod tests {
         // floor is never truncated by a stale magic cap.
         let floor = StartupConfig::parse(DEFAULT_CONFIG).expect("the boot floor parses");
         assert_eq!(floor.services().len(), MAX_SERVICES);
-        // The current floor is sysinfod, netstack, devmgr, seatmgr, confd,
-        // timed; this pins the derived value so a change to the floor is a
-        // conscious one.
-        assert_eq!(MAX_SERVICES, 6);
+        // The current floor is sysinfod, netstack, devmgr, seatmgr, confd;
+        // this pins the derived value so a change to the floor is a conscious
+        // one.
+        assert_eq!(MAX_SERVICES, 5);
+        // The same derivation over the `enrolled` keyword: `timed` alone.
+        assert_eq!(floor.enrolled().len(), MAX_ENROLLED_SERVICES);
+        assert_eq!(MAX_ENROLLED_SERVICES, 1);
+    }
+
+    #[test]
+    fn more_than_the_enrolled_bound_fails_closed() {
+        // The enrolment-governed tier is bounded by its own derivation the
+        // same way the floor is, and overflows fail closed rather than
+        // dropping an entry.
+        let mut text = String::from("console\nsession /x login\n");
+        for n in 0..=MAX_ENROLLED_SERVICES {
+            let _ = writeln!(text, "enrolled /System/Services/e{n} timed");
+        }
+        assert_eq!(
+            StartupConfig::parse(&text),
+            Err(ConfigError::TooManyServices),
+        );
     }
 
     #[test]

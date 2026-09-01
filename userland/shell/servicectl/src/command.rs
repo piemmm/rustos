@@ -1,12 +1,12 @@
 //! The parsed shape of a `servicectl` command line.
 
 use tairix_abi::service::SERVICE_MANIFEST_MAX_NAME_LEN;
-use tairix_abi::ServiceControlOp;
+use tairix_abi::{ServiceControlOp, ServiceEnrolOp};
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `servicectl`'s own Help tree is
 /// unavailable.
-pub const USAGE: &str = "usage: servicectl [-h | -?] start|stop SERVICE";
+pub const USAGE: &str = "usage: servicectl [-h | -?] start|stop|enable|disable SERVICE";
 
 /// Why a command line was not understood.
 ///
@@ -38,23 +38,30 @@ pub enum Command<'a> {
         /// The service it applies to.
         service: &'a str,
     },
+    /// Change a named service's persistent enrolment.
+    Enrol {
+        /// The enrolment change to record.
+        op: ServiceEnrolOp,
+        /// The service it applies to.
+        service: &'a str,
+    },
     /// Render `servicectl`'s own short help (`-h`/`-?`/`--help`).
     Help,
 }
 
 /// Parse `args` (the tool's arguments, excluding the program name).
 ///
-/// The grammar is `servicectl [-h | -?] start|stop SERVICE`:
+/// The grammar is `servicectl [-h | -?] start|stop|enable|disable SERVICE`:
 ///
 /// * `-h` / `-?` / `--help` — the reserved short-help switches; they win
 ///   immediately.
 /// * `start SERVICE` / `stop SERVICE` — the runtime-lifecycle operations.
+/// * `enable SERVICE` / `disable SERVICE` — the persistent enrolment changes,
+///   which the manager records and obeys on the next boot as well as now.
+///   They travel to a different endpoint from the runtime pair, because the
+///   two acts differ in durability.
 /// * `--` ends the options, so a service whose name begins with a dash is
 ///   still nameable.
-///
-/// Enablement (`enable`/`disable`) is deliberately absent: it mutates the
-/// registration store rather than the runtime, and is a separate operation
-/// on a separate path.
 ///
 /// # Errors
 ///
@@ -71,25 +78,42 @@ pub fn parse<'a>(args: &[&'a str]) -> Result<Command<'a>, UsageError> {
     let Some((verb, operands)) = rest.split_first() else {
         return Err(UsageError::MissingCommand);
     };
-    let op = match *verb {
-        "start" => ServiceControlOp::Start,
-        "stop" => ServiceControlOp::Stop,
-        _ => return Err(UsageError::UnknownCommand),
-    };
+    let verb = *verb;
+    if !matches!(verb, "start" | "stop" | "enable" | "disable") {
+        return Err(UsageError::UnknownCommand);
+    }
     let [service] = operands else {
         return Err(UsageError::WrongOperandCount);
     };
     if service.len() > SERVICE_MANIFEST_MAX_NAME_LEN {
         return Err(UsageError::NameTooLong);
     }
-    Ok(Command::Control { op, service })
+    Ok(match verb {
+        "start" => Command::Control {
+            op: ServiceControlOp::Start,
+            service,
+        },
+        "stop" => Command::Control {
+            op: ServiceControlOp::Stop,
+            service,
+        },
+        "enable" => Command::Enrol {
+            op: ServiceEnrolOp::Enable,
+            service,
+        },
+        // The match above admits exactly these four verbs.
+        _ => Command::Enrol {
+            op: ServiceEnrolOp::Disable,
+            service,
+        },
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::{parse, Command, UsageError, USAGE};
     use tairix_abi::service::SERVICE_MANIFEST_MAX_NAME_LEN;
-    use tairix_abi::ServiceControlOp;
+    use tairix_abi::{ServiceControlOp, ServiceEnrolOp};
 
     fn control(args: &[&str]) -> (ServiceControlOp, alloc::string::String) {
         match parse(args) {
@@ -104,6 +128,32 @@ mod tests {
         assert_eq!(control(&["start", "timed"]).1, "timed");
         assert_eq!(control(&["stop", "netstack"]).0, ServiceControlOp::Stop);
         assert_eq!(control(&["stop", "netstack"]).1, "netstack");
+    }
+
+    fn enrol(args: &[&str]) -> (ServiceEnrolOp, alloc::string::String) {
+        match parse(args) {
+            Ok(Command::Enrol { op, service }) => (op, alloc::string::String::from(service)),
+            other => panic!("expected an enrolment command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn both_enrolment_verbs_parse_with_their_service() {
+        assert_eq!(enrol(&["enable", "timed"]).0, ServiceEnrolOp::Enable);
+        assert_eq!(enrol(&["enable", "timed"]).1, "timed");
+        assert_eq!(enrol(&["disable", "timed"]).0, ServiceEnrolOp::Disable);
+        assert_eq!(enrol(&["disable", "timed"]).1, "timed");
+    }
+
+    #[test]
+    fn an_enrolment_verb_needs_its_service_too() {
+        assert_eq!(parse(&["enable"]), Err(UsageError::WrongOperandCount));
+        assert_eq!(
+            parse(&["disable", "a", "b"]),
+            Err(UsageError::WrongOperandCount)
+        );
+        let long = "a".repeat(SERVICE_MANIFEST_MAX_NAME_LEN + 1);
+        assert_eq!(parse(&["enable", &long]), Err(UsageError::NameTooLong));
     }
 
     #[test]
@@ -164,7 +214,14 @@ mod tests {
         for locale in tairix_help::REQUIRED_LOCALES {
             let path = format!("{help_root}/{locale}/servicectl.md");
             let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
-            for key in ["`-h, -?`", "`--`", "`start SERVICE`", "`stop SERVICE`"] {
+            for key in [
+                "`-h, -?`",
+                "`--`",
+                "`start SERVICE`",
+                "`stop SERVICE`",
+                "`enable SERVICE`",
+                "`disable SERVICE`",
+            ] {
                 assert!(
                     text.contains(key),
                     "{locale}/servicectl.md must document {key}"
@@ -182,9 +239,10 @@ mod tests {
     }
 
     #[test]
-    fn the_usage_banner_names_both_verbs_and_the_help_switches() {
-        assert!(USAGE.contains("start"));
-        assert!(USAGE.contains("stop"));
+    fn the_usage_banner_names_every_verb_and_the_help_switches() {
+        for verb in ["start", "stop", "enable", "disable"] {
+            assert!(USAGE.contains(verb), "the banner must name {verb}");
+        }
         assert!(USAGE.contains("-h"));
         assert!(USAGE.contains("-?"));
     }

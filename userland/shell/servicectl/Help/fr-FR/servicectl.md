@@ -1,10 +1,10 @@
 ## NAME
 
-servicectl — démarrer et arrêter les services système
+servicectl — démarrer, arrêter, inscrire et désinscrire les services système
 
 ## SYNOPSIS
 
-`servicectl [-h | -?] start|stop SERVICE`
+`servicectl [-h | -?] start|stop|enable|disable SERVICE`
 
 ## DESCRIPTION
 
@@ -25,13 +25,19 @@ peut donc même pas demander.
 - `stop SERVICE` — arrêter proprement un service en cours, ainsi que ses
   dépendants dans l'ordre inverse des dépendances. Le service est invité à
   se terminer et n'est forcé qu'après son délai de grâce.
+- `enable SERVICE` — enregistrer le service comme inscrit, afin que le
+  gestionnaire le démarre à chaque amorçage, et le démarrer maintenant.
+- `disable SERVICE` — l'enregistrer comme non inscrit, afin qu'aucun
+  amorçage ultérieur ne le démarre, et l'arrêter maintenant.
 
 En cas de succès, une ligne nomme l'état dans lequel le gestionnaire a
 laissé le service.
 
-Arrêter un service affecte tous les principaux de la machine, pas seulement
-votre session, et un service inscrit revient au prochain démarrage : cet
-outil modifie le système *en cours d'exécution*, pas ce qui est activé.
+Les deux sortes de changement affectent tous les principaux de la machine,
+pas seulement votre session. `start` et `stop` ne modifient que le système
+*en cours d'exécution*, si bien qu'un service inscrit revient au prochain
+démarrage ; `enable` et `disable` modifient l'inscription même et lui
+survivent donc.
 
 ## OPTIONS
 

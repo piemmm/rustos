@@ -775,14 +775,87 @@ the live model wins, and the engine is reshaped to it in place (§2.13).
   scope-derived (a system id plus one per user) and `lib/cmdres`-style shared
   derivation decides which a caller names, so authority cannot be crossed by
   spelling. Do not add a second endpoint constant ad hoc.
-- **Remaining (TODO).** `enable`/`disable` over the enrolment store-write seam
-  and `status` via §16.6 — both deliberately *not* on the control endpoint:
-  enablement mutates the registration store and status is served through the
-  System Information API, never a control-reply scrape. Then the **live
-  heartbeat transport** (a supervised driver renewing its heartbeat, so
-  `plans/FIX-IO.md`'s block drivers can) and a vertical for a live watchdog
-  kill+restart, and the live rlimit enforcement at spawn (which rides the
-  loader/kernel seam, SVC-5). Full §7 gate on each landing.
+- **Enablement + status — the enrolment endpoint and the §16.6 query.**
+  `enable`/`disable` and `status` stay off the control endpoint: enablement
+  mutates the registration store and status is served through the System
+  Information API, never a control-reply scrape. What lands instead:
+  - `SERVICE_ENROL_ENDPOINT`, a **second** reserved id beside
+    `SERVICE_CONTROL_ENDPOINT`, in the same `lib/abi::service_control` module
+    and sharing its request framing (one frame codec, §2.2) but with its own
+    op set and its own reply, because the two answers differ in kind — a
+    `ServiceState` versus an enabled/disabled disposition and whether it
+    changed. The *endpoint* is what the no-enablement-on-control decision is
+    about, not the file. Both ids become scope-derived together when the
+    per-user manager lands (the open item above); neither is a second
+    constant for the same purpose.
+  - Both endpoints are gated by the existing `CAP_SERVICE_CONTROL`. No new
+    capability: nothing yet needs to grant a principal the power to restart a
+    wedged service without also trusting it to disable one, so the coarse
+    capability stands (§5.2), and the durable form of an administrative act is
+    not a different authority from the transient form.
+  - **The authority is the identity boundary, not a capability computation —
+    and `enrol` therefore loses its manifest/ceiling check.** SVC-3 gave
+    `enrol` a "requested ⊆ enroller's ceiling" refusal. It has never had a
+    caller, and it is not merely unused but *unusable*: every system service
+    holds service-scoped capabilities no human account's ceiling carries
+    (`CAP_SANDBOX_SPAWN` for `timed`, `CAP_SYSINFO_INTROSPECT` for `sysinfod`,
+    `CAP_DRV_LOAD` for `devmgr`, `CAP_SEAT_ADMIN` for `seatmgr`), so the check
+    would refuse an administrator enabling any of them — including `timed`,
+    this feature's own witness. It is also exactly the "second
+    capability-derivation path" `scope.rs` states the engine must not grow.
+    `enrol` becomes the pure record transform it always was in effect, and the
+    three checks that do the work are: the kernel's `CAP_SERVICE_CONTROL` gate
+    on the endpoint; the service being **known** to this manager, so a typo
+    can never record a phantom enrolment a later image would activate; and
+    `AuthorityScope::permits_account`, the same identity boundary the launch
+    path uses, which is what stops a future per-user manager enrolling a
+    system-authority service. Authority itself is unwidenable regardless: the
+    kernel derives `manifest ∩ account-ceiling` at spawn.
+  - **The registration store is two layers**, forced by
+    `plans/NEW-NAMESPACE.md` §5: its target policy pins
+    `attach.system.flags = ro` and
+    `project./System/Settings = root:/System/Settings`, so the pre-unlock
+    volume can never be the mutable store and the mutable path can never be
+    read pre-unlock. The **administrator** layer is
+    `/System/Settings/Services/overrides` on the encrypted root, holding only
+    `<name> enabled|disabled` for what was changed, so a system update's new
+    default takes effect at once for everything unspoken. The **vendor** layer
+    is the `enrolled` directives of PID 1's startup configuration, *not* a
+    document: a QEMU run settled that no file under `/System` is reliably
+    readable at the instant the manager must decide what to bring up, and the
+    only sanctioned pre-unlock read is the store service's `CAP_DRV_LOAD`-gated
+    whitelist, which PID 1 must not hold. An on-disk vendor record waits for the
+    `/System/Services` discovery scan (SVC-5), which needs that same read path
+    and must answer the question properly. `effective` is one pure function over
+    the pair. This retires the `SystemConfigFile::SystemServices` whitelist
+    entry, which named a path the mount table makes unreachable and never had a
+    reader (§2.14).
+  - Applying the administrator layer is bounded by the unlock and is stated
+    rather than hidden: pre-unlock PID 1 obeys the vendor layer alone, and the
+    moment the override document is readable — on a bounded doubling one-shot
+    ladder (`lib/util::retry`, shared with the clock service, which waits the
+    same way for the same reason) — it re-derives the effective set and stops a
+    service the administrator disabled through the existing reverse-dependency
+    `stop`, audited. So a disabled service does run for the few seconds before
+    the unlock. Deferring the whole enrolled tier until the ladder resolves
+    would instead deny a never-unlocking machine its clock for the ladder's
+    length, which is worse; nothing is granted by the document being unreadable,
+    so this is a narrowing that arrives late, not a fail-open.
+  - `status` is `SysinfoQueryId::SERVICE_STATUS`, a new spec at the **end** of
+    `SYSINFO_QUERIES`, gated `CAP_SYSINFO_GLOBAL` and audited like
+    `GLOBAL_PROCESS_LIST` (it names other principals and their pids). PID 1
+    serves the rows on a read-only reserved endpoint that requires
+    `CAP_SYSINFO_INTROSPECT` on the sender, so only the introspection service
+    reads the manager's table and every consumer goes through the audited
+    query rather than round the side of it.
+  - PID 1 gains `CAP_FS_ACCESS` for the two documents. Per-inode
+    authorisation still applies under its attested identity, and the vendor
+    layer's volume is read-only, so its reach there can never write.
+- **Remaining (TODO).** The **live heartbeat transport** (a supervised driver
+  renewing its heartbeat, so `plans/FIX-IO.md`'s block drivers can) and a
+  vertical for a live watchdog kill+restart, and the live rlimit enforcement at
+  spawn (which rides the loader/kernel seam, SVC-5). Full §7 gate on each
+  landing.
 
 ---
 

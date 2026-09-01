@@ -45,7 +45,7 @@ GPT type byte.
 - `tairix_abi::driver_store::SystemConfigFile` — a **closed whitelist** of
   files the `/System` store service reads on a bootstrap client's behalf
   *before the encrypted root is unlocked*. Already the sanctioned pre-unlock
-  read path (`system.conf`, `network.conf`, the service enrolment record).
+  read path (`system.conf`, `network.conf`).
 - `kernel/core::fs::volumes::VolumeForest` — publishes each attached volume's
   stable identity so `id::<uuid>/path` resolves.
 - `unlock_orchestrate.rs::finish_unlock` — runs the driver-store serve loop
@@ -128,9 +128,9 @@ data on it is. So the policy lives on the read-only `/System` volume, signed:
 `drives.md` §7 already fixes this location: *"Persistent alias policy is
 signed (`System:/Security/Policy`) and loaded at boot."*
 
-**Why `Security/Policy` and not `Settings`.** The service enrolment record
-lives under `/System/Settings` because enablement is configuration. The
-namespace policy is not: it decides which volume the `System:` alias — hence
+**Why `Security/Policy` and not `Settings`.** The administrator's service
+enrolment overrides live under `/System/Settings` because enablement is
+configuration. The namespace policy is not: it decides which volume the `System:` alias — hence
 every executable the system loads — comes from. That is a statement about
 trust, and it belongs beside the MAC and capability policy.
 

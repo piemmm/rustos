@@ -1,10 +1,10 @@
 ## NAME
 
-servicectl — start and stop system services
+servicectl — start, stop, enable and disable system services
 
 ## SYNOPSIS
 
-`servicectl [-h | -?] start|stop SERVICE`
+`servicectl [-h | -?] start|stop|enable|disable SERVICE`
 
 ## DESCRIPTION
 
@@ -23,12 +23,17 @@ before the manager sees it, so an unprivileged account cannot even ask.
 - `stop SERVICE` — stop a running service gracefully, and its dependents
   in reverse-dependency order. The service is asked to exit and forced down
   only after its grace period.
+- `enable SERVICE` — record the service as enrolled, so the manager brings
+  it up at every boot, and start it now.
+- `disable SERVICE` — record it as not enrolled, so no later boot starts it,
+  and stop it now.
 
 On success one line names the state the manager left the service in.
 
-Stopping a service affects every principal on the machine, not just your
-own session, and a service that is enrolled comes back at the next boot:
-this tool changes the *running* system, not what is enabled.
+Either kind of change affects every principal on the machine, not just your
+own session. `start` and `stop` change only the *running* system, so an
+enrolled service comes back at the next boot; `enable` and `disable` change
+what is enrolled, so they also survive one.
 
 ## OPTIONS
 

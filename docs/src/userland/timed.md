@@ -7,8 +7,12 @@ clock from a network source runs through it. The staged design is
 [`tairix-timesync`](../lib/timesync.md) and the wire protocol is
 `tairix_net::ntp`.
 
-The installed binary lives at `/System/Services/timed.app/Run` and is a
-boot-floor service PID 1 launches from its startup configuration. A Raspberry
+The installed binary lives at `/System/Services/timed.app/Run`. It is the
+**enrolment-governed** tier rather than the bootstrap floor: automatic
+time-setting is something a user may turn off, so PID 1 starts it only if the
+enrolment record enables it, and an administrator's `servicectl disable timed`
+survives a reboot ([`servicectl`](servicectl.md)). A stock image enrols it, so
+the default is on. A Raspberry
 Pi 3/4 has no RTC at all, so without this service such a machine boots with
 `WallTimeState::Unset` for ever — and the audit log's hash chains, ARXFS
 `Time64` metadata, and certificate lifetimes all rest on the clock it
@@ -97,8 +101,8 @@ Two keys in `/System/Settings/Configuration/system.conf`:
 * `time.refresh` — `6h`, `12h`, `1d` (the default), `2d`, or `7d`: how much
   *uptime* passes between steady-state re-queries.
 
-The store lives on the encrypted root and this is a boot-floor service, so its
-first read normally happens before that root is mounted. There is no userland
+The store lives on the encrypted root and this service starts before that root
+is mounted, so its first read normally finds nothing. There is no userland
 event for "the root is mounted", so the tiers are re-selected on a bounded,
 doubling schedule folded into the reactor's own deadline — about seventeen
 minutes of attempts, parking between them, never a spin and never a wait on the

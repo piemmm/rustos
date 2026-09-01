@@ -124,59 +124,73 @@ pub const SERVICE_WATCHDOG_ARMED: EventId = EventId(9_024);
 /// `on-failure`/`always` service is relaunched with the crash-loop budget; a
 /// `never` service is left down). A security- and reliability-relevant event.
 pub const SERVICE_WATCHDOG_TIMEOUT: EventId = EventId(9_025);
+/// A service's **persistent enrolment was changed** by an enrolment-surface
+/// request: an administrator, through the capability-gated enrolment
+/// endpoint, enabled or disabled a service, so the manager recorded the
+/// decision and will obey it on the next boot as well as now.
+pub const SERVICE_ENROLMENT_CHANGED: EventId = EventId(9_026);
+/// An enrolment-surface request was refused: it named an unknown or
+/// policy-invalid service, or one running under an account outside this
+/// manager's [`AuthorityScope`](crate::AuthorityScope). A security-relevant
+/// refusal, audited and failing closed — the request records nothing.
+pub const SERVICE_ENROLMENT_DENIED: EventId = EventId(9_027);
+/// A service was **stopped because the administrator's enrolment override
+/// became readable** and disables it. Pre-unlock the manager obeys the
+/// image's enrolment layer alone, so a service the administrator disabled runs
+/// until the override document on the encrypted root can be read; this records
+/// the moment that narrowing is applied.
+pub const SERVICE_ENROLMENT_REVOKED: EventId = EventId(9_028);
+
+/// Every event id this crate emits, in numeric order.
+///
+/// One list, so the uniqueness/range checks and the message table's coverage
+/// check cannot disagree about which ids exist — an id missing from here would
+/// otherwise render as the generic fallback with nothing to catch it.
+pub const ALL: [EventId; 27] = [
+    SERVICE_STARTED,
+    SERVICE_START_FAILED,
+    SERVICE_SKIPPED,
+    SERVICE_EXITED,
+    ORPHAN_REAPED,
+    GRAPH_REJECTED,
+    SERVICE_READY,
+    CONDITION_SATISFIED,
+    NOTIFY_REJECTED,
+    SERVICE_NOT_ENROLLED,
+    SERVICE_ACTIVATED,
+    ACTIVATION_QUEUED,
+    ACTIVATION_DENIED,
+    SERVICE_LINGER_ARMED,
+    SERVICE_STOPPING,
+    SERVICE_FORCE_TERMINATED,
+    SERVICE_RESTART_SCHEDULED,
+    SERVICE_RESTART_EXHAUSTED,
+    SERVICE_SCOPE_REJECTED,
+    SERVICE_CONTROL_STARTED,
+    SERVICE_CONTROL_STOPPED,
+    SERVICE_CONTROL_DENIED,
+    SERVICE_WATCHDOG_ARMED,
+    SERVICE_WATCHDOG_TIMEOUT,
+    SERVICE_ENROLMENT_CHANGED,
+    SERVICE_ENROLMENT_DENIED,
+    SERVICE_ENROLMENT_REVOKED,
+];
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ACTIVATION_DENIED, ACTIVATION_QUEUED, CONDITION_SATISFIED, GRAPH_REJECTED, INIT_RANGE_END,
-        INIT_RANGE_START, NOTIFY_REJECTED, ORPHAN_REAPED, SERVICE_ACTIVATED,
-        SERVICE_CONTROL_DENIED, SERVICE_CONTROL_STARTED, SERVICE_CONTROL_STOPPED, SERVICE_EXITED,
-        SERVICE_FORCE_TERMINATED, SERVICE_LINGER_ARMED, SERVICE_NOT_ENROLLED, SERVICE_READY,
-        SERVICE_RESTART_EXHAUSTED, SERVICE_RESTART_SCHEDULED, SERVICE_SCOPE_REJECTED,
-        SERVICE_SKIPPED, SERVICE_STARTED, SERVICE_START_FAILED, SERVICE_STOPPING,
-        SERVICE_WATCHDOG_ARMED, SERVICE_WATCHDOG_TIMEOUT,
-    };
-
-    const ALL: [u32; 24] = [
-        SERVICE_STARTED.0,
-        SERVICE_START_FAILED.0,
-        SERVICE_SKIPPED.0,
-        SERVICE_EXITED.0,
-        ORPHAN_REAPED.0,
-        GRAPH_REJECTED.0,
-        SERVICE_READY.0,
-        CONDITION_SATISFIED.0,
-        NOTIFY_REJECTED.0,
-        SERVICE_NOT_ENROLLED.0,
-        SERVICE_ACTIVATED.0,
-        ACTIVATION_QUEUED.0,
-        ACTIVATION_DENIED.0,
-        SERVICE_LINGER_ARMED.0,
-        SERVICE_STOPPING.0,
-        SERVICE_FORCE_TERMINATED.0,
-        SERVICE_RESTART_SCHEDULED.0,
-        SERVICE_RESTART_EXHAUSTED.0,
-        SERVICE_SCOPE_REJECTED.0,
-        SERVICE_CONTROL_STARTED.0,
-        SERVICE_CONTROL_STOPPED.0,
-        SERVICE_CONTROL_DENIED.0,
-        SERVICE_WATCHDOG_ARMED.0,
-        SERVICE_WATCHDOG_TIMEOUT.0,
-    ];
+    use super::{ALL, INIT_RANGE_END, INIT_RANGE_START};
+    use alloc::collections::BTreeSet;
 
     #[test]
     fn ids_are_inside_reserved_range() {
         for id in ALL {
-            assert!((INIT_RANGE_START..INIT_RANGE_END).contains(&id));
+            assert!((INIT_RANGE_START..INIT_RANGE_END).contains(&id.0));
         }
     }
 
     #[test]
     fn ids_are_unique() {
-        let mut ids = ALL;
-        ids.sort_unstable();
-        for w in ids.windows(2) {
-            assert_ne!(w[0], w[1], "duplicate init EventId");
-        }
+        let set: BTreeSet<u32> = ALL.iter().map(|id| id.0).collect();
+        assert_eq!(set.len(), ALL.len());
     }
 }

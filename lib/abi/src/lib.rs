@@ -178,14 +178,15 @@ pub use rxe::{
 };
 pub use service::{
     ActivationMode, Conditions, Dependencies, LifecycleSignal, Limits, ReadinessKind,
-    ReadyCondition, ReadyNotice, RestartPolicy, ServiceLimit, ServiceManifest, ServiceState,
-    ServiceUnit, SERVICE_MANIFEST_MAGIC, SERVICE_MANIFEST_MAX_CONDITIONS,
+    ReadyCondition, ReadyNotice, RestartPolicy, ServiceEnrolment, ServiceLimit, ServiceManifest,
+    ServiceState, ServiceUnit, SERVICE_MANIFEST_MAGIC, SERVICE_MANIFEST_MAX_CONDITIONS,
     SERVICE_MANIFEST_MAX_DEPENDENCIES, SERVICE_MANIFEST_MAX_LIMITS, SERVICE_MANIFEST_MAX_NAME_LEN,
-    SERVICE_NOTICE_MAGIC, SERVICE_VERSION_V1,
+    SERVICE_NOTICE_MAGIC, SERVICE_OVERRIDES_DIR, SERVICE_OVERRIDES_PATH, SERVICE_VERSION_V1,
 };
 pub use service_control::{
-    ServiceControlOp, ServiceControlRequest, SERVICE_CONTROL_ENDPOINT, SERVICE_CONTROL_MAGIC,
-    SERVICE_CONTROL_VERSION_V1,
+    ServiceControlOp, ServiceControlRequest, ServiceEnrolOp, ServiceEnrolRequest,
+    SERVICE_CONTROL_ENDPOINT, SERVICE_CONTROL_MAGIC, SERVICE_CONTROL_VERSION_V1,
+    SERVICE_ENROL_ENDPOINT, SERVICE_ENROL_MAGIC,
 };
 pub use stdinfo::{
     Human, Severity, StdInfoKind, StdInfoRecord, STDINFO_FD, STDINFO_VERSION_CURRENT,

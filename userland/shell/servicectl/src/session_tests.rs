@@ -6,16 +6,21 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::service_control::{
-    encode_error_reply, encode_reply, ServiceControlRequest, REPLY_LEN,
+    encode_enrol_reply, encode_error_reply, encode_reply, ServiceControlRequest,
+    ServiceEnrolRequest, ENROL_REPLY_LEN, REPLY_LEN, SERVICE_CONTROL_ENDPOINT,
+    SERVICE_ENROL_ENDPOINT,
 };
-use tairix_abi::{Errno, ServiceControlOp, ServiceState};
+use tairix_abi::{Errno, ServiceControlOp, ServiceEnrolOp, ServiceEnrolment, ServiceState};
 
 use crate::command::{parse, Command, UsageError};
-use crate::session::{dispatch, report_usage, run, ControlChannel, Exit, ToolIo};
+use crate::session::{dispatch, report_usage, run, run_enrol, ControlChannel, Exit, ToolIo};
 
 /// A channel double: records the request frame it was given and replays a
 /// scripted answer.
 struct MockChannel {
+    /// The endpoint each call named, so a test can assert an enrolment
+    /// request never travels to the runtime-control endpoint.
+    endpoints: Vec<u64>,
     answer: Result<Vec<u8>, i64>,
     seen: Vec<Vec<u8>>,
 }
@@ -28,6 +33,7 @@ impl MockChannel {
         Self {
             answer: Ok(reply[..n].to_vec()),
             seen: Vec::new(),
+            endpoints: Vec::new(),
         }
     }
 
@@ -38,6 +44,7 @@ impl MockChannel {
         Self {
             answer: Ok(reply[..n].to_vec()),
             seen: Vec::new(),
+            endpoints: Vec::new(),
         }
     }
 
@@ -47,12 +54,14 @@ impl MockChannel {
         Self {
             answer: Err(-i64::from(err.as_i32())),
             seen: Vec::new(),
+            endpoints: Vec::new(),
         }
     }
 }
 
 impl ControlChannel for MockChannel {
-    fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, i64> {
+    fn call(&mut self, endpoint: u64, request: &[u8], reply: &mut [u8]) -> Result<usize, i64> {
+        self.endpoints.push(endpoint);
         self.seen.push(request.to_vec());
         match &self.answer {
             Ok(frame) => {
@@ -79,6 +88,138 @@ impl ToolIo for MockIo {
     fn write_error(&mut self, line: &str) {
         self.err.push(line.to_string());
     }
+}
+
+/// A manager that answers an enrolment request with `enrolment`/`changed`.
+fn enrolling(enrolment: ServiceEnrolment, changed: bool) -> MockChannel {
+    let mut reply = [0u8; ENROL_REPLY_LEN];
+    let n = encode_enrol_reply(&mut reply, enrolment, changed).expect("encodes");
+    MockChannel {
+        answer: Ok(reply[..n].to_vec()),
+        seen: Vec::new(),
+        endpoints: Vec::new(),
+    }
+}
+
+#[test]
+fn a_successful_disable_reports_the_recorded_enrolment_on_stdout() {
+    let mut channel = enrolling(ServiceEnrolment::Disabled, true);
+    let mut io = MockIo::default();
+    let exit = run_enrol(&mut channel, &mut io, ServiceEnrolOp::Disable, "timed");
+
+    assert_eq!(exit, Exit::Ok);
+    assert_eq!(io.out, ["timed is now disabled"]);
+    assert!(io.err.is_empty());
+    // The durable act travels to the enrolment endpoint, never to the
+    // runtime-control one: the two authorities are separable by construction.
+    assert_eq!(channel.endpoints, [SERVICE_ENROL_ENDPOINT]);
+    // …and the frame it sent decodes as the request that was asked for.
+    let sent = ServiceEnrolRequest::decode(&channel.seen[0]).expect("a well-formed frame");
+    assert_eq!(sent.op, ServiceEnrolOp::Disable);
+    assert_eq!(sent.name, "timed");
+}
+
+#[test]
+fn an_unchanged_enrolment_succeeds_and_says_so_rather_than_claiming_work() {
+    // Enabling what is already enabled is what a provisioning script run
+    // twice does; it must succeed, and it must not report a change.
+    let mut channel = enrolling(ServiceEnrolment::Enabled, false);
+    let mut io = MockIo::default();
+    let exit = run_enrol(&mut channel, &mut io, ServiceEnrolOp::Enable, "timed");
+
+    assert_eq!(exit, Exit::Ok);
+    assert_eq!(io.out, ["timed was already enabled"]);
+}
+
+#[test]
+fn an_unknown_service_is_refused_with_its_reason_on_stderr() {
+    let mut channel = MockChannel::refusing(Errno::NotFound);
+    let mut io = MockIo::default();
+    let exit = run_enrol(&mut channel, &mut io, ServiceEnrolOp::Enable, "ghost");
+
+    assert_eq!(exit, Exit::Failed);
+    assert!(io.out.is_empty(), "a refusal never reads as applied");
+    assert_eq!(io.err.len(), 1);
+    assert!(io.err[0].contains("enable ghost"));
+    assert!(io.err[0].contains("no such service is installed"));
+}
+
+#[test]
+fn an_enrolment_the_manager_could_not_record_is_refused_not_acknowledged() {
+    // The decision is only durable once it is on disk, so an administrator is
+    // never told a change was made that the next boot will contradict — and
+    // every code that write surfaces reads as the *manager* failing to record,
+    // never as the caller's authority, which reaching a gated endpoint already
+    // proved.
+    for err in [
+        Errno::BufferTooSmall,
+        Errno::PermissionDenied,
+        Errno::NoSpace,
+    ] {
+        let mut channel = MockChannel::refusing(err);
+        let mut io = MockIo::default();
+        let exit = run_enrol(&mut channel, &mut io, ServiceEnrolOp::Disable, "timed");
+
+        assert_eq!(exit, Exit::Failed);
+        assert!(io.out.is_empty());
+        assert!(
+            io.err[0].contains("could not write the enrolment record"),
+            "{err:?} rendered as {:?}",
+            io.err[0]
+        );
+    }
+}
+
+#[test]
+fn an_unreachable_enrolment_endpoint_names_the_missing_authority() {
+    let mut channel = MockChannel::unreachable(Errno::PermissionDenied);
+    let mut io = MockIo::default();
+    let exit = run_enrol(&mut channel, &mut io, ServiceEnrolOp::Disable, "timed");
+
+    assert_eq!(exit, Exit::Failed);
+    assert!(io.out.is_empty());
+    assert!(io.err[0].contains("may not control services"));
+}
+
+#[test]
+fn a_corrupt_enrolment_reply_fails_closed() {
+    // A success status word with a garbage enrolment byte: the decoder
+    // refuses it and the tool must not claim the record was written.
+    let mut channel = MockChannel {
+        answer: Ok(alloc::vec![0, 0, 0, 0, 0xEE, 0, 0, 0]),
+        seen: Vec::new(),
+        endpoints: Vec::new(),
+    };
+    let mut io = MockIo::default();
+    let exit = run_enrol(&mut channel, &mut io, ServiceEnrolOp::Enable, "svc");
+
+    assert_eq!(exit, Exit::Failed);
+    assert!(io.out.is_empty());
+}
+
+#[test]
+fn dispatch_routes_each_verb_to_its_own_endpoint() {
+    // The one place the two halves could be crossed. A control verb must
+    // never reach the enrolment endpoint, nor an enrolment verb the control
+    // one — the frames' magics would refuse it, but the routing is what
+    // makes that unreachable in the first place.
+    let mut channel = MockChannel::applying(ServiceState::Stopping);
+    let mut io = MockIo::default();
+    dispatch(
+        &mut channel,
+        &mut io,
+        parse(&["stop", "timed"]).expect("parses"),
+    );
+    assert_eq!(channel.endpoints, [SERVICE_CONTROL_ENDPOINT]);
+
+    let mut channel = enrolling(ServiceEnrolment::Disabled, true);
+    let mut io = MockIo::default();
+    dispatch(
+        &mut channel,
+        &mut io,
+        parse(&["disable", "timed"]).expect("parses"),
+    );
+    assert_eq!(channel.endpoints, [SERVICE_ENROL_ENDPOINT]);
 }
 
 #[test]
@@ -174,6 +315,7 @@ fn a_corrupt_reply_fails_closed_rather_than_reporting_success() {
     let mut channel = MockChannel {
         answer: Ok(alloc::vec![0, 0, 0, 0, 0xEE, 0, 0, 0]),
         seen: Vec::new(),
+        endpoints: Vec::new(),
     };
     let mut io = MockIo::default();
     let exit = run(&mut channel, &mut io, ServiceControlOp::Stop, "svc");

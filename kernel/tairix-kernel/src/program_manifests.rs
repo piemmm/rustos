@@ -481,10 +481,14 @@ pub const USERS_TOOL_MANIFEST: &[CapabilityId] = &[
 /// manager can record structured service-lifecycle events (skip, spawn,
 /// ready) through the diagnostic sink — the same authority the boot
 /// services it launches (`login`, `devmgr`, `sysinfod`) already carry, and
-/// `CAP_IPC_BIND_PRIVILEGED` to bind the reserved service-control endpoint it
-/// serves as the system service manager — a well-known id a squatter could
-/// otherwise claim ahead of it, bound restricted-sender so only a
-/// `CAP_SERVICE_CONTROL` holder can call it.
+/// `CAP_IPC_BIND_PRIVILEGED` to bind the two reserved control endpoints it
+/// serves as the system service manager — well-known ids a squatter could
+/// otherwise claim ahead of it, each bound restricted-sender so only a
+/// `CAP_SERVICE_CONTROL` holder can call them. `CAP_FS_ACCESS` is held solely
+/// for the two enrolment documents: the image's record it obeys, on the
+/// read-only `/System` volume its reach there can never write, and the
+/// administrator's overrides it writes back on the encrypted root — both still
+/// authorised per-inode under its own attested identity.
 /// As a system program its manifest is
 /// also its ceiling (there is no account row for the system principal),
 /// and each child it spawns is bounded by that child's *own* registered
@@ -496,6 +500,7 @@ pub const INIT_MANIFEST: &[CapabilityId] = &[
     CapabilityId::SPAWN_AS_USER,
     CapabilityId::LOG_EMIT,
     CapabilityId::IPC_BIND_PRIVILEGED,
+    CapabilityId::FS_ACCESS,
 ];
 
 #[cfg(test)]
@@ -910,6 +915,7 @@ mod tests {
                 CapabilityId::SPAWN_AS_USER,
                 CapabilityId::LOG_EMIT,
                 CapabilityId::IPC_BIND_PRIVILEGED,
+                CapabilityId::FS_ACCESS,
             ])
         );
     }

@@ -400,6 +400,7 @@ members = [
     "tests/integration/rtc_pl031_qemu_aarch64",
     "tests/integration/rtc_goldfish_qemu_riscv64",
     "tests/integration/rtc_mc146818_qemu_x86_64",
+    "tests/integration/enrol_qemu_aarch64",
     "tests/integration/servicectl_qemu_aarch64",
     "tests/integration/arxfs_image",
     "tests/integration/encrypted_root_image",

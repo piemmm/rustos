@@ -5786,6 +5786,63 @@ static TESTS: &[QemuTest] = &[
             ("root@tairix ~% ", Duration::ZERO, "servicectl stop timed\n"),
         ],
     },
+    // `plans/TIMESYNC.md` TS-5b: the live *enrolment* vertical.
+    // `tairix-test-enrol-qemu-aarch64` boots the same production aarch64
+    // pipeline and encrypted-root disk as the control vertical above, unlocks,
+    // authenticates as the seeded `root` account, and runs
+    // `servicectl disable timed` then `servicectl enable timed` at the shell.
+    //
+    // What the run proves that no host test can: PID 1 binds a *second*
+    // reserved endpoint, `SERVICE_ENROL_ENDPOINT`, beside the control one and
+    // parks on a wait-set carrying both, so the runtime and durable halves are
+    // separable by construction; and the manager **persists the
+    // administrator's override document to the encrypted root before it
+    // answers**, which is why the `disable`'s own success line is a witness
+    // that the decision survives a reboot — the next boot reads that same
+    // document. The script gates the `enable` on that line, so a guest whose
+    // write was refused never types it and the run fails loud on the deadline.
+    //
+    // The exit witness is the manager's own `SERVICE_ENROLMENT_CHANGED`,
+    // counted twice: exiting on the first would cut the script off before the
+    // `enable` was typed (the mistake `plans/TIMESYNC.md` TS-2 records). Same
+    // 180-second budget and single CPU as the control vertical, whose boot,
+    // unlock, login, and app-load path this shares exactly.
+    QemuTest {
+        package: "tairix-test-enrol-qemu-aarch64",
+        binary: "tairix-test-enrol-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(180),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        fs_disk: FsDisk::EncryptedRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[
+            ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
+            ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
+            ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
+            (
+                "root@tairix ~% ",
+                Duration::ZERO,
+                "servicectl disable timed\n",
+            ),
+            // Gated on the tool's own success line, which the manager prints
+            // only after the override document is on disk: this step is the
+            // reboot-survival proof, and it is also the last, so the guest's
+            // exit on the second change cannot truncate the script.
+            (
+                "timed is now disabled",
+                Duration::ZERO,
+                "servicectl enable timed\n",
+            ),
+        ],
+    },
     // `plans/NETWORK.md` N9b-3-2-β-2-ii-b-bond: the live bond-failover
     // vertical. `tairix-test-netstack-bond-qemu-aarch64` boots the
     // *production* aarch64 pipeline with the `bond-net-root` disk: the

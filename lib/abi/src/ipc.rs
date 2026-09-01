@@ -69,6 +69,7 @@ pub const fn is_reserved_endpoint(id: u64) -> bool {
         || id == crate::net::NETSTACK_SOCKET_ENDPOINT
         || id == crate::font_ipc::FONT_ENDPOINT
         || id == crate::service_control::SERVICE_CONTROL_ENDPOINT
+        || id == crate::service_control::SERVICE_ENROL_ENDPOINT
         || id == crate::session_ipc::SESSION_ENDPOINT
         || id == crate::raid_ipc::RAID_REGISTRY_ENDPOINT
         || id == crate::raid_admin::RAID_CONTROL_ENDPOINT

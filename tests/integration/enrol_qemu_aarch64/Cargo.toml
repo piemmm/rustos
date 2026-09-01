@@ -1,0 +1,34 @@
+[package]
+name = "tairix-test-enrol-qemu-aarch64"
+description = "plans/TIMESYNC.md TS-5b QEMU integration test: boot the production aarch64 tairix-kernel pipeline against the encrypted-root disk, log in as the seeded root account, and drive `servicectl disable timed` then `servicectl enable timed` from the shell -- proving the live enrolment path: PID 1 binds SERVICE_ENROL_ENDPOINT restricted-sender beside the control one, the engine records the decision, and the manager persists the administrator override document to the encrypted root before it answers, so the tool's success line is itself the witness that a disable survives a reboot."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tairix-test-enrol-qemu-aarch64"
+path = "src/main.rs"
+
+# Freestanding "boot the production aarch64 kernel pipeline, log in, and drive
+# the real servicectl bundle's enrolment verbs at the shell" integration test.
+# It reuses the entire production aarch64 boot pipeline through
+# `tairix-kernel`'s library half (`boot_aarch64::boot`) unchanged and only
+# swaps the diagnostic sink for the witness.
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The witness the guest exits on: PID 1's own enrolment audit id, so the
+# vertical and the engine cannot disagree on what "the decision was recorded"
+# is.
+tairix-init = { path = "../../../userland/system/init", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

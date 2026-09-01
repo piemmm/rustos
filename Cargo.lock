@@ -3193,6 +3193,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-enrol-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
+ "tairix-init",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-log",
+]
+
+[[package]]
 name = "tairix-test-enter-user-qemu-x86_64"
 version = "0.0.0"
 dependencies = [
@@ -5469,6 +5481,7 @@ dependencies = [
  "tairix-sandbox",
  "tairix-sysconfig",
  "tairix-timesync",
+ "tairix-util",
 ]
 
 [[package]]

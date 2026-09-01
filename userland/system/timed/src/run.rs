@@ -73,14 +73,15 @@ mod program {
     use tairix_sandbox::timesync::TimeSyncService;
     use tairix_sysconfig::SystemConfig;
     use tairix_timed::{
-        Clock, RecordStore, RetryLadder, RtcSource, Timed, TimedConfig, Transport,
-        CONFIG_RETRY_ATTEMPTS, CONFIG_RETRY_BASE_NANOS,
+        Clock, RecordStore, RtcSource, Timed, TimedConfig, Transport, CONFIG_RETRY_ATTEMPTS,
+        CONFIG_RETRY_BASE_NANOS,
     };
     use tairix_timesync::events::{SERVERS_FROM_FALLBACK, SERVICE_UNAVAILABLE, TIMED_RANGE_START};
     use tairix_timesync::{
         select_servers, ServerSelection, ServerSource, TimeServer, RECORD_DIR, RECORD_LEN,
         RECORD_PATH,
     };
+    use tairix_util::retry::RetryLadder;
 
     /// Exit code when the reactor could not be armed: the delivery port could
     /// not be bound, or the wait-set could not be created or armed. A

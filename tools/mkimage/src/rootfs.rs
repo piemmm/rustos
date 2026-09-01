@@ -125,6 +125,11 @@ const LOG_ATTESTATION_KEY_MODE: u32 = 0o600;
 /// denied `mkdir`).
 const TIME_STATE_DIR_MODE: u32 = 0o755;
 
+/// Mode of `/System/Settings/Services`: the system user writes the
+/// administrator's enrolment overrides, everyone reads which services are
+/// enrolled (public configuration, not a secret).
+const SERVICE_OVERRIDES_DIR_MODE: u32 = 0o755;
+
 /// Everything seeded onto the encrypted root beyond the directory
 /// skeleton. Every image profile seeds both account databases (the
 /// canonical default system/service set at minimum, `plans/USERS.md`), so
@@ -350,6 +355,7 @@ fn populate_system_subtree(
     write_security_file(fs, security, GROUPS_DB_NAME, seed.groups_db)?;
     write_library_config(fs, system, seed.library_conf)?;
     create_time_state_dir(fs, system)?;
+    create_service_overrides_dir(fs, system)?;
     if let Some(key_bytes) = seed.log_attestation_key {
         let keys = fs
             .lookup(security, b"Keys")
@@ -467,6 +473,38 @@ fn plant_network_config(
         .map(str::as_bytes)
         .collect();
     plant_nested_file(fs, root, &components, text.as_bytes()).map_err(MkimageError::SystemPartition)
+}
+
+/// Create `/System/Settings/Services` on the writable root, owned by the
+/// system user.
+///
+/// PID 1 rewrites the administrator's enrolment `overrides` there on every
+/// `enable`/`disable`. `/System/Settings` is system-user-owned, so an image
+/// that did not author this directory would leave the manager unable to create
+/// it and every enrolment change would be refused rather than recorded.
+fn create_service_overrides_dir(
+    fs: &mut ARXFS<MemBlock>,
+    system: NodeId,
+) -> Result<(), MkimageError> {
+    let settings = fs
+        .lookup(system, b"Settings")
+        .map_err(MkimageError::RootPartition)?;
+    let leaf = tairix_abi::SERVICE_OVERRIDES_DIR
+        .rsplit('/')
+        .next()
+        .unwrap_or(tairix_abi::SERVICE_OVERRIDES_DIR);
+    let dir = fs
+        .create(settings, leaf.as_bytes(), NodeKind::Directory)
+        .map_err(MkimageError::RootPartition)?;
+    fs.set_security(
+        dir,
+        Security::new(
+            SERVICE_OVERRIDES_DIR_MODE,
+            tairix_users::SYSTEM_UID.0,
+            tairix_users::SYSTEM_GID.0,
+        ),
+    )
+    .map_err(MkimageError::RootPartition)
 }
 
 /// Lay out the program-library store on the writable root: create

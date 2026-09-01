@@ -37,4 +37,4 @@ pub mod session;
 mod session_tests;
 
 pub use command::{parse, Command, UsageError, USAGE};
-pub use session::{dispatch, report_usage, run, ControlChannel, Exit, ToolIo};
+pub use session::{dispatch, report_usage, run, run_enrol, ControlChannel, Exit, ToolIo};

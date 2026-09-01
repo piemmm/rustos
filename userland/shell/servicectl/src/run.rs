@@ -28,18 +28,17 @@
 mod program {
     extern crate alloc;
 
-    use tairix_abi::service_control::SERVICE_CONTROL_ENDPOINT;
     use tairix_help::{own_short_help, BundleHelp};
     use tairix_rt::io::{write_stderr_line, Stdout, Write};
     use tairix_servicectl::{dispatch, parse, report_usage, ControlChannel, Exit, ToolIo, USAGE};
 
-    /// The production control channel: one synchronous call to the service
-    /// manager's reserved endpoint.
+    /// The production control channel: one synchronous call to whichever of
+    /// the service manager's two reserved endpoints the command names.
     struct RtChannel;
 
     impl ControlChannel for RtChannel {
-        fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, i64> {
-            tairix_rt::ipc_call(SERVICE_CONTROL_ENDPOINT, request, reply)
+        fn call(&mut self, endpoint: u64, request: &[u8], reply: &mut [u8]) -> Result<usize, i64> {
+            tairix_rt::ipc_call(endpoint, request, reply)
         }
     }
 

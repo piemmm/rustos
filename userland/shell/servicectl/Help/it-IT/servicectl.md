@@ -1,10 +1,10 @@
 ## NAME
 
-servicectl — avviare e fermare i servizi di sistema
+servicectl — avviare, fermare, abilitare e disabilitare i servizi di sistema
 
 ## SYNOPSIS
 
-`servicectl [-h | -?] start|stop SERVICE`
+`servicectl [-h | -?] start|stop|enable|disable SERVICE`
 
 ## DESCRIPTION
 
@@ -25,13 +25,18 @@ nemmeno chiedere.
 - `stop SERVICE` — fermare con grazia un servizio in esecuzione, e i suoi
   dipendenti in ordine inverso di dipendenza. Al servizio viene chiesto di
   terminare e viene forzato solo dopo il suo periodo di grazia.
+- `enable SERVICE` — registrare il servizio come iscritto, così che il
+  gestore lo avvii a ogni avvio, e avviarlo ora.
+- `disable SERVICE` — registrarlo come non iscritto, così che nessun avvio
+  successivo lo avvii, e fermarlo ora.
 
 In caso di successo una riga nomina lo stato in cui il gestore ha lasciato
 il servizio.
 
-Fermare un servizio riguarda ogni principale della macchina, non solo la
-vostra sessione, e un servizio iscritto ritorna al prossimo avvio: questo
-strumento cambia il sistema *in esecuzione*, non ciò che è abilitato.
+Entrambi i tipi di cambiamento riguardano ogni principale della macchina,
+non solo la vostra sessione. `start` e `stop` cambiano solo il sistema *in
+esecuzione*, quindi un servizio iscritto ritorna al prossimo avvio; `enable`
+e `disable` cambiano l'iscrizione stessa e perciò gli sopravvivono.
 
 ## OPTIONS
 

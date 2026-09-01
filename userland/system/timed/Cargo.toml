@@ -54,6 +54,10 @@ tairix-sysconfig = { path = "../../../lib/sysconfig", version = "=0.0.0" }
 # The structured audit records every clock change, refused sample, and retired
 # server is written through.
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The bounded doubling one-shot schedule the configuration store and the RTC
+# are both waited for on — shared with the service manager, which waits the
+# same way for the enrolment overrides on the encrypted root.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 
 # The `Run` binary's freestanding userland runtime:
 # `tairix-rt` provides `_start`, the stack canary, the panic handler, the

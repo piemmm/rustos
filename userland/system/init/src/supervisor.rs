@@ -109,6 +109,13 @@ pub trait Services {
     /// supervision.
     fn serve_control(&mut self);
 
+    /// Answer one pending request on the service-enrolment endpoint.
+    ///
+    /// The sibling of [`serve_control`](Self::serve_control) for the durable
+    /// half of the surface: it records an enrolment decision and persists it.
+    /// The loop again neither reads nor interprets the wire.
+    fn serve_enrol(&mut self);
+
     /// Run every one-shot deadline that has lapsed.
     ///
     /// Called when the wait lapses at the deadline
@@ -166,6 +173,8 @@ pub enum Woke {
     Child(u64),
     /// The service-control endpoint has a request waiting to be answered.
     Control,
+    /// The service-enrolment endpoint has a request waiting to be answered.
+    Enrol,
     /// The park lapsed at the deadline the caller passed.
     Deadline,
     /// The park itself failed (`-errno`) — a kernel-state inconsistency PID 1
@@ -330,6 +339,10 @@ pub fn supervise<E: Services, S: Sessions>(
                 services.serve_control();
                 continue;
             }
+            Woke::Enrol => {
+                services.serve_enrol();
+                continue;
+            }
             Woke::Deadline => {
                 services.expire_deadlines();
                 continue;
@@ -401,6 +414,8 @@ mod tests {
         exits: Vec<(u64, i32)>,
         /// Control requests the loop asked the engine to answer.
         served: usize,
+        /// Enrolment requests the loop asked the engine to answer.
+        enrolled: usize,
         /// Deadline wakeups the loop asked the engine to expire.
         expired: usize,
         /// The park length the loop asked for, most recent last.
@@ -415,6 +430,7 @@ mod tests {
                 running: false,
                 exits: Vec::new(),
                 served: 0,
+                enrolled: 0,
                 expired: 0,
                 timeouts: Vec::new(),
                 timeout: WAITSET_TIMEOUT_NONE,
@@ -446,6 +462,9 @@ mod tests {
         }
         fn serve_control(&mut self) {
             self.served += 1;
+        }
+        fn serve_enrol(&mut self) {
+            self.enrolled += 1;
         }
         fn expire_deadlines(&mut self) {
             self.expired += 1;
@@ -789,8 +808,8 @@ mod tests {
 
     #[test]
     fn control_and_deadline_wakeups_never_end_the_loop() {
-        // A perpetual service with a stream of control and deadline wakeups:
-        // the loop keeps parking, so neither event can be mistaken for the
+        // A perpetual service with a stream of control, enrolment and deadline
+        // wakeups: the loop keeps parking, so no event can be mistaken for the
         // exhaustion or failure that ends PID 1.
         let mut services = MockServices::perpetual();
         let mut sys = ScriptedSessions::new(
@@ -801,8 +820,10 @@ mod tests {
             vec![
                 Woke::Deadline,
                 Woke::Control,
+                Woke::Enrol,
                 Woke::Deadline,
                 Woke::Control,
+                Woke::Enrol,
                 child(10),
                 Woke::Failed,
             ],
@@ -811,7 +832,10 @@ mod tests {
             supervise(&mut services, &mut sys, session(b"login")),
             Outcome::WaitFailed
         );
-        assert_eq!((services.served, services.expired), (2, 2));
+        assert_eq!(
+            (services.served, services.enrolled, services.expired),
+            (2, 2, 2)
+        );
         // The child exit was the session's, so it was relaunched rather than
         // routed to the engine.
         assert!(services.exits.is_empty());

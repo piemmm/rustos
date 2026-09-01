@@ -43,6 +43,82 @@ pub const SERVICE_NOTICE_MAGIC: u32 = u32::from_le_bytes(*b"SVC1");
 /// The `service-v1` readiness-protocol version.
 pub const SERVICE_VERSION_V1: u16 = 1;
 
+/// Directory holding the **administrator's** service enrolment overrides.
+pub const SERVICE_OVERRIDES_DIR: &str = "/System/Settings/Services";
+
+/// Absolute path of the administrator's service enrolment overrides: one
+/// `<service> enabled|disabled` line per service whose enrolment differs from
+/// the image's own.
+///
+/// On the writable encrypted root, so it is readable only after the root is
+/// unlocked and holds only what was changed — a system update shipping a
+/// different default then reaches every service the administrator has not
+/// spoken about. It is the only enrolment layer on disk: no document under
+/// `/System` is reliably readable at the instant the service manager must
+/// decide what to bring up, so the image's own layer travels in the manager's
+/// startup configuration instead.
+pub const SERVICE_OVERRIDES_PATH: &str = "/System/Settings/Services/overrides";
+
+/// Whether a service is **enrolled** — eligible to be brought up — or not.
+///
+/// The closed two-state vocabulary the enrolment record, the control protocol,
+/// and the status query all speak, so the wire byte and the document word have
+/// one definition rather than one per layer. It is deliberately *not* a
+/// lifecycle state ([`ServiceState`]): enrolment says whether a service may
+/// run at all, never whether it is running now.
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum ServiceEnrolment {
+    /// Eligible to be brought up.
+    Enabled = 1,
+    /// Not eligible; the manager never starts it.
+    Disabled = 2,
+}
+
+impl ServiceEnrolment {
+    /// The stable wire discriminant.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Classify a wire discriminant, or `None` outside the closed set (wire
+    /// corruption — the caller fails closed).
+    #[must_use]
+    pub const fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(Self::Enabled),
+            2 => Some(Self::Disabled),
+            _ => None,
+        }
+    }
+
+    /// The stable word used in the enrolment documents and in status output.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Enabled => "enabled",
+            Self::Disabled => "disabled",
+        }
+    }
+
+    /// Classify a document word, or `None` for anything else (fail closed).
+    #[must_use]
+    pub fn from_name(word: &str) -> Option<Self> {
+        match word {
+            "enabled" => Some(Self::Enabled),
+            "disabled" => Some(Self::Disabled),
+            _ => None,
+        }
+    }
+
+    /// Whether this enrols the service.
+    #[must_use]
+    pub const fn is_enabled(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+}
+
 /// A point in one service's lifecycle, tracked by the manager and reported
 /// through the status query.
 ///

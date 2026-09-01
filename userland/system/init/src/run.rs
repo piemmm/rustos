@@ -42,15 +42,16 @@ mod program {
     extern crate alloc;
     use alloc::vec::Vec;
 
-    use tairix_abi::service_control::ServiceControlRequest;
+    use tairix_abi::service_control::{ServiceControlRequest, ServiceEnrolRequest};
     use tairix_abi::{CapabilityId, Duration64, Errno, Signal, WaitSetOp, WaitSourceKind};
     use tairix_caps::CapabilitySet;
     use tairix_init::{
-        AuthorityScope, ControlError, Init, InitConfig, LoopReaper, Pid, ReapedChild, ServiceSpec,
-        Spawner, Stopper,
+        enrol, AuthorityScope, ControlError, Enrolment, EnrolmentOverride, Init, InitConfig,
+        LoopReaper, Pid, ReapedChild, ServiceSpec, Spawner, Stopper,
     };
     use tairix_rt::io::{Stderr, Stdout, Write};
     use tairix_rt::LogSink;
+    use tairix_util::retry::RetryLadder;
 
     use crate::startup::{render_banner, service_name, StartupConfig, BANNER_MAX, DEFAULT_CONFIG};
     use crate::supervisor::{supervise, Launch, Outcome, Services, Sessions, Woke};
@@ -89,6 +90,66 @@ mod program {
     /// (for their fd 2 diagnostics). Sessions fan out across every console;
     /// a service has no console of its own, so it takes console 0.
     const SERVICE_CONSOLE: u64 = 0;
+
+    /// Register the compiled-in bootstrap floor and the enrolment-governed
+    /// tier, reporting `false` (with its reason on the diagnostic stream) if
+    /// either is structurally invalid.
+    ///
+    /// The floor is registered unconditionally: those services exist below the
+    /// registration store, so no enrolment record could govern them. The
+    /// enrolled tier is registered only where the effective enrolment enables
+    /// it; at boot that is the image's layer alone, because the
+    /// administrator's overrides live on the encrypted root, so the manager
+    /// boots on the image's decision and narrows to the administrator's as soon
+    /// as that document appears.
+    fn register_startup_services(engine: &mut Init<'_>, config: &StartupConfig<'_>) -> bool {
+        for entry in config.services() {
+            let spec =
+                ServiceSpec::new(service_name(entry.path), entry.path, entry.uid, Vec::new());
+            if engine.register(spec).is_err() {
+                // Two floor services resolved to the same name — a defect in
+                // the compiled-in `DEFAULT_CONFIG`, not a runtime input.
+                let _ = Stderr.write_fmt(format_args!(
+                    "init: duplicate service name for {}; refusing to boot a surprising system\n",
+                    entry.path
+                ));
+                return false;
+            }
+        }
+        let enrolled: Vec<ServiceSpec> = config
+            .enrolled()
+            .iter()
+            .map(|entry| {
+                ServiceSpec::new(service_name(entry.path), entry.path, entry.uid, Vec::new())
+            })
+            .collect();
+        // The image's layer is the `enrolled` tier itself: every directive it
+        // carries is enrolled by default. It cannot come off disk, because a
+        // document under `/System` is not reliably readable at the instant PID
+        // 1 must decide what to bring up — the writable root is not mounted
+        // and the read-only volume's availability is a boot-order fact PID 1
+        // has no event for. The administrator's layer *is* on disk and is
+        // adopted as soon as it can be read.
+        let vendor = enrolled
+            .iter()
+            .try_fold(Enrolment::empty(), |set, spec| enrol(&set, spec.name()));
+        let Ok(vendor) = vendor else {
+            let _ = Stderr.write_fmt(format_args!(
+                "init: an enrolled service's name is not a valid identifier; refusing to boot\n"
+            ));
+            return false;
+        };
+        if engine
+            .register_enrolled(enrolled, vendor, EnrolmentOverride::empty())
+            .is_err()
+        {
+            let _ = Stderr.write_fmt(format_args!(
+                "init: an enrolled service clashes with the boot floor or is out of scope; refusing to boot\n"
+            ));
+            return false;
+        }
+        true
+    }
 
     /// The production [`Spawner`]: launch a service's `Run` binary on the
     /// primary console as its own service account through `spawn_as`.
@@ -144,6 +205,86 @@ mod program {
         }
     }
 
+    /// How long PID 1 waits before its first attempt to read the
+    /// administrator's enrolment overrides, and the base its retry doubles.
+    ///
+    /// The document lives on the encrypted root, which is unlocked a few
+    /// seconds after PID 1 starts, and no userland event says when — so the
+    /// wait is a bounded doubling one-shot ladder, never a poll.
+    const OVERRIDE_RETRY_BASE: Duration64 = Duration64::from_secs(1);
+
+    /// How many rungs that ladder climbs before it stops asking.
+    ///
+    /// Six doublings from one second span about a minute, which comfortably
+    /// covers an unlock; a machine that never unlocks (a recovery session, a
+    /// volume-less test guest) has no such document at all, and the ladder's
+    /// own finite length is what bounds that case rather than a guess at the
+    /// error `open` returns — an unmounted root and an absent one look
+    /// identical from here.
+    const OVERRIDE_RETRY_ATTEMPTS: u32 = 6;
+
+    /// Read the administrator's override layer off the encrypted root, or
+    /// `None` while the document is unreachable.
+    ///
+    /// A document that is present but malformed resolves to the empty layer —
+    /// obey the signed image — rather than being retried for ever.
+    fn read_overrides() -> Option<EnrolmentOverride> {
+        let text = read_document(tairix_abi::SERVICE_OVERRIDES_PATH)?;
+        Some(EnrolmentOverride::parse(&text).unwrap_or_else(|_| EnrolmentOverride::empty()))
+    }
+
+    /// Read a whole enrolment document as UTF-8 text, or `None` if it cannot
+    /// be opened, read, or decoded.
+    fn read_document(path: &str) -> Option<alloc::string::String> {
+        let file = tairix_rt::open(path.as_bytes()).ok()?;
+        let bytes = tairix_rt::read_fd_to_end(file.fd(), ENROLMENT_DOCUMENT_MAX).ok()?;
+        // The reader answers *past* the cap, so an oversize document is
+        // refused whole rather than parsed as a shortened one.
+        (bytes.len() <= ENROLMENT_DOCUMENT_MAX)
+            .then(|| alloc::string::String::from_utf8(bytes).ok())
+            .flatten()
+    }
+
+    /// Byte ceiling on an enrolment document.
+    ///
+    /// A validation bound, not a capacity: these documents hold one short
+    /// service name per line, so anything larger is a corrupt or hostile file
+    /// and is refused rather than read into PID 1's heap.
+    const ENROLMENT_DOCUMENT_MAX: usize = 64 * 1024;
+
+    /// Persist the administrator's override layer, creating its directory if
+    /// the volume was laid out before this manager existed.
+    fn write_overrides(overrides: &EnrolmentOverride) -> Result<(), Errno> {
+        let text = overrides.to_store_text();
+        let path = tairix_abi::SERVICE_OVERRIDES_PATH.as_bytes();
+        let file = match tairix_rt::create(path) {
+            Ok(file) => file,
+            // `/System/Settings` is system-owned, so an unconditional `mkdir`
+            // would be refused on every provisioned machine and file a denied
+            // mutation record on each request, burying a real denial in noise.
+            Err(ret) if Errno::from_syscall(ret) == Errno::NotFound => {
+                let made = tairix_rt::fs_mkdir(tairix_abi::SERVICE_OVERRIDES_DIR.as_bytes());
+                if made != 0 && Errno::from_syscall(made) != Errno::AlreadyExists {
+                    return Err(Errno::from_syscall(made));
+                }
+                tairix_rt::create(path).map_err(Errno::from_syscall)?
+            }
+            Err(ret) => return Err(Errno::from_syscall(ret)),
+        };
+        let bytes = text.as_bytes();
+        let written = file.write_at(0, bytes).map_err(Errno::from_syscall)?;
+        if written != bytes.len() {
+            return Err(Errno::BufferTooSmall);
+        }
+        // A shorter document must not leave the tail of a longer one behind,
+        // which would reparse as entries the administrator did not write.
+        let truncated = tairix_rt::fs_truncate(file.fd(), written as u64);
+        if truncated != 0 {
+            return Err(Errno::from_syscall(truncated));
+        }
+        Ok(())
+    }
+
     /// The [`Services`] backing over the live [`Init`] engine: PID 1's
     /// service-manager half.
     ///
@@ -157,6 +298,10 @@ mod program {
     struct EngineServices<'a, 'cfg> {
         engine: &'a mut Init<'cfg>,
         reaper: &'a LoopReaper,
+        /// The bounded one-shot schedule for reading the administrator's
+        /// enrolment overrides off the encrypted root, or `None` once they
+        /// have been adopted or the ladder is spent.
+        override_retry: Option<RetryLadder>,
     }
 
     impl Services for EngineServices<'_, '_> {
@@ -179,17 +324,24 @@ mod program {
         }
 
         fn next_timeout_ns(&mut self) -> u64 {
-            let Some(deadline) = self.engine.next_deadline() else {
+            let engine_at = self
+                .engine
+                .next_deadline()
+                .map(|d| d.saturating_total_nanos());
+            let soonest = match (engine_at, self.override_retry.map(|l| l.at)) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (only, None) | (None, only) => only,
+            };
+            let Some(at) = soonest else {
                 return tairix_abi::WAITSET_TIMEOUT_NONE;
             };
-            // The engine's deadlines are absolute monotonic instants and the
-            // park takes a relative span, so an already-lapsed deadline is a
-            // zero-length wait that returns at once and is served on the next
-            // turn. That cannot spin: `expire_due` consumes or drops every
-            // deadline it finds lapsed, so the same wakeup is never served
-            // twice.
-            let now = tairix_rt::clock_get();
-            deadline.saturating_total_nanos().saturating_sub(now)
+            // The deadlines are absolute monotonic instants and the park takes
+            // a relative span, so an already-lapsed deadline is a zero-length
+            // wait that returns at once and is served on the next turn. That
+            // cannot spin: `expire_due` consumes or drops every deadline it
+            // finds lapsed, and the override ladder either advances a rung or
+            // disarms, so the same wakeup is never served twice.
+            at.saturating_sub(tairix_rt::clock_get())
         }
 
         fn serve_control(&mut self) {
@@ -213,11 +365,11 @@ mod program {
             // leaving it parked would be a denial of service against a
             // principal that reached a gated endpoint legitimately.
             let outcome = ServiceControlRequest::decode(&request[..len])
-                .map_err(ControlReply::Malformed)
+                .map_err(ControlReply::Verbatim)
                 .and_then(|req| self.engine.control(req, now).map_err(ControlReply::Refused));
             let written = match outcome {
                 Ok(state) => tairix_abi::service_control::encode_reply(&mut reply, state),
-                Err(ControlReply::Malformed(err)) => {
+                Err(ControlReply::Verbatim(err)) => {
                     tairix_abi::service_control::encode_error_reply(&mut reply, err)
                 }
                 Err(ControlReply::Refused(err)) => {
@@ -237,8 +389,64 @@ mod program {
             self.engine.arm_watchdogs(now);
         }
 
+        fn serve_enrol(&mut self) {
+            let mut request = [0u8; tairix_abi::service_control::REQUEST_LEN];
+            let mut ticket = 0u64;
+            let Ok(len) = tairix_rt::call_recv_nonblock(
+                tairix_abi::service_control::SERVICE_ENROL_ENDPOINT,
+                &mut request,
+                &mut ticket,
+            ) else {
+                return;
+            };
+
+            let now = Duration64::from_nanos(tairix_rt::clock_get());
+            let mut reply = [0u8; tairix_abi::service_control::ENROL_REPLY_LEN];
+            // A malformed frame is answered rather than dropped, for the same
+            // reason the control endpoint answers one: the caller is parked
+            // synchronously and a silent drop would deny a legitimate
+            // principal.
+            let outcome = ServiceEnrolRequest::decode(&request[..len])
+                .map_err(ControlReply::Verbatim)
+                .and_then(|req| {
+                    self.engine
+                        .enrol_control(req, now)
+                        .map_err(ControlReply::Refused)
+                })
+                .and_then(|report| {
+                    // The decision is only durable once the document is on
+                    // disk, so a failed write is reported rather than
+                    // acknowledged — otherwise the next boot would silently
+                    // contradict the answer the administrator was given.
+                    if report.changed {
+                        write_overrides(&report.overrides).map_err(ControlReply::Verbatim)?;
+                    }
+                    Ok(report)
+                });
+            let written = match outcome {
+                Ok(report) => tairix_abi::service_control::encode_enrol_reply(
+                    &mut reply,
+                    report.enrolment,
+                    report.changed,
+                ),
+                Err(ControlReply::Verbatim(err)) => {
+                    tairix_abi::service_control::encode_error_reply(&mut reply, err)
+                }
+                Err(ControlReply::Refused(err)) => {
+                    tairix_abi::service_control::encode_error_reply(&mut reply, control_errno(err))
+                }
+            };
+            let _ = tairix_rt::call_reply(
+                tairix_abi::service_control::SERVICE_ENROL_ENDPOINT,
+                ticket,
+                &reply[..written.unwrap_or(0)],
+            );
+            self.engine.arm_watchdogs(now);
+        }
+
         fn expire_deadlines(&mut self) {
             let now = Duration64::from_nanos(tairix_rt::clock_get());
+            self.try_adopt_overrides(now);
             let report = self.engine.expire_due(now);
             for failed in &report.failed {
                 // Fail loud, degrade gracefully: a relaunch the kernel
@@ -253,13 +461,49 @@ mod program {
         }
     }
 
-    /// Which half of the control path refused a request, so the reply carries
-    /// the right `Errno` without conflating a malformed frame with a
-    /// well-formed request the manager declined.
+    impl EngineServices<'_, '_> {
+        /// Try once to read the administrator's enrolment overrides, if the
+        /// ladder is armed and its rung is due.
+        ///
+        /// Pre-unlock the manager obeys the image's layer alone, so this is
+        /// where a service the administrator disabled is stopped. A rung that
+        /// finds nothing advances; a spent ladder disarms and the image's layer
+        /// stands for the rest of the boot, which is the honest answer for a
+        /// machine that never unlocks.
+        fn try_adopt_overrides(&mut self, now: Duration64) {
+            let Some(mut ladder) = self.override_retry else {
+                return;
+            };
+            if now.saturating_total_nanos() < ladder.at {
+                return;
+            }
+            if let Some(overrides) = read_overrides() {
+                self.override_retry = None;
+                for name in self.engine.adopt_overrides(overrides, now) {
+                    let _ = Stderr.write_fmt(format_args!(
+                        "init: service {name} stopped: disabled by the administrator\n"
+                    ));
+                }
+                return;
+            }
+            self.override_retry = ladder
+                .advance(now.saturating_total_nanos())
+                .then_some(ladder);
+        }
+    }
+
+    /// Which half of the path refused a request, so the reply carries the right
+    /// `Errno` without conflating a refusal that already *is* the right code
+    /// with a well-formed request the manager declined.
     enum ControlReply {
-        /// The frame did not decode; the decoder's own `Errno` is returned.
-        Malformed(Errno),
-        /// The frame decoded but the manager refused the operation.
+        /// The reply carries this `Errno` as it stands: the decoder's own
+        /// refusal of a malformed frame, or the store write's refusal of an
+        /// enrolment change the manager could not persist — a decision the next
+        /// boot would contradict is not a decision, so it is reported rather
+        /// than acknowledged. Neither is about the caller's authority.
+        Verbatim(Errno),
+        /// The frame decoded but the manager declined the operation, so the
+        /// refusal is mapped onto the errno the wire carries.
         Refused(ControlError),
     }
 
@@ -290,6 +534,9 @@ mod program {
     /// Wait-set token identifying the any-child member.
     const TOKEN_CHILD: u64 = 2;
 
+    /// Wait-set token identifying the service-enrolment endpoint member.
+    const TOKEN_ENROL: u64 = 3;
+
     /// How many control requests the endpoint queues before a further caller
     /// is refused by the kernel.
     ///
@@ -314,22 +561,33 @@ mod program {
         /// Create the wait-set and enrol both members, or report the kernel's
         /// `-errno`.
         ///
-        /// The control endpoint is created here rather than by a separate
-        /// service because PID 1 *is* the system service manager: the endpoint
-        /// is bound restricted-sender, so the kernel refuses a call from a
-        /// task without `CAP_SERVICE_CONTROL` and the engine never re-checks a
+        /// Both control endpoints are created here rather than by a separate
+        /// service because PID 1 *is* the system service manager: each is
+        /// bound restricted-sender, so the kernel refuses a call from a task
+        /// without `CAP_SERVICE_CONTROL` and the engine never re-checks a
         /// caller-supplied claim.
         fn new() -> Result<Self, i64> {
-            let created = tairix_rt::call_create(
-                tairix_abi::service_control::SERVICE_CONTROL_ENDPOINT,
-                &control_send_caps(),
-                &CapabilitySet::empty(),
-                tairix_abi::service_control::REQUEST_LEN,
-                tairix_abi::service_control::REPLY_LEN,
-                CONTROL_QUEUE_DEPTH,
-            );
-            if created != 0 {
-                return Err(created);
+            for (endpoint, reply_len) in [
+                (
+                    tairix_abi::service_control::SERVICE_CONTROL_ENDPOINT,
+                    tairix_abi::service_control::REPLY_LEN,
+                ),
+                (
+                    tairix_abi::service_control::SERVICE_ENROL_ENDPOINT,
+                    tairix_abi::service_control::ENROL_REPLY_LEN,
+                ),
+            ] {
+                let created = tairix_rt::call_create(
+                    endpoint,
+                    &control_send_caps(),
+                    &CapabilitySet::empty(),
+                    tairix_abi::service_control::REQUEST_LEN,
+                    reply_len,
+                    CONTROL_QUEUE_DEPTH,
+                );
+                if created != 0 {
+                    return Err(created);
+                }
             }
             let set = tairix_rt::waitset_create();
             if set < 0 {
@@ -343,6 +601,11 @@ mod program {
                     WaitSourceKind::Endpoint,
                     tairix_abi::service_control::SERVICE_CONTROL_ENDPOINT,
                     TOKEN_CONTROL,
+                ),
+                (
+                    WaitSourceKind::Endpoint,
+                    tairix_abi::service_control::SERVICE_ENROL_ENDPOINT,
+                    TOKEN_ENROL,
                 ),
                 (
                     WaitSourceKind::Child,
@@ -359,7 +622,7 @@ mod program {
         }
     }
 
-    /// The capability a caller must hold to reach the control endpoint.
+    /// The capability a caller must hold to reach either control endpoint.
     ///
     /// One definition, used both to bind the endpoint and by the manifest
     /// pinning tests, so the gate and the tool's request cannot drift.
@@ -394,6 +657,7 @@ mod program {
             }
             match token {
                 TOKEN_CONTROL => Woke::Control,
+                TOKEN_ENROL => Woke::Enrol,
                 TOKEN_CHILD => {
                     // A child member's readiness is a peek, so the reap is a
                     // separate non-blocking call — it must never park the one
@@ -502,18 +766,8 @@ mod program {
             // the confined `AuthorityScope::User` scope instead.
             scope: AuthorityScope::System,
         });
-        for entry in config.services() {
-            let spec =
-                ServiceSpec::new(service_name(entry.path), entry.path, entry.uid, Vec::new());
-            if engine.register(spec).is_err() {
-                // Two floor services resolved to the same name — a defect in
-                // the compiled-in `DEFAULT_CONFIG`, not a runtime input.
-                let _ = Stderr.write_fmt(format_args!(
-                    "init: duplicate service name for {}; refusing to boot a surprising system\n",
-                    entry.path
-                ));
-                return EXIT_CONFIG_INVALID;
-            }
+        if !register_startup_services(&mut engine, &config) {
+            return EXIT_CONFIG_INVALID;
         }
         let report = match engine.start_all() {
             Ok(report) => report,
@@ -546,6 +800,12 @@ mod program {
         let mut services = EngineServices {
             engine: &mut engine,
             reaper: &reaper,
+            override_retry: RetryLadder::arm(
+                tairix_rt::clock_get(),
+                OVERRIDE_RETRY_BASE.saturating_total_nanos(),
+                OVERRIDE_RETRY_ATTEMPTS,
+                false,
+            ),
         };
         let session = Launch {
             path: config.session().path.as_bytes(),
@@ -625,6 +885,7 @@ impl supervisor::Sessions for StubSessions {
 #[derive(Default)]
 struct StubServices {
     control: usize,
+    enrol: usize,
     deadlines: usize,
     exits: usize,
 }
@@ -643,6 +904,9 @@ impl supervisor::Services for StubServices {
     fn serve_control(&mut self) {
         self.control += 1;
     }
+    fn serve_enrol(&mut self) {
+        self.enrol += 1;
+    }
     fn expire_deadlines(&mut self) {
         self.deadlines += 1;
     }
@@ -652,9 +916,10 @@ impl supervisor::Services for StubServices {
 fn main() {
     if let Ok(config) = startup::StartupConfig::parse(startup::DEFAULT_CONFIG) {
         let mut banner_buf = [0u8; startup::BANNER_MAX];
-        // Touch the `service_name` derivation every boot-floor entry now flows
-        // through, so a regression in it is caught by an ordinary host build.
-        for entry in config.services() {
+        // Touch the `service_name` derivation every startup entry now flows
+        // through — the floor and the enrolment-governed tier alike — so a
+        // regression in it is caught by an ordinary host build.
+        for entry in config.services().iter().chain(config.enrolled()) {
             let _ = startup::service_name(entry.path);
         }
         let _ = (
@@ -663,12 +928,14 @@ fn main() {
         );
     }
     // Drive the reactor's dispatch over a scripted seam so an ordinary host
-    // build covers every arm: a control request, a lapsed deadline, a
-    // non-session child exit, then a failed park that ends the loop.
+    // build covers every arm: a control request, an enrolment request, a
+    // lapsed deadline, a non-session child exit, then a failed park that ends
+    // the loop.
     let mut services = StubServices::default();
     let mut sessions = StubSessions {
         script: &[
             supervisor::Woke::Control,
+            supervisor::Woke::Enrol,
             supervisor::Woke::Deadline,
             supervisor::Woke::Child(4242),
             supervisor::Woke::Failed,
@@ -687,7 +954,12 @@ fn main() {
         supervisor::Outcome::WaitFailed
     );
     assert_eq!(
-        (services.control, services.deadlines, services.exits),
-        (1, 1, 1)
+        (
+            services.control,
+            services.enrol,
+            services.deadlines,
+            services.exits
+        ),
+        (1, 1, 1, 1)
     );
 }

@@ -55,10 +55,11 @@
 //!   [`Spawner`] / [`Reaper`] seams, and the shared manifest →
 //!   capability-set decode.
 //! * [`registry`] — service **discovery** and the fail-closed **enrolment
-//!   registry**: which discovered `/System/Services` bundles are *eligible*
-//!   to be brought up ([`Enrolment`]), and the ceiling-checked `enable` /
-//!   `disable` operations ([`enrol`] / [`unenrol`]) that record that
-//!   decision without ever widening authority.
+//!   registry**: which bundles are *eligible* to be brought up, as the
+//!   image's [`Enrolment`] layer with the administrator's
+//!   [`EnrolmentOverride`] applied ([`effective`]), plus the pure `enable` /
+//!   `disable` record transforms ([`enrol`] / [`unenrol`]) and
+//!   [`overrides_for`], which derives the document that persists a decision.
 //! * [`scope`] — the [`AuthorityScope`] a manager instance wields (the
 //!   single system manager versus a per-user manager), the fixed security
 //!   boundary that confines a per-user manager to services running as its
@@ -67,8 +68,10 @@
 //!   `register_enrolled`, `start_all`, the readiness admission engine
 //!   (`notify`, `satisfy_condition`), on-demand endpoint activation
 //!   (`connect` / `disconnect`, the idle-linger `expire_linger` /
-//!   `expire_grace` one-shot callbacks, and `take_ready_clients`), and
-//!   `reap`.
+//!   `expire_grace` one-shot callbacks, and `take_ready_clients`), `reap`,
+//!   and the two control surfaces — `control` for a service's runtime
+//!   lifecycle and `enrol_control` / `adopt_overrides` for its persistent
+//!   enrolment.
 //!
 //! The package also builds the `init` `Run` entry-point binary (`src/run.rs`,
 //! `plans/PI.md` P6b). That binary is a lean, **pure-Rust** freestanding
@@ -100,11 +103,14 @@ pub mod service;
 
 pub use error::{ActivateError, ControlError, InitError, NotifyError, StartFailure};
 pub use manager::{
-    ActivationOutcome, FailedService, Init, InitConfig, ReadyClient, StartReport, StartedService,
+    ActivationOutcome, EnrolReport, FailedService, Init, InitConfig, ReadyClient, StartReport,
+    StartedService,
 };
-pub use registry::{enrol, unenrol, EnrolError, Enrolment};
+pub use registry::{
+    effective, enrol, overrides_for, unenrol, EnrolError, Enrolment, EnrolmentOverride,
+};
 pub use scope::AuthorityScope;
 pub use service::{
-    decode_manifest_capabilities, ClientId, LoopReaper, Pid, ReapedChild, Reaper, ServiceSpec,
-    Spawner, Stopper, DEFAULT_STOP_GRACE,
+    ClientId, LoopReaper, Pid, ReapedChild, Reaper, ServiceSpec, Spawner, Stopper,
+    DEFAULT_STOP_GRACE,
 };

@@ -45,6 +45,7 @@ use tairix_timesync::{
     events, ClockUpdate, Event as SyncEvent, ServerSelection, ServerSource, SyncReason, SyncRecord,
     TimeServer, TimeSync,
 };
+use tairix_util::retry::RetryLadder;
 
 /// The wall and monotonic clocks the service reads and sets.
 ///
@@ -758,51 +759,6 @@ pub const RTC_RETRY_BASE_NANOS: u64 = 1_000_000_000;
 /// board with no clock chip at all — a Raspberry Pi 3/4 — stops asking
 /// instead of waking for the rest of the boot.
 pub const RTC_RETRY_ATTEMPTS: u32 = 6;
-
-/// A bounded, doubling one-shot schedule for retrying something that is not
-/// available yet and has no readiness event to wait on.
-///
-/// Two things need it: the configuration store, which lives on a root this
-/// boot-floor service starts before, and the RTC, whose driver `devmgr`
-/// autoloads after the service is already running. Both are the same problem
-/// — no userland event says "it is there now" — so both climb this one
-/// definition rather than each carrying a schedule of its own.
-///
-/// Why a failed attempt never disarms it: every way the thing can be missing
-/// looks the same from here. A boot where it never appears is bounded by the
-/// ladder's own finite length rather than by guessing at the error, so the
-/// guess is not worth making — reading one wrong is what strands the service.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct RetryLadder {
-    /// Absolute nanosecond deadline of the next attempt.
-    pub at: u64,
-    wait: u64,
-    left: u32,
-}
-
-impl RetryLadder {
-    /// The schedule to climb while `satisfied` is false, or [`None`] when
-    /// there is nothing to wait for.
-    #[must_use]
-    pub fn arm(now: u64, base_nanos: u64, attempts: u32, satisfied: bool) -> Option<Self> {
-        (!satisfied).then_some(Self {
-            at: now.saturating_add(base_nanos),
-            wait: base_nanos,
-            left: attempts,
-        })
-    }
-
-    /// Advance to the next rung, or report the ladder spent.
-    pub fn advance(&mut self, now: u64) -> bool {
-        self.left = self.left.saturating_sub(1);
-        if self.left == 0 {
-            return false;
-        }
-        self.wait = self.wait.saturating_mul(2);
-        self.at = now.saturating_add(self.wait);
-        true
-    }
-}
 
 #[cfg(test)]
 #[path = "tests.rs"]

@@ -1,10 +1,10 @@
 ## NAME
 
-servicectl — cychwyn a stopio gwasanaethau system
+servicectl — cychwyn, stopio, galluogi ac analluogi gwasanaethau system
 
 ## SYNOPSIS
 
-`servicectl [-h | -?] start|stop SERVICE`
+`servicectl [-h | -?] start|stop|enable|disable SERVICE`
 
 ## DESCRIPTION
 
@@ -24,14 +24,19 @@ alwad cyn i'r rheolwr ei gweld; ni all cyfrif difraint hyd yn oed ofyn.
 - `stop SERVICE` — stopio gwasanaeth sy'n rhedeg yn raslon, a'i
   ddibynyddion yn nhrefn gwrthdro'r dibyniaethau. Gofynnir i'r gwasanaeth
   ymadael, a'i orfodi i lawr dim ond ar ôl ei gyfnod gras.
+- `enable SERVICE` — cofnodi'r gwasanaeth fel un cofrestredig, fel bod y
+  rheolwr yn ei godi ar bob cychwyn, a'i gychwyn nawr.
+- `disable SERVICE` — ei gofnodi fel un heb ei gofrestru, fel nad yw unrhyw
+  gychwyn diweddarach yn ei godi, a'i stopio nawr.
 
 Ar lwyddiant, mae un llinell yn enwi'r cyflwr y gadawodd y rheolwr y
 gwasanaeth ynddo.
 
-Mae stopio gwasanaeth yn effeithio ar bob prifolyn ar y peiriant, nid eich
-sesiwn eich hun yn unig, ac mae gwasanaeth cofrestredig yn dychwelyd wrth
-gychwyn nesaf: mae'r offeryn hwn yn newid y system *sy'n rhedeg*, nid yr
-hyn sydd wedi'i alluogi.
+Mae'r ddau fath o newid yn effeithio ar bob prifolyn ar y peiriant, nid eich
+sesiwn eich hun yn unig. Dim ond y system *sy'n rhedeg* y mae `start` a `stop`
+yn ei newid, felly mae gwasanaeth cofrestredig yn dychwelyd wrth gychwyn
+nesaf; mae `enable` ac `disable` yn newid y cofrestriad ei hun, ac felly'n
+goroesi cychwyn.
 
 ## OPTIONS
 

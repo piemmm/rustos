@@ -285,7 +285,6 @@ mod tests {
         for (which, bytes) in [
             (SystemConfigFile::Network, &b"wan.kind ethernet\n"[..]),
             (SystemConfigFile::System, &b"os.loginType graphical\n"[..]),
-            (SystemConfigFile::SystemServices, &b"netstack\n"[..]),
         ] {
             fs.add_file(&alloc::format!("/{}", which.volume_path()), bytes);
         }
@@ -295,7 +294,6 @@ mod tests {
         for (which, expected) in [
             (SystemConfigFile::Network, &b"wan.kind ethernet\n"[..]),
             (SystemConfigFile::System, &b"os.loginType graphical\n"[..]),
-            (SystemConfigFile::SystemServices, &b"netstack\n"[..]),
         ] {
             let mut buf = Vec::new();
             service
@@ -313,11 +311,7 @@ mod tests {
         let root = SYSTEM_VOLUME_SETTINGS_PATH
             .strip_prefix('/')
             .expect("the confinement root is absolute");
-        for which in [
-            SystemConfigFile::System,
-            SystemConfigFile::Network,
-            SystemConfigFile::SystemServices,
-        ] {
+        for which in [SystemConfigFile::System, SystemConfigFile::Network] {
             let rest = which
                 .volume_path()
                 .strip_prefix(root)

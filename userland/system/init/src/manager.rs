@@ -15,14 +15,16 @@ use core::fmt::{self, Write as _};
 
 use tairix_abi::{
     Duration64, LifecycleSignal, ReadinessKind, ReadyCondition, ServiceControlOp,
-    ServiceControlRequest, ServiceState, NANOS_PER_SEC,
+    ServiceControlRequest, ServiceEnrolRequest, ServiceEnrolment, ServiceState, NANOS_PER_SEC,
 };
 use tairix_caps::CapabilitySet;
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
 
 use crate::error::{ActivateError, ControlError, InitError, NotifyError, StartFailure};
 use crate::events;
-use crate::registry::{validate_service_name, Enrolment};
+use crate::registry::{
+    effective, enrol, overrides_for, unenrol, validate_service_name, Enrolment, EnrolmentOverride,
+};
 use crate::scope::AuthorityScope;
 use crate::service::{ClientId, Pid, ReapedChild, Reaper, ServiceSpec, Spawner, Stopper};
 
@@ -328,6 +330,23 @@ impl Service {
     }
 }
 
+/// The outcome of an accepted enrolment request.
+///
+/// `changed` is what lets a tool distinguish "disabled it" from "it was
+/// already disabled" without a second query, and `overrides` is the document
+/// the transport persists — the manager derives it rather than the caller, so
+/// what is written back always describes the image layer the manager booted
+/// from.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EnrolReport {
+    /// The service's enrolment after the request.
+    pub enrolment: ServiceEnrolment,
+    /// Whether the request changed the recorded enrolment.
+    pub changed: bool,
+    /// The administrator override document to persist.
+    pub overrides: EnrolmentOverride,
+}
+
 /// PID 1 service manager.
 ///
 /// Bring-up is an event-driven admission engine rather than a single
@@ -354,6 +373,19 @@ pub struct Init<'a> {
     /// drain. The manager never wakes a client itself; it records who is now
     /// ready and lets the transport layer deliver the endpoint.
     ready_clients: Vec<ReadyClient>,
+    /// The image's enrolment layer — which discovered bundles it enrols.
+    vendor: Enrolment,
+    /// The administrator's override layer, holding only what differs from
+    /// the image's. Empty until the document it lives in is readable.
+    overrides: EnrolmentOverride,
+    /// Discovered bundles the effective enrolment did **not** admit to the
+    /// registry this boot.
+    ///
+    /// Discovery, registration and activation are three distinct steps, so a
+    /// present-but-disabled bundle is known without being registered: that is
+    /// what lets an administrator enable it later by name instead of the
+    /// manager having forgotten it exists.
+    unenrolled: Vec<ServiceSpec>,
 }
 
 impl<'a> Init<'a> {
@@ -366,6 +398,9 @@ impl<'a> Init<'a> {
             order: Vec::new(),
             satisfied: [false; CONDITION_COUNT],
             ready_clients: Vec::new(),
+            vendor: Enrolment::empty(),
+            overrides: EnrolmentOverride::empty(),
+            unenrolled: Vec::new(),
         }
     }
 
@@ -466,13 +501,18 @@ impl<'a> Init<'a> {
     /// This is the discovery → registration → activation split
     /// (`plans/NEW-SERVICEMANAGER.md` §3.1): `discovered` is what a scan of
     /// `/System/Services` turned up (each already parsed into a
-    /// [`ServiceSpec`] by the loader seam), and `enrolment` is the
-    /// fail-closed enrolment record read from the registration store. A
-    /// bundle is registered for bring-up **only** if
-    /// [`Enrolment::is_enabled`] returns `true` for its name; a discovered
-    /// bundle that is not enrolled is never registered — presence on disk
-    /// grants no eligibility (no ambient authority). Each skip emits
-    /// [`events::SERVICE_NOT_ENROLLED`].
+    /// [`ServiceSpec`] by the loader seam), and the two enrolment layers are
+    /// the image's record and the administrator's overrides. A bundle is
+    /// registered for bring-up **only** if the [`effective`] enrolment enables
+    /// it; a discovered bundle that is not enrolled is never registered —
+    /// presence on disk grants no eligibility (no ambient authority). Each
+    /// skip emits [`events::SERVICE_NOT_ENROLLED`] and its spec is retained as
+    /// *known but unenrolled*, so an administrator can enable it by name
+    /// rather than the manager having forgotten it exists.
+    ///
+    /// The manager adopts both layers, so the document it later writes back on
+    /// an enrolment request is derived from the same image layer it booted
+    /// from — a caller cannot hand it an effective set that disagrees.
     ///
     /// Registration only records the service; the kernel still derives the
     /// capability grant from the signed bundle and the service account's
@@ -491,8 +531,12 @@ impl<'a> Init<'a> {
     pub fn register_enrolled(
         &mut self,
         discovered: Vec<ServiceSpec>,
-        enrolment: &Enrolment,
+        vendor: Enrolment,
+        overrides: EnrolmentOverride,
     ) -> Result<(), InitError> {
+        let enrolment = effective(&vendor, &overrides);
+        self.vendor = vendor;
+        self.overrides = overrides;
         for spec in discovered {
             if enrolment.is_enabled(spec.name()) {
                 self.register(spec)?;
@@ -503,6 +547,7 @@ impl<'a> Init<'a> {
                     spec.name(),
                     "not enrolled",
                 );
+                self.unenrolled.push(spec);
             }
         }
         Ok(())
@@ -1432,6 +1477,175 @@ impl<'a> Init<'a> {
         }
     }
 
+    /// Apply a decoded [`ServiceEnrolRequest`] — the engine side of the
+    /// capability-gated **enrolment** surface.
+    ///
+    /// Authorization is the *endpoint's*, exactly as for
+    /// [`control`](Self::control). The identity boundary is the one
+    /// [`AuthorityScope`] already draws: a request may only name a service
+    /// this manager knows, and a service becomes known only by passing
+    /// [`register`](Self::register)'s scope check, so a per-user manager can
+    /// never enrol a system-authority service. No manifest is decoded and no
+    /// grant is derived here — the kernel derives `manifest ∩ account-ceiling`
+    /// at spawn whatever this record says.
+    ///
+    /// Both operations are idempotent and report honestly: the returned
+    /// [`EnrolReport`] carries the resulting enrolment, whether the request
+    /// changed it, and — when it did — the administrator override document the
+    /// caller must persist. Enabling also starts the service now (subject to
+    /// its readiness conditions) and disabling stops it, so a request takes
+    /// effect immediately as well as on the next boot; a start the kernel
+    /// refuses still leaves the *enrolment* recorded, because the record is a
+    /// decision about eligibility, not a claim that the service is up.
+    ///
+    /// # Errors
+    ///
+    /// [`ControlError::UnknownService`] for a policy-invalid name or one this
+    /// manager does not know (including one outside its scope, which is never
+    /// registered), and [`ControlError::Unavailable`] if a disable could not
+    /// tear the service down.
+    pub fn enrol_control(
+        &mut self,
+        request: ServiceEnrolRequest<'_>,
+        now: Duration64,
+    ) -> Result<EnrolReport, ControlError> {
+        if validate_service_name(request.name).is_err() {
+            self.audit(
+                events::SERVICE_ENROLMENT_DENIED,
+                Level::Warn,
+                request.name,
+                "invalid service name",
+            );
+            return Err(ControlError::UnknownService);
+        }
+        let known = self.index_of(request.name).is_some()
+            || self.unenrolled.iter().any(|s| s.name() == request.name);
+        if !known {
+            self.audit(
+                events::SERVICE_ENROLMENT_DENIED,
+                Level::Warn,
+                request.name,
+                "unknown service",
+            );
+            return Err(ControlError::UnknownService);
+        }
+
+        let before = effective(&self.vendor, &self.overrides);
+        let wanted = request.op.wanted();
+        let desired = if wanted.is_enabled() {
+            enrol(&before, request.name).map_err(|_| ControlError::UnknownService)?
+        } else {
+            // A disable of something already unenrolled leaves the record
+            // untouched; the requested end state already holds.
+            unenrol(&before, request.name).unwrap_or_else(|_| before.clone())
+        };
+        let changed = desired != before;
+        self.overrides = overrides_for(&self.vendor, &desired);
+        let name = String::from(request.name);
+        if changed {
+            self.audit(
+                events::SERVICE_ENROLMENT_CHANGED,
+                Level::Info,
+                &name,
+                wanted.as_str(),
+            );
+            self.enact_enrolment(&name, wanted, now)?;
+        }
+        Ok(EnrolReport {
+            enrolment: wanted,
+            changed,
+            overrides: self.overrides.clone(),
+        })
+    }
+
+    /// Make a just-recorded enrolment true of the *running* system: start a
+    /// newly-enabled service (registering it first if this boot skipped it),
+    /// or tear a newly-disabled one down.
+    ///
+    /// A start the kernel's load gate refuses is reported to the caller but
+    /// leaves the record standing: the administrator's decision is about
+    /// eligibility, and a bundle that cannot load is a separate fault.
+    fn enact_enrolment(
+        &mut self,
+        name: &str,
+        wanted: ServiceEnrolment,
+        now: Duration64,
+    ) -> Result<(), ControlError> {
+        if wanted.is_enabled() {
+            if self.index_of(name).is_none() {
+                let Some(pos) = self.unenrolled.iter().position(|s| s.name() == name) else {
+                    return Err(ControlError::UnknownService);
+                };
+                let spec = self.unenrolled.remove(pos);
+                // `register` is where the scope check lives, so a service
+                // this manager may not manage is refused here rather than
+                // being brought to life by an enrolment request.
+                if self.register(spec).is_err() {
+                    self.audit(
+                        events::SERVICE_ENROLMENT_DENIED,
+                        Level::Warn,
+                        name,
+                        "outside this manager's authority",
+                    );
+                    return Err(ControlError::UnknownService);
+                }
+            }
+            self.start_service(name).map(|_| ())
+        } else {
+            self.stop(name, now)
+                .map_err(|_| ControlError::Unavailable)
+                .map(drop)
+        }
+    }
+
+    /// Adopt an administrator override layer that has become readable, and
+    /// narrow the running system to it.
+    ///
+    /// Pre-unlock the manager obeys the image's enrolment layer alone, because
+    /// the override document lives on the encrypted root. This is the moment
+    /// that narrowing arrives: every service the overrides disable and this
+    /// boot started is stopped, each recorded with
+    /// [`events::SERVICE_ENROLMENT_REVOKED`]. Nothing is *started* here — an
+    /// override that enables a service the image does not is honoured at the
+    /// next boot's registration, so a late document can never bring an
+    /// unregistered service up behind the dependency graph's back.
+    ///
+    /// Returns the names it stopped.
+    pub fn adopt_overrides(
+        &mut self,
+        overrides: EnrolmentOverride,
+        now: Duration64,
+    ) -> Vec<String> {
+        self.overrides = overrides;
+        let enrolment = effective(&self.vendor, &self.overrides);
+        let revoked: Vec<String> = self
+            .services
+            .iter()
+            .filter(|s| !enrolment.is_enabled(s.spec.name()))
+            .map(|s| String::from(s.spec.name()))
+            .collect();
+        for name in &revoked {
+            self.audit(
+                events::SERVICE_ENROLMENT_REVOKED,
+                Level::Warn,
+                name,
+                "disabled by the administrator's override",
+            );
+            let _ = self.stop(name, now);
+        }
+        revoked
+    }
+
+    /// Whether the effective enrolment enables `name`.
+    #[must_use]
+    pub fn enrolment_of(&self, name: &str) -> ServiceEnrolment {
+        if effective(&self.vendor, &self.overrides).is_enabled(name) {
+            ServiceEnrolment::Enabled
+        } else {
+            ServiceEnrolment::Disabled
+        }
+    }
+
     /// Bring a specific registered service up now, on a control request — the
     /// engine side of the control surface's `start`.
     ///
@@ -2053,8 +2267,14 @@ fn event_message(id: EventId) -> &'static str {
         events::SERVICE_RESTART_SCHEDULED => "service restart scheduled",
         events::SERVICE_RESTART_EXHAUSTED => "service restart budget spent",
         events::SERVICE_SCOPE_REJECTED => "service account outside manager scope",
+        events::SERVICE_CONTROL_STARTED => "control request started service",
+        events::SERVICE_CONTROL_STOPPED => "control request stopped service",
+        events::SERVICE_CONTROL_DENIED => "control request denied",
         events::SERVICE_WATCHDOG_ARMED => "liveness watchdog armed",
         events::SERVICE_WATCHDOG_TIMEOUT => "liveness watchdog elapsed: process wedged",
+        events::SERVICE_ENROLMENT_CHANGED => "service enrolment changed",
+        events::SERVICE_ENROLMENT_DENIED => "service enrolment request denied",
+        events::SERVICE_ENROLMENT_REVOKED => "service stopped: disabled by the administrator",
         _ => "init event",
     }
 }
@@ -2154,7 +2374,8 @@ mod tests {
     use core::cell::{Cell, RefCell};
     use tairix_abi::{
         ActivationMode, CapabilityId, Duration64, Errno, LifecycleSignal, ReadinessKind,
-        ReadyCondition, RestartPolicy, ServiceControlOp, ServiceControlRequest, ServiceState,
+        ReadyCondition, RestartPolicy, ServiceControlOp, ServiceControlRequest, ServiceEnrolOp,
+        ServiceEnrolRequest, ServiceEnrolment, ServiceState,
     };
     use tairix_caps::CapabilitySet;
     use tairix_log::{Event, EventId, Level, Sink};
@@ -2441,7 +2662,7 @@ mod tests {
 
     #[test]
     fn register_enrolled_registers_only_enrolled_bundles_and_audits_skips() {
-        use crate::registry::Enrolment;
+        use crate::registry::{Enrolment, EnrolmentOverride};
         let spawner = MockSpawner::new();
         let reaper = IdleReaper;
         let sink = RecordingSink::new();
@@ -2455,7 +2676,8 @@ mod tests {
         ];
         let enrolment = Enrolment::parse("netstack\nsysinfod\n").expect("parses");
 
-        init.register_enrolled(discovered, &enrolment).unwrap();
+        init.register_enrolled(discovered, enrolment, EnrolmentOverride::empty())
+            .unwrap();
 
         // The present-but-unenrolled `rogue` bundle is never registered:
         // presence on disk grants no eligibility. The skip is audited.
@@ -2471,7 +2693,7 @@ mod tests {
 
     #[test]
     fn register_enrolled_with_an_empty_enrolment_registers_nothing() {
-        use crate::registry::Enrolment;
+        use crate::registry::{Enrolment, EnrolmentOverride};
         let spawner = MockSpawner::new();
         let reaper = IdleReaper;
         let sink = RecordingSink::new();
@@ -2480,7 +2702,7 @@ mod tests {
         // A missing or corrupt store resolves to the empty enrolment, so no
         // discovered bundle is eligible — nothing auto-starts, fail closed.
         let discovered = alloc::vec![spec("netstack", &[]), spec("sysinfod", &[])];
-        init.register_enrolled(discovered, &Enrolment::empty())
+        init.register_enrolled(discovered, Enrolment::empty(), EnrolmentOverride::empty())
             .unwrap();
 
         assert_eq!(init.registered_count(), 0);
@@ -2572,7 +2794,7 @@ mod tests {
         // per-user scope is refused: enrolment records a decision but can
         // never raise a service above the manager's own authority. The whole
         // bring-up fails closed rather than booting a surprising service.
-        use crate::registry::Enrolment;
+        use crate::registry::{Enrolment, EnrolmentOverride};
         let spawner = MockSpawner::new();
         let reaper = IdleReaper;
         let sink = RecordingSink::new();
@@ -2580,7 +2802,7 @@ mod tests {
         let enrolment = Enrolment::parse("privileged\n").expect("parses");
         let discovered = alloc::vec![spec_account("privileged", 0)];
         assert_eq!(
-            init.register_enrolled(discovered, &enrolment),
+            init.register_enrolled(discovered, enrolment, EnrolmentOverride::empty()),
             Err(InitError::ScopeViolation),
         );
         assert_eq!(init.registered_count(), 0);
@@ -2654,8 +2876,19 @@ mod tests {
         assert_eq!(buf.format(0), "0");
         assert_eq!(buf.format(-42), "-42");
         assert_eq!(buf.format(i128::from(u64::MAX)), "18446744073709551615");
-        // Every emitted id has a dedicated message; unknown ids fall back.
-        assert_eq!(event_message(events::SERVICE_STARTED), "service started");
+        // Every emitted id has a dedicated message, checked against the one
+        // list of them: an id that fell through would otherwise reach an
+        // operator's transcript as the generic fallback with nothing to catch
+        // it.
+        for id in events::ALL {
+            assert_ne!(
+                event_message(id),
+                "init event",
+                "event {} has no dedicated message",
+                id.0
+            );
+        }
+        // An id this crate does not emit still falls back rather than panicking.
         assert_eq!(event_message(EventId(1)), "init event");
     }
 
@@ -3580,6 +3813,234 @@ mod tests {
             op: ServiceControlOp::Stop,
             name,
         }
+    }
+
+    // --- TS-5b: the enrolment surface -----------------------------------
+
+    /// An `enable` request naming `name`.
+    fn enable_req(name: &str) -> ServiceEnrolRequest<'_> {
+        ServiceEnrolRequest {
+            op: ServiceEnrolOp::Enable,
+            name,
+        }
+    }
+
+    /// A `disable` request naming `name`.
+    fn disable_req(name: &str) -> ServiceEnrolRequest<'_> {
+        ServiceEnrolRequest {
+            op: ServiceEnrolOp::Disable,
+            name,
+        }
+    }
+
+    /// A manager that booted with `vendor` enrolling every discovered spec in
+    /// `names` and no administrator overrides.
+    fn booted_enrolled(
+        init: &mut Init<'_>,
+        names: &[&str],
+        vendor_text: &str,
+    ) -> Result<(), InitError> {
+        use crate::registry::{Enrolment, EnrolmentOverride};
+        let discovered: Vec<ServiceSpec> = names.iter().map(|n| spec(n, &[])).collect();
+        init.register_enrolled(
+            discovered,
+            Enrolment::parse(vendor_text).expect("vendor layer parses"),
+            EnrolmentOverride::empty(),
+        )
+    }
+
+    #[test]
+    fn disable_records_an_override_stops_the_service_and_is_idempotent() {
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        booted_enrolled(&mut init, &["timed", "netstack"], "netstack\ntimed\n").unwrap();
+        init.start_all().unwrap();
+        assert_eq!(init.state_of("timed"), Some(ServiceState::Running));
+
+        let now = Duration64::from_secs(5);
+        let report = init.enrol_control(disable_req("timed"), now).unwrap();
+        assert_eq!(report.enrolment, ServiceEnrolment::Disabled);
+        assert!(report.changed);
+        // The document records only what differs from the image's layer.
+        assert_eq!(
+            report.overrides.entries(),
+            [(String::from("timed"), ServiceEnrolment::Disabled)]
+        );
+        // It takes effect now as well as at the next boot.
+        assert_eq!(init.state_of("timed"), Some(ServiceState::Stopping));
+        assert_eq!(init.enrolment_of("timed"), ServiceEnrolment::Disabled);
+        assert_eq!(sink.count(events::SERVICE_ENROLMENT_CHANGED), 1);
+        // An unrelated service is untouched.
+        assert_eq!(init.enrolment_of("netstack"), ServiceEnrolment::Enabled);
+
+        // Repeating it changes nothing and says so, rather than claiming work.
+        let again = init.enrol_control(disable_req("timed"), now).unwrap();
+        assert_eq!(again.enrolment, ServiceEnrolment::Disabled);
+        assert!(!again.changed);
+        assert_eq!(again.overrides, report.overrides);
+        assert_eq!(sink.count(events::SERVICE_ENROLMENT_CHANGED), 1);
+    }
+
+    #[test]
+    fn enable_registers_and_starts_a_bundle_this_boot_skipped() {
+        // The whole point of retaining a discovered-but-unenrolled spec: a
+        // service disabled at the last boot is not registered, and an
+        // administrator must still be able to enable it by name.
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        booted_enrolled(&mut init, &["timed", "netstack"], "netstack\n").unwrap();
+        init.start_all().unwrap();
+        assert_eq!(init.registered_count(), 1);
+        assert_eq!(init.state_of("timed"), None);
+        assert_eq!(init.enrolment_of("timed"), ServiceEnrolment::Disabled);
+
+        let report = init
+            .enrol_control(enable_req("timed"), Duration64::from_secs(7))
+            .unwrap();
+        assert_eq!(report.enrolment, ServiceEnrolment::Enabled);
+        assert!(report.changed);
+        assert_eq!(
+            report.overrides.entries(),
+            [(String::from("timed"), ServiceEnrolment::Enabled)]
+        );
+        assert_eq!(init.registered_count(), 2);
+        assert_eq!(init.state_of("timed"), Some(ServiceState::Running));
+
+        // Re-disabling it empties the document rather than pinning the
+        // image's default, so a later image is obeyed again.
+        let back = init
+            .enrol_control(disable_req("timed"), Duration64::from_secs(8))
+            .unwrap();
+        assert!(back.changed);
+        assert!(back.overrides.is_empty());
+    }
+
+    #[test]
+    fn an_unknown_or_invalid_name_is_refused_and_records_nothing() {
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        booted_enrolled(&mut init, &["timed"], "timed\n").unwrap();
+        let now = Duration64::from_secs(1);
+
+        // A name the manager has never discovered cannot be enrolled: a typo
+        // must not record a phantom a later image would silently activate.
+        for req in [enable_req("ghost"), disable_req("ghost")] {
+            assert_eq!(
+                init.enrol_control(req, now),
+                Err(ControlError::UnknownService)
+            );
+        }
+        // A policy-invalid name is refused before anything is looked up.
+        for name in ["../etc", "Upper", ""] {
+            assert_eq!(
+                init.enrol_control(enable_req(name), now),
+                Err(ControlError::UnknownService)
+            );
+        }
+        assert_eq!(sink.count(events::SERVICE_ENROLMENT_DENIED), 5);
+        assert_eq!(sink.count(events::SERVICE_ENROLMENT_CHANGED), 0);
+        assert_eq!(init.enrolment_of("timed"), ServiceEnrolment::Enabled);
+    }
+
+    #[test]
+    fn a_per_user_manager_cannot_enrol_a_system_authority_service() {
+        // The identity boundary, not a capability computation: an out-of-scope
+        // bundle never registers, so it is not a service this manager knows
+        // and the enrolment request is refused fail closed.
+        use crate::registry::{Enrolment, EnrolmentOverride};
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg_user(&spawner, &reaper, &sink, 1000));
+        // Discovered but not enrolled, so registration (and its scope check)
+        // is deferred to the enable request below.
+        init.register_enrolled(
+            alloc::vec![spec_account("privileged", 0)],
+            Enrolment::empty(),
+            EnrolmentOverride::empty(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            init.enrol_control(enable_req("privileged"), Duration64::from_secs(1)),
+            Err(ControlError::UnknownService)
+        );
+        assert_eq!(sink.count(events::SERVICE_SCOPE_REJECTED), 1);
+        assert_eq!(sink.count(events::SERVICE_ENROLMENT_DENIED), 1);
+        assert_eq!(init.registered_count(), 0);
+        assert!(spawner.launched.borrow().is_empty());
+    }
+
+    #[test]
+    fn adopting_a_late_override_layer_stops_what_it_disables() {
+        // Pre-unlock the manager obeys the image's layer alone, because the
+        // administrator's document lives on the encrypted root. This is the
+        // moment that narrowing arrives.
+        use crate::registry::EnrolmentOverride;
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        booted_enrolled(&mut init, &["timed", "netstack"], "netstack\ntimed\n").unwrap();
+        init.start_all().unwrap();
+        assert_eq!(init.state_of("timed"), Some(ServiceState::Running));
+
+        let overrides = EnrolmentOverride::parse("timed disabled\n").expect("parses");
+        let revoked = init.adopt_overrides(overrides, Duration64::from_secs(30));
+        assert_eq!(revoked, [String::from("timed")]);
+        assert_eq!(init.state_of("timed"), Some(ServiceState::Stopping));
+        assert_eq!(init.state_of("netstack"), Some(ServiceState::Running));
+        assert_eq!(sink.count(events::SERVICE_ENROLMENT_REVOKED), 1);
+    }
+
+    #[test]
+    fn adopting_an_override_layer_never_starts_anything() {
+        // An override that *enables* a service the image does not is honoured
+        // at the next boot's registration, never by bringing an unregistered
+        // service up behind the dependency graph's back.
+        use crate::registry::EnrolmentOverride;
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        booted_enrolled(&mut init, &["timed", "netstack"], "netstack\n").unwrap();
+        init.start_all().unwrap();
+        let launched_before = spawner.launched.borrow().len();
+
+        let overrides = EnrolmentOverride::parse("timed enabled\n").expect("parses");
+        assert!(init
+            .adopt_overrides(overrides, Duration64::from_secs(30))
+            .is_empty());
+        assert_eq!(spawner.launched.borrow().len(), launched_before);
+        assert_eq!(init.state_of("timed"), None);
+        // The record does say it is enabled — the next boot registers it.
+        assert_eq!(init.enrolment_of("timed"), ServiceEnrolment::Enabled);
+    }
+
+    #[test]
+    fn a_disable_leaves_the_record_standing_when_the_stop_cannot_complete() {
+        // Enrolment is a decision about eligibility; a service that is not
+        // currently up is still recorded disabled so the next boot obeys it.
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        booted_enrolled(&mut init, &["timed"], "timed\n").unwrap();
+        // Registered but never started, so there is nothing to tear down.
+        assert_eq!(init.state_of("timed"), Some(ServiceState::Inactive));
+
+        let report = init
+            .enrol_control(disable_req("timed"), Duration64::from_secs(2))
+            .unwrap();
+        assert!(report.changed);
+        assert_eq!(report.enrolment, ServiceEnrolment::Disabled);
+        assert_eq!(init.enrolment_of("timed"), ServiceEnrolment::Disabled);
     }
 
     #[test]

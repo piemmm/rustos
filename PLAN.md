@@ -133,11 +133,16 @@ Do **not** begin a stage before all its listed dependencies are complete.
   rolling "keep the last N bytes/lines" windows; the `head` + `tail`
   command apps — `head`'s `-c -N`/`-n -N` elide modes and `tail`'s
   `-c N`/`-n N` last-N modes are the two policies over one mechanism),
-  and `conf` (the `#`-comment line grammar every line-oriented
+  `conf` (the `#`-comment line grammar every line-oriented
   configuration store shares; `lib/sysconfig` + `lib/netconfig` +
   `userland/system/init`'s service registry and startup list, hoisted out
   of the four private copies so a comment is recognised identically in
-  all of them).
+  all of them), and `retry` (the bounded doubling one-shot schedule a reader
+  climbs when the thing it needs appears after it starts and no readiness
+  event says so; `userland/system/timed`'s configuration store and RTC +
+  `userland/system/init`'s administrator enrolment overrides on the encrypted
+  root, hoisted out of `timed` when the service manager hit the same
+  boot-order problem).
 - The cross-checked `syscalls.rs` ↔ `table.rs` pair is reserved for Stage 2
   so `cargo xtask abi-check` always sees both halves.
 
@@ -3505,8 +3510,14 @@ HAT tier — a new `lib/i2c` register-transaction protocol, the
 grant-restricted transfer endpoint per device-tree-declared child so a chip
 driver can never address a neighbour. TS-5a is done: PID 1 now serves a
 capability-gated control endpoint from its one wait-set park, and
-`servicectl start`/`stop` is its first holder. TS-5b (enablement) and TS-6
-(the desktop toggle, which needs it) follow.
+`servicectl start`/`stop` is its first holder. TS-5b's **enablement** half is
+done: PID 1 serves a second reserved endpoint for enrolment beside the control
+one, `servicectl enable`/`disable` drives it, the enrolment record is live as
+two layers (the image's on the read-only `/System` volume, the administrator's
+overrides on the encrypted root), and `timed` has moved out of the compiled-in
+boot floor into the enrolment-governed tier — so turning automatic time-setting
+off survives a reboot. TS-5b's `status` query (§16.6) and TS-6 (the desktop
+toggle, which needs the enrolment path this landed) follow.
 `plans/TIMESYNC.md` is the binding design and carries the deliverable list and
 its current state; it is not repeated here.
 
@@ -3559,7 +3570,7 @@ Load-bearing decisions a future contributor needs:
   one.
 - **Enable/disable is service enrolment, not a second switch.** Both the
   `servicectl` command line and the taskbar clock's toggle drive the one
-  control path, which is why TS-5 lands `plans/NEW-SERVICEMANAGER.md` SVC-8's
+  enrolment path, which is why TS-5 lands `plans/NEW-SERVICEMANAGER.md` SVC-8's
   remaining control transport as a genuine prerequisite.
 
 ---
