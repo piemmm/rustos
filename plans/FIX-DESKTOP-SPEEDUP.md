@@ -56,8 +56,7 @@ A.4 gate found on its first run, which is the one open per-control damage gap
 and the reason A.4's damage bound sits where it does — **Stage F.2**'s packed
 candidates, which F.1's measurements narrow to the blur window and the resample
 row filter and which are aarch64-only until Stage G, **D.5**'s approved
-half-resolution blur (visual comparison first), **D.13**'s transmittance bound
-(the measured reason the terminal ships with its backdrop blur off), and
+half-resolution blur (visual comparison first), and
 **Stage G**, still behind a User decision. `plans/OPEN-DEFECTS.md` D37 is a confirmed defect fixed
 independently of this schedule.
 
@@ -93,10 +92,13 @@ image.** A dev-profile timing is never quoted as evidence.
 2. **Bit-identical output, proven.** Every fast path, cache, and CPU candidate
    produces byte-identical frames to the portable reference for the same scene,
    asserted by composing the scene both ways. A change that alters output is a
-   *deliberate, documented rendering decision with a visual test*, never a
-   silent tweak. Exactly one has been made: B.5's per-pixel dither on a
+   *deliberate, documented rendering decision with a bounded, asserted
+   difference*, never a silent tweak. Two have been made: B.5's per-pixel
+   dither on a
    *blended* pixel, whose bound is stated there; a copied or opaque pixel is
-   still byte-identical.
+   still byte-identical. D.13's skipped frost is the second, and its bound is
+   the last bit of a channel — the tightest integer compositing admits through
+   translucency.
 3. **Tests assert work, not wall-clock (§7).** CI gates on deterministic
    counters — pixels blended, rects presented, controls repainted, IPC round
    trips, cache hits — which are load-independent. A wall-clock threshold in CI
@@ -617,7 +619,7 @@ measuring this stage no longer has a 0.5 Hz whole-bar repaint underneath it.
 
 ---
 
-## Stage D — Make blur cost what it changes  **[done; D.5 is a User decision, D.13 not started]**
+## Stage D — Make blur cost what it changes  **[done; D.5 is a User decision]**
 
 ### D.1 Four damage funnels, because the kind of change decides what a frame owes
 There is no bare `damage.add` in the compositor. A mutation uses the **narrowest
@@ -653,8 +655,10 @@ change far past the rectangle that caused it.
 pixels plus the rectangle, physical radius and window shape they are a function
 of) in a `ReclaimCache` keyed by `WindowId`, built by `frost_cache` from
 `lib/reclaim`'s shared `screenful_ui_cache` policy — generalised from
-`window_chrome_cache`, since "no more of this can be visible at once than fills
-the screen" is the furniture argument word for word.
+`window_chrome_cache`. A frost is a *whole window's* rectangle, so unlike
+furniture a stack of overlapping ones can want several times that screenful;
+the ceiling is a bound on what the desktop may retain, not a claim that no more
+can be wanted, and D.13 is what a pass over that bound then does.
 
 - The rectangle recorded is the window's **whole** one, not the on-screen part:
   a window pushed off an edge is frosted from the row and column the screen
@@ -887,54 +891,74 @@ crossings used to mark a large translucent window in full and drop its frost.
 
 ---
 
-### D.13 A frost that cannot change an output pixel — **not started**
-Stage D makes a frost cost what it *changes*; it does not yet ask whether the
-frost is **seen at all**. Every blurred window is frosted over its whole
-rectangle each frame it is recomputed, however deeply it is buried.
+### D.13 A frost that cannot change an output pixel — **done**
+Stage D makes a frost cost what it *changes*; this asks whether it is **seen at
+all**. A blurred window used to be frosted over its whole rectangle each frame
+its frost was recomputed, however deeply it was buried, and ordinary occlusion
+cannot help: `Window::opaque_run` requires `alpha == 255` and a translucent
+terminal yields no opaque runs.
 
-Measured on `tairix-test-desktop-pressure-qemu-aarch64` (aarch64, 1 CPU,
-ramfb), which cascades 32 terminal windows. With the terminal defaulting to
-80% opacity **and a half-strength backdrop blur** the run never finished: cost
-per window climbed linearly (+0.22 s for window 2, +3.5 s for 16, +8.6 s for
-26) and the guest stalled at 26 of 32, killed at the 600 s ceiling. With the
-same tree and the blur default off it passed in **37 s**. The translucency is
-free; the blur is the whole cost. `CASCADE_WRAP` puts those windows on eight
-positions, so the scene is genuinely ~26 overlapping frosted layers, and the
-retained frosts are ~22 screenfuls against a `screenful_ui_cache` budget the
-test is simultaneously driving down — so they thrash and every frame re-blurs.
+**The bound.** Compositing is `over`, so what a frost still contributes is the
+destination weight of every layer laid over it — its own window first, then
+each one above. Each transmission is one rounded division by 255, so the
+largest per-channel difference a wrong backdrop survives as shrinks by
+`d -> ceil(d·(255−α)/255)`; from the widest 8-bit difference, four layers at
+80% opacity take it to **one**. That is the tightest integer compositing
+admits, because a translucent layer maps a difference of one to a difference of
+one — only an opaque layer reaches zero — so the skipped pixels are within the
+last bit of a channel rather than byte-identical. That is the deliberate limit
+of this item and the second rendering decision this plan records, after B.5's
+dither.
 
-Ordinary occlusion cannot help: `Window::opaque_run` requires `alpha == 255`
-and a translucent terminal yields no opaque runs, so nothing culls.
+What landed:
 
-**The exact bound.** Compositing is `over`, so a frost's contribution to the
-final pixel is `T = ∏(1 − α)` across its own window and every one above it.
-An 8-bit channel cannot record a contribution below half an LSB, so a frost
-with `255·T < 0.5` is *provably* invisible and need not be computed. At 80%
-opacity that is four layers deep, turning per-frame blur cost from O(windows)
-into O(1).
+- **A per-surface alpha floor** (`Surface::alpha_floor` /
+  `settle_alpha_floor`, `lib/raster`). Every write seam records the pixels it
+  hands out — all three of them, since `row_span_mut` and `row_bands_mut` are
+  the only ways a `Surface`'s pixels are reached — and settling reads them
+  back, lowering the bound to what they hold and retaking it from the whole
+  surface once as much area has been written as the surface holds. Typing
+  therefore stays O(damage). An unaccounted borrow reads as fully transparent,
+  so a write path that forgets to settle costs the skip and never a pixel.
+- **`Window::solid_core`**: the screen rectangle where the window draws its own
+  content at full corner coverage — the drawable client area inside the reach
+  of the shape its client is cut to, *not* the bounds, since the furniture band
+  and the arcs are other things — paired with the least alpha those pixels can
+  compose at. Floored, not rounded: the ordered dither's lowest bias floors the
+  opacity scale.
+- **`Compositor::unseen_core`**: the walk upward, intersecting each covering
+  window's solid core and taking the region in by the radius of every blur
+  above that still has a difference worth spreading — a blur carries what is
+  beneath it outward, where the walk has proved nothing.
+- **`FrostPlan::Unseen`**, fed to the existing `blur_backdrop(index, keep)`, so
+  only the border is blurred, the layers under the core are not composed, and
+  the frost is **not captured**.
+- **The skip is only taken for a frost the budget cannot keep**
+  (`ReclaimCache::admits`, weighed against what the pass has already promised).
+  Retaining beats any partial blur — one blur and then nothing, and a *moved*
+  occluder above then costs nothing at all — so a keepable frost is blurred
+  whole. This is what stops the skip regressing D.8's dragged occluder, which
+  it otherwise does: a punched core is refused the moment the window hiding it
+  moves, and every drag sample pays a full re-blur.
 
-What it needs, none of which exists yet:
+**Measured.** On the D.13 cascade shape as a host unit test (26 80%-opaque
+blurred terminals on eight positions over 1024×768, retained backdrops some 22
+screenfuls against a budget of one) a frame falls from 5 552 560 to 4 664 760
+blurred pixels and 5 552 559 to 4 920 035 blends. The counters miss the larger
+saving: 23 window-sized captures a frame — allocation plus blit — stop being
+made for entries the budget was always going to turn away. On
+`tairix-test-desktop-pressure-qemu-aarch64` (aarch64, 1 CPU, ramfb, 32
+cascaded terminals under real memory pressure) the terminal defaulting to 80%
+opacity **and** a half-strength blur went from never finishing — cost per
+window climbing linearly, +0.22 s for window 2, +3.5 s for 16, +8.6 s for 26,
+killed at the ceiling with 26 of 32 on screen — to **133 s**, against 37 s for
+the same tree with the blur off. The blur therefore ships on
+(`plans/GUI-TERMINAL.md` §2).
 
-- **A sound per-window alpha lower bound.** Content is painted in place over
-  the damaged region only, so a full scan per present would turn the dominant
-  interaction (typing) from O(damage) into O(area). Instead `Surface` keeps a
-  `min_alpha` that partial writes *lower* (always sound — under-estimating
-  opacity can only fail to skip, never wrongly skip) and that a full rescan
-  refreshes once the written area since the last refresh reaches the surface
-  area, which is amortised free.
-- **A transmittance walk** per blurred window: from its own layer upward,
-  accumulate `T *= 1 − min_alpha_j` over the shrinking intersection of
-  `inset(bounds_j, corner_reach_j)`, stopping at `255·T < 0.5`.
-- **A partial frost.** The resulting rectangle is fed to the existing
-  `blur_backdrop(index, keep)` core mechanism, and a frost computed with a
-  skipped core is *not* retained — the occluders above it may move away, and
-  the retained-frost contract records a whole rectangle.
-
-Verified against the byte-for-byte equivalence harness that already composes a
-scene both ways (`set_opaque_runs`, `frost_reuse`), since this changes which
-pixels are computed. Until it lands the terminal ships translucent with the
-blur off (`plans/GUI-TERMINAL.md` §2) — the blur is one slider away and costs
-only the window that asks for it.
+Verified by composing one scene both ways (`set_frost_skip`, beside
+`set_opaque_runs` and `frost_reuse`) across content presents above and inside
+the frost, a moved occluder, a faded one, a closed one and a restack, requiring
+every scan-out byte to agree to within the one bit the walk allows.
 
 ## Stage E — One present per frame, and a frame deadline  **[done]**
 

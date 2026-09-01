@@ -60,11 +60,9 @@ ANSI colours — with red, green, and blue sliders for whichever one is
 selected.
 
 **Effects** sets how the screen is drawn. A new terminal opens at 80%
-opacity with every other effect off, so the desktop shows through behind
-the text. The backdrop blur is off by default because the compositor
-blurs each see-through window separately every frame, which a screenful
-of them makes expensive; turn it on for one terminal and it costs only
-that one.
+opacity with the backdrop blurred at half strength and every other
+effect off, so the desktop reads as frosted glass behind the text rather
+than showing through sharply.
 
 | Effect | What it does |
 | --- | --- |

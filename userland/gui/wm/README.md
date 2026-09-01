@@ -53,7 +53,9 @@ router**:
   beneath it, the window's whole rectangle, its physical radius and the
   window's shape — and of *nothing at or above its own layer*. So it is kept in
   a `ReclaimCache` (`frost_cache`, one screenful, `lib/reclaim`'s shared
-  desktop policy) and a window's own repaint copies it back instead of
+  desktop policy — a frost is a whole window's rectangle, so a stack of
+  overlapping ones can want several times that, which is what the unseen-core
+  entry below keys on) and a window's own repaint copies it back instead of
   composing that stack again. A blur of radius zero leaves the composed layers
   exactly as it found them, so an unblurred translucent window retains its
   backdrop through the very same path (`Window::reads_backdrop`) rather than a
@@ -89,6 +91,23 @@ router**:
   counts no second lookup), so admitting one frost cannot evict another the
   same pass had already decided to reuse. A frost is a blurred image of the
   user's desktop, so a released entry is wiped, not merely dropped.
+- A frost nothing can show (`Compositor::unseen_core`): compositing is `over`,
+  so what a frost still contributes to the screen is the destination weight of
+  its own window and every one above. Each transmission is a rounded division
+  by 255, so the largest per-channel difference a wrong backdrop survives as
+  shrinks by `d -> ceil(d * (255 - alpha) / 255)` — four layers at 80% opacity
+  take the widest 8-bit difference down to **one**, which is as far as integer
+  compositing goes through translucency. The walk climbs from the blurred
+  window, intersecting each covering window's `solid_core` (its drawable client
+  area inside the reach of the shape its client is cut to, paired with its
+  content's `Surface::alpha_floor`) and taking the region in by the radius of
+  every blur above that still has a difference worth spreading. Only where the
+  frosts of a whole pass together exceed the budget — so admitting one means
+  pushing a live one out and every frame rebuilds all of them — is the
+  resulting rectangle left uncomputed (`FrostPlan::Unseen`, blurred around
+  through the same `blur_backdrop(index, keep)`), and then it is neither
+  composed beneath nor captured. Retaining beats any partial blur otherwise,
+  which is why a frost the cache will keep is always blurred whole.
 - Damage tracking (`tairix_geometry::Region`): only changed pixels are
   recomposited, and the region's rectangles are pairwise disjoint, so no
   pixel is composited or presented twice and two far-apart updates stay two

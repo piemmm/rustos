@@ -1804,16 +1804,15 @@ monotonically increasing `Phase` that the program advances on a one-shot frame
 deadline in its wait-set park — there is no poll loop, and a terminal with the
 effects off never wakes for them at all.
 
-A new terminal opens at **80% opacity with the backdrop blur off**
-(`Effects::default`), as well as the four pass effects. Translucency is free —
-it is the alpha the background is filled at, so the compositor's own blend
-does the work and the shipped look still costs the cell-diff present described
-below. A backdrop blur is not: the compositor frosts each blurred window's
-whole rectangle every frame and retains it in a reclaim-governed cache, so a
-stack of frosted windows costs one blur apiece and outgrows that budget. It is
-one slider away for a single terminal, and `plans/FIX-DESKTOP-SPEEDUP.md`
-records the measurement and the transmittance bound that would make it
-affordable by default.
+A new terminal opens at **80% opacity with the backdrop blurred at half
+strength** (`Effects::default`), the four pass effects off. Translucency is
+free — it is the alpha the background is filled at, so the compositor's own
+blend does the work — and the blur is what makes the window read as frosted
+glass rather than as a hole. A screenful of them is affordable because the
+compositor stopped computing the frosts a stack of them buries: what a window
+still contributes to the screen is the destination weight of everything over
+it, and four layers of 80% opacity take that below the last bit of an 8-bit
+channel (`docs/src/desktop/wm.md`, *A frost no output channel can record*).
 
 A pass is a *whole-frame* post-process by nature — wobble displaces rows and
 phosphor decays every pixel — so when one is in force the finished screen is

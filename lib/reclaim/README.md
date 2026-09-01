@@ -33,7 +33,11 @@ that enforces all of it.
   frosted backdrop exists only as the by-product of a composite pass —
   asks with `get_or_build`, which counts the lookup, and offers the
   finished value afterwards with `retain`, which counts none, so one
-  lookup is recorded once however it was satisfied.
+  lookup is recorded once however it was satisfied. `admits` answers the
+  question before that: admission evicts to make room, which is right when
+  the oldest entry has gone cold and wrong when every entry is live, so a
+  consumer with a cheaper unretainable answer asks whether the budget is
+  already spoken for rather than paying a build and an eviction each pass.
 - `ledger` — `CacheLedger`: one cache described for a diagnostics
   registry (its label, owner, and class plus a shared handle to the
   counters above) and the one conversion of that description into the

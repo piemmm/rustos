@@ -1080,7 +1080,12 @@ weaker policy:
   entry and compared on every lookup, so geometry, radius, scale and corner
   changes fail closed to a recompute; damage marked *below* a window is what
   drops it, which is why a cursor sample, a fade step and the window's own
-  content all keep it.
+  content all keep it. A frost is a *whole window's* rectangle, so unlike
+  furniture a stack of overlapping ones can want several times the screenful
+  the ceiling allows — the compositor asks `ReclaimCache::admits` before
+  building one, and where a pass's frosts together exceed the budget it leaves
+  the part no output channel could record uncomputed instead of rebuilding all
+  of them every frame (`plans/FIX-DESKTOP-SPEEDUP.md` D.13).
 - **The font service's glyph rasters, on both sides.** The service's own
   rasterised coverage and the client-side memoisation of what it fetched
   are `ReclaimCache`es too, built from the single

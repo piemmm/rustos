@@ -38,7 +38,7 @@ use tairix_theme::{CursorKind, Theme};
 use crate::chrome::{ChromeEpoch, WindowChrome};
 use crate::color::{Color, DitherRow, Pixel};
 use crate::corner::Corners;
-use crate::frost::{inset, FrostEpoch, FrostPlan, FrostedBackdrop};
+use crate::frost::{frost_bytes, inset, FrostEpoch, FrostPlan, FrostedBackdrop};
 use crate::geometry::{Point, Rect, Region, Scale};
 use crate::stats::{area_px, FrameCounters, FrameStats};
 use crate::surface::{blend_run, Surface};
@@ -191,17 +191,44 @@ pub struct Compositor {
     /// [`composite`](Compositor::composite) and read back through
     /// [`frame_stats`](Compositor::frame_stats).
     stats: FrameCounters,
-    /// Whether the opaque-run copy path may serve a row. Only a test turns it
-    /// off, to compose a scene the general way and prove the two agree byte
-    /// for byte; production has no reason to and no way to.
+    /// Frost bytes this composite has already committed to capturing, so the
+    /// budget is weighed against a whole pass's demand rather than one
+    /// window's. Reset by each composite.
+    frost_promised: usize,
+    /// Which of the composite's specialisations may serve this compositor.
+    /// Only a test turns one off, to compose the same scene the general way
+    /// and hold the two to each other; production has no reason to and no way
+    /// to.
     #[cfg(test)]
-    opaque_runs: bool,
-    /// Whether a retained frost may be reused instead of blurred again. Only
-    /// a test turns it off, to compose the same scene both ways and prove
-    /// they agree byte for byte; production has no reason to and no way to.
-    #[cfg(test)]
-    frost_reuse: bool,
+    fast_paths: FastPaths,
     next_id: u64,
+}
+
+/// The composite specialisations a test may withhold, so one scene can be
+/// composed both ways and the two compared.
+///
+/// Each is a *loop* specialisation over the same blend and the same blur, so
+/// withholding one must change the frame it produces by no more than that
+/// specialisation's own stated bound — nothing at all for the first two.
+#[cfg(test)]
+#[derive(Copy, Clone, Debug)]
+struct FastPaths {
+    /// Copying a fully opaque run of the front window's own pixels.
+    opaque_runs: bool,
+    /// Reusing a retained frost instead of blurring again.
+    frost_reuse: bool,
+    /// Leaving uncomputed the part of a frost no output channel can record.
+    frost_skip: bool,
+}
+
+#[cfg(test)]
+impl FastPaths {
+    /// Every specialisation allowed, which is what production always is.
+    const ALL: Self = Self {
+        opaque_runs: true,
+        frost_reuse: true,
+        frost_skip: true,
+    };
 }
 
 impl Compositor {
@@ -276,10 +303,9 @@ impl Compositor {
             scanout: Region::new(),
             plane: Region::new(),
             stats: FrameCounters::new(),
+            frost_promised: 0,
             #[cfg(test)]
-            opaque_runs: true,
-            #[cfg(test)]
-            frost_reuse: true,
+            fast_paths: FastPaths::ALL,
             next_id: 1,
         };
         let screen = compositor.screen_rect();
@@ -447,23 +473,30 @@ impl Compositor {
         if rect.is_empty() || self.frost.is_empty() {
             return;
         }
-        let Self {
-            windows,
-            frost,
-            frost_decision,
-            ..
-        } = self;
-        for (index, window) in windows.iter().enumerate().skip(from) {
-            if !window.bounds().intersection(&rect).is_empty() {
-                frost.invalidate(&window.id());
-                // A frame that has already been told it may reuse this one is
-                // told otherwise here, rather than asking the cache a second
-                // time for an answer this call has just determined. Rewriting
-                // it is also what keeps the plan and the cache in step: a frame
-                // may never read a decision to copy a frost this dropped.
-                if let Some(decision) = frost_decision.get_mut(index) {
-                    *decision = Some(FrostPlan::Blur);
-                }
+        for index in from..self.windows.len() {
+            let Some((id, bounds)) = self.windows.get(index).map(|w| (w.id(), w.bounds())) else {
+                continue;
+            };
+            if bounds.intersection(&rect).is_empty() {
+                continue;
+            }
+            self.frost.invalidate(&id);
+            // A frame that has already been told it may copy this one is told
+            // otherwise here, rather than asking the cache a second time for an
+            // answer this call has just determined. Rewriting it is also what
+            // keeps the plan and the cache in step: a frame may never read a
+            // decision to copy a frost this dropped. A decision that copies
+            // nothing, and one not yet taken, are both left alone — the second
+            // so the lookup that finds the entry gone still counts its miss.
+            if !matches!(
+                self.frost_decision.get(index),
+                Some(Some(FrostPlan::Whole | FrostPlan::Core(_)))
+            ) {
+                continue;
+            }
+            let refreshed = self.blur_plan(index, bounds.intersection(&self.screen_rect()));
+            if let Some(decision) = self.frost_decision.get_mut(index) {
+                *decision = Some(refreshed);
             }
         }
     }
@@ -660,7 +693,7 @@ impl Compositor {
     /// reads as absent.
     fn ask_frost(&mut self, index: usize) -> FrostPlan {
         #[cfg(test)]
-        if !self.frost_reuse {
+        if !self.fast_paths.frost_reuse {
             return FrostPlan::Blur;
         }
         let screen = self.screen_rect();
@@ -678,10 +711,109 @@ impl Compositor {
         if kept == Some(FrostPlan::Blur) {
             self.frost.invalidate(&id);
         }
-        match self.frost.get_or_build(&epoch, id, || None) {
+        let plan = match self.frost.get_or_build(&epoch, id, || None) {
             Some(_) => kept.unwrap_or(FrostPlan::Blur),
             None => FrostPlan::Blur,
+        };
+        // Only a frost with nothing to reuse is worth skipping part of: a
+        // retained one is already cheaper than any partial blur, and copying it
+        // whole is what leaves the *next* frame something to copy too.
+        if plan == FrostPlan::Blur {
+            return self.blur_plan(index, bounds.intersection(&screen));
         }
+        plan
+    }
+
+    /// What a frame that can reuse no part of the frost of the window at
+    /// z-index `index` must do about it.
+    ///
+    /// The whole rectangle, whenever the cache would keep the result: a
+    /// retained frost costs one blur and then nothing, which beats any partial
+    /// blur repeated every frame, and it is what leaves a *moved* occluder
+    /// costing nothing at all. Only where the budget is already spoken for —
+    /// so this frost could be admitted solely by pushing a live one out, and
+    /// every frame would rebuild all of them — is the part no output channel
+    /// can record left uncomputed, and then it is neither captured nor
+    /// retained.
+    fn blur_plan(&mut self, index: usize, rect: Rect) -> FrostPlan {
+        let bytes = frost_bytes(rect);
+        // Weighed against what this pass has already promised, not the budget
+        // as the last frame left it: "does one more fit" is true of every
+        // window in a stack whose frosts together are several times the
+        // budget, and answering it one window at a time is how they all come
+        // to be rebuilt every frame.
+        if self.frost.admits(bytes.saturating_add(self.frost_promised)) {
+            self.frost_promised = self.frost_promised.saturating_add(bytes);
+            return FrostPlan::Blur;
+        }
+        let unseen = self.unseen_core(index);
+        if unseen.is_empty() {
+            FrostPlan::Blur
+        } else {
+            FrostPlan::Unseen(unseen)
+        }
+    }
+
+    /// The part of the frost of the window at z-index `index` that no output
+    /// channel could record, empty when every part of it could.
+    ///
+    /// # The bound
+    ///
+    /// Compositing is `over`, so what a frost still contributes to the screen
+    /// is the destination weight of every layer laid over it — its own window
+    /// first, then each one above. A layer whose alpha is at least `a`
+    /// transmits at most `255 - a` of what is beneath it, and each transmission
+    /// is one rounded division by 255, so the largest per-channel difference a
+    /// wrong backdrop can survive as shrinks by `d -> ceil(d * (255 - a) /
+    /// 255)`. Starting from the widest difference an 8-bit channel holds and
+    /// walking the stack upward, the difference reaches **one** — the tightest
+    /// integer compositing admits, since a translucent layer maps `1` to `1` —
+    /// after four layers at 80% opacity. Its backdrop is then worth no more
+    /// than the last bit of a channel, and computing it is work the screen
+    /// cannot show.
+    ///
+    /// # Why the rectangle shrinks as the walk climbs
+    ///
+    /// A window's alpha is only bounded over its
+    /// [`solid_core`](Window::solid_core), so the region carries the
+    /// intersection of the cores of every window that attenuates it; a window
+    /// whose bounds miss the region neither attenuates nor reads it and is
+    /// passed over. A window that *blurs* also spreads whatever is beneath it
+    /// by its own radius, so the difference left in the region would reappear
+    /// that far outside it, where the walk has proved nothing — the region is
+    /// therefore taken in by the radius of every blur that still has a
+    /// difference worth spreading.
+    fn unseen_core(&self, index: usize) -> Rect {
+        #[cfg(test)]
+        if !self.fast_paths.frost_skip {
+            return Rect::EMPTY;
+        }
+        let Some(window) = self.windows.get(index) else {
+            return Rect::EMPTY;
+        };
+        let (mut region, alpha) = window.solid_core();
+        region = region.intersection(&self.screen_rect());
+        let mut difference = attenuated(u32::from(u8::MAX), alpha);
+        let mut spread: u32 = 0;
+        for above in self.windows.iter().skip(index.saturating_add(1)) {
+            if difference <= 1 {
+                break;
+            }
+            if !above.is_visible() || above.bounds().intersection(&region).is_empty() {
+                continue;
+            }
+            let (core, alpha) = above.solid_core();
+            region = region.intersection(&core);
+            if region.is_empty() {
+                return Rect::EMPTY;
+            }
+            spread = spread.saturating_add(self.blur_radius_px(above));
+            difference = attenuated(difference, alpha);
+        }
+        if difference > 1 {
+            return Rect::EMPTY;
+        }
+        inset(region, spread)
     }
 
     /// Frosted backdrops currently retained, one entry per backdrop-blurred
@@ -1404,6 +1536,7 @@ impl Compositor {
         let window = self.windows.get_mut(index)?;
         let (content, established) = window.content_for_present(width, height)?;
         let (out, local_damage) = convert(content);
+        window.settle_content_alpha();
         let client = window.client_rect();
         let screen_damage = if established {
             client
@@ -1489,6 +1622,7 @@ impl Compositor {
             return false;
         };
         paint(content, painted.rects());
+        window.settle_content_alpha();
         let client = window.client_rect();
         painted.translate(client.left(), client.top());
         painted.clip(client);
@@ -2284,6 +2418,7 @@ impl Compositor {
         self.cursor_on_screen = current_cursor;
         self.cursor_replaced = false;
 
+        self.frost_promised = 0;
         let mut damage = core::mem::take(&mut self.damage);
         // Clipping once here is what lets the walk below trust every
         // rectangle it is handed: damage marked wholly off screen composites
@@ -2556,7 +2691,7 @@ impl Compositor {
     /// scene both ways and compare the results.
     #[cfg(test)]
     pub(crate) fn set_opaque_runs(&mut self, allowed: bool) {
-        self.opaque_runs = allowed;
+        self.fast_paths.opaque_runs = allowed;
         self.mark(self.screen_rect());
     }
 
@@ -2567,10 +2702,18 @@ impl Compositor {
     /// cannot be reading a frost the fast way left behind.
     #[cfg(test)]
     pub(crate) fn set_frost_reuse(&mut self, allowed: bool) {
-        self.frost_reuse = allowed;
+        self.fast_paths.frost_reuse = allowed;
         if !allowed {
             self.frost.teardown();
         }
+        self.mark(self.screen_rect());
+    }
+
+    /// Allow or forbid leaving the unseen core of a frost uncomputed, so a
+    /// test can compose one scene both ways and bound the difference.
+    #[cfg(test)]
+    pub(crate) fn set_frost_skip(&mut self, allowed: bool) {
+        self.fast_paths.frost_skip = allowed;
         self.mark(self.screen_rect());
     }
 
@@ -2932,6 +3075,12 @@ impl Compositor {
     /// core taken in by the radius is spared. A frost being blurred outright
     /// reads the whole rectangle and spares nothing.
     ///
+    /// An unseen core spares the same rectangle a kept one does, for the same
+    /// reason, and keeps whatever the buffer already held there rather than
+    /// taking a copy — the walk that produced the core proved no output channel
+    /// can record the difference, so composing those layers would be work for a
+    /// pixel that cannot change.
+    ///
     /// Nothing is spared for a frost the cache no longer holds, which the plan
     /// says cannot happen — every path that drops an entry rewrites the plan —
     /// but asking here and copying in [`frost_segment`](Self::frost_segment)
@@ -2945,7 +3094,9 @@ impl Compositor {
             FrostPlan::Whole if self.frost_retained(window.id()) => {
                 window.bounds().intersection(&self.screen_rect())
             }
-            FrostPlan::Core(core) => inset(core, self.blur_radius_px(window)),
+            FrostPlan::Core(core) | FrostPlan::Unseen(core) => {
+                inset(core, self.blur_radius_px(window))
+            }
             FrostPlan::Whole | FrostPlan::Blur => Rect::EMPTY,
         }
     }
@@ -3010,6 +3161,16 @@ impl Compositor {
                 self.blur_backdrop(index, core);
                 self.restore_frost(id, core);
             }
+            FrostPlan::Unseen(core) => {
+                // Neither copied nor captured: the core holds pixels the blur
+                // never wrote, and an entry records a whole rectangle a later
+                // frame may copy back once the windows hiding it have moved
+                // away. Not taking the copy is most of what this saves — a
+                // capture is a whole window's allocation and blit, and the
+                // budget that refused this frost is why it was skipped.
+                self.blur_backdrop(index, core);
+                return;
+            }
             FrostPlan::Blur => self.blur_backdrop(index, Rect::EMPTY),
         }
         // Nothing is lost when the copy cannot be taken: the frame is already
@@ -3073,7 +3234,7 @@ impl Compositor {
     ) {
         let epoch = self.chrome_epoch();
         #[cfg(test)]
-        let opaque_runs = self.opaque_runs;
+        let opaque_runs = self.fast_paths.opaque_runs;
         #[cfg(not(test))]
         let opaque_runs = true;
         let runner = self.runner;
@@ -3691,6 +3852,21 @@ fn claim(plan: &mut Vec<Rect>, mut rect: Rect) -> Rect {
     }
     plan.push(rect);
     rect
+}
+
+/// The largest per-channel difference that survives one `over` by a layer
+/// whose own alpha is at least `alpha`.
+///
+/// A destination channel is transmitted as one rounded division by 255, and
+/// rounding can carry a difference's quotient up but never further, so what
+/// survives is at most `ceil(d * (255 - alpha) / 255)`. It bottoms out at one
+/// rather than zero: a translucent layer maps a difference of one to a
+/// difference of one, so no depth of translucency can promise a byte-identical
+/// channel — only an opaque layer can.
+pub(crate) fn attenuated(difference: u32, alpha: u8) -> u32 {
+    difference
+        .saturating_mul(u32::from(u8::MAX - alpha))
+        .div_ceil(u32::from(u8::MAX))
 }
 
 /// A cumulative cache counter's growth across one composite pass, as this

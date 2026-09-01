@@ -421,6 +421,79 @@ impl Window {
         self.content.as_mut().map(|content| (content, true))
     }
 
+    /// Read back the alpha of whatever a paint has just written into this
+    /// window's content, so [`solid_core`](Self::solid_core) can be trusted
+    /// again.
+    ///
+    /// Every borrow of the content buffer is settled by the compositor call
+    /// that took it. A path that forgot to costs the window its skip — an
+    /// unsettled surface reports a floor of zero — and never a wrong pixel.
+    pub(crate) fn settle_content_alpha(&mut self) {
+        if let Some(content) = self.content.as_mut() {
+            content.settle_alpha_floor();
+        }
+    }
+
+    /// The screen rectangle inside which every pixel this window composes is
+    /// one of its own content pixels at full corner coverage, paired with the
+    /// least alpha any of them can carry.
+    ///
+    /// This is what bounds how much of what lies *behind* the window can
+    /// still reach the screen: over that rectangle the window transmits at
+    /// most `1 - alpha` of it, so a stack of them multiplies out to a
+    /// contribution an 8-bit channel may be unable to record at all. Outside
+    /// it the window may be drawing furniture, a corner arc, the gutter of a
+    /// root viewport, or nothing, so nothing is claimed there — which is why
+    /// the rectangle is the drawable client area taken in by the reach of the
+    /// shape its client is cut to, and not the window's bounds.
+    ///
+    /// A hidden window, or one whose pixels are released, claims nothing.
+    pub(crate) fn solid_core(&self) -> (Rect, u8) {
+        if !self.visible {
+            return (Rect::EMPTY, 0);
+        }
+        let Some(content) = self.content.as_ref() else {
+            return (Rect::EMPTY, 0);
+        };
+        let (extent_w, extent_h) = self.client_extent();
+        let (drawable_w, drawable_h) = (
+            extent_w.min(content.width()),
+            extent_h.min(content.height()),
+        );
+        let (x0, y0, x1, y1) = match self.client_cut() {
+            None => (0, 0, drawable_w, drawable_h),
+            Some(cut) => {
+                // Full coverage is everything the plate's own corner radius
+                // does not reach, stated in the plate's coordinates and read
+                // back in the client's.
+                let reach = cut.shape.corner_reach();
+                let (dx, dy) = cut.offset;
+                (
+                    reach.saturating_sub(dx),
+                    reach.saturating_sub(dy),
+                    cut.shape
+                        .width
+                        .saturating_sub(reach)
+                        .saturating_sub(dx)
+                        .min(drawable_w),
+                    cut.shape
+                        .height
+                        .saturating_sub(reach)
+                        .saturating_sub(dy)
+                        .min(drawable_h),
+                )
+            }
+        };
+        let client = self.client_rect();
+        let core = Rect::new(
+            client.left().saturating_add_unsigned(x0),
+            client.top().saturating_add_unsigned(y0),
+            x1.saturating_sub(x0),
+            y1.saturating_sub(y0),
+        );
+        (core, veiled_by(self.opacity, content.alpha_floor()))
+    }
+
     /// The window's screen rectangle.
     ///
     /// For a plain window this is the origin plus the content surface size. For
@@ -768,8 +841,11 @@ impl Window {
 
     /// Replace the content pixels with `surface`, adopting its extent as
     /// the window's client size (a replacement may be a different shape).
-    pub(crate) fn replace_surface(&mut self, surface: Surface) {
+    pub(crate) fn replace_surface(&mut self, mut surface: Surface) {
         self.client_size = (surface.width(), surface.height());
+        // Whatever painted it is done, so its alpha is read back here once
+        // rather than left for the first frame that asks what the window hides.
+        surface.settle_alpha_floor();
         self.content = Some(surface);
     }
 
@@ -1507,4 +1583,15 @@ impl RowCut {
 /// Combine two `0..=255` factors as `a * b / 255` (shared `div255`).
 fn combine(a: u8, b: u8) -> u8 {
     div255(u32::from(a) * u32::from(b))
+}
+
+/// The least alpha a content pixel of at least `alpha` can compose at through
+/// a window opacity of `factor`.
+///
+/// Not [`combine`]: composition scales by the ordered dither's own bias rather
+/// than by nearest rounding, and the lowest bias in the tile floors the
+/// quotient. A bound that rounded would claim a level the darkest column of the
+/// dither does not carry.
+fn veiled_by(factor: u8, alpha: u8) -> u8 {
+    u8::try_from(u32::from(factor) * u32::from(alpha) / u32::from(u8::MAX)).unwrap_or(u8::MAX)
 }

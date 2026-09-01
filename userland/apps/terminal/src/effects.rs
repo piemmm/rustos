@@ -163,20 +163,19 @@ pub struct Effects {
 }
 
 impl Default for Effects {
-    /// A see-through window, and every effect that costs a frame off.
+    /// A see-through, frosted window, and every effect that costs a frame off.
     ///
-    /// Translucency is free: it is the alpha the background is filled at
-    /// while the cells are painted, so the compositor's own blend does the
-    /// work. Backdrop blur is not — the compositor blurs each frosted
-    /// window's whole rectangle every frame, so a stack of them costs one
-    /// blur apiece and the retained frosts outgrow their reclaim budget.
-    /// It stays off by default and one slider away
-    /// (`plans/FIX-DESKTOP-SPEEDUP.md` records the measurement and the
-    /// transmittance bound that would make it affordable).
+    /// Translucency is free: it is the alpha the background is filled at while
+    /// the cells are painted, so the compositor's own blend does the work. The
+    /// blur is what makes it read as glass rather than as a hole, and it is
+    /// half strength because that is the depth at which text stays legible over
+    /// a busy backdrop. The compositor stopped computing the frosts a stack of
+    /// them buries (`plans/FIX-DESKTOP-SPEEDUP.md` D.13), which is what made a
+    /// screenful of frosted terminals affordable.
     fn default() -> Self {
         Self {
             opacity: 800,
-            blur: 0,
+            blur: 500,
             scanlines: 0,
             fuzz: 0,
             phosphor: 0,

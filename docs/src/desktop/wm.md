@@ -383,7 +383,9 @@ releases it rather than pinning the old screen's worth of pixels.
 
 `Surface::frost_region_around` frosts the same rectangle *except* a kept
 inner block, writing exactly the pixels the whole-rectangle frost would write
-around it. The rectangle still decides the answer — samples replicate at its
+around it. The kept block is either a retained frost's still-valid core or a
+core no output channel could record (see [A frost no output channel can
+record](#a-frost-no-output-channel-can-record)). The rectangle still decides the answer — samples replicate at its
 edges and coverage is read at its own coordinates — so a border is never a
 smaller frost of a smaller rectangle, which would spread a clipped
 neighbourhood and seam against the pixels it was kept beside. The border's
@@ -663,8 +665,8 @@ case the cache answers.
 
 The compositor keeps each frosted window's backdrop instead, in a bounded,
 pressure-governed cache on the same terms as the window furniture above:
-ceilinged at one screenful of pixels (no more of it can be visible at once),
-released when the memory-pressure band tightens, and **wiped** on release,
+ceilinged at one screenful of pixels, released when the memory-pressure band
+tightens, and **wiped** on release,
 because a frost is a blurred image of whatever the user had on screen — and an
 unblurred backdrop is a plain one, so the wipe matters more, not less. The same
 repaint now costs 26 µs.
@@ -754,6 +756,68 @@ How a retained backdrop is known to be still right:
   budget until it is next looked up. A window that stops frosting altogether is
   never looked up again, so setting its blur radius to zero releases its entry
   outright rather than leaving a screenful of dead pixels charged.
+
+### A frost no output channel can record
+
+A frost is only worth computing if some pixel of the screen can still show it.
+Compositing is `over`, so what one contributes to the output is the destination
+weight of every layer laid over it — the window's own pixels first, then each
+one above. Each transmission is a rounded division by 255, so the largest
+per-channel difference a wrong backdrop can survive as shrinks by `d ->
+ceil(d * (255 - alpha) / 255)`; starting from the widest difference an 8-bit
+channel holds, four layers at 80% opacity take it to **one**. That is the
+tightest bound integer compositing admits — a translucent layer maps a
+difference of one to a difference of one, so only an opaque layer reaches zero
+— and it is the deliberate limit of this optimisation: the skipped pixels are
+not byte-identical, they are within the last bit of a channel.
+
+The compositor therefore walks upward from each frosted window it must blur,
+carrying the rectangle over which the walk holds and taking it in as it goes:
+
+- **A window's alpha is only bounded over its own client pixels.** Every
+  surface carries an alpha *floor* (`Surface::alpha_floor`), a lower bound on
+  what any of its pixels holds, and `Window::solid_core` pairs it with the
+  screen rectangle where that pixel is what the window actually draws — the
+  drawable client area taken in by the reach of the shape its client is cut to,
+  never the bounds, since the furniture band and the corner arcs are other
+  things. The walk intersects those rectangles; a window whose bounds miss the
+  region neither hides it nor reads it and is passed over.
+- **A window that blurs also spreads.** Its own blur carries whatever is
+  beneath it up to its radius outward, so a difference left inside the region
+  would reappear that far outside it, where the walk has proved nothing. The
+  region is taken in by the radius of every blur above that still has a
+  difference worth spreading.
+- **The floor is maintained, not rescanned.** A partial write to a surface
+  lowers it to what that write laid down — under-stating it can only cost the
+  skip, never take one wrongly — and the exact figure is retaken from every
+  pixel once as much area has been rewritten as the surface holds. Typing in a
+  terminal therefore stays proportional to the cell it changed.
+
+What the frame does with the resulting rectangle is blur the border around it
+and leave it alone (`FrostPlan::Unseen`, through the same
+`blur_backdrop(index, keep)` a partially-reused frost takes), and compose no
+layer beneath it either.
+
+**The skip is only taken for a frost the budget cannot keep.** Retaining beats
+any partial blur — one blur and then nothing, however deeply a window is
+buried, and a moved occluder above then costs nothing at all — so a frost the
+cache will admit is computed in full. Only where a whole pass's frosts together
+exceed the budget, so admitting one means pushing a live one out and every
+frame rebuilds all of them, is the unseen core left uncomputed. Such a frost is
+also **not captured**: an entry records a whole rectangle a later frame may copy
+back once the windows hiding it have moved away, and not taking the copy is
+most of what this saves — a capture is a window-sized allocation and blit, per
+window, per frame.
+
+Measured on the cascade `plans/FIX-DESKTOP-SPEEDUP.md` D.13 describes — 26
+80%-opaque blurred terminals on eight positions over a 1024×768 output, whose
+retained backdrops are some 22 screenfuls against a budget of one — a frame
+falls from 5 552 560 to 4 664 760 blurred pixels and 5 552 559 to 4 920 035
+blends, and stops making 23 window-sized captures a frame.
+
+A frost is a *whole window's* rectangle, so unlike furniture a stack of
+overlapping ones can want several times the screenful the budget allows — which
+is the condition the section below keys on, not an accident of the ceiling.
 
 The cache is read-only for the whole of a composite pass and written at the end
 of it: admitting a frost mid-pass could evict one the same pass had already

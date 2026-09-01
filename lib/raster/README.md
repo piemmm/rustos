@@ -21,6 +21,15 @@ This crate owns:
   `get`/`set`, the `row_span_mut` write seam, `fill`, and clipped
   `fill_rect`/`fill_round_rect`. It is the rendered content of a window for the
   compositor and the painted body of the taskbar.
+- `Surface::alpha_floor` / `Surface::settle_alpha_floor` — a lower bound on the
+  alpha every pixel of a surface carries, which is what lets a compositor prove
+  that what lies *behind* it cannot reach the screen. Every write seam records
+  the pixels it hands out; settling reads them back, lowering the bound to what
+  they hold and retaking it from the whole surface once as much area has been
+  written as the surface holds, so a buffer painted a rectangle at a time keeps
+  a tight bound at an amortised one extra read per pixel written. An
+  unaccounted borrow reads as fully transparent: under-stating the bound costs
+  the consumer work, never correctness.
 - `Surface::with_clip` — the scoped clip window every write is confined to, so a
   view bounds what it paints to the area it owns even when it hands the surface
   to code that does not know it is clipped (see below).

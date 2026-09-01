@@ -482,6 +482,32 @@ where
         }
     }
 
+    /// Whether a value of `payload_bytes` would fit alongside everything
+    /// already retained, at the live pressure band.
+    ///
+    /// A consumer that can answer its question a cheaper way when the cache
+    /// cannot help asks this before building the retainable answer. Admission
+    /// itself will evict to make room (see [`retain`](Self::retain)), which is
+    /// right when the oldest entry has gone cold and wrong when every entry is
+    /// live: a working set larger than the budget then rebuilds all of itself
+    /// every pass, paying the build *and* the eviction for nothing. This is the
+    /// question "is the budget already spoken for", not "would admission
+    /// succeed".
+    ///
+    /// A poisoned or unclassified cache admits nothing.
+    #[must_use]
+    pub fn admits(&self, payload_bytes: usize) -> bool {
+        if self.poisoned {
+            return false;
+        }
+        let Some(policy) = self.policy else {
+            return false;
+        };
+        let cost = payload_bytes.saturating_add(self.entry_metadata_bytes);
+        let ceiling = shrink_target(self.pressure.sample(), policy.class(), self.budget);
+        self.charged_bytes().saturating_add(cost) <= ceiling
+    }
+
     /// Apply the band's forced shrink now, returning the bytes
     /// released.
     ///

@@ -79,14 +79,13 @@ AD5 migrated it.
 - Colours are bare `rrggbb`, never `#rrggbb`: the grammar's comment marker
   would cut the line at the `#`.
 
-Defaults: system scheme, 14 px text, 80% opacity, and every other effect —
-backdrop blur included — off. Translucency is free (it is the alpha the
-background is filled at, and it is not a pass), so the shipped look keeps the
-cell-diff present. The blur is off by default because the compositor frosts
-each blurred window's whole rectangle every frame and retains it in a
-reclaim-governed cache: a screenful of frosted terminals costs one blur apiece
-and outgrows that budget. `plans/FIX-DESKTOP-SPEEDUP.md` holds the measurement
-and the transmittance bound that would let it ship on.
+Defaults: system scheme, 14 px text, 80% opacity, the backdrop blurred at half
+strength, and the four pass effects off. Translucency is free (it is the alpha
+the background is filled at, and it is not a pass), so the shipped look keeps
+the cell-diff present; the blur is what makes the window read as frosted glass
+rather than as a hole. A screenful of frosted terminals is affordable because
+the compositor no longer computes the frosts a stack of them buries
+(`plans/FIX-DESKTOP-SPEEDUP.md` D.13).
 
 ---
 
@@ -255,6 +254,10 @@ compositor can do it.
 - The hardware layer path cannot express a backdrop blur, so a frame
   containing a blurred window falls back to the software composite rather than
   presenting a wrong frame.
+- A frost the layers over it hide is not computed at all
+  (`plans/FIX-DESKTOP-SPEEDUP.md` D.13), which is what lets the blur ship on by
+  default: a screenful of cascaded terminals under memory pressure went from
+  never finishing to **133 s**.
 
 ---
 

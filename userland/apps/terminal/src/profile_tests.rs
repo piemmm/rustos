@@ -69,16 +69,15 @@ fn edited_profile() -> Profile {
 // --- Profile::default -------------------------------------------------------
 
 #[test]
-fn default_profile_is_system_scheme_default_size_and_a_see_through_window() {
+fn default_profile_is_system_scheme_default_size_and_a_frosted_window() {
     let profile = Profile::default();
     assert_eq!(profile.scheme, Scheme::System);
     assert_eq!(profile.font_size_px, DEFAULT_FONT_SIZE_PX);
     assert_eq!(profile.effects, Effects::default());
     assert!(profile.effects.opacity < FULL, "the default is see-through");
-    assert_eq!(
-        profile.effects.blur_radius_px(),
-        0,
-        "the backdrop blur is opt-in: it costs the compositor a frost per frame"
+    assert!(
+        profile.effects.blur_radius_px() > 0,
+        "and frosted: what is behind it is blurred, not merely shown through"
     );
 }
 

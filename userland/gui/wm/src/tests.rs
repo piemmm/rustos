@@ -7587,3 +7587,295 @@ fn a_one_participant_runner_composes_exactly_what_no_runner_does() {
         "a one-participant runner is never dispatched to"
     );
 }
+
+// ---- a frost no output channel can record ----------------------------
+
+use crate::compositor::attenuated;
+
+/// A content surface of one flat translucent tone, which is what a terminal
+/// painted at less than full opacity hands the compositor.
+fn veiled(w: u32, h: u32, alpha: u8) -> Surface {
+    opaque(w, h, Color::rgba(20, 24, 30, alpha))
+}
+
+/// A compositor whose frost cache has no budget at all, so every frost is one
+/// the cache cannot help with and the skip is always on the table.
+fn spent_frost_budget(mode: DisplayMode) -> Compositor {
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+    Compositor::new(
+        mode,
+        BLUE,
+        chrome_cache(TEST_SEAT, TEST_FB_BYTES, &NORMAL_PRESSURE, &TEST_SINK),
+        frost_cache(TEST_SEAT, 0, &NORMAL_PRESSURE, &TEST_SINK),
+        &NORMAL_PRESSURE,
+    )
+    .expect("compositor")
+}
+
+#[test]
+fn a_difference_survives_four_layers_of_eighty_percent_and_never_reaches_zero() {
+    // 80% of 255 is 204, so each layer transmits 51/255 of what is beneath it.
+    let veil = 204;
+    let mut difference = u32::from(u8::MAX);
+    let mut layers = 0;
+    while difference > 1 {
+        difference = attenuated(difference, veil);
+        layers += 1;
+    }
+    assert_eq!((layers, difference), (4, 1));
+    assert_eq!(
+        attenuated(1, veil),
+        1,
+        "no depth of translucency reaches zero — only an opaque layer does"
+    );
+    assert_eq!(attenuated(u32::from(u8::MAX), u8::MAX), 0);
+    assert_eq!(
+        attenuated(u32::from(u8::MAX), 0),
+        u32::from(u8::MAX),
+        "a fully transparent layer hides nothing"
+    );
+}
+
+#[test]
+fn a_window_claims_only_the_client_pixels_its_own_shape_covers() {
+    let mut c = new_compositor(mode(200, 160), BLUE).expect("compositor");
+    let id = c.add_window(Point::new(10, 12), veiled(120, 90, 204));
+    assert!(c.set_window_frame(id, WindowFrame::new(decorated())));
+    let window = c.window(id).expect("window");
+    let (core, alpha) = window.solid_core();
+    let client = window.client_rect();
+    assert_eq!(
+        alpha, 204,
+        "the content's own floor, at full window opacity"
+    );
+    assert!(
+        core.intersection(&client) == core && core != client,
+        "the claim is inside the client area and smaller than it: {core:?} of {client:?}"
+    );
+    assert!(
+        core.top() > window.bounds().top(),
+        "the furniture band is not the window's own content"
+    );
+
+    // Halving the window's opacity halves what its content can hide.
+    assert!(c.set_opacity(id, 128));
+    assert_eq!(c.window(id).expect("window").solid_core().1, 102);
+
+    // A hidden window hides nothing.
+    assert!(c.set_visible(id, false));
+    let (core, alpha) = c.window(id).expect("window").solid_core();
+    assert!(core.is_empty());
+    assert_eq!(alpha, 0);
+}
+
+#[test]
+fn a_frost_the_cache_will_keep_is_computed_in_full() {
+    // Retaining beats any partial blur: one blur and then nothing, however
+    // deeply the window is buried. The skip is for the frosts the budget
+    // cannot hold, and this desktop's holds them all.
+    let mut c = new_compositor(mode(120, 90), BLUE).expect("compositor");
+    c.add_window(Point::ORIGIN, opaque(120, 90, GREEN));
+    let buried = c.add_window(Point::new(4, 4), veiled(90, 70, 204));
+    assert!(c.set_backdrop_blur(buried, 3));
+    let cover = c.add_window(Point::new(4, 4), opaque(90, 70, RED));
+    c.composite();
+    assert_eq!(
+        c.frame_stats().blur_px,
+        90 * 70,
+        "a keepable frost is blurred whole even under an opaque window"
+    );
+    assert!(c.frost_resident(buried));
+
+    // Which is what leaves the occluder's drag free: the frost beneath it is
+    // whole, so every sample copies it.
+    for step in 1..4 {
+        assert!(c.move_window(cover, Point::new(4 + step, 4 + step)));
+        c.composite();
+        assert_eq!(c.frame_stats().blur_px, 0, "step {step} re-blurred");
+    }
+}
+
+#[test]
+fn a_frost_the_budget_cannot_hold_costs_only_what_the_screen_can_show() {
+    let mut c = spent_frost_budget(mode(120, 90));
+    c.add_window(Point::ORIGIN, opaque(120, 90, GREEN));
+    let buried = c.add_window(Point::new(4, 4), veiled(90, 70, 204));
+    assert!(c.set_backdrop_blur(buried, 3));
+    let cover = c.add_window(Point::new(4, 4), opaque(90, 70, RED));
+    c.composite();
+    assert_eq!(
+        c.frame_stats().blur_px,
+        0,
+        "an opaque window of the same extent hides the whole frost"
+    );
+    assert!(
+        !c.frost_resident(buried),
+        "a frost with an uncomputed core is never retained"
+    );
+
+    // Slide the cover half off and the exposed half is blurred again, from the
+    // layers below rather than from anything kept.
+    assert!(c.move_window(cover, Point::new(49, 4)));
+    c.composite();
+    let exposed = c.frame_stats().blur_px;
+    assert!(
+        (1..90 * 70).contains(&exposed),
+        "only the exposed part is blurred, not none of it and not all: {exposed}"
+    );
+}
+
+/// One scene composed twice: once leaving the frost of a window nothing can
+/// show uncomputed, once computing all of it.
+///
+/// The two are *not* asked to agree byte for byte, and could not: the whole
+/// point is that the skipped pixels are never written, so the back buffer
+/// under the stack differs by whatever the blur would have changed. What is
+/// asserted is the bound the skip is taken on — that no scan-out channel moves
+/// by more than the last bit a translucent stack can never extinguish — plus
+/// the fact that the skip really happened, so a scene that quietly stopped
+/// skipping would fail rather than pass for free.
+struct SkippingBothWays {
+    skipping: Compositor,
+    whole: Compositor,
+    skipped_px: u64,
+}
+
+impl SkippingBothWays {
+    fn new(mode: DisplayMode) -> Self {
+        let skipping = spent_frost_budget(mode);
+        let mut whole = spent_frost_budget(mode);
+        whole.set_frost_skip(false);
+        Self {
+            skipping,
+            whole,
+            skipped_px: 0,
+        }
+    }
+
+    fn both<T>(&mut self, act: impl Fn(&mut Compositor) -> T) -> T
+    where
+        T: core::fmt::Debug + PartialEq,
+    {
+        let skipping = act(&mut self.skipping);
+        let whole = act(&mut self.whole);
+        assert_eq!(skipping, whole, "the two compositors took different paths");
+        skipping
+    }
+
+    /// Composite both and require every scan-out byte to agree to within the
+    /// one bit the walk allows each skipped frost.
+    fn settle(&mut self, step: &str) {
+        self.skipping.composite();
+        self.whole.composite();
+        let blurred = self.skipping.frame_stats().blur_px;
+        let all = self.whole.frame_stats().blur_px;
+        assert!(
+            blurred <= all,
+            "skipping blurred {blurred} against {all} for all of it, after {step}"
+        );
+        self.skipped_px = self.skipped_px.saturating_add(all - blurred);
+        let worst = self
+            .skipping
+            .frame()
+            .iter()
+            .zip(self.whole.frame())
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap_or(0);
+        assert!(
+            worst <= 1,
+            "scan-out moved by {worst} after {step}, past the bit the walk allows"
+        );
+    }
+}
+
+#[test]
+fn a_frost_nothing_can_show_is_left_uncomputed_without_moving_the_screen() {
+    let mut both = SkippingBothWays::new(mode(120, 90));
+    both.both(|c| c.add_window(Point::ORIGIN, opaque(120, 90, GREEN)));
+    // Four veiled layers: the fourth is what takes the difference below the
+    // last bit of a channel, so the bottom one's frost stops being computed.
+    let glass: alloc::vec::Vec<WindowId> = (0..4)
+        .map(|n| {
+            let id =
+                both.both(move |c| c.add_window(Point::new(4 + n, 4 + n), veiled(90, 70, 204)));
+            both.both(|c| c.set_backdrop_blur(id, 3));
+            id
+        })
+        .collect();
+    both.settle("four veiled layers");
+    assert!(
+        both.skipped_px > 0,
+        "nothing was skipped, so the comparison proves nothing"
+    );
+
+    let buried = *glass.first().expect("a bottom layer");
+    let top = *glass.last().expect("a top layer");
+    both.both(|c| present_content(c, buried, paint_dot) == Some(true));
+    both.settle("the buried window's own content");
+    both.both(|c| present_content(c, top, paint_dot) == Some(true));
+    both.settle("the top window's content");
+    both.both(|c| c.move_window(top, Point::new(20, 14)));
+    both.settle("the top window moved off the buried one");
+    both.both(|c| c.set_opacity(top, 40));
+    both.settle("the top window faded");
+    both.both(|c| c.remove(top));
+    both.settle("the top window closed");
+    both.both(|c| c.raise(buried));
+    both.settle("the buried window raised to the front");
+}
+
+#[test]
+fn the_buried_frosts_of_a_cascade_cost_less_than_the_whole_of_them() {
+    // The shape `plans/FIX-DESKTOP-SPEEDUP.md` D.13 measures: a screenful of
+    // 80%-opaque blurred terminals cascaded onto eight positions, every one of
+    // which really does contribute to the output, so ordinary occlusion culls
+    // nothing and the retained backdrops are many screenfuls against a budget
+    // of one.
+    const WINDOWS: i32 = 26;
+    let compose = |skip: bool| {
+        NORMAL_PRESSURE.report(PressureBand::Normal);
+        let mut c = Compositor::new(
+            mode(1024, 768),
+            BLUE,
+            chrome_cache(TEST_SEAT, TEST_FB_BYTES, &NORMAL_PRESSURE, &TEST_SINK),
+            frost_cache(TEST_SEAT, 1024 * 768 * 4, &NORMAL_PRESSURE, &TEST_SINK),
+            &NORMAL_PRESSURE,
+        )
+        .expect("compositor");
+        c.set_frost_skip(skip);
+        let mut top = None;
+        for n in 0..WINDOWS {
+            let step = (n % 8) * 32;
+            let id = c.add_window(Point::new(48 + step, 48 + step), veiled(560, 350, 204));
+            assert!(c.set_window_frame(id, WindowFrame::new(decorated())));
+            assert!(c.set_backdrop_blur(id, 12));
+            top = Some(id);
+        }
+        // The first frame fills the budget; what a desktop then costs is the
+        // next one, where a terminal repaints one cell of itself.
+        c.composite();
+        if let Some(top) = top {
+            assert_eq!(present_content(&mut c, top, paint_dot), Some(true));
+        }
+        c.composite();
+        c.frame_stats()
+    };
+    let all = compose(false);
+    let skipping = compose(true);
+    // Measured 5 552 560 -> 4 664 760 blurred and 5 552 559 -> 4 920 035
+    // blended. What the counters cannot show is the larger saving: a frost
+    // left uncomputed is never captured either, so twenty-three window-sized
+    // allocations and blits a frame stop being made for entries the budget was
+    // always going to turn away.
+    assert!(
+        skipping.blur_px * 100 <= all.blur_px * 88,
+        "the cascade skipped only {} of {} blurred pixels",
+        all.blur_px - skipping.blur_px,
+        all.blur_px
+    );
+    assert!(
+        skipping.blended_px < all.blended_px,
+        "the layers under an unseen core are composed for nothing"
+    );
+}
