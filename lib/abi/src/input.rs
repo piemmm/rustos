@@ -688,13 +688,224 @@ impl KeyInput {
     }
 }
 
+/// Per-button history for suppressing a re-press that follows a release too
+/// closely to be a distinct click.
+///
+/// A mechanical switch can chatter on release, emitting a second press a few
+/// milliseconds later that the device intended as one click. The seat cannot
+/// ask the device which it meant, so it applies a window: a press inside the
+/// window of the same button's last release is dropped, and the release that
+/// closes that same pulse is dropped with it, so no consumer is left holding
+/// half an edge pair as a latched grab.
+///
+/// Holds history only. The window and the clock are both the caller's to know
+/// — the window is operator policy that can change under a running seat, and
+/// the clock belongs to whoever is servicing the injection — so this type is
+/// pure, host-testable, and cannot read either behind the caller's back.
+///
+/// A window of zero disables the filter: a device whose rapid-fire mode
+/// deliberately emits click pairs at ~10 ms is reporting real intent, and
+/// suppressing that would destroy real input. Motion and scroll are never
+/// debounced.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct ClickDebounce {
+    /// Monotonic time each button was last released at, indexed by
+    /// `PointerButtonCode` discriminant minus one.
+    released_ns: [Option<u64>; POINTER_BUTTON_COUNT as usize],
+    /// Buttons whose press was dropped, so the release closing the same
+    /// chatter pulse is dropped too.
+    suppressed: [bool; POINTER_BUTTON_COUNT as usize],
+}
+
+impl ClickDebounce {
+    /// A filter with no history: the first edge of any button is admitted.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            released_ns: [None; POINTER_BUTTON_COUNT as usize],
+            suppressed: [false; POINTER_BUTTON_COUNT as usize],
+        }
+    }
+
+    /// Whether `record` is delivered, at monotonic `now_ns`, under a chatter
+    /// window of `window_ns` (zero disabling the filter).
+    ///
+    /// Motion and scroll are always delivered: only a button edge can chatter.
+    pub fn admits(&mut self, record: PointerInput, now_ns: u64, window_ns: u64) -> bool {
+        let (button, pressed) = match record {
+            PointerInput::Pressed(button) => (button, true),
+            PointerInput::Released(button) => (button, false),
+            PointerInput::MovedBy { .. } | PointerInput::Scrolled { .. } => return true,
+        };
+        let slot = usize::from(button.code() - 1);
+        let Some(released_ns) = self.released_ns.get_mut(slot) else {
+            return true;
+        };
+        if !pressed {
+            *released_ns = Some(now_ns);
+            // A window turned off between the press and its release must not
+            // swallow the release: the suppression is cleared either way.
+            return match self.suppressed.get_mut(slot) {
+                Some(flag) if *flag => {
+                    *flag = false;
+                    window_ns == 0
+                }
+                _ => true,
+            };
+        }
+        if window_ns == 0 {
+            return true;
+        }
+        let chatter = released_ns
+            .is_some_and(|last| now_ns >= last && now_ns.saturating_sub(last) < window_ns);
+        if chatter {
+            if let Some(flag) = self.suppressed.get_mut(slot) {
+                *flag = true;
+            }
+        }
+        !chatter
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    const MS: u64 = 1_000_000;
+
+    /// The default chatter window the tests exercise.
+    const WINDOW: u64 = 25 * MS;
+
+    fn debounce() -> ClickDebounce {
+        ClickDebounce::new()
+    }
+
+    #[test]
+    fn an_ordinary_click_is_admitted_whole() {
+        let mut filter = debounce();
+        assert!(filter.admits(PointerInput::Pressed(PointerButtonCode::Primary), 0, WINDOW));
+        assert!(filter.admits(
+            PointerInput::Released(PointerButtonCode::Primary),
+            80 * MS,
+            WINDOW
+        ));
+    }
+
+    #[test]
+    fn a_repress_inside_the_window_is_dropped_with_its_release() {
+        // The on-metal chatter: a second press 16 ms after the release, and the
+        // 32 ms pulse that closes it. Both go, so no consumer sees an unpaired
+        // edge it would hold as a latched grab.
+        let mut filter = debounce();
+        assert!(filter.admits(PointerInput::Pressed(PointerButtonCode::Primary), 0, WINDOW));
+        assert!(filter.admits(
+            PointerInput::Released(PointerButtonCode::Primary),
+            80 * MS,
+            WINDOW
+        ));
+        assert!(!filter.admits(
+            PointerInput::Pressed(PointerButtonCode::Primary),
+            96 * MS,
+            WINDOW
+        ));
+        assert!(!filter.admits(
+            PointerInput::Released(PointerButtonCode::Primary),
+            128 * MS,
+            WINDOW
+        ));
+        // The next genuine click is unaffected.
+        assert!(filter.admits(
+            PointerInput::Pressed(PointerButtonCode::Primary),
+            400 * MS,
+            WINDOW
+        ));
+    }
+
+    #[test]
+    fn a_repress_at_the_window_edge_is_admitted() {
+        let mut filter = debounce();
+        assert!(filter.admits(
+            PointerInput::Released(PointerButtonCode::Primary),
+            0,
+            WINDOW
+        ));
+        assert!(filter.admits(
+            PointerInput::Pressed(PointerButtonCode::Primary),
+            25 * MS,
+            WINDOW
+        ));
+    }
+
+    #[test]
+    fn the_window_is_per_button() {
+        // A chattering left switch must not swallow a deliberate right click.
+        let mut filter = debounce();
+        assert!(filter.admits(
+            PointerInput::Released(PointerButtonCode::Primary),
+            0,
+            WINDOW
+        ));
+        assert!(filter.admits(
+            PointerInput::Pressed(PointerButtonCode::Secondary),
+            5 * MS,
+            WINDOW
+        ));
+    }
+
+    #[test]
+    fn a_zero_window_admits_a_rapid_fire_pair() {
+        // A device whose rapid-fire mode emits click pairs at ~10 ms is
+        // reporting real intent; zero must deliver it untouched.
+        let mut filter = ClickDebounce::new();
+        for step in 0..4 {
+            let t = step * 10 * MS;
+            assert!(filter.admits(PointerInput::Pressed(PointerButtonCode::Primary), t, 0));
+            assert!(filter.admits(
+                PointerInput::Released(PointerButtonCode::Primary),
+                t + 5 * MS,
+                0
+            ));
+        }
+    }
+
+    #[test]
+    fn turning_the_window_off_mid_gesture_still_delivers_the_release() {
+        // A press dropped as chatter, then the operator sets the window to
+        // zero. The release must reach consumers rather than be swallowed by a
+        // window that no longer applies.
+        let mut filter = debounce();
+        assert!(filter.admits(
+            PointerInput::Released(PointerButtonCode::Primary),
+            0,
+            WINDOW
+        ));
+        assert!(!filter.admits(
+            PointerInput::Pressed(PointerButtonCode::Primary),
+            5 * MS,
+            WINDOW
+        ));
+        assert!(filter.admits(
+            PointerInput::Released(PointerButtonCode::Primary),
+            9 * MS,
+            0
+        ));
+    }
+
+    #[test]
+    fn motion_and_scroll_are_never_debounced() {
+        let mut filter = debounce();
+        assert!(filter.admits(
+            PointerInput::Released(PointerButtonCode::Primary),
+            0,
+            WINDOW
+        ));
+        assert!(filter.admits(PointerInput::MovedBy { dx: 3, dy: -2 }, MS, WINDOW));
+        assert!(filter.admits(PointerInput::Scrolled { dx: 0, dy: 1 }, 2 * MS, WINDOW));
+    }
+
     use super::{
-        KeyInput, KeyValue, Modifiers, NamedKeyCode, PointerButtonCode, PointerInput, BUTTON_NONE,
-        KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC, KIND_KEY_PRESSED, KIND_KEY_RELEASED,
-        KIND_MODIFIERS_CHANGED, KIND_MOVED_BY, KIND_PRESSED, KIND_RELEASED, KIND_SCROLLED, MOD_ALT,
-        MOD_CTRL, MOD_META, MOD_SHIFT, POINTER_INPUT_MAGIC,
+        ClickDebounce, KeyInput, KeyValue, Modifiers, NamedKeyCode, PointerButtonCode,
+        PointerInput, BUTTON_NONE, KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC,
+        KIND_KEY_PRESSED, KIND_KEY_RELEASED, KIND_MODIFIERS_CHANGED, KIND_MOVED_BY, KIND_PRESSED,
+        KIND_RELEASED, KIND_SCROLLED, MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT, POINTER_INPUT_MAGIC,
     };
     use crate::driver::input::{
         InputEvent, InputEventKind, AXIS_X, AXIS_Y, POINTER_BUTTON_CODE_BASE,

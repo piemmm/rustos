@@ -32,7 +32,8 @@ use crate::cache_control::CacheControl;
 use crate::fs::{read_bootstrap_file, BootstrapReadError, VfsError};
 
 /// Read `system.conf` off the mounted root `fs`, parse it, and apply the
-/// operator's caching switches to `control`.
+/// operator's caching switches to `control` and the pointer-button chatter
+/// window to the seat's live control.
 ///
 /// Production passes the process-global
 /// [`CACHE_CONTROL`](crate::cache_control::CACHE_CONTROL) — the very control
@@ -73,6 +74,9 @@ where
     };
 
     control.apply(&config);
+    // The pointer-button chatter window is seat policy, applied to the same
+    // process-global control every seat reads on each button edge.
+    crate::seat::CLICK_DEBOUNCE.set_ms(config.input_mouse_debounce_ms);
     audit_applied(audit, &config, source);
 }
 

@@ -487,7 +487,8 @@ mod tests {
              net.tcp.keepalive false\n\
              net.tcp.ecn false\n\
              time.servers none\n\
-             time.refresh 1d\n",
+             time.refresh 1d\n\
+             input.mouse.debounce 25\n",
         );
     }
 

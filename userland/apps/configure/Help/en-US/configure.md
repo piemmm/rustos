@@ -79,6 +79,12 @@ never changes a result.
   passes between clock re-queries once the time is known. `1d` is the
   default. A clock that is unset, implausible, or long stale is corrected
   as soon as the network allows, whatever this says.
+- `input.mouse.debounce` — whole milliseconds, `25` by default, `0` to
+  disable, at most `100`: how long after a mouse button is released the same
+  button's next press is ignored as switch chatter instead of starting a new
+  click. A worn switch can report a second press a few milliseconds after the
+  release that it meant as one click. Set it to `0` for a mouse whose
+  rapid-fire mode sends deliberate click pairs.
 
 Changing a `net.*` setting saves it and delivers it to the running network
 stack, so it takes effect at once. If the running stack does not accept it

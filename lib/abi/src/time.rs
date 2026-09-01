@@ -29,6 +29,13 @@ use crate::Errno;
 /// kept in `0..NANOS_PER_SEC`.
 pub const NANOS_PER_SEC: u32 = 1_000_000_000;
 
+/// Nanoseconds in one millisecond.
+///
+/// Here beside [`NANOS_PER_SEC`] so a millisecond-valued setting or budget has
+/// one conversion to the nanoseconds every kernel deadline is expressed in,
+/// rather than a private copy per subsystem.
+pub const NANOS_PER_MILLI: u64 = 1_000_000;
+
 /// Resolution, in nanoseconds, that the monotonic clock is coarsened to
 /// for callers that do not hold
 /// [`CapabilityId::TIME_HIRES`](crate::CapabilityId::TIME_HIRES).

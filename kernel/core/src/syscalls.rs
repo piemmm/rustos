@@ -6139,7 +6139,10 @@ where
         // discarded while unowned (the text console has no pointer
         // consumer) — so the driver never chooses the destination.
         let record = PointerInput::from_bytes(&record_bytes)?;
-        let consumed = self.seat_registry.inject_pointer(seat, record)?;
+        let now_ns = self
+            .arch
+            .monotonic_ns(SchedulerArch::current_cpu(self.arch));
+        let consumed = self.seat_registry.inject_pointer(seat, record, now_ns)?;
         // The pointer analogue of `key_inject`'s liveness witness: the
         // first delivered pointer record proves an (autoloaded) pointer
         // driver is routing through the arbiter. The per-kind latch fires

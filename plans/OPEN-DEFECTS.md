@@ -4217,10 +4217,13 @@ reaching for a constructor whose name says it must never run.
 
 ---
 
-## D72 — one iconbar click opened two terminal windows on a Pi 4B; unreproduced, mechanism unidentified
+## D72 — one iconbar click opened two terminal windows on a Pi 4B: the pointing device emitted a second press (CLOSED)
 
-**State:** open, **unreproduced**. Not fixed — the symptom stopped, nothing was
-shown to have caused it to stop.
+**State:** **closed.** The pointing device genuinely reported a second press,
+and every layer TAIRiX owns reported it faithfully. The operator can now
+suppress such chatter with `input.mouse.debounce` (default 25 ms, `0` to
+disable). Kept as a worked example of the diagnosis, because the symptom looked
+exactly like a desktop double-dispatch and was not one.
 
 **Symptom as reported.** Early in a graphical session on a Raspberry Pi 4B,
 with `terminal.app` already running, a single primary click on its icon-bar
@@ -4256,16 +4259,93 @@ terminal window: `EventOutcome::NewWindow` has exactly two producers,
 `WindowEvent::AppBarDefault` and an `AppBarMenu` row resolving to
 `BarCommand::NewWindow`, and the terminal binds no keyboard shortcut to it.
 
-**Why it is not closed.** Two later sessions on the same hardware, tested
-within seconds of the desktop appearing and including deliberate long presses,
-produced one relay and one window per click (4 clicks → 4 relays → 4 windows;
-6 → 6 → 6). But no change in the tree has an identified causal path to the
-symptom: the Report-ID demux fix is provably a no-op for a descriptor with no
-Report IDs, and the read-back never runs for an interface whose descriptor
-yields a map. What the same work *did* add is roughly six extra control
-transfers during HID enumeration, which shifts timing — and the original
-symptom was explicitly time-limited within a session, the profile of a race a
-timing shift can mask without repairing.
+**Reproduced, and localised to the input path.** Two captures with
+`APP_BAR_RELAYED` armed each show one click producing **two** relays, and the
+gap between them equals how long the button was held:
+
+| capture | relay 1 | relay 2 | gap | gesture |
+|---|---|---|---|---|
+| A | 547.939 | 549.070 | 1131 ms | long press |
+| B | 700.653 | 700.730 | 77 ms | quick click |
+
+So one relay fires on the mouse-down and one on the mouse-up, exactly as first
+reported. It is not a consequence of the first window appearing: in capture B
+relay 2 preceded that window's first frame, and in capture A it followed it.
+
+**Not load-gated.** Roughly nine windows were on screen in both captures — the
+`window=` field of the shown-window record is a never-reused *identifier*, not
+a count of open windows, so its three-digit values say only how many windows
+the session had created over its life. Relay-to-first-frame latency was
+uniform in capture B (116–171 ms across nine windows, including the doubled
+pair); capture A carried a single 1121 ms outlier at the doubling against
+121–192 ms elsewhere. One outlier in one capture and none in the other means a
+stall is a coincidence, not a precondition.
+
+`TaskbarResponse::AppDefault` is constructed at exactly one line
+(`taskbar/src/input.rs`), from `activate_app`, called from exactly one place,
+inside `press_primary`'s `Hit::App` arm — reachable only from
+`InputEvent::PointerPressed { button: Primary }`. `release_primary` resolves
+only the Switchboard capsule gesture. So **two relays mean two `Pressed`
+records reached the router**: the release is arriving as a second press, and
+the duplication is at or below the seat, not in the desktop.
+
+**The driver injected two presses.** A temporary trace of the button edges the
+class driver injects (since removed, with the provenance trace below) showed
+that for one physical click it injected `pressed, released,
+pressed, released`. The capture showing the natural spacing:
+
+```
+131.684  pressed    -> relay 1
+131.780  released           (96 ms hold, an ordinary click)
+131.796  pressed    -> relay 2   (+16 ms)
+131.812  released           (+16 ms)
+```
+
+The other capture logged `released, pressed, released` inside one millisecond —
+the same sequence drained as a catch-up burst after the driver fell ~16 ms
+behind. So the report stream reaching `BootMouse` carries `1, 0, 1, 0` within
+one hold; the decoder emits a press only on a `0→1` edge, so it reported
+faithfully. **The duplication is at or below the class driver**, and the desktop
+reading above is confirmed rather than refuted. Every other click in both
+captures is a clean single pair (64–160 ms hold).
+
+**Two causes remain, indistinguishable at the class driver.** A 16 ms re-press
+after release is textbook mechanical contact bounce, and the fastest deliberate
+human double-click is 60–100 ms between presses, so it cannot be intentional.
+But a duplicate xHCI completion that re-delivers a transfer slot's stale bytes
+produces the identical `1, 0, 1, 0`: the slot still holds the press report, the
+controller completes the TRB again without writing, and the decode copies the
+stale bytes out as a fresh press.
+
+**A temporary provenance trace separated the two.** The engine recorded each
+*edge* report's transfer slot, completion code, residual, length, and the bytes
+as the controller wrote them, and the HCD logged what it drained after every
+report pump. Only reports whose lead byte changed were recorded — the button
+bitmap of a normalised mouse report, the modifier set of a keyboard's — so
+motion could not flood it. The readings it distinguished:
+
+* two `0x01`-lead captures from the **same slot with identical bytes** — a
+  controller completion re-delivered stale bytes, which would have been ours;
+* two from **different slots**, the second carrying its own displacement — the
+  device genuinely reported again;
+* one `0x01` capture against two injected presses — a fault in the URB
+  transport or the driver between them.
+
+Both traces were **removed once they had answered the question**: they logged a
+line per button edge, which is noise on every click and leaves an input-timing
+record in the journal for no standing benefit. The one-per-enumeration
+descriptor dump and the one-per-user-action icon-bar relay record stay. To
+re-run this diagnosis, re-add an edge-gated provenance trace at
+`UsbDevice::decode_transfer_report` and drain it from the HCD's report pump —
+the slot is the field that matters.
+
+**Not caused by anything in this change.** The Report-ID demux fix is provably
+a no-op for a descriptor with no Report IDs, and the `GET_PROTOCOL` read-back
+never runs for an interface whose descriptor yields a map — so neither touches
+this pointer's path. The same work did add roughly six extra control transfers
+during HID enumeration, which shifts timing, and an interval of sessions did
+not reproduce; that is consistent with a race whose window moved, not one that
+closed.
 
 **Standing detector.** `APP_BAR_RELAYED` (`20_007`, "icon-bar action relayed to
 its application") is emitted once per relay with the target's `ProcId` and
@@ -4277,7 +4357,48 @@ against two windows would mean the duplication is inside the application. An
 `action=menu` line would mean a secondary press opened the app menu and the
 release of that same press chose a row.
 
-**Fix direction.** None to implement until it recurs and the detector says
-which side of the relay the duplication is on. Do not close this on a further
-absence of reproduction: a defect that stops appearing is not a defect that has
-been explained.
+**Verdict: the device emitted the second press.** The provenance trace settled
+it on the transfer slot:
+
+```
+30.243  slot 12  raw=01000000000000   press    <- the real click, 80 ms wide
+30.323  slot 13  raw=00000000000000   release
+30.339  slot 14  raw=01000000000000   press    <- +16 ms, 32 ms wide
+30.371  slot  0  raw=00000000000000   release
+```
+
+Slots advance 12 → 13 → 14 → 0 — four consecutive **fresh** transfers, none
+repeated (0 is the wrap past the link TRB). A completion re-delivering a slot's
+stale bytes would have shown slot 12 twice, because that is where the press
+report's bytes live. Instead the controller performed a genuine fourth transfer
+and the device wrote a second press into slot 14. Every real click in the
+capture is 64–128 ms wide; the spurious pulse is 32 ms wide, 16 ms after the
+release — a contact-bounce signature. `code=13` (Short Packet), `residual=9`,
+`len=7` are identical on every report, which is normal for a seven-byte report
+armed to a sixteen-byte capture.
+
+The *bytes* would not have discriminated: the real press also carries zero
+displacement, because the pointer was stationary. Only the slot did. A future
+investigation of a duplicated input should read the slot first.
+
+**Superseded by an operator-settable chatter filter.** On the evidence above the
+device is at fault, and the chain from controller completion to the terminal
+reported it faithfully — but the operator now has a way to suppress it:
+`input.mouse.debounce` (25 ms by default, `0` to disable) drops a press inside
+that window of the same button's release, and the release closing that pulse
+with it, at the seat. The rapid-fire objection is why zero must remain
+available and why the filter is settable rather than fixed: a device emitting
+deliberate click pairs at ~10 ms is reporting real intent. The decode layer
+still conditions nothing (`docs/src/lib/hid.md`); the filter lives at the seat,
+the one funnel every injector passes through.
+
+The original chain analysis, unchanged: from
+controller completion through the HCD capture, report FIFO, URB transport,
+`BootMouse` decode, seat ring, session drain, taskbar and relay to the terminal
+reported exactly what the device sent.
+
+The intermittency is the switch's, not a race: whole sessions pass cleanly and
+frame latency was normal throughout the capture that doubled.
+
+Do not close this on a further absence of reproduction: a defect that stops
+appearing is not a defect that has been explained.

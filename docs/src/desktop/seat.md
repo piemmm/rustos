@@ -93,7 +93,23 @@ that does not (or no longer) exist.
   `keyboard_read`, so no other capability holder can observe the pointer
   stream. While the seat is unowned the record is consumed and
   discarded: the text console has no pointer consumer, and the driver
-  never learns — and never chooses — the destination. The first
+  never learns — and never chooses — the destination.
+
+  A button edge additionally passes the seat's **chatter filter** before the
+  lease is consulted. A worn switch can emit a second press a few milliseconds
+  after its release that the device meant as one click; a press inside
+  `input.mouse.debounce` of the same button's last release is dropped, and the
+  release that closes that pulse is dropped with it, so no consumer is left
+  holding half an edge pair as a latched grab. The default window is 25 ms —
+  above the few milliseconds a switch chatters for, below the 60–100 ms of a
+  deliberate double-click — and **`0` disables the filter**, which is what a
+  device whose rapid-fire mode emits deliberate click pairs at ~10 ms needs.
+  Motion and scroll are never filtered. It is applied here, at the one funnel
+  every injector passes through, rather than per driver: the filter would
+  otherwise be duplicated in each, and a driver holds no configuration
+  authority to read the operator's window with. The per-button history
+  (`ClickDebounce`) is the seat's; the window and the clock are supplied to it,
+  so it reads neither behind the caller's back. The first
   delivered record of each input kind emits that kind's one-shot
   `INPUT_DELIVERED` witness (`kind=key` / `kind=pointer`), so keyboard
   and pointer liveness are separately attributable from the log.

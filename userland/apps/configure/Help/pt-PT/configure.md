@@ -83,6 +83,13 @@ afetado — nunca altera um resultado.
   conhecida. `1d` é a predefinição. Um relógio não acertado, implausível
   ou muito desatualizado é corrigido assim que a rede o permita,
   independentemente desta definição.
+- `input.mouse.debounce` — milissegundos inteiros, `25` por omissão, `0` para
+  desativar, no máximo `100`: quanto tempo depois de largar um botão do rato a
+  premência seguinte do mesmo botão é ignorada como ressalto do interruptor em
+  vez de ser tratada como um novo clique. Um interruptor gasto pode comunicar
+  uma segunda premência poucos milissegundos depois de largar quando
+  pretendia um só clique. Ponha `0` num rato cujo modo de tiro rápido envia
+  pares de cliques de propósito.
 
 A pilha de rede lê as definições `net.*`; uma alteração produz efeito
 quando a pilha aplica novamente a sua configuração.

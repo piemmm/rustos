@@ -38,15 +38,17 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use tairix_abi::driver::display::SeatGate;
-use tairix_abi::input::{KeyInput, PointerInput};
+use tairix_abi::input::{ClickDebounce, KeyInput, PointerInput};
 use tairix_abi::seat::{ReleaseSurface, SeatLease, SEAT_PRIMARY};
 use tairix_abi::sysinfo::{SeatRecord, SEAT_FLAG_OWNED};
+use tairix_abi::time::NANOS_PER_MILLI;
 use tairix_abi::{DriverError, Errno};
 use tairix_fbcon::Surface;
 use tairix_keymap::{encode_key_input, MAX_KEY_BYTES};
 use tairix_log::Field;
 use tairix_seat::{ConsoleIndex, Lease, Route, SeatError, SeatOwner, SeatState};
 use tairix_sync::SpinLock;
+use tairix_sysconfig::DEFAULT_CLICK_DEBOUNCE_MS;
 use zeroize::Zeroize;
 
 use crate::console::{ConsoleDevice, ConsoleInput, NULL_CONSOLE_INPUT};
@@ -230,6 +232,11 @@ struct SeatSlot {
     channel: KeyboardChannel,
     /// The desktop pointer channel — the seat's desktop pointer sink.
     pointer: PointerChannel,
+    /// The seat's pointer-button chatter filter. The seat is the one funnel
+    /// every pointer injector passes through, so the window is applied here
+    /// rather than in each driver — and a driver holds no configuration
+    /// authority to read the operator's window with.
+    debounce: SpinLock<ClickDebounce>,
 }
 
 impl SeatSlot {
@@ -239,6 +246,7 @@ impl SeatSlot {
             text_sink,
             channel: KeyboardChannel::new(),
             pointer: PointerChannel::new(),
+            debounce: SpinLock::new(ClickDebounce::new()),
         }
     }
 
@@ -295,6 +303,48 @@ impl Deref for SlotRef<'_> {
             Self::Primary(slot) => slot,
             Self::Hotplug(slot) => slot,
         }
+    }
+}
+
+/// The operator's pointer-button chatter window, in nanoseconds.
+///
+/// A process-global control on the same pattern as the cache switches: the
+/// seat reads it on every button edge, so an operator's value takes effect on
+/// the next click without a seat needing to be rebuilt. Zero disables the
+/// filter.
+pub static CLICK_DEBOUNCE: ClickDebounceControl = ClickDebounceControl::new();
+
+/// The live pointer-button chatter window every seat consults.
+pub struct ClickDebounceControl {
+    window_ns: AtomicU64,
+}
+
+impl ClickDebounceControl {
+    /// A control at the shipped default window.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            window_ns: AtomicU64::new(DEFAULT_CLICK_DEBOUNCE_MS as u64 * NANOS_PER_MILLI),
+        }
+    }
+
+    /// The window in force, in nanoseconds.
+    #[must_use]
+    pub fn window_ns(&self) -> u64 {
+        self.window_ns.load(Ordering::Relaxed)
+    }
+
+    /// Apply the operator's window in whole milliseconds; `0` disables the
+    /// filter. Bounded by the configuration parser, so no clamp is needed here.
+    pub fn set_ms(&self, ms: u16) {
+        self.window_ns
+            .store(u64::from(ms) * NANOS_PER_MILLI, Ordering::Relaxed);
+    }
+}
+
+impl Default for ClickDebounceControl {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -600,8 +650,24 @@ impl SeatRegistry {
     /// # Errors
     ///
     /// - [`Errno::NotFound`] — no live seat has that id.
-    pub fn inject_pointer(&self, seat_id: u64, record: PointerInput) -> Result<usize, Errno> {
+    pub fn inject_pointer(
+        &self,
+        seat_id: u64,
+        record: PointerInput,
+        now_ns: u64,
+    ) -> Result<usize, Errno> {
         let slot = self.resolve(seat_id)?;
+        // Chatter is filtered before the lease is consulted, so the filter's
+        // per-button history stays continuous across a lease change: a press
+        // dropped as chatter must still suppress the release that closes it,
+        // whoever holds the seat by then.
+        if !slot
+            .debounce
+            .lock()
+            .admits(record, now_ns, CLICK_DEBOUNCE.window_ns())
+        {
+            return Ok(PointerInput::WIRE_LEN);
+        }
         let state = slot.state.lock();
         if let Route::Desktop(_) = state.route() {
             let bytes = record.to_le_bytes();
@@ -1045,6 +1111,81 @@ pub static NULL_SEAT_REGISTRY: SeatRegistry = SeatRegistry::new(&NULL_CONSOLE_IN
 
 #[cfg(test)]
 mod tests {
+    /// Monotonic time the seat tests inject at. Well past any configured
+    /// chatter window, so no test edge is judged against a stale release.
+    const TEST_NOW_NS: u64 = 1_000_000_000;
+
+    use tairix_abi::input::PointerButtonCode;
+
+    #[test]
+    fn a_chattering_repress_never_reaches_the_pointer_channel() {
+        // The on-metal fault: a worn switch emits a second press 16 ms after
+        // the release. The seat drops it and the release that closes the same
+        // pulse, so the desktop sees one click and no unpaired edge.
+        const MS: u64 = 1_000_000;
+        let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
+        seat.acquire(SEAT_PRIMARY, SeatOwner(7)).expect("acquired");
+        CLICK_DEBOUNCE.set_ms(25);
+
+        let press = PointerInput::Pressed(PointerButtonCode::Primary);
+        let release = PointerInput::Released(PointerButtonCode::Primary);
+        for (record, at) in [
+            (press, 0),
+            (release, 80 * MS),
+            (press, 96 * MS),
+            (release, 128 * MS),
+        ] {
+            seat.inject_pointer(SEAT_PRIMARY, record, at)
+                .expect("injected");
+        }
+
+        let mut buf = [0u8; PointerInput::WIRE_LEN];
+        let mut drained = alloc::vec::Vec::new();
+        while seat
+            .read_pointer(SEAT_PRIMARY, SeatOwner(7), &mut buf)
+            .expect("drained")
+            != 0
+        {
+            drained.push(PointerInput::from_bytes(&buf).expect("decodes"));
+        }
+        assert_eq!(
+            drained,
+            alloc::vec![press, release],
+            "the chatter pulse is dropped whole, not half"
+        );
+    }
+
+    #[test]
+    fn a_zero_window_delivers_a_rapid_fire_pair() {
+        // A device whose rapid-fire mode emits click pairs at ~10 ms is
+        // reporting real intent; zero must deliver every edge.
+        const MS: u64 = 1_000_000;
+        let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
+        seat.acquire(SEAT_PRIMARY, SeatOwner(9)).expect("acquired");
+        CLICK_DEBOUNCE.set_ms(0);
+
+        let press = PointerInput::Pressed(PointerButtonCode::Primary);
+        let release = PointerInput::Released(PointerButtonCode::Primary);
+        for step in 0..3u64 {
+            seat.inject_pointer(SEAT_PRIMARY, press, step * 10 * MS)
+                .expect("injected");
+            seat.inject_pointer(SEAT_PRIMARY, release, step * 10 * MS + 5 * MS)
+                .expect("injected");
+        }
+        CLICK_DEBOUNCE.set_ms(DEFAULT_CLICK_DEBOUNCE_MS);
+
+        let mut buf = [0u8; PointerInput::WIRE_LEN];
+        let mut count = 0;
+        while seat
+            .read_pointer(SEAT_PRIMARY, SeatOwner(9), &mut buf)
+            .expect("drained")
+            != 0
+        {
+            count += 1;
+        }
+        assert_eq!(count, 6, "every edge of a deliberate rapid-fire run");
+    }
+
     use super::*;
     use crate::console::{ConsoleInputQueue, ConsoleRead, ConsoleWrite, NULL_CONSOLE_READ};
     use crate::test_sink::TestSink;
@@ -1277,8 +1418,12 @@ mod tests {
             let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
             seat.acquire(SEAT_PRIMARY, WM).expect("seat acquired");
             seat.inject(SEAT_PRIMARY, press_char('s')).expect("keyed");
-            seat.inject_pointer(SEAT_PRIMARY, PointerInput::MovedBy { dx: 3, dy: 4 })
-                .expect("moved");
+            seat.inject_pointer(
+                SEAT_PRIMARY,
+                PointerInput::MovedBy { dx: 3, dy: 4 },
+                TEST_NOW_NS,
+            )
+            .expect("moved");
 
             end_lease(&seat);
             seat.acquire(SEAT_PRIMARY, INTRUDER).expect("reacquired");
@@ -1369,7 +1514,11 @@ mod tests {
         assert!(!seat.input_ready(SEAT_PRIMARY, WM));
         // A pointer record queues through the sibling channel: also ready.
         assert_eq!(
-            seat.inject_pointer(SEAT_PRIMARY, PointerInput::MovedBy { dx: 1, dy: 2 }),
+            seat.inject_pointer(
+                SEAT_PRIMARY,
+                PointerInput::MovedBy { dx: 1, dy: 2 },
+                TEST_NOW_NS
+            ),
             Ok(PointerInput::WIRE_LEN)
         );
         assert!(seat.input_ready(SEAT_PRIMARY, WM));
@@ -1621,7 +1770,7 @@ mod tests {
             .expect("fresh seat is acquirable");
         let record = PointerInput::MovedBy { dx: 40, dy: -8 };
         assert_eq!(
-            seat.inject_pointer(SEAT_PRIMARY, record),
+            seat.inject_pointer(SEAT_PRIMARY, record, TEST_NOW_NS),
             Ok(PointerInput::WIRE_LEN)
         );
         let mut buf = [0u8; PointerInput::WIRE_LEN];
@@ -1642,7 +1791,7 @@ mod tests {
         let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
         let record = PointerInput::MovedBy { dx: 1, dy: 2 };
         assert_eq!(
-            seat.inject_pointer(SEAT_PRIMARY, record),
+            seat.inject_pointer(SEAT_PRIMARY, record, TEST_NOW_NS),
             Ok(PointerInput::WIRE_LEN)
         );
         // Acquiring afterwards finds an empty channel: the pre-ownership
@@ -1660,7 +1809,7 @@ mod tests {
             .expect("fresh seat is acquirable");
         let record = PointerInput::MovedBy { dx: 3, dy: 4 };
         assert_eq!(
-            seat.inject_pointer(SEAT_PRIMARY, record),
+            seat.inject_pointer(SEAT_PRIMARY, record, TEST_NOW_NS),
             Ok(PointerInput::WIRE_LEN)
         );
         let mut buf = [0u8; PointerInput::WIRE_LEN];
@@ -1711,7 +1860,7 @@ mod tests {
                 dy: 0,
             };
             assert_eq!(
-                seat.inject_pointer(SEAT_PRIMARY, record),
+                seat.inject_pointer(SEAT_PRIMARY, record, TEST_NOW_NS),
                 Ok(PointerInput::WIRE_LEN)
             );
         }

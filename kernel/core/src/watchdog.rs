@@ -85,6 +85,7 @@
 //! never panics (fail closed).
 
 use core::sync::atomic::{AtomicBool, Ordering};
+use tairix_abi::time::NANOS_PER_MILLI;
 // `AtomicU64` backs only the debug-diagnostics kernel-image-base seam, so
 // it is imported only when that facility is compiled in.
 #[cfg(feature = "watchdog-diagnostics")]
@@ -155,9 +156,6 @@ pub const DEFAULT_HARD_LOCKUP_THRESHOLD_NS: u64 = 10_000_000_000;
 /// already firing on the CPU (the ~1 Hz watchdog cadence and the preemption
 /// tick) and arms no new timer, so the tickless invariant is preserved.
 pub const DEFAULT_MONOPOLY_YIELD_THRESHOLD_NS: u64 = 1_000_000_000;
-
-/// Nanoseconds per millisecond, for rendering the human-facing duration.
-const NS_PER_MS: u64 = 1_000_000;
 
 /// The watchdog activity class a CPU publishes so a cross-CPU check can
 /// tell a CPU that *owes* progress apart from one that legitimately does
@@ -1689,7 +1687,7 @@ fn report_summary_to(
     }
     fields[n] = tairix_log::Field {
         key: "stalled_ms",
-        value: tairix_log::FieldValue::UnsignedInt(elapsed_ns / NS_PER_MS),
+        value: tairix_log::FieldValue::UnsignedInt(elapsed_ns / NANOS_PER_MILLI),
     };
     n += 1;
     // The running-task id (not an address) names the culprit task where one

@@ -85,6 +85,13 @@ travail concerné — cela ne change jamais un résultat.
   l'heure connue. `1d` est la valeur par défaut. Une horloge non réglée,
   invraisemblable ou trop ancienne est corrigée dès que le réseau le
   permet, quoi que dise ce réglage.
+- `input.mouse.debounce` — en millisecondes entières, `25` par défaut, `0`
+  pour désactiver, `100` au maximum : durée après le relâchement d'un bouton
+  pendant laquelle l'appui suivant du même bouton est ignoré comme rebond du
+  contacteur plutôt que traité comme un nouveau clic. Un contacteur usé peut
+  signaler un second appui quelques millisecondes après le relâchement alors
+  qu'il n'en visait qu'un. Mettez `0` pour une souris dont le mode tir rapide
+  envoie volontairement des paires de clics.
 
 La pile réseau lit les réglages `net.*` ; une modification prend effet
 lorsque la pile applique de nouveau sa configuration.

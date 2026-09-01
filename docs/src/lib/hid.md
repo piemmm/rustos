@@ -49,6 +49,14 @@ dependency (`AGENTS.md` §17.4 /
   every keypress on a Report-ID keyboard. Pure, `no_std`, alloc-free;
   an undecodable or unsupported descriptor yields `None` (the caller falls back
   to boot protocol), never a guess or a panic (`AGENTS.md` §2.9).
+  **The decode reports what the device reported, and never conditions it.** No
+  debounce, no coalescing, no suppression of a button edge here: this layer has
+  no clock and no policy, and a decoder that quietly dropped edges would make
+  every consumer's view of the device unknowable. Chatter filtering is the
+  *seat's*, applied once at the one funnel every pointer injector passes through
+  and settled by the operator (`input.mouse.debounce`,
+  `docs/src/desktop/seat.md`) — not per driver, and never in the decode.
+
   `HidReportMap::summary` → `ReportMapSummary` exposes what the parser decided
   — one variant per device kind, naming every located field's bit offset, width,
   and element count — so the xHCI driver can log how a device's reports are

@@ -83,6 +83,13 @@ dan sylw yn arafach — nid yw byth yn newid canlyniad.
   yw'r diofyn. Caiff cloc heb ei osod, cloc annhebygol, neu gloc hen iawn
   ei gywiro cyn gynted ag y bydd y rhwydwaith yn caniatáu, beth bynnag
   ddywed hyn.
+- `input.mouse.debounce` — milieiliadau cyfan, `25` yn ddiofyn, `0` i'w
+  ddiffodd, `100` ar y mwyaf: pa mor hir ar ôl rhyddhau botwm llygoden y
+  caiff y gwasgiad nesaf o'r un botwm ei anwybyddu fel tincian switsh yn
+  lle ei drin fel clic newydd. Gall switsh treuliedig adrodd ail wasgiad
+  ychydig filieiliadau ar ôl ei ryddhau pan mai un clic a olygai. Rhowch `0`
+  ar gyfer llygoden y mae ei modd tanio cyflym yn anfon parau o gliciau'n
+  fwriadol.
 
 Mae'r pentwr rhwydwaith yn darllen y gosodiadau `net.*`; daw newid i
 rym pan fydd y pentwr yn cymhwyso'i ffurfweddiad y tro nesaf.

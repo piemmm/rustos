@@ -83,6 +83,13 @@ afectado — nunca cambia un resultado.
   es el valor por omisión. Un reloj sin ajustar, inverosímil o muy
   desactualizado se corrige en cuanto la red lo permite, diga esto lo que
   diga.
+- `input.mouse.debounce` — milisegundos enteros, `25` por omisión, `0` para
+  desactivarlo, `100` como máximo: cuánto tiempo después de soltar un botón
+  del ratón se ignora la siguiente pulsación del mismo botón como rebote del
+  interruptor en lugar de tratarla como un clic nuevo. Un interruptor
+  desgastado puede notificar una segunda pulsación unos milisegundos después
+  de soltarlo cuando pretendía un solo clic. Ponga `0` en un ratón cuyo modo
+  de disparo rápido envía pares de clics a propósito.
 
 La pila de red lee los ajustes `net.*`; un cambio surte efecto cuando
 la pila vuelve a aplicar su configuración.

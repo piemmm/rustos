@@ -85,6 +85,13 @@ Arbeit daher nur langsamer — es ändert niemals ein Ergebnis.
   zwischen erneuten Uhrabfragen vergeht, sobald die Zeit bekannt ist. `1d`
   ist die Vorgabe. Eine ungestellte, unplausible oder lange veraltete Uhr
   wird unabhängig davon sofort korrigiert, sobald das Netz es erlaubt.
+- `input.mouse.debounce` — ganze Millisekunden, standardmäßig `25`, `0`
+  deaktiviert, höchstens `100`: wie lange nach dem Loslassen einer Maustaste
+  der nächste Druck derselben Taste als Kontaktprellen ignoriert wird, statt
+  als neuer Klick zu gelten. Ein abgenutzter Schalter kann wenige
+  Millisekunden nach dem Loslassen einen zweiten Druck melden, der als ein
+  Klick gemeint war. Bei einer Maus, deren Schnellfeuermodus absichtlich
+  Klickpaare sendet, `0` setzen.
 
 Die `net.*`-Einstellungen liest der Netzwerk-Stack; eine Änderung wirkt,
 sobald der Stack seine Konfiguration das nächste Mal anwendet.

@@ -70,6 +70,15 @@
 //!   none, not that the machine never queries — the clock service then
 //!   prefers what DHCP offered, and failing that its own built-in
 //!   public-pool fallback.
+//! * `input.mouse.debounce` — whole milliseconds, `25` by default, `0` to
+//!   disable: how long after a pointer button is released the *same* button's
+//!   next press is treated as switch chatter rather than a distinct click. A
+//!   worn switch can emit a second press a few milliseconds after release that
+//!   the device meant as one click, and the seat cannot ask the device which it
+//!   meant. Bounded by [`MAX_CLICK_DEBOUNCE_MS`]. Set it to `0` for a device
+//!   whose rapid-fire mode deliberately emits click pairs at ~10 ms: that is
+//!   real user intent and must not be suppressed. Motion and scroll are never
+//!   debounced.
 //! * `time.refresh` — `6h`, `12h`, `1d` (default), `2d`, or `7d`: how much
 //!   *uptime* passes between steady-state re-queries. A closed set rather
 //!   than a free-form span, so no configuration can ask for a cadence that
@@ -114,6 +123,23 @@ pub const CONFIG_PATH: &str = SystemConfigFile::System.path();
 
 /// Longest single `time.servers` entry, in bytes.
 ///
+/// Default pointer-button chatter window in milliseconds
+/// (`input.mouse.debounce`).
+///
+/// Comfortably above the few milliseconds a mechanical switch chatters for, and
+/// comfortably below the 60–100 ms between presses of a deliberate human
+/// double-click, so the default suppresses chatter without touching a real
+/// second click.
+pub const DEFAULT_CLICK_DEBOUNCE_MS: u16 = 25;
+
+/// Largest pointer-button chatter window an operator may configure, in
+/// milliseconds.
+///
+/// A validation bound on untrusted store text, not a capacity: a window this
+/// side of a tenth of a second cannot swallow a deliberate click, while an
+/// unbounded one could make the pointer appear dead.
+pub const MAX_CLICK_DEBOUNCE_MS: u16 = 100;
+
 /// The longest dotted DNS name RFC 1035 §2.3.4 allows (255 wire bytes, so
 /// 253 in dotted form), which also comfortably admits any address literal.
 /// A longer entry is refused rather than truncated.
@@ -489,6 +515,9 @@ pub enum Key {
     TimeServers,
     /// `time.refresh` — the steady-state clock re-query cadence.
     TimeRefresh,
+    /// `input.mouse.debounce` — the pointer-button chatter window, in whole
+    /// milliseconds.
+    InputMouseDebounce,
 }
 
 impl Key {
@@ -508,6 +537,7 @@ impl Key {
         Self::NetTcpEcn,
         Self::TimeServers,
         Self::TimeRefresh,
+        Self::InputMouseDebounce,
     ];
 
     /// Whether this key belongs to the stack-wide `net.*` family, and so
@@ -532,7 +562,8 @@ impl Key {
             | Self::CacheTransform
             | Self::CacheSemantic
             | Self::TimeServers
-            | Self::TimeRefresh => false,
+            | Self::TimeRefresh
+            | Self::InputMouseDebounce => false,
         }
     }
 
@@ -552,6 +583,7 @@ impl Key {
             Self::NetTcpSynCookies => "net.tcp.syncookies",
             Self::NetTcpKeepalive => "net.tcp.keepalive",
             Self::NetTcpEcn => "net.tcp.ecn",
+            Self::InputMouseDebounce => "input.mouse.debounce",
             Self::TimeServers => "time.servers",
             Self::TimeRefresh => "time.refresh",
         }
@@ -583,8 +615,27 @@ impl Key {
             Self::TimeServers => {
                 return ValueShape::Free("`none`, or a comma-separated list of host names")
             }
+            Self::InputMouseDebounce => {
+                return ValueShape::Free("whole milliseconds, `0` to disable, at most 100")
+            }
         })
     }
+}
+
+/// Parse `input.mouse.debounce` — whole milliseconds, `0` disabling the filter.
+///
+/// Rejects anything that is not a bare decimal count, and any count above
+/// [`MAX_CLICK_DEBOUNCE_MS`], rather than clamping: an operator who asked for a
+/// window the system will not honour is told so.
+fn parse_click_debounce_ms(value: &str) -> Result<u16, ConfigError> {
+    if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(ConfigError::InvalidValue);
+    }
+    let ms: u16 = value.parse().map_err(|_| ConfigError::InvalidValue)?;
+    if ms > MAX_CLICK_DEBOUNCE_MS {
+        return Err(ConfigError::InvalidValue);
+    }
+    Ok(ms)
 }
 
 /// Why a store text (or a single setting) was refused.
@@ -674,6 +725,9 @@ pub struct SystemConfig {
     /// programmatic caller assembling one directly is responsible for the
     /// same bounds, exactly as it is for every other field here.
     pub time_servers: Vec<String>,
+    /// The pointer-button chatter window in whole milliseconds
+    /// (`input.mouse.debounce`); `0` disables the filter.
+    pub input_mouse_debounce_ms: u16,
     /// The steady-state clock re-query cadence (`time.refresh`).
     pub time_refresh: RefreshCadence,
 }
@@ -701,6 +755,7 @@ impl Default for SystemConfig {
             net_tcp_ecn: NetToggle::Disabled,
             time_servers: Vec::new(),
             time_refresh: RefreshCadence::default(),
+            input_mouse_debounce_ms: DEFAULT_CLICK_DEBOUNCE_MS,
         }
     }
 }
@@ -772,10 +827,17 @@ impl SystemConfig {
     /// The current value of `key`, in its canonical spelling.
     #[must_use]
     pub fn render_value(&self, key: Key) -> String {
-        if key == Key::TimeServers {
-            return render_time_servers(&self.time_servers);
+        match key {
+            Key::TimeServers => render_time_servers(&self.time_servers),
+            Key::InputMouseDebounce => {
+                let mut buf = [0u8; 12];
+                String::from(tairix_util::fmt::format_usize(
+                    usize::from(self.input_mouse_debounce_ms),
+                    &mut buf,
+                ))
+            }
+            _ => String::from(self.closed_value(key)),
         }
-        String::from(self.closed_value(key))
     }
 
     /// The canonical spelling of a closed-set key's current value.
@@ -786,6 +848,8 @@ impl SystemConfig {
     const fn closed_value(&self, key: Key) -> &'static str {
         match key {
             Key::TimeServers => NO_TIME_SERVERS,
+            // Rendered numerically by `render_value`; no fixed spelling exists.
+            Key::InputMouseDebounce => "",
             Key::TimeRefresh => self.time_refresh.as_str(),
             Key::LoginType => self.login_type.as_str(),
             Key::CacheAll => self.cache_all.as_str(),
@@ -883,6 +947,9 @@ impl SystemConfig {
                 self.time_refresh =
                     RefreshCadence::from_value(value).ok_or(ConfigError::InvalidValue)?;
             }
+            Key::InputMouseDebounce => {
+                self.input_mouse_debounce_ms = parse_click_debounce_ms(value)?;
+            }
         }
         Ok(())
     }
@@ -975,8 +1042,9 @@ mod tests {
 
     use super::{
         CacheClass, CacheMode, CacheSwitch, ConfigError, Key, LoginType, NetToggle, RefreshCadence,
-        SynCookies, SystemConfig, ValueShape, CONFIG_PATH, MAX_CONFIG_LEN, MAX_TIME_SERVERS,
-        MAX_TIME_SERVER_LEN, NO_TIME_SERVERS,
+        SynCookies, SystemConfig, ValueShape, CONFIG_PATH, DEFAULT_CLICK_DEBOUNCE_MS,
+        MAX_CLICK_DEBOUNCE_MS, MAX_CONFIG_LEN, MAX_TIME_SERVERS, MAX_TIME_SERVER_LEN,
+        NO_TIME_SERVERS,
     };
     use std::vec;
     use std::vec::Vec;
@@ -1063,6 +1131,54 @@ mod tests {
     }
 
     #[test]
+    fn click_debounce_defaults_to_twenty_five_milliseconds() {
+        assert_eq!(
+            SystemConfig::default().input_mouse_debounce_ms,
+            DEFAULT_CLICK_DEBOUNCE_MS
+        );
+    }
+
+    #[test]
+    fn click_debounce_accepts_a_millisecond_count_and_zero() {
+        let config = SystemConfig::parse("input.mouse.debounce 40\n").expect("parses");
+        assert_eq!(config.input_mouse_debounce_ms, 40);
+        // Zero is the documented way to disable the filter for a device whose
+        // rapid-fire mode emits deliberate click pairs.
+        let off = SystemConfig::parse("input.mouse.debounce 0\n").expect("parses");
+        assert_eq!(off.input_mouse_debounce_ms, 0);
+    }
+
+    #[test]
+    fn click_debounce_refuses_a_window_it_will_not_honour() {
+        // Refused, not clamped: an operator who asked for a window the system
+        // will not apply is told so rather than silently given another.
+        for text in [
+            "input.mouse.debounce 101\n",
+            "input.mouse.debounce -1\n",
+            "input.mouse.debounce 25ms\n",
+            "input.mouse.debounce lots\n",
+        ] {
+            assert_eq!(
+                SystemConfig::parse(text).map(|_| ()),
+                Err(ConfigError::InvalidValue),
+                "{text:?} must fail closed"
+            );
+        }
+        // A key with no value at all is the line parser's refusal, and its
+        // more precise one, before any value spelling is considered.
+        assert_eq!(
+            SystemConfig::parse("input.mouse.debounce \n").map(|_| ()),
+            Err(ConfigError::MissingValue)
+        );
+        assert_eq!(
+            SystemConfig::parse("input.mouse.debounce 100\n")
+                .expect("the bound itself is accepted")
+                .input_mouse_debounce_ms,
+            MAX_CLICK_DEBOUNCE_MS
+        );
+    }
+
+    #[test]
     fn render_parse_round_trips_exactly() {
         for login_type in [LoginType::Text, LoginType::Graphical] {
             for cache_all in [CacheSwitch::On, CacheSwitch::Off] {
@@ -1088,6 +1204,7 @@ mod tests {
                                         String::from("2001:db8::1"),
                                     ],
                                     time_refresh: RefreshCadence::TwoDays,
+                                    input_mouse_debounce_ms: 40,
                                 };
                                 let rendered = config.render();
                                 assert_eq!(SystemConfig::parse(&rendered), Ok(config));

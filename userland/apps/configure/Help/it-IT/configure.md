@@ -84,6 +84,14 @@ interessato — non cambia mai un risultato.
   l'ora. `1d` è il valore predefinito. Un orologio non impostato, non
   plausibile o molto vecchio viene corretto appena la rete lo consente,
   qualunque cosa dica questa impostazione.
+- `input.mouse.debounce` — millisecondi interi, `25` per impostazione
+  predefinita, `0` per disattivarlo, al massimo `100`: quanto tempo dopo il
+  rilascio di un pulsante del mouse la pressione successiva dello stesso
+  pulsante viene ignorata come rimbalzo del contatto invece di essere
+  trattata come un nuovo clic. Un interruttore consumato può segnalare una
+  seconda pressione pochi millisecondi dopo il rilascio pur intendendo un
+  solo clic. Impostare `0` per un mouse il cui modo a raffica invia coppie di
+  clic intenzionali.
 
 Lo stack di rete legge le impostazioni `net.*`; una modifica ha effetto
 quando lo stack applica di nuovo la sua configurazione.
