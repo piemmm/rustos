@@ -388,6 +388,14 @@ fn render_resources(
                     }
                 }
             }
+            Some(HwResourceKind::BusChild) => match resource.bus_child_pair() {
+                Some((endpoint, address)) => {
+                    let _ = write!(line, "Bus child at 0x{address:x} on endpoint {endpoint}");
+                }
+                // Unreachable for a decoded `BusChild`; listed without
+                // inventing a pairing rather than dropped.
+                None => line.push_str("Bus child (no pairing published)"),
+            },
             None => line.push_str("resource (unknown kind)"),
         }
         line.push('\n');

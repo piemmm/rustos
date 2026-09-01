@@ -137,6 +137,23 @@ pub const MC146818_STORE_PATH: &[&[u8]] = &[b"Drivers", b"rtc", b"mc146818", b"R
 /// mailbox).
 pub const RPI_RTC_STORE_PATH: &[&[u8]] = &[b"Drivers", b"rtc", b"rpi", b"Run"];
 
+/// Store path of the Broadcom Serial Controller I2C bus driver bundle: class
+/// `bus_i2c`, the controller leaf `bcm2835` (the part name appears only at
+/// the leaf; the class namespace above it stays vendor-neutral).
+pub const I2C_BCM2835_STORE_PATH: &[&[u8]] = &[b"Drivers", b"bus_i2c", b"bcm2835", b"Run"];
+
+/// Store path of the DS3231 / DS1307 real-time-clock driver bundle: class
+/// `rtc`, the chip leaf `ds3231`.
+pub const DS3231_STORE_PATH: &[&[u8]] = &[b"Drivers", b"rtc", b"ds3231", b"Run"];
+
+/// Store path of the PCF8523 real-time-clock driver bundle: class `rtc`, the
+/// chip leaf `pcf8523`.
+pub const PCF8523_STORE_PATH: &[&[u8]] = &[b"Drivers", b"rtc", b"pcf8523", b"Run"];
+
+/// Store path of the PCF85063A real-time-clock driver bundle: class `rtc`,
+/// the chip leaf `pcf85063a`.
+pub const PCF85063A_STORE_PATH: &[&[u8]] = &[b"Drivers", b"rtc", b"pcf85063a", b"Run"];
+
 /// Cross-compile `package` for the freestanding aarch64 target, convert the
 /// linked PIE ELF to a production-biased `rxe`, and wrap it as the signed
 /// payload of a `kind = UserSpace` bundle requesting exactly `caps` and
@@ -793,6 +810,114 @@ pub fn build_rpi_rtc_bundle(
         profile,
     )
 }
+
+/// Build and sign the Broadcom Serial Controller I2C bus-driver bundle.
+///
+/// It owns the controller's register window (`CAP_MMIO_MAP`) and its
+/// interrupt line (`CAP_IRQ_BIND`, which every transfer parks on rather than
+/// spinning), and binds one reserved transfer endpoint per child the device
+/// tree declared (`CAP_IPC_BIND_PRIVILEGED`). It holds no clock authority:
+/// the chips above it report readings, and only `timed` sets the machine
+/// clock. Carries `tairix_drv_bus_i2c_bcm2835::BIND_KEYS`.
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_i2c_bcm2835_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
+    build_bundle(
+        ctx,
+        arch,
+        "tairix-drv-bus-i2c-bcm2835",
+        &[
+            CapabilityId::MMIO_MAP,
+            CapabilityId::IRQ_BIND,
+            CapabilityId::IPC_BIND_PRIVILEGED,
+        ],
+        tairix_drv_bus_i2c_bcm2835::BIND_KEYS,
+        profile,
+    )
+}
+
+/// Build and sign the DS3231 / DS1307 clock-chip driver bundle.
+///
+/// Like every I2C clock chip it requests no `CAP_MMIO_MAP`: it owns no
+/// registers, only `CAP_IPC_ENDPOINT` to call the transfer endpoint its
+/// matched node's grant names and `CAP_IPC_BIND_PRIVILEGED` to serve the RTC
+/// endpoint `timed` reads. The same no-clock-authority split as
+/// [`build_pl031_bundle`].
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_ds3231_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
+    build_bundle(
+        ctx,
+        arch,
+        "tairix-drv-rtc-ds3231",
+        I2C_RTC_CAPABILITIES,
+        tairix_drv_rtc_ds3231::BIND_KEYS,
+        profile,
+    )
+}
+
+/// Build and sign the PCF8523 clock-chip driver bundle, on the same terms as
+/// [`build_ds3231_bundle`].
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_pcf8523_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
+    build_bundle(
+        ctx,
+        arch,
+        "tairix-drv-rtc-pcf8523",
+        I2C_RTC_CAPABILITIES,
+        tairix_drv_rtc_pcf8523::BIND_KEYS,
+        profile,
+    )
+}
+
+/// Build and sign the PCF85063A clock-chip driver bundle, on the same terms
+/// as [`build_ds3231_bundle`].
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_pcf85063a_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
+    build_bundle(
+        ctx,
+        arch,
+        "tairix-drv-rtc-pcf85063a",
+        I2C_RTC_CAPABILITIES,
+        tairix_drv_rtc_pcf85063a::BIND_KEYS,
+        profile,
+    )
+}
+
+/// The capability set every I2C clock-chip bundle requests: a call to its own
+/// transfer endpoint and the privilege to serve the RTC endpoint. Defined once
+/// because it is the same set by definition — none of these parts owns a
+/// register window.
+const I2C_RTC_CAPABILITIES: &[CapabilityId] = &[
+    CapabilityId::IPC_ENDPOINT,
+    CapabilityId::IPC_BIND_PRIVILEGED,
+];
 
 /// The composed, signed driver bundles the `-M virt` autoload verticals
 /// plant into their whole-disk fixture's `/System/Drivers/` store, each

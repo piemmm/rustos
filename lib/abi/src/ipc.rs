@@ -39,9 +39,10 @@ pub const IPC_MESSAGE_MAX_PAYLOAD_LEN: u32 = 1 << 20;
 /// status surface ([`crate::raid_admin::RAID_CONTROL_ENDPOINT`]), the per-NIC
 /// driver device channels
 /// ([`crate::driver::net_channel::NET_CHANNEL_ENDPOINT_BASE`] through
-/// `+ NET_CHANNEL_ENDPOINT_COUNT`), and the per-console elevation
+/// `+ NET_CHANNEL_ENDPOINT_COUNT`), the per-console elevation
 /// supervisors ([`crate::elevate::ELEVATE_ENDPOINT_BASE`] through
-/// `ELEVATE_ENDPOINT_BASE + CONSOLE_INDEX_MAX`).
+/// `ELEVATE_ENDPOINT_BASE + CONSOLE_INDEX_MAX`), and the per-bus-child
+/// transfer endpoints ([`crate::hwtree::is_bus_child_endpoint`]).
 ///
 /// Binding a reserved id requires
 /// [`crate::CapabilityId::IPC_BIND_PRIVILEGED`] even when the endpoint
@@ -74,7 +75,9 @@ pub const fn is_reserved_endpoint(id: u64) -> bool {
     {
         return true;
     }
-    if crate::driver::net_channel::is_net_channel_endpoint(id) {
+    if crate::driver::net_channel::is_net_channel_endpoint(id)
+        || crate::hwtree::is_bus_child_endpoint(id)
+    {
         return true;
     }
     let elevate_base = crate::elevate::ELEVATE_ENDPOINT_BASE;

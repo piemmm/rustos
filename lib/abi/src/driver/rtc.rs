@@ -63,6 +63,41 @@ pub const fn bin_to_bcd(bin: u8) -> Option<u8> {
     Some(((bin / 10) << 4) | (bin % 10))
 }
 
+/// The hour of day (`0..=23`) a 12-hour clock reading names.
+///
+/// Returns `None` unless `twelve` is `1..=12`. A 12-hour clock spells
+/// midnight as 12 AM and noon as 12 PM, which is why twelve maps to zero
+/// before the PM offset — the mistake this exists to make once.
+///
+/// Which register bit carries `pm`, and whether the field is BCD or binary,
+/// differ per chip; this arithmetic does not, so every calendar driver shares
+/// it.
+#[must_use]
+pub const fn hour_from_twelve(twelve: u8, pm: bool) -> Option<u8> {
+    if twelve < 1 || twelve > 12 {
+        return None;
+    }
+    let hour = twelve % 12;
+    Some(if pm { hour + 12 } else { hour })
+}
+
+/// The 12-hour reading and PM flag for an hour of day — the inverse of
+/// [`hour_from_twelve`].
+///
+/// Returns `None` for an `hour` outside `0..=23`, so a caller composing a
+/// register block fails closed rather than writing a wrapped field.
+#[must_use]
+pub const fn twelve_from_hour(hour: u8) -> Option<(u8, bool)> {
+    if hour > 23 {
+        return None;
+    }
+    let twelve = match hour % 12 {
+        0 => 12,
+        other => other,
+    };
+    Some((twelve, hour >= 12))
+}
+
 /// The first full year the wall-clock plausibility window admits — the civil
 /// year of [`RELEASE_EPOCH_SECS`], derived rather than restated.
 fn release_year() -> i64 {
@@ -166,7 +201,10 @@ pub trait Rtc {
 
 #[cfg(test)]
 mod tests {
-    use super::{bcd_to_bin, bin_to_bcd, release_year, resolve_two_digit_year};
+    use super::{
+        bcd_to_bin, bin_to_bcd, hour_from_twelve, release_year, resolve_two_digit_year,
+        twelve_from_hour,
+    };
 
     #[test]
     fn bcd_round_trips_every_representable_value() {
@@ -200,6 +238,29 @@ mod tests {
     fn a_value_two_digits_cannot_hold_is_refused() {
         assert_eq!(bin_to_bcd(100), None);
         assert_eq!(bin_to_bcd(u8::MAX), None);
+    }
+
+    #[test]
+    fn the_twelve_hour_clock_round_trips_every_hour_of_the_day() {
+        for hour in 0u8..24 {
+            let (twelve, pm) = twelve_from_hour(hour).expect("in range");
+            assert!((1..=12).contains(&twelve), "{hour} spells {twelve}");
+            assert_eq!(hour_from_twelve(twelve, pm), Some(hour));
+        }
+        // The two ends a 12-hour clock gets wrong if written by hand.
+        assert_eq!(twelve_from_hour(0), Some((12, false)));
+        assert_eq!(twelve_from_hour(12), Some((12, true)));
+        assert_eq!(hour_from_twelve(12, false), Some(0));
+        assert_eq!(hour_from_twelve(12, true), Some(12));
+    }
+
+    #[test]
+    fn an_hour_field_outside_its_range_is_refused() {
+        assert_eq!(hour_from_twelve(0, false), None);
+        assert_eq!(hour_from_twelve(13, false), None);
+        assert_eq!(hour_from_twelve(u8::MAX, true), None);
+        assert_eq!(twelve_from_hour(24), None);
+        assert_eq!(twelve_from_hour(u8::MAX), None);
     }
 
     #[test]

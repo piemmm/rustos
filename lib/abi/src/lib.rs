@@ -33,6 +33,7 @@ pub mod field;
 pub mod font_ipc;
 pub mod fs;
 pub mod hwtree;
+pub mod i2c_ipc;
 pub mod input;
 pub mod ipc;
 pub(crate) mod le;

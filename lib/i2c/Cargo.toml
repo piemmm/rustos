@@ -1,0 +1,24 @@
+[package]
+name = "tairix-i2c"
+description = "TAIRiX I²C register-transaction protocol: the register sequences every chip driver composes over the bus-agnostic transfer seam."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The `abi-v1` transfer seam this crate composes over: `I2cBus`, the
+# validated `I2cAddress`, and the per-phase byte bound.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+
+[features]
+# Expose the protocol-faithful register-file bus double (`mock` module) to
+# consumers' host tests, so every chip driver proves itself against one
+# definition rather than a private copy. Dev-dependency use only; never
+# enabled by a production build.
+mock-bus = []
+
+[lints]
+workspace = true

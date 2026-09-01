@@ -1029,6 +1029,18 @@ name = "tairix-dma-barrier"
 version = "0.0.0"
 
 [[package]]
+name = "tairix-drv-bus-i2c-bcm2835"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-caps",
+ "tairix-drvrt",
+ "tairix-log",
+ "tairix-rt",
+ "tairix-util",
+]
+
+[[package]]
 name = "tairix-drv-bus-mailbox-vcmailbox"
 version = "0.0.0"
 dependencies = [
@@ -1254,6 +1266,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-drv-rtc-ds3231"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-caps",
+ "tairix-drvrt",
+ "tairix-i2c",
+ "tairix-rt",
+]
+
+[[package]]
 name = "tairix-drv-rtc-goldfish"
 version = "0.0.0"
 dependencies = [
@@ -1270,6 +1293,28 @@ dependencies = [
  "tairix-abi",
  "tairix-caps",
  "tairix-drvrt",
+ "tairix-rt",
+]
+
+[[package]]
+name = "tairix-drv-rtc-pcf85063a"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-caps",
+ "tairix-drvrt",
+ "tairix-i2c",
+ "tairix-rt",
+]
+
+[[package]]
+name = "tairix-drv-rtc-pcf8523"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-caps",
+ "tairix-drvrt",
+ "tairix-i2c",
  "tairix-rt",
 ]
 
@@ -1678,6 +1723,13 @@ dependencies = [
  "tairix-net",
  "tairix-resolver",
  "tairix-rt",
+]
+
+[[package]]
+name = "tairix-i2c"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
 ]
 
 [[package]]
@@ -5674,6 +5726,7 @@ dependencies = [
  "tairix-devids",
  "tairix-devmatch",
  "tairix-display",
+ "tairix-drv-bus-i2c-bcm2835",
  "tairix-drv-bus-pcie-brcm",
  "tairix-drv-bus-usb",
  "tairix-drv-bus-usb-vl805",
@@ -5683,8 +5736,11 @@ dependencies = [
  "tairix-drv-input-virtio-input",
  "tairix-drv-network-genet",
  "tairix-drv-network-virtio-net",
+ "tairix-drv-rtc-ds3231",
  "tairix-drv-rtc-goldfish",
  "tairix-drv-rtc-mc146818",
+ "tairix-drv-rtc-pcf85063a",
+ "tairix-drv-rtc-pcf8523",
  "tairix-drv-rtc-pl031",
  "tairix-drv-rtc-rpi",
  "tairix-drv-storage-raid",

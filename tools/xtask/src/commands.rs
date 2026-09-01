@@ -1518,6 +1518,22 @@ fn build_image_driver_bundles(
             image_drivers::build_rpi_rtc_bundle(ctx, arch, profile)?,
         ),
         (
+            image_drivers::I2C_BCM2835_STORE_PATH,
+            image_drivers::build_i2c_bcm2835_bundle(ctx, arch, profile)?,
+        ),
+        (
+            image_drivers::DS3231_STORE_PATH,
+            image_drivers::build_ds3231_bundle(ctx, arch, profile)?,
+        ),
+        (
+            image_drivers::PCF8523_STORE_PATH,
+            image_drivers::build_pcf8523_bundle(ctx, arch, profile)?,
+        ),
+        (
+            image_drivers::PCF85063A_STORE_PATH,
+            image_drivers::build_pcf85063a_bundle(ctx, arch, profile)?,
+        ),
+        (
             image_drivers::USB_MSD_STORE_PATH,
             image_drivers::build_usb_msd_bundle(ctx, arch, profile)?,
         ),

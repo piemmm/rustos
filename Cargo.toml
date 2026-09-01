@@ -73,6 +73,7 @@ members = [
     "lib/greeter",
     "lib/help",
     "lib/hid",
+    "lib/i2c",
     "lib/icon",
     "lib/image",
     "lib/input",
@@ -141,6 +142,7 @@ members = [
     "drivers/bus/usb/xhci",
     "drivers/bus/usb/vl805",
     "drivers/bus/pcie_brcm",
+    "drivers/bus/i2c/bcm2835",
     "drivers/bus/mailbox/vcmailbox",
     "drivers/bus/virtio",
     "drivers/bus/mmio",
@@ -155,7 +157,10 @@ members = [
 
     # Drivers — real-time clock
     "drivers/rtc/pl031",
+    "drivers/rtc/ds3231",
     "drivers/rtc/goldfish",
+    "drivers/rtc/pcf8523",
+    "drivers/rtc/pcf85063a",
     "drivers/rtc/mc146818",
     "drivers/rtc/rpi",
 

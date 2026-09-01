@@ -1,0 +1,44 @@
+[package]
+name = "tairix-drv-bus-i2c-bcm2835"
+description = "TAIRiX autoloaded user-space Broadcom Serial Controller (BSC) I2C bus driver: binds the discovered brcm,bcm2835-i2c node and serves one grant-restricted transfer endpoint per child the device tree declared."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Two targets, one crate, both on cargo's default paths and names like every
+# sibling driver — the bundle builder cross-compiles `--bin <package>`, so a
+# renamed binary would not be installable. The controller logic (`src/lib.rs`)
+# is the BSC's own register sequence, so it lives with the driver rather than
+# in `lib/*`, and is host-testable against a simulated controller. The `Run`
+# binary (`src/main.rs`) is what `devmgr` autoloads into user space; it links
+# the userland runtime, so it is freestanding-only and an inert host stub
+# elsewhere (`build.rs`).
+
+[dependencies]
+# The `abi-v1` surface: the `I2cPort` seam the controller serves, the
+# validated `I2cAddress` it narrows a duty grant into, the transfer wire
+# contract, the register-window seam, and the capability ids.
+tairix-abi = { path = "../../../../lib/abi", version = "=0.0.0" }
+
+# The `Run` binary's freestanding-only dependencies; on the host it is an inert
+# stub, so nothing here reaches the host build.
+[target.'cfg(target_os = "none")'.dependencies]
+# The capability-set type the rt-backed `DriverHost` is built over.
+tairix-caps = { path = "../../../../lib/caps", version = "=0.0.0" }
+# The user-space driver runtime: turns the kernel-issued device-resource
+# grants into the `MmioMapper` the bring-up maps its window through, and the
+# bound interrupt line the transfer parks on.
+tairix-drvrt = { path = "../../../../lib/drvrt", version = "=0.0.0" }
+# Structured logging for the per-child bind outcomes.
+tairix-log = { path = "../../../../lib/log", version = "=0.0.0" }
+# The shared hex formatter the bind records render their ids with.
+tairix-util = { path = "../../../../lib/util", version = "=0.0.0" }
+# The pure-Rust userland runtime: `_start`, the stack canary, the panic
+# handler, and the wait-set / call-endpoint wrappers.
+tairix-rt = { path = "../../../../lib/rt", version = "=0.0.0" }

@@ -488,6 +488,56 @@ pub enum HwResourceKind {
     /// [`required_capability`](Self::required_capability) reports [`None`].
     /// Recovered through [`HwResource::link_address`].
     LinkAddress = 8,
+    /// A **child of an addressed, non-enumerable bus** the holder must
+    /// serve: `base` is the child's transfer-endpoint id, `len` is `1`, and
+    /// `xlate` is the child's address on the parent bus. Recovered through
+    /// [`HwResource::bus_child`].
+    ///
+    /// I²C, SPI chip-select, and 1-Wire share one shape: the bus carries no
+    /// enumeration protocol, so the children and their addresses are known
+    /// only from the platform's device tree, and probing for them is
+    /// forbidden and can be destructive. Discovery therefore splits the two
+    /// halves of a child's existence — the **duty** onto the bus node (this
+    /// kind) and the **authority** onto the child node (an ordinary
+    /// [`Endpoint`](Self::Endpoint) resource naming the same id). The bus
+    /// driver learns which addresses to serve and under which endpoint; the
+    /// chip driver learns only its own endpoint, so its endpoint *is* its
+    /// chip and it can never address a neighbour.
+    ///
+    /// A separate kind rather than an overloaded [`Endpoint`](Self::Endpoint)
+    /// because the two facts must arrive paired, and because `Endpoint` means
+    /// "may submit to", never "must serve".
+    BusChild = 9,
+}
+
+/// Base of the reserved block of per-bus-child transfer-endpoint ids.
+///
+/// The block spans one `u32` above this base, indexed by the child's
+/// hardware-tree node id — unique per tree, so the mapping is collision-free
+/// by construction. Reserved (see
+/// [`crate::ipc::is_reserved_endpoint`]) because a squatter binding a chip's
+/// transfer endpoint first would serve that chip's driver forged register
+/// contents; binding one additionally requires the caller to hold the
+/// matching [`HwResourceKind::BusChild`] duty grant, so only the driver
+/// discovery bound to the *parent bus* may serve it. The high bytes spell
+/// `"BC"`.
+pub const BUS_CHILD_ENDPOINT_BASE: u64 = 0x4243_0000_0000_0000;
+
+/// Number of ids the [`BUS_CHILD_ENDPOINT_BASE`] block reserves: one per
+/// representable hardware-tree node id.
+const BUS_CHILD_ENDPOINT_SPAN: u64 = 1 << u32::BITS;
+
+/// The transfer-endpoint id reserved for the bus child whose hardware-tree
+/// node id is `node_id`.
+#[must_use]
+pub fn bus_child_endpoint(node_id: u32) -> u64 {
+    BUS_CHILD_ENDPOINT_BASE + u64::from(node_id)
+}
+
+/// Whether `id` lies in the reserved per-bus-child transfer-endpoint block.
+#[must_use]
+pub const fn is_bus_child_endpoint(id: u64) -> bool {
+    id >= BUS_CHILD_ENDPOINT_BASE && id < BUS_CHILD_ENDPOINT_BASE + BUS_CHILD_ENDPOINT_SPAN
 }
 
 /// CPU mapping policy for a linear framebuffer resource.
@@ -522,6 +572,25 @@ impl FramebufferMemory {
 }
 
 impl HwResourceKind {
+    /// Every kind, in discriminant order.
+    ///
+    /// The generated C view of the hardware tree enumerates this rather than
+    /// a hand-kept list, so a kind cannot reach the wire without a C
+    /// spelling. Its density — index equals discriminant, and nothing
+    /// follows the last entry — is asserted by this module's tests.
+    pub const ALL: &'static [Self] = &[
+        Self::Mmio,
+        Self::Irq,
+        Self::Port,
+        Self::Dma,
+        Self::BusWindow,
+        Self::Endpoint,
+        Self::Shared,
+        Self::Framebuffer,
+        Self::LinkAddress,
+        Self::BusChild,
+    ];
+
     /// Raw on-wire discriminant.
     #[must_use]
     pub const fn as_u16(self) -> u16 {
@@ -541,6 +610,7 @@ impl HwResourceKind {
             6 => Some(Self::Shared),
             7 => Some(Self::Framebuffer),
             8 => Some(Self::LinkAddress),
+            9 => Some(Self::BusChild),
             _ => None,
         }
     }
@@ -569,6 +639,9 @@ impl HwResourceKind {
             // A link-layer address is read straight out of the grant record:
             // no syscall resolves it and holding it authorises nothing.
             Self::LinkAddress => return None,
+            // A bus-child duty authorises binding that child's transfer
+            // endpoint, which is a privileged bind of a reserved id.
+            Self::BusChild => CapabilityId::IPC_BIND_PRIVILEGED,
         })
     }
 }
@@ -740,6 +813,22 @@ impl HwResource {
             1,
             0,
         )
+    }
+
+    /// The duty to serve one child of an addressed, non-enumerable bus:
+    /// `endpoint` is the transfer endpoint the child's driver will call,
+    /// `address` the child's address on this bus
+    /// ([`HwResourceKind::BusChild`]).
+    #[must_use]
+    pub fn bus_child(endpoint: u64, address: u64) -> Self {
+        Self::new_xlate(HwResourceKind::BusChild, endpoint, 1, 0, address)
+    }
+
+    /// The `(endpoint, bus address)` pair a [`HwResourceKind::BusChild`]
+    /// resource carries, or [`None`] for any other kind.
+    #[must_use]
+    pub fn bus_child_pair(&self) -> Option<(u64, u64)> {
+        (self.kind() == Some(HwResourceKind::BusChild)).then_some((self.base, self.xlate))
     }
 
     /// The link-layer address a [`HwResourceKind::LinkAddress`] resource
@@ -1047,6 +1136,21 @@ impl HwResource {
                 // geometry plus the exact window must too — a child cannot
                 // reinterpret the parent's surface with a different shape.
                 self.xlate == child.xlate && self.base == child.base && self.len == child.len
+            }
+            (HwResourceKind::BusChild, HwResourceKind::BusChild) => {
+                // A duty is granted whole: the endpoint id *and* the bus
+                // address must match, so a driver cannot re-point a child's
+                // endpoint at a different address on the same bus.
+                self.xlate == child.xlate
+                    && interval_contains(self.base, self.len, child.base, child.len)
+            }
+            (HwResourceKind::BusChild, HwResourceKind::Endpoint) => {
+                // Holding the duty to serve a child covers naming that
+                // child's endpoint id: it is what authorises the bus driver's
+                // bind, and what lets it forward the endpoint onto a node it
+                // publishes. Both records are flagless.
+                self.flags == child.flags
+                    && interval_contains(self.base, self.len, child.base, child.len)
             }
             (HwResourceKind::Mmio, HwResourceKind::Framebuffer) => {
                 // An emitter holding a plain (flagless) window over the
@@ -2421,6 +2525,87 @@ mod tests {
         assert!(!fb.covers(&HwResource::mmio(0x1000, 32)));
     }
 
+    /// The first discriminant no [`HwResourceKind`] defines, derived from
+    /// the registry so adding a kind cannot turn a rejection test into a
+    /// silent acceptance one.
+    fn undefined_resource_kind() -> u16 {
+        u16::try_from(HwResourceKind::ALL.len()).expect("the registry is small")
+    }
+
+    #[test]
+    fn the_resource_kind_registry_is_dense_and_complete() {
+        for (index, kind) in HwResourceKind::ALL.iter().enumerate() {
+            let raw = u16::try_from(index).expect("index fits the discriminant width");
+            assert_eq!(kind.as_u16(), raw, "{kind:?} is out of discriminant order");
+            assert_eq!(HwResourceKind::from_u16(raw), Some(*kind));
+        }
+        let past_end = u16::try_from(HwResourceKind::ALL.len()).expect("small");
+        assert_eq!(HwResourceKind::from_u16(past_end), None);
+    }
+
+    #[test]
+    fn a_bus_child_resource_pairs_an_endpoint_with_an_address() {
+        let endpoint = bus_child_endpoint(7);
+        let duty = HwResource::bus_child(endpoint, 0x68);
+        assert_eq!(duty.kind(), Some(HwResourceKind::BusChild));
+        assert_eq!(duty.bus_child_pair(), Some((endpoint, 0x68)));
+        assert_eq!(
+            duty.required_capability(),
+            Ok(Some(CapabilityId::IPC_BIND_PRIVILEGED))
+        );
+        let wire = duty.to_le_bytes();
+        assert_eq!(HwResource::from_bytes(&wire), Ok(duty));
+        // Only a bus-child resource answers the pair.
+        assert_eq!(HwResource::endpoint(endpoint).bus_child_pair(), None);
+    }
+
+    #[test]
+    fn a_bus_child_duty_covers_its_own_endpoint_and_nothing_else() {
+        let endpoint = bus_child_endpoint(7);
+        let duty = HwResource::bus_child(endpoint, 0x68);
+        // The duty authorises naming exactly its own child's endpoint.
+        assert!(duty.covers(&HwResource::endpoint(endpoint)));
+        assert!(!duty.covers(&HwResource::endpoint(endpoint + 1)));
+        assert!(duty.covers(&HwResource::bus_child(endpoint, 0x68)));
+        // A neighbour's address on the same endpoint id, and the reverse
+        // direction, both fail closed.
+        assert!(!duty.covers(&HwResource::bus_child(endpoint, 0x51)));
+        assert!(!HwResource::endpoint(endpoint).covers(&duty));
+        // A duty is not a window, a port range, or a shared region.
+        assert!(!duty.covers(&HwResource::mmio(endpoint, 1)));
+        assert!(!duty.covers(&HwResource::shared(endpoint)));
+        assert!(!HwResource::mmio(0, u64::MAX).covers(&duty));
+    }
+
+    #[test]
+    fn the_bus_child_endpoint_block_is_reserved_and_collision_free() {
+        assert_eq!(bus_child_endpoint(0), BUS_CHILD_ENDPOINT_BASE);
+        assert_eq!(
+            bus_child_endpoint(u32::MAX),
+            BUS_CHILD_ENDPOINT_BASE + BUS_CHILD_ENDPOINT_SPAN - 1
+        );
+        // Distinct node ids never share an endpoint.
+        assert_ne!(bus_child_endpoint(1), bus_child_endpoint(2));
+        for id in [0u32, 1, 4096, u32::MAX] {
+            let endpoint = bus_child_endpoint(id);
+            assert!(is_bus_child_endpoint(endpoint));
+            // Squatting a chip's transfer endpoint would let a bystander
+            // feed that chip's driver forged registers, so the whole block
+            // is a privileged bind.
+            assert!(crate::ipc::is_reserved_endpoint(endpoint));
+        }
+        assert!(!is_bus_child_endpoint(BUS_CHILD_ENDPOINT_BASE - 1));
+        assert!(!is_bus_child_endpoint(
+            BUS_CHILD_ENDPOINT_BASE + BUS_CHILD_ENDPOINT_SPAN
+        ));
+        // The block does not swallow another service's rendezvous.
+        assert!(!is_bus_child_endpoint(crate::rtc_ipc::RTC_ENDPOINT));
+        assert!(!is_bus_child_endpoint(crate::mailbox_ipc::MAILBOX_ENDPOINT));
+        assert!(!is_bus_child_endpoint(
+            crate::driver::net_channel::NET_CHANNEL_ENDPOINT_BASE
+        ));
+    }
+
     #[test]
     fn endpoint_resource_round_trips_and_covers_only_itself() {
         let ep = HwResource::endpoint(0xC0FF_EE01);
@@ -2538,7 +2723,7 @@ mod tests {
             Err(Errno::BufferTooSmall)
         );
         let mut bytes = HwResource::mmio(0, 0).to_le_bytes();
-        put_u16(&mut bytes, 0, 9);
+        put_u16(&mut bytes, 0, undefined_resource_kind());
         assert_eq!(HwResource::from_bytes(&bytes), Err(Errno::OutOfRange));
     }
 
@@ -2656,7 +2841,8 @@ mod tests {
         // A well-sized buffer whose embedded resource carries an unknown kind
         // is rejected by `HwResource::from_bytes`.
         let mut bytes = GrantedResource::new(1, HwResource::mmio(0, 0)).to_le_bytes();
-        put_u16(&mut bytes, 8, 9); // unknown HwResourceKind at the resource's offset
+        // An unknown kind at the resource's offset.
+        put_u16(&mut bytes, 8, undefined_resource_kind());
         assert_eq!(GrantedResource::from_bytes(&bytes), Err(Errno::OutOfRange));
     }
 

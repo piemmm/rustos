@@ -206,6 +206,16 @@ tairix-drv-rtc-mc146818 = { path = "../../drivers/rtc/mc146818", version = "=0.0
 # The Raspberry Pi PMIC clock-chip driver's bind table, for the flashable Pi
 # image.
 tairix-drv-rtc-rpi = { path = "../../drivers/rtc/rpi", version = "=0.0.0" }
+# The Broadcom Serial Controller bus driver's bind table, for the flashable Pi
+# image: it serves the transfer endpoint each I2C clock chip below is reached
+# through.
+tairix-drv-bus-i2c-bcm2835 = { path = "../../drivers/bus/i2c/bcm2835", version = "=0.0.0" }
+# The three I2C clock-chip drivers' bind tables, on the same
+# single-source-of-truth basis. Which one binds is the board's HAT; all three
+# ship so any of them works with no rebuild.
+tairix-drv-rtc-ds3231 = { path = "../../drivers/rtc/ds3231", version = "=0.0.0" }
+tairix-drv-rtc-pcf8523 = { path = "../../drivers/rtc/pcf8523", version = "=0.0.0" }
+tairix-drv-rtc-pcf85063a = { path = "../../drivers/rtc/pcf85063a", version = "=0.0.0" }
 # The one `network.conf` grammar engine: the shipped Raspberry Pi addressing
 # default is authored here and validated through the same parser `netstack`
 # reads it with, so a malformed default fails the image build.

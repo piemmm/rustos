@@ -330,10 +330,10 @@ Three tiers, in the order they land:
   Pi's own `i2c-rtc` overlay documentation names), and
   `drivers/rtc/pcf85063a/` (`nxp,pcf85063a`).
 
-QEMU does not model the BSC, so the I²C tier is host-unit-tested against a
-mock bus with no QEMU vertical possible. Each affected driver's `README.md`
-states that plainly; §8's emulable-hardware clause is satisfied by the first
-tier.
+QEMU does not model the BSC, so the I²C tier is host-unit-tested against the
+shared mock part with no QEMU vertical possible. Each affected driver's
+`README.md` states that plainly; §8's emulable-hardware clause is satisfied by
+the first tier.
 
 ## 6. Enable and disable
 
@@ -630,7 +630,7 @@ over virtio-PCI rather than MMIO — not a copy of the aarch64 vertical. x86_64
 is `◐ mc146818` in the `README.md` matrix until that lands; the driver, the
 node synthesis, and the port trap beneath them are host-tested and shipped.
 
-### TS-4 — Pi RTC support — mailbox tier DONE, I²C tier remaining
+### TS-4 — Pi RTC support — DONE
 
 **The mailbox tier.** `lib/vcmailbox` carries the RTC property tags — get
 `0x0003_0087`, set `0x0003_8087`, with a two-word value buffer holding a
@@ -676,64 +676,90 @@ No QEMU vertical is possible — QEMU models no `VideoCore` — so the protocol
 and every fail-closed path are host-proven and the live channel is the on-metal
 acceptance item, exactly as for the rest of `plans/PI.md`'s mailbox work.
 
-**The I²C tier remains**: `lib/i2c`, `drivers/bus/i2c/bcm2835/`, and the
-`ds3231` / `pcf8523` / `pcf85063a` chip drivers. §5 fixes the *requirement* —
-one grant-restricted transfer endpoint per child, so a chip driver can never
-address a neighbour on the bus — and the mechanism that satisfies it is
-**settled below** rather than left to be re-derived, because I²C has no
-enumeration protocol and the obvious readings of "enumerated child" do not
-work:
+**The I²C tier.** §5 fixed the *requirement* — one grant-restricted transfer
+endpoint per child, so a chip driver can never address a neighbour on the bus
+— and I²C has no enumeration protocol to satisfy it with: a driver learns only
+its own grants, `hw_tree_read` is the privileged global inventory, and probing
+every address is forbidden and can be destructive. The shape that landed is
+**the parent carries the duty, the child carries the authority, and both come
+from the device tree**:
 
-- A driver learns only its own `HwResource` grants (`resource_grants`); there
-  is no per-driver view of its node's children, and `hw_tree_read` is the
-  privileged *global* inventory (`CAP_SYSINFO_HW`) — far more than a bus driver
-  should hold.
-- `hw_emit_node` publishes only under the emitter's own node and only
-  resources the emitter's own grants cover, so the endpoint authority a chip
-  driver receives *must* be minted from a resource the bus driver already
-  holds. The bus driver is therefore the emitter, and it must learn its
-  children from discovery.
-- Probing every address to find them is forbidden (§18.5) and can be
-  destructive on a write-only register block.
-
-The settled shape: **the parent carries the duty, the child carries the
-authority, and both come from the device tree.**
-
-- The generic FDT walk (`kernel/arch/api::fdtwalk`, shared by aarch64 and
-  riscv64 — do not fork it) recognises a **bus child** by the Devicetree
-  convention for a non-memory-mapped addressed bus: the parent declares
-  `#address-cells = <1>` and `#size-cells = <0>`, so a child's single `reg`
-  cell is its *bus address*, not an MMIO base. That is a Devicetree rule, not
-  an I²C or board rule, so it stays platform-neutral (§2.20).
-- For each such child the walk derives one endpoint id from the child's
-  hardware-tree node id (ids are unique per tree, so a reserved
-  `u32`-wide window is collision-free), and pushes:
-  - onto the **child** node, an existing `HwResourceKind::Endpoint` resource
-    naming that id — the chip driver's sole authority, so its endpoint *is* its
-    chip and it never sees or supplies a bus address;
-  - onto the **parent** node, one new `BusChild`-kind resource pairing that
-    endpoint id with the child's bus address — the bus driver's duty list. A
-    new `HwResourceKind` (append after `LinkAddress = 8`) is needed because the
-    two facts must arrive paired; `Endpoint` means "may submit", never "must
-    serve", so overloading it would be wrong. `HwResource` already carries
-    `flags`/`xlate` alongside `base`/`len` (see `Framebuffer`), so the pair
-    fits one record. Name it for the general case — any addressed,
-    non-enumerable bus (I²C, SPI chip-select, 1-Wire) has this exact shape.
-- Ordering needs nothing new: `mint_grant` does not require the endpoint to
-  exist, and a chip driver whose `ipc_call` lands before the bus driver has
-  bound climbs the same bounded doubling ladder `timed` uses for
-  `RTC_ENDPOINT`. `revoke_endpoint_grants` already withdraws the grant if the
-  bus driver dies, so authority cannot outlive the endpoint instance.
-
-With that fixed, the tier is: `lib/i2c` (the bus-agnostic transfer vocabulary
-— addressing, direction, register sequences, error taxonomy — in the shape
-`lib/usb` and `lib/virtio` hold protocol without device logic), a wire contract
-for the transfer endpoint beside `rtc_ipc`, `drivers/bus/i2c/bcm2835/` (the
-BSC: IRQ-driven via `irq_bind`/`irq_wait`, clock-stretch aware, a bounded
-fail-closed handshake timeout, one endpoint per tree-declared child), and the
-three chip drivers, each honouring its own oscillator-stop / clock-integrity
-flag over the **shared** BCD codec and `resolve_two_digit_year`. QEMU does not
-model the BSC, so each README states that no vertical is possible for the tier.
+- **`kernel/arch/api::fdtwalk`** (shared by aarch64 and riscv64) recognises a
+  bus child by the Devicetree convention for a non-memory-mapped addressed bus
+  — parent `#address-cells = <1>` with `#size-cells = <0>` — so it stays
+  platform-neutral. `/cpus` spells itself the same way, so a CPU node is
+  excluded by its own spec-defined `device_type`. Each such child's endpoint id
+  is `hwtree::bus_child_endpoint` over its hardware-tree node id; the child
+  node gets a plain `Endpoint` resource naming it and the **parent** gets a new
+  `HwResourceKind::BusChild = 9` pairing that id with the child's bus address
+  (`base`/`xlate`, the `Framebuffer` precedent for a paired record).
+- **The parent is emitted before its children, so the duties are read ahead.**
+  A cloned walk iterator replays the *same* emission predicate (`is_emitted`,
+  now the one definition `build_node` also applies) to predict the ids the walk
+  is about to assign. A child past the parent's `HW_NODE_MAX_RESOURCES` gets no
+  duty **and** no endpoint — the two halves can never disagree, and that chip
+  is simply left unbound and logged.
+- **Binding a bus-child endpoint requires the duty grant.** The block is
+  reserved (`ipc::is_reserved_endpoint`), and `call_create` additionally
+  resolves a `BusChild` grant covering the id against the *calling task*, so a
+  second privileged driver cannot claim a chip's endpoint first and feed its
+  driver forged registers. `covers` gives `BusChild ⊃ Endpoint(same id)`, which
+  is also what would let a bus driver forward the endpoint onto a node it
+  publishes.
+- **The wire carries no address.** `lib/abi::driver::i2c`'s `I2cPort` is one
+  *part*, not a bus, and `i2c_ipc`'s frame is two phase lengths plus a payload:
+  the bus driver takes the address from the duty grant paired with the endpoint
+  a request arrived on. A chip driver has no field in which to name a
+  neighbour, whatever it believes about the bus. `I2cAddress::from_bus_address`
+  narrows the grant's 64-bit field rather than truncating it, so a malformed
+  tree leaves a child unserved instead of pointing the controller elsewhere.
+- **`lib/i2c`** holds the register-transaction protocol (`Device`: block/single
+  read, block/single write, and the `update_one` read-modify-write that writes
+  only a change) plus `mock::MockPart`, the one register-file part double every
+  chip driver's host tests drive. `MAX_BLOCK_LEN` is derived from the seam's
+  own per-phase bound, never restated.
+- **`drivers/bus/i2c/bcm2835`** is the BSC: IRQ-driven through the host's
+  `wait_irq` park (which `VirtioHost::notify_wait` now also routes through, one
+  definition), one restricted-sender endpoint per duty, and a per-phase
+  deadline sized from the slowest bus rate the driver tolerates — a liveness
+  backstop for a wedged controller, not a bus-speed bound, since clock
+  stretching is bounded by the controller's own timeout register. Two facts
+  worth not re-deriving: **whether the address was acknowledged comes from
+  `DLEN`**, which reads back the bytes still to move once a transfer has begun
+  (the bytes the driver pushed into the FIFO say nothing — a write phase fills
+  it before the part answers); and **aborting a transfer needs the enable bit
+  dropped**, because the control register has no abort, so recovery disables,
+  clears, and re-enables. It does not touch the clock divider: the bus speed is
+  the board's, and nothing in discovery tells a driver what the part is rated
+  for. The BSC cannot emit a true repeated START — a documented limitation, so
+  a multi-master bus is out of scope.
+- **`drivers/rtc/ds3231`** (`maxim,ds3231`, and `maxim,ds1307` on the same
+  `0x00..=0x06` block), **`drivers/rtc/pcf8523`** (`nxp,pcf8523`), and
+  **`drivers/rtc/pcf85063a`** (`nxp,pcf85063a`). Each honours its own
+  oscillator-stop / clock-integrity flag by answering `Ok(None)` rather than
+  reporting registers it cannot vouch for, and clears the flag only with the
+  write that puts a real time in. The DS3231's century bit is masked off and
+  never read as a century — it is a carry the chip toggles when the year field
+  wraps. The two PCF parts put the chip in 24-hour mode at bring-up
+  (read-modify-write, so the board's other settings survive) because the mode
+  lives in a control register a previous owner could have left anywhere, while
+  still honouring a 12-hour *field* on read. `battery_backed` is evidence, not
+  a part number: the DS3231's own cell input is its purpose, the PCF8523 reads
+  its switch-over setting, and the PCF85063A has no such circuit and reports
+  `false`. An instant the two-digit year could not read back as itself is
+  refused on write.
+- **The 12-hour conversion is now the class's**
+  (`driver::rtc::{hour_from_twelve, twelve_from_hour}`), hoisted out of
+  `mc146818` rather than written a fourth time: which bit carries PM and
+  whether the field is BCD differ per chip, the arithmetic does not.
+- All four bundles ship in the flashable Pi store. **QEMU models no BSC**, so
+  no vertical is possible for the tier and each README says so; the protocol
+  and every fail-closed path are host-proven and the live bus is an on-metal
+  acceptance item.
+- Fixed in passing: the generated C header omitted `HwResourceKind::LinkAddress`
+  entirely. The emission now iterates `HwResourceKind::ALL` (asserted dense by a
+  unit test) through an exhaustive-match name function, so a kind cannot reach a
+  C consumer's header as an unnamed discriminant again.
 
 ### TS-5 — Service-control transport + `servicectl`
 The `Enable`/`Disable`/`Status` ops, the PID 1 control reactor and its

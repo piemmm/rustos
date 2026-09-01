@@ -564,10 +564,11 @@ tairix/
 │   │   └── arxfs/      # Native, POSIX-compliant, capability-aware FS.
 │   ├── input/
 │   ├── network/
-│   ├── rtc/            # Real-time clocks: pl031 (and the staged chip set).
+│   ├── rtc/            # Real-time clocks: pl031, goldfish, mc146818, rpi,
+│   │                    #   and the I2C chips ds3231/pcf8523/pcf85063a.
 │   ├── storage/
 │   └── bus/             # Bus drivers: virtio, mmio, usb/ (xhci, vl805),
-│                        #   pcie_brcm.
+│                        #   pcie_brcm, i2c/ (bcm2835).
 │
 ├── lib/                 # Shared no_std crates. The only place for common code.
 │   ├── abi/             # Stable user/kernel ABI types.
@@ -612,6 +613,7 @@ tairix/
 │   ├── greeter/         # Shared screen-authentication surface (login/lock).
 │   ├── help/            # Shared command-help engine.
 │   ├── hid/             # Arch-neutral HID boot-protocol decode.
+│   ├── i2c/             # I2C register-transaction protocol over the transfer seam.
 │   ├── icon/            # Shared desktop icons: glyph vocabulary, artwork cache,
 │   │                    #   and the shipped raster masters in `assets/`.
 │   ├── image/           # Fail-closed raster-image decoding (PNG).

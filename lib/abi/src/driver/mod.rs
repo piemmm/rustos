@@ -51,6 +51,7 @@ pub mod bus;
 pub mod display;
 pub mod dma;
 pub mod filesystem;
+pub mod i2c;
 pub mod input;
 pub mod mailbox;
 pub mod mmio;
@@ -68,6 +69,7 @@ pub mod virtio_mmio;
 pub mod virtio_pci;
 
 pub use dma::{DmaHost, DmaSlab, PoolId, SlabFreeFn};
+pub use i2c::{I2cAddress, I2cPort};
 pub use mailbox::MailboxChannel;
 pub use mmio::{MmioMapError, MmioMapper, RegisterWindow, WindowError};
 pub use msix::{MsiMessage, MsixBus};

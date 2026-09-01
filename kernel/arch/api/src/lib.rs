@@ -118,6 +118,12 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
+// The device-tree fixture builder the `fdtwalk` tests compose their trees
+// with returns owned blobs, and the collecting sink they walk into grows.
+// Test scaffolding only; the crate itself stays allocator-free.
+#[cfg(test)]
+extern crate std;
+
 pub mod backtrace;
 pub mod conformance;
 pub mod context;

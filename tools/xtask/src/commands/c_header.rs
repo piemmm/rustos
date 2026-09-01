@@ -694,23 +694,35 @@ fn hwtree_enum_macros(out: &mut String) {
     out.push('\n');
 
     out.push_str("/* Resource kinds (uint16_t). */\n");
-    for (name, kind) in [
-        ("MMIO", HwResourceKind::Mmio),
-        ("IRQ", HwResourceKind::Irq),
-        ("PORT", HwResourceKind::Port),
-        ("DMA", HwResourceKind::Dma),
-        ("BUS_WINDOW", HwResourceKind::BusWindow),
-        ("ENDPOINT", HwResourceKind::Endpoint),
-        ("SHARED", HwResourceKind::Shared),
-        ("FRAMEBUFFER", HwResourceKind::Framebuffer),
-    ] {
+    for kind in HwResourceKind::ALL {
         let _ = writeln!(
             out,
-            "#define TAIRIX_HW_RES_{name} ((uint16_t){}u)",
+            "#define TAIRIX_HW_RES_{} ((uint16_t){}u)",
+            resource_kind_name(*kind),
             kind.as_u16()
         );
     }
     out.push('\n');
+}
+
+/// The C spelling of one resource kind.
+///
+/// An exhaustive match over the ABI enum, so a kind added to `lib/abi`
+/// cannot reach a C consumer's header as an unnamed discriminant — the
+/// generator fails to compile until it is spelled.
+fn resource_kind_name(kind: HwResourceKind) -> &'static str {
+    match kind {
+        HwResourceKind::Mmio => "MMIO",
+        HwResourceKind::Irq => "IRQ",
+        HwResourceKind::Port => "PORT",
+        HwResourceKind::Dma => "DMA",
+        HwResourceKind::BusWindow => "BUS_WINDOW",
+        HwResourceKind::Endpoint => "ENDPOINT",
+        HwResourceKind::Shared => "SHARED",
+        HwResourceKind::Framebuffer => "FRAMEBUFFER",
+        HwResourceKind::LinkAddress => "LINK_ADDRESS",
+        HwResourceKind::BusChild => "BUS_CHILD",
+    }
 }
 
 /// Emit the `#[repr(C)]` hardware-tree record layouts as C typedefs.

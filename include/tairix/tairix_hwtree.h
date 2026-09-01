@@ -65,6 +65,8 @@
 #define TAIRIX_HW_RES_ENDPOINT ((uint16_t)5u)
 #define TAIRIX_HW_RES_SHARED ((uint16_t)6u)
 #define TAIRIX_HW_RES_FRAMEBUFFER ((uint16_t)7u)
+#define TAIRIX_HW_RES_LINK_ADDRESS ((uint16_t)8u)
+#define TAIRIX_HW_RES_BUS_CHILD ((uint16_t)9u)
 
 /* One match key on a node. Mirrors the #[repr(C)] layout; the packed
 * little-endian wire size is TAIRIX_HW_MATCH_KEY_WIRE_LEN. */

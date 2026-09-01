@@ -205,6 +205,9 @@ const SOURCES: &[&str] = &[
     "Intel",
     "AMD",
     "SDM",
+    "NXP",
+    "Maxim",
+    "Broadcom",
     // Wire and file formats.
     "DHCP",
     "DNS",
@@ -745,6 +748,8 @@ mod tests {
             "//! (`docs/src/filesystem/arxfs-spec.md` §11) queries the array.",
             "/// Split virtqueue management (virtio 1.1 §2.6).",
             "// the spec §13 authority treatment",
+            "//! Reference: NXP PCF8523 data sheet, §8 (register overview).",
+            "//! Reference: Maxim DS3231 data sheet, §9 (register map).",
         ] {
             assert!(
                 reasons(body).is_empty(),

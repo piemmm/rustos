@@ -104,6 +104,9 @@ time.
 | `goldfish` | `drivers/rtc/goldfish`  | Google Goldfish RTC (`google,goldfish-rtc`)  | shipped in the riscv64 driver store, with the same vertical over this port's own chip |
 | `mc146818` | `drivers/rtc/mc146818`  | PC CMOS clock (`motorola,mc146818`)          | shipped in the x86_64 driver store, matching the node the legacy-fallback discovery path emits; its QEMU vertical waits on the first x86_64 full-boot harness |
 | `rpi`      | `drivers/rtc/rpi`       | Pi 5 PMIC clock (`raspberrypi,rpi-rtc`)      | shipped in the flashable Pi driver store; host-proven against the mock firmware, and no QEMU vertical is possible because QEMU models no `VideoCore` |
+| `ds3231`   | `drivers/rtc/ds3231`    | Maxim DS3231 / DS1307 (`maxim,ds3231`, `maxim,ds1307`) | shipped in the flashable Pi driver store; host-proven against the shared mock part, and no QEMU vertical is possible because QEMU models no BSC |
+| `pcf8523`  | `drivers/rtc/pcf8523`   | NXP PCF8523 (`nxp,pcf8523`)                  | as `ds3231` |
+| `pcf85063a`| `drivers/rtc/pcf85063a` | NXP PCF85063A (`nxp,pcf85063a`)              | as `ds3231` |
 
 The CMOS clock is the class's only port-addressed part, and the only one whose
 node is a legacy fallback rather than a discovered one: no ACPI table
@@ -134,6 +137,41 @@ success code while never processing the tag. `lib/vcmailbox` requires the
 per-tag response bit, so such a reply is reported as a fault rather than
 believed as a 1970 reading, and the driver never waits on the mailbox for one.
 
-`plans/TIMESYNC.md` TS-4 stages the remaining Raspberry Pi tier: the I²C HAT
-chips, reached through a bus path (`lib/i2c` plus a BSC bus driver) that does
-not exist yet.
+## The I²C tier
+
+The three calendar chips above are the HAT parts a Pi 3 or Pi 4 adds, and they
+are reached through a bus path rather than an address of their own:
+`drivers/bus/i2c/bcm2835` drives the Broadcom Serial Controller, and
+`lib/i2c` holds the register-transaction protocol all three compose over. None
+of the three owns a register window, so none requests `CAP_MMIO_MAP` — their
+whole authority is one transfer endpoint.
+
+I²C carries no enumeration protocol, and probing every address is forbidden
+(§18.5) and can be destructive on a write-only register block, so a bus's
+children are known only from the platform's device tree. Discovery therefore
+splits each child in two, and the shared FDT walk
+(`tairix_arch_api::fdtwalk`) recognises one by the Devicetree convention for a
+non-memory-mapped addressed bus — the parent declares `#address-cells = <1>`
+with `#size-cells = <0>`, so a child's single `reg` cell is its bus address
+rather than a window:
+
+* the **bus** node gets one `HwResourceKind::BusChild` resource per child,
+  pairing a transfer-endpoint id (derived from the child's hardware-tree node
+  id, so the mapping is collision-free) with that child's bus address — the
+  bus driver's duty list;
+* the **child** node gets an ordinary endpoint grant naming the same id — the
+  chip driver's sole authority.
+
+The transfer wire carries no address at all: the bus driver takes it from the
+duty grant paired with the endpoint a request arrived on. A chip driver
+therefore has no field in which it could name a neighbour, and a compromised
+one still reaches only its own part. The endpoint block is reserved, and the
+kernel refuses to bind one unless the caller holds the matching duty grant, so
+a bystander cannot claim a chip's endpoint first and feed its driver forged
+registers either.
+
+A child whose duty the bus node's resource list could not hold gets no
+endpoint, so the two halves can never disagree: that chip is simply left
+unbound and logged, which is what §18.4 asks of any node with no driver.
+
+`plans/TIMESYNC.md` TS-4 carries the staged design.

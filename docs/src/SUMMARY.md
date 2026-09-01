@@ -68,6 +68,7 @@
   - [`tairix-greeter`](./lib/greeter.md)
   - [`tairix-help`](./lib/help.md)
   - [`tairix-hid`](./lib/hid.md)
+  - [`tairix-i2c`](./lib/i2c.md)
   - [`tairix-icon`](./lib/icon.md)
   - [`tairix-image`](./lib/image.md)
   - [`tairix-keymap`](./lib/keymap.md)

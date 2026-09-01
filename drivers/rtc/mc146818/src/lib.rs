@@ -45,7 +45,10 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
-use tairix_abi::driver::rtc::{bcd_to_bin, bin_to_bcd, resolve_two_digit_year, Rtc, RtcStatus};
+use tairix_abi::driver::rtc::{
+    bcd_to_bin, bin_to_bcd, hour_from_twelve, resolve_two_digit_year, twelve_from_hour, Rtc,
+    RtcStatus,
+};
 use tairix_abi::time::{CivilTime, Duration64, Time64};
 use tairix_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
 
@@ -236,38 +239,29 @@ impl Format {
     /// Decode the hours register to `0..=23`.
     ///
     /// In 12-hour mode bit 7 is the PM flag rather than part of the value, so
-    /// it is masked off before the digits are decoded; midnight is stored as
-    /// 12 AM and noon as 12 PM, which is why 12 maps to 0 before the PM
-    /// offset is applied.
+    /// it is masked off before the digits are decoded; the clock arithmetic
+    /// itself is the class's, shared with every other calendar chip.
     fn hour(self, raw: u8) -> Option<u8> {
         if self.twenty_four_hour {
             let hour = self.field(raw)?;
             (hour < 24).then_some(hour)
         } else {
             let pm = raw & HOUR_PM != 0;
-            let twelve = self.field(raw & !HOUR_PM)?;
-            if !(1..=12).contains(&twelve) {
-                return None;
-            }
-            let hour = twelve % 12;
-            Some(if pm { hour + 12 } else { hour })
+            hour_from_twelve(self.field(raw & !HOUR_PM)?, pm)
         }
     }
 
     /// Encode `hour` (`0..=23`) into the hours register.
     fn encode_hour(self, hour: u8) -> Option<u8> {
-        if hour > 23 {
-            return None;
-        }
         if self.twenty_four_hour {
-            return self.encode_field(hour);
+            return if hour > 23 {
+                None
+            } else {
+                self.encode_field(hour)
+            };
         }
-        let twelve = match hour % 12 {
-            0 => 12,
-            other => other,
-        };
-        let pm = if hour >= 12 { HOUR_PM } else { 0 };
-        Some(self.encode_field(twelve)? | pm)
+        let (twelve, pm) = twelve_from_hour(hour)?;
+        Some(self.encode_field(twelve)? | if pm { HOUR_PM } else { 0 })
     }
 }
 

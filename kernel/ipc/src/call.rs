@@ -336,6 +336,26 @@ impl CallEndpoint {
         )
     }
 
+    /// Record a bind refusal a caller resolved for itself, so every denied
+    /// bind reaches the log through one event id.
+    ///
+    /// The kernel's `call_create` handler owns one authority this module
+    /// cannot see: a per-bus-child transfer endpoint is served only by the
+    /// driver holding that child's duty grant, which lives in the address-space
+    /// registry. It refuses such a bind before the endpoint exists and calls
+    /// this so the decision is auditable exactly like a capability refusal.
+    pub fn record_create_denied<S: Sink + ?Sized>(id: EndpointId, audit: &S) {
+        let mut id_buf = [0u8; 16];
+        record(
+            audit,
+            AuditEvent::CallEndpointCreateDenied,
+            &[Field {
+                key: "endpoint",
+                value: tairix_log::FieldValue::Str(format_hex_u64(id.0, &mut id_buf)),
+            }],
+        );
+    }
+
     /// The one create path both public constructors share.
     /// `reserved_bind_attested` is the handler's kernel-attested
     /// alternative authority for a reserved id (see

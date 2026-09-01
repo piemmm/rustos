@@ -7765,6 +7765,25 @@ where
         let restricted_sender = !send_set.is_empty();
         let endpoint_id = endpoint;
 
+        // A per-bus-child transfer endpoint is *per-node* authority, not a
+        // machine-wide rendezvous: discovery pairs each child's endpoint id
+        // with a `BusChild` duty resource on its own bus's node, so the
+        // driver the kernel granted that duty is the one entitled to serve
+        // it. Resolved against the caller's own minted grants — never a
+        // claim — so a second privileged driver cannot bind a chip's
+        // endpoint first and feed its driver forged registers. Refused
+        // before the endpoint exists, and audited like any other denied
+        // bind.
+        if tairix_abi::hwtree::is_bus_child_endpoint(endpoint_id)
+            && !self
+                .aspaces
+                .read()
+                .grant_covers(caller.process(), &HwResource::endpoint(endpoint_id))
+        {
+            CallEndpoint::record_create_denied(EndpointId(endpoint_id), self.audit);
+            return Err(Errno::PermissionDenied);
+        }
+
         // Build the endpoint owned by the calling task. `CallEndpoint::create`
         // runs the bind-time authority checks against the caller's effective
         // set *before* the endpoint exists: the
@@ -30624,6 +30643,63 @@ mod tests {
             .read()
             .grant_covers(ProcessId(5), &tairix_abi::HwResource::endpoint(id + 1)));
         crate::callreg::unregister(EndpointId(id));
+    }
+
+    #[test]
+    fn call_create_admits_a_bus_child_endpoint_only_to_the_driver_holding_its_duty() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = call_aspace(&one_cap_image(CapabilityId::IPC_ENDPOINT));
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(9), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(9, &[CapabilityId::IPC_BIND_PRIVILEGED], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(9),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        let served = tairix_abi::hwtree::bus_child_endpoint(41);
+        let neighbour = tairix_abi::hwtree::bus_child_endpoint(42);
+
+        // The privileged-bind capability alone is not enough: a driver with
+        // no duty for this child cannot bind its transfer endpoint and feed
+        // the chip's driver forged registers.
+        assert_eq!(
+            h.call_create(&ctx, served, 0x1000, 0x2000, 64, 64, 4),
+            Err(Errno::PermissionDenied)
+        );
+        assert!(crate::callreg::lookup(EndpointId(served)).is_none());
+
+        // Granted the duty discovery paired with that child, the same
+        // driver binds it…
+        aspaces.write().mint_grant(
+            ProcessId(9),
+            tairix_abi::HwResource::bus_child(served, 0x68),
+        );
+        assert_eq!(
+            h.call_create(&ctx, served, 0x1000, 0x2000, 64, 64, 4),
+            Ok(0)
+        );
+
+        // …and still cannot bind the child next to it on the same bus.
+        assert_eq!(
+            h.call_create(&ctx, neighbour, 0x1000, 0x2000, 64, 64, 4),
+            Err(Errno::PermissionDenied)
+        );
+        crate::callreg::unregister(EndpointId(served));
     }
 
     /// Register a grant-restricted endpoint (required send cap
