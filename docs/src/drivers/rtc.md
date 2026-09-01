@@ -102,7 +102,7 @@ time.
 |------------|-------------------------|----------------------------------------------|--------|
 | `pl031`    | `drivers/rtc/pl031`     | ARM PrimeCell PL031 (`arm,pl031`)            | shipped in the aarch64 driver store; its QEMU vertical proves the clock is set `Firmware` before any network exists |
 | `goldfish` | `drivers/rtc/goldfish`  | Google Goldfish RTC (`google,goldfish-rtc`)  | shipped in the riscv64 driver store, with the same vertical over this port's own chip |
-| `mc146818` | `drivers/rtc/mc146818`  | PC CMOS clock (`motorola,mc146818`)          | shipped in the x86_64 driver store, matching the node the legacy-fallback discovery path emits; its QEMU vertical waits on the first x86_64 full-boot harness |
+| `mc146818` | `drivers/rtc/mc146818`  | PC CMOS clock (`motorola,mc146818`)          | shipped in the x86_64 driver store, matching the node the legacy-fallback discovery path emits; its QEMU vertical proves the same clock chain over the port-I/O trap, the one path neither MMIO sibling exercises |
 | `rpi`      | `drivers/rtc/rpi`       | Pi 5 PMIC clock (`raspberrypi,rpi-rtc`)      | shipped in the flashable Pi driver store; host-proven against the mock firmware, and no QEMU vertical is possible because QEMU models no `VideoCore` |
 | `ds3231`   | `drivers/rtc/ds3231`    | Maxim DS3231 / DS1307 (`maxim,ds3231`, `maxim,ds1307`) | shipped in the flashable Pi driver store; host-proven against the shared mock part, and no QEMU vertical is possible because QEMU models no BSC |
 | `pcf8523`  | `drivers/rtc/pcf8523`   | NXP PCF8523 (`nxp,pcf8523`)                  | as `ds3231` |

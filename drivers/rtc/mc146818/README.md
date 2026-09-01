@@ -102,4 +102,7 @@ one, a flat backup cell, the century register being ignored, the
 two-digit-year window in both directions, `set` round-tripping in all four
 formats with `SET` raised and lowered, a mid-write refusal still releasing the
 chip, a year outside the window refused whole, and pre-1970 / post-2038
-instants. The end-to-end autoload path is the x86_64 QEMU clock vertical.
+instants. The end-to-end autoload path — node synthesis, the signed-bundle
+autoload, the granted port reads, and `timed` applying the reading — is
+proven by `tests/integration/rtc_mc146818_qemu_x86_64`, which gates on the
+applied second landing in the window the harness pinned the emulated chip to.

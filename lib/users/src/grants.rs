@@ -171,6 +171,11 @@ pub const SESSION_BASELINE: &[CapabilityId] = &[
 ///   (`plans/FIX-IO.md` `IO6f`). It overwrites disks and changes what a
 ///   mounted filesystem is made of, so it belongs to whoever administers
 ///   the machine's storage rather than to any session that merely uses it.
+/// * `CAP_SERVICE_CONTROL` — drive a service manager's runtime lifecycle
+///   over its control endpoint (`servicectl`). Stopping the device manager,
+///   the network stack, or the clock affects every principal on the machine
+///   rather than the caller's own work, so it is administrative; an ordinary
+///   session holding it could disable most of the system.
 pub const ADMINISTRATIVE_SET: &[CapabilityId] = &[
     CapabilityId::USER_ADMIN,
     CapabilityId::FS_CHOWN,
@@ -189,6 +194,7 @@ pub const ADMINISTRATIVE_SET: &[CapabilityId] = &[
     CapabilityId::PROC_CONTROL,
     CapabilityId::SYSTEM_POWER,
     CapabilityId::STORAGE_ADMIN,
+    CapabilityId::SERVICE_CONTROL,
 ];
 
 /// The `devmgr` service account's grant ceiling: read the hardware tree,
@@ -405,7 +411,7 @@ mod tests {
     #[test]
     fn administrator_ceiling_is_pinned() {
         let set = administrator_ceiling();
-        assert_eq!(set.len(), 26);
+        assert_eq!(set.len(), 27);
         for cap in SESSION_BASELINE {
             assert!(set.contains(*cap), "{cap:?} missing from the ceiling");
         }
@@ -427,6 +433,7 @@ mod tests {
             CapabilityId::PROC_CONTROL,
             CapabilityId::SYSTEM_POWER,
             CapabilityId::STORAGE_ADMIN,
+            CapabilityId::SERVICE_CONTROL,
         ] {
             assert!(set.contains(cap), "{cap:?} missing from the ceiling");
         }

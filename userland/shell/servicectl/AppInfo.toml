@@ -1,0 +1,20 @@
+# Signed-AppInfo manifest source for the `servicectl` service-control
+# command app (plans/NEW-SERVICEMANAGER.md SVC-8). Discovered by the build's
+# app-bundle composer; the capability list is the bundle's request,
+# intersected with the launching user's grants. Deliberately above the
+# session baseline: only an account whose ceiling carries
+# CAP_SERVICE_CONTROL (an administrator) ends up with a working tool — on
+# any other account the intersection strips it and the kernel refuses the
+# call to the control endpoint outright. CAP_FS_ACCESS exists solely so the
+# short-help switches can read the bundle's own Help/ tree through the
+# secured VFS, which still authorises every path per-inode under the
+# caller's attested identity.
+id = "os.tairix.servicectl"
+name = "servicectl"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_SERVICE_CONTROL", "CAP_FS_ACCESS"]
+# This bundle's own icon master in its Resources/ (plans/ICONS.md). SVG is
+# the preferred form: one vector file serves every slot and every UI scale
+# exactly, so no slot ever upscales a raster.
+library-icon = "servicectl.svg"

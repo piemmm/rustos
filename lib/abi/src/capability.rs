@@ -636,6 +636,29 @@ impl CapabilityId {
     /// implied by any other grant.
     pub const APPDATA_ADMIN: Self = Self(44);
 
+    /// Drive a service manager's runtime lifecycle over its control
+    /// endpoint — start a down service, stop a running one.
+    ///
+    /// The manager binds [`crate::service_control::SERVICE_CONTROL_ENDPOINT`]
+    /// as a restricted-sender call endpoint requiring this capability, so the
+    /// kernel refuses a call from a task that does not hold it and the manager
+    /// never re-checks a caller-supplied claim. Reaching the endpoint *is* the
+    /// authority: a holder can stop any service the manager owns, which on the
+    /// system manager means the device manager, the network stack, and the
+    /// clock — enough to disable most of the machine — so it is granted to the
+    /// control tool and never held ambiently by a session or an app.
+    ///
+    /// It guards a whole class — every service of every manager instance the
+    /// holder can reach — rather than one service or one method, and no
+    /// existing capability expresses it: `CAP_PROC_CONTROL` signals an
+    /// individual process the holder already knows the pid of, which is
+    /// neither the same reach (it cannot start anything, and cannot name a
+    /// service) nor the same principal. A per-user manager confines the blast
+    /// radius further by its own authority scope, which this capability does
+    /// not widen: holding it never grants authority over a service outside the
+    /// manager's scope.
+    pub const SERVICE_CONTROL: Self = Self(45);
+
     /// Every capability assigned a canonical name in `abi-v1`, paired with
     /// that name.
     ///
@@ -690,6 +713,7 @@ impl CapabilityId {
         (Self::STORAGE_ADMIN, "CAP_STORAGE_ADMIN"),
         (Self::SANDBOX_SPAWN, "CAP_SANDBOX_SPAWN"),
         (Self::APPDATA_ADMIN, "CAP_APPDATA_ADMIN"),
+        (Self::SERVICE_CONTROL, "CAP_SERVICE_CONTROL"),
     ];
 
     /// The canonical `CAP_*` name of this capability, or [`None`] for an
@@ -828,6 +852,7 @@ mod tests {
         assert_eq!(CapabilityId::STORAGE_ADMIN.as_u16(), 42);
         assert_eq!(CapabilityId::SANDBOX_SPAWN.as_u16(), 43);
         assert_eq!(CapabilityId::APPDATA_ADMIN.as_u16(), 44);
+        assert_eq!(CapabilityId::SERVICE_CONTROL.as_u16(), 45);
     }
 
     #[test]
@@ -871,15 +896,15 @@ mod tests {
 
     #[test]
     fn every_assigned_id_has_a_name() {
-        // Capabilities 1..=44 are assigned in abi-v1; each must carry a
+        // Capabilities 1..=45 are assigned in abi-v1; each must carry a
         // canonical name so `getcap`/`setcap` can render and accept it.
-        for raw in 1..=44 {
+        for raw in 1..=45 {
             let cap = CapabilityId::from_raw(raw).expect("in range");
             assert!(cap.name().is_some(), "capability {raw} has no name");
         }
         // …and the assigned range stops there: the next id is free, so a new
         // capability cannot silently reuse one.
-        assert_eq!(CapabilityId::from_raw(45).expect("in range").name(), None);
+        assert_eq!(CapabilityId::from_raw(46).expect("in range").name(), None);
     }
 
     #[test]

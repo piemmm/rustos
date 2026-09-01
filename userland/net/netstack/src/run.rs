@@ -176,7 +176,8 @@ mod program {
 
     /// Nanoseconds from `now` until the engines' earliest deadline —
     /// folding the per-interface deadlines and every connected stream's
-    /// TCP timer — or `u64::MAX` (park indefinitely) when nothing is armed.
+    /// TCP timer — or [`tairix_abi::WAITSET_TIMEOUT_NONE`] (park
+    /// indefinitely) when nothing is armed.
     fn timeout_ns(stack: &Netstack, sockets: &SocketService) -> u64 {
         let deadline = match (stack.next_deadline(), sockets.stream_next_deadline()) {
             (Some(a), Some(b)) => {
@@ -187,7 +188,7 @@ mod program {
                 }
             }
             (Some(d), None) | (None, Some(d)) => d,
-            (None, None) => return u64::MAX,
+            (None, None) => return tairix_abi::WAITSET_TIMEOUT_NONE,
         };
         span_nanos(deadline)
             .saturating_sub(span_nanos(now()))

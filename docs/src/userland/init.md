@@ -18,8 +18,11 @@ and the account, never a capability set.
 > below have landed, as has the **authority-scope boundary** that confines
 > a per-user manager to its own user (SVC-6, *Authority scope* below). The
 > engine cores of on-demand endpoint activation, idle linger, and
-> stop/shutdown ordering are in place; binding them to a live transport
-> (and spawning the per-user manager at session start) is still ahead.
+> stop/shutdown ordering are in place, and the **control transport** that
+> serves them is live (SVC-8: the wait-set park, `CAP_SERVICE_CONTROL`, and
+> the `servicectl` tool). Persistent enablement, the live heartbeat
+> transport, and spawning the per-user manager at session start are still
+> ahead.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and depends only on
 the audited `lib/*` crates `tairix-abi`, `tairix-caps`, and `tairix-log`,
@@ -260,13 +263,23 @@ closed and auditing every refusal (`ControlError`):
   with a relaunch).
 
 An unknown or policy-invalid name fails closed as
-`ControlError::UnknownService`. This is the **engine core**; the live
-transport — a per-manager wait-set reactor that serves the endpoint
-alongside child reaping and one-shot timers, the `servicectl` control tool
-that holds the send capability, and the `CAP_SERVICE_CONTROL` grant that
-gates it — lands with the loader/kernel transport seam (SVC-5/SVC-8), the
-same staging the readiness (`notify`), activation (`connect`), and restart
-paths follow.
+`ControlError::UnknownService`.
+
+**The transport is live.** PID 1 binds the endpoint restricted-sender
+requiring `CAP_SERVICE_CONTROL` and serves it from its single park, and
+[`servicectl`](./servicectl.md) is the first holder. There is no second
+dispatch loop: the session supervisor's blocking wait-on-children became a
+wait-set park carrying the control endpoint, any-child readiness, and a
+timeout folded from the engine's own `Init::next_deadline`, so a control
+request is answered while the login session sits blocked on its console and an
+idle machine takes no timer interrupt. When the park lapses,
+`Init::expire_due` runs every deadline that is now due — one park can find
+several — and guarantees each is afterwards consumed or dropped, which is what
+makes the derived park length safe rather than a zero-length spin.
+
+`Enable`/`Disable` and `Status` are deliberately **not** on this endpoint:
+enablement mutates the registration store and status is served through the
+System Information API, never a control-reply scrape.
 
 ## Liveness watchdog
 
@@ -393,9 +406,11 @@ over the `lib/rt` userland heap (`plans/NEW-SERVICEMANAGER.md` SVC-A): the
 `Run` binary builds an `Init` engine over the real syscall seams — `spawn_as`
 for launching a service as its account, `signal` for the graceful-then-forced
 stop, `log_emit` (via `tairix_rt::LogSink`) for the audit sink, and a small
-`LoopReaper` mailbox the wait loop fills so `Init::reap` drains an exited
+`LoopReaper` mailbox the park loop fills so `Init::reap` drains an exited
 child without a second `wait` — never a second, parallel service manager
-(`AGENTS.md` §2.2). The tiny startup-config parser still lives alongside the
+(`AGENTS.md` §2.2). That park is the wait-set described above, so the same
+loop that supervises sessions also answers the control endpoint and runs the
+engine's one-shot deadlines. The tiny startup-config parser still lives alongside the
 binary (`src/startup.rs`) rather than in the library.
 
 What `init` should do at user-mode entry is **data, not control flow**: a

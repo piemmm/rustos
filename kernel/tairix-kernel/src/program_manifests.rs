@@ -480,7 +480,11 @@ pub const USERS_TOOL_MANIFEST: &[CapabilityId] = &[
 /// boot-installed identity table), and `CAP_LOG_EMIT` so its service
 /// manager can record structured service-lifecycle events (skip, spawn,
 /// ready) through the diagnostic sink — the same authority the boot
-/// services it launches (`login`, `devmgr`, `sysinfod`) already carry.
+/// services it launches (`login`, `devmgr`, `sysinfod`) already carry, and
+/// `CAP_IPC_BIND_PRIVILEGED` to bind the reserved service-control endpoint it
+/// serves as the system service manager — a well-known id a squatter could
+/// otherwise claim ahead of it, bound restricted-sender so only a
+/// `CAP_SERVICE_CONTROL` holder can call it.
 /// As a system program its manifest is
 /// also its ceiling (there is no account row for the system principal),
 /// and each child it spawns is bounded by that child's *own* registered
@@ -491,6 +495,7 @@ pub const INIT_MANIFEST: &[CapabilityId] = &[
     CapabilityId::PROC_SPAWN,
     CapabilityId::SPAWN_AS_USER,
     CapabilityId::LOG_EMIT,
+    CapabilityId::IPC_BIND_PRIVILEGED,
 ];
 
 #[cfg(test)]
@@ -904,6 +909,7 @@ mod tests {
                 CapabilityId::PROC_SPAWN,
                 CapabilityId::SPAWN_AS_USER,
                 CapabilityId::LOG_EMIT,
+                CapabilityId::IPC_BIND_PRIVILEGED,
             ])
         );
     }
@@ -1151,6 +1157,21 @@ mod tests {
         CapabilityId::FS_ACCESS,
         CapabilityId::SYSINFO_HW,
         CapabilityId::STORAGE_ADMIN,
+    ];
+
+    // The service-control tool `servicectl` (plans/NEW-SERVICEMANAGER.md
+    // SVC-8): the console write for its outcome line, `CAP_FS_ACCESS` so the
+    // short-help switches can read the bundle's own Help/ tree, and
+    // `CAP_SERVICE_CONTROL`, which is what lets the kernel admit its call to
+    // the manager's restricted-sender control endpoint at all. Deliberately
+    // above the session baseline: on an account whose ceiling lacks it the
+    // intersection strips the capability and the kernel refuses the call, so
+    // the tool cannot even reach the manager to be told no. Not an embedded
+    // spawn-floor program, so the list lives only in this pin.
+    const SERVICECTL_TOOL_REQUEST: &[CapabilityId] = &[
+        CapabilityId::CONSOLE_WRITE,
+        CapabilityId::SERVICE_CONTROL,
+        CapabilityId::FS_ACCESS,
     ];
 
     // The device-inventory listing tools `lspci` and `lsusb`
@@ -1440,6 +1461,7 @@ mod tests {
             ("rmdir", ProgramKind::Command, PURE_TOOL_REQUEST),
             ("seatmgr", ProgramKind::Service, SEATMGR_MANIFEST),
             ("seq", ProgramKind::Command, PURE_TOOL_REQUEST),
+            ("servicectl", ProgramKind::Command, SERVICECTL_TOOL_REQUEST),
             ("sleep", ProgramKind::Command, PURE_TOOL_REQUEST),
             ("ss", ProgramKind::Command, SS_TOOL_REQUEST),
             ("stat", ProgramKind::Command, PURE_TOOL_REQUEST),

@@ -1,0 +1,45 @@
+[package]
+name = "tairix-servicectl"
+description = "TAIRiX `servicectl` CLI: drive a service manager's runtime lifecycle over the capability-gated service-control endpoint (`plans/NEW-SERVICEMANAGER.md` SVC-8)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The `Run` binary's freestanding userland runtime (`tairix-rt`) is an
+# optional, on-by-default build feature, mirroring `tairix-users-cli`. Host
+# tooling builds only the behaviour *library*, so the host test build never
+# pulls the userland runtime's `_start` / `#[global_allocator]` / panic
+# handler.
+[features]
+default = ["program"]
+program = ["dep:tairix-rt"]
+
+# The package is both the `tairix-servicectl` behaviour library (below) and
+# the `Run` entry-point binary of the `servicectl` tool.
+[[bin]]
+name = "tairix-servicectl-run"
+path = "src/run.rs"
+
+[dependencies]
+# The control-endpoint wire contract, the lifecycle vocabulary, and the
+# stable `Errno` set: the tool encodes through these ABI types and invents no
+# parallel format or error set.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The one help engine: locale fallback, the bounded structured-Markdown
+# parser, and the shared own-bundle short-help render the `-h`/`-?` switches
+# use.
+tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
+
+# For the freestanding `Run` binary only: the userland runtime `tairix-rt`
+# (`_start`, canary, panic handler, `mem_map` allocator, syscall wrappers).
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+# The freestanding `Run` binary also enables the help engine's syscall-backed
+# own-bundle `HelpSource` (`BundleHelp`), shared by every command app.
+tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }

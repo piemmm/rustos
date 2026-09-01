@@ -64,5 +64,6 @@
 #define TAIRIX_CAP_STORAGE_ADMIN ((uint16_t)42u)
 #define TAIRIX_CAP_SANDBOX_SPAWN ((uint16_t)43u)
 #define TAIRIX_CAP_APPDATA_ADMIN ((uint16_t)44u)
+#define TAIRIX_CAP_SERVICE_CONTROL ((uint16_t)45u)
 
 #endif /* TAIRIX_CAPABILITY_H */

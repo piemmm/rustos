@@ -6,10 +6,17 @@
 //! the debug log, with no session), else the discovered UART — and reports
 //! how many exist through the `console_count` syscall. PID 1 launches the
 //! configured session program once per console with `spawn`'s explicit
-//! console selector and supervises the whole set with wait-any: whichever
-//! session exits is reaped and relaunched on **its own** console, within a
-//! per-console crash-loop budget (never an unbounded
-//! `spawn` loop).
+//! console selector and supervises the whole set from **one** park:
+//! whichever session exits is reaped and relaunched on **its own** console,
+//! within a per-console crash-loop budget (never an unbounded `spawn` loop).
+//!
+//! That park is multiplexed rather than a wait on children alone, because
+//! PID 1 is also the service manager's control surface and the owner of its
+//! one-shot timers. A wait on children would leave a control request
+//! unanswered until some unrelated process happened to exit; a second loop
+//! or a poll between the two would be the cooperative dispatch the charter
+//! forbids. So there is one loop, and [`Sessions::wait_next`] reports which
+//! of the three woke it.
 //!
 //! The long-running **services** (the System Information, network-stack,
 //! device-manager, and seat-manager services, today) are **not** supervised
@@ -85,6 +92,30 @@ pub trait Services {
     /// abandoned, so a perpetual service holds PID 1 up rather than the
     /// supervisor declaring [`Outcome::Exhausted`].
     fn any_running(&self) -> bool;
+
+    /// Nanoseconds until the engine's soonest armed one-shot, or
+    /// `WAITSET_TIMEOUT_NONE` when nothing is armed.
+    ///
+    /// The loop passes this straight to [`Sessions::wait_next`], so a manager
+    /// with no pending linger, grace, restart, or watchdog deadline waits
+    /// indefinitely and the machine takes no timer interrupt.
+    fn next_timeout_ns(&mut self) -> u64;
+
+    /// Answer one pending request on the service-control endpoint.
+    ///
+    /// Called when the wait reports the endpoint ready. The engine validates
+    /// the request and replies; the loop neither reads nor interprets the
+    /// wire, so a malformed or unauthorised request cannot affect session
+    /// supervision.
+    fn serve_control(&mut self);
+
+    /// Run every one-shot deadline that has lapsed.
+    ///
+    /// Called when the wait lapses at the deadline
+    /// [`next_timeout_ns`](Self::next_timeout_ns) derived. The engine
+    /// guarantees each wakeup either consumes or drops every lapsed deadline,
+    /// so this loop cannot be woken twice for the same one.
+    fn expire_deadlines(&mut self);
 }
 
 /// The syscalls the supervisor drives, as a seam so the policy is
@@ -101,9 +132,20 @@ pub trait Sessions {
     /// and resolves the credential from its boot-installed identity
     /// table), returning the PID or `-errno`.
     fn spawn_at(&mut self, path: &[u8], console: u32, uid: u32) -> i64;
-    /// `wait` with `WAIT_PID_ANY`: block until any child exits, reap it, and
-    /// return its PID (writing the exit code to `status`), or `-errno`.
-    fn wait_any(&mut self, status: &mut i32) -> i64;
+    /// Wait for whichever supervised event happens next, parking for at most
+    /// `timeout_ns` (`WAITSET_TIMEOUT_NONE` to park indefinitely).
+    ///
+    /// PID 1 has three things to wake for — a child exiting, a request on the
+    /// service-control endpoint, and a lapsed one-shot deadline — and it must
+    /// wake for whichever comes first. A blocking wait on children alone
+    /// would leave a control request unanswered until some unrelated process
+    /// happened to exit, and a deadline unserved indefinitely; polling
+    /// between them would peg a core. So the seam is one multiplexed park and
+    /// the backing is a wait-set.
+    ///
+    /// For [`Woke::Child`] the child has been reaped and its exit code
+    /// written to `status`.
+    fn wait_next(&mut self, timeout_ns: u64, status: &mut i32) -> Woke;
     /// State the reason a launch was refused: `spawn_at` for `path` on
     /// `console` returned the negative `err` (`-errno`). PID 1 abandons the
     /// entry and boots on, so the refusal must land somewhere a user can
@@ -111,6 +153,24 @@ pub trait Sessions {
     /// (fd 2, the inherited diagnostic stream); a silent skip would hide a
     /// dead service behind a working-looking boot.
     fn report_launch_failure(&mut self, path: &[u8], console: u32, err: i64);
+}
+
+/// What one [`Sessions::wait_next`] park observed.
+///
+/// A closed set: PID 1 wakes for a child exit, a service-control request, or
+/// a lapsed deadline, and reports a failed wait rather than guessing.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Woke {
+    /// A child exited and has been reaped; its PID, with the exit code in the
+    /// caller's `status` out-parameter.
+    Child(u64),
+    /// The service-control endpoint has a request waiting to be answered.
+    Control,
+    /// The park lapsed at the deadline the caller passed.
+    Deadline,
+    /// The park itself failed (`-errno`) — a kernel-state inconsistency PID 1
+    /// surfaces rather than continuing blindly.
+    Failed,
 }
 
 /// Why [`supervise`] returned (PID 1 never returns while a
@@ -196,15 +256,24 @@ impl Slot<'_> {
 ///    session is reported through [`Sessions::report_launch_failure`] and
 ///    its slot abandoned; the remaining sessions still launch — one console
 ///    that cannot host a session must not take the others down.
-/// 3. Wait-any in a loop. A reaped pid that matches a live session slot is
-///    relaunched on **its own** console until that slot's
-///    [`SESSION_SPAWN_BUDGET`] is consumed (the slot is then abandoned, never
-///    busy-looped on `spawn`). Every other reaped pid — a supervised service
-///    or an inherited orphan — is handed to [`Services::on_child_exit`], which
-///    the engine classifies and reaps. The loop returns [`Outcome::Exhausted`]
-///    only when no session is alive **and** the engine holds no running
-///    service; a perpetual service (e.g. `devmgr`) therefore keeps PID 1
-///    waiting for the life of the system even after every session is gone.
+/// 3. Park on [`Sessions::wait_next`] in a loop, waking for whichever of the
+///    three events comes first.
+///    * A reaped pid that matches a live session slot is relaunched on **its
+///      own** console until that slot's [`SESSION_SPAWN_BUDGET`] is consumed
+///      (the slot is then abandoned, never busy-looped on `spawn`). Every
+///      other reaped pid — a supervised service or an inherited orphan — is
+///      handed to [`Services::on_child_exit`], which the engine classifies
+///      and reaps.
+///    * A service-control request is answered by [`Services::serve_control`].
+///    * A lapsed deadline is served by [`Services::expire_deadlines`].
+///
+///    The park length is the engine's own
+///    [`next_timeout_ns`](Services::next_timeout_ns), so the loop is
+///    event-driven and tickless: with nothing armed it waits indefinitely.
+///    It returns [`Outcome::Exhausted`] only when no session is alive **and**
+///    the engine holds no running service; a perpetual service (e.g.
+///    `devmgr`) therefore keeps PID 1 waiting for the life of the system even
+///    after every session is gone.
 pub fn supervise<E: Services, S: Sessions>(
     services: &mut E,
     sys: &mut S,
@@ -255,14 +324,22 @@ pub fn supervise<E: Services, S: Sessions>(
         }
 
         let mut status = 0i32;
-        let reaped = sys.wait_any(&mut status);
-        if reaped < 0 {
-            return Outcome::WaitFailed;
-        }
+        let reaped = match sys.wait_next(services.next_timeout_ns(), &mut status) {
+            Woke::Failed => return Outcome::WaitFailed,
+            Woke::Control => {
+                services.serve_control();
+                continue;
+            }
+            Woke::Deadline => {
+                services.expire_deadlines();
+                continue;
+            }
+            Woke::Child(pid) => pid,
+        };
 
         if let Some(index) = slots[..consoles]
             .iter()
-            .position(|slot| slot.alive() && slot.pid == reaped)
+            .position(|slot| slot.alive() && slot.pid.unsigned_abs() == reaped)
         {
             let slot = &mut slots[index];
             if slot.launches >= SESSION_SPAWN_BUDGET {
@@ -287,9 +364,8 @@ pub fn supervise<E: Services, S: Sessions>(
             // Not a login session: a service the engine started, or an
             // inherited orphan. Either way it is the engine's to reap and
             // classify (a service exit applies its restart policy; an
-            // orphan is logged). `reaped` is non-negative here (the `< 0`
-            // check above returned), so `unsigned_abs` is its exact value.
-            services.on_child_exit(reaped.unsigned_abs(), status);
+            // orphan is logged).
+            services.on_child_exit(reaped, status);
         }
     }
 }
@@ -297,9 +373,15 @@ pub fn supervise<E: Services, S: Sessions>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tairix_abi::WAITSET_TIMEOUT_NONE;
 
     /// The session's fixture uid (the `login` service account's band).
     const LOGIN_UID: u32 = 13;
+
+    /// A scripted child-exit event for `pid` — the commonest script entry.
+    const fn child(pid: u64) -> Woke {
+        Woke::Child(pid)
+    }
 
     /// A session [`Launch`] over `path` under [`LOGIN_UID`].
     fn session(path: &'static [u8]) -> Launch<'static> {
@@ -317,6 +399,14 @@ mod tests {
     struct MockServices {
         running: bool,
         exits: Vec<(u64, i32)>,
+        /// Control requests the loop asked the engine to answer.
+        served: usize,
+        /// Deadline wakeups the loop asked the engine to expire.
+        expired: usize,
+        /// The park length the loop asked for, most recent last.
+        timeouts: Vec<u64>,
+        /// What [`Services::next_timeout_ns`] reports.
+        timeout: u64,
     }
 
     impl MockServices {
@@ -324,13 +414,22 @@ mod tests {
             Self {
                 running: false,
                 exits: Vec::new(),
+                served: 0,
+                expired: 0,
+                timeouts: Vec::new(),
+                timeout: WAITSET_TIMEOUT_NONE,
             }
         }
         fn perpetual() -> Self {
             Self {
                 running: true,
-                exits: Vec::new(),
+                ..Self::idle()
             }
+        }
+        /// Report a bounded park length rather than "nothing armed".
+        fn with_timeout(mut self, ns: u64) -> Self {
+            self.timeout = ns;
+            self
         }
     }
 
@@ -340,6 +439,16 @@ mod tests {
         }
         fn any_running(&self) -> bool {
             self.running
+        }
+        fn next_timeout_ns(&mut self) -> u64 {
+            self.timeouts.push(self.timeout);
+            self.timeout
+        }
+        fn serve_control(&mut self) {
+            self.served += 1;
+        }
+        fn expire_deadlines(&mut self) {
+            self.expired += 1;
         }
     }
 
@@ -352,15 +461,17 @@ mod tests {
         spawns: Vec<u32>,
         spawn_paths: Vec<Vec<u8>>,
         spawn_uids: Vec<u32>,
-        waits: Vec<i64>,
+        waits: Vec<Woke>,
         statuses: Vec<i32>,
         reports: Vec<(Vec<u8>, u32, i64)>,
+        /// Park lengths the loop passed, most recent last.
+        parks: Vec<u64>,
         next_spawn: usize,
         next_wait: usize,
     }
 
     impl ScriptedSessions {
-        fn new(count: i64, spawn_results: Vec<i64>, waits: Vec<i64>) -> Self {
+        fn new(count: i64, spawn_results: Vec<i64>, waits: Vec<Woke>) -> Self {
             Self {
                 count,
                 spawn_results,
@@ -370,13 +481,14 @@ mod tests {
                 waits,
                 statuses: Vec::new(),
                 reports: Vec::new(),
+                parks: Vec::new(),
                 next_spawn: 0,
                 next_wait: 0,
             }
         }
 
         /// Attach a parallel exit-status script, written into `status` on each
-        /// `wait_any` (index-aligned with `waits`; absent entries stay `0`).
+        /// park (index-aligned with `waits`; absent entries stay `0`).
         fn with_statuses(mut self, statuses: Vec<i32>) -> Self {
             self.statuses = statuses;
             self
@@ -395,11 +507,18 @@ mod tests {
             self.next_spawn += 1;
             result
         }
-        fn wait_any(&mut self, status: &mut i32) -> i64 {
+        fn wait_next(&mut self, timeout_ns: u64, status: &mut i32) -> Woke {
+            self.parks.push(timeout_ns);
             if let Some(s) = self.statuses.get(self.next_wait) {
                 *status = *s;
             }
-            let result = self.waits[self.next_wait];
+            // A spent script is a failed park, so a test that under-scripts
+            // ends deterministically instead of indexing out of bounds.
+            let result = self
+                .waits
+                .get(self.next_wait)
+                .copied()
+                .unwrap_or(Woke::Failed);
             self.next_wait += 1;
             result
         }
@@ -435,7 +554,14 @@ mod tests {
             2,
             // budget=3 per console: 2 initial + 2×2 relaunches.
             vec![10, 20, 11, 21, 12, 22],
-            vec![10, 20, 11, 21, 12, 22],
+            vec![
+                child(10),
+                child(20),
+                child(11),
+                child(21),
+                child(12),
+                child(22),
+            ],
         );
         assert_eq!(
             supervise(&mut MockServices::idle(), &mut sys, session(b"login")),
@@ -450,7 +576,11 @@ mod tests {
         // exits. Every relaunch lands back on console 1, then the budget
         // (3 launches) abandons that console and the next wait fails the
         // run out so the test terminates deterministically.
-        let mut sys = ScriptedSessions::new(2, vec![10, 20, 21, 22], vec![20, 21, 22, -7]);
+        let mut sys = ScriptedSessions::new(
+            2,
+            vec![10, 20, 21, 22],
+            vec![child(20), child(21), child(22), Woke::Failed],
+        );
         assert_eq!(
             supervise(&mut MockServices::idle(), &mut sys, session(b"login")),
             Outcome::WaitFailed
@@ -465,7 +595,8 @@ mod tests {
         // session spawn — it is handed to the engine to reap and classify.
         // A non-zero exit status is forwarded verbatim.
         let mut services = MockServices::perpetual();
-        let mut sys = ScriptedSessions::new(1, vec![10], vec![99, -7]).with_statuses(vec![7, 0]);
+        let mut sys = ScriptedSessions::new(1, vec![10], vec![child(99), Woke::Failed])
+            .with_statuses(vec![7, 0]);
         assert_eq!(
             supervise(&mut services, &mut sys, session(b"login")),
             Outcome::WaitFailed
@@ -481,7 +612,7 @@ mod tests {
         // refusal is reported, console 0's session keeps running (the next
         // wait error ends the run deterministically) — one refused session
         // never aborts PID 1.
-        let mut at_start = ScriptedSessions::new(2, vec![10, -3], vec![-7]);
+        let mut at_start = ScriptedSessions::new(2, vec![10, -3], vec![Woke::Failed]);
         assert_eq!(
             supervise(&mut MockServices::idle(), &mut at_start, session(b"login")),
             Outcome::WaitFailed
@@ -491,7 +622,7 @@ mod tests {
         // A refused *relaunch* abandons only that slot: with no other live
         // session and no running service, the supervisor then reports honest
         // exhaustion.
-        let mut at_relaunch = ScriptedSessions::new(1, vec![10, -3], vec![10]);
+        let mut at_relaunch = ScriptedSessions::new(1, vec![10, -3], vec![child(10)]);
         assert_eq!(
             supervise(
                 &mut MockServices::idle(),
@@ -524,7 +655,11 @@ mod tests {
         // the life of the system. The scripted wait error only ends the
         // *test*, proving the loop was still waiting rather than exhausted.
         let mut services = MockServices::perpetual();
-        let mut sys = ScriptedSessions::new(1, vec![10, 11, 12], vec![10, 11, 12, -7]);
+        let mut sys = ScriptedSessions::new(
+            1,
+            vec![10, 11, 12],
+            vec![child(10), child(11), child(12), Woke::Failed],
+        );
         assert_eq!(
             supervise(&mut services, &mut sys, session(b"login")),
             Outcome::WaitFailed
@@ -541,7 +676,8 @@ mod tests {
         // One console, budget 3, no running service: three launches (PIDs
         // 10, 11, 12), three exits, then exhaustion — exactly the
         // single-console session behaviour the pre-P11 supervisor had.
-        let mut sys = ScriptedSessions::new(1, vec![10, 11, 12], vec![10, 11, 12]);
+        let mut sys =
+            ScriptedSessions::new(1, vec![10, 11, 12], vec![child(10), child(11), child(12)]);
         assert_eq!(
             supervise(&mut MockServices::idle(), &mut sys, session(b"login")),
             Outcome::Exhausted
@@ -557,7 +693,10 @@ mod tests {
         let launches = MAX_SUPERVISED_CONSOLES * SESSION_SPAWN_BUDGET as usize;
         let bound = i64::try_from(launches).expect("small test constant");
         let spawn_results: Vec<i64> = (0..bound).map(|n| 100 + n).collect();
-        let waits: Vec<i64> = spawn_results.clone();
+        let waits: Vec<Woke> = spawn_results
+            .iter()
+            .map(|&p| child(p.unsigned_abs()))
+            .collect();
         let mut sys = ScriptedSessions::new(64, spawn_results, waits);
         assert_eq!(
             supervise(&mut MockServices::idle(), &mut sys, session(b"login")),
@@ -578,7 +717,8 @@ mod tests {
         // run. Proves the loop distinguishes a session pid from every other
         // reaped pid.
         let mut services = MockServices::perpetual();
-        let mut sys = ScriptedSessions::new(1, vec![10], vec![50, -7]).with_statuses(vec![0, 0]);
+        let mut sys = ScriptedSessions::new(1, vec![10], vec![child(50), Woke::Failed])
+            .with_statuses(vec![0, 0]);
         assert_eq!(
             supervise(&mut services, &mut sys, session(b"login")),
             Outcome::WaitFailed
@@ -587,5 +727,94 @@ mod tests {
         // exit); the service exit was routed to the engine.
         assert_eq!(sys.spawns, vec![0]);
         assert_eq!(services.exits, vec![(50, 0)]);
+    }
+    #[test]
+    fn a_control_request_is_served_without_disturbing_the_sessions() {
+        // Two control wakeups arrive while the session is happily blocked on
+        // its console. Each is handed to the engine; the session is neither
+        // relaunched nor abandoned, and nothing is routed as a child exit.
+        let mut services = MockServices::idle();
+        let mut sys = ScriptedSessions::new(
+            1,
+            vec![10],
+            vec![Woke::Control, Woke::Control, Woke::Failed],
+        );
+        assert_eq!(
+            supervise(&mut services, &mut sys, session(b"login")),
+            Outcome::WaitFailed
+        );
+        assert_eq!(services.served, 2);
+        assert_eq!(services.expired, 0);
+        assert!(services.exits.is_empty());
+        // One launch only: the control traffic did not touch the slot table.
+        assert_eq!(sys.spawns, vec![0]);
+    }
+
+    #[test]
+    fn a_lapsed_deadline_is_routed_to_the_engine() {
+        let mut services = MockServices::idle();
+        let mut sys = ScriptedSessions::new(1, vec![10], vec![Woke::Deadline, Woke::Failed]);
+        assert_eq!(
+            supervise(&mut services, &mut sys, session(b"login")),
+            Outcome::WaitFailed
+        );
+        assert_eq!(services.expired, 1);
+        assert_eq!(services.served, 0);
+        assert_eq!(sys.spawns, vec![0]);
+    }
+
+    #[test]
+    fn the_park_length_is_the_engines_own_next_deadline() {
+        // Nothing armed: the loop parks indefinitely, so an idle machine takes
+        // no timer interrupt at all.
+        let mut idle = MockServices::idle();
+        let mut sys = ScriptedSessions::new(1, vec![10], vec![Woke::Failed]);
+        assert_eq!(
+            supervise(&mut idle, &mut sys, session(b"login")),
+            Outcome::WaitFailed
+        );
+        assert_eq!(sys.parks, vec![WAITSET_TIMEOUT_NONE]);
+        assert_eq!(idle.timeouts, vec![WAITSET_TIMEOUT_NONE]);
+
+        // A deadline armed: the loop parks for exactly that span rather than a
+        // fixed tick of its own.
+        let mut armed = MockServices::idle().with_timeout(250_000);
+        let mut sys = ScriptedSessions::new(1, vec![10], vec![Woke::Deadline, Woke::Failed]);
+        assert_eq!(
+            supervise(&mut armed, &mut sys, session(b"login")),
+            Outcome::WaitFailed
+        );
+        assert_eq!(sys.parks, vec![250_000, 250_000]);
+    }
+
+    #[test]
+    fn control_and_deadline_wakeups_never_end_the_loop() {
+        // A perpetual service with a stream of control and deadline wakeups:
+        // the loop keeps parking, so neither event can be mistaken for the
+        // exhaustion or failure that ends PID 1.
+        let mut services = MockServices::perpetual();
+        let mut sys = ScriptedSessions::new(
+            1,
+            // Two launches: the initial one and the relaunch after the
+            // session's own exit lands mid-script.
+            vec![10, 11],
+            vec![
+                Woke::Deadline,
+                Woke::Control,
+                Woke::Deadline,
+                Woke::Control,
+                child(10),
+                Woke::Failed,
+            ],
+        );
+        assert_eq!(
+            supervise(&mut services, &mut sys, session(b"login")),
+            Outcome::WaitFailed
+        );
+        assert_eq!((services.served, services.expired), (2, 2));
+        // The child exit was the session's, so it was relaunched rather than
+        // routed to the engine.
+        assert!(services.exits.is_empty());
+        assert_eq!(sys.spawns, vec![0, 0]);
     }
 }

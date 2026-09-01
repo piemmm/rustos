@@ -2512,6 +2512,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-servicectl"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-help",
+ "tairix-rt",
+]
+
+[[package]]
 name = "tairix-setcap"
 version = "0.0.0"
 dependencies = [
@@ -4320,6 +4329,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-rtc-mc146818-qemu-x86-64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-x86_64",
+ "tairix-itest-harness",
+ "tairix-kernel",
+ "tairix-log",
+ "tairix-test-rtc-fixture",
+ "tairix-timesync",
+]
+
+[[package]]
 name = "tairix-test-rtc-pl031-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
@@ -4444,6 +4465,18 @@ dependencies = [
  "tairix-log",
  "tairix-sync",
  "tairix-users",
+]
+
+[[package]]
+name = "tairix-test-servicectl-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
+ "tairix-init",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-log",
 ]
 
 [[package]]

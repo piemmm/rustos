@@ -861,6 +861,7 @@ mod tests {
                 "rmdir",
                 "seatmgr",
                 "seq",
+                "servicectl",
                 "sleep",
                 "ss",
                 "stat",

@@ -213,6 +213,40 @@ impl StartReport {
     }
 }
 
+/// Which of a service's four one-shot deadlines an entry refers to.
+///
+/// [`Init::expire_due`](Init::expire_due) snapshots the due deadlines before
+/// running any, because an expiry can re-enter the admission engine; this
+/// records what each snapshot entry was for.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Deadline {
+    /// An on-demand service's idle-stop timer.
+    Linger,
+    /// A gracefully-stopping service's force-terminate timer.
+    Grace,
+    /// A crashed service's restart backoff.
+    Restart,
+    /// A running service's liveness watchdog.
+    Watchdog,
+}
+
+impl Deadline {
+    /// The four kinds, in the same order as [`Service::armed_deadlines`].
+    const ALL: [Self; 4] = [Self::Linger, Self::Grace, Self::Restart, Self::Watchdog];
+
+    /// Sort key placing the force-down kinds before the bring-up kind, so a
+    /// wakeup that finds both does not relaunch a service it is about to
+    /// kill.
+    const fn order(self) -> u8 {
+        match self {
+            Self::Grace => 0,
+            Self::Watchdog => 1,
+            Self::Linger => 2,
+            Self::Restart => 3,
+        }
+    }
+}
+
 /// One registered service and its live lifecycle state.
 ///
 /// The `pid` is `Some` for exactly the window between a successful spawn and
@@ -279,6 +313,19 @@ struct Service {
     /// clean stop, regardless of the exit code the killed process reports.
     /// Cleared once that exit is reaped or the service is next started.
     killed_by_watchdog: bool,
+}
+
+impl Service {
+    /// This service's four one-shot deadlines, in [`Deadline::ALL`] order so
+    /// a caller can zip the two together.
+    const fn armed_deadlines(&self) -> [Option<Duration64>; 4] {
+        [
+            self.linger_deadline,
+            self.grace_deadline,
+            self.restart_deadline,
+            self.watchdog_deadline,
+        ]
+    }
 }
 
 /// PID 1 service manager.
@@ -1001,6 +1048,107 @@ impl<'a> Init<'a> {
     pub fn restart_deadline(&self, name: &str) -> Option<Duration64> {
         self.index_of(name)
             .and_then(|idx| self.services[idx].restart_deadline)
+    }
+
+    /// The soonest armed one-shot deadline across every registered service
+    /// and every deadline kind, or `None` when nothing is armed.
+    ///
+    /// The transport programs one wait from this and calls
+    /// [`expire_due`](Self::expire_due) when it lapses, so a manager with
+    /// nothing pending waits indefinitely and takes no timer interrupt.
+    #[must_use]
+    pub fn next_deadline(&self) -> Option<Duration64> {
+        self.services
+            .iter()
+            .flat_map(Service::armed_deadlines)
+            .flatten()
+            .min()
+    }
+
+    /// Run every one-shot deadline that has lapsed at `now`, returning
+    /// whatever a lapsed restart backoff relaunched.
+    ///
+    /// One wakeup can find several deadlines due — including several on one
+    /// service — so this drives them all rather than the soonest alone;
+    /// otherwise the transport would need a wakeup per deadline. Each of the
+    /// four is the existing guarded path, so a deadline that is no longer
+    /// genuinely due (a heartbeat arrived, the process already exited) is a
+    /// no-op here exactly as when called by name.
+    ///
+    /// The kills run before the relaunch: a service whose grace or watchdog
+    /// deadline lapses in the same wakeup as its restart backoff must be
+    /// forced down before the backoff brings it back, or the relaunch would
+    /// race the corpse.
+    ///
+    /// Every deadline this call finds lapsed is afterwards either consumed or
+    /// disarmed, so the same wakeup can never be served twice. That is what
+    /// makes it safe for the transport to derive a wait length from
+    /// [`next_deadline`](Self::next_deadline): without it a lapsed deadline
+    /// whose guard declined would leave the next wait zero-length for ever
+    /// and peg a core.
+    pub fn expire_due(&mut self, now: Duration64) -> StartReport {
+        // Snapshot which deadlines are due before running any: an expiring
+        // restart backoff re-enters the admission engine, which may register
+        // state changes across the table, so indices taken now would not
+        // survive the first expiry.
+        let mut due: Vec<(String, Deadline)> = Vec::new();
+        for service in &self.services {
+            for (armed, kind) in service.armed_deadlines().into_iter().zip(Deadline::ALL) {
+                if armed.is_some_and(|at| now >= at) {
+                    due.push((service.spec.name().to_string(), kind));
+                }
+            }
+        }
+        due.sort_by_key(|(_, kind)| kind.order());
+
+        let mut report = StartReport::default();
+        for (name, kind) in due {
+            match kind {
+                Deadline::Linger => {
+                    self.expire_linger(&name, now);
+                }
+                Deadline::Grace => {
+                    self.expire_grace(&name, now);
+                }
+                Deadline::Watchdog => {
+                    self.expire_watchdog(&name, now);
+                }
+                Deadline::Restart => {
+                    let relaunched = self.expire_restart_backoff(&name, now);
+                    report.started.extend(relaunched.started);
+                    report.failed.extend(relaunched.failed);
+                }
+            }
+            self.disarm_if_stale(&name, kind, now);
+        }
+        report
+    }
+
+    /// Drop a one-shot that fired and found its condition already gone.
+    ///
+    /// The four guarded paths decline such a wakeup and leave the deadline
+    /// set — correct when a caller drives them by name, but for
+    /// [`expire_due`](Self::expire_due) it would mean the deadline stays
+    /// lapsed and the transport's next wait is zero-length again. A fired
+    /// one-shot whose condition has passed is spent, so it is dropped: a
+    /// still-eligible service re-arms through the ordinary path
+    /// ([`arm_watchdogs`](Self::arm_watchdogs) after a pass, a
+    /// [`disconnect`](Self::disconnect) re-arming the idle linger), which is
+    /// why dropping it loses nothing.
+    fn disarm_if_stale(&mut self, name: &str, kind: Deadline, now: Duration64) {
+        let Some(idx) = self.index_of(name) else {
+            return;
+        };
+        let service = &mut self.services[idx];
+        let armed = match kind {
+            Deadline::Linger => &mut service.linger_deadline,
+            Deadline::Grace => &mut service.grace_deadline,
+            Deadline::Restart => &mut service.restart_deadline,
+            Deadline::Watchdog => &mut service.watchdog_deadline,
+        };
+        if armed.is_some_and(|at| now >= at) {
+            *armed = None;
+        }
     }
 
     /// Number of clients currently connected to a service's endpoint (its
@@ -3585,5 +3733,229 @@ mod tests {
         assert!(stopper.requested.borrow().is_empty());
         assert_eq!(init.state_of("svc"), Some(ServiceState::Running));
         assert_eq!(sink.count(events::SERVICE_CONTROL_DENIED), 1);
+    }
+    #[test]
+    fn next_deadline_is_none_until_something_is_armed() {
+        let spawner = MockSpawner::new();
+        let stopper = RecordingStopper::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg_stop(&spawner, &stopper, &reaper, &sink));
+        init.register(spec("svc", &[])).unwrap();
+        init.start_all().unwrap();
+
+        // A plain running service opts out of the watchdog and has nothing
+        // pending, so the transport waits indefinitely and takes no timer.
+        assert_eq!(init.next_deadline(), None);
+    }
+
+    #[test]
+    fn next_deadline_is_the_soonest_across_services_and_kinds() {
+        let spawner = MockSpawner::new();
+        let stopper = RecordingStopper::new();
+        let reaper = ScriptedReaper::new(&[]);
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg_stop(&spawner, &stopper, &reaper, &sink));
+        init.register(watchdog_spec("watched", RestartPolicy::OnFailure))
+            .unwrap();
+        init.register(restart_spec("crasher", RestartPolicy::OnFailure))
+            .unwrap();
+        init.start_all().unwrap();
+        let crasher = init.running_pid("crasher").unwrap();
+
+        init.arm_watchdogs(Duration64::from_secs(100));
+        let watchdog = init.watchdog_deadline("watched").unwrap();
+
+        // Crash the second service so its restart backoff arms too. The
+        // backoff is far sooner than the 5-second watchdog interval, so it
+        // is what the fold must return.
+        reaper.push(ReapedChild {
+            pid: crasher,
+            exit_code: 1,
+        });
+        init.reap(Duration64::from_secs(100));
+        let restart = init.restart_deadline("crasher").unwrap();
+        assert!(restart < watchdog);
+
+        assert_eq!(init.next_deadline(), Some(restart));
+    }
+
+    #[test]
+    fn expire_due_runs_every_lapsed_deadline_in_one_wakeup() {
+        let spawner = MockSpawner::new();
+        let stopper = RecordingStopper::new();
+        let reaper = ScriptedReaper::new(&[]);
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg_stop(&spawner, &stopper, &reaper, &sink));
+        init.register(watchdog_spec("watched", RestartPolicy::Never))
+            .unwrap();
+        init.register(restart_spec("crasher", RestartPolicy::OnFailure))
+            .unwrap();
+        init.start_all().unwrap();
+        let watched = init.running_pid("watched").unwrap();
+        let crasher = init.running_pid("crasher").unwrap();
+
+        init.arm_watchdogs(Duration64::from_secs(0));
+        reaper.push(ReapedChild {
+            pid: crasher,
+            exit_code: 1,
+        });
+        init.reap(Duration64::from_secs(0));
+        assert!(init.watchdog_deadline("watched").is_some());
+        assert!(init.restart_deadline("crasher").is_some());
+
+        // One wakeup, well past both: the wedged process is force-killed and
+        // the crashed one relaunched, so a transport needs no second pass.
+        let report = init.expire_due(Duration64::from_secs(60));
+        assert_eq!(stopper.forced.borrow().as_slice(), &[watched]);
+        assert_eq!(sink.count(events::SERVICE_WATCHDOG_TIMEOUT), 1);
+        assert_eq!(started_names(&report), ["crasher"]);
+        assert_eq!(init.restart_deadline("crasher"), None);
+    }
+
+    #[test]
+    fn expire_due_leaves_a_deadline_that_is_no_longer_due() {
+        let spawner = MockSpawner::new();
+        let stopper = RecordingStopper::new();
+        let reaper = ScriptedReaper::new(&[]);
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg_stop(&spawner, &stopper, &reaper, &sink));
+        init.register(watchdog_spec("svc", RestartPolicy::Always))
+            .unwrap();
+        init.start_all().unwrap();
+        init.arm_watchdogs(Duration64::from_secs(10));
+
+        // A heartbeat lands after the transport armed its one-shot but before
+        // it fires. The stale wakeup must not kill a service that is plainly
+        // alive.
+        assert!(init.heartbeat("svc", Duration64::from_secs(14)));
+        let report = init.expire_due(Duration64::from_secs(15));
+        assert!(stopper.forced.borrow().is_empty());
+        assert!(report.started.is_empty());
+        assert_eq!(init.next_deadline(), Some(Duration64::from_secs(19)));
+    }
+
+    #[test]
+    fn expire_due_forces_a_wedged_service_down_before_relaunching_it() {
+        let spawner = MockSpawner::new();
+        let stopper = RecordingStopper::new();
+        let reaper = ScriptedReaper::new(&[]);
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg_stop(&spawner, &stopper, &reaper, &sink));
+        init.register(watchdog_spec("svc", RestartPolicy::OnFailure))
+            .unwrap();
+        init.start_all().unwrap();
+        let pid = init.running_pid("svc").unwrap();
+        init.arm_watchdogs(Duration64::from_secs(0));
+
+        // The watchdog lapses and the service wedges. It is killed, and the
+        // relaunch waits for the reap rather than racing the corpse: nothing
+        // is started in this wakeup because the process is still live.
+        let report = init.expire_due(Duration64::from_secs(60));
+        assert_eq!(stopper.forced.borrow().as_slice(), &[pid]);
+        assert!(report.started.is_empty());
+        assert_eq!(init.state_of("svc"), Some(ServiceState::Running));
+
+        // Only once the forced exit is reaped does the policy arm the backoff.
+        reaper.push(ReapedChild { pid, exit_code: 0 });
+        init.reap(Duration64::from_secs(61));
+        assert_eq!(init.state_of("svc"), Some(ServiceState::Failed));
+        let backoff = init.restart_deadline("svc").expect("backoff armed");
+        assert_eq!(init.next_deadline(), Some(backoff));
+
+        let report = init.expire_due(backoff);
+        assert_eq!(started_names(&report), ["svc"]);
+    }
+    #[test]
+    fn expire_due_never_leaves_a_lapsed_deadline_armed() {
+        let spawner = MockSpawner::new();
+        let stopper = RecordingStopper::new();
+        let reaper = ScriptedReaper::new(&[]);
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg_stop(&spawner, &stopper, &reaper, &sink));
+        init.register(watchdog_spec("svc", RestartPolicy::Never))
+            .unwrap();
+        init.start_all().unwrap();
+        init.arm_watchdogs(Duration64::from_secs(0));
+
+        // Take the service out of the state the watchdog guard requires, so
+        // the guard declines the wakeup while the deadline stays lapsed. This
+        // is the shape that would make the transport's next wait zero-length
+        // for ever.
+        init.stop("svc", Duration64::from_secs(1)).unwrap();
+        assert_eq!(init.state_of("svc"), Some(ServiceState::Stopping));
+
+        let now = Duration64::from_secs(600);
+        let _ = init.expire_due(now);
+
+        // Whatever the guards decided, nothing lapsed is still armed — so the
+        // transport's next wait is either indefinite or genuinely in the
+        // future, and one wakeup can never be served twice.
+        assert!(
+            init.next_deadline().is_none_or(|at| at > now),
+            "a lapsed deadline survived expire_due; the reactor would spin"
+        );
+    }
+
+    #[test]
+    fn a_crashed_on_demand_services_restart_backoff_does_not_spin_the_transport() {
+        let spawner = MockSpawner::new();
+        let stopper = RecordingStopper::new();
+        let reaper = ScriptedReaper::new(&[]);
+        let sink = RecordingSink::new();
+        let caps = CapabilitySet::empty();
+        let mut init = Init::new(cfg_stop(&spawner, &stopper, &reaper, &sink));
+        init.register(on_demand_spec("fontd", 30).with_restart(RestartPolicy::Always))
+            .unwrap();
+        init.start_all().unwrap();
+        init.connect("fontd", &caps, ClientId::new(1)).unwrap();
+        let pid = init.running_pid("fontd").unwrap();
+
+        // The crash arms a restart backoff — `schedule_restart` applies the
+        // policy without regard to activation mode — but an on-demand service
+        // comes back on its next connect, never by timer, so the backoff's own
+        // path declines it for ever. Left armed, that lapsed deadline would
+        // make every subsequent transport wait zero-length and peg a core.
+        reaper.push(ReapedChild { pid, exit_code: 1 });
+        init.reap(Duration64::from_secs(10));
+        assert!(init.restart_deadline("fontd").is_some());
+
+        let now = Duration64::from_secs(600);
+        let report = init.expire_due(now);
+        assert!(
+            report.started.is_empty(),
+            "on-demand services wait for a connect"
+        );
+        assert_eq!(init.restart_deadline("fontd"), None);
+        assert_eq!(init.next_deadline(), None);
+    }
+
+    #[test]
+    fn a_disarmed_watchdog_is_re_armed_by_the_next_pass() {
+        let spawner = MockSpawner::new();
+        let stopper = RecordingStopper::new();
+        let reaper = ScriptedReaper::new(&[]);
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg_stop(&spawner, &stopper, &reaper, &sink));
+        init.register(watchdog_spec("svc", RestartPolicy::Always))
+            .unwrap();
+        init.start_all().unwrap();
+
+        // Whatever drops a watchdog deadline, supervision is not lost: the
+        // ordinary arming pass the transport runs after every wakeup puts a
+        // still-running, still-opted-in service back under the watchdog. This
+        // is why dropping a spent one-shot is safe rather than a hole.
+        init.arm_watchdogs(Duration64::from_secs(0));
+        let first = init.watchdog_deadline("svc").expect("armed");
+        let pid = init.running_pid("svc").unwrap();
+        assert!(init.expire_watchdog("svc", first));
+        assert_eq!(init.watchdog_deadline("svc"), None);
+
+        init.arm_watchdogs(Duration64::from_secs(100));
+        assert_eq!(
+            init.watchdog_deadline("svc"),
+            Some(Duration64::from_secs(105))
+        );
+        assert_eq!(stopper.forced.borrow().as_slice(), &[pid]);
     }
 }

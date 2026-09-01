@@ -129,6 +129,7 @@
 # Userland
 
 - [PID 1 service manager](./userland/init.md)
+- [Service control (`servicectl`)](./userland/servicectl.md)
 - [System Information service](./userland/sysinfod.md)
 - [Font service](./userland/fontd.md)
 - [App-data service (`confd`)](./userland/confd.md)

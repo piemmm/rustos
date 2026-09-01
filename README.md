@@ -81,7 +81,7 @@ for filesystems, the feature section below.
 | DHCPv4 / DHCPv6 address configuration | ✓ | ✓ | ✓ | — |
 | DNS name resolution, forward and reverse (`A`/`AAAA`/`PTR`) | ✓ | ✓ | ✓ | — |
 | Network clock synchronisation (`timed`, sandboxed NTP client) | ✓ | ✓ | ✓ | — |
-| Real-time clock (RTC) drivers | ◐ mc146818 | ✓ pl031 + ◐ rpi + ◐ i2c | ✓ goldfish | — |
+| Real-time clock (RTC) drivers | ✓ mc146818 | ✓ pl031 + ◐ rpi + ◐ i2c | ✓ goldfish | — |
 | Network offloads (RX/TX csum, TSO, mergeable RX, multiqueue RX) | ✓ virtio | ✓ virtio + GENET | ✓ virtio | — |
 | NIC completion-interrupt masking (no per-frame interrupt storm) | ✓ virtio | ✓ virtio + GENET | ✓ virtio | — |
 | Receive pre-filter (foreign traffic shed before the stack wakes) | ✓ | ✓ | ✓ | — |

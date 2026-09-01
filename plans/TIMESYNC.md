@@ -517,7 +517,7 @@ Each stage leaves the whole-project §7 gate green before it is reported done.
   so `timed` is registered there, and TS-5 moves it to the enrolled tier with
   the control transport that makes enrolment mean something.
 
-### TS-3 — RTC class + the QEMU-emulable RTCs — DONE (x86_64 driver pending)
+### TS-3 — RTC class + the QEMU-emulable RTCs — DONE
 
 **The clock authority stays with `timed`.** An RTC driver holds no clock
 capability: it serves the `Rtc` class over `tairix_abi::rtc_ipc`'s
@@ -620,15 +620,20 @@ ACPI FADT, which the driver does not see). `kernel/arch/x86_64`'s
 legacy-fallback discovery path synthesises its node with the `0x70`/`0x71`
 port pair, and the bundle ships in the x86_64 driver store.
 
-**Remaining: the x86_64 QEMU vertical only.** It is not a mirror of its two
-siblings. Every x86_64 vertical in the tree drives the scenario harness
-(`run_virtio_pci_scenario` over `tairix-test-virtio-qemu-support`); none boots
-the production `tairix_kernel::x86_64::boot` pipeline, so there is no
-full-boot shape to hang an autoload witness on. Building the first one is its
-own increment — Multiboot2 entry, the linker script, and storage discovery
-over virtio-PCI rather than MMIO — not a copy of the aarch64 vertical. x86_64
-is `◐ mc146818` in the `README.md` matrix until that lands; the driver, the
-node synthesis, and the port trap beneath them are host-tested and shipped.
+**All three ports are proven.**
+`tairix-test-rtc-mc146818-qemu-x86-64` boots the production x86_64 pipeline
+against the same `rtc-root` disk with the same value-gated witness. It is worth
+more than a third copy of one proof: the CMOS chip is the class's only
+port-addressed part, so this is the only witness that a granted **port range**
+reaches a real device from user space, and its node is *synthesised* rather
+than parsed, so it is the only run that exercises the legacy-fallback discovery
+path. Neither MMIO sibling can show either.
+
+The x86_64 full-boot shape this hangs on is **not** new work and must not be
+re-derived: `autoload_input_qemu_x86_64` and `netstack_autoload_qemu_x86_64`
+already boot `boot_x86_64::boot` against a planted whole disk over virtio-PCI,
+so a clock vertical here is an enrolment entry plus a witness sink, exactly as
+on the two MMIO ports.
 
 ### TS-4 — Pi RTC support — DONE
 
@@ -761,12 +766,32 @@ from the device tree**:
   unit test) through an exhaustive-match name function, so a kind cannot reach a
   C consumer's header as an unnamed discriminant again.
 
-### TS-5 — Service-control transport + `servicectl`
-The `Enable`/`Disable`/`Status` ops, the PID 1 control reactor and its
-one-shot timers, `CAP_SERVICE_CONTROL` with its enforcement point and holder,
-the enrolment store-write seam, and the `servicectl` tool with its bundle
-`Help/` tree and coreutils-shaped options and exit codes (§16.7). QEMU
-vertical: a live `servicectl disable timed` survives a reboot.
+### TS-5a — Service-control transport + `servicectl start`/`stop` — DONE
+The PID 1 wait-set control reactor and its one-shot timers,
+`CAP_SERVICE_CONTROL` with its enforcement point (the restricted-sender
+endpoint bind) and its first holder, and the `servicectl` tool with its bundle
+`Help/` tree and coreutils-shaped options and exit codes (§16.7). The design
+and the decisions live in `plans/NEW-SERVICEMANAGER.md` SVC-8; they are not
+repeated here. QEMU witness: `tairix-test-servicectl-qemu-aarch64` runs a live
+`servicectl stop timed` from a logged-in shell.
+
+The tool's icon is authored as **SVG**, the charter's preferred form for an
+icon expressible in the vector subset — one file serves every slot and UI
+scale, so no slot ever upscales a raster.
+
+### TS-5b — Enablement: `Enable`/`Disable`/`Status`
+The remaining ops, over the *enrolment* path rather than the control endpoint:
+`Enable`/`Disable` write through the existing pure `registry::enrol`/`unenrol`
+transforms so the enroller's ceiling check cannot be bypassed, and `Status` is
+served through the System Information API (§16.6), never a control-reply
+scrape. This is also where `timed`'s SUM1 unit metadata (`requires:
+network-up`, `activation: permanent`, `restart: on-failure`) is authored —
+once something reads it — and where `timed` moves out of the compiled-in boot
+floor. QEMU vertical: a live `servicectl disable timed` survives a reboot.
+
+**TS-6 depends on TS-5b, not TS-5a.** The desktop toggle is *automatic
+time-setting on or off*, which is enrolment; the running-state control TS-5a
+landed is not the switch that row needs.
 
 ### TS-6 — The desktop toggle
 The taskbar clock menu row and the Date & Time settings pane entry over the

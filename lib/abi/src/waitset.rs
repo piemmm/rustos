@@ -60,6 +60,14 @@ impl WaitSetOp {
 /// PID.
 pub const WAITSET_CHILD_ANY: u64 = u64::MAX;
 
+/// `timeout_ns` value meaning "no deadline": park until a member is ready.
+///
+/// Named because every reactor that folds a set of armed deadlines needs a
+/// spelling for "nothing is armed", and two callers writing the bare
+/// saturating value could drift from what the syscall actually treats as
+/// unbounded.
+pub const WAITSET_TIMEOUT_NONE: u64 = u64::MAX;
+
 /// The kind of event source a wait-set member observes.
 ///
 /// Every kind names a resource the calling task already holds; the kernel
@@ -316,5 +324,6 @@ mod tests {
         assert_eq!(WaitSourceKind::MemoryPressure.as_u32(), 9);
         assert_eq!(WaitSourceKind::PortRoom.as_u32(), 10);
         assert_eq!(WAITSET_CHILD_ANY, u64::MAX);
+        assert_eq!(WAITSET_TIMEOUT_NONE, u64::MAX);
     }
 }

@@ -5707,6 +5707,85 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
+    // `plans/TIMESYNC.md` TS-3: the live clock-chip vertical's x86_64 half.
+    // Same `rtc-root` disk and same value-gated witness as its two siblings,
+    // over the one clock in the class with no device-tree node and no
+    // register window: the CMOS chip's `0x70`/`0x71` index/data pair, whose
+    // node discovery synthesises on the legacy-fallback path and whose
+    // registers the autoloaded driver reads through the user-space port-I/O
+    // trap. So this is also the witness that a granted port range reaches a
+    // real device from user space, which neither MMIO sibling can prove.
+    QemuTest {
+        package: "tairix-test-rtc-mc146818-qemu-x86-64",
+        binary: "tairix-test-rtc-mc146818-qemu-x86-64",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        fs_disk: FsDisk::RtcRootDisk,
+        rtc_base: Some(tairix_test_rtc_fixture::RTC_BASE_SECS),
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[],
+    },
+    // `plans/NEW-SERVICEMANAGER.md` SVC-8 / `plans/TIMESYNC.md` TS-5: the live
+    // service-control vertical. `tairix-test-servicectl-qemu-aarch64` boots
+    // the *production* aarch64 pipeline with the encrypted-root disk (so the
+    // real app store, and therefore the real `servicectl` bundle, is on it),
+    // types the fixture passphrase, authenticates as the seeded `root`
+    // account, and runs `servicectl stop timed` at the shell.
+    //
+    // What the run proves that no host test can: PID 1 binds
+    // `SERVICE_CONTROL_ENDPOINT` restricted-sender and parks on a wait-set
+    // carrying it *beside* any-child readiness, so the request is answered
+    // while the login session sits blocked on its console rather than waiting
+    // for an unrelated process to exit; the kernel admits the call only
+    // because `root`'s administrator ceiling carries `CAP_SERVICE_CONTROL` and
+    // the bundle's signed manifest requests it; `servicectl` is resolved from
+    // the on-disk `/System/Commands` store through the shared resolution
+    // policy and loaded by the ordinary app-load gate, not embedded anywhere;
+    // and the engine applies the stop.
+    //
+    // The witness is PID 1's own `SERVICE_CONTROL_STOPPED` audit record, so
+    // the vertical cannot disagree with the engine about what succeeded, and
+    // it is unreachable unless every link above held. A 180-second budget
+    // covers boot + unlock + users-database install + login + shell + the app
+    // load on QEMU TCG; single CPU like the other full-boot verticals.
+    QemuTest {
+        package: "tairix-test-servicectl-qemu-aarch64",
+        binary: "tairix-test-servicectl-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(180),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        fs_disk: FsDisk::EncryptedRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[
+            ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
+            // The full-screen login view paints `Username:` once and the
+            // minimal-diff renderer then repaints only the changed label
+            // cells (`Password` over it), so the anchors are the labels
+            // without their trailing blanks.
+            ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
+            ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
+            // `timed` is the clock service the boot floor starts last, and
+            // nothing in this run depends on it, so stopping it exercises the
+            // control path without tearing the session down.
+            ("root@tairix ~% ", Duration::ZERO, "servicectl stop timed\n"),
+        ],
+    },
     // `plans/NETWORK.md` N9b-3-2-β-2-ii-b-bond: the live bond-failover
     // vertical. `tairix-test-netstack-bond-qemu-aarch64` boots the
     // *production* aarch64 pipeline with the `bond-net-root` disk: the

@@ -42,16 +42,18 @@ mod program {
     extern crate alloc;
     use alloc::vec::Vec;
 
-    use tairix_abi::{Duration64, Errno, Signal};
+    use tairix_abi::service_control::ServiceControlRequest;
+    use tairix_abi::{CapabilityId, Duration64, Errno, Signal, WaitSetOp, WaitSourceKind};
+    use tairix_caps::CapabilitySet;
     use tairix_init::{
-        AuthorityScope, Init, InitConfig, LoopReaper, Pid, ReapedChild, ServiceSpec, Spawner,
-        Stopper,
+        AuthorityScope, ControlError, Init, InitConfig, LoopReaper, Pid, ReapedChild, ServiceSpec,
+        Spawner, Stopper,
     };
     use tairix_rt::io::{Stderr, Stdout, Write};
     use tairix_rt::LogSink;
 
     use crate::startup::{render_banner, service_name, StartupConfig, BANNER_MAX, DEFAULT_CONFIG};
-    use crate::supervisor::{supervise, Launch, Outcome, Services, Sessions};
+    use crate::supervisor::{supervise, Launch, Outcome, Services, Sessions, Woke};
 
     /// Exit code when the compiled-in startup config does not parse, names a
     /// duplicate service, or forms an invalid dependency graph. A reserved,
@@ -75,6 +77,13 @@ mod program {
     /// the count): there is nothing a session could attach its standard
     /// streams to, so PID 1 reports the system unusable fail-closed rather than spawning stream-less sessions.
     const EXIT_NO_CONSOLES: i32 = 74;
+
+    /// Exit code when PID 1 could not create the wait-set it supervises from,
+    /// or could not bind the service-control endpoint. A reserved, fail-closed
+    /// value distinct from the other exits so the cause is unambiguous in the
+    /// transcript: without the wait-set there is no park to multiplex sessions,
+    /// control, and timers over.
+    const EXIT_WAITSET_FAILED: i32 = 75;
 
     /// The primary console index services attach their standard streams to
     /// (for their fd 2 diagnostics). Sessions fan out across every console;
@@ -162,18 +171,203 @@ mod program {
             // service is registered.
             let now = Duration64::from_nanos(tairix_rt::clock_get());
             self.engine.reap(now);
+            self.engine.arm_watchdogs(now);
         }
 
         fn any_running(&self) -> bool {
             self.engine.running_count() > 0
         }
+
+        fn next_timeout_ns(&mut self) -> u64 {
+            let Some(deadline) = self.engine.next_deadline() else {
+                return tairix_abi::WAITSET_TIMEOUT_NONE;
+            };
+            // The engine's deadlines are absolute monotonic instants and the
+            // park takes a relative span, so an already-lapsed deadline is a
+            // zero-length wait that returns at once and is served on the next
+            // turn. That cannot spin: `expire_due` consumes or drops every
+            // deadline it finds lapsed, so the same wakeup is never served
+            // twice.
+            let now = tairix_rt::clock_get();
+            deadline.saturating_total_nanos().saturating_sub(now)
+        }
+
+        fn serve_control(&mut self) {
+            let mut request = [0u8; tairix_abi::service_control::REQUEST_LEN];
+            let mut ticket = 0u64;
+            let Ok(len) = tairix_rt::call_recv_nonblock(
+                tairix_abi::service_control::SERVICE_CONTROL_ENDPOINT,
+                &mut request,
+                &mut ticket,
+            ) else {
+                // The readiness peek raced another drain, or the kernel
+                // refused. There is nothing to answer and no ticket to
+                // release, so the loop simply parks again.
+                return;
+            };
+
+            let now = Duration64::from_nanos(tairix_rt::clock_get());
+            let mut reply = [0u8; tairix_abi::service_control::REPLY_LEN];
+            // A malformed frame is answered with the decoder's own refusal
+            // rather than dropped: the caller is waiting synchronously, and
+            // leaving it parked would be a denial of service against a
+            // principal that reached a gated endpoint legitimately.
+            let outcome = ServiceControlRequest::decode(&request[..len])
+                .map_err(ControlReply::Malformed)
+                .and_then(|req| self.engine.control(req, now).map_err(ControlReply::Refused));
+            let written = match outcome {
+                Ok(state) => tairix_abi::service_control::encode_reply(&mut reply, state),
+                Err(ControlReply::Malformed(err)) => {
+                    tairix_abi::service_control::encode_error_reply(&mut reply, err)
+                }
+                Err(ControlReply::Refused(err)) => {
+                    tairix_abi::service_control::encode_error_reply(&mut reply, control_errno(err))
+                }
+            };
+            // The buffer is `REPLY_LEN`, which both encoders fit, so the
+            // encode cannot fail — but the caller is parked on this ticket, so
+            // it is answered whatever happened rather than left waiting. A
+            // zero-length frame decodes as a refusal on the client side, which
+            // is the fail-closed direction.
+            let _ = tairix_rt::call_reply(
+                tairix_abi::service_control::SERVICE_CONTROL_ENDPOINT,
+                ticket,
+                &reply[..written.unwrap_or(0)],
+            );
+            self.engine.arm_watchdogs(now);
+        }
+
+        fn expire_deadlines(&mut self) {
+            let now = Duration64::from_nanos(tairix_rt::clock_get());
+            let report = self.engine.expire_due(now);
+            for failed in &report.failed {
+                // Fail loud, degrade gracefully: a relaunch the kernel
+                // refused is stated on the diagnostic stream, exactly as at
+                // boot, and the rest of the system stays up.
+                let _ = Stderr.write_fmt(format_args!(
+                    "init: service {} not restarted ({:?}); continuing without it\n",
+                    failed.name, failed.failure
+                ));
+            }
+            self.engine.arm_watchdogs(now);
+        }
     }
 
+    /// Which half of the control path refused a request, so the reply carries
+    /// the right `Errno` without conflating a malformed frame with a
+    /// well-formed request the manager declined.
+    enum ControlReply {
+        /// The frame did not decode; the decoder's own `Errno` is returned.
+        Malformed(Errno),
+        /// The frame decoded but the manager refused the operation.
+        Refused(ControlError),
+    }
+
+    /// Map a manager refusal onto the `Errno` the reply carries.
+    ///
+    /// The control wire has no room for a richer reason and does not need one:
+    /// the manager has already audited the refusal with its cause, so the
+    /// caller learns *that* it was refused and the operator reads *why* in the
+    /// log.
+    const fn control_errno(err: ControlError) -> Errno {
+        match err {
+            ControlError::UnknownService => Errno::NotFound,
+            // Retryable: a readiness condition is unmet or the service is
+            // mid-teardown, so the resource is simply not in a state to serve
+            // the request.
+            ControlError::Unavailable => Errno::Busy,
+            // Not `PermissionDenied`: the caller's authority was sufficient —
+            // it reached a gated endpoint — and it is the *target's* bundle
+            // that the load gate refused. Blaming the caller would send an
+            // administrator hunting the wrong problem.
+            ControlError::NotStartable => Errno::NotSupported,
+        }
+    }
+
+    /// Wait-set token identifying the service-control endpoint member.
+    const TOKEN_CONTROL: u64 = 1;
+
+    /// Wait-set token identifying the any-child member.
+    const TOKEN_CHILD: u64 = 2;
+
+    /// How many control requests the endpoint queues before a further caller
+    /// is refused by the kernel.
+    ///
+    /// A control tool call is synchronous and PID 1 answers one per wakeup, so
+    /// the queue only absorbs callers that arrive while an earlier one is
+    /// being served. A bound rather than a capacity: this is the depth at
+    /// which a flood of control calls is refused instead of consuming kernel
+    /// memory, and only an administrator can reach the endpoint at all.
+    const CONTROL_QUEUE_DEPTH: usize = 4;
+
     /// The production [`Sessions`] backing: the real `tairix-rt` syscall
-    /// wrappers (`console_count`, the console-selecting `spawn_at`, and
-    /// wait-any). Zero-sized — the per-console session table lives on
+    /// wrappers (`console_count`, the console-selecting `spawn_at`) over the
+    /// wait-set PID 1 parks on. The per-console session table lives on
     /// `main`'s stack inside [`supervise`].
-    struct RtSessions;
+    struct RtSessions {
+        /// The wait-set handle carrying the control-endpoint and any-child
+        /// members.
+        set: u64,
+    }
+
+    impl RtSessions {
+        /// Create the wait-set and enrol both members, or report the kernel's
+        /// `-errno`.
+        ///
+        /// The control endpoint is created here rather than by a separate
+        /// service because PID 1 *is* the system service manager: the endpoint
+        /// is bound restricted-sender, so the kernel refuses a call from a
+        /// task without `CAP_SERVICE_CONTROL` and the engine never re-checks a
+        /// caller-supplied claim.
+        fn new() -> Result<Self, i64> {
+            let created = tairix_rt::call_create(
+                tairix_abi::service_control::SERVICE_CONTROL_ENDPOINT,
+                &control_send_caps(),
+                &CapabilitySet::empty(),
+                tairix_abi::service_control::REQUEST_LEN,
+                tairix_abi::service_control::REPLY_LEN,
+                CONTROL_QUEUE_DEPTH,
+            );
+            if created != 0 {
+                return Err(created);
+            }
+            let set = tairix_rt::waitset_create();
+            if set < 0 {
+                return Err(set);
+            }
+            // A non-negative kernel result is a valid handle.
+            #[allow(clippy::cast_sign_loss)]
+            let set = set as u64;
+            for (kind, id, token) in [
+                (
+                    WaitSourceKind::Endpoint,
+                    tairix_abi::service_control::SERVICE_CONTROL_ENDPOINT,
+                    TOKEN_CONTROL,
+                ),
+                (
+                    WaitSourceKind::Child,
+                    tairix_abi::WAITSET_CHILD_ANY,
+                    TOKEN_CHILD,
+                ),
+            ] {
+                let added = tairix_rt::waitset_ctl(set, WaitSetOp::Add, kind, id, token);
+                if added != 0 {
+                    return Err(added);
+                }
+            }
+            Ok(Self { set })
+        }
+    }
+
+    /// The capability a caller must hold to reach the control endpoint.
+    ///
+    /// One definition, used both to bind the endpoint and by the manifest
+    /// pinning tests, so the gate and the tool's request cannot drift.
+    fn control_send_caps() -> CapabilitySet {
+        let mut caps = CapabilitySet::empty();
+        caps.insert(CapabilityId::SERVICE_CONTROL);
+        caps
+    }
 
     impl Sessions for RtSessions {
         fn console_count(&mut self) -> i64 {
@@ -187,8 +381,34 @@ mod program {
             // table, failing closed on an unknown uid.
             tairix_rt::spawn_as(path, u64::from(console), uid)
         }
-        fn wait_any(&mut self, status: &mut i32) -> i64 {
-            tairix_rt::wait_exit(tairix_abi::WAIT_PID_ANY, status)
+
+        fn wait_next(&mut self, timeout_ns: u64, status: &mut i32) -> Woke {
+            let mut token = 0u64;
+            let woke = tairix_rt::waitset_wait(self.set, timeout_ns, &mut token);
+            if woke < 0 {
+                return if Errno::from_syscall(woke) == Errno::TimedOut {
+                    Woke::Deadline
+                } else {
+                    Woke::Failed
+                };
+            }
+            match token {
+                TOKEN_CONTROL => Woke::Control,
+                TOKEN_CHILD => {
+                    // A child member's readiness is a peek, so the reap is a
+                    // separate non-blocking call — it must never park the one
+                    // loop that also owes the control endpoint an answer. A
+                    // reported-ready child that is then not reapable is a
+                    // kernel-state inconsistency, not a quiet retry.
+                    let reaped = tairix_rt::try_wait_exit(tairix_abi::WAIT_PID_ANY, status);
+                    if reaped < 0 {
+                        Woke::Failed
+                    } else {
+                        Woke::Child(reaped.unsigned_abs())
+                    }
+                }
+                _ => Woke::Failed,
+            }
         }
         fn report_launch_failure(&mut self, path: &[u8], console: u32, err: i64) {
             // One terse line on the inherited diagnostic stream, so a
@@ -331,7 +551,20 @@ mod program {
             path: config.session().path.as_bytes(),
             uid: config.session().uid,
         };
-        match supervise(&mut services, &mut RtSessions, session) {
+        // The wait-set is PID 1's only park: the control endpoint, any-child
+        // readiness, and the one-shot deadlines all wake it. Without it there
+        // is nothing to supervise sessions *from*, so a refusal is fatal and
+        // says why rather than silently degrading to a wait on children.
+        let mut sessions = match RtSessions::new() {
+            Ok(sessions) => sessions,
+            Err(err) => {
+                let _ = Stderr.write_fmt(format_args!(
+                    "init: service-control wait-set unavailable (err {err}); refusing to boot a system it cannot supervise\n"
+                ));
+                return EXIT_WAITSET_FAILED;
+            }
+        };
+        match supervise(&mut services, &mut sessions, session) {
             Outcome::NoConsoles => EXIT_NO_CONSOLES,
             Outcome::WaitFailed => EXIT_WAIT_FAILED,
             Outcome::Exhausted => EXIT_SESSION_EXHAUSTED,
@@ -349,40 +582,69 @@ mod program {
 // parses the compiled-in default config (touching the parser's accessors and
 // the `service_name` derivation each boot-floor entry now flows through) so a
 // malformed `DEFAULT_CONFIG` is caught by an ordinary `cargo build`, and
-// drives the session supervisor against inert zero-console / no-service seams
-// so neither is dead code on the host. It performs no I/O. The real
-// engine-backed [`Services`](supervisor::Services) glue is exercised by the
-// freestanding build and the QEMU boot vertical; the pure supervision policy
-// and the engine itself are host-tested in their own modules.
-/// An inert host-stub session seam: zero consoles, so the supervisor returns
-/// [`supervisor::Outcome::NoConsoles`] without spawning or waiting.
+// drives the session supervisor against scripted seams that replay one of
+// every event, so no reactor arm is dead code on the host. It performs no
+// I/O. The real engine-backed [`Services`](supervisor::Services) glue is
+// exercised by the freestanding build and the QEMU boot vertical; the pure
+// supervision policy and the engine itself are host-tested in their own
+// modules.
+/// A host-stub session seam replaying a scripted event sequence, so the host
+/// build drives every arm of the reactor's dispatch.
 #[cfg(not(freestanding))]
-struct NoSessions;
+struct StubSessions {
+    /// The events `wait_next` replays, in order; a spent script reports a
+    /// failed park so the supervisor terminates.
+    script: &'static [supervisor::Woke],
+    next: usize,
+}
 
 #[cfg(not(freestanding))]
-impl supervisor::Sessions for NoSessions {
+impl supervisor::Sessions for StubSessions {
     fn console_count(&mut self) -> i64 {
-        0
+        1
     }
     fn spawn_at(&mut self, _path: &[u8], _console: u32, _uid: u32) -> i64 {
-        -1
+        1
     }
-    fn wait_any(&mut self, _status: &mut i32) -> i64 {
-        -1
+    fn wait_next(&mut self, _timeout_ns: u64, _status: &mut i32) -> supervisor::Woke {
+        let woke = self
+            .script
+            .get(self.next)
+            .copied()
+            .unwrap_or(supervisor::Woke::Failed);
+        self.next += 1;
+        woke
     }
     fn report_launch_failure(&mut self, _path: &[u8], _console: u32, _err: i64) {}
 }
 
-/// An inert host-stub service seam: no running service, so the supervisor's
-/// exhaustion check depends only on the (also inert) sessions.
+/// A host-stub service seam that records which reactor callbacks the
+/// supervisor drove, so the host build covers the dispatch rather than only
+/// type-checking it.
 #[cfg(not(freestanding))]
-struct NoServices;
+#[derive(Default)]
+struct StubServices {
+    control: usize,
+    deadlines: usize,
+    exits: usize,
+}
 
 #[cfg(not(freestanding))]
-impl supervisor::Services for NoServices {
-    fn on_child_exit(&mut self, _pid: u64, _exit_code: i32) {}
+impl supervisor::Services for StubServices {
+    fn on_child_exit(&mut self, _pid: u64, _exit_code: i32) {
+        self.exits += 1;
+    }
     fn any_running(&self) -> bool {
         false
+    }
+    fn next_timeout_ns(&mut self) -> u64 {
+        tairix_abi::WAITSET_TIMEOUT_NONE
+    }
+    fn serve_control(&mut self) {
+        self.control += 1;
+    }
+    fn expire_deadlines(&mut self) {
+        self.deadlines += 1;
     }
 }
 
@@ -400,15 +662,32 @@ fn main() {
             startup::render_banner(None, &mut banner_buf),
         );
     }
+    // Drive the reactor's dispatch over a scripted seam so an ordinary host
+    // build covers every arm: a control request, a lapsed deadline, a
+    // non-session child exit, then a failed park that ends the loop.
+    let mut services = StubServices::default();
+    let mut sessions = StubSessions {
+        script: &[
+            supervisor::Woke::Control,
+            supervisor::Woke::Deadline,
+            supervisor::Woke::Child(4242),
+            supervisor::Woke::Failed,
+        ],
+        next: 0,
+    };
     assert_eq!(
         supervisor::supervise(
-            &mut NoServices,
-            &mut NoSessions,
+            &mut services,
+            &mut sessions,
             supervisor::Launch {
                 path: b"session",
                 uid: 0,
             },
         ),
-        supervisor::Outcome::NoConsoles
+        supervisor::Outcome::WaitFailed
+    );
+    assert_eq!(
+        (services.control, services.deadlines, services.exits),
+        (1, 1, 1)
     );
 }

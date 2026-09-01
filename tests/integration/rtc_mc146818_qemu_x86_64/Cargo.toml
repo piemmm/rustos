@@ -1,0 +1,37 @@
+[package]
+name = "tairix-test-rtc-mc146818-qemu-x86-64"
+description = "plans/TIMESYNC.md TS-3 QEMU integration test: boot the production x86_64 tairix-kernel pipeline (boot_x86_64::boot) against the rtc-root whole disk, whose read-only /System store carries the kernel-signed CMOS clock-chip driver bundle and nothing else. QEMU starts the board's mc146818 at a pinned instant, so the run proves the whole chain -- synthesise the motorola,mc146818 node on the legacy-fallback discovery path, autoload the signed bundle into user space, issue the granted port-I/O reads through the PORT_READ trap, bind the RTC service endpoint, and have timed read it and set the wall clock as Firmware -- lands on a value only a correct register decode can produce, with no network and before the operator unlocks anything."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tairix-test-rtc-mc146818-qemu-x86-64"
+path = "src/main.rs"
+
+# Freestanding "boot the production x86_64 kernel pipeline against the
+# rtc-root disk and prove the clock is established from the board's own CMOS
+# clock chip" integration test. It reuses the entire production x86_64 boot
+# pipeline through `tairix-kernel`'s library half (`boot_x86_64::boot`)
+# unchanged -- the bootstrap-floor virtio-PCI enumeration that reaches the
+# disk, the ACPI/legacy-fallback discovery that synthesises the clock node,
+# the user-space port-I/O trap the driver reads its registers through, and the
+# autoload path -- and only swaps the diagnostic sink for the witness.
+[target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
+tairix-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The witness the guest exits on: the service's own `RTC_CLOCK_SET` event id.
+tairix-timesync = { path = "../../../lib/timesync", version = "=0.0.0" }
+# The window the applied reading must land in, shared with the harness that
+# pins the emulated chip's start instant on the QEMU command line.
+tairix-test-rtc-fixture = { path = "../rtc_fixture", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

@@ -2242,8 +2242,29 @@ pub fn try_wait(pid: i32, status: &mut WaitStatus) -> i64 {
 /// negative result.
 #[must_use]
 pub fn wait_exit(pid: i32, code: &mut i32) -> i64 {
+    wait_exit_with(pid, code, WaitFlags::empty())
+}
+
+/// Reap the child selected by `pid` **if one has already terminated**, without
+/// blocking — the non-blocking sibling of [`wait_exit`].
+///
+/// The reap a reactor performs after a wait-set reported a
+/// [`WaitSourceKind::Child`] member ready:
+/// that readiness is a peek, so the reap must not park the loop that also owes
+/// other members an answer. Returns the reaped child's PID, or the `-errno`
+/// encoding exactly as [`wait`] does — `Errno::WouldBlock` when no child has
+/// terminated yet; `code` is untouched on a negative result.
+#[must_use]
+pub fn try_wait_exit(pid: i32, code: &mut i32) -> i64 {
+    wait_exit_with(pid, code, WaitFlags::NONBLOCK)
+}
+
+/// The one status-to-exit-code path [`wait_exit`] and [`try_wait_exit`] share,
+/// so the blocking and non-blocking forms cannot disagree on how a stop report
+/// is refused.
+fn wait_exit_with(pid: i32, code: &mut i32, flags: WaitFlags) -> i64 {
     let mut status = WaitStatus::Exited(0);
-    let ret = wait(pid, &mut status, WaitFlags::empty());
+    let ret = wait(pid, &mut status, flags);
     if ret >= 0 {
         match status {
             WaitStatus::Exited(exit_code) => *code = exit_code,

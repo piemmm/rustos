@@ -222,7 +222,7 @@ pub use volume::{
     validate_volume_name, VolumeAttachRequest, VolumeDetachRequest, VolumeFsType,
     VOLUME_ATTACH_MAX_LEN, VOLUME_DETACH_LEN, VOLUME_ID_LEN, VOLUME_NAME_MAX,
 };
-pub use waitset::{WaitSetOp, WaitSourceKind, WAITSET_CHILD_ANY};
+pub use waitset::{WaitSetOp, WaitSourceKind, WAITSET_CHILD_ANY, WAITSET_TIMEOUT_NONE};
 
 /// ABI version tag for the frozen `abi-v1` interface.
 ///

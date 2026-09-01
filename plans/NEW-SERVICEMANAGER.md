@@ -702,18 +702,87 @@ the live model wins, and the engine is reshaped to it in place (§2.13).
   below, so `plans/FIX-IO.md`'s block drivers renew through it once it exists;
   the engine core is complete and proven host-side first, exactly as the
   sibling stages staged their transport.
-- **Remaining (TODO).** The **transport**: a per-manager wait-set reactor
-  (`waitset_*`) serving `SERVICE_CONTROL_ENDPOINT` alongside child-reaping,
-  the heartbeat-renewal path, and the one-shot linger/grace/restart/watchdog
-  timers (arming from `watchdog_deadline` and calling `expire_watchdog`); the
-  `servicectl` control tool (the live holder) and the `CAP_SERVICE_CONTROL`
-  send capability the manager binds the endpoint with (added *with* that
-  enforcement point + holder, §5.2); a QEMU vertical proving live start/stop
-  and a live watchdog kill+restart. Then `enable`/`disable` over the enrolment
-  store-write seam, `status` via §16.6, and the live rlimit enforcement at spawn.
-  This rides with the loader/kernel transport seam (SVC-5), the same staging the
-  readiness/activation/restart engine cores already follow. README matrix and
-  full §7 gate on each landing.
+- **One-shot deadline fold — DONE (engine core).** The four per-name
+  deadline accessors left the transport to ask about each service in turn,
+  which no reactor can do: it needs one instant to program its single wait
+  from. `Init::next_deadline()` folds the soonest armed deadline across every
+  service and all four kinds (`None` = wait indefinitely, take no timer), and
+  `Init::expire_due(now)` runs *every* deadline that has lapsed in that
+  wakeup — one wakeup can find several, including several on one service, so
+  a soonest-only design would need a wakeup per deadline. It reuses the four
+  existing guarded `expire_*` paths, so a deadline no longer genuinely due (a
+  heartbeat landed, the process already exited) is the same no-op it is when
+  called by name, and there is no second expiry engine. Two ordering facts
+  worth not re-deriving: the due set is **snapshotted before any expiry runs**
+  (an expiring restart backoff re-enters the admission engine, so indices
+  taken earlier would not survive it), and the **force-down kinds run before
+  the bring-up kind**, so a wakeup that finds both a lapsed watchdog and a
+  lapsed backoff on one service does not relaunch it into its own corpse.
+  Host-tested (5 tests: the empty fold, the soonest across services and
+  kinds, several kinds in one wakeup, a renewed deadline left alone, and
+  kill-then-reap-then-relaunch).
+- **The live control transport — DONE (start/stop).** PID 1's one loop now
+  parks on a **wait-set** carrying `SERVICE_CONTROL_ENDPOINT`, any-child
+  readiness, and a timeout folded from `next_deadline()`; the endpoint is bound
+  restricted-sender requiring the new `CAP_SERVICE_CONTROL`, and
+  `userland/shell/servicectl` is its first holder. Decisions worth not
+  re-deriving:
+  - **One loop, three wake reasons — never a second dispatch loop.** The
+    session supervisor's blocking wait-on-children became a multiplexed park:
+    the `Sessions::wait_next` seam reports `Woke::{Child, Control, Deadline,
+    Failed}` and the pure policy routes each. A control request is therefore
+    answered while the login session sits blocked on its console, instead of
+    waiting for some unrelated process to exit. The session fan-out, per-console
+    budget, and exhaustion policy are unchanged and still host-tested; the
+    engine calls live in the `Services` backing.
+  - **The park length is the engine's, so PID 1 is tickless.** Nothing armed
+    means `WAITSET_TIMEOUT_NONE` — an indefinite park and no timer interrupt.
+    That sentinel is now named once in `lib/abi::waitset` beside
+    `WAITSET_CHILD_ANY` rather than spelled `u64::MAX` per reactor.
+  - **A child member's readiness is a peek, so the reap is non-blocking.**
+    `lib/rt` gained `try_wait_exit` beside `wait_exit` over one shared
+    status-to-code path; a blocking reap would park the loop that owes the
+    control endpoint an answer.
+  - **The reply distinguishes *who* refused.** `ControlError::Unavailable` maps
+    to `Busy` (retryable) and `NotStartable` to `NotSupported` — deliberately
+    **not** `PermissionDenied`, because the caller's authority was sufficient
+    (it reached a gated endpoint) and it is the target's bundle the load gate
+    refused. Blaming the caller sends an administrator hunting the wrong
+    problem. A malformed frame is answered with the decoder's own refusal
+    rather than dropped: the caller waits synchronously, so a silent drop is a
+    denial of service against a legitimate principal.
+  - **`CAP_SERVICE_CONTROL` is in `ADMINISTRATIVE_SET`**, so an administrator's
+    ceiling carries it and an ordinary session's does not. Stopping the device
+    manager, the network stack, or the clock reaches every principal on the
+    machine, which is what makes it administrative rather than baseline. PID 1's
+    manifest gained `CAP_IPC_BIND_PRIVILEGED` for the reserved bind.
+  - **The tool checks no capability.** Reaching the endpoint *is* the
+    authority, so `servicectl` holds none of its own and reports the kernel's
+    refusal; `enable`/`disable`/`status` are deliberately absent from both the
+    tool and the endpoint (see below).
+  - QEMU witness: `tairix-test-servicectl-qemu-aarch64` boots the production
+    pipeline, unlocks, logs in, and runs `servicectl stop timed` at the shell,
+    exiting on the engine's own `SERVICE_CONTROL_STOPPED`. The transcript shows
+    the on-disk bundle resolved from `/System/Commands` and signature-verified,
+    so the run also proves the tool is a real store app rather than anything
+    embedded.
+- **Open, and load-bearing for SVC-6: the endpoint id is per-*manager*, and
+  there is currently one.** `SERVICE_CONTROL_ENDPOINT` is a single well-known
+  reserved id, which is right while PID 1 is the only manager but cannot serve a
+  per-user manager as well — two managers cannot both bind one id, and a user's
+  tool must not reach the system manager's endpoint. When the per-user manager
+  is spawned at session start (SVC-6's remaining half), the id becomes
+  scope-derived (a system id plus one per user) and `lib/cmdres`-style shared
+  derivation decides which a caller names, so authority cannot be crossed by
+  spelling. Do not add a second endpoint constant ad hoc.
+- **Remaining (TODO).** `enable`/`disable` over the enrolment store-write seam
+  and `status` via §16.6 — both deliberately *not* on the control endpoint:
+  enablement mutates the registration store and status is served through the
+  System Information API, never a control-reply scrape. Then the **live
+  heartbeat transport** (a supervised driver renewing its heartbeat, so
+  `plans/FIX-IO.md`'s block drivers can) and a vertical for a live watchdog
+  kill+restart, and the live rlimit enforcement at spawn (which rides the
+  loader/kernel seam, SVC-5). Full §7 gate on each landing.
 
 ---
 
