@@ -6402,17 +6402,17 @@ static TESTS: &[QemuTest] = &[
     // `stress --cpu 10 --timeout 120s --background`, requires the returned
     // prompt to accept `sysmon`, observes its `Pres` gauge frame, refreshes to
     // the reclaim (`hit%`) panel, and quits back to the shell while ten CPU-bound
-    // workers saturate four CPUs. After the post-`sysmon` prompt it advances
-    // its serial cursor past the launcher's early stress-worker syscalls and,
-    // on the next `comm=stress` line (the detached controller waking to tear
-    // its 120-second run down), types `exit`. PASS is decided by the guest
-    // sink, which records three witnesses — both `comm=stress` exits (the
-    // foreground launcher and the detached controller) and the `comm=elsh`
-    // shell exit — and fires on whichever completes the set. The order is not
-    // fixed on purpose: the controller's exit and the shell's scripted `exit`
-    // are concurrent, so any ordering assumption would race. A 300-second
-    // guest budget covers boot, bounded PBKDF2, the required 120-second load,
-    // and teardown on QEMU TCG; four CPUs reproduce the RPi4 saturation shape.
+    // workers saturate four CPUs, then types `exit` at the prompt the monitor
+    // restored. PASS is decided by the guest sink, which records three
+    // witnesses — both `comm=stress` exits (the foreground launcher and the
+    // detached controller) and the `comm=elsh` shell exit — and fires on
+    // whichever completes the set, so the detached run must still finish
+    // however the shell exit interleaves with it. Every scripted marker is a
+    // line one process prints and leaves standing; none is a transient line
+    // from a concurrent process, which cannot be waited for once the search
+    // cursor has passed it. A 300-second guest budget covers boot, bounded
+    // PBKDF2, the required 120-second load, and teardown on QEMU TCG; four
+    // CPUs reproduce the RPi4 saturation shape.
     QemuTest {
         package: "tairix-test-stress-qemu-aarch64",
         binary: "tairix-test-stress-qemu-aarch64",
@@ -6444,17 +6444,14 @@ static TESTS: &[QemuTest] = &[
             ("Pres", Duration::ZERO, "r"),
             // Raw input and a fresh sysinfo round trip remain live under load.
             ("hit%", Duration::ZERO, "q"),
-            // Advance past the prompt restored by `sysmon`; the launcher's
-            // earlier stress-worker syscalls are now outside the search window.
-            ("root@tairix ~% ", Duration::ZERO, ""),
-            // The next `comm=stress` line past that prompt is the detached
-            // controller waking to tear down its 120-second run, so the shell
-            // `exit` is typed while the controller is finishing. PASS ordering
-            // is not keyed on this marker: the guest sink fires once both
-            // `comm=stress` exits and this `comm=elsh` exit are observed, in
-            // any order, so the concurrent shell-exit / controller-exit race
-            // that this marker cannot disambiguate cannot flake the run.
-            ("comm=stress", Duration::ZERO, "exit\n"),
+            // `exit` goes to the prompt `sysmon` restored: a line the shell
+            // prints once and never retracts. Gating it on the detached
+            // controller's own exit line instead was unreachable whenever the
+            // monitor dialogue outlasted the 120-second run — that line had
+            // already passed the search cursor, so `exit` was never typed and
+            // the shell witness never arrived. The sink fires on whichever
+            // witness lands last, so the full run is still required.
+            ("root@tairix ~% ", Duration::ZERO, "exit\n"),
         ],
     },
     // `plans/PI.md` design B / B2 + `plans/DISPLAY.md` D7d (first stage): the
@@ -12361,6 +12358,48 @@ mod tests {
                 t.timeout,
                 MIN_REACHABLE_BUDGET,
             );
+        }
+    }
+
+    /// Audit-record field prefixes that identify a serial marker as a line
+    /// from the kernel's audit stream rather than a program's own output.
+    const AUDIT_FIELD_PREFIXES: &[&str] = &[
+        "comm=",
+        "task=",
+        "proc=",
+        "pproc=",
+        "sc=",
+        "id=",
+        "endpoint=",
+        "sender=",
+    ];
+
+    /// Regression guard: a scripted marker must be a line some process prints
+    /// and leaves standing, never a transient line from a concurrent one.
+    ///
+    /// The harness matches each marker at or after the previous step's match,
+    /// so a marker naming an audit record — which whichever task happens to
+    /// syscall emits, once — is unreachable the moment that record precedes
+    /// the cursor. The `stress` vertical gated its final `exit` on the
+    /// detached controller's `comm=stress` exit line and hung for the whole
+    /// runtime ceiling whenever the monitor dialogue outlasted the load, since
+    /// the controller had already exited and no further such line could
+    /// appear. Wait on a prompt, a banner, or a program's own message instead.
+    #[test]
+    fn no_serial_marker_waits_on_an_audit_record() {
+        for t in TESTS {
+            for (marker, _, _) in t.serial {
+                for field in AUDIT_FIELD_PREFIXES {
+                    assert!(
+                        !marker.contains(field),
+                        "enrolment {}: serial marker {marker:?} waits on the audit \
+                         field {field:?}. An audit line is emitted once by whichever \
+                         task syscalls, so it is unreachable once the search cursor \
+                         has passed it; wait on output the process leaves standing",
+                        t.package,
+                    );
+                }
+            }
         }
     }
 }

@@ -777,14 +777,36 @@ The tool's icon is authored as **SVG**, the charter's preferred form for an
 icon expressible in the vector subset — one file serves every slot and UI
 scale, so no slot ever upscales a raster.
 
-### TS-5b — Enablement: `Enable`/`Disable`/`Status`
-The remaining ops, over the *enrolment* path rather than the control endpoint:
+### TS-5b — Enablement: `Enable`/`Disable` — DONE
+The enrolment ops, over the *enrolment* path rather than the control endpoint:
 `Enable`/`Disable` write through the existing pure `registry::enrol`/`unenrol`
-transforms so the enroller's ceiling check cannot be bypassed, and `Status` is
-served through the System Information API (§16.6), never a control-reply
-scrape. This is also where `timed`'s SUM1 unit metadata is authored — once
-something reads it — and where `timed` moves out of the compiled-in boot
-floor. QEMU vertical: a live `servicectl disable timed` survives a reboot.
+transforms so the enroller's ceiling check cannot be bypassed. This is also
+where `timed`'s SUM1 unit metadata is authored and where `timed` moves out of
+the compiled-in boot floor into the `enrolled` startup-config tier. QEMU
+vertical `tairix-test-enrol-qemu-aarch64`: a live `servicectl disable timed`
+survives a reboot.
+
+Reading enrolment and lifecycle state back is **TS-5c**, below: it is served
+through the System Information API (§16.6), never a control-reply scrape, so
+it is a separate query with its own capability gate rather than a third
+enrolment op.
+
+### TS-5c — `servicectl list` / `status SERVICE`
+Not started. One paged System Information query behind both verbs — `list` is
+the walk with no name filter, `status` the same walk looking for one row — so
+the two can never disagree about a service's state, and a second singular
+query is not added. A new `SysinfoQueryId` at the end of `SYSINFO_QUERIES`,
+gated `CAP_SYSINFO_GLOBAL` and audited, because the answer names other
+principals and their pids exactly as `GLOBAL_PROCESS_LIST` does. `sysinfod`
+brokers it to PID 1 over a **read-only** reserved endpoint bound requiring
+`CAP_SYSINFO_INTROSPECT` on the sender — which `sysinfod` alone holds — so the
+audited query is the only way in, unlike netstack's ungated read endpoint. The
+row set spans both enrolment tiers: the unenrolled-but-known specs PID 1
+retains (`Init::unenrolled`) must appear too, or a disabled service would be
+invisible and `enable` would look impossible. `list` takes no operand, so it is
+the first verb whose arity differs from `servicectl`'s one-operand grammar, and
+the `WrongOperandCount` path stays fail-closed for both arities rather than
+becoming "any number is fine".
 
 **The enrolment record is two layers, and that shape is forced by
 `plans/NEW-NAMESPACE.md` §5.** PID 1 must know what is enrolled *before* the

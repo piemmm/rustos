@@ -3516,8 +3516,10 @@ one, `servicectl enable`/`disable` drives it, the enrolment record is live as
 two layers (the image's on the read-only `/System` volume, the administrator's
 overrides on the encrypted root), and `timed` has moved out of the compiled-in
 boot floor into the enrolment-governed tier — so turning automatic time-setting
-off survives a reboot. TS-5b's `status` query (§16.6) and TS-6 (the desktop
-toggle, which needs the enrolment path this landed) follow.
+off survives a reboot. TS-5c (`servicectl list` / `status SERVICE` over one
+paged §16.6 query, brokered to PID 1 through a read-only introspection
+endpoint) and TS-6 (the desktop toggle, which needs the enrolment path this
+landed) follow.
 `plans/TIMESYNC.md` is the binding design and carries the deliverable list and
 its current state; it is not repeated here.
 

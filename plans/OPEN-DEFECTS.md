@@ -105,6 +105,26 @@ The open items, in priority order:
   starving every concurrent reader — OPEN.** It is the measured whole of the
   read-throughput gap `plans/FIX-KHEAP.md` reported: bundle load rate tracks
   overlap with this burst, not bundle size. Desktop-side, not block-layer.
+- **D68 — an interactive program's asynchronous bundle load takes 59–120 s
+  while ten CPU-bound tasks saturate four CPUs — OPEN (to root-cause).**
+  Measured on `stress_qemu_aarch64`: the shell spawns `sysmon` at t≈6.4 s and
+  the child's loading body does not reach its image-verified capability
+  derivation (audit 1020) until t≈66 s run alone, or t≈126.6 s with the `ci`
+  matrix in flight — the latter being the entire 120 s of the load, so the
+  monitor first renders only once the workers have gone. Not a preemption
+  failure: that run's own `sysmon` frame reports 20 490 preemptions and
+  25 415 switches across 4 CPUs at 90.5% busy, and `timed`'s timer wakes keep
+  landing throughout. Not the placement rule either — `RunQueue::admit_weight`
+  seats a joiner level with the leftmost ready entry. The unapportioned cost
+  is in the three stages the child's own loading body runs before that
+  derivation: waiting to be picked, `wait_app_store`, and `load_store_bundle`
+  reading the bundle off the encrypted root. Separating them needs per-stage
+  instrumentation, not more log reading; suspect the read, since D54 starves
+  concurrent readers by the same shape. A user who starts a load generator
+  and then a monitor must not wait a minute for the monitor. Found while
+  diagnosing the `stress_qemu_aarch64` gate failure under
+  `plans/TIMESYNC.md` TS-5c; escalated rather than fixed inline because
+  apportioning it is a launch-path/block-layer investigation of its own.
 - **D50 — the flake hunt's concurrent replicas re-planted one guest's backing
   image underneath itself — DONE.** Up to four simultaneous runs of one
   enrolment shared a planted-image path, so a replica rewrote a live sibling's

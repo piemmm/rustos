@@ -761,11 +761,18 @@ implementation fixed):
   sequence exactly on four CPUs: login → wait one second at the first shell
   prompt → `stress --cpu 10 --timeout 120s --background` → returned prompt
   accepts `sysmon` → `Pressure:` frame renders → raw `r` refresh reaches the
-  `reclaimable` panel → `q` restores the shell → detached controller reaches
-  its audited exit after the full 120-second run → shell exits. The sink
-  requires both `comm=stress` exits (foreground detach launcher plus detached
-  controller) before the shell exit can report PASS; workers terminate through
-  controller teardown and do not invoke `exit`. The QEMU matrix retains
+  `reclaimable` panel → `q` restores the shell → shell exits at the restored
+  prompt. The sink requires both `comm=stress` exits (foreground detach
+  launcher plus detached controller) *and* the shell exit, firing on whichever
+  lands last, so the detached controller's full 120-second run is still
+  required however it interleaves with the shell exit; workers terminate
+  through controller teardown and do not invoke `exit`. The shell exit is
+  deliberately **not** sequenced after the controller's: every scripted marker
+  must be a line some process prints and leaves standing, and the controller's
+  exit line is a transient one from a concurrent process — gating on it hung
+  the run whenever the monitor dialogue outlasted the load, because the line
+  had already passed the search cursor. Under D68 that dialogue can take the
+  whole 120 s, so the ordering was never one the script could guarantee. The QEMU matrix retains
   emulator/I/O headroom for one-vCPU guests and admits an SMP TCG guest alone,
   so mutually synchronising guest CPUs cannot be starved by another emulator
   past a wall-clock deadline. Its stdout/stderr drains retry interrupted host
