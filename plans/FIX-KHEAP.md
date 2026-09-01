@@ -193,6 +193,15 @@ identity extent (`paging::IDENTITY_GIGAPAGES`) is derived from the same
 figure, so the window and the identity map cannot overlap and the direct
 physical map is sized from what the MMU actually maps.
 
+**The heap reaches the kernel core as a handover value.** `#[global_allocator]`
+can only be declared by the final binary, so every kernel bin hands its
+allocator to `boot`, which carries it in `BootInfo` to
+`install_frame_heap_source`. It is a required field rather than an installable
+option deliberately: the first shape of this seam was a registration call, and
+every test kernel omitted it (`plans/OPEN-DEFECTS.md` D69). The same handover
+is what makes `KernelMemoryStats::kernel_heap_bytes` a live reading of the
+heap's capacity rather than a boot-time constant.
+
 **The re-entrancy trap** is why the bookkeeping is new code rather than a
 reuse. `FrameAllocator::alloc_chunks` returns a `Vec` — its order-step-down
 *algorithm* is reused inline, never its surface. `AnonWindowMap` keeps its
@@ -237,8 +246,23 @@ mapped.
 - **The host cannot dereference the window.** A host test has no hardware to
   map its addresses, so `kernel/core::kheap`'s tests drive the growth
   source's *contract* (extents, frame accounting, fail-closed paths,
-  no-allocation proof) over a non-allocating page-table double; the
-  end-to-end dereference is proven by every QEMU vertical, none of which can
-  finish booting unless the window works.
+  no-allocation proof) over a non-allocating page-table double. The
+  on-the-metal half is `tests/integration/kheap_growth`, one arch-neutral
+  exercise the three boot-completed verticals drive after `BootCompleted`:
+  force a request one page past the heap's free remainder, check the capacity
+  rose, marker-check **every page** of the assembled run, free it so the
+  drained region drives `shrink`, and repeat. The earlier claim that every
+  vertical proved the dereference by booting at all was wrong — no test
+  kernel published its allocator, so the source was never installed
+  (`plans/OPEN-DEFECTS.md` D69).
+- **The bootstrap arena is far larger than boot needs.** The exercise reports
+  the heap's live bytes at `BootCompleted`: 0.84 MiB on riscv64, 1.22 MiB on
+  x86_64, 1.41 MiB on aarch64, against a 64 MiB `.bss` arena. Sizing the
+  arena to what boot actually consumes before the frame allocator exists
+  would reclaim ~62 MiB of `.bss` per image and make every vertical grow the
+  heap as part of booting; it needs the *pre-install* watermark (a lower
+  figure still) and re-validation of the ~80 hand-rolled test kernels that
+  install no source and would then be capped at the smaller arena, so it is
+  staged rather than taken here.
 - **The teardown batch is a batching granule**, not a limit on how much may
   be torn down: a longer run is simply processed in more batches.

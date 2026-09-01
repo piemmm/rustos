@@ -47,20 +47,29 @@ use tairix_arch_api::mmu::{AccessTracking, AddressSpace as _, MapError, PageFlag
 #[cfg(itest_x86_64)]
 use tairix_arch_x86_64::{idt, paging, qemu_exit, serial};
 
-/// Virtual address the test maps its single 4 KiB probe page at. Chosen
-/// at 1 GiB, well outside the 32 MiB identity-mapped boot region, so the
-/// mapping is a fresh 4 KiB leaf (its own PDPT/PD/PT), never a huge block.
+/// Virtual address the test maps its single 4 KiB probe page at: the first
+/// byte past the live identity window, so the mapping is a fresh 4 KiB leaf
+/// (its own PDPT/PD/PT) and never lands inside one of the window's huge
+/// blocks. Derived from the port's published window rather than picked, so a
+/// window widened to cover more RAM cannot swallow it.
 #[cfg(itest_x86_64)]
-const TEST_VADDR: u64 = 0x4000_0000;
+fn test_vaddr() -> u64 {
+    paging::configured_identity_bytes()
+}
 
 /// A misaligned address, to confirm the fail-closed reject.
 #[cfg(itest_x86_64)]
-const MISALIGNED_VADDR: u64 = TEST_VADDR + 0x123;
+fn misaligned_vaddr() -> u64 {
+    test_vaddr() + 0x123
+}
 
-/// An address that is mapped nowhere in the test space (2 GiB), to confirm
-/// the "not mapped" fail-closed reject.
+/// An address mapped nowhere in the test space, to confirm the "not mapped"
+/// fail-closed reject: a gigabyte past the probe page, so it is clear of both
+/// the identity window and the probe's own leaf.
 #[cfg(itest_x86_64)]
-const UNMAPPED_VADDR: u64 = 0x8000_0000;
+fn unmapped_vaddr() -> u64 {
+    test_vaddr() + (1 << 30)
+}
 
 /// Magic byte written into the probe frame so the accesses read real data.
 #[cfg(itest_x86_64)]
@@ -69,7 +78,7 @@ const PROBE_BYTE: u8 = 0x5A;
 #[cfg(itest_x86_64)]
 static PAGE_TABLE_POOL: paging::PageTablePool = paging::PageTablePool::new();
 
-/// 4 KiB frame the test maps at [`TEST_VADDR`]. `#[repr(align(4096))]` so
+/// 4 KiB frame the test maps at [`test_vaddr`]. `#[repr(align(4096))]` so
 /// its physical address is a valid page frame.
 #[cfg(itest_x86_64)]
 #[repr(C, align(4096))]
@@ -118,14 +127,18 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
             .write_volatile(PROBE_BYTE);
     }
 
-    let Some(mut space) = paging::AddressSpace::new_identity_first_32mib(&PAGE_TABLE_POOL) else {
+    let Some(mut space) = paging::AddressSpace::new_identity_window(&PAGE_TABLE_POOL) else {
         fail(&mut com1, "page-table pool exhausted building space");
     };
 
     // Map the probe page read/write through the Arch HAL MMU surface (the
     // path the architecture-neutral kernel uses).
     if space
-        .map_page(TEST_VADDR, probe_paddr, PageFlags::READ | PageFlags::WRITE)
+        .map_page(
+            test_vaddr(),
+            probe_paddr,
+            PageFlags::READ | PageFlags::WRITE,
+        )
         .is_err()
     {
         fail(&mut com1, "probe-page mapping refused");
@@ -136,28 +149,29 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
         fail(&mut com1, "x86_64 must declare AccessTracking::Supported");
     }
 
-    // SAFETY: the space maps the low 32 MiB (boot stack / RIP) and the
+    // SAFETY: the space carries the live identity window (boot stack / RIP) and the
     // higher-half kernel window, so RIP/RSP stay mapped across the switch.
     unsafe { space.activate() };
     SETUP_DONE.store(true, Ordering::SeqCst);
     let _ = writeln!(
         com1,
-        "[accessed_bit] space active, probe mapped at 0x{TEST_VADDR:x} -> 0x{probe_paddr:x}"
+        "[accessed_bit] space active, probe mapped at 0x{:x} -> 0x{probe_paddr:x}",
+        test_vaddr()
     );
 
     // ---- Fail-closed edges. ----
-    match space.test_and_clear_accessed(MISALIGNED_VADDR) {
+    match space.test_and_clear_accessed(misaligned_vaddr()) {
         Err(MapError::Misaligned) => {}
         _ => fail(&mut com1, "misaligned address must be rejected"),
     }
-    match space.test_and_clear_accessed(UNMAPPED_VADDR) {
+    match space.test_and_clear_accessed(unmapped_vaddr()) {
         Err(MapError::NotMapped) => {}
         _ => fail(&mut com1, "unmapped address must report NotMapped"),
     }
     let _ = writeln!(com1, "[accessed_bit] fail-closed edges OK");
 
     // ---- Probe 1: a fresh mapping was never accessed → clear. ----
-    match space.test_and_clear_accessed(TEST_VADDR) {
+    match space.test_and_clear_accessed(test_vaddr()) {
         Ok(false) => {}
         Ok(true) => fail(&mut com1, "fresh mapping reported accessed"),
         Err(_) => fail(&mut com1, "probe 1 errored on a mapped page"),
@@ -165,8 +179,8 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     let _ = writeln!(com1, "[accessed_bit] probe 1 (fresh) = clear OK");
 
     // ---- Access the page, then probe 2 → set (and cleared). ----
-    touch(TEST_VADDR);
-    match space.test_and_clear_accessed(TEST_VADDR) {
+    touch(test_vaddr());
+    match space.test_and_clear_accessed(test_vaddr()) {
         Ok(true) => {}
         Ok(false) => fail(&mut com1, "accessed page reported clear"),
         Err(_) => fail(&mut com1, "probe 2 errored on a mapped page"),
@@ -174,7 +188,7 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     let _ = writeln!(com1, "[accessed_bit] probe 2 (after access) = set OK");
 
     // ---- Probe 3: no access since the clear → clear again. ----
-    match space.test_and_clear_accessed(TEST_VADDR) {
+    match space.test_and_clear_accessed(test_vaddr()) {
         Ok(false) => {}
         Ok(true) => fail(&mut com1, "cleared bit did not take effect"),
         Err(_) => fail(&mut com1, "probe 3 errored on a mapped page"),
@@ -182,8 +196,8 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     let _ = writeln!(com1, "[accessed_bit] probe 3 (cold) = clear OK");
 
     // ---- Access again, then probe 4 → set (CPU re-sets after a clear). ----
-    touch(TEST_VADDR);
-    match space.test_and_clear_accessed(TEST_VADDR) {
+    touch(test_vaddr());
+    match space.test_and_clear_accessed(test_vaddr()) {
         Ok(true) => {}
         Ok(false) => fail(&mut com1, "CPU did not re-set the bit after a clear"),
         Err(_) => fail(&mut com1, "probe 4 errored on a mapped page"),

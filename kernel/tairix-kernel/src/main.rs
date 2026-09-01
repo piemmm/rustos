@@ -73,11 +73,6 @@ mod kernel {
     /// `tests/integration/kernel_arch_boot`).
     #[no_mangle]
     pub extern "C" fn kernel_main(boot_info: u64) -> ! {
-        // Publish the `#[global_allocator]` so the boot path wires the
-        // frame-backed growth source into it (the growable kernel heap):
-        // the heap then grows past its `.bss` bootstrap region on demand
-        // instead of being capped at a fixed slab.
-        tairix_kernel::register_global_heap(&ALLOCATOR);
         // Log stream: the raw COM1 sink. Audit stream: the fan-out that both
         // renders to COM1 and retains the trail in the tail-able boot audit
         // ring the pre-boot Supervisor reads (`plans/NEW-SUPERVISOR.md`).
@@ -86,6 +81,7 @@ mod kernel {
         );
         boot(
             boot_info,
+            &ALLOCATOR,
             &SERIAL_SINK,
             &tairix_kernel::x86_64::boot::AUDIT_SINK,
             tairix_log::Level::Info,
@@ -151,17 +147,13 @@ mod kernel {
     /// `tests/integration/devmgr_hwtree_qemu_aarch64`).
     #[no_mangle]
     pub extern "C" fn kernel_main(dtb: u64) -> ! {
-        // Publish the `#[global_allocator]` so the boot path wires the
-        // frame-backed growth source into it (the growable kernel heap):
-        // the heap then grows past its `.bss` bootstrap region on demand
-        // instead of being capped at a fixed slab.
-        tairix_kernel::register_global_heap(&ALLOCATOR);
         // Log stream: the raw PL011 sink. Audit stream: the fan-out that both
         // renders to the PL011 and retains the trail in the tail-able boot
         // audit ring the pre-boot Supervisor reads (`plans/NEW-SUPERVISOR.md`).
         let _ = tairix_kernel_core::install_boot_log_tail(&boot::BOOT_AUDIT_RING);
         boot::boot(
             dtb,
+            &ALLOCATOR,
             &SERIAL_SINK,
             &boot::AUDIT_SINK,
             tairix_log::Level::Info,
@@ -230,11 +222,6 @@ mod kernel {
     /// `tests/integration/kernel_arch_boot_riscv64`).
     #[no_mangle]
     pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
-        // Publish the `#[global_allocator]` so the boot path wires the
-        // frame-backed growth source into it (the growable kernel heap):
-        // the heap then grows past its `.bss` bootstrap region on demand
-        // instead of being capped at a fixed slab.
-        tairix_kernel::register_global_heap(&ALLOCATOR);
         // Log stream: the raw SBI sink. Audit stream: the fan-out that both
         // renders to the SBI console and retains the trail in the tail-able
         // boot audit ring the pre-boot Supervisor reads
@@ -243,6 +230,7 @@ mod kernel {
         boot::boot(
             hartid,
             dtb,
+            &ALLOCATOR,
             &SERIAL_SINK,
             &boot::AUDIT_SINK,
             tairix_log::Level::Info,

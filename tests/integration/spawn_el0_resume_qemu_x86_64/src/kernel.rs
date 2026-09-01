@@ -63,12 +63,6 @@ const CANARY: u64 = 0x5520_C000_D15E_A5ED;
 const IA32_EFER: u32 = 0xC000_0080;
 const EFER_NXE: u64 = 1 << 11;
 
-/// Physical base of the architectural LAPIC MMIO page (the value
-/// `smp::bsp_lapic_id` reads the ID register from and `X86_64Arch::send_ipi`
-/// writes the ICR to). 4 KiB-aligned; identity-mapped into the test's address
-/// space so those accesses stay valid after the CR3 switch.
-const LAPIC_MMIO_BASE: u64 = 0xFEE0_0000;
-
 /// Physical frames the test hands the spawn build.
 const FRAME_COUNT: usize = 128;
 
@@ -237,34 +231,19 @@ fn run_resume() -> ! {
         );
     }
 
-    // Fresh address space (low 32 MiB identity + higher-half kernel window) and
+    // Fresh address space (the live identity window + higher-half kernel window) and
     // activate it before any user mapping is added.
-    let Some(mut arch_space) = paging::AddressSpace::new_identity_first_32mib(&PAGE_TABLE_POOL)
-    else {
+    let Some(arch_space) = paging::AddressSpace::new_identity_window(&PAGE_TABLE_POOL) else {
         note(TEST_FAIL, "X1 test: page-table pool exhausted");
         qemu_exit::exit_failure();
     };
-    // Identity-map the LAPIC MMIO page (~3.98 GiB) into the new space. Unlike
-    // the `mem_map`/`enter_user` siblings — which never touch the LAPIC after
-    // the CR3 switch — this test builds a live scheduler over `X86_64Arch`,
-    // whose `bsp_lapic_id` reads the LAPIC ID register and whose spawn-time
-    // self-IPI writes the LAPIC ICR; the minimal new space maps only the low
-    // 32 MiB + higher-half kernel window, so without this those accesses would
-    // fault after the switch (fail closed if the pool is exhausted).
-    if arch_space
-        .map_4k(&PAGE_TABLE_POOL, LAPIC_MMIO_BASE, LAPIC_MMIO_BASE, true)
-        .is_none()
-    {
-        note(TEST_FAIL, "X1 test: could not map LAPIC MMIO page");
-        qemu_exit::exit_failure();
-    }
     // Capture the CR3 root before the arch space is moved into the `kernel/mem`
     // wrapper, so the per-task `pre_resume` hook can reload it on every switch.
     let root_phys = arch_space.pml4_phys();
-    // SAFETY: the new space maps the low 32 MiB, the higher-half kernel
-    // window, and the LAPIC MMIO page, so the executing RIP, the current
-    // stack, the per-CPU `swapgs` TLS, the page-table pool, the frame pool,
-    // the heap, `dispatch`, and every LAPIC access stay mapped across the CR3
+    // SAFETY: the new space carries the live identity window and the
+    // higher-half kernel window, so the executing RIP, the current stack, the
+    // per-CPU `swapgs` TLS, the page-table pool, the frame pool, the heap,
+    // `dispatch`, and every LAPIC MMIO access stay mapped across the CR3
     // switch.
     unsafe { arch_space.switch() };
     syscall_entry::set_dispatch_callback(dispatch);
@@ -415,6 +394,7 @@ fn run_resume() -> ! {
 pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
     boot(
         multiboot_info,
+        &ALLOCATOR,
         &SERIAL_SINK,
         &AUDIT_SINK,
         tairix_log::Level::Info,

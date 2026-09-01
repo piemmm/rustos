@@ -205,11 +205,21 @@ impl Table {
     }
 }
 
-/// Maximum number of page-table pages the Stage-2 tests need. Sized for
-/// two [`AddressSpace`]s, each carrying the low 32 MiB identity map
-/// (PML4 + PDPT + PD), the higher-half kernel window (PDPT + PD), and up
-/// to one extra fine-grained mapping (PDPT + PD + PT): 2 × 8 + spares.
-const POOL_SIZE: usize = 24;
+/// Page-table pages one live root costs at the boot identity floor: the
+/// PML4, the low PDPT, a page directory per identity gigabyte (none where
+/// the part has 1 GiB pages), the higher-half window's PDPT and PD, and one
+/// fine-grained PDPT/PD/PT chain.
+const PAGES_PER_LIVE_ROOT: usize = 2 + BOOT_IDENTITY_GIB + 2 + 3;
+
+/// Pages a further fine-grained mapping costs (PDPT + PD + PT).
+const PAGES_PER_FINE_CHAIN: usize = 3;
+
+/// Maximum number of page-table pages a static pool hands out. Sized for the
+/// two roots a bring-up path or a fixture builds at once, plus a further
+/// fine-grained chain each. A window widened past the boot floor needs more,
+/// and `alloc_table` then answers `None`, so the constructor fails closed
+/// rather than returning a root with holes in its identity map.
+const POOL_SIZE: usize = 2 * (PAGES_PER_LIVE_ROOT + PAGES_PER_FINE_CHAIN);
 
 /// A statically-allocated pool of zero-initialised page-table pages.
 ///
@@ -242,7 +252,7 @@ impl PageTablePool {
         // initializer is consumed at array-literal expansion time and
         // never re-named, so the `declare_interior_mutable_const` lint
         // is suppressed with rationale. The
-        // array itself is `POOL_SIZE * sizeof::<Table>() = 64 KiB`
+        // array itself is `POOL_SIZE * sizeof::<Table>()`
         // and is materialised straight into the returned `Self`,
         // which lives in `.bss` via `static` storage at every call
         // site — there is no real stack temporary despite the
@@ -325,49 +335,50 @@ pub struct AddressSpace {
 }
 
 impl AddressSpace {
-    /// Build a new address space identity-mapping `[0, 32 MiB)`.
+    /// Build a root carrying the live identity window plus the higher-half
+    /// kernel window — the constructor for any space that will be **made
+    /// live**.
+    ///
+    /// The extent is not a parameter, and deliberately so: kernel code runs
+    /// with the current task's root active, so a root that maps less than
+    /// [`configured_identity_gigapages`] leaves kernel memory above its own
+    /// ceiling unreachable while it is loaded. That is silent until something
+    /// the kernel touches happens to land high — a kernel-heap slab page
+    /// drawn from a frame, an intermediate table the walk dereferences
+    /// through its low physical address (see [`ensure_child`]), a frame handed
+    /// to a process image — at which point the fault has no local cause. The
+    /// window is read here so no caller can get it wrong. The leaves are
+    /// 1 GiB pages where the part has them and 2 MiB pages otherwise.
+    ///
+    /// # Errors
+    ///
+    /// Returns `None` if the frame source is exhausted or the window
+    /// overflows the 2 MiB-page count.
+    pub fn new_identity_window(frames: &'static dyn PageTableFrames) -> Option<Self> {
+        // 512 × 2 MiB = 1 GiB.
+        Self::new_identity(frames, configured_identity_gigapages().checked_mul(512)?)
+    }
+
+    /// Build a root identity-mapping only `[0, 32 MiB)`, for a space that is
+    /// **never made live**.
+    ///
+    /// The MMIO register-window maps use one purely as page-table
+    /// bookkeeping — the device is reached through the direct physical map,
+    /// never through this root — and their window base sits inside the live
+    /// identity window, so a root carrying that window would collide with it.
+    /// Making this space live would strand every kernel address above
+    /// 32 MiB; use [`Self::new_identity_window`] for anything that runs.
     ///
     /// # Errors
     ///
     /// Returns `None` if the frame source is exhausted.
-    pub fn new_identity_first_32mib(frames: &'static dyn PageTableFrames) -> Option<Self> {
+    pub fn new_bookkeeping_identity_32mib(frames: &'static dyn PageTableFrames) -> Option<Self> {
         // 16 × 2 MiB = 32 MiB.
         Self::new_identity(frames, 16)
     }
 
-    /// Build a new address space identity-mapping `[0, gib GiB)`, plus the
-    /// higher-half kernel window.
-    ///
-    /// Callers pass [`configured_identity_gigapages`] so every root carries
-    /// the one window the boot path sized from discovered RAM. The leaves
-    /// are 1 GiB pages where the part has them and 2 MiB pages otherwise.
-    ///
-    /// Unlike [`Self::new_identity_first_32mib`], this maps whole gigabytes so
-    /// the low identity map covers all of the physical RAM the page-table walk
-    /// dereferences intermediate tables through (the walk recovers each table
-    /// from its low physical address — see [`ensure_child`]) **and** the frames
-    /// the live allocator hands a process image. A fresh per-process space the
-    /// kernel switches to while building an image (`init_spawn_x86_64`,
-    /// `plans/PI.md` X3a) needs this broad map; the 32 MiB window is only
-    /// enough when every table and frame lives in low memory. `gib` is sized to
-    /// cover the platform's RAM (and the architectural LAPIC MMIO page at
-    /// ~3.98 GiB when `gib >= 4`), mirroring the boot trampoline's identity
-    /// map.
-    ///
-    /// # Errors
-    ///
-    /// Returns `None` if the frame source is exhausted or `gib` overflows the
-    /// 2 MiB-page count.
-    pub fn new_identity_first_gib(
-        frames: &'static dyn PageTableFrames,
-        gib: usize,
-    ) -> Option<Self> {
-        // 512 × 2 MiB = 1 GiB.
-        Self::new_identity(frames, gib.checked_mul(512)?)
-    }
-
-    /// Shared constructor backing [`Self::new_identity_first_32mib`] and
-    /// [`Self::new_identity_first_gib`] (one definition).
+    /// Shared constructor backing [`Self::new_identity_window`] and
+    /// [`Self::new_bookkeeping_identity_32mib`] (one definition).
     ///
     /// Identity-maps the first `pages_2mib` 2 MiB pages and mirrors the boot
     /// trampoline's higher-half kernel window. A whole-gigabyte span on a
@@ -839,8 +850,8 @@ impl AddressSpace {
     /// Caller must guarantee that the new PML4 also maps the currently
     /// executing instruction's `rip` and the current stack — otherwise
     /// the CPU will fault on the very next memory access.
-    /// [`Self::new_identity_first_32mib`] upholds that by mapping both the
-    /// low 32 MiB (boot stack / low physical) and the higher-half kernel
+    /// [`Self::new_identity_window`] upholds that by mapping both the live
+    /// identity window (boot stack / low physical) and the higher-half kernel
     /// window (where the higher-half-linked code/stack/data live).
     #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     pub unsafe fn switch(&self) {
@@ -1671,7 +1682,7 @@ fn ensure_child(
         // Identity mapping makes phys = virt here.
         let phys = entry & ADDR_MASK;
         // SAFETY: every entry that has PRESENT set was inserted below (or
-        // by `new_identity_first_32mib`) with a physical address that came
+        // by a `new_identity_*` constructor) with a physical address that came
         // from a `TableFrame`, so the round-trip is valid; identity
         // mapping means we can dereference the physical address directly.
         let child: &'static mut [u64; ENTRIES_PER_TABLE] =

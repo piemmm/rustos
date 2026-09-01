@@ -23,7 +23,7 @@
 //!
 //! The runtime `spawn` syscall is issued by PID 1 `init`, so the producer runs
 //! under PID 1's own root, which [`init_spawn`](crate::x86_64::init_spawn)
-//! built with [`ArchAddressSpace::new_identity_first_gib`]: it identity-maps the
+//! built with [`ArchAddressSpace::new_identity_window`]: it identity-maps the
 //! discovered-RAM window ([`paging::configured_identity_gigapages`]) **and**
 //! mirrors the higher-half kernel window. The
 //! x86_64 page-table walk recovers each existing intermediate table from its
@@ -224,11 +224,8 @@ impl ArchImageBuilder for X86_64ProcessSpawn {
         // active.
         // The child's own CR3 is reloaded by its `pre_resume` hook before the
         // scheduler first resumes it (`plans/SPAWN.md` SP2, `plans/PI.md` X1).
-        let mut arch = ArchAddressSpace::new_identity_first_gib(
-            table_frames,
-            paging::configured_identity_gigapages(),
-        )
-        .ok_or_else(|| refuse_build(ctx, "page_table_frames_exhausted"))?;
+        let mut arch = ArchAddressSpace::new_identity_window(table_frames)
+            .ok_or_else(|| refuse_build(ctx, "page_table_frames_exhausted"))?;
         let child_root_phys = arch.pml4_phys();
 
         // Re-express the loading kthread's kernel-stack guard page in the

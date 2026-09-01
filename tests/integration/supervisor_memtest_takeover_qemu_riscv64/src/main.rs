@@ -147,6 +147,7 @@ mod kernel {
         boot(
             hartid,
             dtb,
+            &ALLOCATOR,
             &SERIAL_SINK,
             &AUDIT_SINK,
             tairix_log::Level::Info,

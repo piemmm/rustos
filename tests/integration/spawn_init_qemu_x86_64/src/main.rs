@@ -138,6 +138,7 @@ mod kernel {
         // boot with the filter lowered.
         boot(
             multiboot_info,
+            &ALLOCATOR,
             &SERIAL_SINK,
             &AUDIT_SINK,
             tairix_log::Level::Debug,

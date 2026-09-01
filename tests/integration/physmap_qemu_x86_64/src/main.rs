@@ -172,6 +172,7 @@ mod kernel {
     pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
         boot(
             multiboot_info,
+            &ALLOCATOR,
             &OBSERVER,
             &OBSERVER,
             tairix_log::Level::Info,

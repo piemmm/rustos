@@ -53,11 +53,6 @@ const USER_BLOCK_BASE: u64 = USER_BIAS + 0x30_0000;
 /// Per-process stack-canary seed handed to the program.
 const CANARY: u64 = 0x5520_C000_D15E_A5ED;
 
-/// Physical base of the architectural LAPIC MMIO page, identity-mapped into the
-/// spinner's space so the live scheduler's LAPIC accesses stay valid after the
-/// CR3 switch.
-const LAPIC_MMIO_BASE: u64 = 0xFEE0_0000;
-
 /// `IA32_EFER` MSR number and its No-Execute-Enable bit (bit 11).
 const IA32_EFER: u32 = 0xC000_0080;
 const EFER_NXE: u64 = 1 << 11;
@@ -218,23 +213,16 @@ static AUDIT_SINK: BootCompletedSink = BootCompletedSink;
 /// [`PAGE_TABLE_POOL`], returning its PML4 root and the entry register state.
 /// Fails the test loudly on any error.
 fn build_el0_space(image: &LoadImage) -> (u64, UserEntry) {
-    let Some(mut arch_space) = paging::AddressSpace::new_identity_first_32mib(&PAGE_TABLE_POOL)
-    else {
+    let Some(arch_space) = paging::AddressSpace::new_identity_window(&PAGE_TABLE_POOL) else {
         note(TEST_FAIL, "P-1c test: page-table pool exhausted");
         qemu_exit::exit_failure();
     };
-    if arch_space
-        .map_4k(&PAGE_TABLE_POOL, LAPIC_MMIO_BASE, LAPIC_MMIO_BASE, true)
-        .is_none()
-    {
-        note(TEST_FAIL, "P-1c test: could not map LAPIC MMIO page");
-        qemu_exit::exit_failure();
-    }
     let root_phys = arch_space.pml4_phys();
-    // SAFETY: the new space maps the low 32 MiB, the higher-half kernel window,
-    // and the LAPIC MMIO page, so the executing RIP, the current stack, the
+    // SAFETY: the new space carries the live identity window and the
+    // higher-half kernel window, so the executing RIP, the current stack, the
     // per-CPU `swapgs` TLS, the page-table pool, the frame pool, the heap,
-    // `dispatch`, and every LAPIC access stay mapped across the CR3 switch.
+    // `dispatch`, and every LAPIC MMIO access stay mapped across the CR3
+    // switch.
     unsafe { arch_space.switch() };
 
     let mut space = AddressSpace::new(arch_space);
@@ -469,6 +457,7 @@ fn run_preempt() -> ! {
 pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
     boot(
         multiboot_info,
+        &ALLOCATOR,
         &SERIAL_SINK,
         &AUDIT_SINK,
         tairix_log::Level::Info,

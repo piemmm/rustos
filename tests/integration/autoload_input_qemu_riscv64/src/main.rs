@@ -163,6 +163,7 @@ mod kernel {
         boot_riscv64::boot(
             hartid,
             dtb,
+            &ALLOCATOR,
             &SERIAL_SINK,
             &AUDIT_SINK,
             tairix_log::Level::Debug,

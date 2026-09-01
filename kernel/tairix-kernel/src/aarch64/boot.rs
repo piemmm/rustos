@@ -302,6 +302,7 @@ pub static AUDIT_SINK: TeeSink<'static, 2> = TeeSink::new([&SERIAL_SINK, &BOOT_A
 /// compiler may lower to NEON runs.
 pub fn boot(
     dtb: u64,
+    heap: &'static tairix_kalloc::FreeListAllocator,
     log_sink: &'static (dyn Sink + Sync),
     audit_sink: &'static (dyn Sink + Sync),
     log_level: Level,
@@ -323,9 +324,9 @@ pub fn boot(
     // its own interrupted mainline holds (a single-CPU self-deadlock). One
     // install covers every core and every heap the binary holds: the hooks
     // mask the *current* CPU's interrupts and are read by the allocator
-    // itself, so a bin that publishes no heap to the kernel core is covered
-    // too. It stores two `fn` pointers and does not allocate, so it is safe
-    // before the heap has grown.
+    // itself, so a heap the boot handover never names is covered too. It
+    // stores two `fn` pointers and does not allocate, so it is safe before
+    // the heap has grown.
     tairix_kalloc::install_irq_control(
         crate::aarch64::gic_irq::kalloc_irq_disable,
         crate::aarch64::gic_irq::kalloc_irq_restore,
@@ -485,8 +486,11 @@ pub fn boot(
             audit_root_storage_binding(dtb, early.video, log_sink);
             enter_kernel_core(
                 arch,
-                layout.map,
-                installed_memory_bytes,
+                BootMemory {
+                    map: layout.map,
+                    installed_bytes: installed_memory_bytes,
+                },
+                heap,
                 log_sink,
                 audit_sink,
                 log_level,
@@ -1338,6 +1342,15 @@ fn audit_root_storage_binding(
     crate::unlock_service::record_boot(binding, dtb, tree);
 }
 
+/// The two memory figures the hand-off carries, which discovery produces
+/// together and only [`BootInfo`] consumes: the physical map the frame
+/// allocator is built from, and the platform's installed total *before* the
+/// identity map's Device clip drops the bytes it cannot reach.
+struct BootMemory {
+    map: tairix_kernel_mem::BootMemoryMap,
+    installed_bytes: u64,
+}
+
 /// Assemble the validated [`BootInfo`] hand-off and enter
 /// [`tairix_kernel_core::kernel_main`].
 ///
@@ -1352,8 +1365,8 @@ fn audit_root_storage_binding(
 /// than entering the core.
 fn enter_kernel_core(
     arch: Aarch64Arch,
-    memory_map: tairix_kernel_mem::BootMemoryMap,
-    installed_memory_bytes: u64,
+    memory: BootMemory,
+    heap: &'static tairix_kalloc::FreeListAllocator,
     log_sink: &'static (dyn Sink + Sync),
     audit_sink: &'static (dyn Sink + Sync),
     log_level: Level,
@@ -1415,13 +1428,14 @@ fn enter_kernel_core(
         BOOT_CPU,
         cpu_count,
         "",
-        memory_map,
+        memory.map,
         SchedulerConfig::defaults_for(cpu_count),
         arch,
         log_sink,
         audit_sink,
         log_level,
         &DISPATCH_SLOT,
+        heap,
     )
     // Install the discovered console list (`plans/PI.md` P11): when the
     // P7b framebuffer boot console came up, the display (with its
@@ -1432,7 +1446,7 @@ fn enter_kernel_core(
     .with_consoles(consoles)
     // Record the firmware-discovered installed-RAM total so the core mints
     // the `boot_facts_get` machine summary from it.
-    .with_installed_memory(installed_memory_bytes)
+    .with_installed_memory(memory.installed_bytes)
     // Install the kernel seat registry (`plans/DISPLAY.md` D2 — input
     // follows the surface owner): its text sink is that same console's
     // keyboard queue, so an injected key press reaches the login by
@@ -1501,12 +1515,7 @@ fn enter_kernel_core(
     // accounts into. Until that install a switch fails closed; the default
     // `spawn` (inherit) never consults it, so wiring the hook here changes no
     // boot behaviour until the unlock lands.
-    .with_spawn_identity(&crate::root_mount::LATE_IDENTITY)
-    // Report the committed kernel-heap size to the System Information
-    // `KernelMemory` domain (`PREREQUISITES.md` P-C): the binding kernel owns
-    // the `#[global_allocator]` over `tairix_kalloc`, so it threads its heap
-    // region's fixed committed size here rather than `kernel/core` guessing.
-    .with_kernel_heap_bytes(crate::kalloc::HEAP_BYTES as u64);
+    .with_spawn_identity(&crate::root_mount::LATE_IDENTITY);
     if boot_info.validate().is_err() {
         halt_current_cpu()
     }

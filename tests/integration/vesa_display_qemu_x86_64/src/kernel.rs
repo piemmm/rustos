@@ -83,6 +83,7 @@ fn vesa_qemu_panic(info: &PanicInfo<'_>) -> ! {
 pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
     boot(
         multiboot_info,
+        &ALLOCATOR,
         &SERIAL_SINK,
         &AUDIT_SINK,
         tairix_log::Level::Info,

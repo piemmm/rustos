@@ -17,6 +17,7 @@
 
 use tairix_abi::ABI_VERSION_CURRENT;
 use tairix_arch_api::TakeoverError;
+use tairix_kalloc::FreeListAllocator;
 use tairix_kernel_mem::{
     ram_snapshot_free_regions, ram_sweep_pattern, ram_takeover_test_bytes, BootMemoryMap,
     MemoryRegion, PhysAddr, RamFault, RamTestPattern, RegionKind, SweepObserver, PAGE_SIZE,
@@ -141,8 +142,9 @@ pub struct KernelSupervisorSystem<A: KernelArch + 'static> {
     memory_map: &'static BootMemoryMap,
     /// The kernel wall clock (`date`).
     wall_clock: &'static (dyn WallClockSource + 'static),
-    /// Committed size of the kernel heap region, in bytes (`mem`).
-    kernel_heap_bytes: u64,
+    /// The binary's kernel heap, read live for `mem` (it grows and shrinks
+    /// by whole regions, so its size is a reading, not a boot constant).
+    heap: &'static FreeListAllocator,
 }
 
 impl<A: KernelArch + 'static> KernelSupervisorSystem<A> {
@@ -156,13 +158,13 @@ impl<A: KernelArch + 'static> KernelSupervisorSystem<A> {
         state: &'static KernelState<A>,
         memory_map: &'static BootMemoryMap,
         wall_clock: &'static (dyn WallClockSource + 'static),
-        kernel_heap_bytes: u64,
+        heap: &'static FreeListAllocator,
     ) -> Self {
         Self {
             state,
             memory_map,
             wall_clock,
-            kernel_heap_bytes,
+            heap,
         }
     }
 
@@ -472,7 +474,7 @@ impl<A: KernelArch + 'static> SupervisorSystem for KernelSupervisorSystem<A> {
         Self::write_mib(out, free);
         out.newline();
         out.write_str("kernel heap: ");
-        Self::write_mib(out, self.kernel_heap_bytes);
+        Self::write_mib(out, self.heap.capacity() as u64);
         out.newline();
     }
 

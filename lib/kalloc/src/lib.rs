@@ -920,6 +920,18 @@ impl FreeListAllocator {
         self.with_inner(|inner| inner.capacity.saturating_sub(inner.used))
     }
 
+    /// Total usable bytes the heap currently holds: the bootstrap region
+    /// plus every region grown from the installed source.
+    ///
+    /// This is what the System Information API reports as the kernel heap
+    /// size, so a grown heap is reported at its real size rather than at the
+    /// bootstrap constant it started from. Zero before the first allocation
+    /// plants the bootstrap block.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.with_inner(|inner| inner.capacity)
+    }
+
     /// The physical successor of `block`, or `None` when it ends its region.
     ///
     /// # Safety

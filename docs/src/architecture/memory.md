@@ -2396,8 +2396,17 @@ into one run of a kernel **remap window**.
   blocks, sub-page waste, fail-closed exhaustion and window exhaustion,
   refused mismatched shrink, address-space reuse, and a counting-allocator
   proof that neither `grow` nor `shrink` performs a single global-heap
-  allocation. The end-to-end dereference is proven on the metal by every
-  QEMU vertical: the kernel cannot complete boot unless the window works.
+  allocation. A host test cannot dereference a window address — nothing maps
+  it — so the on-the-metal half is the
+  `tests/integration/kheap_growth` exercise the three boot-completed
+  verticals drive on each port after `BootCompleted`: it forces a request
+  one page past the heap's free remainder (nothing already mapped can serve
+  it), checks the capacity rose, writes and reads back a marker on **every
+  page** of the assembled run, frees it so the drained region drives
+  `shrink`, and repeats — a teardown that stranded window address space or
+  left a stale leaf cannot serve the same request twice. Measured: each port
+  grows a ~63 MiB region out of a fragmented pool, dereferences all of it,
+  and settles back at exactly the bootstrap capacity.
 
 ## 7v. The kernel heap's two tiers (`lib/kalloc`, `framepages`)
 
@@ -2437,8 +2446,15 @@ descriptor at all it both undercuts the byte tier and is the one shape that
 fits a single frame. Four classes result on a 64-bit target with 4 KiB pages,
 so the one page each keeps back is a bounded retention (§24.1), not a cache.
 
-**Page supply, and provenance.** After the boot path installs the heap source
-the slab draws one frame per page through `kernel/mem::FramePages` — the
+**Page supply, and provenance.** The boot path installs the heap source into
+the binary's `#[global_allocator]`, which reaches it as a required
+`BootInfo` field: `#[global_allocator]` can only be declared by the final
+binary, so every kernel bin hands its allocator to `boot` and the compiler
+refuses a bin that does not. It used to publish it through a registry call
+instead, which every QEMU test kernel omitted — so the install silently
+no-op'd and the growth and slab-page paths were inert in the whole matrix
+(`plans/OPEN-DEFECTS.md` D69). After the install the slab draws one frame per
+page through `kernel/mem::FramePages` — the
 kernel commit path, so it may use the reserve exactly as region growth does —
 and addresses it through the direct physical map. No remap-window slot is
 consumed, which is the point: `kvslots` allocates first-fit, so a slot per

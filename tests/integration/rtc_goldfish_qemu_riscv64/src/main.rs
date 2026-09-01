@@ -126,6 +126,7 @@ mod kernel {
         boot_riscv64::boot(
             hartid,
             dtb,
+            &ALLOCATOR,
             &WITNESS_SINK,
             &SERIAL_SINK,
             tairix_log::Level::Info,

@@ -26,7 +26,7 @@
 //! # x86_64 specifics versus the aarch64 sibling
 //!
 //! * The address space is built from
-//!   [`ArchAddressSpace::new_identity_first_gib`] over the window the boot
+//!   [`ArchAddressSpace::new_identity_window`] over the window the boot
 //!   path sized from the discovered memory map
 //!   ([`paging::configured_identity_gigapages`]), plus the higher-half kernel
 //!   window the trampoline established. The
@@ -126,10 +126,7 @@ impl InitSpawn for X86_64InitSpawn {
         // resolve under PID 1's CR3 (the production `kernel_main` drain runs
         // on PID 1's root once `pre_resume` has reloaded it). Fail closed on
         // frame exhaustion.
-        let Some(mut arch) = ArchAddressSpace::new_identity_first_gib(
-            table_frames,
-            paging::configured_identity_gigapages(),
-        ) else {
+        let Some(mut arch) = ArchAddressSpace::new_identity_window(table_frames) else {
             return;
         };
         // Capture PID 1's PML4 root before the arch space is moved into the

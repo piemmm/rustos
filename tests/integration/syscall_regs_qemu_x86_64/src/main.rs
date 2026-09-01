@@ -329,8 +329,7 @@ mod kernel {
     fn run_round_trip() -> ! {
         let page = paging::PAGE_SIZE as u64;
 
-        let Some(mut space) = paging::AddressSpace::new_identity_first_32mib(&PAGE_TABLE_POOL)
-        else {
+        let Some(mut space) = paging::AddressSpace::new_identity_window(&PAGE_TABLE_POOL) else {
             qemu_exit::exit_failure();
         };
 
@@ -378,25 +377,11 @@ mod kernel {
 
         syscall_entry::set_dispatch_callback(probe_dispatch);
 
-        // Identity-map the architectural LAPIC MMIO page (supervisor-only)
-        // so the ring-3 preemption timer ISR keeps working under this CR3,
-        // exactly as the sibling enter-user vertical maps it.
-        if space
-            .map_4k(
-                &PAGE_TABLE_POOL,
-                tairix_arch_x86_64::preempt::LAPIC_BASE_PHYS,
-                tairix_arch_x86_64::preempt::LAPIC_BASE_PHYS,
-                true,
-            )
-            .is_none()
-        {
-            qemu_exit::exit_failure();
-        }
-
-        // SAFETY: the new space maps the low 32 MiB, the higher-half kernel
-        // window, and the LAPIC MMIO page, so the currently executing RIP,
-        // the current stack, the per-CPU `swapgs` TLS, `probe_dispatch`, and
-        // the timer ISR's LAPIC access all stay mapped across the switch.
+        // SAFETY: the new space carries the live identity window and the
+        // higher-half kernel window, so the currently executing RIP, the
+        // current stack, the per-CPU `swapgs` TLS, `probe_dispatch`, and the
+        // ring-3 preemption timer ISR's LAPIC MMIO access all stay mapped
+        // across the switch.
         unsafe { space.switch() };
 
         // SAFETY: `user_entry` aliases the executable USER|R|X probe page
@@ -417,6 +402,7 @@ mod kernel {
     pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
         boot(
             multiboot_info,
+            &ALLOCATOR,
             &SERIAL_SINK,
             &AUDIT_SINK,
             tairix_log::Level::Info,

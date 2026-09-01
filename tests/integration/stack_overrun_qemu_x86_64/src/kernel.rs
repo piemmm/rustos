@@ -40,13 +40,6 @@ const SO_TEST_FAIL: EventId = EventId(4326);
 /// The single-core slice runs logical CPU 0 on the boot processor.
 const BOOT_CPU: u32 = 0;
 
-/// Gigabytes of identity map the space installs. The 64 MiB bump heap
-/// pushes this binary's `.bss` (and the `ARENA` static within it) well
-/// past the 32 MiB window other x86_64 verticals use, so the low identity
-/// must cover all of RAM — 4 GiB also covers the architectural LAPIC MMIO
-/// page at ~3.98 GiB, mirroring the spawn producer (`plans/PI.md` X3a).
-const IDENTITY_GIB: usize = 4;
-
 /// Width of the kthread-stack guard region: one 4 KiB page, matching
 /// `tairix_kernel_core::BoxStack` and the production `ArenaStack` (the
 /// guard sits immediately *below* the usable stack).
@@ -267,9 +260,7 @@ fn run_overrun_test() -> ! {
     // Build a 4 GiB-identity space (low identity + higher-half kernel
     // window) so the running RIP / stack / per-CPU TLS, the heap, and the
     // arena's low-identity alias all stay mapped across the CR3 switch.
-    let Some(mut space) =
-        paging::AddressSpace::new_identity_first_gib(&PAGE_TABLE_POOL, IDENTITY_GIB)
-    else {
+    let Some(mut space) = paging::AddressSpace::new_identity_window(&PAGE_TABLE_POOL) else {
         fail("page-table pool exhausted");
     };
 
@@ -408,6 +399,7 @@ static AUDIT_SINK: BootCompletedSink = BootCompletedSink;
 pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
     boot(
         multiboot_info,
+        &ALLOCATOR,
         &SERIAL_SINK,
         &AUDIT_SINK,
         tairix_log::Level::Info,

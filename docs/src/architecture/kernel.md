@@ -174,6 +174,7 @@ stack-resident, so the panic path survives a wedged heap.
 | `audit_sink`       | `&'static (dyn Sink + Sync)`      | Lives until power-off.                        |
 | `log_level`        | `tairix_log::Level`               | Installed before the first `PhaseStarted`.    |
 | `dispatcher_callback_slot` | `&'static DispatchCallbackSlot`   | Bin-crate-owned slot; receives the production `DispatchHook` during the `syscall` phase. See below. |
+| `heap`             | `&'static FreeListAllocator`      | The binary's `#[global_allocator]`. Required rather than installable: only the final binary can declare a global allocator, and the boot path both wires the growable-heap source into it (`mem` phase) and reads its live capacity for `KernelMemoryStats::kernel_heap_bytes`. Handing it over as a parameter is what stops a bin booting with an ungrowable heap (`plans/OPEN-DEFECTS.md` D69). |
 | `consoles`         | `&'static [ConsoleDevice]`        | The installed system console list backing the standard streams (the `stream_write` / `stream_read` syscalls, `AGENTS.md` §20): index 0 the primary console, each further entry an independent console with its own session context (`plans/PI.md` P11). Defaults to the empty fail-closed `NO_CONSOLES` until the arch port installs its discovered list via `with_consoles`. |
 
 `BootInfo::validate()` runs at the top of `kernel_main` and reports any

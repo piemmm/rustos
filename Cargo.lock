@@ -3480,6 +3480,7 @@ dependencies = [
  "tairix-itest-harness",
  "tairix-kernel",
  "tairix-log",
+ "tairix-test-kheap-growth",
 ]
 
 [[package]]
@@ -3492,6 +3493,7 @@ dependencies = [
  "tairix-kalloc",
  "tairix-kernel",
  "tairix-log",
+ "tairix-test-kheap-growth",
 ]
 
 [[package]]
@@ -3499,9 +3501,11 @@ name = "tairix-test-kernel-arch-boot-riscv64"
 version = "0.0.0"
 dependencies = [
  "tairix-arch-riscv64",
+ "tairix-itest-finisher",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-log",
+ "tairix-test-kheap-growth",
  "tairix-test-riscv64-boot",
 ]
 
@@ -3514,6 +3518,15 @@ dependencies = [
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel-sched-mlfq",
+]
+
+[[package]]
+name = "tairix-test-kheap-growth"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-kalloc",
+ "tairix-log",
 ]
 
 [[package]]
@@ -4183,6 +4196,7 @@ name = "tairix-test-riscv64-boot"
 version = "0.0.0"
 dependencies = [
  "tairix-itest-harness",
+ "tairix-kalloc",
  "tairix-kernel",
  "tairix-kernel-mem",
  "tairix-log",

@@ -449,6 +449,7 @@ mod kernel {
         // lowered.
         boot(
             multiboot_info,
+            &ALLOCATOR,
             &SERIAL_SINK,
             &AUDIT_SINK,
             tairix_log::Level::Debug,

@@ -28,6 +28,8 @@ pub use tairix_kernel::riscv64::boot::{try_boot, BootError, RiscvBinArch};
 /// has moved the map into the `kernel_core` hand-off — then delegates to
 /// [`tairix_kernel::riscv64::boot::boot`].
 ///
+/// `heap` is the consuming vertical's own `#[global_allocator]`, which the
+/// production pipeline wires the growable-heap source into.
 /// `log_sink` / `audit_sink` are the `&'static` sinks the consuming
 /// vertical installs; its audit sink flips the `SiFive` Test device on
 /// `AuditEvent::BootCompleted`. `log_level` is the initial global log
@@ -43,6 +45,7 @@ pub use tairix_kernel::riscv64::boot::{try_boot, BootError, RiscvBinArch};
 pub fn boot(
     hartid: u64,
     dtb: u64,
+    heap: &'static tairix_kalloc::FreeListAllocator,
     log_sink: &'static (dyn Sink + Sync),
     audit_sink: &'static (dyn Sink + Sync),
     log_level: Level,
@@ -55,5 +58,5 @@ pub fn boot(
         crate::publish::publish_memory_map(&map);
     }
     crate::publish::publish_dtb(dtb);
-    tairix_kernel::riscv64::boot::boot(hartid, dtb, log_sink, audit_sink, log_level)
+    tairix_kernel::riscv64::boot::boot(hartid, dtb, heap, log_sink, audit_sink, log_level)
 }

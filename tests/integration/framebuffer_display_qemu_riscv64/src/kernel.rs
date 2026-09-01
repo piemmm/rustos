@@ -81,6 +81,7 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
     boot(
         hartid,
         dtb,
+        &ALLOCATOR,
         &SERIAL_SINK,
         &AUDIT_SINK,
         tairix_log::Level::Info,

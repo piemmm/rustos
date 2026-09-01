@@ -155,6 +155,8 @@ pub(crate) mod test_bundle;
 // controllable free-memory source plus per-band readings), used by the
 // filesystem-cache, launch-cache, and cross-cache integration suites so
 // the gauge scaffolding is defined once.
+#[cfg(any(test, feature = "test-arch"))]
+pub mod test_heap;
 #[cfg(test)]
 pub(crate) mod test_pressure;
 #[cfg(any(test, feature = "test-arch"))]

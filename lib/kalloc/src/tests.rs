@@ -645,6 +645,39 @@ fn grows_from_the_source_when_the_bootstrap_is_exhausted() {
 }
 
 #[test]
+fn capacity_tracks_the_bootstrap_then_every_grown_region() {
+    // The reported figure is what the System Information API serves as the
+    // kernel heap size, so it must be the live total and not the bootstrap
+    // constant the allocator was built over.
+    let alloc = fixture(64);
+    let source = std::boxed::Box::leak(std::boxed::Box::new(MockSource::new(usize::MAX)));
+    alloc.install_source(source);
+
+    assert_eq!(alloc.capacity(), 0, "nothing is planted before first use");
+
+    let layout = Layout::from_size_align(2 * PAGE_SIZE, 8).unwrap();
+    // SAFETY: non-zero layout.
+    let p = unsafe { alloc.alloc(layout) };
+    assert!(!p.is_null());
+    let grown = alloc.capacity();
+    assert!(
+        grown > 64,
+        "capacity must exceed the bootstrap region once a region is grown"
+    );
+    assert!(
+        grown >= alloc.used(),
+        "capacity is the denominator `used` is measured against"
+    );
+
+    // SAFETY: `p` came from this allocator with `layout`.
+    unsafe { alloc.dealloc(p, layout) };
+    assert!(
+        alloc.capacity() < grown,
+        "capacity must fall again when the drained region goes back"
+    );
+}
+
+#[test]
 fn draining_a_grown_region_returns_it_to_the_source() {
     // Bootstrap too small for the request, so the block lands in a grown
     // region; freeing it drains that region, which must be handed back.

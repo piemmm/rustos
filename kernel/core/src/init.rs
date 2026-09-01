@@ -1910,7 +1910,7 @@ fn run_phases<A: KernelArch>(
         volumes,
         volume_service,
         spawn_identity,
-        kernel_heap_bytes,
+        heap,
         installed_memory_bytes,
         ..
     } = boot;
@@ -1962,7 +1962,7 @@ fn run_phases<A: KernelArch>(
         let arch_arc: &'static Arc<A> = Box::leak(Box::new(Arc::clone(&arch)));
         let arch_static: &'static A = arch_arc;
         if let Some(kvmap) = A::install_kernel_remap(arch_static, frame_allocator, physmap) {
-            crate::kheap::install_frame_heap_source(frame_allocator, physmap, kvmap);
+            crate::kheap::install_frame_heap_source(heap, frame_allocator, physmap, kvmap);
         }
     }
     phase_ready(log_sink, Phase::Mem);
@@ -2273,22 +2273,19 @@ fn run_phases<A: KernelArch>(
     // (`PREREQUISITES.md` P-C): built over the leaked `KernelState` (its
     // `CapTable` / scheduler / frame allocator / per-task limits / arch),
     // the mounted filesystem service (mount table), the wall clock (uptime),
-    // and the binding kernel's committed heap size. Leaked for the same
+    // and the binary's kernel heap (its live capacity). Leaked for the same
     // one-shot-publish reason as the hook. A boot path that wires no
     // filesystem still answers every domain truthfully (an empty mount list,
     // the unprovisioned identity sentinel), so the broker that holds
     // `CAP_SYSINFO_INTROSPECT` can serve every query.
     let introspect: &'static (dyn crate::introspect::IntrospectSource + 'static) = Box::leak(
         Box::new(crate::introspect_source::KernelIntrospectSource::new(
-            state,
-            filesystem,
-            wall_clock,
+            state, filesystem, wall_clock,
             // The account directory (uid + username, no credential
             // material) is derived from the same kernel-held database
             // `users_db_read` serves; with none installed the directory is
             // truthfully empty.
-            users_db,
-            kernel_heap_bytes,
+            users_db, heap,
         )),
     );
 
@@ -2304,10 +2301,7 @@ fn run_phases<A: KernelArch>(
     let supervisor_system: &'static (dyn crate::supervisor_system::SupervisorSystem + 'static) =
         Box::leak(Box::new(
             crate::supervisor_system::KernelSupervisorSystem::new(
-                state,
-                memory_map,
-                wall_clock,
-                kernel_heap_bytes,
+                state, memory_map, wall_clock, heap,
             ),
         ));
     let _ = crate::supervisor_system::install_supervisor_system(supervisor_system);
@@ -2729,6 +2723,7 @@ mod tests {
             audit_sink,
             Level::Info,
             slot,
+            crate::test_heap::leak_heap().expect("host test heap"),
         )
     }
 
@@ -2844,6 +2839,55 @@ mod tests {
         assert!(second.is_some());
         assert_ne!(first, second);
         assert_eq!(state.scheduler.live_task_count(), before + 2);
+    }
+
+    #[test]
+    fn the_kernel_memory_domain_reports_the_heap_size_it_reads_now() {
+        // The reported heap size used to be a `u64` one port threaded from
+        // `tairix_kalloc::HEAP_BYTES` at boot, so it named the bootstrap
+        // constant and never moved — wrong from the moment the heap started
+        // growing by whole regions, and `0` on the two ports that never
+        // threaded it. It is now read from the live heap, so growth and
+        // reclaim both show up.
+        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let boot = bootinfo_with(log_sink, audit_sink, make_memory_map());
+        let heap = boot.heap;
+        let (state, _process_wait) =
+            run_phases(boot, log_sink, audit_sink).expect("phases succeed");
+
+        let source = crate::introspect_source::KernelIntrospectSource::new(
+            state,
+            &crate::fs::NULL_FILESYSTEM,
+            &crate::wallclock::NULL_WALL_CLOCK,
+            &crate::NULL_USERS_DB,
+            heap,
+        );
+        let read = || {
+            let bytes = crate::introspect::IntrospectSource::kernel_memory(&source)
+                .expect("the kernel-memory domain answers");
+            tairix_abi::sysinfo::KernelMemoryStats::from_bytes(&bytes)
+                .expect("a well-formed record")
+                .kernel_heap_bytes
+        };
+
+        // Nothing has been allocated from this heap, so it has not planted
+        // its bootstrap block and honestly reports nothing rather than the
+        // arena's size.
+        assert_eq!(read(), 0);
+
+        let layout = core::alloc::Layout::from_size_align(64, 8).expect("valid layout");
+        // SAFETY: a non-zero layout, and the block is freed below.
+        let block = unsafe { core::alloc::GlobalAlloc::alloc(heap, layout) };
+        assert!(!block.is_null(), "the test heap serves a 64-byte request");
+        assert_eq!(
+            read(),
+            heap.capacity() as u64,
+            "the domain must report what the heap holds now"
+        );
+        assert!(read() > 0, "planting the bootstrap block is visible");
+        // SAFETY: `block` came from this heap with this layout.
+        unsafe { core::alloc::GlobalAlloc::dealloc(heap, block, layout) };
     }
 
     #[test]

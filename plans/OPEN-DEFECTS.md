@@ -1698,12 +1698,13 @@ masked).
 **The seam is crate-global, because the first shape of it was fail-open.**
 The hooks were originally per-`FreeListAllocator`, and the boot path reached
 the instance through `kheap::install_kheap_irq_control`, which forwarded to
-whatever `register_global_heap` had published — *and silently no-op'd when
-nothing had*. Only `kernel/tairix-kernel`'s production `main.rs` registers.
-Every one of the ~155 freestanding QEMU integration-test bins declares its own
-`#[global_allocator] FreeListAllocator` and registers it nowhere, so on all of
-them the install was a no-op and the heap lock stayed interrupt-unsafe: the
-D13 root cause was live in the entire QEMU matrix, including the
+whatever the then-existing registration seam had published — *and silently
+no-op'd when nothing had*. Only `kernel/tairix-kernel`'s production `main.rs`
+registered. Every one of the ~155 freestanding QEMU integration-test bins
+declares its own `#[global_allocator] FreeListAllocator` and registered it
+nowhere, so on all of them the install was a no-op and the heap lock stayed
+interrupt-unsafe: the D13 root cause was live in the entire QEMU matrix,
+including the
 `stress_qemu_aarch64` vertical whose job is to confirm D13 fixed. The hooks
 mask the *calling* CPU, so they describe the machine and not any one heap;
 they now live at crate scope in `lib/kalloc`, the ports call
@@ -1715,13 +1716,13 @@ installed and not before, *and* an allocator built after the install that no
 registry knows about is interrupt-safe too.
 
 **Noticed while fixing it, not fixed here.**
-- The same `register_global_heap` gate also withholds the frame-backed growth
-  source (`install_frame_heap_source`) from every test bin, so a QEMU vertical
-  boots a kernel whose heap is capped at its `.bss` bootstrap region and the
-  growth path is never exercised under a guest. That is test fidelity and
-  capacity, not the D13 safety property; closing it means registering the heap
-  in every vertical and re-validating the matrix's memory behaviour, so it is
-  staged rather than smuggled into this change.
+- The same registration gate also withheld the frame-backed growth source
+  (`install_frame_heap_source`) from every test bin, so a QEMU vertical booted
+  a kernel whose heap was capped at its `.bss` bootstrap region and the growth
+  path was never exercised under a guest. That was test fidelity and capacity,
+  not the D13 safety property, so it was staged rather than smuggled into that
+  change; it is D69, now fixed by deleting the registration seam in favour of
+  a required `BootInfo` field.
 - Heap growth runs *under* the heap lock and takes the frame allocator's and
   kernel-remap window's plain `SpinLock`s, so an ISR that allocated while
   interrupting an EL1 mainline holding one of those would still self-deadlock
@@ -4037,10 +4038,10 @@ block is chained), `a_returned_region_is_scrubbed_before_it_is_reused`,
 `double_free_inside_a_live_block_is_refused`, and
 `freeing_a_never_allocated_region_is_refused`.
 
-**What the hunt ruled out.** The kernel heap is not involved: no QEMU
-test-kernel bin publishes its `#[global_allocator]`, so `install_frame_heap_
-source` is a no-op in every vertical and the heap draws no frames at all
-there (recorded as D69). The reap path's task-keyed maps are not involved
+**What the hunt ruled out.** The kernel heap was not involved: at the time no
+QEMU test-kernel bin published its `#[global_allocator]`, so
+`install_frame_heap_source` was a no-op in every vertical and the heap drew no
+frames at all there (that publication gap is D69, now fixed). The reap path's task-keyed maps are not involved
 either — `AddressSpaceRegistry::withdraw`'s `stale_task_entry` tripwire is a
 `debug_assert` and the verticals are debug builds, and the live process count
 was flat across the soak. The remaining 8 KiB step the pre-fix figures showed
@@ -4048,39 +4049,61 @@ belongs to `timed`, whose address space gains two pages once when it wakes
 inside the measured window; that was the fixture's system-wide sampling, not
 the cycle, and is fixed as D70.
 
-## D69 — no QEMU test kernel publishes its allocator, so the growable kernel heap is inert in every vertical (OPEN)
+## D69 — no QEMU test kernel published its allocator, so the growable kernel heap was inert in every vertical (FIXED)
 
 **Mechanism.** `plans/FIX-KHEAP.md` made the kernel heap grow on demand
-through two seams: a bin publishes its `#[global_allocator]` with
+through two seams: a bin published its `#[global_allocator]` with
 `tairix_kernel_core::kheap::register_global_heap`, and the boot path then
-wires the frame-backed growth source into it with `install_frame_heap_source`.
-`kernel/tairix-kernel/src/main.rs` calls the first for all three production
-ports. **None of the 128 QEMU test-kernel bins does**, and
-`install_frame_heap_source` returns early when no heap was published — so in
-every vertical the heap is silently capped at its 64 MiB `.bss` bootstrap
-region, the byte-granular tier never grows a region and the slab tier never
-draws a frame.
+wired the frame-backed growth source into it with `install_frame_heap_source`.
+Only `kernel/tairix-kernel/src/main.rs` called the first. **None of the QEMU
+test-kernel bins did**, and `install_frame_heap_source` returned early when no
+heap had been published — so in every vertical the heap was silently capped at
+its 64 MiB `.bss` bootstrap region, the byte-granular tier never grew a region
+and the slab tier never drew a frame. Nothing had hit it because 64 MiB is
+ample for a vertical, and the growth and slab-page paths therefore had no
+end-to-end coverage at all: every claim about them rested on host unit tests
+over a non-allocating page-table double, which is exactly the gap that plan's
+"deliberate carve-outs" names.
 
-Two consequences. The growth and slab-page paths FIX-KHEAP added have **no
-end-to-end coverage**: every claim about them rests on host unit tests over a
-non-allocating page-table double, which is exactly the gap that plan's
-"deliberate carve-outs" names. And a vertical whose kernel exceeds the
-bootstrap region fails an allocation that production would satisfy, so the
-test kernels are strictly weaker than the thing they certify. Nothing has hit
-it because 64 MiB is ample for a vertical.
+**The fix: delete the seam, not add a 129th place to remember it.** The heap
+is now a **required** `BootInfo` field, handed over from the bin through
+`boot`. `register_global_heap`, its `AtomicPtr` slot, and its accessor are
+gone, and so is the fail-open early return: `install_frame_heap_source` takes
+the heap it installs into. `#[global_allocator]` can only be declared by the
+final binary, so a parameter is the strongest available guarantee — the
+compiler refuses a bin that does not name its heap, and the one place the
+wiring happens is a library body no bin can skip. Every kernel bin (the
+production binary, ~45 verticals, and the two shared boot-harness macros) now
+hands its allocator over.
 
-**Why it is recorded rather than fixed here.** It was found while proving the
-heap was *not* D68's leak, and it is orthogonal to it. The one-line-per-bin
-fix touches 128 files and changes the memory behaviour of every vertical at
-once, which does not belong in a D68 diff. The better fix is structural: make
-the step impossible to skip rather than adding a 129th place to remember it —
-either `boot()` takes the `&'static FreeListAllocator` (the compiler then
-enforces it, at the cost of the same 128 call-site edits) or `tairix_kalloc`
-publishes the active allocator itself so `kheap` has nothing to be told
-(`register_global_heap` then disappears entirely, §2.14). `tairix_kalloc`'s
-own `install_irq_control` doc already contrasts itself with this seam and
-names this failure mode — "covers every heap in the binary rather than only
-the one a bin remembered to publish" — so the fragility was known.
+The same handover made the reported heap size truthful.
+`KernelMemoryStats::kernel_heap_bytes` was a `u64` snapshot the *aarch64* port
+alone threaded from `tairix_kalloc::HEAP_BYTES` — the bootstrap constant, so
+it never moved once the heap started growing, and it was `0` on x86_64 and
+riscv64. It is now read live from the heap (`FreeListAllocator::capacity`) by
+both the System Information introspection source and the pre-boot Supervisor's
+`mem`, so `with_kernel_heap_bytes` and the per-port threading are deleted.
+
+**What it uncovered.** Installing the source put live kernel-heap objects in
+frames drawn from the pool for the first time, which broke every x86_64
+fixture whose translation root identity-mapped only the low 32 MiB — a
+violation of the port's own stated window invariant that had been harmless
+only while the heap sat entirely low. That is D71, fixed alongside.
+
+**Regression cover.** `tests/integration/kheap_growth` is one arch-neutral
+exercise the three boot-completed verticals drive after `BootCompleted`: it
+requests one page past the heap's free remainder (nothing already mapped can
+serve that, so it must come from a fresh region), checks the capacity rose,
+writes and reads back a marker on **every page** of the assembled run, frees
+it so the drained region drives `shrink`, then repeats — a teardown that
+stranded window address space or left a stale leaf cannot serve the same
+request twice. It is the guest-side half the host tests cannot reach: nothing
+maps a window address on the host. Measured on all three ports: a ~63 MiB
+region grown out of a fragmented pool, every page dereferenced, and capacity
+settling back at exactly the bootstrap figure. Host-side,
+`capacity_tracks_the_bootstrap_then_every_grown_region` (`lib/kalloc`) pins the
+accessor and `the_kernel_memory_domain_reports_the_heap_size_it_reads_now`
+(`kernel/core`) pins the live reading.
 
 ## D70 — the memsoak fixture judged a figure any process could move, so an unrelated service's allocation failed it (FIXED)
 
@@ -4097,13 +4120,23 @@ timing-dependent failure of a few percent per run — a pass was not evidence
 the next run passes, and no `WARMUP_CYCLES` length excludes an event driven by
 wall time rather than by cycle count.
 
-**The fix.** The sample is `free_bytes + user_resident_bytes`
-(`tairix_test_memsoak::sample_bytes`). A page moving between the free pool and
-*any* user address space leaves that sum unchanged, while kernel memory the
-cycle failed to return still lowers it, so the byte-exact verdict is untouched
-and now judges only the quantity it is meaningful over. No tolerance band was
+**The fix.** The sample is `free_bytes + user_resident_bytes +
+kernel_heap_bytes` (`tairix_test_memsoak::sample_bytes`). A page moving
+between the free pool and either a user address space or the kernel heap
+leaves that sum unchanged, while memory the cycle failed to return to any of
+the three still lowers it, so the byte-exact verdict is untouched and now
+judges only the quantity it is meaningful over. No tolerance band was
 introduced: the fixture's own reasoning against one — it would let a slow leak
 pass N cycles and fail N+M — stands.
+
+The heap term joined once D69 made the growable-heap source live in every
+vertical. The heap then draws frames from the pool: whole regions on growth,
+and one page per slab size class kept back as anti-thrash hysteresis — a
+bounded one-time retention that can land in any cycle, measured or not, and
+did (a 3-page shortfall over 32 cycles). Those frames are owned and reusable,
+not lost, and `kernel_heap_bytes` is now the heap's live capacity (also D69),
+so counting it makes each such move invisible to the verdict while a genuine
+loss still shows.
 
 `KernelMemoryStats::user_resident_bytes` is live to make that possible. It was
 an honest `0` ("per-space resident accounting has no live accounter yet"); it
@@ -4117,6 +4150,67 @@ written against a live value and simply become truthful.
 
 **Regression cover.** Host tests in the fixture library pin the property
 directly: `a_page_moving_into_a_user_address_space_leaves_the_sample_unchanged`
-(the case that used to fail the soak), `a_page_retained_kernel_side_lowers_the_
-sample` (the case that still must), and `the_sample_saturates_rather_than_
-wrapping`.
+(the case that used to fail the soak),
+`a_frame_moving_into_the_kernel_heap_leaves_the_sample_unchanged` (the case
+that used to fail it after D69), `a_page_retained_outside_every_accounted_
+owner_lowers_the_sample` (the case that still must), and
+`the_sample_saturates_rather_than_wrapping`.
+
+## D71 — eleven x86_64 fixtures ran on a root that identity-mapped only 32 MiB, so kernel memory above it was unreachable (FIXED)
+
+**Mechanism.** The x86_64 port publishes one identity window
+(`configured_identity_gigapages`), and its own doc states the invariant: that
+figure is "identity-mapped in **every** translation root", read "by every root
+constructor", and is "the ceiling a kernel stack or arena block must sit below
+to stay reachable under every root". Kernel code runs with the current task's
+root active, so a root that maps less strands every kernel address above its
+own ceiling while it is loaded.
+
+`AddressSpace::new_identity_first_32mib` let a caller build exactly such a
+root, and eleven QEMU fixtures activated one. It was harmless only by luck:
+the byte-granular heap consumes its `.bss` arena from the bottom, and boot
+leaves barely 1.5 MiB live, so every kernel-heap object happened to sit below
+32 MiB. Two of those fixtures had already met the problem locally and worked
+around it with a private `IDENTITY_GIB = 4` copy of the port's figure; seven
+more carried a private LAPIC identity mapping (two with their own copy of the
+LAPIC base) because the page at ~3.98 GiB fell outside their narrow window.
+Two more picked probe addresses — 1 GiB, 2 GiB — precisely *because* they were
+"well outside the 32 MiB identity-mapped boot region", which the real window
+covers.
+
+D69's fix armed it. Once the growable-heap source is installed the slab tier
+draws a frame per page through the direct map, and the frame allocator hands
+out RAM above `__kernel_end` (past the 64 MiB `.bss` heap, so ~70 MiB up), so
+the first page-class allocation after the install put live kernel-heap objects
+far above 32 MiB. `spawn_program_qemu_x86_64` and `mem_map_qemu_x86_64` then
+faulted with no local cause the instant they switched `CR3`; the other nine
+were latently broken and passed only on whether they happened to touch a high
+object while their root was loaded — luck, not correctness.
+
+**The fix: the extent stopped being a caller's choice.**
+`AddressSpace::new_identity_window` reads `configured_identity_gigapages()`
+itself, so a root that will be made live cannot under-map the window. The one
+narrow constructor left is `new_bookkeeping_identity_32mib`, documented for a
+space that is **never made live** — the two MMIO register-window maps use one
+purely as page-table bookkeeping, and their window base sits *inside* the live
+identity window, so those genuinely need a narrow root. Consequently:
+
+- Every fixture that activates a root now carries the same window production
+  does, and the two private `IDENTITY_GIB` copies are deleted.
+- The seven LAPIC identity mappings and their two duplicated base constants
+  are deleted: the window covers that page, which is why production never
+  needed them. They had also become *failures* rather than redundancies —
+  `map_4k` will not shatter the window's huge leaf.
+- The isolation fixture's secret address and the accessed-bit fixture's probe
+  and never-mapped addresses are derived from `configured_identity_bytes()`
+  instead of hard-coded, so a window widened to cover more RAM cannot quietly
+  bring them back inside it — the same staleness that caused this defect.
+- `POOL_SIZE` is derived from the per-root page-table cost
+  (`PAGES_PER_LIVE_ROOT`) rather than a hand-picked 24 sized for the narrow
+  root, and a window wider than the boot floor makes the constructor fail
+  closed rather than return a root with holes.
+
+**Regression cover.** The verticals themselves: every one of the eleven now
+exercises a root carrying the real window, so the fault the two hit is
+foreclosed for all of them, and a future fixture cannot reintroduce it without
+reaching for a constructor whose name says it must never run.

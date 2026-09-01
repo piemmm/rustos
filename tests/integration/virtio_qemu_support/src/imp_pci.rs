@@ -61,10 +61,13 @@ static mut HEAP: Heap = Heap::ZERO;
 /// Global allocator backed by the module-private `HEAP` static, shared by
 /// every x86_64 virtio QEMU test that links this crate.
 ///
+/// Public so the `define_boot_harness!` entry point can hand it to the boot
+/// pipeline, which wires the growable-heap source into it.
+///
 /// SAFETY: the `HEAP` static outlives the binary; the allocator is the
 /// only consumer. Identical justification to the other QEMU test bins.
 #[global_allocator]
-static ALLOCATOR: FreeListAllocator =
+pub static ALLOCATOR: FreeListAllocator =
     unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
 // --- Stable identifiers ----------------------------------------------
@@ -364,6 +367,7 @@ macro_rules! define_boot_harness {
         pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
             $crate::boot(
                 multiboot_info,
+                &$crate::ALLOCATOR,
                 &$crate::HARNESS_SERIAL_SINK,
                 &AUDIT_SINK,
                 $crate::HarnessLevel::Info,

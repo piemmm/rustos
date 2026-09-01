@@ -63,10 +63,6 @@ const CANARY: u64 = 0x5520_C000_D15E_A5ED;
 const IA32_EFER: u32 = 0xC000_0080;
 const EFER_NXE: u64 = 1 << 11;
 
-/// Physical base of the architectural LAPIC MMIO page, identity-mapped into
-/// both spaces so the scheduler's LAPIC accesses stay valid after a CR3 switch.
-const LAPIC_MMIO_BASE: u64 = 0xFEE0_0000;
-
 /// Physical frames the test hands each spawn build.
 const FRAME_COUNT: usize = 256;
 
@@ -333,35 +329,26 @@ fn copy_status_to_parent(status_va: u64, status: WaitStatus) -> bool {
 
 /// Build one isolated ring-3 address space from `rxe` over the per-space
 /// `pool`, returning its PML4 root and the entry register state. The new space
-/// identity-maps the low 32 MiB, the higher-half kernel window, and the LAPIC
-/// MMIO page; it is activated (so the user mappings land in it) and the image
-/// is built through the production capability-checked, audited `spawn_image`
-/// caller. Fails the test loudly on any error.
+/// carries the live identity window and the higher-half kernel window; it is
+/// activated (so the user mappings land in it) and the image is built through
+/// the production capability-checked, audited `spawn_image` caller. Fails the
+/// test loudly on any error.
 fn build_el0_space(
     pool: &'static paging::PageTablePool,
     image: &LoadImage,
     rxe: &[u8],
     is_parent: bool,
 ) -> (u64, UserEntry) {
-    let Some(mut arch_space) = paging::AddressSpace::new_identity_first_32mib(pool) else {
+    let Some(arch_space) = paging::AddressSpace::new_identity_window(pool) else {
         note(TEST_FAIL, "X4 test: page-table pool exhausted");
         qemu_exit::exit_failure();
     };
-    // Identity-map the LAPIC MMIO page into the new space so the live scheduler
-    // over `X86_64Arch` can read its ID register / write the ICR after the CR3
-    // switch (fail closed if the pool is exhausted).
-    if arch_space
-        .map_4k(pool, LAPIC_MMIO_BASE, LAPIC_MMIO_BASE, true)
-        .is_none()
-    {
-        note(TEST_FAIL, "X4 test: could not map LAPIC MMIO page");
-        qemu_exit::exit_failure();
-    }
     let root_phys = arch_space.pml4_phys();
-    // SAFETY: the new space maps the low 32 MiB, the higher-half kernel window,
-    // and the LAPIC MMIO page, so the executing RIP, the current stack, the
+    // SAFETY: the new space carries the live identity window and the
+    // higher-half kernel window, so the executing RIP, the current stack, the
     // per-CPU `swapgs` TLS, the page-table pools, the frame pool, the heap,
-    // `dispatch`, and every LAPIC access stay mapped across the CR3 switch.
+    // `dispatch`, and every LAPIC MMIO access stay mapped across the CR3
+    // switch.
     unsafe { arch_space.switch() };
 
     let mut space = AddressSpace::new(arch_space);
@@ -577,6 +564,7 @@ fn run_wait() -> ! {
 pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
     boot(
         multiboot_info,
+        &ALLOCATOR,
         &SERIAL_SINK,
         &AUDIT_SINK,
         tairix_log::Level::Info,

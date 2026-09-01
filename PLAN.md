@@ -5294,11 +5294,11 @@ and fail-closed (§24.4) — this work must not loosen them.
   pool can offer into one virtually-contiguous run of the kernel remap window
   (`plans/FIX-KHEAP.md`), so growth needs no large contiguous block — and
   single direct-mapped frames for the slab tier, so a page-sized allocation
-  costs exactly one frame. Production wiring is `kernel/core::kheap`
-  (`register_global_heap` — an `AtomicPtr` slot each arch bin sets in
-  `kernel_main` before `boot` — plus the frame-backed `FrameHeapSource` and
-  `install_frame_heap_source`, called in `kernel_bringup` once the frame
-  allocator and `arch.direct_phys_map()` exist), over a new
+  costs exactly one frame. Production wiring is `kernel/core::kheap` (the
+  frame-backed `FrameHeapSource` and `install_frame_heap_source`, called in
+  `kernel_bringup` once the frame allocator and `arch.direct_phys_map()`
+  exist, against the `#[global_allocator]` every bin hands over as a required
+  `BootInfo` field), over a new
   `PhysMap::reverse(virt)->Option<PhysAddr>` (heap-shrink recovers a region's
   physical frame from its direct-map base). Growth draws the whole pool
   (kernel-internal), while a **user** commit is reserve-gated: `FrameAllocator`

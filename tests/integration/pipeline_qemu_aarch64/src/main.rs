@@ -186,6 +186,7 @@ mod kernel {
         let dtb = DTB_BLOB.as_ptr() as u64;
         boot_aarch64::boot(
             dtb,
+            &ALLOCATOR,
             &SERIAL_SINK,
             &AUDIT_SINK,
             // `SyscallInvoked` (`EventId(5000)`) is `Debug`, below the

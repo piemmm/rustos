@@ -65,24 +65,37 @@ pub const PASS_MARKER: &str = "MEMSOAK PASS";
 /// [`PASS_MARKER`] so a transcript is unambiguous at a glance.
 pub const FAIL_MARKER: &str = "MEMSOAK FAIL";
 
-/// The soak's sample: free physical memory **plus** every byte resident in a
-/// user address space.
+/// The soak's sample: free physical memory, **plus** every byte resident in a
+/// user address space, **plus** the kernel heap's own capacity.
 ///
 /// `free_bytes` alone is not a quantity a byte-exact verdict can judge. It
 /// falls whenever *any* process on the machine allocates, so an unrelated
 /// service waking inside the measured window fails a soak the cycle under
 /// test passed — `timed`'s NTP retry, which permanently gains its address
 /// space two pages, is the observed case, and it is driven by wall time, so
-/// no warmup length excludes it. A page moving between the free pool and a
-/// user address space leaves this sum unchanged, while kernel memory the
-/// cycle failed to return still lowers it. The verdict therefore measures
-/// kernel-side retention and nothing else.
+/// no warmup length excludes it.
+///
+/// The kernel heap term is there for the same reason. The heap grows and
+/// shrinks by whole regions and draws a frame per slab page, so a frame can
+/// move from the free pool into the *allocator* — memory still owned and
+/// reusable, not lost. Each size class also keeps one drained page back as
+/// hysteresis against thrashing the frame allocator, a bounded one-time
+/// retention that can land in any cycle, including a measured one. Counting
+/// the heap's capacity makes each of those moves leave the sum unchanged.
+///
+/// So a page moving between the free pool and either a user address space or
+/// the kernel heap leaves this sum unchanged, while memory the cycle failed
+/// to return to *any* of the three still lowers it. The verdict therefore
+/// measures genuine retention and nothing else.
 ///
 /// Saturating, so a malformed reply can only under-report rather than wrap
 /// into a figure that would read as a stable soak.
 #[must_use]
 pub fn sample_bytes(stats: &KernelMemoryStats) -> u64 {
-    stats.free_bytes.saturating_add(stats.user_resident_bytes)
+    stats
+        .free_bytes
+        .saturating_add(stats.user_resident_bytes)
+        .saturating_add(stats.kernel_heap_bytes)
 }
 
 /// The soak's outcome: the strict comparison of the final sample against the
@@ -138,10 +151,18 @@ mod tests {
     use super::*;
 
     fn stats(free_bytes: u64, user_resident_bytes: u64) -> KernelMemoryStats {
+        heap_stats(free_bytes, user_resident_bytes, 0)
+    }
+
+    fn heap_stats(
+        free_bytes: u64,
+        user_resident_bytes: u64,
+        kernel_heap_bytes: u64,
+    ) -> KernelMemoryStats {
         KernelMemoryStats {
             total_bytes: 1 << 30,
             free_bytes,
-            kernel_heap_bytes: 0,
+            kernel_heap_bytes,
             user_resident_bytes,
             page_size: 4096,
             reserved: 0,
@@ -160,10 +181,24 @@ mod tests {
         assert_eq!(verdict(before, after), Verdict::Stable);
     }
 
-    /// A page that leaves the free pool without becoming user-resident is
-    /// exactly what the soak hunts, and still lowers the sample.
+    /// The kernel heap drawing a frame — a grown region, or the one page a
+    /// size class keeps back as anti-thrash hysteresis — is not retention
+    /// either: the memory is still owned and reusable, so it must not move
+    /// the sample. Without this the slab's bounded per-class retention fails
+    /// a soak in whichever cycle it happens to land.
     #[test]
-    fn a_page_retained_kernel_side_lowers_the_sample() {
+    fn a_frame_moving_into_the_kernel_heap_leaves_the_sample_unchanged() {
+        let before = sample_bytes(&heap_stats(8192, 0, 0));
+        let after = sample_bytes(&heap_stats(4096, 0, 4096));
+        assert_eq!(before, after);
+        assert_eq!(verdict(before, after), Verdict::Stable);
+    }
+
+    /// A page that leaves the free pool without becoming user-resident or
+    /// joining the kernel heap is exactly what the soak hunts, and still
+    /// lowers the sample.
+    #[test]
+    fn a_page_retained_outside_every_accounted_owner_lowers_the_sample() {
         let before = sample_bytes(&stats(8192, 0));
         let after = sample_bytes(&stats(4096, 0));
         assert_eq!(before - after, 4096);
@@ -175,6 +210,7 @@ mod tests {
     #[test]
     fn the_sample_saturates_rather_than_wrapping() {
         assert_eq!(sample_bytes(&stats(u64::MAX, 4096)), u64::MAX);
+        assert_eq!(sample_bytes(&heap_stats(u64::MAX, 0, 4096)), u64::MAX);
     }
 
     #[test]

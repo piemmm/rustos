@@ -27,6 +27,7 @@ use alloc::sync::Arc;
 use tairix_arch_api::{ContextSwitch, CoreClock, CpuFeatures, PlatformEntropy, SecondaryBringup};
 
 use crate::sched::{CpuId, SchedulerArch, SchedulerConfig};
+use tairix_kalloc::FreeListAllocator;
 use tairix_kernel_irq::{IrqController, IrqTable, UNSUPPORTED_CONTROLLER};
 use tairix_kernel_mem::{BootMemoryMap, PhysAddr};
 use tairix_log::{Level, Sink};
@@ -1052,16 +1053,18 @@ where
     /// cell lives for the running kernel's lifetime.
     pub spawn_identity: Option<&'static LateIdentity>,
 
-    /// Committed size, in bytes, of the kernel heap region — reported as
-    /// [`tairix_abi::sysinfo::KernelMemoryStats::kernel_heap_bytes`] by the
-    /// System Information introspection source (`PREREQUISITES.md` P-C).
+    /// The binary's `#[global_allocator]` — the one kernel heap.
     ///
-    /// `kernel/core` does not own the `#[global_allocator]` (the binding
-    /// kernel does, over `tairix_kalloc`), so the boot path threads its
-    /// committed heap size here. Defaults to `0` — a boot path that does not
-    /// set it reports "no kernel heap accounted" rather than a fabricated
-    /// figure.
-    pub kernel_heap_bytes: u64,
+    /// `kernel/core` cannot own it (`#[global_allocator]` must be declared
+    /// by the final binary), so every bin hands its allocator over here.
+    /// The field is **required**, not an installable option, because two
+    /// things depend on reaching the real heap and both were silently
+    /// skippable while a bin had to remember a registration call: the
+    /// growable-heap source ([`crate::kheap::install_frame_heap_source`]),
+    /// without which the heap stays capped at its bootstrap region, and the
+    /// live capacity the System Information API reports as
+    /// [`tairix_abi::sysinfo::KernelMemoryStats::kernel_heap_bytes`].
+    pub heap: &'static FreeListAllocator,
 
     /// Installed physical memory, in bytes, as the boot path's platform
     /// memory source reports it (the firmware map / device-tree memory
@@ -1107,6 +1110,7 @@ where
         audit_sink: &'static (dyn Sink + Sync),
         log_level: Level,
         dispatcher_callback_slot: &'static DispatchCallbackSlot,
+        heap: &'static FreeListAllocator,
     ) -> Self {
         Self {
             boot_cpu,
@@ -1119,6 +1123,7 @@ where
             audit_sink,
             log_level,
             dispatcher_callback_slot,
+            heap,
             // Fail closed until the arch port installs its discovered
             // console list through `with_consoles`.
             consoles: &NO_CONSOLES,
@@ -1171,29 +1176,12 @@ where
             // and every credential resolution fails closed through the
             // inert `NULL_IDENTITY`.
             spawn_identity: None,
-            // Kernel heap size unaccounted until the binding kernel threads
-            // its committed `tairix_kalloc::HEAP_BYTES` through
-            // `with_kernel_heap_bytes`; reported as `0` until then.
-            kernel_heap_bytes: 0,
             // Installed memory unknown until the boot path threads its
             // pre-carve platform total through `with_installed_memory`;
             // the boot facts stay uninstalled (fail closed) until then.
             installed_memory_bytes: 0,
             _marker: core::marker::PhantomData,
         }
-    }
-
-    /// Record the committed size, in bytes, of the kernel heap region,
-    /// consuming and returning `self` (`PREREQUISITES.md` P-C).
-    ///
-    /// The binding kernel owns the `#[global_allocator]`, so it passes its
-    /// `tairix_kalloc::HEAP_BYTES` here; `kernel_main` threads it into the
-    /// introspection source so the `KernelMemory` domain reports a truthful
-    /// committed-heap figure. A boot path that never calls it reports `0`.
-    #[must_use]
-    pub const fn with_kernel_heap_bytes(mut self, bytes: u64) -> Self {
-        self.kernel_heap_bytes = bytes;
-        self
     }
 
     /// Record the installed physical memory, in bytes, as the platform's
@@ -1539,6 +1527,7 @@ mod tests {
             empty_sink(),
             Level::Info,
             leak_dispatch_slot(),
+            crate::test_heap::leak_heap().expect("host test heap"),
         )
     }
 

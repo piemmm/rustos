@@ -404,6 +404,7 @@ pub static AUDIT_SINK: TeeSink<'static, 2> = TeeSink::new([&SERIAL_SINK, &BOOT_A
 /// identity-mapped 0..4 GiB window.
 pub fn boot(
     boot_info: u64,
+    heap: &'static tairix_kalloc::FreeListAllocator,
     log_sink: &'static (dyn Sink + Sync),
     audit_sink: &'static (dyn Sink + Sync),
     log_level: Level,
@@ -416,13 +417,13 @@ pub fn boot(
     // forever on the lock its own interrupted mainline holds (a single-CPU
     // self-deadlock). One install covers every core and every heap the binary
     // holds: the hooks mask the *current* CPU's interrupts and are read by
-    // the allocator itself, so a bin that publishes no heap to the kernel
-    // core is covered too.
+    // the allocator itself, so a heap the boot handover never names is
+    // covered too.
     tairix_kalloc::install_irq_control(
         crate::x86_64::com1_rx::kalloc_irq_disable,
         crate::x86_64::com1_rx::kalloc_irq_restore,
     );
-    match try_boot(boot_info, log_sink, audit_sink, log_level) {
+    match try_boot(boot_info, heap, log_sink, audit_sink, log_level) {
         Ok(boot_info) => kernel_main(boot_info),
         Err(err) => {
             log_init_failure(log_sink, err);
@@ -860,6 +861,7 @@ pub fn bring_up_bsp(
 
 fn try_boot(
     boot_info: u64,
+    heap: &'static tairix_kalloc::FreeListAllocator,
     log_sink: &'static (dyn Sink + Sync),
     audit_sink: &'static (dyn Sink + Sync),
     log_level: Level,
@@ -938,6 +940,7 @@ fn try_boot(
         // is the *kernel-side* publication point for the eventual
         // production dispatch hook.
         &DISPATCH_SLOT,
+        heap,
     )
     // The COM1 console list for the standard streams: `stream_write` on
     // fd 1/2/3 reaches the same serial line the log sink uses, so PID 1
@@ -1243,7 +1246,8 @@ where
     // interrupt-driven functions are left undiscovered rather than granted a
     // line that never delivers (fail closed).
     let phys = DirectPhysMap::identity(paging::configured_identity_bytes());
-    let Some(mmio_space) = ArchAddressSpace::new_identity_first_32mib(&MSI_PROBE_PT_POOL) else {
+    let Some(mmio_space) = ArchAddressSpace::new_bookkeeping_identity_32mib(&MSI_PROBE_PT_POOL)
+    else {
         return;
     };
     let Ok(mut mmio) = MmioMap::new(

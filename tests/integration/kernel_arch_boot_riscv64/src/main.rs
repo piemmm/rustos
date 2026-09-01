@@ -27,11 +27,14 @@
 
 #[cfg(itest_riscv64)]
 mod kernel {
+    use core::num::NonZeroU16;
     use core::panic::PanicInfo;
 
     use tairix_arch_riscv64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
+    use tairix_itest_finisher::fail_point;
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_log::{Event, EventId, Sink};
+    use tairix_test_kheap_growth as kheap_growth;
     use tairix_test_riscv64_boot::boot;
 
     /// Static boot heap.
@@ -68,10 +71,18 @@ mod kernel {
             // records the full boot timeline.
             SerialSink::new().write_event(event);
             if event.id == BOOT_COMPLETED_EVENT_ID {
+                // Boot proved the remap window exists; this proves the heap
+                // can grow a region into it and dereference every page.
+                if kheap_growth::verify(&ALLOCATOR, &SERIAL_SINK).is_err() {
+                    qemu_exit::exit_failure(FAIL_KHEAP_GROWTH);
+                }
                 qemu_exit::exit_success();
             }
         }
     }
+
+    /// Failure finisher code for a growth-path fault.
+    const FAIL_KHEAP_GROWTH: NonZeroU16 = fail_point!(1);
 
     static AUDIT_SINK: BootCompletedExitSink = BootCompletedExitSink;
 
@@ -93,6 +104,7 @@ mod kernel {
         boot(
             hartid,
             dtb,
+            &ALLOCATOR,
             &SERIAL_SINK,
             &AUDIT_SINK,
             tairix_log::Level::Info,

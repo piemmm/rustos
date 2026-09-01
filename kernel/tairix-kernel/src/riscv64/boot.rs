@@ -868,6 +868,7 @@ fn enable_mmu_and_vectors() -> bool {
 pub fn boot(
     hartid: u64,
     dtb: u64,
+    heap: &'static tairix_kalloc::FreeListAllocator,
     log_sink: &'static (dyn Sink + Sync),
     audit_sink: &'static (dyn Sink + Sync),
     log_level: Level,
@@ -880,8 +881,8 @@ pub fn boot(
     // spinning forever on the lock its own interrupted mainline holds (a
     // single-CPU self-deadlock). One install covers every hart and every heap
     // the binary holds: the hooks mask the *current* hart's interrupts and
-    // are read by the allocator itself, so a bin that publishes no heap to
-    // the kernel core is covered too.
+    // are read by the allocator itself, so a heap the boot handover never
+    // names is covered too.
     tairix_kalloc::install_irq_control(kalloc_irq_disable, kalloc_irq_restore);
 
     // RV-P2: enable the Sv39 identity MMU + S-mode trap vector before
@@ -922,7 +923,7 @@ pub fn boot(
         halt_current_hart()
     }
 
-    match try_boot(hartid, dtb, log_sink, audit_sink, log_level) {
+    match try_boot(hartid, dtb, heap, log_sink, audit_sink, log_level) {
         Ok(boot_info) => kernel_main(boot_info),
         Err(err) => {
             log_init_failure(log_sink, err);
@@ -1044,6 +1045,7 @@ fn log_init_failure(sink: &(dyn Sink + Sync), err: BootError) {
 pub fn try_boot(
     hartid: u64,
     dtb: u64,
+    heap: &'static tairix_kalloc::FreeListAllocator,
     log_sink: &'static (dyn Sink + Sync),
     audit_sink: &'static (dyn Sink + Sync),
     log_level: Level,
@@ -1173,6 +1175,7 @@ pub fn try_boot(
         audit_sink,
         log_level,
         &DISPATCH_SLOT,
+        heap,
     )
     // Install the SBI console as the only console-list entry so PID 1
     // `init` and its session can write their startup banners. Its read half is the fail-closed

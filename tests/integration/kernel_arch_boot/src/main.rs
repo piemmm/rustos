@@ -38,6 +38,7 @@ mod kernel {
         boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
     };
     use tairix_log::{Event, EventId, Sink};
+    use tairix_test_kheap_growth as kheap_growth;
 
     // --- Bump-allocator-backed `#[global_allocator]` ---------------
     //
@@ -92,6 +93,11 @@ mod kernel {
             SerialSink::new().write_event(event);
 
             if event.id == BOOT_COMPLETED_EVENT_ID {
+                // Boot proved the remap window exists; this proves the heap
+                // can grow a region into it and dereference every page.
+                if kheap_growth::verify(&ALLOCATOR, &SERIAL_SINK).is_err() {
+                    qemu_exit::exit_failure();
+                }
                 qemu_exit::exit_success();
             }
         }
@@ -124,6 +130,7 @@ mod kernel {
     pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
         boot(
             multiboot_info,
+            &ALLOCATOR,
             &SERIAL_SINK,
             &AUDIT_SINK,
             tairix_log::Level::Info,

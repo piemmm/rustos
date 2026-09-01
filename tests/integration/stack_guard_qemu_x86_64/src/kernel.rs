@@ -27,13 +27,6 @@ const SG_TEST_START: EventId = EventId(4320);
 const SG_TEST_PASS: EventId = EventId(4321);
 const SG_TEST_FAIL: EventId = EventId(4322);
 
-/// Gigabytes of identity map the space installs. The 64 MiB bump heap
-/// pushes this binary's `.bss` (and the guard static within it) well past
-/// the 32 MiB window the X1/X2 verticals use, so the low identity must
-/// cover all of RAM — 4 GiB also covers the architectural LAPIC MMIO page
-/// at ~3.98 GiB, mirroring the spawn producer (`plans/PI.md` X3a).
-const IDENTITY_GIB: usize = 4;
-
 /// The sentinel written through the guard page after the split, to prove
 /// the split preserved the mapping before the page is torn down.
 const SENTINEL: u8 = 0xA5;
@@ -169,9 +162,7 @@ fn run_guard_test() -> ! {
     // Build a 4 GiB-identity space (low identity + higher-half kernel
     // window) so the running RIP / stack / per-CPU TLS and the guard
     // static's low-identity alias all stay mapped across the CR3 switch.
-    let Some(mut space) =
-        paging::AddressSpace::new_identity_first_gib(&PAGE_TABLE_POOL, IDENTITY_GIB)
-    else {
+    let Some(mut space) = paging::AddressSpace::new_identity_window(&PAGE_TABLE_POOL) else {
         fail("x86_64 stack-guard test: page-table pool exhausted");
     };
 
@@ -250,6 +241,7 @@ static AUDIT_SINK: BootCompletedSink = BootCompletedSink;
 pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
     boot(
         multiboot_info,
+        &ALLOCATOR,
         &SERIAL_SINK,
         &AUDIT_SINK,
         tairix_log::Level::Info,

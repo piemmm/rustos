@@ -30,6 +30,7 @@ use tairix_abi::sysinfo::{
     RESOURCE_LIMITS_REPORT_LEN,
 };
 use tairix_abi::{Duration64, Errno, LimitKind, ProcId, Time64};
+use tairix_kalloc::FreeListAllocator;
 use tairix_kernel_mem::PAGE_SIZE;
 use tairix_kernel_sched_api::{Priority, SchedulerPolicy, TaskId, TaskState};
 use tairix_kernel_sec::ProcessId;
@@ -143,11 +144,10 @@ pub struct KernelIntrospectSource<A: KernelArch + 'static> {
     filesystem: &'static (dyn FilesystemService + 'static),
     /// The kernel wall clock, for the uptime domain's boot wall-instant.
     wall_clock: &'static (dyn WallClockSource + 'static),
-    /// Committed size of the kernel heap region in bytes, reported as
-    /// `KernelMemoryStats::kernel_heap_bytes` (the heap is committed at this
-    /// fixed size at boot; the value is threaded from the binding kernel's
-    /// `tairix_kalloc::HEAP_BYTES`).
-    kernel_heap_bytes: u64,
+    /// The binary's kernel heap, read live for
+    /// `KernelMemoryStats::kernel_heap_bytes`. The heap grows and shrinks by
+    /// whole regions, so its size is a reading and not a boot-time constant.
+    heap: &'static FreeListAllocator,
     /// The kernel-held user database the account directory is derived
     /// from. Only the uid + username pairing is ever exposed; credential
     /// material stays behind the capability-gated `users_db_read` syscall.
@@ -169,14 +169,14 @@ impl<A: KernelArch + 'static> KernelIntrospectSource<A> {
         filesystem: &'static (dyn FilesystemService + 'static),
         wall_clock: &'static (dyn WallClockSource + 'static),
         users_db: &'static (dyn UsersDbSource + 'static),
-        kernel_heap_bytes: u64,
+        heap: &'static FreeListAllocator,
     ) -> Self {
         Self {
             state,
             filesystem,
             wall_clock,
             users_db,
-            kernel_heap_bytes,
+            heap,
             load: LoadTracker::new(),
         }
     }
@@ -301,7 +301,7 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
         let stats = KernelMemoryStats {
             total_bytes: usable_ram_bytes(self.usable_frames()),
             free_bytes: free_frames.saturating_mul(page),
-            kernel_heap_bytes: self.kernel_heap_bytes,
+            kernel_heap_bytes: self.heap.capacity() as u64,
             user_resident_bytes,
             page_size: u32::try_from(PAGE_SIZE).unwrap_or(u32::MAX),
             reserved: 0,

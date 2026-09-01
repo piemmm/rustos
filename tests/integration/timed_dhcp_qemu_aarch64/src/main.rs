@@ -160,6 +160,7 @@ mod kernel {
         let dtb = DTB_BLOB.as_ptr() as u64;
         boot_aarch64::boot(
             dtb,
+            &ALLOCATOR,
             &WITNESS_SINK,
             &SERIAL_SINK,
             tairix_log::Level::Info,

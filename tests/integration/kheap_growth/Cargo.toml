@@ -1,0 +1,20 @@
+[package]
+name = "tairix-test-kheap-growth"
+description = "Runtime support seam linked by the freestanding boot-completed QEMU kernels: the one arch-neutral exercise that drives the growable kernel heap past its bootstrap region against the port's real remap window and dereferences every page of the assembled run. Host tests cannot dereference a window address, so this is the guest-side half of the growth path's coverage; keeping it here means one definition rather than a copy per port."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }

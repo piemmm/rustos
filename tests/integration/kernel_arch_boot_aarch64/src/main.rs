@@ -71,6 +71,7 @@ mod kernel {
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
     use tairix_log::{Event, EventId, Sink};
+    use tairix_test_kheap_growth as kheap_growth;
 
     // The canonical QEMU `virt` device tree, dumped and embedded at build
     // time (`build.rs`). The boot pipeline discovers the board from it
@@ -119,6 +120,7 @@ mod kernel {
     /// Failure finisher codes, distinct per failure site.
     const FAIL_VIDEO_INACTIVE: NonZeroU16 = fail_point!(1);
     const FAIL_SECONDARY_START: NonZeroU16 = fail_point!(2);
+    const FAIL_KHEAP_GROWTH: NonZeroU16 = fail_point!(3);
 
     /// Set once `BootCompleted` was observed (with the video console
     /// active); the PASS finisher additionally requires every secondary
@@ -172,6 +174,11 @@ mod kernel {
                 if !tairix_arch_aarch64::video::is_active() {
                     qemu_exit::exit_failure(FAIL_VIDEO_INACTIVE);
                 }
+                // Boot proved the remap window exists; this proves the heap
+                // can grow a region into it and dereference every page.
+                if kheap_growth::verify(&ALLOCATOR, &SERIAL_SINK).is_err() {
+                    qemu_exit::exit_failure(FAIL_KHEAP_GROWTH);
+                }
                 BOOT_COMPLETED.store(true, Ordering::SeqCst);
                 Self::exit_if_complete();
             } else if event.id == SECONDARY_ONLINE_EVENT_ID {
@@ -204,6 +211,7 @@ mod kernel {
         let dtb = DTB_BLOB.as_ptr() as u64;
         boot_aarch64::boot(
             dtb,
+            &ALLOCATOR,
             &SERIAL_SINK,
             &AUDIT_SINK,
             tairix_log::Level::Info,

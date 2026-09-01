@@ -22,6 +22,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
 use tairix_kernel_core::test_arch::{TestArch, HALT_SENTINEL};
+use tairix_kernel_core::test_heap::leak_heap;
 use tairix_kernel_core::test_sink::TestSink;
 use tairix_kernel_core::{
     kernel_main, panic_dump, AuditEvent, BootInfo, DispatchCallbackSlot, PanicContext, Phase,
@@ -79,6 +80,7 @@ where
         audit_sink,
         Level::Info,
         slot,
+        leak_heap().expect("host test heap"),
     );
     setup(&mut boot);
 

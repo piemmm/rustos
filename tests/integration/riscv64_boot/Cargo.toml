@@ -27,6 +27,9 @@ tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
 # `publish` clones + serves the firmware `BootMemoryMap` through a
 # set-once slot for the device-bring-up observers.
 tairix-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
+# The `FreeListAllocator` type the consuming vertical's own
+# `#[global_allocator]` is handed through to the production pipeline.
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
 tairix-sync = { path = "../../../lib/sync", version = "=0.0.0" }
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 

@@ -378,7 +378,7 @@ fn virtio_blk_unlock<'a>(
     // bookkeeping arch space (never made live) and device access is through
     // the identity `phys` map, so the base is pure bookkeeping. A 32 MiB
     // identity base leaves the window base (1.5 GiB) free of collision.
-    let mmio_space = ArchAddressSpace::new_identity_first_32mib(&UNLOCK_PT_POOL)
+    let mmio_space = ArchAddressSpace::new_bookkeeping_identity_32mib(&UNLOCK_PT_POOL)
         .ok_or("root-unlock: mmio bookkeeping space")?;
     let mmio: &'static mut MmioMap<'static, ArchAddressSpace> = Box::leak(Box::new(
         MmioMap::new(
@@ -441,7 +441,7 @@ fn virtio_blk_unlock<'a>(
     // controller, whose MSI-line half is a no-op — an edge MSI has no line to
     // re-enable, the message delivers on its own and the ready-flag consume
     // is the interlock.
-    let dma_space = ArchAddressSpace::new_identity_first_32mib(&UNLOCK_PT_POOL)
+    let dma_space = ArchAddressSpace::new_bookkeeping_identity_32mib(&UNLOCK_PT_POOL)
         .ok_or("root-unlock: dma bookkeeping space")?;
     let pool = DmaPool::new(
         AddressSpace::new(dma_space),

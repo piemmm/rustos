@@ -13,21 +13,19 @@
 //! byte-granular tier (below), and single direct-mapped frames for the slab
 //! tier that serves everything up to a page.
 //!
-//! Two seams connect the bin's allocator to the kernel core:
+//! The bin's allocator reaches the kernel core as a *handover value*, not
+//! through a registry: every bin hands its `#[global_allocator]` to `boot`,
+//! which carries it in [`crate::BootInfo`], and
+//! [`install_frame_heap_source`] wires the frame-backed source into that
+//! heap once the frame allocator, the arch direct physical map, and the
+//! port's kernel remap window all exist and are `'static`. The compiler
+//! therefore enforces the wiring: a bin cannot boot without naming its
+//! heap, so no binary can silently run with an ungrowable one.
 //!
-//! * [`register_global_heap`] — each arch bin publishes its
-//!   `#[global_allocator]` here with one line before it calls `boot`, so
-//!   the core can reach the same allocator instance without naming the
-//!   bin.
-//! * [`install_frame_heap_source`] — the boot path calls this once the
-//!   frame allocator, the arch direct physical map, and the port's kernel
-//!   remap window all exist and are `'static`, wiring the frame-backed
-//!   source into the registered heap.
-//!
-//! The lock's interrupt-safety is deliberately **not** one of them: it is
-//! installed straight into `tairix_kalloc` by the port's boot entry, so it
-//! covers every heap in the binary rather than only the one a bin
-//! remembered to publish here.
+//! The lock's interrupt-safety travels differently, and deliberately so: it
+//! is installed straight into `tairix_kalloc` by the port's boot entry, so
+//! it covers every heap in the binary rather than only the one the handover
+//! names.
 //!
 //! # How a region is grown
 //!
@@ -67,13 +65,11 @@
 //! drawn from the frame allocator ([`tairix_kernel_mem::SlotWindow`]),
 //! which is heap-independent by construction.
 //!
-//! A bin that registers no heap, or a port that reserves no remap window,
-//! simply leaves the heap capped at its bootstrap region (fail closed,
-//! never a panic).
+//! A port that reserves no remap window simply leaves the heap capped at
+//! its bootstrap region (fail closed, never a panic).
 
 use alloc::boxed::Box;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicPtr, Ordering};
 
 use tairix_kalloc::{FreeListAllocator, HeapSource};
 use tairix_kernel_mem::{
@@ -89,33 +85,6 @@ use tairix_sync::SpinLock;
 /// (amortised growth); the remainder stays as free holes the next
 /// allocation reuses, and a wholly-drained region is returned intact.
 const MIN_GROW_PAGES: usize = 16;
-
-/// The registered bin `#[global_allocator]`, or null before a bin
-/// publishes one. Set once per boot by [`register_global_heap`].
-static GLOBAL_HEAP: AtomicPtr<FreeListAllocator> = AtomicPtr::new(core::ptr::null_mut());
-
-/// Publish the bin's `#[global_allocator]` so [`install_frame_heap_source`]
-/// can later wire the growth source into it.
-///
-/// Each arch bin calls this with its `&'static FreeListAllocator` before
-/// entering `boot`. Idempotent-by-policy: the boot path registers exactly
-/// one heap for the life of the binary; a second call simply retargets the
-/// slot.
-pub fn register_global_heap(heap: &'static FreeListAllocator) {
-    GLOBAL_HEAP.store(
-        core::ptr::from_ref::<FreeListAllocator>(heap).cast_mut(),
-        Ordering::Release,
-    );
-}
-
-/// Borrow the registered heap, or `None` when no bin published one (a host
-/// harness, or an early call before registration).
-fn global_heap() -> Option<&'static FreeListAllocator> {
-    // SAFETY: the pointer is only ever set by `register_global_heap` from a
-    // `&'static FreeListAllocator`, so a non-null value is a valid `'static`
-    // reference for the life of the binary; null means none was registered.
-    unsafe { GLOBAL_HEAP.load(Ordering::Acquire).as_ref() }
-}
 
 /// The production kernel-heap source: physical chunks from the frame
 /// allocator assembled into one virtually-contiguous region in the port's
@@ -245,24 +214,23 @@ impl HeapSource for FrameHeapSource {
     }
 }
 
-/// Wire the frame-backed source into the registered kernel heap, so its
-/// byte-granular tier can grow past the bootstrap region and its slab tier
-/// can draw pages.
+/// Wire the frame-backed source into `heap` — the binary's
+/// `#[global_allocator]`, carried here from the bin through
+/// [`crate::BootInfo`] — so its byte-granular tier can grow past the
+/// bootstrap region and its slab tier can draw pages.
 ///
 /// Called once from the boot path after the frame allocator, the arch direct
 /// physical map, and the port's kernel remap window all exist and are
 /// `'static`. `physmap` backs the address-space bookkeeping's own
 /// heap-independent record storage; `kvmap` is where the regions are
-/// assembled. A no-op when no bin registered a heap (a host harness): the
-/// heap then stays capped at its bootstrap region, fail closed.
+/// assembled. A window whose bookkeeping cannot be sized leaves the heap on
+/// its bootstrap region, fail closed.
 pub fn install_frame_heap_source(
+    heap: &'static FreeListAllocator,
     frames: &'static FrameAllocator,
     physmap: &'static (dyn PhysMap + Sync),
     kvmap: &'static dyn KernelVirtMap,
 ) {
-    let Some(heap) = global_heap() else {
-        return;
-    };
     let Ok(slots) = SlotWindow::new(kvmap.window().pages(), frames, physmap) else {
         return;
     };
