@@ -1030,7 +1030,22 @@ as its colour. See [theming](./theming.md) for the four roles.
   strips are kept: the region between them is never sampled (the compositor
   draws the window's own content there), so retained bytes follow the band
   thickness and not the window area — a 1920×1080 window's furniture costs
-  roughly a thirty-fifth of what one outer-sized surface did. The compositor
+  roughly a thirty-fifth of what one outer-sized surface did.
+  **Nothing outer-sized is allocated on the way there either.** Each strip is
+  a `Surface` the size of its own band that the whole frame paints *into*,
+  standing in for that band's rectangle of the window
+  (`Surface::with_origin`): the frame draws across the outer rectangle in the
+  window's own coordinates and every write outside the band is off the
+  surface and dropped. So the largest buffer a chrome render asks the
+  allocator for is one band, not one window — which matters because the
+  render is per *cache miss*, and the cache is ceilinged at a screenful and
+  reclaimed under pressure, so a cold screenful of decorated windows used to
+  re-pay a window-sized transient each. A strip is pixel-identical to the
+  same rectangle of a whole-window render, because a stated origin places
+  every shape, ramp and ordered dither where the drawing says rather than
+  where the buffer begins. The band is composed only where the surface
+  admits some of it (`Surface::admits`), so a strip the title does not reach
+  neither elides its text nor rasterises its identity glyph. The compositor
   samples those strips in the reserved band and the client content inside
   them (`Window::row` /
   `Window::sample_local`), for both the software and the

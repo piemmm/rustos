@@ -60,6 +60,11 @@
 
 extern crate alloc;
 
+// The furniture-render allocation budget owns a counting `#[global_allocator]`
+// that forwards to the host allocator.
+#[cfg(test)]
+extern crate std;
+
 pub mod chrome;
 pub mod color;
 pub mod compositor;

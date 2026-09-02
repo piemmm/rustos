@@ -932,8 +932,8 @@ found two more read-only writes on the same path).
     layout's rect list, a title `String`) stays infallible: `alloc`'s
     collections have no fallible push, and threading a `Result` through every
     layout function to answer a 32-byte refusal would be a worse design for a
-    failure the process cannot survive anyway. D79 is the churn that made the
-    refusal fire in the first place.
+    failure the process cannot survive anyway. D79 was the churn that made the
+    refusal fire in the first place, and is now gone.
   - **Two things found while diagnosing it are fixed.** A userland panic's
     reason reached only `stderr`, so a service — or a graphical session whose
     console is the screen it composites over — died leaving nothing but an
@@ -962,11 +962,12 @@ found two more read-only writes on the same path).
     window count may be moved to make it pass.
   - **Two structural resolutions, and they are different work.** Either the
     per-window cost comes down until 32 windows genuinely fit with headroom —
-    the retained trio above is the budget, and D79's churn is on top of it — or
-    the vertical drives the pressure band by a means that does not sit on the
-    exhaustion boundary, while still asserting what it exists to assert (the
-    icon bar keeps its real artwork through mild and moderate pressure).
-    Choosing between them is a scope decision, not a defect fix.
+    the retained trio above is the budget, and D79's window-sized transient no
+    longer sits on top of it — or the vertical drives the pressure band by a
+    means that does not sit on the exhaustion boundary, while still asserting
+    what it exists to assert (the icon bar keeps its real artwork through mild
+    and moderate pressure). Choosing between them is a scope decision, not a
+    defect fix.
   - **Its refusal is currently invisible, which is why this took a source
     read to diagnose.** The terminal states "screen surface refused; no window
     opened" on `stderr`, and a graphical app's stderr in a desktop session has
@@ -977,36 +978,50 @@ found two more read-only writes on the same path).
     routing a non-fatal refusal to the system log as well is a policy question
     to settle rather than assume.
 
-- **D79 — a decorated window's furniture is rendered through a transient the
-  size of the whole window, to keep four thin strips (OPEN).**
-  `WindowChrome::render` allocates an outer-sized `Surface` (975,840 bytes for
-  a default terminal), paints the frame into it, copies the four furniture
-  bands out, and frees it. The bands total about 80 KiB, so the transient is
-  twelve times what is kept, and `vec![fill; count]` writes every one of those
-  pixels transparent before the paint begins. It is per *chrome-cache miss*,
-  and the chrome cache is ceilinged at one screenful and reclaimed under
-  pressure — which is precisely the state the D77 soak drives — so a screenful
-  of decorated windows re-pays it per frame once the cache is cold. That churn
-  is the best candidate for why a ~953 KiB request was refused on a machine
-  that had, minutes earlier, satisfied thirty of them.
-  - **Not a defect of the code that wrote it.** `plans/COMPOSITOR-WORK.md`
-    Stage B records the transient as forced: the `lib/controls` paint
-    vocabulary works in unsigned surface coordinates (`surface_rect` refuses a
-    negative destination origin, and every helper below it takes
-    `(u32, u32, u32, u32)`), so only the *top* band — the one whose local
-    origin is already `(0, 0)` — can be painted straight into its own strip.
-  - **The fix is the missing capability, not a workaround.** A surface cannot
-    presently be a window onto a larger coordinate space, which is what a
-    strip is. Either a scoped origin translation on `Surface` (the natural
-    sibling of `with_clip`, mapping space to buffer in the one place
-    `span_offsets` already computes an index, with a `base_row` precedent) or
-    a signed paint vocabulary in `lib/controls`. Both reach the whole
-    desktop's drawing layer, so this is its own change on its own gate, and
-    `plans/COMPOSITOR-WORK.md` Stage B is updated by it.
-  - **Do not "fix" it by sharing one transient across the residency pass.**
-    That would keep the allocation and make chrome rendering stateful across
-    windows for a fraction of the win; the strips want to be painted once,
-    into themselves.
+- **D79 — a decorated window's furniture was rendered through a transient the
+  size of the whole window, to keep four thin strips — FIXED.**
+  `WindowChrome::render` allocated an outer-sized `Surface` (975,840 bytes for
+  a default terminal, 7,753,840 for a 1880×1000 one), painted the frame into
+  it, copied the four furniture bands out, and freed it. The bands total about
+  80 KiB, so the transient was twelve times what is kept, and every one of
+  those pixels was written transparent before the paint began. It was per
+  *chrome-cache miss*, and the chrome cache is ceilinged at one screenful and
+  reclaimed under pressure — precisely the state the D77 soak drives — so a
+  screenful of decorated windows re-paid it per frame once the cache went
+  cold.
+  - **Fixed by the missing capability, not a workaround.** A `Surface` can now
+    *be* one rectangle of a larger drawing: `Surface::with_origin(x, y, paint)`
+    states, for the duration of one paint, that the buffer's first pixel is
+    the drawing's `(x, y)`. Each strip is therefore a surface the size of its
+    own band that the whole frame paints into, and every write outside the
+    band is off the buffer and dropped. The largest buffer a render asks for
+    is one band. The `lib/controls` paint vocabulary is untouched — it keeps
+    its unsigned coordinates, which are now the *drawing's*.
+  - **One definition, and it reaches every primitive.** The translation lives
+    in the one place the clip-and-index arithmetic already lived
+    (`span_offsets`), so no primitive can honour a stated origin while another
+    forgets it: the row-granular borrows, the row bands a parallel pass
+    splits, the blit placement, `admitted`, `with_clip`'s own rectangle, and
+    the scan converter's device-space placement and bounds all read the
+    drawing's coordinates. The surface-relative primitives (`fill`,
+    `mask_to_round_rect`, a design-grid fill) act on the rectangle the buffer
+    holds, which is the same rule stated for the whole surface. The alpha
+    floor still measures the buffer, because that is what it bounds.
+  - **A strip is pixel-identical to the same rectangle of the whole
+    drawing** — corner arcs, gradient ramps, the ordered dither, a placed
+    sprite and device-space geometry are all sampled where the drawing says
+    rather than where the buffer begins. `lib/raster` proves that directly
+    against a drawing exercising all of them, band by band.
+  - **The band is composed only where it is drawn.** `TitleBar::render`
+    returns at once for a surface that admits none of its rectangle
+    (`Surface::admits`), because it elides a title and can rasterise an
+    identity glyph before its first write — so the three strips the title
+    does not reach pay neither.
+  - **Regression cover.** `tairix-wm` measures the largest single allocation a
+    furniture render makes (a counting `#[global_allocator]` over a warm
+    glyph cache) and holds it within what that render retains: 218,312 bytes
+    against 286,480 retained for a 1880×1000 window, where the transient
+    asked for 7,753,840.
 - **D76 — three riscv64 QEMU verticals blow their absolute ceiling only under
   the loaded matrix (OPEN).** `autoload-input`, `netstack-autoload` and
   `netstack-dhcp` on riscv64 leave the guest alive and parked in WFI at the

@@ -138,13 +138,14 @@ guarantees:
   `lib/font`, the four `WindowControl` buttons), using the one `lib/raster`
   fill and the shared rounded-corner path (no second recipe). The rim's
   rounded corners stay transparent so the desktop shows
-  through. The strips are cut from one transient outer-sized render because
-  the drawing primitives refuse a negative-origin destination; only the strips
-  are kept, so retained bytes scale with the band and never with the window
-  area. That transient is twelve times what it yields and is re-paid per
-  chrome-cache miss, which `plans/OPEN-DEFECTS.md` D79 tracks along with the
-  `Surface`/`lib/controls` capability its removal needs; this stage's
-  behaviour is unchanged by it. A zero-extent edge holds no surface at all.
+  through. Each strip is a surface the size of its own band that the whole
+  frame paints *into*, standing in for that band's rectangle of the window
+  (`Surface::with_origin`), so neither the retained bytes nor any transient
+  scale with the window area, and a strip is pixel-identical to the same
+  rectangle of a whole-window render. `TitleBar::render` skips a band the
+  surface admits none of (`Surface::admits`), so the three strips the title
+  does not reach compose no text and rasterise no identity glyph. A
+  zero-extent edge holds no surface at all.
 - **The window's silhouette is the frame's rim, and the client is clipped to
   it.** `Window::shape` reports one shape for either kind of window — a
   decorated window's `WindowFrame::rim` radius over its outer rectangle, a plain

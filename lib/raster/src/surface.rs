@@ -10,6 +10,12 @@
 //! to its item area — by stating that bound once, rather than every drawing
 //! routine trimming its own geometry to an edge.
 //!
+//! A surface can also *be* one rectangle of a larger drawing
+//! ([`Surface::with_origin`]): the paint works in the drawing's coordinates
+//! and the buffer holds only the part it covers. That is what renders a strip
+//! of a drawing into a buffer the size of the strip, instead of into one the
+//! size of the whole drawing.
+//!
 //! [`Surface::frost_region`] is the shared frosted glass: one rectangle
 //! blurred in place and mixed back over itself at a caller-supplied
 //! coverage.
@@ -148,6 +154,67 @@ impl ClipRect {
     }
 }
 
+/// Where the buffer's first pixel sits in the coordinate space a paint works
+/// in ([`Surface::with_origin`]).
+///
+/// `(0, 0)` — the default, and every paint that has not stated otherwise —
+/// makes the two coordinate systems identical, so a surface that is not a
+/// window onto anything larger pays only these two comparisons.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+struct Origin {
+    x: u32,
+    y: u32,
+}
+
+impl Origin {
+    /// The buffer column drawing column `x` sits at, or `None` when it lies
+    /// left of the buffer's first.
+    const fn column(self, x: u32) -> Option<u32> {
+        x.checked_sub(self.x)
+    }
+
+    /// The buffer row drawing row `y` sits at, or `None` when it lies above
+    /// the buffer's first.
+    const fn row(self, y: u32) -> Option<u32> {
+        y.checked_sub(self.y)
+    }
+
+    /// The drawing column of buffer column `column`.
+    const fn space_column(self, column: u32) -> u32 {
+        column.saturating_add(self.x)
+    }
+
+    /// The drawing row of buffer row `row`.
+    const fn space_row(self, row: u32) -> u32 {
+        row.saturating_add(self.y)
+    }
+
+    /// The buffer columns drawing columns `[x, x+w)` reach, as a start and a
+    /// width: the part of the range left of the buffer holds no pixel and is
+    /// dropped rather than wrapping the start negative.
+    fn columns(self, x: u32, w: u32) -> (u32, u32) {
+        let start = x.max(self.x);
+        (start - self.x, x.saturating_add(w).saturating_sub(start))
+    }
+
+    /// The buffer rows drawing rows `[y, y+h)` reach (see
+    /// [`columns`](Self::columns)).
+    fn rows(self, y: u32, h: u32) -> (u32, u32) {
+        let start = y.max(self.y);
+        (start - self.y, y.saturating_add(h).saturating_sub(start))
+    }
+
+    /// Where a source placed at signed drawing coordinates `(x, y)` sits in
+    /// the buffer's own, widened so a placement far outside the buffer clips
+    /// rather than wrapping.
+    fn buffer_point(self, x: i32, y: i32) -> (i64, i64) {
+        (
+            i64::from(x) - i64::from(self.x),
+            i64::from(y) - i64::from(self.y),
+        )
+    }
+}
+
 /// A lower bound on the alpha every pixel of a [`Surface`] carries, and the
 /// borrows it has yet to account for.
 ///
@@ -190,18 +257,21 @@ impl AlphaFloor {
 
 /// A row-major, premultiplied-alpha pixel buffer.
 ///
-/// Two surfaces are equal when they carry the same pixels *and* the same clip
-/// window. [`Surface::with_clip`] restores the previous window before it
-/// returns, so a surface observed outside a clipped paint always carries the
-/// whole-surface window and equality is decided by its pixels alone. The
-/// alpha floor ([`alpha_floor`](Surface::alpha_floor)) is a bound derived
-/// from those pixels and how tight it happens to be is not part of a
-/// surface's identity, so it takes no part in the comparison.
+/// Two surfaces are equal when they carry the same pixels *and* the same
+/// painting state — the clip window and the stated origin.
+/// [`Surface::with_clip`] and [`Surface::with_origin`] both restore what they
+/// found before returning, so a surface observed outside such a paint carries
+/// the whole-surface window at the buffer's own origin and equality is decided
+/// by its pixels alone. The alpha floor
+/// ([`alpha_floor`](Surface::alpha_floor)) is a bound derived from those
+/// pixels and how tight it happens to be is not part of a surface's identity,
+/// so it takes no part in the comparison.
 #[derive(Clone, Debug)]
 pub struct Surface {
     width: u32,
     height: u32,
     clip: ClipRect,
+    origin: Origin,
     pixels: Vec<Pixel>,
     floor: AlphaFloor,
 }
@@ -211,6 +281,7 @@ impl PartialEq for Surface {
         self.width == other.width
             && self.height == other.height
             && self.clip == other.clip
+            && self.origin == other.origin
             && self.pixels == other.pixels
     }
 }
@@ -256,6 +327,7 @@ impl Surface {
             width,
             height,
             clip: ClipRect::whole(width, height),
+            origin: Origin::default(),
             pixels: fallible::filled(count, fill)?,
             floor: AlphaFloor::flat(fill.a),
         })
@@ -377,6 +449,7 @@ impl Surface {
             width,
             height,
             clip: ClipRect::whole(width, height),
+            origin: Origin::default(),
             pixels,
             floor: AlphaFloor::unscanned(width, height),
         })
@@ -526,7 +599,26 @@ impl Surface {
     /// Fill the surface with `color` (premultiplied on the way in), within the
     /// active clip window.
     pub fn fill(&mut self, color: Color) {
-        self.fill_rect(0, 0, self.width, self.height, color);
+        let (x, y, w, h) = self.space_rect();
+        self.fill_rect(x, y, w, h, color);
+    }
+
+    /// The rectangle of the paint's coordinate space this buffer holds: the
+    /// buffer's own extent, at the stated origin.
+    const fn space_rect(&self) -> (u32, u32, u32, u32) {
+        (self.origin.x, self.origin.y, self.width, self.height)
+    }
+
+    /// The rows of `[y, y+h)` a write reaches — the range intersected with the
+    /// buffer's rows and the active clip window — in the paint's own
+    /// coordinates.
+    ///
+    /// Every row-wise primitive walks this rather than the clip window
+    /// directly, so one definition decides which rows exist for all of them.
+    fn admitted_rows(&self, y: u32, h: u32) -> Range<u32> {
+        let (row, rows) = self.origin.rows(y, h);
+        let buffer = self.clip.rows(row, rows);
+        self.origin.space_row(buffer.start)..self.origin.space_row(buffer.end)
     }
 
     /// Fill the half-open rectangle `[x, x+w) × [y, y+h)` with `color`,
@@ -537,7 +629,7 @@ impl Surface {
     /// rectangle's area, never the whole surface.
     pub fn fill_rect(&mut self, x: u32, y: u32, w: u32, h: u32, color: Color) {
         let pixel = color.premultiply();
-        for row in self.clip.rows(y, h) {
+        for row in self.admitted_rows(y, h) {
             if let Some((_, span)) = self.row_span_mut(row, x, w) {
                 span.fill(pixel);
             }
@@ -611,7 +703,7 @@ impl Surface {
         // exceeds `w`, so neither subtraction can wrap.
         let radius = radius.min(w / 2).min(h / 2);
         let right_band = w - radius;
-        for row in self.clip.rows(y, h) {
+        for row in self.admitted_rows(y, h) {
             let local_y = row - y;
             let Some((first, span)) = self.row_span_mut(row, x, w) else {
                 continue;
@@ -696,7 +788,7 @@ impl Surface {
             return;
         }
         let last = h - 1;
-        for row in self.clip.rows(y, h) {
+        for row in self.admitted_rows(y, h) {
             let source = lerp_color(top, bottom, row - y, last);
             // A transparent source contributes nothing at any bias, so the row
             // is left exactly as it was found.
@@ -739,7 +831,7 @@ impl Surface {
         if w == 0 || h == 0 || color.a == 0 {
             return;
         }
-        for row in self.clip.rows(y, h) {
+        for row in self.admitted_rows(y, h) {
             let local_y = row - y;
             let dither = DitherRow::at(row);
             let Some((first, span)) = self.row_span_mut(row, x, w) else {
@@ -863,16 +955,17 @@ impl Surface {
     /// confining content to nothing means.
     pub fn mask_to_round_rect(&mut self, x: u32, y: u32, w: u32, h: u32, radius: u32) {
         let radius = radius.min(w / 2).min(h / 2);
-        let (width, height) = (self.width, self.height);
-        let right = x.saturating_add(w).min(width);
+        let (left, top, width, height) = self.space_rect();
+        let far = left.saturating_add(width);
+        let right = x.saturating_add(w).min(far);
         let bottom = y.saturating_add(h);
-        for row in self.clip.rows(0, height) {
+        for row in self.admitted_rows(top, height) {
             if row < y || row >= bottom {
-                self.clear_span(row, 0, width);
+                self.clear_span(row, left, width);
                 continue;
             }
-            self.clear_span(row, 0, x.min(width));
-            self.clear_span(row, right, width - right);
+            self.clear_span(row, left, x.saturating_sub(left));
+            self.clear_span(row, right, far - right);
 
             let local_y = row - y;
             if !in_corner_band(local_y, h, radius) {
@@ -916,8 +1009,8 @@ impl Surface {
     /// [`Pixel::over`] path.
     ///
     /// The polygon's vertices are authored on a square `design`×`design`
-    /// grid and mapped across the whole surface, so one piece of vector
-    /// artwork fills a surface of any size crisply. This is the single
+    /// grid and mapped across the rectangle this surface holds, so one piece
+    /// of vector artwork fills a surface of any size crisply. This is the single
     /// anti-aliased polygon-fill path the desktop's vector assets share —
     /// pointer cursors (`lib/cursor`) and desktop icons (`lib/icon`)
     /// rasterise through here rather than each carrying its own scan
@@ -941,7 +1034,7 @@ impl Surface {
     ///
     /// [`Pixel::over`]: crate::color::Pixel::over
     pub fn fill_polygon(&mut self, polygon: &[(i32, i32)], design: u32, color: Color) {
-        let space = SampleSpace::design(design, self.width, self.height);
+        let space = SampleSpace::design(design, self.space_rect());
         self.fill_scan(
             slice::from_ref(&polygon),
             space,
@@ -959,7 +1052,7 @@ impl Surface {
     /// path is several contours whose nesting decides where the holes are, and
     /// an SVG gradient is a paint rather than a colour. The contours are
     /// authored on the same square `design`×`design` grid, stretched across
-    /// the whole surface.
+    /// the rectangle this surface holds.
     ///
     /// Each contour is implicitly closed and one with fewer than three points
     /// contributes nothing; an empty list draws nothing, and a `design` of
@@ -973,12 +1066,12 @@ impl Surface {
         rule: FillRule,
         paint: &Paint,
     ) {
-        let space = SampleSpace::design(design, self.width, self.height);
+        let space = SampleSpace::design(design, self.space_rect());
         self.fill_scan(contours, space, rule, paint);
     }
 
     /// Fill an anti-aliased polygon whose vertices are already in *device*
-    /// sub-pixel units — [`SUBPIXEL`] per pixel, measured from this surface's
+    /// sub-pixel units — [`SUBPIXEL`] per pixel, measured from the drawing's
     /// own origin — instead of on a design grid stretched across the surface.
     ///
     /// This is how chrome that must stay sharp at a small pixel size is drawn.
@@ -1085,7 +1178,7 @@ impl Surface {
     /// exactly as one the clip window admits nothing of does — the entry
     /// points report no outcome, and an undrawn shape beats a dead process.
     fn fill_coverage(&mut self, mut fill: ScanFill, paint: &Paint) {
-        let Some((x_start, x_end, y_start, y_end)) = fill.bounds(self.width, self.height) else {
+        let Some((x_start, x_end, y_start, y_end)) = fill.bounds(self.space_rect()) else {
             return;
         };
         let span_w = x_end - x_start;
@@ -1102,7 +1195,7 @@ impl Surface {
         let Some(mut alphas) = fallible::filled(pixels, 0_u8) else {
             return;
         };
-        for py in self.clip.rows(y_start, y_end - y_start) {
+        for py in self.admitted_rows(y_start, y_end - y_start) {
             let Some((first, row)) = self.row_span_mut(py, x_start, span_w) else {
                 continue;
             };
@@ -1248,11 +1341,14 @@ impl Surface {
     fn blit_with(&mut self, x: i32, y: i32, src: &Surface, lay: impl Fn(&mut [Pixel], &[Pixel])) {
         // Which of the source's columns and rows land somewhere this blit is
         // allowed to write. Resolving both once, rather than per pixel, is what
-        // turns the inner loop below into a plain paired-slice walk.
+        // turns the inner loop below into a plain paired-slice walk. The clip
+        // window is the buffer's, so the placement is taken there; the spans
+        // below are asked for in the paint's own coordinates.
         let clip = self.clip;
+        let (at_x, at_y) = self.origin.buffer_point(x, y);
         let (Some(columns), Some(rows)) = (
-            source_overlap(x, src.width, clip.x0, clip.x1),
-            source_overlap(y, src.height, clip.y0, clip.y1),
+            source_overlap(at_x, src.width, clip.x0, clip.x1),
+            source_overlap(at_y, src.height, clip.y0, clip.y1),
         ) else {
             return;
         };
@@ -1306,15 +1402,64 @@ impl Surface {
     /// cannot widen its way back out to the area its host withheld.
     pub fn with_clip(&mut self, x: u32, y: u32, w: u32, h: u32, paint: impl FnOnce(&mut Self)) {
         let enclosing = self.clip;
-        self.clip = enclosing.narrowed(x, y, w, h);
+        let (column, columns) = self.origin.columns(x, w);
+        let (row, rows) = self.origin.rows(y, h);
+        self.clip = enclosing.narrowed(column, row, columns, rows);
         paint(self);
         self.clip = enclosing;
     }
 
+    /// Paint as if this buffer were the one rectangle of a larger drawing
+    /// whose top-left pixel is the drawing's `(x, y)`, restoring the enclosing
+    /// statement before returning.
+    ///
+    /// This is how a *strip* of a drawing is rendered: the drawing is painted
+    /// in its own coordinates — a window frame lays its rim, body and title
+    /// band across the whole window — and the buffer keeps only the rectangle
+    /// it covers, because every write outside that rectangle is off the buffer
+    /// and dropped. Rendering into a drawing-sized buffer and copying the
+    /// strip out instead costs the whole drawing's pixels to keep a fraction
+    /// of them.
+    ///
+    /// Coordinates inside `paint` are the drawing's throughout: the pixel it
+    /// names `(x, y)` is the buffer's first, a shape is placed and a gradient
+    /// or ordered dither sampled where the drawing says, so a strip is
+    /// pixel-identical to the same rectangle of the whole drawing. The clip
+    /// window ([`with_clip`](Self::with_clip)) is unaffected — it confines
+    /// writes to the buffer's own pixels whatever a nested paint calls them —
+    /// so a restated origin relabels this buffer and can never reach past it.
+    ///
+    /// The primitives defined in terms of *the surface* rather than a
+    /// rectangle — [`fill`](Self::fill),
+    /// [`mask_to_round_rect`](Self::mask_to_round_rect), and a design-grid
+    /// fill ([`fill_contours`](Self::fill_contours)) — act on the rectangle
+    /// this buffer holds, since the drawing's full extent is not something a
+    /// surface can know. A design-grid fill therefore stretches across the
+    /// strip, not across the drawing.
+    pub fn with_origin(&mut self, x: u32, y: u32, paint: impl FnOnce(&mut Self)) {
+        let enclosing = self.origin;
+        self.origin = Origin { x, y };
+        paint(self);
+        self.origin = enclosing;
+    }
+
+    /// Whether any pixel of `[x, x+w) × [y, y+h)` is one this surface would
+    /// write.
+    ///
+    /// The test a paint takes before *composing* work whose writes would all
+    /// be dropped: a clip window or a stated origin can leave a whole
+    /// sub-drawing off-buffer, and a part that allocates before it writes — a
+    /// title band composing its text, or rasterising an identity glyph —
+    /// should not pay for pixels nothing can keep.
+    #[must_use]
+    pub fn admits(&self, x: u32, y: u32, w: u32, h: u32) -> bool {
+        self.admitted(x, y, w, h).is_some()
+    }
+
     /// Borrow the writable pixels of row `y` from column `x`, for at most `w`
     /// columns, with the column the returned span actually starts at. `None`
-    /// when the row, or every one of those columns, lies outside the surface
-    /// or the active clip window.
+    /// when the row, or every one of those columns, lies outside the rectangle
+    /// this surface holds or the active clip window.
     ///
     /// This is the one place a write is confined: the fills, the polygon
     /// rasteriser, [`blit`](Self::blit), [`set`](Self::set), and a consumer
@@ -1324,22 +1469,25 @@ impl Surface {
     /// it. A caller pays one bounds check and one index computation per row
     /// rather than per pixel.
     ///
-    /// The returned start exceeds `x` when the window cut the span's leading
-    /// columns; a caller pairing the span with source data of its own advances
-    /// that source by the difference. The pixels stay premultiplied: this is
-    /// [`set`](Self::set)'s contract at row granularity.
+    /// The returned start exceeds `x` when the window, or the stated origin
+    /// ([`with_origin`](Self::with_origin)), cut the span's leading columns; a
+    /// caller pairing the span with source data of its own advances that
+    /// source by the difference. Coordinates are the paint's own throughout.
+    /// The pixels stay premultiplied: this is [`set`](Self::set)'s contract at
+    /// row granularity.
     #[must_use]
     pub fn row_span_mut(&mut self, y: u32, x: u32, w: u32) -> Option<(u32, &mut [Pixel])> {
-        let (first, offsets) = span_offsets(self.clip, self.width, 0, y, x, w)?;
-        let span = self.pixels.get_mut(offsets)?;
+        let place = span_offsets(self.clip, self.width, 0..self.height, self.origin, y, x, w)?;
+        let span = self.pixels.get_mut(place.offsets)?;
         let columns = u32::try_from(span.len()).unwrap_or(0);
+        let (column, row) = place.at;
         self.floor.pending = self.floor.pending.united(ClipRect {
-            x0: first,
-            y0: y,
-            x1: first.saturating_add(columns),
-            y1: y.saturating_add(1),
+            x0: column,
+            y0: row,
+            x1: column.saturating_add(columns),
+            y1: row.saturating_add(1),
         });
-        Some((first, span))
+        Some((place.first, span))
     }
 
     /// Borrow the pixels of row `y` from column `x`, for at most `w` columns,
@@ -1353,8 +1501,8 @@ impl Surface {
     /// pass exclusive for no reason.
     #[must_use]
     pub fn row_span(&self, y: u32, x: u32, w: u32) -> Option<(u32, &[Pixel])> {
-        let (first, offsets) = span_offsets(self.clip, self.width, 0, y, x, w)?;
-        Some((first, self.pixels.get(offsets)?))
+        let place = span_offsets(self.clip, self.width, 0..self.height, self.origin, y, x, w)?;
+        Some((place.first, self.pixels.get(place.offsets)?))
     }
 
     /// Split the rows `rows` admits into bands of `rows_per_band` whole rows,
@@ -1375,7 +1523,10 @@ impl Surface {
     /// caller need not pre-clamp; `rows_per_band` of `0` reads as `1`, and
     /// nothing admitted yields no bands.
     pub fn row_bands_mut(&mut self, rows: Range<u32>, rows_per_band: u32) -> RowBands<'_> {
-        let admitted = rows.start.max(self.clip.y0)..rows.end.min(self.clip.y1);
+        let (row, requested) = self
+            .origin
+            .rows(rows.start, rows.end.saturating_sub(rows.start));
+        let admitted = row.max(self.clip.y0)..row.saturating_add(requested).min(self.clip.y1);
         let span = admitted.end.saturating_sub(admitted.start);
         let per_band = rows_per_band.max(1);
         // A band's own writes cannot reach back here, so the whole block is
@@ -1403,12 +1554,14 @@ impl Surface {
             rows_per_band: per_band,
             width: self.width,
             clip: self.clip,
+            origin: self.origin,
         }
     }
 
     /// The part of `[x, x+w) × [y, y+h)` a write reaches — the rectangle
     /// intersected with the surface bounds and the active clip window — as
-    /// its admitted columns and rows, or `None` when nothing survives.
+    /// its admitted columns and rows in the paint's own coordinates, or
+    /// `None` when nothing survives.
     ///
     /// Both ranges are non-empty. This answers for a whole block what
     /// [`row_span_mut`](Self::row_span_mut) answers per row, which is what
@@ -1421,13 +1574,20 @@ impl Surface {
         w: u32,
         h: u32,
     ) -> Option<(Range<u32>, Range<u32>)> {
-        let columns = self.clip.columns(x, w)?;
-        let rows = self.clip.rows(y, h);
-        (!rows.is_empty()).then_some((columns, rows))
+        let (column, columns) = self.origin.columns(x, w);
+        let columns = self.clip.columns(column, columns)?;
+        let rows = self.admitted_rows(y, h);
+        (!rows.is_empty()).then(|| {
+            (
+                self.origin.space_column(columns.start)..self.origin.space_column(columns.end),
+                rows,
+            )
+        })
     }
 
     /// Row-major index of `(x, y)`, or `None` if out of bounds.
     fn index(&self, x: u32, y: u32) -> Option<usize> {
+        let (x, y) = (self.origin.column(x)?, self.origin.row(y)?);
         if x >= self.width || y >= self.height {
             return None;
         }
@@ -1450,32 +1610,53 @@ impl Surface {
     }
 }
 
-/// Row `y`'s admitted columns `[x, x+w)` as the column the span starts at and
-/// the pixel offsets it occupies, inside a row-major block of `width`-pixel rows
-/// whose first row is `base_row`. `None` when nothing is admitted.
+/// Where one row-granular borrow landed.
+struct SpanPlace {
+    /// The drawing column the span's first pixel is at — the coordinate the
+    /// caller asked in, so a caller pairing source data with the span
+    /// advances that source by the difference from what it asked for.
+    first: u32,
+    /// That same pixel's buffer column and row, which is where the alpha
+    /// floor records the write.
+    at: (u32, u32),
+    /// The pixels the span occupies within the borrowed block.
+    offsets: Range<usize>,
+}
+
+/// Drawing row `y`'s admitted columns `[x, x+w)`, inside a row-major block of
+/// `width`-pixel buffer rows covering `rows`. `None` when nothing is admitted.
 ///
-/// The one definition of the clip-and-index arithmetic every row-granular borrow
-/// goes through — the whole surface's rows and one band's alike — so a band can
-/// never admit a pixel the surface would not, or the other way round.
+/// The one definition of the translate-clip-and-index arithmetic every
+/// row-granular borrow goes through — the whole surface's rows and one band's
+/// alike — so a band can never admit a pixel the surface would not, or the
+/// other way round, and no primitive can honour the stated origin while
+/// another forgets it.
 fn span_offsets(
     clip: ClipRect,
     width: u32,
-    base_row: u32,
+    rows: Range<u32>,
+    origin: Origin,
     y: u32,
     x: u32,
     w: u32,
-) -> Option<(u32, Range<usize>)> {
+) -> Option<SpanPlace> {
+    let row = origin.row(y)?;
     // The window is already intersected with the surface bounds, so admitting the
     // row here also proves it is in bounds.
-    if y < clip.y0 || y >= clip.y1 || y < base_row {
+    if row < clip.y0 || row >= clip.y1 || row < rows.start || row >= rows.end {
         return None;
     }
-    let columns = clip.columns(x, w)?;
-    let local = u64::from(y.checked_sub(base_row)?);
+    let (column, columns) = origin.columns(x, w);
+    let columns = clip.columns(column, columns)?;
+    let local = u64::from(row - rows.start);
     let start = usize::try_from(local * u64::from(width)).ok()?;
     let lo = start.checked_add(usize::try_from(columns.start).ok()?)?;
     let hi = start.checked_add(usize::try_from(columns.end).ok()?)?;
-    Some((columns.start, lo..hi))
+    Some(SpanPlace {
+        first: origin.space_column(columns.start),
+        at: (columns.start, row),
+        offsets: lo..hi,
+    })
 }
 
 /// One band of [`Surface::row_bands_mut`]: a contiguous block of whole surface
@@ -1488,17 +1669,18 @@ fn span_offsets(
 /// [`row_span_mut`]: RowBand::row_span_mut
 pub struct RowBand<'a> {
     pixels: &'a mut [Pixel],
-    /// The surface rows this band covers.
+    /// The buffer rows this band covers.
     rows: Range<u32>,
     width: u32,
     clip: ClipRect,
+    origin: Origin,
 }
 
 impl RowBand<'_> {
-    /// The surface rows this band owns.
+    /// The surface rows this band owns, in the paint's own coordinates.
     #[must_use]
     pub fn rows(&self) -> Range<u32> {
-        self.rows.clone()
+        self.origin.space_row(self.rows.start)..self.origin.space_row(self.rows.end)
     }
 
     /// Borrow the writable pixels of row `y` from column `x`, for at most `w`
@@ -1508,22 +1690,28 @@ impl RowBand<'_> {
     /// [`Surface::row_span_mut`] answers for the same arguments.
     #[must_use]
     pub fn row_span_mut(&mut self, y: u32, x: u32, w: u32) -> Option<(u32, &mut [Pixel])> {
-        if y < self.rows.start || y >= self.rows.end {
-            return None;
-        }
-        let (first, offsets) = span_offsets(self.clip, self.width, self.rows.start, y, x, w)?;
-        Some((first, self.pixels.get_mut(offsets)?))
+        let place = span_offsets(
+            self.clip,
+            self.width,
+            self.rows.clone(),
+            self.origin,
+            y,
+            x,
+            w,
+        )?;
+        Some((place.first, self.pixels.get_mut(place.offsets)?))
     }
 }
 
 /// The bands [`Surface::row_bands_mut`] splits a row range into.
 pub struct RowBands<'a> {
     chunks: core::slice::ChunksMut<'a, Pixel>,
-    /// The first surface row of the next band.
+    /// The first buffer row of the next band.
     next_row: u32,
     rows_per_band: u32,
     width: u32,
     clip: ClipRect,
+    origin: Origin,
 }
 
 impl<'a> Iterator for RowBands<'a> {
@@ -1542,6 +1730,7 @@ impl<'a> Iterator for RowBands<'a> {
             rows: start..start.saturating_add(rows),
             width: self.width,
             clip: self.clip,
+            origin: self.origin,
         })
     }
 
@@ -1613,8 +1802,7 @@ fn perpendicular(component: i32, half: i32, len: NonZeroU64) -> i32 {
 /// A blit's columns and rows are the same question asked twice, so it is
 /// answered once here rather than per axis. The arithmetic is done in `i64`, so
 /// a wildly negative origin or an over-large source clips instead of wrapping.
-fn source_overlap(origin: i32, extent: u32, lo: u32, hi: u32) -> Option<Range<u32>> {
-    let origin = i64::from(origin);
+fn source_overlap(origin: i64, extent: u32, lo: u32, hi: u32) -> Option<Range<u32>> {
     let start = (i64::from(lo) - origin).max(0);
     let end = (i64::from(hi) - origin).min(i64::from(extent));
     if start >= end {

@@ -112,14 +112,21 @@ pub(crate) struct SampleSpace {
     denominator: i64,
     /// Contour units per pixel, horizontally then vertically.
     contour_per_pixel: (f64, f64),
+    /// The drawing pixel the mapped contour space starts at — a surface
+    /// holding one rectangle of a larger drawing
+    /// ([`Surface::with_origin`](crate::surface::Surface::with_origin)) places
+    /// its artwork where the drawing says, not where its buffer begins.
+    origin: (u32, u32),
 }
 
 impl SampleSpace {
     /// Artwork authored on a square `design`×`design` grid and stretched over
-    /// the whole `width`×`height` surface.
+    /// the whole of the surface's own `(x, y, width, height)` rectangle of the
+    /// drawing.
     ///
     /// A `design` of zero would divide by zero, so it is read as `1`.
-    pub(crate) fn design(design: u32, width: u32, height: u32) -> Self {
+    pub(crate) fn design(design: u32, rect: (u32, u32, u32, u32)) -> Self {
+        let (x, y, width, height) = rect;
         let design = design.max(1);
         Self::new(
             i64::from(width) * UNIT,
@@ -129,17 +136,19 @@ impl SampleSpace {
                 f64::from(design) / f64::from(width.max(1)),
                 f64::from(design) / f64::from(height.max(1)),
             ),
+            (x, y),
         )
     }
 
     /// Vertices already in device [`SUBPIXEL`] units, placed from the
-    /// surface's own origin rather than stretched across it.
+    /// drawing's own origin rather than stretched across the surface.
     pub(crate) fn device() -> Self {
         Self::new(
             UNIT,
             UNIT,
             i64::from(SUBPIXEL),
             (f64::from(SUBPIXEL), f64::from(SUBPIXEL)),
+            (0, 0),
         )
     }
 
@@ -150,20 +159,28 @@ impl SampleSpace {
         numerator_y: i64,
         denominator: i64,
         contour_per_pixel: (f64, f64),
+        origin: (u32, u32),
     ) -> Self {
         Self {
             numerator_x,
             numerator_y,
             denominator: denominator.max(1),
             contour_per_pixel,
+            origin,
         }
     }
 
     /// `point` in sub-units.
     fn to_sample(self, point: (i32, i32)) -> (i64, i64) {
         (
-            scale_axis(point.0, self.numerator_x, self.denominator),
-            scale_axis(point.1, self.numerator_y, self.denominator),
+            placed(
+                scale_axis(point.0, self.numerator_x, self.denominator),
+                self.origin.0,
+            ),
+            placed(
+                scale_axis(point.1, self.numerator_y, self.denominator),
+                self.origin.1,
+            ),
         )
     }
 
@@ -171,8 +188,8 @@ impl SampleSpace {
     /// gradient is sampled for that pixel.
     fn pixel_centre(self, x: u32, y: u32) -> (f64, f64) {
         (
-            (f64::from(x) + 0.5) * self.contour_per_pixel.0,
-            (f64::from(y) + 0.5) * self.contour_per_pixel.1,
+            (f64::from(x.saturating_sub(self.origin.0)) + 0.5) * self.contour_per_pixel.0,
+            (f64::from(y.saturating_sub(self.origin.1)) + 0.5) * self.contour_per_pixel.1,
         )
     }
 }
@@ -441,21 +458,24 @@ impl ScanFill {
     }
 
     /// The pixel box `(x0, x1, y0, y1)` — half open on both axes — that can
-    /// hold any covered area, intersected with a `width`×`height` surface.
-    /// `None` when the shape misses the surface entirely.
+    /// hold any covered area, intersected with the surface's own
+    /// `(x, y, width, height)` rectangle of the drawing. `None` when the shape
+    /// misses that rectangle entirely.
     ///
     /// No part of a pixel outside the vertices' own extent can be inside the
     /// shape, so restricting the scan to this box paints exactly what scanning
     /// the whole canvas would: a cursor or an icon glyph costs its own area
     /// rather than the surface's.
-    pub(crate) fn bounds(&self, width: u32, height: u32) -> Option<(u32, u32, u32, u32)> {
+    pub(crate) fn bounds(&self, rect: (u32, u32, u32, u32)) -> Option<(u32, u32, u32, u32)> {
+        let (x, y, width, height) = rect;
+        let (lo_x, lo_y) = (i64::from(x), i64::from(y));
         // A pixel `p` owns sub-units `[p * UNIT, (p + 1) * UNIT)`, so the
         // mathematical floor — correct for a vertex left of the origin too —
         // names the pixel each extreme sits in.
-        let x0 = self.extent.min_x.div_euclid(UNIT).max(0);
-        let x1 = (self.extent.max_x.div_euclid(UNIT) + 1).min(i64::from(width));
-        let y0 = self.extent.min_y.div_euclid(UNIT).max(0);
-        let y1 = (self.extent.max_y.div_euclid(UNIT) + 1).min(i64::from(height));
+        let x0 = self.extent.min_x.div_euclid(UNIT).max(lo_x);
+        let x1 = (self.extent.max_x.div_euclid(UNIT) + 1).min(lo_x + i64::from(width));
+        let y0 = self.extent.min_y.div_euclid(UNIT).max(lo_y);
+        let y1 = (self.extent.max_y.div_euclid(UNIT) + 1).min(lo_y + i64::from(height));
         if x0 >= x1 || y0 >= y1 {
             return None;
         }
@@ -548,6 +568,19 @@ fn scale_axis(coord: i32, numerator: i64, denominator: i64) -> i64 {
         return if coord < 0 { -COORD_LIMIT } else { COORD_LIMIT };
     };
     rounded_div(product, denominator).clamp(-COORD_LIMIT, COORD_LIMIT)
+}
+
+/// A scaled coordinate moved to where the surface's rectangle of the drawing
+/// begins, kept inside the range the converter's arithmetic stays exact over.
+///
+/// The clamp is re-applied after the move because the placement is unbounded
+/// where the scaled coordinate was not: a rectangle stated further out than
+/// [`COORD_LIMIT`] reaches has no representable geometry, so it draws nothing
+/// rather than overflowing.
+fn placed(sample: i64, origin: u32) -> i64 {
+    sample
+        .saturating_add(i64::from(origin).saturating_mul(UNIT))
+        .clamp(-COORD_LIMIT, COORD_LIMIT)
 }
 
 /// `numerator / denominator`, rounded half away from zero. A zero denominator

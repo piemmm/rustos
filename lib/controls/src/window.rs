@@ -1275,6 +1275,10 @@ impl TitleBar {
     /// draws something. It is ignored by a bar with no identity. The artwork
     /// is decoded and rasterised long before it reaches this call — a control
     /// never parses image bytes.
+    ///
+    /// A surface that admits no pixel of `bounds` is left alone without the
+    /// band being composed at all: eliding a title allocates, and a missing
+    /// identity artwork rasterises a glyph, both before the first write.
     pub fn render(
         &self,
         surface: &mut Surface,
@@ -1283,6 +1287,14 @@ impl TitleBar {
         theme: &Theme,
         artwork: Option<IconPicture<'_>>,
     ) {
+        // The band composes its title and may rasterise an identity glyph
+        // before its first write, so a surface holding a part of the window
+        // the band does not reach is left alone rather than paying for pixels
+        // nothing can keep.
+        if surface_rect(bounds).is_some_and(|(x, y, w, h)| !surface.admits(x, y, w, h)) {
+            return;
+        }
+
         // Window furniture is titling text, not interface body text.
         let font = role_font(theme, scale, TextRole::WindowTitle);
         let palette = theme.palette();

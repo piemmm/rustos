@@ -3,19 +3,22 @@
 //!
 //! # Strips, not one outer-sized surface
 //!
-//! A decorated window used to rasterise its whole [`WindowFrame`] into one
-//! outer-window-sized [`Surface`], even though the client region of that
+//! A decorated window's whole [`WindowFrame`] does not fit in one
+//! outer-window-sized [`Surface`] worth keeping: the client region of such a
 //! surface is never sampled — the compositor draws the window's own content
-//! there, never the decoration's. For a large window almost all of that
-//! surface was allocated, cleared, and rendered for nothing that is ever
-//! read.
+//! there, never the decoration's — so for a large window almost all of it
+//! would be allocated, cleared, and rendered for nothing that is ever read.
 //!
-//! [`WindowChrome`] instead keeps only the four furniture strips the frame
-//! actually draws into: the top (title) band, the bottom band, and the left
-//! and right side borders. Retained memory scales with the reserved frame
-//! band (a fixed size for a given theme/scale), never with the window's
-//! client area, so a tall or wide window's decoration does not grow past
-//! what its border thickness needs.
+//! [`WindowChrome`] holds only the four furniture strips the frame actually
+//! draws into: the top (title) band, the bottom band, and the left and right
+//! side borders. Retained memory scales with the reserved frame band (a fixed
+//! size for a given theme/scale), never with the window's client area, so a
+//! tall or wide window's decoration does not grow past what its border
+//! thickness needs. Nothing outer-sized is allocated on the way there either:
+//! each strip is a [`Surface`] the size of its own band that the frame paints
+//! *into* as one rectangle of the whole window
+//! ([`Surface::with_origin`](crate::surface::Surface::with_origin)), so a
+//! window's furniture costs its bands rather than its area even transiently.
 //!
 //! The top and bottom strips are as deep as the rim's corner radius wherever
 //! the reserved inset is thinner than it, because a corner arc must be drawn as
@@ -146,20 +149,16 @@ impl WindowChrome {
     /// Render the furniture strips described by `bands` (the top, bottom,
     /// left, and right rectangles, in the window's own local space — see
     /// [`Window::local_furniture_bands`]) for `frame` at outer size
-    /// `outer_size`, or `None` when the render surface cannot be allocated
-    /// (fail closed, matching the allocation the un-split decoration would
-    /// have needed).
+    /// `outer_size`, or `None` when a strip cannot be allocated (fail
+    /// closed: the caller retains no half-painted frame).
     ///
-    /// [`WindowFrame::render`]'s drawing primitives refuse a destination
-    /// rectangle with a negative origin outright (they read it back as
-    /// "fully off the top-left" and paint nothing), so a strip other than
-    /// the top-left one cannot be rendered directly into its own small
-    /// canvas by translating the paint origin negative. Instead the frame
-    /// is painted once into a transient, outer-sized surface — exactly as
-    /// before this type existed — and each strip is copied out of it, so
-    /// the painted pixels are identical to the pre-split single surface;
-    /// only the transient full-size buffer is temporary; what is kept
-    /// afterwards is the four strips.
+    /// Each strip is painted by the whole frame, into a surface the size of
+    /// that one band standing in for the band's rectangle of the window: the
+    /// frame draws its rim, body, and title band across the outer rectangle
+    /// in the window's own coordinates, and every write outside the band is
+    /// off that surface and dropped. So a strip carries exactly the pixels
+    /// the same rectangle of a whole-window render would have, and no buffer
+    /// larger than a band is ever allocated.
     ///
     /// `artwork` is the owning application's identity icon, already
     /// rasterised at the title bar's slot side; it is handed straight to
@@ -176,25 +175,33 @@ impl WindowChrome {
         artwork: Option<&Surface>,
     ) -> Option<Self> {
         let (ow, oh) = outer_size;
-        let mut transient = Surface::new(ow, oh)?;
         let outer = Rect::new(0, 0, ow, oh);
-        frame.render(
-            &mut transient,
-            outer,
-            scale,
-            theme,
-            artwork.map(IconPicture::Artwork),
-        );
-
         // No corner grip: a resizable window's band is the plain frame inset,
         // too thin to hold one without painting into the client. The grab zone
         // is invisible, carried by `WindowFrame::hit`'s client overlap alone.
-        let [top, bottom, left, right] = bands;
+        let mut strips: [Option<Surface>; 4] = [None, None, None, None];
+        for (strip, band) in strips.iter_mut().zip(bands) {
+            let Some((x, y)) = strip_origin(band) else {
+                continue;
+            };
+            let mut surface = Surface::new(band.width, band.height)?;
+            surface.with_origin(x, y, |target| {
+                frame.render(
+                    target,
+                    outer,
+                    scale,
+                    theme,
+                    artwork.map(IconPicture::Artwork),
+                );
+            });
+            *strip = Some(surface);
+        }
+        let [top, bottom, left, right] = strips;
         Some(Self {
-            top: extract(&transient, top),
-            bottom: extract(&transient, bottom),
-            left: extract(&transient, left),
-            right: extract(&transient, right),
+            top,
+            bottom,
+            left,
+            right,
         })
     }
 
@@ -261,20 +268,15 @@ impl WindowChrome {
     }
 }
 
-/// Copy `band` (in `source`'s own local coordinates) out of `source` into a
-/// fresh surface of exactly `band`'s size, or `None` for a zero-extent band.
-///
-/// [`Surface::blit`] composites the source over the destination through the
-/// premultiplied-alpha *over* operator, but a fresh [`Surface::new`] starts
-/// fully transparent, and compositing anything over a fully transparent
-/// destination reproduces the source exactly — so this is a plain copy of
-/// the band's pixels, reusing the existing blit path instead of a second
-/// hand-written row-copy loop.
-fn extract(source: &Surface, band: Rect) -> Option<Surface> {
+/// Where `band` starts in the window's own coordinates, or `None` for a band
+/// that holds no furniture: one with no extent, or — since those coordinates
+/// begin at the window's outer top-left — one placed outside them.
+fn strip_origin(band: Rect) -> Option<(u32, u32)> {
     if band.is_empty() {
         return None;
     }
-    let mut strip = Surface::new(band.width, band.height)?;
-    strip.blit(-band.left(), -band.top(), source);
-    Some(strip)
+    Some((
+        u32::try_from(band.left()).ok()?,
+        u32::try_from(band.top()).ok()?,
+    ))
 }

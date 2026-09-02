@@ -1238,6 +1238,252 @@ fn an_empty_clip_admits_nothing_and_restores() {
     assert!(s.pixels().iter().all(|p| *p == BLUE.premultiply()));
 }
 
+// ---- a stated origin: one rectangle of a larger drawing --------------
+//
+// A surface may stand in for one rectangle of a drawing larger than itself,
+// which is how a strip of window furniture is rendered without a
+// window-sized buffer. Coordinates are then the drawing's; the primitives
+// defined in terms of "the surface" act on the rectangle it holds.
+
+/// The bands of `DRAWING_W`×`DRAWING_H` a window's furniture is cut to: the
+/// full-width top and bottom, and the two side borders between them.
+const BANDS: [(u32, u32, u32, u32); 4] =
+    [(0, 0, 24, 4), (0, 16, 24, 4), (0, 4, 3, 12), (21, 4, 3, 12)];
+
+const DRAWING_W: u32 = 24;
+const DRAWING_H: u32 = 20;
+
+/// A drawing exercising every position-dependent primitive at once — a
+/// rounded fill's corner arcs, a gradient's ramp, a two-dimensional wash's
+/// ordered dither, a placed sprite, device-space geometry, and a shape mask —
+/// so a strip that differed anywhere in any of them shows it.
+fn furniture_like_drawing(surface: &mut Surface, sprite: &Surface) {
+    let step = SUBPIXEL;
+    surface.fill_round_rect(0, 0, DRAWING_W, DRAWING_H, 6, Color::rgba(30, 60, 90, 255));
+    surface.fill_vertical_gradient(
+        2,
+        1,
+        DRAWING_W - 4,
+        DRAWING_H - 2,
+        Color::rgba(255, 0, 0, 90),
+        Color::rgba(0, 0, 255, 210),
+    );
+    surface.wash_region(
+        0,
+        0,
+        DRAWING_W,
+        DRAWING_H,
+        Color::rgba(0, 255, 0, 130),
+        |x, y| u8::try_from((x * 11 + y * 5) % 251).unwrap_or(0),
+    );
+    surface.blit(19, 15, sprite);
+    surface.fill_polygon_subpixel(
+        &[
+            (6 * step, 2 * step),
+            (20 * step, 9 * step),
+            (3 * step, 17 * step),
+        ],
+        RED,
+    );
+    surface.stroke_polyline(
+        &[(0, 0), (24 * step, 20 * step)],
+        step,
+        Color::rgba(255, 255, 255, 160),
+    );
+    surface.mask_to_round_rect(1, 1, DRAWING_W - 2, DRAWING_H - 2, 4);
+}
+
+/// A small sprite with a distinct pixel per position, so a blit landing one
+/// column or row out is visible.
+fn sprite() -> Surface {
+    let mut sprite = Surface::new(3, 3).expect("allocates");
+    for y in 0..3 {
+        for x in 0..3 {
+            let level = 40 + 20 * u8::try_from(y * 3 + x).expect("small");
+            sprite.set(x, y, Color::rgba(255, 255, 0, level).premultiply());
+        }
+    }
+    sprite
+}
+
+/// The property every strip render rests on: a buffer standing in for one
+/// rectangle of a drawing carries exactly the pixels that rectangle of the
+/// whole drawing carries.
+#[test]
+fn a_strip_of_a_drawing_matches_that_rectangle_of_the_whole() {
+    let sprite = sprite();
+    let mut whole = Surface::new(DRAWING_W, DRAWING_H).expect("allocates");
+    furniture_like_drawing(&mut whole, &sprite);
+
+    for (x, y, w, h) in BANDS {
+        let mut strip = Surface::new(w, h).expect("allocates");
+        strip.with_origin(x, y, |s| furniture_like_drawing(s, &sprite));
+        for row in 0..h {
+            for column in 0..w {
+                assert_eq!(
+                    strip.get(column, row),
+                    whole.get(x + column, y + row),
+                    "band ({x}, {y}) at ({column}, {row})"
+                );
+            }
+        }
+        assert!(
+            strip.pixels().iter().any(|p| *p != Pixel::TRANSPARENT),
+            "band ({x}, {y}) is painted, so the comparison is not vacuous"
+        );
+    }
+}
+
+#[test]
+fn a_stated_origin_maps_the_drawings_pixel_to_the_buffers_first() {
+    let mut s = Surface::new(2, 2).expect("allocates");
+    s.with_origin(10, 20, |s| s.set(10, 20, RED.premultiply()));
+    assert_eq!(s.get(0, 0), Some(RED.premultiply()));
+    assert_eq!(s.get(1, 1), Some(Pixel::TRANSPARENT));
+}
+
+#[test]
+fn paint_outside_the_stated_rectangle_is_dropped() {
+    let mut s = Surface::new(2, 2).expect("allocates");
+    s.with_origin(10, 10, |s| {
+        s.fill_rect(0, 0, 4, 4, RED);
+        s.fill_rect(12, 12, 4, 4, RED);
+    });
+    assert!(s.pixels().iter().all(|p| *p == Pixel::TRANSPARENT));
+}
+
+/// A span reaching in from left of the buffer is cut, and reports the
+/// *drawing* column it starts at — a caller pairing it with its own source
+/// data advances that source by the difference from what it asked for.
+#[test]
+fn a_span_straddling_the_stated_origin_is_cut_and_reports_the_drawing_column() {
+    let mut s = Surface::new(4, 1).expect("allocates");
+    s.with_origin(6, 0, |s| {
+        let (first, span) = s.row_span_mut(0, 4, 8).expect("row admitted");
+        assert_eq!(first, 6, "the first drawing column the buffer holds");
+        assert_eq!(span.len(), 4, "the columns left of the buffer are cut");
+        assert!(s.row_span_mut(0, 0, 6).is_none(), "wholly left of it");
+        assert!(s.row_span_mut(0, 10, 4).is_none(), "wholly right of it");
+        assert!(s.row_span_mut(1, 6, 4).is_none(), "wholly below it");
+    });
+}
+
+#[test]
+fn the_stated_origin_is_restored_on_return() {
+    let mut s = Surface::new(2, 2).expect("allocates");
+    s.with_origin(5, 5, |s| s.set(5, 5, RED.premultiply()));
+    s.set(1, 1, BLUE.premultiply());
+    assert_eq!(s.get(0, 0), Some(RED.premultiply()));
+    assert_eq!(s.get(1, 1), Some(BLUE.premultiply()));
+}
+
+#[test]
+fn a_clip_inside_a_stated_origin_confines_in_the_drawings_coordinates() {
+    let mut s = Surface::new(4, 4).expect("allocates");
+    s.with_origin(10, 10, |s| {
+        s.with_clip(12, 12, 2, 2, |s| s.fill_rect(10, 10, 4, 4, RED));
+    });
+    assert_eq!(s.get(2, 2), Some(RED.premultiply()));
+    assert_eq!(s.get(1, 1), Some(Pixel::TRANSPARENT));
+}
+
+/// A restated origin relabels this buffer; it can never reach the pixels an
+/// enclosing clip window withheld.
+#[test]
+fn a_restated_origin_reaches_no_further_than_the_buffer() {
+    let mut s = Surface::new(2, 2).expect("allocates");
+    s.with_clip(0, 0, 1, 1, |s| {
+        s.with_origin(50, 50, |s| s.fill_rect(50, 50, 2, 2, RED));
+    });
+    assert_eq!(s.get(0, 0), Some(RED.premultiply()));
+    assert_eq!(s.get(1, 1), Some(Pixel::TRANSPARENT));
+}
+
+/// "The surface" is the rectangle it holds, so a whole-surface fill still
+/// covers every pixel of the buffer.
+#[test]
+fn a_whole_surface_fill_covers_the_buffer_under_a_stated_origin() {
+    let mut s = Surface::new(3, 3).expect("allocates");
+    s.with_origin(100, 100, |s| s.fill(RED));
+    assert!(s.pixels().iter().all(|p| *p == RED.premultiply()));
+}
+
+/// A design-grid fill is likewise stretched over the surface's own rectangle
+/// of the drawing, so it draws the same shape wherever that rectangle sits.
+#[test]
+fn a_design_grid_fill_stretches_across_the_surfaces_own_rectangle() {
+    let square = [(0, 0), (4, 0), (4, 4), (0, 4)];
+    let mut plain = Surface::new(4, 4).expect("allocates");
+    plain.fill_polygon(&square, 4, RED);
+    let mut placed = Surface::new(4, 4).expect("allocates");
+    placed.with_origin(9, 5, |s| s.fill_polygon(&square, 4, RED));
+    assert_eq!(placed, plain);
+}
+
+#[test]
+fn a_blit_is_placed_in_the_drawings_coordinates() {
+    let mut src = Surface::new(2, 1).expect("allocates");
+    src.set(0, 0, RED.premultiply());
+    src.set(1, 0, BLUE.premultiply());
+    let mut s = Surface::new(2, 1).expect("allocates");
+    // The sprite's first column is left of the buffer, so its second lands
+    // in the buffer's first and the sprite is not smeared across.
+    s.with_origin(7, 3, |s| s.blit(6, 3, &src));
+    assert_eq!(s.get(0, 0), Some(BLUE.premultiply()));
+    assert_eq!(s.get(1, 0), Some(Pixel::TRANSPARENT));
+}
+
+/// The alpha floor bounds the *buffer's* pixels, so a translated write has to
+/// be recorded where those pixels are rather than where the drawing put them.
+#[test]
+fn the_alpha_floor_records_a_translated_write_in_the_buffer() {
+    let mut s = Surface::filled(2, 2, Color::rgba(0, 0, 0, 255).premultiply()).expect("allocates");
+    assert_eq!(s.alpha_floor(), 255);
+    s.with_origin(10, 10, |s| {
+        s.set(10, 10, Color::rgba(255, 0, 0, 40).premultiply());
+    });
+    s.settle_alpha_floor();
+    assert_eq!(s.alpha_floor(), 40);
+}
+
+#[test]
+fn row_bands_under_a_stated_origin_own_the_drawings_rows() {
+    let mut s = Surface::new(2, 4).expect("allocates");
+    s.with_origin(5, 7, |s| {
+        let mut expected = 7;
+        for mut band in s.row_bands_mut(7..11, 2) {
+            let rows = band.rows();
+            assert_eq!(rows, expected..expected + 2);
+            assert!(
+                band.row_span_mut(rows.end, 5, 2).is_none(),
+                "a row the band does not own"
+            );
+            for row in rows {
+                let (column, span) = band.row_span_mut(row, 5, 2).expect("row admitted");
+                assert_eq!(column, 5);
+                span.fill(RED.premultiply());
+            }
+            expected += 2;
+        }
+        assert_eq!(expected, 11, "four rows in bands of two");
+    });
+    assert!(s.pixels().iter().all(|p| *p == RED.premultiply()));
+}
+
+#[test]
+fn admits_answers_for_the_stated_rectangle() {
+    let mut s = Surface::new(4, 4).expect("allocates");
+    assert!(s.admits(0, 0, 1, 1));
+    assert!(!s.admits(4, 0, 1, 1));
+    s.with_origin(10, 10, |s| {
+        assert!(s.admits(13, 13, 1, 1));
+        assert!(!s.admits(9, 9, 1, 1), "wholly above and left of it");
+        assert!(!s.admits(14, 10, 4, 4), "wholly right of it");
+        assert!(s.admits(8, 8, 4, 4), "a rectangle that reaches in");
+    });
+    s.with_clip(0, 0, 1, 1, |s| assert!(!s.admits(2, 2, 1, 1)));
+}
+
 // ---- CachedBytes: Surface plugs into the shared reclaim cache --------
 
 #[test]

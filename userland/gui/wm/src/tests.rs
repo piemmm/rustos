@@ -4719,6 +4719,115 @@ fn resizing_a_decorated_window_still_produces_correct_furniture() {
     assert_eq!(frame_pixel(&c, content_x, mid_y), [255, 0, 0, 255]);
 }
 
+/// High-water mark of the largest single allocation, behind the test
+/// harness's global allocator, so the furniture render's *transient* cost can
+/// be measured and not merely argued about.
+///
+/// The mark is **per thread**: this crate's unit tests share one binary and
+/// the harness runs them in parallel, so a process-global figure would fold
+/// unrelated tests' allocations into the measured window. Every allocating
+/// method is counted, `realloc` and `alloc_zeroed` included, so a buffer
+/// grown rather than reserved cannot slip past.
+mod alloc_peak {
+    use core::alloc::{GlobalAlloc, Layout};
+    use core::cell::Cell;
+    use std::alloc::System;
+    use std::thread_local;
+
+    // `Cell<usize>` has no destructor, so this is const-initialised with no
+    // TLS teardown hook — the access itself never allocates and so cannot
+    // recurse into the allocator. `try_with` keeps a late allocation during
+    // thread teardown from panicking.
+    thread_local! {
+        static LARGEST: Cell<usize> = const { Cell::new(0) };
+    }
+
+    fn note(size: usize) {
+        let _ = LARGEST.try_with(|largest| largest.set(largest.get().max(size)));
+    }
+
+    /// Start a fresh measurement on the calling thread.
+    pub(super) fn reset() {
+        let _ = LARGEST.try_with(|largest| largest.set(0));
+    }
+
+    /// The largest single allocation charged to the calling thread since
+    /// [`reset`].
+    pub(super) fn largest() -> usize {
+        LARGEST.with(Cell::get)
+    }
+
+    pub(super) struct Counting;
+
+    // SAFETY: every method forwards to the system allocator unchanged; the
+    // only added behaviour is a maximum taken over a destructor-free
+    // thread-local `Cell`, which allocates nothing and cannot affect memory
+    // safety.
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            note(layout.size());
+            unsafe { System.alloc(layout) }
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(ptr, layout) }
+        }
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            note(layout.size());
+            unsafe { System.alloc_zeroed(layout) }
+        }
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            note(new_size);
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+    }
+}
+
+#[global_allocator]
+static COUNTING_ALLOC: alloc_peak::Counting = alloc_peak::Counting;
+
+/// The render asks the allocator for a strip, never for a window.
+///
+/// Painting the frame into one outer-sized surface and cutting the four bands
+/// out of it asked for the whole window's pixels — an order of magnitude more
+/// than the bands keep — on *every* chrome-cache miss, and the cache is
+/// ceilinged at one screenful and reclaimed under pressure, which is exactly
+/// the state a machine short of memory is in. So the largest single request a
+/// render makes must stay within what that render retains.
+#[test]
+fn rendering_furniture_never_asks_for_a_window_sized_buffer() {
+    let mut c = new_compositor(mode(1920, 1080), BLUE).expect("compositor");
+    let id = c.add_window(Point::new(0, 0), opaque(1880, 1000, RED));
+    assert!(c.set_window_frame(id, WindowFrame::new(decorated())));
+    assert!(c.set_window_title(id, "Untitled"));
+    let (scale, theme) = (c.scale(), c.theme().clone());
+    let window = c.window(id).expect("window");
+    let outer = window.bounds();
+
+    // A first text draw anywhere in the process fills the shared glyph cache,
+    // which is a process-lifetime cost and not part of what a render pays, so
+    // the measured round is a warm one.
+    window
+        .render_chrome(scale, &theme)
+        .expect("furniture renders");
+    alloc_peak::reset();
+    let chrome = window
+        .render_chrome(scale, &theme)
+        .expect("furniture renders");
+    let largest = alloc_peak::largest();
+
+    let retained = chrome.payload_bytes();
+    let window_bytes = usize::try_from(u64::from(outer.width) * u64::from(outer.height))
+        .expect("a window's pixel count is a host-sized count")
+        * core::mem::size_of::<Pixel>();
+    assert!(retained > 0, "the furniture is rendered, not skipped");
+    assert!(
+        largest <= retained,
+        "the largest request ({largest} bytes) should stay within the strips \
+         the render keeps ({retained} bytes), not reach the window's own \
+         {window_bytes} bytes"
+    );
+}
+
 #[test]
 fn retained_chrome_scales_with_the_frame_band_not_the_window_area() {
     // Two decorated windows near the width of a 1080p panel, one short and
